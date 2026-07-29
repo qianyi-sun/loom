@@ -36,11 +36,11 @@ trt-gb10-14 = "gx10-0a49"
 trt-gb10-15 = "gx10-0152"
 
 [capacity]
-slot_budget = 140
-pending_slot_budget = 30
+slot_budget = 112
+pending_slot_budget = 24
 cpus_per_slot = 2
 memory_mib_per_slot = 11500
-gpu_tres_per_slot = 0.1
+gpu_tres_per_slot = 0.125
 job_pids_max = 65536
 
 [slurm]
@@ -70,11 +70,15 @@ child_accounts = [
   "loom-dev-hongjian",
   "loom-dev-devansh",
 ]
-users = ["qianyi", "hongjian", "devansh"]
+users = [
+  "loom-sandbox-qianyi",
+  "loom-sandbox-hongjian",
+  "loom-sandbox-devansh",
+]
 fairshare = 1
 qos = "loom-dev"
 qos_priority = 0
 qos_max_wall = "02:00:00"
 qos_max_jobs_per_user = 14
 qos_max_submit_jobs_per_user = 28
-parent_group_tres = ["cpu=280", "mem=1610G", "gres/gpu=14"]
+parent_group_tres = ["cpu=224", "mem=1288G", "gres/gpu=14"]

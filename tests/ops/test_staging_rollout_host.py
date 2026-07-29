@@ -68,6 +68,9 @@ class FakeSystem:
         self.install_source_sha: str | None = None
         self.install_owner_calls: list[tuple[Path, str, str, int]] = []
         self.shared_worker_identity_ready = True
+        self.external_slurm = False
+        self.shared_worker_repo_calls: list[str] = []
+        self.shared_work2_mount_calls: list[str] = []
         self.shared_work2_mounted = False
         self.preflight_credentials = False
         self.credential_refresh_timer = False
@@ -128,6 +131,11 @@ class FakeSystem:
         assert source_sha in {"a" * 40, "b" * 40}
         self.source_reads.append(relative_path)
         return (host.REPO_ROOT / relative_path).read_bytes()
+
+    def external_slurm_profile(self, source_root: Path, source_sha: str) -> bool:
+        assert source_root in {host.REPO_ROOT, host.INSTALL_SOURCE}
+        assert source_sha in {"a" * 40, "b" * 40}
+        return self.external_slurm
 
     def validate_installed_source(
         self,
@@ -192,6 +200,7 @@ class FakeSystem:
         return self.docker
 
     def shared_worker_repo_identity(self) -> dict[str, object]:
+        self.shared_worker_repo_calls.append("identity")
         if (
             not self.service_user
             or not self.shared_worker_identity_ready
@@ -242,6 +251,7 @@ class FakeSystem:
         return identity
 
     def shared_worker_repo_root_ready(self) -> bool:
+        self.shared_worker_repo_calls.append("ready")
         self.shared_worker_repo_identity()
         return all(
             (mapped := self.filesystem.path(path)).is_dir()
@@ -251,6 +261,7 @@ class FakeSystem:
         )
 
     def ensure_shared_worker_repo_root(self) -> bool:
+        self.shared_worker_repo_calls.append("ensure")
         self.shared_worker_repo_identity()
         changed = False
         changed = (
@@ -262,6 +273,7 @@ class FakeSystem:
         return changed
 
     def shared_work2_mount_identity(self) -> dict[str, object]:
+        self.shared_work2_mount_calls.append("identity")
         if not self.shared_work2_mounted:
             raise host.InstallError("shared_work2 mount helper failed safely")
         return {
@@ -286,15 +298,18 @@ class FakeSystem:
         }
 
     def shared_work2_mount_ready(self) -> bool:
+        self.shared_work2_mount_calls.append("ready")
         return self.shared_work2_mounted
 
     def ensure_shared_work2_mount(self) -> bool:
+        self.shared_work2_mount_calls.append("ensure")
         changed = not self.shared_work2_mounted
         self.shared_work2_mounted = True
         self.filesystem.ensure_directory(host.SHARED_WORK2_MOUNT_POINT, 0o755)
         return changed
 
     def disable_shared_work2_mount(self) -> None:
+        self.shared_work2_mount_calls.append("disable")
         self.shared_work2_mounted = False
 
     def reload_systemd(self) -> None:
@@ -609,14 +624,15 @@ class FakeSystem:
         *,
         source_tree_sha: str | None = None,
         source_base_sha: str | None = None,
+        require_shared_worker_repo: bool = True,
     ) -> list[str]:
         if source_tree_sha is not None or source_base_sha is not None:
             assert source_tree_sha == "b" * 40
             assert source_base_sha == "c" * 40
         failures = [] if self.candidate_sha == expected_sha else ["candidate-checkout"]
-        if not self.shared_work2_mount_ready():
+        if require_shared_worker_repo and not self.shared_work2_mount_ready():
             failures.append("shared-work2-mount")
-        if not self.shared_worker_repo_root_ready():
+        if require_shared_worker_repo and not self.shared_worker_repo_root_ready():
             failures.append("shared-worker-repo-root")
         return failures
 
@@ -810,6 +826,21 @@ def test_installer_known_hosts_authority_rejects_missing_or_malformed_hosts() ->
         )
 
 
+def test_checked_in_staging_profile_selects_external_zero_touch_authority() -> None:
+    payload = (host.REPO_ROOT / "deploy/environment-state/staging.toml").read_bytes()
+
+    assert host._uses_external_slurm_profile(payload) is True
+    assert (
+        host._uses_external_slurm_profile(
+            b'environment = "staging"\n'
+            b"[[gb10_worker_pool_desired_states]]\n"
+            b'pool_name = "gb10"\n'
+            b"target_slots = 0\n"
+        )
+        is False
+    )
+
+
 def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Path) -> None:
     installer, system = _installer(tmp_path)
 
@@ -847,8 +878,7 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
         assert "__CANDIDATE_VENV__" not in wrapper
         assert str(host.LEGACY_VENV) not in wrapper
     assert installer.filesystem.path(host.BROKER_PATH).read_text(encoding="utf-8") == (
-        "#!/bin/sh\nset -eu\n\n"
-        'exec /usr/local/libexec/loom-rollout-broker --env staging "$@"\n'
+        '#!/bin/sh\nset -eu\n\nexec /usr/local/libexec/loom-rollout-broker --env staging "$@"\n'
     )
     sudoers = installer.filesystem.path(host.SUDOERS_PATH).read_text(encoding="utf-8")
     assert "--env dev *" in sudoers
@@ -980,6 +1010,64 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
         "deploy/worker-pools/gb10/known_hosts",
         "scripts/ops/staging_rollout_gb10_trust.py",
     }
+
+
+def test_external_profile_install_upgrade_and_check_never_touch_legacy_shared_repo(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    system.external_slurm = True
+
+    first = installer.install(TEAM_ID)
+    second = installer.install(TEAM_ID)
+    checked = installer.check()
+
+    assert first["ok"] is True
+    assert second["changed"] == []
+    assert checked["ok"] is True, checked
+    assert system.shared_worker_repo_calls == []
+    assert system.shared_work2_mount_calls == []
+    assert not installer.filesystem.path(host.SHARED_WORKER_AUTHORITY_ROOT).exists()
+    assert not installer.filesystem.path(host.SHARED_WORKER_REPO_ROOT).exists()
+    assert not installer.filesystem.path(host.SHARED_WORK2_MOUNT_UNIT_PATH).exists()
+    record = installer.filesystem.load_install_record()
+    assert record is not None
+    assert record["gb10_authority_mode"] == "external-slurm"
+    assert "shared_worker_repo" not in record
+    attestation = json.loads(installer.filesystem.path(host.INSTALL_ATTESTATION).read_bytes())
+    assert "shared-work2-mount-unit" not in attestation["asset_sha256"]
+
+
+def test_legacy_profile_keeps_shared_worker_repository_convergence(tmp_path: Path) -> None:
+    installer, system = _installer(tmp_path)
+    system.external_slurm = False
+
+    installer.install(TEAM_ID)
+
+    assert "ensure" in system.shared_worker_repo_calls
+    assert "ensure" in system.shared_work2_mount_calls
+    assert installer.filesystem.path(host.SHARED_WORKER_REPO_ROOT).is_dir()
+
+
+def test_external_uninstall_preserves_preexisting_legacy_mount_authority(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    system.external_slurm = True
+    installer.install(TEAM_ID)
+    foreign_unit = installer.filesystem.path(host.SHARED_WORK2_MOUNT_UNIT_PATH)
+    foreign_unit.parent.mkdir(parents=True, exist_ok=True)
+    foreign_unit.write_bytes(b"foreign legacy mount authority\n")
+    system.shared_work2_mounted = True
+    system.shared_work2_mount_calls.clear()
+    system.status = "done"
+
+    result = installer.uninstall(retain_ledger=True)
+
+    assert result["ok"] is True
+    assert foreign_unit.read_bytes() == b"foreign legacy mount authority\n"
+    assert system.shared_work2_mount_calls == []
+    assert str(host.SHARED_WORK2_MOUNT_UNIT_PATH) not in result["removed"]
 
 
 def test_install_plan_converges_legacy_service_shell_before_strict_readiness(
@@ -5314,6 +5402,8 @@ def test_plan_json_contains_only_fixed_scope(tmp_path: Path) -> None:
     assert host.FETCH_REF in payload
     assert "--ref" not in payload
     assert "admin-token-fixture" not in payload
+    assert "/shared_work2" not in payload
+    assert "/home/qianyi" not in payload
 
 
 def test_maintenance_marker_transition_is_locked_and_idempotent(tmp_path: Path) -> None:

@@ -1,0 +1,19 @@
+[Unit]
+Description=Verify developer sandbox platform-health trusted evidence
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/loom-developer-sandbox-platform-health-authority verify-current
+User=root
+Group=root
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadOnlyPaths=/var/lib/loom-developer-sandbox-live-acceptance
+ReadWritePaths=/var/lib/loom-developer-sandbox-platform-health-authority
+
+[Install]
+WantedBy=multi-user.target

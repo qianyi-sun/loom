@@ -8,16 +8,20 @@ import stat
 import subprocess
 import threading
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from scripts.ops import developer_sandbox_slurm_policy as policy
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROFILE = REPO_ROOT / "deploy/slurm/developer-sandboxes/oldlab.toml"
 GB10_PROFILE = REPO_ROOT / "deploy/slurm/developer-sandboxes/gb10.toml"
-TEST_GENERATION_ID = "0" * 12
+TEST_GENERATION_ID = "0" * 64
+SANDBOX = "qianyi"
 
 
 def _generation_window() -> tuple[str, str]:
@@ -61,6 +65,45 @@ def _root(tmp_path: Path) -> Path:
     return root
 
 
+def test_live_apply_revalidates_cluster_controller_and_quiescence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    monkeypatch.setattr(policy, "verify_source_candidate", lambda _sha: None)
+    monkeypatch.setattr(policy.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(policy, "_canonical_host", lambda: "trt-eai-oldlab-2")
+    responses = {
+        ("scontrol", "show", "config"): (
+            "ClusterName = trt-oldlab\nSlurmctldHost = TRT-EAI-OLDLAB-1\n"
+        ),
+        ("squeue", "-h", "-w", "trt-EAI-OLDLAB-2"): "123\n",
+        ("docker", "ps", "-q"): "",
+    }
+    monkeypatch.setattr(policy, "_run", lambda argv: responses[tuple(argv)])
+
+    with pytest.raises(policy.PolicyError, match="still has Slurm jobs"):
+        policy._validate_live_apply(
+            Path("/"),
+            loaded,
+            candidate_sha="a" * 40,
+            restart=True,
+            apply_accounting=False,
+        )
+
+    responses[("squeue", "-h", "-w", "trt-EAI-OLDLAB-2")] = ""
+    responses[("scontrol", "show", "config")] = (
+        "ClusterName = wrong-cluster\nSlurmctldHost = TRT-EAI-OLDLAB-1\n"
+    )
+    with pytest.raises(policy.PolicyError, match="cluster identity"):
+        policy._validate_live_apply(
+            Path("/"),
+            loaded,
+            candidate_sha="a" * 40,
+            restart=True,
+            apply_accounting=False,
+        )
+
+
 def test_profile_is_exact_three_sandbox_fairshare_contract() -> None:
     loaded = policy.load_profile(PROFILE)
 
@@ -70,9 +113,27 @@ def test_profile_is_exact_three_sandbox_fairshare_contract() -> None:
         "loom-dev-hongjian",
         "loom-dev-devansh",
     )
-    assert loaded.users == ("qianyi", "hongjian", "devansh")
+    assert loaded.users == (
+        "loom-sandbox-qianyi",
+        "loom-sandbox-hongjian",
+        "loom-sandbox-devansh",
+    )
     assert loaded.docker_cgroup_driver == "cgroupfs"
     assert loaded.slurm["accounting_storage_enforce"] == ("associations,limits,qos,safe")
+
+
+def test_profile_rejects_personal_login_users(tmp_path: Path) -> None:
+    profile = tmp_path / "oldlab.toml"
+    profile.write_text(
+        PROFILE.read_text(encoding="utf-8").replace(
+            '  "loom-sandbox-qianyi",\n  "loom-sandbox-hongjian",\n  "loom-sandbox-devansh",',
+            '  "qianyi",\n  "hongjian",\n  "devansh",',
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(policy.PolicyError, match="fixed sandbox service users"):
+        policy.load_profile(profile)
 
 
 def test_gb10_profile_maps_connection_aliases_to_canonical_hosts() -> None:
@@ -151,6 +212,155 @@ def test_rollback_restores_preinstall_absence_without_mixed_state(tmp_path: Path
     assert (root / "etc/slurm/slurm.conf").read_text() == original_slurm
     assert not (root / "etc/loom/slurm-job-cgroup-guard.json").exists()
     assert not (root / "usr/libexec/loom-slurm-job-cgroup-guard").exists()
+
+
+def test_snapshot_manifest_is_closed_and_binds_archive_content(tmp_path: Path) -> None:
+    loaded = policy.load_profile(PROFILE)
+    root = _root(tmp_path)
+    snapshot = policy._snapshot(
+        root,
+        policy.desired_files(root, loaded, candidate_sha="7" * 40),
+    )
+    manifest = json.loads((snapshot / "manifest.json").read_text(encoding="utf-8"))
+
+    assert [row["path"] for row in manifest["files"]] == list(
+        policy._SNAPSHOT_RELATIVE_PATHS,
+    )
+    assert all(set(row) == policy._SNAPSHOT_ROW_FIELDS for row in manifest["files"])
+    present = next(row for row in manifest["files"] if row["present"])
+    archived = snapshot / present["path"]
+    archived.write_bytes(b"x" * present["size"])
+
+    with pytest.raises(policy.PolicyError, match="content identity drifted"):
+        policy._restore_snapshot(root, snapshot)
+
+
+def test_snapshot_rejects_hardlinked_or_foreign_archive_content(tmp_path: Path) -> None:
+    loaded = policy.load_profile(PROFILE)
+    root = _root(tmp_path)
+    snapshot = policy._snapshot(
+        root,
+        policy.desired_files(root, loaded, candidate_sha="6" * 40),
+    )
+    manifest = json.loads((snapshot / "manifest.json").read_text(encoding="utf-8"))
+    present = next(row for row in manifest["files"] if row["present"])
+    archived = snapshot / present["path"]
+    os.link(archived, snapshot / "foreign-hardlink")
+
+    with pytest.raises(policy.PolicyError, match="metadata is unsafe"):
+        policy._snapshot_manifest_rows(root, snapshot)
+
+
+def test_orphan_recovery_rejects_open_or_foreign_journal_before_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    root = _root(tmp_path)
+    result = policy.apply(
+        root,
+        loaded,
+        restart=False,
+        apply_accounting=False,
+        candidate_sha="5" * 40,
+    )
+    journal_path = Path(result["journal"])
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    journal["phase"] = "files_written"
+    journal["foreign"] = True
+    policy._write_journal(journal_path, journal)
+    monkeypatch.setattr(
+        policy,
+        "_restore_snapshot",
+        lambda *_args: pytest.fail("foreign journal reached restore"),
+    )
+    monkeypatch.setattr(
+        policy,
+        "_restore_services",
+        lambda *_args: pytest.fail("foreign journal reached restart"),
+    )
+
+    with pytest.raises(policy.PolicyError, match="journal binding"):
+        policy._recover_orphan(root, loaded, slurm_node=None)
+
+
+def test_orphan_recovery_rejects_accounting_path_flag_mismatch_before_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    root = _root(tmp_path)
+    result = policy.apply(
+        root,
+        loaded,
+        restart=False,
+        apply_accounting=False,
+        candidate_sha="4" * 40,
+    )
+    journal_path = Path(result["journal"])
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    journal["phase"] = "files_written"
+    journal["accounting_snapshot"] = str(Path(result["snapshot"]) / "accounting-cas.json")
+    policy._write_journal(journal_path, journal)
+    monkeypatch.setattr(
+        policy,
+        "_restore_snapshot",
+        lambda *_args: pytest.fail("mismatched accounting binding reached restore"),
+    )
+
+    with pytest.raises(policy.PolicyError, match="accounting path binding"):
+        policy._recover_orphan(root, loaded, slurm_node=None)
+
+
+def test_orphan_recovery_prevalidates_accounting_payload_before_file_restore(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    root = _root(tmp_path)
+    result = policy.apply(
+        root,
+        loaded,
+        restart=False,
+        apply_accounting=False,
+        candidate_sha="3" * 40,
+    )
+    snapshot = Path(result["snapshot"])
+    accounting = snapshot / "accounting-cas.json"
+    accounting.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "cluster": loaded.cluster,
+                "before": {"qos": {}, "accounts": {}, "associations": {}},
+                "desired": {"foreign": {}},
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    accounting.chmod(0o600)
+    journal_path = Path(result["journal"])
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    journal.update(
+        {
+            "phase": "files_written",
+            "apply_accounting": True,
+            "accounting_snapshot": str(accounting),
+        },
+    )
+    policy._write_journal(journal_path, journal)
+    monkeypatch.setattr(
+        policy,
+        "_restore_snapshot",
+        lambda *_args: pytest.fail("invalid accounting snapshot reached file restore"),
+    )
+
+    offline_controller = replace(loaded, controller=None)
+    with pytest.raises(policy.PolicyError, match="accounting CAS snapshot binding"):
+        policy._recover_orphan(root, offline_controller, slurm_node=None)
 
 
 def test_file_plan_rejects_guard_permission_drift(tmp_path: Path) -> None:
@@ -856,6 +1066,7 @@ def test_live_readback_rejects_effective_slurm_drift(
     assert policy.live_readback(
         root,
         loaded,
+        sandbox=None,
         candidate_sha=candidate,
         require_probe=True,
     )["converged"]
@@ -868,6 +1079,7 @@ def test_live_readback_rejects_effective_slurm_drift(
         policy.live_readback(
             root,
             loaded,
+            sandbox=None,
             candidate_sha=candidate,
             require_probe=True,
         )
@@ -1085,6 +1297,7 @@ def _allocation_inflight_payload(
     node = loaded.allowed_nodes[0]
     return {
         "schema_version": 1,
+        "sandbox": SANDBOX,
         "created_at": datetime.now(UTC).isoformat(),
         "candidate_sha": candidate,
         "cluster": loaded.cluster,
@@ -1096,11 +1309,13 @@ def _allocation_inflight_payload(
         "account": loaded.child_accounts[0],
         "job_id": job_id,
         "job_name": policy._allocation_job_name(
+            SANDBOX,
             candidate,
             node,
             1,
             generation_id=TEST_GENERATION_ID,
         ),
+        "generation_id": TEST_GENERATION_ID,
         "batch_uid": 501,
         "batch_gid": 20,
         "phase": "submitted",
@@ -1156,6 +1371,7 @@ def test_allocation_probe_lock_serializes_candidate_transactions(
             with policy._allocation_probe_lock(
                 tmp_path,
                 loaded,
+                SANDBOX,
                 candidate,
                 enforce_root_ownership=False,
             ):
@@ -1173,6 +1389,7 @@ def test_allocation_probe_lock_serializes_candidate_transactions(
             with policy._allocation_probe_lock(
                 tmp_path,
                 loaded,
+                SANDBOX,
                 candidate,
                 enforce_root_ownership=False,
             ):
@@ -1195,11 +1412,204 @@ def test_allocation_probe_lock_serializes_candidate_transactions(
     assert not second.is_alive()
     assert errors == []
     assert second_submitted.is_set()
-    lock = policy._allocation_lock_path(tmp_path, loaded, candidate)
+    lock = policy._allocation_lock_path(tmp_path, loaded, SANDBOX, candidate)
     metadata = lock.lstat()
     assert stat.S_ISREG(metadata.st_mode)
     assert stat.S_IMODE(metadata.st_mode) == 0o600
     assert (metadata.st_uid, metadata.st_gid) == (os.geteuid(), os.getegid())
+
+
+def test_three_sandboxes_hold_independent_candidate_locks_and_bind_distinct_shas(
+    tmp_path: Path,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    candidates = {
+        "qianyi": "1" * 40,
+        "hongjian": "2" * 40,
+        "devansh": "3" * 40,
+    }
+    entered = threading.Barrier(len(candidates) + 1)
+    release = threading.Event()
+    errors: list[BaseException] = []
+
+    def hold(sandbox: str, candidate: str) -> None:
+        try:
+            with policy._allocation_probe_lock(
+                tmp_path,
+                loaded,
+                sandbox,
+                candidate,
+                enforce_root_ownership=False,
+            ):
+                entered.wait(timeout=2)
+                if not release.wait(timeout=2):
+                    raise RuntimeError("sandbox allocation lock was not released")
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=hold, args=(sandbox, candidate))
+        for sandbox, candidate in candidates.items()
+    ]
+    for thread in threads:
+        thread.start()
+    entered.wait(timeout=2)
+    release.set()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert errors == []
+    assert all(not thread.is_alive() for thread in threads)
+    paths = {
+        sandbox: policy._allocation_matrix_path(
+            tmp_path,
+            loaded,
+            sandbox,
+            candidate,
+        )
+        for sandbox, candidate in candidates.items()
+    }
+    assert len(set(paths.values())) == 3
+    assert all(f"/{loaded.cluster}/{sandbox}/" in str(path) for sandbox, path in paths.items())
+    proof_paths = {
+        sandbox: (
+            policy._runtime_proof_base(
+                tmp_path,
+                loaded,
+                sandbox,
+                candidate,
+            ),
+            policy._runtime_proof_high_water_path(tmp_path, loaded, sandbox),
+            policy._runtime_proof_transaction_path(tmp_path, loaded, sandbox),
+        )
+        for sandbox, candidate in candidates.items()
+    }
+    assert len({path for rows in proof_paths.values() for path in rows}) == 9
+    assert all(
+        f"/{loaded.cluster}/{sandbox}" in str(path)
+        for sandbox, rows in proof_paths.items()
+        for path in rows
+    )
+    assert {policy._sandbox_account(loaded, sandbox) for sandbox in candidates} == set(
+        loaded.child_accounts
+    )
+    for sandbox, service_user, account in zip(
+        policy._SANDBOXES,
+        loaded.users,
+        loaded.child_accounts,
+        strict=True,
+    ):
+        arguments = policy._allocation_probe_arguments(
+            loaded,
+            sandbox=sandbox,
+            node=loaded.allowed_nodes[0],
+            attempt=1,
+            candidate_sha=candidates[sandbox],
+            candidate_root=Path("/candidate"),
+            worker_env=Path("/private/worker.env"),
+            binding={
+                "repository": {"candidate_tree": "a" * 40},
+                "worker_env": {"inode": 1, "sha256": "b" * 64},
+            },
+            batch_uid=501,
+            batch_gid=20,
+            expected_pool="oldlab",
+            expected_concurrency=1,
+            result_path=Path(f"/private/{sandbox}.json"),
+            generation_id=TEST_GENERATION_ID,
+        )
+        assert f"--uid={service_user}" in arguments
+        assert f"--account={account}" in arguments
+        assert f"--sandbox {sandbox}" in arguments[-1]
+    assert (
+        len(
+            {
+                policy._allocation_job_name(
+                    sandbox,
+                    candidate,
+                    loaded.allowed_nodes[0],
+                    1,
+                    generation_id=TEST_GENERATION_ID,
+                )
+                for sandbox, candidate in candidates.items()
+            },
+        )
+        == 3
+    )
+
+
+def test_cross_sandbox_runtime_and_legacy_recovery_bindings_fail_closed(
+    tmp_path: Path,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    candidate = "4" * 40
+    binding, runtime_attestation, _payload = _allocation_matrix_fixture(
+        tmp_path,
+        loaded,
+        candidate,
+    )
+    with pytest.raises(policy.PolicyError, match="sandbox binding drifted"):
+        policy._new_allocation_matrix(
+            loaded,
+            sandbox="hongjian",
+            candidate_sha=candidate,
+            binding=binding,
+            runtime_attestation=runtime_attestation,
+            batch_uid=501,
+            batch_gid=20,
+            expected_pool="oldlab",
+            expected_concurrency=1,
+        )
+    with pytest.raises(policy.PolicyError, match="unavailable"):
+        policy.allocation_probe_readback(
+            tmp_path,
+            loaded,
+            sandbox="hongjian",
+            candidate_sha=candidate,
+            candidate_binding=binding,
+            runtime_attestation={**runtime_attestation, "sandbox": "hongjian"},
+            expected_pool="oldlab",
+            expected_concurrency=1,
+        )
+    matrix = policy._load_allocation_state(
+        policy._allocation_matrix_path(tmp_path, loaded, SANDBOX, candidate),
+        enforce_root_ownership=False,
+    )
+    assert matrix is not None
+    matrix["generation_id"] = str(runtime_attestation["receipt_sha256"])[:12]
+    assert policy._legacy_allocation_generation_is_bound(
+        matrix,
+        sandbox=SANDBOX,
+    )
+    assert not policy._legacy_allocation_generation_is_bound(
+        matrix,
+        sandbox="hongjian",
+    )
+    with pytest.raises(policy.PolicyError, match="fixed sandbox labels"):
+        policy._allocation_probe_path(tmp_path, loaded, "foreign", candidate)
+
+
+@pytest.mark.parametrize(
+    "command",
+    ("materialize-runtime-proof", "allocation-probe", "check"),
+)
+def test_live_runtime_commands_require_explicit_sandbox(
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+) -> None:
+    result = policy.main(
+        (
+            command,
+            "--profile",
+            str(PROFILE),
+            "--candidate-sha",
+            "5" * 40,
+            "--execute",
+        ),
+    )
+
+    assert result == 1
+    assert f"{command} requires --sandbox" in capsys.readouterr().err
 
 
 def test_allocation_cleanup_archives_completed_job_without_scancel(
@@ -1208,7 +1618,7 @@ def test_allocation_cleanup_archives_completed_job_without_scancel(
 ) -> None:
     loaded = policy.load_profile(PROFILE)
     candidate = "3" * 40
-    path = policy._allocation_inflight_path(tmp_path, loaded, candidate)
+    path = policy._allocation_inflight_path(tmp_path, loaded, SANDBOX, candidate)
     payload = _allocation_inflight_payload(loaded, candidate)
     policy._write_allocation_state(path, payload, enforce_root_ownership=False)
     monkeypatch.setattr(
@@ -1232,12 +1642,15 @@ def test_allocation_cleanup_archives_completed_job_without_scancel(
         path,
         payload,
         loaded,
+        sandbox=SANDBOX,
         enforce_root_ownership=False,
     )
 
     assert not path.exists()
     history = path.parent / f"{candidate}.123.terminal.json"
-    assert json.loads(history.read_text())["terminal_state"] == "COMPLETED"
+    archived = json.loads(history.read_text())
+    assert archived["terminal_state"] == "COMPLETED"
+    assert archived["generation_id"] == TEST_GENERATION_ID
 
 
 @pytest.mark.parametrize(
@@ -1255,7 +1668,7 @@ def test_allocation_probe_poll_failure_cancels_and_waits_for_terminal_state(
 ) -> None:
     loaded = policy.load_profile(PROFILE)
     candidate = "e" * 40
-    path = policy._allocation_inflight_path(tmp_path, loaded, candidate)
+    path = policy._allocation_inflight_path(tmp_path, loaded, SANDBOX, candidate)
     payload = _allocation_inflight_payload(loaded, candidate)
     policy._write_allocation_state(path, payload, enforce_root_ownership=False)
     poll_calls = 0
@@ -1297,6 +1710,7 @@ def test_allocation_probe_poll_failure_cancels_and_waits_for_terminal_state(
             path,
             payload,
             loaded,
+            sandbox=SANDBOX,
             timeout_seconds=5,
             enforce_root_ownership=False,
         )
@@ -1313,7 +1727,7 @@ def test_allocation_probe_recovers_crash_journal_before_new_submission(
 ) -> None:
     loaded = policy.load_profile(PROFILE)
     candidate = "f" * 40
-    path = policy._allocation_inflight_path(tmp_path, loaded, candidate)
+    path = policy._allocation_inflight_path(tmp_path, loaded, SANDBOX, candidate)
     payload = _allocation_inflight_payload(loaded, candidate)
     policy._write_allocation_state(path, payload, enforce_root_ownership=False)
     commands: list[tuple[str, ...]] = []
@@ -1346,12 +1760,14 @@ def test_allocation_probe_recovers_crash_journal_before_new_submission(
     with policy._allocation_probe_lock(
         tmp_path,
         loaded,
+        SANDBOX,
         candidate,
         enforce_root_ownership=False,
     ):
         policy._recover_allocation_probe(
             path,
             loaded,
+            sandbox=SANDBOX,
             candidate_sha=candidate,
             node=str(payload["node"]),
             job_name=str(payload["job_name"]),
@@ -1369,7 +1785,7 @@ def test_allocation_recovery_archives_terminal_job_without_scancel(
 ) -> None:
     loaded = policy.load_profile(PROFILE)
     candidate = "4" * 40
-    path = policy._allocation_inflight_path(tmp_path, loaded, candidate)
+    path = policy._allocation_inflight_path(tmp_path, loaded, SANDBOX, candidate)
     payload = _allocation_inflight_payload(loaded, candidate)
     policy._write_allocation_state(path, payload, enforce_root_ownership=False)
     monkeypatch.setattr(
@@ -1394,6 +1810,7 @@ def test_allocation_recovery_archives_terminal_job_without_scancel(
     policy._recover_allocation_probe(
         path,
         loaded,
+        sandbox=SANDBOX,
         candidate_sha=candidate,
         node=str(payload["node"]),
         job_name=str(payload["job_name"]),
@@ -1432,12 +1849,19 @@ def test_unjournaled_foreign_same_name_job_is_never_cancelled(
     candidate = "a" * 40
     node = loaded.allowed_nodes[0]
     job_name = policy._allocation_job_name(
+        SANDBOX,
         candidate,
         node,
         1,
         generation_id=TEST_GENERATION_ID,
     )
-    path = policy._allocation_node_inflight_path(tmp_path, loaded, candidate, node)
+    path = policy._allocation_node_inflight_path(
+        tmp_path,
+        loaded,
+        SANDBOX,
+        candidate,
+        node,
+    )
     commands: list[tuple[str, ...]] = []
 
     def fake_run(
@@ -1457,6 +1881,7 @@ def test_unjournaled_foreign_same_name_job_is_never_cancelled(
         policy._recover_allocation_probe(
             path,
             loaded,
+            sandbox=SANDBOX,
             candidate_sha=candidate,
             node=node,
             job_name=job_name,
@@ -1475,12 +1900,19 @@ def test_unjournaled_quick_terminal_job_is_recovered_without_resubmission(
     candidate = "b" * 40
     node = loaded.allowed_nodes[0]
     job_name = policy._allocation_job_name(
+        SANDBOX,
         candidate,
         node,
         1,
         generation_id=TEST_GENERATION_ID,
     )
-    path = policy._allocation_node_inflight_path(tmp_path, loaded, candidate, node)
+    path = policy._allocation_node_inflight_path(
+        tmp_path,
+        loaded,
+        SANDBOX,
+        candidate,
+        node,
+    )
     commands: list[tuple[str, ...]] = []
 
     def fake_run(
@@ -1512,6 +1944,7 @@ def test_unjournaled_quick_terminal_job_is_recovered_without_resubmission(
     recovered_job = policy._recover_allocation_probe(
         path,
         loaded,
+        sandbox=SANDBOX,
         candidate_sha=candidate,
         node=node,
         job_name=job_name,
@@ -1535,7 +1968,7 @@ def test_allocation_cleanup_scancels_when_initial_sacct_is_temporarily_empty(
 ) -> None:
     loaded = policy.load_profile(PROFILE)
     candidate = "5" * 40
-    path = policy._allocation_inflight_path(tmp_path, loaded, candidate)
+    path = policy._allocation_inflight_path(tmp_path, loaded, SANDBOX, candidate)
     payload = _allocation_inflight_payload(loaded, candidate)
     policy._write_allocation_state(path, payload, enforce_root_ownership=False)
     monkeypatch.setattr(policy, "_probe_accounting_rows", lambda _job_id, _profile: [])
@@ -1567,6 +2000,7 @@ def test_allocation_cleanup_scancels_when_initial_sacct_is_temporarily_empty(
         path,
         payload,
         loaded,
+        sandbox=SANDBOX,
         enforce_root_ownership=False,
     )
 
@@ -1581,7 +2015,7 @@ def test_allocation_probe_scancel_failure_remains_durably_fail_closed(
 ) -> None:
     loaded = policy.load_profile(PROFILE)
     candidate = "1" * 40
-    path = policy._allocation_inflight_path(tmp_path, loaded, candidate)
+    path = policy._allocation_inflight_path(tmp_path, loaded, SANDBOX, candidate)
     payload = _allocation_inflight_payload(loaded, candidate)
     policy._write_allocation_state(path, payload, enforce_root_ownership=False)
 
@@ -1605,6 +2039,7 @@ def test_allocation_probe_scancel_failure_remains_durably_fail_closed(
             path,
             payload,
             loaded,
+            sandbox=SANDBOX,
             enforce_root_ownership=False,
         )
 
@@ -1618,7 +2053,7 @@ def test_allocation_probe_cancel_readback_failure_remains_durably_fail_closed(
 ) -> None:
     loaded = policy.load_profile(PROFILE)
     candidate = "2" * 40
-    path = policy._allocation_inflight_path(tmp_path, loaded, candidate)
+    path = policy._allocation_inflight_path(tmp_path, loaded, SANDBOX, candidate)
     payload = _allocation_inflight_payload(loaded, candidate)
     policy._write_allocation_state(path, payload, enforce_root_ownership=False)
     monkeypatch.setattr(policy, "_probe_accounting_rows", lambda _job_id, _profile: [])
@@ -1643,6 +2078,7 @@ def test_allocation_probe_cancel_readback_failure_remains_durably_fail_closed(
             path,
             payload,
             loaded,
+            sandbox=SANDBOX,
             enforce_root_ownership=False,
         )
 
@@ -1674,10 +2110,12 @@ def _allocation_matrix_fixture(
         },
     }
     runtime_attestation: dict[str, object] = {
+        "bundle_id": "a" * 64,
         "receipt_path": "/private/combined.json",
         "receipt_sha256": "d" * 64,
         "receipt_collected_at": collected_at,
         "receipt_expires_at": expires_at,
+        "proof_expires_at": expires_at,
         "sandbox": "qianyi",
         "candidate_sha": candidate,
         "candidate_tree": "b" * 40,
@@ -1691,6 +2129,7 @@ def _allocation_matrix_fixture(
     }
     matrix = policy._new_allocation_matrix(
         loaded,
+        sandbox=SANDBOX,
         candidate_sha=candidate,
         binding=binding,
         runtime_attestation=runtime_attestation,
@@ -1704,10 +2143,12 @@ def _allocation_matrix_fixture(
     for index, node in enumerate(loaded.allowed_nodes, start=1):
         job_id = str(100 + index)
         item: dict[str, object] = {
+            "sandbox": SANDBOX,
             "node": node,
             "host": loaded.host_aliases[node],
             "job_id": job_id,
             "job_name": policy._allocation_job_name(
+                SANDBOX,
                 candidate,
                 node,
                 1,
@@ -1724,6 +2165,8 @@ def _allocation_matrix_fixture(
             "explicit_nodelist": node,
             "compute_check": {
                 "schema_version": 1,
+                "sandbox": SANDBOX,
+                "account": loaded.child_accounts[0],
                 "candidate_sha": candidate,
                 "candidate_tree": "b" * 40,
                 "host": loaded.host_aliases[node],
@@ -1759,6 +2202,7 @@ def _allocation_matrix_fixture(
         "generation_expires_at": expires_at,
         "candidate_sha": candidate,
         "candidate_tree": "b" * 40,
+        "sandbox": SANDBOX,
         "cluster": loaded.cluster,
         "controller": loaded.controller,
         "submit_host": loaded.submit_host,
@@ -1777,12 +2221,12 @@ def _allocation_matrix_fixture(
         "closed_world_verified": True,
     }
     policy._write_allocation_state(
-        policy._allocation_matrix_path(tmp_path, loaded, candidate),
+        policy._allocation_matrix_path(tmp_path, loaded, SANDBOX, candidate),
         matrix,
         enforce_root_ownership=False,
     )
     policy._write_allocation_state(
-        policy._allocation_probe_path(tmp_path, loaded, candidate),
+        policy._allocation_probe_path(tmp_path, loaded, SANDBOX, candidate),
         payload,
         enforce_root_ownership=False,
     )
@@ -1802,6 +2246,7 @@ def test_allocation_probe_readback_is_candidate_route_and_closed_set_bound(
     observed = policy.allocation_probe_readback(
         tmp_path,
         loaded,
+        sandbox=SANDBOX,
         candidate_sha=candidate,
         candidate_binding=binding,
         runtime_attestation=runtime_attestation,
@@ -1809,9 +2254,11 @@ def test_allocation_probe_readback_is_candidate_route_and_closed_set_bound(
         expected_concurrency=1,
     )
     assert observed["cluster"] == "trt-oldlab"
+    assert observed["generation_id"] == runtime_attestation["bundle_id"]
+    assert len(str(observed["generation_id"])) == 64
     payload["controller"] = "trt-gb10-1"
     policy._write_allocation_state(
-        policy._allocation_probe_path(tmp_path, loaded, candidate),
+        policy._allocation_probe_path(tmp_path, loaded, SANDBOX, candidate),
         payload,
         enforce_root_ownership=False,
     )
@@ -1819,6 +2266,7 @@ def test_allocation_probe_readback_is_candidate_route_and_closed_set_bound(
         policy.allocation_probe_readback(
             tmp_path,
             loaded,
+            sandbox=SANDBOX,
             candidate_sha=candidate,
             candidate_binding=binding,
             runtime_attestation=runtime_attestation,
@@ -1842,6 +2290,7 @@ def test_allocation_matrix_sbatch_explicitly_targets_every_declared_host() -> No
     commands = [
         policy._allocation_probe_arguments(
             loaded,
+            sandbox=SANDBOX,
             node=node,
             attempt=1,
             candidate_sha=candidate,
@@ -1863,7 +2312,7 @@ def test_allocation_matrix_sbatch_explicitly_targets_every_declared_host() -> No
     for node, command in zip(loaded.allowed_nodes, commands, strict=True):
         assert f"--nodelist={node}" in command
         assert "--oversubscribe" in command
-        assert f"--job-name=loom827-{candidate}-{node.lower()}-g{TEST_GENERATION_ID}-a1" in command
+        assert f"--job-name=loom827-{SANDBOX}-{node.lower()}-g{TEST_GENERATION_ID}-a1" in command
         assert f"--nodelist={node}" in command[-1]
         assert "/bin/sleep" not in command[-1]
         assert "allocation-node-check" in command[-1]
@@ -1879,6 +2328,12 @@ def test_allocation_node_check_binds_raw_inputs_docker_and_compose(
     monkeypatch.setenv("SLURM_JOB_ID", "123")
     monkeypatch.setattr(policy.os, "geteuid", lambda: 501)
     monkeypatch.setattr(policy.os, "getegid", lambda: 20)
+
+    def service_identity(user: str) -> object:
+        assert user == "loom-sandbox-qianyi"
+        return type("Identity", (), {"pw_uid": 501, "pw_gid": 20})()
+
+    monkeypatch.setattr(policy.pwd, "getpwnam", service_identity)
     monkeypatch.setattr(policy, "_canonical_host", lambda: "trt-eai-oldlab-1")
     monkeypatch.setattr(
         policy,
@@ -1937,6 +2392,7 @@ def test_allocation_node_check_binds_raw_inputs_docker_and_compose(
 
     result = policy.allocation_node_check(
         loaded,
+        sandbox=SANDBOX,
         candidate_sha=candidate,
         candidate_root=Path("/candidate"),
         worker_env=Path("/private/worker.env"),
@@ -1980,7 +2436,7 @@ def test_allocation_matrix_readback_rejects_nonclosed_node_set(
     else:
         nodes.pop()
     policy._write_allocation_state(
-        policy._allocation_probe_path(tmp_path, loaded, candidate),
+        policy._allocation_probe_path(tmp_path, loaded, SANDBOX, candidate),
         payload,
         enforce_root_ownership=False,
     )
@@ -1989,6 +2445,7 @@ def test_allocation_matrix_readback_rejects_nonclosed_node_set(
         policy.allocation_probe_readback(
             tmp_path,
             loaded,
+            sandbox=SANDBOX,
             candidate_sha=candidate,
             candidate_binding=binding,
             runtime_attestation=runtime_attestation,
@@ -2006,12 +2463,18 @@ def test_allocation_matrix_resume_selects_only_unfinished_nodes() -> None:
     }
     collected_at, expires_at = _generation_window()
     runtime_attestation = {
+        "bundle_id": "3" * 64,
+        "sandbox": SANDBOX,
         "receipt_sha256": "4" * 64,
         "receipt_collected_at": collected_at,
         "receipt_expires_at": expires_at,
+        "proof_expires_at": expires_at,
+        "candidate_sha": candidate,
+        "candidate_tree": "5" * 40,
     }
     matrix = policy._new_allocation_matrix(
         loaded,
+        sandbox=SANDBOX,
         candidate_sha=candidate,
         binding=binding,
         runtime_attestation=runtime_attestation,
@@ -2058,12 +2521,18 @@ def test_completed_crash_replays_original_attempt_before_deleting_result(
     }
     collected_at, expires_at = _generation_window()
     runtime_attestation = {
+        "bundle_id": "e" * 64,
+        "sandbox": SANDBOX,
         "receipt_sha256": "f" * 64,
         "receipt_collected_at": collected_at,
         "receipt_expires_at": expires_at,
+        "proof_expires_at": expires_at,
+        "candidate_sha": candidate,
+        "candidate_tree": "d" * 40,
     }
     matrix = policy._new_allocation_matrix(
         loaded,
+        sandbox=SANDBOX,
         candidate_sha=candidate,
         binding=binding,
         runtime_attestation=runtime_attestation,
@@ -2073,8 +2542,14 @@ def test_completed_crash_replays_original_attempt_before_deleting_result(
         expected_concurrency=1,
     )
     matrix["nodes"][node]["attempts"] = 1
-    matrix_path = policy._allocation_matrix_path(tmp_path, loaded, candidate)
-    result_path = policy._allocation_result_path(worker_env, loaded, candidate, node)
+    matrix_path = policy._allocation_matrix_path(tmp_path, loaded, SANDBOX, candidate)
+    result_path = policy._allocation_result_path(
+        worker_env,
+        loaded,
+        SANDBOX,
+        candidate,
+        node,
+    )
     policy._prepare_allocation_result_path(
         result_path,
         worker_env=worker_env,
@@ -2084,6 +2559,8 @@ def test_completed_crash_replays_original_attempt_before_deleting_result(
     job_id = "789"
     node_result = {
         "schema_version": 1,
+        "sandbox": SANDBOX,
+        "account": loaded.child_accounts[0],
         "candidate_sha": candidate,
         "candidate_tree": "d" * 40,
         "host": loaded.host_aliases[node],
@@ -2104,6 +2581,7 @@ def test_completed_crash_replays_original_attempt_before_deleting_result(
         enforce_root_ownership=False,
     )
     job_name = policy._allocation_job_name(
+        SANDBOX,
         candidate,
         node,
         1,
@@ -2138,6 +2616,7 @@ def test_completed_crash_replays_original_attempt_before_deleting_result(
         matrix_path,
         matrix,
         loaded,
+        sandbox=SANDBOX,
         node=node,
         candidate_sha=candidate,
         candidate_root=tmp_path / "candidate",
@@ -2174,9 +2653,9 @@ def test_allocation_matrix_one_node_failure_has_no_final_pass(tmp_path: Path) ->
         loaded,
         candidate,
     )
-    target = policy._allocation_probe_path(tmp_path, loaded, candidate)
+    target = policy._allocation_probe_path(tmp_path, loaded, SANDBOX, candidate)
     target.unlink()
-    matrix_path = policy._allocation_matrix_path(tmp_path, loaded, candidate)
+    matrix_path = policy._allocation_matrix_path(tmp_path, loaded, SANDBOX, candidate)
     matrix = policy._load_allocation_state(
         matrix_path,
         enforce_root_ownership=False,
@@ -2200,6 +2679,7 @@ def test_allocation_matrix_one_node_failure_has_no_final_pass(tmp_path: Path) ->
         policy.allocation_probe_readback(
             tmp_path,
             loaded,
+            sandbox=SANDBOX,
             candidate_sha=candidate,
             candidate_binding=binding,
             runtime_attestation=runtime_attestation,
@@ -2224,6 +2704,7 @@ def test_allocation_matrix_readback_rejects_runtime_receipt_drift(tmp_path: Path
         policy.allocation_probe_readback(
             tmp_path,
             loaded,
+            sandbox=SANDBOX,
             candidate_sha=candidate,
             candidate_binding=binding,
             runtime_attestation=drifted,
@@ -2232,7 +2713,7 @@ def test_allocation_matrix_readback_rejects_runtime_receipt_drift(tmp_path: Path
         )
 
 
-def test_runtime_receipt_binds_digest_generation_and_nineteen_node_fleet(
+def test_legacy_runtime_receipt_path_is_rejected(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2379,43 +2860,630 @@ def test_runtime_receipt_binds_digest_generation_and_nineteen_node_fleet(
         mode=0o600,
     )
 
-    binding = policy._runtime_attestation_binding(
-        receipt_path,
-        loaded,
-        candidate_sha=candidate_sha,
-        candidate_tree=candidate_tree,
-        candidate_root=candidate_root,
-        worker_env=worker_env,
-        enforce_root_ownership=False,
-    )
-
-    assert binding["domain_generation"] == 9
-    assert binding["domain_hosts"] == [loaded.host_aliases[node] for node in loaded.allowed_nodes]
-    assert binding["fleet_nodes"] == fleet_nodes
-    manifest["candidate"] = {
-        "sha": candidate_sha,
-        "tree": "0" * 40,
-        "path": str(candidate_root),
-    }
-    manifest["payload_sha256"] = hashlib.sha256(
-        policy._canonical_json_bytes(
-            {key: value for key, value in manifest.items() if key != "payload_sha256"},
-        ),
-    ).hexdigest()
-    policy._atomic_write(
-        manifest_path,
-        policy._canonical_json_bytes(manifest).decode() + "\n",
-        mode=0o644,
-    )
-    with pytest.raises(policy.PolicyError, match="digest drifted"):
+    with pytest.raises(policy.PolicyError, match="runtime attestation input is unavailable"):
         policy._runtime_attestation_binding(
             receipt_path,
             loaded,
+            sandbox=SANDBOX,
             candidate_sha=candidate_sha,
             candidate_tree=candidate_tree,
             candidate_root=candidate_root,
             worker_env=worker_env,
             enforce_root_ownership=False,
+        )
+
+
+def _runtime_proof_source_bytes(
+    *,
+    candidate_sha: str,
+    candidate_tree: str,
+    combined_root: Path,
+    domain_root: Path,
+    fleet_root: Path,
+    published_at: datetime,
+    generations: dict[str, int],
+    private_keys: dict[str, Ed25519PrivateKey],
+) -> dict[Path, bytes]:
+    expires_at = published_at + timedelta(minutes=15)
+    fleet: dict[str, object] = {
+        "candidate_sha": candidate_sha,
+        "generated_at": published_at.isoformat().replace("+00:00", "Z"),
+        "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
+        "eligible_nodes": list(policy._RUNTIME_FLEET_NODES),
+        "nodes": {node: {"candidate_sha": candidate_sha} for node in policy._RUNTIME_FLEET_NODES},
+    }
+    fleet["payload_sha256"] = (
+        "sha256:" + hashlib.sha256(policy._canonical_json_bytes(fleet)).hexdigest()
+    )
+    fleet_path = fleet_root / "qianyi" / candidate_sha / "fleet.json"
+    fleet_reference = {
+        "path": str(fleet_path),
+        "payload_sha256": fleet["payload_sha256"],
+        "generated_at": fleet["generated_at"],
+        "expires_at": fleet["expires_at"],
+    }
+    sources = {fleet_path: policy._canonical_json_bytes(fleet) + b"\n"}
+    domain_rows: dict[str, dict[str, object]] = {}
+    for domain_name in ("oldlab", "gb10"):
+        private_key = private_keys[domain_name]
+        public_key = private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        manifest: dict[str, object] = {
+            "schema_version": 1,
+            "kind": "loom.developer-runtime-domain-attestation",
+            "domain": domain_name,
+            "sandbox": "qianyi",
+            "candidate": {
+                "sha": candidate_sha,
+                "tree": candidate_tree,
+                "path": f"/shared_work/loom/candidates/sandboxes/qianyi/{candidate_sha}",
+            },
+            "runtime_env": {
+                "path": (
+                    f"/shared_work/loom/runtime/sandboxes/qianyi/{candidate_sha}/"
+                    f"worker-{domain_name}.env"
+                ),
+            },
+            "fleet_attestation": fleet_reference,
+            "publisher": {
+                "hostname": policy._RUNTIME_PROOF_SOURCES[domain_name][1],
+                "generation": generations[domain_name],
+                "published_at": published_at.isoformat(),
+                "expires_at": expires_at.isoformat(),
+                "signature_algorithm": "ed25519",
+                "key_id": hashlib.sha256(public_key).hexdigest(),
+            },
+            "eligible_peers": [
+                {
+                    "hostname": hostname,
+                    "candidate_inode": 101,
+                    "env_inode": 202,
+                    "result": "verified",
+                }
+                for hostname in policy._RUNTIME_DOMAIN_HOSTS[domain_name]
+            ],
+        }
+        manifest["payload_sha256"] = hashlib.sha256(
+            policy._canonical_json_bytes(manifest),
+        ).hexdigest()
+        manifest_bytes = policy._canonical_json_bytes(manifest) + b"\n"
+        signature = private_key.sign(manifest_bytes)
+        parent = domain_root / "qianyi" / candidate_sha
+        manifest_path = parent / f"{domain_name}.json"
+        signature_path = parent / f"{domain_name}.sig"
+        key_path = Path(
+            f"/etc/loom/developer-domain-runtime/attestation-keys/{domain_name}.pub",
+        )
+        sources[manifest_path] = manifest_bytes
+        sources[signature_path] = base64.b64encode(signature) + b"\n"
+        sources[key_path] = public_key
+        domain_rows[domain_name] = {
+            "manifest_path": str(manifest_path),
+            "signature_path": str(signature_path),
+            "payload_sha256": manifest["payload_sha256"],
+            "signature_sha256": hashlib.sha256(signature).hexdigest(),
+            "key_id": hashlib.sha256(public_key).hexdigest(),
+            "generation": generations[domain_name],
+            "published_at": published_at.isoformat(),
+            "expires_at": expires_at.isoformat(),
+        }
+    receipt: dict[str, object] = {
+        "schema_version": 1,
+        "kind": "loom.developer-runtime-combined-activation",
+        "sandbox": "qianyi",
+        "candidate_sha": candidate_sha,
+        "candidate_tree": candidate_tree,
+        "collector": {
+            "hostname": "trt-eai-oldlab-2",
+            "collected_at": published_at.isoformat(),
+            "expires_at": expires_at.isoformat(),
+        },
+        "fleet_attestation": fleet_reference,
+        "domains": domain_rows,
+    }
+    receipt["payload_sha256"] = hashlib.sha256(
+        policy._canonical_json_bytes(receipt),
+    ).hexdigest()
+    sources[combined_root / "qianyi" / candidate_sha / "combined.json"] = (
+        policy._canonical_json_bytes(receipt) + b"\n"
+    )
+    return sources
+
+
+def test_materialized_runtime_proof_verifies_both_signed_domains_and_closed_fleet(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    candidate_sha = "8" * 40
+    candidate_tree = "9" * 40
+    combined_root = tmp_path / "remote-combined"
+    domain_root = tmp_path / "remote-domains"
+    fleet_root = tmp_path / "remote-fleet"
+    monkeypatch.setattr(policy, "_COMBINED_RUNTIME_ATTESTATION_ROOT", combined_root)
+    monkeypatch.setattr(policy, "_DOMAIN_RUNTIME_ATTESTATION_ROOT", domain_root)
+    monkeypatch.setattr(policy, "_FLEET_ATTESTATION_ROOT", fleet_root)
+    publish_attempts = 0
+
+    def publish(source: Path, target: Path) -> None:
+        nonlocal publish_attempts
+        publish_attempts += 1
+        if publish_attempts == 1:
+            raise policy.PolicyError("injected publication crash")
+        source.rename(target)
+
+    monkeypatch.setattr(policy, "_rename_noreplace", publish)
+    published_at = datetime.now(UTC)
+    expires_at = published_at + timedelta(minutes=15)
+    fleet: dict[str, object] = {
+        "candidate_sha": candidate_sha,
+        "generated_at": published_at.isoformat().replace("+00:00", "Z"),
+        "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
+        "eligible_nodes": list(policy._RUNTIME_FLEET_NODES),
+        "nodes": {node: {"candidate_sha": candidate_sha} for node in policy._RUNTIME_FLEET_NODES},
+    }
+    fleet["payload_sha256"] = (
+        "sha256:" + hashlib.sha256(policy._canonical_json_bytes(fleet)).hexdigest()
+    )
+    fleet_path = fleet_root / "qianyi" / candidate_sha / "fleet.json"
+    fleet_reference = {
+        "path": str(fleet_path),
+        "payload_sha256": fleet["payload_sha256"],
+        "generated_at": fleet["generated_at"],
+        "expires_at": fleet["expires_at"],
+    }
+    fetched_by_path: dict[Path, bytes] = {
+        fleet_path: policy._canonical_json_bytes(fleet) + b"\n",
+    }
+    domain_rows: dict[str, dict[str, object]] = {}
+    for generation, domain_name in enumerate(("oldlab", "gb10"), start=11):
+        private_key = Ed25519PrivateKey.generate()
+        public_key = private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        manifest: dict[str, object] = {
+            "schema_version": 1,
+            "kind": "loom.developer-runtime-domain-attestation",
+            "domain": domain_name,
+            "sandbox": "qianyi",
+            "candidate": {
+                "sha": candidate_sha,
+                "tree": candidate_tree,
+                "path": f"/shared_work/loom/candidates/sandboxes/qianyi/{candidate_sha}",
+            },
+            "runtime_env": {
+                "path": (
+                    f"/shared_work/loom/runtime/sandboxes/qianyi/{candidate_sha}/"
+                    f"worker-{domain_name}.env"
+                ),
+            },
+            "fleet_attestation": fleet_reference,
+            "publisher": {
+                "hostname": policy._RUNTIME_PROOF_SOURCES[domain_name][1],
+                "generation": generation,
+                "published_at": published_at.isoformat(),
+                "expires_at": expires_at.isoformat(),
+                "signature_algorithm": "ed25519",
+                "key_id": hashlib.sha256(public_key).hexdigest(),
+            },
+            "eligible_peers": [
+                {
+                    "hostname": hostname,
+                    "candidate_inode": 101,
+                    "env_inode": 202,
+                    "result": "verified",
+                }
+                for hostname in policy._RUNTIME_DOMAIN_HOSTS[domain_name]
+            ],
+        }
+        manifest["payload_sha256"] = hashlib.sha256(
+            policy._canonical_json_bytes(manifest),
+        ).hexdigest()
+        manifest_bytes = policy._canonical_json_bytes(manifest) + b"\n"
+        signature = private_key.sign(manifest_bytes)
+        parent = domain_root / "qianyi" / candidate_sha
+        manifest_path = parent / f"{domain_name}.json"
+        signature_path = parent / f"{domain_name}.sig"
+        key_path = Path(
+            f"/etc/loom/developer-domain-runtime/attestation-keys/{domain_name}.pub",
+        )
+        fetched_by_path[manifest_path] = manifest_bytes
+        fetched_by_path[signature_path] = base64.b64encode(signature) + b"\n"
+        fetched_by_path[key_path] = public_key
+        domain_rows[domain_name] = {
+            "manifest_path": str(manifest_path),
+            "signature_path": str(signature_path),
+            "payload_sha256": manifest["payload_sha256"],
+            "signature_sha256": hashlib.sha256(signature).hexdigest(),
+            "key_id": hashlib.sha256(public_key).hexdigest(),
+            "generation": generation,
+            "published_at": published_at.isoformat(),
+            "expires_at": expires_at.isoformat(),
+        }
+    receipt: dict[str, object] = {
+        "schema_version": 1,
+        "kind": "loom.developer-runtime-combined-activation",
+        "sandbox": "qianyi",
+        "candidate_sha": candidate_sha,
+        "candidate_tree": candidate_tree,
+        "collector": {
+            "hostname": "trt-eai-oldlab-2",
+            "collected_at": published_at.isoformat(),
+            "expires_at": expires_at.isoformat(),
+        },
+        "fleet_attestation": fleet_reference,
+        "domains": domain_rows,
+    }
+    receipt["payload_sha256"] = hashlib.sha256(
+        policy._canonical_json_bytes(receipt),
+    ).hexdigest()
+    receipt_path = combined_root / "qianyi" / candidate_sha / "combined.json"
+    fetched_by_path[receipt_path] = policy._canonical_json_bytes(receipt) + b"\n"
+
+    def fetcher(
+        _target: str,
+        _hostname: str,
+        artifact_id: str,
+        *,
+        expected_mode: int,
+    ) -> bytes:
+        assert expected_mode in {0o600, 0o644}
+        name = artifact_id.rsplit("/", 1)[-1]
+        return next(value for path, value in fetched_by_path.items() if path.name == name)
+
+    with pytest.raises(policy.PolicyError, match="injected publication crash"):
+        policy.materialize_runtime_proof(
+            tmp_path,
+            loaded,
+            sandbox=SANDBOX,
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+            fetcher=fetcher,
+        )
+    result = policy.materialize_runtime_proof(
+        tmp_path,
+        loaded,
+        sandbox=SANDBOX,
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+        fetcher=fetcher,
+    )
+    repeated = policy.materialize_runtime_proof(
+        tmp_path,
+        loaded,
+        sandbox=SANDBOX,
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+        fetcher=fetcher,
+    )
+    binding = policy._runtime_attestation_binding(
+        tmp_path,
+        loaded,
+        sandbox=SANDBOX,
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+        candidate_root=Path("/candidate"),
+        worker_env=Path("/worker.env"),
+        enforce_root_ownership=False,
+    )
+
+    assert binding["bundle_id"] == result["bundle_id"]
+    assert repeated["bundle_id"] == result["bundle_id"]
+    assert set(binding["domains"]) == {"oldlab", "gb10"}
+    assert binding["fleet_nodes"] == list(policy._RUNTIME_FLEET_NODES)
+    proof = Path(result["proof_path"]).parent
+    assert {item.name for item in proof.iterdir()} == policy._RUNTIME_PROOF_FILE_NAMES
+    assert all(stat.S_IMODE(item.stat().st_mode) == 0o600 for item in proof.iterdir())
+    policy._atomic_write(proof / "gb10.sig", "Zm9yZWlnbg==\n", mode=0o600)
+    with pytest.raises(policy.PolicyError, match="local digest drifted"):
+        policy._runtime_attestation_binding(
+            tmp_path,
+            loaded,
+            sandbox=SANDBOX,
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+            candidate_root=Path("/candidate"),
+            worker_env=Path("/worker.env"),
+            enforce_root_ownership=False,
+        )
+
+
+def test_rotated_receipt_recovers_prior_crash_before_fetch_and_rename_preserves_pointer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    candidate_sha = "6" * 40
+    candidate_tree = "7" * 40
+    combined_root = tmp_path / "remote-combined"
+    domain_root = tmp_path / "remote-domains"
+    fleet_root = tmp_path / "remote-fleet"
+    monkeypatch.setattr(policy, "_COMBINED_RUNTIME_ATTESTATION_ROOT", combined_root)
+    monkeypatch.setattr(policy, "_DOMAIN_RUNTIME_ATTESTATION_ROOT", domain_root)
+    monkeypatch.setattr(policy, "_FLEET_ATTESTATION_ROOT", fleet_root)
+    monkeypatch.setattr(policy, "_rename_noreplace", lambda source, target: source.rename(target))
+    keys = {
+        "oldlab": Ed25519PrivateKey.generate(),
+        "gb10": Ed25519PrivateKey.generate(),
+    }
+    started = datetime.now(UTC) - timedelta(seconds=3)
+    current_sources = _runtime_proof_source_bytes(
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+        combined_root=combined_root,
+        domain_root=domain_root,
+        fleet_root=fleet_root,
+        published_at=started,
+        generations={"oldlab": 11, "gb10": 12},
+        private_keys=keys,
+    )
+
+    def fetcher(
+        _target: str,
+        _hostname: str,
+        artifact_id: str,
+        *,
+        expected_mode: int,
+    ) -> bytes:
+        assert expected_mode in {0o600, 0o644}
+        name = artifact_id.rsplit("/", 1)[-1]
+        return next(value for path, value in current_sources.items() if path.name == name)
+
+    first = policy.materialize_runtime_proof(
+        tmp_path,
+        loaded,
+        sandbox=SANDBOX,
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+        fetcher=fetcher,
+    )
+    current_sources = _runtime_proof_source_bytes(
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+        combined_root=combined_root,
+        domain_root=domain_root,
+        fleet_root=fleet_root,
+        published_at=started + timedelta(seconds=1),
+        generations={"oldlab": 21, "gb10": 22},
+        private_keys=keys,
+    )
+
+    def fail_publish(_source: Path, _target: Path) -> None:
+        raise policy.PolicyError("injected rename failure")
+
+    monkeypatch.setattr(policy, "_rename_noreplace", fail_publish)
+    with pytest.raises(policy.PolicyError, match="injected rename failure"):
+        policy.materialize_runtime_proof(
+            tmp_path,
+            loaded,
+            sandbox=SANDBOX,
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+            fetcher=fetcher,
+        )
+    high_water_path = policy._runtime_proof_high_water_path(tmp_path, loaded, SANDBOX)
+    after_failure = policy._load_canonical_attestation_json(
+        high_water_path,
+        expected_mode=0o600,
+        enforce_root_ownership=False,
+    )
+    assert after_failure["bundle_id"] == first["bundle_id"]
+
+    current_sources = _runtime_proof_source_bytes(
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+        combined_root=combined_root,
+        domain_root=domain_root,
+        fleet_root=fleet_root,
+        published_at=started + timedelta(seconds=2),
+        generations={"oldlab": 31, "gb10": 32},
+        private_keys=keys,
+    )
+    monkeypatch.setattr(policy, "_rename_noreplace", lambda source, target: source.rename(target))
+    rotated = policy.materialize_runtime_proof(
+        tmp_path,
+        loaded,
+        sandbox=SANDBOX,
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+        fetcher=fetcher,
+    )
+    recovered = policy._load_canonical_attestation_json(
+        high_water_path,
+        expected_mode=0o600,
+        enforce_root_ownership=False,
+    )
+
+    assert rotated["bundle_id"] != first["bundle_id"]
+    assert recovered["bundle_id"] == rotated["bundle_id"]
+    assert not policy._path_exists_without_following(
+        policy._runtime_proof_transaction_path(tmp_path, loaded, SANDBOX),
+    )
+
+
+def test_foreign_runtime_proof_journal_fails_before_fetch_without_cleanup(
+    tmp_path: Path,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    candidate_sha = "4" * 40
+    candidate_tree = "5" * 40
+    bundle_id = "a" * 64
+    foreign_stage = tmp_path / "foreign-stage"
+    foreign_stage.mkdir(mode=0o700)
+    marker = foreign_stage / "keep"
+    marker.write_text("foreign\n", encoding="utf-8")
+    marker.chmod(0o600)
+    transaction_path = policy._runtime_proof_transaction_path(tmp_path, loaded, SANDBOX)
+    policy._write_journal(
+        transaction_path,
+        {
+            "schema_version": 1,
+            "kind": "loom.developer-runtime-proof-transaction",
+            "cluster": loaded.cluster,
+            "submit_node": loaded.submit_host,
+            "submit_hostname": loaded.host_aliases[loaded.submit_host],
+            "sandbox": loaded.users[0],
+            "candidate_sha": candidate_sha,
+            "candidate_tree": candidate_tree,
+            "bundle_id": bundle_id,
+            "receipt_sha256": "b" * 64,
+            "stage": str(foreign_stage),
+            "final": str(tmp_path / "foreign-final"),
+            "phase": "prepared",
+        },
+    )
+    fetched = False
+
+    def fetcher(*_args: object, **_kwargs: object) -> bytes:
+        nonlocal fetched
+        fetched = True
+        raise AssertionError("foreign recovery must stop before fetch")
+
+    with pytest.raises(policy.PolicyError, match="foreign runtime proof transaction"):
+        policy.materialize_runtime_proof(
+            tmp_path,
+            loaded,
+            sandbox=SANDBOX,
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+            fetcher=fetcher,
+        )
+
+    assert fetched is False
+    assert marker.read_text(encoding="utf-8") == "foreign\n"
+    assert policy._path_exists_without_following(transaction_path)
+
+
+def test_runtime_receipt_cli_option_is_removed() -> None:
+    with pytest.raises(SystemExit):
+        policy._parser().parse_args(
+            [
+                "allocation-probe",
+                "--profile",
+                str(PROFILE),
+                "--runtime-receipt",
+                "/tmp/foreign.json",
+            ],
+        )
+
+
+def test_runtime_proof_fetch_uses_fixed_node_authority_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: tuple[str, ...] = ()
+    content = b'{"proof":"bounded"}\n'
+    candidate_sha = "a" * 40
+    candidate_tree = "b" * 40
+    artifact_id = f"runtime-proof/v1/qianyi/{candidate_sha}/{candidate_tree}/artifact/oldlab.json"
+
+    def bounded(
+        argv: tuple[str, ...],
+        *,
+        input_bytes: bytes | None,
+        timeout: float,
+        max_bytes: int,
+    ) -> bytes:
+        nonlocal captured
+        captured = argv
+        assert timeout == 120
+        assert max_bytes == 1536 * 1024
+        assert input_bytes is not None
+        request = json.loads(input_bytes)
+        assert input_bytes == policy._canonical_json_bytes(request) + b"\n"
+        assert request["action"] == "export-runtime-proof-artifact"
+        assert request["node"] == "oldlab-1"
+        assert base64.b64decode(request["payload_base64"], validate=True).decode() == artifact_id
+        response = {
+            "schema_version": 1,
+            "request_id": request["request_id"],
+            "status": "succeeded",
+            "result": {
+                "schema_version": 1,
+                "operation": "export-runtime-proof-artifact",
+                "artifact_id": artifact_id,
+                "artifact_name": "oldlab.json",
+                "node": "oldlab-1",
+                "hostname": "trt-eai-oldlab-1",
+                "domain": "oldlab",
+                "sandbox": "qianyi",
+                "candidate_sha": candidate_sha,
+                "candidate_tree": candidate_tree,
+                "content_size": len(content),
+                "content_sha256": hashlib.sha256(content).hexdigest(),
+                "content_base64": base64.b64encode(content).decode(),
+            },
+        }
+        return policy._canonical_json_bytes(response) + b"\n"
+
+    monkeypatch.setattr(policy, "_run_bounded_stdout", bounded)
+
+    fetched = policy._fetch_runtime_proof_source(
+        "oldlab-1",
+        "trt-eai-oldlab-1",
+        artifact_id,
+        expected_mode=0o644,
+    )
+
+    assert fetched == content
+    assert captured == (
+        "/usr/bin/python3",
+        "-I",
+        "/usr/local/libexec/loom-developer-sandbox-node-transport",
+        "invoke",
+        "--node",
+        "oldlab-1",
+        "--verb",
+        "check",
+    )
+    source = Path(policy.__file__).read_text(encoding="utf-8")
+    assert "runtime-proof-known-hosts" not in source
+    assert "runtime-proof-fetch" not in source
+    assert '"ssh"' not in source
+
+
+def test_bounded_transport_runner_drops_ambient_python_and_ssh_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        captured["argv"] = argv
+        captured["env"] = kwargs["env"]
+        output = kwargs["stdout"]
+        assert hasattr(output, "write")
+        output.write(b"bounded\n")
+        output.flush()
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setenv("PYTHONPATH", "/tmp/ambient")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/agent")
+    monkeypatch.setattr(policy.subprocess, "run", run)
+
+    result = policy._run_bounded_stdout(
+        ("/usr/bin/python3", "-I", "/fixed/transport"),
+        input_bytes=b"{}\n",
+        timeout=1,
+        max_bytes=1024,
+    )
+
+    assert result == b"bounded\n"
+    assert captured["env"] == {
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+    }
+
+
+def test_runtime_proof_fetch_rejects_unbound_artifact_id_before_transport() -> None:
+    with pytest.raises(policy.PolicyError, match="artifact identity"):
+        policy._fetch_runtime_proof_source(
+            "oldlab-1",
+            "trt-eai-oldlab-1",
+            "/var/lib/foreign.json",
+            expected_mode=0o644,
         )
 
 
@@ -2429,7 +3497,7 @@ def test_allocation_readback_waits_for_writer_and_never_returns_invalidated_arti
         loaded,
         candidate,
     )
-    target = policy._allocation_probe_path(tmp_path, loaded, candidate)
+    target = policy._allocation_probe_path(tmp_path, loaded, SANDBOX, candidate)
     old_created_at = payload["created_at"]
     writer_invalidated = threading.Event()
     allow_writer_finish = threading.Event()
@@ -2443,6 +3511,7 @@ def test_allocation_readback_waits_for_writer_and_never_returns_invalidated_arti
             with policy._allocation_probe_lock(
                 tmp_path,
                 loaded,
+                SANDBOX,
                 candidate,
                 enforce_root_ownership=False,
             ):
@@ -2469,6 +3538,7 @@ def test_allocation_readback_waits_for_writer_and_never_returns_invalidated_arti
                 policy.allocation_probe_readback(
                     tmp_path,
                     loaded,
+                    sandbox=SANDBOX,
                     candidate_sha=candidate,
                     candidate_binding=binding,
                     runtime_attestation=runtime_attestation,
@@ -2524,11 +3594,11 @@ def test_pending_queue_reason_does_not_impersonate_an_allocated_node() -> None:
     pending = _allocation_queue_row(loaded, payload, state="PENDING")
     pending[-1] = "(Resources)"
 
-    policy._validate_probe_queue_row(pending, payload, loaded)
+    policy._validate_probe_queue_row(pending, payload, loaded, sandbox=SANDBOX)
 
     pending[3] = "foreign-user"
     with pytest.raises(policy.PolicyError, match="identity drifted"):
-        policy._validate_probe_queue_row(pending, payload, loaded)
+        policy._validate_probe_queue_row(pending, payload, loaded, sandbox=SANDBOX)
 
 
 def test_allocation_accounting_rejects_effective_qos_drift() -> None:
@@ -2538,7 +3608,7 @@ def test_allocation_accounting_rejects_effective_qos_drift() -> None:
     row[8] = "foreign-qos"
 
     with pytest.raises(policy.PolicyError, match="identity drifted"):
-        policy._validate_probe_base_row(row, payload, loaded)
+        policy._validate_probe_base_row(row, payload, loaded, sandbox=SANDBOX)
 
 
 def test_final_created_at_cannot_refresh_stale_completed_nodes(tmp_path: Path) -> None:
@@ -2549,7 +3619,7 @@ def test_final_created_at_cannot_refresh_stale_completed_nodes(tmp_path: Path) -
         loaded,
         candidate,
     )
-    matrix_path = policy._allocation_matrix_path(tmp_path, loaded, candidate)
+    matrix_path = policy._allocation_matrix_path(tmp_path, loaded, SANDBOX, candidate)
     matrix = policy._load_allocation_state(
         matrix_path,
         enforce_root_ownership=False,
@@ -2566,7 +3636,7 @@ def test_final_created_at_cannot_refresh_stale_completed_nodes(tmp_path: Path) -
         enforce_root_ownership=False,
     )
     policy._write_allocation_state(
-        policy._allocation_probe_path(tmp_path, loaded, candidate),
+        policy._allocation_probe_path(tmp_path, loaded, SANDBOX, candidate),
         payload,
         enforce_root_ownership=False,
     )
@@ -2575,6 +3645,7 @@ def test_final_created_at_cannot_refresh_stale_completed_nodes(tmp_path: Path) -
         policy.allocation_probe_readback(
             tmp_path,
             loaded,
+            sandbox=SANDBOX,
             candidate_sha=candidate,
             candidate_binding=binding,
             runtime_attestation=runtime_attestation,
@@ -2594,7 +3665,7 @@ def test_receipt_rotation_archives_old_generation_and_resets_all_nodes(
         loaded,
         candidate,
     )
-    matrix_path = policy._allocation_matrix_path(tmp_path, loaded, candidate)
+    matrix_path = policy._allocation_matrix_path(tmp_path, loaded, SANDBOX, candidate)
     matrix = policy._load_allocation_state(
         matrix_path,
         enforce_root_ownership=False,
@@ -2603,9 +3674,11 @@ def test_receipt_rotation_archives_old_generation_and_resets_all_nodes(
     next_collected, next_expires = _generation_window()
     rotated = {
         **runtime_attestation,
+        "bundle_id": "9" * 64,
         "receipt_sha256": "e" * 64,
         "receipt_collected_at": next_collected,
         "receipt_expires_at": next_expires,
+        "proof_expires_at": next_expires,
     }
     assert policy._allocation_matrix_requires_reset(
         matrix,
@@ -2614,13 +3687,25 @@ def test_receipt_rotation_archives_old_generation_and_resets_all_nodes(
         now=datetime.now(UTC),
     )
     monkeypatch.setattr(policy, "_require_root_private_directory", lambda _path: None)
-    policy._archive_allocation_generation(tmp_path, loaded, candidate, matrix)
+    policy._archive_allocation_generation(
+        tmp_path,
+        loaded,
+        SANDBOX,
+        candidate,
+        matrix,
+    )
 
     assert not matrix_path.exists()
-    assert not policy._allocation_probe_path(tmp_path, loaded, candidate).exists()
+    assert not policy._allocation_probe_path(
+        tmp_path,
+        loaded,
+        SANDBOX,
+        candidate,
+    ).exists()
     assert len(list(matrix_path.parent.glob("*.archived"))) == 2
     replacement = policy._new_allocation_matrix(
         loaded,
+        sandbox=SANDBOX,
         candidate_sha=candidate,
         binding=binding,
         runtime_attestation=rotated,
@@ -2632,18 +3717,133 @@ def test_receipt_rotation_archives_old_generation_and_resets_all_nodes(
     assert policy._unfinished_allocation_nodes(replacement, loaded) == loaded.allowed_nodes
     node = loaded.allowed_nodes[0]
     old_name = policy._allocation_job_name(
+        SANDBOX,
         candidate,
         node,
         1,
         generation_id=str(matrix["generation_id"]),
     )
     new_name = policy._allocation_job_name(
+        SANDBOX,
         candidate,
         node,
         1,
         generation_id=str(replacement["generation_id"]),
     )
     assert old_name != new_name
+
+
+def test_allocation_generation_binds_full_bundle_not_receipt_prefix(tmp_path: Path) -> None:
+    loaded = policy.load_profile(PROFILE)
+    candidate = "a" * 40
+    binding, runtime_attestation, _payload = _allocation_matrix_fixture(
+        tmp_path,
+        loaded,
+        candidate,
+    )
+    same_receipt_new_bundle = {
+        **runtime_attestation,
+        "bundle_id": "b" * 64,
+    }
+
+    assert policy._allocation_generation_id(runtime_attestation) == "a" * 64
+    assert policy._allocation_generation_id(same_receipt_new_bundle) == "b" * 64
+    matrix = policy._new_allocation_matrix(
+        loaded,
+        sandbox=SANDBOX,
+        candidate_sha=candidate,
+        binding=binding,
+        runtime_attestation=runtime_attestation,
+        batch_uid=501,
+        batch_gid=20,
+        expected_pool="oldlab",
+        expected_concurrency=1,
+    )
+    assert policy._allocation_matrix_requires_reset(
+        matrix,
+        loaded,
+        runtime_attestation=same_receipt_new_bundle,
+        now=datetime.now(UTC),
+    )
+
+
+@pytest.mark.parametrize(
+    "runtime_attestation",
+    (
+        {"receipt_sha256": "c" * 64},
+        {"bundle_id": "d" * 12, "receipt_sha256": "c" * 64},
+    ),
+)
+def test_allocation_generation_rejects_missing_or_truncated_bundle(
+    runtime_attestation: dict[str, str],
+) -> None:
+    with pytest.raises(policy.PolicyError, match="bundle ID"):
+        policy._allocation_generation_id(runtime_attestation)
+
+
+def test_legacy_receipt_generation_is_only_archivable_when_bundle_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    candidate = "b" * 40
+    _binding, runtime_attestation, _payload = _allocation_matrix_fixture(
+        tmp_path,
+        loaded,
+        candidate,
+    )
+    matrix_path = policy._allocation_matrix_path(tmp_path, loaded, SANDBOX, candidate)
+    matrix = policy._load_allocation_state(matrix_path, enforce_root_ownership=False)
+    assert matrix is not None
+    matrix["generation_id"] = str(runtime_attestation["receipt_sha256"])[:12]
+    policy._write_allocation_state(
+        matrix_path,
+        matrix,
+        enforce_root_ownership=False,
+    )
+    monkeypatch.setattr(policy, "_require_root_private_directory", lambda _path: None)
+
+    policy._archive_allocation_generation(
+        tmp_path,
+        loaded,
+        SANDBOX,
+        candidate,
+        matrix,
+    )
+
+    assert not matrix_path.exists()
+    assert len(list(matrix_path.parent.glob("*.archived"))) == 2
+    foreign = dict(matrix)
+    foreign["generation_id"] = "0" * 12
+    with pytest.raises(policy.PolicyError, match="cannot be archived safely"):
+        policy._archive_allocation_generation(
+            tmp_path,
+            loaded,
+            SANDBOX,
+            candidate,
+            foreign,
+        )
+
+
+def test_allocation_rejects_proof_expiring_inside_timeout_margin() -> None:
+    now = datetime.now(UTC)
+    runtime_attestation = {
+        "bundle_id": "e" * 64,
+        "receipt_collected_at": (now - timedelta(seconds=1)).isoformat(),
+        "proof_expires_at": (
+            now
+            + timedelta(seconds=180)
+            + policy._ALLOCATION_PROOF_EXPIRY_MARGIN
+            - timedelta(microseconds=1)
+        ).isoformat(),
+    }
+
+    with pytest.raises(policy.PolicyError, match="timeout safety window"):
+        policy._require_allocation_proof_freshness(
+            runtime_attestation,
+            timeout_seconds=180,
+            now=now,
+        )
 
 
 def test_missing_completed_result_is_durably_retried(
@@ -2657,7 +3857,7 @@ def test_missing_completed_result_is_durably_retried(
         loaded,
         candidate,
     )
-    matrix_path = policy._allocation_matrix_path(tmp_path, loaded, candidate)
+    matrix_path = policy._allocation_matrix_path(tmp_path, loaded, SANDBOX, candidate)
     matrix = policy._load_allocation_state(
         matrix_path,
         enforce_root_ownership=False,
@@ -2684,6 +3884,7 @@ def test_missing_completed_result_is_durably_retried(
         matrix_path,
         matrix,
         loaded,
+        sandbox=SANDBOX,
         node=node,
         candidate_sha=candidate,
         candidate_root=Path("/candidate"),
@@ -2710,7 +3911,7 @@ def test_missing_completed_result_is_durably_retried(
     assert persisted["runtime_attestation"] == runtime_attestation
 
 
-def test_allocation_writer_uses_domain_then_candidate_lock(
+def test_allocation_writer_uses_sandbox_candidate_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     loaded = policy.load_profile(PROFILE)
@@ -2718,23 +3919,17 @@ def test_allocation_writer_uses_domain_then_candidate_lock(
     events: list[str] = []
 
     @contextmanager
-    def domain_lock(_root: Path, _profile: policy.Profile):  # type: ignore[no-untyped-def]
-        events.append("domain-enter")
-        yield
-        events.append("domain-exit")
-
-    @contextmanager
     def candidate_lock(  # type: ignore[no-untyped-def]
         _root: Path,
         _profile: policy.Profile,
+        _sandbox: str,
         _candidate: str,
     ):
-        assert events == ["domain-enter"]
+        assert events == []
         events.append("candidate-enter")
         yield
         events.append("candidate-exit")
 
-    monkeypatch.setattr(policy, "_domain_lock", domain_lock)
     monkeypatch.setattr(policy, "_allocation_probe_lock", candidate_lock)
     monkeypatch.setattr(policy.os, "geteuid", lambda: 0)
     monkeypatch.setattr(
@@ -2746,10 +3941,10 @@ def test_allocation_writer_uses_domain_then_candidate_lock(
     policy.run_allocation_probe(
         Path("/"),
         loaded,
+        sandbox=SANDBOX,
         candidate_sha=candidate,
         candidate_root=Path("/candidate"),
         worker_env=Path("/private/worker.env"),
-        runtime_receipt=Path("/receipt"),
         batch_uid=501,
         batch_gid=20,
         expected_pool="oldlab",
@@ -2757,10 +3952,8 @@ def test_allocation_writer_uses_domain_then_candidate_lock(
     )
 
     assert events == [
-        "domain-enter",
         "candidate-enter",
         "candidate-exit",
-        "domain-exit",
     ]
 
 
@@ -2788,6 +3981,7 @@ def test_public_live_readback_holds_domain_lock(
     assert policy.live_readback(
         tmp_path,
         loaded,
+        sandbox=None,
         candidate_sha="c" * 40,
         require_probe=False,
     ) == {"converged": True}

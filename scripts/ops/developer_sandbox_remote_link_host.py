@@ -24,7 +24,6 @@ import tempfile
 import tomllib
 import uuid
 from collections.abc import Iterator, Sequence
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -361,19 +360,12 @@ def _link_transaction(profile: Profile) -> Iterator[None]:
     lock_path = TRANSACTION_LOCK_ROOT / f"{profile.sandbox}.lock"
     descriptor = os.open(
         lock_path,
-        os.O_RDWR
-        | os.O_CREAT
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0),
+        os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
         0o600,
     )
     try:
         metadata = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_uid != 0
-            or metadata.st_gid != 0
-        ):
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0 or metadata.st_gid != 0:
             raise LinkHostError("remote-link transaction lock metadata is invalid")
         os.fchmod(descriptor, 0o600)
         fcntl.flock(descriptor, fcntl.LOCK_EX)
@@ -752,10 +744,9 @@ def _validate_existing_issuance(
         if _fingerprint(ca) != _fingerprint(root / "ca.pem"):
             raise LinkHostError("candidate issuance client CA binding is invalid")
         text = _certificate_text(root / "client.pem")
-        if (
-            set(re.findall(r"URI:([^,\s]+)", text)) != {profile.client_uri(candidate_sha)}
-            or set(re.findall(r"DNS:([^,\s]+)", text)) != {node}
-        ):
+        if set(re.findall(r"URI:([^,\s]+)", text)) != {profile.client_uri(candidate_sha)} or set(
+            re.findall(r"DNS:([^,\s]+)", text)
+        ) != {node}:
             raise LinkHostError("candidate issuance client identity is invalid")
 
 
@@ -1272,164 +1263,6 @@ def validate_worker_env(
     return expected
 
 
-def fleet_check(
-    profile: Profile,
-    candidate_sha: str,
-    *,
-    ssh_path: str,
-) -> dict[str, Any]:
-    node_payloads: dict[str, dict[str, Any]] = {}
-    failed: list[str] = []
-
-    def check_node(node: str) -> tuple[str, int, str]:
-        completed = _run(
-            (
-                ssh_path,
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=8",
-                node,
-                "sudo",
-                "-n",
-                str(INSTALLED_HOST),
-                "check-client",
-                "--sandbox",
-                profile.sandbox,
-                "--candidate-sha",
-                candidate_sha,
-                "--node",
-                node,
-            ),
-            expected=frozenset(range(256)),
-        )
-        return node, completed.returncode, completed.stdout
-
-    with ThreadPoolExecutor(max_workers=8, thread_name_prefix="loom-link-check") as pool:
-        futures = [pool.submit(check_node, node) for node in ELIGIBLE_NODES]
-        for future in as_completed(futures):
-            node, returncode, stdout = future.result()
-            if returncode != 0:
-                failed.append(node)
-                continue
-            try:
-                raw = json.loads(stdout)
-            except json.JSONDecodeError:
-                failed.append(node)
-                continue
-            if (
-                not isinstance(raw, dict)
-                or raw.get("node") != node
-                or raw.get("candidate_sha") != candidate_sha
-                or raw.get("sandbox") != profile.sandbox
-            ):
-                failed.append(node)
-                continue
-            node_payloads[node] = {
-                "node": node,
-                "candidate_sha": candidate_sha,
-                "route": {
-                    "destination": profile.server_address,
-                    "status": raw.get("route"),
-                },
-                "tls_version": raw.get("tls_version"),
-                "client_uri_san": raw.get("client_uri_san"),
-                "ca_fingerprint": raw.get("ca_fingerprint"),
-                "client_cert_fingerprint": raw.get("client_cert_fingerprint"),
-                "secret_files": raw.get("secret_files"),
-                "services": {
-                    name: {
-                        "listener_port": raw.get("services", {}).get(name, {}).get("listener_port"),
-                        "health": raw.get("services", {}).get(name, {}).get("health"),
-                    }
-                    for name in SERVICE_VALUES
-                },
-            }
-    if failed:
-        raise LinkHostError(
-            "fleet route/TLS readback failed for: " + ",".join(sorted(failed)),
-        )
-
-    server_completed = _run(
-        (
-            ssh_path,
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=8",
-            "oldlab-2",
-            "sudo",
-            "-n",
-            str(INSTALLED_HOST),
-            "check-server",
-            "--sandbox",
-            profile.sandbox,
-            "--candidate-sha",
-            candidate_sha,
-        ),
-    )
-    try:
-        server = json.loads(server_completed.stdout)
-    except json.JSONDecodeError as exc:
-        raise LinkHostError("server relay readback was not valid JSON") from exc
-    if (
-        not isinstance(server, dict)
-        or server.get("active_candidate_sha") != candidate_sha
-        or server.get("client_uri_san") != profile.client_uri(candidate_sha)
-    ):
-        raise LinkHostError("server relay readback identity drifted")
-    ca_fingerprints = {str(payload["ca_fingerprint"]) for payload in node_payloads.values()}
-    if ca_fingerprints != {server.get("ca_fingerprint")}:
-        raise LinkHostError("fleet CA generation is inconsistent")
-    generated = datetime.now(UTC).replace(microsecond=0)
-    payload: dict[str, Any] = {
-        "schema_version": 1,
-        "sandbox": profile.sandbox,
-        "candidate_sha": candidate_sha,
-        "generated_at": generated.isoformat().replace("+00:00", "Z"),
-        "expires_at": (generated + timedelta(seconds=ATTESTATION_TTL_SECONDS))
-        .isoformat()
-        .replace("+00:00", "Z"),
-        "eligible_nodes": list(ELIGIBLE_NODES),
-        "bundle_generation": {
-            "candidate_sha": candidate_sha,
-            "ca_fingerprint": server["ca_fingerprint"],
-            "client_uri_san": profile.client_uri(candidate_sha),
-        },
-        "server": server,
-        "nodes": {node: node_payloads[node] for node in ELIGIBLE_NODES},
-    }
-    payload["payload_sha256"] = _attestation_digest(payload)
-    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    persist_completed = _run(
-        (
-            ssh_path,
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=8",
-            "oldlab-2",
-            "sudo",
-            "-n",
-            str(INSTALLED_HOST),
-            "persist-attestation",
-            "--sandbox",
-            profile.sandbox,
-            "--candidate-sha",
-            candidate_sha,
-            "--execute",
-        ),
-        input_text=serialized + "\n",
-    )
-    try:
-        persisted = json.loads(persist_completed.stdout)
-    except json.JSONDecodeError as exc:
-        raise LinkHostError("fleet attestation persistence readback failed") from exc
-    if persisted.get("payload_sha256") != payload["payload_sha256"]:
-        raise LinkHostError("fleet attestation persistence digest drifted")
-    return payload
-
-
 def _attestation_digest(payload: dict[str, Any]) -> str:
     unsigned = {key: value for key, value in payload.items() if key != "payload_sha256"}
     canonical = json.dumps(
@@ -1629,7 +1462,7 @@ def _plan(args: argparse.Namespace, profile: Profile, candidate_sha: str) -> dic
         },
         "eligible_nodes": list(ELIGIBLE_NODES),
         "shared_filesystem_secrets": False,
-        "requires_root": args.command not in {"validate-env", "fleet-check"},
+        "requires_root": args.command != "validate-env",
     }
 
 
@@ -1645,7 +1478,6 @@ def build_parser() -> argparse.ArgumentParser:
         "check-server",
         "check-client",
         "validate-env",
-        "fleet-check",
         "persist-attestation",
     ):
         child = subparsers.add_parser(command)
@@ -1657,7 +1489,6 @@ def build_parser() -> argparse.ArgumentParser:
             "install-client",
             "activate-server",
             "rollback-server",
-            "fleet-check",
             "persist-attestation",
         }:
             child.add_argument("--execute", action="store_true")
@@ -1673,8 +1504,6 @@ def build_parser() -> argparse.ArgumentParser:
             child.add_argument("--node", choices=ELIGIBLE_NODES, required=True)
         if command == "validate-env":
             child.add_argument("--env-file", type=Path, required=True)
-        if command == "fleet-check":
-            child.add_argument("--ssh", default="ssh")
     return parser
 
 
@@ -1736,8 +1565,6 @@ def main(argv: list[str] | None = None) -> int:
             candidate_sha,
             args.env_file,
         )
-    elif args.command == "fleet-check":
-        plan = fleet_check(profile, candidate_sha, ssh_path=args.ssh)
     elif args.command == "persist-attestation":
         try:
             payload = json.loads(sys.stdin.read())

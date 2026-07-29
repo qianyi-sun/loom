@@ -337,9 +337,7 @@ def _acquire_environment_state_rollout_lock(
         diagnostic = getattr(exc, "diagnostic", None)
         if isinstance(diagnostic, dict):
             sys.stderr.write(
-                "rollout lock diagnostic: "
-                + json.dumps(diagnostic, sort_keys=True)
-                + "\n",
+                "rollout lock diagnostic: " + json.dumps(diagnostic, sort_keys=True) + "\n",
             )
         raise
     sys.stderr.write(
@@ -865,10 +863,7 @@ def _format_environment_state_value(value: Any) -> str:
 def _environment_state_label(profile: EnvironmentStateProfile) -> str:
     if profile.control_plane_environment == profile.environment:
         return profile.environment
-    return (
-        f"{profile.environment} "
-        f"(CP environment {profile.control_plane_environment})"
-    )
+    return f"{profile.environment} (CP environment {profile.control_plane_environment})"
 
 
 def _fetch_environment_state(
@@ -957,6 +952,20 @@ def _environment_state_apply_impl(
         autoscaler_policy_payload,
         gb10_desired_state_payload,
     )
+    from loom_cli.external_slurm_acceptance import (
+        ExternalSlurmAcceptanceError,
+        run_fixed_activation_verifier,
+    )
+
+    # The independent root authority is verified before resolving credentials,
+    # issuing the first CP mutation, or changing a systemd unit.  A missing,
+    # stale, wrong-candidate, or invalidly signed receipt therefore leaves both
+    # policy and supervisor state untouched.
+    try:
+        run_fixed_activation_verifier(profile)
+    except ExternalSlurmAcceptanceError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 1
 
     try:
         admin_token = _resolve_admin_token(args.admin_token)
@@ -970,24 +979,9 @@ def _environment_state_apply_impl(
     base = args.cp_url.rstrip("/")
     applied: list[dict[str, str]] = []
     try:
-        for policy in profile.autoscaler_policies:
-            url = (
-                f"{base}/admin/worker-pool-autoscaler-policies/"
-                f"{policy['environment']}/{policy['pool_name']}"
-            )
-            resp = httpx.put(
-                url,
-                json=autoscaler_policy_payload(policy),
-                headers=headers,
-                timeout=10.0,
-            )
-            if resp.status_code != 200:
-                sys.stderr.write(
-                    f"error: CP returned {resp.status_code} for {url}: {resp.text}\n",
-                )
-                return 1
-            applied.append({"kind": "worker_pool_autoscaler_policy", "url": url})
-
+        # Desired node-agent retirement is always written before an external
+        # Slurm policy can be enabled.  The fixed activation verifier above
+        # rejects any staging profile that does not stop the full GB10 fleet.
         for state in profile.gb10_desired_states:
             url = (
                 f"{base}/admin/gb10-worker-pools/"
@@ -1005,6 +999,24 @@ def _environment_state_apply_impl(
                 )
                 return 1
             applied.append({"kind": "gb10_worker_pool_desired_state", "url": url})
+
+        for policy in profile.autoscaler_policies:
+            url = (
+                f"{base}/admin/worker-pool-autoscaler-policies/"
+                f"{policy['environment']}/{policy['pool_name']}"
+            )
+            resp = httpx.put(
+                url,
+                json=autoscaler_policy_payload(policy),
+                headers=headers,
+                timeout=10.0,
+            )
+            if resp.status_code != 200:
+                sys.stderr.write(
+                    f"error: CP returned {resp.status_code} for {url}: {resp.text}\n",
+                )
+                return 1
+            applied.append({"kind": "worker_pool_autoscaler_policy", "url": url})
     except httpx.RequestError as e:
         sys.stderr.write(f"error: could not reach CP at {base}: {e}\n")
         return 2
@@ -1090,6 +1102,38 @@ def _environment_state_check_impl(
         diff_external_slurm_autoscaler_supervisors,
         diff_external_slurm_runner_prerequisites,
     )
+    from loom_cli.external_slurm_acceptance import (
+        ExternalSlurmAcceptanceError,
+        run_fixed_activation_verifier,
+    )
+
+    try:
+        run_fixed_activation_verifier(profile)
+    except ExternalSlurmAcceptanceError as exc:
+        if args.format == "json":
+            json.dump(
+                {
+                    "environment": profile.environment,
+                    "control_plane_environment": profile.control_plane_environment,
+                    "profile": str(args.file),
+                    "ok": False,
+                    "drift": [
+                        {
+                            "path": "external_slurm_acceptance_authority",
+                            "desired": "valid exact-candidate root authority",
+                            "live": str(exc),
+                        }
+                    ],
+                    "autoscaler_blockers": [],
+                    "catalog_provisioning": profile.catalog_provisioning,
+                },
+                sys.stdout,
+                indent=2,
+            )
+            sys.stdout.write("\n")
+        else:
+            sys.stderr.write(f"error: {exc}\n")
+        return 1
 
     try:
         admin_token = _resolve_admin_token(args.admin_token)
@@ -1185,14 +1229,12 @@ def _environment_state_check_impl(
                 f"reason={blocker.get('last_decision_reason') or '-'}\n",
             )
         sys.stderr.write(
-            "Resolve the autoscaler blocker before accepting this environment as "
-            "release-ready.\n",
+            "Resolve the autoscaler blocker before accepting this environment as release-ready.\n",
         )
         return 1
 
     sys.stdout.write(
-        f"Environment state {_environment_state_label(profile)} "
-        "matches desired profile.\n",
+        f"Environment state {_environment_state_label(profile)} matches desired profile.\n",
     )
     if profile.catalog_provisioning.get("required"):
         command = profile.catalog_provisioning.get("command")
@@ -1923,7 +1965,9 @@ def dispatch(argv: list[str]) -> int:
     )
     _add_common_args(p_autoscaler_status)
     p_autoscaler_status.add_argument(
-        "--format", choices=["text", "json"], default="text",
+        "--format",
+        choices=["text", "json"],
+        default="text",
         help="Output format.",
     )
     p_autoscaler_status.set_defaults(handler=_worker_pool_autoscaler_status)
@@ -1946,10 +1990,7 @@ def dispatch(argv: list[str]) -> int:
             "--file",
             type=Path,
             required=True,
-            help=(
-                "TOML desired-state profile, for example "
-                "deploy/environment-state/staging.toml."
-            ),
+            help=("TOML desired-state profile, for example deploy/environment-state/staging.toml."),
         )
         p.add_argument(
             "--environment",

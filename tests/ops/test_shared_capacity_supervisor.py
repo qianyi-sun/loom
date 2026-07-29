@@ -47,18 +47,18 @@ def _fixture(tmp_path: Path) -> tuple[supervisor.SupervisorConfig, Path]:
                 f'supervisor_state_path = "{authority / "supervisor-state.json"}"',
                 f'audit_path = "{authority / "supervisor-audit.jsonl"}"',
                 f'evidence_path = "{authority / "evidence/latest.json"}"',
-                "global_slot_budget = 160",
-                "global_pending_slot_budget = 40",
+                "global_slot_budget = 132",
+                "global_pending_slot_budget = 34",
                 "instances = [",
                 '  "qianyi-gb10", "qianyi-oldlab",',
                 '  "hongjian-gb10", "hongjian-oldlab",',
                 '  "devansh-gb10", "devansh-oldlab",',
                 "]",
                 "[pool_slot_budgets]",
-                "gb10 = 140",
+                "gb10 = 112",
                 "oldlab = 20",
                 "[pool_pending_slot_budgets]",
-                "gb10 = 30",
+                "gb10 = 24",
                 "oldlab = 10",
                 "",
             ),
@@ -104,11 +104,14 @@ def _assert_complete_generation(config: supervisor.SupervisorConfig) -> dict[str
         if entry["status"] == "absent":
             assert not path.exists()
         else:
-            canonical = json.dumps(
-                json.loads(path.read_text()),
-                sort_keys=True,
-                separators=(",", ":"),
-            ) + "\n"
+            canonical = (
+                json.dumps(
+                    json.loads(path.read_text()),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
             assert hashlib.sha256(canonical.encode()).hexdigest() == entry["digest"]
     return manifest
 
@@ -133,8 +136,7 @@ def _observation(
         "request_id": handoff["request_id"],
         "lease_epoch": handoff["lease_epoch"],
         "capacity_lease_state": (
-            capacity_lease_state
-            or ("active" if handoff["enabled"] else "retiring")
+            capacity_lease_state or ("active" if handoff["enabled"] else "retiring")
         ),
         "observed_at": observed_at.isoformat().replace("+00:00", "Z"),
         "observation_sequence": sequence,
@@ -448,10 +450,7 @@ def test_terminal_tombstone_is_ignored_without_blocking_new_request(
 
     result = supervisor.run_once(config, now=NOW)
 
-    assert (
-        result["observations"]["qianyi-gb10"]["status"]
-        == "terminal_tombstone_ignored"
-    )
+    assert result["observations"]["qianyi-gb10"]["status"] == "terminal_tombstone_ignored"
     assert second_id != first_id
     assert _handoff(config, "qianyi-gb10")["request_id"] == second_id
 
@@ -617,20 +616,20 @@ def test_independent_budget_validation_blocks_publication_after_transaction(
     ("config_replacement", "lease_updates", "aggregate_updates", "message"),
     [
         (
-            ("global_slot_budget = 160", "global_slot_budget = 100"),
+            ("global_slot_budget = 132", "global_slot_budget = 100"),
             {"pending_slots": 0, "active_slots": 101, "committed_slots": 101},
             {"pending_slots": 0, "active_slots": 101, "committed_slots": 101},
             "global budget",
         ),
         (
             None,
-            {"pending_slots": 0, "active_slots": 141, "committed_slots": 141},
-            {"pending_slots": 0, "active_slots": 141, "committed_slots": 141},
+            {"pending_slots": 0, "active_slots": 113, "committed_slots": 113},
+            {"pending_slots": 0, "active_slots": 113, "committed_slots": 113},
             "gb10 budget",
         ),
         (
             (
-                "global_pending_slot_budget = 40",
+                "global_pending_slot_budget = 34",
                 "global_pending_slot_budget = 20",
             ),
             {"pending_slots": 21, "committed_slots": 21},
@@ -639,8 +638,8 @@ def test_independent_budget_validation_blocks_publication_after_transaction(
         ),
         (
             None,
-            {"pending_slots": 31, "committed_slots": 31},
-            {"pending_slots": 31, "committed_slots": 31},
+            {"pending_slots": 25, "committed_slots": 25},
+            {"pending_slots": 25, "committed_slots": 25},
             "gb10 pending",
         ),
     ],
@@ -697,8 +696,8 @@ def test_restart_rejects_config_digest_change_while_capacity_is_committed(
     _write(
         config_path,
         config_path.read_text().replace(
-            "global_slot_budget = 160",
-            "global_slot_budget = 159",
+            "global_slot_budget = 132",
+            "global_slot_budget = 131",
             1,
         ),
     )
@@ -713,9 +712,13 @@ def test_restart_rejects_config_digest_change_while_capacity_is_committed(
 @pytest.mark.parametrize(
     ("old", "new", "message"),
     [
-        ("global_slot_budget = 160", "global_slot_budget = 161", "global_slot"),
-        ("global_pending_slot_budget = 40", "global_pending_slot_budget = 41", "global_pending"),
-        ("gb10 = 140", "gb10 = 141", "reviewed bound"),
+        ("global_slot_budget = 132", "global_slot_budget = 133", "global_slot"),
+        (
+            "global_pending_slot_budget = 34",
+            "global_pending_slot_budget = 35",
+            "global_pending",
+        ),
+        ("gb10 = 112", "gb10 = 113", "reviewed bound"),
     ],
 )
 def test_config_rejects_budgets_above_reviewed_bounds(
@@ -749,8 +752,8 @@ def test_checked_in_config_and_exact_candidate_service_renderer(tmp_path: Path) 
     installed = tmp_path / "supervisor.toml"
     _write(installed, checked.read_text())
     config = supervisor.load_config(installed)
-    assert config.pool_slot_budgets == {"gb10": 140, "oldlab": 20}
-    assert config.pool_pending_slot_budgets == {"gb10": 30, "oldlab": 10}
+    assert config.pool_slot_budgets == {"gb10": 112, "oldlab": 20}
+    assert config.pool_pending_slot_budgets == {"gb10": 24, "oldlab": 10}
     assert set(config.instances) == set(supervisor._EXPECTED_INSTANCES)
     template = (
         ROOT / "deploy/developer-sandboxes/loom-shared-capacity-supervisor.service"

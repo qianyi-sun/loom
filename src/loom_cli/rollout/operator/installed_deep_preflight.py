@@ -35,7 +35,11 @@ from loom_cli.rollout.systemd_readiness import CommandRunner as SystemdCommandRu
 from loom_cli.rollout.systemd_unit_readiness import CommandRunner as SystemdAnalyzeRunner
 
 from .config import OperatorConfig
-from .deep_preflight_authority import DeepPreflightAuthority, RuntimePurpose
+from .deep_preflight_authority import (
+    AdmissionPreparationLifecycle,
+    DeepPreflightAuthority,
+    RuntimePurpose,
+)
 from .installed_preflight_inputs import InstalledPreflightInputs
 from .model import CandidateBinding
 
@@ -67,7 +71,7 @@ class InstalledDeepPreflightComposition:
     external_supervisor_predecessor_source: ExternalSupervisorPredecessorSource
     systemd_run: SystemdCommandRunner
     gb10_run: SystemdCommandRunner
-    gb10_mount_source: Callable[[], GB10SharedMountReadiness]
+    gb10_mount_source: Callable[[dict[str, int]], GB10SharedMountReadiness]
     systemd_analyze_run: SystemdAnalyzeRunner
     image_run: ImageDockerRunner
     render_manifest_factory: ManifestFactory
@@ -83,6 +87,7 @@ class InstalledDeepPreflightComposition:
     read_mutation_epoch: Callable[[], int]
     read_database_schema_revision: Callable[[], str]
     now: Callable[[], datetime]
+    prepare_admission_run: Callable[[CandidateBinding], None]
     importer: ModuleImporter = importlib.import_module
     max_concurrency: int = 8
     gb10_candidate_source_run: SystemdCommandRunner | None = None
@@ -121,6 +126,7 @@ class InstalledDeepPreflightComposition:
                 namespace=self.config.namespace,
                 image_run=self.image_run,
             )
+        mount_binding, mount_binding_digest = self.inputs.resolve_gb10_mount_binding()
         rehearsal_actions, rehearsal_identity = self.rehearsal_factory(
             candidate, mutation_epoch, purpose, loaded
         )
@@ -151,8 +157,9 @@ class InstalledDeepPreflightComposition:
             gb10_identity=self.inputs.gb10_identity,
             gb10_ssh_config_sha256=self.inputs.gb10_ssh_config_sha256,
             gb10_identity_metadata_fingerprint=(self.inputs.gb10_identity_metadata_fingerprint),
-            gb10_mount_source=self.gb10_mount_source,
-            gb10_mount_binding_digest=self.inputs.gb10_mount_binding_digest,
+            gb10_mount_source=lambda: self.gb10_mount_source(mount_binding),
+            gb10_mount_binding_digest=mount_binding_digest,
+            gb10_external_profile_digest=self.inputs.gb10_external_profile_digest,
             alembic_ini=self.config.runner_repo / "migrations/alembic.ini",
             migration_policy_path=self.inputs.migration_policy_path,
             migration_policy_digest=self.inputs.migration_policy_digest,
@@ -172,9 +179,7 @@ class InstalledDeepPreflightComposition:
             now=self.now,
             importer=self.importer,
             loaded_artifacts=loaded,
-            permit_reserved_rotation_candidate=(
-                purpose is RuntimePurpose.DETACHED_REHEARSAL
-            ),
+            permit_reserved_rotation_candidate=(purpose is RuntimePurpose.DETACHED_REHEARSAL),
             gb10_candidate_source_run=self.gb10_candidate_source_run,
         )
 
@@ -186,7 +191,20 @@ class InstalledDeepPreflightComposition:
             read_mutation_epoch=self.read_mutation_epoch,
             now=self.now,
             max_concurrency=self.max_concurrency,
+            admission_preparation=(
+                None
+                if self.inputs.gb10_external_profile_digest is None
+                else AdmissionPreparationLifecycle(
+                    prepare=self.prepare_admission,
+                    now=self.now,
+                )
+            ),
         )
+
+    def prepare_admission(self, candidate: CandidateBinding) -> None:
+        """Invoke the fixed producer only for the external Slurm profile."""
+        if self.inputs.gb10_external_profile_digest is not None:
+            self.prepare_admission_run(candidate)
 
 
 __all__ = ["InstalledDeepPreflightComposition"]

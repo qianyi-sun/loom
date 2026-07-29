@@ -1,0 +1,461 @@
+schema_version = 1
+operator = "qianyi"
+authority_program = "/usr/local/libexec/loom-developer-sandbox-node-authority"
+
+[[nodes]]
+name = "oldlab-1"
+hostname = "trt-eai-oldlab-1"
+
+[[nodes]]
+name = "oldlab-2"
+hostname = "trt-eai-oldlab-2"
+
+[[nodes]]
+name = "oldlab-3"
+hostname = "trt-eai-oldlab-3"
+
+[[nodes]]
+name = "oldlab-4"
+hostname = "trt-eai-oldlab-4"
+
+[[nodes]]
+name = "oldlab-5"
+hostname = "trt-eai-oldlab-5"
+
+[[nodes]]
+name = "trt-gb10-1"
+hostname = "gx10-01c7"
+
+[[nodes]]
+name = "trt-gb10-2"
+hostname = "gx10-0fca"
+
+[[nodes]]
+name = "trt-gb10-3"
+hostname = "gx10-0f0d"
+
+[[nodes]]
+name = "trt-gb10-4"
+hostname = "gx10-0d93"
+
+[[nodes]]
+name = "trt-gb10-5"
+hostname = "gx10-1036"
+
+[[nodes]]
+name = "trt-gb10-6"
+hostname = "gx10-1000"
+
+[[nodes]]
+name = "trt-gb10-8"
+hostname = "gx10-db22"
+
+[[nodes]]
+name = "trt-gb10-9"
+hostname = "gx10-16f6"
+
+[[nodes]]
+name = "trt-gb10-10"
+hostname = "gx10-0f82"
+
+[[nodes]]
+name = "trt-gb10-11"
+hostname = "gx10-c38b"
+
+[[nodes]]
+name = "trt-gb10-12"
+hostname = "gx10-e45f"
+
+[[nodes]]
+name = "trt-gb10-13"
+hostname = "gx10-fc5d"
+
+[[nodes]]
+name = "trt-gb10-14"
+hostname = "gx10-0a49"
+
+[[nodes]]
+name = "trt-gb10-15"
+hostname = "gx10-0152"
+
+[[roles]]
+name = "oldlab2-controller"
+kind = "authority"
+initiator = "oldlab-2"
+verbs = ["transact", "check"]
+targets = [
+  "oldlab-1",
+  "oldlab-2",
+  "oldlab-3",
+  "oldlab-4",
+  "oldlab-5",
+  "trt-gb10-1",
+  "trt-gb10-2",
+  "trt-gb10-3",
+  "trt-gb10-4",
+  "trt-gb10-5",
+  "trt-gb10-6",
+  "trt-gb10-8",
+  "trt-gb10-9",
+  "trt-gb10-10",
+  "trt-gb10-11",
+  "trt-gb10-12",
+  "trt-gb10-13",
+  "trt-gb10-14",
+  "trt-gb10-15",
+]
+
+[[roles]]
+name = "oldlab1-publisher"
+kind = "authority"
+initiator = "oldlab-1"
+verbs = ["transact", "check"]
+targets = [
+  "oldlab-1",
+  "oldlab-2",
+  "oldlab-3",
+  "oldlab-4",
+  "oldlab-5",
+  "trt-gb10-1",
+]
+
+[[roles]]
+name = "gb10-1-publisher"
+kind = "authority"
+initiator = "trt-gb10-1"
+verbs = ["check"]
+targets = [
+  "oldlab-1",
+  "oldlab-2",
+  "trt-gb10-1",
+  "trt-gb10-2",
+  "trt-gb10-3",
+  "trt-gb10-4",
+  "trt-gb10-5",
+  "trt-gb10-6",
+  "trt-gb10-8",
+  "trt-gb10-9",
+  "trt-gb10-10",
+  "trt-gb10-11",
+  "trt-gb10-12",
+  "trt-gb10-13",
+  "trt-gb10-14",
+  "trt-gb10-15",
+]
+
+[[roles]]
+name = "gb10-1-oldlab-jump"
+kind = "proxy"
+initiator = "trt-gb10-1"
+verbs = []
+targets = [
+  "oldlab-2",
+]
+
+[[roles]]
+name = "oldlab2-gb10-jump"
+kind = "proxy"
+initiator = "oldlab-2"
+verbs = []
+targets = [
+  "trt-gb10-2",
+  "trt-gb10-3",
+  "trt-gb10-4",
+  "trt-gb10-5",
+  "trt-gb10-6",
+  "trt-gb10-8",
+  "trt-gb10-9",
+  "trt-gb10-10",
+  "trt-gb10-11",
+  "trt-gb10-12",
+  "trt-gb10-13",
+  "trt-gb10-14",
+  "trt-gb10-15",
+]
+
+[[routes]]
+initiator = "oldlab-1"
+node = "oldlab-1"
+address = "192.168.50.13"
+port = 22
+jump = ""
+
+[[routes]]
+initiator = "oldlab-1"
+node = "oldlab-2"
+address = "192.168.50.14"
+port = 22
+jump = ""
+
+[[routes]]
+initiator = "oldlab-1"
+node = "oldlab-3"
+address = "192.168.50.15"
+port = 22
+jump = ""
+
+[[routes]]
+initiator = "oldlab-1"
+node = "oldlab-4"
+address = "192.168.50.16"
+port = 22
+jump = ""
+
+[[routes]]
+initiator = "oldlab-1"
+node = "oldlab-5"
+address = "192.168.50.17"
+port = 22
+jump = ""
+
+[[routes]]
+initiator = "oldlab-1"
+node = "trt-gb10-1"
+address = "207.35.188.227"
+port = 2221
+jump = ""
+
+[[routes]]
+initiator = "oldlab-2"
+node = "oldlab-1"
+address = "192.168.50.13"
+port = 22
+jump = ""
+
+[[routes]]
+initiator = "oldlab-2"
+node = "oldlab-2"
+address = "192.168.50.14"
+port = 22
+jump = ""
+
+[[routes]]
+initiator = "oldlab-2"
+node = "oldlab-3"
+address = "192.168.50.15"
+port = 22
+jump = ""
+
+[[routes]]
+initiator = "oldlab-2"
+node = "oldlab-4"
+address = "192.168.50.16"
+port = 22
+jump = ""
+
+[[routes]]
+initiator = "oldlab-2"
+node = "oldlab-5"
+address = "192.168.50.17"
+port = 22
+jump = ""
+
+[[routes]]
+initiator = "oldlab-2"
+node = "trt-gb10-1"
+address = "207.35.188.227"
+port = 2221
+jump = ""
+
+[[routes]]
+initiator = "oldlab-2"
+node = "trt-gb10-2"
+address = "192.168.20.12"
+port = 22
+jump = "trt-gb10-1"
+
+[[routes]]
+initiator = "oldlab-2"
+node = "trt-gb10-3"
+address = "192.168.20.13"
+port = 22
+jump = "trt-gb10-1"
+
+[[routes]]
+initiator = "oldlab-2"
+node = "trt-gb10-4"
+address = "192.168.20.14"
+port = 22
+jump = "trt-gb10-1"
+
+[[routes]]
+initiator = "oldlab-2"
+node = "trt-gb10-5"
+address = "192.168.20.15"
+port = 22
+jump = "trt-gb10-1"
+
+[[routes]]
+initiator = "oldlab-2"
+node = "trt-gb10-6"
+address = "192.168.20.16"
+port = 22
+jump = "trt-gb10-1"
+
+[[routes]]
+initiator = "oldlab-2"
+node = "trt-gb10-8"
+address = "192.168.20.18"
+port = 22
+jump = "trt-gb10-1"
+
+[[routes]]
+initiator = "oldlab-2"
+node = "trt-gb10-9"
+address = "192.168.20.19"
+port = 22
+jump = "trt-gb10-1"
+
+[[routes]]
+initiator = "oldlab-2"
+node = "trt-gb10-10"
+address = "192.168.20.20"
+port = 22
+jump = "trt-gb10-1"
+
+[[routes]]
+initiator = "oldlab-2"
+node = "trt-gb10-11"
+address = "192.168.20.21"
+port = 22
+jump = "trt-gb10-1"
+
+[[routes]]
+initiator = "oldlab-2"
+node = "trt-gb10-12"
+address = "192.168.20.22"
+port = 22
+jump = "trt-gb10-1"
+
+[[routes]]
+initiator = "oldlab-2"
+node = "trt-gb10-13"
+address = "192.168.20.23"
+port = 22
+jump = "trt-gb10-1"
+
+[[routes]]
+initiator = "oldlab-2"
+node = "trt-gb10-14"
+address = "192.168.20.24"
+port = 22
+jump = "trt-gb10-1"
+
+[[routes]]
+initiator = "oldlab-2"
+node = "trt-gb10-15"
+address = "192.168.20.25"
+port = 22
+jump = "trt-gb10-1"
+
+[[routes]]
+initiator = "trt-gb10-1"
+node = "oldlab-1"
+address = "207.35.188.227"
+port = 2321
+jump = ""
+
+[[routes]]
+initiator = "trt-gb10-1"
+node = "oldlab-2"
+address = "192.168.50.14"
+port = 22
+jump = "oldlab-1"
+
+[[routes]]
+initiator = "trt-gb10-1"
+node = "trt-gb10-1"
+address = "192.168.20.11"
+port = 22
+jump = ""
+
+[[routes]]
+initiator = "trt-gb10-1"
+node = "trt-gb10-2"
+address = "192.168.20.12"
+port = 22
+jump = ""
+
+[[routes]]
+initiator = "trt-gb10-1"
+node = "trt-gb10-3"
+address = "192.168.20.13"
+port = 22
+jump = ""
+
+[[routes]]
+initiator = "trt-gb10-1"
+node = "trt-gb10-4"
+address = "192.168.20.14"
+port = 22
+jump = ""
+
+[[routes]]
+initiator = "trt-gb10-1"
+node = "trt-gb10-5"
+address = "192.168.20.15"
+port = 22
+jump = ""
+
+[[routes]]
+initiator = "trt-gb10-1"
+node = "trt-gb10-6"
+address = "192.168.20.16"
+port = 22
+jump = ""
+
+[[routes]]
+initiator = "trt-gb10-1"
+node = "trt-gb10-8"
+address = "192.168.20.18"
+port = 22
+jump = ""
+
+[[routes]]
+initiator = "trt-gb10-1"
+node = "trt-gb10-9"
+address = "192.168.20.19"
+port = 22
+jump = ""
+
+[[routes]]
+initiator = "trt-gb10-1"
+node = "trt-gb10-10"
+address = "192.168.20.20"
+port = 22
+jump = ""
+
+[[routes]]
+initiator = "trt-gb10-1"
+node = "trt-gb10-11"
+address = "192.168.20.21"
+port = 22
+jump = ""
+
+[[routes]]
+initiator = "trt-gb10-1"
+node = "trt-gb10-12"
+address = "192.168.20.22"
+port = 22
+jump = ""
+
+[[routes]]
+initiator = "trt-gb10-1"
+node = "trt-gb10-13"
+address = "192.168.20.23"
+port = 22
+jump = ""
+
+[[routes]]
+initiator = "trt-gb10-1"
+node = "trt-gb10-14"
+address = "192.168.20.24"
+port = 22
+jump = ""
+
+[[routes]]
+initiator = "trt-gb10-1"
+node = "trt-gb10-15"
+address = "192.168.20.25"
+port = 22
+jump = ""

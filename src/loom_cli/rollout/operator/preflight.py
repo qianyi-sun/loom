@@ -57,8 +57,11 @@ FULL_GB10_HOSTS = gb10_readiness_module.FULL_GB10_HOSTS
 TEMPORARILY_EXCLUDED_GB10_HOSTS = gb10_readiness_module.TEMPORARILY_EXCLUDED_GB10_HOSTS
 ACTIVE_GB10_HOSTS = gb10_readiness_module.ACTIVE_GB10_HOSTS
 EXPECTED_GB10_SSH_CONFIG_SHA256 = "7ac3cbe20670762590b9efe4daea46126caa823f192e060be109b96350e82b4e"
-_SHARED_REPOSITORY_ROOT = Path("/shared_work2/qianyi/.loom-staging-rollout/worker-repos")
-_SHARED_REPOSITORY_SOURCE = "192.168.20.12:/shared_work2"
+_SHARED_REPOSITORY_ROOT = Path("/srv/loom/staging-shared/candidates")
+_SYSTEM_SHARED_REPOSITORY_SOURCE = "192.168.20.12:/shared_work2/loom/staging"
+_LEGACY_SHARED_REPOSITORY_SOURCE = "192.168.20.12:/shared_work2"
+_SHARED_MOUNT_ROOT = Path("/srv/loom/staging-shared")
+_SHARED_GENERATED_ROOT = _SHARED_MOUNT_ROOT / "generated"
 _MOUNTINFO = Path("/proc/self/mountinfo")
 _GB10_KNOWN_HOSTS = Path("/etc/loom/staging-rollout-gb10-known-hosts")
 
@@ -445,6 +448,79 @@ class GB10PreflightInputs:
     targets: tuple[GB10ProbeTarget, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class ExternalGB10AuthorityProfile:
+    """Exact closed pre-s10 authority declaration from candidate bytes."""
+
+    profile_digest: str
+
+
+def load_external_gb10_authority_profile(
+    config: OperatorConfig,
+    *,
+    service_uid: int,
+) -> ExternalGB10AuthorityProfile | None:
+    path = config.runner_repo / "deploy/environment-state/staging.toml"
+    payload = _readable_config_bytes(path, service_uid=service_uid)
+    if payload is None:
+        return None
+    try:
+        raw = tomllib.loads(payload.decode("utf-8"))
+    except (UnicodeError, tomllib.TOMLDecodeError):
+        return None
+    prerequisites = raw.get("external_slurm_runner_prerequisites")
+    desired = raw.get("gb10_worker_pool_desired_states")
+    policies = raw.get("worker_pool_autoscaler_policies")
+    supervisors = raw.get("external_slurm_autoscaler_supervisors")
+    expected_intents = {
+        f"trt-gb10-{number}": "stopped" for number in range(1, 16)
+    }
+    if (
+        raw.get("environment") != "staging"
+        or not isinstance(prerequisites, dict)
+        or prerequisites.get("pools") != ["gb10"]
+        or prerequisites.get("require_external_allocation_authority") is not True
+        or not isinstance(desired, list)
+        or len(desired) != 1
+        or not isinstance(policies, list)
+        or not isinstance(supervisors, list)
+    ):
+        return None
+    state = desired[0]
+    gb10_policies = [
+        item for item in policies if isinstance(item, dict) and item.get("pool_name") == "gb10"
+    ]
+    gb10_supervisors = [
+        item
+        for item in supervisors
+        if isinstance(item, dict) and item.get("name") == "gb10-staging"
+    ]
+    if (
+        not isinstance(state, dict)
+        or state.get("pool_name") != "gb10"
+        or state.get("target_slots") != 0
+        or state.get("host_intents") != expected_intents
+        or len(gb10_policies) != 1
+        or len(gb10_supervisors) != 1
+    ):
+        return None
+    actuator = gb10_policies[0].get("actuator_config")
+    if not (
+        gb10_policies[0].get("enabled") is True
+        and isinstance(actuator, dict)
+        and actuator.get("allowed_nodes") == list(ACTIVE_GB10_HOSTS)
+        and actuator.get("external_runner") is True
+        and actuator.get("repo_dir")
+        == "/srv/loom/staging-shared/candidates/loom-remote-worker-${IMAGE_TAG}"
+        and actuator.get("env_file")
+        == "/srv/loom/staging-shared/generated/staging-gb10-worker-${IMAGE_TAG}.env"
+        and gb10_supervisors[0].get("enabled") is True
+        and gb10_supervisors[0].get("active") is True
+    ):
+        return None
+    return ExternalGB10AuthorityProfile(hashlib.sha256(payload).hexdigest())
+
+
 def load_catalog_environment_path(
     config: OperatorConfig,
     *,
@@ -490,12 +566,93 @@ def load_gb10_preflight_inputs(
     )
 
 
+def _system_shared_repository_binding(
+    *,
+    service_uid: int,
+    mountinfo: Path = _MOUNTINFO,
+) -> dict[str, int] | None:
+    """Read back the fixed root-owned /srv mount without a human identity."""
+    try:
+        service = pwd.getpwnam("loom-rollout")
+        service_group = grp.getgrnam("loom-rollout")
+        batch = pwd.getpwnam("loom-staging-worker")
+        mount_payload = mountinfo.read_text(encoding="utf-8")
+        root = _SHARED_MOUNT_ROOT.lstat()
+        repository = _SHARED_REPOSITORY_ROOT.lstat()
+        generated = _SHARED_GENERATED_ROOT.lstat()
+    except (KeyError, OSError):
+        return None
+    if (
+        service.pw_uid != service_uid
+        or service.pw_gid != service_group.gr_gid
+        or (batch.pw_uid, batch.pw_gid) != (31024, 31024)
+        or any(
+            not stat.S_ISDIR(item.st_mode) or stat.S_ISLNK(item.st_mode)
+            for item in (root, repository, generated)
+        )
+        or any(
+            (item.st_uid, item.st_gid, stat.S_IMODE(item.st_mode)) != (0, 31024, 0o750)
+            for item in (root, repository, generated)
+        )
+    ):
+        return None
+    matches: list[tuple[int, int]] = []
+    for raw_line in mount_payload.splitlines():
+        left, separator, right = raw_line.partition(" - ")
+        left_fields = left.split()
+        right_fields = right.split()
+        if (
+            not separator
+            or len(left_fields) < 6
+            or len(right_fields) != 3
+            or left_fields[4] != str(_SHARED_MOUNT_ROOT)
+        ):
+            continue
+        device = left_fields[2].split(":", 1)
+        try:
+            major, minor = int(device[0]), int(device[1])
+        except (IndexError, ValueError):
+            return None
+        mount_options = set(left_fields[5].split(","))
+        super_options = set(right_fields[2].split(","))
+        if (
+            right_fields[0] != "nfs4"
+            or right_fields[1] != _SYSTEM_SHARED_REPOSITORY_SOURCE
+            or not {"rw", "nosuid", "nodev", "noexec"}.issubset(
+                mount_options | super_options
+            )
+            or "hard" not in super_options
+        ):
+            return None
+        matches.append((major, minor))
+    if matches != [(os.major(root.st_dev), os.minor(root.st_dev))]:
+        return None
+    return {
+        "service_uid": service_uid,
+        "service_primary_gid": service_group.gr_gid,
+        "consumer_uid": batch.pw_uid,
+        "consumer_primary_gid": batch.pw_gid,
+        "shared_gid": batch.pw_gid,
+        "parent_device": root.st_dev,
+        "parent_inode": root.st_ino,
+        "authority_device": repository.st_dev,
+        "authority_inode": repository.st_ino,
+        "repository_device": generated.st_dev,
+        "repository_inode": generated.st_ino,
+    }
+
+
 def _shared_repository_binding(
     *,
     service_uid: int,
     root: Path = _SHARED_REPOSITORY_ROOT,
     mountinfo: Path = _MOUNTINFO,
 ) -> dict[str, int] | None:
+    if root == _SHARED_REPOSITORY_ROOT and mountinfo == _MOUNTINFO:
+        return _system_shared_repository_binding(
+            service_uid=service_uid,
+            mountinfo=mountinfo,
+        )
     try:
         service = pwd.getpwnam("loom-rollout")
         service_group = grp.getgrnam("loom-rollout")
@@ -541,7 +698,7 @@ def _shared_repository_binding(
         super_options = set(right_fields[2].split(","))
         if (
             right_fields[0] != "nfs4"
-            or right_fields[1] != _SHARED_REPOSITORY_SOURCE
+            or right_fields[1] != _LEGACY_SHARED_REPOSITORY_SOURCE
             or not {"rw", "nosuid", "nodev", "noexec"}.issubset(mount_options)
             or not {
                 "rw",
@@ -649,6 +806,11 @@ def load_shared_repository_binding(*, service_uid: int) -> dict[str, int] | None
     return _shared_repository_binding(service_uid=service_uid)
 
 
+def load_system_shared_repository_binding(*, service_uid: int) -> dict[str, int] | None:
+    """Return the fixed root-owned /srv mount readback for external authority."""
+    return _system_shared_repository_binding(service_uid=service_uid)
+
+
 def shared_repository_binding_digest(binding: dict[str, int]) -> str:
     """Hash the complete non-secret local mount/UID/GID binding."""
     expected = {
@@ -715,11 +877,11 @@ def _validate_gb10_shared_mount_output(
         or mount_device != repository_device
         or (
             host == "trt-gb10-2"
-            and (mount_type != "ext4" or mount_source == _SHARED_REPOSITORY_SOURCE)
+            and (mount_type != "ext4" or mount_source == _LEGACY_SHARED_REPOSITORY_SOURCE)
         )
         or (
             host != "trt-gb10-2"
-            and (mount_type != "nfs4" or mount_source != _SHARED_REPOSITORY_SOURCE)
+            and (mount_type != "nfs4" or mount_source != _LEGACY_SHARED_REPOSITORY_SOURCE)
         )
     ):
         return None
@@ -1069,7 +1231,24 @@ def collect_preflight(
         _shared_repository_binding(service_uid=service_uid) if service_uid >= 0 else None
     )
     shared_evidence = None
-    if gb10_ok and gb10 is not None and shared_binding is not None:
+    external_profile = (
+        load_external_gb10_authority_profile(config, service_uid=service_uid)
+        if service_uid >= 0
+        else None
+    )
+    if (
+        gb10_ok
+        and gb10 is not None
+        and shared_binding is not None
+        and external_profile is not None
+    ):
+        shared_evidence = hashlib.sha256(
+            (
+                shared_repository_binding_digest(shared_binding)
+                + external_profile.profile_digest
+            ).encode("ascii")
+        ).hexdigest()
+    elif gb10_ok and gb10 is not None and shared_binding is not None:
         ssh_config, identity, hosts = gb10
         shared_evidence = _gb10_shared_repository_probe(
             child_run,
@@ -1101,8 +1280,10 @@ __all__ = [
     "catalog_secret_values",
     "collect_preflight",
     "load_catalog_environment_path",
+    "load_external_gb10_authority_profile",
     "load_gb10_preflight_inputs",
     "load_shared_repository_binding",
+    "load_system_shared_repository_binding",
     "probe_gb10_shared_mount_readonly",
     "safe_fingerprint",
     "shared_repository_binding_digest",

@@ -14,7 +14,6 @@ from loom_cli.rollout.gb10_convergence import (
     GB10MutationKind,
 )
 from loom_cli.rollout.operator.protected_gb10_transport import (
-    _REMOTE_SHARED_GIT_TIMEOUT_SECONDS,
     FixedGB10SSHTransport,
     GB10FleetApplyError,
     GB10TransportTarget,
@@ -26,6 +25,16 @@ from tests.loom_cli.rollout.operator.test_protected_migration_component import _
 
 
 def _target(host: str = "trt-gb10-1") -> GB10TransportTarget:
+    return GB10TransportTarget(
+        ssh_target=host,
+        repo_path=None,
+        env_file_path=None,
+        node_agent_service="loom-gb10-node-agent.service",
+        retirement_only=True,
+    )
+
+
+def _legacy_target(host: str = "trt-gb10-1") -> GB10TransportTarget:
     return GB10TransportTarget(
         ssh_target=host,
         repo_path=PurePosixPath("/home/qianyi/loom-worker-build-staging"),
@@ -58,12 +67,12 @@ def test_fixed_transport_observes_exact_candidate_without_remote_mutation(tmp_pa
         "baseline_ready": True,
         "boot_id": "boot-1",
         "candidate_source_exact": True,
-        "checkout_exact": False,
-        "environment_exact": False,
-        "legacy_absent": True,
+        "checkout_exact": True,
+        "environment_exact": True,
+        "legacy_absent": False,
         "service_timer_exact": False,
         "service_timer_transient": False,
-        "units_exact": False,
+        "units_exact": True,
     }
 
     def run(argv):
@@ -80,10 +89,11 @@ def test_fixed_transport_observes_exact_candidate_without_remote_mutation(tmp_pa
     argv = calls[0]
     assert argv[-2] == "trt-gb10-1"
     assert plan.candidate_sha in argv[-1]
-    assert plan.candidate_tree in argv[-1]
-    assert "/shared_work2/qianyi/.loom-staging-rollout/worker-repos" in argv[-1]
-    assert "git fetch" not in argv[-1]
-    assert "systemctl --user start" not in argv[-1]
+    assert plan.plan_digest in argv[-1]
+    assert "/srv/loom/staging-shared/candidates" not in argv[-1]
+    assert "/home/qianyi/loom-worker-build-staging" not in argv[-1]
+    assert "gb10-authority-retirement.json" in argv[-1]
+    assert 'systemctl", "--user", "is-active' in argv[-1]
 
 
 def test_fixed_transport_applies_only_typed_operations_to_planned_host(tmp_path) -> None:
@@ -99,7 +109,7 @@ def test_fixed_transport_applies_only_typed_operations_to_planned_host(tmp_path)
         mutations=(
             GB10HostMutation(
                 "trt-gb10-2",
-                (GB10MutationKind.ENVIRONMENT, GB10MutationKind.UNITS),
+                (GB10MutationKind.LEGACY_RETIRE, GB10MutationKind.SERVICE_TIMER),
             ),
         ),
         blockers={},
@@ -109,11 +119,12 @@ def test_fixed_transport_applies_only_typed_operations_to_planned_host(tmp_path)
 
     assert len(calls) == 1
     assert calls[0][-2] == "trt-gb10-2"
-    assert "environment" in calls[0][-1]
-    assert "units" in calls[0][-1]
+    assert "legacy-retire" in calls[0][-1]
+    assert "service-timer" in calls[0][-1]
     assert plan.candidate_sha in calls[0][-1]
     assert "loom-gb10-worker.service" in calls[0][-1]
-    assert "curl" not in calls[0][-1]
+    assert 'run(["systemctl", "--user", "disable", "--now", unit])' in calls[0][-1]
+    assert "git" not in calls[0][-1]
 
 
 def _retrying_transport(
@@ -292,7 +303,7 @@ def test_fixed_transport_apply_retries_transient_failure(tmp_path) -> None:
 
     convergence = GB10ConvergencePlan(
         state=GB10ConvergenceState.READY,
-        mutations=(GB10HostMutation("trt-gb10-2", (GB10MutationKind.ENVIRONMENT,)),),
+        mutations=(GB10HostMutation("trt-gb10-2", (GB10MutationKind.LEGACY_RETIRE,)),),
         blockers={},
         evidence_digest="1" * 64,
     )
@@ -320,8 +331,8 @@ def test_fixed_transport_reports_only_validated_failed_hosts(tmp_path) -> None:
     convergence = GB10ConvergencePlan(
         state=GB10ConvergenceState.READY,
         mutations=(
-            GB10HostMutation("trt-gb10-1", (GB10MutationKind.ENVIRONMENT,)),
-            GB10HostMutation("trt-gb10-2", (GB10MutationKind.ENVIRONMENT,)),
+            GB10HostMutation("trt-gb10-1", (GB10MutationKind.LEGACY_RETIRE,)),
+            GB10HostMutation("trt-gb10-2", (GB10MutationKind.LEGACY_RETIRE,)),
         ),
         blockers={},
         evidence_digest="1" * 64,
@@ -366,42 +377,38 @@ def test_fixed_remote_programs_compile_and_apply_rejects_noncanonical_order(tmp_
         transport.apply(plan, convergence)
 
 
-def test_remote_shared_candidate_git_uses_live_nfs_timeout_budget(tmp_path) -> None:
+def test_remote_retirement_program_has_no_candidate_or_git_dependency(tmp_path) -> None:
     plan = _plan(tmp_path, "trt-gb10-1")
     observation = _remote_observation_source(_target(), plan)
     apply = _remote_apply_source(
         _target(),
         plan,
-        (GB10MutationKind.CHECKOUT, GB10MutationKind.SERVICE_TIMER),
+        (GB10MutationKind.LEGACY_RETIRE, GB10MutationKind.SERVICE_TIMER),
     )
 
-    assert _REMOTE_SHARED_GIT_TIMEOUT_SECONDS == 30
-    assert "def run(argv, *, cwd=None, timeout_seconds=10):" in observation
-    assert "timeout=timeout_seconds" in observation
-    assert f"timeout_seconds={_REMOTE_SHARED_GIT_TIMEOUT_SECONDS}" in observation
-    assert "def output(argv, *, timeout_seconds=20):" in apply
-    assert "timeout=timeout_seconds" in apply
-    assert f"timeout_seconds={_REMOTE_SHARED_GIT_TIMEOUT_SECONDS}" in apply
+    assert "/srv/loom/staging-shared/candidates" not in observation
+    assert plan.candidate_sha in observation
+    assert plan.plan_digest in observation
+    assert "git" not in observation
+    assert "git" not in apply
+    assert "gb10-authority-retirement.lock" in apply
+    assert 'committed["phase"] = "committed"' in apply
 
 
-def test_remote_checkout_trusts_only_exact_shared_candidate_upload_pack(tmp_path) -> None:
+def test_remote_retirement_never_updates_human_checkout_or_starts_timer(tmp_path) -> None:
     plan = _plan(tmp_path, "trt-gb10-1")
     apply = _remote_apply_source(
         _target(),
         plan,
-        (GB10MutationKind.CHECKOUT,),
+        (GB10MutationKind.LEGACY_RETIRE, GB10MutationKind.SERVICE_TIMER),
     )
-    shared = (
-        "/shared_work2/qianyi/.loom-staging-rollout/worker-repos/"
-        f"loom-remote-worker-staging-{plan.candidate_sha[:7]}"
-    )
-    upload_pack = f"/usr/bin/git -c safe.directory={shared}/.git upload-pack"
 
-    assert f"upload_pack = {upload_pack!r}" in apply
-    assert '"--no-write-fetch-head", f"--upload-pack={upload_pack}"' in apply
-    assert "safe.directory=*" not in apply
-    assert "config --global" not in apply
-    assert "config --system" not in apply
+    assert "/home/qianyi/loom-worker-build-staging" not in apply
+    assert "/srv/loom/staging-shared/candidates" not in apply
+    assert '"start"' not in apply
+    assert '"enable"' not in apply
+    assert '"disable", "--now"' in apply
+    assert "daemon-reload" in apply
 
 
 def test_fixed_transport_aggregates_unavailable_hosts_and_rejects_inventory_drift(
@@ -451,5 +458,82 @@ def test_fixed_transport_factory_binds_checked_in_staging_inventory() -> None:
     )
 
     assert tuple(target.ssh_target for target in transport.targets) == hosts
+    assert all(target.retirement_only for target in transport.targets)
+    assert all(
+        target.repo_path is None and target.env_file_path is None for target in transport.targets
+    )
+    assert "/home/qianyi" not in repr(transport.targets)
     assert transport.identity == Path("/var/lib/loom-staging-rollout/gb10-deploy-ed25519")
     assert transport.ssh_config == (repo_root / "deploy/worker-pools/gb10/ssh_config").resolve()
+
+
+@pytest.mark.parametrize("forbidden_field", ("repo_path", "env_file_path", "repo_url"))
+def test_external_transport_factory_rejects_legacy_candidate_authority(
+    tmp_path: Path,
+    forbidden_field: str,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[4]
+    source = repo_root / "deploy/environments/staging.cluster.toml"
+    raw = source.read_text(encoding="utf-8")
+    raw = raw.replace(
+        '{ ssh_target = "trt-gb10-1",',
+        f'{{ ssh_target = "trt-gb10-1", {forbidden_field} = "/forbidden",',
+        1,
+    )
+    config = tmp_path / "staging.cluster.toml"
+    config.write_text(
+        raw.replace(
+            'env_state_profile = "../environment-state/staging.toml"',
+            f'env_state_profile = "{repo_root / "deploy/environment-state/staging.toml"}"',
+        ).replace(
+            'ssh_config = "../worker-pools/gb10/ssh_config"',
+            f'ssh_config = "{repo_root / "deploy/worker-pools/gb10/ssh_config"}"',
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="host authority is invalid"):
+        build_fixed_gb10_ssh_transport(
+            config,
+            expected_hosts=tuple(
+                f"trt-gb10-{index}" for index in range(1, 16) if index != 7
+            ),
+            run=lambda argv: subprocess.CompletedProcess(argv, 0, "", ""),
+            max_concurrency=4,
+        )
+
+
+def test_legacy_transport_explicitly_retains_existing_user_path_contract(tmp_path: Path) -> None:
+    target = _legacy_target()
+    plan = _plan(tmp_path, target.ssh_target)
+
+    observation = _remote_observation_source(target, plan)
+    apply = _remote_apply_source(
+        target,
+        plan,
+        (
+            GB10MutationKind.CHECKOUT,
+            GB10MutationKind.ENVIRONMENT,
+            GB10MutationKind.UNITS,
+            GB10MutationKind.LEGACY_RETIRE,
+            GB10MutationKind.SERVICE_TIMER,
+        ),
+    )
+
+    assert "/home/qianyi/loom-worker-build-staging" in observation
+    assert "/shared_work2/qianyi/.loom-staging-rollout/worker-repos" in observation
+    assert "/home/qianyi/loom-worker-build-staging" in apply
+    assert '"checkout"' in apply
+    assert '"environment"' in apply
+    assert '"units"' in apply
+
+
+def test_external_transport_target_rejects_any_legacy_human_path() -> None:
+    with pytest.raises(ValueError, match="outside fixed authority"):
+        GB10TransportTarget(
+            ssh_target="trt-gb10-1",
+            repo_path=PurePosixPath("/home/qianyi/loom-worker-build-staging"),
+            env_file_path=PurePosixPath("/home/qianyi/loom-worker-build-staging/.env"),
+            node_agent_service="loom-gb10-node-agent.service",
+            retirement_only=True,
+        )

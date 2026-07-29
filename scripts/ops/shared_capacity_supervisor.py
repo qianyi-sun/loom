@@ -36,10 +36,10 @@ from loom_control_plane.shared_capacity_broker import (
 
 _SCHEMA_VERSION = 1
 _SANDBOXES = ("qianyi", "hongjian", "devansh")
-_REVIEWED_POOL_SLOT_BOUNDS = {"gb10": 140, "oldlab": 20}
-_REVIEWED_POOL_PENDING_BOUNDS = {"gb10": 30, "oldlab": 10}
-_REVIEWED_GLOBAL_SLOT_BOUND = 160
-_REVIEWED_GLOBAL_PENDING_BOUND = 40
+_REVIEWED_POOL_SLOT_BOUNDS = {"gb10": 112, "oldlab": 20}
+_REVIEWED_POOL_PENDING_BOUNDS = {"gb10": 24, "oldlab": 10}
+_REVIEWED_GLOBAL_SLOT_BOUND = 132
+_REVIEWED_GLOBAL_PENDING_BOUND = 34
 _EXPECTED_INSTANCES = tuple(
     f"{sandbox}-{pool}" for sandbox in _SANDBOXES for pool in _REVIEWED_POOL_SLOT_BOUNDS
 )
@@ -50,9 +50,7 @@ _UUID_RE = re.compile(
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _GENERATION_RE = re.compile(r"^generation-[0-9]{20}-[0-9a-f]{16}$")
-_STAGING_GENERATION_RE = re.compile(
-    r"^\.generation-[0-9]{20}-[0-9a-f]{16}\.tmp-[0-9]+$"
-)
+_STAGING_GENERATION_RE = re.compile(r"^\.generation-[0-9]{20}-[0-9a-f]{16}\.tmp-[0-9]+$")
 _OBSERVATION_FIELDS = {
     "sandbox",
     "pool_name",
@@ -116,12 +114,7 @@ def _exclusive_supervisor_lock(config: SupervisorConfig) -> Iterator[None]:
         f".{config.supervisor_state_path.name}.lock",
     )
     _private_parent(lock_path.parent)
-    flags = (
-        os.O_RDWR
-        | os.O_CREAT
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(lock_path, flags, 0o600)
     except OSError as exc:
@@ -505,9 +498,7 @@ def _collect_observations(
         observed_epoch = observation.lease_epoch
         if observed_epoch != expected_epoch:
             raise SupervisorError("adapter observation lease_epoch is not current")
-        expected_state = (
-            {"active"} if bool(binding["enabled"]) else {"retiring", "retired"}
-        )
+        expected_state = {"active"} if bool(binding["enabled"]) else {"retiring", "retired"}
         if (
             observation.sandbox != record["request"]["sandbox"]
             or observation.pool_name != binding["pool_name"]
@@ -596,9 +587,7 @@ def _validate_report_budgets(
         pending = int(lease.get("pending_slots") or 0)
         expected_committed = max(
             granted,
-            pending
-            + int(lease.get("active_slots") or 0)
-            + int(lease.get("draining_slots") or 0),
+            pending + int(lease.get("active_slots") or 0) + int(lease.get("draining_slots") or 0),
         )
         if committed != expected_committed:
             raise SupervisorError("broker committed slots do not match lease counters")

@@ -183,6 +183,7 @@ def test_sources_build_complete_exact_registry_without_running_probes(
         gb10_identity_metadata_fingerprint="5" * 64,
         gb10_mount_source=lambda: None,  # type: ignore[arg-type,return-value]
         gb10_mount_binding_digest="6" * 64,
+        gb10_external_profile_digest=None,
         alembic_ini=tmp_path / "alembic.ini",
         migration_policy_path=DEFAULT_MIGRATION_POLICY,
         migration_policy_digest=policy_digest,

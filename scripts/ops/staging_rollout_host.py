@@ -174,6 +174,7 @@ _ACL_ENTRY_RE = re.compile(
 _ACL_SNAPSHOT_ENTRY_RE = re.compile(r"(user|group|mask|other):([^:]*):([rwx-]{3})")
 _ACL_ENTRY_ORDER = {"user": 0, "group": 1, "mask": 2, "other": 3}
 _GB10_ENV_NAME_RE = re.compile(r"^staging-gb10-worker-staging-[A-Za-z0-9._-]+[.]env$")
+_STAGING_GB10_HOSTS = tuple(f"trt-gb10-{number}" for number in range(1, 16))
 _REQUIRED_GB10_ENV_KEYS = frozenset(
     {
         "LOOM_WORKER_CONTROL_PLANE_URL",
@@ -184,6 +185,31 @@ _REQUIRED_GB10_ENV_KEYS = frozenset(
         "LOOM_WORKER_MINIO_SECRET_KEY",
     }
 )
+
+
+def _uses_external_slurm_profile(payload: bytes) -> bool:
+    """Classify the exact staging profile without consulting any live path."""
+    if not payload or len(payload) > 4 << 20:
+        raise InstallError("staging environment profile is unavailable")
+    try:
+        raw = tomllib.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise InstallError("staging environment profile is invalid") from exc
+    prerequisites = raw.get("external_slurm_runner_prerequisites")
+    desired = raw.get("gb10_worker_pool_desired_states")
+    if not isinstance(prerequisites, dict) or not isinstance(desired, list):
+        return False
+    return bool(
+        prerequisites.get("pools") == ["gb10"]
+        and prerequisites.get("require_external_allocation_authority") is True
+        and len(desired) == 1
+        and isinstance(desired[0], dict)
+        and desired[0].get("pool_name") == "gb10"
+        and desired[0].get("target_slots") == 0
+        and isinstance(desired[0].get("host_intents"), dict)
+        and set(desired[0]["host_intents"]) == set(_STAGING_GB10_HOSTS)
+        and set(desired[0]["host_intents"].values()) == {"stopped"}
+    )
 
 
 class InstallError(RuntimeError):
@@ -235,6 +261,7 @@ _INSTALL_ATTESTATION_ASSETS = frozenset(
         "tmpfiles",
     }
 )
+_EXTERNAL_INSTALL_ATTESTATION_ASSETS = _INSTALL_ATTESTATION_ASSETS - {"shared-work2-mount-unit"}
 
 
 def _runner_install_attestation_payload(
@@ -242,11 +269,18 @@ def _runner_install_attestation_payload(
     assets: dict[str, bytes],
 ) -> bytes:
     """Render the minimal root-issued statement readable by the service broker."""
+    authority_mode = record.get("gb10_authority_mode", "legacy-user")
+    expected_assets = (
+        _EXTERNAL_INSTALL_ATTESTATION_ASSETS
+        if authority_mode == "external-slurm"
+        else _INSTALL_ATTESTATION_ASSETS
+    )
     if (
         record.get("installation_state") != "ready"
         or record.get("admission_enabled") is not True
         or record.get("maintenance_enabled") is not False
-        or set(assets) != _INSTALL_ATTESTATION_ASSETS
+        or authority_mode not in {"external-slurm", "legacy-user"}
+        or set(assets) != expected_assets
     ):
         raise InstallError("runner install attestation inputs are incomplete")
     source_sha = record.get("source_sha")
@@ -1770,6 +1804,16 @@ class HostSystem:
             ["git", "-C", str(source_root), "show", f"{source_sha}:{relative_path}"]
         )
         return result.stdout.encode("utf-8")
+
+    def external_slurm_profile(self, source_root: Path, source_sha: str) -> bool:
+        """Read the candidate-bound profile; never inspect a legacy shared path."""
+        return _uses_external_slurm_profile(
+            self.source_file(
+                source_root,
+                source_sha,
+                "deploy/environment-state/staging.toml",
+            )
+        )
 
     def validate_installed_source(
         self,
@@ -3726,6 +3770,7 @@ class HostSystem:
         *,
         source_tree_sha: str | None = None,
         source_base_sha: str | None = None,
+        require_shared_worker_repo: bool = True,
     ) -> list[str]:
         failures: list[str] = []
         candidate_venv = _candidate_venv_path(expected_sha)
@@ -3758,13 +3803,14 @@ class HostSystem:
         service_groups = set(self._probe(["id", "-nG", SERVICE_USER]).stdout.split())
         if service_groups != {SERVICE_USER, "docker"}:
             failures.append("service-groups")
-        if not self.shared_work2_mount_ready():
+        if require_shared_worker_repo and not self.shared_work2_mount_ready():
             failures.append("shared-work2-mount")
         try:
-            if not self.shared_worker_repo_root_ready():
+            if require_shared_worker_repo and not self.shared_worker_repo_root_ready():
                 failures.append("shared-worker-repo-root")
         except InstallError:
-            failures.append("shared-worker-repo-root")
+            if require_shared_worker_repo:
+                failures.append("shared-worker-repo-root")
         if not service_account_ready or not self.candidate_ready(
             expected_sha,
             source_tree_sha=source_tree_sha,
@@ -4437,11 +4483,7 @@ class HostInstaller:
             "service_user": SERVICE_USER,
             "operator_group": OPERATOR_GROUP,
             "operators": list(OPERATORS),
-            "shared_worker_repo_root": str(SHARED_WORKER_REPO_ROOT),
-            "shared_worker_repo_consumer": SHARED_WORK_CONSUMER,
-            "shared_worker_repo_group": SHARED_WORK_GROUP,
-            "shared_work2_mount_point": str(SHARED_WORK2_MOUNT_POINT),
-            "shared_work2_mount_source": "192.168.20.12:/shared_work2",
+            "gb10_capacity_authority": "candidate-profile-bound",
             "protected_inputs": [str(path) for path in PROTECTED_INPUTS],
             "data_directories": [str(path) for path in DATA_DIRECTORIES],
             "preserves": [str(STATE_ROOT), "/data/loom-staging/rollouts"],
@@ -4488,6 +4530,10 @@ class HostInstaller:
         if sealed_source is None:
             self.system.validate_invocation_merged(invocation_head, source_sha)
         self.system.validate_assets(self.source_root, source_sha)
+        external_slurm_profile = self.system.external_slurm_profile(
+            self.source_root,
+            source_sha,
+        )
         changes: list[str] = []
         root_directories = (
             Path("/etc/loom"),
@@ -4545,7 +4591,7 @@ class HostInstaller:
             or previous_record.get("installation_state") != "ready"
         )
 
-        installed_files = (
+        installed_files: tuple[tuple[Path, bytes, int, str, str], ...] = (
             (ROLLOUT_CLIENT_PATH, self._asset("loom-rollout"), 0o755, "root", "root"),
             (ROLLOUT_BROKER_PATH, self._asset("loom-rollout-broker"), 0o755, "root", "root"),
             (CLIENT_PATH, self._asset("loom-staging-rollout"), 0o755, "root", "root"),
@@ -4622,6 +4668,10 @@ class HostInstaller:
                 "root",
             ),
         )
+        if external_slurm_profile:
+            installed_files = tuple(
+                item for item in installed_files if item[0] != SHARED_WORK2_MOUNT_UNIT_PATH
+            )
         sudoers = self._asset("loom-staging-rollout.sudoers")
         attestation_assets = {
             "broker": self._asset("loom-staging-rollout-broker"),
@@ -4644,6 +4694,8 @@ class HostInstaller:
             "sysctl": self._asset("loom-staging-rollout.sysctl"),
             "tmpfiles": self._asset("loom-staging-rollout.tmpfiles"),
         }
+        if external_slurm_profile:
+            attestation_assets.pop("shared-work2-mount-unit")
 
         added_operator_memberships = self._record_operator_memberships(previous_record)
         missing_operators = {
@@ -4754,10 +4806,12 @@ class HostInstaller:
         )
         group_missing = not self.system.group_present(OPERATOR_GROUP)
         service_user_missing = self.system.service_user_convergence_needed()
-        shared_work2_mount_ready = self.system.shared_work2_mount_ready()
+        shared_work2_mount_ready = (
+            True if external_slurm_profile else self.system.shared_work2_mount_ready()
+        )
         shared_worker_repo_identity = (
             None
-            if service_user_missing or not shared_work2_mount_ready
+            if external_slurm_profile or service_user_missing or not shared_work2_mount_ready
             else self.system.shared_worker_repo_identity()
         )
 
@@ -4799,6 +4853,8 @@ class HostInstaller:
                         "source_base_sha": self.source_base_sha,
                     }
                 )
+            if external_slurm_profile:
+                value["gb10_authority_mode"] = "external-slurm"
             if mask_adjustments:
                 value["acl_mask_adjustments"] = [
                     adjustment.to_dict()
@@ -4860,7 +4916,7 @@ class HostInstaller:
             )
         else:
             candidate_ready = service_directories_ready and self.system.candidate_ready(source_sha)
-        shared_worker_repo_ready = (
+        shared_worker_repo_ready = external_slurm_profile or (
             not service_user_missing
             and shared_work2_mount_ready
             and self.system.shared_worker_repo_root_ready()
@@ -5042,21 +5098,28 @@ class HostInstaller:
             added_docker_membership = True
             changes.append("service-group:docker")
 
-        if not self.system.shared_work2_mount_ready():
-            if self.system.ensure_root_directory(SHARED_WORK2_MOUNT_POINT, mode=0o755):
-                changes.append(f"directory:{SHARED_WORK2_MOUNT_POINT}")
-        mount_payload = self._asset(SHARED_WORK2_MOUNT_UNIT)
-        if self.filesystem.atomic_write(SHARED_WORK2_MOUNT_UNIT_PATH, mount_payload, 0o644):
-            changes.append(f"file:{SHARED_WORK2_MOUNT_UNIT_PATH}")
-        if self.system.install_owner(SHARED_WORK2_MOUNT_UNIT_PATH, "root", 0o644, group="root"):
-            changes.append(f"ownership:{SHARED_WORK2_MOUNT_UNIT_PATH}")
-        if self.system.ensure_shared_work2_mount():
-            changes.append(f"mount:{SHARED_WORK2_MOUNT_POINT}")
-        shared_work2_mount_ready = True
+        if not external_slurm_profile:
+            if not self.system.shared_work2_mount_ready():
+                if self.system.ensure_root_directory(SHARED_WORK2_MOUNT_POINT, mode=0o755):
+                    changes.append(f"directory:{SHARED_WORK2_MOUNT_POINT}")
+            mount_payload = self._asset(SHARED_WORK2_MOUNT_UNIT)
+            if self.filesystem.atomic_write(SHARED_WORK2_MOUNT_UNIT_PATH, mount_payload, 0o644):
+                changes.append(f"file:{SHARED_WORK2_MOUNT_UNIT_PATH}")
+            if self.system.install_owner(
+                SHARED_WORK2_MOUNT_UNIT_PATH,
+                "root",
+                0o644,
+                group="root",
+            ):
+                changes.append(f"ownership:{SHARED_WORK2_MOUNT_UNIT_PATH}")
+            if self.system.ensure_shared_work2_mount():
+                changes.append(f"mount:{SHARED_WORK2_MOUNT_POINT}")
+            shared_work2_mount_ready = True
 
-        if self.system.ensure_shared_worker_repo_root():
-            changes.append(f"directory:{SHARED_WORKER_REPO_ROOT}")
-        shared_worker_repo_identity = self.system.shared_worker_repo_identity()
+        if not external_slurm_profile:
+            if self.system.ensure_shared_worker_repo_root():
+                changes.append(f"directory:{SHARED_WORKER_REPO_ROOT}")
+            shared_worker_repo_identity = self.system.shared_worker_repo_identity()
 
         for directory, mode in (
             (STATE_ROOT, 0o700),
@@ -5291,7 +5354,13 @@ class HostInstaller:
         grants = self._record_grants(record)
         self._validate_acl_ledgers(grants, mask_adjustments, snapshot_adjustments)
         self._bind_existing_source(record)
-        expected = (
+        if self.source_root is None or self.source_sha is None:
+            raise InstallError("installed source binding is unavailable")
+        external_slurm_profile = self.system.external_slurm_profile(
+            self.source_root,
+            self.source_sha,
+        )
+        expected: tuple[tuple[Path, bytes, int], ...] = (
             (ROLLOUT_CLIENT_PATH, self._asset("loom-rollout"), 0o755),
             (ROLLOUT_BROKER_PATH, self._asset("loom-rollout-broker"), 0o755),
             (CLIENT_PATH, self._asset("loom-staging-rollout"), 0o755),
@@ -5332,6 +5401,8 @@ class HostInstaller:
                 0o644,
             ),
         )
+        if external_slurm_profile:
+            expected = tuple(item for item in expected if item[0] != SHARED_WORK2_MOUNT_UNIT_PATH)
         failures = [
             str(path)
             for path, payload, mode in expected
@@ -5390,6 +5461,8 @@ class HostInstaller:
                 "sysctl": self._asset("loom-staging-rollout.sysctl"),
                 "tmpfiles": self._asset("loom-staging-rollout.tmpfiles"),
             }
+            if external_slurm_profile:
+                attestation_assets.pop("shared-work2-mount-unit")
             expected_attestation = _runner_install_attestation_payload(
                 record,
                 attestation_assets,
@@ -5445,10 +5518,16 @@ class HostInstaller:
                     source_sha,
                     source_tree_sha=source_tree_sha,
                     source_base_sha=source_base_sha,
+                    require_shared_worker_repo=not external_slurm_profile,
                 )
             )
         else:
-            failures.extend(self.system.check_runtime(source_sha))
+            failures.extend(
+                self.system.check_runtime(
+                    source_sha,
+                    require_shared_worker_repo=not external_slurm_profile,
+                )
+            )
         for grant, mask_adjustment in mask_adjustments.items():
             if self.system.acl_adjustment_state(mask_adjustment) != "after":
                 namespace = "default" if grant.default else "access"
@@ -5554,6 +5633,10 @@ class HostInstaller:
         added_docker_membership = self._record_flag(record, "added_docker_membership")
         created_service_key = self._record_flag(record, "created_service_key")
         maintenance_enabled = self._record_flag(record, "maintenance_enabled")
+        authority_mode = record.get("gb10_authority_mode", "legacy-user")
+        if authority_mode not in {"external-slurm", "legacy-user"}:
+            raise InstallError("install record GB10 authority mode is invalid")
+        owns_legacy_shared_mount = authority_mode == "legacy-user"
 
         resuming_uninstall = record.get("installation_state") == "uninstalling"
         admission_enabled = self._record_flag(record, "admission_enabled")
@@ -5690,7 +5773,9 @@ class HostInstaller:
             self.system.remove_operator_membership(username)
         if added_docker_membership:
             self.system.remove_docker_membership()
-        mount_unit_present = self.filesystem.exists(SHARED_WORK2_MOUNT_UNIT_PATH)
+        mount_unit_present = bool(
+            owns_legacy_shared_mount and self.filesystem.exists(SHARED_WORK2_MOUNT_UNIT_PATH)
+        )
         if mount_unit_present:
             self.system.disable_shared_work2_mount()
         credential_refresh_unit_present = self.filesystem.exists(CREDENTIAL_REFRESH_TIMER_PATH)
@@ -5710,11 +5795,12 @@ class HostInstaller:
             TMPFILES_PATH,
             SYSCTL_PATH,
             KNOWN_HOSTS_PATH,
-            SHARED_WORK2_MOUNT_UNIT_PATH,
             CREDENTIAL_REFRESH_PATH,
             CREDENTIAL_REFRESH_SERVICE_PATH,
             CREDENTIAL_REFRESH_TIMER_PATH,
         ]
+        if owns_legacy_shared_mount:
+            removable_files.append(SHARED_WORK2_MOUNT_UNIT_PATH)
         if created_service_key:
             removable_files.extend((SERVICE_KEY, Path(str(SERVICE_KEY) + ".pub")))
         for path in removable_files:

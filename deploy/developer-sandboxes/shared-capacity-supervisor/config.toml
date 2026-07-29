@@ -5,8 +5,8 @@ observation_dir = "/var/lib/loom-shared-capacity/observations"
 supervisor_state_path = "/var/lib/loom-shared-capacity/supervisor-state.json"
 audit_path = "/var/lib/loom-shared-capacity/supervisor-audit.jsonl"
 evidence_path = "/var/lib/loom-shared-capacity/evidence/supervisor-latest.json"
-global_slot_budget = 160
-global_pending_slot_budget = 40
+global_slot_budget = 132
+global_pending_slot_budget = 34
 instances = [
   "qianyi-gb10",
   "qianyi-oldlab",
@@ -17,9 +17,9 @@ instances = [
 ]
 
 [pool_slot_budgets]
-gb10 = 140
+gb10 = 112
 oldlab = 20
 
 [pool_pending_slot_budgets]
-gb10 = 30
+gb10 = 24
 oldlab = 10

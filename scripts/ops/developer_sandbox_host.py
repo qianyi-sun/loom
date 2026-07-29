@@ -21,7 +21,9 @@ import os
 import pwd
 import re
 import secrets
+import shlex
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -32,6 +34,7 @@ import tomllib
 import urllib.error
 import urllib.request
 from collections.abc import Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -43,6 +46,11 @@ SOURCE_PROFILES = REPO_ROOT / "deploy/developer-sandboxes"
 SOURCE_UNIT = SOURCE_PROFILES / "loom-developer-sandbox@.service"
 
 SANDBOXES = ("qianyi", "hongjian", "devansh")
+SANDBOX_BATCH_IDENTITIES = {
+    "qianyi": ("loom-sandbox-qianyi", 31021),
+    "hongjian": ("loom-sandbox-hongjian", 31022),
+    "devansh": ("loom-sandbox-devansh", 31023),
+}
 EXPECTED_HOSTNAME = "trt-eai-oldlab-2"
 SHARED_GROUP = "sharedwork"
 NFS_ROOT = Path("/shared_work/loom/candidates/sandboxes")
@@ -52,6 +60,9 @@ CONFIG_ROOT = Path("/etc/loom/developer-sandboxes")
 DESIRED_ROOT = CONFIG_ROOT / "desired"
 PROFILE_CONFIG_ROOT = CONFIG_ROOT / "profiles"
 TRANSACTION_ROOT = Path("/var/lib/loom-developer-sandbox-installer/transactions")
+SLURM_MAINTENANCE_ROOT = Path(
+    "/var/lib/loom-developer-sandbox-installer/slurm-maintenance",
+)
 TRANSACTION_LOCK_ROOT = Path("/run/loom-developer-sandbox-installer")
 SOURCE_STAGING_ROOT = Path("/var/lib/loom-developer-sandbox-installer/source")
 RENEWAL_STATE_ROOT = Path("/var/lib/loom-developer-sandbox-installer/renewals")
@@ -59,8 +70,12 @@ COMBINED_RECEIPT_ROOT = Path("/var/lib/loom-shared-capacity/runtime-attestations
 FLEET_ATTESTATION_ROOT = Path("/var/lib/loom-developer-sandbox-links/attestations")
 REMOTE_LINK_ISSUANCE_ROOT = Path("/var/lib/loom/developer-sandbox-links/issuance")
 REMOTE_LINK_SERVER_ROOT = Path("/etc/loom/developer-sandbox-links/server")
-DOMAIN_RUNTIME_PROGRAM = Path("/usr/local/libexec/loom-developer-domain-runtime")
-DOMAIN_RUNTIME_CONFIG = Path("/etc/loom/developer-runtime-domains.toml")
+NODE_AUTHORITY_PROGRAM = Path(
+    "/usr/local/libexec/loom-developer-sandbox-node-authority",
+)
+NODE_TRANSPORT_PROGRAM = Path(
+    "/usr/local/libexec/loom-developer-sandbox-node-transport",
+)
 UNIT_PATH = Path("/etc/systemd/system/loom-developer-sandbox@.service")
 RENEWAL_SERVICE_PATH = Path(
     "/etc/systemd/system/loom-developer-sandbox-attestation-renewal.service",
@@ -69,10 +84,31 @@ RENEWAL_TIMER_PATH = Path(
     "/etc/systemd/system/loom-developer-sandbox-attestation-renewal.timer",
 )
 INSTALLED_PROGRAM = Path("/usr/local/libexec/loom-developer-sandbox-host")
+STAGING_ALLOCATION_CONFIG = Path(
+    "/etc/loom/staging-external-slurm-authority/authority.toml",
+)
 UNIT_NAME = "loom-developer-sandbox@{sandbox}.service"
 RENEWAL_TIMER = "loom-developer-sandbox-attestation-renewal.timer"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+SLURM_AUTHORITY_BINDING_RE = re.compile(
+    r"^slurm-policy-v1:(trt-oldlab|trt-gb10):[0-9a-f]{64}:[0-9a-f]{64}$",
+)
+SLURM_AUTHORITY_RECEIPT_FIELDS = {
+    "schema_version",
+    "request_id",
+    "action",
+    "node",
+    "domain",
+    "sandbox",
+    "candidate_sha",
+    "candidate_tree",
+    "payload_sha256",
+    "result_sha256",
+    "inner_receipt",
+    "completed_at",
+    "status",
+}
 FINGERPRINT_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 RENEWAL_HISTORY_RE = re.compile(r"^([0-9]{20})-([0-9a-f]{64})\.json$")
 TRANSACTION_TTL = timedelta(minutes=30)
@@ -81,12 +117,35 @@ ATTESTATION_TTL = timedelta(minutes=15)
 DOMAIN_PEERS = {
     "oldlab": ("oldlab-1", "oldlab-2", "oldlab-3", "oldlab-4", "oldlab-5"),
     "gb10": tuple(
-        f"trt-gb10-{index}"
-        for index in (1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15)
+        f"trt-gb10-{index}" for index in (1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15)
     ),
 }
 DOMAIN_PUBLISHERS = {"oldlab": "oldlab-1", "gb10": "trt-gb10-1"}
 ELIGIBLE_LINK_NODES = DOMAIN_PEERS["oldlab"] + DOMAIN_PEERS["gb10"]
+REMOTE_LINK_SERVER_ADDRESS = "192.168.50.14"
+REMOTE_LINK_SERVICE_NAMES = ("control-plane", "gateway", "minio")
+REMOTE_LINK_SERVICE_PORTS = {
+    "qianyi": {
+        "control-plane": (26080, 20080),
+        "gateway": (26100, 20100),
+        "minio": (26900, 20900),
+    },
+    "hongjian": {
+        "control-plane": (27080, 21080),
+        "gateway": (27100, 21100),
+        "minio": (27900, 21900),
+    },
+    "devansh": {
+        "control-plane": (28080, 22080),
+        "gateway": (28100, 22100),
+        "minio": (28900, 22900),
+    },
+}
+REMOTE_LINK_HEALTH_PATHS = {
+    "control-plane": "/healthz",
+    "gateway": "/healthz",
+    "minio": "/minio/health/live",
+}
 
 SECRET_KEYS = (
     "LOOM_DEV_POSTGRES_USER",
@@ -155,6 +214,53 @@ class ActivationReceipt:
     expires_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class StagingAllocationConfig:
+    environment: str
+    pool: str
+    source_host: str
+    submit_host: str
+    controller: str
+    cluster: str
+    partition: str
+    producer_user: str
+    producer_group: str
+    producer_uid: int
+    producer_gid: int
+    producer_home: Path
+    producer_shell: Path
+    batch_user: str
+    batch_group: str
+    batch_uid: int
+    batch_gid: int
+    batch_home: Path
+    batch_shell: Path
+    batch_supplementary_groups: tuple[str, ...]
+    shared_mount_source: str
+    shared_mount_target: Path
+    shared_mount_filesystem_type: str
+    shared_mount_unit: str
+    repository_root: Path
+    worker_env_root: Path
+    result_root: Path
+    slurm_account: str
+    qos: str
+    allowed_nodes: tuple[str, ...]
+    host_aliases: dict[str, str]
+    repository_template: str
+    worker_env_template: str
+    probe_result_root: Path
+    job_timeout_seconds: int
+    heartbeat_interval_seconds: int
+
+    def candidate_paths(self, candidate_sha: str) -> tuple[Path, Path]:
+        image_tag = f"staging-{candidate_sha[:7]}"
+        return (
+            Path(self.repository_template.format(image_tag=image_tag)),
+            Path(self.worker_env_template.format(image_tag=image_tag)),
+        )
+
+
 def _load_profile(path: Path) -> Profile:
     try:
         with path.open("rb") as handle:
@@ -214,6 +320,155 @@ def load_profiles(root: Path = SOURCE_PROFILES) -> tuple[Profile, ...]:
     return profiles
 
 
+def load_staging_allocation_config(
+    path: Path = STAGING_ALLOCATION_CONFIG,
+) -> StagingAllocationConfig:
+    try:
+        raw_bytes = path.read_bytes()
+        raw = tomllib.loads(raw_bytes.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise HostConvergeError("fixed staging allocation config is unavailable") from exc
+    if len(raw_bytes) > 128 * 1024 or raw.get("schema_version") != 1:
+        raise HostConvergeError("fixed staging allocation config is invalid")
+    candidate_paths = raw.get("candidate_paths")
+    probe = raw.get("probe")
+    host_aliases = raw.get("host_aliases")
+    shared_mount = raw.get("shared_mount")
+    if (
+        not isinstance(candidate_paths, dict)
+        or not isinstance(probe, dict)
+        or not isinstance(host_aliases, dict)
+        or not isinstance(shared_mount, dict)
+    ):
+        raise HostConvergeError("fixed staging allocation config is incomplete")
+
+    def text(source: Mapping[str, Any], field: str) -> str:
+        value = source.get(field)
+        if not isinstance(value, str) or not value or value != value.strip():
+            raise HostConvergeError(f"fixed staging allocation {field} is invalid")
+        return value
+
+    def integer(source: Mapping[str, Any], field: str, minimum: int) -> int:
+        value = source.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            raise HostConvergeError(f"fixed staging allocation {field} is invalid")
+        return value
+
+    def text_list(source: Mapping[str, Any], field: str) -> tuple[str, ...]:
+        value = source.get(field)
+        if (
+            not isinstance(value, list)
+            or not value
+            or any(not isinstance(item, str) or not item for item in value)
+        ):
+            raise HostConvergeError(f"fixed staging allocation {field} is invalid")
+        items = tuple(value)
+        if len(items) != len(set(items)):
+            raise HostConvergeError(f"fixed staging allocation {field} has duplicates")
+        return items
+
+    allowed_nodes = text_list(raw, "allowed_nodes")
+    aliases = {
+        str(node): str(host)
+        for node, host in host_aliases.items()
+        if isinstance(node, str) and isinstance(host, str) and host
+    }
+    config = StagingAllocationConfig(
+        environment=text(raw, "environment"),
+        pool=text(raw, "pool"),
+        source_host=text(raw, "source_host"),
+        submit_host=text(raw, "submit_host"),
+        controller=text(raw, "controller"),
+        cluster=text(raw, "cluster"),
+        partition=text(raw, "partition"),
+        producer_user=text(raw, "producer_user"),
+        producer_group=text(raw, "producer_group"),
+        producer_uid=integer(raw, "producer_uid", 1),
+        producer_gid=integer(raw, "producer_gid", 1),
+        producer_home=Path(text(raw, "producer_home")),
+        producer_shell=Path(text(raw, "producer_shell")),
+        batch_user=text(raw, "batch_user"),
+        batch_group=text(raw, "batch_group"),
+        batch_uid=integer(raw, "batch_uid", 1),
+        batch_gid=integer(raw, "batch_gid", 1),
+        batch_home=Path(text(raw, "batch_home")),
+        batch_shell=Path(text(raw, "batch_shell")),
+        batch_supplementary_groups=text_list(raw, "batch_supplementary_groups"),
+        shared_mount_source=text(shared_mount, "source"),
+        shared_mount_target=Path(text(shared_mount, "target")),
+        shared_mount_filesystem_type=text(shared_mount, "filesystem_type"),
+        shared_mount_unit=text(shared_mount, "unit"),
+        repository_root=Path(text(shared_mount, "repository_root")),
+        worker_env_root=Path(text(shared_mount, "worker_env_root")),
+        result_root=Path(text(shared_mount, "result_root")),
+        slurm_account=text(raw, "slurm_account"),
+        qos=text(raw, "qos"),
+        allowed_nodes=allowed_nodes,
+        host_aliases=aliases,
+        repository_template=text(candidate_paths, "repository"),
+        worker_env_template=text(candidate_paths, "worker_env"),
+        probe_result_root=Path(text(probe, "result_root")),
+        job_timeout_seconds=integer(probe, "job_timeout_seconds", 30),
+        heartbeat_interval_seconds=integer(
+            probe,
+            "heartbeat_interval_seconds",
+            1,
+        ),
+    )
+    expected_nodes = tuple(f"trt-gb10-{index}" for index in range(1, 16) if index != 7)
+    paths = (
+        config.producer_home,
+        config.producer_shell,
+        config.batch_home,
+        config.batch_shell,
+        config.shared_mount_target,
+        config.repository_root,
+        config.worker_env_root,
+        config.result_root,
+        config.probe_result_root,
+    )
+    if (
+        config.environment != "staging"
+        or config.pool != "gb10"
+        or config.source_host != "trt-eai-oldlab-1"
+        or config.submit_host != "trt-gb10-1"
+        or config.controller != "trt-gb10-1"
+        or config.cluster != "trt-gb10"
+        or config.partition != "gb10"
+        or config.producer_user != "loom-rollout"
+        or config.producer_group != "loom-rollout"
+        or config.producer_uid != 995
+        or config.producer_gid != 982
+        or config.producer_home != Path("/var/lib/loom-staging-rollout")
+        or config.producer_shell != Path("/bin/sh")
+        or config.batch_user != "loom-staging-worker"
+        or config.batch_group != "loom-staging-worker"
+        or config.batch_uid != 31024
+        or config.batch_gid != 31024
+        or config.batch_home != Path("/nonexistent")
+        or config.batch_shell != Path("/usr/sbin/nologin")
+        or config.batch_supplementary_groups != ("docker",)
+        or config.shared_mount_source != "192.168.20.12:/shared_work2/loom/staging"
+        or config.shared_mount_target != Path("/srv/loom/staging-shared")
+        or config.shared_mount_filesystem_type != "nfs4"
+        or config.shared_mount_unit != r"srv-loom-staging\x2dshared.mount"
+        or config.repository_root != config.shared_mount_target / "candidates"
+        or config.worker_env_root != config.shared_mount_target / "generated"
+        or config.result_root != config.shared_mount_target / "results"
+        or config.probe_result_root != config.result_root
+        or config.slurm_account != "loom-staging"
+        or config.qos != "loom-staging"
+        or config.allowed_nodes != expected_nodes
+        or set(config.host_aliases) != set(expected_nodes)
+        or len(set(config.host_aliases.values())) != len(expected_nodes)
+        or any(not item.is_absolute() or ".." in item.parts for item in paths)
+        or config.job_timeout_seconds > 600
+        or config.heartbeat_interval_seconds > 30
+    ):
+        raise HostConvergeError("fixed staging allocation config drifted")
+    return config
+
+
 def _identity(user: str, group: str) -> Identity:
     try:
         account = pwd.getpwnam(user)
@@ -221,6 +476,1391 @@ def _identity(user: str, group: str) -> Identity:
     except KeyError as exc:
         raise HostConvergeError(f"required host identity is absent: {exc}") from exc
     return Identity(user=user, group=group, uid=account.pw_uid, gid=group_row.gr_gid)
+
+
+def _sandbox_batch_identity(sandbox: str) -> Identity:
+    try:
+        user, expected_id = SANDBOX_BATCH_IDENTITIES[sandbox]
+    except KeyError as exc:
+        raise HostConvergeError("sandbox batch identity is outside the fixed contract") from exc
+    identity = _identity(user, user)
+    account = pwd.getpwnam(user)
+    if (
+        identity.uid != expected_id
+        or identity.gid != expected_id
+        or account.pw_gid != expected_id
+        or account.pw_dir != "/nonexistent"
+        or account.pw_shell != "/usr/sbin/nologin"
+    ):
+        raise HostConvergeError("sandbox batch identity metadata drifted")
+    return identity
+
+
+def _staging_allocation_node(config: StagingAllocationConfig) -> str:
+    hostname = socket.gethostname().rstrip(".").lower()
+    if hostname == config.source_host.lower():
+        return config.source_host
+    matches = [
+        node
+        for node, alias in config.host_aliases.items()
+        if hostname in {node.lower(), alias.lower()}
+    ]
+    if len(matches) != 1:
+        raise HostConvergeError(
+            "staging allocation action requires its fixed source or GB10 node",
+        )
+    return matches[0]
+
+
+def _staging_identity_snapshot(
+    config: StagingAllocationConfig,
+) -> dict[str, Any]:
+    try:
+        account = pwd.getpwnam(config.batch_user)
+        primary = grp.getgrnam(config.batch_group)
+    except KeyError as exc:
+        raise HostConvergeError("staging allocation service identity is absent") from exc
+    supplementary = sorted(
+        row.gr_name
+        for row in grp.getgrall()
+        if row.gr_gid != account.pw_gid and config.batch_user in row.gr_mem
+    )
+    if (
+        account.pw_uid != config.batch_uid
+        or account.pw_gid != config.batch_gid
+        or primary.gr_gid != config.batch_gid
+        or account.pw_dir != str(config.batch_home)
+        or account.pw_shell != str(config.batch_shell)
+        or supplementary != sorted(config.batch_supplementary_groups)
+    ):
+        raise HostConvergeError("staging allocation service identity drifted")
+    return {
+        "username": config.batch_user,
+        "group": config.batch_group,
+        "uid": config.batch_uid,
+        "gid": config.batch_gid,
+        "home": str(config.batch_home),
+        "shell": str(config.batch_shell),
+        "supplementary_groups": list(config.batch_supplementary_groups),
+    }
+
+
+def _converge_staging_identity(
+    config: StagingAllocationConfig,
+) -> dict[str, Any]:
+    if os.geteuid() != 0:
+        raise HostConvergeError("staging allocation identity bootstrap requires root")
+    try:
+        existing_group = grp.getgrnam(config.batch_group)
+    except KeyError:
+        try:
+            occupied = grp.getgrgid(config.batch_gid)
+        except KeyError:
+            _run(
+                (
+                    "groupadd",
+                    "--system",
+                    "--gid",
+                    str(config.batch_gid),
+                    config.batch_group,
+                )
+            )
+        else:
+            raise HostConvergeError(
+                f"staging allocation GID is occupied by {occupied.gr_name}",
+            ) from None
+    else:
+        if existing_group.gr_gid != config.batch_gid:
+            raise HostConvergeError("staging allocation service GID is occupied")
+    try:
+        existing_user = pwd.getpwnam(config.batch_user)
+    except KeyError:
+        try:
+            occupied_user = pwd.getpwuid(config.batch_uid)
+        except KeyError:
+            _run(
+                (
+                    "useradd",
+                    "--system",
+                    "--uid",
+                    str(config.batch_uid),
+                    "--gid",
+                    config.batch_group,
+                    "--home-dir",
+                    str(config.batch_home),
+                    "--shell",
+                    str(config.batch_shell),
+                    "--no-create-home",
+                    config.batch_user,
+                )
+            )
+        else:
+            raise HostConvergeError(
+                f"staging allocation UID is occupied by {occupied_user.pw_name}",
+            ) from None
+    else:
+        if existing_user.pw_uid != config.batch_uid or existing_user.pw_gid != config.batch_gid:
+            raise HostConvergeError("staging allocation service UID/GID is occupied")
+        if existing_user.pw_dir != str(config.batch_home) or existing_user.pw_shell != str(
+            config.batch_shell
+        ):
+            _run(
+                (
+                    "usermod",
+                    "--home",
+                    str(config.batch_home),
+                    "--shell",
+                    str(config.batch_shell),
+                    config.batch_user,
+                )
+            )
+    for group_name in config.batch_supplementary_groups:
+        try:
+            grp.getgrnam(group_name)
+        except KeyError as exc:
+            raise HostConvergeError(
+                f"staging allocation required group is absent: {group_name}",
+            ) from exc
+    _run(
+        (
+            "usermod",
+            "--groups",
+            ",".join(config.batch_supplementary_groups),
+            config.batch_user,
+        )
+    )
+    return _staging_identity_snapshot(config)
+
+
+def _converge_staging_shared_namespace(
+    config: StagingAllocationConfig,
+) -> dict[str, Any]:
+    if os.geteuid() != 0:
+        raise HostConvergeError("staging shared namespace bootstrap requires root")
+    staging_root = config.shared_mount_target
+    repository, worker_env = config.candidate_paths("a" * 40)
+    if (
+        repository.parent != staging_root / "candidates"
+        or worker_env.parent != staging_root / "generated"
+        or config.probe_result_root != staging_root / "results"
+    ):
+        raise HostConvergeError("staging shared namespace config drifted")
+    mount = _run(
+        (
+            "findmnt",
+            "-n",
+            "-o",
+            "SOURCE,FSTYPE,TARGET",
+            "-T",
+            str(staging_root),
+        )
+    ).stdout.split()
+    if mount != [
+        config.shared_mount_source,
+        config.shared_mount_filesystem_type,
+        str(staging_root),
+    ]:
+        raise HostConvergeError("staging shared mount identity drifted")
+    path_contracts = (
+        (staging_root, 0, config.batch_gid, 0o750),
+        (repository.parent, 0, config.batch_gid, 0o750),
+        (worker_env.parent, 0, config.batch_gid, 0o750),
+        (config.probe_result_root, config.batch_uid, config.batch_gid, 0o2770),
+    )
+    for path, owner, group, mode in path_contracts:
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            path.mkdir(mode=mode)
+            os.chown(path, owner, group)
+            os.chmod(path, mode)
+            metadata = path.lstat()
+        except OSError as exc:
+            raise HostConvergeError("staging shared namespace is unavailable") from exc
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or (metadata.st_uid, metadata.st_gid) != (owner, group)
+            or stat.S_IMODE(metadata.st_mode) != mode
+        ):
+            raise HostConvergeError(
+                f"staging shared namespace metadata drifted at {path}",
+            )
+    return {
+        "root": str(staging_root),
+        "mount_source": mount[0],
+        "mount_fstype": mount[1],
+        "mount_device": staging_root.lstat().st_dev,
+        "mount_inode": staging_root.lstat().st_ino,
+        "repository_root": str(repository.parent),
+        "worker_env_root": str(worker_env.parent),
+        "result_root": str(config.probe_result_root),
+        "service_uid": config.batch_uid,
+        "service_gid": config.batch_gid,
+        "root_mode": "0o750",
+        "repository_root_mode": "0o750",
+        "worker_env_root_mode": "0o750",
+        "result_root_mode": "0o2770",
+    }
+
+
+def staging_allocation_identity_converge(
+    config: StagingAllocationConfig,
+) -> dict[str, Any]:
+    node = _staging_allocation_node(config)
+    identity = _converge_staging_identity(config)
+    namespace = _converge_staging_shared_namespace(config)
+    return {
+        "schema_version": 1,
+        "kind": "staging_external_slurm_identity_bootstrap",
+        "node": node,
+        "canonical_host": socket.gethostname().rstrip(".").lower(),
+        "service_identity": identity,
+        "namespace": namespace,
+        "result": "pass",
+    }
+
+
+def _staging_timestamp() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _staging_candidate_binding(
+    config: StagingAllocationConfig,
+    *,
+    candidate_sha: str,
+    candidate_tree: str,
+) -> dict[str, Any]:
+    repository, worker_env = config.candidate_paths(candidate_sha)
+    expected_namespace = config.shared_mount_target
+    if (
+        repository.parent != expected_namespace / "candidates"
+        or worker_env.parent != expected_namespace / "generated"
+    ):
+        raise HostConvergeError("staging allocation candidate paths drifted")
+    _converge_staging_shared_namespace(config) if os.geteuid() == 0 else None
+    identity = _staging_identity_snapshot(config)
+    service = Identity(
+        user=config.batch_user,
+        group=config.batch_group,
+        uid=config.batch_uid,
+        gid=config.batch_gid,
+    )
+    try:
+        repository_metadata = repository.lstat()
+        env_metadata = worker_env.lstat()
+    except OSError as exc:
+        raise HostConvergeError("staging allocation candidate inputs are unavailable") from exc
+    if (
+        not stat.S_ISDIR(repository_metadata.st_mode)
+        or stat.S_ISLNK(repository_metadata.st_mode)
+        or (repository_metadata.st_uid, repository_metadata.st_gid) != (0, config.batch_gid)
+        or stat.S_IMODE(repository_metadata.st_mode) != 0o550
+    ):
+        raise HostConvergeError("staging allocation repository metadata drifted")
+    if (
+        not stat.S_ISREG(env_metadata.st_mode)
+        or stat.S_ISLNK(env_metadata.st_mode)
+        or env_metadata.st_nlink != 1
+        or (env_metadata.st_uid, env_metadata.st_gid) != (0, config.batch_gid)
+        or stat.S_IMODE(env_metadata.st_mode) != 0o440
+        or not 0 < env_metadata.st_size <= 1024 * 1024
+    ):
+        raise HostConvergeError("staging allocation worker env metadata drifted")
+    head = _run(
+        (
+            "git",
+            "-c",
+            f"safe.directory={repository}",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.attributesFile=/dev/null",
+            "-c",
+            "core.excludesFile=/dev/null",
+            "-C",
+            str(repository),
+            "rev-parse",
+            "--verify",
+            "HEAD",
+        ),
+        env=_clean_git_environment(),
+        identity=service,
+        init_groups=True,
+    ).stdout.strip()
+    tree = _run(
+        (
+            "git",
+            "-c",
+            f"safe.directory={repository}",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.attributesFile=/dev/null",
+            "-c",
+            "core.excludesFile=/dev/null",
+            "-C",
+            str(repository),
+            "rev-parse",
+            "--verify",
+            "HEAD^{tree}",
+        ),
+        env=_clean_git_environment(),
+        identity=service,
+        init_groups=True,
+    ).stdout.strip()
+    dirty = _run(
+        (
+            "git",
+            "-c",
+            f"safe.directory={repository}",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.attributesFile=/dev/null",
+            "-c",
+            "core.excludesFile=/dev/null",
+            "-C",
+            str(repository),
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignored=matching",
+        ),
+        env=_clean_git_environment(),
+        identity=service,
+        init_groups=True,
+    ).stdout
+    if head != candidate_sha or tree != candidate_tree or dirty:
+        raise HostConvergeError("staging allocation candidate Git binding drifted")
+    entry_count = 0
+    for root, directories, files in os.walk(repository, followlinks=False):
+        for entry in (
+            Path(root),
+            *(Path(root) / name for name in (*directories, *files)),
+        ):
+            entry_count += 1
+            if entry_count > 250_000:
+                raise HostConvergeError("staging allocation repository is too large")
+            metadata = entry.lstat()
+            if (metadata.st_uid, metadata.st_gid) != (0, config.batch_gid) or (
+                not stat.S_ISLNK(metadata.st_mode) and metadata.st_mode & 0o022
+            ):
+                raise HostConvergeError(
+                    "staging allocation repository ownership or mode drifted",
+                )
+    raw_env = worker_env.read_bytes()
+    if len(raw_env) != env_metadata.st_size:
+        raise HostConvergeError("staging allocation worker env changed while read")
+    values = _parse_env_file(worker_env)
+    if (
+        values.get("LOOM_WORKER_CANDIDATE_SHA") != candidate_sha
+        or values.get("LOOM_WORKER_POOL_NAME") != config.pool
+        or values.get("LOOM_WORKER_MAX_CONCURRENT") != "10"
+        or values.get("LOOM_IMAGE_TAG") != f"staging-{candidate_sha[:7]}"
+    ):
+        raise HostConvergeError("staging allocation worker env binding drifted")
+    return {
+        "service_identity": identity,
+        "repository": {
+            "path": str(repository),
+            "device": repository_metadata.st_dev,
+            "inode": repository_metadata.st_ino,
+            "candidate_sha": candidate_sha,
+            "candidate_tree": candidate_tree,
+            "entry_count": entry_count,
+        },
+        "worker_env": {
+            "path": str(worker_env),
+            "device": env_metadata.st_dev,
+            "inode": env_metadata.st_ino,
+            "sha256": hashlib.sha256(raw_env).hexdigest(),
+        },
+        "env_values": values,
+    }
+
+
+def _staging_result_path(
+    config: StagingAllocationConfig,
+    *,
+    candidate_sha: str,
+    request_id: str,
+    node: str,
+) -> Path:
+    if (
+        SHA_RE.fullmatch(candidate_sha) is None
+        or DIGEST_RE.fullmatch(request_id) is None
+        or node not in config.allowed_nodes
+    ):
+        raise HostConvergeError("staging allocation result identity is invalid")
+    return config.probe_result_root / request_id / f"{node}.json"
+
+
+def _staging_worker_token(values: Mapping[str, str]) -> str:
+    inline = values.get("LOOM_WORKER_TOKEN", "")
+    token_file = values.get("LOOM_WORKER_TOKEN_FILE_HOST", "")
+    if bool(inline) == bool(token_file):
+        raise HostConvergeError("staging worker token source is ambiguous")
+    if inline:
+        return inline
+    path = Path(token_file)
+    try:
+        metadata = path.lstat()
+        token = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise HostConvergeError("staging worker token file is unavailable") from exc
+    if (
+        not path.is_absolute()
+        or stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or not token
+    ):
+        raise HostConvergeError("staging worker token file is unsafe")
+    return token
+
+
+def _staging_worker_heartbeat(
+    *,
+    control_plane_url: str,
+    worker_id: str,
+    token: str,
+) -> None:
+    if (
+        re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+            worker_id,
+        )
+        is None
+    ):
+        raise HostConvergeError("staging worker registration ID is invalid")
+    request = urllib.request.Request(
+        f"{control_plane_url.rstrip('/')}/workers/{worker_id}/heartbeat",
+        data=b"{}",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            body = response.read(4096)
+            if response.status != 200 or json.loads(body) != {"status": "ok"}:
+                raise HostConvergeError("staging worker heartbeat was rejected")
+    except (OSError, urllib.error.HTTPError, json.JSONDecodeError) as exc:
+        raise HostConvergeError("staging worker heartbeat failed safely") from exc
+
+
+def staging_allocation_node_check(
+    config: StagingAllocationConfig,
+    *,
+    candidate_sha: str,
+    candidate_tree: str,
+    request_id: str,
+    steady: bool = False,
+) -> dict[str, Any]:
+    if (
+        SHA_RE.fullmatch(candidate_sha) is None
+        or SHA_RE.fullmatch(candidate_tree) is None
+        or DIGEST_RE.fullmatch(request_id) is None
+    ):
+        raise HostConvergeError("staging allocation node request is invalid")
+    node = _staging_allocation_node(config)
+    if node not in config.allowed_nodes:
+        raise HostConvergeError("staging allocation node check requires a GB10 node")
+    if (
+        os.geteuid() != config.batch_uid
+        or os.getegid() != config.batch_gid
+        or os.environ.get("SLURM_JOB_ID", "").isdigit() is False
+        or os.environ.get("SLURM_JOB_NODELIST", "").lower() != node.lower()
+    ):
+        raise HostConvergeError("staging allocation numeric/Slurm identity drifted")
+    binding = _staging_candidate_binding(
+        config,
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+    )
+    job_id = os.environ["SLURM_JOB_ID"]
+    repository = Path(binding["repository"]["path"])
+    worker_env = Path(binding["worker_env"]["path"])
+    compose_project = f"loom-staging-{request_id[:12]}-{node.replace('trt-', '')}"
+    base_compose = repository / "deploy/docker-compose.remote-worker.yml"
+    cgroup_compose = repository / "deploy/docker-compose.remote-worker.cgroup-parent.yml"
+    if not base_compose.is_file() or not cgroup_compose.is_file():
+        raise HostConvergeError("staging worker Compose assets are unavailable")
+    cgroup_program = repository / "src/loom_control_plane/slurm_job_cgroup.py"
+    cgroup = subprocess.run(
+        (
+            "/usr/bin/python3",
+            "-I",
+            "-B",
+            str(cgroup_program),
+            "--job-id",
+            job_id,
+            "--pids-max",
+            "65536",
+            "--wait-seconds",
+            "30",
+        ),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=45,
+    )
+    cgroup_parent = cgroup.stdout.strip()
+    if cgroup.returncode != 0 or not cgroup_parent.startswith("/"):
+        raise HostConvergeError("staging allocation cgroup guard failed")
+    compose_environment = {
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "LANG": "C.UTF-8",
+        "LOOM_WORKER_CGROUP_PARENT": cgroup_parent,
+        "LOOM_WORKER_REQUIRE_CGROUP_PARENT": "true",
+        "LOOM_WORKER_SLURM_JOB_ID": job_id,
+        "LOOM_WORKER_COMPOSE_PROJECT": compose_project,
+        "LOOM_WORKER_RESTART_POLICY": "no",
+        "LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS": "0" if steady else "60",
+        "LOOM_WORKER_HOSTNAME": node,
+        "LOOM_WORKER_CANDIDATE_SHA": candidate_sha,
+        "LOOM_WORKER_CONTAINER_CPUS": "2",
+        "LOOM_WORKER_CONTAINER_MEMORY_MIB": "11500",
+        "LOOM_WORKER_CONTAINER_PIDS": "4096",
+        "COMPOSE_PROJECT_NAME": compose_project,
+    }
+    compose = (
+        "docker",
+        "compose",
+        "--project-name",
+        compose_project,
+        "--env-file",
+        str(worker_env),
+        "-f",
+        str(base_compose),
+        "-f",
+        str(cgroup_compose),
+    )
+    docker_version = _run(
+        ("docker", "info", "--format", "{{.ServerVersion}}"),
+        env=compose_environment,
+    ).stdout.strip()
+    config_result = subprocess.run(
+        (*compose, "config", "--format", "json"),
+        cwd=repository,
+        env=compose_environment,
+        check=False,
+        capture_output=True,
+        timeout=60,
+    )
+    if config_result.returncode != 0 or len(config_result.stdout) > 4 * 1024 * 1024:
+        raise HostConvergeError("staging worker Compose config failed safely")
+    compose_config_sha256 = hashlib.sha256(config_result.stdout).hexdigest()
+    registered_at = ""
+    first_heartbeat_at = ""
+    last_heartbeat_at = ""
+    cancel_requested_at = ""
+    worker_id = ""
+    stopped_at = ""
+    cleanup_verified = False
+    try:
+        up = subprocess.run(
+            (*compose, "up", "--detach", "--no-build", "worker"),
+            cwd=repository,
+            env=compose_environment,
+            check=False,
+            capture_output=True,
+            timeout=90,
+        )
+        if up.returncode != 0:
+            raise HostConvergeError("staging worker failed to start")
+        deadline = time.monotonic() + 90
+        registration = re.compile(
+            rb"worker_registered worker_id=([0-9a-f-]{36})",
+        )
+        while time.monotonic() < deadline:
+            logs = subprocess.run(
+                (*compose, "logs", "--no-color", "--tail", "200", "worker"),
+                cwd=repository,
+                env=compose_environment,
+                check=False,
+                capture_output=True,
+                timeout=15,
+            )
+            if logs.returncode == 0 and (match := registration.search(logs.stdout)):
+                worker_id = match.group(1).decode("ascii")
+                registered_at = _staging_timestamp()
+                break
+            time.sleep(1)
+        if not worker_id:
+            raise HostConvergeError("staging worker did not register within the bound")
+        values = binding["env_values"]
+        token = _staging_worker_token(values)
+        control_plane_url = values.get("LOOM_WORKER_CONTROL_PLANE_URL", "")
+        if not control_plane_url:
+            raise HostConvergeError("staging worker control-plane URL is unavailable")
+        _staging_worker_heartbeat(
+            control_plane_url=control_plane_url,
+            worker_id=worker_id,
+            token=token,
+        )
+        first_heartbeat_at = _staging_timestamp()
+        time.sleep(config.heartbeat_interval_seconds)
+        _staging_worker_heartbeat(
+            control_plane_url=control_plane_url,
+            worker_id=worker_id,
+            token=token,
+        )
+        last_heartbeat_at = _staging_timestamp()
+        if steady:
+            stop_requested = False
+
+            def request_stop(_signum: int, _frame: object) -> None:
+                nonlocal stop_requested
+                stop_requested = True
+
+            previous_term = signal.signal(signal.SIGTERM, request_stop)
+            previous_int = signal.signal(signal.SIGINT, request_stop)
+            try:
+                while not stop_requested:
+                    time.sleep(1)
+            finally:
+                signal.signal(signal.SIGTERM, previous_term)
+                signal.signal(signal.SIGINT, previous_int)
+        cancel_requested_at = _staging_timestamp()
+    finally:
+        down = subprocess.run(
+            (*compose, "down", "--remove-orphans", "--volumes", "--timeout", "15"),
+            cwd=repository,
+            env=compose_environment,
+            check=False,
+            capture_output=True,
+            timeout=60,
+        )
+        stopped_at = _staging_timestamp()
+        containers = _run(
+            (
+                "docker",
+                "ps",
+                "-aq",
+                "--filter",
+                f"label=com.docker.compose.project={compose_project}",
+            ),
+            env=compose_environment,
+        ).stdout.splitlines()
+        networks = _run(
+            (
+                "docker",
+                "network",
+                "ls",
+                "-q",
+                "--filter",
+                f"label=com.docker.compose.project={compose_project}",
+            ),
+            env=compose_environment,
+        ).stdout.splitlines()
+        volumes = _run(
+            (
+                "docker",
+                "volume",
+                "ls",
+                "-q",
+                "--filter",
+                f"label=com.docker.compose.project={compose_project}",
+            ),
+            env=compose_environment,
+        ).stdout.splitlines()
+        cleanup_verified = down.returncode == 0 and not containers and not networks and not volumes
+    if (
+        not all(
+            (
+                registered_at,
+                first_heartbeat_at,
+                last_heartbeat_at,
+                cancel_requested_at,
+                stopped_at,
+            )
+        )
+        or not cleanup_verified
+    ):
+        raise HostConvergeError("staging worker lifecycle did not close cleanly")
+    result = {
+        "schema_version": 1,
+        "kind": (
+            "staging_external_slurm_worker_terminal"
+            if steady
+            else "staging_external_slurm_node_probe"
+        ),
+        "request_id": request_id,
+        "candidate_sha": candidate_sha,
+        "candidate_tree": candidate_tree,
+        "node": node,
+        "canonical_host": socket.gethostname().rstrip(".").lower(),
+        "service_identity": binding["service_identity"],
+        "repository": binding["repository"],
+        "worker_env": {key: value for key, value in binding["worker_env"].items()},
+        "job_id": job_id,
+        "compose_project": compose_project,
+        "worker_id": worker_id,
+        "registered_at": registered_at,
+        "first_heartbeat_at": first_heartbeat_at,
+        "last_heartbeat_at": last_heartbeat_at,
+        "heartbeat_count": 2,
+        "cancel_requested_at": cancel_requested_at,
+        "stopped_at": stopped_at,
+        "docker_server_version": docker_version,
+        "compose_config_sha256": compose_config_sha256,
+        "orphan_containers": 0,
+        "orphan_networks": 0,
+        "orphan_volumes": 0,
+        "cleanup_verified": True,
+        "result": "pass",
+    }
+    result_path = _staging_result_path(
+        config,
+        candidate_sha=candidate_sha,
+        request_id=request_id,
+        node=node,
+    )
+    try:
+        parent_metadata = result_path.parent.lstat()
+    except OSError as exc:
+        raise HostConvergeError("staging result request directory is unavailable") from exc
+    if (
+        not stat.S_ISDIR(parent_metadata.st_mode)
+        or stat.S_ISLNK(parent_metadata.st_mode)
+        or (parent_metadata.st_uid, parent_metadata.st_gid) != (config.batch_uid, config.batch_gid)
+        or stat.S_IMODE(parent_metadata.st_mode) != 0o700
+    ):
+        raise HostConvergeError("staging result request directory is unsafe")
+    _atomic_write(
+        result_path,
+        (
+            json.dumps(
+                result,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+            + "\n"
+        ).encode("ascii"),
+        mode=0o600,
+        identity=Identity(
+            config.batch_user,
+            config.batch_group,
+            config.batch_uid,
+            config.batch_gid,
+        ),
+    )
+    return result
+
+
+def _staging_prepare_result_directory(
+    config: StagingAllocationConfig,
+    *,
+    candidate_sha: str,
+    request_id: str,
+) -> Path:
+    if SHA_RE.fullmatch(candidate_sha) is None or DIGEST_RE.fullmatch(request_id) is None:
+        raise HostConvergeError("staging allocation result identity is invalid")
+    request_root = config.probe_result_root / request_id
+    for path, must_create in ((request_root, True),):
+        try:
+            path.mkdir(mode=0o700)
+            os.chown(path, config.batch_uid, config.batch_gid)
+            os.chmod(path, 0o700)
+        except FileExistsError:
+            if must_create:
+                raise HostConvergeError(
+                    "staging allocation request ID was already used",
+                ) from None
+        except OSError as exc:
+            raise HostConvergeError(
+                "staging allocation result directory cannot be prepared",
+            ) from exc
+        metadata = path.lstat()
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or (metadata.st_uid, metadata.st_gid) != (config.batch_uid, config.batch_gid)
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            raise HostConvergeError("staging allocation result directory is unsafe")
+    return request_root
+
+
+def _staging_slurm_live_config(
+    config: StagingAllocationConfig,
+) -> dict[str, str]:
+    raw = _run(("scontrol", "show", "config")).stdout
+    values: dict[str, str] = {}
+    for line in raw.splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            values[key.strip()] = value.strip()
+    controllers = {
+        item.strip().split("(", 1)[0].lower()
+        for item in values.get("SlurmctldHost", "").split(",")
+        if item.strip()
+    }
+    if values.get("ClusterName") != config.cluster or config.controller.lower() not in controllers:
+        raise HostConvergeError("staging allocation reached the wrong Slurm authority")
+    assoc = _run(
+        (
+            "sacctmgr",
+            "-nP",
+            "show",
+            "assoc",
+            f"where cluster={config.cluster}",
+            f"user={config.batch_user}",
+            f"account={config.slurm_account}",
+            "format=Cluster,Account,User,QOS",
+        )
+    ).stdout
+    rows = [line.split("|") for line in assoc.splitlines() if line.strip()]
+    if len(rows) != 1 or len(rows[0]) != 4:
+        raise HostConvergeError("staging Slurm account association is unavailable")
+    cluster, account, user, qos_values = rows[0]
+    if (
+        cluster != config.cluster
+        or account != config.slurm_account
+        or user != config.batch_user
+        or config.qos not in {item for item in qos_values.split(",") if item}
+    ):
+        raise HostConvergeError("staging Slurm account/QoS association drifted")
+    return {
+        "cluster": cluster,
+        "controller": config.controller,
+        "account": account,
+        "user": user,
+        "qos": config.qos,
+    }
+
+
+def _staging_sacct_rows(
+    config: StagingAllocationConfig,
+    job_id: str,
+) -> list[list[str]]:
+    output = _run(
+        (
+            "sacct",
+            "-nP",
+            f"--clusters={config.cluster}",
+            "--starttime=now-1hour",
+            f"--jobs={job_id}",
+            "--format=JobIDRaw,JobName,State,NodeList,Account,User,Cluster,QOS,Start,End",
+        )
+    ).stdout
+    return [line.split("|") for line in output.splitlines() if line.strip()]
+
+
+def _staging_terminal_state(value: str) -> str:
+    return value.split("+", 1)[0].split(" ", 1)[0].strip().upper()
+
+
+def staging_allocation_submit(
+    config: StagingAllocationConfig,
+    *,
+    candidate_sha: str,
+    candidate_tree: str,
+    request_id: str,
+    requested_node: str,
+) -> dict[str, Any]:
+    if (
+        os.geteuid() != 0
+        or SHA_RE.fullmatch(candidate_sha) is None
+        or SHA_RE.fullmatch(candidate_tree) is None
+        or DIGEST_RE.fullmatch(request_id) is None
+        or requested_node not in config.allowed_nodes
+        or _staging_allocation_node(config) != config.submit_host
+    ):
+        raise HostConvergeError("staging allocation submit request is invalid")
+    identity = _staging_identity_snapshot(config)
+    namespace = _converge_staging_shared_namespace(config)
+    _staging_candidate_binding(
+        config,
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+    )
+    slurm = _staging_slurm_live_config(config)
+    _staging_prepare_result_directory(
+        config,
+        candidate_sha=candidate_sha,
+        request_id=request_id,
+    )
+    job_name = f"loom-staging-worker-{request_id[:16]}"
+    worker = (
+        str(INSTALLED_PROGRAM),
+        "staging-allocation-worker",
+        "--candidate-sha",
+        candidate_sha,
+        "--candidate-tree",
+        candidate_tree,
+        "--request-id",
+        request_id,
+    )
+    wrapped = " ".join(
+        shlex.quote(item)
+        for item in (
+            "/usr/bin/srun",
+            "--nodes=1",
+            "--ntasks=1",
+            f"--nodelist={requested_node}",
+            *worker,
+        )
+    )
+    submitted = _run(
+        (
+            "sbatch",
+            "--parsable",
+            f"--job-name={job_name}",
+            f"--uid={config.batch_user}",
+            f"--account={config.slurm_account}",
+            f"--qos={config.qos}",
+            f"--clusters={config.cluster}",
+            f"--partition={config.partition}",
+            f"--nodelist={requested_node}",
+            "--oversubscribe",
+            "--nodes=1",
+            "--ntasks=1",
+            "--cpus-per-task=2",
+            "--mem=11500M",
+            "--time=12:00:00",
+            "--output=/dev/null",
+            "--error=/dev/null",
+            "--comment=loom-cgroup-v1:pids=65536",
+            "--export=NONE",
+            f"--wrap={wrapped}",
+        ),
+    ).stdout.strip()
+    match = re.fullmatch(r"([1-9][0-9]*)(?:;[A-Za-z0-9_.-]+)?", submitted)
+    if match is None:
+        raise HostConvergeError("staging allocation submit returned no exact job ID")
+    return {
+        "schema_version": 1,
+        "kind": "staging_external_slurm_allocation_submission",
+        "request_id": request_id,
+        "candidate_sha": candidate_sha,
+        "candidate_tree": candidate_tree,
+        "job_id": match.group(1),
+        "job_name": job_name,
+        "node": requested_node,
+        "cluster": slurm["cluster"],
+        "account": slurm["account"],
+        "qos": slurm["qos"],
+        "user": config.batch_user,
+        "uid": config.batch_uid,
+        "gid": config.batch_gid,
+        "service_identity": identity,
+        "mount": namespace,
+        "submitted_at": _staging_timestamp(),
+        "status": "submitted",
+    }
+
+
+def staging_allocation_cancel(
+    config: StagingAllocationConfig,
+    *,
+    candidate_sha: str,
+    candidate_tree: str,
+    request_id: str,
+    submit_request_id: str,
+    job_id: str,
+    requested_node: str,
+) -> dict[str, Any]:
+    if (
+        os.geteuid() != 0
+        or SHA_RE.fullmatch(candidate_sha) is None
+        or SHA_RE.fullmatch(candidate_tree) is None
+        or DIGEST_RE.fullmatch(request_id) is None
+        or DIGEST_RE.fullmatch(submit_request_id) is None
+        or re.fullmatch(r"[1-9][0-9]*", job_id) is None
+        or requested_node not in config.allowed_nodes
+        or _staging_allocation_node(config) != config.submit_host
+    ):
+        raise HostConvergeError("staging allocation cancel request is invalid")
+    rows = _staging_sacct_rows(config, job_id)
+    base = [row for row in rows if len(row) == 10 and row[0] == job_id]
+    expected_name = f"loom-staging-worker-{submit_request_id[:16]}"
+    if (
+        len(base) != 1
+        or base[0][1] != expected_name
+        or base[0][3].lower() != requested_node.lower()
+        or base[0][4] != config.slurm_account
+        or base[0][5] != config.batch_user
+        or base[0][6] != config.cluster
+        or base[0][7] != config.qos
+    ):
+        raise HostConvergeError("staging allocation cancel readback drifted")
+    _run(("scancel", f"--clusters={config.cluster}", job_id), expected={0, 1})
+    deadline = time.monotonic() + config.job_timeout_seconds
+    terminal: list[str] | None = None
+    while time.monotonic() < deadline:
+        rows = _staging_sacct_rows(config, job_id)
+        matches = [row for row in rows if len(row) == 10 and row[0] == job_id]
+        if len(matches) == 1 and _staging_terminal_state(matches[0][2]) in {
+            "CANCELLED",
+            "COMPLETED",
+            "FAILED",
+            "TIMEOUT",
+            "NODE_FAIL",
+        }:
+            terminal = matches[0]
+            break
+        time.sleep(1)
+    if terminal is None:
+        raise HostConvergeError("staging allocation cancel did not become terminal")
+    cleanup_path = _staging_result_path(
+        config,
+        candidate_sha=candidate_sha,
+        request_id=submit_request_id,
+        node=requested_node,
+    )
+    try:
+        cleanup = json.loads(cleanup_path.read_bytes())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HostConvergeError("staging allocation cleanup result is unavailable") from exc
+    if (
+        not isinstance(cleanup, dict)
+        or cleanup.get("kind") != "staging_external_slurm_worker_terminal"
+        or cleanup.get("request_id") != submit_request_id
+        or cleanup.get("candidate_sha") != candidate_sha
+        or cleanup.get("candidate_tree") != candidate_tree
+        or cleanup.get("node") != requested_node
+        or cleanup.get("job_id") != job_id
+        or cleanup.get("cleanup_verified") is not True
+        or any(
+            cleanup.get(field) != 0
+            for field in (
+                "orphan_containers",
+                "orphan_networks",
+                "orphan_volumes",
+            )
+        )
+    ):
+        raise HostConvergeError("staging allocation cleanup result drifted")
+    return {
+        "schema_version": 1,
+        "kind": "staging_external_slurm_allocation_cancellation",
+        "request_id": request_id,
+        "submit_request_id": submit_request_id,
+        "candidate_sha": candidate_sha,
+        "candidate_tree": candidate_tree,
+        "job_id": job_id,
+        "node": requested_node,
+        "state": _staging_terminal_state(terminal[2]),
+        "cleanup_sha256": hashlib.sha256(
+            (
+                json.dumps(cleanup, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"
+            ).encode("ascii"),
+        ).hexdigest(),
+        "orphan_containers": 0,
+        "orphan_networks": 0,
+        "orphan_volumes": 0,
+        "cancelled_at": _staging_timestamp(),
+        "status": "cancelled",
+    }
+
+
+def _staging_load_node_result(
+    config: StagingAllocationConfig,
+    *,
+    candidate_sha: str,
+    candidate_tree: str,
+    request_id: str,
+    node: str,
+) -> dict[str, Any]:
+    path = _staging_result_path(
+        config,
+        candidate_sha=candidate_sha,
+        request_id=request_id,
+        node=node,
+    )
+    try:
+        metadata = path.lstat()
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise HostConvergeError("staging allocation node result is unavailable") from exc
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or (metadata.st_uid, metadata.st_gid) != (config.batch_uid, config.batch_gid)
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or len(raw) > 256 * 1024
+    ):
+        raise HostConvergeError("staging allocation node result metadata drifted")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HostConvergeError("staging allocation node result is invalid") from exc
+    if (
+        not isinstance(payload, dict)
+        or raw
+        != (
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+            + "\n"
+        ).encode("ascii")
+        or payload.get("schema_version") != 1
+        or payload.get("kind") != "staging_external_slurm_node_probe"
+        or payload.get("request_id") != request_id
+        or payload.get("candidate_sha") != candidate_sha
+        or payload.get("candidate_tree") != candidate_tree
+        or payload.get("node") != node
+        or payload.get("canonical_host") != config.host_aliases[node]
+        or payload.get("service_identity") != _staging_identity_snapshot(config)
+        or payload.get("heartbeat_count") != 2
+        or payload.get("orphan_containers") != 0
+        or payload.get("orphan_networks") != 0
+        or payload.get("orphan_volumes") != 0
+        or payload.get("cleanup_verified") is not True
+        or payload.get("result") != "pass"
+    ):
+        raise HostConvergeError("staging allocation node result binding drifted")
+    return payload
+
+
+def staging_allocation_probe(
+    config: StagingAllocationConfig,
+    *,
+    candidate_sha: str,
+    candidate_tree: str,
+    request_id: str,
+) -> dict[str, Any]:
+    if (
+        os.geteuid() != 0
+        or SHA_RE.fullmatch(candidate_sha) is None
+        or SHA_RE.fullmatch(candidate_tree) is None
+        or DIGEST_RE.fullmatch(request_id) is None
+    ):
+        raise HostConvergeError("staging allocation probe request is invalid")
+    current_node = _staging_allocation_node(config)
+    if current_node != config.submit_host:
+        raise HostConvergeError("staging allocation probe requires the exact submit host")
+    identity = _staging_identity_snapshot(config)
+    namespace = _converge_staging_shared_namespace(config)
+    binding = _staging_candidate_binding(
+        config,
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+    )
+    slurm = _staging_slurm_live_config(config)
+    request_root = _staging_prepare_result_directory(
+        config,
+        candidate_sha=candidate_sha,
+        request_id=request_id,
+    )
+    jobs: dict[str, tuple[str, str]] = {}
+    try:
+        for index, node in enumerate(config.allowed_nodes, start=1):
+            job_name = f"loom-staging-accept-{request_id[:12]}-{index:02d}"
+            node_check = (
+                str(INSTALLED_PROGRAM),
+                "staging-allocation-node-check",
+                "--candidate-sha",
+                candidate_sha,
+                "--candidate-tree",
+                candidate_tree,
+                "--request-id",
+                request_id,
+            )
+            wrapped = " ".join(
+                shlex.quote(item)
+                for item in (
+                    "/usr/bin/srun",
+                    "--nodes=1",
+                    "--ntasks=1",
+                    f"--nodelist={node}",
+                    *node_check,
+                )
+            )
+            submitted = _run(
+                (
+                    "sbatch",
+                    "--parsable",
+                    f"--job-name={job_name}",
+                    f"--uid={config.batch_user}",
+                    f"--account={config.slurm_account}",
+                    f"--qos={config.qos}",
+                    f"--clusters={config.cluster}",
+                    f"--partition={config.partition}",
+                    f"--nodelist={node}",
+                    "--oversubscribe",
+                    "--nodes=1",
+                    "--ntasks=1",
+                    "--cpus-per-task=2",
+                    "--mem=11500M",
+                    "--time=00:04:00",
+                    "--output=/dev/null",
+                    "--error=/dev/null",
+                    "--comment=loom-cgroup-v1:pids=65536",
+                    "--export=NONE",
+                    f"--wrap={wrapped}",
+                )
+            ).stdout.strip()
+            match = re.fullmatch(r"([1-9][0-9]*)(?:;[A-Za-z0-9_.-]+)?", submitted)
+            if match is None:
+                raise HostConvergeError("staging allocation submit returned no exact job ID")
+            jobs[node] = (match.group(1), job_name)
+    except Exception:
+        for job_id, _job_name in jobs.values():
+            _run(
+                ("scancel", f"--clusters={config.cluster}", job_id),
+                expected={0, 1},
+            )
+        raise
+    terminal: dict[str, tuple[list[str], list[str]]] = {}
+    deadline = time.monotonic() + config.job_timeout_seconds
+    while time.monotonic() < deadline and len(terminal) < len(jobs):
+        for node, (job_id, job_name) in jobs.items():
+            if node in terminal:
+                continue
+            rows = _staging_sacct_rows(config, job_id)
+            base = [row for row in rows if len(row) == 10 and row[0] == job_id]
+            step = [row for row in rows if len(row) == 10 and row[0] == f"{job_id}.0"]
+            if (
+                len(base) == 1
+                and len(step) == 1
+                and _staging_terminal_state(base[0][2])
+                in {
+                    "COMPLETED",
+                    "FAILED",
+                    "CANCELLED",
+                    "TIMEOUT",
+                    "OUT_OF_MEMORY",
+                    "NODE_FAIL",
+                }
+                and _staging_terminal_state(step[0][2])
+                in {
+                    "COMPLETED",
+                    "FAILED",
+                    "CANCELLED",
+                    "TIMEOUT",
+                    "OUT_OF_MEMORY",
+                    "NODE_FAIL",
+                }
+            ):
+                if base[0][1] != job_name:
+                    raise HostConvergeError("staging allocation job name drifted")
+                terminal[node] = (base[0], step[0])
+        if len(terminal) < len(jobs):
+            time.sleep(1)
+    if len(terminal) != len(jobs):
+        for node, (job_id, _job_name) in jobs.items():
+            if node not in terminal:
+                _run(
+                    ("scancel", f"--clusters={config.cluster}", job_id),
+                    expected={0, 1},
+                )
+        raise HostConvergeError("staging allocation jobs exceeded the bounded timeout")
+    final_nodes: list[dict[str, Any]] = []
+    for node in config.allowed_nodes:
+        job_id, job_name = jobs[node]
+        base, step = terminal[node]
+        if (
+            _staging_terminal_state(base[2]) != "COMPLETED"
+            or _staging_terminal_state(step[2]) != "COMPLETED"
+            or base[3].lower() != node.lower()
+            or step[3].lower() != node.lower()
+            or base[4] != config.slurm_account
+            or step[4] != config.slurm_account
+            or base[5] != config.batch_user
+            or step[5] != config.batch_user
+            or base[6] != config.cluster
+            or step[6] != config.cluster
+            or base[7] != config.qos
+        ):
+            raise HostConvergeError("staging allocation sbatch/srun readback drifted")
+        node_result = _staging_load_node_result(
+            config,
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+            request_id=request_id,
+            node=node,
+        )
+        repository_binding = node_result["repository"]
+        env_binding = node_result["worker_env"]
+        final_nodes.append(
+            {
+                "node": node,
+                "job_id": job_id,
+                "job_name": job_name,
+                "account": config.slurm_account,
+                "qos": config.qos,
+                "user": config.batch_user,
+                "uid": config.batch_uid,
+                "gid": config.batch_gid,
+                "sbatch_verified": True,
+                "srun_verified": True,
+                "candidate_sha": candidate_sha,
+                "candidate_tree": candidate_tree,
+                "repository": repository_binding["path"],
+                "repository_device": repository_binding["device"],
+                "repository_inode": repository_binding["inode"],
+                "worker_env": env_binding["path"],
+                "worker_env_device": env_binding["device"],
+                "worker_env_inode": env_binding["inode"],
+                "worker_env_sha256": env_binding["sha256"],
+                "compose_project": node_result["compose_project"],
+                "compose_config_sha256": node_result["compose_config_sha256"],
+                "docker_server_version": node_result["docker_server_version"],
+                "worker_id": node_result["worker_id"],
+                "registered_at": node_result["registered_at"],
+                "first_heartbeat_at": node_result["first_heartbeat_at"],
+                "last_heartbeat_at": node_result["last_heartbeat_at"],
+                "heartbeat_count": node_result["heartbeat_count"],
+                "cancel_requested_at": node_result["cancel_requested_at"],
+                "stopped_at": node_result["stopped_at"],
+                "job_terminal_at": base[9],
+                "job_state": "COMPLETED",
+                "orphan_containers": 0,
+                "orphan_networks": 0,
+                "orphan_volumes": 0,
+                "cleanup_verified": True,
+            }
+        )
+    repository = str(binding["repository"]["path"])
+    worker_env = str(binding["worker_env"]["path"])
+    if any(path.parent != request_root for path in request_root.iterdir() if path.is_file()):
+        raise HostConvergeError("staging allocation result set escaped its request root")
+    result = {
+        "schema_version": 1,
+        "kind": "staging_external_slurm_allocation_probe",
+        "request_id": request_id,
+        "candidate_sha": candidate_sha,
+        "candidate_tree": candidate_tree,
+        "cluster": config.cluster,
+        "pool": config.pool,
+        "submit_host": config.submit_host,
+        "controller": config.controller,
+        "service_identity": identity,
+        "namespace": namespace,
+        "slurm_account": slurm["account"],
+        "qos": slurm["qos"],
+        "allowed_nodes": list(config.allowed_nodes),
+        "repository": repository,
+        "worker_env": worker_env,
+        "nodes": final_nodes,
+        "result": "pass",
+    }
+    _atomic_write(
+        request_root / "probe.json",
+        (
+            json.dumps(result, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"
+        ).encode("ascii"),
+        mode=0o600,
+        identity=Identity(
+            config.batch_user,
+            config.batch_group,
+            config.batch_uid,
+            config.batch_gid,
+        ),
+    )
+    return result
 
 
 def _run(
@@ -341,20 +1981,18 @@ def _atomic_write(
                     dir_fd=parent_fd,
                     follow_symlinks=False,
                 )
-                if (
-                    not stat.S_ISREG(temporary.st_mode)
-                    or (temporary.st_dev, temporary.st_ino)
-                    != (opened.st_dev, opened.st_ino)
+                if not stat.S_ISREG(temporary.st_mode) or (temporary.st_dev, temporary.st_ino) != (
+                    opened.st_dev,
+                    opened.st_ino,
                 ):
                     raise HostConvergeError("atomic write temporary binding changed")
 
                 _replace_file_at(parent_fd, temporary_name, path.name)
                 temporary_name = ""
                 rebound = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
-                if (
-                    not stat.S_ISREG(rebound.st_mode)
-                    or (rebound.st_dev, rebound.st_ino)
-                    != (opened.st_dev, opened.st_ino)
+                if not stat.S_ISREG(rebound.st_mode) or (rebound.st_dev, rebound.st_ino) != (
+                    opened.st_dev,
+                    opened.st_ino,
                 ):
                     raise HostConvergeError("atomic write target binding changed")
                 os.fsync(parent_fd)
@@ -414,12 +2052,7 @@ def _assert_secure_file(path: Path, identity: Identity, label: str) -> None:
 
 
 def _directory_open_flags() -> int:
-    return (
-        os.O_RDONLY
-        | os.O_DIRECTORY
-        | getattr(os, "O_CLOEXEC", 0)
-        | os.O_NOFOLLOW
-    )
+    return os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW
 
 
 def _open_absolute_directory(path: Path, *, create: bool) -> int:
@@ -495,10 +2128,9 @@ def _private_child_names(profile: Profile) -> tuple[str, ...]:
         profile.runtime_root,
         profile.secrets_root,
     )
-    if (
-        any(path.parent != profile.state_root or path.name in {"", ".", ".."} for path in children)
-        or len({path.name for path in children}) != len(children)
-    ):
+    if any(
+        path.parent != profile.state_root or path.name in {"", ".", ".."} for path in children
+    ) or len({path.name for path in children}) != len(children):
         raise HostConvergeError("private sandbox child paths are invalid")
     return tuple(path.name for path in children)
 
@@ -557,9 +2189,9 @@ def _private_state_directory(
             follow_symlinks=False,
         )
         current = os.fstat(state_fd)
-        if (
-            not stat.S_ISDIR(rebound.st_mode)
-            or (rebound.st_dev, rebound.st_ino) != (current.st_dev, current.st_ino)
+        if not stat.S_ISDIR(rebound.st_mode) or (rebound.st_dev, rebound.st_ino) != (
+            current.st_dev,
+            current.st_ino,
         ):
             raise HostConvergeError(
                 f"private sandbox root binding changed: {profile.state_root}",
@@ -672,14 +2304,12 @@ def ensure_private_roots(profile: Profile, identity: Identity) -> None:
                     os.fchmod(descriptor, 0o700)
                     current = os.fstat(descriptor)
                     rebound = os.stat(name, dir_fd=state_fd, follow_symlinks=False)
-                    if (
-                        not stat.S_ISDIR(rebound.st_mode)
-                        or (current.st_dev, current.st_ino)
-                        != (rebound.st_dev, rebound.st_ino)
+                    if not stat.S_ISDIR(rebound.st_mode) or (current.st_dev, current.st_ino) != (
+                        rebound.st_dev,
+                        rebound.st_ino,
                     ):
                         raise HostConvergeError(
-                            f"private sandbox root binding changed: "
-                            f"{profile.state_root / name}",
+                            f"private sandbox root binding changed: {profile.state_root / name}",
                         )
                 finally:
                     os.close(descriptor)
@@ -861,8 +2491,8 @@ def verify_worker_runtime_env(
     if (
         stat.S_ISLNK(metadata.st_mode)
         or not stat.S_ISREG(metadata.st_mode)
-        or (metadata.st_uid, metadata.st_gid) != (0, sandbox_group.gid)
-        or stat.S_IMODE(metadata.st_mode) != 0o640
+        or (metadata.st_uid, metadata.st_gid) != (sandbox_group.uid, sandbox_group.gid)
+        or stat.S_IMODE(metadata.st_mode) != 0o600
     ):
         raise HostConvergeError("OLDLAB worker runtime env metadata is invalid")
     values = _parse_env_file(path)
@@ -1011,8 +2641,7 @@ def verify_combined_receipt(
     fleet_generated = _parse_attestation_time(fleet["generated_at"], "fleet generated_at")
     fleet_expires = _parse_attestation_time(fleet["expires_at"], "fleet expires_at")
     if (
-        fleet["path"]
-        != str(FLEET_ATTESTATION_ROOT / profile.sandbox / sha / "fleet.json")
+        fleet["path"] != str(FLEET_ATTESTATION_ROOT / profile.sandbox / sha / "fleet.json")
         or not isinstance(fleet["payload_sha256"], str)
         or FINGERPRINT_RE.fullmatch(fleet["payload_sha256"]) is None
         or fleet_generated > now + timedelta(seconds=30)
@@ -1108,9 +2737,9 @@ def _write_root_exclusive(path: Path, content: bytes) -> None:
             os.fsync(descriptor)
             opened = os.fstat(descriptor)
             rebound = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
-            if (
-                not stat.S_ISREG(rebound.st_mode)
-                or (opened.st_dev, opened.st_ino) != (rebound.st_dev, rebound.st_ino)
+            if not stat.S_ISREG(rebound.st_mode) or (opened.st_dev, opened.st_ino) != (
+                rebound.st_dev,
+                rebound.st_ino,
             ):
                 raise HostConvergeError("renewal history binding changed")
             os.fsync(parent_fd)
@@ -1145,9 +2774,7 @@ def _archive_runtime_attestation(
         ).encode()
         + b"\n"
     )
-    unsigned_combined = {
-        key: value for key, value in combined.items() if key != "payload_sha256"
-    }
+    unsigned_combined = {key: value for key, value in combined.items() if key != "payload_sha256"}
     combined_digest = hashlib.sha256(
         json.dumps(
             unsigned_combined,
@@ -1187,17 +2814,18 @@ def _archive_runtime_attestation(
         raise HostConvergeError("fleet attestation is invalid") from exc
     if not isinstance(fleet_payload, dict):
         raise HostConvergeError("fleet attestation is invalid")
-    fleet_unsigned = {
-        key: value for key, value in fleet_payload.items() if key != "payload_sha256"
-    }
-    fleet_digest = "sha256:" + hashlib.sha256(
-        json.dumps(
-            fleet_unsigned,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=True,
-        ).encode(),
-    ).hexdigest()
+    fleet_unsigned = {key: value for key, value in fleet_payload.items() if key != "payload_sha256"}
+    fleet_digest = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(
+                fleet_unsigned,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode(),
+        ).hexdigest()
+    )
     fleet_nodes = fleet_payload.get("nodes")
     fleet_bundle = fleet_payload.get("bundle_generation")
     fleet_server = fleet_payload.get("server")
@@ -1226,8 +2854,7 @@ def _archive_runtime_attestation(
         raise HostConvergeError("fleet attestation host coverage is invalid")
     try:
         domain_generations = {
-            domain: int(domains[domain]["generation"])
-            for domain in ("oldlab", "gb10")
+            domain: int(domains[domain]["generation"]) for domain in ("oldlab", "gb10")
         }
     except (KeyError, TypeError, ValueError) as exc:
         raise HostConvergeError("combined activation receipt generations are invalid") from exc
@@ -1273,8 +2900,7 @@ def _archive_runtime_attestation(
             or not isinstance(previous_domains, dict)
             or set(previous_domains) != {"oldlab", "gb10"}
             or any(
-                type(previous_domains[domain]) is not int
-                or previous_domains[domain] < 1
+                type(previous_domains[domain]) is not int or previous_domains[domain] < 1
                 for domain in ("oldlab", "gb10")
             )
         ):
@@ -1683,9 +3309,7 @@ def _install_assets(source_root: Path) -> None:
     )
     _atomic_write(
         RENEWAL_SERVICE_PATH,
-        (
-            profiles_root / "loom-developer-sandbox-attestation-renewal.service"
-        ).read_bytes(),
+        (profiles_root / "loom-developer-sandbox-attestation-renewal.service").read_bytes(),
         mode=0o644,
     )
     _atomic_write(
@@ -1936,18 +3560,7 @@ def _renew_attestation_locked(
     sha: str,
     tree: str,
 ) -> ActivationReceipt:
-    relative_program = "scripts/ops/developer_sandbox_remote_link_host.py"
-    _run_candidate_program(
-        profile,
-        sha,
-        relative_program,
-        "fleet-check",
-        "--sandbox",
-        profile.sandbox,
-        "--candidate-sha",
-        sha,
-        "--execute",
-    )
+    _collect_and_persist_remote_link_fleet(profile, sha, tree)
     _publish_domain_attestations(profile, sha, tree)
     receipt = verify_combined_receipt(profile, sha, tree)
     _archive_runtime_attestation(profile, sha, tree, receipt)
@@ -1963,7 +3576,7 @@ def _service_converge_locked(
     sha = str(desired["candidate_sha"])
     authority = _identity("root", SHARED_GROUP)
     owner = _identity(sandbox, SHARED_GROUP)
-    runtime_group = _identity(sandbox, f"loom-sandbox-{sandbox}")
+    runtime_group = _sandbox_batch_identity(sandbox)
     verify_candidate_root(profile, authority)
     tree = verify_candidate(profile, profile.candidate_root / sha, sha, authority)
     verify_worker_runtime_env(profile, sha, runtime_group)
@@ -2047,7 +3660,7 @@ def service_check(sandbox: str) -> None:
         sha,
         authority,
     )
-    verify_worker_runtime_env(profile, sha, _identity(sandbox, f"loom-sandbox-{sandbox}"))
+    verify_worker_runtime_env(profile, sha, _sandbox_batch_identity(sandbox))
     receipt = verify_combined_receipt(profile, sha, tree)
     _validate_desired_binding(
         profile,
@@ -2090,7 +3703,7 @@ def renew_attestations(profiles: Sequence[Profile], *, execute: bool) -> None:
                 verify_worker_runtime_env(
                     profile,
                     sha,
-                    _identity(profile.sandbox, f"loom-sandbox-{profile.sandbox}"),
+                    _sandbox_batch_identity(profile.sandbox),
                 )
                 _renew_attestation_locked(profile, sha=sha, tree=tree)
                 renewed.append(profile.sandbox)
@@ -2153,33 +3766,663 @@ def _run_candidate_program(
     return payload
 
 
-def _ssh(
-    node: str,
-    argv: Sequence[str],
+def _node_authority_envelope(
     *,
-    input_bytes: bytes | None = None,
-    expected: set[int] | frozenset[int] = frozenset({0}),
-) -> subprocess.CompletedProcess[bytes]:
-    completed = subprocess.run(
+    action: str,
+    node: str,
+    domain: str,
+    sandbox: str,
+    sha: str,
+    tree: str,
+    payload_kind: str = "none",
+    payload_bytes: bytes = b"",
+    prior_request_id: str | None = None,
+) -> bytes:
+    if (
+        action
+        not in {
+            "host-converge",
+            "materialize",
+            "install-client",
+            "attest",
+            "rollback",
+            "persist-fleet-attestation",
+            "inspect-candidate",
+            "inspect-local",
+            "inspect-link-client",
+            "inspect-link-server",
+            "export-domain-attestation",
+            "export-runtime-proof-artifact",
+            "slurm-node-converge",
+            "slurm-controller-converge",
+            "slurm-rollback",
+            "slurm-check",
+            "collect-live-overlap",
+            "observe-live-overlap-job",
+            "observe-platform-health-node",
+            "staging-allocation-bootstrap",
+            "staging-allocation-probe",
+            "staging-allocation-submit",
+            "staging-allocation-cancel",
+            "staging-shared-source-bootstrap",
+            "staging-slurm-accounting-converge",
+        }
+        or node not in ELIGIBLE_LINK_NODES
+        or domain not in DOMAIN_PEERS
+        or (sandbox != "staging" if action.startswith("staging-") else sandbox not in SANDBOXES)
+        or SHA_RE.fullmatch(sha) is None
+        or SHA_RE.fullmatch(tree) is None
+        or (prior_request_id is not None and DIGEST_RE.fullmatch(prior_request_id) is None)
+    ):
+        raise HostConvergeError("node authority request identity is invalid")
+    body: dict[str, Any] = {
+        "schema_version": 1,
+        "action": action,
+        "node": node,
+        "domain": domain,
+        "sandbox": sandbox,
+        "candidate_sha": sha,
+        "candidate_tree": tree,
+        "payload_kind": payload_kind,
+        "payload_sha256": hashlib.sha256(payload_bytes).hexdigest(),
+        "payload_base64": base64.b64encode(payload_bytes).decode("ascii"),
+        "prior_request_id": prior_request_id,
+    }
+    digest = hashlib.sha256(
         (
-            "ssh",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=10",
+            json.dumps(
+                body,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+            + "\n"
+        ).encode("ascii"),
+    ).hexdigest()
+    body["request_id"] = digest
+    return (
+        json.dumps(
+            body,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("ascii")
+        + b"\n"
+    )
+
+
+def _node_authority(
+    node: str,
+    verb: str,
+    envelope: bytes,
+) -> dict[str, Any]:
+    if verb not in {"transact", "check"}:
+        raise HostConvergeError("node authority verb is invalid")
+    result = subprocess.run(
+        (
+            str(NODE_TRANSPORT_PROGRAM),
+            "invoke",
+            "--node",
             node,
-            *argv,
+            "--verb",
+            verb,
         ),
-        input=input_bytes,
+        input=envelope,
+        env={
+            "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "LANG": "C.UTF-8",
+        },
         check=False,
         capture_output=True,
     )
-    if completed.returncode not in expected:
-        raise HostConvergeError(
-            f"remote {Path(argv[0]).name if argv else 'command'} failed safely "
-            f"on {node} with exit code {completed.returncode}",
+    if result.returncode != 0 or result.stderr:
+        raise HostConvergeError(f"node authority transport failed safely on {node}")
+    try:
+        report = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise HostConvergeError("node authority returned invalid JSON") from exc
+    if not isinstance(report, dict) or report.get("status") != "succeeded":
+        raise HostConvergeError("node authority returned an invalid receipt")
+    return report
+
+
+def _slurm_maintenance_file(domain: str, sandbox: str, sha: str) -> Path:
+    if domain not in DOMAIN_PEERS or sandbox not in SANDBOXES or SHA_RE.fullmatch(sha) is None:
+        raise HostConvergeError("Slurm maintenance identity is invalid")
+    return SLURM_MAINTENANCE_ROOT / f"{domain}-{sandbox}-{sha}.json"
+
+
+def _ensure_slurm_maintenance_root(*, create: bool) -> bool:
+    expected_uid, expected_gid = os.geteuid(), os.getegid()
+    for directory in (SLURM_MAINTENANCE_ROOT.parent, SLURM_MAINTENANCE_ROOT):
+        try:
+            metadata = directory.lstat()
+        except FileNotFoundError:
+            if not create:
+                return False
+            try:
+                directory.mkdir(mode=0o700)
+                os.chown(directory, expected_uid, expected_gid)
+                os.chmod(directory, 0o700)
+                _fsync_directory(directory.parent)
+                metadata = directory.lstat()
+            except OSError as exc:
+                raise HostConvergeError(
+                    "Slurm maintenance state root could not be created safely",
+                ) from exc
+        except OSError as exc:
+            raise HostConvergeError("Slurm maintenance state root is unavailable") from exc
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISDIR(metadata.st_mode)
+            or (metadata.st_uid, metadata.st_gid) != (expected_uid, expected_gid)
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            raise HostConvergeError("Slurm maintenance state root is unsafe")
+    return True
+
+
+def _load_slurm_maintenance_file(path: Path) -> dict[str, Any] | None:
+    if path.parent != SLURM_MAINTENANCE_ROOT or not _ensure_slurm_maintenance_root(create=False):
+        return None
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW
+    try:
+        lexical = path.lstat()
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise HostConvergeError("Slurm maintenance journal is unavailable") from exc
+    expected_uid, expected_gid = os.geteuid(), os.getegid()
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            stat.S_ISLNK(lexical.st_mode)
+            or not stat.S_ISREG(lexical.st_mode)
+            or not stat.S_ISREG(opened.st_mode)
+            or (lexical.st_uid, lexical.st_gid) != (expected_uid, expected_gid)
+            or (opened.st_uid, opened.st_gid) != (expected_uid, expected_gid)
+            or stat.S_IMODE(lexical.st_mode) != 0o600
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or lexical.st_nlink != 1
+            or opened.st_nlink != 1
+            or (lexical.st_dev, lexical.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise HostConvergeError("Slurm maintenance journal metadata is unsafe")
+        payloads: list[bytes] = []
+        identities: list[tuple[int, ...]] = []
+        for _attempt in range(2):
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            content = bytearray()
+            while True:
+                chunk = os.read(descriptor, 65536)
+                if not chunk:
+                    break
+                content.extend(chunk)
+                if len(content) > 1024 * 1024:
+                    raise HostConvergeError("Slurm maintenance journal is too large")
+            current = os.fstat(descriptor)
+            payloads.append(bytes(content))
+            identities.append(
+                (
+                    current.st_dev,
+                    current.st_ino,
+                    current.st_mode,
+                    current.st_uid,
+                    current.st_gid,
+                    current.st_nlink,
+                    current.st_size,
+                    current.st_mtime_ns,
+                    current.st_ctime_ns,
+                ),
+            )
+        rebound = path.lstat()
+        rebound_identity = (
+            rebound.st_dev,
+            rebound.st_ino,
+            rebound.st_mode,
+            rebound.st_uid,
+            rebound.st_gid,
+            rebound.st_nlink,
+            rebound.st_size,
+            rebound.st_mtime_ns,
+            rebound.st_ctime_ns,
         )
-    return completed
+        if (
+            payloads[0] != payloads[1]
+            or hashlib.sha256(payloads[0]).digest() != hashlib.sha256(payloads[1]).digest()
+            or identities[0] != identities[1]
+            or identities[1] != rebound_identity
+        ):
+            raise HostConvergeError("Slurm maintenance journal changed during read")
+    finally:
+        os.close(descriptor)
+    try:
+        payload = json.loads(payloads[0])
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HostConvergeError("Slurm maintenance journal is invalid") from exc
+    if not isinstance(payload, dict) or payloads[0] != (
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"
+    ).encode("ascii"):
+        raise HostConvergeError("Slurm maintenance journal is invalid")
+    return payload
+
+
+@contextmanager
+def _slurm_maintenance_lock(domain: str) -> Iterator[None]:
+    if domain not in DOMAIN_PEERS:
+        raise HostConvergeError("Slurm maintenance domain is invalid")
+    _ensure_root_private_directory(TRANSACTION_LOCK_ROOT)
+    path = TRANSACTION_LOCK_ROOT / f"slurm-{domain}.lock"
+    descriptor = os.open(
+        path,
+        os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or (metadata.st_uid, metadata.st_gid) != (0, 0):
+            raise HostConvergeError("Slurm maintenance lock metadata is invalid")
+        os.fchmod(descriptor, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def _slurm_node_order(domain: str) -> tuple[str, ...]:
+    controller = DOMAIN_PUBLISHERS[domain]
+    return (
+        *(node for node in DOMAIN_PEERS[domain] if node != controller),
+        controller,
+    )
+
+
+def _slurm_maintenance_tree(profile: Profile, sha: str) -> str:
+    authority = _identity("root", SHARED_GROUP)
+    verify_candidate_root(profile, authority)
+    return verify_candidate(profile, profile.candidate_root / sha, sha, authority)
+
+
+def _new_slurm_maintenance_state(
+    profile: Profile,
+    *,
+    domain: str,
+    sha: str,
+    tree: str,
+) -> dict[str, Any]:
+    order = _slurm_node_order(domain)
+    controller = DOMAIN_PUBLISHERS[domain]
+    return {
+        "schema_version": 1,
+        "artifact_type": "developer-sandbox-slurm-maintenance-journal",
+        "domain": domain,
+        "sandbox": profile.sandbox,
+        "candidate_sha": sha,
+        "candidate_tree": tree,
+        "controller": controller,
+        "node_order": list(order),
+        "phase": "running",
+        "nodes": {
+            node: {
+                "converge_action": (
+                    "slurm-controller-converge" if node == controller else "slurm-node-converge"
+                ),
+                "converge_receipt": None,
+                "check_request_id": None,
+                "rollback_receipt": None,
+            }
+            for node in order
+        },
+        "last_failure": None,
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+
+
+def _validate_slurm_maintenance_state(
+    payload: object,
+    profile: Profile,
+    *,
+    domain: str,
+    sha: str,
+    tree: str,
+) -> dict[str, Any]:
+    order = _slurm_node_order(domain)
+    controller = DOMAIN_PUBLISHERS[domain]
+    if (
+        not isinstance(payload, dict)
+        or set(payload)
+        != {
+            "schema_version",
+            "artifact_type",
+            "domain",
+            "sandbox",
+            "candidate_sha",
+            "candidate_tree",
+            "controller",
+            "node_order",
+            "phase",
+            "nodes",
+            "last_failure",
+            "updated_at",
+        }
+        or payload.get("schema_version") != 1
+        or payload.get("artifact_type") != "developer-sandbox-slurm-maintenance-journal"
+        or payload.get("domain") != domain
+        or payload.get("sandbox") != profile.sandbox
+        or payload.get("candidate_sha") != sha
+        or payload.get("candidate_tree") != tree
+        or payload.get("controller") != controller
+        or payload.get("node_order") != list(order)
+        or payload.get("phase")
+        not in {"running", "blocked", "completed", "rolling-back", "rolled-back"}
+        or not isinstance(payload.get("nodes"), dict)
+        or set(payload["nodes"]) != set(order)
+        or not isinstance(payload.get("updated_at"), str)
+    ):
+        raise HostConvergeError("Slurm maintenance journal binding drifted")
+    for node in order:
+        row = payload["nodes"][node]
+        expected_action = (
+            "slurm-controller-converge" if node == controller else "slurm-node-converge"
+        )
+        if (
+            not isinstance(row, dict)
+            or set(row)
+            != {
+                "converge_action",
+                "converge_receipt",
+                "check_request_id",
+                "rollback_receipt",
+            }
+            or row.get("converge_action") != expected_action
+            or (
+                row.get("check_request_id") is not None
+                and DIGEST_RE.fullmatch(str(row["check_request_id"])) is None
+            )
+            or (
+                row.get("converge_receipt") is not None
+                and not isinstance(row["converge_receipt"], dict)
+            )
+            or (
+                row.get("rollback_receipt") is not None
+                and not isinstance(row["rollback_receipt"], dict)
+            )
+        ):
+            raise HostConvergeError("Slurm maintenance node journal binding drifted")
+    failure = payload["last_failure"]
+    if failure is not None and (
+        not isinstance(failure, dict)
+        or set(failure) != {"node", "action", "failed_at"}
+        or failure.get("node") not in order
+        or not isinstance(failure.get("action"), str)
+        or not isinstance(failure.get("failed_at"), str)
+    ):
+        raise HostConvergeError("Slurm maintenance failure journal is invalid")
+    return payload
+
+
+def _write_slurm_maintenance_state(
+    path: Path,
+    state: dict[str, Any],
+) -> None:
+    state["updated_at"] = datetime.now(UTC).isoformat()
+    _ensure_slurm_maintenance_root(create=True)
+    _atomic_write(
+        path,
+        (json.dumps(state, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode(
+            "ascii"
+        ),
+        mode=0o600,
+    )
+    if _load_slurm_maintenance_file(path) != state:
+        raise HostConvergeError("Slurm maintenance journal write readback drifted")
+
+
+def _slurm_authority_request(
+    profile: Profile,
+    *,
+    domain: str,
+    node: str,
+    action: str,
+    sha: str,
+    tree: str,
+    prior_request_id: str | None = None,
+) -> tuple[dict[str, Any], str]:
+    envelope = _node_authority_envelope(
+        action=action,
+        node=node,
+        domain=domain,
+        sandbox=profile.sandbox,
+        sha=sha,
+        tree=tree,
+        prior_request_id=prior_request_id,
+    )
+    request_id = str(json.loads(envelope)["request_id"])
+    verb = "check" if action == "slurm-check" else "transact"
+    response = _node_authority(node, verb, envelope)
+    binding = SLURM_AUTHORITY_BINDING_RE.fullmatch(
+        str(response.get("inner_receipt")),
+    )
+    expected_cluster = "trt-oldlab" if domain == "oldlab" else "trt-gb10"
+    if response.get("request_id") != request_id or (
+        verb == "transact"
+        and (
+            set(response) != SLURM_AUTHORITY_RECEIPT_FIELDS
+            or response.get("schema_version") != 1
+            or response.get("action") != action
+            or response.get("node") != node
+            or response.get("domain") != domain
+            or response.get("sandbox") != profile.sandbox
+            or response.get("candidate_sha") != sha
+            or response.get("candidate_tree") != tree
+            or response.get("payload_sha256") != hashlib.sha256(b"").hexdigest()
+            or DIGEST_RE.fullmatch(str(response.get("result_sha256"))) is None
+            or binding is None
+            or binding.group(1) != expected_cluster
+            or not isinstance(response.get("completed_at"), str)
+        )
+    ):
+        raise HostConvergeError("Slurm node authority receipt binding is invalid")
+    return response, request_id
+
+
+def _slurm_check_node(
+    profile: Profile,
+    *,
+    domain: str,
+    node: str,
+    sha: str,
+    tree: str,
+) -> str:
+    response, request_id = _slurm_authority_request(
+        profile,
+        domain=domain,
+        node=node,
+        action="slurm-check",
+        sha=sha,
+        tree=tree,
+    )
+    result = response.get("result")
+    expected_cluster = "trt-oldlab" if domain == "oldlab" else "trt-gb10"
+    if (
+        not isinstance(result, dict)
+        or result.get("cluster") != expected_cluster
+        or result.get("candidate_sha") != sha
+        or result.get("file_plan", {}).get("converged") is not True
+    ):
+        raise HostConvergeError("Slurm node check readback is invalid")
+    return request_id
+
+
+def slurm_maintenance_converge(profile: Profile, sha: str, domain: str) -> dict[str, Any]:
+    _require_live_host()
+    tree = _slurm_maintenance_tree(profile, sha)
+    path = _slurm_maintenance_file(domain, profile.sandbox, sha)
+    with _slurm_maintenance_lock(domain):
+        raw = _load_slurm_maintenance_file(path)
+        state = (
+            _new_slurm_maintenance_state(
+                profile,
+                domain=domain,
+                sha=sha,
+                tree=tree,
+            )
+            if raw is None
+            else _validate_slurm_maintenance_state(
+                raw,
+                profile,
+                domain=domain,
+                sha=sha,
+                tree=tree,
+            )
+        )
+        if state["phase"] in {"rolling-back", "rolled-back"}:
+            raise HostConvergeError("Slurm maintenance candidate is rolling back")
+        state["phase"] = "running"
+        state["last_failure"] = None
+        _write_slurm_maintenance_state(path, state)
+        current_node = _slurm_node_order(domain)[0]
+        current_action = "slurm-node-converge"
+        try:
+            for node in _slurm_node_order(domain):
+                current_node = node
+                row = state["nodes"][node]
+                action = str(row["converge_action"])
+                current_action = action
+                response, _request_id = _slurm_authority_request(
+                    profile,
+                    domain=domain,
+                    node=node,
+                    action=action,
+                    sha=sha,
+                    tree=tree,
+                )
+                if row["converge_receipt"] is not None:
+                    if response != row["converge_receipt"]:
+                        raise HostConvergeError("Slurm converge receipt replay drifted")
+                else:
+                    row["converge_receipt"] = response
+                    _write_slurm_maintenance_state(path, state)
+                current_action = "slurm-check"
+                row["check_request_id"] = _slurm_check_node(
+                    profile,
+                    domain=domain,
+                    node=node,
+                    sha=sha,
+                    tree=tree,
+                )
+                _write_slurm_maintenance_state(path, state)
+            for node in _slurm_node_order(domain):
+                current_node = node
+                current_action = "slurm-check"
+                state["nodes"][node]["check_request_id"] = _slurm_check_node(
+                    profile,
+                    domain=domain,
+                    node=node,
+                    sha=sha,
+                    tree=tree,
+                )
+                _write_slurm_maintenance_state(path, state)
+            state["phase"] = "completed"
+            _write_slurm_maintenance_state(path, state)
+            return state
+        except Exception:
+            state["phase"] = "blocked"
+            state["last_failure"] = {
+                "node": current_node,
+                "action": current_action,
+                "failed_at": datetime.now(UTC).isoformat(),
+            }
+            _write_slurm_maintenance_state(path, state)
+            raise
+
+
+def slurm_maintenance_check(profile: Profile, sha: str, domain: str) -> dict[str, Any]:
+    _require_live_host()
+    tree = _slurm_maintenance_tree(profile, sha)
+    checked = [
+        {
+            "node": node,
+            "request_id": _slurm_check_node(
+                profile,
+                domain=domain,
+                node=node,
+                sha=sha,
+                tree=tree,
+            ),
+        }
+        for node in _slurm_node_order(domain)
+    ]
+    return {
+        "schema_version": 1,
+        "artifact_type": "developer-sandbox-slurm-maintenance-check",
+        "domain": domain,
+        "sandbox": profile.sandbox,
+        "candidate_sha": sha,
+        "candidate_tree": tree,
+        "nodes": checked,
+        "status": "succeeded",
+    }
+
+
+def slurm_maintenance_rollback(profile: Profile, sha: str, domain: str) -> dict[str, Any]:
+    _require_live_host()
+    tree = _slurm_maintenance_tree(profile, sha)
+    path = _slurm_maintenance_file(domain, profile.sandbox, sha)
+    with _slurm_maintenance_lock(domain):
+        raw = _load_slurm_maintenance_file(path)
+        state = _validate_slurm_maintenance_state(
+            raw,
+            profile,
+            domain=domain,
+            sha=sha,
+            tree=tree,
+        )
+        state["phase"] = "rolling-back"
+        state["last_failure"] = None
+        _write_slurm_maintenance_state(path, state)
+        current_node = DOMAIN_PUBLISHERS[domain]
+        try:
+            for node in reversed(_slurm_node_order(domain)):
+                current_node = node
+                row = state["nodes"][node]
+                prior = row["converge_receipt"]
+                if prior is None:
+                    continue
+                prior_request_id = prior.get("request_id")
+                if (
+                    not isinstance(prior_request_id, str)
+                    or DIGEST_RE.fullmatch(prior_request_id) is None
+                ):
+                    raise HostConvergeError("Slurm rollback owned receipt is invalid")
+                response, _request_id = _slurm_authority_request(
+                    profile,
+                    domain=domain,
+                    node=node,
+                    action="slurm-rollback",
+                    sha=sha,
+                    tree=tree,
+                    prior_request_id=prior_request_id,
+                )
+                if row["rollback_receipt"] is not None:
+                    if response != row["rollback_receipt"]:
+                        raise HostConvergeError("Slurm rollback receipt replay drifted")
+                else:
+                    row["rollback_receipt"] = response
+                    _write_slurm_maintenance_state(path, state)
+            state["phase"] = "rolled-back"
+            _write_slurm_maintenance_state(path, state)
+            return state
+        except Exception:
+            state["phase"] = "blocked"
+            state["last_failure"] = {
+                "node": current_node,
+                "action": "slurm-rollback",
+                "failed_at": datetime.now(UTC).isoformat(),
+            }
+            _write_slurm_maintenance_state(path, state)
+            raise
 
 
 def _verify_remote_candidate(
@@ -2195,29 +4438,19 @@ def _verify_remote_candidate(
     )
     if domain is None:
         raise HostConvergeError("remote candidate node is outside the closed inventory")
-    result = _ssh(
+    authority_report = _node_authority(
         node,
-        (
-            "sudo",
-            "-n",
-            str(DOMAIN_RUNTIME_PROGRAM),
-            "inspect-candidate",
-            "--config",
-            str(DOMAIN_RUNTIME_CONFIG),
-            "--domain",
-            domain,
-            "--sandbox",
-            profile.sandbox,
-            "--candidate-sha",
-            sha,
-            "--candidate-tree",
-            tree,
+        "check",
+        _node_authority_envelope(
+            action="inspect-candidate",
+            node=node,
+            domain=domain,
+            sandbox=profile.sandbox,
+            sha=sha,
+            tree=tree,
         ),
     )
-    try:
-        report = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise HostConvergeError("remote candidate verifier returned invalid JSON") from exc
+    report = authority_report.get("result")
     if (
         not isinstance(report, dict)
         or report.get("operation") != "inspect-candidate"
@@ -2369,205 +4602,21 @@ def _candidate_source_stage(sha: str) -> Iterator[tuple[Path, str]]:
         _remove_source_stage(stage, sha)
 
 
-def _materialization_archive(bundle: Path, sha: str, tree: str) -> bytes:
-    def committed(relative: str) -> bytes:
-        return _run(
-            (
-                "git",
-                "-c",
-                "core.hooksPath=/dev/null",
-                "-c",
-                "core.attributesFile=/dev/null",
-                "-C",
-                str(REPO_ROOT),
-                "show",
-                f"{sha}:{relative}",
-            ),
-            env=_clean_git_environment(),
-        ).stdout.encode()
-
-    files = {
-        "candidate.bundle": (bundle.read_bytes(), 0o600),
-        "developer_sandbox_domain_runtime.py": (
-            committed("scripts/ops/developer_sandbox_domain_runtime.py"),
-            0o700,
-        ),
-        "runtime-domains.toml": (
-            committed("deploy/developer-sandboxes/runtime-domains.toml"),
-            0o600,
-        ),
-        "manifest.json": (
-            (
-                json.dumps(
-                    {
-                        "schema_version": 1,
-                        "candidate_sha": sha,
-                        "candidate_tree": tree,
-                        "bundle_sha256": hashlib.sha256(bundle.read_bytes()).hexdigest(),
-                    },
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )
-                + "\n"
-            ).encode(),
-            0o600,
-        ),
-    }
-    output = io.BytesIO()
-    with tarfile.open(fileobj=output, mode="w") as archive:
-        for name, (content, mode) in files.items():
-            info = tarfile.TarInfo(name)
-            info.size = len(content)
-            info.mode = mode
-            info.uid = 0
-            info.gid = 0
-            archive.addfile(info, io.BytesIO(content))
-    return output.getvalue()
-
-
-def _runtime_bootstrap_archive(sha: str) -> bytes:
-    files: dict[str, tuple[bytes, int]] = {}
-    for relative, target, mode in (
-        (
-            "scripts/ops/developer_sandbox_domain_runtime.py",
-            "developer_sandbox_domain_runtime.py",
-            0o700,
-        ),
-        (
-            "deploy/developer-sandboxes/runtime-domains.toml",
-            "runtime-domains.toml",
-            0o600,
-        ),
-    ):
-        content = _run(
-            (
-                "git",
-                "-c",
-                "core.hooksPath=/dev/null",
-                "-c",
-                "core.attributesFile=/dev/null",
-                "-C",
-                str(REPO_ROOT),
-                "show",
-                f"{sha}:{relative}",
-            ),
-            env=_clean_git_environment(),
-        ).stdout.encode()
-        files[target] = (content, mode)
-    output = io.BytesIO()
-    with tarfile.open(fileobj=output, mode="w") as archive:
-        for name, (content, mode) in files.items():
-            info = tarfile.TarInfo(name)
-            info.size = len(content)
-            info.mode = mode
-            info.uid = 0
-            info.gid = 0
-            archive.addfile(info, io.BytesIO(content))
-    return output.getvalue()
-
-
-def _remote_stage_failure_path(
-    profile: Profile,
-    sha: str,
-    domain: str,
-    node: str,
-) -> Path:
-    return SOURCE_STAGING_ROOT / "failures" / (
-        f"{profile.sandbox}-{sha}-{domain}-{node}.json"
-    )
-
-
-def _cleanup_remote_stage(
-    profile: Profile,
-    sha: str,
-    domain: str,
-    node: str,
-    stage: Path,
-) -> None:
-    failure = _remote_stage_failure_path(profile, sha, domain, node)
-    try:
-        _ssh(node, ("sudo", "-n", "rm", "-rf", "--", str(stage)))
-    except HostConvergeError:
-        _ensure_root_private_directory(failure.parent)
-        _atomic_write(
-            failure,
-            (
-                json.dumps(
-                    {
-                        "schema_version": 1,
-                        "status": "remote-cleanup-failed",
-                        "sandbox": profile.sandbox,
-                        "candidate_sha": sha,
-                        "domain": domain,
-                        "node": node,
-                        "stage": str(stage),
-                        "recorded_at": datetime.now(UTC).isoformat(),
-                    },
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )
-                + "\n"
-            ).encode(),
-            mode=0o600,
-        )
-        raise
-    if failure.exists():
-        failure.unlink()
-        _fsync_directory(failure.parent)
-
-
-def _bootstrap_domain_runtime_hosts(profile: Profile, sha: str) -> None:
-    archive = _runtime_bootstrap_archive(sha)
+def _bootstrap_domain_runtime_hosts(profile: Profile, sha: str, tree: str) -> None:
     for domain, nodes in DOMAIN_PEERS.items():
         for node in nodes:
-            stage = Path(
-                f"/run/loom-developer-sandbox-installer/bootstrap/"
-                f"{profile.sandbox}/{sha}/{domain}/{node}",
+            _node_authority(
+                node,
+                "transact",
+                _node_authority_envelope(
+                    action="host-converge",
+                    node=node,
+                    domain=domain,
+                    sandbox=profile.sandbox,
+                    sha=sha,
+                    tree=tree,
+                ),
             )
-            _cleanup_remote_stage(profile, sha, domain, node, stage)
-            try:
-                _ssh(node, ("sudo", "-n", "install", "-d", "-m", "0700", str(stage)))
-                _ssh(
-                    node,
-                    (
-                        "sudo",
-                        "-n",
-                        "tar",
-                        "--extract",
-                        "--file=-",
-                        "--directory",
-                        str(stage),
-                        "--no-same-owner",
-                        "--no-same-permissions",
-                    ),
-                    input_bytes=archive,
-                )
-                for name, mode in (
-                    ("developer_sandbox_domain_runtime.py", "0700"),
-                    ("runtime-domains.toml", "0600"),
-                ):
-                    _ssh(
-                        node,
-                        ("sudo", "-n", "chown", "root:root", str(stage / name)),
-                    )
-                    _ssh(node, ("sudo", "-n", "chmod", mode, str(stage / name)))
-                _ssh(
-                    node,
-                    (
-                        "sudo",
-                        "-n",
-                        "python3",
-                        str(stage / "developer_sandbox_domain_runtime.py"),
-                        "host-converge",
-                        "--config",
-                        str(stage / "runtime-domains.toml"),
-                        "--domain",
-                        domain,
-                        "--execute",
-                    ),
-                )
-            finally:
-                _cleanup_remote_stage(profile, sha, domain, node, stage)
 
 
 def _materialize_domain_candidates(
@@ -2576,75 +4625,318 @@ def _materialize_domain_candidates(
     tree: str,
     bundle: Path,
 ) -> None:
-    archive = _materialization_archive(bundle, sha, tree)
+    payload = bundle.read_bytes()
     for domain, publisher in DOMAIN_PUBLISHERS.items():
-        stage = Path(
-            f"/run/loom-developer-sandbox-installer/source/"
-            f"{profile.sandbox}/{sha}/{domain}",
+        _node_authority(
+            publisher,
+            "transact",
+            _node_authority_envelope(
+                action="materialize",
+                node=publisher,
+                domain=domain,
+                sandbox=profile.sandbox,
+                sha=sha,
+                tree=tree,
+                payload_kind="git-bundle",
+                payload_bytes=payload,
+            ),
         )
-        _cleanup_remote_stage(profile, sha, domain, publisher, stage)
-        try:
-            _ssh(publisher, ("sudo", "-n", "install", "-d", "-m", "0700", str(stage)))
-            _ssh(
-                publisher,
-                (
-                    "sudo",
-                    "-n",
-                    "tar",
-                    "--extract",
-                    "--file=-",
-                    "--directory",
-                    str(stage),
-                    "--no-same-owner",
-                    "--no-same-permissions",
-                ),
-                input_bytes=archive,
-            )
-            for name, mode in (
-                ("candidate.bundle", "0600"),
-                ("developer_sandbox_domain_runtime.py", "0700"),
-                ("runtime-domains.toml", "0600"),
-                ("manifest.json", "0600"),
-            ):
-                _ssh(
-                    publisher,
-                    (
-                        "sudo",
-                        "-n",
-                        "chown",
-                        "root:root",
-                        str(stage / name),
-                    ),
-                )
-                _ssh(
-                    publisher,
-                    ("sudo", "-n", "chmod", mode, str(stage / name)),
-                )
-            _ssh(
-                publisher,
-                (
-                    "sudo",
-                    "-n",
-                    "python3",
-                    str(stage / "developer_sandbox_domain_runtime.py"),
-                    "materialize",
-                    "--config",
-                    str(stage / "runtime-domains.toml"),
-                    "--domain",
-                    domain,
-                    "--sandbox",
-                    profile.sandbox,
-                    "--candidate-sha",
-                    sha,
-                    "--candidate-tree",
-                    tree,
-                    "--source-bundle",
-                    str(stage / "candidate.bundle"),
-                    "--execute",
-                ),
-            )
-        finally:
-            _cleanup_remote_stage(profile, sha, domain, publisher, stage)
+
+
+def _link_domain(node: str) -> str:
+    for domain, nodes in DOMAIN_PEERS.items():
+        if node in nodes:
+            return domain
+    raise HostConvergeError("remote-link node is outside the closed inventory")
+
+
+def _link_client_uri(profile: Profile, sha: str) -> str:
+    return f"spiffe://loom/developer-sandbox/{profile.sandbox}/candidate/{sha}/worker"
+
+
+def _validate_link_client_inspection(
+    profile: Profile,
+    sha: str,
+    node: str,
+    report: object,
+) -> dict[str, Any]:
+    expected_keys = {
+        "schema_version",
+        "sandbox",
+        "candidate_sha",
+        "node",
+        "route",
+        "tls_version",
+        "services",
+        "client_uri_san",
+        "secret_files",
+        "ca_fingerprint",
+        "client_cert_fingerprint",
+    }
+    expected_secret = {"uid": 0, "gid": 0, "mode": "0600", "present": True}
+    expected_secret_names = {
+        "worker-token",
+        "minio-access-key",
+        "minio-secret-key",
+        "client-key.pem",
+    }
+    expected_services = {
+        name: {
+            "listener_port": REMOTE_LINK_SERVICE_PORTS[profile.sandbox][name][0],
+            "target_port": REMOTE_LINK_SERVICE_PORTS[profile.sandbox][name][1],
+            "health": "ok",
+        }
+        for name in REMOTE_LINK_SERVICE_NAMES
+    }
+    if (
+        not isinstance(report, dict)
+        or set(report) != expected_keys
+        or report.get("schema_version") != 1
+        or report.get("sandbox") != profile.sandbox
+        or report.get("candidate_sha") != sha
+        or report.get("node") != node
+        or report.get("route") != "ok"
+        or report.get("tls_version") != "TLSv1.3"
+        or report.get("client_uri_san") != _link_client_uri(profile, sha)
+        or not isinstance(report.get("services"), dict)
+        or report.get("services") != expected_services
+        or not isinstance(report.get("secret_files"), dict)
+        or set(report["secret_files"]) != expected_secret_names
+        or any(state != expected_secret for state in report["secret_files"].values())
+        or FINGERPRINT_RE.fullmatch(str(report.get("ca_fingerprint"))) is None
+        or FINGERPRINT_RE.fullmatch(str(report.get("client_cert_fingerprint"))) is None
+    ):
+        raise HostConvergeError(f"{node} remote-link client inspection is invalid")
+    return {
+        "node": node,
+        "candidate_sha": sha,
+        "route": {
+            "destination": REMOTE_LINK_SERVER_ADDRESS,
+            "status": "ok",
+        },
+        "tls_version": "TLSv1.3",
+        "client_uri_san": _link_client_uri(profile, sha),
+        "ca_fingerprint": report["ca_fingerprint"],
+        "client_cert_fingerprint": report["client_cert_fingerprint"],
+        "secret_files": report["secret_files"],
+        "services": {
+            name: {
+                "listener_port": expected_services[name]["listener_port"],
+                "health": "ok",
+            }
+            for name in REMOTE_LINK_SERVICE_NAMES
+        },
+    }
+
+
+def _validate_link_server_inspection(
+    profile: Profile,
+    sha: str,
+    report: object,
+) -> dict[str, Any]:
+    expected_keys = {
+        "node",
+        "address",
+        "unit",
+        "unit_active",
+        "active_candidate_sha",
+        "ca_fingerprint",
+        "server_cert_fingerprint",
+        "client_uri_san",
+        "services",
+    }
+    expected_services = {
+        name: {
+            "listener_port": REMOTE_LINK_SERVICE_PORTS[profile.sandbox][name][0],
+            "target_host": "127.0.0.1",
+            "target_port": REMOTE_LINK_SERVICE_PORTS[profile.sandbox][name][1],
+            "health_path": REMOTE_LINK_HEALTH_PATHS[name],
+            "tls_version": "TLSv1.3",
+            "status": "active",
+        }
+        for name in REMOTE_LINK_SERVICE_NAMES
+    }
+    if (
+        not isinstance(report, dict)
+        or set(report) != expected_keys
+        or report.get("node") != "oldlab-2"
+        or report.get("address") != REMOTE_LINK_SERVER_ADDRESS
+        or report.get("unit") != f"loom-developer-sandbox-link@{profile.sandbox}.service"
+        or report.get("unit_active") is not True
+        or report.get("active_candidate_sha") != sha
+        or report.get("client_uri_san") != _link_client_uri(profile, sha)
+        or FINGERPRINT_RE.fullmatch(str(report.get("ca_fingerprint"))) is None
+        or FINGERPRINT_RE.fullmatch(str(report.get("server_cert_fingerprint"))) is None
+        or report.get("services") != expected_services
+    ):
+        raise HostConvergeError("oldlab-2 remote-link server inspection is invalid")
+    return dict(report)
+
+
+def _fleet_attestation_digest(payload: Mapping[str, Any]) -> str:
+    unsigned = {key: value for key, value in payload.items() if key != "payload_sha256"}
+    canonical = json.dumps(
+        unsigned,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("ascii")
+    return "sha256:" + hashlib.sha256(canonical).hexdigest()
+
+
+def _collect_and_persist_remote_link_fleet(
+    profile: Profile,
+    sha: str,
+    tree: str,
+) -> dict[str, Any]:
+    node_payloads: dict[str, dict[str, Any]] = {}
+    failures: list[str] = []
+
+    def inspect_client(node: str) -> tuple[str, dict[str, Any]]:
+        envelope = _node_authority_envelope(
+            action="inspect-link-client",
+            node=node,
+            domain=_link_domain(node),
+            sandbox=profile.sandbox,
+            sha=sha,
+            tree=tree,
+        )
+        request_id = str(json.loads(envelope)["request_id"])
+        response = _node_authority(
+            node,
+            "check",
+            envelope,
+        )
+        if (
+            set(response) != {"schema_version", "request_id", "status", "result"}
+            or response.get("schema_version") != 1
+            or response.get("request_id") != request_id
+            or response.get("status") != "succeeded"
+        ):
+            raise HostConvergeError(f"{node} link authority response is invalid")
+        return node, _validate_link_client_inspection(
+            profile,
+            sha,
+            node,
+            response.get("result"),
+        )
+
+    with ThreadPoolExecutor(max_workers=8, thread_name_prefix="loom-link-authority") as pool:
+        futures = {pool.submit(inspect_client, node): node for node in ELIGIBLE_LINK_NODES}
+        for future in as_completed(futures):
+            node = futures[future]
+            try:
+                checked_node, payload = future.result()
+            except Exception:
+                failures.append(node)
+                continue
+            if checked_node != node:
+                failures.append(node)
+                continue
+            node_payloads[node] = payload
+    if failures or set(node_payloads) != set(ELIGIBLE_LINK_NODES):
+        failed = sorted(set(failures) | (set(ELIGIBLE_LINK_NODES) - set(node_payloads)))
+        raise HostConvergeError(
+            "remote-link client inspection failed for: " + ",".join(failed),
+        )
+
+    server_envelope = _node_authority_envelope(
+        action="inspect-link-server",
+        node="oldlab-2",
+        domain="oldlab",
+        sandbox=profile.sandbox,
+        sha=sha,
+        tree=tree,
+    )
+    server_request_id = str(json.loads(server_envelope)["request_id"])
+    server_response = _node_authority("oldlab-2", "check", server_envelope)
+    if (
+        set(server_response) != {"schema_version", "request_id", "status", "result"}
+        or server_response.get("schema_version") != 1
+        or server_response.get("request_id") != server_request_id
+        or server_response.get("status") != "succeeded"
+    ):
+        raise HostConvergeError("oldlab-2 link authority response is invalid")
+    server = _validate_link_server_inspection(
+        profile,
+        sha,
+        server_response.get("result"),
+    )
+    if {str(payload["ca_fingerprint"]) for payload in node_payloads.values()} != {
+        server["ca_fingerprint"]
+    }:
+        raise HostConvergeError("remote-link fleet CA generation is inconsistent")
+    generated = datetime.now(UTC).replace(microsecond=0)
+    fleet: dict[str, Any] = {
+        "schema_version": 1,
+        "sandbox": profile.sandbox,
+        "candidate_sha": sha,
+        "generated_at": generated.isoformat().replace("+00:00", "Z"),
+        "expires_at": (generated + ATTESTATION_TTL).isoformat().replace("+00:00", "Z"),
+        "eligible_nodes": list(ELIGIBLE_LINK_NODES),
+        "bundle_generation": {
+            "candidate_sha": sha,
+            "ca_fingerprint": server["ca_fingerprint"],
+            "client_uri_san": _link_client_uri(profile, sha),
+        },
+        "server": server,
+        "nodes": {node: node_payloads[node] for node in ELIGIBLE_LINK_NODES},
+    }
+    fleet["payload_sha256"] = _fleet_attestation_digest(fleet)
+    serialized = (
+        json.dumps(
+            fleet,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("ascii")
+        + b"\n"
+    )
+    envelope = _node_authority_envelope(
+        action="persist-fleet-attestation",
+        node="oldlab-2",
+        domain="oldlab",
+        sandbox=profile.sandbox,
+        sha=sha,
+        tree=tree,
+        payload_kind="fleet-attestation-json",
+        payload_bytes=serialized,
+    )
+    request_id = str(json.loads(envelope)["request_id"])
+    persisted = _node_authority("oldlab-2", "transact", envelope)
+    if (
+        set(persisted)
+        != {
+            "schema_version",
+            "request_id",
+            "action",
+            "node",
+            "domain",
+            "sandbox",
+            "candidate_sha",
+            "candidate_tree",
+            "payload_sha256",
+            "result_sha256",
+            "inner_receipt",
+            "completed_at",
+            "status",
+        }
+        or persisted.get("schema_version") != 1
+        or persisted.get("request_id") != request_id
+        or persisted.get("action") != "persist-fleet-attestation"
+        or persisted.get("node") != "oldlab-2"
+        or persisted.get("domain") != "oldlab"
+        or persisted.get("sandbox") != profile.sandbox
+        or persisted.get("candidate_sha") != sha
+        or persisted.get("candidate_tree") != tree
+        or persisted.get("payload_sha256") != hashlib.sha256(serialized).hexdigest()
+        or DIGEST_RE.fullmatch(str(persisted.get("result_sha256"))) is None
+        or persisted.get("inner_receipt") is not None
+        or not isinstance(persisted.get("completed_at"), str)
+        or persisted.get("status") != "succeeded"
+    ):
+        raise HostConvergeError("fleet attestation persistence receipt is invalid")
+    return fleet
 
 
 def _install_remote_link_fleet(
@@ -2682,61 +4974,27 @@ def _install_remote_link_fleet(
     )
     for node in ELIGIBLE_LINK_NODES:
         _verify_remote_candidate(profile, node, sha, tree, authority.gid)
-        inbox = Path(
-            f"/run/loom-developer-sandbox-installer/{profile.sandbox}/{sha}/{node}",
-        )
         archive = _archive_credentials(
             issuance / "clients" / node,
             worker_token=values["LOOM_WORKER_TOKEN"],
             minio_access_key=values["LOOM_DEV_MINIO_ROOT_USER"],
             minio_secret_key=values["LOOM_DEV_MINIO_ROOT_PASSWORD"],
         )
-        _cleanup_remote_stage(profile, sha, "credentials", node, inbox)
-        try:
-            _ssh(node, ("sudo", "-n", "install", "-d", "-m", "0700", str(inbox)))
-            _ssh(
-                node,
-                (
-                    "sudo",
-                    "-n",
-                    "tar",
-                    "--extract",
-                    "--file=-",
-                    "--directory",
-                    str(inbox),
-                    "--no-same-owner",
-                    "--no-same-permissions",
-                ),
-                input_bytes=archive,
-            )
-            remote_program = profile.candidate_root / sha / program
-            _ssh(
-                node,
-                (
-                    "sudo",
-                    "-n",
-                    "python3",
-                    str(remote_program),
-                    "install-client",
-                    "--sandbox",
-                    profile.sandbox,
-                    "--candidate-sha",
-                    sha,
-                    "--node",
-                    node,
-                    "--credential-source",
-                    str(inbox),
-                    "--worker-token-file",
-                    str(inbox / "worker-token"),
-                    "--minio-access-key-file",
-                    str(inbox / "minio-access-key"),
-                    "--minio-secret-key-file",
-                    str(inbox / "minio-secret-key"),
-                    "--execute",
-                ),
-            )
-        finally:
-            _cleanup_remote_stage(profile, sha, "credentials", node, inbox)
+        domain = next(name for name, nodes in DOMAIN_PEERS.items() if node in nodes)
+        _node_authority(
+            node,
+            "transact",
+            _node_authority_envelope(
+                action="install-client",
+                node=node,
+                domain=domain,
+                sandbox=profile.sandbox,
+                sha=sha,
+                tree=tree,
+                payload_kind="client-credentials",
+                payload_bytes=archive,
+            ),
+        )
     _run_candidate_program(
         profile,
         sha,
@@ -2748,17 +5006,7 @@ def _install_remote_link_fleet(
         sha,
         "--execute",
     )
-    _run_candidate_program(
-        profile,
-        sha,
-        program,
-        "fleet-check",
-        "--sandbox",
-        profile.sandbox,
-        "--candidate-sha",
-        sha,
-        "--execute",
-    )
+    _collect_and_persist_remote_link_fleet(profile, sha, tree)
 
 
 def _worker_env_seed(profile: Profile, sha: str) -> bytes:
@@ -2785,25 +5033,19 @@ def _converge_domain_runtime_hosts(
     tree: str,
     authority: Identity,
 ) -> None:
-    relative_program = "scripts/ops/developer_sandbox_domain_runtime.py"
-    config_relative = "deploy/developer-sandboxes/runtime-domains.toml"
     for domain, nodes in DOMAIN_PEERS.items():
         for node in nodes:
             _verify_remote_candidate(profile, node, sha, tree, authority.gid)
-            candidate = profile.candidate_root / sha
-            _ssh(
+            _node_authority(
                 node,
-                (
-                    "sudo",
-                    "-n",
-                    "python3",
-                    str(candidate / relative_program),
-                    "host-converge",
-                    "--config",
-                    str(candidate / config_relative),
-                    "--domain",
-                    domain,
-                    "--execute",
+                "transact",
+                _node_authority_envelope(
+                    action="host-converge",
+                    node=node,
+                    domain=domain,
+                    sandbox=profile.sandbox,
+                    sha=sha,
+                    tree=tree,
                 ),
             )
 
@@ -2816,78 +5058,49 @@ def _publish_domain_attestations(
     relative_program = "scripts/ops/developer_sandbox_domain_runtime.py"
     config_relative = "deploy/developer-sandboxes/runtime-domains.toml"
     seed = _worker_env_seed(profile, sha)
-    for domain in DOMAIN_PEERS:
-        publisher = DOMAIN_PUBLISHERS[domain]
-        seed_path = Path(
-            f"/run/loom-developer-sandbox-installer/{profile.sandbox}-{sha}-{domain}.env",
-        )
-        archive = io.BytesIO()
-        with tarfile.open(fileobj=archive, mode="w") as tar:
-            info = tarfile.TarInfo(seed_path.name)
-            info.size = len(seed)
+    fleet_path = FLEET_ATTESTATION_ROOT / profile.sandbox / sha / "fleet.json"
+    try:
+        fleet_metadata = fleet_path.lstat()
+        fleet = fleet_path.read_bytes()
+    except OSError as exc:
+        raise HostConvergeError("fleet attestation seed is unavailable") from exc
+    if (
+        stat.S_ISLNK(fleet_metadata.st_mode)
+        or not stat.S_ISREG(fleet_metadata.st_mode)
+        or fleet_metadata.st_uid != 0
+        or fleet_metadata.st_gid != 0
+        or stat.S_IMODE(fleet_metadata.st_mode) != 0o600
+        or fleet_metadata.st_nlink != 1
+        or not fleet
+        or len(fleet) > (1 << 20)
+    ):
+        raise HostConvergeError("fleet attestation seed metadata is invalid")
+    archive_buffer = io.BytesIO()
+    with tarfile.open(fileobj=archive_buffer, mode="w") as archive:
+        for name, content in (("worker.env", seed), ("fleet.json", fleet)):
+            info = tarfile.TarInfo(name)
+            info.size = len(content)
             info.mode = 0o600
             info.uid = 0
             info.gid = 0
-            tar.addfile(info, io.BytesIO(seed))
-        try:
-            _cleanup_remote_stage(
-                profile,
-                sha,
-                f"{domain}-env",
-                publisher,
-                seed_path,
-            )
-            _ssh(
-                publisher,
-                ("sudo", "-n", "install", "-d", "-m", "0700", str(seed_path.parent)),
-            )
-            _ssh(
-                publisher,
-                (
-                    "sudo",
-                    "-n",
-                    "tar",
-                    "--extract",
-                    "--file=-",
-                    "--directory",
-                    str(seed_path.parent),
-                    "--no-same-owner",
-                    "--no-same-permissions",
-                ),
-                input_bytes=archive.getvalue(),
-            )
-            candidate = profile.candidate_root / sha
-            _ssh(
-                publisher,
-                (
-                    "sudo",
-                    "-n",
-                    "python3",
-                    str(candidate / relative_program),
-                    "attest",
-                    "--config",
-                    str(candidate / config_relative),
-                    "--domain",
-                    domain,
-                    "--sandbox",
-                    profile.sandbox,
-                    "--candidate-sha",
-                    sha,
-                    "--candidate-tree",
-                    tree,
-                    "--worker-env-seed",
-                    str(seed_path),
-                    "--execute",
-                ),
-            )
-        finally:
-            _cleanup_remote_stage(
-                profile,
-                sha,
-                f"{domain}-env",
-                publisher,
-                seed_path,
-            )
+            archive.addfile(info, io.BytesIO(content))
+    attestation_seed = archive_buffer.getvalue()
+    for domain in DOMAIN_PEERS:
+        publisher = DOMAIN_PUBLISHERS[domain]
+        _node_authority(
+            publisher,
+            "transact",
+            _node_authority_envelope(
+                action="attest",
+                node=publisher,
+                domain=domain,
+                sandbox=profile.sandbox,
+                sha=sha,
+                tree=tree,
+                payload_kind="attestation-seed",
+                payload_bytes=attestation_seed,
+            ),
+        )
     _run_candidate_program(
         profile,
         sha,
@@ -2899,6 +5112,8 @@ def _publish_domain_attestations(
         profile.sandbox,
         "--candidate-sha",
         sha,
+        "--candidate-tree",
+        tree,
         "--execute",
     )
 
@@ -3246,11 +5461,16 @@ def rollback(profile: Profile, target_sha: str) -> None:
             raise
 
 
-def _nfs_readback_commands(profile: Profile, sha: str) -> list[list[str]]:
-    path = profile.candidate_root / sha
-    remote = ["stat", "-Lc", "%i:%u:%g:%a:%n", str(profile.candidate_root), str(path)]
+def _nfs_readback_commands(_profile: Profile, _sha: str) -> list[list[str]]:
     return [
-        ["ssh", "-o", "BatchMode=yes", host, "--", *remote]
+        [
+            str(NODE_TRANSPORT_PROGRAM),
+            "invoke",
+            "--node",
+            host,
+            "--verb",
+            "check",
+        ]
         for host in ("oldlab-1", "oldlab-2", "oldlab-3", "oldlab-4", "oldlab-5")
     ]
 
@@ -3288,6 +5508,14 @@ def plan_document(profiles: Sequence[Profile], sha: str, operation: str) -> dict
         "host": EXPECTED_HOSTNAME,
         "candidate_sha": sha,
         "sandboxes": rows,
+        "node_authority": {
+            "program": str(NODE_AUTHORITY_PROGRAM),
+            "runtime_verbs": ["transact", "check"],
+            "external_root_bootstrap_required": True,
+            "candidate_tree_pinned": True,
+            "nodes": list(ELIGIBLE_LINK_NODES),
+            "raw_remote_sudo_allowed": False,
+        },
         "rollback": {
             "preserves_compose_volumes": True,
             "requires_recorded_previous_sha": True,
@@ -3306,18 +5534,12 @@ def _activation_lock(profile: Profile) -> Iterator[None]:
     lock_path = TRANSACTION_LOCK_ROOT / f"{profile.sandbox}.lock"
     descriptor = os.open(
         lock_path,
-        os.O_RDWR
-        | os.O_CREAT
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0),
+        os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
         0o600,
     )
     try:
         metadata = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or (metadata.st_uid, metadata.st_gid) != (0, 0)
-        ):
+        if not stat.S_ISREG(metadata.st_mode) or (metadata.st_uid, metadata.st_gid) != (0, 0):
             raise HostConvergeError("sandbox activation lock metadata is invalid")
         os.fchmod(descriptor, 0o600)
         fcntl.flock(descriptor, fcntl.LOCK_EX)
@@ -3332,18 +5554,12 @@ def _install_lock() -> Iterator[None]:
     lock_path = TRANSACTION_LOCK_ROOT / "install.lock"
     descriptor = os.open(
         lock_path,
-        os.O_RDWR
-        | os.O_CREAT
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0),
+        os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
         0o600,
     )
     try:
         metadata = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or (metadata.st_uid, metadata.st_gid) != (0, 0)
-        ):
+        if not stat.S_ISREG(metadata.st_mode) or (metadata.st_uid, metadata.st_gid) != (0, 0):
             raise HostConvergeError("global install lock metadata is invalid")
         os.fchmod(descriptor, 0o600)
         fcntl.flock(descriptor, fcntl.LOCK_EX)
@@ -3639,9 +5855,9 @@ def _invalidate_exact_live_receipt(
                     "live activation receipt advanced outside the rollback transaction",
                 )
         rebound = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
-        if (
-            not stat.S_ISREG(rebound.st_mode)
-            or (rebound.st_dev, rebound.st_ino) != (opened.st_dev, opened.st_ino)
+        if not stat.S_ISREG(rebound.st_mode) or (rebound.st_dev, rebound.st_ino) != (
+            opened.st_dev,
+            opened.st_ino,
         ):
             raise HostConvergeError("live activation receipt changed during invalidation")
         os.unlink(path.name, dir_fd=parent_fd)
@@ -3691,10 +5907,7 @@ def _recover_transaction(profile: Profile, transaction: Mapping[str, Any]) -> No
             or SHA_RE.fullmatch(previous_sha) is None
             or (
                 operation == "rollback"
-                and (
-                    not isinstance(previous_tree, str)
-                    or SHA_RE.fullmatch(previous_tree) is None
-                )
+                and (not isinstance(previous_tree, str) or SHA_RE.fullmatch(previous_tree) is None)
             )
         ):
             raise HostConvergeError("previous desired state in transaction is invalid")
@@ -3737,10 +5950,10 @@ def _install_materialized(
     fingerprints: dict[tuple[str, str], str] = {}
     candidates: list[tuple[Profile, str, Identity]] = []
     if profiles:
-        _bootstrap_domain_runtime_hosts(profiles[0], sha)
+        _bootstrap_domain_runtime_hosts(profiles[0], sha, source_tree)
     for profile in profiles:
         owner = _identity(profile.sandbox, SHARED_GROUP)
-        runtime_group = _identity(profile.sandbox, f"loom-sandbox-{profile.sandbox}")
+        runtime_group = _sandbox_batch_identity(profile.sandbox)
         verify_developer_docker_access(owner)
         ensure_secret_files(profile, owner)
         _materialize_domain_candidates(profile, sha, source_tree, source_bundle)
@@ -3902,19 +6115,102 @@ def _parser() -> argparse.ArgumentParser:
     rollback_parser.add_argument("--sandbox", choices=SANDBOXES, required=True)
     rollback_parser.add_argument("--candidate-sha", required=True)
     rollback_parser.add_argument("--execute", action="store_true")
+    for command in ("slurm-converge", "slurm-check", "slurm-rollback"):
+        child = subparsers.add_parser(command)
+        child.add_argument("--domain", choices=tuple(DOMAIN_PEERS), required=True)
+        child.add_argument("--sandbox", choices=SANDBOXES, required=True)
+        child.add_argument("--candidate-sha", required=True)
+        child.add_argument("--execute", action="store_true")
     for command in ("service-converge", "service-check"):
         child = subparsers.add_parser(command)
         child.add_argument("--sandbox", choices=SANDBOXES, required=True)
     renew = subparsers.add_parser("renew-attestations")
     renew.add_argument("--sandbox", choices=(*SANDBOXES, "all"), default="all")
     renew.add_argument("--execute", action="store_true")
+    staging_identity = subparsers.add_parser(
+        "staging-allocation-identity-converge",
+        allow_abbrev=False,
+    )
+    staging_identity.add_argument("--execute", action="store_true")
+    for command in (
+        "staging-allocation-node-check",
+        "staging-allocation-worker",
+        "staging-allocation-probe",
+        "staging-allocation-submit",
+        "staging-allocation-cancel",
+    ):
+        staging = subparsers.add_parser(command, allow_abbrev=False)
+        staging.add_argument("--candidate-sha", required=True)
+        staging.add_argument("--candidate-tree", required=True)
+        staging.add_argument("--request-id", required=True)
+        if command in {"staging-allocation-probe", "staging-allocation-submit"}:
+            if command == "staging-allocation-submit":
+                staging.add_argument("--requested-node", required=True)
+            staging.add_argument("--execute", action="store_true")
+        if command == "staging-allocation-cancel":
+            staging.add_argument("--submit-request-id", required=True)
+            staging.add_argument("--job-id", required=True)
+            staging.add_argument("--requested-node", required=True)
+            staging.add_argument("--execute", action="store_true")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(list(argv) if argv is not None else None)
     try:
-        if args.command == "service-converge":
+        if args.command == "staging-allocation-identity-converge":
+            if not args.execute:
+                raise HostConvergeError("staging identity convergence requires --execute")
+            result = staging_allocation_identity_converge(
+                load_staging_allocation_config(),
+            )
+        elif args.command == "staging-allocation-node-check":
+            result = staging_allocation_node_check(
+                load_staging_allocation_config(),
+                candidate_sha=args.candidate_sha,
+                candidate_tree=args.candidate_tree,
+                request_id=args.request_id,
+            )
+        elif args.command == "staging-allocation-worker":
+            result = staging_allocation_node_check(
+                load_staging_allocation_config(),
+                candidate_sha=args.candidate_sha,
+                candidate_tree=args.candidate_tree,
+                request_id=args.request_id,
+                steady=True,
+            )
+        elif args.command == "staging-allocation-probe":
+            if not args.execute:
+                raise HostConvergeError("staging allocation probe requires --execute")
+            result = staging_allocation_probe(
+                load_staging_allocation_config(),
+                candidate_sha=args.candidate_sha,
+                candidate_tree=args.candidate_tree,
+                request_id=args.request_id,
+            )
+        elif args.command == "staging-allocation-submit":
+            if not args.execute:
+                raise HostConvergeError("staging allocation submit requires --execute")
+            result = staging_allocation_submit(
+                load_staging_allocation_config(),
+                candidate_sha=args.candidate_sha,
+                candidate_tree=args.candidate_tree,
+                request_id=args.request_id,
+                requested_node=args.requested_node,
+            )
+        elif args.command == "staging-allocation-cancel":
+            if not args.execute:
+                raise HostConvergeError("staging allocation cancel requires --execute")
+            result = staging_allocation_cancel(
+                load_staging_allocation_config(),
+                candidate_sha=args.candidate_sha,
+                candidate_tree=args.candidate_tree,
+                request_id=args.request_id,
+                submit_request_id=args.submit_request_id,
+                job_id=args.job_id,
+                requested_node=args.requested_node,
+            )
+        elif args.command == "service-converge":
             service_converge(args.sandbox)
             result = {"status": "succeeded", "sandbox": args.sandbox}
         elif args.command == "service-check":
@@ -3928,6 +6224,30 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "status": "succeeded",
                 "sandboxes": [profile.sandbox for profile in selected],
             }
+        elif args.command in {"slurm-converge", "slurm-check", "slurm-rollback"}:
+            if SHA_RE.fullmatch(args.candidate_sha) is None:
+                raise HostConvergeError("candidate SHA must be full lowercase 40-hex")
+            profiles = load_profiles()
+            selected = _select_profiles(profiles, args.sandbox)
+            result = {
+                "schema_version": 1,
+                "artifact_type": "developer-sandbox-slurm-maintenance-plan",
+                "operation": args.command,
+                "domain": args.domain,
+                "sandbox": args.sandbox,
+                "candidate_sha": args.candidate_sha,
+                "controller": DOMAIN_PUBLISHERS[args.domain],
+                "node_order": list(_slurm_node_order(args.domain)),
+                "controller_last": True,
+                "mutation_authorized": False,
+            }
+            if args.execute:
+                operation = {
+                    "slurm-converge": slurm_maintenance_converge,
+                    "slurm-check": slurm_maintenance_check,
+                    "slurm-rollback": slurm_maintenance_rollback,
+                }[args.command]
+                result = operation(selected[0], args.candidate_sha, args.domain)
         else:
             profiles = load_profiles()
             selected = _select_profiles(profiles, args.sandbox)

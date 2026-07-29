@@ -24,10 +24,12 @@ from loom_cli.rollout.steps.s04_gb10_prep import GB10Host
 from loom_cli.rollout.steps.s10_env_state import (
     ControlPlaneReadinessError,
     EnvStateStep,
+    ExternalSlurmAcceptanceAuthorityError,
     ExternalSlurmPrereqMaterializationError,
     _control_plane_health_url,
     _materialize_external_slurm_runner_prerequisites,
     _materialize_repo_dir,
+    _prepare_probe_activate_external_slurm_authority,
     _verify_external_slurm_runner_consumers,
     _wait_for_control_plane,
 )
@@ -889,6 +891,123 @@ def test_env_state_stops_before_apply_when_control_plane_is_not_ready(
     assert "# control-plane-readiness" in step_dir.stderr_path().read_text(
         encoding="utf-8",
     )
+
+
+def test_external_authority_runs_prepare_probe_activate_in_order_before_apply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = tmp_path / "staging.toml"
+    profile.write_text(
+        """
+environment = "staging"
+[external_slurm_runner_prerequisites]
+require_external_allocation_authority = true
+""",
+        encoding="utf-8",
+    )
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    step_dir = ev.step_dir(11, "env-state")
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    ctx = SimpleNamespace(resolved_sha="a" * 40, image_tag="staging-aaaaaaa")
+    seen: list[list[str]] = []
+
+    def fake_run(argv, **_kwargs):
+        command = list(argv)
+        seen.append(command)
+        if command[0] == "git":
+            return SubprocessResult(command, 0, "b" * 40 + "\n", "")
+        phase = command[3]
+        payload: dict[str, Any] = {"phase": phase}
+        if phase == "activate":
+            payload = {
+                "result": "pass",
+                "candidate_sha": "a" * 40,
+                "candidate_tree": "b" * 40,
+                "node_count": 14,
+            }
+        return SubprocessResult(command, 0, json.dumps(payload), "")
+
+    monkeypatch.setattr(env_state_module, "candidate_loom_cwd", lambda _step: candidate)
+    monkeypatch.setattr(env_state_module, "candidate_loom_env", lambda _step: {})
+    monkeypatch.setattr(env_state_module, "run_captured", fake_run)
+
+    evidence = _prepare_probe_activate_external_slurm_authority(
+        ctx,
+        profile_path=profile,
+        step_dir=step_dir,
+    )
+
+    assert evidence is not None
+    assert [command[3] for command in seen[1:]] == [
+        "bootstrap",
+        "prepare",
+        "probe",
+        "activate",
+    ]
+    assert all(
+        command[:3]
+        == [
+            "sudo",
+            "-n",
+            "/usr/local/libexec/loom-staging-external-slurm-authority",
+        ]
+        for command in seen[1:]
+    )
+    assert all(
+        command[4:8]
+        == [
+            "--candidate-sha",
+            "a" * 40,
+            "--candidate-tree",
+            "b" * 40,
+        ]
+        for command in seen[1:]
+    )
+    assert seen[1][-1] == "--execute"
+    assert seen[2][-1] == "--execute"
+    assert seen[3][-1] == "--execute"
+    assert "--execute" not in seen[4]
+
+
+def test_external_authority_stops_at_first_failed_phase(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = tmp_path / "staging.toml"
+    profile.write_text(
+        "[external_slurm_runner_prerequisites]\nrequire_external_allocation_authority = true\n",
+        encoding="utf-8",
+    )
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    step_dir = ev.step_dir(11, "env-state")
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    ctx = SimpleNamespace(resolved_sha="a" * 40, image_tag="staging-aaaaaaa")
+    seen: list[list[str]] = []
+
+    def fake_run(argv, **_kwargs):
+        command = list(argv)
+        seen.append(command)
+        if command[0] == "git":
+            return SubprocessResult(command, 0, "b" * 40 + "\n", "")
+        return SubprocessResult(command, 1, "", "prepare rejected")
+
+    monkeypatch.setattr(env_state_module, "candidate_loom_cwd", lambda _step: candidate)
+    monkeypatch.setattr(env_state_module, "candidate_loom_env", lambda _step: {})
+    monkeypatch.setattr(env_state_module, "run_captured", fake_run)
+
+    with pytest.raises(ExternalSlurmAcceptanceAuthorityError, match="bootstrap failed"):
+        _prepare_probe_activate_external_slurm_authority(
+            ctx,
+            profile_path=profile,
+            step_dir=step_dir,
+        )
+
+    assert len(seen) == 2
 
 
 def test_wait_for_control_plane_uses_root_healthz_and_records_evidence(

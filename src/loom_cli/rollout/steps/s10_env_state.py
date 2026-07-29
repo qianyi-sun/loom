@@ -26,6 +26,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import tomllib
 import urllib.error
 import urllib.request
 from collections.abc import Collection, Iterator, Sequence
@@ -73,11 +74,22 @@ class ControlPlaneReadinessError(RuntimeError):
     """Raised when the private control-plane URL does not become usable."""
 
 
+class ExternalSlurmAcceptanceAuthorityError(RuntimeError):
+    """Raised when the fixed staging allocation authority rejects a candidate."""
+
+
 _CONTROL_PLANE_READY_TIMEOUT_SECONDS = 60.0
 _CONTROL_PLANE_READY_INTERVAL_SECONDS = 0.5
 _MAX_CATALOG_SOURCE_BYTES = 1024 * 1024
 _MAX_PORT_FORWARD_LOG_CHARS = 64 * 1024
-_SHARED_WORKER_REPO_ROOT = Path("/shared_work2/qianyi/.loom-staging-rollout/worker-repos")
+_SHARED_STAGING_ROOT = Path("/srv/loom/staging-shared")
+_FINAL_WORKER_REPO_ROOT = _SHARED_STAGING_ROOT / "candidates"
+_FINAL_WORKER_ENV_ROOT = _SHARED_STAGING_ROOT / "generated"
+_PRIVATE_PREPARED_ROOT = Path("/var/lib/loom-staging-rollout/prepared")
+# Process-owned preparation roots. The fixed root authority, not loom-rollout,
+# publishes these inputs into _FINAL_WORKER_*.
+_SHARED_WORKER_REPO_ROOT = _PRIVATE_PREPARED_ROOT / "candidates"
+_SHARED_WORKER_ENV_ROOT = _PRIVATE_PREPARED_ROOT / "generated"
 _SHARED_WORKER_REPO_CONSUMER = PurePosixPath("scripts/ops/staging_rollout_shared_repo_consumer.py")
 _GIT_OBJECT_ID_RE = re.compile(r"[0-9a-f]{40}\Z")
 _MAX_SHARED_REPO_INDEX_BYTES = 64 * 1024 * 1024
@@ -96,6 +108,7 @@ _CATALOG_CACHE_ENV_PATHS = {
 }
 _EXTERNAL_CONSUMER_VERIFY_ATTEMPTS = 13
 _EXTERNAL_CONSUMER_VERIFY_BACKOFF_SECONDS = 5.0
+_EXTERNAL_SLURM_AUTHORITY_PROGRAM = Path("/usr/local/libexec/loom-staging-external-slurm-authority")
 _PORT_FORWARD_ENV_KEYS = frozenset(
     {
         "DBUS_SESSION_BUS_ADDRESS",
@@ -1037,6 +1050,97 @@ def _wait_for_control_plane(
     )
 
 
+def _external_slurm_authority_required(profile_path: Path) -> bool:
+    try:
+        raw = tomllib.loads(profile_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise ExternalSlurmAcceptanceAuthorityError(
+            "cannot inspect the candidate environment-state authority requirement"
+        ) from exc
+    prerequisites = raw.get("external_slurm_runner_prerequisites")
+    return (
+        isinstance(prerequisites, dict)
+        and prerequisites.get("require_external_allocation_authority") is True
+    )
+
+
+def _prepare_probe_activate_external_slurm_authority(
+    ctx: RolloutContext,
+    *,
+    profile_path: Path,
+    step_dir: StepDir,
+) -> dict[str, Any] | None:
+    """Run the fixed root authority after CP readiness and before any apply."""
+
+    if not _external_slurm_authority_required(profile_path):
+        return None
+    cwd = candidate_loom_cwd(step_dir)
+    env = candidate_loom_env(step_dir)
+    tree = run_captured(
+        ["git", "-C", str(cwd), "rev-parse", "HEAD^{tree}"],
+        cwd=cwd,
+        env=env,
+    )
+    candidate_tree = tree.stdout.strip()
+    if tree.returncode != 0 or _GIT_OBJECT_ID_RE.fullmatch(candidate_tree) is None:
+        raise ExternalSlurmAcceptanceAuthorityError(
+            "cannot resolve the pinned candidate tree for external Slurm acceptance"
+        )
+    records: list[dict[str, Any]] = []
+    for phase in ("bootstrap", "prepare", "probe", "activate"):
+        argv = [
+            "sudo",
+            "-n",
+            str(_EXTERNAL_SLURM_AUTHORITY_PROGRAM),
+            phase,
+            "--candidate-sha",
+            ctx.resolved_sha,
+            "--candidate-tree",
+            candidate_tree,
+        ]
+        if phase == "bootstrap":
+            argv.append("--execute")
+        elif phase in {"prepare", "probe"}:
+            argv.extend(["--image-tag", ctx.image_tag, "--execute"])
+        result = run_captured(argv, cwd=cwd, env=env)
+        if result.returncode != 0:
+            raise ExternalSlurmAcceptanceAuthorityError(
+                f"external Slurm authority {phase} failed: "
+                f"{_safe_text(result.stderr).strip()[:200]}"
+            )
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise ExternalSlurmAcceptanceAuthorityError(
+                f"external Slurm authority {phase} returned invalid JSON"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise ExternalSlurmAcceptanceAuthorityError(
+                f"external Slurm authority {phase} returned a non-object"
+            )
+        if phase == "activate" and (
+            payload.get("result") != "pass"
+            or payload.get("candidate_sha") != ctx.resolved_sha
+            or payload.get("candidate_tree") != candidate_tree
+            or payload.get("node_count") != 14
+        ):
+            raise ExternalSlurmAcceptanceAuthorityError(
+                "external Slurm authority activation summary does not bind the candidate"
+            )
+        records.append({"phase": phase, "result": payload})
+    evidence = {
+        "candidate_sha": ctx.resolved_sha,
+        "candidate_tree": candidate_tree,
+        "phases": records,
+        "result": "pass",
+    }
+    _write_safe_json(
+        step_dir.artifact_path("external-slurm-acceptance-authority.json"),
+        evidence,
+    )
+    return evidence
+
+
 def _catalog_port_forward_evidence(
     handle: CatalogPortForwardHandle,
 ) -> dict[str, Any]:
@@ -1456,11 +1560,60 @@ def _materialize_env_file(
     env_file: Path,
     settings: dict[str, Any],
     image_tag: str,
+    candidate_sha: str,
     pool_name: str,
     requested_concurrency: object,
     worker_token: str | None,
     worker_token_env_key: str,
+    fixed_private_namespace: bool = False,
 ) -> dict[str, Any]:
+    if (
+        not env_file.is_absolute()
+        or ".." in env_file.parts
+        or not env_file.name.startswith("staging-gb10-worker-staging-")
+        or not env_file.name.endswith(".env")
+        or (
+            fixed_private_namespace
+            and env_file.parent != _SHARED_WORKER_ENV_ROOT
+        )
+    ):
+        raise ExternalSlurmPrereqMaterializationError(
+            "external runner env destination is outside the fixed system namespace",
+        )
+    try:
+        parent = env_file.parent.lstat()
+    except OSError as exc:
+        raise ExternalSlurmPrereqMaterializationError(
+            "external runner private preparation namespace is unavailable",
+        ) from exc
+    production_private_root = fixed_private_namespace and (
+        _SHARED_WORKER_ENV_ROOT == _PRIVATE_PREPARED_ROOT / "generated"
+    )
+    if not fixed_private_namespace:
+        production_private_root = False
+    expected_gid = os.getegid()
+    expected_mode: int | None = 0o700 if production_private_root else None
+    if fixed_private_namespace and not production_private_root:
+        try:
+            expected_gid = grp.getgrnam("sharedwork").gr_gid
+        except KeyError as exc:
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner test namespace group is unavailable",
+            ) from exc
+        expected_mode = 0o2750
+    if (
+        not stat.S_ISDIR(parent.st_mode)
+        or stat.S_ISLNK(parent.st_mode)
+        or parent.st_uid != os.geteuid()
+        or parent.st_gid != expected_gid
+        or (
+            expected_mode is not None
+            and stat.S_IMODE(parent.st_mode) != expected_mode
+        )
+    ):
+        raise ExternalSlurmPrereqMaterializationError(
+            "external runner private preparation namespace has unsafe owner or mode",
+        )
     if os.path.lexists(env_file):
         if not _env_source_is_safe(env_file):
             raise ExternalSlurmPrereqMaterializationError(
@@ -1479,13 +1632,13 @@ def _materialize_env_file(
         "LOOM_IMAGE_TAG": image_tag,
         "LOOM_WORKER_ENV_CONFIG_VERSION": image_tag,
         "LOOM_WORKER_POOL_NAME": pool_name,
+        "LOOM_WORKER_CANDIDATE_SHA": candidate_sha,
     }
     if requested_concurrency is not None:
         updates["LOOM_WORKER_MAX_CONCURRENT"] = str(requested_concurrency)
     if worker_token is not None:
         updates[worker_token_env_key] = worker_token
 
-    env_file.parent.mkdir(parents=True, exist_ok=True)
     rendered = _update_env_text(existing, updates)
     tmp = env_file.with_name(f".{env_file.name}.tmp-{os.getpid()}")
     tmp.write_text(rendered, encoding="utf-8")
@@ -1639,17 +1792,24 @@ def _validate_repo_root(repo_dir: Path, expected_ref: str) -> _BoundDirectory:
             "external runner repository authority is unavailable",
         ) from exc
     mode = stat.S_IMODE(root.identity.st_mode)
-    try:
-        shared_work_gid = grp.getgrnam("sharedwork").gr_gid
-    except KeyError as exc:
-        os.close(root.fd)
-        raise ExternalSlurmPrereqMaterializationError(
-            "sharedwork group is unavailable for external runner materialization",
-        ) from exc
+    production_private_root = (
+        _SHARED_WORKER_REPO_ROOT == _PRIVATE_PREPARED_ROOT / "candidates"
+    )
+    expected_gid = os.getegid()
+    expected_mode = 0o700
+    if not production_private_root:
+        try:
+            expected_gid = grp.getgrnam("sharedwork").gr_gid
+        except KeyError as exc:
+            os.close(root.fd)
+            raise ExternalSlurmPrereqMaterializationError(
+                "sharedwork group is unavailable for external runner materialization",
+            ) from exc
+        expected_mode = 0o2750
     if (
         root.identity.st_uid != os.geteuid()
-        or root.identity.st_gid != shared_work_gid
-        or mode != 0o2750
+        or root.identity.st_gid != expected_gid
+        or mode != expected_mode
     ):
         os.close(root.fd)
         raise ExternalSlurmPrereqMaterializationError(
@@ -2757,6 +2917,29 @@ def _materialize_external_slurm_runner_prerequisites(
             raise ExternalSlurmPrereqMaterializationError(_safe_text(exc)) from None
 
     records: list[dict[str, Any]] = []
+    authority_required = _external_slurm_authority_required(Path(profile_path))
+    production_private_roots = authority_required and (
+        _SHARED_WORKER_REPO_ROOT == _PRIVATE_PREPARED_ROOT / "candidates"
+        and _SHARED_WORKER_ENV_ROOT == _PRIVATE_PREPARED_ROOT / "generated"
+    )
+    if production_private_roots:
+        for directory in (
+            _PRIVATE_PREPARED_ROOT,
+            _SHARED_WORKER_REPO_ROOT,
+            _SHARED_WORKER_ENV_ROOT,
+        ):
+            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            metadata = directory.lstat()
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or stat.S_ISLNK(metadata.st_mode)
+                or metadata.st_uid != os.geteuid()
+                or metadata.st_gid != os.getegid()
+            ):
+                raise ExternalSlurmPrereqMaterializationError(
+                    "external runner private preparation namespace is unsafe",
+                )
+            os.chmod(directory, 0o700)
     source_repo = candidate_worktree(step_dir)
     expected_repo_ref = str(settings.get("expected_repo_ref") or ctx.image_tag)
     for policy in _external_slurm_policies(profile):
@@ -2766,28 +2949,47 @@ def _materialize_external_slurm_runner_prerequisites(
         actuator_config = policy.get("actuator_config", {})
         if not isinstance(actuator_config, dict):
             continue
-        env_file = actuator_config.get("env_file")
-        repo_dir = actuator_config.get("repo_dir")
-        if not isinstance(env_file, str) or not isinstance(repo_dir, str):
+        final_env_file = actuator_config.get("env_file")
+        final_repo_dir = actuator_config.get("repo_dir")
+        if not isinstance(final_env_file, str) or not isinstance(final_repo_dir, str):
             continue
+        final_env_path = Path(final_env_file).expanduser()
+        final_repo_path = Path(final_repo_dir).expanduser()
+        if production_private_roots:
+            if (
+                final_env_path.parent != _FINAL_WORKER_ENV_ROOT
+                or final_repo_path.parent != _FINAL_WORKER_REPO_ROOT
+            ):
+                raise ExternalSlurmPrereqMaterializationError(
+                    "external runner final paths are outside the fixed system namespace",
+                )
+            env_file = _SHARED_WORKER_ENV_ROOT / final_env_path.name
+            repo_dir = _SHARED_WORKER_REPO_ROOT / final_repo_path.name
+        else:
+            env_file = final_env_path
+            repo_dir = final_repo_path
         record = {
             "environment": policy["environment"],
             "pool_name": pool_name,
+            "final_env_file": str(final_env_path),
+            "final_repo_dir": str(final_repo_path),
         }
         record.update(
             _materialize_env_file(
-                env_file=Path(env_file).expanduser(),
+                env_file=env_file,
                 settings=settings,
                 image_tag=ctx.image_tag,
+                candidate_sha=ctx.resolved_sha,
                 pool_name=pool_name,
                 requested_concurrency=actuator_config.get("requested_concurrency"),
                 worker_token=worker_token,
                 worker_token_env_key=worker_token_env_key,
+                fixed_private_namespace=production_private_roots,
             )
         )
         record.update(
             _materialize_repo_dir(
-                repo_dir=Path(repo_dir).expanduser(),
+                repo_dir=repo_dir,
                 source_repo=source_repo,
                 resolved_sha=ctx.resolved_sha,
                 expected_ref=expected_repo_ref,
@@ -3103,10 +3305,14 @@ class EnvStateStep(BaseStep):
                 profile_path,
                 step_dir,
             )
-            consumer_evidence = _verify_external_slurm_runner_consumers(
-                ctx,
-                step_dir,
-                materialized,
+            consumer_evidence = (
+                None
+                if _external_slurm_authority_required(profile_path)
+                else _verify_external_slurm_runner_consumers(
+                    ctx,
+                    step_dir,
+                    materialized,
+                )
             )
         except ExternalSlurmPrereqMaterializationError as exc:
             message = _safe_text(exc)
@@ -3140,6 +3346,30 @@ class EnvStateStep(BaseStep):
             return RunResult(
                 exit_code=2,
                 error=f"control-plane readiness failed: {message}",
+                artifacts={
+                    "control_plane_readiness": str(
+                        step_dir.artifact_path("control-plane-readiness.json")
+                    ),
+                    "environment_state_profile_materialization": str(
+                        step_dir.artifact_path("environment-state-profile-materialization.json")
+                    ),
+                },
+            )
+        try:
+            authority_evidence = _prepare_probe_activate_external_slurm_authority(
+                ctx,
+                profile_path=profile_path,
+                step_dir=step_dir,
+            )
+        except ExternalSlurmAcceptanceAuthorityError as exc:
+            message = _safe_text(exc)[:300]
+            _write_safe_text(
+                step_dir.stderr_path(),
+                f"# external-slurm-acceptance-authority\n{message}\n",
+            )
+            return RunResult(
+                exit_code=2,
+                error=f"external Slurm acceptance authority failed: {message}",
                 artifacts={
                     "control_plane_readiness": str(
                         step_dir.artifact_path("control-plane-readiness.json")
@@ -3264,6 +3494,10 @@ class EnvStateStep(BaseStep):
         if consumer_evidence is not None:
             artifacts["external_runner_consumer_verification"] = str(
                 step_dir.artifact_path("external-slurm-runner-consumer-verification.json")
+            )
+        if authority_evidence is not None:
+            artifacts["external_slurm_acceptance_authority"] = str(
+                step_dir.artifact_path("external-slurm-acceptance-authority.json")
             )
         if catalog_artifact is not None:
             artifacts["catalog_provisioning"] = catalog_artifact

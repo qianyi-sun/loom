@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import ctypes
 import fcntl
 import grp
@@ -54,6 +55,20 @@ _COLLECTOR_HOSTNAME = "trt-eai-oldlab-2"
 _FLEET_ATTESTATION_ROOT = Path(
     "/var/lib/loom-developer-sandbox-links/attestations",
 )
+_NODE_TRANSPORT = Path("/usr/local/libexec/loom-developer-sandbox-node-transport")
+_RUNTIME_PROOF_ARTIFACT_NAMES = frozenset(
+    {
+        "combined.json",
+        "fleet.json",
+        "oldlab.json",
+        "oldlab.sig",
+        "oldlab.pub",
+        "gb10.json",
+        "gb10.sig",
+        "gb10.pub",
+    },
+)
+_RUNTIME_PROOF_ARTIFACT_MAX_BYTES = 1 << 20
 _ELIGIBLE_LINK_NODES = (
     "oldlab-1",
     "oldlab-2",
@@ -123,6 +138,7 @@ class ConvergenceError(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class SandboxGroup:
     name: str
+    uid: int
     gid: int
     member: str
     upstream_control_plane_port: int
@@ -181,6 +197,7 @@ _TOP_LEVEL_KEYS = {
 }
 _GROUP_KEYS = {
     "name",
+    "uid",
     "gid",
     "member",
     "upstream_control_plane_port",
@@ -246,13 +263,17 @@ def load_config(path: Path) -> RuntimeConfig:
         _exact_keys(item, _GROUP_KEYS, f"sandbox_groups.{sandbox}")
         name = _safe_name(item["name"], f"sandbox_groups.{sandbox}.name")
         member = _safe_name(item["member"], f"sandbox_groups.{sandbox}.member")
+        uid = item["uid"]
         gid = item["gid"]
         upstream_control_plane_port = item["upstream_control_plane_port"]
         upstream_gateway_port = item["upstream_gateway_port"]
         upstream_minio_port = item["upstream_minio_port"]
         if (
             name != f"loom-sandbox-{sandbox}"
-            or member != sandbox
+            or member != f"loom-sandbox-{sandbox}"
+            or type(uid) is not int
+            or not 1000 <= uid <= 60000
+            or uid != gid
             or type(gid) is not int
             or not 1000 <= gid <= 60000
             or gid in gids
@@ -283,6 +304,7 @@ def load_config(path: Path) -> RuntimeConfig:
         gids.add(gid)
         groups[sandbox] = SandboxGroup(
             name=name,
+            uid=uid,
             gid=gid,
             member=member,
             upstream_control_plane_port=upstream_control_plane_port,
@@ -382,6 +404,80 @@ def _run(
     if result.returncode != 0:
         raise ConvergenceError(f"command failed safely: {Path(argv[0]).name}")
     return result
+
+
+def _authority_envelope(
+    *,
+    action: str,
+    node: str,
+    domain: str,
+    sandbox: str,
+    identity: CandidateIdentity,
+) -> str:
+    if (
+        action not in {"inspect-candidate", "inspect-local", "export-domain-attestation"}
+        or node not in _ELIGIBLE_LINK_NODES
+        or domain not in ALLOWED_DOMAINS
+        or sandbox not in ALLOWED_SANDBOXES
+    ):
+        raise ConvergenceError("node authority check identity is invalid")
+    body: dict[str, object] = {
+        "schema_version": SCHEMA_VERSION,
+        "action": action,
+        "node": node,
+        "domain": domain,
+        "sandbox": sandbox,
+        "candidate_sha": identity.sha,
+        "candidate_tree": identity.tree,
+        "payload_kind": "none",
+        "payload_sha256": hashlib.sha256(b"").hexdigest(),
+        "payload_base64": "",
+        "prior_request_id": None,
+    }
+    request_id = hashlib.sha256(_canonical_json(body) + b"\n").hexdigest()
+    body["request_id"] = request_id
+    return (_canonical_json(body) + b"\n").decode("ascii")
+
+
+def _authority_check(
+    *,
+    action: str,
+    node: str,
+    domain: str,
+    sandbox: str,
+    identity: CandidateIdentity,
+) -> dict[str, Any]:
+    result = _run(
+        (
+            str(_NODE_TRANSPORT),
+            "invoke",
+            "--node",
+            node,
+            "--verb",
+            "check",
+        ),
+        input_text=_authority_envelope(
+            action=action,
+            node=node,
+            domain=domain,
+            sandbox=sandbox,
+            identity=identity,
+        ),
+        env={
+            "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "LANG": "C.UTF-8",
+        },
+    )
+    if result.stderr:
+        raise ConvergenceError("node authority check failed safely")
+    try:
+        envelope = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise ConvergenceError("node authority check returned invalid output") from exc
+    report = envelope.get("result") if isinstance(envelope, dict) else None
+    if envelope.get("status") != "succeeded" or not isinstance(report, dict):
+        raise ConvergenceError("node authority check returned invalid output")
+    return report
 
 
 def _git_run(*argv: str) -> subprocess.CompletedProcess[str]:
@@ -586,28 +682,54 @@ def runtime_paths(domain: Domain, sandbox: str, sha: str) -> RuntimePaths:
     )
 
 
-def _group_status(name: str, gid: int, member: str) -> str:
+def _service_identity_status(group: SandboxGroup) -> str:
     try:
-        user = pwd.getpwnam(member)
-    except KeyError as exc:
-        raise ConvergenceError(f"required local account {member} is unavailable") from exc
-    try:
-        group = grp.getgrnam(name)
+        local_group = grp.getgrnam(group.name)
     except KeyError:
         try:
-            collision = grp.getgrgid(gid)
+            group_collision = grp.getgrgid(group.gid)
         except KeyError:
-            return "create"
+            return "create-group"
         raise ConvergenceError(
-            f"stable group GID is already owned by {collision.gr_name}",
+            f"stable group GID is already owned by {group_collision.gr_name}",
         ) from None
-    if group.gr_gid != gid:
-        raise ConvergenceError(f"stable group {name} has a conflicting GID")
-    effective = gid in os.getgrouplist(member, user.pw_gid)
-    explicit = set(group.gr_mem)
-    if explicit - {member}:
-        raise ConvergenceError(f"stable group {name} has unexpected members")
-    return "ok" if effective and explicit == {member} else "update-member"
+    if local_group.gr_gid != group.gid:
+        raise ConvergenceError(f"stable group {group.name} has a conflicting GID")
+    if set(local_group.gr_mem):
+        raise ConvergenceError(f"stable group {group.name} has unexpected explicit members")
+    try:
+        user = pwd.getpwnam(group.member)
+    except KeyError:
+        try:
+            user_collision = pwd.getpwuid(group.uid)
+        except KeyError:
+            return "create-user"
+        raise ConvergenceError(
+            f"stable service UID is already owned by {user_collision.pw_name}",
+        ) from None
+    if (
+        user.pw_uid != group.uid
+        or user.pw_gid != group.gid
+        or user.pw_dir != "/nonexistent"
+        or user.pw_shell != "/usr/sbin/nologin"
+    ):
+        raise ConvergenceError(f"stable service identity {group.member} has conflicting metadata")
+    return "ok"
+
+
+def _batch_identity(group: SandboxGroup) -> pwd.struct_passwd:
+    try:
+        identity = pwd.getpwnam(group.member)
+    except KeyError as exc:
+        raise ConvergenceError("sandbox batch identity is unavailable") from exc
+    if (
+        identity.pw_uid != group.uid
+        or identity.pw_gid != group.gid
+        or identity.pw_dir != "/nonexistent"
+        or identity.pw_shell != "/usr/sbin/nologin"
+    ):
+        raise ConvergenceError("sandbox batch identity metadata drifted")
+    return identity
 
 
 def _user_has_group(member: str, gid: int) -> bool:
@@ -629,8 +751,7 @@ def identity_plan(config: RuntimeConfig, domain: Domain) -> dict[str, object]:
     if shared.gr_gid != config.shared_gid:
         raise ConvergenceError("sharedwork GID does not match the domain contract")
     groups = {
-        sandbox: _group_status(group.name, group.gid, group.member)
-        for sandbox, group in config.sandbox_groups.items()
+        sandbox: _service_identity_status(group) for sandbox, group in config.sandbox_groups.items()
     }
     sharedwork_membership = {
         sandbox: ("ok" if _user_has_group(group.member, config.shared_gid) else "add-member")
@@ -776,12 +897,27 @@ def converge_host(config_path: Path, config: RuntimeConfig, domain: Domain) -> d
     plan = identity_plan(config, domain)
     for sandbox, group in config.sandbox_groups.items():
         status = plan["groups"][sandbox]  # type: ignore[index]
-        if status == "create":
+        if status == "create-group":
             _run(("groupadd", "--gid", str(group.gid), group.name))
-        if status != "ok":
-            _run(("gpasswd", "--members", group.member, group.name))
-        if _group_status(group.name, group.gid, group.member) != "ok":
-            raise ConvergenceError(f"stable group {group.name} did not converge")
+            status = "create-user"
+        if status == "create-user":
+            _run(
+                (
+                    "useradd",
+                    "--uid",
+                    str(group.uid),
+                    "--gid",
+                    group.name,
+                    "--no-create-home",
+                    "--home-dir",
+                    "/nonexistent",
+                    "--shell",
+                    "/usr/sbin/nologin",
+                    group.member,
+                ),
+            )
+        if _service_identity_status(group) != "ok":
+            raise ConvergenceError(f"stable service identity {group.member} did not converge")
         if not _user_has_group(group.member, config.shared_gid):
             _run(
                 (
@@ -808,8 +944,7 @@ def converge_host(config_path: Path, config: RuntimeConfig, domain: Domain) -> d
     report = dict(plan)
     report["mode"] = "applied"
     report["groups"] = {
-        sandbox: _group_status(group.name, group.gid, group.member)
-        for sandbox, group in config.sandbox_groups.items()
+        sandbox: _service_identity_status(group) for sandbox, group in config.sandbox_groups.items()
     }
     report["sharedwork_membership"] = {
         sandbox: ("ok" if _user_has_group(group.member, config.shared_gid) else "missing")
@@ -1151,34 +1286,13 @@ def _peer_candidate_readback(
         if peer.hostname == local:
             report = inspect_candidate_local(config, domain, sandbox, identity)
         else:
-            result = _run(
-                (
-                    "ssh",
-                    "-o",
-                    "BatchMode=yes",
-                    "-o",
-                    "ConnectTimeout=10",
-                    peer.ssh_target,
-                    "sudo",
-                    "-n",
-                    str(config.installed_program),
-                    "inspect-candidate",
-                    "--config",
-                    str(config.installed_config),
-                    "--domain",
-                    domain.name,
-                    "--sandbox",
-                    sandbox,
-                    "--candidate-sha",
-                    identity.sha,
-                    "--candidate-tree",
-                    identity.tree,
-                ),
+            report = _authority_check(
+                action="inspect-candidate",
+                node=peer.ssh_target,
+                domain=domain.name,
+                sandbox=sandbox,
+                identity=identity,
             )
-            try:
-                report = json.loads(result.stdout)
-            except json.JSONDecodeError as exc:
-                raise ConvergenceError("candidate peer readback returned invalid output") from exc
         if (
             report.get("hostname") != peer.hostname
             or report.get("candidate_uid") != 0
@@ -1283,15 +1397,15 @@ def converge_materialize(
         }
 
 
-def _atomic_env_write(source: Path, target: Path, group_gid: int) -> None:
+def _atomic_env_write(source: Path, target: Path, owner_uid: int, owner_gid: int) -> None:
     with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as handle:
         temporary = Path(handle.name)
         handle.write(source.read_bytes())
         handle.flush()
         os.fsync(handle.fileno())
     try:
-        os.chown(temporary, 0, group_gid)
-        os.chmod(temporary, 0o640)
+        os.chown(temporary, owner_uid, owner_gid)
+        os.chmod(temporary, 0o600)
         os.replace(temporary, target)
         _fsync_directory(target.parent)
     finally:
@@ -1445,8 +1559,9 @@ def inspect_local(
 ) -> dict[str, object]:
     _require_root()
     group = config.sandbox_groups[sandbox]
-    if _group_status(group.name, group.gid, group.member) != "ok":
-        raise ConvergenceError("stable sandbox group is not converged")
+    if _service_identity_status(group) != "ok":
+        raise ConvergenceError("stable sandbox service identity is not converged")
+    batch_identity = _batch_identity(group)
     paths = runtime_paths(domain, sandbox, identity.sha)
     candidate = _verify_candidate(paths.candidate, identity, config.shared_gid)
     try:
@@ -1456,9 +1571,9 @@ def inspect_local(
     if (
         stat.S_ISLNK(env.st_mode)
         or not stat.S_ISREG(env.st_mode)
-        or env.st_uid != 0
-        or env.st_gid != group.gid
-        or stat.S_IMODE(env.st_mode) != 0o640
+        or env.st_uid != batch_identity.pw_uid
+        or env.st_gid != batch_identity.pw_gid
+        or stat.S_IMODE(env.st_mode) != 0o600
     ):
         raise ConvergenceError("published worker env metadata is invalid")
     return {
@@ -1495,34 +1610,13 @@ def _peer_readback(
         if peer.hostname == local:
             report = inspect_local(config, domain, sandbox, identity)
         else:
-            result = _run(
-                (
-                    "ssh",
-                    "-o",
-                    "BatchMode=yes",
-                    "-o",
-                    "ConnectTimeout=10",
-                    peer.ssh_target,
-                    "sudo",
-                    "-n",
-                    str(config.installed_program),
-                    "inspect-local",
-                    "--config",
-                    str(config.installed_config),
-                    "--domain",
-                    domain.name,
-                    "--sandbox",
-                    sandbox,
-                    "--candidate-sha",
-                    identity.sha,
-                    "--candidate-tree",
-                    identity.tree,
-                ),
+            report = _authority_check(
+                action="inspect-local",
+                node=peer.ssh_target,
+                domain=domain.name,
+                sandbox=sandbox,
+                identity=identity,
             )
-            try:
-                report = json.loads(result.stdout)
-            except json.JSONDecodeError as exc:
-                raise ConvergenceError("peer readback returned invalid output") from exc
         if report.get("hostname") != peer.hostname:
             raise ConvergenceError("peer readback hostname does not match inventory")
         reports.append(report)
@@ -1569,55 +1663,31 @@ def _fleet_attestation_path(sandbox: str, sha: str) -> Path:
     return _FLEET_ATTESTATION_ROOT / sandbox / sha / "fleet.json"
 
 
-def _read_fleet_attestation_bytes(sandbox: str, sha: str) -> bytes:
-    path = _fleet_attestation_path(sandbox, sha)
-    if _hostname() == _COLLECTOR_HOSTNAME:
-        try:
-            metadata = path.lstat()
-            content = path.read_bytes()
-        except OSError as exc:
-            raise ConvergenceError("remote-link fleet attestation is unavailable") from exc
-        if (
-            stat.S_ISLNK(metadata.st_mode)
-            or not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_uid != 0
-            or metadata.st_gid != 0
-            or stat.S_IMODE(metadata.st_mode) != 0o600
-        ):
-            raise ConvergenceError("remote-link fleet attestation metadata is invalid")
-        return content
-    remote_metadata = _run(
-        (
-            "ssh",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=10",
-            "oldlab-2",
-            "sudo",
-            "-n",
-            "stat",
-            "-c",
-            "%u:%g:%a:%F",
-            str(path),
-        ),
-    ).stdout.strip()
-    if remote_metadata != "0:0:600:regular file":
+def _read_fleet_attestation_bytes(
+    sandbox: str,
+    sha: str,
+    seed: Path | None = None,
+) -> bytes:
+    path = _fleet_attestation_path(sandbox, sha) if seed is None else seed
+    if seed is None and _hostname() != _COLLECTOR_HOSTNAME:
+        raise ConvergenceError("publisher requires a transported fleet attestation seed")
+    try:
+        metadata = path.lstat()
+        content = path.read_bytes()
+    except OSError as exc:
+        raise ConvergenceError("remote-link fleet attestation is unavailable") from exc
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != 0
+        or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_nlink != 1
+        or not content
+        or len(content) > (1 << 20)
+    ):
         raise ConvergenceError("remote-link fleet attestation metadata is invalid")
-    return _run(
-        (
-            "ssh",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=10",
-            "oldlab-2",
-            "sudo",
-            "-n",
-            "cat",
-            str(path),
-        ),
-    ).stdout.encode()
+    return content
 
 
 def _verify_fleet_attestation(
@@ -1807,12 +1877,13 @@ def _read_and_verify_fleet(
     sha: str,
     *,
     now: datetime,
+    seed: Path | None = None,
 ) -> tuple[dict[str, Any], dict[str, object]]:
     return _verify_fleet_attestation(
         config,
         sandbox,
         sha,
-        _read_fleet_attestation_bytes(sandbox, sha),
+        _read_fleet_attestation_bytes(sandbox, sha, seed),
         now=now,
     )
 
@@ -1844,6 +1915,292 @@ def _attestation_paths(
 ) -> tuple[Path, Path]:
     root = _PUBLIC_ATTESTATION_ROOT / sandbox / sha
     return root / f"{domain}.json", root / f"{domain}.sig"
+
+
+def export_domain_attestation(
+    config: RuntimeConfig,
+    domain: Domain,
+    sandbox: str,
+    identity: CandidateIdentity,
+) -> dict[str, object]:
+    _require_root()
+    if _hostname() != domain.publisher_hostname:
+        raise ConvergenceError("attestation export must run on the declared publisher")
+    manifest_path, signature_path = _attestation_paths(
+        domain.name,
+        sandbox,
+        identity.sha,
+    )
+    payloads: list[bytes] = []
+    for path in (manifest_path, signature_path):
+        try:
+            metadata = path.lstat()
+            payload = path.read_bytes()
+        except OSError as exc:
+            raise ConvergenceError("domain attestation export is unavailable") from exc
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != 0
+            or metadata.st_gid != 0
+            or stat.S_IMODE(metadata.st_mode) != 0o644
+            or metadata.st_nlink != 1
+            or not payload
+            or len(payload) > (1 << 20)
+        ):
+            raise ConvergenceError("domain attestation export metadata is invalid")
+        payloads.append(payload)
+    manifest_bytes, signature_bytes = payloads
+    try:
+        manifest = json.loads(manifest_bytes)
+        decoded_signature = base64.b64decode(signature_bytes.strip(), validate=True)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise ConvergenceError("domain attestation export payload is invalid") from exc
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema_version") != SCHEMA_VERSION
+        or manifest.get("kind") != "loom.developer-runtime-domain-attestation"
+        or manifest.get("domain") != domain.name
+        or manifest.get("sandbox") != sandbox
+        or not isinstance(manifest.get("candidate"), dict)
+        or manifest["candidate"].get("sha") != identity.sha
+        or manifest["candidate"].get("tree") != identity.tree
+        or not isinstance(manifest.get("publisher"), dict)
+        or manifest["publisher"].get("hostname") != domain.publisher_hostname
+        or len(decoded_signature) != 64
+    ):
+        raise ConvergenceError("domain attestation export identity is invalid")
+    digest = manifest.get("payload_sha256")
+    unsigned = dict(manifest)
+    unsigned.pop("payload_sha256", None)
+    if (
+        not isinstance(digest, str)
+        or hashlib.sha256(_canonical_json(unsigned)).hexdigest() != digest
+    ):
+        raise ConvergenceError("domain attestation export digest is invalid")
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "operation": "export-domain-attestation",
+        "domain": domain.name,
+        "hostname": _hostname(),
+        "sandbox": sandbox,
+        "candidate_sha": identity.sha,
+        "candidate_tree": identity.tree,
+        "manifest_path": str(manifest_path),
+        "signature_path": str(signature_path),
+        "manifest_base64": base64.b64encode(manifest_bytes).decode("ascii"),
+        "signature_base64": base64.b64encode(signature_bytes).decode("ascii"),
+        "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        "signature_sha256": hashlib.sha256(signature_bytes).hexdigest(),
+    }
+
+
+def _runtime_proof_artifact_identity(
+    artifact_id: str,
+) -> tuple[str, str, str, str]:
+    fields = artifact_id.split("/")
+    if (
+        len(fields) != 7
+        or fields[:2] != ["runtime-proof", "v1"]
+        or fields[2] not in ALLOWED_SANDBOXES
+        or _SHA_RE.fullmatch(fields[3]) is None
+        or _SHA_RE.fullmatch(fields[4]) is None
+        or fields[5] != "artifact"
+        or fields[6] not in _RUNTIME_PROOF_ARTIFACT_NAMES
+    ):
+        raise ConvergenceError("runtime proof artifact identity is invalid")
+    return fields[2], fields[3], fields[4], fields[6]
+
+
+def _runtime_proof_artifact_path(
+    artifact_name: str,
+    sandbox: str,
+    candidate_sha: str,
+) -> tuple[Path, int, str, str, str]:
+    if artifact_name == "combined.json":
+        return (
+            _COMBINED_ROOT / sandbox / candidate_sha / artifact_name,
+            0o600,
+            "oldlab",
+            "oldlab-2",
+            _COLLECTOR_HOSTNAME,
+        )
+    if artifact_name == "fleet.json":
+        return (
+            _fleet_attestation_path(sandbox, candidate_sha),
+            0o600,
+            "oldlab",
+            "oldlab-2",
+            _COLLECTOR_HOSTNAME,
+        )
+    domain_name, suffix = artifact_name.split(".", 1)
+    if domain_name not in ALLOWED_DOMAINS or suffix not in {"json", "sig", "pub"}:
+        raise ConvergenceError("runtime proof artifact identity is invalid")
+    domain = "oldlab" if domain_name == "oldlab" else "gb10"
+    node = "oldlab-1" if domain == "oldlab" else "trt-gb10-1"
+    hostname = "trt-eai-oldlab-1" if domain == "oldlab" else "gx10-01c7"
+    if suffix == "pub":
+        path = _ATTESTATION_KEY_ROOT / artifact_name
+    else:
+        path = _PUBLIC_ATTESTATION_ROOT / sandbox / candidate_sha / artifact_name
+    return path, 0o644, domain, node, hostname
+
+
+def _read_runtime_proof_artifact(path: Path, *, mode: int) -> bytes:
+    try:
+        lexical = path.lstat()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
+        )
+    except OSError as exc:
+        raise ConvergenceError("runtime proof artifact is unavailable") from exc
+    try:
+        opened = os.fstat(descriptor)
+        content = bytearray()
+        while len(content) <= _RUNTIME_PROOF_ARTIFACT_MAX_BYTES:
+            chunk = os.read(
+                descriptor,
+                min(
+                    65_536,
+                    _RUNTIME_PROOF_ARTIFACT_MAX_BYTES + 1 - len(content),
+                ),
+            )
+            if not chunk:
+                break
+            content.extend(chunk)
+        after = os.fstat(descriptor)
+        if (
+            len(content) > _RUNTIME_PROOF_ARTIFACT_MAX_BYTES
+            or not content
+            or stat.S_ISLNK(lexical.st_mode)
+            or not stat.S_ISREG(lexical.st_mode)
+            or not stat.S_ISREG(opened.st_mode)
+            or stat.S_IMODE(lexical.st_mode) != mode
+            or stat.S_IMODE(opened.st_mode) != mode
+            or lexical.st_uid != 0
+            or lexical.st_gid != 0
+            or opened.st_uid != 0
+            or opened.st_gid != 0
+            or lexical.st_nlink != 1
+            or opened.st_nlink != 1
+            or (lexical.st_dev, lexical.st_ino) != (opened.st_dev, opened.st_ino)
+            or (
+                opened.st_dev,
+                opened.st_ino,
+                opened.st_size,
+                opened.st_mtime_ns,
+            )
+            != (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+                after.st_mtime_ns,
+            )
+        ):
+            raise ConvergenceError("runtime proof artifact metadata is invalid")
+        return bytes(content)
+    finally:
+        os.close(descriptor)
+
+
+def export_runtime_proof_artifact(
+    config: RuntimeConfig,
+    domain: Domain,
+    sandbox: str,
+    identity: CandidateIdentity,
+    artifact_id: str,
+) -> dict[str, object]:
+    _require_root()
+    bound_sandbox, bound_sha, bound_tree, artifact_name = _runtime_proof_artifact_identity(
+        artifact_id
+    )
+    path, mode, required_domain, node, hostname = _runtime_proof_artifact_path(
+        artifact_name,
+        sandbox,
+        identity.sha,
+    )
+    if (
+        (bound_sandbox, bound_sha, bound_tree) != (sandbox, identity.sha, identity.tree)
+        or domain.name != required_domain
+        or _hostname() != hostname
+    ):
+        raise ConvergenceError("runtime proof artifact binding is invalid")
+    content = _read_runtime_proof_artifact(path, mode=mode)
+    if artifact_name.endswith(".json"):
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise ConvergenceError("runtime proof artifact JSON is invalid") from exc
+        if (
+            not isinstance(payload, dict)
+            or content != _canonical_json(payload) + b"\n"
+            or (
+                artifact_name == "combined.json"
+                and (
+                    payload.get("kind") != "loom.developer-runtime-combined-activation"
+                    or payload.get("sandbox") != sandbox
+                    or payload.get("candidate_sha") != identity.sha
+                    or payload.get("candidate_tree") != identity.tree
+                    or not isinstance(payload.get("collector"), dict)
+                    or payload["collector"].get("hostname") != hostname
+                )
+            )
+            or (artifact_name == "fleet.json" and payload.get("candidate_sha") != identity.sha)
+            or (
+                artifact_name in {"oldlab.json", "gb10.json"}
+                and (
+                    payload.get("kind") != "loom.developer-runtime-domain-attestation"
+                    or payload.get("domain") != required_domain
+                    or payload.get("sandbox") != sandbox
+                    or not isinstance(payload.get("candidate"), dict)
+                    or payload["candidate"].get("sha") != identity.sha
+                    or payload["candidate"].get("tree") != identity.tree
+                    or not isinstance(payload.get("publisher"), dict)
+                    or payload["publisher"].get("hostname") != hostname
+                )
+            )
+        ):
+            raise ConvergenceError("runtime proof artifact identity is invalid")
+    elif artifact_name.endswith(".sig"):
+        try:
+            signature = base64.b64decode(content.strip(), validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise ConvergenceError("runtime proof signature artifact is invalid") from exc
+        if content != base64.b64encode(signature) + b"\n" or len(signature) != 64:
+            raise ConvergenceError("runtime proof signature artifact is invalid")
+    else:
+        with tempfile.TemporaryDirectory() as temporary:
+            public_key = Path(temporary) / "public.pem"
+            public_key.write_bytes(content)
+            description = _run(
+                (
+                    "openssl",
+                    "pkey",
+                    "-pubin",
+                    "-in",
+                    str(public_key),
+                    "-text_pub",
+                    "-noout",
+                ),
+            ).stdout
+        if "ED25519" not in description.upper():
+            raise ConvergenceError("runtime proof public key artifact is invalid")
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "operation": "export-runtime-proof-artifact",
+        "artifact_id": artifact_id,
+        "artifact_name": artifact_name,
+        "node": node,
+        "hostname": hostname,
+        "domain": required_domain,
+        "sandbox": sandbox,
+        "candidate_sha": identity.sha,
+        "candidate_tree": identity.tree,
+        "content_size": len(content),
+        "content_sha256": hashlib.sha256(content).hexdigest(),
+        "content_base64": base64.b64encode(content).decode("ascii"),
+    }
 
 
 def _sign_bytes(content: bytes, private_key: Path, public_key: Path) -> bytes:
@@ -1890,6 +2247,8 @@ def _emit_attestation(
     sandbox: str,
     identity: CandidateIdentity,
     reports: Sequence[Mapping[str, object]],
+    *,
+    fleet_attestation_seed: Path | None = None,
 ) -> dict[str, object]:
     private_key, public_key = _attestation_key_paths(domain.name)
     key_id = _key_id(public_key)
@@ -1911,6 +2270,7 @@ def _emit_attestation(
         sandbox,
         identity.sha,
         now=now,
+        seed=fleet_attestation_seed,
     )
     generation = _next_generation(config, domain.name, sandbox)
     group = config.sandbox_groups[sandbox]
@@ -1920,6 +2280,8 @@ def _emit_attestation(
             "hostname": report["hostname"],
             "candidate_inode": report["candidate_inode"],
             "env_inode": report["env_inode"],
+            "env_uid": report["env_uid"],
+            "env_gid": report["env_gid"],
             "result": "verified",
         }
         for report in reports
@@ -1943,10 +2305,10 @@ def _emit_attestation(
         "runtime_env": {
             "schema_version": SCHEMA_VERSION,
             "path": str(paths.env),
-            "uid": 0,
+            "uid": group.uid,
             "gid": group.gid,
-            "group": group.name,
-            "mode": "0640",
+            "user": group.member,
+            "mode": "0600",
             "candidate_sha": identity.sha,
             "local_urls": {
                 "control-plane": "http://sandbox-link:8080",
@@ -2134,7 +2496,7 @@ def _verify_domain_attestation(
             "path",
             "uid",
             "gid",
-            "group",
+            "user",
             "mode",
             "candidate_sha",
             "local_urls",
@@ -2147,10 +2509,10 @@ def _verify_domain_attestation(
     if (
         runtime_env["schema_version"] != SCHEMA_VERSION
         or runtime_env["path"] != str(paths.env)
-        or runtime_env["uid"] != 0
+        or runtime_env["uid"] != group.uid
         or runtime_env["gid"] != group.gid
-        or runtime_env["group"] != group.name
-        or runtime_env["mode"] != "0640"
+        or runtime_env["user"] != group.member
+        or runtime_env["mode"] != "0600"
         or runtime_env["candidate_sha"] != sha
         or runtime_env["local_urls"]
         != {
@@ -2211,12 +2573,21 @@ def _verify_domain_attestation(
             raise ConvergenceError("eligible peer attestation is invalid")
         _exact_keys(
             item,
-            {"hostname", "candidate_inode", "env_inode", "result"},
+            {
+                "hostname",
+                "candidate_inode",
+                "env_inode",
+                "env_uid",
+                "env_gid",
+                "result",
+            },
             "eligible peer attestation",
         )
         if (
             not isinstance(item["candidate_inode"], int)
             or not isinstance(item["env_inode"], int)
+            or item["env_uid"] != group.uid
+            or item["env_gid"] != group.gid
             or item["result"] != "verified"
         ):
             raise ConvergenceError("eligible peer attestation is invalid")
@@ -2236,40 +2607,42 @@ def _remote_attestation(
     domain: Domain,
     sandbox: str,
     sha: str,
+    tree: str,
 ) -> tuple[bytes, bytes, str, str]:
     manifest_path, signature_path = _attestation_paths(domain.name, sandbox, sha)
     target = next(
         peer.ssh_target for peer in domain.peers if peer.hostname == domain.publisher_hostname
     )
-    content = _run(
-        (
-            "ssh",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=10",
-            target,
-            "cat",
-            str(manifest_path),
-        ),
-    ).stdout.encode()
-    encoded_signature = (
-        _run(
-            (
-                "ssh",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=10",
-                target,
-                "cat",
-                str(signature_path),
-            ),
-        )
-        .stdout.strip()
-        .encode()
+    report = _authority_check(
+        action="export-domain-attestation",
+        node=target,
+        domain=domain.name,
+        sandbox=sandbox,
+        identity=CandidateIdentity(sha, tree),
     )
-    return content, encoded_signature, str(manifest_path), str(signature_path)
+    if (
+        report.get("operation") != "export-domain-attestation"
+        or report.get("domain") != domain.name
+        or report.get("hostname") != domain.publisher_hostname
+        or report.get("sandbox") != sandbox
+        or report.get("candidate_sha") != sha
+        or report.get("candidate_tree") != tree
+        or report.get("manifest_path") != str(manifest_path)
+        or report.get("signature_path") != str(signature_path)
+        or not isinstance(report.get("manifest_base64"), str)
+        or not isinstance(report.get("signature_base64"), str)
+    ):
+        raise ConvergenceError("domain attestation export returned invalid identity")
+    try:
+        content = base64.b64decode(report["manifest_base64"], validate=True)
+        encoded_signature = base64.b64decode(report["signature_base64"], validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise ConvergenceError("domain attestation export returned invalid payload") from exc
+    if hashlib.sha256(content).hexdigest() != report.get("manifest_sha256") or hashlib.sha256(
+        encoded_signature
+    ).hexdigest() != report.get("signature_sha256"):
+        raise ConvergenceError("domain attestation export digest is invalid")
+    return content, encoded_signature.strip(), str(manifest_path), str(signature_path)
 
 
 def pin_key_plan(domain: str, public_key: Path) -> dict[str, object]:
@@ -2311,6 +2684,7 @@ def _collect_attestation_checks(
     config: RuntimeConfig,
     sandbox: str,
     sha: str,
+    tree: str,
     *,
     execute: bool,
 ) -> dict[str, object]:
@@ -2330,6 +2704,7 @@ def _collect_attestation_checks(
             domain,
             sandbox,
             sha,
+            tree,
         )
         verified[name] = _verify_domain_attestation(
             config,
@@ -2353,7 +2728,7 @@ def _collect_attestation_checks(
             "expires_at": publisher["expires_at"],
         }
     trees = {item["candidate"]["tree"] for item in verified.values()}
-    if len(trees) != 1:
+    if trees != {tree}:
         raise ConvergenceError("OLDLAB and GB10 candidate trees do not match")
     generation_state = _COMBINED_ROOT / "generation-state.json"
     previous: dict[str, object] = {}
@@ -2398,7 +2773,7 @@ def _collect_attestation_checks(
         "kind": "loom.developer-runtime-combined-activation",
         "sandbox": sandbox,
         "candidate_sha": sha,
-        "candidate_tree": next(iter(trees)),
+        "candidate_tree": tree,
         "collector": {
             "hostname": _COLLECTOR_HOSTNAME,
             "collected_at": now.isoformat(),
@@ -2508,6 +2883,7 @@ def collect_attestations(
     config: RuntimeConfig,
     sandbox: str,
     sha: str,
+    tree: str,
     *,
     execute: bool,
 ) -> dict[str, object]:
@@ -2519,6 +2895,7 @@ def collect_attestations(
             config,
             sandbox,
             sha,
+            tree,
             execute=False,
         )
     _require_capacity_root()
@@ -2529,6 +2906,7 @@ def collect_attestations(
             config,
             sandbox,
             sha,
+            tree,
             execute=True,
         )
 
@@ -2728,13 +3106,17 @@ def _rollback_locked(
             receipt.get("previous_attestation_signature_sha256"),
             "previous attestation signature snapshot",
         )
-        if not attestation_pending and phase is None and (
-            not manifest_path.is_file()
-            or not signature_path.is_file()
-            or hashlib.sha256(manifest_path.read_bytes()).hexdigest()
-            != receipt.get("previous_attestation_payload_sha256")
-            or hashlib.sha256(signature_path.read_bytes()).hexdigest()
-            != receipt.get("previous_attestation_signature_sha256")
+        if (
+            not attestation_pending
+            and phase is None
+            and (
+                not manifest_path.is_file()
+                or not signature_path.is_file()
+                or hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+                != receipt.get("previous_attestation_payload_sha256")
+                or hashlib.sha256(signature_path.read_bytes()).hexdigest()
+                != receipt.get("previous_attestation_signature_sha256")
+            )
         ):
             raise ConvergenceError("current attestation changed before rollback")
     elif (
@@ -2750,10 +3132,9 @@ def _rollback_locked(
         _write_json(receipt_path, receipt)
         phase = "preflighted"
     if phase == "preflighted":
-        if (
-            (isinstance(attestation, dict) or attestation_pending)
-            and receipt.get("attestation_previously_existed") is True
-        ):
+        if (isinstance(attestation, dict) or attestation_pending) and receipt.get(
+            "attestation_previously_existed"
+        ) is True:
             assert previous_manifest is not None and previous_signature is not None
             _atomic_bytes(
                 manifest_path,
@@ -2775,7 +3156,13 @@ def _rollback_locked(
         phase = "attestation-restored"
     if phase == "attestation-restored":
         if previous_env is not None:
-            _atomic_env_write(backup, paths.env, config.sandbox_groups[sandbox].gid)
+            group = config.sandbox_groups[sandbox]
+            _atomic_env_write(
+                backup,
+                paths.env,
+                group.uid,
+                group.gid,
+            )
         else:
             paths.env.unlink(missing_ok=True)
         receipt["rollback_phase"] = "env-restored"
@@ -2815,6 +3202,7 @@ def _converge_publish_locked(
     source_repo: Path,
     env_seed: Path,
     identity: CandidateIdentity,
+    fleet_attestation_seed: Path | None = None,
 ) -> dict[str, object]:
     _require_root()
     if _hostname() != domain.publisher_hostname:
@@ -2827,8 +3215,8 @@ def _converge_publish_locked(
     )
     plan = publish_plan(config, domain, sandbox, identity, env_seed)
     group = config.sandbox_groups[sandbox]
-    if _group_status(group.name, group.gid, group.member) != "ok":
-        raise ConvergenceError("stable sandbox group is not converged")
+    if _service_identity_status(group) != "ok":
+        raise ConvergenceError("stable sandbox service identity is not converged")
     paths = runtime_paths(domain, sandbox, identity.sha)
     _ensure_runtime_parents(domain, group.gid, identity.sha, sandbox)
     receipt_path, receipt = _create_receipt(
@@ -2855,7 +3243,12 @@ def _converge_publish_locked(
             sha=identity.sha,
         )
         if not paths.env.exists() or paths.env.read_bytes() != seed.read_bytes():
-            _atomic_env_write(seed, paths.env, group.gid)
+            _atomic_env_write(
+                seed,
+                paths.env,
+                group.uid,
+                group.gid,
+            )
         receipt["published_env_sha256"] = hashlib.sha256(paths.env.read_bytes()).hexdigest()
         _write_json(receipt_path, receipt)
         reports = _peer_readback(config, domain, sandbox, identity)
@@ -2892,6 +3285,7 @@ def _converge_publish_locked(
                 sandbox,
                 identity,
                 reports,
+                fleet_attestation_seed=fleet_attestation_seed,
             )
         except Exception:
             if prior_attestation:
@@ -2974,15 +3368,22 @@ def _converge_attest_locked(
     sandbox: str,
     env_seed: Path,
     identity: CandidateIdentity,
+    fleet_attestation_seed: Path | None = None,
 ) -> dict[str, object]:
     _recover_orphaned_transactions(config, domain, sandbox, identity.sha)
     # Fleet proof is deliberately read before any env or attestation mutation.
     # This makes the materialize -> relay fleet -> attest dependency explicit.
-    _read_and_verify_fleet(config, sandbox, identity.sha, now=datetime.now(UTC))
+    _read_and_verify_fleet(
+        config,
+        sandbox,
+        identity.sha,
+        now=datetime.now(UTC),
+        seed=fleet_attestation_seed,
+    )
     plan = attest_plan(config, domain, sandbox, env_seed, identity)
     group = config.sandbox_groups[sandbox]
-    if _group_status(group.name, group.gid, group.member) != "ok":
-        raise ConvergenceError("stable sandbox group is not converged")
+    if _service_identity_status(group) != "ok":
+        raise ConvergenceError("stable sandbox service identity is not converged")
     paths = runtime_paths(domain, sandbox, identity.sha)
     _ensure_runtime_parents(domain, group.gid, identity.sha, sandbox)
     receipt_path, receipt = _create_receipt(
@@ -2999,7 +3400,12 @@ def _converge_attest_locked(
         seed = _secure_seed(env_seed, require_root_owner=True)
         _parse_env_references(seed, sandbox=sandbox, sha=identity.sha)
         if not paths.env.exists() or paths.env.read_bytes() != seed.read_bytes():
-            _atomic_env_write(seed, paths.env, group.gid)
+            _atomic_env_write(
+                seed,
+                paths.env,
+                group.uid,
+                group.gid,
+            )
         receipt["published_env_sha256"] = hashlib.sha256(paths.env.read_bytes()).hexdigest()
         _write_json(receipt_path, receipt)
         reports = _peer_readback(config, domain, sandbox, identity)
@@ -3011,6 +3417,7 @@ def _converge_attest_locked(
             sandbox,
             identity,
             reports,
+            fleet_attestation_seed=fleet_attestation_seed,
         )
         receipt["attestation"] = attestation
         receipt["attestation_pending"] = False
@@ -3042,6 +3449,7 @@ def converge_attest(
     sandbox: str,
     env_seed: Path,
     identity: CandidateIdentity,
+    fleet_attestation_seed: Path | None = None,
 ) -> dict[str, object]:
     _require_root()
     if _hostname() != domain.publisher_hostname:
@@ -3053,6 +3461,7 @@ def converge_attest(
             sandbox,
             env_seed,
             identity,
+            fleet_attestation_seed,
         )
 
 
@@ -3063,6 +3472,7 @@ def converge_publish(
     source_repo: Path,
     env_seed: Path,
     identity: CandidateIdentity,
+    fleet_attestation_seed: Path | None = None,
 ) -> dict[str, object]:
     _require_root()
     if _hostname() != domain.publisher_hostname:
@@ -3075,6 +3485,7 @@ def converge_publish(
             source_repo,
             env_seed,
             identity,
+            fleet_attestation_seed,
         )
 
 
@@ -3089,6 +3500,8 @@ def _parser() -> argparse.ArgumentParser:
             "publish",
             "inspect-candidate",
             "inspect-local",
+            "export-domain-attestation",
+            "export-runtime-proof-artifact",
             "rollback",
             "pin-key",
             "collect",
@@ -3102,8 +3515,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-repo", type=Path)
     parser.add_argument("--source-bundle", type=Path)
     parser.add_argument("--worker-env-seed", type=Path)
+    parser.add_argument("--fleet-attestation-seed", type=Path)
     parser.add_argument("--receipt", type=Path)
     parser.add_argument("--public-key", type=Path)
+    parser.add_argument("--artifact-id")
     parser.add_argument("--execute", action="store_true")
     return parser
 
@@ -3125,12 +3540,17 @@ def main(argv: list[str] | None = None) -> int:
                 args.sandbox is None
                 or args.candidate_sha is None
                 or _SHA_RE.fullmatch(args.candidate_sha) is None
+                or args.candidate_tree is None
+                or _SHA_RE.fullmatch(args.candidate_tree) is None
             ):
-                raise ConvergenceError("collect requires sandbox and exact candidate SHA")
+                raise ConvergenceError(
+                    "collect requires sandbox and exact candidate SHA/tree",
+                )
             report = collect_attestations(
                 config,
                 args.sandbox,
                 args.candidate_sha,
+                args.candidate_tree,
                 execute=args.execute,
             )
         elif args.command == "rollback":
@@ -3165,7 +3585,12 @@ def main(argv: list[str] | None = None) -> int:
                     raise ConvergenceError(
                         f"{args.command} requires sandbox and exact candidate SHA",
                     )
-                if args.command in {"inspect-candidate", "inspect-local"}:
+                if args.command in {
+                    "inspect-candidate",
+                    "inspect-local",
+                    "export-domain-attestation",
+                    "export-runtime-proof-artifact",
+                }:
                     if (
                         args.candidate_tree is None
                         or _SHA_RE.fullmatch(args.candidate_tree) is None
@@ -3174,21 +3599,39 @@ def main(argv: list[str] | None = None) -> int:
                             f"{args.command} requires exact candidate tree",
                         )
                     identity = CandidateIdentity(args.candidate_sha, args.candidate_tree)
-                    report = (
-                        inspect_candidate_local(
+                    if args.command == "inspect-candidate":
+                        report = inspect_candidate_local(
                             config,
                             domain,
                             args.sandbox,
                             identity,
                         )
-                        if args.command == "inspect-candidate"
-                        else inspect_local(
+                    elif args.command == "inspect-local":
+                        report = inspect_local(
                             config,
                             domain,
                             args.sandbox,
                             identity,
                         )
-                    )
+                    elif args.command == "export-domain-attestation":
+                        report = export_domain_attestation(
+                            config,
+                            domain,
+                            args.sandbox,
+                            identity,
+                        )
+                    else:
+                        if args.artifact_id is None:
+                            raise ConvergenceError(
+                                "export-runtime-proof-artifact requires artifact ID",
+                            )
+                        report = export_runtime_proof_artifact(
+                            config,
+                            domain,
+                            args.sandbox,
+                            identity,
+                            args.artifact_id,
+                        )
                 elif args.command == "materialize":
                     if (
                         args.source_bundle is None
@@ -3229,11 +3672,12 @@ def main(argv: list[str] | None = None) -> int:
                 elif args.command == "attest":
                     if (
                         args.worker_env_seed is None
+                        or args.fleet_attestation_seed is None
                         or args.candidate_tree is None
                         or _SHA_RE.fullmatch(args.candidate_tree) is None
                     ):
                         raise ConvergenceError(
-                            "attest requires worker env seed and exact candidate tree",
+                            "attest requires worker/fleet seeds and exact candidate tree",
                         )
                     identity = CandidateIdentity(args.candidate_sha, args.candidate_tree)
                     report = (
@@ -3243,6 +3687,7 @@ def main(argv: list[str] | None = None) -> int:
                             args.sandbox,
                             args.worker_env_seed,
                             identity,
+                            args.fleet_attestation_seed,
                         )
                         if args.execute
                         else attest_plan(
@@ -3254,9 +3699,13 @@ def main(argv: list[str] | None = None) -> int:
                         )
                     )
                 else:
-                    if args.source_repo is None or args.worker_env_seed is None:
+                    if (
+                        args.source_repo is None
+                        or args.worker_env_seed is None
+                        or args.fleet_attestation_seed is None
+                    ):
                         raise ConvergenceError(
-                            "publish requires source repository and worker env seed",
+                            "publish requires source repository and worker/fleet seeds",
                         )
                     identity = _candidate_identity(args.source_repo, args.candidate_sha)
                     report = (
@@ -3267,6 +3716,7 @@ def main(argv: list[str] | None = None) -> int:
                             args.source_repo,
                             args.worker_env_seed,
                             identity,
+                            args.fleet_attestation_seed,
                         )
                         if args.execute
                         else publish_plan(

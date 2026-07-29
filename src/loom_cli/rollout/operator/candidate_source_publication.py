@@ -34,7 +34,10 @@ from .installed_preflight_commands import InstalledPreflightCommands
 from .model import CandidateBinding
 from .policy import PolicyError, sanitized_child_environment
 
-_SHARED_REPOSITORY_ROOT = Path("/shared_work2/qianyi/.loom-staging-rollout/worker-repos")
+# ``loom-rollout`` prepares candidate bytes only in its private namespace.
+# The fixed root authority performs the no-replace publication into the shared
+# system mount after verifying the exact candidate and environment inputs.
+_SHARED_REPOSITORY_ROOT = Path("/var/lib/loom-staging-rollout/prepared/candidates")
 
 Publication = Callable[..., Mapping[str, object]]
 

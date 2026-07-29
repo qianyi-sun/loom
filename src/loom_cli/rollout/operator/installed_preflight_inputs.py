@@ -22,10 +22,13 @@ from loom_cli.rollout.preflight_registered_checks import CredentialProbeSource
 from .config import OperatorConfig
 from .preflight import (
     EXPECTED_GB10_SSH_CONFIG_SHA256,
+    ExternalGB10AuthorityProfile,
     GB10PreflightInputs,
     load_catalog_environment_path,
+    load_external_gb10_authority_profile,
     load_gb10_preflight_inputs,
     load_shared_repository_binding,
+    load_system_shared_repository_binding,
     shared_repository_binding_digest,
 )
 
@@ -34,6 +37,8 @@ TrustedReader = Callable[..., TrustedFileRead]
 CatalogPathLoader = Callable[..., Path | None]
 GB10InputsLoader = Callable[..., GB10PreflightInputs | None]
 SharedBindingLoader = Callable[..., dict[str, int] | None]
+SystemBindingLoader = Callable[..., dict[str, int] | None]
+ExternalProfileLoader = Callable[..., ExternalGB10AuthorityProfile | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,10 +53,12 @@ class InstalledPreflightInputs:
     gb10_identity: Path
     gb10_ssh_config_sha256: str
     gb10_identity_metadata_fingerprint: str
-    gb10_mount_binding: dict[str, int]
-    gb10_mount_binding_digest: str
+    gb10_mount_binding: dict[str, int] | None
+    gb10_mount_binding_digest: str | None
     migration_policy_path: Path
     migration_policy_digest: str
+    gb10_external_profile_digest: str | None = None
+    external_mount_binding_loader: Callable[[], dict[str, int] | None] | None = None
 
     def __post_init__(self) -> None:
         digests = (
@@ -59,8 +66,13 @@ class InstalledPreflightInputs:
             self.kubeconfig_metadata_digest,
             self.gb10_ssh_config_sha256,
             self.gb10_identity_metadata_fingerprint,
-            self.gb10_mount_binding_digest,
             self.migration_policy_digest,
+            *((self.gb10_mount_binding_digest,) if self.gb10_mount_binding_digest else ()),
+            *(
+                ()
+                if self.gb10_external_profile_digest is None
+                else (self.gb10_external_profile_digest,)
+            ),
         )
         if (
             any(
@@ -72,6 +84,22 @@ class InstalledPreflightInputs:
             or not self.gb10_ssh_config.is_absolute()
             or not self.gb10_identity.is_absolute()
             or not self.migration_policy_path.is_absolute()
+            or (
+                self.gb10_external_profile_digest is None
+                and (
+                    self.gb10_mount_binding is None
+                    or self.gb10_mount_binding_digest is None
+                    or self.external_mount_binding_loader is not None
+                )
+            )
+            or (
+                self.gb10_external_profile_digest is not None
+                and (
+                    self.gb10_mount_binding is not None
+                    or self.gb10_mount_binding_digest is not None
+                    or self.external_mount_binding_loader is None
+                )
+            )
         ):
             raise ValueError("installed preflight inputs are invalid")
 
@@ -86,6 +114,8 @@ class InstalledPreflightInputs:
         catalog_path_loader: CatalogPathLoader = load_catalog_environment_path,
         gb10_inputs_loader: GB10InputsLoader = load_gb10_preflight_inputs,
         shared_binding_loader: SharedBindingLoader = load_shared_repository_binding,
+        system_binding_loader: SystemBindingLoader = load_system_shared_repository_binding,
+        external_profile_loader: ExternalProfileLoader = load_external_gb10_authority_profile,
         migration_policy_path: Path | None = None,
     ) -> InstalledPreflightInputs:
         """Fail closed while reading all static installed authorities."""
@@ -107,8 +137,11 @@ class InstalledPreflightInputs:
             require_nonempty=True,
         )
         gb10 = gb10_inputs_loader(config, service_uid=service_uid)
-        binding = shared_binding_loader(service_uid=service_uid)
-        if gb10 is None or binding is None:
+        external_profile = external_profile_loader(config, service_uid=service_uid)
+        binding = (
+            shared_binding_loader(service_uid=service_uid) if external_profile is None else None
+        )
+        if gb10 is None or (external_profile is None and binding is None):
             raise ValueError("installed preflight GB10 authority is unavailable")
         ssh_config = read_file(
             gb10.ssh_config,
@@ -147,11 +180,35 @@ class InstalledPreflightInputs:
             gb10_identity=gb10.identity,
             gb10_ssh_config_sha256=ssh_digest,
             gb10_identity_metadata_fingerprint=identity.metadata_fingerprint,
-            gb10_mount_binding=dict(binding),
-            gb10_mount_binding_digest=shared_repository_binding_digest(binding),
+            gb10_mount_binding=None if binding is None else dict(binding),
+            gb10_mount_binding_digest=(
+                None if binding is None else shared_repository_binding_digest(binding)
+            ),
+            gb10_external_profile_digest=(
+                None if external_profile is None else external_profile.profile_digest
+            ),
             migration_policy_path=selected_migration_policy,
             migration_policy_digest=migration_policy_digest,
+            external_mount_binding_loader=(
+                None
+                if external_profile is None
+                else lambda: system_binding_loader(service_uid=service_uid)
+            ),
         )
+
+    def resolve_gb10_mount_binding(self) -> tuple[dict[str, int], str]:
+        """Read the external system mount only after explicit preparation."""
+        if self.gb10_external_profile_digest is None:
+            if self.gb10_mount_binding is None or self.gb10_mount_binding_digest is None:
+                raise ValueError("installed preflight GB10 authority is unavailable")
+            return dict(self.gb10_mount_binding), self.gb10_mount_binding_digest
+        loader = self.external_mount_binding_loader
+        if loader is None:
+            raise ValueError("installed external GB10 mount authority is unavailable")
+        binding = loader()
+        if binding is None:
+            raise ValueError("installed external GB10 mount authority is unavailable")
+        return dict(binding), shared_repository_binding_digest(binding)
 
     @property
     def browser_token_path(self) -> Path:

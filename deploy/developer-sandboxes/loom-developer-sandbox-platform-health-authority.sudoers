@@ -1,0 +1,7 @@
+qianyi ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-developer-sandbox-platform-health-authority collect --session-id [0-9a-f]* --checkpoint baseline --execute
+qianyi ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-developer-sandbox-platform-health-authority collect --session-id [0-9a-f]* --checkpoint mixed_non_loom --execute
+qianyi ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-developer-sandbox-platform-health-authority collect --session-id [0-9a-f]* --checkpoint cancel_cleanup --execute
+qianyi ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-developer-sandbox-platform-health-authority collect --session-id [0-9a-f]* --checkpoint worker_crash --execute
+qianyi ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-developer-sandbox-platform-health-authority collect --session-id [0-9a-f]* --checkpoint staging_pressure_reclaim --execute
+qianyi ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-developer-sandbox-platform-health-authority collect --session-id [0-9a-f]* --checkpoint final_drain --execute
+qianyi ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-developer-sandbox-platform-health-authority verify --session-id [0-9a-f]*

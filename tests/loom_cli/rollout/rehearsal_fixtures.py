@@ -31,13 +31,6 @@ def active_external_supervisor_artifact(
         profile_text = (REPO_ROOT / "deploy/environment-state/staging.toml").read_text(
             encoding="utf-8"
         )
-        profile_text = profile_text.replace("enabled = false", "enabled = true", 1)
-        profile_text = profile_text.replace("materialize = false", "materialize = true", 1)
-        profile_text = profile_text.replace(
-            "enabled = false\nactive = false",
-            "enabled = true\nactive = true",
-            1,
-        )
         profile.write_text(profile_text, encoding="utf-8")
         shutil.copyfile(
             REPO_ROOT / "scripts/ops/worker_pool_autoscaler_external_once.py",

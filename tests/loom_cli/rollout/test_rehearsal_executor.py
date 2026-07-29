@@ -1969,13 +1969,17 @@ def test_cleanup_deletes_only_exact_unit_and_namespace_with_preconditions() -> N
 
 def test_cleanup_retires_only_exact_external_supervisor_validation_unit() -> None:
     plan = _plan()
-    service_name = _external_supervisor_artifact().supervisors[0].service_name
-    validation_unit = _external_supervisor_validation_unit(plan, service_name)
-    validation_active = True
+    service_names = tuple(
+        supervisor.service_name for supervisor in _external_supervisor_artifact().supervisors
+    )
+    validation_units = {
+        _external_supervisor_validation_unit(plan, service_name): service_name
+        for service_name in service_names
+    }
+    validation_active = set(validation_units)
     calls: list[tuple[str, ...]] = []
 
     def run(argv, _payload, _timeout):
-        nonlocal validation_active
         command = tuple(argv)
         calls.append(command)
         if command[:3] == ("systemctl", "--user", "show"):
@@ -1984,22 +1988,22 @@ def test_cleanup_retires_only_exact_external_supervisor_validation_unit() -> Non
                 if command[-1] == "--value":
                     return subprocess.CompletedProcess(argv, 0, "not-found\n", "")
                 return subprocess.CompletedProcess(argv, 4, "", "")
-            assert unit == validation_unit
+            assert unit in validation_units
             if command[-1] == "--value":
-                state = "loaded" if validation_active else "not-found"
+                state = "loaded" if unit in validation_active else "not-found"
                 return subprocess.CompletedProcess(argv, 0, state + "\n", "")
             properties = _external_supervisor_validation_expected_properties(
                 plan,
-                service_name,
+                validation_units[unit],
             )
             output = "".join(f"{name}={value}\n" for name, value in properties.items())
             return subprocess.CompletedProcess(argv, 0, output, "")
         if command[:3] == ("systemctl", "--user", "stop"):
-            assert command[3] == validation_unit
-            validation_active = False
+            assert command[3] in validation_units
+            validation_active.remove(command[3])
             return subprocess.CompletedProcess(argv, 0, "", "")
         if command[:3] == ("systemctl", "--user", "reset-failed"):
-            assert command[3] == validation_unit
+            assert command[3] in validation_units
             return subprocess.CompletedProcess(argv, 0, "", "")
         if "get" in command and "namespace" in command:
             assert "--ignore-not-found=true" in command
@@ -2013,17 +2017,20 @@ def test_cleanup_retires_only_exact_external_supervisor_validation_unit() -> Non
 
     assert outcome.passed and outcome.cleanup_verified
     assert not validation_active
-    assert ("systemctl", "--user", "stop", validation_unit) in calls
-    assert ("systemctl", "--user", "reset-failed", validation_unit) in calls
-    assert (
-        sum(
-            command[:4] == ("systemctl", "--user", "show", validation_unit)
-            and command[-1] == "--value"
-            for command in calls
+    for validation_unit in validation_units:
+        assert ("systemctl", "--user", "stop", validation_unit) in calls
+        assert ("systemctl", "--user", "reset-failed", validation_unit) in calls
+        assert (
+            sum(
+                command[:4] == ("systemctl", "--user", "show", validation_unit)
+                and command[-1] == "--value"
+                for command in calls
+            )
+            >= 3
         )
-        >= 3
+    assert all(
+        service_name not in command for service_name in service_names for command in calls
     )
-    assert all(service_name not in command for command in calls)
 
 
 @pytest.mark.parametrize(

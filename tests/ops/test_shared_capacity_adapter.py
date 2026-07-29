@@ -167,7 +167,7 @@ def _fixture(
                 f'adapter_state_path = "{state_path}"',
                 f'sandbox_state_path = "{sandbox_state_path}"',
                 f'runtime_attestation_root = "{root / "runtime-attestations"}"',
-                "max_slots_bound = 140",
+                "max_slots_bound = 112",
                 "timeout_seconds = 10",
                 "",
             ),
@@ -396,9 +396,7 @@ def test_periodic_receipt_renewal_keeps_adapter_enabled_beyond_thirty_minutes(
     assert control_plane.policy["enabled"] is True
     assert len(set(receipt_digests)) == len(receipt_digests)
     assert not any(
-        call["body"]["enabled"] is False
-        for call in control_plane.calls
-        if call["method"] == "PUT"
+        call["body"]["enabled"] is False for call in control_plane.calls if call["method"] == "PUT"
     )
 
 
@@ -649,7 +647,7 @@ def test_bootstrap_rejects_job_pid_budget_below_concurrency_bound(
     source = (ROOT / "deploy/developer-sandboxes/shared-capacity-policies/gb10.toml").read_text()
     _write(
         templates / "gb10.toml",
-        source.replace("job_pids_max = 65536", "job_pids_max = 32768"),
+        source.replace("job_pids_max = 65536", "job_pids_max = 32767"),
     )
     monkeypatch.setattr(adapter, "_POLICY_TEMPLATE_DIR", templates)
 
@@ -1415,7 +1413,7 @@ def test_checked_in_configs_cover_three_sandboxes_and_two_pools() -> None:
     assert len({item.observation_path for item in configs}) == 6
     assert len({item.adapter_state_path for item in configs}) == 6
     assert {(item.pool_name, item.max_slots_bound) for item in configs} == {
-        ("gb10", 140),
+        ("gb10", 112),
         ("oldlab", 20),
     }
     for config in configs:
@@ -1450,6 +1448,27 @@ def test_checked_in_configs_cover_three_sandboxes_and_two_pools() -> None:
         assert config.admin_secret_file == Path(
             f"/srv/loom/developer-sandboxes/{config.sandbox}/secrets/admin.toml",
         )
+
+
+def test_checked_in_gb10_slice_preserves_burst_and_node_headroom() -> None:
+    template = tomllib.loads(
+        (ROOT / "deploy/developer-sandboxes/shared-capacity-policies/gb10.toml").read_text(),
+    )
+    profile = tomllib.loads(
+        (ROOT / "deploy/slurm/developer-sandboxes/gb10.toml").read_text(),
+    )
+    policy = template["policy"]
+    actuator = policy["actuator_config"]
+    capacity = profile["capacity"]
+
+    assert template["slot_budget"] == policy["max_slots"] == 112
+    assert actuator["requested_concurrency"] == 8
+    assert actuator["requested_cpus"] == actuator["container_cpus"] * 8 == 16
+    assert actuator["requested_memory_mib"] == actuator["container_memory_mib"] * 8 == 92000
+    assert actuator["max_jobs"] * actuator["requested_concurrency"] == 112
+    assert capacity["gpu_tres_per_slot"] * actuator["requested_concurrency"] == 1
+    assert actuator["requested_cpus"] < 20
+    assert actuator["requested_memory_mib"] < 115000
 
 
 def test_service_renderer_binds_exact_candidate_and_rejects_drift() -> None:

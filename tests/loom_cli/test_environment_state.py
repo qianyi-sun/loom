@@ -2015,7 +2015,8 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
     assert profile.control_plane_environment == environment
     assert gb10_policy["environment"] == environment
     assert gb10_policy["actuator"] == "slurm"
-    assert gb10_policy["max_slots"] == 140
+    assert gb10_policy["min_slots"] == 8
+    assert gb10_policy["max_slots"] == 112
     assert gb10_policy["actuator_config"]["backend"] == "docker"
     assert gb10_policy["actuator_config"]["cpu_arch"] == "arm64"
     assert gb10_policy["actuator_config"]["partition"] == "gb10"
@@ -2023,9 +2024,13 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
         f"trt-gb10-{index}" for index in range(1, 16) if index != 7
     ]
     assert gb10_policy["actuator_config"]["max_jobs"] == 14
+    assert gb10_policy["actuator_config"]["pending_job_cap"] == 3
+    assert gb10_policy["actuator_config"]["requested_cpus"] == 16
+    assert gb10_policy["actuator_config"]["requested_memory_mib"] == 92000
+    assert gb10_policy["actuator_config"]["requested_concurrency"] == 8
     assert (
         gb10_policy["actuator_config"]["env_file"]
-        == "/var/lib/loom-staging-rollout/generated/staging-gb10-worker-staging-test.env"
+        == "/srv/loom/staging-shared/generated/staging-gb10-worker-staging-test.env"
     )
     suffix = "loom-remote-worker-staging-test"
     assert gb10_policy["actuator_config"]["repo_dir"].endswith(suffix)
@@ -2038,11 +2043,11 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
     assert gb10_state["env_config_version"] == "staging-test"
     assert gb10_state["source_git_commit"] == ("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
     assert gb10_state["max_concurrent"] == 10
-    assert gb10_state["target_slots"] == 140
-    assert gb10_state["host_intents"]["trt-gb10-1"] == "active"
-    assert gb10_state["host_intents"]["trt-gb10-14"] == "active"
+    assert gb10_state["target_slots"] == 0
+    assert gb10_state["host_intents"]["trt-gb10-1"] == "stopped"
+    assert gb10_state["host_intents"]["trt-gb10-14"] == "stopped"
     assert gb10_state["host_intents"]["trt-gb10-7"] == "stopped"
-    assert set(gb10_state["host_intents"].values()) == {"active", "stopped"}
+    assert set(gb10_state["host_intents"].values()) == {"stopped"}
     assert gb10_state["rollout_policy"] == {"mode": "all"}
     assert profile.catalog_provisioning["required"] is True
     command = profile.catalog_provisioning["command"]
@@ -2082,10 +2087,13 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
     } & set(profile.catalog_provisioning["required_env"])
     assert set(profile.external_slurm_runner_prerequisites["pools"]) == {"gb10"}
     assert profile.external_slurm_runner_prerequisites["require_worker_token_parity"] is True
-    assert profile.external_slurm_runner_prerequisites["materialize"] is False
+    assert profile.external_slurm_runner_prerequisites["materialize"] is True
+    assert (
+        profile.external_slurm_runner_prerequisites["require_external_allocation_authority"] is True
+    )
     assert (
         profile.external_slurm_runner_prerequisites["env_template_glob"]
-        == "/var/lib/loom-staging-rollout/generated/staging-gb10-worker-staging-*.env"
+        == "/srv/loom/staging-shared/generated/staging-gb10-worker-staging-*.env"
     )
 
 
@@ -2128,7 +2136,7 @@ def test_committed_development_profile_ships_fail_closed_supervisors() -> None:
     )
 
 
-def test_committed_staging_profile_ships_fail_closed_supervisors() -> None:
+def test_committed_staging_profile_activates_only_gb10_final_desired_state() -> None:
     profile = load_environment_state_profile(
         Path("deploy/environment-state/staging.toml"),
         variables={
@@ -2146,8 +2154,8 @@ def test_committed_staging_profile_ships_fail_closed_supervisors() -> None:
     assert gb10["pool_name"] == "gb10"
     assert gb10["service_name"] == "loom-autoscaler-gb10-staging.service"
     assert gb10["timer_name"] == "loom-autoscaler-gb10-staging.timer"
-    assert gb10["enabled"] is False
-    assert gb10["active"] is False
+    assert gb10["enabled"] is True
+    assert gb10["active"] is True
     assert "15451" in gb10["args"]
 
     # OLDLAB staging also remains fail-closed until #896.
@@ -2189,7 +2197,7 @@ nodes = ["trt-gb10-1"]
 
     with pytest.raises(
         EnvironmentStateProfileError,
-        match="external_slurm_acceptance_authority_unavailable",
+        match="candidate_external_slurm_self_attestation_forbidden",
     ):
         load_environment_state_profile(
             profile_path,
@@ -2202,44 +2210,35 @@ nodes = ["trt-gb10-1"]
         )
 
 
-@pytest.mark.parametrize(
-    ("policy_enabled", "materialize", "supervisor_enabled"),
-    [
-        (True, False, False),
-        (False, True, False),
-        (False, False, True),
-    ],
-)
-def test_staging_gb10_external_activation_requires_external_authority(
-    policy_enabled: bool,
-    materialize: bool,
-    supervisor_enabled: bool,
-) -> None:
+def test_staging_gb10_external_final_contract_has_no_static_blockers() -> None:
     blockers = staging_gb10_external_activation_blockers(
         environment="staging",
         autoscaler_policies=[
             {
                 "pool_name": "gb10",
                 "actuator": "slurm",
-                "enabled": policy_enabled,
-                "disabled_reason": "gated" if not policy_enabled else None,
+                "enabled": True,
                 "actuator_config": {
                     "external_runner": True,
                     "allowed_nodes": ["trt-gb10-1"],
                 },
             }
         ],
-        prerequisites={"pools": ["gb10"], "materialize": materialize},
+        prerequisites={
+            "pools": ["gb10"],
+            "materialize": True,
+            "require_external_allocation_authority": True,
+        },
         supervisors=[
             {
                 "pool_name": "gb10",
-                "enabled": supervisor_enabled,
-                "active": supervisor_enabled,
+                "enabled": True,
+                "active": True,
             }
         ],
     )
 
-    assert blockers == ("external_slurm_acceptance_authority_unavailable",)
+    assert blockers == ()
 
 
 def test_staging_gb10_supervisor_activation_without_policy_requires_external_authority() -> None:
@@ -2250,7 +2249,10 @@ def test_staging_gb10_supervisor_activation_without_policy_requires_external_aut
         supervisors=[{"pool_name": "gb10", "enabled": True, "active": True}],
     )
 
-    assert blockers == ("external_slurm_acceptance_authority_unavailable",)
+    assert blockers == (
+        "external_slurm_allocation_authority_requirement_missing",
+        "external_slurm_gb10_materialization_required",
+    )
 
 
 def test_staging_gb10_external_activation_rejects_candidate_self_attestation() -> None:
@@ -2270,6 +2272,7 @@ def test_staging_gb10_external_activation_rejects_candidate_self_attestation() -
         prerequisites={
             "pools": ["gb10"],
             "materialize": True,
+            "require_external_allocation_authority": True,
             "service_identity": {
                 "username": "loom-rollout",
                 "uid": 995,
@@ -2289,7 +2292,7 @@ def test_staging_gb10_external_activation_rejects_candidate_self_attestation() -
         supervisors=[{"pool_name": "gb10", "enabled": True, "active": True}],
     )
 
-    assert blockers == ("external_slurm_acceptance_authority_unavailable",)
+    assert blockers == ("candidate_external_slurm_self_attestation_forbidden",)
 
 
 def _supervisor_profile_payload(*, second_service: str, second_port: str) -> str:
@@ -2389,8 +2392,7 @@ def test_render_supervisor_service_and_timer_contain_full_execstart() -> None:
     assert "OnUnitActiveSec=30" in timer_unit
 
 
-def test_staging_profile_defines_both_external_pools_fail_closed() -> None:
-    # GB10 stays disabled for #827 and OLDLAB stays disabled for #896.
+def test_staging_profile_activates_gb10_but_keeps_oldlab_fail_closed() -> None:
     profile = load_environment_state_profile(
         Path("deploy/environment-state/staging.toml"),
         variables={
@@ -2403,8 +2405,11 @@ def test_staging_profile_defines_both_external_pools_fail_closed() -> None:
 
     policies = {policy["pool_name"]: policy for policy in profile.autoscaler_policies}
     assert set(policies) == {"gb10", "oldlab"}
-    assert policies["gb10"]["enabled"] is False
-    assert "#827" in policies["gb10"]["disabled_reason"]
+    assert policies["gb10"]["enabled"] is True
+    assert policies["gb10"]["min_slots"] == 8
+    assert policies["gb10"]["max_slots"] == 112
+    assert policies["gb10"]["actuator_config"]["exclusive"] is False
+    assert policies["gb10"]["actuator_config"]["candidate_sha"] == "a" * 40
     assert policies["oldlab"]["enabled"] is False
     assert policies["oldlab"]["actuator_config"]["exclusive"] is False
 
@@ -2413,4 +2418,5 @@ def test_staging_profile_defines_both_external_pools_fail_closed() -> None:
     )
     assert len(gb10_state["host_intents"]) == 15
     assert gb10_state["host_intents"]["trt-gb10-7"] == "stopped"
-    assert sum(intent == "active" for intent in gb10_state["host_intents"].values()) == 14
+    assert gb10_state["target_slots"] == 0
+    assert set(gb10_state["host_intents"].values()) == {"stopped"}

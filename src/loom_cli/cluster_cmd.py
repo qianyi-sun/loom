@@ -76,6 +76,11 @@ from loom_cli.cluster_workload_trust import (
     workload_contract_from_mapping,
     workload_contract_profile_from_file,
 )
+from loom_cli.external_slurm_acceptance import (
+    ExternalSlurmAcceptanceError,
+    load_authority_config,
+    verify_authority,
+)
 from loom_cli.minio_storage_preflight import (
     DEFAULT_BUCKETS,
     DEFAULT_STOP_FREE_PERCENT,
@@ -1686,8 +1691,7 @@ def _frontend_route_context(config: ClusterConfig) -> dict[str, Any]:
             )
         if config.ingress_host != "yylx.world":
             raise ValueError(
-                f"frontend_route_path_from={route_path_from!r} must use "
-                "ingress_host='yylx.world'",
+                f"frontend_route_path_from={route_path_from!r} must use ingress_host='yylx.world'",
             )
 
     return {
@@ -2314,6 +2318,43 @@ def _release_gate(args: argparse.Namespace) -> int:
         live_alembic_error = live_alembic.error
         live_alembic_evidence = live_alembic.evidence
 
+    external_slurm_authority_artifact: dict[str, Any] | None = None
+    external_slurm_authority_error: str | None = None
+    external_workers = manifest.get("external_workers")
+    external_workers = external_workers if isinstance(external_workers, dict) else {}
+    external_prerequisites = external_workers.get("external_slurm_runner_prerequisites")
+    external_prerequisites = (
+        external_prerequisites if isinstance(external_prerequisites, dict) else {}
+    )
+    if external_prerequisites.get("require_external_allocation_authority") is True:
+        release = manifest.get("release")
+        release = release if isinstance(release, dict) else {}
+        candidate_sha = str(release.get("git_sha") or "")
+        environment_state_file = external_workers.get("environment_state_file")
+        environment_state_file = (
+            environment_state_file if isinstance(environment_state_file, dict) else {}
+        )
+        profile_sha256 = environment_state_file.get("sha256")
+        try:
+            verified_authority = verify_authority(
+                config=load_authority_config(),
+                candidate_sha=candidate_sha,
+                profile_sha256=(str(profile_sha256) if profile_sha256 is not None else None),
+            )
+            external_slurm_authority_artifact = {
+                "result": "pass",
+                "candidate_sha": verified_authority.payload["candidate_sha"],
+                "candidate_tree": verified_authority.payload["candidate_tree"],
+                "profile_sha256": verified_authority.payload["profile_sha256"],
+                "node_count": len(verified_authority.payload["nodes"]),
+                "artifact_sha256": verified_authority.artifact_sha256,
+                "signature_sha256": verified_authority.signature_sha256,
+                "key_id": verified_authority.key_id,
+                "expires_at": verified_authority.payload["expires_at"],
+            }
+        except ExternalSlurmAcceptanceError as exc:
+            external_slurm_authority_error = str(exc)
+
     report = collect_release_gate_report(
         manifest=manifest,
         apps_v1=apps_v1,
@@ -2339,6 +2380,8 @@ def _release_gate(args: argparse.Namespace) -> int:
         hf_mirror_boundary_artifact=hf_mirror_boundary_artifact,
         hf_mirror_boundary_path=hf_mirror_boundary_path,
         hf_mirror_boundary_error=hf_mirror_boundary_error,
+        external_slurm_authority_artifact=external_slurm_authority_artifact,
+        external_slurm_authority_error=external_slurm_authority_error,
     )
 
     if args.environment:
@@ -3207,10 +3250,7 @@ def _check_workload_trust_contract(
         return PreflightCheck(
             name="workload-trust-contract",
             outcome="fail",
-            detail=(
-                f"protected environment {environment!r} has invalid "
-                f"workload contract: {exc}"
-            ),
+            detail=(f"protected environment {environment!r} has invalid workload contract: {exc}"),
             remediation=(
                 "Declare the exact v1 [workload_contract] tuple: "
                 "internal_trusted with all three capability flags set to false."
@@ -3470,12 +3510,9 @@ def _protected_target_environment_failure_check() -> PreflightCheck:
     return PreflightCheck(
         name="protected-target-environment",
         outcome="fail",
-        detail=(
-            "explicit environment conflicts with an authoritative protected namespace"
-        ),
+        detail=("explicit environment conflicts with an authoritative protected namespace"),
         remediation=(
-            "Use the protected namespace's matching environment or a "
-            "non-protected namespace."
+            "Use the protected namespace's matching environment or a non-protected namespace."
         ),
     )
 
@@ -4014,8 +4051,7 @@ def _prepare_statefulsets_for_apply(
                 apply_docs.append(doc)
                 continue
             errors.append(
-                f"could not read existing StatefulSet {name!r}: "
-                f"{_exception_to_note(exc)}"
+                f"could not read existing StatefulSet {name!r}: {_exception_to_note(exc)}"
             )
             continue
 
@@ -4139,19 +4175,11 @@ def _prune_k8s_defaults(value: Any) -> Any:
 def _statefulset_mutable_patch(doc: dict[str, Any]) -> dict[str, Any]:
     patch: dict[str, Any] = {}
     metadata = _dict_child(doc, "metadata")
-    metadata_patch = {
-        key: metadata[key]
-        for key in ("labels", "annotations")
-        if key in metadata
-    }
+    metadata_patch = {key: metadata[key] for key in ("labels", "annotations") if key in metadata}
     if metadata_patch:
         patch["metadata"] = metadata_patch
     spec = _dict_child(doc, "spec")
-    spec_patch = {
-        key: spec[key]
-        for key in _STATEFULSET_MUTABLE_SPEC_FIELDS
-        if key in spec
-    }
+    spec_patch = {key: spec[key] for key in _STATEFULSET_MUTABLE_SPEC_FIELDS if key in spec}
     if spec_patch:
         patch["spec"] = spec_patch
     return patch
@@ -4312,9 +4340,9 @@ def _up(args: argparse.Namespace) -> int:
         except ValueError as exc:
             sys.stderr.write(f"error: {exc}\n")
             return 1
-    if (
-        snapshot.protected_target == "production"
-        and explicit_environment not in (None, "production")
+    if snapshot.protected_target == "production" and explicit_environment not in (
+        None,
+        "production",
     ):
         sys.stderr.write(
             "error: protected cluster config target production conflicts with "
@@ -4353,9 +4381,7 @@ def _up(args: argparse.Namespace) -> int:
         workload_contract_profile=snapshot.workload_contract_profile,
     )
     if workload_contract_check is not None and workload_contract_check.outcome == "fail":
-        sys.stderr.write(
-            "error: workload-trust-contract preflight failed — refusing to apply.\n"
-        )
+        sys.stderr.write("error: workload-trust-contract preflight failed — refusing to apply.\n")
         sys.stderr.write(
             _format_preflight_table(
                 PreflightReport(
@@ -4752,8 +4778,7 @@ def _guard_protected_destructive_down(args: argparse.Namespace) -> int | None:
         )
     except ValueError:
         sys.stderr.write(
-            "error: protected-target-environment conflict — "
-            "refusing destructive operation.\n",
+            "error: protected-target-environment conflict — refusing destructive operation.\n",
         )
         return 1
     if environment not in PROTECTED_ENVIRONMENTS:
@@ -5049,7 +5074,9 @@ def _bootstrap_secrets(args: argparse.Namespace) -> int:
     # Resolve pgbouncer_enabled: CLI flag overrides schema default.
     pgbouncer_entry = schema.render_config.get("pgbouncer")
     schema_pgbouncer_default: bool = bool(
-        pgbouncer_entry.fields.get("enabled", False) if pgbouncer_entry and pgbouncer_entry.fields else False
+        pgbouncer_entry.fields.get("enabled", False)
+        if pgbouncer_entry and pgbouncer_entry.fields
+        else False
     )
     cli_pgbouncer: bool | None = getattr(args, "pgbouncer", None)
     pgbouncer_enabled: bool = schema_pgbouncer_default if cli_pgbouncer is None else cli_pgbouncer
@@ -5070,7 +5097,9 @@ def _derive_pool_dsn(args: argparse.Namespace) -> int:
 
     try:
         pool_dsn = _rewrite_dsn_host_port(
-            args.dsn, host="loom-pgbouncer", port=6432,
+            args.dsn,
+            host="loom-pgbouncer",
+            port=6432,
         )
     except ValueError as exc:
         print(f"derive-pool-dsn: {exc}", file=sys.stderr)
@@ -5970,7 +5999,7 @@ def dispatch(argv: list[str]) -> int:
     p_derive = sub.add_parser(
         "derive-pool-dsn",
         help="Derive the pgbouncer pool DSN from a direct-to-Postgres DSN "
-             "by rewriting host+port (#609).",
+        "by rewriting host+port (#609).",
     )
     p_derive.add_argument(
         "dsn",

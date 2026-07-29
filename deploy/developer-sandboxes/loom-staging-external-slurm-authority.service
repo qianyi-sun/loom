@@ -1,0 +1,20 @@
+[Unit]
+Description=Verify the current staging external Slurm acceptance authority
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/srv/loom/staging-shared
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/loom-staging-external-slurm-authority verify-current
+User=root
+Group=root
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/loom-staging-external-slurm-authority
+ReadOnlyPaths=/srv/loom/staging-shared
+
+[Install]
+WantedBy=multi-user.target

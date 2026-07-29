@@ -45,6 +45,9 @@ _STAGING_GB10_HOST_INTENTS = {
     **{f"trt-gb10-{index}": "active" for index in range(1, 16) if index != 7},
     "trt-gb10-7": "stopped",
 }
+_STAGING_GB10_RETIRED_HOST_INTENTS = {
+    **{f"trt-gb10-{index}": "stopped" for index in range(1, 16)},
+}
 _STAGING_GB10_POOL_NAME = "gb10"
 _STAGING_GB10_MAX_CONCURRENT = 10
 _STAGING_GB10_TARGET_SLOTS = 140
@@ -800,6 +803,9 @@ def _environment_state_manifest_evidence(manifest: dict[str, Any]) -> dict[str, 
 
 def _external_slurm_acceptance_check(
     manifest: dict[str, Any],
+    *,
+    authority_artifact: dict[str, Any] | None = None,
+    authority_error: str | None = None,
 ) -> ReleaseGateCheck | None:
     external_workers = manifest.get("external_workers")
     if not isinstance(external_workers, dict):
@@ -822,8 +828,50 @@ def _external_slurm_acceptance_check(
         prerequisites=external_workers.get("external_slurm_runner_prerequisites"),
         supervisors=external_workers.get("external_slurm_autoscaler_supervisors"),
     )
-    if not has_gb10_external_policy and not blockers:
+    raw_supervisors = external_workers.get("external_slurm_autoscaler_supervisors")
+    has_gb10_supervisor = isinstance(raw_supervisors, list) and any(
+        isinstance(row, dict) and row.get("pool_name") == "gb10" for row in raw_supervisors
+    )
+    if not has_gb10_external_policy and not has_gb10_supervisor and not blockers:
         return None
+    prerequisites = external_workers.get("external_slurm_runner_prerequisites")
+    prerequisites = prerequisites if isinstance(prerequisites, dict) else {}
+    supervisors = raw_supervisors
+    supervisors = supervisors if isinstance(supervisors, list) else []
+    activation_requested = any(
+        isinstance(pool, dict) and pool.get("pool_name") == "gb10" and pool.get("enabled") is True
+        for pool in slurm_pools
+    ) or any(
+        isinstance(row, dict)
+        and row.get("pool_name") == "gb10"
+        and (row.get("enabled") is True or row.get("active") is True)
+        for row in supervisors
+    )
+    dynamic_blockers = list(blockers)
+    if activation_requested:
+        desired_states = external_workers.get("gb10_desired_states")
+        retired = (
+            isinstance(desired_states, list)
+            and len(desired_states) == 1
+            and isinstance(desired_states[0], dict)
+            and desired_states[0].get("pool_name") == "gb10"
+            and desired_states[0].get("target_slots") == 0
+            and isinstance(desired_states[0].get("host_intents"), dict)
+            and desired_states[0]["host_intents"] == _STAGING_GB10_RETIRED_HOST_INTENTS
+        )
+        if not retired:
+            dynamic_blockers.append("gb10_node_agent_authority_not_retired")
+        release_sha = release.get("git_sha")
+        if authority_error:
+            dynamic_blockers.append("external_slurm_acceptance_authority_invalid")
+        elif authority_artifact is None:
+            dynamic_blockers.append("external_slurm_acceptance_authority_unavailable")
+        elif (
+            authority_artifact.get("result") != "pass"
+            or authority_artifact.get("candidate_sha") != release_sha
+            or authority_artifact.get("node_count") != 14
+        ):
+            dynamic_blockers.append("external_slurm_acceptance_authority_mismatch")
     evidence = {
         "pool_name": "gb10",
         "policy_enabled": any(
@@ -840,24 +888,36 @@ def _external_slurm_acceptance_check(
             )
             else None
         ),
-        "blockers": list(blockers),
+        "authority_required": prerequisites.get("require_external_allocation_authority"),
+        "authority_verified": (
+            authority_artifact is not None
+            and authority_artifact.get("result") == "pass"
+            and not authority_error
+        ),
+        "authority_candidate_sha": (
+            authority_artifact.get("candidate_sha") if authority_artifact is not None else None
+        ),
+        "authority_node_count": (
+            authority_artifact.get("node_count") if authority_artifact is not None else None
+        ),
+        "authority_error": authority_error,
+        "blockers": sorted(set(dynamic_blockers)),
     }
-    if blockers:
+    if dynamic_blockers:
         return ReleaseGateCheck(
             name="external-slurm-acceptance",
             outcome="fail",
             detail="staging GB10 external Slurm activation is not accepted",
             evidence=evidence,
             remediation=(
-                "keep policy, materialization, and supervisor disabled until an "
-                "independent installed authority verifies candidate-bound service "
-                "identity and all-node allocation evidence"
+                "run the fixed root-installed prepare/probe/activate authority for "
+                "this exact candidate; do not add artifact claims to repository TOML"
             ),
         )
     return ReleaseGateCheck(
         name="external-slurm-acceptance",
         outcome="pass",
-        detail="staging GB10 external Slurm remains fail-closed",
+        detail="independent staging GB10 external Slurm authority passed",
         evidence=evidence,
     )
 
@@ -1453,10 +1513,30 @@ def _gb10_manifest_policy_mismatches(
         issues.append(f"staging GB10 pool_name must be {_STAGING_GB10_POOL_NAME}")
     if desired.get("max_concurrent") != _STAGING_GB10_MAX_CONCURRENT:
         issues.append(f"staging GB10 max_concurrent must be {_STAGING_GB10_MAX_CONCURRENT}")
-    if desired.get("target_slots") != _STAGING_GB10_TARGET_SLOTS:
-        issues.append(f"staging GB10 target_slots must be {_STAGING_GB10_TARGET_SLOTS}")
-    if desired.get("host_intents") != _STAGING_GB10_HOST_INTENTS:
-        issues.append("staging GB10 host_intents must be exact active14 with trt-gb10-7 stopped")
+    external_workers = manifest.get("external_workers")
+    prerequisites = (
+        external_workers.get("external_slurm_runner_prerequisites")
+        if isinstance(external_workers, dict)
+        else None
+    )
+    requires_retirement = (
+        isinstance(prerequisites, dict)
+        and prerequisites.get("require_external_allocation_authority") is True
+    )
+    expected_slots = 0 if requires_retirement else _STAGING_GB10_TARGET_SLOTS
+    expected_intents = (
+        _STAGING_GB10_RETIRED_HOST_INTENTS
+        if requires_retirement
+        else _STAGING_GB10_HOST_INTENTS
+    )
+    if desired.get("target_slots") != expected_slots:
+        issues.append(f"staging GB10 target_slots must be {expected_slots}")
+    if desired.get("host_intents") != expected_intents:
+        issues.append(
+            "staging GB10 host_intents must stop all node-agent workers"
+            if requires_retirement
+            else "staging GB10 host_intents must be exact active14 with trt-gb10-7 stopped"
+        )
     return issues
 
 
@@ -1591,9 +1671,7 @@ def _current_active_gb10_worker_ids(
     """Resolve current worker registrations for the manifest-active GB10 hosts."""
     expected_hosts = _manifest_active_gb10_hosts(manifest)
     release = manifest.get("release")
-    release_environment = (
-        str(release.get("environment") or "") if isinstance(release, dict) else ""
-    )
+    release_environment = str(release.get("environment") or "") if isinstance(release, dict) else ""
     errors: list[str] = []
     if not expected_hosts:
         errors.append("release manifest has no active GB10 hosts")
@@ -1896,11 +1974,9 @@ def _hf_mirror_boundary_check(
         if isinstance(gb10_status_artifact, dict)
         else None
     )
-    current_active_worker_ids, active_worker_identity_errors = (
-        _current_active_gb10_worker_ids(
-            manifest=manifest,
-            status=gb10_status_artifact,
-        )
+    current_active_worker_ids, active_worker_identity_errors = _current_active_gb10_worker_ids(
+        manifest=manifest,
+        status=gb10_status_artifact,
     )
     evidence.update(
         {
@@ -2050,9 +2126,7 @@ def _hf_mirror_boundary_check(
             "canary_trial_worker_ids": canary_worker_ids,
             "canary_worker_ids_schema_valid": canary_worker_ids_schema_valid,
             "canary_unexpected_worker_ids": unexpected_canary_worker_ids,
-            "canary_workers_match_current_candidate": (
-                canary_workers_match_current_candidate
-            ),
+            "canary_workers_match_current_candidate": (canary_workers_match_current_candidate),
         }
     )
     terminal_pools = (
@@ -2138,6 +2212,8 @@ def collect_release_gate_report(
     hf_mirror_boundary_artifact: dict[str, Any] | None = None,
     hf_mirror_boundary_path: str | None = None,
     hf_mirror_boundary_error: str | None = None,
+    external_slurm_authority_artifact: dict[str, Any] | None = None,
+    external_slurm_authority_error: str | None = None,
 ) -> ReleaseGateReport:
     environment = str(manifest.get("release", {}).get("environment") or "")
     expected_rendered = manifest.get("rendered_manifest", {}).get("sha256")
@@ -2190,7 +2266,11 @@ def collect_release_gate_report(
     )
     if disabled_k8s_worker_check is not None:
         checks.append(disabled_k8s_worker_check)
-    external_slurm_acceptance_check = _external_slurm_acceptance_check(manifest)
+    external_slurm_acceptance_check = _external_slurm_acceptance_check(
+        manifest,
+        authority_artifact=external_slurm_authority_artifact,
+        authority_error=external_slurm_authority_error,
+    )
     if external_slurm_acceptance_check is not None:
         checks.append(external_slurm_acceptance_check)
     environment_state_check = _environment_state_check(

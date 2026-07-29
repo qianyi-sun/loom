@@ -55,7 +55,7 @@ enabled = false
 min_replicas = 2
 max_replicas = 8
 cpu_target_pct = 60
-# GB10 hosts managed by protected rollout steps 11-12. ssh_config optionally points at an operator SSH config file used for every host; ssh_identity_file and ssh_certificate_file point at platform-dev-local deploy auth material for detached rollout runners; each host entry is an inline TOML table with ssh_target, repo_path, env_file_path, optional repo_url, and optional node_agent_service. node_agent_service must be a simple .service basename; step 12 derives the matching .timer, requires Linger=yes, installs both candidate units, starts the oneshot, enables the timer, and verifies both units fail closed.
+# GB10 hosts managed by protected rollout steps 11-12. ssh_config optionally points at an operator SSH config file used for every host; ssh_identity_file and ssh_certificate_file point at platform-dev-local deploy auth material for detached rollout runners. Legacy profiles require ssh_target, repo_path, env_file_path, and optional repo_url/node_agent_service. External-Slurm retirement profiles permit only ssh_target and node_agent_service so candidate config cannot retain human checkout-path authority.
 
 [gb10_pool]
 ssh_config = ""

@@ -219,8 +219,11 @@ def test_release_gate_passes_for_fail_closed_external_gb10() -> None:
 
 def test_release_gate_rejects_candidate_self_attested_external_gb10_activation() -> None:
     workers = _external_gb10_workers(enabled=True)
+    workers["external_slurm_autoscaler_supervisors"][0].update({"enabled": True, "active": True})
     workers["external_slurm_runner_prerequisites"].update(
         {
+            "materialize": True,
+            "require_external_allocation_authority": True,
             "service_identity": {
                 "username": "loom-rollout",
                 "uid": 995,
@@ -242,19 +245,104 @@ def test_release_gate_rejects_candidate_self_attested_external_gb10_activation()
 
     assert check is not None
     assert check.outcome == "fail"
-    assert check.evidence["blockers"] == ["external_slurm_acceptance_authority_unavailable"]
+    assert "candidate_external_slurm_self_attestation_forbidden" in check.evidence["blockers"]
+    assert "external_slurm_acceptance_authority_unavailable" in check.evidence["blockers"]
 
 
 def test_release_gate_rejects_gb10_supervisor_activation_without_policy() -> None:
     workers = _external_gb10_workers(enabled=False)
     workers["slurm_pools"] = []
     workers["external_slurm_autoscaler_supervisors"][0].update({"enabled": True, "active": True})
+    workers["external_slurm_runner_prerequisites"].update(
+        {
+            "materialize": True,
+            "require_external_allocation_authority": True,
+        }
+    )
 
     check = _external_slurm_acceptance_check(_manifest(external_workers=workers))
 
     assert check is not None
     assert check.outcome == "fail"
-    assert check.evidence["blockers"] == ["external_slurm_acceptance_authority_unavailable"]
+    assert check.evidence["blockers"] == [
+        "external_slurm_acceptance_authority_unavailable",
+        "gb10_node_agent_authority_not_retired",
+    ]
+
+
+def test_release_gate_accepts_verified_exact_candidate_fourteen_node_authority() -> None:
+    workers = _external_gb10_workers(enabled=True)
+    workers["external_slurm_runner_prerequisites"].update(
+        {
+            "materialize": True,
+            "require_external_allocation_authority": True,
+        }
+    )
+    workers["external_slurm_autoscaler_supervisors"][0].update({"enabled": True, "active": True})
+    workers["gb10_desired_states"] = [
+        {
+            "pool_name": "gb10",
+            "target_slots": 0,
+            "host_intents": {
+                f"trt-gb10-{index}": "stopped" for index in range(1, 16)
+            },
+        }
+    ]
+    manifest = _manifest(external_workers=workers)
+    candidate_sha = manifest["release"]["git_sha"]
+
+    check = _external_slurm_acceptance_check(
+        manifest,
+        authority_artifact={
+            "result": "pass",
+            "candidate_sha": candidate_sha,
+            "node_count": 14,
+        },
+    )
+
+    assert check is not None
+    assert check.outcome == "pass"
+    assert check.evidence["authority_verified"] is True
+
+
+def test_release_gate_rejects_dual_gb10_worker_authorities() -> None:
+    workers = _external_gb10_workers(enabled=True)
+    workers["external_slurm_runner_prerequisites"].update(
+        {
+            "materialize": True,
+            "require_external_allocation_authority": True,
+        }
+    )
+    workers["external_slurm_autoscaler_supervisors"][0].update(
+        {"enabled": True, "active": True}
+    )
+    workers["gb10_desired_states"] = [
+        {
+            "pool_name": "gb10",
+            "target_slots": 140,
+            "host_intents": {
+                **{
+                    f"trt-gb10-{index}": "active"
+                    for index in range(1, 16)
+                    if index != 7
+                },
+                "trt-gb10-7": "stopped",
+            },
+        }
+    ]
+
+    check = _external_slurm_acceptance_check(
+        _manifest(external_workers=workers),
+        authority_artifact={
+            "result": "pass",
+            "candidate_sha": "a" * 40,
+            "node_count": 14,
+        },
+    )
+
+    assert check is not None
+    assert check.outcome == "fail"
+    assert "gb10_node_agent_authority_not_retired" in check.evidence["blockers"]
 
 
 @pytest.mark.parametrize(

@@ -1,15 +1,14 @@
 schema_version = 1
 pool_name = "gb10"
-slot_budget = 140
-pending_slot_budget = 30
+slot_budget = 112
+pending_slot_budget = 24
 job_pids_max = 65536
 
 [policy]
 actuator = "slurm"
-enabled = false
-disabled_reason = "awaiting_shared_capacity_handoff"
+enabled = true
 min_slots = 0
-max_slots = 0
+max_slots = 112
 scale_up_threshold_slots = 1
 scale_down_idle_seconds = 600
 scale_up_cooldown_seconds = 60
@@ -39,9 +38,9 @@ allowed_nodes = [
 ]
 env_file = "/shared_work/loom/runtime/sandboxes/${SANDBOX}/${CANDIDATE_SHA}/worker-gb10.env"
 repo_dir = "/shared_work/loom/candidates/sandboxes/${SANDBOX}/${CANDIDATE_SHA}"
-requested_cpus = 20
-requested_memory_mib = 115000
-requested_concurrency = 10
+requested_cpus = 16
+requested_memory_mib = 92000
+requested_concurrency = 8
 max_jobs = 14
 pending_job_cap = 3
 time_limit = "02:00:00"

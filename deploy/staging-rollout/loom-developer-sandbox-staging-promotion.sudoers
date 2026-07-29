@@ -1,0 +1,2 @@
+%loom-staging-operators ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-developer-sandbox-staging-promotion produce --request-id req-* --execute
+%loom-staging-operators ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-developer-sandbox-staging-promotion check

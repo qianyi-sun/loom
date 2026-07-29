@@ -1,0 +1,20 @@
+schema_version = 1
+environment = "staging"
+pool = "gb10"
+source_host = "trt-eai-oldlab-1"
+submit_host = "trt-gb10-1"
+partition = "gb10"
+control_plane_url = "http://127.0.0.1:8080"
+# External direct-root secret prerequisites. The node authority never creates,
+# copies, rotates, hashes, or reports either token.
+admin_secret_file = "/etc/loom/staging-pressure-reclaim/admin-token"
+worker_secret_file = "/etc/loom/staging-pressure-reclaim/acceptance-worker-token"
+node_transport = "/usr/local/libexec/loom-developer-sandbox-node-transport"
+published_root = "/srv/loom/staging-shared/results/pressure-reclaim"
+public_key = "/etc/loom/staging-pressure-reclaim/authority-public.pem"
+private_key = "/etc/loom/staging-pressure-reclaim/authority-private.pem"
+max_session_age_seconds = 7200
+poll_interval_seconds = 2.0
+terminal_timeout_seconds = 600
+retry_timeout_seconds = 60
+http_timeout_seconds = 30.0

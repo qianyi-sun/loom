@@ -46,7 +46,7 @@ def _record(action: str) -> dict[str, object]:
     return {
         "repo_action": action,
         "repo_dir": (
-            "/shared_work2/qianyi/.loom-staging-rollout/worker-repos/"
+            "/var/lib/loom-staging-rollout/prepared/candidates/"
             "loom-remote-worker-staging-aaaaaaa"
         ),
         "repo_group_id": 2007,

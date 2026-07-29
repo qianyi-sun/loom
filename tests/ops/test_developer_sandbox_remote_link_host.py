@@ -161,27 +161,22 @@ def test_mutation_commands_are_plan_only_by_default(capsys: pytest.CaptureFixtur
     assert "worker-token" not in output
 
 
-def test_fleet_check_requires_every_node(monkeypatch: pytest.MonkeyPatch) -> None:
-    profile = host.load_profile("qianyi")
+def test_remote_link_host_has_no_fleet_or_ssh_command_surface() -> None:
+    source = Path(host.__file__).read_text(encoding="utf-8")
+    assert "fleet-check" not in source
+    assert "--ssh" not in source
+    assert "BatchMode" not in source
 
-    def fake_run(
-        argv: tuple[str, ...],
-        **_: object,
-    ) -> object:
-        node = argv[6]
-        return type(
-            "Completed",
-            (),
-            {
-                "returncode": 1 if node == "trt-gb10-15" else 0,
-                "stdout": "{}",
-            },
-        )()
-
-    monkeypatch.setattr(host, "_run", fake_run)
-
-    with pytest.raises(host.LinkHostError, match="trt-gb10-15"):
-        host.fleet_check(profile, SHA, ssh_path="ssh")
+    with pytest.raises(SystemExit):
+        host.build_parser().parse_args(
+            [
+                "fleet-check",
+                "--sandbox",
+                "qianyi",
+                "--candidate-sha",
+                SHA,
+            ],
+        )
 
 
 def test_prepare_and_install_candidate_credentials_are_exact_and_host_local(

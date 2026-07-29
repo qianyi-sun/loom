@@ -1,0 +1,4 @@
+# Session registration and key bootstrap remain direct-root operations.
+loom-rollout ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-staging-pressure-reclaim-authority run --session-id *
+loom-rollout ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-staging-pressure-reclaim-authority verify --session-id *
+loom-rollout ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-staging-pressure-reclaim-authority verify-current

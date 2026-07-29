@@ -117,15 +117,6 @@ def _bound_artifact(tmp_path: Path):
     script_target.parent.mkdir(parents=True, exist_ok=True)
     repository = Path(__file__).resolve().parents[4]
     shutil.copyfile(repository / "deploy/environment-state/staging.toml", profile_target)
-    profile_text = profile_target.read_text(encoding="utf-8")
-    profile_text = profile_text.replace("enabled = false", "enabled = true", 1)
-    profile_text = profile_text.replace("materialize = false", "materialize = true", 1)
-    profile_text = profile_text.replace(
-        "enabled = false\nactive = false",
-        "enabled = true\nactive = true",
-        1,
-    )
-    profile_target.write_text(profile_text, encoding="utf-8")
     shutil.copyfile(
         repository / "scripts/ops/worker_pool_autoscaler_external_once.py",
         script_target,
@@ -209,12 +200,18 @@ def _observation(
     timers: dict[str, TimerRuntimeStatus] = {}
     services: dict[str, ServiceRuntimeStatus] = {}
     for supervisor in artifact.supervisors:
+        legacy_service = legacy.unit_payloads.get(supervisor.service_name)
+        legacy_timer = legacy.unit_payloads.get(supervisor.timer_name)
         if files == "legacy":
-            units[supervisor.service_name] = legacy.unit_payloads[supervisor.service_name].encode()
-            units[supervisor.timer_name] = legacy.unit_payloads[supervisor.timer_name].encode()
+            units[supervisor.service_name] = (
+                None if legacy_service is None else legacy_service.encode()
+            )
+            units[supervisor.timer_name] = None if legacy_timer is None else legacy_timer.encode()
         elif files == "partial":
-            units[supervisor.service_name] = supervisor.service_unit.encode()
-            units[supervisor.timer_name] = legacy.unit_payloads[supervisor.timer_name].encode()
+            units[supervisor.service_name] = (
+                None if legacy_service is None else supervisor.service_unit.encode()
+            )
+            units[supervisor.timer_name] = None if legacy_timer is None else legacy_timer.encode()
         else:
             units[supervisor.service_name] = (
                 supervisor.service_unit.encode() if files == "exact" else None
@@ -222,12 +219,30 @@ def _observation(
             units[supervisor.timer_name] = (
                 supervisor.timer_unit.encode() if files == "exact" else None
             )
-        if runtime == "exact":
+        pair_present = (
+            units[supervisor.service_name] is not None
+            and units[supervisor.timer_name] is not None
+        )
+        if not pair_present or runtime == "absent":
+            timers[supervisor.timer_name] = _timer_status(
+                supervisor.timer_name, "not-found", "not-found", "inactive"
+            )
+            services[supervisor.service_name] = _service_status(
+                supervisor.service_name, "not-found", "", None
+            )
+        elif runtime == "exact" and supervisor.enabled and supervisor.active:
             timers[supervisor.timer_name] = _timer_status(
                 supervisor.timer_name, "loaded", "enabled", "active"
             )
             services[supervisor.service_name] = _service_status(
                 supervisor.service_name, "loaded", "success", 0
+            )
+        elif runtime == "exact":
+            timers[supervisor.timer_name] = _timer_status(
+                supervisor.timer_name, "loaded", "disabled", "inactive"
+            )
+            services[supervisor.service_name] = _service_status(
+                supervisor.service_name, "loaded", "", None
             )
         elif runtime == "failed":
             timers[supervisor.timer_name] = _timer_status(
@@ -242,13 +257,6 @@ def _observation(
             )
             services[supervisor.service_name] = _service_status(
                 supervisor.service_name, "loaded", "", None
-            )
-        else:
-            timers[supervisor.timer_name] = _timer_status(
-                supervisor.timer_name, "not-found", "not-found", "inactive"
-            )
-            services[supervisor.service_name] = _service_status(
-                supervisor.service_name, "not-found", "", None
             )
     canonical = None
     if files == "exact" and runtime == "exact":

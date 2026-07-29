@@ -7,24 +7,27 @@ installed_config = "/etc/loom/developer-runtime-domains.toml"
 
 [sandbox_groups.qianyi]
 name = "loom-sandbox-qianyi"
+uid = 31021
 gid = 31021
-member = "qianyi"
+member = "loom-sandbox-qianyi"
 upstream_control_plane_port = 26080
 upstream_gateway_port = 26100
 upstream_minio_port = 26900
 
 [sandbox_groups.hongjian]
 name = "loom-sandbox-hongjian"
+uid = 31022
 gid = 31022
-member = "hongjian"
+member = "loom-sandbox-hongjian"
 upstream_control_plane_port = 27080
 upstream_gateway_port = 27100
 upstream_minio_port = 27900
 
 [sandbox_groups.devansh]
 name = "loom-sandbox-devansh"
+uid = 31023
 gid = 31023
-member = "devansh"
+member = "loom-sandbox-devansh"
 upstream_control_plane_port = 28080
 upstream_gateway_port = 28100
 upstream_minio_port = 28900

@@ -94,7 +94,13 @@ records are single-link regular files with exact mode `0600`. Recovery accepts
 only the canonical timestamped snapshot directory and the exact
 `manifest.json` and `accounting-cas.json` filenames recorded by this tool;
 symlink, hardlink, owner, mode, inode, or path drift fails closed before a
-restore.
+restore. The snapshot manifest is a closed, ordered six-file inventory. Every
+row records presence, original mode/UID/GID/link count/size, and the exact
+content SHA-256. Archived file bodies are separate root-private mode-`0600`
+single-link files read with `O_NOFOLLOW`; their metadata and digest are checked
+before restore, and the restored live file is checked again against the same
+row. Missing, extra, replaced, hardlinked, foreign-owned, or content-tampered
+snapshot entries cannot satisfy rollback CAS.
 
 The accounting snapshot is a compare-and-swap record scoped only to the Loom QoS,
 parent/child accounts, and three exact user associations; the converger never
@@ -106,7 +112,15 @@ Owned-field or intermediate-state drift fails closed. Each phase is durable
 before the next mutation. A failed daemon reload, restart,
 `scontrol reconfigure`, accounting mutation, or live readback restores both the
 files and the exact owned accounting fields automatically. A later invocation
-recovers an orphaned non-terminal journal before starting new work.
+recovers an orphaned non-terminal journal before starting new work. Policy
+journals are canonical closed objects bound to the exact operation, cluster,
+physical host, Slurm node, candidate, restart/accounting flags, canonical
+snapshot/accounting paths, and finite phase set. Recovery validates that
+complete identity, requires the accounting flag and canonical accounting path
+to agree in both directions, and prevalidates the closed snapshot plus any
+cluster-bound accounting CAS before any file restore or service restart. An
+open-shape, cross-host, cross-cluster, foreign, or malformed journal is a hard
+stop.
 
 The administration lock is cooperative across supported operations. Every
 administrator must use this converger for Loom-owned accounting changes and
@@ -139,18 +153,60 @@ requires a real opted-in job probe with finite CPU, memory, and PID cgroup
 readback; the GB10 profile additionally requires a positive allocated GPU TRES
 readback.
 
-After launching the bounded acceptance probe, run the combined file and live
-check as root. First create the allocation-side artifact from the profile's
-exact submit host (OLDLAB and GB10 are independent controllers; never reuse one
-domain's command or evidence for the other):
+After the collector publishes a fresh combined receipt, materialize a complete
+proof bundle on each profile's exact submit host. Fetches use only the
+installed node-authority transport and its forced `check` verb. There is no
+separate root SSH key, known-hosts file, caller-selected remote path, or
+fallback in the Slurm policy.
+
+Each request carries one canonical artifact ID binding the exact sandbox,
+candidate SHA/tree, and one of the eight approved proof source names. The node
+authority independently binds that ID to its fixed logical node, canonical
+hostname, and domain before reading a root-owned single-link artifact with a
+1 MiB source bound. The response remains bounded after JSON/base64 framing,
+and bundle metadata records only the logical node, hostname, and transport
+artifact ID. It never records a credential or remote filesystem path.
+
+The materializer copies the combined receipt, fleet, both domain
+manifests/signatures, and both publisher public keys into a root-only local
+bundle. It verifies both Ed25519 signatures, candidate/tree identity,
+monotonic publisher generations, and the closed nineteen-node fleet before an
+atomic no-replace publish. Run the command once on `oldlab2` with the OLDLAB
+profile and once on `gb10-1` with the GB10 profile:
+
+Recovery runs under a persistent `<cluster>/<sandbox>` proof lock before any
+fresh remote fetch. This permits `qianyi`, `hongjian`, and `devansh` to
+materialize different candidate SHAs concurrently without sharing a
+transaction, stage, final bundle, or current/high-water pointer. A
+closed, journal-owned stage is rolled forward and re-read; a journal-owned
+partial stage is removed only after every present entry passes the private-file
+checks. A published final is adopted only when its complete manifest and local
+file digests match the journal. Unknown journal fields, paths, stages, finals,
+or current/high-water state fail closed. Publication and complete final
+readback happen before the monotonic high-water pointer changes, so a rename
+failure leaves the previous accepted bundle selected. After recovery commits,
+a rotated fresh receipt starts a new transaction instead of being blocked by
+the prior receipt's journal.
+
+```bash
+sudo python scripts/ops/developer_sandbox_slurm_policy.py materialize-runtime-proof \
+  --profile deploy/slurm/developer-sandboxes/oldlab.toml \
+  --sandbox "$SANDBOX_USER" \
+  --candidate-sha "$EXACT_CANDIDATE_SHA" \
+  --execute
+```
+
+Then create and check the allocation-side artifact from that same exact submit
+host. OLDLAB and GB10 are independent controllers; never reuse one domain's
+command or evidence for the other:
 
 ```bash
 sudo python scripts/ops/developer_sandbox_slurm_policy.py allocation-probe \
   --profile deploy/slurm/developer-sandboxes/oldlab.toml \
+  --sandbox "$SANDBOX_USER" \
   --candidate-sha "$EXACT_CANDIDATE_SHA" \
   --candidate-root "$EXACT_CANDIDATE_ROOT" \
   --worker-env "$PRIVATE_WORKER_ENV" \
-  --runtime-receipt "/var/lib/loom-shared-capacity/runtime-attestations/qianyi/$EXACT_CANDIDATE_SHA/combined.json" \
   --batch-uid "$EXPECTED_BATCH_UID" \
   --batch-gid "$EXPECTED_BATCH_GID" \
   --expected-pool oldlab \
@@ -159,29 +215,39 @@ sudo python scripts/ops/developer_sandbox_slurm_policy.py allocation-probe \
 
 sudo python scripts/ops/developer_sandbox_slurm_policy.py check \
   --profile deploy/slurm/developer-sandboxes/oldlab.toml \
+  --sandbox "$SANDBOX_USER" \
   --candidate-sha "$EXACT_CANDIDATE_SHA" \
   --candidate-root "$EXACT_CANDIDATE_ROOT" \
   --worker-env "$PRIVATE_WORKER_ENV" \
-  --runtime-receipt "/var/lib/loom-shared-capacity/runtime-attestations/qianyi/$EXACT_CANDIDATE_SHA/combined.json" \
   --batch-uid "$EXPECTED_BATCH_UID" \
   --batch-gid "$EXPECTED_BATCH_GID" \
   --expected-pool oldlab \
   --expected-concurrency 1
 ```
 
+`--sandbox` is mandatory for proof materialization, allocation probing,
+compute-side checking, and strict live readback. It remains the logical label
+`qianyi`, `hongjian`, or `devansh`; it is never interpreted as a personal
+login user. The policy maps it exactly to the non-login service identity
+`loom-sandbox-<sandbox>` in `profile.accounting.users` and the aligned
+`loom-dev-<sandbox>` child account. The submitted `--uid`, pwd and numeric
+UID/GID readback, squeue/sacct user, Slurm account, journal, and compute result
+must all agree with that mapping. Cross-sandbox or personal-user reuse fails
+closed.
+
 The probe is an all-node matrix by default. While holding one persistent
-cluster/candidate lock, it walks the profile's `allowed_nodes` exactly once in
-declared order. Every bounded, non-exclusive `sbatch` carries
+`<cluster>/<sandbox>/<candidate>` lock, it walks the profile's `allowed_nodes`
+exactly once in declared order. Every bounded, non-exclusive `sbatch` carries
 `--oversubscribe` and the exact
 `--nodelist=<allowed_nodes node>`; its `srun` repeats that Slurm `NodeName`.
 Inside the allocation, the observed compute OS hostname must independently
-equal `host_aliases[node]`. The deterministic job name contains the full
-candidate SHA, declared node, the first 12 hexadecimal characters of the
-runtime-receipt digest, and the durable attempt number and is bounded to
-Slurm's safe 128-character limit. The receipt digest gives every fresh
-collection window its own job namespace, so accounting history from an older
-window cannot be mistaken for the current attempt. Random scheduler placement
-or a single successful node is never acceptance.
+equal `host_aliases[node]`. The deterministic job name contains the declared
+sandbox, node, complete 64-hex immutable runtime-proof bundle ID, and durable
+attempt number and is bounded to Slurm's safe 128-character limit. The bundle
+ID binds the candidate and every receipt, signed domain, fleet, and manifest
+byte, so a receipt-only or truncated generation can never share the current
+job namespace. Random scheduler placement or a single successful node is never
+acceptance.
 
 Submission uses immediate parsable output, not `sbatch --wait`. A root-owned,
 single-link mode-`0600` matrix journal and per-node inflight record live below
@@ -201,16 +267,30 @@ jobs, or terminal readback failure stays durable and fail-closed. One failed
 node invalidates the final artifact; it cannot be hidden by passes elsewhere
 in the matrix.
 
-The matrix is a receipt-generation transaction. It records the receipt's
-collection and expiry timestamps and must finish every node inside that exact
-window. Re-running a completed current generation returns the existing final
-artifact; it does not mint a new top-level timestamp from old node evidence.
+The live probe and check do not accept a receipt or bundle path. They read the
+root-owned `<cluster>/<sandbox>` high-water index, derive the
+immutable local bundle path, require its exact closed-world file set, and
+re-read and verify every digest and both signatures. There is no fallback to
+the collector's or publishers' global paths. The allocation matrix binds the
+full local bundle ID as well as the receipt digest.
+
+The matrix is a proof-bundle-generation transaction. Its generation ID is the
+complete bundle ID, and its expiry is the earliest expiry among the receipt,
+both signed domains, and fleet proof. Before starting and before each node
+submission, that window must still cover the configured allocation timeout
+plus a 30-second safety margin. Re-running a completed current generation
+returns the existing final artifact; it does not mint a new top-level
+timestamp from old node evidence.
 Final readback validates every node's `completed_at` as well as the matrix
 completion time. When the receipt rotates or the generation/evidence becomes
 stale, the converger first recovers every exact inflight job, atomically
-archives both the old matrix and final artifact below the root-only state
-directory, and starts a new all-node matrix. Operators must not delete a
-matrix to renew evidence.
+archives both the old matrix and final artifact below the root-only
+`<cluster>/<sandbox>` state directory, and starts a new all-node matrix.
+Operators must not delete a matrix to renew evidence. A tightly bound legacy
+12-hex receipt generation is accepted only for exact recovery and archival
+when its journal, runtime attestation, candidate, and sandbox all agree;
+missing, unrelated, cross-sandbox, or otherwise foreign short generations
+fail closed and are never accepted as evidence.
 
 If a job reached `COMPLETED` but its compute result cannot be safely opened or
 validated, recovery preserves the exact result long enough for one replay. An
@@ -301,6 +381,46 @@ Rollback also reloads/reconfigures services, performs live readback, and
 automatically restores the pre-rollback state if any rollback phase fails. Do
 not delete or edit the journal or snapshot tree by hand.
 
+## Fleet maintenance authority
+
+Do not run the policy CLI directly across the fleet. The persistent installer
+exposes a maintenance-window command whose only caller inputs are the closed
+domain, sandbox, and exact candidate SHA:
+
+```bash
+sudo /usr/local/libexec/loom-developer-sandbox-host slurm-converge \
+  --domain oldlab --sandbox qianyi --candidate-sha <SHA> --execute
+sudo /usr/local/libexec/loom-developer-sandbox-host slurm-check \
+  --domain oldlab --sandbox qianyi --candidate-sha <SHA> --execute
+```
+
+The node authority derives the candidate root, domain profile, live root,
+restart, and controller accounting behavior. No caller-provided profile,
+root, path, accounting, restart, or arbitrary policy flag reaches the node.
+The policy independently revalidates sandbox profile membership, the
+candidate, physical hostname, Slurm node, cluster/controller identity, and
+zero-job/zero-container drain precondition. GB10 node 7 is outside the closed
+inventory.
+
+The host journal advances compute nodes first and writes each exact authority
+receipt before continuing. A busy or foreign job/container stops the pass
+without cancellation. Rerunning the same command replays and compares the
+committed receipts; the controller runs only after every compute receipt and
+check readback exists. A final check covers every node. The journal remains on
+failure so the pass is resumable.
+
+Rollback is receipt-owned and candidate-bound:
+
+```bash
+sudo /usr/local/libexec/loom-developer-sandbox-host slurm-rollback \
+  --domain oldlab --sandbox qianyi --candidate-sha <SHA> --execute
+```
+
+Each rollback envelope names only the prior authority request ID. The node
+authority rejects a different node/domain/sandbox/candidate/tree or an
+advanced policy journal/snapshot digest. It never accepts a snapshot or
+journal path from the host command.
+
 ## Fair-share contract
 
 `loom-dev` is the aggregate capacity boundary. Its three children are:
@@ -315,3 +435,8 @@ fixed one- or two-worker ceiling. The shared-capacity broker still clamps
 active plus pending slots before submission. Slurm fair-share and current
 cluster availability determine actual capacity; the profiles do not create a
 reservation or a guaranteed full-pool entitlement.
+
+The corresponding Slurm association users are
+`loom-sandbox-qianyi`, `loom-sandbox-hongjian`, and
+`loom-sandbox-devansh`. Personal login UIDs are deliberately absent because
+their numeric identities are not consistent across OLDLAB and GB10.

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import importlib.util
 import json
 import os
@@ -13,6 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from scripts.ops import developer_sandbox_node_authority as authority
 
 _ROOT = Path(__file__).resolve().parents[2]
 _SCRIPT = _ROOT / "scripts" / "ops" / "developer_sandbox_domain_runtime.py"
@@ -87,13 +90,143 @@ def test_checked_in_contract_has_two_independent_domains_and_stable_groups() -> 
         31022,
         31023,
     }
-    assert config.sandbox_groups["devansh"].member == "devansh"
+    assert {group.uid for group in config.sandbox_groups.values()} == {
+        31021,
+        31022,
+        31023,
+    }
+    assert config.sandbox_groups["devansh"].member == "loom-sandbox-devansh"
     assert runtime._listener_ports(config.sandbox_groups["qianyi"]) == {
         "control-plane": 26080,
         "gateway": 26100,
         "minio": 26900,
     }
     assert "trt-gb10-7" not in {peer.ssh_target for peer in config.domains["gb10"].peers}
+
+
+def test_peer_check_envelope_is_canonical_for_the_fixed_node_authority() -> None:
+    identity = runtime.CandidateIdentity("a" * 40, "b" * 40)
+    raw = runtime._authority_envelope(
+        action="inspect-local",
+        node="oldlab-3",
+        domain="oldlab",
+        sandbox="qianyi",
+        identity=identity,
+    ).encode("ascii")
+    policy = authority.AuthorityPolicy(
+        source_sha="c" * 40,
+        source_tree=identity.tree,
+        node="oldlab-3",
+        asset_sha256={str(path): "d" * 64 for path in authority.SOURCE_ASSETS},
+    )
+
+    parsed = authority._parse_request(raw, verb="check", policy=policy)
+
+    assert parsed.action == "inspect-local"
+    assert raw == authority._canonical(parsed.payload)
+
+
+def test_remote_attestation_uses_bounded_authority_export(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = runtime.load_config(_CONFIG)
+    domain = config.domains["gb10"]
+    sha = "a" * 40
+    tree = "b" * 40
+    manifest = b'{"proof":"manifest"}\n'
+    signature = b"c2lnbmF0dXJl\n"
+    manifest_path, signature_path = runtime._attestation_paths(
+        "gb10",
+        "qianyi",
+        sha,
+    )
+    calls: list[dict[str, object]] = []
+
+    def check(**kwargs: object) -> dict[str, object]:
+        calls.append(kwargs)
+        return {
+            "operation": "export-domain-attestation",
+            "domain": "gb10",
+            "hostname": domain.publisher_hostname,
+            "sandbox": "qianyi",
+            "candidate_sha": sha,
+            "candidate_tree": tree,
+            "manifest_path": str(manifest_path),
+            "signature_path": str(signature_path),
+            "manifest_base64": base64.b64encode(manifest).decode("ascii"),
+            "signature_base64": base64.b64encode(signature).decode("ascii"),
+            "manifest_sha256": hashlib.sha256(manifest).hexdigest(),
+            "signature_sha256": hashlib.sha256(signature).hexdigest(),
+        }
+
+    monkeypatch.setattr(runtime, "_authority_check", check)
+
+    result = runtime._remote_attestation(config, domain, "qianyi", sha, tree)
+
+    assert result == (manifest, signature.strip(), str(manifest_path), str(signature_path))
+    assert calls == [
+        {
+            "action": "export-domain-attestation",
+            "node": "trt-gb10-1",
+            "domain": "gb10",
+            "sandbox": "qianyi",
+            "identity": runtime.CandidateIdentity(sha, tree),
+        },
+    ]
+
+
+def test_runtime_proof_export_binds_closed_artifact_node_and_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = runtime.load_config(_CONFIG)
+    domain = config.domains["oldlab"]
+    identity = runtime.CandidateIdentity("a" * 40, "b" * 40)
+    artifact_id = f"runtime-proof/v1/qianyi/{identity.sha}/{identity.tree}/artifact/combined.json"
+    combined: dict[str, object] = {
+        "kind": "loom.developer-runtime-combined-activation",
+        "sandbox": "qianyi",
+        "candidate_sha": identity.sha,
+        "candidate_tree": identity.tree,
+        "collector": {"hostname": "trt-eai-oldlab-2"},
+    }
+    content = runtime._canonical_json(combined) + b"\n"
+    monkeypatch.setattr(runtime, "_require_root", lambda: None)
+    monkeypatch.setattr(runtime, "_hostname", lambda: "trt-eai-oldlab-2")
+    monkeypatch.setattr(
+        runtime,
+        "_read_runtime_proof_artifact",
+        lambda _path, *, mode: content if mode == 0o600 else b"",
+    )
+
+    report = runtime.export_runtime_proof_artifact(
+        config,
+        domain,
+        "qianyi",
+        identity,
+        artifact_id,
+    )
+
+    assert report["artifact_id"] == artifact_id
+    assert report["node"] == "oldlab-2"
+    assert report["hostname"] == "trt-eai-oldlab-2"
+    assert base64.b64decode(str(report["content_base64"]), validate=True) == content
+    with pytest.raises(runtime.ConvergenceError, match="artifact binding"):
+        runtime.export_runtime_proof_artifact(
+            config,
+            config.domains["gb10"],
+            "qianyi",
+            identity,
+            artifact_id,
+        )
+
+
+def test_domain_runtime_has_no_raw_remote_ssh_cat_or_stat_path() -> None:
+    source = _SCRIPT.read_text(encoding="utf-8")
+
+    assert '"ssh"' not in source
+    assert '"sudo"' not in source
+    assert '"cat"' not in source
+    assert "remote_metadata" not in source
 
 
 def test_paths_bind_domain_specific_env_to_same_exact_candidate_sha() -> None:
@@ -134,7 +267,7 @@ def test_host_converge_creates_empty_candidate_namespace_before_materialize(
             "groups": {sandbox: "ok" for sandbox in runtime.ALLOWED_SANDBOXES},
         },
     )
-    monkeypatch.setattr(runtime, "_group_status", lambda *_args: "ok")
+    monkeypatch.setattr(runtime, "_service_identity_status", lambda *_args: "ok")
     monkeypatch.setattr(runtime, "_user_has_group", lambda *_args: True)
     monkeypatch.setattr(runtime, "_atomic_install", lambda *_args: None)
     monkeypatch.setattr(runtime, "_ensure_attestation_key", lambda *_args: "a" * 64)
@@ -356,31 +489,44 @@ def test_env_references_reject_unknown_nonsecret_field(tmp_path: Path) -> None:
         runtime._parse_env_references(seed, sandbox="qianyi", sha=sha)
 
 
-def test_stable_group_membership_does_not_depend_on_user_uid(
+def test_stable_service_identity_requires_fixed_nonlogin_uid_gid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    config = runtime.load_config(_CONFIG)
+    group = config.sandbox_groups["devansh"]
     monkeypatch.setattr(
         runtime.pwd,
         "getpwnam",
-        lambda _name: SimpleNamespace(pw_uid=2501, pw_gid=2501),
+        lambda _name: SimpleNamespace(
+            pw_uid=31023,
+            pw_gid=31023,
+            pw_dir="/nonexistent",
+            pw_shell="/usr/sbin/nologin",
+        ),
     )
     monkeypatch.setattr(
         runtime.grp,
         "getgrnam",
-        lambda _name: SimpleNamespace(gr_gid=31023, gr_mem=["devansh"]),
+        lambda _name: SimpleNamespace(gr_gid=31023, gr_mem=[]),
     )
-    monkeypatch.setattr(runtime.os, "getgrouplist", lambda _name, _gid: [2501, 31023])
 
-    assert runtime._group_status("loom-sandbox-devansh", 31023, "devansh") == "ok"
+    assert runtime._service_identity_status(group) == "ok"
 
 
 def test_stable_group_rejects_numeric_collision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    config = runtime.load_config(_CONFIG)
+    group = config.sandbox_groups["devansh"]
     monkeypatch.setattr(
         runtime.pwd,
         "getpwnam",
-        lambda _name: SimpleNamespace(pw_uid=2011, pw_gid=2011),
+        lambda _name: SimpleNamespace(
+            pw_uid=31023,
+            pw_gid=31023,
+            pw_dir="/nonexistent",
+            pw_shell="/usr/sbin/nologin",
+        ),
     )
 
     def missing_name(_name: str) -> object:
@@ -394,7 +540,7 @@ def test_stable_group_rejects_numeric_collision(
     )
 
     with pytest.raises(runtime.ConvergenceError, match="already owned"):
-        runtime._group_status("loom-sandbox-devansh", 31023, "devansh")
+        runtime._service_identity_status(group)
 
 
 def test_unprivileged_execution_has_no_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -631,10 +777,10 @@ def _domain_manifest(
         "runtime_env": {
             "schema_version": 1,
             "path": str(paths.env),
-            "uid": 0,
+            "uid": group.uid,
             "gid": group.gid,
-            "group": group.name,
-            "mode": "0640",
+            "user": group.member,
+            "mode": "0600",
             "candidate_sha": sha,
             "local_urls": {
                 "control-plane": "http://sandbox-link:8080",
@@ -668,6 +814,8 @@ def _domain_manifest(
                 "hostname": peer.hostname,
                 "candidate_inode": 101,
                 "env_inode": 202,
+                "env_uid": group.uid,
+                "env_gid": group.gid,
                 "result": "verified",
             }
             for peer in domain.peers
@@ -842,7 +990,7 @@ def test_collector_requires_matching_two_domain_trees_before_receipt(
     monkeypatch.setattr(
         runtime,
         "_remote_attestation",
-        lambda _config, domain, _sandbox, _sha: (
+        lambda _config, domain, _sandbox, _sha, _tree: (
             domain.name.encode(),
             b"signature",
             f"/remote/{domain.name}.json",
@@ -876,7 +1024,7 @@ def test_collector_requires_matching_two_domain_trees_before_receipt(
     monkeypatch.setattr(runtime, "_verify_domain_attestation", verified)
 
     with pytest.raises(runtime.ConvergenceError, match="trees do not match"):
-        runtime.collect_attestations(config, "qianyi", sha, execute=False)
+        runtime.collect_attestations(config, "qianyi", sha, "b" * 40, execute=False)
 
 
 def test_collector_plan_has_closed_combined_receipt_inputs(
@@ -899,7 +1047,7 @@ def test_collector_plan_has_closed_combined_receipt_inputs(
     monkeypatch.setattr(
         runtime,
         "_remote_attestation",
-        lambda _config, domain, _sandbox, _sha: (
+        lambda _config, domain, _sandbox, _sha, _tree: (
             domain.name.encode(),
             b"signature",
             f"/remote/{domain.name}.json",
@@ -932,7 +1080,13 @@ def test_collector_plan_has_closed_combined_receipt_inputs(
 
     monkeypatch.setattr(runtime, "_verify_domain_attestation", verified)
 
-    report = runtime.collect_attestations(config, "qianyi", sha, execute=False)
+    report = runtime.collect_attestations(
+        config,
+        "qianyi",
+        sha,
+        "b" * 40,
+        execute=False,
+    )
     combined = report["combined"]
 
     assert report["mode"] == "plan"
@@ -993,6 +1147,7 @@ def test_failed_execute_revokes_prior_receipt_while_lock_is_held(
         _config: object,
         _sandbox: str,
         _sha: str,
+        _tree: str,
         *,
         execute: bool,
     ) -> dict[str, object]:
@@ -1011,7 +1166,7 @@ def test_failed_execute_revokes_prior_receipt_while_lock_is_held(
     monkeypatch.setattr(runtime, "_collect_attestation_checks", fail_checks)
 
     with pytest.raises(runtime.ConvergenceError, match="injected SSH failure"):
-        runtime.collect_attestations(config, "qianyi", sha, execute=True)
+        runtime.collect_attestations(config, "qianyi", sha, "b" * 40, execute=True)
 
     assert not target.exists()
     assert events == ["lock-enter", "invalidate", "checks", "lock-exit"]
@@ -1122,7 +1277,9 @@ def test_old_receipt_cannot_mutate_a_newer_attestation_generation(
         "_atomic_env_write",
         lambda *_args, **_kwargs: mutations.append("env"),
     )
-    monkeypatch.setattr(runtime, "_write_json", lambda *_args, **_kwargs: mutations.append("receipt"))
+    monkeypatch.setattr(
+        runtime, "_write_json", lambda *_args, **_kwargs: mutations.append("receipt")
+    )
 
     with pytest.raises(runtime.ConvergenceError, match="no longer matches"):
         runtime._rollback_locked(config, tmp_path / "receipt.json", allow_committed=True)

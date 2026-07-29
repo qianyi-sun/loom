@@ -1,0 +1,8 @@
+loom-rollout ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-staging-external-slurm-authority bootstrap --candidate-sha * --candidate-tree * --execute
+loom-rollout ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-staging-external-slurm-authority prepare *
+loom-rollout ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-staging-external-slurm-authority probe *
+loom-rollout ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-staging-external-slurm-authority activate *
+loom-rollout ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-staging-external-slurm-authority verify *
+loom-rollout ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-staging-external-slurm-authority verify-infrastructure --candidate-sha * --candidate-tree *
+loom-rollout ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-staging-external-slurm-authority converge-infrastructure --candidate-sha * --candidate-tree *
+loom-rollout ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-staging-external-slurm-authority verify-current

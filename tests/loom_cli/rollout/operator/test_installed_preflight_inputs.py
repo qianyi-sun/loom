@@ -11,6 +11,7 @@ from loom_cli.rollout.operator.installed_preflight_inputs import InstalledPrefli
 from loom_cli.rollout.operator.preflight import (
     EXPECTED_GB10_SSH_CONFIG_SHA256,
     GB10PreflightInputs,
+    shared_repository_binding_digest,
 )
 from tests.loom_cli.rollout.operator.test_checkpoint_inventory_provider import _config
 
@@ -125,6 +126,58 @@ def test_loader_uses_exact_candidate_policy_path_in_packaged_runtime(tmp_path: P
 
     assert inputs.migration_policy_path == policy
     assert inputs.migration_policy_digest == hashlib.sha256(policy.read_bytes()).hexdigest()
+
+
+def test_loader_uses_only_system_binding_for_external_gb10_profile(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    policy = tmp_path / "migration-policy.json"
+    policy.write_text("{}\n", encoding="utf-8")
+    ssh_config = tmp_path / "ssh-config"
+    identity = tmp_path / "identity"
+    ssh_payload = (
+        Path(__file__).resolve().parents[4] / "deploy/worker-pools/gb10/ssh_config"
+    ).read_bytes()
+    system_binding = {**_binding(), "repository_inode": 99}
+    system_reads: list[str] = []
+
+    def read_file(path: Path, **_kwargs):
+        if path == ssh_config:
+            return SimpleNamespace(payload=ssh_payload, metadata_fingerprint="a" * 64)
+        return SimpleNamespace(payload=b"private", metadata_fingerprint="b" * 64)
+
+    inputs = InstalledPreflightInputs.load(
+        config,
+        service_uid=501,
+        verify_install=lambda **_kwargs: SimpleNamespace(
+            ready=True,
+            attestation=SimpleNamespace(payload_digest="d" * 64),
+        ),
+        read_file=read_file,
+        catalog_path_loader=lambda *_args, **_kwargs: tmp_path / "catalog.env",
+        gb10_inputs_loader=lambda *_args, **_kwargs: GB10PreflightInputs(
+            ssh_config=ssh_config,
+            identity=identity,
+            targets=(GB10ProbeTarget("trt-gb10-1", "loom-gb10-node-agent.service"),),
+        ),
+        shared_binding_loader=lambda **_kwargs: pytest.fail(
+            "legacy shared binding must not run for the external authority"
+        ),
+        system_binding_loader=lambda **_kwargs: (
+            system_reads.append("system-mount") or system_binding
+        ),
+        external_profile_loader=lambda *_args, **_kwargs: SimpleNamespace(profile_digest="e" * 64),
+        migration_policy_path=policy,
+    )
+
+    assert inputs.gb10_mount_binding is None
+    assert inputs.gb10_mount_binding_digest is None
+    assert system_reads == []
+    assert inputs.resolve_gb10_mount_binding() == (
+        system_binding,
+        shared_repository_binding_digest(system_binding),
+    )
+    assert system_reads == ["system-mount"]
+    assert inputs.gb10_external_profile_digest == "e" * 64
 
 
 def test_loader_rejects_ssh_topology_digest_drift(tmp_path: Path) -> None:

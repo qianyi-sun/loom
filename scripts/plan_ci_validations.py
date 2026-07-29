@@ -86,14 +86,35 @@ PROTECTED_STAGING_ROLLOUT_PREFIXES = (
 
 PROTECTED_DEVELOPER_SANDBOX_EXACT = {
     "scripts/ops/developer_sandbox.py",
+    "scripts/ops/developer_sandbox_domain_runtime.py",
     "scripts/ops/developer_sandbox_host.py",
+    "scripts/ops/developer_sandbox_live_acceptance.py",
+    "scripts/ops/developer_sandbox_live_authority.py",
+    "scripts/ops/developer_sandbox_node_authority.py",
+    "scripts/ops/developer_sandbox_node_transport.py",
+    "scripts/ops/developer_sandbox_slurm_policy.py",
+    "scripts/ops/developer_sandbox_staging_promotion.py",
     "scripts/ops/shared_capacity_runtime_host.py",
+    "scripts/ops/staging_external_slurm_acceptance_authority.py",
+    "src/loom_cli/external_slurm_acceptance.py",
     "tests/ops/test_developer_sandbox.py",
+    "tests/ops/test_developer_sandbox_domain_runtime.py",
     "tests/ops/test_developer_sandbox_host.py",
+    "tests/ops/test_developer_sandbox_live_acceptance.py",
+    "tests/ops/test_developer_sandbox_live_authority.py",
+    "tests/ops/test_developer_sandbox_node_authority.py",
+    "tests/ops/test_developer_sandbox_node_transport.py",
+    "tests/ops/test_developer_sandbox_slurm_policy.py",
+    "tests/ops/test_developer_sandbox_staging_promotion.py",
     "tests/ops/test_shared_capacity_runtime_host.py",
+    "tests/ops/test_staging_external_slurm_acceptance_authority.py",
+    "tests/loom_cli/test_external_slurm_acceptance.py",
 }
 
-PROTECTED_DEVELOPER_SANDBOX_PREFIXES = ("deploy/developer-sandboxes/",)
+PROTECTED_DEVELOPER_SANDBOX_PREFIXES = (
+    "deploy/developer-sandboxes/",
+    "deploy/slurm/developer-sandboxes/",
+)
 
 
 @dataclass(frozen=True)

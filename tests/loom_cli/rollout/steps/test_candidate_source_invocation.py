@@ -30,6 +30,7 @@ from loom_cli.rollout.image_readiness import (
 from loom_cli.rollout.steps import candidate_source
 from loom_cli.rollout.steps.base import RunResult, VerifyOutcome
 from loom_cli.rollout.steps.candidate_source import (
+    CandidateToolingError,
     candidate_loom_argv,
     candidate_loom_env,
     candidate_relative_path,
@@ -40,6 +41,7 @@ from loom_cli.rollout.steps.s04_gb10_prep import (
     _LEGACY_NODE_AGENT_TIMER_DROPIN,
     GB10Host,
     GB10PrepStep,
+    _external_authority_retirement_mode,
     _node_agent_timer_dropin_cleanup_command,
     _node_agent_timer_dropins_absent_command,
     _node_agent_timer_name,
@@ -126,7 +128,7 @@ def test_sealed_gb10_prep_fetches_exact_shared_candidate(
     assert "--upload-pack='/usr/bin/git -c safe.directory=" in fetch
     assert "/loom-remote-worker-staging-aaaaaaa/.git upload-pack'" in fetch
     assert (
-        "/shared_work2/qianyi/.loom-staging-rollout/worker-repos/loom-remote-worker-staging-aaaaaaa"
+        "/srv/loom/staging-shared/candidates/loom-remote-worker-staging-aaaaaaa"
     ) in fetch
     assert fetch.endswith(sha)
 
@@ -2372,6 +2374,98 @@ def _gb10_candidate_config_fixture(
     candidate_config = worktree / "deploy" / "environments" / "staging.cluster.toml"
     candidate_config.parent.mkdir(parents=True)
     return ctx, ev, runner_config, candidate_config
+
+
+def _external_authority_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[RolloutContext, Path]:
+    profile = tmp_path / "staging.toml"
+    profile.write_text(
+        (
+            Path(__file__).resolve().parents[4]
+            / "deploy/environment-state/staging.toml"
+        ).read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s04_gb10_prep._env_state_profile_path_for",
+        lambda *_args, **_kwargs: profile,
+    )
+    return make_ctx(tmp_path), profile
+
+
+def test_gb10_prep_external_authority_mode_accepts_only_exact_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx, _profile = _external_authority_profile(tmp_path, monkeypatch)
+
+    assert _external_authority_retirement_mode(
+        ctx,
+        config_path=tmp_path / "candidate.cluster.toml",
+    )
+
+
+@pytest.mark.parametrize(
+    ("original", "replacement"),
+    (
+        (
+            "require_external_allocation_authority = true",
+            "require_external_allocation_authority = false",
+        ),
+        ("target_slots = 0", "target_slots = 1"),
+        (
+            'repo_dir = "/srv/loom/staging-shared/candidates/loom-remote-worker-${IMAGE_TAG}"',
+            'repo_dir = "/srv/loom/staging-shared/candidates/drift-${IMAGE_TAG}"',
+        ),
+        ("slurm_account = \"loom-staging\"", "slurm_account = \"drift\""),
+        ("active = true", "active = false"),
+    ),
+)
+def test_gb10_prep_declared_external_authority_drift_never_downgrades_to_legacy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    original: str,
+    replacement: str,
+) -> None:
+    ctx, profile = _external_authority_profile(tmp_path, monkeypatch)
+    payload = profile.read_text(encoding="utf-8")
+    assert original in payload
+    profile.write_text(payload.replace(original, replacement, 1), encoding="utf-8")
+
+    with pytest.raises(CandidateToolingError, match="exact closed contract"):
+        _external_authority_retirement_mode(
+            ctx,
+            config_path=tmp_path / "candidate.cluster.toml",
+        )
+
+
+def test_gb10_prep_malformed_external_profile_never_downgrades_to_legacy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx, profile = _external_authority_profile(tmp_path, monkeypatch)
+    profile.write_text("[external_slurm_runner_prerequisites\n", encoding="utf-8")
+
+    with pytest.raises(CandidateToolingError, match="profile is invalid"):
+        _external_authority_retirement_mode(
+            ctx,
+            config_path=tmp_path / "candidate.cluster.toml",
+        )
+
+
+def test_gb10_prep_explicit_legacy_profile_remains_legacy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx, profile = _external_authority_profile(tmp_path, monkeypatch)
+    profile.write_text('environment = "staging"\n', encoding="utf-8")
+
+    assert not _external_authority_retirement_mode(
+        ctx,
+        config_path=tmp_path / "candidate.cluster.toml",
+    )
 
 
 def test_gb10_prep_uses_candidate_hosts_and_ssh_when_runner_is_stale(

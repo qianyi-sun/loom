@@ -52,7 +52,11 @@ child_accounts = [
   "loom-dev-hongjian",
   "loom-dev-devansh",
 ]
-users = ["qianyi", "hongjian", "devansh"]
+users = [
+  "loom-sandbox-qianyi",
+  "loom-sandbox-hongjian",
+  "loom-sandbox-devansh",
+]
 fairshare = 1
 qos = "loom-dev"
 qos_priority = 0

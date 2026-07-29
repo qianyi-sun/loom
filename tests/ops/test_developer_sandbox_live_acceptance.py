@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import importlib.util
@@ -8,12 +9,15 @@ import os
 import subprocess
 import sys
 import uuid
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from jsonschema import Draft202012Validator
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -30,6 +34,18 @@ def _load_module() -> Any:
 
 
 ACCEPTANCE = _load_module()
+
+
+def _candidate_map() -> dict[str, dict[str, str]]:
+    return {
+        "qianyi": {"sha": "a" * 40, "tree": "b" * 40},
+        "hongjian": {"sha": "c" * 40, "tree": "d" * 40},
+        "devansh": {"sha": "e" * 40, "tree": "f" * 40},
+    }
+
+
+def _start_session() -> dict[str, Any]:
+    return ACCEPTANCE.start_session(_candidate_map(), execute=True)
 
 
 def _run(*args: str | Path) -> subprocess.CompletedProcess[str]:
@@ -53,14 +69,15 @@ def _iso(minutes: int, seconds: int = 0) -> str:
 PHASE_BOUNDS = {
     "preflight": (0, 1),
     "baseline": (1, 2),
-    "large_batch_burst": (2, 4),
-    "fairness_contention": (4, 34),
-    "mixed_non_loom": (34, 36),
-    "cancel_cleanup": (36, 37),
-    "ttl_cleanup": (37, 38),
-    "submit_host_restart": (38, 39),
-    "worker_crash": (39, 40),
-    "final_drain": (40, 41),
+    "multi_candidate_overlap": (2, 3),
+    "large_batch_burst": (3, 5),
+    "fairness_contention": (5, 35),
+    "mixed_non_loom": (35, 37),
+    "cancel_cleanup": (37, 38),
+    "ttl_cleanup": (38, 39),
+    "submit_host_restart": (39, 40),
+    "worker_crash": (40, 41),
+    "final_drain": (41, 42),
 }
 
 
@@ -72,53 +89,57 @@ def _request_id(index: int) -> str:
     return str(uuid.UUID(int=index))
 
 
-def _runtime_receipts(candidate: str, tree: str) -> list[dict[str, Any]]:
+def _runtime_receipts(
+    sandbox: str,
+    candidate: str,
+    tree: str,
+) -> list[dict[str, Any]]:
     receipts: list[dict[str, Any]] = []
-    for sandbox_index, sandbox in enumerate(ACCEPTANCE.SANDBOXES, start=1):
-        previous: str | None = None
-        for generation, minute in enumerate((0, 10, 20, 30, 40), start=1):
-            collected_at = _iso(minute)
-            expires_at = _iso(minute + 15)
-            fleet_nodes = (
-                "oldlab-1",
-                "oldlab-2",
-                "oldlab-3",
-                "oldlab-4",
-                "oldlab-5",
-                "trt-gb10-1",
-                "trt-gb10-2",
-                "trt-gb10-3",
-                "trt-gb10-4",
-                "trt-gb10-5",
-                "trt-gb10-6",
-                "trt-gb10-8",
-                "trt-gb10-9",
-                "trt-gb10-10",
-                "trt-gb10-11",
-                "trt-gb10-12",
-                "trt-gb10-13",
-                "trt-gb10-14",
-                "trt-gb10-15",
-            )
-            fleet_unsigned = {
-                "schema_version": 1,
-                "sandbox": sandbox,
-                "candidate_sha": candidate,
-                "generated_at": collected_at,
-                "expires_at": expires_at,
-                "eligible_nodes": list(fleet_nodes),
-                "bundle_generation": {"candidate_sha": candidate},
-                "server": {
-                    "node": "oldlab-2",
-                    "unit_active": True,
-                    "active_candidate_sha": candidate,
-                },
-                "nodes": {
-                    node: {"candidate_sha": candidate} for node in fleet_nodes
-                },
-            }
-            fleet_proof = dict(fleet_unsigned)
-            fleet_proof["payload_sha256"] = "sha256:" + hashlib.sha256(
+    sandbox_index = ACCEPTANCE.SANDBOXES.index(sandbox) + 1
+    previous: str | None = None
+    for generation, minute in enumerate((0, 10, 20, 30, 40), start=1):
+        collected_at = _iso(minute)
+        expires_at = _iso(minute + 15)
+        fleet_nodes = (
+            "oldlab-1",
+            "oldlab-2",
+            "oldlab-3",
+            "oldlab-4",
+            "oldlab-5",
+            "trt-gb10-1",
+            "trt-gb10-2",
+            "trt-gb10-3",
+            "trt-gb10-4",
+            "trt-gb10-5",
+            "trt-gb10-6",
+            "trt-gb10-8",
+            "trt-gb10-9",
+            "trt-gb10-10",
+            "trt-gb10-11",
+            "trt-gb10-12",
+            "trt-gb10-13",
+            "trt-gb10-14",
+            "trt-gb10-15",
+        )
+        fleet_unsigned = {
+            "schema_version": 1,
+            "sandbox": sandbox,
+            "candidate_sha": candidate,
+            "generated_at": collected_at,
+            "expires_at": expires_at,
+            "eligible_nodes": list(fleet_nodes),
+            "bundle_generation": {"candidate_sha": candidate},
+            "server": {
+                "node": "oldlab-2",
+                "unit_active": True,
+                "active_candidate_sha": candidate,
+            },
+            "nodes": {node: {"candidate_sha": candidate} for node in fleet_nodes},
+        }
+        fleet_proof = dict(fleet_unsigned)
+        fleet_proof["payload_sha256"] = (
+            "sha256:"
+            + hashlib.sha256(
                 json.dumps(
                     fleet_unsigned,
                     sort_keys=True,
@@ -126,102 +147,103 @@ def _runtime_receipts(candidate: str, tree: str) -> list[dict[str, Any]]:
                     ensure_ascii=True,
                 ).encode(),
             ).hexdigest()
-            domains = {
-                domain: {
-                    "manifest_path": (
-                        f"/var/lib/loom-developer-domain-attestations/"
-                        f"{sandbox}/{candidate}/{domain}.json"
-                    ),
-                    "signature_path": (
-                        f"/var/lib/loom-developer-domain-attestations/"
-                        f"{sandbox}/{candidate}/{domain}.sig"
-                    ),
-                    "payload_sha256": f"{sandbox_index * 100 + generation:064x}",
-                    "signature_sha256": f"{sandbox_index * 1000 + generation:064x}",
-                    "key_id": f"{sandbox_index * 10000 + generation:064x}",
-                    "generation": sandbox_index * 100 + generation,
-                    "published_at": collected_at,
-                    "expires_at": expires_at,
-                }
-                for domain in ACCEPTANCE.POOLS
+        )
+        domains = {
+            domain: {
+                "manifest_path": (
+                    f"/var/lib/loom-developer-domain-attestations/"
+                    f"{sandbox}/{candidate}/{domain}.json"
+                ),
+                "signature_path": (
+                    f"/var/lib/loom-developer-domain-attestations/"
+                    f"{sandbox}/{candidate}/{domain}.sig"
+                ),
+                "payload_sha256": f"{sandbox_index * 100 + generation:064x}",
+                "signature_sha256": f"{sandbox_index * 1000 + generation:064x}",
+                "key_id": f"{sandbox_index * 10000 + generation:064x}",
+                "generation": sandbox_index * 100 + generation,
+                "published_at": collected_at,
+                "expires_at": expires_at,
             }
-            combined_unsigned = {
-                "schema_version": 1,
-                "kind": "loom.developer-runtime-combined-activation",
+            for domain in ACCEPTANCE.POOLS
+        }
+        combined_unsigned = {
+            "schema_version": 1,
+            "kind": "loom.developer-runtime-combined-activation",
+            "sandbox": sandbox,
+            "candidate_sha": candidate,
+            "candidate_tree": tree,
+            "collector": {
+                "hostname": ACCEPTANCE.SUBMIT_HOST,
+                "collected_at": collected_at,
+                "expires_at": expires_at,
+            },
+            "fleet_attestation": {
+                "path": (
+                    "/var/lib/loom-developer-sandbox-links/attestations/"
+                    f"{sandbox}/{candidate}/fleet.json"
+                ),
+                "payload_sha256": fleet_proof["payload_sha256"],
+                "generated_at": collected_at,
+                "expires_at": expires_at,
+            },
+            "domains": domains,
+        }
+        combined = dict(combined_unsigned)
+        combined["payload_sha256"] = hashlib.sha256(
+            json.dumps(
+                combined_unsigned,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode(),
+        ).hexdigest()
+        wrapper_unsigned = {
+            "schema_version": 1,
+            "kind": "loom.developer-runtime-attestation-renewal",
+            "sandbox": sandbox,
+            "candidate_sha": candidate,
+            "candidate_tree": tree,
+            "renewal_generation": generation,
+            "previous_payload_sha256": previous,
+            "collected_at": collected_at,
+            "expires_at": expires_at,
+            "domain_generations": {
+                domain: domains[domain]["generation"] for domain in ACCEPTANCE.POOLS
+            },
+            "fleet_attestation": fleet_proof,
+            "combined_receipt": combined,
+        }
+        digest = hashlib.sha256(
+            json.dumps(
+                wrapper_unsigned,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode(),
+        ).hexdigest()
+        receipts.append(
+            {
                 "sandbox": sandbox,
                 "candidate_sha": candidate,
                 "candidate_tree": tree,
-                "collector": {
-                    "hostname": ACCEPTANCE.SUBMIT_HOST,
-                    "collected_at": collected_at,
-                    "expires_at": expires_at,
-                },
-                "fleet_attestation": {
-                    "path": (
-                        "/var/lib/loom-developer-sandbox-links/attestations/"
-                        f"{sandbox}/{candidate}/fleet.json"
-                    ),
-                    "payload_sha256": fleet_proof["payload_sha256"],
-                    "generated_at": collected_at,
-                    "expires_at": expires_at,
-                },
-                "domains": domains,
-            }
-            combined = dict(combined_unsigned)
-            combined["payload_sha256"] = hashlib.sha256(
-                json.dumps(
-                    combined_unsigned,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    ensure_ascii=True,
-                ).encode(),
-            ).hexdigest()
-            wrapper_unsigned = {
-                "schema_version": 1,
-                "kind": "loom.developer-runtime-attestation-renewal",
-                "sandbox": sandbox,
-                "candidate_sha": candidate,
-                "candidate_tree": tree,
+                "path": str(
+                    ACCEPTANCE.RUNTIME_ATTESTATION_ROOT
+                    / sandbox
+                    / candidate
+                    / "renewals"
+                    / f"{generation:020d}-{digest}.json",
+                ),
                 "renewal_generation": generation,
                 "previous_payload_sha256": previous,
                 "collected_at": collected_at,
                 "expires_at": expires_at,
-                "domain_generations": {
-                    domain: domains[domain]["generation"] for domain in ACCEPTANCE.POOLS
-                },
-                "fleet_attestation": fleet_proof,
-                "combined_receipt": combined,
-            }
-            digest = hashlib.sha256(
-                json.dumps(
-                    wrapper_unsigned,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    ensure_ascii=True,
-                ).encode(),
-            ).hexdigest()
-            receipts.append(
-                {
-                    "sandbox": sandbox,
-                    "candidate_sha": candidate,
-                    "candidate_tree": tree,
-                    "path": str(
-                        ACCEPTANCE.RUNTIME_ATTESTATION_ROOT
-                        / sandbox
-                        / candidate
-                        / "renewals"
-                        / f"{generation:020d}-{digest}.json",
-                    ),
-                    "renewal_generation": generation,
-                    "previous_payload_sha256": previous,
-                    "collected_at": collected_at,
-                    "expires_at": expires_at,
-                    "payload_sha256": digest,
-                    "domain_generations": wrapper_unsigned["domain_generations"],
-                    "_wrapper": {**wrapper_unsigned, "payload_sha256": digest},
-                },
-            )
-            previous = digest
+                "payload_sha256": digest,
+                "domain_generations": wrapper_unsigned["domain_generations"],
+                "_wrapper": {**wrapper_unsigned, "payload_sha256": digest},
+            },
+        )
+        previous = digest
     return receipts
 
 
@@ -235,6 +257,41 @@ def _patch_live_host(
         "RUNTIME_ATTESTATION_ROOT",
         tmp_path / "runtime-attestations",
     )
+    monkeypatch.setattr(
+        ACCEPTANCE,
+        "CAPACITY_OBSERVATION_ROOT",
+        tmp_path / "authority/capacity",
+    )
+    monkeypatch.setattr(
+        ACCEPTANCE,
+        "SERVICE_STATE_ROOT",
+        tmp_path / "authority/services",
+    )
+    monkeypatch.setattr(
+        ACCEPTANCE,
+        "LIVE_AUTHORITY_ROOT",
+        tmp_path / "authority/live",
+    )
+    monkeypatch.setattr(
+        ACCEPTANCE,
+        "PROMOTION_AUTHORITY_RECEIPT",
+        tmp_path / "authority/promotion/promotion.json",
+    )
+    monkeypatch.setattr(
+        ACCEPTANCE,
+        "PLATFORM_HEALTH_AUTHORITY_ROOT",
+        tmp_path / "authority/platform-health",
+    )
+    monkeypatch.setattr(
+        ACCEPTANCE,
+        "STAGING_PRESSURE_PUBLISHED_ROOT",
+        tmp_path / "authority/staging-pressure",
+    )
+    monkeypatch.setattr(
+        ACCEPTANCE,
+        "STAGING_PRESSURE_PUBLIC_KEY",
+        tmp_path / "authority/staging-pressure-key/authority-public.pem",
+    )
     monkeypatch.setattr(ACCEPTANCE, "REQUIRED_OWNER_UID", os.getuid())
     monkeypatch.setattr(ACCEPTANCE, "REQUIRED_OWNER_GID", os.getgid())
     monkeypatch.setattr(ACCEPTANCE.os, "geteuid", lambda: 0)
@@ -243,6 +300,544 @@ def _patch_live_host(
         "gethostname",
         lambda: f"{ACCEPTANCE.SUBMIT_HOST}.internal",
     )
+
+
+def _write_authority_json(path: Path, root: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    current = path.parent
+    while True:
+        if current == root or root in current.parents:
+            current.chmod(0o700)
+        if current == root:
+            break
+        current = current.parent
+    path.write_bytes(ACCEPTANCE._canonical_bytes(payload))
+    path.chmod(0o600)
+
+
+def _write_authority_bytes(path: Path, root: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    current = path.parent
+    while True:
+        if current == root or root in current.parents:
+            current.chmod(0o700)
+        if current == root:
+            break
+        current = current.parent
+    path.write_bytes(payload)
+    path.chmod(0o600)
+
+
+def _write_overlap_authority_sources(
+    evidence: dict[str, Any],
+    pool: str,
+    observation: dict[str, Any],
+) -> tuple[Path, Path, Path]:
+    sandbox = observation["sandbox"]
+    sample = next(
+        row
+        for row in evidence["capacity_samples"]
+        if row["phase"] == "multi_candidate_overlap"
+        and row["sandbox"] == sandbox
+        and row["pool"] == pool
+    )
+    capacity_unsigned = {
+        "sandbox": sandbox,
+        "pool_name": pool,
+        "candidate_sha": observation["candidate_sha"],
+        "request_id": sample["request_id"],
+        "lease_epoch": sample["lease_epoch"],
+        "capacity_lease_state": "active",
+        "observed_at": sample["observed_at"],
+        "observation_sequence": sample["observation_sequence"],
+        "pending_slots": sample["pending_slots"],
+        "active_slots": sample["active_slots"],
+        "draining_slots": sample["draining_slots"],
+        "terminal_slots": sample["terminal_slots"],
+    }
+    capacity = {
+        **capacity_unsigned,
+        "payload_sha256": hashlib.sha256(
+            ACCEPTANCE._canonical_digest_bytes(capacity_unsigned),
+        ).hexdigest(),
+    }
+    capacity_document = [capacity]
+    sandbox_state = {
+        "schema_version": 1,
+        "sandbox": sandbox,
+        "compose_project": f"loom-sandbox-{sandbox}",
+        "candidate_sha": observation["candidate_sha"],
+        "candidate_tree": observation["candidate_tree"],
+        "source_repo": "/srv/loom/source",
+        "updated_at": observation["observed_at"],
+    }
+    live_observation = {
+        "schema_version": 1,
+        "kind": "loom.developer-sandbox.live-overlap-observation",
+        "source_host": ACCEPTANCE.POOL_AUTHORITY_HOSTS[pool],
+        "observed_at": observation["observed_at"],
+        "sandbox": sandbox,
+        "pool": pool,
+        "candidate_sha": observation["candidate_sha"],
+        "candidate_tree": observation["candidate_tree"],
+        "capacity_observation_sha256": hashlib.sha256(
+            ACCEPTANCE._canonical_bytes(capacity_document),
+        ).hexdigest(),
+        "sandbox_state_sha256": hashlib.sha256(
+            ACCEPTANCE._canonical_bytes(sandbox_state),
+        ).hexdigest(),
+        "capacity_sample": sample,
+        "job_readback": observation["job_readback"],
+        "service_readback": observation["service_readback"],
+    }
+    paths = ACCEPTANCE._overlap_source_paths(
+        sandbox=sandbox,
+        pool=pool,
+        candidate_sha=observation["candidate_sha"],
+        job_id=observation["job_id"],
+    )
+    _write_authority_json(
+        paths[0],
+        ACCEPTANCE.CAPACITY_OBSERVATION_ROOT,
+        capacity_document,
+    )
+    _write_authority_json(
+        paths[1],
+        ACCEPTANCE.SERVICE_STATE_ROOT,
+        sandbox_state,
+    )
+    _write_authority_json(
+        paths[2],
+        ACCEPTANCE.LIVE_AUTHORITY_ROOT,
+        live_observation,
+    )
+    return paths
+
+
+def _staging_pressure_evidence(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    authority_session_id = "00000000-0000-0000-0000-000000000001"
+    acceptance_session_id = evidence["session"]["id"]
+    promotion = evidence["promotion_candidate"]
+    owned_job = {
+        "registry_id": "00000000-0000-0000-0000-000000000006",
+        "job_id": "12345",
+        "worker_id": "00000000-0000-0000-0000-000000000007",
+        "compose_project": "loom-pressure-acceptance",
+        "sandbox_identity": "qianyi",
+        "candidate_sha": promotion["sha"],
+        "state": "running",
+        "pending_reason": None,
+        "acceptance_owned": True,
+    }
+    peer = {
+        "job_id": "99999",
+        "user": "researcher",
+        "account": "research",
+        "qos": "normal",
+        "state": "RUNNING",
+        "nodes": "trt-gb10-2",
+        "name": "peer",
+    }
+    owned_slurm = {
+        "job_id": "12345",
+        "user": "loom-staging-worker",
+        "account": "loom-staging",
+        "qos": "loom-staging",
+        "state": "RUNNING",
+        "nodes": "trt-gb10-1",
+        "name": "loom-pressure",
+    }
+
+    def snapshot(phase: str) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "schema_version": 1,
+            "kind": "loom.staging-pressure-reclaim.observe-result",
+            "submit_host": "trt-gb10-1",
+            "environment": "staging",
+            "pool": "gb10",
+            "partition": "gb10",
+            "account": "loom-staging",
+            "qos": "loom-staging",
+            "phase": phase,
+            "session_id": authority_session_id,
+            "acceptance_session_id": acceptance_session_id,
+            "candidate_sha": promotion["sha"],
+            "candidate_tree": promotion["tree"],
+            "observed_at": _iso(42, 20 if phase == "before" else 25),
+            "jobs": (
+                sorted([owned_slurm, peer], key=lambda row: row["job_id"])
+                if phase == "before"
+                else [peer]
+            ),
+        }
+        payload["snapshot_sha256"] = hashlib.sha256(
+            ACCEPTANCE._canonical_bytes(payload),
+        ).hexdigest()
+        return payload
+
+    authority_receipt = {
+        "schema_version": 1,
+        "kind": "loom.staging-pressure-reclaim.receipt",
+        "environment": "staging",
+        "pool": "gb10",
+        "partition": "gb10",
+        "source_host": ACCEPTANCE.STAGING_PRESSURE_SOURCE_HOST,
+        "submit_host": "trt-gb10-1",
+        "sequence": 1,
+        "session_id": authority_session_id,
+        "acceptance_session_id": acceptance_session_id,
+        "session_sha256": "2" * 64,
+        "candidate_sha": promotion["sha"],
+        "candidate_tree": promotion["tree"],
+        "issued_at": _iso(42, 30),
+        "evidence": {
+            "registry_before": [owned_job],
+            "interrupted_trial_before": {
+                "id": "00000000-0000-0000-0000-000000000005",
+                "team_id": "00000000-0000-0000-0000-000000000002",
+                "task_id": "pressure-interrupted",
+                "state": "running",
+                "failure_reason": None,
+                "attempt_count": 1,
+            },
+            "claim_probe_before": {
+                "id": "00000000-0000-0000-0000-000000000003",
+                "team_id": "00000000-0000-0000-0000-000000000002",
+                "task_id": "pressure-claim-probe",
+                "state": "queued",
+                "failure_reason": None,
+                "attempt_count": 0,
+            },
+            "slurm_before": snapshot("before"),
+            "foreign_peer_snapshot": [peer],
+            "pressure_on": {
+                "action": "draining",
+                "actuator": "slurm",
+                "environment": "staging",
+                "pool_name": "gb10",
+                "has_pressure": True,
+                "new_staging_claims_allowed": False,
+                "drain_intent_active": True,
+                "grace_action": "cancel_retryable",
+            },
+            "claim_fence": {"status": 204, "trial_id": None},
+            "registry_terminal": [
+                {
+                    **owned_job,
+                    "state": "cancelled",
+                    "pending_reason": "cancelled by prod-pressure reclaim",
+                },
+            ],
+            "interrupted_trial_retryable": {
+                "id": "00000000-0000-0000-0000-000000000005",
+                "team_id": "00000000-0000-0000-0000-000000000002",
+                "task_id": "pressure-interrupted",
+                "state": "queued",
+                "failure_reason": "prod_capacity_pressure",
+                "attempt_count": 1,
+            },
+            "slurm_during": snapshot("during"),
+            "pressure_off": {
+                "action": "recovered",
+                "actuator": "slurm",
+                "environment": "staging",
+                "pool_name": "gb10",
+                "has_pressure": False,
+                "new_staging_claims_allowed": True,
+                "drain_intent_active": False,
+                "grace_action": "none",
+            },
+            "claim_recovered": {
+                "trial_id": "00000000-0000-0000-0000-000000000003",
+                "state": "claimed",
+            },
+            "claim_probe_requeued": {
+                "id": "00000000-0000-0000-0000-000000000003",
+                "team_id": "00000000-0000-0000-0000-000000000002",
+                "task_id": "pressure-claim-probe",
+                "state": "queued",
+                "failure_reason": "node_setup_health",
+                "attempt_count": 0,
+            },
+            "slurm_after": snapshot("after"),
+            "foreign_peer_zero_impact": True,
+        },
+    }
+    return {
+        "authority_evidence": authority_receipt,
+        "trusted_receipt": {
+            "receipt_sha256": "0" * 64,
+            "authority_session_id": authority_session_id,
+            "authority_receipt_sha256": hashlib.sha256(
+                ACCEPTANCE._canonical_bytes(authority_receipt),
+            ).hexdigest(),
+            "authority_signature_sha256": "3" * 64,
+            "authority_key_id": "4" * 64,
+            "sequence": 1,
+            "source_host": ACCEPTANCE.STAGING_PRESSURE_SOURCE_HOST,
+            "observed_at": authority_receipt["issued_at"],
+        },
+    }
+
+
+def _record_trusted_receipts(
+    session_id: str,
+    evidence: dict[str, Any],
+) -> None:
+    for window in evidence["overlap_windows"]:
+        pool = window["pool"]
+        for observation in window["observations"]:
+            sandbox = observation["sandbox"]
+            _write_overlap_authority_sources(evidence, pool, observation)
+            receipt = ACCEPTANCE.record_overlap_receipt(
+                session_id,
+                sandbox,
+                pool,
+                observation["job_id"],
+                execute=True,
+            )
+            observation["trusted_receipt"] = {
+                "sequence": receipt["sequence"],
+                "receipt_sha256": receipt["receipt_sha256"],
+            }
+
+    promotion = evidence["promotion_candidate"]
+    promotion_reference = promotion["trusted_receipt"]
+    authority = {
+        "schema_version": 1,
+        "kind": "loom.staging-rollout.acceptance",
+        "source_host": ACCEPTANCE.PROMOTION_SOURCE_HOST,
+        "rollout_id": promotion_reference["rollout_id"],
+        "candidate_sha": promotion["sha"],
+        "candidate_tree": promotion["tree"],
+        "result": "pass",
+        "observed_at": promotion_reference["observed_at"],
+    }
+    _write_authority_json(
+        ACCEPTANCE.PROMOTION_AUTHORITY_RECEIPT,
+        ACCEPTANCE.PROMOTION_AUTHORITY_RECEIPT.parent,
+        authority,
+    )
+    receipt = ACCEPTANCE.record_promotion_receipt(session_id, execute=True)
+    promotion["trusted_receipt"] = {
+        "receipt_sha256": receipt["receipt_sha256"],
+        "source_host": receipt["source_host"],
+        "rollout_id": receipt["rollout_id"],
+        "result": receipt["result"],
+        "observed_at": receipt["observed_at"],
+    }
+
+    pressure = _staging_pressure_evidence(evidence)
+    authority_receipt = pressure["authority_evidence"]
+    authority_session_id = authority_receipt["session_id"]
+    private_key = Ed25519PrivateKey.generate()
+    public_key = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    _write_authority_bytes(
+        ACCEPTANCE.STAGING_PRESSURE_PUBLIC_KEY,
+        ACCEPTANCE.STAGING_PRESSURE_PUBLIC_KEY.parent,
+        public_key,
+    )
+    signature_bytes = private_key.sign(
+        ACCEPTANCE._canonical_bytes(authority_receipt),
+    )
+    signature = {
+        "schema_version": 1,
+        "kind": "loom.staging-pressure-reclaim.receipt.signature",
+        "session_id": authority_session_id,
+        "receipt_sha256": hashlib.sha256(
+            ACCEPTANCE._canonical_bytes(authority_receipt),
+        ).hexdigest(),
+        "key_id": hashlib.sha256(public_key).hexdigest(),
+        "signature_base64": base64.b64encode(signature_bytes).decode("ascii"),
+        "signature_sha256": hashlib.sha256(signature_bytes).hexdigest(),
+    }
+    published = {
+        "schema_version": 1,
+        "kind": "loom.staging-pressure-reclaim.published-receipt",
+        "acceptance_session_id": session_id,
+        "authority_session_id": authority_session_id,
+        "candidate_sha": promotion["sha"],
+        "candidate_tree": promotion["tree"],
+        "source_host": ACCEPTANCE.STAGING_PRESSURE_SOURCE_HOST,
+        "published_at": authority_receipt["issued_at"],
+        "receipt": authority_receipt,
+        "signature": signature,
+    }
+    authority_path = ACCEPTANCE._pressure_authority_path(
+        session_id,
+        authority_session_id,
+    )
+    _write_authority_json(
+        authority_path,
+        ACCEPTANCE.STAGING_PRESSURE_PUBLISHED_ROOT,
+        published,
+    )
+    pressure_receipt = ACCEPTANCE.record_staging_pressure_receipt(
+        session_id,
+        authority_session_id,
+        execute=True,
+    )
+    evidence["staging_pressure_reclaim"] = {
+        "authority_evidence": authority_receipt,
+        "trusted_receipt": {
+            "receipt_sha256": pressure_receipt["receipt_sha256"],
+            "authority_session_id": pressure_receipt["authority_session_id"],
+            "authority_receipt_sha256": pressure_receipt["authority_receipt_sha256"],
+            "authority_signature_sha256": pressure_receipt["authority_signature_sha256"],
+            "authority_key_id": pressure_receipt["authority_key_id"],
+            "sequence": pressure_receipt["sequence"],
+            "source_host": pressure_receipt["source_host"],
+            "observed_at": pressure_receipt["observed_at"],
+        },
+    }
+
+    platform_authority = _platform_health_authority(evidence)
+    platform_path = (
+        ACCEPTANCE.PLATFORM_HEALTH_AUTHORITY_ROOT / "sessions" / session_id / "evidence.json"
+    )
+    _write_authority_json(
+        platform_path,
+        ACCEPTANCE.PLATFORM_HEALTH_AUTHORITY_ROOT,
+        platform_authority,
+    )
+    platform_receipt = ACCEPTANCE.record_platform_health_receipt(
+        session_id,
+        execute=True,
+    )
+    evidence["platform_health"] = {
+        "authority_evidence": platform_authority,
+        "trusted_receipt": {
+            "receipt_sha256": platform_receipt["receipt_sha256"],
+            "authority_payload_sha256": platform_receipt["authority_payload_sha256"],
+            "source_host": platform_receipt["source_host"],
+            "observed_at": platform_receipt["observed_at"],
+        },
+    }
+
+
+def _platform_health_authority(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    mixed_jobs = [dict(row) for row in evidence["runtime_envelopes"]]
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "kind": "loom.developer-sandbox.platform-health-evidence",
+        "session_id": evidence["session"]["id"],
+        "candidates": {
+            sandbox: {
+                "sha": evidence["candidates"][sandbox]["sha"],
+                "tree": evidence["candidates"][sandbox]["tree"],
+            }
+            for sandbox in ACCEPTANCE.SANDBOXES
+        },
+        "collector_host": ACCEPTANCE.SUBMIT_HOST,
+        "checkpoints": [
+            {
+                "sequence": sequence,
+                "checkpoint": checkpoint,
+                "checkpoint_group": (
+                    "baseline"
+                    if checkpoint == "baseline"
+                    else "after"
+                    if checkpoint == "final_drain"
+                    else "during"
+                ),
+                "observed_at": _iso(35 + sequence),
+                "payload_sha256": f"{sequence:064x}",
+            }
+            for sequence, checkpoint in enumerate(
+                (
+                    "baseline",
+                    "mixed_non_loom",
+                    "cancel_cleanup",
+                    "worker_crash",
+                    "final_drain",
+                ),
+                start=1,
+            )
+        ],
+        "mixed_jobs": mixed_jobs,
+        "cancelled_jobs": [
+            {
+                "job_id": "9001",
+                "sandbox": "qianyi",
+                "candidate_sha": evidence["candidates"]["qianyi"]["sha"],
+                "state": "CANCELLED",
+            },
+        ],
+        "crashed_jobs": [
+            {
+                "job_id": "9002",
+                "sandbox": "hongjian",
+                "candidate_sha": evidence["candidates"]["hongjian"]["sha"],
+                "state": "FAILED",
+            },
+        ],
+        "node_intervals": {
+            node: {
+                "cpu_busy_ratio": 0.3,
+                "minimum_memory_bytes_available": 32_000_000_000,
+                "read_bytes": 1024,
+                "write_bytes": 2048,
+            }
+            for node in ACCEPTANCE.EXPECTED_NODES
+        },
+        "policy_capacity": {
+            "oldlab": {
+                "max_slots": 20,
+                "requested_cpus": 8,
+                "requested_memory_mib": 32000,
+                "requested_concurrency": 4,
+                "container_cpus": 2,
+                "container_memory_mib": 8000,
+                "minimum_node_cpu_cores": 24,
+                "minimum_node_memory_bytes": 120 * 1024**3,
+            },
+            "gb10": {
+                "max_slots": 112,
+                "requested_cpus": 16,
+                "requested_memory_mib": 92000,
+                "requested_concurrency": 8,
+                "container_cpus": 2,
+                "container_memory_mib": 11500,
+                "reserved_cpu_cores_per_node": 4,
+                "reserved_memory_mib_per_node": 23000,
+                "minimum_node_cpu_cores": 20,
+                "minimum_node_memory_bytes": 115000 * 1024**2,
+            },
+        },
+        "zero_orphans": True,
+        "completed_at": _phase_observed_at("final_drain"),
+        "expires_at": _iso(PHASE_BOUNDS["final_drain"][0] + 15, 30),
+    }
+    payload["payload_sha256"] = hashlib.sha256(
+        ACCEPTANCE._canonical_bytes(payload),
+    ).hexdigest()
+    return payload
+
+
+@pytest.mark.parametrize("attack", ["missing", "short", "long"])
+def test_platform_health_authority_requires_exact_bounded_expiry(attack: str) -> None:
+    evidence = _evidence()
+    authority = _platform_health_authority(evidence)
+    if attack == "missing":
+        del authority["expires_at"]
+    elif attack == "short":
+        authority["expires_at"] = _iso(PHASE_BOUNDS["final_drain"][0] + 14, 30)
+    else:
+        authority["expires_at"] = _iso(PHASE_BOUNDS["final_drain"][0] + 16, 30)
+    unsigned = {key: value for key, value in authority.items() if key != "payload_sha256"}
+    authority["payload_sha256"] = hashlib.sha256(
+        ACCEPTANCE._canonical_bytes(unsigned),
+    ).hexdigest()
+
+    with pytest.raises(ACCEPTANCE.AcceptanceError):
+        ACCEPTANCE._validate_platform_health_authority(
+            authority,
+            session_id=evidence["session"]["id"],
+            candidates=evidence["candidates"],
+        )
 
 
 def _runtime_envelope(
@@ -256,11 +851,11 @@ def _runtime_envelope(
     job_path = f"/system.slice/slurmstepd.scope/job_{job_id}"
     if pool == "gb10":
         allocation = {
-            "cpu_cores": 20,
-            "memory_bytes": 115_000_000_000,
+            "cpu_cores": 16,
+            "memory_bytes": 92_000_000_000,
             "pids": 65_536,
             "gpu_count": 1,
-            "tres": "cpu=20,mem=115000M,gres/gpu=1",
+            "tres": "cpu=16,mem=92000M,gres/gpu=1",
             "exclusive": False,
         }
         node = "trt-gb10-1"
@@ -316,21 +911,33 @@ def _runtime_envelope(
 
 
 def _evidence() -> dict[str, Any]:
-    candidate = "a" * 40
-    tree = "b" * 40
-    session_id = "c" * 32
+    candidate_ids = {
+        "qianyi": {"sha": "a" * 40, "tree": "b" * 40},
+        "hongjian": {"sha": "c" * 40, "tree": "d" * 40},
+        "devansh": {"sha": "e" * 40, "tree": "f" * 40},
+    }
+    session_id = "1" * 32
+    candidates: dict[str, Any] = {}
+    for sandbox in ACCEPTANCE.SANDBOXES:
+        identity = candidate_ids[sandbox]
+        receipts = _runtime_receipts(sandbox, identity["sha"], identity["tree"])
+        for receipt in receipts:
+            receipt.pop("_wrapper")
+        candidates[sandbox] = {**identity, "runtime_receipts": receipts}
+
     phases = []
-    for index, phase in enumerate(ACCEPTANCE.PHASES):
+    for index, (phase, sandbox) in enumerate(ACCEPTANCE.PHASE_CHECKPOINTS):
         phase_start, phase_finish = PHASE_BOUNDS[phase]
-        duration_seconds = (phase_finish - phase_start) * 60
+        identity = candidate_ids[sandbox]
         phases.append(
             {
                 "phase": phase,
-                "candidate_sha": candidate,
-                "candidate_tree": tree,
+                "sandbox": sandbox,
+                "candidate_sha": identity["sha"],
+                "candidate_tree": identity["tree"],
                 "started_at": _iso(phase_start),
                 "finished_at": _iso(phase_finish),
-                "deadline_seconds": duration_seconds,
+                "deadline_seconds": (phase_finish - phase_start) * 60,
                 "status": "pass",
                 "checkpoint_sha256": f"{index + 1:064x}",
             },
@@ -338,17 +945,52 @@ def _evidence() -> dict[str, Any]:
     capacity_samples = []
     pair_index = 1
     for sandbox in ACCEPTANCE.SANDBOXES:
+        identity = candidate_ids[sandbox]
         for pool in ACCEPTANCE.POOLS:
             for phase_index, phase in enumerate(ACCEPTANCE.CAPACITY_PHASES, start=1):
                 final = phase == "final_drain"
+                job_id = str(6000 + pair_index * 100 + phase_index)
+                node = "trt-eai-oldlab-1" if pool == "oldlab" else "trt-gb10-1"
+                allocation = (
+                    {
+                        "cpu_cores": 8,
+                        "memory_bytes": 32_000_000_000,
+                        "pids": 32_768,
+                        "gpu_count": 0,
+                        "tres": "cpu=8,mem=32000M",
+                        "exclusive": False,
+                    }
+                    if pool == "oldlab"
+                    else {
+                        "cpu_cores": 16,
+                        "memory_bytes": 92_000_000_000,
+                        "pids": 65_536,
+                        "gpu_count": 1,
+                        "tres": "cpu=16,mem=92000M,gres/gpu=1",
+                        "exclusive": False,
+                    }
+                )
                 capacity_samples.append(
                     {
                         "phase": phase,
-                        "observed_at": _phase_observed_at(phase, pair_index),
+                        "observed_at": _phase_observed_at(
+                            phase,
+                            30 if phase == "multi_candidate_overlap" else pair_index,
+                        ),
                         "sandbox": sandbox,
                         "pool": pool,
-                        "candidate_sha": candidate,
-                        "candidate_tree": tree,
+                        "candidate_sha": identity["sha"],
+                        "candidate_tree": identity["tree"],
+                        "job_id": job_id,
+                        "account": f"loom-dev-{sandbox}",
+                        "user": ACCEPTANCE.SANDBOX_SERVICE_USERS[sandbox],
+                        "job_name": ACCEPTANCE._expected_job_name(
+                            sandbox,
+                            identity["sha"],
+                            node,
+                        ),
+                        "node": node,
+                        "allocation": allocation,
                         "request_id": _request_id(pair_index),
                         "lease_epoch": 1,
                         "observation_sequence": phase_index,
@@ -364,9 +1006,16 @@ def _evidence() -> dict[str, Any]:
     runtime_envelopes = []
     index = 1
     for sandbox in ACCEPTANCE.SANDBOXES:
+        identity = candidate_ids[sandbox]
         for pool in ACCEPTANCE.POOLS:
             runtime_envelopes.append(
-                _runtime_envelope(sandbox, pool, index, candidate, tree),
+                _runtime_envelope(
+                    sandbox,
+                    pool,
+                    index,
+                    identity["sha"],
+                    identity["tree"],
+                ),
             )
             index += 1
     fairness = []
@@ -375,8 +1024,6 @@ def _evidence() -> dict[str, Any]:
             {
                 "pool": pool,
                 "phase": "fairness_contention",
-                "candidate_sha": candidate,
-                "candidate_tree": tree,
                 "started_at": _iso(PHASE_BOUNDS["fairness_contention"][0]),
                 "finished_at": _iso(PHASE_BOUNDS["fairness_contention"][1]),
                 "window_seconds": 1800,
@@ -385,6 +1032,8 @@ def _evidence() -> dict[str, Any]:
                 "participants": [
                     {
                         "sandbox": sandbox,
+                        "candidate_sha": candidate_ids[sandbox]["sha"],
+                        "candidate_tree": candidate_ids[sandbox]["tree"],
                         "requested_slots": 4,
                         "granted_slots_total": 8,
                         "grant_cycles": 2,
@@ -401,8 +1050,6 @@ def _evidence() -> dict[str, Any]:
         peer_workloads.append(
             {
                 "pool": pool,
-                "candidate_sha": candidate,
-                "candidate_tree": tree,
                 "job_id": "9001" if pool == "oldlab" else "9002",
                 "account": "research-peer",
                 "baseline": {
@@ -436,8 +1083,6 @@ def _evidence() -> dict[str, Any]:
     storage_io = [
         {
             "domain": pool,
-            "candidate_sha": candidate,
-            "candidate_tree": tree,
             "baseline_observed_at": _phase_observed_at("baseline"),
             "minimum_observed_at": _phase_observed_at("mixed_non_loom"),
             "after_observed_at": _phase_observed_at("final_drain"),
@@ -459,13 +1104,14 @@ def _evidence() -> dict[str, Any]:
     fault_recovery = []
     for index, event in enumerate(ACCEPTANCE.FAULTS, start=1):
         phase = ACCEPTANCE.FAULT_PHASES[event]
+        sandbox = ACCEPTANCE.SANDBOXES[(index - 1) % 3]
         fault_recovery.append(
             {
                 "event": event,
                 "phase": phase,
-                "candidate_sha": candidate,
-                "candidate_tree": tree,
-                "sandbox": ACCEPTANCE.SANDBOXES[(index - 1) % 3],
+                "candidate_sha": candidate_ids[sandbox]["sha"],
+                "candidate_tree": candidate_ids[sandbox]["tree"],
+                "sandbox": sandbox,
                 "pool": ACCEPTANCE.POOLS[(index - 1) % 2],
                 "request_id": _request_id(100 + index),
                 "injected_at": _phase_observed_at(phase, 10),
@@ -485,15 +1131,157 @@ def _evidence() -> dict[str, Any]:
                 },
             },
         )
-    runtime_receipts = _runtime_receipts(candidate, tree)
-    for receipt in runtime_receipts:
-        receipt.pop("_wrapper")
-    return {
-        "schema_version": 1,
-        "candidate": {
-            "sha": candidate,
-            "tree": tree,
-            "runtime_receipts": runtime_receipts,
+    overlap_windows = []
+    for pool_index, pool in enumerate(ACCEPTANCE.POOLS, start=1):
+        observations = []
+        for sandbox_index, sandbox in enumerate(ACCEPTANCE.SANDBOXES, start=1):
+            identity = candidate_ids[sandbox]
+            capacity_sample = next(
+                sample
+                for sample in capacity_samples
+                if sample["phase"] == "multi_candidate_overlap"
+                and sample["sandbox"] == sandbox
+                and sample["pool"] == pool
+            )
+            job_id = capacity_sample["job_id"]
+            node = capacity_sample["node"]
+            observed_at = _iso(2, 30)
+            service_unit = f"loom-developer-sandbox-{sandbox}.service"
+            job_name = ACCEPTANCE._expected_job_name(sandbox, identity["sha"], node)
+            job_readback = {
+                "sandbox": sandbox,
+                "pool": pool,
+                "candidate_sha": identity["sha"],
+                "candidate_tree": identity["tree"],
+                "job_id": job_id,
+                "account": f"loom-dev-{sandbox}",
+                "user": ACCEPTANCE.SANDBOX_SERVICE_USERS[sandbox],
+                "job_name": job_name,
+                "node": node,
+                "state": "RUNNING",
+                "allocation": capacity_sample["allocation"],
+                "observed_at": observed_at,
+            }
+            service_readback = {
+                "sandbox": sandbox,
+                "candidate_sha": identity["sha"],
+                "candidate_tree": identity["tree"],
+                "unit": service_unit,
+                "active_state": "active",
+                "sub_state": "running",
+                "observed_at": observed_at,
+            }
+            observations.append(
+                {
+                    "sandbox": sandbox,
+                    "candidate_sha": identity["sha"],
+                    "candidate_tree": identity["tree"],
+                    "active_candidate_sha": identity["sha"],
+                    "active_candidate_tree": identity["tree"],
+                    "service_unit": service_unit,
+                    "service_active": True,
+                    "service_readback": service_readback,
+                    "service_readback_sha256": hashlib.sha256(
+                        ACCEPTANCE._canonical_bytes(service_readback),
+                    ).hexdigest(),
+                    "job_id": job_id,
+                    "job_active": True,
+                    "slurm_account": f"loom-dev-{sandbox}",
+                    "slurm_user": ACCEPTANCE.SANDBOX_SERVICE_USERS[sandbox],
+                    "job_name": job_name,
+                    "job_readback": job_readback,
+                    "job_readback_sha256": hashlib.sha256(
+                        ACCEPTANCE._canonical_bytes(job_readback),
+                    ).hexdigest(),
+                    "capacity_binding": {
+                        "request_id": capacity_sample["request_id"],
+                        "lease_epoch": capacity_sample["lease_epoch"],
+                        "observation_sequence": capacity_sample["observation_sequence"],
+                        "sample_sha256": hashlib.sha256(
+                            ACCEPTANCE._canonical_bytes(capacity_sample),
+                        ).hexdigest(),
+                    },
+                    "trusted_receipt": {
+                        "sequence": (pool_index - 1) * len(ACCEPTANCE.SANDBOXES) + sandbox_index,
+                        "receipt_sha256": "0" * 64,
+                    },
+                    "node": node,
+                    "active_from": _iso(2, 5),
+                    "active_until": _iso(2, 55),
+                    "observed_at": observed_at,
+                },
+            )
+        overlap_windows.append(
+            {
+                "phase": "multi_candidate_overlap",
+                "pool": pool,
+                "started_at": _iso(2, 10),
+                "finished_at": _iso(2, 50),
+                "observations": observations,
+            },
+        )
+
+    bursts = []
+    for sandbox_index, sandbox in enumerate(ACCEPTANCE.SANDBOXES, start=1):
+        identity = candidate_ids[sandbox]
+        for pool_index, pool in enumerate(ACCEPTANCE.POOLS, start=1):
+            oldlab = pool == "oldlab"
+            nodes = (
+                ["trt-eai-oldlab-1", "trt-eai-oldlab-3"] if oldlab else ["trt-gb10-1", "trt-gb10-2"]
+            )
+            budget = ACCEPTANCE.POOL_SLOT_BUDGETS[pool]
+            bursts.append(
+                {
+                    "sandbox": sandbox,
+                    "pool": pool,
+                    "phase": "large_batch_burst",
+                    "candidate_sha": identity["sha"],
+                    "candidate_tree": identity["tree"],
+                    "started_at": _iso(PHASE_BOUNDS["large_batch_burst"][0]),
+                    "finished_at": _iso(PHASE_BOUNDS["large_batch_burst"][1]),
+                    "batch_id": _request_id(200 + sandbox_index * 10 + pool_index),
+                    "trial_count": 100,
+                    "completed_trials": 100,
+                    "failed_trials": 0,
+                    "cancelled_trials": 0,
+                    "duplicate_trial_ids": 0,
+                    "requested_slots": budget,
+                    "granted_slots": budget,
+                    "peak_active_slots": budget,
+                    "nodes": nodes,
+                    "node_trial_counts": {node: 50 for node in nodes},
+                },
+            )
+
+    promotion_phase = {
+        "phase": "promotion_staging_regression",
+        "candidate_sha": "7" * 40,
+        "candidate_tree": "8" * 40,
+        "started_at": _iso(42),
+        "finished_at": _iso(43),
+        "status": "pass",
+    }
+    promotion_checkpoint = hashlib.sha256(
+        ACCEPTANCE._canonical_bytes(promotion_phase),
+    ).hexdigest()
+
+    evidence = {
+        "schema_version": ACCEPTANCE.SCHEMA_VERSION,
+        "candidates": candidates,
+        "promotion_candidate": {
+            "sha": "7" * 40,
+            "tree": "8" * 40,
+            "staging_regression": {
+                **promotion_phase,
+                "checkpoint_sha256": promotion_checkpoint,
+            },
+            "trusted_receipt": {
+                "receipt_sha256": "0" * 64,
+                "source_host": ACCEPTANCE.PROMOTION_SOURCE_HOST,
+                "rollout_id": "rollout-1023",
+                "result": "pass",
+                "observed_at": _iso(42, 30),
+            },
         },
         "session": {
             "id": session_id,
@@ -513,14 +1301,17 @@ def _evidence() -> dict[str, Any]:
             "pending_slot_budgets": ACCEPTANCE.POOL_PENDING_BUDGETS.copy(),
         },
         "state_machine": phases,
+        "overlap_windows": overlap_windows,
         "cross_sandbox_negative": [
             {
                 "phase": "baseline",
                 "source": source,
                 "target": target,
                 "resource": resource,
-                "candidate_sha": candidate,
-                "candidate_tree": tree,
+                "source_candidate_sha": candidate_ids[source]["sha"],
+                "source_candidate_tree": candidate_ids[source]["tree"],
+                "target_candidate_sha": candidate_ids[target]["sha"],
+                "target_candidate_tree": candidate_ids[target]["tree"],
                 "observed_at": _phase_observed_at("baseline"),
                 "denied": True,
             }
@@ -530,52 +1321,7 @@ def _evidence() -> dict[str, Any]:
             for resource in ACCEPTANCE.CROSS_SANDBOX_RESOURCES
         ],
         "capacity_samples": capacity_samples,
-        "large_batch_bursts": [
-            {
-                "pool": "oldlab",
-                "phase": "large_batch_burst",
-                "candidate_sha": candidate,
-                "candidate_tree": tree,
-                "started_at": _iso(PHASE_BOUNDS["large_batch_burst"][0]),
-                "finished_at": _iso(PHASE_BOUNDS["large_batch_burst"][1]),
-                "batch_id": _request_id(201),
-                "trial_count": 100,
-                "completed_trials": 98,
-                "failed_trials": 2,
-                "cancelled_trials": 0,
-                "duplicate_trial_ids": 0,
-                "requested_slots": 20,
-                "granted_slots": 20,
-                "peak_active_slots": 20,
-                "nodes": ["trt-eai-oldlab-1", "trt-eai-oldlab-3"],
-                "node_trial_counts": {
-                    "trt-eai-oldlab-1": 50,
-                    "trt-eai-oldlab-3": 50,
-                },
-            },
-            {
-                "pool": "gb10",
-                "phase": "large_batch_burst",
-                "candidate_sha": candidate,
-                "candidate_tree": tree,
-                "started_at": _iso(PHASE_BOUNDS["large_batch_burst"][0]),
-                "finished_at": _iso(PHASE_BOUNDS["large_batch_burst"][1]),
-                "batch_id": _request_id(202),
-                "trial_count": 100,
-                "completed_trials": 100,
-                "failed_trials": 0,
-                "cancelled_trials": 0,
-                "duplicate_trial_ids": 0,
-                "requested_slots": 140,
-                "granted_slots": 140,
-                "peak_active_slots": 120,
-                "nodes": ["trt-gb10-1", "trt-gb10-2"],
-                "node_trial_counts": {
-                    "trt-gb10-1": 50,
-                    "trt-gb10-2": 50,
-                },
-            },
-        ],
+        "large_batch_bursts": bursts,
         "fairness": fairness,
         "runtime_envelopes": runtime_envelopes,
         "peer_workloads": peer_workloads,
@@ -598,6 +1344,18 @@ def _evidence() -> dict[str, Any]:
             "unattributed_retries": 0,
         },
     }
+    platform_authority = _platform_health_authority(evidence)
+    evidence["platform_health"] = {
+        "authority_evidence": platform_authority,
+        "trusted_receipt": {
+            "receipt_sha256": "0" * 64,
+            "authority_payload_sha256": platform_authority["payload_sha256"],
+            "source_host": ACCEPTANCE.SUBMIT_HOST,
+            "observed_at": platform_authority["completed_at"],
+        },
+    }
+    evidence["staging_pressure_reclaim"] = _staging_pressure_evidence(evidence)
+    return evidence
 
 
 def _failures(evidence: dict[str, Any]) -> list[str]:
@@ -610,29 +1368,38 @@ def _journaled_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[str, dict[str, Any], Path, dict[str, Any]]:
     _patch_live_host(tmp_path, monkeypatch)
-    state = ACCEPTANCE.start_session("a" * 40, "b" * 40, execute=True)
+    state = _start_session()
     session_id = state["session_id"]
     evidence = _evidence()
     evidence["session"]["id"] = session_id
-    for receipt in _runtime_receipts(evidence["candidate"]["sha"], evidence["candidate"]["tree"]):
-        wrapper = receipt.pop("_wrapper")
-        assert receipt in evidence["candidate"]["runtime_receipts"]
-        path = Path(receipt["path"])
-        path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-        path.write_bytes(ACCEPTANCE._canonical_bytes(wrapper))
-        path.chmod(0o600)
+    evidence["staging_pressure_reclaim"] = _staging_pressure_evidence(evidence)
+    for sandbox in ACCEPTANCE.SANDBOXES:
+        candidate = evidence["candidates"][sandbox]
+        for receipt in _runtime_receipts(
+            sandbox,
+            candidate["sha"],
+            candidate["tree"],
+        ):
+            wrapper = receipt.pop("_wrapper")
+            assert receipt in candidate["runtime_receipts"]
+            path = Path(receipt["path"])
+            path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+            path.write_bytes(ACCEPTANCE._canonical_bytes(wrapper))
+            path.chmod(0o600)
+    _record_trusted_receipts(session_id, evidence)
     phase_dir = tmp_path / "phase-inputs"
     phase_dir.mkdir()
-    for index, phase in enumerate(ACCEPTANCE.PHASES):
+    for index, (phase, sandbox) in enumerate(ACCEPTANCE.PHASE_CHECKPOINTS):
         phase_payload = evidence["state_machine"][index].copy()
         del phase_payload["checkpoint_sha256"]
         digest = hashlib.sha256(ACCEPTANCE._canonical_bytes(phase_payload)).hexdigest()
         evidence["state_machine"][index]["checkpoint_sha256"] = digest
-        phase_path = phase_dir / f"{phase}.json"
+        phase_path = phase_dir / f"{sandbox}-{phase}.json"
         phase_path.write_text(json.dumps(phase_payload), encoding="utf-8")
         ACCEPTANCE.checkpoint_session(
             session_id,
             phase,
+            sandbox,
             phase_path,
             execute=True,
         )
@@ -647,6 +1414,163 @@ def test_schema_is_valid_and_complete_fixture_passes() -> None:
     Draft202012Validator.check_schema(schema)
 
     assert _failures(_evidence()) == []
+
+
+def test_premerge_candidate_map_requires_three_distinct_sandbox_shas() -> None:
+    evidence = _evidence()
+    evidence["candidates"]["hongjian"]["sha"] = evidence["candidates"]["qianyi"]["sha"]
+
+    assert "pre-merge sandbox candidate SHAs must be distinct" in _failures(evidence)
+
+
+def test_legacy_single_candidate_shape_is_rejected() -> None:
+    evidence = _evidence()
+    evidence["candidate"] = evidence.pop("candidates")["qianyi"]
+
+    assert any("schema violation" in failure for failure in _failures(evidence))
+
+
+def test_runtime_receipt_cannot_cross_candidate_map_entries() -> None:
+    evidence = _evidence()
+    receipt = evidence["candidates"]["qianyi"]["runtime_receipts"][0]
+    receipt["candidate_sha"] = evidence["candidates"]["hongjian"]["sha"]
+
+    assert "qianyi runtime receipt candidate does not match" in _failures(evidence)
+
+
+def test_overlap_requires_a_real_common_active_window() -> None:
+    evidence = _evidence()
+    evidence["overlap_windows"][0]["observations"][0]["active_until"] = _iso(2, 20)
+
+    assert any(
+        "does not prove the common active window" in failure for failure in _failures(evidence)
+    )
+
+    evidence = _evidence()
+    evidence["overlap_windows"][1]["observations"][1]["candidate_sha"] = evidence["candidates"][
+        "qianyi"
+    ]["sha"]
+    assert any("overlap candidate does not match" in failure for failure in _failures(evidence))
+
+
+def test_overlap_rejects_reused_job_ids_with_self_consistent_readbacks() -> None:
+    evidence = _evidence()
+    for window in evidence["overlap_windows"]:
+        for observation in window["observations"]:
+            observation["job_id"] = "123"
+            observation["job_readback"]["job_id"] = "123"
+            observation["job_readback_sha256"] = hashlib.sha256(
+                ACCEPTANCE._canonical_bytes(observation["job_readback"]),
+            ).hexdigest()
+
+    failures = _failures(evidence)
+    assert all(f"{pool} overlap job IDs are not unique" in failures for pool in ACCEPTANCE.POOLS)
+    assert "overlap job ID is reused across pools" in failures
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("slurm_account", "loom-dev-hongjian"),
+        ("slurm_user", "loom-sandbox-hongjian"),
+        ("job_name", f"loom-sandbox-hongjian-{'c' * 12}-trt-eai-oldlab-1"),
+    ],
+)
+def test_overlap_rejects_wrong_slurm_identity(field: str, replacement: str) -> None:
+    evidence = _evidence()
+    evidence["overlap_windows"][0]["observations"][0][field] = replacement
+
+    assert any(
+        "overlap Slurm identity does not match" in failure for failure in _failures(evidence)
+    )
+
+
+def test_overlap_rejects_service_candidate_drift() -> None:
+    evidence = _evidence()
+    observation = evidence["overlap_windows"][0]["observations"][0]
+    observation["active_candidate_sha"] = evidence["candidates"]["hongjian"]["sha"]
+
+    assert any(
+        "overlap service candidate does not match" in failure for failure in _failures(evidence)
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "expected"),
+    [
+        ("job_readback_sha256", "overlap Slurm readback digest does not match"),
+        (
+            "service_readback_sha256",
+            "overlap service readback digest does not match",
+        ),
+    ],
+)
+def test_overlap_rejects_readback_digest_tamper(field: str, expected: str) -> None:
+    evidence = _evidence()
+    evidence["overlap_windows"][0]["observations"][0][field] = "0" * 64
+
+    assert any(expected in failure for failure in _failures(evidence))
+
+
+def test_overlap_rejects_capacity_binding_digest_tamper() -> None:
+    evidence = _evidence()
+    evidence["overlap_windows"][0]["observations"][0]["capacity_binding"]["sample_sha256"] = (
+        "0" * 64
+    )
+
+    assert any(
+        "overlap capacity binding does not match" in failure for failure in _failures(evidence)
+    )
+
+
+def test_global_job_identity_cannot_be_reused_by_runtime_or_peer() -> None:
+    evidence = _evidence()
+    overlap_job_id = evidence["overlap_windows"][0]["observations"][0]["job_id"]
+    evidence["runtime_envelopes"][0]["job_id"] = overlap_job_id
+
+    assert "overlap job ID is reused by a runtime envelope" in _failures(evidence)
+
+    evidence = _evidence()
+    runtime_job_id = evidence["runtime_envelopes"][0]["job_id"]
+    evidence["peer_workloads"][0]["job_id"] = runtime_job_id
+
+    assert "runtime envelope job ID is reused by a peer workload" in _failures(evidence)
+
+
+def test_each_phase_binds_its_sandbox_candidate() -> None:
+    evidence = _evidence()
+    hongjian_phase = next(
+        phase for phase in evidence["state_machine"] if phase["sandbox"] == "hongjian"
+    )
+    hongjian_phase["candidate_sha"] = evidence["candidates"]["qianyi"]["sha"]
+
+    assert any("is not bound to the exact candidate" in failure for failure in _failures(evidence))
+
+
+def test_duplicate_and_missing_phase_identity_fail_without_keyerror() -> None:
+    evidence = _evidence()
+    evidence["state_machine"][4] = copy.deepcopy(evidence["state_machine"][0])
+
+    failures = _failures(evidence)
+    assert "state-machine phase identity is duplicated" in failures
+    assert "state-machine phase identity is missing" in failures
+
+    evidence = _evidence()
+    evidence["state_machine"].pop()
+    failures = ACCEPTANCE._semantic_failures(evidence)
+    assert "state-machine phase identity is missing" in failures
+
+
+def test_promotion_candidate_is_separate_and_exactly_bound() -> None:
+    evidence = _evidence()
+    evidence["promotion_candidate"]["sha"] = evidence["candidates"]["qianyi"]["sha"]
+    evidence["promotion_candidate"]["staging_regression"]["candidate_sha"] = evidence["candidates"][
+        "qianyi"
+    ]["sha"]
+
+    failures = _failures(evidence)
+    assert "promotion candidate must be distinct from pre-merge sandbox SHAs" in failures
+    assert "promotion staging regression checkpoint digest does not match" in failures
 
 
 def test_default_plan_is_read_only_fixed_and_complete() -> None:
@@ -667,10 +1591,18 @@ def test_default_plan_is_read_only_fixed_and_complete() -> None:
 def test_session_mutation_requires_execute_before_host_checks() -> None:
     completed = _run(
         "session-start",
-        "--candidate-sha",
+        "--qianyi-sha",
         "a" * 40,
-        "--candidate-tree",
+        "--qianyi-tree",
         "b" * 40,
+        "--hongjian-sha",
+        "c" * 40,
+        "--hongjian-tree",
+        "d" * 40,
+        "--devansh-sha",
+        "e" * 40,
+        "--devansh-tree",
+        "f" * 40,
     )
 
     assert completed.returncode == 1
@@ -682,12 +1614,13 @@ def test_persistent_state_machine_is_ordered_and_candidate_bound(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_live_host(tmp_path, monkeypatch)
-    state = ACCEPTANCE.start_session("a" * 40, "b" * 40, execute=True)
+    state = _start_session()
     session_id = state["session_id"]
 
     phase_evidence = {
         "candidate_sha": "a" * 40,
         "candidate_tree": "b" * 40,
+        "sandbox": "qianyi",
         "phase": "preflight",
         "started_at": _iso(0),
         "finished_at": _iso(0, 30),
@@ -701,6 +1634,7 @@ def test_persistent_state_machine_is_ordered_and_candidate_bound(
         ACCEPTANCE.checkpoint_session(
             session_id,
             "baseline",
+            "qianyi",
             phase_path,
             execute=True,
         )
@@ -708,15 +1642,16 @@ def test_persistent_state_machine_is_ordered_and_candidate_bound(
     advanced = ACCEPTANCE.checkpoint_session(
         session_id,
         "preflight",
+        "qianyi",
         phase_path,
         execute=True,
     )
-    assert advanced["completed_phases"] == ["preflight"]
+    assert advanced["completed_phases"] == ["qianyi:preflight"]
     assert advanced["next_phase_index"] == 1
     persisted = json.loads(
-        (tmp_path / "state/sessions" / session_id / "checkpoints/00-preflight.json").read_text(
-            encoding="utf-8"
-        ),
+        (
+            tmp_path / "state/sessions" / session_id / "checkpoints/00-qianyi-preflight.json"
+        ).read_text(encoding="utf-8"),
     )
     digest = hashlib.sha256(ACCEPTANCE._canonical_bytes(phase_evidence)).hexdigest()
     assert persisted["evidence_sha256"] == digest
@@ -745,16 +1680,86 @@ def test_complete_session_seals_verified_evidence(
     assert json.loads(sealed.read_text(encoding="utf-8")) == evidence
 
 
+def test_staging_pressure_semantics_reject_candidate_and_session_drift() -> None:
+    evidence = _evidence()
+    evidence["staging_pressure_reclaim"]["authority_evidence"]["candidate_sha"] = "9" * 40
+    evidence["staging_pressure_reclaim"]["authority_evidence"]["acceptance_session_id"] = "2" * 32
+
+    failures = _failures(evidence)
+
+    assert "staging pressure reclaim evidence is not exactly bound" in failures
+
+
+def test_staging_pressure_published_receipt_rejects_bad_signature(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id, evidence, _evidence_path, _schema = _journaled_evidence(
+        tmp_path,
+        monkeypatch,
+    )
+    authority_session_id = evidence["staging_pressure_reclaim"]["trusted_receipt"][
+        "authority_session_id"
+    ]
+    published_path = ACCEPTANCE._pressure_authority_path(
+        session_id,
+        authority_session_id,
+    )
+    published = json.loads(published_path.read_text(encoding="utf-8"))
+    signature_bytes = base64.b64decode(published["signature"]["signature_base64"])
+    signature_bytes = bytes([signature_bytes[0] ^ 1, *signature_bytes[1:]])
+    published["signature"]["signature_base64"] = base64.b64encode(signature_bytes).decode(
+        "ascii",
+    )
+    published["signature"]["signature_sha256"] = hashlib.sha256(signature_bytes).hexdigest()
+
+    with pytest.raises(ACCEPTANCE.AcceptanceError, match="signature is invalid"):
+        ACCEPTANCE._validate_pressure_authority(
+            published,
+            acceptance_session_id=session_id,
+            authority_session_id=authority_session_id,
+            candidate_sha=evidence["promotion_candidate"]["sha"],
+            candidate_tree=evidence["promotion_candidate"]["tree"],
+        )
+
+
+def test_finalize_rejects_tampered_staging_pressure_session_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id, _evidence, evidence_path, schema = _journaled_evidence(
+        tmp_path,
+        monkeypatch,
+    )
+    state = ACCEPTANCE._session_state(session_id)
+    digest = state["staging_pressure_receipt_sha256"]
+    receipt_path = (
+        tmp_path
+        / "state/sessions"
+        / session_id
+        / "trusted-receipts"
+        / f"staging-pressure-{digest}.json"
+    )
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["sequence"] += 1
+    receipt_path.write_bytes(ACCEPTANCE._canonical_bytes(receipt))
+    receipt_path.chmod(0o600)
+
+    with pytest.raises(ACCEPTANCE.AcceptanceError, match="receipt digest"):
+        ACCEPTANCE.finalize_session(
+            session_id,
+            evidence_path,
+            schema,
+            execute=True,
+        )
+
+
 def test_runtime_receipt_series_covers_longer_than_single_ttl() -> None:
     evidence = _evidence()
 
     assert _failures(evidence) == []
     for sandbox in ACCEPTANCE.SANDBOXES:
-        chain = [
-            receipt
-            for receipt in evidence["candidate"]["runtime_receipts"]
-            if receipt["sandbox"] == sandbox
-        ]
+        chain = [receipt for receipt in evidence["candidates"][sandbox]["runtime_receipts"]]
         assert len(chain) == 5
         assert ACCEPTANCE._timestamp(chain[0]["collected_at"]) <= ACCEPTANCE._timestamp(
             evidence["session"]["started_at"],
@@ -766,10 +1771,10 @@ def test_runtime_receipt_series_covers_longer_than_single_ttl() -> None:
 
 def test_runtime_receipt_series_rejects_missing_renewal_gap() -> None:
     evidence = _evidence()
-    evidence["candidate"]["runtime_receipts"] = [
+    evidence["candidates"]["qianyi"]["runtime_receipts"] = [
         receipt
-        for receipt in evidence["candidate"]["runtime_receipts"]
-        if not (receipt["sandbox"] == "qianyi" and receipt["renewal_generation"] == 2)
+        for receipt in evidence["candidates"]["qianyi"]["runtime_receipts"]
+        if receipt["renewal_generation"] != 2
     ]
 
     assert "qianyi runtime receipt chain link is invalid" in _failures(evidence)
@@ -784,7 +1789,7 @@ def test_finalize_reads_root_owned_receipt_instead_of_trusting_caller(
         tmp_path,
         monkeypatch,
     )
-    reference = evidence["candidate"]["runtime_receipts"][0]
+    reference = evidence["candidates"]["qianyi"]["runtime_receipts"][0]
     path = Path(reference["path"])
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload["expires_at"] = _iso(60)
@@ -809,12 +1814,306 @@ def test_finalize_rejects_missing_root_owned_renewal(
     )
     missing = next(
         receipt
-        for receipt in evidence["candidate"]["runtime_receipts"]
-        if receipt["sandbox"] == "hongjian" and receipt["renewal_generation"] == 3
+        for receipt in evidence["candidates"]["hongjian"]["runtime_receipts"]
+        if receipt["renewal_generation"] == 3
     )
     Path(missing["path"]).unlink()
 
     with pytest.raises(ACCEPTANCE.AcceptanceError, match="root-owned runtime receipt"):
+        ACCEPTANCE.finalize_session(
+            session_id,
+            evidence_path,
+            schema,
+            execute=True,
+        )
+
+
+def test_overlap_record_fails_closed_when_fixed_producer_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_live_host(tmp_path, monkeypatch)
+    state = _start_session()
+    observation = _evidence()["overlap_windows"][0]["observations"][0]
+
+    with pytest.raises(ACCEPTANCE.AcceptanceError, match="authority root is unavailable"):
+        ACCEPTANCE.record_overlap_receipt(
+            state["session_id"],
+            observation["sandbox"],
+            "oldlab",
+            observation["job_id"],
+            execute=True,
+        )
+
+
+def test_overlap_record_rejects_foreign_path_and_hardlinked_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_live_host(tmp_path, monkeypatch)
+    state = _start_session()
+    evidence = _evidence()
+    observation = evidence["overlap_windows"][0]["observations"][0]
+    paths = _write_overlap_authority_sources(evidence, "oldlab", observation)
+
+    foreign = paths[0].with_name("foreign.json")
+    paths[0].replace(foreign)
+    with pytest.raises(ACCEPTANCE.AcceptanceError, match="authority file safely"):
+        ACCEPTANCE.record_overlap_receipt(
+            state["session_id"],
+            observation["sandbox"],
+            "oldlab",
+            observation["job_id"],
+            execute=True,
+        )
+
+    foreign.replace(paths[0])
+    os.link(paths[0], paths[0].with_name("hardlink.json"))
+    with pytest.raises(ACCEPTANCE.AcceptanceError, match="authority file is unsafe"):
+        ACCEPTANCE.record_overlap_receipt(
+            state["session_id"],
+            observation["sandbox"],
+            "oldlab",
+            observation["job_id"],
+            execute=True,
+        )
+
+
+def test_overlap_record_detects_source_swap_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_live_host(tmp_path, monkeypatch)
+    state = _start_session()
+    evidence = _evidence()
+    observation = evidence["overlap_windows"][0]["observations"][0]
+    paths = _write_overlap_authority_sources(evidence, "oldlab", observation)
+    replacement = paths[0].with_name("replacement.json")
+    replacement.write_bytes(paths[0].read_bytes())
+    replacement.chmod(0o600)
+    original_read = ACCEPTANCE.os.read
+    swapped = False
+
+    def swap_during_read(descriptor: int, size: int) -> bytes:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            os.replace(replacement, paths[0])
+        return original_read(descriptor, size)
+
+    monkeypatch.setattr(ACCEPTANCE.os, "read", swap_during_read)
+    with pytest.raises(ACCEPTANCE.AcceptanceError, match="changed during read"):
+        ACCEPTANCE.record_overlap_receipt(
+            state["session_id"],
+            observation["sandbox"],
+            "oldlab",
+            observation["job_id"],
+            execute=True,
+        )
+
+
+def test_overlap_receipt_replay_and_sequence_regression_fail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_live_host(tmp_path, monkeypatch)
+    state = _start_session()
+    evidence = _evidence()
+    observation = evidence["overlap_windows"][0]["observations"][0]
+    _write_overlap_authority_sources(evidence, "oldlab", observation)
+    ACCEPTANCE.record_overlap_receipt(
+        state["session_id"],
+        observation["sandbox"],
+        "oldlab",
+        observation["job_id"],
+        execute=True,
+    )
+    with pytest.raises(ACCEPTANCE.AcceptanceError, match="already exists"):
+        ACCEPTANCE.record_overlap_receipt(
+            state["session_id"],
+            observation["sandbox"],
+            "oldlab",
+            observation["job_id"],
+            execute=True,
+        )
+
+    session_dir = tmp_path / "state/sessions" / state["session_id"]
+    persisted = json.loads((session_dir / "state.json").read_text(encoding="utf-8"))
+    persisted["next_trusted_sequence"] = 1
+    ACCEPTANCE._atomic_write(session_dir / "state.json", persisted)
+    with pytest.raises(ACCEPTANCE.AcceptanceError, match="progress is invalid"):
+        ACCEPTANCE._session_state(state["session_id"])
+
+
+def test_overlap_record_rejects_capacity_sample_drift_from_adapter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_live_host(tmp_path, monkeypatch)
+    state = _start_session()
+    evidence = _evidence()
+    observation = evidence["overlap_windows"][0]["observations"][0]
+    paths = _write_overlap_authority_sources(evidence, "oldlab", observation)
+    live_observation = json.loads(paths[2].read_text(encoding="utf-8"))
+    live_observation["capacity_sample"]["observation_sequence"] += 1
+    _write_authority_json(
+        paths[2],
+        ACCEPTANCE.LIVE_AUTHORITY_ROOT,
+        live_observation,
+    )
+
+    with pytest.raises(ACCEPTANCE.AcceptanceError, match="authority sources do not agree"):
+        ACCEPTANCE.record_overlap_receipt(
+            state["session_id"],
+            observation["sandbox"],
+            "oldlab",
+            observation["job_id"],
+            execute=True,
+        )
+
+
+def test_finalize_rejects_self_consistent_forged_overlap_readback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id, evidence, evidence_path, schema = _journaled_evidence(
+        tmp_path,
+        monkeypatch,
+    )
+    observation = evidence["overlap_windows"][0]["observations"][0]
+    sample = next(
+        row
+        for row in evidence["capacity_samples"]
+        if row["phase"] == "multi_candidate_overlap"
+        and row["sandbox"] == observation["sandbox"]
+        and row["pool"] == "oldlab"
+    )
+    observation["node"] = "trt-eai-oldlab-3"
+    observation["job_name"] = ACCEPTANCE._expected_job_name(
+        observation["sandbox"],
+        observation["candidate_sha"],
+        observation["node"],
+    )
+    observation["job_readback"]["node"] = observation["node"]
+    observation["job_readback"]["job_name"] = observation["job_name"]
+    observation["job_readback_sha256"] = hashlib.sha256(
+        ACCEPTANCE._canonical_bytes(observation["job_readback"]),
+    ).hexdigest()
+    sample["node"] = observation["node"]
+    sample["job_name"] = observation["job_name"]
+    observation["capacity_binding"]["sample_sha256"] = hashlib.sha256(
+        ACCEPTANCE._canonical_bytes(sample),
+    ).hexdigest()
+    assert _failures(evidence) == []
+    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+
+    with pytest.raises(ACCEPTANCE.AcceptanceError, match="trusted overlap receipt"):
+        ACCEPTANCE.finalize_session(
+            session_id,
+            evidence_path,
+            schema,
+            execute=True,
+        )
+
+
+def test_finalize_rejects_stale_trusted_overlap_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id, evidence, _evidence_path, _schema = _journaled_evidence(
+        tmp_path,
+        monkeypatch,
+    )
+    state = ACCEPTANCE._session_state(session_id)
+    evidence["overlap_windows"][0]["started_at"] = _iso(2, 40)
+
+    with pytest.raises(ACCEPTANCE.AcceptanceError, match="trusted overlap receipt"):
+        ACCEPTANCE._verify_overlap_session_receipts(
+            session_id,
+            evidence,
+            state,
+        )
+
+
+def test_finalize_rejects_self_consistent_capacity_drift_from_root_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id, evidence, evidence_path, schema = _journaled_evidence(
+        tmp_path,
+        monkeypatch,
+    )
+    observation = evidence["overlap_windows"][0]["observations"][0]
+    sample = next(
+        row
+        for row in evidence["capacity_samples"]
+        if row["phase"] == "multi_candidate_overlap"
+        and row["sandbox"] == observation["sandbox"]
+        and row["pool"] == "oldlab"
+    )
+    sample["requested_slots"] += 1
+    observation["capacity_binding"]["sample_sha256"] = hashlib.sha256(
+        ACCEPTANCE._canonical_bytes(sample),
+    ).hexdigest()
+    assert _failures(evidence) == []
+    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+
+    with pytest.raises(ACCEPTANCE.AcceptanceError, match="trusted overlap receipt"):
+        ACCEPTANCE.finalize_session(
+            session_id,
+            evidence_path,
+            schema,
+            execute=True,
+        )
+
+
+def test_finalize_rejects_promotion_self_hash_without_root_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id, _evidence, evidence_path, schema = _journaled_evidence(
+        tmp_path,
+        monkeypatch,
+    )
+    state = ACCEPTANCE._session_state(session_id)
+    digest = state["promotion_receipt_sha256"]
+    assert isinstance(digest, str)
+    (
+        tmp_path / "state/sessions" / session_id / "trusted-receipts" / f"promotion-{digest}.json"
+    ).unlink()
+
+    with pytest.raises(ACCEPTANCE.AcceptanceError, match="state file is unavailable"):
+        ACCEPTANCE.finalize_session(
+            session_id,
+            evidence_path,
+            schema,
+            execute=True,
+        )
+
+
+def test_finalize_rejects_hardlinked_session_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id, _evidence, evidence_path, schema = _journaled_evidence(
+        tmp_path,
+        monkeypatch,
+    )
+    state = ACCEPTANCE._session_state(session_id)
+    descriptor = state["trusted_overlap_receipts"][0]
+    receipt = (
+        tmp_path
+        / "state/sessions"
+        / session_id
+        / "trusted-receipts"
+        / (
+            f"{descriptor['sequence']:020d}-{descriptor['sandbox']}-"
+            f"{descriptor['pool']}-{descriptor['receipt_sha256']}.json"
+        )
+    )
+    os.link(receipt, receipt.with_name("foreign-hardlink.json"))
+
+    with pytest.raises(ACCEPTANCE.AcceptanceError, match="unsafe ownership or mode"):
         ACCEPTANCE.finalize_session(
             session_id,
             evidence_path,
@@ -833,7 +2132,7 @@ def test_state_tree_is_closed_root_only_and_rejects_symlinks(
     (tmp_path / "state").symlink_to(target, target_is_directory=True)
 
     with pytest.raises(ACCEPTANCE.AcceptanceError, match="unsafe ownership or mode"):
-        ACCEPTANCE.start_session("a" * 40, "b" * 40, execute=True)
+        _start_session()
 
 
 def test_state_tree_owner_modes_and_fqdn_host_are_enforced(
@@ -841,7 +2140,7 @@ def test_state_tree_owner_modes_and_fqdn_host_are_enforced(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_live_host(tmp_path, monkeypatch)
-    state = ACCEPTANCE.start_session("a" * 40, "b" * 40, execute=True)
+    state = _start_session()
     session_dir = tmp_path / "state/sessions" / state["session_id"]
 
     for directory in (
@@ -868,7 +2167,7 @@ def test_state_file_owner_mismatch_fails_readback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_live_host(tmp_path, monkeypatch)
-    state = ACCEPTANCE.start_session("a" * 40, "b" * 40, execute=True)
+    state = _start_session()
     monkeypatch.setattr(ACCEPTANCE, "REQUIRED_OWNER_UID", os.getuid() + 1)
 
     with pytest.raises(ACCEPTANCE.AcceptanceError, match="unsafe ownership or mode"):
@@ -880,12 +2179,9 @@ def test_late_checkpoint_create_failure_is_not_mistaken_for_durable_replay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_live_host(tmp_path, monkeypatch)
-    state = ACCEPTANCE.start_session("a" * 40, "b" * 40, execute=True)
+    state = _start_session()
     destination = (
-        tmp_path
-        / "state/sessions"
-        / state["session_id"]
-        / "checkpoints/00-preflight.json"
+        tmp_path / "state/sessions" / state["session_id"] / "checkpoints/00-qianyi-preflight.json"
     )
     payload = {"schema_version": 1, "phase": "preflight"}
     original_fsync_directory = ACCEPTANCE._fsync_directory
@@ -917,10 +2213,11 @@ def test_checkpoint_is_crash_idempotent_and_rejects_changed_phase(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_live_host(tmp_path, monkeypatch)
-    state = ACCEPTANCE.start_session("a" * 40, "b" * 40, execute=True)
+    state = _start_session()
     session_id = state["session_id"]
     phase_payload = {
         "phase": "preflight",
+        "sandbox": "qianyi",
         "candidate_sha": "a" * 40,
         "candidate_tree": "b" * 40,
         "started_at": _iso(0),
@@ -945,10 +2242,11 @@ def test_checkpoint_is_crash_idempotent_and_rejects_changed_phase(
         ACCEPTANCE.checkpoint_session(
             session_id,
             "preflight",
+            "qianyi",
             phase_path,
             execute=True,
         )
-    checkpoint = tmp_path / "state/sessions" / session_id / "checkpoints/00-preflight.json"
+    checkpoint = tmp_path / "state/sessions" / session_id / "checkpoints/00-qianyi-preflight.json"
     assert checkpoint.is_file()
     assert ACCEPTANCE._session_state(session_id)["next_phase_index"] == 0
 
@@ -959,6 +2257,7 @@ def test_checkpoint_is_crash_idempotent_and_rejects_changed_phase(
         ACCEPTANCE.checkpoint_session(
             session_id,
             "preflight",
+            "qianyi",
             phase_path,
             execute=True,
         )
@@ -968,6 +2267,7 @@ def test_checkpoint_is_crash_idempotent_and_rejects_changed_phase(
     recovered = ACCEPTANCE.checkpoint_session(
         session_id,
         "preflight",
+        "qianyi",
         phase_path,
         execute=True,
     )
@@ -979,9 +2279,10 @@ def test_concurrent_same_phase_checkpoint_is_serialized(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_live_host(tmp_path, monkeypatch)
-    state = ACCEPTANCE.start_session("a" * 40, "b" * 40, execute=True)
+    state = _start_session()
     phase_payload = {
         "phase": "preflight",
+        "sandbox": "qianyi",
         "candidate_sha": "a" * 40,
         "candidate_tree": "b" * 40,
         "started_at": _iso(0),
@@ -997,6 +2298,7 @@ def test_concurrent_same_phase_checkpoint_is_serialized(
             ACCEPTANCE.checkpoint_session(
                 state["session_id"],
                 "preflight",
+                "qianyi",
                 phase_path,
                 execute=True,
             ),
@@ -1006,7 +2308,9 @@ def test_concurrent_same_phase_checkpoint_is_serialized(
         results = list(executor.map(lambda _: checkpoint(), range(2)))
 
     assert [result["next_phase_index"] for result in results] == [1, 1]
-    assert ACCEPTANCE._session_state(state["session_id"])["completed_phases"] == ["preflight"]
+    assert ACCEPTANCE._session_state(state["session_id"])["completed_phases"] == [
+        "qianyi:preflight",
+    ]
 
 
 def test_finalize_is_crash_idempotent(
@@ -1077,7 +2381,9 @@ def test_finalize_rejects_checkpoint_metadata_tampering(
         tmp_path,
         monkeypatch,
     )
-    checkpoint_path = tmp_path / "state/sessions" / session_id / "checkpoints/00-preflight.json"
+    checkpoint_path = (
+        tmp_path / "state/sessions" / session_id / "checkpoints/00-qianyi-preflight.json"
+    )
     checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
     checkpoint["candidate_sha"] = "e" * 40
     checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
@@ -1103,9 +2409,9 @@ def test_cross_sandbox_negative_matrix_is_exact_and_candidate_bound() -> None:
     assert any("negative matrix is incomplete" in failure for failure in _failures(evidence))
 
     evidence = _evidence()
-    evidence["cross_sandbox_negative"][0]["candidate_sha"] = "e" * 40
+    evidence["cross_sandbox_negative"][0]["source_candidate_sha"] = "e" * 40
     assert any(
-        "negative probe candidate does not match" in failure for failure in _failures(evidence)
+        "negative probe candidate pair does not match" in failure for failure in _failures(evidence)
     )
 
 
@@ -1127,7 +2433,7 @@ def test_cross_sandbox_negative_matrix_is_exact_and_candidate_bound() -> None:
             "large-batch burst candidate does not match",
         ),
         (
-            lambda item: item["fairness"][0].__setitem__(
+            lambda item: item["fairness"][0]["participants"][0].__setitem__(
                 "candidate_tree",
                 "e" * 40,
             ),
@@ -1139,20 +2445,6 @@ def test_cross_sandbox_negative_matrix_is_exact_and_candidate_bound() -> None:
                 "e" * 40,
             ),
             "runtime envelope candidate does not match",
-        ),
-        (
-            lambda item: item["peer_workloads"][0].__setitem__(
-                "candidate_tree",
-                "e" * 40,
-            ),
-            "peer candidate does not match",
-        ),
-        (
-            lambda item: item["storage_io"][0].__setitem__(
-                "candidate_sha",
-                "e" * 40,
-            ),
-            "storage candidate does not match",
         ),
         (
             lambda item: item["fault_recovery"][0].__setitem__(

@@ -74,6 +74,7 @@ from loom_cli.rollout.preflight_registered_checks import (
     build_capacity_high_water_check,
     build_credentials_metadata_check,
     build_docker_runtime_check,
+    build_external_gb10_stage_boundary_checks,
     build_external_supervisor_predecessor_check,
     build_final_gate_checks,
     build_gb10_candidate_source_check,
@@ -844,6 +845,184 @@ def test_registered_credentials_check_rejects_source_binding_drift_before_read(
         "catalog",
     }
     assert calls == []
+
+
+def _external_infrastructure_summary(
+    *,
+    created_at: datetime,
+    expires_at: datetime,
+) -> dict[str, object]:
+    hosts = [f"trt-gb10-{number}" for number in range(1, 16) if number != 7]
+
+    def operation(action: str, node: str, *, accounting: bool = False) -> dict[str, object]:
+        return {
+            "action": action,
+            "node": node,
+            "request_id": hashlib.sha256(f"{action}:{node}".encode()).hexdigest(),
+            "payload_sha256": "4" * 64,
+            "result_sha256": hashlib.sha256(node.encode()).hexdigest(),
+            "inner_receipt": (
+                f"staging-accounting/v1/{'5' * 64}" if accounting else None
+            ),
+            "completed_at": created_at.isoformat().replace("+00:00", "Z"),
+            "status": "succeeded",
+        }
+
+    return {
+        "schema_version": 1,
+        "kind": "staging_external_slurm_infrastructure_verification",
+        "candidate_sha": "1" * 40,
+        "candidate_tree": "2" * 40,
+        "receipt_path": (
+            "/var/lib/loom-developer-sandbox-node-authority/"
+            f"staging-infrastructure/{'1' * 40}.json"
+        ),
+        "payload_sha256": "3" * 64,
+        "source_controller": "oldlab-2",
+        "source_controller_host": "trt-eai-oldlab-2",
+        "created_at": created_at.isoformat().replace("+00:00", "Z"),
+        "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
+        "source_bootstrap": operation(
+            "staging-shared-source-bootstrap", "trt-gb10-2"
+        ),
+        "accounting": operation(
+            "staging-slurm-accounting-converge",
+            "trt-gb10-1",
+            accounting=True,
+        ),
+        "node_bootstraps": [
+            operation("staging-allocation-bootstrap", host) for host in hosts
+        ],
+        "mount_contract": {
+            "source": "192.168.20.12:/shared_work2/loom/staging",
+            "target": "/srv/loom/staging-shared",
+            "filesystem_type": "nfs4",
+            "repository_root": "/srv/loom/staging-shared/candidates",
+            "worker_env_root": "/srv/loom/staging-shared/generated",
+            "result_root": "/srv/loom/staging-shared/results",
+            "root_uid": 0,
+            "root_gid": 31024,
+            "root_mode": "0o750",
+            "repository_root_mode": "0o750",
+            "worker_env_root_mode": "0o750",
+            "result_uid": 31024,
+            "result_gid": 31024,
+            "result_root_mode": "0o2770",
+        },
+        "node_count": 14,
+        "result": "pass",
+    }
+
+
+@pytest.mark.parametrize("failure", ["missing", "tampered", "stale"])
+def test_external_gb10_infrastructure_receipt_fails_closed(
+    failure: str,
+) -> None:
+    current = datetime(2026, 7, 29, 12, 0, tzinfo=UTC)
+    payload = _external_infrastructure_summary(
+        created_at=current - timedelta(minutes=5),
+        expires_at=current + timedelta(minutes=5),
+    )
+    if failure == "tampered":
+        payload["node_count"] = 13
+    elif failure == "stale":
+        payload["expires_at"] = (current - timedelta(seconds=1)).isoformat()
+
+    def run(argv: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        assert argv[:4] == (
+            "/usr/bin/sudo",
+            "-n",
+            "/usr/local/libexec/loom-staging-external-slurm-authority",
+            "verify-infrastructure",
+        )
+        if failure == "missing":
+            return subprocess.CompletedProcess(argv, 1, "", "")
+        return subprocess.CompletedProcess(argv, 0, json.dumps(payload), "")
+
+    targets = tuple(
+        GB10ProbeTarget(
+            f"trt-gb10-{number}",
+            "loom-gb10-node-agent.service",
+        )
+        for number in range(1, 16)
+        if number != 7
+    )
+    mount, _candidate, _host = build_external_gb10_stage_boundary_checks(
+        run,
+        targets=targets,
+        expected_profile_digest="6" * 64,
+        expected_mount_binding_digest="7" * 64,
+        candidate_root=Path("/fixed/candidate"),
+        expected_candidate_sha="1" * 40,
+        expected_candidate_tree="2" * 40,
+        now=lambda: current,
+    )
+    context = CheckContext(
+        {
+            "gb10.external-profile.sha256": "6" * 64,
+            "gb10.inventory-digest": gb10_target_inventory_digest(targets),
+            "gb10.mount-binding.sha256": "7" * 64,
+            "runner.config.sha256": "8" * 64,
+        }
+    )
+    result = next(
+        item
+        for item in PreflightDag(
+            (_passing_dependency("gb10.ssh-topology"), mount)
+        ).run(context)
+        if item.check_id == mount.spec.check_id
+    )
+
+    assert not result.passed
+    assert result.evidence["receipt-digest"] == "0" * 64
+
+
+def test_external_gb10_infrastructure_receipt_accepts_exact_live_producer_summary() -> None:
+    current = datetime(2026, 7, 29, 12, 0, tzinfo=UTC)
+    payload = _external_infrastructure_summary(
+        created_at=current + timedelta(seconds=20),
+        expires_at=current + timedelta(minutes=5),
+    )
+
+    def run(argv: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 0, json.dumps(payload), "")
+
+    targets = tuple(
+        GB10ProbeTarget(
+            f"trt-gb10-{number}",
+            "loom-gb10-node-agent.service",
+        )
+        for number in range(1, 16)
+        if number != 7
+    )
+    mount, _candidate, _host = build_external_gb10_stage_boundary_checks(
+        run,
+        targets=targets,
+        expected_profile_digest="6" * 64,
+        expected_mount_binding_digest="7" * 64,
+        candidate_root=Path("/fixed/candidate"),
+        expected_candidate_sha="1" * 40,
+        expected_candidate_tree="2" * 40,
+        now=lambda: current,
+    )
+    context = CheckContext(
+        {
+            "gb10.external-profile.sha256": "6" * 64,
+            "gb10.inventory-digest": gb10_target_inventory_digest(targets),
+            "gb10.mount-binding.sha256": "7" * 64,
+            "runner.config.sha256": "8" * 64,
+        }
+    )
+    result = next(
+        item
+        for item in PreflightDag(
+            (_passing_dependency("gb10.ssh-topology"), mount)
+        ).run(context)
+        if item.check_id == mount.spec.check_id
+    )
+
+    assert result.passed
+    assert result.evidence["receipt-digest"] == "3" * 64
 
 
 def test_registered_gb10_readiness_check_returns_bound_fleet_evidence() -> None:

@@ -28,6 +28,14 @@ declared domain publishers, and removes every local and remote staging copy
 after materialization. A failed remote cleanup is a hard failure with a
 root-owned recovery record, not a warning.
 
+Private cross-domain worker envs are not owned by the human developer
+accounts, whose numeric UIDs are not stable across the fleet. The node
+authority instead converges fixed non-login batch identities
+`loom-sandbox-{qianyi,hongjian,devansh}` at UID/GID
+`31021:31021`, `31022:31022`, and `31023:31023`. Each candidate env is owned
+by its one batch identity at mode `0600`; UID/GID collisions or login-capable
+metadata stop bootstrap before publication.
+
 On `oldlab-2`, `/srv/loom` and `/srv/loom/developer-sandboxes` are
 `root:sharedwork` mode `2750`. Each developer root and its `cache`, `evidence`,
 and `runtime` children are owned by that developer and mode `0700`. Clear an
@@ -40,6 +48,93 @@ The capacity-broker state root is separate:
 broker service identity is installed. In that bootstrap state, only a
 root-invoked broker may initialize the database. Never grant a sandbox account
 write access to the broker authority.
+
+## One-time node-authority bootstrap
+
+The oldlab2 installer does not require, request, or emulate general remote
+root. Before the first candidate can be installed, an external root
+administrator must install the fixed node authority on every declared OLDLAB
+and GB10 peer from a clean, root-owned checkout of the exact candidate tree:
+
+```bash
+python3 scripts/ops/developer_sandbox_node_authority.py bootstrap \
+  --candidate-sha <SOURCE-SHA> \
+  --candidate-tree <SOURCE-TREE>
+
+python3 scripts/ops/developer_sandbox_node_authority.py bootstrap \
+  --candidate-sha <SOURCE-SHA> \
+  --candidate-tree <SOURCE-TREE> \
+  --execute
+```
+
+Plan mode is read-only. Execute mode rejects sudo-derived invocation, requires
+the local canonical node identity, verifies exact clean Git SHA/tree and
+root-owned non-writable source assets, installs the fixed source, policy,
+lock/journal/receipt roots, wrapper, and finally the validated sudoers file.
+It rolls back only files and directories created by a failed attempt. Docker
+group membership, a privileged container, a host-root bind, raw root SSH, or a
+temporary `NOPASSWD` grant is not an accepted substitute for this bootstrap.
+
+The installed sudoers surface contains only:
+
+```text
+qianyi ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-developer-sandbox-node-authority transact
+qianyi ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-developer-sandbox-node-authority check
+```
+
+There is no wildcard and no permission to run `install`, `tar`, `rm`,
+`chown`, `chmod`, `python3`, a candidate path, or an operator-selected path.
+Both runtime verbs authenticate the exact sudo caller/command and revalidate
+the root-owned policy and every installed asset. `transact` accepts only a
+bounded canonical stdin envelope whose closed schema binds the fixed node,
+domain, sandbox, exact candidate SHA/tree, action, payload digest, and optional
+prior receipt. The authority uses its own root-private stage and fixed installed
+programs, persists an idempotent root-owned receipt plus fsynced journal record,
+and retains the inner domain-runtime receipt needed by the existing targeted
+rollback. `check` accepts only the read-only exact-candidate inspection action.
+
+The policy pins the installed source tree. A squash-merged commit with that
+same tree can be consumed under its own exact SHA. Upgrade a different reviewed
+tree through the direct-external-root surface; never delete or overwrite the
+installed authority by hand:
+
+```bash
+python3 scripts/ops/developer_sandbox_node_authority.py upgrade \
+  --candidate-sha <NEW-SOURCE-SHA> \
+  --candidate-tree <NEW-SOURCE-TREE>
+
+python3 scripts/ops/developer_sandbox_node_authority.py upgrade \
+  --candidate-sha <NEW-SOURCE-SHA> \
+  --candidate-tree <NEW-SOURCE-TREE> \
+  --execute
+```
+
+Upgrade has no sudoers entry and rejects sudo-derived execution exactly like
+bootstrap. It first verifies the old policy, wrapper, sudoers, fixed source,
+host binding, lock, journal, receipt inventory, and the clean root-owned new
+checkout. Under the existing exclusive runtime lock it recovers any prior
+interrupted upgrade, snapshots every replaceable authority asset, records the
+old/new SHA and tree plus the primary journal and receipt digests, and writes a
+root-owned active transaction and append-only upgrade journal. It then removes
+sudoers admission, atomically replaces the fixed source, wrapper, and policy,
+validates the new source sudoers, installs sudoers last, and performs a full
+policy/asset/state readback. The runtime reads policy and request only after
+taking the same lock, so a request queued before upgrade either completes on
+the old tree or is revalidated against the new tree.
+
+Any ordinary failure restores the exact snapshot with old sudoers last,
+revalidates the old identity, proves the primary journal and all receipts are
+byte-identical, and records `rolled-back`. A process crash leaves the active
+transaction and snapshot for the next direct-root `upgrade` invocation to
+recover. If both upgrade and snapshot restoration fail, sudoers remains absent
+and the active evidence is retained for external-root repair. Successful and
+rolled-back snapshots remain under
+`/var/lib/loom-developer-sandbox-node-authority/upgrades/`; receipts, the
+primary runtime journal, and all domain-runtime rollback evidence are never
+reinitialized.
+
+Stop before host installation if any node lacks this exact-tree authority or
+either fixed command fails its readback.
 
 ## Persistent host installer
 
@@ -60,8 +155,8 @@ state and secret paths, all ten reserved ports, expected owner/mode, unit name,
 and read-only NFS readback commands for `oldlab-1` through `oldlab-5`. It never
 contains raw credential values.
 
-After separate live-host authorization, run the same command on
-`trt-eai-oldlab-2` as root with `install --execute`:
+After separate live-host authorization and exact-tree node-authority readback,
+run the same command on `trt-eai-oldlab-2` as root with `install --execute`:
 
 ```bash
 uv run --no-sync python scripts/ops/developer_sandbox_host.py install \
@@ -76,12 +171,13 @@ The installer performs these bounded steps:
    the three developer identities, acquire the global installer lock, and
    create a root-owned mode-`0600` single-HEAD bundle from the clean exact
    checkout;
-3. stream the exact committed domain helper/config to all OLDLAB and GB10
-   peers to converge stable identities, publisher parents, and signing keys;
-   then stream the bundle only to `oldlab-1` and `trt-gb10-1`, where
-   `materialize` atomically creates the domain-local candidate and proves
-   SHA/tree, raw tracked bytes, owner/mode, cleanliness, and one shared inode
-   across every peer without reading fleet proof or writing env/attestation;
+3. send closed exact-candidate envelopes only to each node's fixed authority;
+   the authority runs its root-owned installed domain helper to converge stable
+   identities, publisher parents, and signing keys, then accepts the bounded
+   bundle only on `oldlab-1` and `trt-gb10-1`, where `materialize` atomically
+   creates the domain-local candidate and proves SHA/tree, raw tracked bytes,
+   owner/mode, cleanliness, and one shared inode across every peer without
+   reading fleet proof or writing env/attestation;
 4. converge each local state/cache/evidence/runtime/secrets directory to its
    developer owner and mode `0700`;
 5. create the per-developer `secrets/sandbox.env` and `secrets/admin.toml`
@@ -91,10 +187,10 @@ The installer performs these bounded steps:
    absent or terminal, journal a root-owned bounded prepare transaction, and
    temporarily converge only the exact candidate's loopback stack without
    writing desired or lifecycle state;
-7. install the exact relay and all 19 host-local client bundles over encrypted
-   administrative transport, then require every route, TLS identity, and
-   Control Plane/Gateway/MinIO health check before persisting a fresh fleet
-   proof;
+7. install the exact relay locally and send all 19 host-local client bundles
+   over encrypted transport to the fixed node authority, never to a raw remote
+   root command; then require every route, TLS identity, and Control
+   Plane/Gateway/MinIO health check before persisting a fresh fleet proof;
 8. invoke `attest` on each publisher only after the fresh 19-node fleet proof
    exists; it republishes the secret-free reference env from a root-private
    seed, rechecks all domain peers, signs the domain receipt, and the collector
@@ -121,8 +217,11 @@ The durable locations for one sandbox are therefore:
 | combined receipt | `/var/lib/loom-shared-capacity/runtime-attestations/<developer>/<SHA>/combined.json` |
 | activation journal | `/var/lib/loom-developer-sandbox-installer/transactions/<developer>.json` |
 | bounded source stage | `/var/lib/loom-developer-sandbox-installer/source/<SHA>/` (removed on exit) |
-| failed remote cleanup record | `/var/lib/loom-developer-sandbox-installer/source/failures/*.json` |
 | installed fixed profile | `/etc/loom/developer-sandboxes/profiles/<developer>.toml` |
+| per-node authority receipt | `/var/lib/loom-developer-sandbox-node-authority/receipts/<REQUEST-SHA256>.json` |
+| per-node authority journal | `/var/lib/loom-developer-sandbox-node-authority/journal.jsonl` |
+| authority upgrade snapshots | `/var/lib/loom-developer-sandbox-node-authority/upgrades/<UPGRADE-ID>/` |
+| authority upgrade journal | `/var/lib/loom-developer-sandbox-node-authority/upgrade-journal.jsonl` |
 
 Do not copy or reveal the private files during readback. Compare only
 owner/mode, required key names, and secret fingerprints when an authorized
@@ -167,9 +266,10 @@ uv run --no-sync python scripts/ops/developer_sandbox_host.py check \
 
 This validates the NFS mount, candidate owner and immutability, private
 owner/mode, secret-file shape, exact lifecycle SHA, Compose health, and all
-reserved loopback listeners. Run the plan's five fixed `ssh ... stat` commands
-separately and require identical inode, UID, GID, and mode for each candidate
-root and exact candidate. Device numbers may differ between NFS clients.
+reserved loopback listeners. Run the plan's five fixed node-transport
+`check` invocations separately and require identical inode, UID, GID, and mode
+for each candidate root and exact candidate. Device numbers may differ between
+NFS clients.
 
 ### Safe rollback
 
@@ -311,8 +411,9 @@ installed by root on every eligible worker node:
 The private key and all three secret files are root-owned mode `0600`. They
 must never be placed below `/shared_work`, embedded in an image, passed as
 command arguments, or rendered by `docker compose config`. Installing the GB10
-copy is a real GB10 root/Slurm-admin prerequisite; Docker group membership is
-not installation authority.
+copy requires the externally bootstrapped exact-tree node authority and the
+separate Slurm-admin policy path; Docker group membership is not installation
+authority.
 
 Each NFS domain materializes a mode `0600` worker env containing the normal
 non-secret worker settings plus these exact candidate-bound references:
@@ -401,19 +502,22 @@ All mutation commands are plan-only without `--execute`.
      activate-server --sandbox qianyi --candidate-sha <SHA> --execute
    ```
 
-5. From the operator host, require route, TLS handshake, exact client identity,
-   and `/healthz` from every eligible worker node:
+5. The root-installed sandbox host installer now performs the fleet gate
+   internally; there is no standalone fleet or SSH command. It sends the
+   closed `inspect-link-client` check envelope through the installed
+   node-authority transport to all 19 eligible nodes, then sends
+   `inspect-link-server` only to `oldlab-2`. The host validates the complete
+   response schemas, exact node/domain/candidate identity, route, TLS version,
+   certificate fingerprints, secret-file metadata, and all three service
+   health results before constructing the fleet document. It then sends one
+   canonical bounded `fleet-attestation-json` payload to `oldlab-2` through
+   the authority's fixed `persist-fleet-attestation` transaction.
 
-   ```bash
-   python scripts/ops/developer_sandbox_remote_link_host.py fleet-check \
-     --sandbox qianyi --candidate-sha <SHA> --execute
-   ```
-
-   `fleet-check` uses non-interactive SSH and the node's root-installed
-   `check-client`; one inaccessible node, missing root authority, route failure,
-   certificate mismatch, TLS downgrade, secret-file metadata drift, or any
-   unhealthy Control Plane/Gateway/MinIO response fails the whole gate. A green
-   check atomically persists a root-owned mode-`0600` receipt at
+   One inaccessible node, authority failure, route failure, certificate
+   mismatch, TLS downgrade, secret-file drift, server mismatch, CA-generation
+   mismatch, or unhealthy Control Plane/Gateway/MinIO response fails the whole
+   gate. A green transaction atomically persists a root-owned mode-`0600`
+   receipt at
    `/var/lib/loom-developer-sandbox-links/attestations/<sandbox>/<SHA>/fleet.json`.
    Its canonical digest binds the exact five OLDLAB and 14 GB10 nodes, oldlab2
    relay state, all three listeners, bundle generation, and 15-minute expiry.
@@ -430,8 +534,10 @@ sudo /usr/local/libexec/loom-developer-sandbox-remote-link-host \
   rollback-server --sandbox qianyi --candidate-sha <PRIOR_SHA> --execute
 ```
 
-After rollback, restore the prior candidate-bound env references and rerun
-`fleet-check` for the prior SHA before re-enabling capacity. Readback output is
+After rollback, restore the prior candidate-bound env references and run the
+supported sandbox-host rollback/renewal transaction. Installation and renewal
+share the same fixed authority fleet collector, so the prior SHA receives a
+fresh fleet receipt before capacity is re-enabled. Readback output is
 secret-free: it includes sandbox, node, candidate SHA, route/health status, and
 certificate fingerprints, never certificate bodies, private keys, tokens, or
 environment dumps.
@@ -521,3 +627,21 @@ remote-link and dual-NFS runtime paths.
 Capacity brokerage and the broker→WPAP handoff adapter are documented in
 [`shared-sandbox-capacity-broker.md`](shared-sandbox-capacity-broker.md). This
 sandbox runbook does not configure Slurm packing or enable shared-worker pools.
+
+Slurm node convergence is a separate, durable maintenance-window operation.
+Use `developer_sandbox_host.py slurm-converge`, `slurm-check`, and
+`slurm-rollback` with one sandbox, domain, and exact candidate SHA. The
+orchestrator persists compute receipts before moving on, runs the controller
+last, stops safely on busy/foreign work without cancelling it, and resumes by
+replaying the exact receipt. The node authority fixes the policy profile,
+candidate/runtime paths, restart/accounting semantics, and sandbox identity;
+operators cannot inject those values through the envelope or CLI. See
+[`developer-sandbox-slurm-policy.md`](developer-sandbox-slurm-policy.md) for
+the full drain, readback, and exact-owned rollback contract.
+
+The host-side Slurm maintenance journal root and its parent are exact
+root-owned mode-`0700` directories. Each journal is a root-owned mode-`0600`
+single-link regular file. Loads use `O_NOFOLLOW`, compare descriptor and path
+identity, and read the same inode twice before accepting canonical JSON.
+Foreign-owned, hardlinked, symlinked, replaced, raced, or open-shape state is
+never adopted for resume or rollback.

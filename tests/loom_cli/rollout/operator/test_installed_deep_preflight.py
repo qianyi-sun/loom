@@ -13,11 +13,17 @@ from loom_cli.rollout.external_supervisor_predecessor import (
     ExternalSupervisorPoolIdentity,
     load_predecessor_manifest,
 )
-from loom_cli.rollout.external_supervisor_readiness import build_external_supervisor_artifact
+from loom_cli.rollout.external_supervisor_readiness import (
+    REHEARSAL_KUBECONFIG,
+    build_external_supervisor_artifact,
+)
 from loom_cli.rollout.gb10_readiness import GB10ProbeTarget, GB10SharedMountReadiness
 from loom_cli.rollout.operator import installed_deep_preflight_factory
 from loom_cli.rollout.operator import protected_external_supervisor_transport as transport_module
-from loom_cli.rollout.operator.deep_preflight_authority import RuntimePurpose
+from loom_cli.rollout.operator.deep_preflight_authority import (
+    AdmissionPreparationLifecycle,
+    RuntimePurpose,
+)
 from loom_cli.rollout.operator.installed_deep_preflight import InstalledDeepPreflightComposition
 from loom_cli.rollout.operator.installed_preflight_inputs import InstalledPreflightInputs
 from loom_cli.rollout.operator.model import APPROVED_REMOTE_URL, CandidateBinding
@@ -129,7 +135,7 @@ def test_composition_uses_one_source_graph_and_loads_outputs_only_for_detached(
         ),
         systemd_run=command,
         gb10_run=command,
-        gb10_mount_source=lambda: GB10SharedMountReadiness(
+        gb10_mount_source=lambda _binding: GB10SharedMountReadiness(
             host_digests={"trt-gb10-1": "8" * 64},
             failed_hosts=(),
         ),
@@ -151,6 +157,7 @@ def test_composition_uses_one_source_graph_and_loads_outputs_only_for_detached(
         read_mutation_epoch=lambda: 9,
         read_database_schema_revision=lambda: "0074",
         now=lambda: datetime(2026, 7, 19, 12, tzinfo=UTC),
+        prepare_admission_run=lambda _candidate: None,
     )
 
     admission = composition.sources(candidate, 9, RuntimePurpose.ADMISSION)
@@ -170,6 +177,62 @@ def test_composition_uses_one_source_graph_and_loads_outputs_only_for_detached(
     ]
     assert composition.authority().current_mutation_epoch() == 9
     assert admission.database_schema_revision == "0074"
+
+
+def test_external_composition_mutates_only_through_prepare_admission(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate()
+    mount_reads: list[str] = []
+    preparations: list[CandidateBinding] = []
+    inputs = InstalledPreflightInputs(
+        runner_install_digest="1" * 64,
+        credential_sources=(CredentialProbeSource(label="admin", path=tmp_path / "admin"),),
+        kubeconfig_metadata_digest="2" * 64,
+        gb10_targets=(GB10ProbeTarget("trt-gb10-1", "loom-gb10-node-agent.service"),),
+        gb10_ssh_config=tmp_path / "ssh-config",
+        gb10_identity=tmp_path / "identity",
+        gb10_ssh_config_sha256="3" * 64,
+        gb10_identity_metadata_fingerprint="4" * 64,
+        gb10_mount_binding=None,
+        gb10_mount_binding_digest=None,
+        migration_policy_path=tmp_path / "migration-policy.json",
+        migration_policy_digest="6" * 64,
+        gb10_external_profile_digest="7" * 64,
+        external_mount_binding_loader=lambda: (
+            mount_reads.append("mount-read")
+            or {
+                "authority_device": 1,
+                "authority_inode": 2,
+                "consumer_primary_gid": 3,
+                "consumer_uid": 4,
+                "parent_device": 5,
+                "parent_inode": 6,
+                "repository_device": 7,
+                "repository_inode": 8,
+                "service_primary_gid": 9,
+                "service_uid": 10,
+                "shared_gid": 11,
+            }
+        ),
+    )
+
+    # Constructing installed inputs must not touch the external mount or invoke
+    # root convergence.
+    assert mount_reads == []
+    assert preparations == []
+
+    lifecycle = AdmissionPreparationLifecycle(
+        prepare=preparations.append,
+        now=lambda: datetime(2026, 7, 19, 12, tzinfo=UTC),
+    )
+    lifecycle.prepare_admission(candidate)
+    lifecycle.require_fresh(candidate)
+
+    assert preparations == [candidate]
+    assert mount_reads == []
+    assert inputs.resolve_gb10_mount_binding()[0]["repository_inode"] == 8
+    assert mount_reads == ["mount-read"]
 
 
 class _LegacyExternalSupervisorStore:
@@ -362,7 +425,7 @@ def test_installed_external_supervisor_predecessor_source_binds_merged_provenanc
     assert snapshot.runtime_ready is True
 
 
-def test_committed_staging_profile_cannot_build_active_supervisor_artifact() -> None:
+def test_committed_staging_profile_builds_only_active_gb10_supervisor() -> None:
     candidate_root = Path(__file__).resolve().parents[4]
     candidate_sha = _git_run(["git", "-C", str(candidate_root), "rev-parse", "HEAD"]).stdout.strip()
     candidate_tree = _git_run(
@@ -377,39 +440,31 @@ def test_committed_staging_profile_cannot_build_active_supervisor_artifact() -> 
         environment="staging",
     )
 
-    assert artifact.supervisors
-    assert all(
-        not supervisor.enabled and not supervisor.active for supervisor in artifact.supervisors
-    )
-    assert artifact.validation_argv("loom-rehearsal-regression", "/tmp/unused-kubeconfig") == {}
+    assert [supervisor.name for supervisor in artifact.supervisors] == ["gb10-staging"]
+    assert artifact.supervisors[0].enabled is True
+    assert artifact.supervisors[0].active is True
+    assert set(
+        artifact.validation_argv(
+            "loom-rehearsal-regression",
+            REHEARSAL_KUBECONFIG,
+        )
+    ) == {"gb10-staging"}
 
 
-@pytest.mark.parametrize("desired_state", ["active", "disabled"])
 def test_installed_external_supervisor_predecessor_uses_live_schema_after_migration(
     monkeypatch: pytest.MonkeyPatch,
-    desired_state: str,
 ) -> None:
     candidate_root = Path(__file__).resolve().parents[4]
     candidate_sha = _git_run(["git", "-C", str(candidate_root), "rev-parse", "HEAD"]).stdout.strip()
     candidate_tree = _git_run(
         ["git", "-C", str(candidate_root), "rev-parse", "HEAD^{tree}"]
     ).stdout.strip()
-    if desired_state == "active":
-        artifact = active_external_supervisor_artifact(
-            candidate_sha=candidate_sha,
-            candidate_tree=candidate_tree,
-            image_tag=f"staging-{candidate_sha[:7]}",
-        )
-        control = _ReadyLegacyExternalSupervisorControl()
-    else:
-        artifact = build_external_supervisor_artifact(
-            candidate_root,
-            candidate_sha=candidate_sha,
-            candidate_tree=candidate_tree,
-            image_tag=f"staging-{candidate_sha[:7]}",
-            environment="staging",
-        )
-        control = _ReadyDisabledExternalSupervisorControl()
+    artifact = active_external_supervisor_artifact(
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+        image_tag=f"staging-{candidate_sha[:7]}",
+    )
+    control = _ReadyLegacyExternalSupervisorControl()
     canonical = ExternalSupervisorCanonicalIdentity.build(
         artifact,
         plan_digest="a" * 64,

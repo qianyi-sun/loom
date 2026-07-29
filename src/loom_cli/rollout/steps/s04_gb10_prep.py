@@ -19,11 +19,14 @@ reasons; step imports the Python wrapper).
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import shlex
 import stat
 import time
+import tomllib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -61,6 +64,9 @@ _SIMPLE_SYSTEMD_SERVICE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@-]*\.service\Z
 _GB10_NODE_AGENT_UNIT_DIR = PurePosixPath("deploy/worker-pools/gb10")
 _NODE_AGENT_TIMER_SETTLE_ATTEMPTS = 16
 _NODE_AGENT_TIMER_SETTLE_INTERVAL_SECONDS = 2.0
+_EXTERNAL_GB10_HOSTS = tuple(
+    f"trt-gb10-{number}" for number in range(1, 16) if number != 7
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,6 +329,124 @@ def _gb10_desired_state_declared(
     return bool(profile.gb10_desired_states)
 
 
+def _external_authority_retirement_mode(
+    ctx: RolloutContext,
+    *,
+    config_path: Path,
+) -> bool:
+    """Select retirement-only behavior without permitting an authority downgrade.
+
+    A valid legacy profile may still use the historical prep path. Once the
+    candidate declares any fixed external-authority marker, however, every
+    relevant field must match the closed staging contract or the step stops
+    before SSH instead of falling back to legacy mutation.
+    """
+    profile_path = _env_state_profile_path_for(ctx, config_path=config_path)
+    if profile_path is None:
+        return False
+    try:
+        raw = tomllib.loads(profile_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+        raise CandidateToolingError(
+            f"candidate external-authority profile is invalid: {exc}",
+        ) from exc
+    prerequisites = raw.get("external_slurm_runner_prerequisites")
+    desired = raw.get("gb10_worker_pool_desired_states")
+    policies = raw.get("worker_pool_autoscaler_policies")
+    supervisors = raw.get("external_slurm_autoscaler_supervisors")
+    policy_rows = policies if isinstance(policies, list) else []
+    supervisor_rows = supervisors if isinstance(supervisors, list) else []
+    fixed_path_intent = any(
+        isinstance(item, dict)
+        and item.get("pool_name") == "gb10"
+        and isinstance(item.get("actuator_config"), dict)
+        and (
+            item["actuator_config"].get("repo_dir")
+            == "/srv/loom/staging-shared/candidates/loom-remote-worker-${IMAGE_TAG}"
+            or item["actuator_config"].get("env_file")
+            == "/srv/loom/staging-shared/generated/staging-gb10-worker-${IMAGE_TAG}.env"
+        )
+        for item in policy_rows
+    )
+    active_supervisor_intent = any(
+        isinstance(item, dict)
+        and item.get("name") == "gb10-staging"
+        and (item.get("enabled") is True or item.get("active") is True)
+        for item in supervisor_rows
+    )
+    prerequisite_intent = isinstance(prerequisites, dict) and (
+        "require_external_allocation_authority" in prerequisites
+    )
+    if not (fixed_path_intent or active_supervisor_intent or prerequisite_intent):
+        return False
+
+    def invalid() -> CandidateToolingError:
+        return CandidateToolingError(
+            "declared external GB10 authority profile is not the exact closed contract",
+        )
+
+    if (
+        raw.get("environment") != "staging"
+        or not isinstance(prerequisites, dict)
+        or prerequisites.get("pools") != ["gb10"]
+        or prerequisites.get("expected_repo_ref") != "${IMAGE_TAG}"
+        or prerequisites.get("require_clean_repo") is not True
+        or prerequisites.get("require_worker_token_parity") is not True
+        or prerequisites.get("materialize") is not True
+        or prerequisites.get("require_external_allocation_authority") is not True
+        or prerequisites.get("env_template_glob")
+        != "/srv/loom/staging-shared/generated/staging-gb10-worker-staging-*.env"
+        or not isinstance(desired, list)
+        or len(desired) != 1
+        or not isinstance(policies, list)
+        or not isinstance(supervisors, list)
+    ):
+        raise invalid()
+    state = desired[0]
+    intents = state.get("host_intents") if isinstance(state, dict) else None
+    expected_legacy_hosts = {
+        f"trt-gb10-{number}": "stopped" for number in range(1, 16)
+    }
+    gb10_policies = [
+        item for item in policies if isinstance(item, dict) and item.get("pool_name") == "gb10"
+    ]
+    gb10_supervisors = [
+        item
+        for item in supervisors
+        if isinstance(item, dict) and item.get("name") == "gb10-staging"
+    ]
+    if (
+        state.get("pool_name") != "gb10"
+        or state.get("target_slots") != 0
+        or intents != expected_legacy_hosts
+        or len(gb10_policies) != 1
+        or len(gb10_supervisors) != 1
+    ):
+        raise invalid()
+    actuator = gb10_policies[0].get("actuator_config")
+    if (
+        gb10_policies[0].get("enabled") is not True
+        or not isinstance(actuator, dict)
+        or actuator.get("allowed_nodes") != list(_EXTERNAL_GB10_HOSTS)
+        or actuator.get("external_runner") is not True
+        or actuator.get("repo_dir")
+        != "/srv/loom/staging-shared/candidates/loom-remote-worker-${IMAGE_TAG}"
+        or actuator.get("env_file")
+        != "/srv/loom/staging-shared/generated/staging-gb10-worker-${IMAGE_TAG}.env"
+        or actuator.get("candidate_sha") != "${GIT_SHA}"
+        or actuator.get("exclusive") is not False
+        or actuator.get("slurm_account") != "loom-staging"
+        or actuator.get("qos_normal") != "loom-staging"
+        or gb10_supervisors[0].get("service_name")
+        != "loom-autoscaler-gb10-staging.service"
+        or gb10_supervisors[0].get("timer_name") != "loom-autoscaler-gb10-staging.timer"
+        or gb10_supervisors[0].get("enabled") is not True
+        or gb10_supervisors[0].get("active") is not True
+    ):
+        raise invalid()
+    return True
+
+
 def _no_gb10_hosts_error(
     ctx: RolloutContext,
     *,
@@ -341,7 +465,7 @@ def _no_gb10_hosts_error(
 
 
 _GB10_KNOWN_HOSTS = "/etc/loom/staging-rollout-gb10-known-hosts"
-_SHARED_WORKER_REPO_ROOT = Path("/shared_work2/qianyi/.loom-staging-rollout/worker-repos")
+_SHARED_WORKER_REPO_ROOT = Path("/srv/loom/staging-shared/candidates")
 
 
 def _ssh(
@@ -641,6 +765,143 @@ def _write_prep_log(host_dir: Path, text: str) -> None:
     )
 
 
+def _retire_external_user_authority(
+    ctx: RolloutContext,
+    host: GB10Host,
+    host_dir: Path,
+) -> tuple[bool, str]:
+    """Re-enter the protected crash-safe retirement transaction on one host."""
+    from types import SimpleNamespace
+    from typing import cast
+
+    from loom_cli.rollout.gb10_convergence import GB10MutationKind
+    from loom_cli.rollout.operator.final_gate_plan import FinalGatePlan
+    from loom_cli.rollout.operator.protected_gb10_transport import (
+        GB10TransportTarget,
+        _remote_apply_source,
+    )
+
+    if host.node_agent_service is None:
+        return False, f"node-agent authority is undeclared on {host.ssh_target}"
+    boot = _ssh(host, "cat /proc/sys/kernel/random/boot_id")
+    boot_id = boot.stdout.strip()
+    if boot.returncode != 0 or not boot_id or any(character.isspace() for character in boot_id):
+        return False, f"boot-id readback failed on {host.ssh_target}: rc={boot.returncode}"
+    target = GB10TransportTarget(
+        ssh_target=host.ssh_target,
+        repo_path=PurePosixPath(host.repo_path),
+        env_file_path=PurePosixPath(host.env_file_path),
+        node_agent_service=host.node_agent_service,
+    )
+    plan = cast(
+        FinalGatePlan,
+        SimpleNamespace(
+            candidate_sha=ctx.resolved_sha,
+            candidate_tree=ctx.resolved_tree or ctx.resolved_sha,
+            plan_digest=hashlib.sha256(
+                f"s04-retirement:{ctx.resolved_sha}".encode("ascii")
+            ).hexdigest(),
+            gb10_boot_ids={host.ssh_target: boot_id},
+        ),
+    )
+    source = _remote_apply_source(
+        target,
+        plan,
+        (GB10MutationKind.LEGACY_RETIRE, GB10MutationKind.SERVICE_TIMER),
+    )
+    result = _ssh(host, "python3 -c " + shlex.quote(source))
+    _write_prep_log(
+        host_dir,
+        f"# external-authority-retirement ({host.ssh_target})\n"
+        f"# rc={result.returncode}\n{result.stdout}\n{result.stderr}\n",
+    )
+    return (
+        (True, f"retired legacy user authority on {host.ssh_target}")
+        if result.returncode == 0
+        else (
+            False,
+            f"external-authority retirement failed on {host.ssh_target}: rc={result.returncode}",
+        )
+    )
+
+
+def _verify_external_user_authority(
+    ctx: RolloutContext,
+    host: GB10Host,
+) -> VerifyOutcome:
+    from loom_cli.rollout.operator.protected_gb10_transport import (
+        GB10TransportTarget,
+        _retirement_observation_source,
+    )
+
+    if host.node_agent_service is None:
+        return VerifyOutcome.MISMATCH
+    target = GB10TransportTarget(
+        ssh_target=host.ssh_target,
+        repo_path=PurePosixPath(host.repo_path),
+        env_file_path=PurePosixPath(host.env_file_path),
+        node_agent_service=host.node_agent_service,
+    )
+    from types import SimpleNamespace
+    from typing import cast
+
+    from loom_cli.rollout.operator.final_gate_plan import FinalGatePlan
+
+    plan = cast(
+        FinalGatePlan,
+        SimpleNamespace(
+            candidate_sha=ctx.resolved_sha,
+            candidate_tree=ctx.resolved_tree or ctx.resolved_sha,
+            plan_digest=hashlib.sha256(
+                f"s04-retirement:{ctx.resolved_sha}".encode("ascii")
+            ).hexdigest(),
+        ),
+    )
+    result = _ssh(
+        host,
+        "python3 -c " + shlex.quote(_retirement_observation_source(target, plan)),
+    )
+    if result.returncode == 255:
+        return VerifyOutcome.UNKNOWN
+    if result.returncode != 0:
+        return VerifyOutcome.MISMATCH
+    try:
+        payload = json.loads(result.stdout)
+    except (TypeError, ValueError):
+        return VerifyOutcome.MISMATCH
+    return (
+        VerifyOutcome.MATCH
+        if payload.get("baseline_ready") is True
+        and payload.get("legacy_absent") is True
+        and payload.get("service_timer_exact") is True
+        else VerifyOutcome.MISMATCH
+    )
+
+
+def _retire_external_with_retries(
+    *,
+    ctx: RolloutContext,
+    host: GB10Host,
+    host_dir: Path,
+    max_retries: int,
+    backoff_sec: float,
+    known_secrets: tuple[str, ...] = (),
+) -> HostPrepResult:
+    with rollout_redaction_scope(known_secrets):
+        host_dir.mkdir(exist_ok=True)
+        ok = False
+        summary = ""
+        attempts = 0
+        for attempt in range(1, max_retries + 1):
+            attempts = attempt
+            ok, summary = _retire_external_user_authority(ctx, host, host_dir)
+            if ok:
+                break
+            if attempt < max_retries:
+                time.sleep(backoff_sec * attempt)
+    return HostPrepResult(host=host.ssh_target, ok=ok, summary=summary, attempts=attempts)
+
+
 def _prep_one_host(
     ctx: RolloutContext,
     host: GB10Host,
@@ -861,6 +1122,23 @@ class GB10PrepStep(BaseStep):
         if auth_error:
             step_dir.stderr_path().write_text(auth_error + "\n")
             return VerifyOutcome.UNKNOWN
+        try:
+            external_retirement = _external_authority_retirement_mode(
+                ctx,
+                config_path=candidate_config,
+            )
+        except CandidateToolingError as exc:
+            message = redact_rollout_text(str(exc))
+            step_dir.stderr_path().write_text(message + "\n", encoding="utf-8")
+            return VerifyOutcome.UNKNOWN
+        if external_retirement:
+            if tuple(host.ssh_target for host in hosts) != _EXTERNAL_GB10_HOSTS:
+                return VerifyOutcome.MISMATCH
+            for host in hosts:
+                outcome = _verify_external_user_authority(ctx, host)
+                if outcome is not VerifyOutcome.MATCH:
+                    return outcome
+            return VerifyOutcome.MATCH
         for host in hosts:
             repo_path = shlex.quote(host.repo_path)
             env_file_path = shlex.quote(host.env_file_path)
@@ -1073,6 +1351,22 @@ class GB10PrepStep(BaseStep):
         if auth_error:
             step_dir.stderr_path().write_text(auth_error + "\n")
             return RunResult(exit_code=1, error=auth_error)
+        try:
+            external_retirement = _external_authority_retirement_mode(
+                ctx,
+                config_path=candidate_config,
+            )
+        except CandidateToolingError as exc:
+            message = redact_rollout_text(str(exc))
+            step_dir.stderr_path().write_text(message + "\n", encoding="utf-8")
+            return RunResult(exit_code=2, error=message)
+        if (
+            external_retirement
+            and tuple(host.ssh_target for host in hosts) != _EXTERNAL_GB10_HOSTS
+        ):
+            error = "external GB10 retirement inventory is not the exact 14-node fleet"
+            step_dir.stderr_path().write_text(error + "\n")
+            return RunResult(exit_code=1, error=error)
         concurrency = _gb10_prep_concurrency(
             ctx,
             host_count=len(hosts),
@@ -1099,7 +1393,11 @@ class GB10PrepStep(BaseStep):
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
             future_to_index = {
                 executor.submit(
-                    _prep_host_with_retries,
+                    (
+                        _retire_external_with_retries
+                        if external_retirement
+                        else _prep_host_with_retries
+                    ),
                     ctx=ctx,
                     host=host,
                     host_dir=_host_evidence_dir(step_dir, host),
@@ -1135,5 +1433,9 @@ class GB10PrepStep(BaseStep):
             )
         return RunResult(
             exit_code=0,
-            summary=f"prepped {len(hosts)} GB10 host(s)",
+            summary=(
+                f"retired legacy user authority on {len(hosts)} GB10 host(s)"
+                if external_retirement
+                else f"prepped {len(hosts)} GB10 host(s)"
+            ),
         )

@@ -489,7 +489,7 @@ and flags, and any raw index/tree mismatch. Plan digests and installed files
 are read from exact commit blobs, never from the mutable source worktree after
 verification. The converger clones that immutable commit under
 `/opt/loom-shared-capacity/candidates/<SHA>/repo`, creates
-`/opt/loom-shared-capacity/candidates/<SHA>/venv` with `uv sync --frozen
+`/opt/loom-shared-capacity/candidates/<SHA>/venv` with `uv sync --locked
 --no-dev`, removes every write bit from the root-owned candidate, and renders
 every `ExecStart` directly to that SHA. `/opt/loom-shared-capacity/current` is
 an atomic audit pointer only; no service executes through it.

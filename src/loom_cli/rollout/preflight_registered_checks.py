@@ -5,10 +5,11 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import re
 import stat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import MappingProxyType
 
@@ -37,6 +38,7 @@ from loom_cli.rollout.final_gate_readiness import (
     FinalGateSession,
 )
 from loom_cli.rollout.gb10_readiness import (
+    ACTIVE_GB10_HOSTS,
     GB10ProbeTarget,
     GB10SharedMountReadiness,
     probe_gb10_candidate_source_readonly,
@@ -1726,6 +1728,379 @@ def build_gb10_shared_mount_check(
     )
 
 
+
+def build_external_gb10_stage_boundary_checks(
+    run: CommandRunner,
+    *,
+    targets: tuple[GB10ProbeTarget, ...],
+    expected_profile_digest: str,
+    expected_mount_binding_digest: str,
+    candidate_root: Path,
+    expected_candidate_sha: str,
+    expected_candidate_tree: str,
+    now: Callable[[], datetime],
+) -> tuple[RegisteredCheck, RegisteredCheck, RegisteredCheck]:
+    """Consume the fixed producer's live candidate-bound infrastructure receipt."""
+    expected_inventory = gb10_target_inventory_digest(targets)
+    expected_hosts = list(ACTIVE_GB10_HOSTS)
+    expected_receipt_path = (
+        "/var/lib/loom-developer-sandbox-node-authority/"
+        f"staging-infrastructure/{expected_candidate_sha}.json"
+    )
+    summary_fields = {
+        "schema_version",
+        "kind",
+        "candidate_sha",
+        "candidate_tree",
+        "receipt_path",
+        "payload_sha256",
+        "source_controller",
+        "source_controller_host",
+        "created_at",
+        "expires_at",
+        "source_bootstrap",
+        "accounting",
+        "node_bootstraps",
+        "mount_contract",
+        "node_count",
+        "result",
+    }
+    operation_fields = {
+        "action",
+        "node",
+        "request_id",
+        "payload_sha256",
+        "result_sha256",
+        "inner_receipt",
+        "completed_at",
+        "status",
+    }
+    mount_contract = {
+        "source": "192.168.20.12:/shared_work2/loom/staging",
+        "target": "/srv/loom/staging-shared",
+        "filesystem_type": "nfs4",
+        "repository_root": "/srv/loom/staging-shared/candidates",
+        "worker_env_root": "/srv/loom/staging-shared/generated",
+        "result_root": "/srv/loom/staging-shared/results",
+        "root_uid": 0,
+        "root_gid": 31024,
+        "root_mode": "0o750",
+        "repository_root_mode": "0o750",
+        "worker_env_root_mode": "0o750",
+        "result_uid": 31024,
+        "result_gid": 31024,
+        "result_root_mode": "0o2770",
+    }
+    if (
+        tuple(target.ssh_target for target in targets) != ACTIVE_GB10_HOSTS
+        or any(
+            len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+            for value in (expected_profile_digest, expected_mount_binding_digest)
+        )
+        or len(expected_candidate_sha) != 40
+        or len(expected_candidate_tree) != 40
+    ):
+        raise ValueError("external GB10 stage boundary is invalid")
+
+    def receipt() -> dict[str, object] | None:
+        try:
+            result = run(
+                (
+                    "/usr/bin/sudo",
+                    "-n",
+                    "/usr/local/libexec/loom-staging-external-slurm-authority",
+                    "verify-infrastructure",
+                    "--candidate-sha",
+                    expected_candidate_sha,
+                    "--candidate-tree",
+                    expected_candidate_tree,
+                )
+            )
+        except Exception:
+            return None
+        if (
+            result.returncode != 0
+            or result.stderr
+            or len(result.stdout.encode("utf-8")) > 256 * 1024
+        ):
+            return None
+        try:
+            payload = json.loads(result.stdout)
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != summary_fields
+            or payload.get("schema_version") != 1
+            or payload.get("kind")
+            != "staging_external_slurm_infrastructure_verification"
+            or payload.get("candidate_sha") != expected_candidate_sha
+            or payload.get("candidate_tree") != expected_candidate_tree
+            or payload.get("receipt_path") != expected_receipt_path
+            or payload.get("source_controller") != "oldlab-2"
+            or payload.get("source_controller_host") != "trt-eai-oldlab-2"
+            or payload.get("node_count") != 14
+            or payload.get("mount_contract") != mount_contract
+            or payload.get("result") != "pass"
+            or re.fullmatch(r"[0-9a-f]{64}", str(payload.get("payload_sha256")))
+            is None
+        ):
+            return None
+        source = payload.get("source_bootstrap")
+        accounting = payload.get("accounting")
+        nodes = payload.get("node_bootstraps")
+        if (
+            not isinstance(source, dict)
+            or set(source) != operation_fields
+            or not isinstance(accounting, dict)
+            or set(accounting) != operation_fields
+            or not isinstance(nodes, list)
+            or len(nodes) != 14
+            or any(not isinstance(item, dict) or set(item) != operation_fields for item in nodes)
+        ):
+            return None
+        expected_operations = (
+            (
+                source,
+                "staging-shared-source-bootstrap",
+                "trt-gb10-2",
+                None,
+            ),
+            (
+                accounting,
+                "staging-slurm-accounting-converge",
+                "trt-gb10-1",
+                None,
+            ),
+            *tuple(
+                (
+                    item,
+                    "staging-allocation-bootstrap",
+                    host,
+                    None,
+                )
+                for item, host in zip(nodes, expected_hosts, strict=True)
+            ),
+        )
+        completed: list[datetime] = []
+        for item, action, host, _unused in expected_operations:
+            inner = item.get("inner_receipt")
+            if (
+                item.get("action") != action
+                or item.get("node") != host
+                or item.get("status") != "succeeded"
+                or re.fullmatch(r"[0-9a-f]{64}", str(item.get("request_id"))) is None
+                or re.fullmatch(r"[0-9a-f]{64}", str(item.get("payload_sha256"))) is None
+                or re.fullmatch(r"[0-9a-f]{64}", str(item.get("result_sha256"))) is None
+                or (
+                    action == "staging-slurm-accounting-converge"
+                    and re.fullmatch(r"staging-accounting/v1/[0-9a-f]{64}", str(inner))
+                    is None
+                )
+                or (action != "staging-slurm-accounting-converge" and inner is not None)
+            ):
+                return None
+            try:
+                completed.append(
+                    datetime.fromisoformat(
+                        str(item["completed_at"]).replace("Z", "+00:00")
+                    )
+                )
+            except ValueError:
+                return None
+        try:
+            created = datetime.fromisoformat(
+                str(payload["created_at"]).replace("Z", "+00:00")
+            )
+            expires = datetime.fromisoformat(
+                str(payload["expires_at"]).replace("Z", "+00:00")
+            )
+            current = now()
+        except ValueError:
+            return None
+        if (
+            any(value.tzinfo is None for value in (*completed, created, expires, current))
+            or completed != sorted(completed)
+            or completed[-1] > created
+            or created > current + timedelta(seconds=30)
+            or not current < expires
+            or (expires - created).total_seconds() > 3600
+            or (current - created).total_seconds() > 3600
+        ):
+            return None
+        return payload
+
+    def base_context_ready(context: CheckContext) -> bool:
+        return bool(
+            context.bindings["gb10.inventory-digest"] == expected_inventory
+            and context.bindings["gb10.mount-binding.sha256"]
+            == expected_mount_binding_digest
+            and context.bindings["gb10.external-profile.sha256"]
+            == expected_profile_digest
+        )
+
+    def mount_probe(context: CheckContext) -> CheckProbe:
+        payload = receipt()
+        contract_digest = (
+            "0" * 64
+            if payload is None
+            else hashlib.sha256(
+                json.dumps(
+                    payload["mount_contract"], sort_keys=True, separators=(",", ":")
+                ).encode()
+            ).hexdigest()
+        )
+        return CheckProbe(
+            passed=payload is not None and base_context_ready(context),
+            evidence={
+                "binding-digest": expected_mount_binding_digest,
+                "profile-digest": expected_profile_digest,
+                "receipt-digest": (
+                    "0" * 64 if payload is None else str(payload["payload_sha256"])
+                ),
+                "mount-contract-digest": contract_digest,
+            },
+        )
+
+    mount = RegisteredCheck(
+        spec=CheckSpec(
+            check_id="gb10.shared-mount",
+            failure_code="gb10.shared-mount.drift",
+            tier=0,
+            stage=StageCapability.STATIC,
+            dependencies=("gb10.ssh-topology",),
+            mutation_class=MutationClass.NONE,
+            input_keys=(
+                "gb10.external-profile.sha256",
+                "gb10.inventory-digest",
+                "gb10.mount-binding.sha256",
+            ),
+            evidence_schema=(
+                EvidenceField("binding-digest", "sha256"),
+                EvidenceField("profile-digest", "sha256"),
+                EvidenceField("receipt-digest", "sha256"),
+                EvidenceField("mount-contract-digest", "sha256"),
+            ),
+            timeout_seconds=30,
+            freshness_ttl_seconds=120,
+            remediation="restore the current candidate-bound external infrastructure receipt",
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="external-v2",
+        operations={CheckOperation.PROBE: mount_probe},
+    )
+
+    def candidate_probe(context: CheckContext) -> CheckProbe:
+        payload = receipt()
+        try:
+            units = inspect_systemd_unit_sources(candidate_root)
+        except (OSError, RuntimeError, ValueError):
+            units = None
+        passed = bool(
+            payload is not None
+            and base_context_ready(context)
+            and context.bindings["candidate.sha"] == expected_candidate_sha
+            and context.bindings["candidate.tree"] == expected_candidate_tree
+            and units is not None
+            and units.ready
+        )
+        return CheckProbe(
+            passed=passed,
+            evidence={
+                "candidate-sha": expected_candidate_sha,
+                "candidate-tree": expected_candidate_tree,
+                "unit-set-digest": units.unit_set_digest if units is not None else "0" * 64,
+                "infrastructure-receipt-digest": (
+                    "0" * 64 if payload is None else str(payload["payload_sha256"])
+                ),
+            },
+        )
+
+    candidate = RegisteredCheck(
+        spec=CheckSpec(
+            check_id="gb10.candidate-source",
+            failure_code="gb10.candidate-source.drift",
+            tier=0,
+            stage=StageCapability.STATIC,
+            dependencies=("candidate.identity", "gb10.shared-mount"),
+            mutation_class=MutationClass.NONE,
+            input_keys=(
+                "candidate.sha",
+                "candidate.tree",
+                "gb10.external-profile.sha256",
+                "gb10.mount-binding.sha256",
+                "gb10.inventory-digest",
+            ),
+            evidence_schema=(
+                EvidenceField("candidate-sha", "string"),
+                EvidenceField("candidate-tree", "string"),
+                EvidenceField("unit-set-digest", "sha256"),
+                EvidenceField("infrastructure-receipt-digest", "sha256"),
+            ),
+            timeout_seconds=30,
+            freshness_ttl_seconds=120,
+            remediation="restore exact local candidate bytes and infrastructure receipt",
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="external-v2",
+        operations={CheckOperation.PROBE: candidate_probe},
+    )
+
+    def host_probe(context: CheckContext) -> CheckProbe:
+        payload = receipt()
+        raw_nodes = None if payload is None else payload.get("node_bootstraps")
+        node_digests = (
+            {
+                str(item["node"]): str(item["result_sha256"])
+                for item in raw_nodes
+                if isinstance(item, dict)
+            }
+            if isinstance(raw_nodes, list)
+            else {}
+        )
+        return CheckProbe(
+            passed=payload is not None and base_context_ready(context),
+            evidence={
+                "host-count": len(node_digests),
+                "inventory-digest": expected_inventory,
+                "node-receipt-digests": node_digests,
+                "receipt-digest": (
+                    "0" * 64 if payload is None else str(payload["payload_sha256"])
+                ),
+            },
+        )
+
+    host = RegisteredCheck(
+        spec=CheckSpec(
+            check_id="gb10.host-readiness",
+            failure_code="gb10.host-readiness.failed",
+            tier=0,
+            stage=StageCapability.STATIC,
+            dependencies=("gb10.ssh-topology", "systemd.user-manager"),
+            mutation_class=MutationClass.NONE,
+            input_keys=(
+                "gb10.external-profile.sha256",
+                "gb10.inventory-digest",
+                "gb10.mount-binding.sha256",
+            ),
+            evidence_schema=(
+                EvidenceField("host-count", "integer"),
+                EvidenceField("inventory-digest", "sha256"),
+                EvidenceField("node-receipt-digests", "string-map"),
+                EvidenceField("receipt-digest", "sha256"),
+            ),
+            timeout_seconds=30,
+            freshness_ttl_seconds=120,
+            remediation="restore the exact current 14-node infrastructure receipt",
+            secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+        ),
+        implementation_version="external-v2",
+        operations={CheckOperation.PROBE: host_probe},
+    )
+    return mount, candidate, host
+
+
 def _empty_gb10_mount_probe(
     targets: tuple[GB10ProbeTarget, ...],
     binding_digest: str,
@@ -3334,6 +3709,7 @@ __all__ = [
     "build_capacity_high_water_check",
     "build_credentials_metadata_check",
     "build_docker_runtime_check",
+    "build_external_gb10_stage_boundary_checks",
     "build_external_supervisor_predecessor_check",
     "build_final_gate_checks",
     "build_gb10_candidate_source_check",

@@ -64,6 +64,7 @@ from loom_cli.rollout.preflight_registered_checks import (
     build_capacity_high_water_check,
     build_credentials_metadata_check,
     build_docker_runtime_check,
+    build_external_gb10_stage_boundary_checks,
     build_external_supervisor_predecessor_check,
     build_gb10_candidate_source_check,
     build_gb10_host_readiness_check,
@@ -235,6 +236,7 @@ class PreflightRuntimeSources:
     gb10_identity_metadata_fingerprint: str
     gb10_mount_source: Callable[[], GB10SharedMountReadiness]
     gb10_mount_binding_digest: str
+    gb10_external_profile_digest: str | None
     alembic_ini: Path
     migration_policy_path: Path
     migration_policy_digest: str
@@ -413,6 +415,46 @@ class PreflightRuntimeSources:
                 monotonic=self.monotonic,
             )
         )
+        gb10_stage_checks = (
+            build_external_gb10_stage_boundary_checks(
+                self.gb10_run,
+                targets=self.gb10_targets,
+                expected_profile_digest=self.gb10_external_profile_digest,
+                expected_mount_binding_digest=self.gb10_mount_binding_digest,
+                candidate_root=self.candidate_root,
+                expected_candidate_sha=self.candidate.resolved_sha,
+                expected_candidate_tree=self.candidate.resolved_tree or "",
+                now=self.now,
+            )
+            if self.gb10_external_profile_digest is not None
+            else (
+                build_gb10_shared_mount_check(
+                    self.gb10_mount_source,
+                    targets=self.gb10_targets,
+                    expected_binding_digest=self.gb10_mount_binding_digest,
+                ),
+                build_gb10_candidate_source_check(
+                    self.gb10_candidate_source_run or self.gb10_run,
+                    targets=self.gb10_targets,
+                    ssh_config=self.gb10_ssh_config,
+                    identity=self.gb10_identity,
+                    candidate_root=self.candidate_root,
+                    expected_candidate_sha=self.candidate.resolved_sha,
+                    expected_candidate_tree=self.candidate.resolved_tree or "",
+                    image_tag=self.candidate.image_tag,
+                    max_concurrency=GB10_CANDIDATE_SOURCE_CONCURRENCY,
+                    settle_attempts=2,
+                    settle_interval_seconds=1.0,
+                ),
+                build_gb10_host_readiness_check(
+                    self.gb10_run,
+                    targets=self.gb10_targets,
+                    ssh_config=self.gb10_ssh_config,
+                    identity=self.gb10_identity,
+                    max_concurrency=GB10_PREFLIGHT_FLEET_CONCURRENCY,
+                ),
+            )
+        )
         return (
             build_candidate_identity_check(
                 config=self.config,
@@ -472,31 +514,7 @@ class PreflightRuntimeSources:
                 expected_identity_metadata_fingerprint=self.gb10_identity_metadata_fingerprint,
                 max_concurrency=GB10_PREFLIGHT_FLEET_CONCURRENCY,
             ),
-            build_gb10_shared_mount_check(
-                self.gb10_mount_source,
-                targets=self.gb10_targets,
-                expected_binding_digest=self.gb10_mount_binding_digest,
-            ),
-            build_gb10_candidate_source_check(
-                self.gb10_candidate_source_run or self.gb10_run,
-                targets=self.gb10_targets,
-                ssh_config=self.gb10_ssh_config,
-                identity=self.gb10_identity,
-                candidate_root=self.candidate_root,
-                expected_candidate_sha=self.candidate.resolved_sha,
-                expected_candidate_tree=self.candidate.resolved_tree or "",
-                image_tag=self.candidate.image_tag,
-                max_concurrency=GB10_CANDIDATE_SOURCE_CONCURRENCY,
-                settle_attempts=2,
-                settle_interval_seconds=1.0,
-            ),
-            build_gb10_host_readiness_check(
-                self.gb10_run,
-                targets=self.gb10_targets,
-                ssh_config=self.gb10_ssh_config,
-                identity=self.gb10_identity,
-                max_concurrency=GB10_PREFLIGHT_FLEET_CONCURRENCY,
-            ),
+            *gb10_stage_checks,
             build_backup_lease_eligibility_check(
                 authority.lease_source,
                 now=self.now,
@@ -629,6 +647,9 @@ class PreflightRuntimeSources:
             "gb10.identity.metadata-fingerprint": self.gb10_identity_metadata_fingerprint,
             "gb10.inventory-digest": gb10_target_inventory_digest(self.gb10_targets),
             "gb10.mount-binding.sha256": self.gb10_mount_binding_digest,
+            "gb10.external-profile.sha256": (
+                self.gb10_external_profile_digest or _SHA256_ZERO
+            ),
             "gb10.ssh-config.sha256": self.gb10_ssh_config_sha256,
             "image.plan.sha256": image_plan_digest(),
             "kubeconfig.metadata.sha256": self.kubeconfig_metadata_digest,

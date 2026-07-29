@@ -6,10 +6,9 @@ job_pids_max = 32768
 
 [policy]
 actuator = "slurm"
-enabled = false
-disabled_reason = "awaiting_shared_capacity_handoff"
+enabled = true
 min_slots = 0
-max_slots = 0
+max_slots = 20
 scale_up_threshold_slots = 1
 scale_down_idle_seconds = 600
 scale_up_cooldown_seconds = 60

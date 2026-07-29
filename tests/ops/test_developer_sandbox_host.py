@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import base64
 import hashlib
+import io
 import json
 import os
 import stat
 import subprocess
 import sys
+import tarfile
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from scripts.ops import developer_sandbox_host as host
@@ -82,8 +86,256 @@ def test_plan_covers_all_fixed_paths_ports_and_nfs_readbacks_without_secrets() -
     )
     assert all(len(row["nfs_readback_commands"]) == 5 for row in plan["sandboxes"])
     assert all(row["candidate"].endswith(SHA) for row in plan["sandboxes"])
+    assert plan["node_authority"] == {
+        "program": "/usr/local/libexec/loom-developer-sandbox-node-authority",
+        "runtime_verbs": ["transact", "check"],
+        "external_root_bootstrap_required": True,
+        "candidate_tree_pinned": True,
+        "nodes": list(host.ELIGIBLE_LINK_NODES),
+        "raw_remote_sudo_allowed": False,
+    }
     assert "LOOM_DEV_POSTGRES_PASSWORD" not in encoded
     assert "loom_admin_" not in encoded
+
+
+def test_slurm_maintenance_inventory_is_controller_last_and_excludes_node7() -> None:
+    assert host._slurm_node_order("oldlab") == (
+        "oldlab-2",
+        "oldlab-3",
+        "oldlab-4",
+        "oldlab-5",
+        "oldlab-1",
+    )
+    assert host._slurm_node_order("gb10")[-1] == "trt-gb10-1"
+    assert "trt-gb10-7" not in host._slurm_node_order("gb10")
+
+
+def test_slurm_maintenance_journal_rejects_symlink_and_hardlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = next(item for item in host.load_profiles() if item.sandbox == "qianyi")
+    monkeypatch.setattr(host, "SLURM_MAINTENANCE_ROOT", tmp_path / "slurm")
+    path = host._slurm_maintenance_file("oldlab", "qianyi", SHA)
+    state = host._new_slurm_maintenance_state(
+        profile,
+        domain="oldlab",
+        sha=SHA,
+        tree="b" * 40,
+    )
+    host._write_slurm_maintenance_state(path, state)
+    os.link(path, path.with_suffix(".hardlink"))
+    with pytest.raises(host.HostConvergeError, match="metadata is unsafe"):
+        host._load_slurm_maintenance_file(path)
+
+    path.with_suffix(".hardlink").unlink()
+    target = path.with_suffix(".target")
+    path.rename(target)
+    path.symlink_to(target)
+    with pytest.raises(host.HostConvergeError, match="unavailable"):
+        host._load_slurm_maintenance_file(path)
+
+
+def test_slurm_maintenance_journal_rejects_foreign_root_and_read_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = next(item for item in host.load_profiles() if item.sandbox == "qianyi")
+    monkeypatch.setattr(host, "SLURM_MAINTENANCE_ROOT", tmp_path / "slurm")
+    path = host._slurm_maintenance_file("oldlab", "qianyi", SHA)
+    state = host._new_slurm_maintenance_state(
+        profile,
+        domain="oldlab",
+        sha=SHA,
+        tree="b" * 40,
+    )
+    host._write_slurm_maintenance_state(path, state)
+
+    original_lseek = host.os.lseek
+    seeks = 0
+
+    def raced_lseek(descriptor: int, offset: int, whence: int) -> int:
+        nonlocal seeks
+        seeks += 1
+        if seeks == 2:
+            path.write_bytes(path.read_bytes() + b" ")
+        return original_lseek(descriptor, offset, whence)
+
+    monkeypatch.setattr(host.os, "lseek", raced_lseek)
+    with pytest.raises(host.HostConvergeError, match="changed during read"):
+        host._load_slurm_maintenance_file(path)
+
+    monkeypatch.setattr(host.os, "lseek", original_lseek)
+    path.write_bytes(
+        json.dumps(state, sort_keys=True, separators=(",", ":")).encode("ascii") + b"\n",
+    )
+    current_uid = os.geteuid()
+    monkeypatch.setattr(host.os, "geteuid", lambda: current_uid + 1)
+    with pytest.raises(host.HostConvergeError, match="state root is unsafe"):
+        host._load_slurm_maintenance_file(path)
+
+
+def test_slurm_maintenance_busy_resume_reuses_receipts_and_keeps_controller_last(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = next(item for item in host.load_profiles() if item.sandbox == "qianyi")
+    monkeypatch.setattr(host, "SLURM_MAINTENANCE_ROOT", tmp_path / "slurm")
+    monkeypatch.setattr(host, "_require_live_host", lambda: None)
+    monkeypatch.setattr(host, "_slurm_maintenance_tree", lambda _profile, _sha: "b" * 40)
+    monkeypatch.setattr(host, "_slurm_maintenance_lock", lambda _domain: nullcontext())
+    monkeypatch.setattr(
+        host,
+        "_ensure_root_private_directory",
+        lambda path: path.mkdir(mode=0o700, parents=True, exist_ok=True),
+    )
+    calls: list[tuple[str, str, str | None]] = []
+    busy = {"enabled": True}
+
+    def authority_request(
+        _profile: host.Profile,
+        *,
+        domain: str,
+        node: str,
+        action: str,
+        sha: str,
+        tree: str,
+        prior_request_id: str | None = None,
+    ) -> tuple[dict[str, object], str]:
+        del domain, sha, tree
+        calls.append((node, action, prior_request_id))
+        if busy["enabled"] and node == "oldlab-3" and action == "slurm-node-converge":
+            raise host.HostConvergeError("node still has Slurm jobs; drain and retry")
+        request_id = hashlib.sha256(f"{node}:{action}:{prior_request_id}".encode()).hexdigest()
+        if action == "slurm-check":
+            return (
+                {
+                    "status": "succeeded",
+                    "request_id": request_id,
+                    "result": {
+                        "cluster": "trt-oldlab",
+                        "candidate_sha": SHA,
+                        "file_plan": {"converged": True},
+                    },
+                },
+                request_id,
+            )
+        return (
+            {
+                "schema_version": 1,
+                "status": "succeeded",
+                "request_id": request_id,
+                "action": action,
+                "node": node,
+                "domain": "oldlab",
+                "sandbox": "qianyi",
+                "candidate_sha": SHA,
+                "candidate_tree": "b" * 40,
+                "payload_sha256": hashlib.sha256(b"").hexdigest(),
+                "result_sha256": "e" * 64,
+                "inner_receipt": "slurm-policy-v1:trt-oldlab:" + "c" * 64 + ":" + "d" * 64,
+                "completed_at": "2026-07-28T00:00:00+00:00",
+            },
+            request_id,
+        )
+
+    monkeypatch.setattr(host, "_slurm_authority_request", authority_request)
+    with pytest.raises(host.HostConvergeError, match="Slurm jobs"):
+        host.slurm_maintenance_converge(profile, SHA, "oldlab")
+
+    path = host._slurm_maintenance_file("oldlab", "qianyi", SHA)
+    blocked = json.loads(path.read_text(encoding="ascii"))
+    assert blocked["phase"] == "blocked"
+    first_receipt = blocked["nodes"]["oldlab-2"]["converge_receipt"]
+    assert first_receipt is not None
+    assert blocked["nodes"]["oldlab-3"]["converge_receipt"] is None
+    assert not any(node == "oldlab-1" for node, _action, _prior in calls)
+
+    calls.clear()
+    busy["enabled"] = False
+    completed = host.slurm_maintenance_converge(profile, SHA, "oldlab")
+    assert completed["phase"] == "completed"
+    assert completed["nodes"]["oldlab-2"]["converge_receipt"] == first_receipt
+    controller_index = calls.index(("oldlab-1", "slurm-controller-converge", None))
+    compute_converge_indexes = [
+        index
+        for index, (_node, action, _prior) in enumerate(calls)
+        if action == "slurm-node-converge"
+    ]
+    assert controller_index > max(compute_converge_indexes)
+    assert all(
+        completed["nodes"][node]["check_request_id"] is not None
+        for node in host._slurm_node_order("oldlab")
+    )
+
+    converge_receipts = {
+        node: completed["nodes"][node]["converge_receipt"]
+        for node in host._slurm_node_order("oldlab")
+    }
+    repeated = host.slurm_maintenance_converge(profile, SHA, "oldlab")
+    assert {
+        node: repeated["nodes"][node]["converge_receipt"]
+        for node in host._slurm_node_order("oldlab")
+    } == converge_receipts
+
+    calls.clear()
+    rolled_back = host.slurm_maintenance_rollback(profile, SHA, "oldlab")
+    assert rolled_back["phase"] == "rolled-back"
+    rollback_calls = [row for row in calls if row[1] == "slurm-rollback"]
+    assert [node for node, _action, _prior in rollback_calls] == list(
+        reversed(host._slurm_node_order("oldlab")),
+    )
+    assert all(prior is not None for _node, _action, prior in rollback_calls)
+
+
+def test_sandbox_batch_identity_is_fixed_nonlogin_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        host,
+        "_identity",
+        lambda user, group: host.Identity(user=user, group=group, uid=31023, gid=31023),
+    )
+    monkeypatch.setattr(
+        host.pwd,
+        "getpwnam",
+        lambda _user: SimpleNamespace(
+            pw_gid=31023,
+            pw_dir="/nonexistent",
+            pw_shell="/usr/sbin/nologin",
+        ),
+    )
+
+    identity = host._sandbox_batch_identity("devansh")
+
+    assert identity == host.Identity(
+        user="loom-sandbox-devansh",
+        group="loom-sandbox-devansh",
+        uid=31023,
+        gid=31023,
+    )
+
+
+def test_sandbox_batch_identity_rejects_login_capable_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        host,
+        "_identity",
+        lambda user, group: host.Identity(user=user, group=group, uid=31021, gid=31021),
+    )
+    monkeypatch.setattr(
+        host.pwd,
+        "getpwnam",
+        lambda _user: SimpleNamespace(
+            pw_gid=31021,
+            pw_dir="/home/loom-sandbox-qianyi",
+            pw_shell="/bin/bash",
+        ),
+    )
+
+    with pytest.raises(host.HostConvergeError, match="metadata drifted"):
+        host._sandbox_batch_identity("qianyi")
 
 
 def test_secret_initialization_is_private_idempotent_and_unique(tmp_path: Path) -> None:
@@ -413,12 +665,10 @@ def test_systemd_entry_is_fixed_and_replayable() -> None:
 
 def test_attestation_renewal_timer_is_persistent_and_bounded() -> None:
     root = Path(__file__).resolve().parents[2] / "deploy/developer-sandboxes"
-    service = (
-        root / "loom-developer-sandbox-attestation-renewal.service"
-    ).read_text(encoding="utf-8")
-    timer = (
-        root / "loom-developer-sandbox-attestation-renewal.timer"
-    ).read_text(encoding="utf-8")
+    service = (root / "loom-developer-sandbox-attestation-renewal.service").read_text(
+        encoding="utf-8"
+    )
+    timer = (root / "loom-developer-sandbox-attestation-renewal.timer").read_text(encoding="utf-8")
 
     assert (
         "ExecStart=/usr/local/libexec/loom-developer-sandbox-host "
@@ -488,21 +738,19 @@ def test_runtime_attestation_history_is_monotonic_and_candidate_bound(
                 for node in host.ELIGIBLE_LINK_NODES
             },
         }
-        fleet_digest = "sha256:" + hashlib.sha256(
-            json.dumps(
-                fleet_unsigned,
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=True,
-            ).encode(),
-        ).hexdigest()
-        fleet_payload = {**fleet_unsigned, "payload_sha256": fleet_digest}
-        fleet_path = (
-            host.COMBINED_RECEIPT_ROOT
-            / profile.sandbox
-            / candidate
-            / "fleet.json"
+        fleet_digest = (
+            "sha256:"
+            + hashlib.sha256(
+                json.dumps(
+                    fleet_unsigned,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode(),
+            ).hexdigest()
         )
+        fleet_payload = {**fleet_unsigned, "payload_sha256": fleet_digest}
+        fleet_path = host.COMBINED_RECEIPT_ROOT / profile.sandbox / candidate / "fleet.json"
         fleet_path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         fleet_path.write_text(json.dumps(fleet_payload), encoding="utf-8")
         combined_unsigned = {
@@ -634,6 +882,11 @@ def test_service_converge_uses_expired_archive_before_links_are_active(
     )
     events: list[str] = []
     monkeypatch.setattr(host, "_identity", lambda user, _group: _current_identity(user))
+    monkeypatch.setattr(
+        host,
+        "_sandbox_batch_identity",
+        lambda sandbox: _current_identity(f"loom-sandbox-{sandbox}"),
+    )
     monkeypatch.setattr(host, "verify_candidate_root", lambda *_args: None)
     monkeypatch.setattr(host, "verify_candidate", lambda *_args: "b" * 40)
     monkeypatch.setattr(host, "verify_worker_runtime_env", lambda *_args: None)
@@ -887,6 +1140,11 @@ def test_attestation_timer_waits_for_the_recovery_activation_lock(
     monkeypatch.setattr(host, "_activation_lock", activation_lock)
     monkeypatch.setattr(host, "_load_json", lambda *_args: {"candidate_sha": SHA})
     monkeypatch.setattr(host, "_identity", lambda user, _group: _current_identity(user))
+    monkeypatch.setattr(
+        host,
+        "_sandbox_batch_identity",
+        lambda sandbox: _current_identity(f"loom-sandbox-{sandbox}"),
+    )
     monkeypatch.setattr(host, "verify_candidate_root", lambda *_args: None)
     monkeypatch.setattr(host, "verify_candidate", lambda *_args: "b" * 40)
     monkeypatch.setattr(host, "verify_worker_runtime_env", lambda *_args: None)
@@ -951,6 +1209,11 @@ def test_rollback_after_attestation_ttl_renews_before_positive_readiness(
         lambda path: path.mkdir(parents=True, exist_ok=True),
     )
     monkeypatch.setattr(host, "_identity", lambda user, _group: _current_identity(user))
+    monkeypatch.setattr(
+        host,
+        "_sandbox_batch_identity",
+        lambda sandbox: _current_identity(f"loom-sandbox-{sandbox}"),
+    )
     monkeypatch.setattr(
         host,
         "verify_candidate",
@@ -1142,8 +1405,9 @@ def test_rollback_crash_after_target_renew_recovers_and_can_retry(
     monkeypatch.setattr(
         host,
         "_renew_attestation_locked",
-        lambda _profile, *, sha, tree: events.append(f"renew:{sha}:{tree}")
-        or _receipt(profile, sha),
+        lambda _profile, *, sha, tree: (
+            events.append(f"renew:{sha}:{tree}") or _receipt(profile, sha)
+        ),
     )
 
     host._recover_transaction(profile, transaction)
@@ -1211,8 +1475,9 @@ def test_failed_post_renew_recovery_invalidates_target_then_refreshes_current(
     monkeypatch.setattr(
         host,
         "_renew_attestation_locked",
-        lambda _profile, *, sha, tree: events.append(f"renew:{sha}:{tree}")
-        or _receipt(profile, sha),
+        lambda _profile, *, sha, tree: (
+            events.append(f"renew:{sha}:{tree}") or _receipt(profile, sha)
+        ),
     )
     monkeypatch.setattr(
         host,
@@ -1449,6 +1714,11 @@ def test_empty_namespace_first_install_materializes_before_prepare_and_attest(
     monkeypatch.setattr(host, "_identity", lambda user, _group: _current_identity(user))
     monkeypatch.setattr(
         host,
+        "_sandbox_batch_identity",
+        lambda sandbox: _current_identity(f"loom-sandbox-{sandbox}"),
+    )
+    monkeypatch.setattr(
+        host,
         "_bootstrap_domain_runtime_hosts",
         lambda *_args: events.append("bootstrap-empty-domain-roots"),
     )
@@ -1533,38 +1803,6 @@ def test_empty_namespace_first_install_materializes_before_prepare_and_attest(
     assert events.index("fleet-after-prepare") < events.index("attest-after-fleet")
 
 
-def test_materialization_archive_reads_helpers_from_commit_not_mutable_worktree(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    repo = tmp_path / "repo"
-    script = repo / "scripts/ops/developer_sandbox_domain_runtime.py"
-    config = repo / "deploy/developer-sandboxes/runtime-domains.toml"
-    script.parent.mkdir(parents=True)
-    config.parent.mkdir(parents=True)
-    script.write_text("committed-helper\n", encoding="utf-8")
-    config.write_text("committed-config\n", encoding="utf-8")
-    _git(repo, "init", "-q")
-    _git(repo, "config", "user.name", "Host Test")
-    _git(repo, "config", "user.email", "host@example.invalid")
-    _git(repo, "add", ".")
-    _git(repo, "commit", "-qm", "candidate")
-    sha = _git(repo, "rev-parse", "HEAD")
-    tree = _git(repo, "rev-parse", "HEAD^{tree}")
-    script.write_text("tampered-after-stage\n", encoding="utf-8")
-    config.write_text("tampered-config\n", encoding="utf-8")
-    bundle = tmp_path / "candidate.bundle"
-    bundle.write_bytes(b"bounded-bundle")
-    monkeypatch.setattr(host, "REPO_ROOT", repo)
-
-    archive = host._materialization_archive(bundle, sha, tree)
-    with host.tarfile.open(fileobj=host.io.BytesIO(archive), mode="r") as tar:
-        helper = tar.extractfile("developer_sandbox_domain_runtime.py")
-        runtime_config = tar.extractfile("runtime-domains.toml")
-        assert helper is not None and helper.read() == b"committed-helper\n"
-        assert runtime_config is not None and runtime_config.read() == b"committed-config\n"
-
-
 def test_remote_link_fleet_reads_each_client_from_issuance_clients_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1592,10 +1830,15 @@ def test_remote_link_fleet_reads_each_client_from_issuance_clients_directory(
     monkeypatch.setattr(host, "_archive_credentials", archive)
     monkeypatch.setattr(
         host,
-        "_ssh",
-        lambda *_args, **_kwargs: type("Completed", (), {"stdout": ""})(),
+        "_node_authority",
+        lambda *_args, **_kwargs: {"status": "succeeded"},
     )
-    monkeypatch.setattr(host, "_cleanup_remote_stage", lambda *_args: None)
+    fleet_calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        host,
+        "_collect_and_persist_remote_link_fleet",
+        lambda _profile, sha, tree: fleet_calls.append((sha, tree)) or {},
+    )
 
     host._install_remote_link_fleet(
         profile,
@@ -1608,47 +1851,298 @@ def test_remote_link_fleet_reads_each_client_from_issuance_clients_directory(
         issuance_root / profile.sandbox / SHA / "clients" / node
         for node in host.ELIGIBLE_LINK_NODES
     ]
+    assert fleet_calls == [(SHA, "b" * 40)]
 
 
-def test_remote_cleanup_failure_is_persisted_and_fails_closed(
+def _link_client_report(
+    profile: host.Profile,
+    node: str,
+    *,
+    ca_fingerprint: str = "sha256:" + "c" * 64,
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "sandbox": profile.sandbox,
+        "candidate_sha": SHA,
+        "node": node,
+        "route": "ok",
+        "tls_version": "TLSv1.3",
+        "services": {
+            name: {
+                "listener_port": host.REMOTE_LINK_SERVICE_PORTS[profile.sandbox][name][0],
+                "target_port": host.REMOTE_LINK_SERVICE_PORTS[profile.sandbox][name][1],
+                "health": "ok",
+            }
+            for name in host.REMOTE_LINK_SERVICE_NAMES
+        },
+        "client_uri_san": host._link_client_uri(profile, SHA),
+        "secret_files": {
+            name: {"uid": 0, "gid": 0, "mode": "0600", "present": True}
+            for name in (
+                "worker-token",
+                "minio-access-key",
+                "minio-secret-key",
+                "client-key.pem",
+            )
+        },
+        "ca_fingerprint": ca_fingerprint,
+        "client_cert_fingerprint": "sha256:" + "d" * 64,
+    }
+
+
+def _link_server_report(profile: host.Profile) -> dict[str, object]:
+    return {
+        "node": "oldlab-2",
+        "address": host.REMOTE_LINK_SERVER_ADDRESS,
+        "unit": f"loom-developer-sandbox-link@{profile.sandbox}.service",
+        "unit_active": True,
+        "active_candidate_sha": SHA,
+        "ca_fingerprint": "sha256:" + "c" * 64,
+        "server_cert_fingerprint": "sha256:" + "e" * 64,
+        "client_uri_san": host._link_client_uri(profile, SHA),
+        "services": {
+            name: {
+                "listener_port": host.REMOTE_LINK_SERVICE_PORTS[profile.sandbox][name][0],
+                "target_host": "127.0.0.1",
+                "target_port": host.REMOTE_LINK_SERVICE_PORTS[profile.sandbox][name][1],
+                "health_path": host.REMOTE_LINK_HEALTH_PATHS[name],
+                "tls_version": "TLSv1.3",
+                "status": "active",
+            }
+            for name in host.REMOTE_LINK_SERVICE_NAMES
+        },
+    }
+
+
+def test_fleet_collection_uses_only_node_authority_and_persists_canonical_payload(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     profile = _temporary_profile(tmp_path)
-    monkeypatch.setattr(host, "SOURCE_STAGING_ROOT", tmp_path / "source")
-    monkeypatch.setattr(os, "chown", lambda *_args: None)
-    monkeypatch.setattr(
-        host,
-        "_ensure_root_private_directory",
-        lambda path: (path.mkdir(parents=True, exist_ok=True), path.chmod(0o700)),
-    )
-    monkeypatch.setattr(
-        host,
-        "_ssh",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            host.HostConvergeError("remote cleanup failed"),
-        ),
-    )
+    tree = "b" * 40
+    calls: list[tuple[str, str, dict[str, object]]] = []
 
-    with pytest.raises(host.HostConvergeError, match="remote cleanup failed"):
-        host._cleanup_remote_stage(
-            profile,
-            SHA,
-            "oldlab",
-            "oldlab-1",
-            Path("/run/loom-developer-sandbox-installer/source/qianyi"),
+    def authority_call(node: str, verb: str, envelope: bytes) -> dict[str, object]:
+        request = json.loads(envelope)
+        calls.append((node, verb, request))
+        if request["action"] == "inspect-link-client":
+            return {
+                "schema_version": 1,
+                "request_id": request["request_id"],
+                "status": "succeeded",
+                "result": _link_client_report(profile, node),
+            }
+        if request["action"] == "inspect-link-server":
+            return {
+                "schema_version": 1,
+                "request_id": request["request_id"],
+                "status": "succeeded",
+                "result": _link_server_report(profile),
+            }
+        assert request["action"] == "persist-fleet-attestation"
+        payload = base64.b64decode(str(request["payload_base64"]), validate=True)
+        assert payload == (
+            json.dumps(
+                json.loads(payload),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("ascii")
+            + b"\n"
         )
+        return {
+            "schema_version": 1,
+            "request_id": request["request_id"],
+            "action": request["action"],
+            "node": node,
+            "domain": "oldlab",
+            "sandbox": profile.sandbox,
+            "candidate_sha": SHA,
+            "candidate_tree": tree,
+            "payload_sha256": hashlib.sha256(payload).hexdigest(),
+            "result_sha256": "f" * 64,
+            "inner_receipt": None,
+            "completed_at": datetime.now(UTC).isoformat(),
+            "status": "succeeded",
+        }
 
-    failure = host._remote_stage_failure_path(profile, SHA, "oldlab", "oldlab-1")
-    payload = json.loads(failure.read_text(encoding="utf-8"))
-    assert payload["status"] == "remote-cleanup-failed"
-    assert stat.S_IMODE(failure.stat().st_mode) == 0o600
+    monkeypatch.setattr(host, "_node_authority", authority_call)
+    fleet = host._collect_and_persist_remote_link_fleet(profile, SHA, tree)
+
+    assert [request["action"] for _, _, request in calls].count(
+        "inspect-link-client",
+    ) == len(host.ELIGIBLE_LINK_NODES)
+    assert [request["action"] for _, _, request in calls].count(
+        "inspect-link-server",
+    ) == 1
+    assert [request["action"] for _, _, request in calls].count(
+        "persist-fleet-attestation",
+    ) == 1
+    assert all(
+        verb == "check" for _, verb, request in calls if request["action"].startswith("inspect-")
+    )
+    assert calls[-1][0:2] == ("oldlab-2", "transact")
+    assert fleet["eligible_nodes"] == list(host.ELIGIBLE_LINK_NODES)
+    assert fleet["payload_sha256"] == host._fleet_attestation_digest(fleet)
+
+
+def test_fleet_collection_rejects_one_cross_bound_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _temporary_profile(tmp_path)
+
+    def authority_call(node: str, _verb: str, envelope: bytes) -> dict[str, object]:
+        request = json.loads(envelope)
+        report = _link_client_report(profile, node)
+        if node == "trt-gb10-15":
+            report["node"] = "trt-gb10-14"
+        return {
+            "schema_version": 1,
+            "request_id": request["request_id"],
+            "status": "succeeded",
+            "result": report,
+        }
+
+    monkeypatch.setattr(host, "_node_authority", authority_call)
+    with pytest.raises(host.HostConvergeError, match="trt-gb10-15"):
+        host._collect_and_persist_remote_link_fleet(profile, SHA, "b" * 40)
+
+
+def test_install_and_renew_share_the_same_fleet_collector(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _temporary_profile(tmp_path)
+    tree = "b" * 40
+    calls: list[str] = []
+    receipt = _receipt(profile, SHA)
+    monkeypatch.setattr(
+        host,
+        "_collect_and_persist_remote_link_fleet",
+        lambda *_args: calls.append("fleet") or {},
+    )
+    monkeypatch.setattr(
+        host,
+        "_publish_domain_attestations",
+        lambda *_args: calls.append("domains"),
+    )
+    monkeypatch.setattr(host, "verify_combined_receipt", lambda *_args: receipt)
+    monkeypatch.setattr(host, "_archive_runtime_attestation", lambda *_args: None)
+    monkeypatch.setattr(host, "write_desired", lambda *_args: None)
+
+    assert host._renew_attestation_locked(profile, sha=SHA, tree=tree) == receipt
+    assert calls == ["fleet", "domains"]
+
+
+def test_node_authority_uses_only_the_two_fixed_sudo_commands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[tuple[str, ...], bytes | None]] = []
+
+    def run(argv: tuple[str, ...], **kwargs: object) -> object:
+        calls.append((argv, kwargs.get("input")))
+        return type(
+            "Completed",
+            (),
+            {
+                "returncode": 0,
+                "stdout": b'{"status":"succeeded"}\n',
+                "stderr": b"",
+            },
+        )()
+
+    monkeypatch.setattr(host.subprocess, "run", run)
+    envelope = host._node_authority_envelope(
+        action="host-converge",
+        node="oldlab-1",
+        domain="oldlab",
+        sandbox="qianyi",
+        sha=SHA,
+        tree="b" * 40,
+    )
+
+    for verb in ("transact", "check"):
+        host._node_authority("oldlab-1", verb, envelope)
+
+    assert [argv for argv, _input in calls] == [
+        (
+            "/usr/local/libexec/loom-developer-sandbox-node-transport",
+            "invoke",
+            "--node",
+            "oldlab-1",
+            "--verb",
+            verb,
+        )
+        for verb in ("transact", "check")
+    ]
+    assert all(input_bytes == envelope for _argv, input_bytes in calls)
+    forbidden = {"install", "tar", "rm", "chown", "chmod", "python3"}
+    assert all(not forbidden.intersection(argv) for argv, _input in calls)
+
+
+def test_domain_attest_sends_fixed_worker_and_fleet_seed_archive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _temporary_profile(tmp_path)
+    tree = "b" * 40
+    fleet_root = tmp_path / "fleet"
+    fleet = fleet_root / profile.sandbox / SHA / "fleet.json"
+    fleet.parent.mkdir(parents=True)
+    fleet.write_bytes(b'{"fleet":"proof"}\n')
+    original_lstat = Path.lstat
+    envelopes: list[dict[str, object]] = []
+    collect_calls: list[tuple[str, ...]] = []
+
+    def lstat(path: Path) -> object:
+        if path == fleet:
+            return SimpleNamespace(
+                st_mode=stat.S_IFREG | 0o600,
+                st_uid=0,
+                st_gid=0,
+                st_nlink=1,
+            )
+        return original_lstat(path)
+
+    def authority_call(_node: str, _verb: str, envelope: bytes) -> dict[str, object]:
+        envelopes.append(json.loads(envelope))
+        return {"status": "succeeded"}
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+    monkeypatch.setattr(host, "FLEET_ATTESTATION_ROOT", fleet_root)
+    monkeypatch.setattr(host, "_worker_env_seed", lambda _profile, _sha: b"ENV=reference\n")
+    monkeypatch.setattr(host, "_node_authority", authority_call)
+    monkeypatch.setattr(
+        host,
+        "_run_candidate_program",
+        lambda _profile, _sha, _program, *args: collect_calls.append(tuple(args)) or {},
+    )
+
+    host._publish_domain_attestations(profile, SHA, tree)
+
+    assert len(envelopes) == 2
+    for envelope in envelopes:
+        assert envelope["payload_kind"] == "attestation-seed"
+        payload = base64.b64decode(str(envelope["payload_base64"]), validate=True)
+        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:") as archive:
+            assert {member.name for member in archive.getmembers()} == {
+                "worker.env",
+                "fleet.json",
+            }
+            assert archive.extractfile("worker.env").read() == b"ENV=reference\n"
+            assert archive.extractfile("fleet.json").read() == b'{"fleet":"proof"}\n'
+    assert "--candidate-tree" in collect_calls[0]
+    assert tree in collect_calls[0]
 
 
 def test_host_installer_and_profiles_require_the_full_ci_matrix() -> None:
     for changed_path in (
         "scripts/ops/developer_sandbox_host.py",
+        "scripts/ops/developer_sandbox_node_authority.py",
+        "tests/ops/test_developer_sandbox_node_authority.py",
         "deploy/developer-sandboxes/qianyi.toml",
+        "deploy/developer-sandboxes/loom-developer-sandbox-node-authority.sudoers",
         "deploy/developer-sandboxes/loom-developer-sandbox@.service",
     ):
         plan = plan_validations(
@@ -1659,3 +2153,43 @@ def test_host_installer_and_profiles_require_the_full_ci_matrix() -> None:
         assert plan.selected_heavy_checks() == set(HEAVY_CHECKS)
         assert plan.unowned_runtime is False
         assert all("protected-developer-sandbox" in plan.reasons[name] for name in HEAVY_CHECKS)
+
+
+def test_staging_allocation_config_separates_producer_batch_and_system_mount() -> None:
+    config = host.load_staging_allocation_config(
+        Path("deploy/developer-sandboxes/staging-external-slurm-authority.toml"),
+    )
+
+    assert (
+        config.producer_user,
+        config.producer_uid,
+        config.producer_gid,
+        config.producer_home,
+        config.producer_shell,
+    ) == (
+        "loom-rollout",
+        995,
+        982,
+        Path("/var/lib/loom-staging-rollout"),
+        Path("/bin/sh"),
+    )
+    assert (
+        config.batch_user,
+        config.batch_uid,
+        config.batch_gid,
+        config.batch_home,
+        config.batch_shell,
+        config.batch_supplementary_groups,
+    ) == (
+        "loom-staging-worker",
+        31024,
+        31024,
+        Path("/nonexistent"),
+        Path("/usr/sbin/nologin"),
+        ("docker",),
+    )
+    assert config.shared_mount_source == "192.168.20.12:/shared_work2/loom/staging"
+    assert config.shared_mount_target == Path("/srv/loom/staging-shared")
+    assert config.repository_root == config.shared_mount_target / "candidates"
+    assert config.worker_env_root == config.shared_mount_target / "generated"
+    assert config.result_root == config.shared_mount_target / "results"

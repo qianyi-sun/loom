@@ -6,6 +6,41 @@ from scripts.plan_ci_validations import HEAVY_CHECKS, plan_validations
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "scripts/ops/developer_sandbox_domain_runtime.py",
+        "scripts/ops/developer_sandbox_live_acceptance.py",
+        "scripts/ops/developer_sandbox_live_authority.py",
+        "scripts/ops/developer_sandbox_node_transport.py",
+        "scripts/ops/developer_sandbox_slurm_policy.py",
+        "scripts/ops/developer_sandbox_staging_promotion.py",
+        "scripts/ops/staging_external_slurm_acceptance_authority.py",
+        "src/loom_cli/external_slurm_acceptance.py",
+        "tests/ops/test_developer_sandbox_domain_runtime.py",
+        "tests/ops/test_developer_sandbox_live_acceptance.py",
+        "tests/ops/test_developer_sandbox_live_authority.py",
+        "tests/ops/test_developer_sandbox_node_transport.py",
+        "tests/ops/test_developer_sandbox_slurm_policy.py",
+        "tests/ops/test_developer_sandbox_staging_promotion.py",
+        "tests/ops/test_staging_external_slurm_acceptance_authority.py",
+        "tests/loom_cli/test_external_slurm_acceptance.py",
+        "deploy/developer-sandboxes/node-authority-transport.toml",
+        "deploy/slurm/developer-sandboxes/gb10.toml",
+    ],
+)
+def test_developer_sandbox_runtime_authority_selects_all_heavy_gates(
+    path: str,
+) -> None:
+    plan = plan_validations(
+        changed_paths=[path],
+        labels=set(),
+        event_name="pull_request",
+    )
+
+    assert plan.selected_heavy_checks() == set(HEAVY_CHECKS)
+
+
 def test_every_non_draft_pr_runs_full_protected_gate() -> None:
     plan = plan_validations(
         changed_paths=["src/loom/config.py"],

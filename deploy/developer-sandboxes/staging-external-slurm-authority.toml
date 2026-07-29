@@ -1,0 +1,107 @@
+schema_version = 1
+environment = "staging"
+pool = "gb10"
+source_host = "trt-eai-oldlab-1"
+submit_host = "trt-gb10-1"
+controller = "trt-gb10-1"
+cluster = "trt-gb10"
+partition = "gb10"
+producer_user = "loom-rollout"
+producer_group = "loom-rollout"
+producer_uid = 995
+producer_gid = 982
+producer_home = "/var/lib/loom-staging-rollout"
+producer_shell = "/bin/sh"
+batch_user = "loom-staging-worker"
+batch_group = "loom-staging-worker"
+batch_uid = 31024
+batch_gid = 31024
+batch_home = "/nonexistent"
+batch_shell = "/usr/sbin/nologin"
+batch_supplementary_groups = ["docker"]
+slurm_account = "loom-staging"
+qos = "loom-staging"
+artifact_root = "/var/lib/loom-staging-external-slurm-authority"
+public_key = "/etc/loom/staging-external-slurm-authority/authority-public.pem"
+private_key = "/etc/loom/staging-external-slurm-authority/authority-private.pem"
+supervisor_service = "loom-autoscaler-gb10-staging.service"
+supervisor_timer = "loom-autoscaler-gb10-staging.timer"
+max_age_seconds = 900
+
+allowed_nodes = [
+  "trt-gb10-1",
+  "trt-gb10-2",
+  "trt-gb10-3",
+  "trt-gb10-4",
+  "trt-gb10-5",
+  "trt-gb10-6",
+  "trt-gb10-8",
+  "trt-gb10-9",
+  "trt-gb10-10",
+  "trt-gb10-11",
+  "trt-gb10-12",
+  "trt-gb10-13",
+  "trt-gb10-14",
+  "trt-gb10-15",
+]
+
+[installation]
+source_root = "/opt/loom-developer-sandbox-node-authority/source"
+candidate_runtime_template = "/opt/loom-staging-runner/candidates/{candidate_sha}/venv/bin/python"
+wrapper = "/usr/local/libexec/loom-staging-external-slurm-authority"
+isolated_python = true
+required_modules = ["loom_cli", "cryptography"]
+
+[infrastructure]
+receipt_root = "/var/lib/loom-developer-sandbox-node-authority/staging-infrastructure"
+source_controller = "oldlab-2"
+source_controller_host = "trt-eai-oldlab-2"
+max_age_seconds = 3600
+
+[host_aliases]
+trt-gb10-1 = "gx10-01c7"
+trt-gb10-2 = "gx10-0fca"
+trt-gb10-3 = "gx10-0f0d"
+trt-gb10-4 = "gx10-0d93"
+trt-gb10-5 = "gx10-1036"
+trt-gb10-6 = "gx10-1000"
+trt-gb10-8 = "gx10-db22"
+trt-gb10-9 = "gx10-16f6"
+trt-gb10-10 = "gx10-0f82"
+trt-gb10-11 = "gx10-c38b"
+trt-gb10-12 = "gx10-e45f"
+trt-gb10-13 = "gx10-fc5d"
+trt-gb10-14 = "gx10-0a49"
+trt-gb10-15 = "gx10-0152"
+
+[shared_mount]
+source = "192.168.20.12:/shared_work2/loom/staging"
+target = "/srv/loom/staging-shared"
+filesystem_type = "nfs4"
+unit = "srv-loom-staging\\x2dshared.mount"
+repository_root = "/srv/loom/staging-shared/candidates"
+worker_env_root = "/srv/loom/staging-shared/generated"
+result_root = "/srv/loom/staging-shared/results"
+
+[submission_broker]
+transport = "/usr/local/libexec/loom-developer-sandbox-node-transport"
+node = "trt-gb10-1"
+domain = "gb10"
+sandbox = "staging"
+submit_action = "staging-allocation-submit"
+cancel_action = "staging-allocation-cancel"
+
+[candidate_paths]
+repository = "/srv/loom/staging-shared/candidates/loom-remote-worker-{image_tag}"
+worker_env = "/srv/loom/staging-shared/generated/staging-gb10-worker-{image_tag}.env"
+environment_state_profile = "/var/lib/loom-staging-rollout/environment-state/staging.toml"
+
+[producer_paths]
+repository = "/var/lib/loom-staging-rollout/prepared/candidates/loom-remote-worker-{image_tag}"
+worker_env = "/var/lib/loom-staging-rollout/prepared/generated/staging-gb10-worker-{image_tag}.env"
+
+[probe]
+action = "staging-allocation-probe"
+result_root = "/srv/loom/staging-shared/results"
+job_timeout_seconds = 240
+heartbeat_interval_seconds = 5

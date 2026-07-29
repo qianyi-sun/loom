@@ -1,0 +1,6049 @@
+#!/usr/bin/python3 -I
+"""Fixed root authority for one exact-tree developer-sandbox node candidate.
+
+An external root administrator bootstraps this program from a clean,
+root-owned exact checkout.  The installed runtime exposes only ``transact`` and
+``check`` through two fixed sudoers commands.  Requests arrive on stdin as a
+closed canonical envelope; no path, program, user, or secret is accepted in
+argv or the inherited environment.  A different source tree is admitted only
+through the direct-root ``upgrade`` transaction, which snapshots and restores
+the installed authority without reinitializing runtime receipts or journals.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import binascii
+import fcntl
+import grp
+import hashlib
+import io
+import json
+import os
+import pwd
+import re
+import shutil
+import socket
+import stat
+import subprocess
+import sys
+import tarfile
+import time
+import uuid
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any, Final, cast
+
+REPO_ROOT: Final = Path(__file__).absolute().parents[2]
+OPERATOR: Final = "qianyi"
+LIBEXEC: Final = Path("/usr/local/libexec/loom-developer-sandbox-node-authority")
+SOURCE_ROOT: Final = Path("/opt/loom-developer-sandbox-node-authority/source")
+POLICY: Final = Path("/etc/loom/developer-sandbox-node-authority.json")
+SUDOERS: Final = Path("/etc/sudoers.d/loom-developer-sandbox-node-authority")
+STATE_ROOT: Final = Path("/var/lib/loom-developer-sandbox-node-authority")
+LOCK: Final = STATE_ROOT / "authority.lock"
+JOURNAL: Final = STATE_ROOT / "journal.jsonl"
+RECEIPT_ROOT: Final = STATE_ROOT / "receipts"
+STAGING_BROKER_ROOT: Final = STATE_ROOT / "staging-broker"
+STAGING_ACCOUNTING_ROOT: Final = STATE_ROOT / "staging-accounting"
+STAGING_ACCOUNTING_JOURNAL: Final = STAGING_ACCOUNTING_ROOT / "journal.json"
+STAGING_INFRASTRUCTURE_PRODUCER_ROOT: Final = STATE_ROOT / "staging-infrastructure-producer"
+STAGING_INFRASTRUCTURE_PRODUCER_LOCK: Final = STAGING_INFRASTRUCTURE_PRODUCER_ROOT / "producer.lock"
+STAGING_INFRASTRUCTURE_PRODUCER_JOURNAL: Final = (
+    STAGING_INFRASTRUCTURE_PRODUCER_ROOT / "journal.json"
+)
+STAGING_INFRASTRUCTURE_PRODUCER_HIGH_WATER: Final = (
+    STAGING_INFRASTRUCTURE_PRODUCER_ROOT / "high-water.json"
+)
+STAGING_INFRASTRUCTURE_PRODUCER_RECEIPTS: Final = STAGING_INFRASTRUCTURE_PRODUCER_ROOT / "receipts"
+STAGING_INFRASTRUCTURE_RECEIPT_ROOT: Final = STATE_ROOT / "staging-infrastructure"
+STAGING_INFRASTRUCTURE_INSTALL_LOCK: Final = STAGING_INFRASTRUCTURE_RECEIPT_ROOT / "install.lock"
+STAGING_INFRASTRUCTURE_INSTALL_JOURNAL: Final = (
+    STAGING_INFRASTRUCTURE_RECEIPT_ROOT / "install-journal.json"
+)
+STAGING_INFRASTRUCTURE_INSTALL_HIGH_WATER: Final = (
+    STAGING_INFRASTRUCTURE_RECEIPT_ROOT / "high-water.json"
+)
+STAGING_INFRASTRUCTURE_INSTALL_GENERATIONS: Final = (
+    STAGING_INFRASTRUCTURE_RECEIPT_ROOT / "generations"
+)
+NODE_TRANSPORT: Final = Path(
+    "/usr/local/libexec/loom-developer-sandbox-node-transport",
+)
+STAGE_ROOT: Final = Path("/run/loom-developer-sandbox-node-authority")
+UPGRADE_ROOT: Final = STATE_ROOT / "upgrades"
+UPGRADE_ACTIVE: Final = STATE_ROOT / "upgrade-active.json"
+UPGRADE_JOURNAL: Final = STATE_ROOT / "upgrade-journal.jsonl"
+DOMAIN_RUNTIME_RELATIVE: Final = Path(
+    "scripts/ops/developer_sandbox_domain_runtime.py",
+)
+REMOTE_LINK_HOST_RELATIVE: Final = Path(
+    "scripts/ops/developer_sandbox_remote_link_host.py",
+)
+LIVE_AUTHORITY_RELATIVE: Final = Path(
+    "scripts/ops/developer_sandbox_live_authority.py",
+)
+PLATFORM_HEALTH_AUTHORITY_RELATIVE: Final = Path(
+    "scripts/ops/developer_sandbox_platform_health_authority.py",
+)
+PLATFORM_HEALTH_CONFIG_RELATIVE: Final = Path(
+    "deploy/developer-sandboxes/platform-health-authority.toml",
+)
+PLATFORM_HEALTH_SERVICE_RELATIVE: Final = Path(
+    "deploy/developer-sandboxes/loom-developer-sandbox-platform-health-authority.service",
+)
+PLATFORM_HEALTH_SUDOERS_RELATIVE: Final = Path(
+    "deploy/developer-sandboxes/loom-developer-sandbox-platform-health-authority.sudoers",
+)
+STAGING_PRESSURE_AUTHORITY_RELATIVE: Final = Path(
+    "scripts/ops/staging_pressure_reclaim_authority.py",
+)
+STAGING_PRESSURE_CONFIG_RELATIVE: Final = Path(
+    "deploy/developer-sandboxes/staging-pressure-reclaim-authority.toml",
+)
+STAGING_PRESSURE_SERVICE_RELATIVE: Final = Path(
+    "deploy/developer-sandboxes/loom-staging-pressure-reclaim-authority.service",
+)
+STAGING_PRESSURE_SUDOERS_RELATIVE: Final = Path(
+    "deploy/developer-sandboxes/loom-staging-pressure-reclaim-authority.sudoers",
+)
+STAGING_EXTERNAL_AUTHORITY_RELATIVE: Final = Path(
+    "scripts/ops/staging_external_slurm_acceptance_authority.py",
+)
+STAGING_EXTERNAL_CONSUMER_RELATIVE: Final = Path(
+    "src/loom_cli/external_slurm_acceptance.py",
+)
+STAGING_EXTERNAL_CONFIG_RELATIVE: Final = Path(
+    "deploy/developer-sandboxes/staging-external-slurm-authority.toml",
+)
+STAGING_EXTERNAL_SERVICE_RELATIVE: Final = Path(
+    "deploy/developer-sandboxes/loom-staging-external-slurm-authority.service",
+)
+STAGING_EXTERNAL_SUDOERS_RELATIVE: Final = Path(
+    "deploy/developer-sandboxes/loom-staging-external-slurm-authority.sudoers",
+)
+STAGING_EXTERNAL_WRAPPER_RELATIVE: Final = Path(
+    "deploy/developer-sandboxes/loom-staging-external-slurm-authority.wrapper",
+)
+HOST_AUTHORITY_RELATIVE: Final = Path(
+    "scripts/ops/developer_sandbox_host.py",
+)
+RUNTIME_CONFIG_RELATIVE: Final = Path(
+    "deploy/developer-sandboxes/runtime-domains.toml",
+)
+SUDOERS_RELATIVE: Final = Path(
+    "deploy/developer-sandboxes/loom-developer-sandbox-node-authority.sudoers",
+)
+SCHEMA_VERSION: Final = 1
+MAX_REQUEST_BYTES: Final = 96 * 1024 * 1024
+MAX_PAYLOAD_BYTES: Final = 64 * 1024 * 1024
+SHA_RE: Final = frozenset("0123456789abcdef")
+SANDBOXES: Final = frozenset({"qianyi", "hongjian", "devansh"})
+STAGING_SCOPE: Final = "staging"
+DOMAINS: Final = frozenset({"oldlab", "gb10"})
+TRANSACT_ACTIONS: Final = frozenset(
+    {
+        "host-converge",
+        "materialize",
+        "install-client",
+        "attest",
+        "rollback",
+        "persist-fleet-attestation",
+        "slurm-node-converge",
+        "slurm-controller-converge",
+        "slurm-rollback",
+        "collect-live-overlap",
+        "staging-allocation-bootstrap",
+        "staging-allocation-probe",
+        "staging-allocation-submit",
+        "staging-allocation-cancel",
+        "staging-shared-source-bootstrap",
+        "staging-slurm-accounting-converge",
+        "staging-infrastructure-converge",
+        "staging-infrastructure-install",
+    },
+)
+CHECK_ACTIONS: Final = frozenset(
+    {
+        "inspect-candidate",
+        "inspect-local",
+        "inspect-link-client",
+        "inspect-link-server",
+        "export-domain-attestation",
+        "export-runtime-proof-artifact",
+        "slurm-check",
+        "observe-live-overlap-job",
+        "observe-platform-health-node",
+        "staging-pressure-reclaim-observe",
+    },
+)
+STAGING_ACTIONS: Final = frozenset(
+    {
+        "staging-allocation-bootstrap",
+        "staging-allocation-probe",
+        "staging-allocation-submit",
+        "staging-allocation-cancel",
+        "staging-shared-source-bootstrap",
+        "staging-slurm-accounting-converge",
+        "staging-infrastructure-converge",
+        "staging-infrastructure-install",
+        "staging-pressure-reclaim-observe",
+    },
+)
+UPGRADE_PHASES: Final = frozenset(
+    {
+        "prepared",
+        "admission-disabled",
+        "assets-replaced",
+        "committed",
+        "rolled-back",
+        "recovered-committed",
+        "recovered-rolled-back",
+    },
+)
+PAYLOAD_KIND: Final = {
+    "host-converge": "none",
+    "materialize": "git-bundle",
+    "install-client": "client-credentials",
+    "attest": "attestation-seed",
+    "rollback": "none",
+    "persist-fleet-attestation": "fleet-attestation-json",
+    "slurm-node-converge": "none",
+    "slurm-controller-converge": "none",
+    "slurm-rollback": "none",
+    "collect-live-overlap": "live-overlap-collection-json",
+    "staging-allocation-bootstrap": "staging-infrastructure-operation-request",
+    "staging-allocation-probe": "staging-allocation-probe-request",
+    "staging-allocation-submit": "staging-allocation-submit-request",
+    "staging-allocation-cancel": "staging-allocation-cancel-request",
+    "staging-shared-source-bootstrap": "staging-infrastructure-operation-request",
+    "staging-slurm-accounting-converge": "staging-infrastructure-operation-request",
+    "staging-infrastructure-converge": "staging-infrastructure-converge-request",
+    "staging-infrastructure-install": "staging-infrastructure-receipt-json",
+    "inspect-candidate": "none",
+    "inspect-local": "none",
+    "inspect-link-client": "none",
+    "inspect-link-server": "none",
+    "export-domain-attestation": "none",
+    "export-runtime-proof-artifact": "runtime-proof-artifact-id",
+    "slurm-check": "none",
+    "observe-live-overlap-job": "live-overlap-job-json",
+    "observe-platform-health-node": "platform-health-node-json",
+    "staging-pressure-reclaim-observe": "staging-pressure-reclaim-observe-request",
+}
+REQUEST_FIELDS: Final = {
+    "schema_version",
+    "request_id",
+    "action",
+    "node",
+    "domain",
+    "sandbox",
+    "candidate_sha",
+    "candidate_tree",
+    "payload_kind",
+    "payload_sha256",
+    "payload_base64",
+    "prior_request_id",
+}
+RECEIPT_FIELDS: Final = {
+    "schema_version",
+    "request_id",
+    "action",
+    "node",
+    "domain",
+    "sandbox",
+    "candidate_sha",
+    "candidate_tree",
+    "payload_sha256",
+    "result_sha256",
+    "inner_receipt",
+    "completed_at",
+    "status",
+}
+JOURNAL_FIELDS: Final = {
+    "schema_version",
+    "request_id",
+    "action",
+    "candidate_sha",
+    "candidate_tree",
+    "result_sha256",
+    "completed_at",
+    "status",
+}
+LIVE_COLLECTION_FIELDS: Final = {
+    "schema_version",
+    "kind",
+    "collection_id",
+    "candidate_tree",
+    "job_id",
+}
+LIVE_SLURM_REQUEST_FIELDS: Final = {
+    "schema_version",
+    "kind",
+    "source_host",
+    "sandbox",
+    "pool",
+    "candidate_sha",
+    "candidate_tree",
+    "job_id",
+    "account",
+    "user",
+    "job_name",
+    "node",
+    "requested_cpus",
+    "requested_memory_mib",
+    "job_pids_max",
+    "requested_gpus",
+    "requested_gpu_tres",
+}
+PLATFORM_HEALTH_REQUEST_FIELDS: Final = {
+    "schema_version",
+    "kind",
+    "session_id",
+    "checkpoint",
+    "checkpoint_group",
+    "expected_node",
+    "expected_host",
+    "since_at",
+    "candidates",
+}
+STAGING_ALLOCATION_PROBE_FIELDS: Final = {
+    "schema_version",
+    "kind",
+    "request_id",
+    "candidate_sha",
+    "candidate_tree",
+}
+STAGING_ALLOCATION_SUBMIT_FIELDS: Final = {
+    *STAGING_ALLOCATION_PROBE_FIELDS,
+    "requested_node",
+}
+STAGING_ALLOCATION_CANCEL_FIELDS: Final = {
+    *STAGING_ALLOCATION_SUBMIT_FIELDS,
+    "job_id",
+    "submit_request_id",
+}
+STAGING_INFRASTRUCTURE_OPERATION_FIELDS: Final = {
+    "schema_version",
+    "kind",
+    "request_id",
+    "action",
+    "node",
+    "candidate_sha",
+    "candidate_tree",
+    "convergence_id",
+    "requested_at",
+}
+STAGING_INFRASTRUCTURE_CONVERGE_FIELDS: Final = {
+    "schema_version",
+    "kind",
+    "candidate_sha",
+    "candidate_tree",
+    "convergence_id",
+    "requested_at",
+}
+STAGING_INFRASTRUCTURE_RECEIPT_FIELDS: Final = {
+    "schema_version",
+    "kind",
+    "candidate_sha",
+    "candidate_tree",
+    "generation",
+    "convergence_id",
+    "requested_at",
+    "request_sha256",
+    "source_controller",
+    "source_controller_host",
+    "created_at",
+    "expires_at",
+    "source_bootstrap",
+    "accounting",
+    "node_bootstraps",
+    "mount_contract",
+    "result",
+}
+STAGING_INFRASTRUCTURE_NODES: Final = tuple(
+    f"trt-gb10-{index}" for index in (1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15)
+)
+STAGING_INFRASTRUCTURE_MAX_TRANSACTION_SECONDS: Final = 3660
+STAGING_PRESSURE_OBSERVE_FIELDS: Final = {
+    "schema_version",
+    "kind",
+    "source_host",
+    "submit_host",
+    "environment",
+    "pool",
+    "partition",
+    "account",
+    "qos",
+    "phase",
+    "session_id",
+    "acceptance_session_id",
+    "candidate_sha",
+    "candidate_tree",
+    "owned_jobs",
+}
+SOURCE_ASSETS: Final = (
+    Path("scripts/ops/developer_sandbox_node_authority.py"),
+    Path("scripts/ops/developer_sandbox_node_transport.py"),
+    LIVE_AUTHORITY_RELATIVE,
+    PLATFORM_HEALTH_AUTHORITY_RELATIVE,
+    STAGING_PRESSURE_AUTHORITY_RELATIVE,
+    HOST_AUTHORITY_RELATIVE,
+    DOMAIN_RUNTIME_RELATIVE,
+    REMOTE_LINK_HOST_RELATIVE,
+    Path("scripts/ops/developer_sandbox_remote_link.py"),
+    Path("scripts/ops/developer_sandbox_slurm_policy.py"),
+    Path("scripts/ops/slurm_job_cgroup_guard.py"),
+    RUNTIME_CONFIG_RELATIVE,
+    Path("deploy/developer-sandboxes/node-authority-transport.toml"),
+    PLATFORM_HEALTH_CONFIG_RELATIVE,
+    STAGING_PRESSURE_CONFIG_RELATIVE,
+    STAGING_PRESSURE_SERVICE_RELATIVE,
+    STAGING_PRESSURE_SUDOERS_RELATIVE,
+    STAGING_EXTERNAL_AUTHORITY_RELATIVE,
+    STAGING_EXTERNAL_CONSUMER_RELATIVE,
+    STAGING_EXTERNAL_CONFIG_RELATIVE,
+    STAGING_EXTERNAL_SERVICE_RELATIVE,
+    STAGING_EXTERNAL_SUDOERS_RELATIVE,
+    STAGING_EXTERNAL_WRAPPER_RELATIVE,
+    Path(r"deploy/developer-sandboxes/srv-loom-staging\x2dshared.mount"),
+    Path("deploy/developer-sandboxes/loom-staging-shared.tmpfiles.conf"),
+    PLATFORM_HEALTH_SERVICE_RELATIVE,
+    PLATFORM_HEALTH_SUDOERS_RELATIVE,
+    Path("deploy/developer-sandboxes/loom-developer-sandbox-link@.service"),
+    Path("deploy/developer-sandboxes/remote-links/qianyi.toml"),
+    Path("deploy/developer-sandboxes/remote-links/hongjian.toml"),
+    Path("deploy/developer-sandboxes/remote-links/devansh.toml"),
+    Path("deploy/slurm/developer-sandboxes/oldlab.toml"),
+    Path("deploy/slurm/developer-sandboxes/gb10.toml"),
+    Path("deploy/slurm/loom-slurm-job-cgroup-guard.service"),
+    SUDOERS_RELATIVE,
+)
+MIGRATABLE_EXTERNAL_SOURCE_ASSETS: Final = frozenset(
+    {
+        STAGING_EXTERNAL_AUTHORITY_RELATIVE,
+        STAGING_EXTERNAL_CONSUMER_RELATIVE,
+        STAGING_EXTERNAL_CONFIG_RELATIVE,
+        STAGING_EXTERNAL_SERVICE_RELATIVE,
+        STAGING_EXTERNAL_SUDOERS_RELATIVE,
+        STAGING_EXTERNAL_WRAPPER_RELATIVE,
+        Path(r"deploy/developer-sandboxes/srv-loom-staging\x2dshared.mount"),
+        Path("deploy/developer-sandboxes/loom-staging-shared.tmpfiles.conf"),
+    },
+)
+PLATFORM_HEALTH_LIBEXEC: Final = Path(
+    "/usr/local/libexec/loom-developer-sandbox-platform-health-authority",
+)
+PLATFORM_HEALTH_SERVICE: Final = Path(
+    "/etc/systemd/system/loom-developer-sandbox-platform-health-authority.service",
+)
+PLATFORM_HEALTH_SUDOERS: Final = Path(
+    "/etc/sudoers.d/loom-developer-sandbox-platform-health-authority",
+)
+STAGING_PRESSURE_LIBEXEC: Final = Path(
+    "/usr/local/libexec/loom-staging-pressure-reclaim-authority",
+)
+STAGING_PRESSURE_CONFIG: Final = Path(
+    "/etc/loom/staging-pressure-reclaim-authority.toml",
+)
+STAGING_PRESSURE_SERVICE: Final = Path(
+    "/etc/systemd/system/loom-staging-pressure-reclaim-authority.service",
+)
+STAGING_PRESSURE_SUDOERS: Final = Path(
+    "/etc/sudoers.d/loom-staging-pressure-reclaim-authority",
+)
+STAGING_EXTERNAL_INSTALL_ROOT: Final = Path(
+    "/usr/local/lib/loom-staging-external-slurm-authority",
+)
+STAGING_EXTERNAL_SOURCE: Final = (
+    STAGING_EXTERNAL_INSTALL_ROOT / "staging_external_slurm_acceptance_authority.py"
+)
+STAGING_EXTERNAL_CONSUMER: Final = (
+    STAGING_EXTERNAL_INSTALL_ROOT / "loom_cli/external_slurm_acceptance.py"
+)
+STAGING_EXTERNAL_WRAPPER: Final = Path(
+    "/usr/local/libexec/loom-staging-external-slurm-authority",
+)
+STAGING_EXTERNAL_CONFIG: Final = Path(
+    "/etc/loom/staging-external-slurm-authority/authority.toml",
+)
+STAGING_EXTERNAL_SERVICE: Final = Path(
+    "/etc/systemd/system/loom-staging-external-slurm-authority.service",
+)
+STAGING_EXTERNAL_SUDOERS: Final = Path(
+    "/etc/sudoers.d/loom-staging-external-slurm-authority",
+)
+STAGING_EXTERNAL_MOUNT: Final = Path(
+    r"/etc/systemd/system/srv-loom-staging\x2dshared.mount",
+)
+STAGING_EXTERNAL_TMPFILES: Final = Path(
+    "/etc/tmpfiles.d/loom-staging-shared.conf",
+)
+SYSTEM_INSTALL_ASSETS: Final = (
+    (
+        PLATFORM_HEALTH_AUTHORITY_RELATIVE,
+        PLATFORM_HEALTH_LIBEXEC,
+        0o755,
+        0o755,
+    ),
+    (
+        PLATFORM_HEALTH_SERVICE_RELATIVE,
+        PLATFORM_HEALTH_SERVICE,
+        0o644,
+        0o755,
+    ),
+    (
+        PLATFORM_HEALTH_SUDOERS_RELATIVE,
+        PLATFORM_HEALTH_SUDOERS,
+        0o440,
+        0o755,
+    ),
+    (
+        STAGING_PRESSURE_AUTHORITY_RELATIVE,
+        STAGING_PRESSURE_LIBEXEC,
+        0o755,
+        0o755,
+    ),
+    (
+        STAGING_PRESSURE_CONFIG_RELATIVE,
+        STAGING_PRESSURE_CONFIG,
+        0o600,
+        0o755,
+    ),
+    (
+        STAGING_PRESSURE_SERVICE_RELATIVE,
+        STAGING_PRESSURE_SERVICE,
+        0o644,
+        0o755,
+    ),
+    (
+        STAGING_PRESSURE_SUDOERS_RELATIVE,
+        STAGING_PRESSURE_SUDOERS,
+        0o440,
+        0o755,
+    ),
+    (
+        STAGING_EXTERNAL_AUTHORITY_RELATIVE,
+        STAGING_EXTERNAL_SOURCE,
+        0o644,
+        0o755,
+    ),
+    (
+        STAGING_EXTERNAL_CONSUMER_RELATIVE,
+        STAGING_EXTERNAL_CONSUMER,
+        0o644,
+        0o755,
+    ),
+    (
+        STAGING_EXTERNAL_WRAPPER_RELATIVE,
+        STAGING_EXTERNAL_WRAPPER,
+        0o755,
+        0o755,
+    ),
+    (
+        STAGING_EXTERNAL_CONFIG_RELATIVE,
+        STAGING_EXTERNAL_CONFIG,
+        0o600,
+        0o700,
+    ),
+    (
+        STAGING_EXTERNAL_SERVICE_RELATIVE,
+        STAGING_EXTERNAL_SERVICE,
+        0o644,
+        0o755,
+    ),
+    (
+        STAGING_EXTERNAL_SUDOERS_RELATIVE,
+        STAGING_EXTERNAL_SUDOERS,
+        0o440,
+        0o755,
+    ),
+    (
+        Path(r"deploy/developer-sandboxes/srv-loom-staging\x2dshared.mount"),
+        STAGING_EXTERNAL_MOUNT,
+        0o644,
+        0o755,
+    ),
+    (
+        Path("deploy/developer-sandboxes/loom-staging-shared.tmpfiles.conf"),
+        STAGING_EXTERNAL_TMPFILES,
+        0o644,
+        0o755,
+    ),
+)
+NODE_HOSTNAMES: Final = {
+    **{f"oldlab-{index}": f"trt-eai-oldlab-{index}" for index in range(1, 6)},
+    "trt-gb10-1": "gx10-01c7",
+    "trt-gb10-2": "gx10-0fca",
+    "trt-gb10-3": "gx10-0f0d",
+    "trt-gb10-4": "gx10-0d93",
+    "trt-gb10-5": "gx10-1036",
+    "trt-gb10-6": "gx10-1000",
+    "trt-gb10-8": "gx10-db22",
+    "trt-gb10-9": "gx10-16f6",
+    "trt-gb10-10": "gx10-0f82",
+    "trt-gb10-11": "gx10-c38b",
+    "trt-gb10-12": "gx10-e45f",
+    "trt-gb10-13": "gx10-fc5d",
+    "trt-gb10-14": "gx10-0a49",
+    "trt-gb10-15": "gx10-0152",
+}
+SLURM_CLUSTER: Final = {"oldlab": "trt-oldlab", "gb10": "trt-gb10"}
+SLURM_CONTROLLER: Final = {"oldlab": "oldlab-1", "gb10": "trt-gb10-1"}
+SLURM_PROFILE_NAME: Final = {"oldlab": "oldlab.toml", "gb10": "gb10.toml"}
+SLURM_POLICY_RELATIVE: Final = Path("scripts/ops/developer_sandbox_slurm_policy.py")
+SLURM_STATE_ROOT: Final = Path("/var/lib/loom-developer-sandbox-slurm-policy")
+SLURM_TRANSACTION_ROOT: Final = SLURM_STATE_ROOT / "transactions"
+STAGING_SERVICE_USER: Final = "loom-staging-worker"
+STAGING_SERVICE_GROUP: Final = "loom-staging-worker"
+STAGING_SERVICE_UID: Final = 31024
+STAGING_SERVICE_GID: Final = 31024
+STAGING_SERVICE_HOME: Final = Path("/nonexistent")
+STAGING_SERVICE_SHELL: Final = "/usr/sbin/nologin"
+STAGING_SUPPLEMENTARY_GROUPS: Final = ("docker",)
+STAGING_SHARED_ROOT: Final = Path("/srv/loom/staging-shared")
+STAGING_SHARED_PATHS: Final = tuple(
+    STAGING_SHARED_ROOT / name for name in ("candidates", "generated", "results")
+)
+STAGING_MOUNT_UNIT: Final = r"srv-loom-staging\x2dshared.mount"
+STAGING_MOUNT_SOURCE_RELATIVE: Final = Path(
+    r"deploy/developer-sandboxes/srv-loom-staging\x2dshared.mount",
+)
+STAGING_TMPFILES_SOURCE_RELATIVE: Final = Path(
+    "deploy/developer-sandboxes/loom-staging-shared.tmpfiles.conf",
+)
+STAGING_MOUNT_UNIT_PATH: Final = Path("/etc/systemd/system") / STAGING_MOUNT_UNIT
+STAGING_TMPFILES_PATH: Final = Path("/usr/lib/tmpfiles.d/loom-staging-shared.conf")
+STAGING_RAW_SOURCE_ROOT: Final = Path("/shared_work2/loom/staging")
+SLURM_SNAPSHOT_ROOT: Final = SLURM_STATE_ROOT / "snapshots"
+SLURM_SNAPSHOT_RELATIVE_PATHS: Final = (
+    "etc/slurm/slurm.conf",
+    "etc/slurm/cgroup.conf",
+    "etc/docker/daemon.json",
+    "usr/libexec/loom-slurm-job-cgroup-guard",
+    "etc/loom/slurm-job-cgroup-guard.json",
+    "etc/systemd/system/loom-slurm-job-cgroup-guard.service",
+)
+SLURM_SNAPSHOT_ROW_FIELDS: Final = {
+    "path",
+    "present",
+    "mode",
+    "uid",
+    "gid",
+    "nlink",
+    "size",
+    "sha256",
+}
+SLURM_POLICY_JOURNAL_COMMON_FIELDS: Final = {
+    "schema_version",
+    "operation",
+    "cluster",
+    "host",
+    "slurm_node",
+    "candidate_sha",
+    "snapshot",
+    "accounting_snapshot",
+    "restart",
+    "apply_accounting",
+    "phase",
+    "created_at",
+    "updated_at",
+}
+SLURM_BINDING_RE: Final = re.compile(
+    r"^slurm-policy-v1:(trt-oldlab|trt-gb10):([0-9a-f]{64}):([0-9a-f]{64})$",
+)
+CLIENT_ARCHIVE_FILES: Final = {
+    "ca.pem",
+    "client.pem",
+    "client-key.pem",
+    "worker-token",
+    "minio-access-key",
+    "minio-secret-key",
+}
+ATTESTATION_ARCHIVE_FILES: Final = {"worker.env", "fleet.json"}
+CONTAINER_MARKERS: Final = (Path("/.dockerenv"), Path("/run/.containerenv"))
+CONTAINER_CGROUP_PATHS: Final = (Path("/proc/self/cgroup"), Path("/proc/1/cgroup"))
+CONTAINER_CGROUP_TOKENS: Final = (
+    "docker",
+    "kubepods",
+    "containerd",
+    "podman",
+    "libpod",
+    "lxc",
+)
+RUNTIME_PROOF_ARTIFACT_NAMES: Final = frozenset(
+    {
+        "combined.json",
+        "fleet.json",
+        "oldlab.json",
+        "oldlab.sig",
+        "oldlab.pub",
+        "gb10.json",
+        "gb10.sig",
+        "gb10.pub",
+    },
+)
+RUNTIME_PROOF_ARTIFACT_SOURCES: Final = {
+    "combined.json": ("oldlab", "oldlab-2"),
+    "fleet.json": ("oldlab", "oldlab-2"),
+    "oldlab.json": ("oldlab", "oldlab-1"),
+    "oldlab.sig": ("oldlab", "oldlab-1"),
+    "oldlab.pub": ("oldlab", "oldlab-1"),
+    "gb10.json": ("gb10", "trt-gb10-1"),
+    "gb10.sig": ("gb10", "trt-gb10-1"),
+    "gb10.pub": ("gb10", "trt-gb10-1"),
+}
+MAX_HELPER_STDOUT_BYTES: Final = 1536 * 1024
+MAX_FLEET_ATTESTATION_BYTES: Final = 1 << 20
+AUDIT_LOGINUID: Final = Path("/proc/self/loginuid")
+
+
+class NodeAuthorityError(RuntimeError):
+    """A bounded, secret-safe node-authority failure."""
+
+
+@dataclass(frozen=True, slots=True)
+class AuthorityPolicy:
+    source_sha: str
+    source_tree: str
+    node: str
+    asset_sha256: Mapping[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class Request:
+    payload: Mapping[str, Any]
+    payload_bytes: bytes
+
+    @property
+    def request_id(self) -> str:
+        return str(self.payload["request_id"])
+
+    @property
+    def action(self) -> str:
+        return str(self.payload["action"])
+
+
+@dataclass(frozen=True, slots=True)
+class UpgradeSnapshot:
+    upgrade_id: str
+    root: Path
+    manifest: Path
+    entries: tuple[Mapping[str, Any], ...]
+    old_source_sha: str
+    old_source_tree: str
+    new_source_sha: str
+    new_source_tree: str
+    high_value_state: Mapping[str, Any]
+
+
+def _is_sha(value: object, *, length: int = 40) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == length
+        and all(character in SHA_RE for character in value)
+    )
+
+
+def _canonical_utc(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00").astimezone(UTC)
+    except ValueError:
+        return None
+    if parsed.isoformat().replace("+00:00", "Z") != value:
+        return None
+    return parsed
+
+
+def _timestamp(value: datetime | None = None) -> str:
+    return (value or datetime.now(UTC)).astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _canonical(value: Mapping[str, Any]) -> bytes:
+    return (
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("ascii")
+        + b"\n"
+    )
+
+
+def _request_digest(payload: Mapping[str, Any]) -> str:
+    unsigned = dict(payload)
+    unsigned.pop("request_id", None)
+    return hashlib.sha256(_canonical(unsigned)).hexdigest()
+
+
+def _clean_env() -> dict[str, str]:
+    return {
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_OPTIONAL_LOCKS": "0",
+    }
+
+
+def _hostname() -> str:
+    return socket.gethostname().rstrip(".").lower()
+
+
+def _node_for_hostname(hostname: str) -> str:
+    matches = [node for node, canonical in NODE_HOSTNAMES.items() if canonical == hostname]
+    if len(matches) != 1:
+        raise NodeAuthorityError("node authority host is outside the closed inventory")
+    return matches[0]
+
+
+def _read_container_cgroup(path: Path) -> str:
+    try:
+        lexical = path.lstat()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
+        )
+    except OSError as exc:
+        raise NodeAuthorityError(
+            "direct external root cgroup identity is unavailable",
+        ) from exc
+    try:
+        before = os.fstat(descriptor)
+        payload = _read_fd_twice(
+            descriptor,
+            limit=64 * 1024,
+            error="direct external root cgroup identity is invalid",
+        )
+        after = os.fstat(descriptor)
+        current = path.lstat()
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or stat.S_ISLNK(lexical.st_mode)
+            or _metadata_identity(lexical) != _metadata_identity(before)
+            or _metadata_identity(before) != _metadata_identity(after)
+            or _metadata_identity(after) != _metadata_identity(current)
+        ):
+            raise NodeAuthorityError("direct external root cgroup identity is invalid")
+    except OSError as exc:
+        raise NodeAuthorityError(
+            "direct external root cgroup identity is unavailable",
+        ) from exc
+    finally:
+        os.close(descriptor)
+    try:
+        decoded = payload.decode("utf-8").lower()
+    except UnicodeDecodeError as exc:
+        raise NodeAuthorityError("direct external root cgroup identity is invalid") from exc
+    if not decoded.strip():
+        raise NodeAuthorityError("direct external root cgroup identity is ambiguous")
+    return decoded
+
+
+def _reject_containerized_root(
+    *,
+    marker_paths: Sequence[Path] = CONTAINER_MARKERS,
+    cgroup_paths: Sequence[Path] = CONTAINER_CGROUP_PATHS,
+) -> None:
+    if "container" in os.environ:
+        raise NodeAuthorityError(
+            "node authority bootstrap/upgrade requires a direct external root administrator",
+        )
+    for marker in marker_paths:
+        try:
+            marker.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise NodeAuthorityError(
+                "direct external root container marker is unavailable",
+            ) from exc
+        raise NodeAuthorityError(
+            "node authority bootstrap/upgrade requires a direct external root administrator",
+        )
+    if len(cgroup_paths) != len(CONTAINER_CGROUP_PATHS) or len(set(cgroup_paths)) != len(
+        CONTAINER_CGROUP_PATHS
+    ):
+        raise NodeAuthorityError("direct external root cgroup identity is ambiguous")
+    for path in cgroup_paths:
+        cgroup = _read_container_cgroup(path)
+        if any(token in cgroup for token in CONTAINER_CGROUP_TOKENS):
+            raise NodeAuthorityError(
+                "node authority bootstrap/upgrade requires a direct external root administrator",
+            )
+
+
+def _read_all_stdin() -> bytes:
+    raw = sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1)
+    if len(raw) > MAX_REQUEST_BYTES:
+        raise NodeAuthorityError("node authority request exceeds its size bound")
+    return raw
+
+
+def _metadata_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _read_fd_twice(
+    descriptor: int,
+    *,
+    limit: int,
+    error: str,
+) -> bytes:
+    payloads: list[bytes] = []
+    identities: list[tuple[int, ...]] = []
+    for _ in range(2):
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(65_536, limit + 1 - total))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > limit:
+                raise NodeAuthorityError(error)
+            chunks.append(chunk)
+        payloads.append(b"".join(chunks))
+        identities.append(_metadata_identity(os.fstat(descriptor)))
+    if (
+        identities[0] != identities[1]
+        or payloads[0] != payloads[1]
+        or hashlib.sha256(payloads[0]).digest() != hashlib.sha256(payloads[1]).digest()
+    ):
+        raise NodeAuthorityError(error)
+    return payloads[0]
+
+
+def _read_audit_loginuid(path: Path = AUDIT_LOGINUID) -> int:
+    try:
+        lexical = path.lstat()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
+        )
+    except OSError as exc:
+        raise NodeAuthorityError(
+            "direct external root audit identity is unavailable",
+        ) from exc
+    try:
+        before = os.fstat(descriptor)
+        payload = _read_fd_twice(
+            descriptor,
+            limit=32,
+            error="direct external root audit identity is invalid",
+        )
+        after = os.fstat(descriptor)
+        current = path.lstat()
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or stat.S_ISLNK(lexical.st_mode)
+            or _metadata_identity(lexical) != _metadata_identity(before)
+            or _metadata_identity(before) != _metadata_identity(after)
+            or _metadata_identity(after) != _metadata_identity(current)
+        ):
+            raise NodeAuthorityError(
+                "direct external root audit identity is invalid",
+            )
+    except OSError as exc:
+        raise NodeAuthorityError(
+            "direct external root audit identity is unavailable",
+        ) from exc
+    finally:
+        os.close(descriptor)
+    try:
+        value = payload.decode("ascii").strip()
+    except UnicodeDecodeError as exc:
+        raise NodeAuthorityError(
+            "direct external root audit identity is invalid",
+        ) from exc
+    if value != "0":
+        raise NodeAuthorityError(
+            "direct external root audit identity is not root",
+        )
+    return 0
+
+
+def _safe_root_file(path: Path, *, mode: int, limit: int = MAX_REQUEST_BYTES) -> bytes:
+    try:
+        lexical = path.lstat()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
+        )
+    except OSError as exc:
+        raise NodeAuthorityError("node authority asset is unavailable") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(65_536, limit + 1 - total))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > limit:
+                raise NodeAuthorityError("node authority asset exceeds its size bound")
+            chunks.append(chunk)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or stat.S_ISLNK(lexical.st_mode)
+            or metadata.st_uid != 0
+            or metadata.st_gid != 0
+            or stat.S_IMODE(metadata.st_mode) != mode
+            or metadata.st_nlink != 1
+            or (metadata.st_dev, metadata.st_ino) != (lexical.st_dev, lexical.st_ino)
+        ):
+            raise NodeAuthorityError("node authority asset metadata is unsafe")
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def _safe_root_directory(path: Path, *, mode: int) -> None:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise NodeAuthorityError("node authority directory is unavailable") from exc
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != 0
+        or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) != mode
+    ):
+        raise NodeAuthorityError("node authority directory metadata is unsafe")
+
+
+def _ensure_root_directory(
+    path: Path,
+    *,
+    mode: int,
+    parent_mode: int = 0o755,
+) -> bool:
+    try:
+        _safe_root_directory(path, mode=mode)
+        return False
+    except NodeAuthorityError:
+        if path.exists() or path.is_symlink():
+            raise
+    _safe_root_directory(path.parent, mode=parent_mode)
+    created = False
+    try:
+        path.mkdir(mode=mode)
+        created = True
+        os.chown(path, 0, 0)
+        os.chmod(path, mode)
+        _safe_root_directory(path, mode=mode)
+    except Exception:
+        if created:
+            try:
+                path.rmdir()
+            except OSError as exc:
+                raise NodeAuthorityError(
+                    "node authority directory rollback failed safely",
+                ) from exc
+        raise
+    return True
+
+
+def _atomic_install(
+    path: Path,
+    payload: bytes,
+    mode: int,
+    *,
+    parent_mode: int = 0o755,
+) -> bool:
+    _safe_root_directory(path.parent, mode=parent_mode)
+    try:
+        existing = _safe_root_file(path, mode=mode)
+    except NodeAuthorityError:
+        if path.exists() or path.is_symlink():
+            raise
+    else:
+        if existing != payload:
+            raise NodeAuthorityError("node authority installed asset drifted")
+        return False
+    descriptor = os.open(
+        path.parent,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+    temporary = f".{path.name}.new-{os.getpid()}"
+    try:
+        output = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=descriptor,
+        )
+        try:
+            view = memoryview(payload)
+            while view:
+                written = os.write(output, view)
+                if written <= 0:
+                    raise NodeAuthorityError("node authority asset write failed safely")
+                view = view[written:]
+            os.fchown(output, 0, 0)
+            os.fchmod(output, mode)
+            os.fsync(output)
+        finally:
+            os.close(output)
+        os.link(
+            temporary,
+            path.name,
+            src_dir_fd=descriptor,
+            dst_dir_fd=descriptor,
+            follow_symlinks=False,
+        )
+        os.unlink(temporary, dir_fd=descriptor)
+        os.fsync(descriptor)
+    except Exception:
+        try:
+            os.unlink(temporary, dir_fd=descriptor)
+        except OSError:
+            pass
+        raise
+    finally:
+        os.close(descriptor)
+    return True
+
+
+def _fsync_directory(path: Path, *, mode: int) -> None:
+    _safe_root_directory(path, mode=mode)
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _atomic_replace(
+    path: Path,
+    payload: bytes,
+    mode: int,
+    *,
+    parent_mode: int = 0o755,
+) -> None:
+    _safe_root_directory(path.parent, mode=parent_mode)
+    descriptor = os.open(
+        path.parent,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+    temporary = f".{path.name}.replace-{os.getpid()}-{uuid.uuid4().hex}"
+    try:
+        output = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=descriptor,
+        )
+        try:
+            view = memoryview(payload)
+            while view:
+                written = os.write(output, view)
+                if written <= 0:
+                    raise NodeAuthorityError(
+                        "node authority replacement write failed safely",
+                    )
+                view = view[written:]
+            os.fchown(output, 0, 0)
+            os.fchmod(output, mode)
+            os.fsync(output)
+        finally:
+            os.close(output)
+        os.replace(
+            temporary,
+            path.name,
+            src_dir_fd=descriptor,
+            dst_dir_fd=descriptor,
+        )
+        os.fsync(descriptor)
+    except Exception:
+        try:
+            os.unlink(temporary, dir_fd=descriptor)
+        except OSError:
+            pass
+        raise
+    finally:
+        os.close(descriptor)
+
+
+def _unlink_root_file(path: Path, *, mode: int, parent_mode: int = 0o755) -> bytes:
+    payload = _safe_root_file(path, mode=mode)
+    descriptor = os.open(
+        path.parent,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+    try:
+        rebound = os.stat(path.name, dir_fd=descriptor, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(rebound.st_mode)
+            or rebound.st_uid != 0
+            or rebound.st_gid != 0
+            or stat.S_IMODE(rebound.st_mode) != mode
+        ):
+            raise NodeAuthorityError("node authority admission file changed")
+        os.unlink(path.name, dir_fd=descriptor)
+        os.fsync(descriptor)
+    except OSError as exc:
+        raise NodeAuthorityError("node authority admission disable failed safely") from exc
+    finally:
+        os.close(descriptor)
+    _safe_root_directory(path.parent, mode=parent_mode)
+    return payload
+
+
+def _source_asset_mode(relative: Path) -> int:
+    if relative == SUDOERS_RELATIVE:
+        return 0o440
+    return 0o755 if relative.parts[:2] == ("scripts", "ops") else 0o644
+
+
+def _managed_assets() -> tuple[tuple[Path, int, int], ...]:
+    return (
+        *tuple(
+            (SOURCE_ROOT / relative, _source_asset_mode(relative), 0o755)
+            for relative in SOURCE_ASSETS
+        ),
+        (LIBEXEC, 0o755, 0o755),
+        (POLICY, 0o600, 0o755),
+        (SUDOERS, 0o440, 0o755),
+        *tuple(
+            (target, mode, parent_mode)
+            for _relative, target, mode, parent_mode in SYSTEM_INSTALL_ASSETS
+        ),
+    )
+
+
+def _system_sudoers_paths() -> frozenset[Path]:
+    return frozenset(
+        target
+        for relative, target, _mode, _parent_mode in SYSTEM_INSTALL_ASSETS
+        if relative
+        in {
+            PLATFORM_HEALTH_SUDOERS_RELATIVE,
+            STAGING_PRESSURE_SUDOERS_RELATIVE,
+            STAGING_EXTERNAL_SUDOERS_RELATIVE,
+        }
+    )
+
+
+def _system_service_paths() -> frozenset[Path]:
+    return frozenset(
+        target
+        for relative, target, _mode, _parent_mode in SYSTEM_INSTALL_ASSETS
+        if relative
+        in {
+            PLATFORM_HEALTH_SERVICE_RELATIVE,
+            STAGING_PRESSURE_SERVICE_RELATIVE,
+            STAGING_EXTERNAL_SERVICE_RELATIVE,
+            Path(r"deploy/developer-sandboxes/srv-loom-staging\x2dshared.mount"),
+        }
+    )
+
+
+def _validate_sudoers(path: Path, *, label: str) -> None:
+    validation = subprocess.run(
+        ("/usr/sbin/visudo", "-cf", str(path)),
+        env=_clean_env(),
+        check=False,
+        capture_output=True,
+    )
+    if validation.returncode != 0:
+        raise NodeAuthorityError(f"{label} sudoers is invalid")
+
+
+def _validate_systemd_service(path: Path, *, label: str) -> None:
+    validation = subprocess.run(
+        ("/usr/bin/systemd-analyze", "verify", str(path)),
+        env=_clean_env(),
+        check=False,
+        capture_output=True,
+    )
+    if validation.returncode != 0:
+        raise NodeAuthorityError(f"{label} systemd service is invalid")
+
+
+def _systemd_daemon_reload() -> None:
+    result = subprocess.run(
+        ("/usr/bin/systemctl", "daemon-reload"),
+        env=_clean_env(),
+        check=False,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise NodeAuthorityError("node authority systemd daemon reload failed safely")
+
+
+def _validate_system_install_sources() -> None:
+    for relative, _target, _mode, _parent_mode in SYSTEM_INSTALL_ASSETS:
+        source = SOURCE_ROOT / relative
+        if relative in {
+            PLATFORM_HEALTH_SUDOERS_RELATIVE,
+            STAGING_PRESSURE_SUDOERS_RELATIVE,
+            STAGING_EXTERNAL_SUDOERS_RELATIVE,
+        }:
+            _validate_sudoers(source, label="source")
+        elif relative == Path(
+            "deploy/developer-sandboxes/loom-staging-shared.tmpfiles.conf",
+        ):
+            _validate_tmpfiles(source, apply=False)
+
+
+def _validate_tmpfiles(path: Path, *, apply: bool) -> None:
+    argv = ["/usr/bin/systemd-tmpfiles", "--create"]
+    if not apply:
+        argv.append("--dry-run")
+    argv.append(str(path))
+    validation = subprocess.run(
+        tuple(argv),
+        env=_clean_env(),
+        check=False,
+        capture_output=True,
+    )
+    if validation.returncode != 0:
+        raise NodeAuthorityError("staging shared tmpfiles policy is invalid")
+
+
+def _ensure_system_install_directories() -> None:
+    for directory, mode, parent_mode in (
+        (STAGING_EXTERNAL_INSTALL_ROOT, 0o755, 0o755),
+        (STAGING_EXTERNAL_CONSUMER.parent, 0o755, 0o755),
+        (STAGING_EXTERNAL_CONFIG.parent, 0o700, 0o755),
+    ):
+        _ensure_root_directory(
+            directory,
+            mode=mode,
+            parent_mode=parent_mode,
+        )
+
+
+def _validate_system_install_assets(
+    *,
+    allow_absent: bool = False,
+) -> tuple[dict[str, Any], ...]:
+    readbacks: list[dict[str, Any]] = []
+    for relative, target, mode, _parent_mode in SYSTEM_INSTALL_ASSETS:
+        try:
+            payload = _safe_root_file(target, mode=mode)
+        except NodeAuthorityError:
+            if allow_absent and not target.exists() and not target.is_symlink():
+                continue
+            raise
+        source = _safe_root_file(
+            SOURCE_ROOT / relative,
+            mode=_source_asset_mode(relative),
+        )
+        if payload != source:
+            raise NodeAuthorityError("node authority system install drifted")
+        readbacks.append(
+            {
+                "path": str(target),
+                "mode": f"{mode:04o}",
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            },
+        )
+    if not allow_absent and len(readbacks) != len(SYSTEM_INSTALL_ASSETS):
+        raise NodeAuthorityError("node authority system install is incomplete")
+    return tuple(readbacks)
+
+
+def _system_install_assets(
+    assets: Mapping[str, bytes],
+    *,
+    replace: bool,
+) -> tuple[dict[str, Any], ...]:
+    _ensure_system_install_directories()
+    _validate_system_install_sources()
+    sudoers_paths = _system_sudoers_paths()
+    service_paths = _system_service_paths()
+    for relative, target, mode, parent_mode in SYSTEM_INSTALL_ASSETS:
+        payload = assets[str(relative)]
+        if target in sudoers_paths or target in service_paths:
+            continue
+        if replace:
+            _atomic_replace(target, payload, mode, parent_mode=parent_mode)
+        else:
+            _atomic_install(target, payload, mode, parent_mode=parent_mode)
+    for relative, target, mode, parent_mode in SYSTEM_INSTALL_ASSETS:
+        if target not in service_paths:
+            continue
+        _validate_systemd_service(
+            SOURCE_ROOT / relative,
+            label="source",
+        )
+        payload = assets[str(relative)]
+        if replace:
+            _atomic_replace(target, payload, mode, parent_mode=parent_mode)
+        else:
+            _atomic_install(target, payload, mode, parent_mode=parent_mode)
+    for relative, target, mode, parent_mode in SYSTEM_INSTALL_ASSETS:
+        if target not in sudoers_paths:
+            continue
+        payload = assets[str(relative)]
+        if replace:
+            _atomic_replace(target, payload, mode, parent_mode=parent_mode)
+        else:
+            _atomic_install(target, payload, mode, parent_mode=parent_mode)
+        _validate_sudoers(target, label="installed")
+    for service in _system_service_paths():
+        _validate_systemd_service(service, label="installed")
+    _validate_tmpfiles(STAGING_EXTERNAL_TMPFILES, apply=True)
+    _systemd_daemon_reload()
+    return _validate_system_install_assets()
+
+
+def _high_value_state_identity() -> dict[str, Any]:
+    _safe_root_directory(STATE_ROOT, mode=0o700)
+    _safe_root_directory(RECEIPT_ROOT, mode=0o700)
+    journal = _safe_root_file(JOURNAL, mode=0o600, limit=MAX_REQUEST_BYTES)
+    receipts: dict[str, str] = {}
+    try:
+        names = sorted(path.name for path in RECEIPT_ROOT.iterdir())
+    except OSError as exc:
+        raise NodeAuthorityError("node authority receipt inventory is unavailable") from exc
+    for name in names:
+        if len(name) != 69 or not name.endswith(".json") or not _is_sha(name[:-5], length=64):
+            raise NodeAuthorityError("node authority receipt inventory drifted")
+        payload = _safe_root_file(RECEIPT_ROOT / name, mode=0o600, limit=1 << 20)
+        receipts[name] = hashlib.sha256(payload).hexdigest()
+    return {
+        "journal_sha256": hashlib.sha256(journal).hexdigest(),
+        "receipts": receipts,
+    }
+
+
+def _validate_high_value_state_identity(value: object) -> dict[str, Any]:
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"journal_sha256", "receipts"}
+        or not _is_sha(value.get("journal_sha256"), length=64)
+        or not isinstance(value.get("receipts"), dict)
+    ):
+        raise NodeAuthorityError("node authority high-value state identity is invalid")
+    receipts = value["receipts"]
+    if any(
+        not isinstance(name, str)
+        or len(name) != 69
+        or not name.endswith(".json")
+        or not _is_sha(name[:-5], length=64)
+        or not _is_sha(digest, length=64)
+        for name, digest in receipts.items()
+    ):
+        raise NodeAuthorityError("node authority high-value state identity is invalid")
+    return {
+        "journal_sha256": value["journal_sha256"],
+        "receipts": dict(receipts),
+    }
+
+
+def _upgrade_journal_append(record: Mapping[str, Any]) -> None:
+    if set(record) != {
+        "schema_version",
+        "upgrade_id",
+        "old_source_sha",
+        "old_source_tree",
+        "new_source_sha",
+        "new_source_tree",
+        "phase",
+        "timestamp_ns",
+    }:
+        raise NodeAuthorityError("node authority upgrade journal record is invalid")
+    descriptor = os.open(
+        UPGRADE_JOURNAL,
+        os.O_WRONLY | os.O_APPEND | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
+    )
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != 0
+            or metadata.st_gid != 0
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_nlink != 1
+        ):
+            raise NodeAuthorityError("node authority upgrade journal is unsafe")
+        view = memoryview(_canonical(record))
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise NodeAuthorityError(
+                    "node authority upgrade journal write failed safely",
+                )
+            view = view[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _validate_upgrade_journal() -> None:
+    raw = _safe_root_file(
+        UPGRADE_JOURNAL,
+        mode=0o600,
+        limit=MAX_REQUEST_BYTES,
+    )
+    for line in raw.splitlines(keepends=True):
+        try:
+            record = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise NodeAuthorityError("node authority upgrade journal is invalid") from exc
+        if (
+            not isinstance(record, dict)
+            or set(record)
+            != {
+                "schema_version",
+                "upgrade_id",
+                "old_source_sha",
+                "old_source_tree",
+                "new_source_sha",
+                "new_source_tree",
+                "phase",
+                "timestamp_ns",
+            }
+            or record.get("schema_version") != SCHEMA_VERSION
+            or not isinstance(record.get("upgrade_id"), str)
+            or not _is_sha(record.get("old_source_sha"))
+            or not _is_sha(record.get("old_source_tree"))
+            or not _is_sha(record.get("new_source_sha"))
+            or not _is_sha(record.get("new_source_tree"))
+            or record.get("phase") not in UPGRADE_PHASES
+            or not isinstance(record.get("timestamp_ns"), int)
+            or int(record["timestamp_ns"]) <= 0
+            or line != _canonical(record)
+        ):
+            raise NodeAuthorityError("node authority upgrade journal is invalid")
+
+
+def _upgrade_event(snapshot: UpgradeSnapshot, phase: str) -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "upgrade_id": snapshot.upgrade_id,
+        "old_source_sha": snapshot.old_source_sha,
+        "old_source_tree": snapshot.old_source_tree,
+        "new_source_sha": snapshot.new_source_sha,
+        "new_source_tree": snapshot.new_source_tree,
+        "phase": phase,
+        "timestamp_ns": time.time_ns(),
+    }
+
+
+def _snapshot_manifest_payload(snapshot: UpgradeSnapshot) -> bytes:
+    return _canonical(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "upgrade_id": snapshot.upgrade_id,
+            "old_source_sha": snapshot.old_source_sha,
+            "old_source_tree": snapshot.old_source_tree,
+            "new_source_sha": snapshot.new_source_sha,
+            "new_source_tree": snapshot.new_source_tree,
+            "high_value_state": snapshot.high_value_state,
+            "entries": list(snapshot.entries),
+        },
+    )
+
+
+def _prepare_upgrade_snapshot(
+    old_policy: AuthorityPolicy,
+    *,
+    new_source_sha: str,
+    new_source_tree: str,
+    high_value_state: Mapping[str, Any],
+) -> UpgradeSnapshot:
+    _ensure_root_directory(UPGRADE_ROOT, mode=0o700, parent_mode=0o700)
+    upgrade_id = (
+        f"{time.time_ns()}-{old_policy.source_tree[:12]}-"
+        f"{new_source_tree[:12]}-{uuid.uuid4().hex[:12]}"
+    )
+    root = UPGRADE_ROOT / upgrade_id
+    _ensure_root_directory(root, mode=0o700, parent_mode=0o700)
+    entries: list[Mapping[str, Any]] = []
+    try:
+        optional_paths = {
+            *(target for _relative, target, _mode, _parent in SYSTEM_INSTALL_ASSETS),
+            *(SOURCE_ROOT / relative for relative in MIGRATABLE_EXTERNAL_SOURCE_ASSETS),
+        }
+        for index, (path, mode, parent_mode) in enumerate(_managed_assets()):
+            try:
+                payload = _safe_root_file(path, mode=mode)
+            except NodeAuthorityError:
+                if path not in optional_paths or path.exists() or path.is_symlink():
+                    raise
+                entries.append(
+                    {
+                        "path": str(path),
+                        "present": False,
+                        "mode": f"{mode:04o}",
+                        "parent_mode": f"{parent_mode:04o}",
+                        "snapshot": None,
+                        "sha256": None,
+                    },
+                )
+                continue
+            snapshot_name = f"{index:04d}.bin"
+            _atomic_install(
+                root / snapshot_name,
+                payload,
+                0o600,
+                parent_mode=0o700,
+            )
+            entries.append(
+                {
+                    "path": str(path),
+                    "present": True,
+                    "mode": f"{mode:04o}",
+                    "parent_mode": f"{parent_mode:04o}",
+                    "snapshot": snapshot_name,
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                },
+            )
+        snapshot = UpgradeSnapshot(
+            upgrade_id=upgrade_id,
+            root=root,
+            manifest=root / "manifest.json",
+            entries=tuple(entries),
+            old_source_sha=old_policy.source_sha,
+            old_source_tree=old_policy.source_tree,
+            new_source_sha=new_source_sha,
+            new_source_tree=new_source_tree,
+            high_value_state=_validate_high_value_state_identity(high_value_state),
+        )
+        _atomic_install(
+            snapshot.manifest,
+            _snapshot_manifest_payload(snapshot),
+            0o600,
+            parent_mode=0o700,
+        )
+        _fsync_directory(root, mode=0o700)
+        _fsync_directory(UPGRADE_ROOT, mode=0o700)
+        return snapshot
+    except Exception:
+        try:
+            shutil.rmtree(root)
+            _fsync_directory(UPGRADE_ROOT, mode=0o700)
+        except OSError:
+            pass
+        raise
+
+
+def _load_upgrade_snapshot(root: Path) -> UpgradeSnapshot:
+    try:
+        resolved = root.resolve(strict=True)
+        expected_parent = UPGRADE_ROOT.resolve(strict=True)
+    except OSError as exc:
+        raise NodeAuthorityError("node authority upgrade snapshot is unavailable") from exc
+    if resolved.parent != expected_parent:
+        raise NodeAuthorityError("node authority upgrade snapshot path is invalid")
+    _safe_root_directory(resolved, mode=0o700)
+    raw = _safe_root_file(resolved / "manifest.json", mode=0o600, limit=1 << 20)
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise NodeAuthorityError("node authority upgrade snapshot is invalid") from exc
+    if (
+        not isinstance(payload, dict)
+        or set(payload)
+        != {
+            "schema_version",
+            "upgrade_id",
+            "old_source_sha",
+            "old_source_tree",
+            "new_source_sha",
+            "new_source_tree",
+            "high_value_state",
+            "entries",
+        }
+        or payload.get("schema_version") != SCHEMA_VERSION
+        or not isinstance(payload.get("upgrade_id"), str)
+        or payload["upgrade_id"] != resolved.name
+        or not _is_sha(payload.get("old_source_sha"))
+        or not _is_sha(payload.get("old_source_tree"))
+        or not _is_sha(payload.get("new_source_sha"))
+        or not _is_sha(payload.get("new_source_tree"))
+        or not isinstance(payload.get("high_value_state"), dict)
+        or not isinstance(payload.get("entries"), list)
+        or raw != _canonical(payload)
+    ):
+        raise NodeAuthorityError("node authority upgrade snapshot is invalid")
+    expected_assets = [
+        (str(path), f"{mode:04o}", f"{parent_mode:04o}")
+        for path, mode, parent_mode in _managed_assets()
+    ]
+    entries = payload["entries"]
+    if len(entries) != len(expected_assets):
+        raise NodeAuthorityError("node authority upgrade snapshot inventory is invalid")
+    for index, (entry, expected_asset) in enumerate(
+        zip(entries, expected_assets, strict=True),
+    ):
+        expected_path, expected_mode, expected_parent_mode = expected_asset
+        if (
+            not isinstance(entry, dict)
+            or set(entry)
+            != {
+                "path",
+                "present",
+                "mode",
+                "parent_mode",
+                "snapshot",
+                "sha256",
+            }
+            or entry.get("path") != expected_path
+            or not isinstance(entry.get("present"), bool)
+            or entry.get("mode") != expected_mode
+            or entry.get("parent_mode") != expected_parent_mode
+        ):
+            raise NodeAuthorityError("node authority upgrade snapshot inventory is invalid")
+        if entry["present"]:
+            if entry.get("snapshot") != f"{index:04d}.bin" or not _is_sha(
+                entry.get("sha256"), length=64
+            ):
+                raise NodeAuthorityError("node authority upgrade snapshot inventory is invalid")
+        elif entry.get("snapshot") is not None or entry.get("sha256") is not None:
+            raise NodeAuthorityError("node authority upgrade snapshot inventory is invalid")
+        if not entry["present"]:
+            continue
+        snapshot_payload = _safe_root_file(
+            resolved / str(entry["snapshot"]),
+            mode=0o600,
+        )
+        if hashlib.sha256(snapshot_payload).hexdigest() != entry["sha256"]:
+            raise NodeAuthorityError("node authority upgrade snapshot digest drifted")
+    return UpgradeSnapshot(
+        upgrade_id=payload["upgrade_id"],
+        root=resolved,
+        manifest=resolved / "manifest.json",
+        entries=tuple(entries),
+        old_source_sha=payload["old_source_sha"],
+        old_source_tree=payload["old_source_tree"],
+        new_source_sha=payload["new_source_sha"],
+        new_source_tree=payload["new_source_tree"],
+        high_value_state=_validate_high_value_state_identity(
+            payload["high_value_state"],
+        ),
+    )
+
+
+def _active_payload(snapshot: UpgradeSnapshot, phase: str) -> bytes:
+    return _canonical(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "upgrade_id": snapshot.upgrade_id,
+            "snapshot": str(snapshot.root),
+            "phase": phase,
+        },
+    )
+
+
+def _write_upgrade_active(snapshot: UpgradeSnapshot, phase: str) -> None:
+    payload = _active_payload(snapshot, phase)
+    if UPGRADE_ACTIVE.exists():
+        _atomic_replace(
+            UPGRADE_ACTIVE,
+            payload,
+            0o600,
+            parent_mode=0o700,
+        )
+    else:
+        _atomic_install(
+            UPGRADE_ACTIVE,
+            payload,
+            0o600,
+            parent_mode=0o700,
+        )
+
+
+def _read_upgrade_active() -> tuple[UpgradeSnapshot, str] | None:
+    if not UPGRADE_ACTIVE.exists():
+        return None
+    raw = _safe_root_file(UPGRADE_ACTIVE, mode=0o600, limit=1 << 20)
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise NodeAuthorityError("node authority active upgrade is invalid") from exc
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"schema_version", "upgrade_id", "snapshot", "phase"}
+        or payload.get("schema_version") != SCHEMA_VERSION
+        or not isinstance(payload.get("upgrade_id"), str)
+        or not isinstance(payload.get("snapshot"), str)
+        or payload.get("phase")
+        not in {"prepared", "admission-disabled", "assets-replaced", "committed"}
+        or raw != _canonical(payload)
+    ):
+        raise NodeAuthorityError("node authority active upgrade is invalid")
+    snapshot = _load_upgrade_snapshot(Path(payload["snapshot"]))
+    if snapshot.upgrade_id != payload["upgrade_id"]:
+        raise NodeAuthorityError("node authority active upgrade binding is invalid")
+    return snapshot, str(payload["phase"])
+
+
+def _reject_active_upgrade() -> None:
+    try:
+        UPGRADE_ACTIVE.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise NodeAuthorityError("node authority upgrade admission state is unavailable") from exc
+    raise NodeAuthorityError("node authority runtime admission is disabled during upgrade")
+
+
+def _remove_upgrade_active() -> None:
+    if not UPGRADE_ACTIVE.exists():
+        return
+    _safe_root_file(UPGRADE_ACTIVE, mode=0o600, limit=1 << 20)
+    UPGRADE_ACTIVE.unlink()
+    _fsync_directory(STATE_ROOT, mode=0o700)
+
+
+def _restore_upgrade_snapshot(snapshot: UpgradeSnapshot) -> None:
+    sudoers_paths = {SUDOERS, *_system_sudoers_paths()}
+    expected_modes = {
+        Path(str(entry["path"])): int(str(entry["mode"]), 8) for entry in snapshot.entries
+    }
+    for sudoers_path in sudoers_paths:
+        if sudoers_path.exists() or sudoers_path.is_symlink():
+            _unlink_root_file(
+                sudoers_path,
+                mode=expected_modes[sudoers_path],
+            )
+    for entry in snapshot.entries:
+        path = Path(str(entry["path"]))
+        if path in sudoers_paths:
+            continue
+        if not entry["present"]:
+            if path.exists() or path.is_symlink():
+                _unlink_root_file(
+                    path,
+                    mode=int(str(entry["mode"]), 8),
+                    parent_mode=int(str(entry["parent_mode"]), 8),
+                )
+            continue
+        payload = _safe_root_file(
+            snapshot.root / str(entry["snapshot"]),
+            mode=0o600,
+        )
+        _atomic_replace(
+            path,
+            payload,
+            int(str(entry["mode"]), 8),
+            parent_mode=int(str(entry["parent_mode"]), 8),
+        )
+    for entry in snapshot.entries:
+        path = Path(str(entry["path"]))
+        if path not in sudoers_paths or not entry["present"]:
+            continue
+        old_sudoers = _safe_root_file(
+            snapshot.root / str(entry["snapshot"]),
+            mode=0o600,
+        )
+        _atomic_install(
+            path,
+            old_sudoers,
+            int(str(entry["mode"]), 8),
+            parent_mode=int(str(entry["parent_mode"]), 8),
+        )
+        _validate_sudoers(path, label="restored")
+    _systemd_daemon_reload()
+    restored = _read_policy()
+    _validate_runtime_assets(
+        restored,
+        allow_absent_system_install=True,
+    )
+    for entry in snapshot.entries:
+        path = Path(str(entry["path"]))
+        if path not in {target for _relative, target, _mode, _parent in SYSTEM_INSTALL_ASSETS}:
+            continue
+        if entry["present"]:
+            payload = _safe_root_file(path, mode=int(str(entry["mode"]), 8))
+            if hashlib.sha256(payload).hexdigest() != entry["sha256"]:
+                raise NodeAuthorityError("restored system install drifted")
+        elif path.exists() or path.is_symlink():
+            raise NodeAuthorityError("restored system install drifted")
+    if (
+        restored.source_sha != snapshot.old_source_sha
+        or restored.source_tree != snapshot.old_source_tree
+    ):
+        raise NodeAuthorityError("restored node authority identity is invalid")
+
+
+def _safe_source_directory(metadata: os.stat_result, *, expected_uid: int) -> bool:
+    return (
+        stat.S_ISDIR(metadata.st_mode)
+        and not stat.S_ISLNK(metadata.st_mode)
+        and metadata.st_uid in {0, expected_uid}
+        and not stat.S_IMODE(metadata.st_mode) & 0o022
+    )
+
+
+def _source_asset(relative: Path, *, expected_uid: int = 0) -> bytes:
+    if (
+        relative.is_absolute()
+        or not relative.parts
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise NodeAuthorityError("bootstrap source asset path is unsafe")
+    repo = REPO_ROOT.absolute()
+    if not repo.is_absolute():
+        raise NodeAuthorityError("bootstrap source asset path is unsafe")
+    directory_parts = (*repo.parts[1:], *relative.parent.parts)
+    descriptors: list[int] = []
+    directory_records: list[tuple[int, str, int, tuple[int, ...]]] = []
+    try:
+        root = os.open(
+            "/",
+            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
+        )
+        descriptors.append(root)
+        root_metadata = os.fstat(root)
+        if not _safe_source_directory(root_metadata, expected_uid=expected_uid):
+            raise NodeAuthorityError("bootstrap source asset parent is unsafe")
+        parent = root
+        for component in directory_parts:
+            lexical = os.stat(component, dir_fd=parent, follow_symlinks=False)
+            child = os.open(
+                component,
+                os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
+                dir_fd=parent,
+            )
+            descriptors.append(child)
+            metadata = os.fstat(child)
+            if (
+                not _safe_source_directory(lexical, expected_uid=expected_uid)
+                or not _safe_source_directory(metadata, expected_uid=expected_uid)
+                or _metadata_identity(lexical) != _metadata_identity(metadata)
+            ):
+                raise NodeAuthorityError("bootstrap source asset parent is unsafe")
+            directory_records.append(
+                (parent, component, child, _metadata_identity(metadata)),
+            )
+            parent = child
+        lexical = os.stat(relative.name, dir_fd=parent, follow_symlinks=False)
+        descriptor = os.open(
+            relative.name,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
+            dir_fd=parent,
+        )
+        descriptors.append(descriptor)
+        before = os.fstat(descriptor)
+        payload = _read_fd_twice(
+            descriptor,
+            limit=MAX_REQUEST_BYTES,
+            error="bootstrap source asset changed during verification",
+        )
+        after = os.fstat(descriptor)
+        current = os.stat(relative.name, dir_fd=parent, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or stat.S_ISLNK(lexical.st_mode)
+            or before.st_uid != expected_uid
+            or before.st_gid != expected_uid
+            or stat.S_IMODE(before.st_mode) & 0o022
+            or before.st_nlink != 1
+            or _metadata_identity(lexical) != _metadata_identity(before)
+            or _metadata_identity(before) != _metadata_identity(after)
+            or _metadata_identity(after) != _metadata_identity(current)
+        ):
+            raise NodeAuthorityError("bootstrap source asset metadata is unsafe")
+        for parent_fd, component, child_fd, identity in directory_records:
+            lexical_parent = os.stat(
+                component,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+            descriptor_parent = os.fstat(child_fd)
+            if (
+                _metadata_identity(lexical_parent) != identity
+                or _metadata_identity(descriptor_parent) != identity
+                or not _safe_source_directory(
+                    descriptor_parent,
+                    expected_uid=expected_uid,
+                )
+            ):
+                raise NodeAuthorityError(
+                    "bootstrap source asset parent changed during verification",
+                )
+        return payload
+    except NodeAuthorityError:
+        raise
+    except OSError as exc:
+        raise NodeAuthorityError("bootstrap source asset is unavailable") from exc
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def _git(*args: str) -> str:
+    result = subprocess.run(
+        (
+            "git",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.attributesFile=/dev/null",
+            "-c",
+            f"safe.directory={REPO_ROOT}",
+            "-C",
+            str(REPO_ROOT),
+            *args,
+        ),
+        env=_clean_env(),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0 or result.stderr:
+        raise NodeAuthorityError("bootstrap exact source verification failed safely")
+    return result.stdout.strip()
+
+
+def _git_bytes(*args: str) -> bytes:
+    result = subprocess.run(
+        (
+            "git",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.attributesFile=/dev/null",
+            "-c",
+            f"safe.directory={REPO_ROOT}",
+            "-C",
+            str(REPO_ROOT),
+            *args,
+        ),
+        env=_clean_env(),
+        check=False,
+        capture_output=True,
+    )
+    if result.returncode != 0 or result.stderr:
+        raise NodeAuthorityError("bootstrap exact source verification failed safely")
+    return result.stdout
+
+
+def _exact_source_assets(source_sha: str, source_tree: str) -> dict[str, bytes]:
+    assets: dict[str, bytes] = {}
+    for relative in SOURCE_ASSETS:
+        payload = _source_asset(relative)
+        committed = _git_bytes(
+            "cat-file",
+            "blob",
+            f"{source_sha}:{relative.as_posix()}",
+        )
+        if (
+            payload != committed
+            or hashlib.sha256(payload).digest() != hashlib.sha256(committed).digest()
+        ):
+            raise NodeAuthorityError(
+                "bootstrap source asset does not match the exact candidate",
+            )
+        assets[str(relative)] = payload
+    if (
+        _git("rev-parse", "--verify", "HEAD") != source_sha
+        or _git("rev-parse", "--verify", "HEAD^{tree}") != source_tree
+        or _git("status", "--porcelain=v1", "--untracked-files=all")
+    ):
+        raise NodeAuthorityError("bootstrap source changed during verification")
+    return assets
+
+
+def _policy_payload(
+    source_sha: str,
+    source_tree: str,
+    node: str,
+    assets: Mapping[str, bytes],
+) -> bytes:
+    return _canonical(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "source_sha": source_sha,
+            "source_tree": source_tree,
+            "node": node,
+            "asset_sha256": {
+                name: hashlib.sha256(payload).hexdigest()
+                for name, payload in sorted(assets.items())
+            },
+        },
+    )
+
+
+def _read_policy() -> AuthorityPolicy:
+    raw = _safe_root_file(POLICY, mode=0o600, limit=1 << 20)
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise NodeAuthorityError("node authority policy is invalid") from exc
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"schema_version", "source_sha", "source_tree", "node", "asset_sha256"}
+        or payload.get("schema_version") != SCHEMA_VERSION
+        or not _is_sha(payload.get("source_sha"))
+        or not _is_sha(payload.get("source_tree"))
+        or payload.get("node") not in NODE_HOSTNAMES
+        or not isinstance(payload.get("asset_sha256"), dict)
+        or raw != _canonical(payload)
+    ):
+        raise NodeAuthorityError("node authority policy is invalid")
+    digests = payload["asset_sha256"]
+    expected = {str(relative) for relative in SOURCE_ASSETS}
+    missing = expected - set(digests)
+    if (
+        set(digests) - expected
+        or missing - {str(relative) for relative in MIGRATABLE_EXTERNAL_SOURCE_ASSETS}
+        or any(not _is_sha(value, length=64) for value in digests.values())
+    ):
+        raise NodeAuthorityError("node authority policy asset identity is invalid")
+    return AuthorityPolicy(
+        source_sha=payload["source_sha"],
+        source_tree=payload["source_tree"],
+        node=payload["node"],
+        asset_sha256=dict(digests),
+    )
+
+
+def _validate_runtime_assets(
+    policy: AuthorityPolicy,
+    *,
+    allow_absent_system_install: bool = False,
+) -> tuple[dict[str, Any], ...]:
+    if _hostname() != NODE_HOSTNAMES[policy.node]:
+        raise NodeAuthorityError("node authority policy host binding is invalid")
+    for relative in SOURCE_ASSETS:
+        installed = SOURCE_ROOT / relative
+        mode = (
+            0o440
+            if relative == SUDOERS_RELATIVE
+            else (0o755 if relative.parts[:2] == ("scripts", "ops") else 0o644)
+        )
+        if str(relative) not in policy.asset_sha256:
+            if (
+                allow_absent_system_install
+                and relative in MIGRATABLE_EXTERNAL_SOURCE_ASSETS
+                and not installed.exists()
+                and not installed.is_symlink()
+            ):
+                continue
+            raise NodeAuthorityError("node authority installed source identity is incomplete")
+        payload = _safe_root_file(installed, mode=mode)
+        if hashlib.sha256(payload).hexdigest() != policy.asset_sha256[str(relative)]:
+            raise NodeAuthorityError("node authority installed source drifted")
+    helper = _safe_root_file(LIBEXEC, mode=0o755)
+    expected_helper = _safe_root_file(
+        SOURCE_ROOT / "scripts/ops/developer_sandbox_node_authority.py",
+        mode=0o755,
+    )
+    if helper != expected_helper:
+        raise NodeAuthorityError("node authority wrapper drifted")
+    sudoers = _safe_root_file(SUDOERS, mode=0o440)
+    expected_sudoers = _safe_root_file(
+        SOURCE_ROOT / SUDOERS_RELATIVE,
+        mode=0o440,
+    )
+    if sudoers != expected_sudoers:
+        raise NodeAuthorityError("node authority sudoers drifted")
+    return _validate_system_install_assets(
+        allow_absent=allow_absent_system_install,
+    )
+
+
+def _validate_invoker(verb: str, environ: Mapping[str, str]) -> None:
+    try:
+        account = pwd.getpwnam(OPERATOR)
+    except KeyError as exc:
+        raise NodeAuthorityError("node authority operator identity is unavailable") from exc
+    if (
+        verb not in {"transact", "check"}
+        or os.geteuid() != 0
+        or environ.get("SUDO_USER") != OPERATOR
+        or environ.get("SUDO_UID") != str(account.pw_uid)
+        or environ.get("SUDO_GID") != str(account.pw_gid)
+        or environ.get("SUDO_COMMAND") != f"{LIBEXEC} {verb}"
+    ):
+        raise NodeAuthorityError("node authority invocation is not approved")
+
+
+def _parse_request(raw: bytes, *, verb: str, policy: AuthorityPolicy) -> Request:
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise NodeAuthorityError("node authority request is invalid") from exc
+    actions = TRANSACT_ACTIONS if verb == "transact" else CHECK_ACTIONS
+    requested_action = payload.get("action") if isinstance(payload, dict) else None
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != REQUEST_FIELDS
+        or payload.get("schema_version") != SCHEMA_VERSION
+        or requested_action not in actions
+        or payload.get("node") != policy.node
+        or payload.get("domain") not in DOMAINS
+        or (
+            payload.get("sandbox") != STAGING_SCOPE
+            if requested_action in STAGING_ACTIONS
+            else payload.get("sandbox") not in SANDBOXES
+        )
+        or not _is_sha(payload.get("candidate_sha"))
+        or not _is_sha(payload.get("candidate_tree"))
+        or (
+            requested_action not in STAGING_ACTIONS
+            and payload.get("candidate_tree") != policy.source_tree
+        )
+        or payload.get("payload_kind") != PAYLOAD_KIND.get(requested_action)
+        or not _is_sha(payload.get("payload_sha256"), length=64)
+        or not isinstance(payload.get("payload_base64"), str)
+        or (
+            payload.get("prior_request_id") is not None
+            and not _is_sha(payload.get("prior_request_id"), length=64)
+        )
+        or not _is_sha(payload.get("request_id"), length=64)
+        or payload.get("request_id") != _request_digest(payload)
+        or raw != _canonical(payload)
+    ):
+        raise NodeAuthorityError("node authority request binding is invalid")
+    action = str(payload["action"])
+    prior = payload["prior_request_id"]
+    if (action in {"rollback", "slurm-rollback"}) != (prior is not None):
+        raise NodeAuthorityError("node authority rollback binding is invalid")
+    try:
+        decoded = base64.b64decode(payload["payload_base64"], validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise NodeAuthorityError("node authority request payload is invalid") from exc
+    if (
+        len(decoded) > MAX_PAYLOAD_BYTES
+        or base64.b64encode(decoded).decode("ascii") != payload["payload_base64"]
+        or hashlib.sha256(decoded).hexdigest() != payload["payload_sha256"]
+        or (payload["payload_kind"] == "none" and decoded)
+        or (payload["payload_kind"] != "none" and not decoded)
+    ):
+        raise NodeAuthorityError("node authority request payload binding is invalid")
+    if payload["payload_kind"] == "fleet-attestation-json":
+        try:
+            fleet = json.loads(decoded)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise NodeAuthorityError(
+                "fleet attestation payload is invalid",
+            ) from exc
+        if (
+            len(decoded) > MAX_FLEET_ATTESTATION_BYTES
+            or not isinstance(fleet, dict)
+            or decoded != _canonical(fleet)
+        ):
+            raise NodeAuthorityError("fleet attestation payload is invalid")
+    if payload["payload_kind"] in {
+        "live-overlap-collection-json",
+        "live-overlap-job-json",
+    }:
+        try:
+            live_payload = json.loads(decoded)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise NodeAuthorityError("live overlap payload is invalid") from exc
+        if not isinstance(live_payload, dict) or decoded != _canonical(live_payload):
+            raise NodeAuthorityError("live overlap payload is invalid")
+        if payload["payload_kind"] == "live-overlap-collection-json":
+            try:
+                uuid.UUID(str(live_payload.get("collection_id")))
+            except (ValueError, AttributeError) as exc:
+                raise NodeAuthorityError("live overlap collection identity is invalid") from exc
+            if (
+                set(live_payload) != LIVE_COLLECTION_FIELDS
+                or live_payload.get("schema_version") != SCHEMA_VERSION
+                or live_payload.get("kind") != "loom.developer-sandbox.live-overlap-collection"
+                or not _is_sha(live_payload.get("candidate_tree"))
+                or re.fullmatch(r"[1-9][0-9]*(?:_[0-9]+)?", str(live_payload.get("job_id"))) is None
+            ):
+                raise NodeAuthorityError("live overlap collection payload is invalid")
+        elif (
+            set(live_payload) != LIVE_SLURM_REQUEST_FIELDS
+            or live_payload.get("schema_version") != SCHEMA_VERSION
+            or live_payload.get("kind") != "loom.developer-sandbox.live-slurm-request"
+            or live_payload.get("sandbox") != payload["sandbox"]
+            or live_payload.get("pool") != payload["domain"]
+            or live_payload.get("candidate_sha") != payload["candidate_sha"]
+            or not _is_sha(live_payload.get("candidate_tree"))
+            or live_payload.get("source_host")
+            != ("trt-eai-oldlab-2" if payload["domain"] == "oldlab" else "trt-gb10-1")
+            or live_payload.get("account") != f"loom-dev-{payload['sandbox']}"
+            or live_payload.get("user") != f"loom-sandbox-{payload['sandbox']}"
+            or not isinstance(live_payload.get("job_name"), str)
+            or re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", live_payload["job_name"]) is None
+            or not isinstance(live_payload.get("node"), str)
+            or live_payload.get("node") == "trt-gb10-7"
+            or re.fullmatch(r"[1-9][0-9]*(?:_[0-9]+)?", str(live_payload.get("job_id"))) is None
+            or any(
+                not isinstance(live_payload.get(field), int)
+                or isinstance(live_payload[field], bool)
+                or live_payload[field] < minimum
+                for field, minimum in (
+                    ("requested_cpus", 1),
+                    ("requested_memory_mib", 1),
+                    ("job_pids_max", 1),
+                    ("requested_gpus", 0),
+                )
+            )
+            or not isinstance(live_payload.get("requested_gpu_tres"), str)
+        ):
+            raise NodeAuthorityError("live overlap Slurm payload is invalid")
+    if payload["payload_kind"] == "platform-health-node-json":
+        try:
+            platform_payload = json.loads(decoded)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise NodeAuthorityError("platform-health node payload is invalid") from exc
+        candidates = (
+            platform_payload.get("candidates") if isinstance(platform_payload, dict) else None
+        )
+        checkpoints = {
+            "baseline": "baseline",
+            "mixed_non_loom": "during",
+            "cancel_cleanup": "during",
+            "worker_crash": "during",
+            "final_drain": "after",
+        }
+        if (
+            not isinstance(platform_payload, dict)
+            or decoded != _canonical(platform_payload)
+            or set(platform_payload) != PLATFORM_HEALTH_REQUEST_FIELDS
+            or platform_payload.get("schema_version") != SCHEMA_VERSION
+            or platform_payload.get("kind") != "loom.developer-sandbox.platform-health-node-request"
+            or re.fullmatch(
+                r"[0-9a-f]{32}",
+                str(platform_payload.get("session_id")),
+            )
+            is None
+            or platform_payload.get("checkpoint") not in checkpoints
+            or platform_payload.get("checkpoint_group")
+            != checkpoints.get(str(platform_payload.get("checkpoint")))
+            or platform_payload.get("expected_node") != payload["node"]
+            or platform_payload.get("expected_host") != NODE_HOSTNAMES.get(str(payload["node"]))
+            or not isinstance(platform_payload.get("since_at"), str)
+            or not isinstance(candidates, dict)
+            or set(candidates) != {"qianyi", "hongjian", "devansh"}
+            or any(
+                not isinstance(candidates[sandbox], dict)
+                or set(candidates[sandbox]) != {"sha", "tree"}
+                or not _is_sha(candidates[sandbox].get("sha"))
+                or not _is_sha(candidates[sandbox].get("tree"))
+                for sandbox in ("qianyi", "hongjian", "devansh")
+            )
+            or candidates["qianyi"]["sha"] != payload["candidate_sha"]
+            or candidates["qianyi"]["tree"] != payload["candidate_tree"]
+        ):
+            raise NodeAuthorityError("platform-health node payload is invalid")
+    if payload["payload_kind"] == "staging-pressure-reclaim-observe-request":
+        try:
+            pressure_payload = json.loads(decoded)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise NodeAuthorityError("staging pressure observe payload is invalid") from exc
+        owned_jobs = (
+            pressure_payload.get("owned_jobs") if isinstance(pressure_payload, dict) else None
+        )
+        if (
+            not isinstance(pressure_payload, dict)
+            or decoded != _canonical(pressure_payload)
+            or set(pressure_payload) != STAGING_PRESSURE_OBSERVE_FIELDS
+            or pressure_payload.get("schema_version") != SCHEMA_VERSION
+            or pressure_payload.get("kind") != "loom.staging-pressure-reclaim.observe-request"
+            or pressure_payload.get("source_host") != "trt-eai-oldlab-1"
+            or pressure_payload.get("submit_host") != "trt-gb10-1"
+            or pressure_payload.get("environment") != "staging"
+            or pressure_payload.get("pool") != "gb10"
+            or pressure_payload.get("partition") != "gb10"
+            or pressure_payload.get("account") != "loom-staging"
+            or pressure_payload.get("qos") != "loom-staging"
+            or pressure_payload.get("phase") not in {"before", "during", "after"}
+            or re.fullmatch(
+                r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                str(pressure_payload.get("session_id")),
+            )
+            is None
+            or re.fullmatch(
+                r"[0-9a-f]{32}",
+                str(pressure_payload.get("acceptance_session_id")),
+            )
+            is None
+            or pressure_payload.get("candidate_sha") != payload["candidate_sha"]
+            or pressure_payload.get("candidate_tree") != payload["candidate_tree"]
+            or not isinstance(owned_jobs, list)
+            or not owned_jobs
+            or len(owned_jobs) > 64
+            or any(
+                not isinstance(job, dict)
+                or set(job) != {"job_id", "user", "account", "qos", "name"}
+                or re.fullmatch(r"[1-9][0-9]*(?:_[0-9]+)?", str(job.get("job_id"))) is None
+                or job.get("user") != "loom-staging-worker"
+                or job.get("account") != "loom-staging"
+                or job.get("qos") != "loom-staging"
+                or re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", str(job.get("name"))) is None
+                for job in owned_jobs
+            )
+            or len({str(job["job_id"]) for job in owned_jobs}) != len(owned_jobs)
+        ):
+            raise NodeAuthorityError("staging pressure observe payload is invalid")
+    if payload["payload_kind"] in {
+        "staging-allocation-probe-request",
+        "staging-allocation-submit-request",
+    }:
+        try:
+            staging_payload = json.loads(decoded)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise NodeAuthorityError("staging allocation payload is invalid") from exc
+        if (
+            not isinstance(staging_payload, dict)
+            or decoded != _canonical(staging_payload)
+            or set(staging_payload)
+            != (
+                STAGING_ALLOCATION_PROBE_FIELDS
+                if payload["payload_kind"] == "staging-allocation-probe-request"
+                else STAGING_ALLOCATION_SUBMIT_FIELDS
+            )
+            or staging_payload.get("schema_version") != SCHEMA_VERSION
+            or staging_payload.get("kind")
+            != (
+                "staging_external_slurm_allocation_probe_request"
+                if payload["payload_kind"] == "staging-allocation-probe-request"
+                else "staging_external_slurm_allocation_submit_request"
+            )
+            or not _is_sha(staging_payload.get("request_id"), length=64)
+            or staging_payload.get("candidate_sha") != payload["candidate_sha"]
+            or staging_payload.get("candidate_tree") != payload["candidate_tree"]
+            or (
+                payload["payload_kind"] == "staging-allocation-submit-request"
+                and staging_payload.get("requested_node")
+                not in {
+                    f"trt-gb10-{index}"
+                    for index in (1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15)
+                }
+            )
+        ):
+            raise NodeAuthorityError("staging allocation payload is invalid")
+    if payload["payload_kind"] == "staging-allocation-cancel-request":
+        try:
+            staging_cancel = json.loads(decoded)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise NodeAuthorityError("staging allocation cancel payload is invalid") from exc
+        if (
+            not isinstance(staging_cancel, dict)
+            or decoded != _canonical(staging_cancel)
+            or set(staging_cancel) != STAGING_ALLOCATION_CANCEL_FIELDS
+            or staging_cancel.get("schema_version") != SCHEMA_VERSION
+            or staging_cancel.get("kind") != "staging_external_slurm_allocation_cancel_request"
+            or not _is_sha(staging_cancel.get("request_id"), length=64)
+            or not _is_sha(staging_cancel.get("submit_request_id"), length=64)
+            or re.fullmatch(r"[1-9][0-9]*", str(staging_cancel.get("job_id"))) is None
+            or staging_cancel.get("requested_node")
+            not in {
+                f"trt-gb10-{index}" for index in (1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15)
+            }
+            or staging_cancel.get("candidate_sha") != payload["candidate_sha"]
+            or staging_cancel.get("candidate_tree") != payload["candidate_tree"]
+        ):
+            raise NodeAuthorityError("staging allocation cancel payload is invalid")
+    if payload["payload_kind"] == "staging-infrastructure-operation-request":
+        try:
+            operation_payload = json.loads(decoded)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise NodeAuthorityError("staging infrastructure operation payload is invalid") from exc
+        operation_unsigned = (
+            {key: value for key, value in operation_payload.items() if key != "request_id"}
+            if isinstance(operation_payload, dict)
+            else {}
+        )
+        if (
+            not isinstance(operation_payload, dict)
+            or decoded != _canonical(operation_payload)
+            or set(operation_payload) != STAGING_INFRASTRUCTURE_OPERATION_FIELDS
+            or operation_payload.get("schema_version") != SCHEMA_VERSION
+            or operation_payload.get("kind")
+            != "loom.staging-external-slurm.infrastructure-operation-request"
+            or operation_payload.get("action") != requested_action
+            or operation_payload.get("node") != payload["node"]
+            or operation_payload.get("candidate_sha") != payload["candidate_sha"]
+            or operation_payload.get("candidate_tree") != payload["candidate_tree"]
+            or not _is_sha(operation_payload.get("convergence_id"), length=64)
+            or _canonical_utc(operation_payload.get("requested_at")) is None
+            or operation_payload.get("request_id")
+            != hashlib.sha256(_canonical(operation_unsigned)).hexdigest()
+        ):
+            raise NodeAuthorityError("staging infrastructure operation payload is invalid")
+    if payload["payload_kind"] == "staging-infrastructure-converge-request":
+        try:
+            converge_payload = json.loads(decoded)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise NodeAuthorityError("staging infrastructure converge payload is invalid") from exc
+        if (
+            not isinstance(converge_payload, dict)
+            or decoded != _canonical(converge_payload)
+            or set(converge_payload) != STAGING_INFRASTRUCTURE_CONVERGE_FIELDS
+            or converge_payload.get("schema_version") != SCHEMA_VERSION
+            or converge_payload.get("kind")
+            != "loom.staging-external-slurm.infrastructure-converge-request"
+            or converge_payload.get("candidate_sha") != payload["candidate_sha"]
+            or converge_payload.get("candidate_tree") != payload["candidate_tree"]
+            or not _is_sha(converge_payload.get("convergence_id"), length=64)
+            or _canonical_utc(converge_payload.get("requested_at")) is None
+        ):
+            raise NodeAuthorityError("staging infrastructure converge payload is invalid")
+    if payload["payload_kind"] == "staging-infrastructure-receipt-json":
+        try:
+            infrastructure_payload = json.loads(decoded)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise NodeAuthorityError("staging infrastructure receipt payload is invalid") from exc
+        if (
+            not isinstance(infrastructure_payload, dict)
+            or decoded != _canonical(infrastructure_payload)
+            or set(infrastructure_payload) != STAGING_INFRASTRUCTURE_RECEIPT_FIELDS
+            or infrastructure_payload.get("schema_version") != SCHEMA_VERSION
+            or infrastructure_payload.get("kind")
+            != "loom.staging-external-slurm.infrastructure-receipt"
+            or infrastructure_payload.get("candidate_sha") != payload["candidate_sha"]
+            or infrastructure_payload.get("candidate_tree") != payload["candidate_tree"]
+            or not _is_sha(infrastructure_payload.get("convergence_id"), length=64)
+            or _canonical_utc(infrastructure_payload.get("requested_at")) is None
+            or not isinstance(infrastructure_payload.get("generation"), int)
+            or isinstance(infrastructure_payload.get("generation"), bool)
+            or infrastructure_payload["generation"] < 1
+        ):
+            raise NodeAuthorityError("staging infrastructure receipt payload is invalid")
+    node = str(payload["node"])
+    domain = str(payload["domain"])
+    if requested_action == "inspect-link-client" and domain != (
+        "oldlab" if node.startswith("oldlab-") else "gb10"
+    ):
+        raise NodeAuthorityError("link client inspection binding is invalid")
+    if requested_action in {"inspect-link-server", "persist-fleet-attestation"} and (
+        node != "oldlab-2" or domain != "oldlab"
+    ):
+        raise NodeAuthorityError("link server authority binding is invalid")
+    if requested_action == "collect-live-overlap" and node != "oldlab-2":
+        raise NodeAuthorityError("live overlap collector is OLDLAB2-only")
+    if requested_action == "observe-live-overlap-job" and (
+        node != ("oldlab-2" if domain == "oldlab" else "trt-gb10-1")
+    ):
+        raise NodeAuthorityError("live overlap observation is source-host-only")
+    if requested_action == "observe-platform-health-node" and node == "trt-gb10-7":
+        raise NodeAuthorityError("platform-health observation excludes trt-gb10-7")
+    if requested_action == "staging-pressure-reclaim-observe" and (
+        node != "trt-gb10-1" or domain != "gb10"
+    ):
+        raise NodeAuthorityError("staging pressure observation is GB10 controller-only")
+    if requested_action == "staging-allocation-bootstrap" and (
+        domain != "gb10" or not node.startswith("trt-gb10-") or node == "trt-gb10-7"
+    ):
+        raise NodeAuthorityError(
+            "staging allocation bootstrap is restricted to the 14-node GB10 set",
+        )
+    if requested_action == "staging-shared-source-bootstrap" and (
+        domain != "gb10" or node != "trt-gb10-2"
+    ):
+        raise NodeAuthorityError(
+            "staging shared source bootstrap is restricted to trt-gb10-2",
+        )
+    if requested_action == "staging-slurm-accounting-converge" and (
+        domain != "gb10" or node != "trt-gb10-1"
+    ):
+        raise NodeAuthorityError(
+            "staging accounting convergence is restricted to trt-gb10-1",
+        )
+    if requested_action == "staging-infrastructure-converge" and (
+        domain != "oldlab" or node != "oldlab-2"
+    ):
+        raise NodeAuthorityError(
+            "staging infrastructure producer is restricted to oldlab-2",
+        )
+    if requested_action == "staging-infrastructure-install" and (
+        domain != "oldlab" or node != "oldlab-1"
+    ):
+        raise NodeAuthorityError(
+            "staging infrastructure receipt install is restricted to oldlab-1",
+        )
+    if requested_action in {
+        "staging-shared-source-bootstrap",
+        "staging-slurm-accounting-converge",
+        "staging-allocation-bootstrap",
+        "staging-infrastructure-converge",
+        "staging-infrastructure-install",
+    } and (
+        payload["candidate_sha"] != policy.source_sha
+        or payload["candidate_tree"] != policy.source_tree
+    ):
+        raise NodeAuthorityError(
+            "staging infrastructure request is not the installed exact candidate",
+        )
+    if requested_action == "staging-allocation-probe" and (
+        domain != "gb10" or node != "trt-gb10-1"
+    ):
+        raise NodeAuthorityError(
+            "staging allocation probe is restricted to the fixed GB10 submit host",
+        )
+    if requested_action in {"staging-allocation-submit", "staging-allocation-cancel"} and (
+        domain != "gb10" or node != "trt-gb10-1"
+    ):
+        raise NodeAuthorityError(
+            "staging allocation broker is restricted to the fixed GB10 submit host",
+        )
+    slurm_actions = {
+        "slurm-node-converge",
+        "slurm-controller-converge",
+        "slurm-rollback",
+        "slurm-check",
+    }
+    if requested_action in slurm_actions:
+        expected_domain = "oldlab" if node.startswith("oldlab-") else "gb10"
+        if domain != expected_domain:
+            raise NodeAuthorityError("Slurm node domain binding is invalid")
+        is_controller = node == SLURM_CONTROLLER[domain]
+        if requested_action == "slurm-node-converge" and is_controller:
+            raise NodeAuthorityError("Slurm compute convergence excludes the controller")
+        if requested_action == "slurm-controller-converge" and not is_controller:
+            raise NodeAuthorityError("Slurm controller convergence is controller-only")
+    return Request(payload=payload, payload_bytes=decoded)
+
+
+def _open_lock(*, exclusive: bool) -> int:
+    return _open_named_lock(LOCK, exclusive=exclusive)
+
+
+def _open_named_lock(path: Path, *, exclusive: bool) -> int:
+    flags = os.O_RDWR if exclusive else os.O_RDONLY
+    try:
+        descriptor = os.open(
+            path,
+            flags | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
+        )
+        metadata = os.fstat(descriptor)
+    except OSError as exc:
+        raise NodeAuthorityError("node authority lock is unavailable") from exc
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != 0
+        or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_nlink != 1
+    ):
+        os.close(descriptor)
+        raise NodeAuthorityError("node authority lock metadata is unsafe")
+    fcntl.flock(descriptor, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+    return descriptor
+
+
+def _receipt_path(request_id: str) -> Path:
+    return RECEIPT_ROOT / f"{request_id}.json"
+
+
+def _read_receipt(request_id: str) -> dict[str, Any] | None:
+    path = _receipt_path(request_id)
+    if not path.exists():
+        return None
+    raw = _safe_root_file(path, mode=0o600, limit=1 << 20)
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise NodeAuthorityError("node authority receipt is invalid") from exc
+    inner = payload.get("inner_receipt") if isinstance(payload, dict) else None
+    action = payload.get("action") if isinstance(payload, dict) else None
+    slurm_inner = isinstance(inner, str) and SLURM_BINDING_RE.fullmatch(inner) is not None
+    domain_inner = isinstance(inner, str) and inner.startswith(
+        "/var/lib/loom-developer-domain-runtime/"
+    )
+    staging_inner = (
+        isinstance(inner, str)
+        and re.fullmatch(
+            r"(?:staging-probe/v1|staging-accounting/v1|"
+            r"staging-infrastructure/v1|"
+            r"staging-broker/v1/(?:submission|cancellation))/[0-9a-f]{64}"
+            r"|staging-infrastructure-install/v1/[1-9][0-9]*",
+            inner,
+        )
+        is not None
+    )
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != RECEIPT_FIELDS
+        or payload.get("schema_version") != SCHEMA_VERSION
+        or payload.get("request_id") != request_id
+        or payload.get("action") not in TRANSACT_ACTIONS
+        or payload.get("node") not in NODE_HOSTNAMES
+        or payload.get("domain") not in DOMAINS
+        or (
+            payload.get("sandbox") != STAGING_SCOPE
+            if action in STAGING_ACTIONS
+            else payload.get("sandbox") not in SANDBOXES
+        )
+        or not _is_sha(payload.get("candidate_sha"))
+        or not _is_sha(payload.get("candidate_tree"))
+        or not _is_sha(payload.get("payload_sha256"), length=64)
+        or payload.get("status") != "succeeded"
+        or not _is_sha(payload.get("result_sha256"), length=64)
+        or (
+            inner is not None
+            and not (
+                slurm_inner
+                if action
+                in {
+                    "slurm-node-converge",
+                    "slurm-controller-converge",
+                    "slurm-rollback",
+                }
+                else staging_inner
+                if action
+                in {
+                    "staging-allocation-probe",
+                    "staging-allocation-submit",
+                    "staging-allocation-cancel",
+                    "staging-slurm-accounting-converge",
+                    "staging-infrastructure-converge",
+                    "staging-infrastructure-install",
+                }
+                else domain_inner
+            )
+        )
+        or not isinstance(payload.get("completed_at"), str)
+        or raw != _canonical(payload)
+    ):
+        raise NodeAuthorityError("node authority receipt binding is invalid")
+    try:
+        datetime.fromisoformat(str(payload["completed_at"]))
+    except ValueError as exc:
+        raise NodeAuthorityError("node authority receipt time is invalid") from exc
+    return payload
+
+
+def _write_receipt(payload: Mapping[str, Any]) -> None:
+    path = _receipt_path(str(payload["request_id"]))
+    if _atomic_install(path, _canonical(payload), 0o600, parent_mode=0o700):
+        return
+    existing = _read_receipt(str(payload["request_id"]))
+    if existing != payload:
+        raise NodeAuthorityError("node authority receipt changed during publication")
+
+
+def _journal_record(receipt: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "request_id": receipt["request_id"],
+        "action": receipt["action"],
+        "candidate_sha": receipt["candidate_sha"],
+        "candidate_tree": receipt["candidate_tree"],
+        "result_sha256": receipt["result_sha256"],
+        "completed_at": receipt["completed_at"],
+        "status": receipt["status"],
+    }
+
+
+def _journal_contains(receipt: Mapping[str, Any]) -> bool:
+    expected = _journal_record(receipt)
+    raw = _safe_root_file(JOURNAL, mode=0o600, limit=MAX_REQUEST_BYTES)
+    found = False
+    for line in raw.splitlines(keepends=True):
+        try:
+            record = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise NodeAuthorityError("node authority journal is invalid") from exc
+        if (
+            not isinstance(record, dict)
+            or set(record) != JOURNAL_FIELDS
+            or line != _canonical(record)
+        ):
+            raise NodeAuthorityError("node authority journal is invalid")
+        if record.get("request_id") == receipt["request_id"]:
+            if record != expected or found:
+                raise NodeAuthorityError("node authority journal receipt drifted")
+            found = True
+    return found
+
+
+def _append_journal(receipt: Mapping[str, Any]) -> None:
+    record = _journal_record(receipt)
+    descriptor = os.open(
+        JOURNAL,
+        os.O_WRONLY | os.O_APPEND | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
+    )
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != 0
+            or metadata.st_gid != 0
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_nlink != 1
+        ):
+            raise NodeAuthorityError("node authority journal metadata is unsafe")
+        view = memoryview(_canonical(record))
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise NodeAuthorityError("node authority journal write failed safely")
+            view = view[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _run_fixed(argv: Sequence[str]) -> dict[str, Any]:
+    result = subprocess.run(
+        tuple(argv),
+        env=_clean_env(),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if (
+        result.returncode != 0
+        or result.stderr
+        or len(result.stdout.encode("utf-8")) > MAX_HELPER_STDOUT_BYTES
+    ):
+        raise NodeAuthorityError("fixed node helper failed safely")
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise NodeAuthorityError("fixed node helper returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise NodeAuthorityError("fixed node helper returned invalid JSON")
+    return payload
+
+
+def _run_fixed_input(argv: Sequence[str], payload: bytes) -> dict[str, Any]:
+    result = subprocess.run(
+        tuple(argv),
+        input=payload,
+        env=_clean_env(),
+        check=False,
+        capture_output=True,
+    )
+    if result.returncode != 0 or result.stderr or len(result.stdout) > MAX_HELPER_STDOUT_BYTES:
+        raise NodeAuthorityError("fixed node helper failed safely")
+    try:
+        parsed = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise NodeAuthorityError("fixed node helper returned invalid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise NodeAuthorityError("fixed node helper returned invalid JSON")
+    return parsed
+
+
+def _prepare_stage(request: Request) -> Path:
+    _safe_root_directory(STAGE_ROOT, mode=0o700)
+    path = STAGE_ROOT / request.request_id
+    try:
+        path.mkdir(mode=0o700)
+    except FileExistsError as exc:
+        raise NodeAuthorityError("node authority request stage is busy") from exc
+    os.chown(path, 0, 0)
+    os.chmod(path, 0o700)
+    _safe_root_directory(path, mode=0o700)
+    return path
+
+
+def _write_stage_file(path: Path, payload: bytes, mode: int) -> None:
+    _atomic_install(path, payload, mode, parent_mode=0o700)
+
+
+def _extract_client_archive(payload: bytes, destination: Path) -> None:
+    try:
+        archive = tarfile.open(fileobj=io.BytesIO(payload), mode="r:")
+    except tarfile.TarError as exc:
+        raise NodeAuthorityError("client credential archive is invalid") from exc
+    with archive:
+        members = archive.getmembers()
+        names = [member.name for member in members]
+        if (
+            len(names) != len(set(names))
+            or set(names) != CLIENT_ARCHIVE_FILES
+            or any(
+                not member.isfile()
+                or Path(member.name).name != member.name
+                or member.size < 1
+                or member.size > 16_384
+                for member in members
+            )
+        ):
+            raise NodeAuthorityError("client credential archive shape is invalid")
+        for member in members:
+            source = archive.extractfile(member)
+            if source is None:
+                raise NodeAuthorityError("client credential archive is invalid")
+            content = source.read(16_385)
+            if len(content) != member.size or len(content) > 16_384:
+                raise NodeAuthorityError("client credential archive entry is invalid")
+            mode = 0o644 if member.name in {"ca.pem", "client.pem"} else 0o600
+            _write_stage_file(destination / member.name, content, mode)
+
+
+def _extract_attestation_archive(payload: bytes, destination: Path) -> None:
+    try:
+        archive = tarfile.open(fileobj=io.BytesIO(payload), mode="r:")
+    except tarfile.TarError as exc:
+        raise NodeAuthorityError("attestation seed archive is invalid") from exc
+    with archive:
+        members = archive.getmembers()
+        names = [member.name for member in members]
+        if (
+            len(names) != len(set(names))
+            or set(names) != ATTESTATION_ARCHIVE_FILES
+            or any(
+                not member.isfile()
+                or Path(member.name).name != member.name
+                or member.size < 1
+                or member.size > (1 << 20)
+                for member in members
+            )
+        ):
+            raise NodeAuthorityError("attestation seed archive shape is invalid")
+        for member in members:
+            source = archive.extractfile(member)
+            if source is None:
+                raise NodeAuthorityError("attestation seed archive is invalid")
+            content = source.read((1 << 20) + 1)
+            if len(content) != member.size or len(content) > (1 << 20):
+                raise NodeAuthorityError("attestation seed archive entry is invalid")
+            _write_stage_file(destination / member.name, content, 0o600)
+
+
+def _domain_argv(request: Request, command: str, *extra: str) -> tuple[str, ...]:
+    return (
+        "/usr/bin/python3",
+        str(SOURCE_ROOT / DOMAIN_RUNTIME_RELATIVE),
+        command,
+        "--config",
+        str(SOURCE_ROOT / RUNTIME_CONFIG_RELATIVE),
+        *extra,
+    )
+
+
+def _slurm_candidate_root(request: Request) -> Path:
+    return (
+        Path("/shared_work/loom/candidates/sandboxes")
+        / str(request.payload["sandbox"])
+        / str(request.payload["candidate_sha"])
+    )
+
+
+def _slurm_policy_argv(request: Request, command: str) -> tuple[str, ...]:
+    expected_action = {
+        "apply": {"slurm-node-converge", "slurm-controller-converge"},
+        "rollback": {"slurm-rollback"},
+        "node-check": {"slurm-check"},
+    }
+    if command not in expected_action or request.action not in expected_action[command]:
+        raise NodeAuthorityError("Slurm policy command binding is invalid")
+    domain = str(request.payload["domain"])
+    candidate = _slurm_candidate_root(request)
+    argv = [
+        "/usr/bin/python3",
+        "-I",
+        str(candidate / SLURM_POLICY_RELATIVE),
+        command,
+        "--profile",
+        str(candidate / "deploy/slurm/developer-sandboxes" / SLURM_PROFILE_NAME[domain]),
+        "--candidate-sha",
+        str(request.payload["candidate_sha"]),
+    ]
+    if command == "node-check":
+        argv.extend(
+            (
+                "--sandbox",
+                str(request.payload["sandbox"]),
+            ),
+        )
+    elif command in {"apply", "rollback"}:
+        argv.extend(("--execute", "--restart"))
+        if command == "apply" and request.action == "slurm-controller-converge":
+            argv.append("--apply-accounting")
+    return tuple(argv)
+
+
+def _live_authority_argv(request: Request, command: str) -> tuple[str, ...]:
+    if (
+        command not in {"collect", "observe-slurm-job"}
+        or (command == "collect" and request.action != "collect-live-overlap")
+        or (command == "observe-slurm-job" and request.action != "observe-live-overlap-job")
+    ):
+        raise NodeAuthorityError("live overlap command binding is invalid")
+    argv = [
+        "/usr/bin/python3",
+        "-I",
+        str(SOURCE_ROOT / LIVE_AUTHORITY_RELATIVE),
+        command,
+    ]
+    if command == "collect":
+        argv.extend(
+            (
+                "--sandbox",
+                str(request.payload["sandbox"]),
+                "--pool",
+                str(request.payload["domain"]),
+                "--candidate-sha",
+                str(request.payload["candidate_sha"]),
+                "--authority-tree",
+                str(request.payload["candidate_tree"]),
+            ),
+        )
+    return tuple(argv)
+
+
+def _platform_health_authority_argv(
+    request: Request,
+    command: str,
+) -> tuple[str, ...]:
+    if command != "observe-node" or request.action != "observe-platform-health-node":
+        raise NodeAuthorityError("platform-health command binding is invalid")
+    return (
+        "/usr/bin/python3",
+        "-I",
+        str(SOURCE_ROOT / PLATFORM_HEALTH_AUTHORITY_RELATIVE),
+        "observe-node",
+    )
+
+
+def _staging_pressure_authority_argv(request: Request) -> tuple[str, ...]:
+    if request.action != "staging-pressure-reclaim-observe":
+        raise NodeAuthorityError("staging pressure command binding is invalid")
+    return (
+        "/usr/bin/python3",
+        "-I",
+        str(SOURCE_ROOT / STAGING_PRESSURE_AUTHORITY_RELATIVE),
+        "observe-slurm",
+    )
+
+
+def _staging_allocation_probe_argv(request: Request) -> tuple[str, ...]:
+    if request.action != "staging-allocation-probe":
+        raise NodeAuthorityError("staging allocation probe command binding is invalid")
+    payload = json.loads(request.payload_bytes)
+    return (
+        "/usr/bin/python3",
+        "-I",
+        str(SOURCE_ROOT / HOST_AUTHORITY_RELATIVE),
+        "staging-allocation-probe",
+        "--candidate-sha",
+        str(payload["candidate_sha"]),
+        "--candidate-tree",
+        str(payload["candidate_tree"]),
+        "--request-id",
+        str(payload["request_id"]),
+        "--execute",
+    )
+
+
+def _staging_identity_converge_argv() -> tuple[str, ...]:
+    return (
+        "/usr/bin/python3",
+        "-I",
+        str(SOURCE_ROOT / HOST_AUTHORITY_RELATIVE),
+        "staging-allocation-identity-converge",
+        "--execute",
+    )
+
+
+def _staging_broker_argv(request: Request) -> tuple[str, ...]:
+    if request.action not in {"staging-allocation-submit", "staging-allocation-cancel"}:
+        raise NodeAuthorityError("staging broker command binding is invalid")
+    payload = json.loads(request.payload_bytes)
+    argv = [
+        "/usr/bin/python3",
+        "-I",
+        str(SOURCE_ROOT / HOST_AUTHORITY_RELATIVE),
+        request.action,
+        "--candidate-sha",
+        str(payload["candidate_sha"]),
+        "--candidate-tree",
+        str(payload["candidate_tree"]),
+        "--request-id",
+        str(payload["request_id"]),
+        "--requested-node",
+        str(payload["requested_node"]),
+    ]
+    if request.action == "staging-allocation-cancel":
+        argv.extend(
+            (
+                "--submit-request-id",
+                str(payload["submit_request_id"]),
+                "--job-id",
+                str(payload["job_id"]),
+            ),
+        )
+    argv.append("--execute")
+    return tuple(argv)
+
+
+def _validate_slurm_candidate(request: Request) -> None:
+    result = _run_fixed(
+        _domain_argv(
+            request,
+            "inspect-candidate",
+            "--domain",
+            str(request.payload["domain"]),
+            "--sandbox",
+            str(request.payload["sandbox"]),
+            "--candidate-sha",
+            str(request.payload["candidate_sha"]),
+            "--candidate-tree",
+            str(request.payload["candidate_tree"]),
+        ),
+    )
+    if (
+        result.get("operation") != "inspect-candidate"
+        or result.get("domain") != request.payload["domain"]
+        or result.get("sandbox") != request.payload["sandbox"]
+        or result.get("candidate_sha") != request.payload["candidate_sha"]
+        or result.get("candidate_tree") != request.payload["candidate_tree"]
+        or result.get("candidate_clean") is not True
+    ):
+        raise NodeAuthorityError("Slurm candidate readback binding is invalid")
+
+
+def _validated_slurm_snapshot_path(value: object) -> Path:
+    if not isinstance(value, str):
+        raise NodeAuthorityError("Slurm policy snapshot path is invalid")
+    snapshot = Path(value)
+    try:
+        snapshot.relative_to(SLURM_SNAPSHOT_ROOT)
+    except ValueError as exc:
+        raise NodeAuthorityError("Slurm policy snapshot path is invalid") from exc
+    if snapshot.parent != SLURM_SNAPSHOT_ROOT:
+        raise NodeAuthorityError("Slurm policy snapshot path is invalid")
+    _safe_root_directory(SLURM_STATE_ROOT, mode=0o700)
+    _safe_root_directory(SLURM_TRANSACTION_ROOT, mode=0o700)
+    _safe_root_directory(SLURM_SNAPSHOT_ROOT, mode=0o700)
+    _safe_root_directory(snapshot, mode=0o700)
+    return snapshot
+
+
+def _slurm_snapshot_manifest_bytes(snapshot: Path) -> bytes:
+    raw = _safe_root_file(
+        snapshot / "manifest.json",
+        mode=0o600,
+        limit=1 << 20,
+    )
+    try:
+        manifest = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise NodeAuthorityError("Slurm policy snapshot manifest is invalid") from exc
+    if (
+        not isinstance(manifest, dict)
+        or set(manifest) != {"schema_version", "files"}
+        or manifest.get("schema_version") != SCHEMA_VERSION
+        or not isinstance(manifest.get("files"), list)
+        or raw
+        != (json.dumps(manifest, sort_keys=True, ensure_ascii=True) + "\n").encode(
+            "ascii",
+        )
+    ):
+        raise NodeAuthorityError("Slurm policy snapshot manifest is invalid")
+    rows = manifest["files"]
+    if (
+        len(rows) != len(SLURM_SNAPSHOT_RELATIVE_PATHS)
+        or tuple(row.get("path") if isinstance(row, dict) else None for row in rows)
+        != SLURM_SNAPSHOT_RELATIVE_PATHS
+    ):
+        raise NodeAuthorityError("Slurm policy snapshot inventory is invalid")
+    for row, relative_name in zip(
+        rows,
+        SLURM_SNAPSHOT_RELATIVE_PATHS,
+        strict=True,
+    ):
+        if (
+            not isinstance(row, dict)
+            or set(row) != SLURM_SNAPSHOT_ROW_FIELDS
+            or row.get("path") != relative_name
+            or type(row.get("present")) is not bool
+        ):
+            raise NodeAuthorityError("Slurm policy snapshot row is invalid")
+        archive = snapshot / relative_name
+        if row["present"] is True:
+            mode = row.get("mode")
+            uid = row.get("uid")
+            gid = row.get("gid")
+            nlink = row.get("nlink")
+            size = row.get("size")
+            digest = row.get("sha256")
+            if (
+                type(mode) is not int
+                or type(uid) is not int
+                or type(gid) is not int
+                or type(nlink) is not int
+                or type(size) is not int
+                or not 0 <= mode <= 0o7777
+                or mode & 0o022
+                or uid != 0
+                or gid != 0
+                or nlink != 1
+                or not 0 <= size <= MAX_REQUEST_BYTES
+                or not _is_sha(digest, length=64)
+            ):
+                raise NodeAuthorityError("Slurm policy snapshot row is invalid")
+            content = _safe_root_file(
+                archive,
+                mode=0o600,
+                limit=MAX_REQUEST_BYTES,
+            )
+            if len(content) != size or hashlib.sha256(content).hexdigest() != digest:
+                raise NodeAuthorityError(
+                    "Slurm policy snapshot archive identity drifted",
+                )
+        elif any(
+            row.get(field) is not None
+            for field in ("mode", "uid", "gid", "nlink", "size", "sha256")
+        ):
+            raise NodeAuthorityError("Slurm policy snapshot absent row is invalid")
+        else:
+            try:
+                archive.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise NodeAuthorityError(
+                    "Slurm policy snapshot absent archive is unavailable",
+                ) from exc
+            raise NodeAuthorityError("Slurm policy snapshot absent archive exists")
+    return raw
+
+
+def _validate_slurm_snapshot_archive_inventory(
+    snapshot: Path,
+    manifest_bytes: bytes,
+    *,
+    journal: Mapping[str, Any],
+    cluster: str,
+    require_accounting: bool,
+) -> str:
+    manifest = json.loads(manifest_bytes)
+    present_paths = {
+        str(row["path"])
+        for row in manifest["files"]
+        if isinstance(row, dict) and row.get("present") is True
+    }
+    accounting = snapshot / "accounting-cas.json"
+    expected_accounting = str(accounting) if require_accounting else None
+    if (
+        journal.get("apply_accounting") is not require_accounting
+        or journal.get("accounting_snapshot") != expected_accounting
+    ):
+        raise NodeAuthorityError("Slurm policy accounting snapshot binding is invalid")
+    accounting_sha256: str | None = None
+    if require_accounting:
+        accounting_bytes = _safe_root_file(
+            accounting,
+            mode=0o600,
+            limit=1 << 20,
+        )
+        try:
+            accounting_payload = json.loads(accounting_bytes)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise NodeAuthorityError("Slurm policy accounting snapshot is invalid") from exc
+        if (
+            not isinstance(accounting_payload, dict)
+            or set(accounting_payload)
+            != {
+                "schema_version",
+                "cluster",
+                "before",
+                "desired",
+            }
+            or accounting_payload.get("schema_version") != SCHEMA_VERSION
+            or accounting_payload.get("cluster") != cluster
+            or not isinstance(accounting_payload.get("before"), dict)
+            or not isinstance(accounting_payload.get("desired"), dict)
+            or accounting_bytes != _canonical(accounting_payload)
+        ):
+            raise NodeAuthorityError("Slurm policy accounting snapshot is invalid")
+        accounting_sha256 = hashlib.sha256(accounting_bytes).hexdigest()
+    else:
+        try:
+            accounting.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise NodeAuthorityError(
+                "Slurm policy accounting snapshot is unavailable",
+            ) from exc
+        else:
+            raise NodeAuthorityError("unexpected Slurm policy accounting snapshot exists")
+
+    expected_files = {"manifest.json", *present_paths}
+    if require_accounting:
+        expected_files.add("accounting-cas.json")
+    actual_files: set[str] = set()
+    try:
+        for directory, directory_names, file_names in os.walk(
+            snapshot,
+            followlinks=False,
+        ):
+            directory_path = Path(directory)
+            _safe_root_directory(directory_path, mode=0o700)
+            for name in directory_names:
+                _safe_root_directory(directory_path / name, mode=0o700)
+            actual_files.update(
+                (directory_path / name).relative_to(snapshot).as_posix() for name in file_names
+            )
+    except OSError as exc:
+        raise NodeAuthorityError("Slurm policy snapshot inventory is unavailable") from exc
+    if actual_files != expected_files:
+        raise NodeAuthorityError("Slurm policy snapshot archive set is not closed")
+    return hashlib.sha256(
+        _canonical(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+                "accounting_sha256": accounting_sha256,
+            },
+        ),
+    ).hexdigest()
+
+
+def _slurm_policy_journal_payload(
+    request: Request,
+    raw: bytes,
+    *,
+    operation: str,
+    snapshot: Path,
+    require_accounting: bool,
+    rollback_target: Path | None = None,
+) -> dict[str, Any]:
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise NodeAuthorityError("Slurm policy state is invalid") from exc
+    expected_fields = set(SLURM_POLICY_JOURNAL_COMMON_FIELDS)
+    if operation == "rollback":
+        expected_fields.add("rollback_target")
+    domain = str(request.payload["domain"])
+    node = str(request.payload["node"])
+    cluster = SLURM_CLUSTER[domain]
+    expected_accounting = str(snapshot / "accounting-cas.json") if require_accounting else None
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != expected_fields
+        or raw != _canonical(payload)
+        or payload.get("schema_version") != SCHEMA_VERSION
+        or payload.get("operation") != operation
+        or payload.get("cluster") != cluster
+        or payload.get("host") != NODE_HOSTNAMES[node]
+        or payload.get("slurm_node") != node
+        or payload.get("candidate_sha") != request.payload["candidate_sha"]
+        or payload.get("snapshot") != str(snapshot)
+        or payload.get("accounting_snapshot") != expected_accounting
+        or payload.get("restart") is not True
+        or payload.get("apply_accounting") is not require_accounting
+        or payload.get("phase") != "committed"
+        or not isinstance(payload.get("created_at"), str)
+        or not isinstance(payload.get("updated_at"), str)
+    ):
+        raise NodeAuthorityError("Slurm policy journal/snapshot binding is invalid")
+    try:
+        created_at = datetime.fromisoformat(payload["created_at"])
+        updated_at = datetime.fromisoformat(payload["updated_at"])
+    except ValueError as exc:
+        raise NodeAuthorityError("Slurm policy journal timestamp is invalid") from exc
+    if created_at.tzinfo is None or updated_at.tzinfo is None or updated_at < created_at:
+        raise NodeAuthorityError("Slurm policy journal timestamp is invalid")
+    if operation == "apply":
+        if rollback_target is not None:
+            raise NodeAuthorityError("Slurm policy apply rollback binding is invalid")
+    else:
+        target = _validated_slurm_snapshot_path(payload.get("rollback_target"))
+        if rollback_target is None or target != rollback_target:
+            raise NodeAuthorityError("Slurm policy rollback target binding is invalid")
+    return payload
+
+
+def _slurm_policy_binding(
+    request: Request,
+    result: Mapping[str, Any],
+    *,
+    snapshot_field: str,
+) -> str:
+    domain = str(request.payload["domain"])
+    cluster = SLURM_CLUSTER[domain]
+    journal = SLURM_TRANSACTION_ROOT / f"{cluster}.json"
+    if (
+        result.get("cluster") != cluster
+        or result.get("phase") != "committed"
+        or result.get("journal") != str(journal)
+    ):
+        raise NodeAuthorityError("Slurm policy result binding is invalid")
+    snapshot_path = _validated_slurm_snapshot_path(result.get(snapshot_field))
+    journal_bytes = _safe_root_file(journal, mode=0o600, limit=1 << 20)
+    manifest_bytes = _slurm_snapshot_manifest_bytes(snapshot_path)
+    expected_operation = "rollback" if request.action == "slurm-rollback" else "apply"
+    require_accounting = request.payload["node"] == SLURM_CONTROLLER[domain]
+    rollback_target = None
+    if expected_operation == "rollback":
+        rollback_target = _validated_slurm_snapshot_path(result.get("restored_snapshot"))
+    journal_payload = _slurm_policy_journal_payload(
+        request,
+        journal_bytes,
+        operation=expected_operation,
+        snapshot=snapshot_path,
+        require_accounting=require_accounting,
+        rollback_target=rollback_target,
+    )
+    archive_identity = _validate_slurm_snapshot_archive_inventory(
+        snapshot_path,
+        manifest_bytes,
+        journal=journal_payload,
+        cluster=cluster,
+        require_accounting=require_accounting,
+    )
+    return (
+        f"slurm-policy-v1:{cluster}:{hashlib.sha256(journal_bytes).hexdigest()}:{archive_identity}"
+    )
+
+
+def _validate_prior_slurm_binding(request: Request, prior: Mapping[str, Any]) -> None:
+    binding = prior.get("inner_receipt")
+    match = SLURM_BINDING_RE.fullmatch(binding) if isinstance(binding, str) else None
+    domain = str(request.payload["domain"])
+    if match is None or match.group(1) != SLURM_CLUSTER[domain]:
+        raise NodeAuthorityError("Slurm rollback receipt binding is invalid")
+    journal = SLURM_TRANSACTION_ROOT / f"{SLURM_CLUSTER[domain]}.json"
+    journal_bytes = _safe_root_file(journal, mode=0o600, limit=1 << 20)
+    if hashlib.sha256(journal_bytes).hexdigest() != match.group(2):
+        raise NodeAuthorityError("Slurm rollback journal identity advanced")
+    try:
+        untrusted = json.loads(journal_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise NodeAuthorityError("Slurm rollback journal is invalid") from exc
+    snapshot_raw = untrusted.get("snapshot") if isinstance(untrusted, dict) else None
+    snapshot_path = _validated_slurm_snapshot_path(snapshot_raw)
+    require_accounting = request.payload["node"] == SLURM_CONTROLLER[domain]
+    journal_payload = _slurm_policy_journal_payload(
+        request,
+        journal_bytes,
+        operation="apply",
+        snapshot=snapshot_path,
+        require_accounting=require_accounting,
+    )
+    manifest_bytes = _slurm_snapshot_manifest_bytes(snapshot_path)
+    archive_identity = _validate_slurm_snapshot_archive_inventory(
+        snapshot_path,
+        manifest_bytes,
+        journal=journal_payload,
+        cluster=SLURM_CLUSTER[domain],
+        require_accounting=require_accounting,
+    )
+    if archive_identity != match.group(3):
+        raise NodeAuthorityError("Slurm rollback snapshot identity drifted")
+
+
+def _run_staging_identity_command(argv: Sequence[str]) -> str:
+    try:
+        completed = subprocess.run(
+            tuple(argv),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=_clean_env(),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise NodeAuthorityError(
+            "staging allocation identity command failed safely",
+        ) from exc
+    if completed.returncode != 0 or completed.stderr or len(completed.stdout.encode()) > 64 * 1024:
+        raise NodeAuthorityError("staging allocation identity command failed safely")
+    return completed.stdout
+
+
+def _replace_staging_system_file(source: Path, target: Path) -> None:
+    raw = _safe_root_file(source, mode=0o644, limit=64 * 1024)
+    try:
+        existing = target.lstat()
+    except FileNotFoundError:
+        existing = None
+    except OSError as exc:
+        raise NodeAuthorityError("staging system file is unavailable") from exc
+    if existing is not None:
+        if (
+            not stat.S_ISREG(existing.st_mode)
+            or stat.S_ISLNK(existing.st_mode)
+            or existing.st_uid != 0
+            or existing.st_gid != 0
+            or existing.st_nlink != 1
+            or stat.S_IMODE(existing.st_mode) != 0o644
+        ):
+            raise NodeAuthorityError("staging system file metadata drifted")
+        if _safe_root_file(target, mode=0o644, limit=64 * 1024) == raw:
+            return
+    temporary = target.parent / f".{target.name}.{os.getpid()}.tmp"
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
+            0o600,
+        )
+        os.fchown(descriptor, 0, 0)
+        os.fchmod(descriptor, 0o644)
+        view = memoryview(raw)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise NodeAuthorityError("staging system file write failed safely")
+            view = view[written:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        os.replace(temporary, target)
+        directory = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        if _safe_root_file(target, mode=0o644, limit=64 * 1024) != raw:
+            raise NodeAuthorityError("staging system file readback drifted")
+    except NodeAuthorityError:
+        raise
+    except OSError as exc:
+        raise NodeAuthorityError("staging system file convergence failed safely") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _staging_mount_readback() -> dict[str, Any]:
+    _replace_staging_system_file(
+        SOURCE_ROOT / STAGING_MOUNT_SOURCE_RELATIVE,
+        STAGING_MOUNT_UNIT_PATH,
+    )
+    _replace_staging_system_file(
+        SOURCE_ROOT / STAGING_TMPFILES_SOURCE_RELATIVE,
+        STAGING_TMPFILES_PATH,
+    )
+    _run_staging_identity_command(
+        ("/usr/bin/systemd-tmpfiles", "--create", str(STAGING_TMPFILES_PATH))
+    )
+    _run_staging_identity_command(("/usr/bin/systemctl", "daemon-reload"))
+    _run_staging_identity_command(
+        ("/usr/bin/systemctl", "enable", "--now", "--quiet", STAGING_MOUNT_UNIT),
+    )
+    active = _run_staging_identity_command(
+        ("/usr/bin/systemctl", "is-active", STAGING_MOUNT_UNIT),
+    ).strip()
+    mount = _run_staging_identity_command(
+        (
+            "/usr/bin/findmnt",
+            "-n",
+            "-o",
+            "SOURCE,FSTYPE,TARGET",
+            "-T",
+            str(STAGING_SHARED_ROOT),
+        ),
+    ).split()
+    if active != "active" or mount != [
+        "192.168.20.12:/shared_work2/loom/staging",
+        "nfs4",
+        str(STAGING_SHARED_ROOT),
+    ]:
+        raise NodeAuthorityError("staging shared mount readback drifted")
+    metadata = STAGING_SHARED_ROOT.lstat()
+    if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+        raise NodeAuthorityError("staging shared mount target is unsafe")
+    return {
+        "unit": STAGING_MOUNT_UNIT,
+        "source": mount[0],
+        "filesystem_type": mount[1],
+        "target": mount[2],
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "active": True,
+    }
+
+
+def _staging_service_identity() -> tuple[pwd.struct_passwd, tuple[str, ...]]:
+    try:
+        service_group = grp.getgrnam(STAGING_SERVICE_GROUP)
+    except KeyError:
+        _run_staging_identity_command(
+            (
+                "/usr/sbin/groupadd",
+                "--gid",
+                str(STAGING_SERVICE_GID),
+                STAGING_SERVICE_GROUP,
+            ),
+        )
+        service_group = grp.getgrnam(STAGING_SERVICE_GROUP)
+    if service_group.gr_gid != STAGING_SERVICE_GID:
+        raise NodeAuthorityError("staging allocation service group identity drifted")
+    try:
+        account = pwd.getpwnam(STAGING_SERVICE_USER)
+    except KeyError:
+        _run_staging_identity_command(
+            (
+                "/usr/sbin/useradd",
+                "--system",
+                "--uid",
+                str(STAGING_SERVICE_UID),
+                "--gid",
+                str(STAGING_SERVICE_GID),
+                "--home-dir",
+                str(STAGING_SERVICE_HOME),
+                "--shell",
+                STAGING_SERVICE_SHELL,
+                "--no-create-home",
+                STAGING_SERVICE_USER,
+            ),
+        )
+        account = pwd.getpwnam(STAGING_SERVICE_USER)
+    if (
+        account.pw_uid != STAGING_SERVICE_UID
+        or account.pw_gid != STAGING_SERVICE_GID
+        or account.pw_dir != str(STAGING_SERVICE_HOME)
+        or account.pw_shell != STAGING_SERVICE_SHELL
+    ):
+        raise NodeAuthorityError("staging allocation service user identity drifted")
+    for name in STAGING_SUPPLEMENTARY_GROUPS:
+        try:
+            grp.getgrnam(name)
+        except KeyError as exc:
+            raise NodeAuthorityError(
+                "staging allocation supplementary group is unavailable",
+            ) from exc
+    groups = {
+        item.gr_name
+        for item in grp.getgrall()
+        if item.gr_gid == account.pw_gid or STAGING_SERVICE_USER in item.gr_mem
+    }
+    if not set(STAGING_SUPPLEMENTARY_GROUPS).issubset(groups):
+        _run_staging_identity_command(
+            (
+                "/usr/sbin/usermod",
+                "--append",
+                "--groups",
+                ",".join(STAGING_SUPPLEMENTARY_GROUPS),
+                STAGING_SERVICE_USER,
+            ),
+        )
+        groups = {
+            item.gr_name
+            for item in grp.getgrall()
+            if item.gr_gid == account.pw_gid or STAGING_SERVICE_USER in item.gr_mem
+        }
+    if not set(STAGING_SUPPLEMENTARY_GROUPS).issubset(groups):
+        raise NodeAuthorityError("staging allocation supplementary groups did not converge")
+    return account, tuple(sorted(STAGING_SUPPLEMENTARY_GROUPS))
+
+
+def _converge_service_directory(
+    path: Path,
+    *,
+    managed_root: Path,
+    mode: int,
+) -> dict[str, Any]:
+    if (
+        not path.is_absolute()
+        or managed_root not in {path, *path.parents}
+        or any(part in {"", ".", ".."} for part in path.parts[1:])
+    ):
+        raise NodeAuthorityError("staging allocation service path is invalid")
+    descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    current = Path("/")
+    try:
+        for part in path.parts[1:]:
+            try:
+                child = os.open(
+                    part,
+                    os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
+                    dir_fd=descriptor,
+                )
+            except FileNotFoundError:
+                os.mkdir(part, mode=mode, dir_fd=descriptor)
+                child = os.open(
+                    part,
+                    os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
+                    dir_fd=descriptor,
+                )
+            os.close(descriptor)
+            descriptor = child
+            current /= part
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise NodeAuthorityError("staging allocation service path is unsafe")
+            if current == managed_root or managed_root in current.parents:
+                os.fchown(descriptor, STAGING_SERVICE_UID, STAGING_SERVICE_GID)
+                os.fchmod(descriptor, mode)
+        metadata = os.fstat(descriptor)
+        if (metadata.st_uid, metadata.st_gid) != (
+            STAGING_SERVICE_UID,
+            STAGING_SERVICE_GID,
+        ) or stat.S_IMODE(metadata.st_mode) != mode:
+            raise NodeAuthorityError("staging allocation service path did not converge")
+        return {
+            "path": str(path),
+            "uid": metadata.st_uid,
+            "gid": metadata.st_gid,
+            "mode": stat.S_IMODE(metadata.st_mode),
+            "device": metadata.st_dev,
+            "inode": metadata.st_ino,
+        }
+    except NodeAuthorityError:
+        raise
+    except OSError as exc:
+        raise NodeAuthorityError(
+            "staging allocation service path convergence failed safely",
+        ) from exc
+    finally:
+        os.close(descriptor)
+
+
+def _staging_accounting_readback() -> None:
+    output = _run_staging_identity_command(
+        (
+            "/usr/bin/sacctmgr",
+            "--noheader",
+            "--parsable2",
+            "show",
+            "association",
+            "where",
+            "cluster=trt-gb10",
+            "account=loom-staging",
+            f"user={STAGING_SERVICE_USER}",
+            "format=Cluster,Account,User,QOS",
+        ),
+    )
+    rows = [line.split("|") for line in output.splitlines() if line.strip()]
+    if (
+        len(rows) != 1
+        or len(rows[0]) != 5
+        or rows[0][-1] != ""
+        or rows[0][:3] != ["trt-gb10", "loom-staging", STAGING_SERVICE_USER]
+        or "loom-staging" not in rows[0][3].split(",")
+    ):
+        raise NodeAuthorityError("staging allocation accounting association is unavailable")
+
+
+def _staging_allocation_bootstrap(request: Request) -> dict[str, Any]:
+    if (
+        request.action != "staging-allocation-bootstrap"
+        or request.payload["domain"] != "gb10"
+        or request.payload["node"] not in NODE_HOSTNAMES
+        or request.payload["node"] == "trt-gb10-7"
+    ):
+        raise NodeAuthorityError("staging allocation bootstrap request is invalid")
+    mount = _staging_mount_readback()
+    account, supplementary = _staging_service_identity()
+    _staging_accounting_readback()
+    converged = _run_fixed(_staging_identity_converge_argv())
+    expected_identity = {
+        "username": STAGING_SERVICE_USER,
+        "group": STAGING_SERVICE_GROUP,
+        "uid": STAGING_SERVICE_UID,
+        "gid": STAGING_SERVICE_GID,
+        "home": str(STAGING_SERVICE_HOME),
+        "shell": STAGING_SERVICE_SHELL,
+        "supplementary_groups": list(STAGING_SUPPLEMENTARY_GROUPS),
+    }
+    if (
+        set(converged)
+        != {
+            "schema_version",
+            "kind",
+            "node",
+            "canonical_host",
+            "service_identity",
+            "namespace",
+            "result",
+        }
+        or converged.get("schema_version") != SCHEMA_VERSION
+        or converged.get("kind") != "staging_external_slurm_identity_bootstrap"
+        or converged.get("node") != request.payload["node"]
+        or converged.get("canonical_host") != NODE_HOSTNAMES[str(request.payload["node"])]
+        or converged.get("service_identity") != expected_identity
+        or converged.get("namespace")
+        != {
+            "root": str(STAGING_SHARED_ROOT),
+            "mount_source": mount["source"],
+            "mount_fstype": mount["filesystem_type"],
+            "mount_device": mount["device"],
+            "mount_inode": mount["inode"],
+            "repository_root": str(STAGING_SHARED_PATHS[0]),
+            "worker_env_root": str(STAGING_SHARED_PATHS[1]),
+            "result_root": str(STAGING_SHARED_PATHS[2]),
+            "service_uid": STAGING_SERVICE_UID,
+            "service_gid": STAGING_SERVICE_GID,
+            "root_mode": "0o750",
+            "repository_root_mode": "0o750",
+            "worker_env_root_mode": "0o750",
+            "result_root_mode": "0o2770",
+        }
+        or converged.get("result") != "pass"
+    ):
+        raise NodeAuthorityError("staging allocation bootstrap readback is invalid")
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "loom.staging-external-slurm.node-bootstrap",
+        "node": request.payload["node"],
+        "canonical_host": NODE_HOSTNAMES[str(request.payload["node"])],
+        "user": STAGING_SERVICE_USER,
+        "uid": account.pw_uid,
+        "gid": account.pw_gid,
+        "home": str(STAGING_SERVICE_HOME),
+        "shell": STAGING_SERVICE_SHELL,
+        "supplementary_groups": list(supplementary),
+        "account": "loom-staging",
+        "qos": "loom-staging",
+        "repository_root": str(STAGING_SHARED_PATHS[0]),
+        "env_root": str(STAGING_SHARED_PATHS[1]),
+        "result_root": str(STAGING_SHARED_PATHS[2]),
+        "mount": mount,
+        "path_readback": converged["namespace"],
+        "status": "converged",
+    }
+
+
+def _staging_shared_source_bootstrap(request: Request) -> dict[str, Any]:
+    if (
+        request.action != "staging-shared-source-bootstrap"
+        or request.payload["node"] != "trt-gb10-2"
+        or request.payload["domain"] != "gb10"
+    ):
+        raise NodeAuthorityError("staging shared source bootstrap request is invalid")
+    parent = STAGING_RAW_SOURCE_ROOT.parent
+    try:
+        parent_metadata = parent.lstat()
+    except OSError as exc:
+        raise NodeAuthorityError("staging shared source parent is unavailable") from exc
+    if (
+        not stat.S_ISDIR(parent_metadata.st_mode)
+        or stat.S_ISLNK(parent_metadata.st_mode)
+        or parent_metadata.st_uid != 0
+        or parent_metadata.st_mode & 0o002
+    ):
+        raise NodeAuthorityError("staging shared source parent is unsafe")
+    readbacks: list[dict[str, Any]] = []
+    for path, uid, gid, mode in (
+        (STAGING_RAW_SOURCE_ROOT, 0, STAGING_SERVICE_GID, 0o750),
+        (STAGING_RAW_SOURCE_ROOT / "candidates", 0, STAGING_SERVICE_GID, 0o750),
+        (STAGING_RAW_SOURCE_ROOT / "generated", 0, STAGING_SERVICE_GID, 0o750),
+        (
+            STAGING_RAW_SOURCE_ROOT / "results",
+            STAGING_SERVICE_UID,
+            STAGING_SERVICE_GID,
+            0o2770,
+        ),
+    ):
+        try:
+            path.mkdir(mode=mode)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise NodeAuthorityError("staging shared source convergence failed safely") from exc
+        metadata = path.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise NodeAuthorityError("staging shared source path is unsafe")
+        if (metadata.st_uid, metadata.st_gid) != (uid, gid) or stat.S_IMODE(
+            metadata.st_mode,
+        ) != mode:
+            try:
+                os.chown(path, uid, gid, follow_symlinks=False)
+                os.chmod(path, mode, follow_symlinks=False)
+            except OSError as exc:
+                raise NodeAuthorityError(
+                    "staging shared source metadata convergence failed safely",
+                ) from exc
+            metadata = path.lstat()
+        if (
+            (metadata.st_uid, metadata.st_gid) != (uid, gid)
+            or stat.S_IMODE(metadata.st_mode) != mode
+            or stat.S_ISLNK(metadata.st_mode)
+        ):
+            raise NodeAuthorityError("staging shared source metadata drifted")
+        readbacks.append(
+            {
+                "path": str(path),
+                "uid": uid,
+                "gid": gid,
+                "mode": mode,
+                "device": metadata.st_dev,
+                "inode": metadata.st_ino,
+            },
+        )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "loom.staging-shared-source-bootstrap",
+        "node": "trt-gb10-2",
+        "canonical_host": NODE_HOSTNAMES["trt-gb10-2"],
+        "paths": readbacks,
+        "status": "converged",
+    }
+
+
+def _staging_broker_submission_path(submit_request_id: str) -> Path:
+    if not _is_sha(submit_request_id, length=64):
+        raise NodeAuthorityError("staging broker submission identity is invalid")
+    return STAGING_BROKER_ROOT / f"{submit_request_id}.json"
+
+
+def _staging_broker_submit(request: Request) -> tuple[dict[str, Any], str]:
+    inner = json.loads(request.payload_bytes)
+    result = _run_fixed(_staging_broker_argv(request))
+    expected = {
+        "schema_version",
+        "kind",
+        "request_id",
+        "candidate_sha",
+        "candidate_tree",
+        "job_id",
+        "job_name",
+        "node",
+        "cluster",
+        "account",
+        "qos",
+        "user",
+        "uid",
+        "gid",
+        "service_identity",
+        "mount",
+        "submitted_at",
+        "status",
+    }
+    if (
+        set(result) != expected
+        or result.get("schema_version") != SCHEMA_VERSION
+        or result.get("kind") != "staging_external_slurm_allocation_submission"
+        or result.get("request_id") != inner["request_id"]
+        or result.get("candidate_sha") != request.payload["candidate_sha"]
+        or result.get("candidate_tree") != request.payload["candidate_tree"]
+        or result.get("job_id") is None
+        or re.fullmatch(r"[1-9][0-9]*", str(result["job_id"])) is None
+        or result.get("job_name") != f"loom-staging-worker-{inner['request_id'][:16]}"
+        or result.get("node") != inner["requested_node"]
+        or result.get("cluster") != "trt-gb10"
+        or result.get("account") != "loom-staging"
+        or result.get("qos") != "loom-staging"
+        or result.get("user") != STAGING_SERVICE_USER
+        or result.get("uid") != STAGING_SERVICE_UID
+        or result.get("gid") != STAGING_SERVICE_GID
+        or result.get("status") != "submitted"
+    ):
+        raise NodeAuthorityError("staging broker submission readback is invalid")
+    ledger = {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "loom.staging-allocation-broker-submission",
+        "authority_request_id": request.request_id,
+        "submit_request_id": inner["request_id"],
+        "candidate_sha": request.payload["candidate_sha"],
+        "candidate_tree": request.payload["candidate_tree"],
+        "node": inner["requested_node"],
+        "job_id": result["job_id"],
+        "job_name": result["job_name"],
+        "user": STAGING_SERVICE_USER,
+        "account": "loom-staging",
+        "qos": "loom-staging",
+        "submitted_at": result["submitted_at"],
+        "result_sha256": hashlib.sha256(_canonical(result)).hexdigest(),
+    }
+    if not _atomic_install(
+        _staging_broker_submission_path(inner["request_id"]),
+        _canonical(ledger),
+        0o600,
+        parent_mode=0o700,
+    ):
+        raise NodeAuthorityError("staging broker submission identity was already used")
+    return result, f"staging-broker/v1/submission/{inner['request_id']}"
+
+
+def _staging_broker_cancel(request: Request) -> tuple[dict[str, Any], str]:
+    inner = json.loads(request.payload_bytes)
+    submission_path = _staging_broker_submission_path(inner["submit_request_id"])
+    raw = _safe_root_file(submission_path, mode=0o600, limit=64 * 1024)
+    try:
+        submission = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise NodeAuthorityError("staging broker submission ledger is invalid") from exc
+    if (
+        not isinstance(submission, dict)
+        or raw != _canonical(submission)
+        or submission.get("kind") != "loom.staging-allocation-broker-submission"
+        or submission.get("submit_request_id") != inner["submit_request_id"]
+        or submission.get("candidate_sha") != request.payload["candidate_sha"]
+        or submission.get("candidate_tree") != request.payload["candidate_tree"]
+        or submission.get("node") != inner["requested_node"]
+        or submission.get("job_id") != inner["job_id"]
+        or submission.get("user") != STAGING_SERVICE_USER
+        or submission.get("account") != "loom-staging"
+        or submission.get("qos") != "loom-staging"
+    ):
+        raise NodeAuthorityError("staging broker cancel escaped its submission ledger")
+    marker = STAGING_BROKER_ROOT / f"{inner['submit_request_id']}-cancel.json"
+    if marker.exists() or marker.is_symlink():
+        raise NodeAuthorityError("staging broker submission was already cancelled")
+    result = _run_fixed(_staging_broker_argv(request))
+    if (
+        result.get("schema_version") != SCHEMA_VERSION
+        or result.get("kind") != "staging_external_slurm_allocation_cancellation"
+        or result.get("request_id") != inner["request_id"]
+        or result.get("submit_request_id") != inner["submit_request_id"]
+        or result.get("candidate_sha") != request.payload["candidate_sha"]
+        or result.get("candidate_tree") != request.payload["candidate_tree"]
+        or result.get("job_id") != inner["job_id"]
+        or result.get("node") != inner["requested_node"]
+        or result.get("status") != "cancelled"
+        or any(
+            result.get(field) != 0
+            for field in ("orphan_containers", "orphan_networks", "orphan_volumes")
+        )
+    ):
+        raise NodeAuthorityError("staging broker cancellation readback is invalid")
+    cancellation = {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "loom.staging-allocation-broker-cancellation",
+        "authority_request_id": request.request_id,
+        "cancel_request_id": inner["request_id"],
+        "submit_request_id": inner["submit_request_id"],
+        "job_id": inner["job_id"],
+        "node": inner["requested_node"],
+        "candidate_sha": request.payload["candidate_sha"],
+        "candidate_tree": request.payload["candidate_tree"],
+        "result_sha256": hashlib.sha256(_canonical(result)).hexdigest(),
+        "cancelled_at": result["cancelled_at"],
+    }
+    if not _atomic_install(marker, _canonical(cancellation), 0o600, parent_mode=0o700):
+        raise NodeAuthorityError("staging broker cancellation publication collided")
+    return result, f"staging-broker/v1/cancellation/{inner['request_id']}"
+
+
+def _staging_accounting_rows(*arguments: str) -> list[list[str]]:
+    output = _run_staging_identity_command(
+        ("/usr/bin/sacctmgr", "--noheader", "--parsable2", *arguments),
+    )
+    rows: list[list[str]] = []
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        fields = line.split("|")
+        if fields and fields[-1] == "":
+            fields.pop()
+        rows.append(fields)
+    return rows
+
+
+def _staging_accounting_snapshot() -> dict[str, Any]:
+    return {
+        "account": _staging_accounting_rows(
+            "show",
+            "account",
+            "where",
+            "name=loom-staging",
+            "cluster=trt-gb10",
+            "format=Cluster,Account,Descr,Org",
+        ),
+        "qos": _staging_accounting_rows(
+            "show",
+            "qos",
+            "where",
+            "name=loom-staging",
+            "format=Name,Flags,MaxJobsPU,MaxSubmitJobsPU,GrpTRES,MaxTRES",
+        ),
+        "association": _staging_accounting_rows(
+            "show",
+            "association",
+            "where",
+            "cluster=trt-gb10",
+            "account=loom-staging",
+            f"user={STAGING_SERVICE_USER}",
+            "format=Cluster,Account,User,QOS,DefaultQOS",
+        ),
+        "user": _staging_accounting_rows(
+            "show",
+            "user",
+            "where",
+            f"name={STAGING_SERVICE_USER}",
+            "format=User,DefaultAccount",
+        ),
+    }
+
+
+def _staging_accounting_state(snapshot: Mapping[str, Any]) -> dict[str, bool]:
+    if set(snapshot) != {"account", "qos", "association", "user"} or any(
+        not isinstance(snapshot[name], list) or len(snapshot[name]) > 1 for name in snapshot
+    ):
+        raise NodeAuthorityError("staging accounting snapshot shape is invalid")
+    account = snapshot["account"]
+    qos = snapshot["qos"]
+    association = snapshot["association"]
+    user = snapshot["user"]
+    if account and account[0] != [
+        "trt-gb10",
+        "loom-staging",
+        "Loom staging external workers",
+        "loom",
+    ]:
+        raise NodeAuthorityError("staging accounting account drifted")
+    if qos:
+        row = qos[0]
+        if (
+            len(row) != 6
+            or row[0] != "loom-staging"
+            or set(item for item in row[1].split(",") if item) != {"DenyOnLimit"}
+            or row[2:4] != ["14", "14"]
+            or row[4:] != ["", ""]
+        ):
+            raise NodeAuthorityError("staging accounting QoS drifted")
+    if association:
+        row = association[0]
+        if (
+            len(row) != 5
+            or row[:3] != ["trt-gb10", "loom-staging", STAGING_SERVICE_USER]
+            or set(item for item in row[3].split(",") if item) != {"loom-staging"}
+            or row[4] != "loom-staging"
+        ):
+            raise NodeAuthorityError("staging accounting association drifted")
+    if user and user[0] != [STAGING_SERVICE_USER, "loom-staging"]:
+        raise NodeAuthorityError("staging accounting user drifted")
+    return {name: bool(snapshot[name]) for name in snapshot}
+
+
+def _staging_accounting_mutate(*arguments: str) -> None:
+    _run_staging_identity_command(("/usr/bin/sacctmgr", "--immediate", *arguments))
+
+
+def _staging_accounting_rollback(snapshot: Mapping[str, Any]) -> None:
+    original = _staging_accounting_state(snapshot)
+    current = _staging_accounting_snapshot()
+    current_state = _staging_accounting_state(current)
+    if not original["association"] and current_state["association"]:
+        _staging_accounting_mutate(
+            "delete",
+            "user",
+            "where",
+            f"name={STAGING_SERVICE_USER}",
+            "account=loom-staging",
+            "cluster=trt-gb10",
+        )
+    if not original["qos"] and current_state["qos"]:
+        _staging_accounting_mutate("delete", "qos", "where", "name=loom-staging")
+    if not original["account"] and current_state["account"]:
+        _staging_accounting_mutate(
+            "delete",
+            "account",
+            "where",
+            "name=loom-staging",
+            "cluster=trt-gb10",
+        )
+    if _staging_accounting_snapshot() != snapshot:
+        raise NodeAuthorityError("staging accounting rollback did not restore its snapshot")
+
+
+def _staging_accounting_recover() -> bool:
+    if not STAGING_ACCOUNTING_JOURNAL.exists() and not STAGING_ACCOUNTING_JOURNAL.is_symlink():
+        return False
+    raw = _safe_root_file(
+        STAGING_ACCOUNTING_JOURNAL,
+        mode=0o600,
+        limit=256 * 1024,
+    )
+    try:
+        journal = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise NodeAuthorityError("staging accounting journal is invalid") from exc
+    expected_fields = {
+        "schema_version",
+        "kind",
+        "authority_request_id",
+        "request_id",
+        "candidate_sha",
+        "candidate_tree",
+        "snapshot",
+        "snapshot_sha256",
+        "phase",
+        "created_at",
+        "updated_at",
+    }
+    if (
+        not isinstance(journal, dict)
+        or raw != _canonical(journal)
+        or set(journal) != expected_fields
+        or journal.get("schema_version") != SCHEMA_VERSION
+        or journal.get("kind") != "loom.staging-slurm-accounting-transaction"
+        or not _is_sha(journal.get("authority_request_id"), length=64)
+        or not _is_sha(journal.get("request_id"), length=64)
+        or not _is_sha(journal.get("candidate_sha"))
+        or not _is_sha(journal.get("candidate_tree"))
+        or not _is_sha(journal.get("snapshot_sha256"), length=64)
+        or journal.get("phase")
+        not in {"prepared", "account", "qos", "association", "verified", "committed", "rolled-back"}
+        or not isinstance(journal.get("snapshot"), dict)
+        or hashlib.sha256(
+            _canonical(
+                cast(Mapping[str, Any], journal.get("snapshot")),
+            ),
+        ).hexdigest()
+        != journal.get("snapshot_sha256")
+        or not isinstance(journal.get("created_at"), str)
+        or not isinstance(journal.get("updated_at"), str)
+    ):
+        raise NodeAuthorityError("staging accounting journal binding is invalid")
+    _staging_accounting_state(journal["snapshot"])
+    if journal["phase"] in {"committed", "rolled-back"}:
+        return False
+    _staging_accounting_rollback(journal["snapshot"])
+    journal["phase"] = "rolled-back"
+    journal["updated_at"] = datetime.now(UTC).isoformat()
+    _atomic_replace(
+        STAGING_ACCOUNTING_JOURNAL,
+        _canonical(journal),
+        0o600,
+        parent_mode=0o700,
+    )
+    return True
+
+
+def _staging_accounting_converge(request: Request) -> tuple[dict[str, Any], str]:
+    if (
+        request.action != "staging-slurm-accounting-converge"
+        or request.payload["node"] != "trt-gb10-1"
+        or request.payload["domain"] != "gb10"
+    ):
+        raise NodeAuthorityError("staging accounting convergence request is invalid")
+    recovered = _staging_accounting_recover()
+    inner = json.loads(request.payload_bytes)
+    snapshot = _staging_accounting_snapshot()
+    present = _staging_accounting_state(snapshot)
+    timestamp = datetime.now(UTC).isoformat()
+    journal = {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "loom.staging-slurm-accounting-transaction",
+        "authority_request_id": request.request_id,
+        "request_id": inner["request_id"],
+        "candidate_sha": request.payload["candidate_sha"],
+        "candidate_tree": request.payload["candidate_tree"],
+        "snapshot": snapshot,
+        "snapshot_sha256": hashlib.sha256(_canonical(snapshot)).hexdigest(),
+        "phase": "prepared",
+        "created_at": timestamp,
+        "updated_at": timestamp,
+    }
+    _atomic_replace(
+        STAGING_ACCOUNTING_JOURNAL,
+        _canonical(journal),
+        0o600,
+        parent_mode=0o700,
+    )
+    try:
+        if not present["account"]:
+            _staging_accounting_mutate(
+                "add",
+                "account",
+                "name=loom-staging",
+                "cluster=trt-gb10",
+                "description=Loom staging external workers",
+                "organization=loom",
+            )
+        journal["phase"] = "account"
+        journal["updated_at"] = datetime.now(UTC).isoformat()
+        _atomic_replace(
+            STAGING_ACCOUNTING_JOURNAL,
+            _canonical(journal),
+            0o600,
+            parent_mode=0o700,
+        )
+        if not present["qos"]:
+            _staging_accounting_mutate(
+                "add",
+                "qos",
+                "name=loom-staging",
+                "flags=DenyOnLimit",
+                "maxjobspu=14",
+                "maxsubmitjobspu=14",
+            )
+        journal["phase"] = "qos"
+        journal["updated_at"] = datetime.now(UTC).isoformat()
+        _atomic_replace(
+            STAGING_ACCOUNTING_JOURNAL,
+            _canonical(journal),
+            0o600,
+            parent_mode=0o700,
+        )
+        if not present["association"]:
+            _staging_accounting_mutate(
+                "add",
+                "user",
+                f"name={STAGING_SERVICE_USER}",
+                "account=loom-staging",
+                "cluster=trt-gb10",
+                "defaultaccount=loom-staging",
+            )
+            _staging_accounting_mutate(
+                "modify",
+                "association",
+                "where",
+                f"user={STAGING_SERVICE_USER}",
+                "account=loom-staging",
+                "cluster=trt-gb10",
+                "set",
+                "qos=loom-staging",
+                "defaultqos=loom-staging",
+            )
+        journal["phase"] = "association"
+        journal["updated_at"] = datetime.now(UTC).isoformat()
+        _atomic_replace(
+            STAGING_ACCOUNTING_JOURNAL,
+            _canonical(journal),
+            0o600,
+            parent_mode=0o700,
+        )
+        verified = _staging_accounting_snapshot()
+        if not all(_staging_accounting_state(verified).values()):
+            raise NodeAuthorityError("staging accounting convergence is incomplete")
+        journal["phase"] = "verified"
+        journal["updated_at"] = datetime.now(UTC).isoformat()
+        _atomic_replace(
+            STAGING_ACCOUNTING_JOURNAL,
+            _canonical(journal),
+            0o600,
+            parent_mode=0o700,
+        )
+    except Exception:
+        _staging_accounting_rollback(snapshot)
+        journal["phase"] = "rolled-back"
+        journal["updated_at"] = datetime.now(UTC).isoformat()
+        _atomic_replace(
+            STAGING_ACCOUNTING_JOURNAL,
+            _canonical(journal),
+            0o600,
+            parent_mode=0o700,
+        )
+        raise
+    journal["phase"] = "committed"
+    journal["updated_at"] = datetime.now(UTC).isoformat()
+    _atomic_replace(
+        STAGING_ACCOUNTING_JOURNAL,
+        _canonical(journal),
+        0o600,
+        parent_mode=0o700,
+    )
+    result = {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "staging_external_slurm_accounting_convergence",
+        "request_id": inner["request_id"],
+        "candidate_sha": request.payload["candidate_sha"],
+        "candidate_tree": request.payload["candidate_tree"],
+        "cluster": "trt-gb10",
+        "account": {
+            "name": "loom-staging",
+            "description": "Loom staging external workers",
+            "organization": "loom",
+        },
+        "qos": {
+            "name": "loom-staging",
+            "flags": ["DenyOnLimit"],
+            "max_jobs_per_user": 14,
+            "max_submit_jobs_per_user": 14,
+            "group_tres": None,
+            "max_tres": None,
+        },
+        "association": {
+            "user": STAGING_SERVICE_USER,
+            "account": "loom-staging",
+            "qos": ["loom-staging"],
+            "default_qos": "loom-staging",
+            "default_account": "loom-staging",
+        },
+        "snapshot_sha256": journal["snapshot_sha256"],
+        "journal_sha256": hashlib.sha256(_canonical(journal)).hexdigest(),
+        "recovered": recovered,
+        "status": "converged",
+    }
+    artifact = STAGING_ACCOUNTING_ROOT / f"{inner['request_id']}.json"
+    if not _atomic_install(
+        artifact,
+        _canonical(result),
+        0o600,
+        parent_mode=0o700,
+    ):
+        existing = _safe_root_file(artifact, mode=0o600, limit=256 * 1024)
+        if existing != _canonical(result):
+            raise NodeAuthorityError("staging accounting result artifact drifted")
+    return result, f"staging-accounting/v1/{inner['request_id']}"
+
+
+def _load_optional_canonical_root(
+    path: Path,
+    *,
+    fields: set[str],
+    label: str,
+) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    raw = _safe_root_file(path, mode=0o600, limit=2 * 1024 * 1024)
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise NodeAuthorityError(f"{label} is invalid") from exc
+    if not isinstance(payload, dict) or set(payload) != fields or raw != _canonical(payload):
+        raise NodeAuthorityError(f"{label} is invalid")
+    return payload
+
+
+def _staging_infrastructure_operation_envelope(
+    *,
+    action: str,
+    node: str,
+    candidate_sha: str,
+    candidate_tree: str,
+    convergence_id: str,
+    requested_at: str,
+) -> bytes:
+    inner_unsigned = {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "loom.staging-external-slurm.infrastructure-operation-request",
+        "action": action,
+        "node": node,
+        "candidate_sha": candidate_sha,
+        "candidate_tree": candidate_tree,
+        "convergence_id": convergence_id,
+        "requested_at": requested_at,
+    }
+    inner = {
+        **inner_unsigned,
+        "request_id": hashlib.sha256(_canonical(inner_unsigned)).hexdigest(),
+    }
+    payload_bytes = _canonical(inner)
+    outer_unsigned = {
+        "schema_version": SCHEMA_VERSION,
+        "action": action,
+        "node": node,
+        "domain": "gb10",
+        "sandbox": STAGING_SCOPE,
+        "candidate_sha": candidate_sha,
+        "candidate_tree": candidate_tree,
+        "payload_kind": "staging-infrastructure-operation-request",
+        "payload_sha256": hashlib.sha256(payload_bytes).hexdigest(),
+        "payload_base64": base64.b64encode(payload_bytes).decode("ascii"),
+        "prior_request_id": None,
+    }
+    return _canonical(
+        {
+            **outer_unsigned,
+            "request_id": hashlib.sha256(_canonical(outer_unsigned)).hexdigest(),
+        },
+    )
+
+
+def _staging_infrastructure_install_envelope(
+    receipt: Mapping[str, Any],
+) -> bytes:
+    payload_bytes = _canonical(receipt)
+    outer_unsigned = {
+        "schema_version": SCHEMA_VERSION,
+        "action": "staging-infrastructure-install",
+        "node": "oldlab-1",
+        "domain": "oldlab",
+        "sandbox": STAGING_SCOPE,
+        "candidate_sha": receipt["candidate_sha"],
+        "candidate_tree": receipt["candidate_tree"],
+        "payload_kind": "staging-infrastructure-receipt-json",
+        "payload_sha256": hashlib.sha256(payload_bytes).hexdigest(),
+        "payload_base64": base64.b64encode(payload_bytes).decode("ascii"),
+        "prior_request_id": None,
+    }
+    return _canonical(
+        {
+            **outer_unsigned,
+            "request_id": hashlib.sha256(_canonical(outer_unsigned)).hexdigest(),
+        },
+    )
+
+
+def _staging_infrastructure_transport(
+    node: str,
+    envelope: bytes,
+) -> dict[str, Any]:
+    expected = json.loads(envelope)
+    expected_inner_payload = json.loads(
+        base64.b64decode(expected["payload_base64"], validate=True),
+    )
+    expected_inner_receipt = (
+        f"staging-accounting/v1/{expected_inner_payload['request_id']}"
+        if expected["action"] == "staging-slurm-accounting-converge"
+        else None
+    )
+    receipt = _run_fixed_input(
+        (
+            str(NODE_TRANSPORT),
+            "invoke",
+            "--node",
+            node,
+            "--verb",
+            "transact",
+        ),
+        envelope,
+    )
+    if (
+        set(receipt) != RECEIPT_FIELDS
+        or receipt.get("schema_version") != SCHEMA_VERSION
+        or any(
+            receipt.get(field) != expected[field]
+            for field in (
+                "request_id",
+                "action",
+                "node",
+                "domain",
+                "sandbox",
+                "candidate_sha",
+                "candidate_tree",
+                "payload_sha256",
+            )
+        )
+        or not _is_sha(receipt.get("result_sha256"), length=64)
+        or receipt.get("inner_receipt") != expected_inner_receipt
+        or receipt.get("status") != "succeeded"
+        or _canonical_utc(receipt.get("completed_at")) is None
+    ):
+        raise NodeAuthorityError("staging infrastructure transport receipt is invalid")
+    return receipt
+
+
+def _staging_infrastructure_mount_contract() -> dict[str, Any]:
+    return {
+        "source": "192.168.20.12:/shared_work2/loom/staging",
+        "target": str(STAGING_SHARED_ROOT),
+        "filesystem_type": "nfs4",
+        "repository_root": str(STAGING_SHARED_PATHS[0]),
+        "worker_env_root": str(STAGING_SHARED_PATHS[1]),
+        "result_root": str(STAGING_SHARED_PATHS[2]),
+        "root_uid": 0,
+        "root_gid": STAGING_SERVICE_GID,
+        "root_mode": "0o750",
+        "repository_root_mode": "0o750",
+        "worker_env_root_mode": "0o750",
+        "result_uid": STAGING_SERVICE_UID,
+        "result_gid": STAGING_SERVICE_GID,
+        "result_root_mode": "0o2770",
+    }
+
+
+def _validate_staging_infrastructure_receipt(
+    receipt: Mapping[str, Any],
+    *,
+    candidate_sha: str,
+    candidate_tree: str,
+) -> tuple[datetime, datetime]:
+    requested_at = _canonical_utc(receipt.get("requested_at"))
+    created_at = _canonical_utc(receipt.get("created_at"))
+    expires_at = _canonical_utc(receipt.get("expires_at"))
+    observed_at = datetime.now(UTC)
+    expected_converge_request = {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "loom.staging-external-slurm.infrastructure-converge-request",
+        "candidate_sha": candidate_sha,
+        "candidate_tree": candidate_tree,
+        "convergence_id": receipt.get("convergence_id"),
+        "requested_at": receipt.get("requested_at"),
+    }
+    node_bootstraps = receipt.get("node_bootstraps")
+    if (
+        set(receipt) != STAGING_INFRASTRUCTURE_RECEIPT_FIELDS
+        or receipt.get("schema_version") != SCHEMA_VERSION
+        or receipt.get("kind") != "loom.staging-external-slurm.infrastructure-receipt"
+        or receipt.get("candidate_sha") != candidate_sha
+        or receipt.get("candidate_tree") != candidate_tree
+        or not _is_sha(receipt.get("convergence_id"), length=64)
+        or not _is_sha(receipt.get("request_sha256"), length=64)
+        or receipt.get("request_sha256")
+        != hashlib.sha256(_canonical(expected_converge_request)).hexdigest()
+        or not isinstance(receipt.get("generation"), int)
+        or isinstance(receipt.get("generation"), bool)
+        or receipt["generation"] < 1
+        or receipt.get("source_controller") != "oldlab-2"
+        or receipt.get("source_controller_host") != NODE_HOSTNAMES["oldlab-2"]
+        or receipt.get("mount_contract") != _staging_infrastructure_mount_contract()
+        or receipt.get("result") != "pass"
+        or not isinstance(node_bootstraps, list)
+        or len(node_bootstraps) != len(STAGING_INFRASTRUCTURE_NODES)
+        or requested_at is None
+        or created_at is None
+        or expires_at is None
+        or not (requested_at <= created_at < expires_at)
+        or expires_at - created_at
+        > timedelta(seconds=STAGING_INFRASTRUCTURE_MAX_TRANSACTION_SECONDS)
+        or requested_at > observed_at + timedelta(seconds=30)
+        or created_at > observed_at + timedelta(seconds=30)
+        or expires_at <= observed_at
+        or observed_at - requested_at
+        > timedelta(seconds=STAGING_INFRASTRUCTURE_MAX_TRANSACTION_SECONDS)
+    ):
+        raise NodeAuthorityError("staging infrastructure receipt binding is invalid")
+    operations = [
+        (
+            "staging-shared-source-bootstrap",
+            "trt-gb10-2",
+            receipt.get("source_bootstrap"),
+        ),
+        (
+            "staging-slurm-accounting-converge",
+            "trt-gb10-1",
+            receipt.get("accounting"),
+        ),
+        *[
+            ("staging-allocation-bootstrap", node, operation)
+            for node, operation in zip(
+                STAGING_INFRASTRUCTURE_NODES,
+                node_bootstraps,
+                strict=True,
+            )
+        ],
+    ]
+    completed: list[datetime] = []
+    for action, node, operation in operations:
+        expected = json.loads(
+            _staging_infrastructure_operation_envelope(
+                action=action,
+                node=node,
+                candidate_sha=candidate_sha,
+                candidate_tree=candidate_tree,
+                convergence_id=str(receipt["convergence_id"]),
+                requested_at=str(receipt["requested_at"]),
+            ),
+        )
+        completed_at = (
+            _canonical_utc(operation.get("completed_at")) if isinstance(operation, dict) else None
+        )
+        expected_inner_payload = json.loads(
+            base64.b64decode(expected["payload_base64"], validate=True),
+        )
+        expected_inner_receipt = (
+            f"staging-accounting/v1/{expected_inner_payload['request_id']}"
+            if action == "staging-slurm-accounting-converge"
+            else None
+        )
+        if (
+            not isinstance(operation, dict)
+            or set(operation) != RECEIPT_FIELDS
+            or any(
+                operation.get(field) != expected[field]
+                for field in (
+                    "schema_version",
+                    "request_id",
+                    "action",
+                    "node",
+                    "domain",
+                    "sandbox",
+                    "candidate_sha",
+                    "candidate_tree",
+                    "payload_sha256",
+                )
+            )
+            or not _is_sha(operation.get("result_sha256"), length=64)
+            or operation.get("inner_receipt") != expected_inner_receipt
+            or operation.get("status") != "succeeded"
+            or completed_at is None
+            or completed_at < requested_at
+            or completed_at > observed_at + timedelta(seconds=30)
+        ):
+            raise NodeAuthorityError("staging infrastructure operation receipt is invalid")
+        completed.append(completed_at)
+    if completed != sorted(completed) or completed[-1] > created_at:
+        raise NodeAuthorityError("staging infrastructure completion order is invalid")
+    return requested_at, created_at
+
+
+def _staging_infrastructure_install(
+    request: Request,
+) -> tuple[dict[str, Any], str]:
+    receipt = json.loads(request.payload_bytes)
+    requested_at, _created_at = _validate_staging_infrastructure_receipt(
+        receipt,
+        candidate_sha=str(request.payload["candidate_sha"]),
+        candidate_tree=str(request.payload["candidate_tree"]),
+    )
+    request_sha256 = hashlib.sha256(request.payload_bytes).hexdigest()
+    generation = int(receipt["generation"])
+    convergence_id = str(receipt["convergence_id"])
+    descriptor = _open_named_lock(
+        STAGING_INFRASTRUCTURE_INSTALL_LOCK,
+        exclusive=True,
+    )
+    try:
+        high_water_fields = {
+            "schema_version",
+            "generation",
+            "convergence_id",
+            "requested_at",
+            "request_sha256",
+        }
+        high_water = _load_optional_canonical_root(
+            STAGING_INFRASTRUCTURE_INSTALL_HIGH_WATER,
+            fields=high_water_fields,
+            label="staging infrastructure install high-water",
+        )
+        generation_path = STAGING_INFRASTRUCTURE_INSTALL_GENERATIONS / f"{generation}.json"
+        existing_generation = (
+            _safe_root_file(generation_path, mode=0o600, limit=2 * 1024 * 1024)
+            if generation_path.exists()
+            else None
+        )
+        if high_water is not None:
+            previous_generation = int(high_water["generation"])
+            previous_requested = _canonical_utc(high_water["requested_at"])
+            if generation < previous_generation or generation > previous_generation + 1:
+                raise NodeAuthorityError(
+                    "staging infrastructure generation regressed or skipped",
+                )
+            if generation == previous_generation and (
+                convergence_id != high_water["convergence_id"]
+                or request_sha256 != high_water["request_sha256"]
+                or existing_generation != request.payload_bytes
+            ):
+                raise NodeAuthorityError(
+                    "staging infrastructure high-water replay was not byte-identical",
+                )
+            if generation == previous_generation + 1 and (
+                previous_requested is None
+                or requested_at <= previous_requested
+                or convergence_id == high_water["convergence_id"]
+            ):
+                raise NodeAuthorityError(
+                    "staging infrastructure generation regressed or replayed",
+                )
+        elif generation != 1:
+            raise NodeAuthorityError("staging infrastructure first generation is invalid")
+        if existing_generation is not None and existing_generation != request.payload_bytes:
+            raise NodeAuthorityError(
+                "staging infrastructure generation was replayed with different bytes",
+            )
+        if existing_generation is None and high_water is not None:
+            if generation == int(high_water["generation"]):
+                raise NodeAuthorityError(
+                    "staging infrastructure high-water artifact is missing",
+                )
+        candidate_path = STAGING_INFRASTRUCTURE_RECEIPT_ROOT / (
+            f"{request.payload['candidate_sha']}.json"
+        )
+        if existing_generation is None:
+            _atomic_install(
+                generation_path,
+                request.payload_bytes,
+                0o600,
+                parent_mode=0o700,
+            )
+        _atomic_replace(
+            candidate_path,
+            request.payload_bytes,
+            0o600,
+            parent_mode=0o700,
+        )
+        _atomic_replace(
+            STAGING_INFRASTRUCTURE_INSTALL_JOURNAL,
+            _canonical(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "generation": generation,
+                    "convergence_id": convergence_id,
+                    "candidate_sha": request.payload["candidate_sha"],
+                    "candidate_tree": request.payload["candidate_tree"],
+                    "requested_at": receipt["requested_at"],
+                    "request_sha256": request_sha256,
+                    "receipt_sha256": request_sha256,
+                    "phase": "committed",
+                },
+            ),
+            0o600,
+            parent_mode=0o700,
+        )
+        _atomic_replace(
+            STAGING_INFRASTRUCTURE_INSTALL_HIGH_WATER,
+            _canonical(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "generation": generation,
+                    "convergence_id": convergence_id,
+                    "requested_at": receipt["requested_at"],
+                    "request_sha256": request_sha256,
+                },
+            ),
+            0o600,
+            parent_mode=0o700,
+        )
+    finally:
+        os.close(descriptor)
+    return (
+        {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "loom.staging-external-slurm.infrastructure-installation",
+            "candidate_sha": request.payload["candidate_sha"],
+            "candidate_tree": request.payload["candidate_tree"],
+            "generation": generation,
+            "convergence_id": convergence_id,
+            "receipt_path": str(candidate_path),
+            "receipt_sha256": request_sha256,
+            "status": "committed",
+        },
+        f"staging-infrastructure-install/v1/{generation}",
+    )
+
+
+def _write_staging_infrastructure_producer_journal(
+    *,
+    request: Request,
+    generation: int,
+    convergence_id: str,
+    requested_at: str,
+    request_sha256: str,
+    operation_receipts: Sequence[Mapping[str, Any]],
+    phase: str,
+) -> None:
+    _atomic_replace(
+        STAGING_INFRASTRUCTURE_PRODUCER_JOURNAL,
+        _canonical(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "generation": generation,
+                "convergence_id": convergence_id,
+                "candidate_sha": request.payload["candidate_sha"],
+                "candidate_tree": request.payload["candidate_tree"],
+                "requested_at": requested_at,
+                "request_sha256": request_sha256,
+                "operation_receipts": list(operation_receipts),
+                "phase": phase,
+            },
+        ),
+        0o600,
+        parent_mode=0o700,
+    )
+
+
+def _resume_staging_infrastructure_generation(
+    *,
+    request: Request,
+    convergence_id: str,
+    requested_at: str,
+    requested_time: datetime,
+    request_sha256: str,
+    high_water: Mapping[str, Any] | None,
+) -> tuple[int, list[dict[str, Any]]]:
+    journal_fields = {
+        "schema_version",
+        "generation",
+        "convergence_id",
+        "candidate_sha",
+        "candidate_tree",
+        "requested_at",
+        "request_sha256",
+        "operation_receipts",
+        "phase",
+    }
+    journal = _load_optional_canonical_root(
+        STAGING_INFRASTRUCTURE_PRODUCER_JOURNAL,
+        fields=journal_fields,
+        label="staging infrastructure producer journal",
+    )
+    if journal is not None and journal["phase"] != "committed":
+        if (
+            journal["convergence_id"] != convergence_id
+            or journal["request_sha256"] != request_sha256
+            or journal["candidate_sha"] != request.payload["candidate_sha"]
+            or journal["candidate_tree"] != request.payload["candidate_tree"]
+            or journal["requested_at"] != requested_at
+            or not isinstance(journal["operation_receipts"], list)
+        ):
+            raise NodeAuthorityError(
+                "staging infrastructure producer has another active generation",
+            )
+        generation = int(journal["generation"])
+        operation_receipts = list(journal["operation_receipts"])
+    else:
+        previous_requested = (
+            _canonical_utc(high_water["requested_at"]) if high_water is not None else None
+        )
+        if high_water is not None and (
+            previous_requested is None or requested_time <= previous_requested
+        ):
+            raise NodeAuthorityError("staging infrastructure convergence request regressed")
+        if high_water is not None and convergence_id == high_water["convergence_id"]:
+            raise NodeAuthorityError("staging infrastructure convergence ID was replayed")
+        generation = int(high_water["generation"]) + 1 if high_water else 1
+        operation_receipts = []
+        _write_staging_infrastructure_producer_journal(
+            request=request,
+            generation=generation,
+            convergence_id=convergence_id,
+            requested_at=requested_at,
+            request_sha256=request_sha256,
+            operation_receipts=operation_receipts,
+            phase="running",
+        )
+    operation_specs = [
+        ("staging-shared-source-bootstrap", "trt-gb10-2"),
+        ("staging-slurm-accounting-converge", "trt-gb10-1"),
+        *[("staging-allocation-bootstrap", node) for node in STAGING_INFRASTRUCTURE_NODES],
+    ]
+    if len(operation_receipts) > len(operation_specs):
+        raise NodeAuthorityError("staging infrastructure producer journal is invalid")
+    for index, (action, node) in enumerate(
+        operation_specs[len(operation_receipts) :],
+        start=len(operation_receipts),
+    ):
+        envelope = _staging_infrastructure_operation_envelope(
+            action=action,
+            node=node,
+            candidate_sha=str(request.payload["candidate_sha"]),
+            candidate_tree=str(request.payload["candidate_tree"]),
+            convergence_id=convergence_id,
+            requested_at=requested_at,
+        )
+        operation_receipts.append(_staging_infrastructure_transport(node, envelope))
+        _write_staging_infrastructure_producer_journal(
+            request=request,
+            generation=generation,
+            convergence_id=convergence_id,
+            requested_at=requested_at,
+            request_sha256=request_sha256,
+            operation_receipts=operation_receipts,
+            phase=f"operation-{index + 1}",
+        )
+    return generation, operation_receipts
+
+
+def _staging_infrastructure_converge(
+    request: Request,
+) -> tuple[dict[str, Any], str]:
+    converge = json.loads(request.payload_bytes)
+    convergence_id = str(converge["convergence_id"])
+    requested_at = str(converge["requested_at"])
+    requested_time = _canonical_utc(requested_at)
+    if requested_time is None:
+        raise NodeAuthorityError("staging infrastructure convergence time is invalid")
+    observed_time = datetime.now(UTC)
+    if requested_time > observed_time + timedelta(
+        seconds=30
+    ) or observed_time - requested_time > timedelta(
+        seconds=STAGING_INFRASTRUCTURE_MAX_TRANSACTION_SECONDS
+    ):
+        raise NodeAuthorityError(
+            "staging infrastructure convergence time is outside its transaction window",
+        )
+    request_sha256 = hashlib.sha256(request.payload_bytes).hexdigest()
+    descriptor = _open_named_lock(
+        STAGING_INFRASTRUCTURE_PRODUCER_LOCK,
+        exclusive=True,
+    )
+    try:
+        high_water_fields = {
+            "schema_version",
+            "generation",
+            "convergence_id",
+            "requested_at",
+            "request_sha256",
+        }
+        high_water = _load_optional_canonical_root(
+            STAGING_INFRASTRUCTURE_PRODUCER_HIGH_WATER,
+            fields=high_water_fields,
+            label="staging infrastructure producer high-water",
+        )
+        receipt_path = STAGING_INFRASTRUCTURE_PRODUCER_RECEIPTS / f"{convergence_id}.json"
+        if receipt_path.exists():
+            existing_raw = _safe_root_file(
+                receipt_path,
+                mode=0o600,
+                limit=2 * 1024 * 1024,
+            )
+            existing = json.loads(existing_raw)
+            if (
+                not isinstance(existing, dict)
+                or existing_raw != _canonical(existing)
+                or existing.get("request_sha256") != request_sha256
+                or existing.get("candidate_sha") != request.payload["candidate_sha"]
+                or existing.get("candidate_tree") != request.payload["candidate_tree"]
+            ):
+                raise NodeAuthorityError(
+                    "staging infrastructure convergence ID was replayed or tampered",
+                )
+            receipt = existing
+            generation = int(receipt["generation"])
+            if (high_water is None and generation != 1) or (
+                high_water is not None
+                and (
+                    generation < int(high_water["generation"])
+                    or generation > int(high_water["generation"]) + 1
+                    or (
+                        generation == int(high_water["generation"])
+                        and (
+                            convergence_id != high_water["convergence_id"]
+                            or request_sha256 != high_water["request_sha256"]
+                        )
+                    )
+                )
+            ):
+                raise NodeAuthorityError(
+                    "staging infrastructure producer receipt is not current",
+                )
+        else:
+            generation, operation_receipts = _resume_staging_infrastructure_generation(
+                request=request,
+                convergence_id=convergence_id,
+                requested_at=requested_at,
+                requested_time=requested_time,
+                request_sha256=request_sha256,
+                high_water=high_water,
+            )
+            created = datetime.now(UTC)
+            receipt = {
+                "schema_version": SCHEMA_VERSION,
+                "kind": "loom.staging-external-slurm.infrastructure-receipt",
+                "candidate_sha": request.payload["candidate_sha"],
+                "candidate_tree": request.payload["candidate_tree"],
+                "generation": generation,
+                "convergence_id": convergence_id,
+                "requested_at": requested_at,
+                "request_sha256": request_sha256,
+                "source_controller": "oldlab-2",
+                "source_controller_host": NODE_HOSTNAMES["oldlab-2"],
+                "created_at": _timestamp(created),
+                "expires_at": _timestamp(created + timedelta(seconds=3600)),
+                "source_bootstrap": operation_receipts[0],
+                "accounting": operation_receipts[1],
+                "node_bootstraps": operation_receipts[2:],
+                "mount_contract": _staging_infrastructure_mount_contract(),
+                "result": "pass",
+            }
+            _validate_staging_infrastructure_receipt(
+                receipt,
+                candidate_sha=str(request.payload["candidate_sha"]),
+                candidate_tree=str(request.payload["candidate_tree"]),
+            )
+            _atomic_install(
+                receipt_path,
+                _canonical(receipt),
+                0o600,
+                parent_mode=0o700,
+            )
+        install_envelope = _staging_infrastructure_install_envelope(receipt)
+        install_receipt = _staging_infrastructure_transport(
+            "oldlab-1",
+            install_envelope,
+        )
+        if install_receipt.get("inner_receipt") != (
+            f"staging-infrastructure-install/v1/{generation}"
+        ):
+            raise NodeAuthorityError(
+                "staging infrastructure install receipt binding is invalid",
+            )
+        high_water_record = {
+            "schema_version": SCHEMA_VERSION,
+            "generation": generation,
+            "convergence_id": convergence_id,
+            "requested_at": requested_at,
+            "request_sha256": request_sha256,
+        }
+        _atomic_replace(
+            STAGING_INFRASTRUCTURE_PRODUCER_HIGH_WATER,
+            _canonical(high_water_record),
+            0o600,
+            parent_mode=0o700,
+        )
+        _write_staging_infrastructure_producer_journal(
+            request=request,
+            generation=generation,
+            convergence_id=convergence_id,
+            requested_at=requested_at,
+            request_sha256=request_sha256,
+            operation_receipts=[
+                receipt["source_bootstrap"],
+                receipt["accounting"],
+                *receipt["node_bootstraps"],
+            ],
+            phase="committed",
+        )
+    finally:
+        os.close(descriptor)
+    return (
+        {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "loom.staging-external-slurm.infrastructure-convergence",
+            "candidate_sha": request.payload["candidate_sha"],
+            "candidate_tree": request.payload["candidate_tree"],
+            "generation": generation,
+            "convergence_id": convergence_id,
+            "requested_at": requested_at,
+            "receipt_sha256": hashlib.sha256(_canonical(receipt)).hexdigest(),
+            "install_request_id": json.loads(install_envelope)["request_id"],
+            "status": "converged",
+        },
+        f"staging-infrastructure/v1/{convergence_id}",
+    )
+
+
+def _execute_request(request: Request) -> tuple[dict[str, Any], str | None]:
+    payload = request.payload
+    action = request.action
+    domain = str(payload["domain"])
+    sandbox = str(payload["sandbox"])
+    sha = str(payload["candidate_sha"])
+    tree = str(payload["candidate_tree"])
+    if action == "staging-allocation-bootstrap":
+        return _staging_allocation_bootstrap(request), None
+    if action == "staging-shared-source-bootstrap":
+        return _staging_shared_source_bootstrap(request), None
+    if action == "staging-allocation-submit":
+        return _staging_broker_submit(request)
+    if action == "staging-allocation-cancel":
+        return _staging_broker_cancel(request)
+    if action == "staging-slurm-accounting-converge":
+        return _staging_accounting_converge(request)
+    if action == "staging-infrastructure-converge":
+        return _staging_infrastructure_converge(request)
+    if action == "staging-infrastructure-install":
+        return _staging_infrastructure_install(request)
+    if action == "staging-allocation-probe":
+        result = _run_fixed(_staging_allocation_probe_argv(request))
+        expected_fields = {
+            "schema_version",
+            "kind",
+            "request_id",
+            "candidate_sha",
+            "candidate_tree",
+            "cluster",
+            "pool",
+            "submit_host",
+            "controller",
+            "service_identity",
+            "namespace",
+            "slurm_account",
+            "qos",
+            "allowed_nodes",
+            "repository",
+            "worker_env",
+            "nodes",
+            "result",
+        }
+        inner = json.loads(request.payload_bytes)
+        if (
+            set(result) != expected_fields
+            or result.get("schema_version") != SCHEMA_VERSION
+            or result.get("kind") != "staging_external_slurm_allocation_probe"
+            or result.get("request_id") != inner["request_id"]
+            or result.get("candidate_sha") != sha
+            or result.get("candidate_tree") != tree
+            or result.get("cluster") != "trt-gb10"
+            or result.get("pool") != "gb10"
+            or result.get("submit_host") != "trt-gb10-1"
+            or result.get("controller") != "trt-gb10-1"
+            or result.get("service_identity")
+            != {
+                "username": STAGING_SERVICE_USER,
+                "group": STAGING_SERVICE_GROUP,
+                "uid": STAGING_SERVICE_UID,
+                "gid": STAGING_SERVICE_GID,
+                "home": str(STAGING_SERVICE_HOME),
+                "shell": STAGING_SERVICE_SHELL,
+                "supplementary_groups": list(STAGING_SUPPLEMENTARY_GROUPS),
+            }
+            or not isinstance(result.get("namespace"), dict)
+            or result["namespace"].get("root") != str(STAGING_SHARED_ROOT)
+            or result["namespace"].get("mount_source") != "192.168.20.12:/shared_work2/loom/staging"
+            or result["namespace"].get("mount_fstype") != "nfs4"
+            or not isinstance(result["namespace"].get("mount_inode"), int)
+            or result.get("slurm_account") != "loom-staging"
+            or result.get("qos") != "loom-staging"
+            or result.get("allowed_nodes")
+            != [f"trt-gb10-{index}" for index in (1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15)]
+            or not isinstance(result.get("nodes"), list)
+            or len(result["nodes"]) != 14
+            or result.get("result") != "pass"
+        ):
+            raise NodeAuthorityError("staging allocation probe readback is invalid")
+        return result, f"staging-probe/v1/{inner['request_id']}"
+    if action == "collect-live-overlap":
+        result = _run_fixed_input(
+            _live_authority_argv(request, "collect"),
+            request.payload_bytes,
+        )
+        expected_path = (
+            f"/var/lib/loom-developer-sandbox-live-authority/overlap/"
+            f"{domain}/{sandbox}/{sha}/{result.get('job_id')}.json"
+        )
+        if (
+            set(result)
+            != {
+                "schema_version",
+                "kind",
+                "path",
+                "payload_sha256",
+                "job_id",
+                "observation_sequence",
+                "observed_at",
+            }
+            or result.get("schema_version") != SCHEMA_VERSION
+            or result.get("kind") != "loom.developer-sandbox.live-overlap-result"
+            or result.get("path") != expected_path
+            or not _is_sha(result.get("payload_sha256"), length=64)
+            or re.fullmatch(r"[1-9][0-9]*(?:_[0-9]+)?", str(result.get("job_id"))) is None
+            or not isinstance(result.get("observation_sequence"), int)
+            or isinstance(result.get("observation_sequence"), bool)
+            or result["observation_sequence"] < 1
+            or not isinstance(result.get("observed_at"), str)
+        ):
+            raise NodeAuthorityError("live overlap collection readback is invalid")
+        return result, expected_path
+    if action == "host-converge":
+        return (
+            _run_fixed(
+                _domain_argv(
+                    request,
+                    "host-converge",
+                    "--domain",
+                    domain,
+                    "--execute",
+                ),
+            ),
+            None,
+        )
+    if action in {"slurm-node-converge", "slurm-controller-converge"}:
+        _validate_slurm_candidate(request)
+        result = _run_fixed(_slurm_policy_argv(request, "apply"))
+        return result, _slurm_policy_binding(request, result, snapshot_field="snapshot")
+    if action == "slurm-rollback":
+        prior = _read_receipt(str(payload["prior_request_id"]))
+        expected_action = (
+            "slurm-controller-converge"
+            if payload["node"] == SLURM_CONTROLLER[domain]
+            else "slurm-node-converge"
+        )
+        if (
+            prior is None
+            or prior.get("node") != payload["node"]
+            or prior.get("domain") != domain
+            or prior.get("sandbox") != sandbox
+            or prior.get("candidate_sha") != sha
+            or prior.get("candidate_tree") != tree
+            or prior.get("action") != expected_action
+        ):
+            raise NodeAuthorityError("Slurm rollback receipt is invalid")
+        _validate_prior_slurm_binding(request, prior)
+        _validate_slurm_candidate(request)
+        result = _run_fixed(_slurm_policy_argv(request, "rollback"))
+        return (
+            result,
+            _slurm_policy_binding(
+                request,
+                result,
+                snapshot_field="recovery_snapshot",
+            ),
+        )
+    if action == "rollback":
+        prior = _read_receipt(str(payload["prior_request_id"]))
+        if (
+            prior is None
+            or prior.get("node") != payload["node"]
+            or prior.get("domain") != domain
+            or prior.get("sandbox") != sandbox
+            or prior.get("candidate_sha") != sha
+            or prior.get("candidate_tree") != tree
+            or prior.get("action") not in {"materialize", "attest"}
+            or not isinstance(prior.get("inner_receipt"), str)
+        ):
+            raise NodeAuthorityError("node authority rollback receipt is invalid")
+        receipt_path = Path(str(prior["inner_receipt"]))
+        expected_root = Path("/var/lib/loom-developer-domain-runtime").resolve()
+        try:
+            resolved = receipt_path.resolve(strict=True)
+        except OSError as exc:
+            raise NodeAuthorityError("node authority rollback receipt is unavailable") from exc
+        if expected_root not in resolved.parents:
+            raise NodeAuthorityError("node authority rollback receipt path is invalid")
+        return (
+            _run_fixed(
+                _domain_argv(
+                    request,
+                    "rollback",
+                    "--receipt",
+                    str(resolved),
+                    "--execute",
+                ),
+            ),
+            str(resolved),
+        )
+    if action == "persist-fleet-attestation":
+        result = _run_fixed_input(
+            (
+                "/usr/bin/python3",
+                str(SOURCE_ROOT / REMOTE_LINK_HOST_RELATIVE),
+                "persist-attestation",
+                "--sandbox",
+                sandbox,
+                "--candidate-sha",
+                sha,
+                "--execute",
+            ),
+            request.payload_bytes,
+        )
+        fleet = json.loads(request.payload_bytes)
+        if (
+            set(result)
+            != {
+                "schema_version",
+                "sandbox",
+                "candidate_sha",
+                "path",
+                "payload_sha256",
+            }
+            or result.get("schema_version") != SCHEMA_VERSION
+            or result.get("sandbox") != sandbox
+            or result.get("candidate_sha") != sha
+            or result.get("path")
+            != f"/var/lib/loom-developer-sandbox-links/attestations/{sandbox}/{sha}/fleet.json"
+            or result.get("payload_sha256") != fleet.get("payload_sha256")
+        ):
+            raise NodeAuthorityError(
+                "fleet attestation persistence readback is invalid",
+            )
+        return (
+            result,
+            None,
+        )
+    stage = _prepare_stage(request)
+    try:
+        if action == "materialize":
+            bundle = stage / "candidate.bundle"
+            _write_stage_file(bundle, request.payload_bytes, 0o600)
+            result = _run_fixed(
+                _domain_argv(
+                    request,
+                    "materialize",
+                    "--domain",
+                    domain,
+                    "--sandbox",
+                    sandbox,
+                    "--candidate-sha",
+                    sha,
+                    "--candidate-tree",
+                    tree,
+                    "--source-bundle",
+                    str(bundle),
+                    "--execute",
+                ),
+            )
+        elif action == "install-client":
+            _extract_client_archive(request.payload_bytes, stage)
+            result = _run_fixed(
+                (
+                    "/usr/bin/python3",
+                    str(SOURCE_ROOT / REMOTE_LINK_HOST_RELATIVE),
+                    "install-client",
+                    "--sandbox",
+                    sandbox,
+                    "--candidate-sha",
+                    sha,
+                    "--node",
+                    str(payload["node"]),
+                    "--credential-source",
+                    str(stage),
+                    "--worker-token-file",
+                    str(stage / "worker-token"),
+                    "--minio-access-key-file",
+                    str(stage / "minio-access-key"),
+                    "--minio-secret-key-file",
+                    str(stage / "minio-secret-key"),
+                    "--execute",
+                ),
+            )
+        elif action == "attest":
+            _extract_attestation_archive(request.payload_bytes, stage)
+            seed = stage / "worker.env"
+            fleet = stage / "fleet.json"
+            result = _run_fixed(
+                _domain_argv(
+                    request,
+                    "attest",
+                    "--domain",
+                    domain,
+                    "--sandbox",
+                    sandbox,
+                    "--candidate-sha",
+                    sha,
+                    "--candidate-tree",
+                    tree,
+                    "--worker-env-seed",
+                    str(seed),
+                    "--fleet-attestation-seed",
+                    str(fleet),
+                    "--execute",
+                ),
+            )
+        else:  # pragma: no cover - request parser owns this invariant
+            raise NodeAuthorityError("node authority action is invalid")
+        inner = result.get("receipt")
+        return result, str(inner) if isinstance(inner, str) else None
+    finally:
+        try:
+            _safe_root_directory(stage, mode=0o700)
+            shutil.rmtree(stage)
+        except OSError as exc:
+            raise NodeAuthorityError("node authority stage cleanup failed safely") from exc
+
+
+def _execute_check(request: Request) -> dict[str, Any]:
+    payload = request.payload
+    action = str(payload["action"])
+    if action == "observe-platform-health-node":
+        result = _run_fixed_input(
+            _platform_health_authority_argv(request, "observe-node"),
+            request.payload_bytes,
+        )
+        if (
+            result.get("schema_version") != SCHEMA_VERSION
+            or result.get("kind") != "loom.developer-sandbox.platform-health-node-observation"
+            or result.get("session_id") != json.loads(request.payload_bytes).get("session_id")
+            or result.get("node") != payload["node"]
+            or result.get("host") != NODE_HOSTNAMES[str(payload["node"])]
+            or result.get("checkpoint") != json.loads(request.payload_bytes).get("checkpoint")
+            or result.get("orphan_container_ids") != []
+        ):
+            raise NodeAuthorityError("platform-health node readback is invalid")
+        return result
+    if action == "observe-live-overlap-job":
+        result = _run_fixed_input(
+            _live_authority_argv(request, "observe-slurm-job"),
+            request.payload_bytes,
+        )
+        if (
+            result.get("schema_version") != SCHEMA_VERSION
+            or result.get("kind") != "loom.developer-sandbox.live-slurm-observation"
+            or result.get("source_host")
+            != ("trt-eai-oldlab-2" if payload["domain"] == "oldlab" else "trt-gb10-1")
+            or result.get("sandbox") != payload["sandbox"]
+            or result.get("pool") != payload["domain"]
+            or result.get("candidate_sha") != payload["candidate_sha"]
+        ):
+            raise NodeAuthorityError("live overlap Slurm readback is invalid")
+        return result
+    if action == "staging-pressure-reclaim-observe":
+        result = _run_fixed_input(
+            _staging_pressure_authority_argv(request),
+            request.payload_bytes,
+        )
+        inner = json.loads(request.payload_bytes)
+        expected_fields = {
+            "schema_version",
+            "kind",
+            "submit_host",
+            "environment",
+            "pool",
+            "partition",
+            "account",
+            "qos",
+            "phase",
+            "session_id",
+            "acceptance_session_id",
+            "candidate_sha",
+            "candidate_tree",
+            "observed_at",
+            "jobs",
+            "snapshot_sha256",
+        }
+        jobs = result.get("jobs") if isinstance(result, dict) else None
+        owned = {str(job["job_id"]): job for job in inner["owned_jobs"]}
+        observed_owned = (
+            {str(job["job_id"]): job for job in jobs if str(job.get("job_id")) in owned}
+            if isinstance(jobs, list)
+            else {}
+        )
+        unsigned = (
+            {key: value for key, value in result.items() if key != "snapshot_sha256"}
+            if isinstance(result, dict)
+            else {}
+        )
+        if (
+            set(result) != expected_fields
+            or result.get("schema_version") != SCHEMA_VERSION
+            or result.get("kind") != "loom.staging-pressure-reclaim.observe-result"
+            or result.get("submit_host") != "trt-gb10-1"
+            or result.get("environment") != "staging"
+            or result.get("pool") != "gb10"
+            or result.get("partition") != "gb10"
+            or result.get("account") != "loom-staging"
+            or result.get("qos") != "loom-staging"
+            or any(
+                result.get(field) != inner[field]
+                for field in (
+                    "phase",
+                    "session_id",
+                    "acceptance_session_id",
+                    "candidate_sha",
+                    "candidate_tree",
+                )
+            )
+            or not isinstance(jobs, list)
+            or any(
+                not isinstance(job, dict)
+                or set(job) != {"job_id", "user", "account", "qos", "state", "nodes", "name"}
+                or re.fullmatch(r"[1-9][0-9]*(?:_[0-9]+)?", str(job.get("job_id"))) is None
+                or job.get("state")
+                not in {
+                    "PENDING",
+                    "RUNNING",
+                    "CONFIGURING",
+                    "COMPLETING",
+                    "SIGNALING",
+                    "STAGE_OUT",
+                    "STOPPED",
+                    "SUSPENDED",
+                    "RESIZING",
+                }
+                or any(
+                    not isinstance(job.get(field), str) or "\n" in str(job[field])
+                    for field in ("user", "account", "qos", "nodes", "name")
+                )
+                for job in jobs
+            )
+            or result.get("snapshot_sha256") != hashlib.sha256(_canonical(unsigned)).hexdigest()
+            or (
+                inner["phase"] == "before"
+                and (
+                    set(observed_owned) != set(owned)
+                    or any(
+                        any(
+                            observed_owned[job_id][field] != expected[field]
+                            for field in ("user", "account", "qos", "name")
+                        )
+                        for job_id, expected in owned.items()
+                    )
+                )
+            )
+            or (inner["phase"] != "before" and bool(observed_owned))
+        ):
+            raise NodeAuthorityError("staging pressure observation readback is invalid")
+        return result
+    if action == "slurm-check":
+        _validate_slurm_candidate(request)
+        result = _run_fixed(_slurm_policy_argv(request, "node-check"))
+        if (
+            result.get("cluster") != SLURM_CLUSTER[str(payload["domain"])]
+            or result.get("candidate_sha") != payload["candidate_sha"]
+            or result.get("file_plan", {}).get("converged") is not True
+            or result.get("live_readback", {}).get("converged") is not True
+        ):
+            raise NodeAuthorityError("Slurm policy check readback is invalid")
+        return result
+    if action == "inspect-link-client":
+        return _run_fixed(
+            (
+                "/usr/bin/python3",
+                str(SOURCE_ROOT / REMOTE_LINK_HOST_RELATIVE),
+                "check-client",
+                "--sandbox",
+                str(payload["sandbox"]),
+                "--candidate-sha",
+                str(payload["candidate_sha"]),
+                "--node",
+                str(payload["node"]),
+            ),
+        )
+    if action == "inspect-link-server":
+        return _run_fixed(
+            (
+                "/usr/bin/python3",
+                str(SOURCE_ROOT / REMOTE_LINK_HOST_RELATIVE),
+                "check-server",
+                "--sandbox",
+                str(payload["sandbox"]),
+                "--candidate-sha",
+                str(payload["candidate_sha"]),
+            ),
+        )
+    extra: tuple[str, ...] = ()
+    if action == "export-runtime-proof-artifact":
+        try:
+            artifact_id = request.payload_bytes.decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise NodeAuthorityError("runtime proof artifact identity is invalid") from exc
+        fields = artifact_id.split("/")
+        if (
+            len(fields) != 7
+            or fields[:2] != ["runtime-proof", "v1"]
+            or fields[2] != payload["sandbox"]
+            or fields[3] != payload["candidate_sha"]
+            or fields[4] != payload["candidate_tree"]
+            or fields[5] != "artifact"
+            or fields[6] not in RUNTIME_PROOF_ARTIFACT_NAMES
+            or RUNTIME_PROOF_ARTIFACT_SOURCES[fields[6]] != (payload["domain"], payload["node"])
+        ):
+            raise NodeAuthorityError("runtime proof artifact identity is invalid")
+        extra = ("--artifact-id", artifact_id)
+    return _run_fixed(
+        _domain_argv(
+            request,
+            action,
+            "--domain",
+            str(payload["domain"]),
+            "--sandbox",
+            str(payload["sandbox"]),
+            "--candidate-sha",
+            str(payload["candidate_sha"]),
+            "--candidate-tree",
+            str(payload["candidate_tree"]),
+            *extra,
+        ),
+    )
+
+
+def dispatch(
+    verb: str,
+    raw: bytes,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    environment = os.environ if environ is None else environ
+    _validate_invoker(verb, environment)
+    descriptor = _open_lock(exclusive=verb == "transact")
+    try:
+        _reject_active_upgrade()
+        policy = _read_policy()
+        _validate_runtime_assets(policy)
+        request = _parse_request(raw, verb=verb, policy=policy)
+        if verb == "check":
+            result = _execute_check(request)
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "request_id": request.request_id,
+                "status": "succeeded",
+                "result": result,
+            }
+        existing = _read_receipt(request.request_id)
+        if existing is not None:
+            if not _journal_contains(existing):
+                _append_journal(existing)
+            return existing
+        result, inner_receipt = _execute_request(request)
+        receipt = {
+            "schema_version": SCHEMA_VERSION,
+            "request_id": request.request_id,
+            "action": request.action,
+            "node": request.payload["node"],
+            "domain": request.payload["domain"],
+            "sandbox": request.payload["sandbox"],
+            "candidate_sha": request.payload["candidate_sha"],
+            "candidate_tree": request.payload["candidate_tree"],
+            "payload_sha256": request.payload["payload_sha256"],
+            "result_sha256": hashlib.sha256(_canonical(result)).hexdigest(),
+            "inner_receipt": inner_receipt,
+            "completed_at": _timestamp(),
+            "status": "succeeded",
+        }
+        _write_receipt(receipt)
+        _append_journal(receipt)
+        return receipt
+    finally:
+        os.close(descriptor)
+
+
+def _validate_direct_root_source(
+    source_sha: str,
+    source_tree: str,
+    *,
+    loginuid_path: Path = AUDIT_LOGINUID,
+    marker_paths: Sequence[Path] = CONTAINER_MARKERS,
+    cgroup_paths: Sequence[Path] = CONTAINER_CGROUP_PATHS,
+) -> str:
+    if (
+        os.getuid() != 0
+        or os.geteuid() != 0
+        or any(name.startswith("SUDO_") for name in os.environ)
+        or not _is_sha(source_sha)
+        or not _is_sha(source_tree)
+    ):
+        raise NodeAuthorityError(
+            "node authority bootstrap/upgrade requires a direct external root administrator",
+        )
+    _read_audit_loginuid(loginuid_path)
+    _reject_containerized_root(
+        marker_paths=marker_paths,
+        cgroup_paths=cgroup_paths,
+    )
+    if (
+        _git("rev-parse", "--verify", "HEAD") != source_sha
+        or _git("rev-parse", "--verify", "HEAD^{tree}") != source_tree
+        or _git("status", "--porcelain=v1", "--untracked-files=all")
+    ):
+        raise NodeAuthorityError("bootstrap source is not the clean exact candidate")
+    return _node_for_hostname(_hostname())
+
+
+def _ensure_upgrade_state() -> None:
+    _ensure_root_directory(UPGRADE_ROOT, mode=0o700, parent_mode=0o700)
+    for directory in (
+        STAGING_INFRASTRUCTURE_PRODUCER_ROOT,
+        STAGING_INFRASTRUCTURE_PRODUCER_RECEIPTS,
+        STAGING_INFRASTRUCTURE_RECEIPT_ROOT,
+        STAGING_INFRASTRUCTURE_INSTALL_GENERATIONS,
+    ):
+        _ensure_root_directory(directory, mode=0o700, parent_mode=0o700)
+    for lock in (
+        STAGING_INFRASTRUCTURE_PRODUCER_LOCK,
+        STAGING_INFRASTRUCTURE_INSTALL_LOCK,
+    ):
+        if not lock.exists():
+            _atomic_install(lock, b"", 0o600, parent_mode=0o700)
+        else:
+            _safe_root_file(lock, mode=0o600)
+    if not UPGRADE_JOURNAL.exists():
+        _atomic_install(
+            UPGRADE_JOURNAL,
+            b"",
+            0o600,
+            parent_mode=0o700,
+        )
+    else:
+        _validate_upgrade_journal()
+
+
+def _recover_upgrade_if_needed() -> str | None:
+    active = _read_upgrade_active()
+    if active is None:
+        return None
+    snapshot, phase = active
+    if phase == "committed":
+        policy = _read_policy()
+        _validate_runtime_assets(policy)
+        if (
+            policy.source_sha != snapshot.new_source_sha
+            or policy.source_tree != snapshot.new_source_tree
+        ):
+            raise NodeAuthorityError("committed node authority upgrade identity drifted")
+        if _high_value_state_identity() != snapshot.high_value_state:
+            raise NodeAuthorityError(
+                "committed node authority high-value state drifted",
+            )
+        _upgrade_journal_append(_upgrade_event(snapshot, "recovered-committed"))
+        _remove_upgrade_active()
+        return "committed"
+    _restore_upgrade_snapshot(snapshot)
+    if _high_value_state_identity() != snapshot.high_value_state:
+        raise NodeAuthorityError(
+            "rolled-back node authority high-value state drifted",
+        )
+    _upgrade_journal_append(_upgrade_event(snapshot, "recovered-rolled-back"))
+    _remove_upgrade_active()
+    return "rolled-back"
+
+
+def upgrade(source_sha: str, source_tree: str) -> dict[str, Any]:
+    node = _validate_direct_root_source(source_sha, source_tree)
+    assets = _exact_source_assets(source_sha, source_tree)
+    descriptor = _open_lock(exclusive=True)
+    try:
+        _ensure_upgrade_state()
+        recovered = _recover_upgrade_if_needed()
+        old_policy = _read_policy()
+        old_system_installs = _validate_runtime_assets(
+            old_policy,
+            allow_absent_system_install=True,
+        )
+        if old_policy.node != node:
+            raise NodeAuthorityError("node authority upgrade host binding drifted")
+        system_install_complete = old_system_installs is None or len(old_system_installs) == len(
+            SYSTEM_INSTALL_ASSETS
+        )
+        if old_policy.source_tree == source_tree and system_install_complete:
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "action": "upgrade",
+                "node": node,
+                "source_sha": old_policy.source_sha,
+                "source_tree": old_policy.source_tree,
+                "changed": False,
+                "recovered": recovered,
+                "system_installs": list(old_system_installs or ()),
+                "status": "succeeded",
+            }
+        high_value_before = _high_value_state_identity()
+        snapshot = _prepare_upgrade_snapshot(
+            old_policy,
+            new_source_sha=source_sha,
+            new_source_tree=source_tree,
+            high_value_state=high_value_before,
+        )
+        created_upgrade_directories: list[Path] = []
+        try:
+            _write_upgrade_active(snapshot, "prepared")
+            _upgrade_journal_append(_upgrade_event(snapshot, "prepared"))
+            _unlink_root_file(SUDOERS, mode=0o440)
+            for sudoers_path in _system_sudoers_paths():
+                if sudoers_path.exists() or sudoers_path.is_symlink():
+                    _unlink_root_file(sudoers_path, mode=0o440)
+            _write_upgrade_active(snapshot, "admission-disabled")
+            _upgrade_journal_append(
+                _upgrade_event(snapshot, "admission-disabled"),
+            )
+            for directory in (SOURCE_ROOT / "src", SOURCE_ROOT / "src/loom_cli"):
+                if _ensure_root_directory(
+                    directory,
+                    mode=0o755,
+                    parent_mode=0o755,
+                ):
+                    created_upgrade_directories.append(directory)
+            for relative in SOURCE_ASSETS:
+                _atomic_replace(
+                    SOURCE_ROOT / relative,
+                    assets[str(relative)],
+                    _source_asset_mode(relative),
+                )
+            authority_payload = assets["scripts/ops/developer_sandbox_node_authority.py"]
+            _atomic_replace(LIBEXEC, authority_payload, 0o755)
+            _atomic_replace(
+                POLICY,
+                _policy_payload(source_sha, source_tree, node, assets),
+                0o600,
+            )
+            system_installs = _system_install_assets(
+                assets,
+                replace=True,
+            )
+            _write_upgrade_active(snapshot, "assets-replaced")
+            _upgrade_journal_append(_upgrade_event(snapshot, "assets-replaced"))
+            _validate_sudoers(
+                SOURCE_ROOT / SUDOERS_RELATIVE,
+                label="upgraded node authority source",
+            )
+            _atomic_install(
+                SUDOERS,
+                assets[str(SUDOERS_RELATIVE)],
+                0o440,
+            )
+            _validate_sudoers(SUDOERS, label="upgraded node authority")
+            installed = _read_policy()
+            _validate_runtime_assets(installed)
+            if (
+                installed.source_sha != source_sha
+                or installed.source_tree != source_tree
+                or installed.node != node
+            ):
+                raise NodeAuthorityError("upgraded node authority identity is invalid")
+            if _high_value_state_identity() != high_value_before:
+                raise NodeAuthorityError(
+                    "node authority high-value state changed during upgrade",
+                )
+            _write_upgrade_active(snapshot, "committed")
+            _upgrade_journal_append(_upgrade_event(snapshot, "committed"))
+            _remove_upgrade_active()
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "action": "upgrade",
+                "node": node,
+                "previous_source_sha": old_policy.source_sha,
+                "previous_source_tree": old_policy.source_tree,
+                "source_sha": source_sha,
+                "source_tree": source_tree,
+                "changed": True,
+                "recovered": recovered,
+                "snapshot": str(snapshot.root),
+                "system_installs": list(system_installs),
+                "status": "succeeded",
+            }
+        except Exception as upgrade_exc:
+            try:
+                _restore_upgrade_snapshot(snapshot)
+                if _high_value_state_identity() != high_value_before:
+                    raise NodeAuthorityError(
+                        "node authority high-value state changed during rollback",
+                    )
+                _upgrade_journal_append(_upgrade_event(snapshot, "rolled-back"))
+                _remove_upgrade_active()
+                for directory in reversed(created_upgrade_directories):
+                    try:
+                        directory.rmdir()
+                    except OSError:
+                        pass
+            except Exception as rollback_exc:
+                try:
+                    if SUDOERS.exists() and not SUDOERS.is_symlink():
+                        _unlink_root_file(SUDOERS, mode=0o440)
+                except Exception:
+                    pass
+                raise NodeAuthorityError(
+                    "node authority upgrade and rollback both failed safely",
+                ) from rollback_exc
+            raise NodeAuthorityError(
+                "node authority upgrade failed and was rolled back",
+            ) from upgrade_exc
+    finally:
+        os.close(descriptor)
+
+
+def bootstrap(source_sha: str, source_tree: str) -> dict[str, Any]:
+    node = _validate_direct_root_source(source_sha, source_tree)
+    assets = _exact_source_assets(source_sha, source_tree)
+    created_directories: list[Path] = []
+    created_files: list[Path] = []
+    preexisting_system_paths = {
+        target
+        for _relative, target, _mode, _parent_mode in SYSTEM_INSTALL_ASSETS
+        if target.exists() or target.is_symlink()
+    }
+    try:
+        for directory, mode in (
+            (SOURCE_ROOT.parent, 0o755),
+            (SOURCE_ROOT, 0o755),
+            (SOURCE_ROOT / "scripts", 0o755),
+            (SOURCE_ROOT / "scripts/ops", 0o755),
+            (SOURCE_ROOT / "src", 0o755),
+            (SOURCE_ROOT / "src/loom_cli", 0o755),
+            (SOURCE_ROOT / "deploy", 0o755),
+            (SOURCE_ROOT / "deploy/developer-sandboxes", 0o755),
+            (SOURCE_ROOT / "deploy/developer-sandboxes/remote-links", 0o755),
+            (SOURCE_ROOT / "deploy/slurm", 0o755),
+            (SOURCE_ROOT / "deploy/slurm/developer-sandboxes", 0o755),
+            (LIBEXEC.parent, 0o755),
+            (POLICY.parent, 0o755),
+            (SUDOERS.parent, 0o755),
+            (PLATFORM_HEALTH_SERVICE.parent, 0o755),
+            (STAGING_EXTERNAL_INSTALL_ROOT, 0o755),
+            (STAGING_EXTERNAL_CONSUMER.parent, 0o755),
+            (STAGING_EXTERNAL_CONFIG.parent, 0o700),
+            (STATE_ROOT, 0o700),
+            (RECEIPT_ROOT, 0o700),
+            (STAGING_BROKER_ROOT, 0o700),
+            (STAGING_ACCOUNTING_ROOT, 0o700),
+            (STAGING_INFRASTRUCTURE_PRODUCER_ROOT, 0o700),
+            (STAGING_INFRASTRUCTURE_PRODUCER_RECEIPTS, 0o700),
+            (STAGING_INFRASTRUCTURE_RECEIPT_ROOT, 0o700),
+            (STAGING_INFRASTRUCTURE_INSTALL_GENERATIONS, 0o700),
+            (UPGRADE_ROOT, 0o700),
+            (STAGE_ROOT, 0o700),
+        ):
+            parent_mode = 0o700 if directory.parent == STATE_ROOT else 0o755
+            if _ensure_root_directory(
+                directory,
+                mode=mode,
+                parent_mode=parent_mode,
+            ):
+                created_directories.append(directory)
+        for relative in SOURCE_ASSETS:
+            mode = (
+                0o440
+                if relative == SUDOERS_RELATIVE
+                else (0o755 if relative.parts[:2] == ("scripts", "ops") else 0o644)
+            )
+            target = SOURCE_ROOT / relative
+            if _atomic_install(target, assets[str(relative)], mode):
+                created_files.append(target)
+        authority_payload = assets["scripts/ops/developer_sandbox_node_authority.py"]
+        if _atomic_install(LIBEXEC, authority_payload, 0o755):
+            created_files.append(LIBEXEC)
+        policy_payload = _policy_payload(source_sha, source_tree, node, assets)
+        if _atomic_install(POLICY, policy_payload, 0o600):
+            created_files.append(POLICY)
+        system_installs = _system_install_assets(
+            assets,
+            replace=False,
+        )
+        for path in (
+            LOCK,
+            JOURNAL,
+            UPGRADE_JOURNAL,
+            STAGING_INFRASTRUCTURE_PRODUCER_LOCK,
+            STAGING_INFRASTRUCTURE_INSTALL_LOCK,
+        ):
+            if _atomic_install(path, b"", 0o600, parent_mode=0o700):
+                created_files.append(path)
+        source_sudoers = SOURCE_ROOT / SUDOERS_RELATIVE
+        _validate_sudoers(source_sudoers, label="node authority source")
+        if _atomic_install(SUDOERS, assets[str(SUDOERS_RELATIVE)], 0o440):
+            created_files.append(SUDOERS)
+        _validate_sudoers(SUDOERS, label="installed node authority")
+        policy = _read_policy()
+        _validate_runtime_assets(policy)
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "action": "bootstrap",
+            "node": node,
+            "source_sha": source_sha,
+            "source_tree": source_tree,
+            "system_installs": list(system_installs),
+            "status": "succeeded",
+        }
+    except Exception:
+        for _relative, target, mode, parent_mode in reversed(SYSTEM_INSTALL_ASSETS):
+            if target in preexisting_system_paths:
+                continue
+            try:
+                if target.exists() or target.is_symlink():
+                    _unlink_root_file(
+                        target,
+                        mode=mode,
+                        parent_mode=parent_mode,
+                    )
+            except OSError:
+                pass
+        for path in reversed(created_files):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        for path in reversed(created_directories):
+            try:
+                path.rmdir()
+            except OSError:
+                pass
+        try:
+            _systemd_daemon_reload()
+        except Exception:
+            pass
+        raise
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers.add_parser("transact", allow_abbrev=False)
+    subparsers.add_parser("check", allow_abbrev=False)
+    for command in ("bootstrap", "upgrade"):
+        install = subparsers.add_parser(command, allow_abbrev=False)
+        install.add_argument("--candidate-sha", required=True)
+        install.add_argument("--candidate-tree", required=True)
+        install.add_argument("--execute", action="store_true")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _parser().parse_args(list(argv) if argv is not None else None)
+    try:
+        if args.command in {"bootstrap", "upgrade"}:
+            if not args.execute:
+                result = {
+                    "schema_version": SCHEMA_VERSION,
+                    "action": args.command,
+                    "mutation_authorized": False,
+                    "candidate_sha": args.candidate_sha,
+                    "candidate_tree": args.candidate_tree,
+                    "external_root_required": True,
+                }
+            else:
+                result = (
+                    bootstrap(args.candidate_sha, args.candidate_tree)
+                    if args.command == "bootstrap"
+                    else upgrade(args.candidate_sha, args.candidate_tree)
+                )
+        else:
+            result = dispatch(args.command, _read_all_stdin())
+        sys.stdout.write(json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n")
+        return 0
+    except NodeAuthorityError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 1
+    except OSError:
+        sys.stderr.write("error: node authority filesystem operation failed safely\n")
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,15 @@
+[Unit]
+Description=Loom staging shared candidate and result namespace
+After=network-online.target
+Wants=network-online.target
+Before=loom-staging-external-slurm-authority.service
+
+[Mount]
+What=192.168.20.12:/shared_work2/loom/staging
+Where=/srv/loom/staging-shared
+Type=nfs4
+Options=rw,hard,nosuid,nodev,noexec,_netdev
+TimeoutSec=30
+
+[Install]
+WantedBy=multi-user.target

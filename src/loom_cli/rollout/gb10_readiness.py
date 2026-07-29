@@ -23,7 +23,7 @@ from loom_cli.rollout.systemd_readiness import (
 _HOST_RE = re.compile(r"trt-gb10-(?:[1-9]|1[0-5])\Z")
 _SERVICE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@-]*[.]service\Z")
 _KNOWN_HOSTS = Path("/etc/loom/staging-rollout-gb10-known-hosts")
-_SHARED_WORKER_REPOSITORY_ROOT = Path("/shared_work2/qianyi/.loom-staging-rollout/worker-repos")
+_SHARED_WORKER_REPOSITORY_ROOT = Path("/srv/loom/staging-shared/candidates")
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _IMAGE_TAG_RE = re.compile(r"^staging-[0-9a-f]{7}$")

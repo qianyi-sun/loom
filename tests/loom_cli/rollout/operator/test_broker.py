@@ -1052,6 +1052,9 @@ def test_staged_start_publishes_short_lock_detached_checkpoint_job(tmp_path: Pat
         store=store,
         lifecycle=StagedLifecycle(),
         bind_candidate=lambda: candidate,
+        prepare_admission=lambda found: deps.order.append(
+            "prepare-admission" if found == candidate else "wrong-candidate"
+        ),
         assess_preflight=assess,
         read_mutation_epoch=lambda: 7,
         new_request_id=lambda: "req-staged0001",

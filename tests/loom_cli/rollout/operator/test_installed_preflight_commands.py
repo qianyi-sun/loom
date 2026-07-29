@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,6 +13,7 @@ from loom_cli.rollout.operator.manifest_apply_contract import (
     server_side_apply_argv,
     server_side_schema_validation_argv,
 )
+from loom_cli.rollout.operator.model import APPROVED_REMOTE_URL, CandidateBinding
 from loom_cli.rollout.operator.readonly_preflight_authority import READONLY_KUBECONFIG_PATH
 from loom_cli.rollout.systemd_readiness import probe_user_manager_readonly
 from tests.loom_cli.rollout.operator.test_checkpoint_inventory_provider import _config
@@ -185,3 +188,180 @@ def test_candidate_source_ssh_has_sub_dag_cancellation_timeout(tmp_path: Path) -
 
     assert calls[0]["argv"] == ("ssh", "trt-gb10-1", "probe")
     assert calls[0]["timeout"] == 12
+
+
+@pytest.mark.parametrize("result_age", (timedelta(0), timedelta(minutes=59)))
+def test_prepare_admission_uses_only_fixed_exact_candidate_root_command(
+    tmp_path: Path,
+    result_age: timedelta,
+) -> None:
+    calls: list[dict[str, object]] = []
+    payload = {
+        "bootstrap_status": "converged",
+        "candidate_sha": "a" * 40,
+        "candidate_tree": "b" * 40,
+        "convergence_id": "c" * 64,
+        "generation": 1,
+        "kind": "staging_external_slurm_infrastructure_convergence",
+        "node_count": 14,
+        "receipt_path": (
+            "/var/lib/loom-developer-sandbox-node-authority/staging-infrastructure/"
+            + "a" * 40
+            + ".json"
+        ),
+        "receipt_sha256": "d" * 64,
+        "requested_at": (datetime.now(UTC) - result_age).isoformat().replace("+00:00", "Z"),
+        "result": "pass",
+        "schema_version": 1,
+        "source_controller": "oldlab-2",
+        "source_controller_host": "trt-eai-oldlab-2",
+    }
+
+    def run(argv, **kwargs):
+        calls.append({"argv": tuple(argv), **kwargs})
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+            stderr="",
+        )
+
+    commands = InstalledPreflightCommands(
+        _config(tmp_path),
+        _environment(),
+        run_subprocess=run,
+    )
+    candidate = CandidateBinding(
+        remote_url=APPROVED_REMOTE_URL,
+        target_ref="origin/dev",
+        resolved_sha="a" * 40,
+        image_tag="staging-aaaaaaa",
+        fetched_at="2026-07-19T12:00:00Z",
+        source_mode="sealed-cumulative",
+        resolved_tree="b" * 40,
+        approved_base_sha="c" * 40,
+    )
+
+    commands.prepare_admission(candidate)
+
+    assert calls == [
+        {
+            "argv": (
+                "/usr/bin/sudo",
+                "-n",
+                "/usr/local/libexec/loom-staging-external-slurm-authority",
+                "converge-infrastructure",
+                "--candidate-sha",
+                "a" * 40,
+                "--candidate-tree",
+                "b" * 40,
+            ),
+            "cwd": None,
+            "env": _environment(),
+            "input": None,
+            "timeout": 3720,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda payload: {**payload, "unexpected": True},
+        lambda payload: {key: value for key, value in payload.items() if key != "convergence_id"},
+        lambda payload: {**payload, "receipt_sha256": "not-a-digest"},
+        lambda payload: {**payload, "requested_at": "2020-01-01T00:00:00Z"},
+    ],
+)
+def test_prepare_admission_rejects_untrusted_producer_output(
+    tmp_path: Path,
+    mutate,
+) -> None:
+    payload = mutate(
+        {
+            "bootstrap_status": "converged",
+            "candidate_sha": "a" * 40,
+            "candidate_tree": "b" * 40,
+            "convergence_id": "c" * 64,
+            "generation": 1,
+            "kind": "staging_external_slurm_infrastructure_convergence",
+            "node_count": 14,
+            "receipt_path": (
+                "/var/lib/loom-developer-sandbox-node-authority/staging-infrastructure/"
+                + "a" * 40
+                + ".json"
+            ),
+            "receipt_sha256": "d" * 64,
+            "requested_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "result": "pass",
+            "schema_version": 1,
+            "source_controller": "oldlab-2",
+            "source_controller_host": "trt-eai-oldlab-2",
+        }
+    )
+    commands = InstalledPreflightCommands(
+        _config(tmp_path),
+        _environment(),
+        run_subprocess=lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+            stderr="",
+        ),
+    )
+    candidate = CandidateBinding(
+        remote_url=APPROVED_REMOTE_URL,
+        target_ref="origin/dev",
+        resolved_sha="a" * 40,
+        image_tag="staging-aaaaaaa",
+        fetched_at="2026-07-19T12:00:00Z",
+        source_mode="sealed-cumulative",
+        resolved_tree="b" * 40,
+        approved_base_sha="c" * 40,
+    )
+
+    with pytest.raises(RuntimeError, match="preparation result"):
+        commands.prepare_admission(candidate)
+
+
+def test_prepare_admission_rejects_noncanonical_producer_output(tmp_path: Path) -> None:
+    payload = {
+        "bootstrap_status": "converged",
+        "candidate_sha": "a" * 40,
+        "candidate_tree": "b" * 40,
+        "convergence_id": "c" * 64,
+        "generation": 1,
+        "kind": "staging_external_slurm_infrastructure_convergence",
+        "node_count": 14,
+        "receipt_path": (
+            "/var/lib/loom-developer-sandbox-node-authority/staging-infrastructure/"
+            + "a" * 40
+            + ".json"
+        ),
+        "receipt_sha256": "d" * 64,
+        "requested_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "result": "pass",
+        "schema_version": 1,
+        "source_controller": "oldlab-2",
+        "source_controller_host": "trt-eai-oldlab-2",
+    }
+    commands = InstalledPreflightCommands(
+        _config(tmp_path),
+        _environment(),
+        run_subprocess=lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(payload, sort_keys=True) + "\n",
+            stderr="",
+        ),
+    )
+    candidate = CandidateBinding(
+        remote_url=APPROVED_REMOTE_URL,
+        target_ref="origin/dev",
+        resolved_sha="a" * 40,
+        image_tag="staging-aaaaaaa",
+        fetched_at="2026-07-19T12:00:00Z",
+        source_mode="sealed-cumulative",
+        resolved_tree="b" * 40,
+        approved_base_sha="c" * 40,
+    )
+
+    with pytest.raises(RuntimeError, match="noncanonical"):
+        commands.prepare_admission(candidate)

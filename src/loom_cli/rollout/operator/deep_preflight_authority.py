@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
+from threading import Lock
 
 from loom_cli.rollout.final_attestation_admission import (
     FinalAttestationAdmission,
@@ -28,6 +29,78 @@ RuntimeSourcesFactory = Callable[
     [CandidateBinding, int, RuntimePurpose],
     PreflightRuntimeSources,
 ]
+AdmissionPreparer = Callable[[CandidateBinding], None]
+
+_DEFAULT_PREPARATION_TTL = timedelta(minutes=5)
+
+
+@dataclass(slots=True)
+class AdmissionPreparationLifecycle:
+    """Keep one bounded exact-candidate infrastructure preparation lease.
+
+    The callback is the only mutation boundary in the deep-preflight graph.
+    Source construction and assessment merely require a fresh lease; they
+    never attempt to manufacture the infrastructure they inspect.
+    """
+
+    prepare: AdmissionPreparer
+    now: Callable[[], datetime]
+    ttl: timedelta = _DEFAULT_PREPARATION_TTL
+    _candidate_identity: tuple[str, str] | None = None
+    _prepared_at: datetime | None = None
+    _lock: Lock | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            not callable(self.prepare)
+            or not callable(self.now)
+            or not timedelta(0) < self.ttl <= timedelta(minutes=30)
+        ):
+            raise ValueError("admission preparation lifecycle is invalid")
+        self._lock = Lock()
+
+    @staticmethod
+    def _identity(candidate: CandidateBinding) -> tuple[str, str]:
+        if candidate.resolved_tree is None:
+            raise ValueError("admission preparation candidate tree is unavailable")
+        return candidate.resolved_sha, candidate.resolved_tree
+
+    def prepare_admission(self, candidate: CandidateBinding) -> None:
+        """Converge once for the exact candidate, refreshing an expired lease."""
+        identity = self._identity(candidate)
+        lock = self._lock
+        if lock is None:  # pragma: no cover - dataclass initialization invariant
+            raise ValueError("admission preparation lifecycle is unavailable")
+        with lock:
+            observed_at = self._timestamp()
+            if self._is_fresh(identity, observed_at):
+                return
+            # Publish freshness only after the producer returns successfully.
+            # A failed producer therefore cannot leave a usable lease behind.
+            self.prepare(candidate)
+            completed_at = self._timestamp()
+            self._candidate_identity = identity
+            self._prepared_at = completed_at
+
+    def require_fresh(self, candidate: CandidateBinding) -> None:
+        """Fail closed unless prepare_admission completed recently."""
+        identity = self._identity(candidate)
+        if not self._is_fresh(identity, self._timestamp()):
+            raise ValueError("admission infrastructure is not freshly prepared")
+
+    def _timestamp(self) -> datetime:
+        value = self.now()
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("admission preparation clock must be timezone-aware")
+        return value
+
+    def _is_fresh(self, identity: tuple[str, str], observed_at: datetime) -> bool:
+        prepared_at = self._prepared_at
+        return bool(
+            self._candidate_identity == identity
+            and prepared_at is not None
+            and timedelta(0) <= observed_at - prepared_at <= self.ttl
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,9 +112,15 @@ class DeepPreflightAuthority:
     read_mutation_epoch: Callable[[], int]
     now: Callable[[], datetime]
     max_concurrency: int = 8
+    admission_preparation: AdmissionPreparationLifecycle | None = None
 
     def assess(self, candidate: CandidateBinding, mutation_epoch: int) -> PreflightAssessment:
         return self.admission_orchestrator().assess(candidate, mutation_epoch)
+
+    def prepare_admission(self, candidate: CandidateBinding) -> None:
+        """Enter the one explicit infrastructure mutation surface."""
+        if self.admission_preparation is not None:
+            self.admission_preparation.prepare_admission(candidate)
 
     def admission_orchestrator(self) -> CandidatePreflightOrchestrator:
         return self._orchestrator(RuntimePurpose.ADMISSION)
@@ -64,6 +143,10 @@ class DeepPreflightAuthority:
         expected_coverage_digest: str,
     ) -> FinalAttestationAdmission:
         """Reload and recheck exact Tier 0 authority before protected apply."""
+        # The worker is a distinct process from the broker. Refresh (or establish)
+        # its bounded lease before collecting final read-only evidence.
+        self.prepare_admission(candidate)
+        self._require_prepared(candidate)
         attestation = self.attestation_store.read(attestation_digest)
         if (
             attestation.registry_digest != expected_registry_digest
@@ -84,6 +167,10 @@ class DeepPreflightAuthority:
             now=self.now(),
             max_concurrency=self.max_concurrency,
         )
+
+    def _require_prepared(self, candidate: CandidateBinding) -> None:
+        if self.admission_preparation is not None:
+            self.admission_preparation.require_fresh(candidate)
 
     def _orchestrator(self, purpose: RuntimePurpose) -> CandidatePreflightOrchestrator:
         def runtime_factory(
@@ -113,6 +200,7 @@ class DeepPreflightAuthority:
 
 
 __all__ = [
+    "AdmissionPreparationLifecycle",
     "DeepPreflightAuthority",
     "RuntimePurpose",
     "RuntimeSourcesFactory",

@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ctypes
+import errno
 import fcntl
 import hashlib
 import json
 import os
 import pwd
 import re
+import resource
 import shlex
 import socket
 import stat
@@ -57,19 +60,135 @@ _CGROUP_KEYS = {
 _SAFE_NAME = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _CANDIDATE_RE = re.compile(r"^[0-9a-f]{40}$")
 _SNAPSHOT_NAME_RE = re.compile(r"^[0-9]{8}T[0-9]{6}\.[0-9]{6}Z$")
+_SNAPSHOT_RELATIVE_PATHS = (
+    "etc/slurm/slurm.conf",
+    "etc/slurm/cgroup.conf",
+    "etc/docker/daemon.json",
+    "usr/libexec/loom-slurm-job-cgroup-guard",
+    "etc/loom/slurm-job-cgroup-guard.json",
+    "etc/systemd/system/loom-slurm-job-cgroup-guard.service",
+)
+_SNAPSHOT_ROW_FIELDS = {
+    "path",
+    "present",
+    "mode",
+    "uid",
+    "gid",
+    "nlink",
+    "size",
+    "sha256",
+}
+_POLICY_JOURNAL_COMMON_FIELDS = {
+    "schema_version",
+    "operation",
+    "cluster",
+    "host",
+    "slurm_node",
+    "candidate_sha",
+    "snapshot",
+    "accounting_snapshot",
+    "restart",
+    "apply_accounting",
+    "phase",
+    "created_at",
+    "updated_at",
+}
+_POLICY_JOURNAL_PHASES = {
+    "prepared",
+    "files_written",
+    "accounting_applied",
+    "services_reconfigured",
+    "verified",
+    "committed",
+    "rolled_back",
+    "rollback_failed",
+    "recovery_failed",
+}
 _STATE_RELATIVE = Path("var/lib/loom-developer-sandbox-slurm-policy")
 _GUARD_STATUS_RELATIVE = _STATE_RELATIVE / "guard-status.json"
 _GUARD_STATUS_MAX_AGE = timedelta(seconds=30)
 _ALLOCATION_PROBE_RELATIVE = _STATE_RELATIVE / "allocation-probes"
+_RUNTIME_PROOF_RELATIVE = _STATE_RELATIVE / "runtime-proofs"
+_RUNTIME_PROOF_TRANSACTION_RELATIVE = _STATE_RELATIVE / "runtime-proof-transactions"
+_RUNTIME_PROOF_HIGH_WATER_RELATIVE = _STATE_RELATIVE / "runtime-proof-high-water"
 _ALLOCATION_PROBE_MAX_AGE = timedelta(minutes=15)
 _ALLOCATION_POLL_SECONDS = 1.0
 _ALLOCATION_TIMEOUT_SECONDS = 180.0
-_ALLOCATION_GENERATION_RE = re.compile(r"^[0-9a-f]{12}$")
+_ALLOCATION_PROOF_EXPIRY_MARGIN = timedelta(seconds=30)
+_ALLOCATION_GENERATION_RE = re.compile(r"^[0-9a-f]{64}$")
+_LEGACY_ALLOCATION_GENERATION_RE = re.compile(r"^[0-9a-f]{12}$")
 _COMBINED_RUNTIME_ATTESTATION_ROOT = Path(
     "/var/lib/loom-shared-capacity/runtime-attestations",
 )
 _DOMAIN_RUNTIME_ATTESTATION_ROOT = Path("/var/lib/loom-developer-domain-attestations")
 _FLEET_ATTESTATION_ROOT = Path("/var/lib/loom-developer-sandbox-links/attestations")
+_NODE_TRANSPORT = Path("/usr/local/libexec/loom-developer-sandbox-node-transport")
+_RUNTIME_PROOF_SOURCES = {
+    "collector": ("oldlab-2", "trt-eai-oldlab-2"),
+    "oldlab": ("oldlab-1", "trt-eai-oldlab-1"),
+    "gb10": ("trt-gb10-1", "gx10-01c7"),
+}
+_RUNTIME_DOMAIN_HOSTS = {
+    "oldlab": (
+        "trt-eai-oldlab-1",
+        "trt-eai-oldlab-2",
+        "trt-eai-oldlab-3",
+        "trt-eai-oldlab-4",
+        "trt-eai-oldlab-5",
+    ),
+    "gb10": (
+        "gx10-01c7",
+        "gx10-0fca",
+        "gx10-0f0d",
+        "gx10-0d93",
+        "gx10-1036",
+        "gx10-1000",
+        "gx10-db22",
+        "gx10-16f6",
+        "gx10-0f82",
+        "gx10-c38b",
+        "gx10-e45f",
+        "gx10-fc5d",
+        "gx10-0a49",
+        "gx10-0152",
+    ),
+}
+_RUNTIME_FLEET_NODES = (
+    "oldlab-1",
+    "oldlab-2",
+    "oldlab-3",
+    "oldlab-4",
+    "oldlab-5",
+    "trt-gb10-1",
+    "trt-gb10-2",
+    "trt-gb10-3",
+    "trt-gb10-4",
+    "trt-gb10-5",
+    "trt-gb10-6",
+    "trt-gb10-8",
+    "trt-gb10-9",
+    "trt-gb10-10",
+    "trt-gb10-11",
+    "trt-gb10-12",
+    "trt-gb10-13",
+    "trt-gb10-14",
+    "trt-gb10-15",
+)
+_RUNTIME_PROOF_FILE_NAMES = frozenset(
+    {
+        "combined.json",
+        "fleet.json",
+        "oldlab.json",
+        "oldlab.sig",
+        "oldlab.pub",
+        "gb10.json",
+        "gb10.sig",
+        "gb10.pub",
+        "manifest.json",
+    },
+)
+_RENAME_NOREPLACE = 1
+_AT_FDCWD = -100
 _TERMINAL_JOB_STATES = frozenset(
     {
         "BOOT_FAIL",
@@ -84,6 +203,12 @@ _TERMINAL_JOB_STATES = frozenset(
     },
 )
 _ENV_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+_SANDBOXES = ("qianyi", "hongjian", "devansh")
+_SANDBOX_SERVICE_USERS = {
+    "qianyi": "loom-sandbox-qianyi",
+    "hongjian": "loom-sandbox-hongjian",
+    "devansh": "loom-sandbox-devansh",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +237,21 @@ class Profile:
     qos_max_jobs_per_user: int
     qos_max_submit_jobs_per_user: int
     parent_group_tres: tuple[str, ...]
+
+
+def _sandbox_account(profile: Profile, sandbox: str) -> str:
+    user = _sandbox_service_user(profile, sandbox)
+    return profile.child_accounts[profile.users.index(user)]
+
+
+def _sandbox_service_user(profile: Profile, sandbox: str) -> str:
+    try:
+        user = _SANDBOX_SERVICE_USERS[sandbox]
+    except KeyError as exc:
+        raise PolicyError("sandbox must be one of the fixed sandbox labels") from exc
+    if user not in profile.users:
+        raise PolicyError("sandbox service user is absent from profile accounting")
+    return user
 
 
 def _table(raw: Mapping[str, Any], key: str) -> dict[str, Any]:
@@ -208,6 +348,8 @@ def load_profile(path: Path) -> Profile:
     )
     if len(users) != 3 or len(child_accounts) != 3:
         raise PolicyError("exactly three sandbox users and child accounts are required")
+    if users != tuple(_SANDBOX_SERVICE_USERS[sandbox] for sandbox in _SANDBOXES):
+        raise PolicyError("accounting.users must be the fixed sandbox service users")
     cluster = raw.get("cluster")
     controller = raw.get("controller")
     submit_host = raw.get("submit_host")
@@ -794,6 +936,7 @@ def _read_exact_env_values(
 def allocation_node_check(
     profile: Profile,
     *,
+    sandbox: str,
     candidate_sha: str,
     candidate_root: Path,
     worker_env: Path,
@@ -808,6 +951,14 @@ def allocation_node_check(
     result_path: Path,
 ) -> dict[str, Any]:
     """Run the secret-safe compute-side portion of the #827 matrix."""
+    account = _sandbox_account(profile, sandbox)
+    service_user = _sandbox_service_user(profile, sandbox)
+    try:
+        sandbox_identity = pwd.getpwnam(service_user)
+    except KeyError as exc:
+        raise PolicyError("allocation-side sandbox user is unavailable") from exc
+    if (sandbox_identity.pw_uid, sandbox_identity.pw_gid) != (batch_uid, batch_gid):
+        raise PolicyError("allocation-side sandbox UID/GID binding drifted")
     if os.geteuid() != batch_uid or os.getegid() != batch_gid:
         raise PolicyError("allocation-side numeric batch identity drifted")
     host = _canonical_host()
@@ -919,6 +1070,8 @@ def allocation_node_check(
         raise PolicyError("allocation-side Docker Compose cgroup binding drifted")
     result = {
         "schema_version": 1,
+        "sandbox": sandbox,
+        "account": account,
         "candidate_sha": candidate_sha,
         "candidate_tree": expected_tree,
         "host": host,
@@ -1166,6 +1319,47 @@ def _run(argv: Sequence[str], *, timeout: float = 60) -> str:
     return completed.stdout
 
 
+def _run_bounded_stdout(
+    argv: Sequence[str],
+    *,
+    input_bytes: bytes | None = None,
+    timeout: float,
+    max_bytes: int,
+) -> bytes:
+    def limit_output() -> None:
+        resource.setrlimit(resource.RLIMIT_FSIZE, (max_bytes, max_bytes))
+
+    try:
+        with tempfile.TemporaryFile() as output:
+            completed = subprocess.run(
+                list(argv),
+                check=False,
+                input=input_bytes,
+                stdout=output,
+                stderr=subprocess.DEVNULL,
+                timeout=timeout,
+                preexec_fn=limit_output,
+                env={
+                    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                    "LANG": "C.UTF-8",
+                    "LC_ALL": "C.UTF-8",
+                },
+            )
+            if completed.returncode:
+                raise PolicyError(
+                    f"{argv[0]} failed safely with exit code {completed.returncode}",
+                )
+            size = os.fstat(output.fileno()).st_size
+            if size > max_bytes:
+                raise PolicyError(f"{argv[0]} returned oversized output")
+            output.seek(0)
+            return output.read(max_bytes + 1)
+    except PolicyError:
+        raise
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PolicyError(f"{argv[0]} failed safely before completion") from exc
+
+
 def _fsync_directory(path: Path) -> None:
     descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
     try:
@@ -1343,25 +1537,55 @@ def _snapshot(root: Path, files: Mapping[Path, str]) -> Path:
         enforce_root_ownership=enforce_root_ownership,
         create=False,
     )
+    relative_paths = tuple(path.relative_to(root).as_posix() for path in files)
+    if relative_paths != _SNAPSHOT_RELATIVE_PATHS:
+        raise PolicyError("Slurm policy snapshot input set is not closed")
     manifest: dict[str, Any] = {"schema_version": 1, "files": []}
     for path in files:
         relative = path.relative_to(root)
         target = snapshot / relative
-        _prepare_private_directory(
-            target.parent,
-            enforce_root_ownership=enforce_root_ownership,
-            create=True,
-        )
-        if path.exists():
-            content = path.read_bytes()
-            mode = stat.S_IMODE(path.stat().st_mode)
-            _atomic_write(target, content.decode("utf-8"), mode=mode)
+        snapshot_parent = snapshot
+        for component in relative.parent.parts:
+            snapshot_parent /= component
+            _prepare_private_directory(
+                snapshot_parent,
+                enforce_root_ownership=enforce_root_ownership,
+                create=True,
+            )
+        if path.exists() or path.is_symlink():
+            content, metadata = _read_bound_regular_file(
+                path,
+                expected_uid=0 if enforce_root_ownership else os.geteuid(),
+                expected_gid=0 if enforce_root_ownership else os.getegid(),
+                expected_mode=None,
+                description="live Slurm policy snapshot input",
+            )
+            mode = stat.S_IMODE(metadata.st_mode)
+            _atomic_write(target, content.decode("utf-8"), mode=0o600)
             manifest["files"].append(
-                {"path": str(relative), "present": True, "mode": mode},
+                {
+                    "path": relative.as_posix(),
+                    "present": True,
+                    "mode": mode,
+                    "uid": metadata.st_uid,
+                    "gid": metadata.st_gid,
+                    "nlink": metadata.st_nlink,
+                    "size": len(content),
+                    "sha256": _sha256(content),
+                },
             )
         else:
             manifest["files"].append(
-                {"path": str(relative), "present": False, "mode": None},
+                {
+                    "path": relative.as_posix(),
+                    "present": False,
+                    "mode": None,
+                    "uid": None,
+                    "gid": None,
+                    "nlink": None,
+                    "size": None,
+                    "sha256": None,
+                },
             )
     _atomic_write(
         snapshot / "manifest.json",
@@ -1369,6 +1593,7 @@ def _snapshot(root: Path, files: Mapping[Path, str]) -> Path:
         mode=0o600,
     )
     _fsync_directory(snapshot)
+    _snapshot_manifest_rows(root, snapshot)
     return snapshot
 
 
@@ -1478,13 +1703,84 @@ def _load_journal(path: Path) -> dict[str, Any] | None:
             chunks.append(chunk)
             if sum(len(item) for item in chunks) > 1024 * 1024:
                 raise PolicyError("durable Slurm policy journal is too large")
-        payload = json.loads(b"".join(chunks).decode("utf-8"))
+        raw = b"".join(chunks)
+        payload = json.loads(raw.decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise PolicyError("durable Slurm policy journal is unreadable") from exc
     finally:
         os.close(descriptor)
-    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != 1
+        or raw
+        != (
+            json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"
+        ).encode("ascii")
+    ):
         raise PolicyError("durable Slurm policy journal is unsafe")
+    return payload
+
+
+def _load_policy_journal(
+    path: Path,
+    *,
+    root: Path,
+    profile: Profile,
+    slurm_node: str | None,
+) -> dict[str, Any] | None:
+    payload = _load_journal(path)
+    if payload is None:
+        return None
+    operation = payload.get("operation")
+    expected_fields = set(_POLICY_JOURNAL_COMMON_FIELDS)
+    if operation == "rollback":
+        expected_fields.add("rollback_target")
+    if (
+        set(payload) != expected_fields
+        or operation not in {"apply", "rollback"}
+        or payload.get("cluster") != profile.cluster
+        or payload.get("host") != _canonical_host()
+        or payload.get("slurm_node") != slurm_node
+        or _CANDIDATE_RE.fullmatch(str(payload.get("candidate_sha", ""))) is None
+        or type(payload.get("restart")) is not bool
+        or type(payload.get("apply_accounting")) is not bool
+        or payload.get("phase") not in _POLICY_JOURNAL_PHASES
+        or not isinstance(payload.get("snapshot"), str)
+        or (
+            payload.get("accounting_snapshot") is not None
+            and not isinstance(payload.get("accounting_snapshot"), str)
+        )
+        or not isinstance(payload.get("created_at"), str)
+        or not isinstance(payload.get("updated_at"), str)
+    ):
+        raise PolicyError("durable Slurm policy journal binding is invalid")
+    if root == Path("/"):
+        if slurm_node is None or profile.host_aliases.get(slurm_node) != payload["host"]:
+            raise PolicyError("durable Slurm policy journal host binding is invalid")
+    elif slurm_node is not None:
+        raise PolicyError("offline Slurm policy journal has a live node binding")
+    if payload["apply_accounting"] is True and slurm_node != profile.controller:
+        raise PolicyError("durable Slurm policy accounting binding is invalid")
+    if payload["operation"] == "apply" and "rollback_target" in payload:
+        raise PolicyError("durable Slurm apply journal contains a rollback target")
+    if payload["operation"] == "rollback" and not isinstance(payload.get("rollback_target"), str):
+        raise PolicyError("durable Slurm rollback journal lacks its exact target")
+    try:
+        created_at = datetime.fromisoformat(payload["created_at"])
+        updated_at = datetime.fromisoformat(payload["updated_at"])
+    except ValueError as exc:
+        raise PolicyError("durable Slurm policy journal timestamp is invalid") from exc
+    if created_at.tzinfo is None or updated_at.tzinfo is None or updated_at < created_at:
+        raise PolicyError("durable Slurm policy journal timestamp is invalid")
+    snapshot = _validate_snapshot_path(root, Path(payload["snapshot"]))
+    accounting = payload["accounting_snapshot"]
+    if accounting is not None:
+        _validate_accounting_snapshot_path(root, snapshot, Path(accounting))
+    if payload["apply_accounting"] is not (accounting is not None):
+        raise PolicyError("durable Slurm policy accounting path binding is invalid")
+    rollback_target = payload.get("rollback_target")
+    if rollback_target is not None:
+        _validate_snapshot_path(root, Path(rollback_target))
     return payload
 
 
@@ -1576,41 +1872,222 @@ def _read_private_json_file(
         os.close(descriptor)
 
 
-def _restore_snapshot(root: Path, snapshot: Path) -> None:
+def _read_bound_regular_file(
+    path: Path,
+    *,
+    expected_uid: int,
+    expected_gid: int,
+    expected_mode: int | None,
+    description: str,
+    max_bytes: int = 8 * 1024 * 1024,
+) -> tuple[bytes, os.stat_result]:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        lexical = path.lstat()
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise PolicyError(f"{description} is unavailable") from exc
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            stat.S_ISLNK(lexical.st_mode)
+            or not stat.S_ISREG(lexical.st_mode)
+            or not stat.S_ISREG(opened.st_mode)
+            or lexical.st_uid != expected_uid
+            or lexical.st_gid != expected_gid
+            or opened.st_uid != expected_uid
+            or opened.st_gid != expected_gid
+            or lexical.st_nlink != 1
+            or opened.st_nlink != 1
+            or (expected_mode is not None and stat.S_IMODE(opened.st_mode) != expected_mode)
+            or (lexical.st_dev, lexical.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise PolicyError(f"{description} metadata is unsafe")
+        content = bytearray()
+        while True:
+            chunk = os.read(descriptor, 65536)
+            if not chunk:
+                break
+            content.extend(chunk)
+            if len(content) > max_bytes:
+                raise PolicyError(f"{description} is too large")
+        after = os.fstat(descriptor)
+        rebound = path.lstat()
+        identity = (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_mode,
+            opened.st_uid,
+            opened.st_gid,
+            opened.st_nlink,
+            opened.st_size,
+            opened.st_mtime_ns,
+            opened.st_ctime_ns,
+        )
+        if identity != (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_uid,
+            after.st_gid,
+            after.st_nlink,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ) or identity != (
+            rebound.st_dev,
+            rebound.st_ino,
+            rebound.st_mode,
+            rebound.st_uid,
+            rebound.st_gid,
+            rebound.st_nlink,
+            rebound.st_size,
+            rebound.st_mtime_ns,
+            rebound.st_ctime_ns,
+        ):
+            raise PolicyError(f"{description} changed during read")
+        if len(content) != opened.st_size:
+            raise PolicyError(f"{description} size changed during read")
+        return bytes(content), opened
+    finally:
+        os.close(descriptor)
+
+
+def _snapshot_manifest_rows(root: Path, snapshot: Path) -> list[dict[str, Any]]:
     snapshot = _validate_snapshot_path(root, snapshot)
+    enforce_root_ownership = root == Path("/")
+    expected_uid, expected_gid = (0, 0) if enforce_root_ownership else (os.geteuid(), os.getegid())
     manifest = _read_private_json_file(
         snapshot / "manifest.json",
-        enforce_root_ownership=root == Path("/"),
+        enforce_root_ownership=enforce_root_ownership,
         description="Slurm policy snapshot manifest",
     )
-    if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
+    rows = manifest.get("files") if isinstance(manifest, dict) else None
+    if (
+        not isinstance(manifest, dict)
+        or set(manifest) != {"schema_version", "files"}
+        or manifest.get("schema_version") != 1
+    ):
         raise PolicyError("Slurm policy snapshot manifest is invalid")
-    rows = manifest.get("files")
-    if not isinstance(rows, list):
+    if not isinstance(rows, list) or len(rows) != len(_SNAPSHOT_RELATIVE_PATHS):
         raise PolicyError("Slurm policy snapshot file list is invalid")
+    actual_paths: list[str] = []
+    expected_archive_files = {"manifest.json"}
+    checked: list[dict[str, Any]] = []
     for row in rows:
-        if not isinstance(row, dict) or not isinstance(row.get("path"), str):
+        if (
+            not isinstance(row, dict)
+            or set(row) != _SNAPSHOT_ROW_FIELDS
+            or not isinstance(row.get("path"), str)
+        ):
             raise PolicyError("Slurm policy snapshot row is invalid")
         relative = Path(row["path"])
-        if relative.is_absolute() or ".." in relative.parts:
+        if relative.is_absolute() or ".." in relative.parts or relative.as_posix() != row["path"]:
             raise PolicyError("Slurm policy snapshot path escapes the root")
+        actual_paths.append(row["path"])
+        archived = snapshot / relative
+        _prepare_private_directory(
+            archived.parent,
+            enforce_root_ownership=enforce_root_ownership,
+            create=False,
+        )
+        if row.get("present") is True:
+            if (
+                type(row.get("mode")) is not int
+                or not 0 <= row["mode"] <= 0o7777
+                or row["mode"] & 0o022
+                or row.get("uid") != expected_uid
+                or row.get("gid") != expected_gid
+                or row.get("nlink") != 1
+                or type(row.get("size")) is not int
+                or row["size"] < 0
+                or _ALLOCATION_GENERATION_RE.fullmatch(str(row.get("sha256", ""))) is None
+            ):
+                raise PolicyError("Slurm policy snapshot metadata is invalid")
+            content, _metadata = _read_bound_regular_file(
+                archived,
+                expected_uid=expected_uid,
+                expected_gid=expected_gid,
+                expected_mode=0o600,
+                description="Slurm policy snapshot content",
+            )
+            if len(content) != row["size"] or _sha256(content) != row["sha256"]:
+                raise PolicyError("Slurm policy snapshot content identity drifted")
+            expected_archive_files.add(row["path"])
+        elif row.get("present") is False:
+            if any(
+                row.get(field) is not None for field in _SNAPSHOT_ROW_FIELDS - {"path", "present"}
+            ):
+                raise PolicyError("absent Slurm policy snapshot row contains metadata")
+            if archived.exists() or archived.is_symlink():
+                raise PolicyError("absent Slurm policy snapshot has foreign content")
+        else:
+            raise PolicyError("Slurm policy snapshot presence is invalid")
+        checked.append(dict(row))
+    if tuple(actual_paths) != _SNAPSHOT_RELATIVE_PATHS:
+        raise PolicyError("Slurm policy snapshot file set is not closed")
+    accounting_snapshot = snapshot / "accounting-cas.json"
+    if accounting_snapshot.exists() or accounting_snapshot.is_symlink():
+        _read_private_json_file(
+            accounting_snapshot,
+            enforce_root_ownership=enforce_root_ownership,
+            description="Loom accounting CAS snapshot",
+        )
+        expected_archive_files.add("accounting-cas.json")
+    actual_archive_files: set[str] = set()
+    for directory, directory_names, file_names in os.walk(snapshot, followlinks=False):
+        directory_path = Path(directory)
+        _prepare_private_directory(
+            directory_path,
+            enforce_root_ownership=enforce_root_ownership,
+            create=False,
+        )
+        for name in directory_names:
+            child = directory_path / name
+            metadata = child.lstat()
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+                raise PolicyError("Slurm policy snapshot contains an unsafe directory")
+        for name in file_names:
+            actual_archive_files.add((directory_path / name).relative_to(snapshot).as_posix())
+    if actual_archive_files != expected_archive_files:
+        raise PolicyError("Slurm policy snapshot archive set is not closed")
+    return checked
+
+
+def _restore_snapshot(root: Path, snapshot: Path) -> None:
+    rows = _snapshot_manifest_rows(root, snapshot)
+    for row in rows:
+        relative = Path(row["path"])
         target = root / relative
         if row.get("present") is True:
             source = snapshot / relative
-            try:
-                content = source.read_text(encoding="utf-8")
-            except OSError as exc:
-                raise PolicyError("Slurm policy snapshot content is unavailable") from exc
-            mode = row.get("mode")
-            if type(mode) is not int:
-                raise PolicyError("Slurm policy snapshot mode is invalid")
-            _atomic_write(target, content, mode=mode)
+            content, _metadata = _read_bound_regular_file(
+                source,
+                expected_uid=0 if root == Path("/") else os.geteuid(),
+                expected_gid=0 if root == Path("/") else os.getegid(),
+                expected_mode=0o600,
+                description="Slurm policy snapshot content",
+            )
+            _atomic_write(target, content.decode("utf-8"), mode=row["mode"])
+            restored, metadata = _read_bound_regular_file(
+                target,
+                expected_uid=row["uid"],
+                expected_gid=row["gid"],
+                expected_mode=row["mode"],
+                description="restored Slurm policy file",
+            )
+            if (
+                metadata.st_nlink != row["nlink"]
+                or len(restored) != row["size"]
+                or _sha256(restored) != row["sha256"]
+            ):
+                raise PolicyError("restored Slurm policy file identity drifted")
         elif row.get("present") is False:
             target.unlink(missing_ok=True)
             if target.parent.exists():
                 _fsync_directory(target.parent)
-        else:
-            raise PolicyError("Slurm policy snapshot presence is invalid")
+            if target.exists() or target.is_symlink():
+                raise PolicyError("restored Slurm policy file should be absent")
 
 
 def _accounting_desired_state(profile: Profile) -> dict[str, Any]:
@@ -1772,11 +2249,41 @@ def _load_accounting_snapshot(path: Path) -> dict[str, Any]:
     )
     if (
         not isinstance(payload, dict)
+        or set(payload) != {"schema_version", "cluster", "before", "desired"}
         or payload.get("schema_version") != 1
+        or not isinstance(payload.get("cluster"), str)
         or not isinstance(payload.get("before"), dict)
         or not isinstance(payload.get("desired"), dict)
     ):
         raise PolicyError("Loom accounting CAS snapshot is unsafe")
+    return payload
+
+
+def _validated_accounting_snapshot(
+    profile: Profile,
+    path: Path,
+) -> dict[str, Any]:
+    payload = _load_accounting_snapshot(path)
+    desired = _accounting_desired_state(profile)
+    before = payload["before"]
+    if (
+        payload["cluster"] != profile.cluster
+        or payload["desired"] != desired
+        or set(before) != {"qos", "accounts", "associations"}
+    ):
+        raise PolicyError("Loom accounting CAS snapshot binding drifted")
+    for category, desired_rows in desired.items():
+        before_rows = before.get(category)
+        if not isinstance(before_rows, dict) or not set(before_rows).issubset(desired_rows):
+            raise PolicyError("Loom accounting CAS snapshot schema is invalid")
+        for identity, row in before_rows.items():
+            expected_row = desired_rows[identity]
+            if (
+                not isinstance(row, dict)
+                or set(row) != set(expected_row)
+                or any(not isinstance(value, str) for value in row.values())
+            ):
+                raise PolicyError("Loom accounting CAS snapshot row is invalid")
     return payload
 
 
@@ -1999,9 +2506,7 @@ def _apply_accounting(
 
 
 def _restore_accounting(profile: Profile, path: Path) -> None:
-    snapshot = _load_accounting_snapshot(path)
-    if snapshot.get("cluster") != profile.cluster:
-        raise PolicyError("Loom accounting CAS snapshot cluster drifted")
+    snapshot = _validated_accounting_snapshot(profile, path)
     before = snapshot["before"]
     desired = snapshot["desired"]
     current = _accounting_state(profile)
@@ -2218,43 +2723,34 @@ def _restore_services(root: Path, profile: Profile, slurm_node: str) -> None:
 
 
 def _snapshot_readback(root: Path, snapshot: Path) -> dict[str, Any]:
-    snapshot = _validate_snapshot_path(root, snapshot)
-    manifest = _read_private_json_file(
-        snapshot / "manifest.json",
-        enforce_root_ownership=root == Path("/"),
-        description="Slurm policy snapshot manifest",
-    )
-    rows = manifest.get("files") if isinstance(manifest, dict) else None
-    if not isinstance(rows, list):
-        raise PolicyError("Slurm policy snapshot file list is invalid")
+    rows = _snapshot_manifest_rows(root, snapshot)
     checked: list[str] = []
     for row in rows:
-        if not isinstance(row, dict) or not isinstance(row.get("path"), str):
-            raise PolicyError("Slurm policy snapshot row is invalid")
         relative = Path(row["path"])
-        if relative.is_absolute() or ".." in relative.parts:
-            raise PolicyError("Slurm policy snapshot path escapes the root")
         live = root / relative
-        archived = snapshot / relative
         if row.get("present") is True:
-            try:
-                if live.read_bytes() != archived.read_bytes():
-                    raise PolicyError("restored Slurm policy file readback drifted")
-            except OSError as exc:
-                raise PolicyError("restored Slurm policy file is unavailable") from exc
+            content, metadata = _read_bound_regular_file(
+                live,
+                expected_uid=row["uid"],
+                expected_gid=row["gid"],
+                expected_mode=row["mode"],
+                description="restored Slurm policy file",
+            )
+            if (
+                metadata.st_nlink != row["nlink"]
+                or len(content) != row["size"]
+                or _sha256(content) != row["sha256"]
+            ):
+                raise PolicyError("restored Slurm policy file readback drifted")
         elif row.get("present") is False:
-            if live.exists():
+            if live.exists() or live.is_symlink():
                 raise PolicyError("restored Slurm policy file should be absent")
-        else:
-            raise PolicyError("Slurm policy snapshot presence is invalid")
         checked.append(str(relative))
     return {"converged": True, "snapshot": str(snapshot), "files": checked}
 
 
 def _accounting_snapshot_matches(profile: Profile, snapshot: Path) -> None:
-    payload = _load_accounting_snapshot(snapshot)
-    if payload.get("cluster") != profile.cluster:
-        raise PolicyError("restored Loom accounting snapshot cluster drifted")
+    payload = _validated_accounting_snapshot(profile, snapshot)
     if _accounting_state(profile) != payload["before"]:
         raise PolicyError("restored Loom accounting readback drifted")
 
@@ -2440,23 +2936,88 @@ def _wait_for_guard_status(
     raise PolicyError("cgroup guard did not publish matching fresh status") from last_error
 
 
-def _allocation_probe_path(root: Path, profile: Profile, candidate_sha: str) -> Path:
-    return root / _ALLOCATION_PROBE_RELATIVE / profile.cluster / f"{candidate_sha}.json"
+def _allocation_state_base(root: Path, profile: Profile, sandbox: str) -> Path:
+    _sandbox_account(profile, sandbox)
+    return root / _ALLOCATION_PROBE_RELATIVE / profile.cluster / sandbox
 
 
-def _allocation_inflight_path(root: Path, profile: Profile, candidate_sha: str) -> Path:
-    return root / _ALLOCATION_PROBE_RELATIVE / profile.cluster / f"{candidate_sha}.inflight.json"
+def _allocation_probe_path(
+    root: Path,
+    profile: Profile,
+    sandbox: str,
+    candidate_sha: str,
+) -> Path:
+    return _allocation_state_base(root, profile, sandbox) / f"{candidate_sha}.json"
 
 
-def _allocation_matrix_path(root: Path, profile: Profile, candidate_sha: str) -> Path:
-    return root / _ALLOCATION_PROBE_RELATIVE / profile.cluster / f"{candidate_sha}.matrix.json"
+def _allocation_inflight_path(
+    root: Path,
+    profile: Profile,
+    sandbox: str,
+    candidate_sha: str,
+) -> Path:
+    return _allocation_state_base(root, profile, sandbox) / f"{candidate_sha}.inflight.json"
+
+
+def _allocation_matrix_path(
+    root: Path,
+    profile: Profile,
+    sandbox: str,
+    candidate_sha: str,
+) -> Path:
+    return _allocation_state_base(root, profile, sandbox) / f"{candidate_sha}.matrix.json"
 
 
 def _allocation_generation_id(runtime_attestation: Mapping[str, Any]) -> str:
-    receipt_sha256 = runtime_attestation.get("receipt_sha256")
-    if re.fullmatch(r"[0-9a-f]{64}", str(receipt_sha256)) is None:
-        raise PolicyError("allocation matrix runtime receipt digest is invalid")
-    return str(receipt_sha256)[:12]
+    bundle_id = runtime_attestation.get("bundle_id")
+    if _ALLOCATION_GENERATION_RE.fullmatch(str(bundle_id)) is None:
+        raise PolicyError("allocation matrix runtime proof bundle ID is invalid")
+    return str(bundle_id)
+
+
+def _legacy_allocation_generation_is_bound(
+    matrix: Mapping[str, Any],
+    *,
+    sandbox: str,
+) -> bool:
+    generation_id = str(matrix.get("generation_id", ""))
+    runtime_attestation = matrix.get("runtime_attestation")
+    if (
+        _LEGACY_ALLOCATION_GENERATION_RE.fullmatch(generation_id) is None
+        or not isinstance(runtime_attestation, Mapping)
+        or _ALLOCATION_GENERATION_RE.fullmatch(
+            str(runtime_attestation.get("bundle_id", "")),
+        )
+        is None
+        or re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(runtime_attestation.get("receipt_sha256", "")),
+        )
+        is None
+        or runtime_attestation.get("candidate_sha") != matrix.get("candidate_sha")
+        or runtime_attestation.get("candidate_tree") != matrix.get("candidate_tree")
+        or runtime_attestation.get("sandbox") != sandbox
+        or matrix.get("sandbox") != sandbox
+    ):
+        return False
+    return generation_id == str(runtime_attestation["receipt_sha256"])[:12]
+
+
+def _allocation_generation_is_bundle_bound(
+    matrix: Mapping[str, Any],
+    *,
+    sandbox: str,
+) -> bool:
+    runtime_attestation = matrix.get("runtime_attestation")
+    return (
+        isinstance(runtime_attestation, Mapping)
+        and _ALLOCATION_GENERATION_RE.fullmatch(str(matrix.get("generation_id", ""))) is not None
+        and matrix.get("generation_id") == runtime_attestation.get("bundle_id")
+        and runtime_attestation.get("candidate_sha") == matrix.get("candidate_sha")
+        and runtime_attestation.get("candidate_tree") == matrix.get("candidate_tree")
+        and runtime_attestation.get("sandbox") == sandbox
+        and matrix.get("sandbox") == sandbox
+    )
 
 
 def _allocation_archive_path(
@@ -2465,7 +3026,10 @@ def _allocation_archive_path(
     generation_id: str,
     archived_at: datetime,
 ) -> Path:
-    if _ALLOCATION_GENERATION_RE.fullmatch(generation_id) is None:
+    if (
+        _ALLOCATION_GENERATION_RE.fullmatch(generation_id) is None
+        and _LEGACY_ALLOCATION_GENERATION_RE.fullmatch(generation_id) is None
+    ):
         raise PolicyError("allocation matrix generation ID is invalid")
     timestamp = archived_at.astimezone(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
     return path.with_name(f"{path.name}.{generation_id}.{timestamp}.archived")
@@ -2474,15 +3038,19 @@ def _allocation_archive_path(
 def _archive_allocation_generation(
     root: Path,
     profile: Profile,
+    sandbox: str,
     candidate_sha: str,
     matrix: Mapping[str, Any],
 ) -> None:
     generation_id = str(matrix.get("generation_id", ""))
-    if _ALLOCATION_GENERATION_RE.fullmatch(generation_id) is None:
+    if not (
+        _allocation_generation_is_bundle_bound(matrix, sandbox=sandbox)
+        or _legacy_allocation_generation_is_bound(matrix, sandbox=sandbox)
+    ):
         raise PolicyError("allocation matrix generation cannot be archived safely")
     archived_at = datetime.now(UTC)
-    matrix_path = _allocation_matrix_path(root, profile, candidate_sha)
-    final_path = _allocation_probe_path(root, profile, candidate_sha)
+    matrix_path = _allocation_matrix_path(root, profile, sandbox, candidate_sha)
+    final_path = _allocation_probe_path(root, profile, sandbox, candidate_sha)
     _require_root_private_directory(matrix_path.parent)
     for source in (matrix_path, final_path):
         if not source.exists():
@@ -2501,6 +3069,7 @@ def _archive_allocation_generation(
 def _allocation_node_inflight_path(
     root: Path,
     profile: Profile,
+    sandbox: str,
     candidate_sha: str,
     node: str,
 ) -> Path:
@@ -2513,6 +3082,7 @@ def _allocation_node_inflight_path(
         root
         / _ALLOCATION_PROBE_RELATIVE
         / profile.cluster
+        / sandbox
         / f"{candidate_sha}.{safe_node}.inflight.json"
     )
 
@@ -2520,6 +3090,7 @@ def _allocation_node_inflight_path(
 def _allocation_result_path(
     worker_env: Path,
     profile: Profile,
+    sandbox: str,
     candidate_sha: str,
     node: str,
 ) -> Path:
@@ -2528,8 +3099,9 @@ def _allocation_result_path(
     return (
         worker_env.parent
         / ".loom-allocation-probes"
-        / candidate_sha
         / profile.cluster
+        / sandbox
+        / candidate_sha
         / f"{node.lower()}.json"
     )
 
@@ -2546,11 +3118,15 @@ def _prepare_allocation_result_path(
         relative = path.relative_to(expected_root)
     except ValueError as exc:
         raise PolicyError("allocation result path escaped its private root") from exc
-    if len(relative.parts) != 3:
+    if len(relative.parts) != 4:
         raise PolicyError("allocation result path escaped its private root")
-    candidate_directory = expected_root / relative.parts[0]
+    cluster_directory = expected_root / relative.parts[0]
+    sandbox_directory = cluster_directory / relative.parts[1]
+    candidate_directory = sandbox_directory / relative.parts[2]
     for directory in (
         expected_root,
+        cluster_directory,
+        sandbox_directory,
         candidate_directory,
         path.parent,
     ):
@@ -2634,12 +3210,16 @@ def _load_allocation_result(
 
 
 def _allocation_job_name(
+    sandbox: str,
     candidate_sha: str,
     node: str,
     attempt: int,
     *,
     generation_id: str,
+    allow_legacy: bool = False,
 ) -> str:
+    if _SAFE_NAME.fullmatch(sandbox) is None:
+        raise PolicyError("allocation matrix sandbox name is unsafe")
     if _CANDIDATE_RE.fullmatch(candidate_sha) is None:
         raise PolicyError("allocation matrix candidate SHA is invalid")
     safe_node = node.lower()
@@ -2647,29 +3227,45 @@ def _allocation_job_name(
         raise PolicyError("allocation matrix node name is unsafe")
     if attempt < 1:
         raise PolicyError("allocation matrix attempt is invalid")
-    if _ALLOCATION_GENERATION_RE.fullmatch(generation_id) is None:
+    if _ALLOCATION_GENERATION_RE.fullmatch(generation_id) is not None:
+        job_name = f"loom827-{sandbox}-{safe_node}-g{generation_id}-a{attempt}"
+    elif allow_legacy and _LEGACY_ALLOCATION_GENERATION_RE.fullmatch(generation_id):
+        job_name = f"loom827-{sandbox}-{candidate_sha}-{safe_node}-g{generation_id}-a{attempt}"
+    else:
         raise PolicyError("allocation matrix generation ID is invalid")
-    job_name = f"loom827-{candidate_sha}-{safe_node}-g{generation_id}-a{attempt}"
     if len(job_name) > 128:
         raise PolicyError("allocation matrix job name exceeds Slurm's safe limit")
     return job_name
 
 
-def _allocation_lock_path(root: Path, profile: Profile, candidate_sha: str) -> Path:
-    return root / _ALLOCATION_PROBE_RELATIVE / profile.cluster / f"{candidate_sha}.lock"
+def _allocation_job_generation(job_name: str) -> str:
+    match = re.search(r"-g([0-9a-f]{64}|[0-9a-f]{12})-a[1-9][0-9]*$", job_name)
+    if match is None:
+        raise PolicyError("allocation matrix job generation is invalid")
+    return match.group(1)
+
+
+def _allocation_lock_path(
+    root: Path,
+    profile: Profile,
+    sandbox: str,
+    candidate_sha: str,
+) -> Path:
+    return _allocation_state_base(root, profile, sandbox) / f"{candidate_sha}.lock"
 
 
 @contextmanager
 def _allocation_probe_lock(
     root: Path,
     profile: Profile,
+    sandbox: str,
     candidate_sha: str,
     *,
     enforce_root_ownership: bool = True,
 ) -> Iterator[None]:
     if _CANDIDATE_RE.fullmatch(candidate_sha) is None:
         raise PolicyError("allocation probe lock candidate SHA is invalid")
-    path = _allocation_lock_path(root, profile, candidate_sha)
+    path = _allocation_lock_path(root, profile, sandbox, candidate_sha)
     with _persistent_private_lock(
         path,
         enforce_root_ownership=enforce_root_ownership,
@@ -2677,8 +3273,13 @@ def _allocation_probe_lock(
         yield
 
 
-def _invalidate_allocation_artifact(root: Path, profile: Profile, candidate_sha: str) -> None:
-    path = _allocation_probe_path(root, profile, candidate_sha)
+def _invalidate_allocation_artifact(
+    root: Path,
+    profile: Profile,
+    sandbox: str,
+    candidate_sha: str,
+) -> None:
+    path = _allocation_probe_path(root, profile, sandbox, candidate_sha)
     _require_root_private_directory(path.parent)
     path.unlink(missing_ok=True)
     _fsync_directory(path.parent)
@@ -2811,26 +3412,1246 @@ def _load_canonical_attestation_json(
     return payload
 
 
-def _runtime_attestation_binding(
-    receipt_path: Path,
+def _runtime_proof_base(
+    root: Path,
+    profile: Profile,
+    sandbox: str,
+    candidate_sha: str,
+) -> Path:
+    _sandbox_account(profile, sandbox)
+    return root / _RUNTIME_PROOF_RELATIVE / profile.cluster / sandbox / candidate_sha
+
+
+def _runtime_proof_high_water_path(
+    root: Path,
+    profile: Profile,
+    sandbox: str,
+) -> Path:
+    _sandbox_account(profile, sandbox)
+    return root / _RUNTIME_PROOF_HIGH_WATER_RELATIVE / profile.cluster / f"{sandbox}.json"
+
+
+def _runtime_proof_transaction_path(
+    root: Path,
+    profile: Profile,
+    sandbox: str,
+) -> Path:
+    _sandbox_account(profile, sandbox)
+    return root / _RUNTIME_PROOF_TRANSACTION_RELATIVE / profile.cluster / f"{sandbox}.json"
+
+
+@contextmanager
+def _runtime_proof_lock(
+    root: Path,
+    profile: Profile,
+    sandbox: str,
+    *,
+    enforce_root_ownership: bool,
+) -> Iterator[None]:
+    transaction = _runtime_proof_transaction_path(root, profile, sandbox)
+    lock_path = transaction.with_suffix(".lock")
+    with _persistent_private_lock(
+        lock_path,
+        enforce_root_ownership=enforce_root_ownership,
+    ):
+        yield
+
+
+def _path_exists_without_following(path: Path) -> bool:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise PolicyError("runtime proof path is unavailable") from exc
+    return True
+
+
+def _rename_noreplace(source: Path, target: Path) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise PolicyError("atomic no-replace runtime proof publication is unavailable")
+    result = renameat2(
+        _AT_FDCWD,
+        os.fsencode(source),
+        _AT_FDCWD,
+        os.fsencode(target),
+        _RENAME_NOREPLACE,
+    )
+    if result != 0:
+        error = ctypes.get_errno()
+        if error == errno.EEXIST:
+            raise FileExistsError(target)
+        raise PolicyError("atomic no-replace runtime proof publication failed")
+
+
+def _fetch_runtime_proof_source(
+    node: str,
+    expected_hostname: str,
+    artifact_id: str,
+    *,
+    expected_mode: int,
+) -> bytes:
+    fields = artifact_id.split("/")
+    if (
+        len(fields) != 7
+        or fields[:2] != ["runtime-proof", "v1"]
+        or fields[2] not in {"qianyi", "hongjian", "devansh"}
+        or _CANDIDATE_RE.fullmatch(fields[3]) is None
+        or _CANDIDATE_RE.fullmatch(fields[4]) is None
+        or fields[5] != "artifact"
+        or fields[6] not in _RUNTIME_PROOF_FILE_NAMES - {"manifest.json"}
+        or expected_mode not in {0o600, 0o644}
+        or expected_mode != (0o600 if fields[6] in {"combined.json", "fleet.json"} else 0o644)
+    ):
+        raise PolicyError("runtime proof artifact identity is invalid")
+    artifact_name = fields[6]
+    domain = "gb10" if artifact_name.startswith("gb10.") else "oldlab"
+    expected_source = (
+        _RUNTIME_PROOF_SOURCES["collector"]
+        if artifact_name in {"combined.json", "fleet.json"}
+        else _RUNTIME_PROOF_SOURCES[domain]
+    )
+    if (node, expected_hostname) != expected_source:
+        raise PolicyError("runtime proof artifact source is invalid")
+    body: dict[str, Any] = {
+        "schema_version": 1,
+        "action": "export-runtime-proof-artifact",
+        "node": node,
+        "domain": domain,
+        "sandbox": fields[2],
+        "candidate_sha": fields[3],
+        "candidate_tree": fields[4],
+        "payload_kind": "runtime-proof-artifact-id",
+        "payload_sha256": hashlib.sha256(artifact_id.encode("ascii")).hexdigest(),
+        "payload_base64": base64.b64encode(artifact_id.encode("ascii")).decode("ascii"),
+        "prior_request_id": None,
+    }
+    body["request_id"] = hashlib.sha256(_canonical_json_bytes(body) + b"\n").hexdigest()
+    envelope = _canonical_json_bytes(body) + b"\n"
+    output = _run_bounded_stdout(
+        (
+            "/usr/bin/python3",
+            "-I",
+            str(_NODE_TRANSPORT),
+            "invoke",
+            "--node",
+            node,
+            "--verb",
+            "check",
+        ),
+        input_bytes=envelope,
+        timeout=120,
+        max_bytes=1536 * 1024,
+    )
+    try:
+        outer = json.loads(output)
+        payload = outer["result"]
+        encoded = payload["content_base64"]
+        content = base64.b64decode(encoded, validate=True)
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise PolicyError("runtime proof source returned invalid metadata") from exc
+    if (
+        not isinstance(outer, dict)
+        or set(outer) != {"schema_version", "request_id", "status", "result"}
+        or outer["schema_version"] != 1
+        or output != _canonical_json_bytes(outer) + b"\n"
+        or outer["request_id"] != body["request_id"]
+        or outer["status"] != "succeeded"
+        or not isinstance(payload, dict)
+        or set(payload)
+        != {
+            "schema_version",
+            "operation",
+            "artifact_id",
+            "artifact_name",
+            "node",
+            "hostname",
+            "domain",
+            "sandbox",
+            "candidate_sha",
+            "candidate_tree",
+            "content_size",
+            "content_sha256",
+            "content_base64",
+        }
+        or payload["schema_version"] != 1
+        or payload["operation"] != "export-runtime-proof-artifact"
+        or payload["artifact_id"] != artifact_id
+        or payload["artifact_name"] != artifact_name
+        or payload["node"] != node
+        or payload["hostname"] != expected_hostname
+        or payload["domain"] != domain
+        or payload["sandbox"] != fields[2]
+        or payload["candidate_sha"] != fields[3]
+        or payload["candidate_tree"] != fields[4]
+        or not isinstance(encoded, str)
+        or len(content) > 1024 * 1024
+        or payload["content_size"] != len(content)
+        or payload["content_sha256"] != hashlib.sha256(content).hexdigest()
+    ):
+        raise PolicyError("runtime proof source binding drifted")
+    return content
+
+
+def _verify_ed25519_signature(content: bytes, encoded_signature: bytes, key: bytes) -> bytes:
+    try:
+        signature = base64.b64decode(encoded_signature.strip(), validate=True)
+    except ValueError as exc:
+        raise PolicyError("runtime domain attestation signature is invalid") from exc
+    if encoded_signature != base64.b64encode(signature) + b"\n":
+        raise PolicyError("runtime domain attestation signature is not canonical")
+    with tempfile.TemporaryDirectory() as temporary:
+        temporary_root = Path(temporary)
+        payload_path = temporary_root / "payload.json"
+        signature_path = temporary_root / "payload.sig"
+        key_path = temporary_root / "public.pem"
+        payload_path.write_bytes(content)
+        signature_path.write_bytes(signature)
+        key_path.write_bytes(key)
+        description = _run(
+            ("openssl", "pkey", "-pubin", "-in", str(key_path), "-text_pub", "-noout"),
+        )
+        if "ED25519" not in description.upper():
+            raise PolicyError("runtime domain attestation key is not Ed25519")
+        _run(
+            (
+                "openssl",
+                "pkeyutl",
+                "-verify",
+                "-rawin",
+                "-pubin",
+                "-inkey",
+                str(key_path),
+                "-in",
+                str(payload_path),
+                "-sigfile",
+                str(signature_path),
+            ),
+        )
+    return signature
+
+
+def _runtime_proof_source_specs(
+    sandbox: str,
+    candidate_sha: str,
+    candidate_tree: str,
+) -> dict[str, tuple[str, str, str, int]]:
+    collector_target, collector_host = _RUNTIME_PROOF_SOURCES["collector"]
+    oldlab_target, oldlab_host = _RUNTIME_PROOF_SOURCES["oldlab"]
+    gb10_target, gb10_host = _RUNTIME_PROOF_SOURCES["gb10"]
+    prefix = f"runtime-proof/v1/{sandbox}/{candidate_sha}/{candidate_tree}/artifact"
+    return {
+        "combined.json": (
+            collector_target,
+            collector_host,
+            f"{prefix}/combined.json",
+            0o600,
+        ),
+        "fleet.json": (
+            collector_target,
+            collector_host,
+            f"{prefix}/fleet.json",
+            0o600,
+        ),
+        "oldlab.json": (oldlab_target, oldlab_host, f"{prefix}/oldlab.json", 0o644),
+        "oldlab.sig": (oldlab_target, oldlab_host, f"{prefix}/oldlab.sig", 0o644),
+        "oldlab.pub": (
+            oldlab_target,
+            oldlab_host,
+            f"{prefix}/oldlab.pub",
+            0o644,
+        ),
+        "gb10.json": (gb10_target, gb10_host, f"{prefix}/gb10.json", 0o644),
+        "gb10.sig": (gb10_target, gb10_host, f"{prefix}/gb10.sig", 0o644),
+        "gb10.pub": (
+            gb10_target,
+            gb10_host,
+            f"{prefix}/gb10.pub",
+            0o644,
+        ),
+    }
+
+
+def _prevalidate_runtime_proof_sources(
+    content: Mapping[str, bytes],
+    *,
+    sandbox: str,
+    candidate_sha: str,
+    candidate_tree: str,
+    require_fresh: bool = True,
+) -> dict[str, Any]:
+    parsed: dict[str, dict[str, Any]] = {}
+    for name in ("combined.json", "fleet.json", "oldlab.json", "gb10.json"):
+        try:
+            payload = json.loads(content[name])
+        except (KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise PolicyError("runtime proof source JSON is invalid") from exc
+        if not isinstance(payload, dict) or content[name] != _canonical_json_bytes(payload) + b"\n":
+            raise PolicyError("runtime proof source JSON is not canonical")
+        parsed[name] = payload
+    receipt = parsed["combined.json"]
+    receipt_unsigned = dict(receipt)
+    receipt_digest = receipt_unsigned.pop("payload_sha256", None)
+    domains = receipt.get("domains")
+    fleet_reference = receipt.get("fleet_attestation")
+    collector = receipt.get("collector")
+    now = datetime.now(UTC)
+    if not isinstance(collector, dict):
+        raise PolicyError("runtime proof combined collector is invalid")
+    try:
+        collected_at = datetime.fromisoformat(str(collector["collected_at"]))
+        receipt_expires_at = datetime.fromisoformat(str(collector["expires_at"]))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise PolicyError("runtime proof combined timestamps are invalid") from exc
+    if (
+        set(receipt)
+        != {
+            "schema_version",
+            "kind",
+            "sandbox",
+            "candidate_sha",
+            "candidate_tree",
+            "collector",
+            "fleet_attestation",
+            "domains",
+            "payload_sha256",
+        }
+        or receipt.get("schema_version") != 1
+        or receipt.get("kind") != "loom.developer-runtime-combined-activation"
+        or receipt.get("sandbox") != sandbox
+        or receipt.get("candidate_sha") != candidate_sha
+        or receipt.get("candidate_tree") != candidate_tree
+        or receipt_digest != hashlib.sha256(_canonical_json_bytes(receipt_unsigned)).hexdigest()
+        or not isinstance(domains, dict)
+        or set(domains) != {"oldlab", "gb10"}
+        or not isinstance(fleet_reference, dict)
+        or set(collector) != {"hostname", "collected_at", "expires_at"}
+        or collector.get("hostname") != _RUNTIME_PROOF_SOURCES["collector"][1]
+        or collected_at.tzinfo is None
+        or receipt_expires_at.tzinfo is None
+        or not timedelta(0)
+        < receipt_expires_at.astimezone(UTC) - collected_at.astimezone(UTC)
+        <= timedelta(minutes=15)
+        or (
+            require_fresh
+            and (
+                collected_at.astimezone(UTC) > now + timedelta(seconds=30)
+                or receipt_expires_at.astimezone(UTC) <= now
+            )
+        )
+    ):
+        raise PolicyError("runtime proof combined source binding drifted")
+    expected_fleet_path = _FLEET_ATTESTATION_ROOT / sandbox / candidate_sha / "fleet.json"
+    fleet = parsed["fleet.json"]
+    fleet_unsigned = dict(fleet)
+    fleet_digest = fleet_unsigned.pop("payload_sha256", None)
+    try:
+        fleet_generated_at = datetime.fromisoformat(
+            str(fleet.get("generated_at")).replace("Z", "+00:00")
+        )
+        fleet_expires_at = datetime.fromisoformat(
+            str(fleet.get("expires_at")).replace("Z", "+00:00")
+        )
+    except ValueError as exc:
+        raise PolicyError("runtime proof fleet timestamps are invalid") from exc
+    if (
+        fleet_reference
+        != {
+            "path": str(expected_fleet_path),
+            "payload_sha256": fleet_digest,
+            "generated_at": fleet.get("generated_at"),
+            "expires_at": fleet.get("expires_at"),
+        }
+        or fleet_digest
+        != "sha256:" + hashlib.sha256(_canonical_json_bytes(fleet_unsigned)).hexdigest()
+        or fleet.get("candidate_sha") != candidate_sha
+        or fleet.get("eligible_nodes") != list(_RUNTIME_FLEET_NODES)
+        or not isinstance(fleet.get("nodes"), dict)
+        or set(fleet["nodes"]) != set(_RUNTIME_FLEET_NODES)
+        or fleet_generated_at.tzinfo is None
+        or fleet_expires_at.tzinfo is None
+        or (require_fresh and fleet_expires_at.astimezone(UTC) <= now)
+    ):
+        raise PolicyError("runtime proof fleet source binding drifted")
+    domain_identity: dict[str, dict[str, Any]] = {}
+    for domain_name in ("oldlab", "gb10"):
+        row = domains.get(domain_name)
+        manifest = parsed[f"{domain_name}.json"]
+        manifest_raw = content[f"{domain_name}.json"]
+        signature = _verify_ed25519_signature(
+            manifest_raw,
+            content[f"{domain_name}.sig"],
+            content[f"{domain_name}.pub"],
+        )
+        unsigned = dict(manifest)
+        payload_digest = unsigned.pop("payload_sha256", None)
+        publisher = manifest.get("publisher")
+        candidate = manifest.get("candidate")
+        runtime_env = manifest.get("runtime_env")
+        eligible_peers = manifest.get("eligible_peers")
+        expected_parent = _DOMAIN_RUNTIME_ATTESTATION_ROOT / sandbox / candidate_sha
+        if (
+            not isinstance(row, dict)
+            or set(row)
+            != {
+                "manifest_path",
+                "signature_path",
+                "payload_sha256",
+                "signature_sha256",
+                "key_id",
+                "generation",
+                "published_at",
+                "expires_at",
+            }
+            or type(row.get("generation")) is not int
+            or row["generation"] < 1
+            or any(
+                re.fullmatch(r"[0-9a-f]{64}", str(row.get(field))) is None
+                for field in ("payload_sha256", "signature_sha256", "key_id")
+            )
+            or row.get("manifest_path") != str(expected_parent / f"{domain_name}.json")
+            or row.get("signature_path") != str(expected_parent / f"{domain_name}.sig")
+            or payload_digest != row.get("payload_sha256")
+            or payload_digest != hashlib.sha256(_canonical_json_bytes(unsigned)).hexdigest()
+            or hashlib.sha256(signature).hexdigest() != row.get("signature_sha256")
+            or not isinstance(publisher, dict)
+            or publisher.get("hostname") != _RUNTIME_PROOF_SOURCES[domain_name][1]
+            or publisher.get("generation") != row.get("generation")
+            or publisher.get("published_at") != row.get("published_at")
+            or publisher.get("expires_at") != row.get("expires_at")
+            or publisher.get("signature_algorithm") != "ed25519"
+            or publisher.get("key_id") != row.get("key_id")
+            or publisher.get("key_id") != hashlib.sha256(content[f"{domain_name}.pub"]).hexdigest()
+            or manifest.get("schema_version") != 1
+            or manifest.get("kind") != "loom.developer-runtime-domain-attestation"
+            or manifest.get("domain") != domain_name
+            or manifest.get("sandbox") != sandbox
+            or not isinstance(candidate, dict)
+            or candidate.get("sha") != candidate_sha
+            or candidate.get("tree") != candidate_tree
+            or not isinstance(candidate.get("path"), str)
+            or not isinstance(runtime_env, dict)
+            or not isinstance(runtime_env.get("path"), str)
+            or manifest.get("fleet_attestation") != fleet_reference
+            or not isinstance(eligible_peers, list)
+            or [item.get("hostname") for item in eligible_peers if isinstance(item, dict)]
+            != list(_RUNTIME_DOMAIN_HOSTS[domain_name])
+            or len(eligible_peers) != len(_RUNTIME_DOMAIN_HOSTS[domain_name])
+            or any(
+                not isinstance(item, dict)
+                or set(item) != {"hostname", "candidate_inode", "env_inode", "result"}
+                or type(item.get("candidate_inode")) is not int
+                or type(item.get("env_inode")) is not int
+                or item.get("result") != "verified"
+                for item in eligible_peers
+            )
+            or len({item["candidate_inode"] for item in eligible_peers}) != 1
+            or len({item["env_inode"] for item in eligible_peers}) != 1
+        ):
+            raise PolicyError("runtime proof domain source binding drifted")
+        domain_identity[domain_name] = {
+            "generation": row["generation"],
+            "payload_sha256": row["payload_sha256"],
+            "signature_sha256": row["signature_sha256"],
+            "key_id": row["key_id"],
+        }
+    return {
+        "receipt_sha256": receipt_digest,
+        "collected_at": collector.get("collected_at"),
+        "domains": domain_identity,
+    }
+
+
+def _validate_runtime_proof_bundle_directory(
+    directory: Path,
     profile: Profile,
     *,
+    sandbox: str,
+    candidate_sha: str,
+    candidate_tree: str,
+    bundle_id: str,
+    enforce_root_ownership: bool,
+    require_fresh: bool,
+) -> dict[str, Any]:
+    _prepare_private_directory(
+        directory,
+        enforce_root_ownership=enforce_root_ownership,
+        create=False,
+    )
+    try:
+        names = {item.name for item in directory.iterdir()}
+    except OSError as exc:
+        raise PolicyError("runtime proof bundle is unreadable") from exc
+    if names != _RUNTIME_PROOF_FILE_NAMES:
+        raise PolicyError("runtime proof bundle is not closed-world")
+    local_bytes = {
+        name: _read_attestation_file(
+            directory / name,
+            expected_mode=0o600,
+            enforce_root_ownership=enforce_root_ownership,
+        )
+        for name in _RUNTIME_PROOF_FILE_NAMES
+    }
+    sources = {name: local_bytes[name] for name in local_bytes if name != "manifest.json"}
+    validated = _prevalidate_runtime_proof_sources(
+        sources,
+        sandbox=sandbox,
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+        require_fresh=require_fresh,
+    )
+    specs = _runtime_proof_source_specs(
+        sandbox,
+        candidate_sha,
+        candidate_tree,
+    )
+    file_rows = {
+        name: {
+            "source_node": target,
+            "source_hostname": hostname,
+            "transport_artifact_id": path,
+            "source_mode": f"{mode:04o}",
+            "sha256": hashlib.sha256(local_bytes[name]).hexdigest(),
+        }
+        for name, (target, hostname, path, mode) in specs.items()
+    }
+    try:
+        manifest = json.loads(local_bytes["manifest.json"])
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PolicyError("runtime proof bundle manifest is invalid") from exc
+    if (
+        not isinstance(manifest, dict)
+        or local_bytes["manifest.json"] != _canonical_json_bytes(manifest) + b"\n"
+    ):
+        raise PolicyError("runtime proof bundle manifest is not canonical")
+    unsigned = dict(manifest)
+    manifest_digest = unsigned.pop("payload_sha256", None)
+    if (
+        set(manifest)
+        != {
+            "schema_version",
+            "kind",
+            "cluster",
+            "submit_node",
+            "submit_hostname",
+            "sandbox",
+            "candidate_sha",
+            "candidate_tree",
+            "receipt_sha256",
+            "created_at",
+            "files",
+            "payload_sha256",
+        }
+        or manifest.get("schema_version") != 1
+        or manifest.get("kind") != "loom.developer-runtime-proof-bundle"
+        or manifest.get("cluster") != profile.cluster
+        or manifest.get("submit_node") != profile.submit_host
+        or manifest.get("submit_hostname") != profile.host_aliases[profile.submit_host]
+        or manifest.get("sandbox") != sandbox
+        or manifest.get("candidate_sha") != candidate_sha
+        or manifest.get("candidate_tree") != candidate_tree
+        or manifest.get("receipt_sha256") != validated["receipt_sha256"]
+        or manifest.get("created_at") != validated["collected_at"]
+        or manifest.get("files") != file_rows
+        or manifest_digest != bundle_id
+        or manifest_digest != hashlib.sha256(_canonical_json_bytes(unsigned)).hexdigest()
+        or directory.name not in {bundle_id, f".stage-{bundle_id}"}
+    ):
+        raise PolicyError("runtime proof bundle manifest binding drifted")
+    return validated
+
+
+def _validate_runtime_proof_high_water(
+    payload: Mapping[str, Any],
+    profile: Profile,
+    *,
+    sandbox: str,
+) -> dict[str, dict[str, Any]]:
+    domains = payload.get("domains")
+    if (
+        set(payload)
+        != {
+            "schema_version",
+            "kind",
+            "cluster",
+            "submit_node",
+            "submit_hostname",
+            "sandbox",
+            "candidate_sha",
+            "candidate_tree",
+            "bundle_id",
+            "receipt_sha256",
+            "domains",
+            "updated_at",
+        }
+        or payload.get("schema_version") != 1
+        or payload.get("kind") != "loom.developer-runtime-proof-high-water"
+        or payload.get("cluster") != profile.cluster
+        or payload.get("submit_node") != profile.submit_host
+        or payload.get("submit_hostname") != profile.host_aliases[profile.submit_host]
+        or payload.get("sandbox") != sandbox
+        or _CANDIDATE_RE.fullmatch(str(payload.get("candidate_sha"))) is None
+        or _CANDIDATE_RE.fullmatch(str(payload.get("candidate_tree"))) is None
+        or re.fullmatch(r"[0-9a-f]{64}", str(payload.get("bundle_id"))) is None
+        or re.fullmatch(r"[0-9a-f]{64}", str(payload.get("receipt_sha256"))) is None
+        or not isinstance(payload.get("updated_at"), str)
+        or not isinstance(domains, dict)
+        or set(domains) != {"oldlab", "gb10"}
+    ):
+        raise PolicyError("runtime proof high-water is invalid")
+    for row in domains.values():
+        if (
+            not isinstance(row, dict)
+            or set(row) != {"generation", "payload_sha256", "signature_sha256", "key_id"}
+            or type(row.get("generation")) is not int
+            or row["generation"] < 1
+            or any(
+                re.fullmatch(r"[0-9a-f]{64}", str(row.get(field))) is None
+                for field in ("payload_sha256", "signature_sha256", "key_id")
+            )
+        ):
+            raise PolicyError("runtime proof high-water is invalid")
+    return domains
+
+
+def _advance_runtime_proof_high_water(
+    root: Path,
+    profile: Profile,
+    *,
+    sandbox: str,
+    candidate_sha: str,
+    candidate_tree: str,
+    bundle_id: str,
+    validated: Mapping[str, Any],
+    enforce_root_ownership: bool,
+) -> None:
+    path = _runtime_proof_high_water_path(root, profile, sandbox)
+    _prepare_private_directory(
+        path.parent,
+        enforce_root_ownership=enforce_root_ownership,
+        create=True,
+    )
+    previous = (
+        _load_canonical_attestation_json(
+            path,
+            expected_mode=0o600,
+            enforce_root_ownership=enforce_root_ownership,
+        )
+        if _path_exists_without_following(path)
+        else None
+    )
+    current_domains = validated.get("domains")
+    if not isinstance(current_domains, dict) or set(current_domains) != {"oldlab", "gb10"}:
+        raise PolicyError("runtime proof verified domains are invalid")
+    if previous is not None:
+        previous_domains = _validate_runtime_proof_high_water(
+            previous,
+            profile,
+            sandbox=sandbox,
+        )
+        for domain_name, current in current_domains.items():
+            prior = previous_domains[domain_name]
+            if current["generation"] < prior["generation"]:
+                raise PolicyError("runtime proof domain generation regressed")
+            if current["generation"] == prior["generation"] and current != prior:
+                raise PolicyError("runtime proof domain generation identity changed")
+            if current["key_id"] != prior["key_id"]:
+                raise PolicyError("runtime proof domain key rotation is not authorized")
+    high_water = {
+        "schema_version": 1,
+        "kind": "loom.developer-runtime-proof-high-water",
+        "cluster": profile.cluster,
+        "submit_node": profile.submit_host,
+        "submit_hostname": profile.host_aliases[profile.submit_host],
+        "sandbox": sandbox,
+        "candidate_sha": candidate_sha,
+        "candidate_tree": candidate_tree,
+        "bundle_id": bundle_id,
+        "receipt_sha256": validated["receipt_sha256"],
+        "domains": current_domains,
+        "updated_at": validated["collected_at"],
+    }
+    _atomic_write(
+        path,
+        _canonical_json_bytes(high_water).decode("utf-8") + "\n",
+        mode=0o600,
+    )
+
+
+def _validate_runtime_proof_transaction(
+    transaction: Mapping[str, Any],
+    root: Path,
+    profile: Profile,
+    *,
+    sandbox: str,
+) -> tuple[Path, Path]:
+    candidate_sha = transaction.get("candidate_sha")
+    candidate_tree = transaction.get("candidate_tree")
+    bundle_id = transaction.get("bundle_id")
+    receipt_sha256 = transaction.get("receipt_sha256")
+    if (
+        set(transaction)
+        != {
+            "schema_version",
+            "kind",
+            "cluster",
+            "submit_node",
+            "submit_hostname",
+            "sandbox",
+            "candidate_sha",
+            "candidate_tree",
+            "bundle_id",
+            "receipt_sha256",
+            "stage",
+            "final",
+            "phase",
+        }
+        or transaction.get("schema_version") != 1
+        or transaction.get("kind") != "loom.developer-runtime-proof-transaction"
+        or transaction.get("cluster") != profile.cluster
+        or transaction.get("submit_node") != profile.submit_host
+        or transaction.get("submit_hostname") != profile.host_aliases[profile.submit_host]
+        or transaction.get("sandbox") != sandbox
+        or _CANDIDATE_RE.fullmatch(str(candidate_sha)) is None
+        or _CANDIDATE_RE.fullmatch(str(candidate_tree)) is None
+        or re.fullmatch(r"[0-9a-f]{64}", str(bundle_id)) is None
+        or re.fullmatch(r"[0-9a-f]{64}", str(receipt_sha256)) is None
+        or transaction.get("phase") != "prepared"
+    ):
+        raise PolicyError("foreign runtime proof transaction exists")
+    base = _runtime_proof_base(root, profile, sandbox, str(candidate_sha))
+    stage = base / f".stage-{bundle_id}"
+    final = base / str(bundle_id)
+    if transaction.get("stage") != str(stage) or transaction.get("final") != str(final):
+        raise PolicyError("foreign runtime proof transaction exists")
+    return stage, final
+
+
+def _finish_runtime_proof_transaction(path: Path, transaction: Mapping[str, Any]) -> None:
+    if _load_journal(path) != transaction:
+        raise PolicyError("runtime proof transaction changed during recovery")
+    path.unlink()
+    _fsync_directory(path.parent)
+
+
+def _clean_owned_runtime_proof_stage(
+    stage: Path,
+    *,
+    enforce_root_ownership: bool,
+) -> None:
+    _prepare_private_directory(
+        stage,
+        enforce_root_ownership=enforce_root_ownership,
+        create=False,
+    )
+    items = list(stage.iterdir())
+    if any(item.name not in _RUNTIME_PROOF_FILE_NAMES for item in items):
+        raise PolicyError("foreign runtime proof stage exists")
+    for item in items:
+        _read_attestation_file(
+            item,
+            expected_mode=0o600,
+            enforce_root_ownership=enforce_root_ownership,
+        )
+    for item in items:
+        item.unlink()
+    _fsync_directory(stage)
+    stage.rmdir()
+    _fsync_directory(stage.parent)
+
+
+def _recover_runtime_proof_transaction(
+    root: Path,
+    profile: Profile,
+    *,
+    sandbox: str,
+    enforce_root_ownership: bool,
+) -> None:
+    transaction_path = _runtime_proof_transaction_path(root, profile, sandbox)
+    transaction = _load_journal(transaction_path)
+    if transaction is None:
+        return
+    stage, final = _validate_runtime_proof_transaction(
+        transaction,
+        root,
+        profile,
+        sandbox=sandbox,
+    )
+    high_water_path = _runtime_proof_high_water_path(root, profile, sandbox)
+    high_water: dict[str, Any] | None = None
+    high_water_matches_transaction = False
+    if _path_exists_without_following(high_water_path):
+        high_water = _load_canonical_attestation_json(
+            high_water_path,
+            expected_mode=0o600,
+            enforce_root_ownership=enforce_root_ownership,
+        )
+        _validate_runtime_proof_high_water(high_water, profile, sandbox=sandbox)
+        high_water_matches_transaction = high_water["bundle_id"] == transaction["bundle_id"]
+        if high_water_matches_transaction:
+            if (
+                high_water["candidate_sha"] != transaction["candidate_sha"]
+                or high_water["candidate_tree"] != transaction["candidate_tree"]
+                or high_water["receipt_sha256"] != transaction["receipt_sha256"]
+            ):
+                raise PolicyError("runtime proof transaction high-water binding drifted")
+        else:
+            current = _runtime_proof_base(
+                root,
+                profile,
+                sandbox,
+                str(high_water["candidate_sha"]),
+            ) / str(high_water["bundle_id"])
+            _validate_runtime_proof_bundle_directory(
+                current,
+                profile,
+                sandbox=sandbox,
+                candidate_sha=str(high_water["candidate_sha"]),
+                candidate_tree=str(high_water["candidate_tree"]),
+                bundle_id=str(high_water["bundle_id"]),
+                enforce_root_ownership=enforce_root_ownership,
+                require_fresh=False,
+            )
+    stage_exists = _path_exists_without_following(stage)
+    final_exists = _path_exists_without_following(final)
+    if stage_exists and final_exists:
+        raise PolicyError("runtime proof transaction collides with stage and final")
+    validated: dict[str, Any] | None = None
+    if final_exists:
+        validated = _validate_runtime_proof_bundle_directory(
+            final,
+            profile,
+            sandbox=sandbox,
+            candidate_sha=str(transaction["candidate_sha"]),
+            candidate_tree=str(transaction["candidate_tree"]),
+            bundle_id=str(transaction["bundle_id"]),
+            enforce_root_ownership=enforce_root_ownership,
+            require_fresh=False,
+        )
+    elif stage_exists:
+        _prepare_private_directory(
+            stage,
+            enforce_root_ownership=enforce_root_ownership,
+            create=False,
+        )
+        names = {item.name for item in stage.iterdir()}
+        if any(name not in _RUNTIME_PROOF_FILE_NAMES for name in names):
+            raise PolicyError("foreign runtime proof stage exists")
+        if names == _RUNTIME_PROOF_FILE_NAMES:
+            validated = _validate_runtime_proof_bundle_directory(
+                stage,
+                profile,
+                sandbox=sandbox,
+                candidate_sha=str(transaction["candidate_sha"]),
+                candidate_tree=str(transaction["candidate_tree"]),
+                bundle_id=str(transaction["bundle_id"]),
+                enforce_root_ownership=enforce_root_ownership,
+                require_fresh=False,
+            )
+            try:
+                _rename_noreplace(stage, final)
+            except FileExistsError as exc:
+                raise PolicyError("foreign runtime proof final exists") from exc
+            _fsync_directory(final.parent)
+            validated = _validate_runtime_proof_bundle_directory(
+                final,
+                profile,
+                sandbox=sandbox,
+                candidate_sha=str(transaction["candidate_sha"]),
+                candidate_tree=str(transaction["candidate_tree"]),
+                bundle_id=str(transaction["bundle_id"]),
+                enforce_root_ownership=enforce_root_ownership,
+                require_fresh=False,
+            )
+        else:
+            if high_water_matches_transaction:
+                raise PolicyError("runtime proof current transaction stage is incomplete")
+            _clean_owned_runtime_proof_stage(
+                stage,
+                enforce_root_ownership=enforce_root_ownership,
+            )
+    elif high_water_matches_transaction:
+        raise PolicyError("runtime proof current transaction has no recoverable bundle")
+    if validated is not None:
+        _advance_runtime_proof_high_water(
+            root,
+            profile,
+            sandbox=sandbox,
+            candidate_sha=str(transaction["candidate_sha"]),
+            candidate_tree=str(transaction["candidate_tree"]),
+            bundle_id=str(transaction["bundle_id"]),
+            validated=validated,
+            enforce_root_ownership=enforce_root_ownership,
+        )
+    _finish_runtime_proof_transaction(transaction_path, transaction)
+
+
+def materialize_runtime_proof(
+    root: Path,
+    profile: Profile,
+    *,
+    sandbox: str,
+    candidate_sha: str,
+    candidate_tree: str,
+    fetcher: Any = _fetch_runtime_proof_source,
+) -> dict[str, Any]:
+    _sandbox_account(profile, sandbox)
+    enforce_root_ownership = root == Path("/")
+    if enforce_root_ownership:
+        if os.geteuid() != 0:
+            raise PolicyError("runtime proof materialization requires root")
+        host = _canonical_host()
+        if _slurm_node_for_host(profile, host) != profile.submit_host:
+            raise PolicyError("runtime proof must be materialized on the exact submit host")
+    if (
+        _CANDIDATE_RE.fullmatch(candidate_sha) is None
+        or _CANDIDATE_RE.fullmatch(candidate_tree) is None
+    ):
+        raise PolicyError("runtime proof candidate binding is invalid")
+    with _runtime_proof_lock(
+        root,
+        profile,
+        sandbox,
+        enforce_root_ownership=enforce_root_ownership,
+    ):
+        _recover_runtime_proof_transaction(
+            root,
+            profile,
+            sandbox=sandbox,
+            enforce_root_ownership=enforce_root_ownership,
+        )
+        specs = _runtime_proof_source_specs(
+            sandbox,
+            candidate_sha,
+            candidate_tree,
+        )
+        fetched = {
+            name: fetcher(target, hostname, path, expected_mode=mode)
+            for name, (target, hostname, path, mode) in specs.items()
+        }
+        validated = _prevalidate_runtime_proof_sources(
+            fetched,
+            sandbox=sandbox,
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+        )
+        file_rows = {
+            name: {
+                "source_node": target,
+                "source_hostname": hostname,
+                "transport_artifact_id": path,
+                "source_mode": f"{mode:04o}",
+                "sha256": hashlib.sha256(fetched[name]).hexdigest(),
+            }
+            for name, (target, hostname, path, mode) in specs.items()
+        }
+        manifest: dict[str, Any] = {
+            "schema_version": 1,
+            "kind": "loom.developer-runtime-proof-bundle",
+            "cluster": profile.cluster,
+            "submit_node": profile.submit_host,
+            "submit_hostname": profile.host_aliases[profile.submit_host],
+            "sandbox": sandbox,
+            "candidate_sha": candidate_sha,
+            "candidate_tree": candidate_tree,
+            "receipt_sha256": validated["receipt_sha256"],
+            "created_at": validated["collected_at"],
+            "files": file_rows,
+        }
+        bundle_id = hashlib.sha256(_canonical_json_bytes(manifest)).hexdigest()
+        manifest["payload_sha256"] = bundle_id
+        manifest_bytes = _canonical_json_bytes(manifest) + b"\n"
+        fetched["manifest.json"] = manifest_bytes
+        base = _runtime_proof_base(root, profile, sandbox, candidate_sha)
+        _prepare_private_directory(
+            base,
+            enforce_root_ownership=enforce_root_ownership,
+            create=True,
+        )
+        stage = base / f".stage-{bundle_id}"
+        final = base / bundle_id
+        transaction_path = _runtime_proof_transaction_path(root, profile, sandbox)
+        transaction = {
+            "schema_version": 1,
+            "kind": "loom.developer-runtime-proof-transaction",
+            "cluster": profile.cluster,
+            "submit_node": profile.submit_host,
+            "submit_hostname": profile.host_aliases[profile.submit_host],
+            "sandbox": sandbox,
+            "candidate_sha": candidate_sha,
+            "candidate_tree": candidate_tree,
+            "bundle_id": bundle_id,
+            "receipt_sha256": validated["receipt_sha256"],
+            "stage": str(stage),
+            "final": str(final),
+            "phase": "prepared",
+        }
+        existing_transaction = _load_journal(transaction_path)
+        if existing_transaction is not None:
+            raise PolicyError("runtime proof transaction recovery did not converge")
+        _write_journal(transaction_path, transaction)
+        if _path_exists_without_following(final):
+            _prepare_private_directory(
+                final,
+                enforce_root_ownership=enforce_root_ownership,
+                create=False,
+            )
+            if _path_exists_without_following(stage):
+                raise PolicyError("runtime proof final and stage both exist")
+            existing_manifest = _read_attestation_file(
+                final / "manifest.json",
+                expected_mode=0o600,
+                enforce_root_ownership=enforce_root_ownership,
+            )
+            if existing_manifest != manifest_bytes:
+                raise PolicyError("foreign runtime proof final exists")
+        else:
+            if _path_exists_without_following(stage):
+                _prepare_private_directory(
+                    stage,
+                    enforce_root_ownership=enforce_root_ownership,
+                    create=False,
+                )
+                if any(item.name not in _RUNTIME_PROOF_FILE_NAMES for item in stage.iterdir()):
+                    raise PolicyError("foreign runtime proof stage exists")
+            else:
+                stage.mkdir(mode=0o700)
+                _prepare_private_directory(
+                    stage,
+                    enforce_root_ownership=enforce_root_ownership,
+                    create=False,
+                )
+            for name, content in fetched.items():
+                target = stage / name
+                if _path_exists_without_following(target):
+                    if (
+                        _read_attestation_file(
+                            target,
+                            expected_mode=0o600,
+                            enforce_root_ownership=enforce_root_ownership,
+                        )
+                        != content
+                    ):
+                        raise PolicyError("foreign runtime proof stage content exists")
+                else:
+                    try:
+                        text_content = content.decode("utf-8")
+                    except UnicodeDecodeError as exc:
+                        raise PolicyError("runtime proof source is not textual") from exc
+                    _atomic_write(target, text_content, mode=0o600)
+            _fsync_directory(stage)
+        if not _path_exists_without_following(final):
+            _validate_runtime_proof_bundle_directory(
+                stage,
+                profile,
+                sandbox=sandbox,
+                candidate_sha=candidate_sha,
+                candidate_tree=candidate_tree,
+                bundle_id=bundle_id,
+                enforce_root_ownership=enforce_root_ownership,
+                require_fresh=True,
+            )
+            try:
+                _rename_noreplace(stage, final)
+            except FileExistsError as exc:
+                raise PolicyError("foreign runtime proof final exists") from exc
+            _fsync_directory(base)
+        published = _validate_runtime_proof_bundle_directory(
+            final,
+            profile,
+            sandbox=sandbox,
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+            bundle_id=bundle_id,
+            enforce_root_ownership=enforce_root_ownership,
+            require_fresh=True,
+        )
+        _advance_runtime_proof_high_water(
+            root,
+            profile,
+            sandbox=sandbox,
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+            bundle_id=bundle_id,
+            validated=published,
+            enforce_root_ownership=enforce_root_ownership,
+        )
+        binding = _runtime_attestation_binding(
+            root,
+            profile,
+            sandbox=sandbox,
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+            candidate_root=Path("/unbound-at-materialization"),
+            worker_env=Path("/unbound-at-materialization"),
+            enforce_root_ownership=enforce_root_ownership,
+        )
+        _finish_runtime_proof_transaction(transaction_path, transaction)
+        return {
+            "schema_version": 1,
+            "operation": "materialize-runtime-proof",
+            "cluster": profile.cluster,
+            "submit_node": profile.submit_host,
+            "sandbox": sandbox,
+            "candidate_sha": candidate_sha,
+            "candidate_tree": candidate_tree,
+            "bundle_id": bundle_id,
+            "proof_path": binding["proof_path"],
+            "receipt_sha256": binding["receipt_sha256"],
+        }
+
+
+def _runtime_attestation_binding(
+    root: Path,
+    profile: Profile,
+    *,
+    sandbox: str,
     candidate_sha: str,
     candidate_tree: str,
     candidate_root: Path,
     worker_env: Path,
     enforce_root_ownership: bool,
 ) -> dict[str, Any]:
-    expected_receipt = (
-        _COMBINED_RUNTIME_ATTESTATION_ROOT / profile.users[0] / candidate_sha / "combined.json"
-    )
-    if receipt_path != expected_receipt:
-        raise PolicyError("runtime attestation receipt path drifted")
-    receipt = _load_canonical_attestation_json(
-        receipt_path,
+    _sandbox_account(profile, sandbox)
+    high_water_path = _runtime_proof_high_water_path(root, profile, sandbox)
+    high_water = _load_canonical_attestation_json(
+        high_water_path,
         expected_mode=0o600,
         enforce_root_ownership=enforce_root_ownership,
     )
+    if (
+        set(high_water)
+        != {
+            "schema_version",
+            "kind",
+            "cluster",
+            "submit_node",
+            "submit_hostname",
+            "sandbox",
+            "candidate_sha",
+            "candidate_tree",
+            "bundle_id",
+            "receipt_sha256",
+            "domains",
+            "updated_at",
+        }
+        or high_water.get("schema_version") != 1
+        or high_water.get("kind") != "loom.developer-runtime-proof-high-water"
+        or high_water.get("cluster") != profile.cluster
+        or high_water.get("submit_node") != profile.submit_host
+        or high_water.get("submit_hostname") != profile.host_aliases[profile.submit_host]
+        or high_water.get("sandbox") != sandbox
+        or high_water.get("candidate_sha") != candidate_sha
+        or high_water.get("candidate_tree") != candidate_tree
+        or re.fullmatch(r"[0-9a-f]{64}", str(high_water.get("bundle_id"))) is None
+        or re.fullmatch(r"[0-9a-f]{64}", str(high_water.get("receipt_sha256"))) is None
+    ):
+        raise PolicyError("runtime proof high-water binding drifted")
+    proof_path = (
+        _runtime_proof_base(root, profile, sandbox, candidate_sha)
+        / str(high_water["bundle_id"])
+        / "manifest.json"
+    )
+    proof_directory = proof_path.parent
+    _prepare_private_directory(
+        proof_directory,
+        enforce_root_ownership=enforce_root_ownership,
+        create=False,
+    )
+    try:
+        actual_names = {item.name for item in proof_directory.iterdir()}
+    except OSError as exc:
+        raise PolicyError("runtime proof bundle is unreadable") from exc
+    if actual_names != _RUNTIME_PROOF_FILE_NAMES:
+        raise PolicyError("runtime proof bundle is not closed-world")
+    proof = _load_canonical_attestation_json(
+        proof_path,
+        expected_mode=0o600,
+        enforce_root_ownership=enforce_root_ownership,
+    )
+    proof_unsigned = dict(proof)
+    bundle_id = proof_unsigned.pop("payload_sha256", None)
+    if (
+        set(proof)
+        != {
+            "schema_version",
+            "kind",
+            "cluster",
+            "submit_node",
+            "submit_hostname",
+            "sandbox",
+            "candidate_sha",
+            "candidate_tree",
+            "receipt_sha256",
+            "created_at",
+            "files",
+            "payload_sha256",
+        }
+        or proof.get("schema_version") != 1
+        or proof.get("kind") != "loom.developer-runtime-proof-bundle"
+        or proof.get("cluster") != profile.cluster
+        or proof.get("submit_node") != profile.submit_host
+        or proof.get("submit_hostname") != profile.host_aliases[profile.submit_host]
+        or proof.get("sandbox") != sandbox
+        or proof.get("candidate_sha") != candidate_sha
+        or proof.get("candidate_tree") != candidate_tree
+        or proof.get("receipt_sha256") != high_water["receipt_sha256"]
+        or bundle_id != high_water["bundle_id"]
+        or bundle_id != hashlib.sha256(_canonical_json_bytes(proof_unsigned)).hexdigest()
+    ):
+        raise PolicyError("runtime proof manifest binding drifted")
+    file_rows = proof.get("files")
+    source_specs = _runtime_proof_source_specs(
+        sandbox,
+        candidate_sha,
+        candidate_tree,
+    )
+    if not isinstance(file_rows, dict) or set(file_rows) != set(source_specs):
+        raise PolicyError("runtime proof file manifest is not closed-world")
+    local_bytes: dict[str, bytes] = {}
+    for name, (
+        source_node,
+        source_hostname,
+        transport_artifact_id,
+        source_mode,
+    ) in source_specs.items():
+        row = file_rows.get(name)
+        if (
+            not isinstance(row, dict)
+            or set(row)
+            != {
+                "source_node",
+                "source_hostname",
+                "transport_artifact_id",
+                "source_mode",
+                "sha256",
+            }
+            or row.get("source_node") != source_node
+            or row.get("source_hostname") != source_hostname
+            or row.get("transport_artifact_id") != transport_artifact_id
+            or row.get("source_mode") != f"{source_mode:04o}"
+            or re.fullmatch(r"[0-9a-f]{64}", str(row.get("sha256"))) is None
+        ):
+            raise PolicyError("runtime proof source binding drifted")
+        content = _read_attestation_file(
+            proof_directory / name,
+            expected_mode=0o600,
+            enforce_root_ownership=enforce_root_ownership,
+        )
+        if hashlib.sha256(content).hexdigest() != row["sha256"]:
+            raise PolicyError("runtime proof local digest drifted")
+        local_bytes[name] = content
+    try:
+        receipt = json.loads(local_bytes["combined.json"])
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PolicyError("runtime attestation receipt is invalid JSON") from exc
+    if (
+        not isinstance(receipt, dict)
+        or local_bytes["combined.json"] != _canonical_json_bytes(receipt) + b"\n"
+    ):
+        raise PolicyError("runtime attestation receipt is not canonical")
     expected_top = {
         "schema_version",
         "kind",
@@ -2859,7 +4680,7 @@ def _runtime_attestation_binding(
         or receipt.get("kind") != "loom.developer-runtime-combined-activation"
         or receipt.get("candidate_sha") != candidate_sha
         or receipt.get("candidate_tree") != candidate_tree
-        or receipt.get("sandbox") != profile.users[0]
+        or receipt.get("sandbox") != sandbox
         or set(collector) != {"hostname", "collected_at", "expires_at"}
         or collector.get("hostname") != "trt-eai-oldlab-2"
         or collected_at.tzinfo is None
@@ -2870,6 +4691,7 @@ def _runtime_attestation_binding(
         or collected_at.astimezone(UTC) > now + timedelta(seconds=30)
         or receipt_expires_at.astimezone(UTC) <= now
         or digest != hashlib.sha256(_canonical_json_bytes(unsigned)).hexdigest()
+        or digest != proof.get("receipt_sha256")
     ):
         raise PolicyError("runtime attestation receipt binding drifted")
     domains = receipt.get("domains")
@@ -2881,13 +4703,6 @@ def _runtime_attestation_binding(
         or set(fleet_reference) != {"path", "payload_sha256", "generated_at", "expires_at"}
     ):
         raise PolicyError("runtime attestation receipt is not closed-world")
-    domain_name = {
-        "trt-oldlab": "oldlab",
-        "trt-gb10": "gb10",
-    }.get(profile.cluster)
-    if domain_name is None:
-        raise PolicyError("runtime attestation does not support this Slurm cluster")
-    domain_row = domains.get(domain_name)
     expected_domain_fields = {
         "manifest_path",
         "signature_path",
@@ -2908,89 +4723,113 @@ def _runtime_attestation_binding(
         for value in domains.values()
     ):
         raise PolicyError("runtime domain attestation references are invalid")
-    if (
-        not isinstance(domain_row, dict)
-        or set(domain_row) != expected_domain_fields
-        or type(domain_row.get("generation")) is not int
-        or domain_row["generation"] < 1
-    ):
-        raise PolicyError("runtime domain attestation reference is invalid")
-    manifest_path = Path(str(domain_row["manifest_path"]))
-    signature_path = Path(str(domain_row["signature_path"]))
-    sandbox = receipt.get("sandbox")
-    expected_manifest_parent = _DOMAIN_RUNTIME_ATTESTATION_ROOT / str(sandbox) / candidate_sha
-    if (
-        manifest_path.parent != expected_manifest_parent
-        or manifest_path.name != f"{domain_name}.json"
-        or signature_path.parent != expected_manifest_parent
-        or signature_path.name != f"{domain_name}.sig"
-    ):
-        raise PolicyError("runtime domain attestation path drifted")
-    manifest = _load_canonical_attestation_json(
-        manifest_path,
-        expected_mode=0o644,
-        enforce_root_ownership=enforce_root_ownership,
-    )
-    manifest_unsigned = dict(manifest)
-    manifest_digest = manifest_unsigned.pop("payload_sha256", None)
-    if (
-        manifest_digest != domain_row.get("payload_sha256")
-        or manifest_digest != hashlib.sha256(_canonical_json_bytes(manifest_unsigned)).hexdigest()
-    ):
-        raise PolicyError("runtime domain attestation digest drifted")
-    try:
-        signature = base64.b64decode(
-            _read_attestation_file(
-                signature_path,
-                expected_mode=0o644,
-                enforce_root_ownership=enforce_root_ownership,
-            ).strip(),
-            validate=True,
-        )
-    except ValueError as exc:
-        raise PolicyError("runtime domain attestation signature is invalid") from exc
-    publisher = manifest.get("publisher")
-    candidate = manifest.get("candidate")
-    runtime_env = manifest.get("runtime_env")
-    eligible_peers = manifest.get("eligible_peers")
-    expected_hosts = [profile.host_aliases[node] for node in profile.allowed_nodes]
-    if (
-        not isinstance(publisher, dict)
-        or publisher.get("generation") != domain_row.get("generation")
-        or publisher.get("published_at") != domain_row.get("published_at")
-        or publisher.get("expires_at") != domain_row.get("expires_at")
-        or not isinstance(candidate, dict)
-        or candidate.get("sha") != candidate_sha
-        or candidate.get("tree") != candidate_tree
-        or not isinstance(runtime_env, dict)
-        or not isinstance(candidate.get("path"), str)
-        or not isinstance(runtime_env.get("path"), str)
-        or hashlib.sha256(signature).hexdigest() != domain_row.get("signature_sha256")
-        or not isinstance(eligible_peers, list)
-        or [item.get("hostname") for item in eligible_peers if isinstance(item, dict)]
-        != expected_hosts
-        or len(eligible_peers) != len(expected_hosts)
-        or any(
-            not isinstance(item, dict)
-            or set(item) != {"hostname", "candidate_inode", "env_inode", "result"}
-            or type(item.get("candidate_inode")) is not int
-            or type(item.get("env_inode")) is not int
-            or item.get("result") != "verified"
-            for item in eligible_peers
-        )
-        or len({item["candidate_inode"] for item in eligible_peers}) != 1
-        or len({item["env_inode"] for item in eligible_peers}) != 1
-    ):
-        raise PolicyError("runtime domain attestation host coverage drifted")
+    expected_manifest_parent = _DOMAIN_RUNTIME_ATTESTATION_ROOT / sandbox / candidate_sha
+    verified_domains: dict[str, dict[str, Any]] = {}
+    domain_expiries: list[datetime] = []
+    for domain_name in ("oldlab", "gb10"):
+        domain_row = domains[domain_name]
+        manifest_path = Path(str(domain_row["manifest_path"]))
+        signature_path = Path(str(domain_row["signature_path"]))
+        if (
+            manifest_path != expected_manifest_parent / f"{domain_name}.json"
+            or signature_path != expected_manifest_parent / f"{domain_name}.sig"
+        ):
+            raise PolicyError("runtime domain attestation path drifted")
+        manifest_raw = local_bytes[f"{domain_name}.json"]
+        signature_raw = local_bytes[f"{domain_name}.sig"]
+        key_raw = local_bytes[f"{domain_name}.pub"]
+        try:
+            manifest = json.loads(manifest_raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise PolicyError("runtime domain attestation is invalid JSON") from exc
+        if (
+            not isinstance(manifest, dict)
+            or manifest_raw != _canonical_json_bytes(manifest) + b"\n"
+        ):
+            raise PolicyError("runtime domain attestation is not canonical")
+        manifest_unsigned = dict(manifest)
+        manifest_digest = manifest_unsigned.pop("payload_sha256", None)
+        signature = _verify_ed25519_signature(manifest_raw, signature_raw, key_raw)
+        publisher = manifest.get("publisher")
+        candidate = manifest.get("candidate")
+        runtime_env = manifest.get("runtime_env")
+        fleet_binding = manifest.get("fleet_attestation")
+        eligible_peers = manifest.get("eligible_peers")
+        expected_hosts = list(_RUNTIME_DOMAIN_HOSTS[domain_name])
+        expected_publisher = _RUNTIME_PROOF_SOURCES[domain_name][1]
+        if not isinstance(publisher, dict):
+            raise PolicyError("runtime domain attestation binding drifted")
+        try:
+            domain_published_at = datetime.fromisoformat(str(publisher["published_at"]))
+            domain_expires_at = datetime.fromisoformat(str(publisher["expires_at"]))
+        except (KeyError, ValueError) as exc:
+            raise PolicyError("runtime domain attestation timestamps are invalid") from exc
+        if (
+            manifest_digest != domain_row.get("payload_sha256")
+            or manifest_digest
+            != hashlib.sha256(_canonical_json_bytes(manifest_unsigned)).hexdigest()
+            or manifest.get("schema_version") != 1
+            or manifest.get("kind") != "loom.developer-runtime-domain-attestation"
+            or manifest.get("domain") != domain_name
+            or manifest.get("sandbox") != sandbox
+            or publisher.get("hostname") != expected_publisher
+            or publisher.get("generation") != domain_row.get("generation")
+            or publisher.get("published_at") != domain_row.get("published_at")
+            or publisher.get("expires_at") != domain_row.get("expires_at")
+            or publisher.get("signature_algorithm") != "ed25519"
+            or publisher.get("key_id") != domain_row.get("key_id")
+            or publisher.get("key_id") != hashlib.sha256(key_raw).hexdigest()
+            or domain_published_at.tzinfo is None
+            or domain_expires_at.tzinfo is None
+            or domain_published_at.astimezone(UTC) > now + timedelta(seconds=30)
+            or domain_expires_at.astimezone(UTC) <= now
+            or domain_published_at.astimezone(UTC) >= domain_expires_at.astimezone(UTC)
+            or not isinstance(candidate, dict)
+            or candidate.get("sha") != candidate_sha
+            or candidate.get("tree") != candidate_tree
+            or not isinstance(candidate.get("path"), str)
+            or not isinstance(runtime_env, dict)
+            or not isinstance(runtime_env.get("path"), str)
+            or fleet_binding != fleet_reference
+            or hashlib.sha256(signature).hexdigest() != domain_row.get("signature_sha256")
+            or not isinstance(eligible_peers, list)
+            or [item.get("hostname") for item in eligible_peers if isinstance(item, dict)]
+            != expected_hosts
+            or len(eligible_peers) != len(expected_hosts)
+            or any(
+                not isinstance(item, dict)
+                or set(item) != {"hostname", "candidate_inode", "env_inode", "result"}
+                or type(item.get("candidate_inode")) is not int
+                or type(item.get("env_inode")) is not int
+                or item.get("result") != "verified"
+                for item in eligible_peers
+            )
+            or len({item["candidate_inode"] for item in eligible_peers}) != 1
+            or len({item["env_inode"] for item in eligible_peers}) != 1
+        ):
+            raise PolicyError("runtime domain attestation binding drifted")
+        domain_expiries.append(domain_expires_at.astimezone(UTC))
+        verified_domains[domain_name] = {
+            "manifest_digest": manifest_digest,
+            "signature_digest": domain_row["signature_sha256"],
+            "generation": domain_row["generation"],
+            "hosts": expected_hosts,
+            "candidate_path": candidate["path"],
+            "runtime_env_path": runtime_env["path"],
+        }
     fleet_path = Path(str(fleet_reference["path"]))
-    expected_fleet_path = _FLEET_ATTESTATION_ROOT / str(sandbox) / candidate_sha / "fleet.json"
+    expected_fleet_path = _FLEET_ATTESTATION_ROOT / sandbox / candidate_sha / "fleet.json"
     if fleet_path != expected_fleet_path:
         raise PolicyError("runtime fleet attestation path drifted")
-    fleet = _load_canonical_attestation_json(
-        fleet_path,
-        expected_mode=0o600,
-        enforce_root_ownership=enforce_root_ownership,
-    )
+    try:
+        fleet = json.loads(local_bytes["fleet.json"])
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PolicyError("runtime fleet attestation is invalid JSON") from exc
+    if (
+        not isinstance(fleet, dict)
+        or local_bytes["fleet.json"] != _canonical_json_bytes(fleet) + b"\n"
+    ):
+        raise PolicyError("runtime fleet attestation is not canonical")
     fleet_unsigned = dict(fleet)
     fleet_digest = fleet_unsigned.pop("payload_sha256", None)
     expected_fleet_digest = (
@@ -3006,27 +4845,7 @@ def _runtime_attestation_binding(
         fleet_expires_at = datetime.fromisoformat(str(fleet["expires_at"]).replace("Z", "+00:00"))
     except (KeyError, ValueError) as exc:
         raise PolicyError("runtime fleet attestation timestamps are invalid") from exc
-    expected_fleet_nodes = [
-        "oldlab-1",
-        "oldlab-2",
-        "oldlab-3",
-        "oldlab-4",
-        "oldlab-5",
-        "trt-gb10-1",
-        "trt-gb10-2",
-        "trt-gb10-3",
-        "trt-gb10-4",
-        "trt-gb10-5",
-        "trt-gb10-6",
-        "trt-gb10-8",
-        "trt-gb10-9",
-        "trt-gb10-10",
-        "trt-gb10-11",
-        "trt-gb10-12",
-        "trt-gb10-13",
-        "trt-gb10-14",
-        "trt-gb10-15",
-    ]
+    expected_fleet_nodes = list(_RUNTIME_FLEET_NODES)
     if (
         fleet_digest != fleet_reference.get("payload_sha256")
         or fleet_digest != expected_fleet_digest
@@ -3041,21 +4860,37 @@ def _runtime_attestation_binding(
         or set(fleet["nodes"]) != set(expected_fleet_nodes)
     ):
         raise PolicyError("runtime fleet attestation coverage drifted")
+    selected_domain = {
+        "trt-oldlab": "oldlab",
+        "trt-gb10": "gb10",
+    }.get(profile.cluster)
+    if selected_domain is None:
+        raise PolicyError("runtime attestation does not support this Slurm cluster")
+    current_domain = verified_domains[selected_domain]
+    proof_expires_at = min(
+        receipt_expires_at.astimezone(UTC),
+        fleet_expires_at.astimezone(UTC),
+        *domain_expiries,
+    )
     return {
-        "receipt_path": str(receipt_path),
+        "proof_path": str(proof_path),
+        "bundle_id": bundle_id,
+        "receipt_path": str(proof_directory / "combined.json"),
         "receipt_sha256": digest,
         "receipt_collected_at": collected_at.astimezone(UTC).isoformat(),
         "receipt_expires_at": receipt_expires_at.astimezone(UTC).isoformat(),
+        "proof_expires_at": proof_expires_at.isoformat(),
         "sandbox": sandbox,
         "candidate_sha": candidate_sha,
         "candidate_tree": candidate_tree,
-        "domain": domain_name,
-        "domain_payload_sha256": manifest_digest,
-        "domain_signature_sha256": domain_row["signature_sha256"],
-        "domain_generation": domain_row["generation"],
-        "domain_hosts": expected_hosts,
-        "domain_candidate_path": candidate["path"],
-        "domain_runtime_env_path": runtime_env["path"],
+        "domain": selected_domain,
+        "domain_payload_sha256": current_domain["manifest_digest"],
+        "domain_signature_sha256": current_domain["signature_digest"],
+        "domain_generation": current_domain["generation"],
+        "domain_hosts": current_domain["hosts"],
+        "domain_candidate_path": current_domain["candidate_path"],
+        "domain_runtime_env_path": current_domain["runtime_env_path"],
+        "domains": verified_domains,
         "allocation_candidate_path": str(candidate_root),
         "allocation_worker_env_path": str(worker_env),
         "fleet_payload_sha256": fleet_digest,
@@ -3140,14 +4975,18 @@ def _validate_probe_base_row(
     row: Sequence[str],
     payload: Mapping[str, Any],
     profile: Profile,
+    *,
+    sandbox: str,
 ) -> None:
+    account = _sandbox_account(profile, sandbox)
     if (
         len(row) < 9
         or row[0] != str(payload.get("job_id", ""))
         or row[1] != payload.get("job_name")
         or row[3].lower() != str(payload.get("node", "")).lower()
-        or row[5] != profile.child_accounts[0]
-        or row[6] != profile.users[0]
+        or payload.get("sandbox") != sandbox
+        or row[5] != account
+        or row[6] != _sandbox_service_user(profile, sandbox)
         or row[7] != profile.cluster
         or row[8] != profile.qos
     ):
@@ -3188,6 +5027,8 @@ def _validate_probe_queue_row(
     row: Sequence[str],
     payload: Mapping[str, Any],
     profile: Profile,
+    *,
+    sandbox: str,
 ) -> None:
     if len(row) < 6:
         raise PolicyError("allocation probe queued job identity drifted")
@@ -3195,8 +5036,9 @@ def _validate_probe_queue_row(
     if (
         row[0] != str(payload.get("job_id", ""))
         or row[1] != payload.get("job_name")
-        or row[3] != profile.users[0]
-        or row[4] != profile.child_accounts[0]
+        or payload.get("sandbox") != sandbox
+        or row[3] != _sandbox_service_user(profile, sandbox)
+        or row[4] != _sandbox_account(profile, sandbox)
         or (
             state not in {"PENDING", "PD"}
             and row[5].lower() != str(payload.get("node", "")).lower()
@@ -3208,6 +5050,8 @@ def _validate_probe_queue_row(
 def _validate_probe_job_identity(
     payload: Mapping[str, Any],
     profile: Profile,
+    *,
+    sandbox: str,
 ) -> tuple[list[list[str]], str | None]:
     job_id = str(payload.get("job_id", ""))
     rows = _probe_accounting_rows(job_id, profile)
@@ -3215,12 +5059,12 @@ def _validate_probe_job_identity(
     if base_rows:
         if len(base_rows) != 1:
             raise PolicyError("allocation probe accounting identity is ambiguous")
-        _validate_probe_base_row(base_rows[0], payload, profile)
+        _validate_probe_base_row(base_rows[0], payload, profile, sandbox=sandbox)
         return rows, _base_job_state(rows, job_id)
     queued = _queue_probe_rows(profile, job_id=job_id)
     if len(queued) != 1:
         raise PolicyError("allocation probe job identity is unavailable or ambiguous")
-    _validate_probe_queue_row(queued[0], payload, profile)
+    _validate_probe_queue_row(queued[0], payload, profile, sandbox=sandbox)
     return rows, None
 
 
@@ -3250,12 +5094,17 @@ def _cancel_allocation_job(
     payload: dict[str, Any],
     profile: Profile,
     *,
+    sandbox: str,
     enforce_root_ownership: bool,
 ) -> list[list[str]]:
     job_id = str(payload.get("job_id", ""))
     if re.fullmatch(r"[1-9][0-9]*", job_id) is None:
         raise PolicyError("allocation inflight journal job ID is invalid")
-    _observed, observed_state = _validate_probe_job_identity(payload, profile)
+    _observed, observed_state = _validate_probe_job_identity(
+        payload,
+        profile,
+        sandbox=sandbox,
+    )
     if observed_state in _TERMINAL_JOB_STATES:
         payload["terminal_state"] = observed_state
         _finish_allocation_inflight(
@@ -3309,6 +5158,7 @@ def _poll_allocation_or_cancel(
     payload: dict[str, Any],
     profile: Profile,
     *,
+    sandbox: str,
     timeout_seconds: float,
     enforce_root_ownership: bool,
 ) -> list[list[str]]:
@@ -3323,6 +5173,7 @@ def _poll_allocation_or_cancel(
             path,
             payload,
             profile,
+            sandbox=sandbox,
             enforce_root_ownership=enforce_root_ownership,
         )
         raise
@@ -3332,6 +5183,7 @@ def _recover_allocation_probe(
     path: Path,
     profile: Profile,
     *,
+    sandbox: str,
     candidate_sha: str,
     node: str,
     job_name: str,
@@ -3343,6 +5195,7 @@ def _recover_allocation_probe(
         path,
         enforce_root_ownership=enforce_root_ownership,
     )
+    expected_generation = _allocation_job_generation(job_name)
     if payload is not None:
         if (
             payload.get("candidate_sha") != candidate_sha
@@ -3352,8 +5205,16 @@ def _recover_allocation_probe(
             or payload.get("node") != node
             or payload.get("host") != profile.host_aliases[node]
             or payload.get("job_name") != job_name
-            or payload.get("user") != profile.users[0]
-            or payload.get("account") != profile.child_accounts[0]
+            or payload.get("sandbox") != sandbox
+            or payload.get("user") != _sandbox_service_user(profile, sandbox)
+            or payload.get("account") != _sandbox_account(profile, sandbox)
+            or (
+                payload.get("generation_id") != expected_generation
+                and not (
+                    _LEGACY_ALLOCATION_GENERATION_RE.fullmatch(expected_generation) is not None
+                    and payload.get("generation_id") is None
+                )
+            )
         ):
             raise PolicyError("allocation inflight journal binding drifted")
         recovered_job_id = str(payload.get("job_id", ""))
@@ -3361,6 +5222,7 @@ def _recover_allocation_probe(
             path,
             payload,
             profile,
+            sandbox=sandbox,
             enforce_root_ownership=enforce_root_ownership,
         )
         if _base_job_state(recovered_rows, recovered_job_id) == "COMPLETED":
@@ -3381,11 +5243,18 @@ def _recover_allocation_probe(
             raise PolicyError("unjournaled allocation probe history is ambiguous")
         recovered_job_id = base_rows[0][0]
         orphan_payload = {
+            "sandbox": sandbox,
             "job_id": recovered_job_id,
             "job_name": job_name,
+            "generation_id": expected_generation,
             "node": node,
         }
-        _validate_probe_base_row(base_rows[0], orphan_payload, profile)
+        _validate_probe_base_row(
+            base_rows[0],
+            orphan_payload,
+            profile,
+            sandbox=sandbox,
+        )
         state = _base_job_state(accounting_rows, recovered_job_id)
         if state not in _TERMINAL_JOB_STATES:
             raise PolicyError("unjournaled allocation probe history is not terminal")
@@ -3393,22 +5262,29 @@ def _recover_allocation_probe(
         recovered_base_rows = [row for row in recovered_rows if row[0] == recovered_job_id]
         if len(recovered_base_rows) != 1:
             raise PolicyError("unjournaled allocation probe accounting is incomplete")
-        _validate_probe_base_row(recovered_base_rows[0], orphan_payload, profile)
+        _validate_probe_base_row(
+            recovered_base_rows[0],
+            orphan_payload,
+            profile,
+            sandbox=sandbox,
+        )
         recovered_state = _base_job_state(recovered_rows, recovered_job_id)
         if recovered_state != state:
             raise PolicyError("unjournaled allocation probe terminal state drifted")
         recovered = {
             "schema_version": 1,
+            "sandbox": sandbox,
             "candidate_sha": candidate_sha,
             "cluster": profile.cluster,
             "controller": profile.controller,
             "submit_host": profile.submit_host,
             "node": node,
             "host": profile.host_aliases[node],
-            "user": profile.users[0],
-            "account": profile.child_accounts[0],
+            "user": _sandbox_service_user(profile, sandbox),
+            "account": _sandbox_account(profile, sandbox),
             "job_id": recovered_job_id,
             "job_name": job_name,
+            "generation_id": expected_generation,
             "phase": "recovered_terminal",
             "created_at": datetime.now(UTC).isoformat(),
             "terminal_state": state,
@@ -3429,25 +5305,34 @@ def _recover_allocation_probe(
         return completed_recovery
     recovered_job_id = orphan_rows[0][0]
     orphan_payload = {
+        "sandbox": sandbox,
         "job_id": recovered_job_id,
         "job_name": job_name,
+        "generation_id": expected_generation,
         "node": node,
     }
-    _validate_probe_queue_row(orphan_rows[0], orphan_payload, profile)
+    _validate_probe_queue_row(
+        orphan_rows[0],
+        orphan_payload,
+        profile,
+        sandbox=sandbox,
+    )
     if re.fullmatch(r"[1-9][0-9]*", recovered_job_id) is None:
         raise PolicyError("unjournaled allocation probe job ID is invalid")
     recovered = {
         "schema_version": 1,
+        "sandbox": sandbox,
         "candidate_sha": candidate_sha,
         "cluster": profile.cluster,
         "controller": profile.controller,
         "submit_host": profile.submit_host,
         "node": node,
         "host": profile.host_aliases[node],
-        "user": profile.users[0],
-        "account": profile.child_accounts[0],
+        "user": _sandbox_service_user(profile, sandbox),
+        "account": _sandbox_account(profile, sandbox),
         "job_id": recovered_job_id,
         "job_name": job_name,
+        "generation_id": expected_generation,
         "phase": "recovered_unjournaled",
         "created_at": datetime.now(UTC).isoformat(),
     }
@@ -3460,6 +5345,7 @@ def _recover_allocation_probe(
         path,
         recovered,
         profile,
+        sandbox=sandbox,
         enforce_root_ownership=enforce_root_ownership,
     )
     if _base_job_state(recovered_rows, recovered_job_id) == "COMPLETED":
@@ -3487,13 +5373,33 @@ def _allocation_generation_window(
             str(runtime_attestation["receipt_collected_at"]),
         ).astimezone(UTC)
         expires_at = datetime.fromisoformat(
-            str(runtime_attestation["receipt_expires_at"]),
+            str(runtime_attestation["proof_expires_at"]),
         ).astimezone(UTC)
     except (KeyError, ValueError) as exc:
         raise PolicyError("allocation matrix generation window is invalid") from exc
     if not started_at < expires_at:
         raise PolicyError("allocation matrix generation window is empty")
     return generation_id, started_at, expires_at
+
+
+def _require_allocation_proof_freshness(
+    runtime_attestation: Mapping[str, Any],
+    *,
+    timeout_seconds: float,
+    now: datetime | None = None,
+) -> None:
+    if not 1 <= timeout_seconds <= 600:
+        raise PolicyError("allocation probe timeout must be between 1 and 600 seconds")
+    _generation_id, _started_at, expires_at = _allocation_generation_window(
+        runtime_attestation,
+    )
+    observed_at = datetime.now(UTC) if now is None else now.astimezone(UTC)
+    required_until = observed_at + timedelta(seconds=timeout_seconds)
+    required_until += _ALLOCATION_PROOF_EXPIRY_MARGIN
+    if expires_at < required_until:
+        raise PolicyError(
+            "runtime proof expires before the allocation timeout safety window",
+        )
 
 
 def _parse_allocation_timestamp(value: Any, description: str) -> datetime:
@@ -3552,14 +5458,17 @@ def _allocation_matrix_requires_reset(
     runtime_attestation: Mapping[str, Any],
     now: datetime,
 ) -> bool:
-    return matrix.get(
-        "runtime_attestation"
-    ) != runtime_attestation or _allocation_matrix_generation_is_stale(matrix, profile, now=now)
+    return (
+        matrix.get("runtime_attestation") != runtime_attestation
+        or matrix.get("generation_id") != _allocation_generation_id(runtime_attestation)
+        or _allocation_matrix_generation_is_stale(matrix, profile, now=now)
+    )
 
 
 def _new_allocation_matrix(
     profile: Profile,
     *,
+    sandbox: str,
     candidate_sha: str,
     binding: Mapping[str, Any],
     runtime_attestation: Mapping[str, Any],
@@ -3568,6 +5477,9 @@ def _new_allocation_matrix(
     expected_pool: str,
     expected_concurrency: int,
 ) -> dict[str, Any]:
+    _sandbox_account(profile, sandbox)
+    if runtime_attestation.get("sandbox") != sandbox:
+        raise PolicyError("allocation matrix runtime proof sandbox binding drifted")
     now = datetime.now(UTC).isoformat()
     generation_id, generation_started_at, generation_expires_at = _allocation_generation_window(
         runtime_attestation
@@ -3579,6 +5491,7 @@ def _new_allocation_matrix(
         "updated_at": now,
         "candidate_sha": candidate_sha,
         "candidate_tree": binding["repository"]["candidate_tree"],
+        "sandbox": sandbox,
         "cluster": profile.cluster,
         "controller": profile.controller,
         "submit_host": profile.submit_host,
@@ -3586,7 +5499,7 @@ def _new_allocation_matrix(
         "host_aliases": dict(profile.host_aliases),
         "batch_uid": batch_uid,
         "batch_gid": batch_gid,
-        "account": profile.child_accounts[0],
+        "account": _sandbox_account(profile, sandbox),
         "qos": profile.qos,
         "expected_pool": expected_pool,
         "expected_concurrency": expected_concurrency,
@@ -3613,6 +5526,7 @@ def _validate_allocation_matrix(
     matrix: Mapping[str, Any],
     profile: Profile,
     *,
+    sandbox: str,
     candidate_sha: str,
     binding: Mapping[str, Any],
     runtime_attestation: Mapping[str, Any],
@@ -3627,6 +5541,7 @@ def _validate_allocation_matrix(
         or matrix.get("artifact_type") != "developer-sandbox-slurm-allocation-matrix-journal"
         or matrix.get("candidate_sha") != candidate_sha
         or matrix.get("candidate_tree") != binding["repository"]["candidate_tree"]
+        or matrix.get("sandbox") != sandbox
         or matrix.get("cluster") != profile.cluster
         or matrix.get("controller") != profile.controller
         or matrix.get("submit_host") != profile.submit_host
@@ -3634,15 +5549,16 @@ def _validate_allocation_matrix(
         or matrix.get("host_aliases") != dict(profile.host_aliases)
         or matrix.get("batch_uid") != batch_uid
         or matrix.get("batch_gid") != batch_gid
-        or matrix.get("account") != profile.child_accounts[0]
+        or matrix.get("account") != _sandbox_account(profile, sandbox)
         or matrix.get("qos") != profile.qos
         or matrix.get("expected_pool") != expected_pool
         or matrix.get("expected_concurrency") != expected_concurrency
         or matrix.get("candidate_binding") != binding
         or matrix.get("runtime_attestation") != runtime_attestation
+        or runtime_attestation.get("sandbox") != sandbox
         or matrix.get("generation_id") != _allocation_generation_id(runtime_attestation)
         or matrix.get("generation_started_at") != runtime_attestation.get("receipt_collected_at")
-        or matrix.get("generation_expires_at") != runtime_attestation.get("receipt_expires_at")
+        or matrix.get("generation_expires_at") != runtime_attestation.get("proof_expires_at")
         or not isinstance(nodes, dict)
         or list(nodes) != list(profile.allowed_nodes)
     ):
@@ -3664,6 +5580,7 @@ def _validate_allocation_matrix_recovery_binding(
     matrix: Mapping[str, Any],
     profile: Profile,
     *,
+    sandbox: str,
     candidate_sha: str,
 ) -> None:
     nodes = matrix.get("nodes")
@@ -3671,12 +5588,16 @@ def _validate_allocation_matrix_recovery_binding(
         matrix.get("schema_version") != 1
         or matrix.get("artifact_type") != "developer-sandbox-slurm-allocation-matrix-journal"
         or matrix.get("candidate_sha") != candidate_sha
+        or matrix.get("sandbox") != sandbox
         or matrix.get("cluster") != profile.cluster
         or matrix.get("controller") != profile.controller
         or matrix.get("submit_host") != profile.submit_host
         or matrix.get("allowed_nodes") != list(profile.allowed_nodes)
         or matrix.get("host_aliases") != dict(profile.host_aliases)
-        or _ALLOCATION_GENERATION_RE.fullmatch(str(matrix.get("generation_id", ""))) is None
+        or not (
+            _allocation_generation_is_bundle_bound(matrix, sandbox=sandbox)
+            or _legacy_allocation_generation_is_bound(matrix, sandbox=sandbox)
+        )
         or not isinstance(matrix.get("generation_started_at"), str)
         or not isinstance(matrix.get("generation_expires_at"), str)
         or not isinstance(nodes, dict)
@@ -3725,6 +5646,7 @@ def _unfinished_allocation_nodes(
 def _allocation_probe_arguments(
     profile: Profile,
     *,
+    sandbox: str,
     node: str,
     attempt: int,
     candidate_sha: str,
@@ -3752,6 +5674,8 @@ def _allocation_probe_arguments(
         "allocation-node-check",
         "--profile",
         str(profile_path),
+        "--sandbox",
+        sandbox,
         "--candidate-sha",
         candidate_sha,
         "--candidate-root",
@@ -3790,9 +5714,9 @@ def _allocation_probe_arguments(
     arguments = [
         "sbatch",
         "--parsable",
-        f"--job-name={_allocation_job_name(candidate_sha, node, attempt, generation_id=generation_id)}",
-        f"--uid={profile.users[0]}",
-        f"--account={profile.child_accounts[0]}",
+        f"--job-name={_allocation_job_name(sandbox, candidate_sha, node, attempt, generation_id=generation_id)}",
+        f"--uid={_sandbox_service_user(profile, sandbox)}",
+        f"--account={_sandbox_account(profile, sandbox)}",
         f"--qos={profile.qos}",
         f"--clusters={profile.cluster}",
         f"--nodelist={node}",
@@ -3816,6 +5740,7 @@ def _allocation_probe_arguments(
 def _allocation_node_evidence(
     profile: Profile,
     *,
+    sandbox: str,
     node: str,
     candidate_sha: str,
     binding: Mapping[str, Any],
@@ -3838,14 +5763,14 @@ def _allocation_node_evidence(
         or base_rows[0][1] != job_name
         or _normalize_probe_job_state(base_rows[0][2]) != "COMPLETED"
         or base_rows[0][3].lower() != node.lower()
-        or base_rows[0][5] != profile.child_accounts[0]
-        or base_rows[0][6] != profile.users[0]
+        or base_rows[0][5] != _sandbox_account(profile, sandbox)
+        or base_rows[0][6] != _sandbox_service_user(profile, sandbox)
         or base_rows[0][7] != profile.cluster
         or base_rows[0][8] != profile.qos
         or _normalize_probe_job_state(srun_rows[0][2]) != "COMPLETED"
         or srun_rows[0][3].lower() != node.lower()
-        or srun_rows[0][5] != profile.child_accounts[0]
-        or srun_rows[0][6] != profile.users[0]
+        or srun_rows[0][5] != _sandbox_account(profile, sandbox)
+        or srun_rows[0][6] != _sandbox_service_user(profile, sandbox)
         or srun_rows[0][7] != profile.cluster
     ):
         raise PolicyError("allocation matrix sbatch/srun readback drifted")
@@ -3855,6 +5780,8 @@ def _allocation_node_evidence(
         raise PolicyError("allocation matrix GPU TRES readback drifted")
     expected_compute = {
         "schema_version": 1,
+        "sandbox": sandbox,
+        "account": _sandbox_account(profile, sandbox),
         "candidate_sha": candidate_sha,
         "candidate_tree": binding["repository"]["candidate_tree"],
         "host": expected_host,
@@ -3882,7 +5809,8 @@ def _allocation_node_evidence(
         "job_id": job_id,
         "job_name": job_name,
         "state": "COMPLETED",
-        "account": profile.child_accounts[0],
+        "sandbox": sandbox,
+        "account": _sandbox_account(profile, sandbox),
         "qos": base_rows[0][8],
         "alloc_tres": alloc_tres,
         "gpu_verified": gpu_verified,
@@ -3903,6 +5831,7 @@ def _replay_completed_allocation_probe(
     matrix: dict[str, Any],
     profile: Profile,
     *,
+    sandbox: str,
     node: str,
     candidate_sha: str,
     candidate_root: Path,
@@ -3920,14 +5849,22 @@ def _replay_completed_allocation_probe(
     attempt = row["attempts"]
     generation_id = str(matrix["generation_id"])
     job_name = _allocation_job_name(
+        sandbox,
         candidate_sha,
         node,
         attempt,
         generation_id=generation_id,
     )
-    result_path = _allocation_result_path(worker_env, profile, candidate_sha, node)
+    result_path = _allocation_result_path(
+        worker_env,
+        profile,
+        sandbox,
+        candidate_sha,
+        node,
+    )
     arguments = _allocation_probe_arguments(
         profile,
+        sandbox=sandbox,
         node=node,
         attempt=attempt,
         candidate_sha=candidate_sha,
@@ -3948,6 +5885,7 @@ def _replay_completed_allocation_probe(
     )
     evidence = _allocation_node_evidence(
         profile,
+        sandbox=sandbox,
         node=node,
         candidate_sha=candidate_sha,
         binding=binding,
@@ -3978,6 +5916,7 @@ def _replay_completed_or_mark_retry(
     matrix: dict[str, Any],
     profile: Profile,
     *,
+    sandbox: str,
     node: str,
     candidate_sha: str,
     candidate_root: Path,
@@ -3996,6 +5935,7 @@ def _replay_completed_or_mark_retry(
             matrix_path,
             matrix,
             profile,
+            sandbox=sandbox,
             node=node,
             candidate_sha=candidate_sha,
             candidate_root=candidate_root,
@@ -4025,7 +5965,13 @@ def _replay_completed_or_mark_retry(
             enforce_root_ownership=enforce_root_ownership,
         )
         _discard_allocation_result(
-            _allocation_result_path(worker_env, profile, candidate_sha, node),
+            _allocation_result_path(
+                worker_env,
+                profile,
+                sandbox,
+                candidate_sha,
+                node,
+            ),
         )
         return False
     return True
@@ -4035,16 +5981,17 @@ def _run_allocation_probe_transaction(
     root: Path,
     profile: Profile,
     *,
+    sandbox: str,
     candidate_sha: str,
     candidate_root: Path,
     worker_env: Path,
-    runtime_receipt: Path,
     batch_uid: int,
     batch_gid: int,
     expected_pool: str,
     expected_concurrency: int,
     timeout_seconds: float = _ALLOCATION_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
+    account = _sandbox_account(profile, sandbox)
     if root != Path("/") or os.geteuid() != 0:
         raise PolicyError("allocation-side Slurm probe requires the live root")
     if batch_uid < 0 or batch_gid < 0:
@@ -4061,12 +6008,13 @@ def _run_allocation_probe_transaction(
     controllers = _split_csv(live_config.get("SlurmctldHost", ""))
     if controllers and profile.controller.lower() not in {item.lower() for item in controllers}:
         raise PolicyError("allocation probe reached the wrong Slurm controller")
-    matrix_path = _allocation_matrix_path(root, profile, candidate_sha)
+    matrix_path = _allocation_matrix_path(root, profile, sandbox, candidate_sha)
     matrix = _load_allocation_state(matrix_path, enforce_root_ownership=True)
     if matrix is not None:
         _validate_allocation_matrix_recovery_binding(
             matrix,
             profile,
+            sandbox=sandbox,
             candidate_sha=candidate_sha,
         )
         nodes = matrix["nodes"]
@@ -4077,6 +6025,7 @@ def _run_allocation_probe_transaction(
         inflight_path = _allocation_node_inflight_path(
             root,
             profile,
+            sandbox,
             candidate_sha,
             node,
         )
@@ -4091,13 +6040,16 @@ def _run_allocation_probe_transaction(
             recovered = _recover_allocation_probe(
                 inflight_path,
                 profile,
+                sandbox=sandbox,
                 candidate_sha=candidate_sha,
                 node=node,
                 job_name=_allocation_job_name(
+                    sandbox,
                     candidate_sha,
                     node,
                     attempt,
                     generation_id=generation_id,
+                    allow_legacy=True,
                 ),
                 enforce_root_ownership=True,
             )
@@ -4105,11 +6057,23 @@ def _run_allocation_probe_transaction(
                 recovered_completed[node] = recovered
             else:
                 _discard_allocation_result(
-                    _allocation_result_path(worker_env, profile, candidate_sha, node),
+                    _allocation_result_path(
+                        worker_env,
+                        profile,
+                        sandbox,
+                        candidate_sha,
+                        node,
+                    ),
                 )
         else:
             _discard_allocation_result(
-                _allocation_result_path(worker_env, profile, candidate_sha, node),
+                _allocation_result_path(
+                    worker_env,
+                    profile,
+                    sandbox,
+                    candidate_sha,
+                    node,
+                ),
             )
         if row["status"] == "inflight" and node not in recovered_completed:
             nodes[node]["status"] = "pending"
@@ -4122,7 +6086,7 @@ def _run_allocation_probe_transaction(
 
     verify_source_candidate(candidate_sha)
     try:
-        batch_identity = pwd.getpwnam(profile.users[0])
+        batch_identity = pwd.getpwnam(_sandbox_service_user(profile, sandbox))
     except KeyError as exc:
         raise PolicyError("allocation probe batch user is unavailable") from exc
     if (batch_identity.pw_uid, batch_identity.pw_gid) != (batch_uid, batch_gid):
@@ -4137,13 +6101,18 @@ def _run_allocation_probe_transaction(
     if _SAFE_NAME.fullmatch(expected_pool) is None or expected_concurrency < 1:
         raise PolicyError("allocation matrix pool/concurrency binding is invalid")
     runtime_attestation = _runtime_attestation_binding(
-        runtime_receipt,
+        root,
         profile,
+        sandbox=sandbox,
         candidate_sha=candidate_sha,
         candidate_tree=binding["repository"]["candidate_tree"],
         candidate_root=candidate_root,
         worker_env=worker_env,
         enforce_root_ownership=True,
+    )
+    _require_allocation_proof_freshness(
+        runtime_attestation,
+        timeout_seconds=timeout_seconds,
     )
     if matrix is not None and _allocation_matrix_requires_reset(
         matrix,
@@ -4154,18 +6123,26 @@ def _run_allocation_probe_transaction(
         _archive_allocation_generation(
             root,
             profile,
+            sandbox,
             candidate_sha,
             matrix,
         )
         for node in profile.allowed_nodes:
             _discard_allocation_result(
-                _allocation_result_path(worker_env, profile, candidate_sha, node),
+                _allocation_result_path(
+                    worker_env,
+                    profile,
+                    sandbox,
+                    candidate_sha,
+                    node,
+                ),
             )
         matrix = None
         recovered_completed.clear()
     if matrix is None:
         matrix = _new_allocation_matrix(
             profile,
+            sandbox=sandbox,
             candidate_sha=candidate_sha,
             binding=binding,
             runtime_attestation=runtime_attestation,
@@ -4182,6 +6159,7 @@ def _run_allocation_probe_transaction(
     _validate_allocation_matrix(
         matrix,
         profile,
+        sandbox=sandbox,
         candidate_sha=candidate_sha,
         binding=binding,
         runtime_attestation=runtime_attestation,
@@ -4192,11 +6170,12 @@ def _run_allocation_probe_transaction(
     )
     nodes = matrix["nodes"]
     if matrix.get("phase") == "completed":
-        final_path = _allocation_probe_path(root, profile, candidate_sha)
+        final_path = _allocation_probe_path(root, profile, sandbox, candidate_sha)
         if final_path.exists():
             return _allocation_probe_readback_unlocked(
                 root,
                 profile,
+                sandbox=sandbox,
                 candidate_sha=candidate_sha,
                 candidate_binding=binding,
                 runtime_attestation=runtime_attestation,
@@ -4204,12 +6183,13 @@ def _run_allocation_probe_transaction(
                 expected_concurrency=expected_concurrency,
             )
     else:
-        _invalidate_allocation_artifact(root, profile, candidate_sha)
+        _invalidate_allocation_artifact(root, profile, sandbox, candidate_sha)
     for node, (job_id, recovered_rows) in recovered_completed.items():
         _replay_completed_or_mark_retry(
             matrix_path,
             matrix,
             profile,
+            sandbox=sandbox,
             node=node,
             candidate_sha=candidate_sha,
             candidate_root=candidate_root,
@@ -4229,6 +6209,10 @@ def _run_allocation_probe_transaction(
         "allocation matrix generation expiry",
     )
     for node in _unfinished_allocation_nodes(matrix, profile):
+        _require_allocation_proof_freshness(
+            runtime_attestation,
+            timeout_seconds=timeout_seconds,
+        )
         if datetime.now(UTC) >= generation_expires_at:
             matrix["phase"] = "generation_expired"
             _persist_allocation_matrix(
@@ -4241,13 +6225,21 @@ def _run_allocation_probe_transaction(
         inflight_path = _allocation_node_inflight_path(
             root,
             profile,
+            sandbox,
             candidate_sha,
             node,
         )
-        result_path = _allocation_result_path(worker_env, profile, candidate_sha, node)
+        result_path = _allocation_result_path(
+            worker_env,
+            profile,
+            sandbox,
+            candidate_sha,
+            node,
+        )
         row["attempts"] += 1
         attempt = row["attempts"]
         job_name = _allocation_job_name(
+            sandbox,
             candidate_sha,
             node,
             attempt,
@@ -4268,6 +6260,7 @@ def _run_allocation_probe_transaction(
         )
         arguments = _allocation_probe_arguments(
             profile,
+            sandbox=sandbox,
             node=node,
             attempt=attempt,
             candidate_sha=candidate_sha,
@@ -4297,6 +6290,7 @@ def _run_allocation_probe_transaction(
                 _recover_allocation_probe(
                     inflight_path,
                     profile,
+                    sandbox=sandbox,
                     candidate_sha=candidate_sha,
                     node=node,
                     job_name=job_name,
@@ -4306,6 +6300,7 @@ def _run_allocation_probe_transaction(
             job_id = job_ids[0]
             inflight = {
                 "schema_version": 1,
+                "sandbox": sandbox,
                 "created_at": datetime.now(UTC).isoformat(),
                 "candidate_sha": candidate_sha,
                 "cluster": profile.cluster,
@@ -4313,10 +6308,11 @@ def _run_allocation_probe_transaction(
                 "submit_host": profile.submit_host,
                 "node": node,
                 "host": profile.host_aliases[node],
-                "user": profile.users[0],
-                "account": profile.child_accounts[0],
+                "user": _sandbox_service_user(profile, sandbox),
+                "account": account,
                 "job_id": job_id,
                 "job_name": job_name,
+                "generation_id": generation_id,
                 "batch_uid": batch_uid,
                 "batch_gid": batch_gid,
                 "phase": "submitted",
@@ -4328,7 +6324,11 @@ def _run_allocation_probe_transaction(
                     enforce_root_ownership=True,
                 )
             except Exception as journal_exc:
-                _accounting, state = _validate_probe_job_identity(inflight, profile)
+                _accounting, state = _validate_probe_job_identity(
+                    inflight,
+                    profile,
+                    sandbox=sandbox,
+                )
                 if state not in _TERMINAL_JOB_STATES:
                     _run(("scancel", f"--clusters={profile.cluster}", job_id), timeout=30)
                 terminal = _poll_probe_terminal(job_id, profile, timeout_seconds=60)
@@ -4349,6 +6349,7 @@ def _run_allocation_probe_transaction(
                 inflight_path,
                 inflight,
                 profile,
+                sandbox=sandbox,
                 timeout_seconds=timeout_seconds,
                 enforce_root_ownership=True,
             )
@@ -4359,6 +6360,7 @@ def _run_allocation_probe_transaction(
             )
             evidence = _allocation_node_evidence(
                 profile,
+                sandbox=sandbox,
                 node=node,
                 candidate_sha=candidate_sha,
                 binding=binding,
@@ -4387,7 +6389,7 @@ def _run_allocation_probe_transaction(
             )
             _discard_allocation_result(result_path)
         except Exception as exc:
-            _invalidate_allocation_artifact(root, profile, candidate_sha)
+            _invalidate_allocation_artifact(root, profile, sandbox, candidate_sha)
             cleanup_completed = False
             try:
                 if inflight_path.exists():
@@ -4401,6 +6403,7 @@ def _run_allocation_probe_transaction(
                         inflight_path,
                         inflight_payload,
                         profile,
+                        sandbox=sandbox,
                         enforce_root_ownership=True,
                     )
                     cleanup_completed = (
@@ -4411,6 +6414,7 @@ def _run_allocation_probe_transaction(
                     recovered = _recover_allocation_probe(
                         inflight_path,
                         profile,
+                        sandbox=sandbox,
                         candidate_sha=candidate_sha,
                         node=node,
                         job_name=job_name,
@@ -4491,6 +6495,7 @@ def _run_allocation_probe_transaction(
         "generation_expires_at": generation_expires_at.isoformat(),
         "candidate_sha": candidate_sha,
         "candidate_tree": binding["repository"]["candidate_tree"],
+        "sandbox": sandbox,
         "cluster": profile.cluster,
         "controller": profile.controller,
         "submit_host": profile.submit_host,
@@ -4499,7 +6504,7 @@ def _run_allocation_probe_transaction(
         "host_aliases": dict(profile.host_aliases),
         "batch_uid": batch_uid,
         "batch_gid": batch_gid,
-        "account": profile.child_accounts[0],
+        "account": account,
         "qos": profile.qos,
         "expected_pool": expected_pool,
         "expected_concurrency": expected_concurrency,
@@ -4509,7 +6514,7 @@ def _run_allocation_probe_transaction(
         "closed_world_verified": True,
     }
     _write_allocation_state(
-        _allocation_probe_path(root, profile, candidate_sha),
+        _allocation_probe_path(root, profile, sandbox, candidate_sha),
         payload,
         enforce_root_ownership=True,
     )
@@ -4526,57 +6531,59 @@ def run_allocation_probe(
     root: Path,
     profile: Profile,
     *,
+    sandbox: str,
     candidate_sha: str,
     candidate_root: Path,
     worker_env: Path,
-    runtime_receipt: Path,
     batch_uid: int,
     batch_gid: int,
     expected_pool: str,
     expected_concurrency: int,
     timeout_seconds: float = _ALLOCATION_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
+    _sandbox_account(profile, sandbox)
     if root != Path("/") or os.geteuid() != 0:
         raise PolicyError("allocation-side Slurm probe requires the live root")
-    with _domain_lock(root, profile):
-        with _allocation_probe_lock(root, profile, candidate_sha):
-            return _run_allocation_probe_transaction(
-                root,
-                profile,
-                candidate_sha=candidate_sha,
-                candidate_root=candidate_root,
-                worker_env=worker_env,
-                runtime_receipt=runtime_receipt,
-                batch_uid=batch_uid,
-                batch_gid=batch_gid,
-                expected_pool=expected_pool,
-                expected_concurrency=expected_concurrency,
-                timeout_seconds=timeout_seconds,
-            )
+    with _allocation_probe_lock(root, profile, sandbox, candidate_sha):
+        return _run_allocation_probe_transaction(
+            root,
+            profile,
+            sandbox=sandbox,
+            candidate_sha=candidate_sha,
+            candidate_root=candidate_root,
+            worker_env=worker_env,
+            batch_uid=batch_uid,
+            batch_gid=batch_gid,
+            expected_pool=expected_pool,
+            expected_concurrency=expected_concurrency,
+            timeout_seconds=timeout_seconds,
+        )
 
 
 def _allocation_probe_readback_unlocked(
     root: Path,
     profile: Profile,
     *,
+    sandbox: str,
     candidate_sha: str,
     candidate_binding: Mapping[str, Any],
     runtime_attestation: Mapping[str, Any],
     expected_pool: str,
     expected_concurrency: int,
 ) -> dict[str, Any]:
-    path = _allocation_probe_path(root, profile, candidate_sha)
+    account = _sandbox_account(profile, sandbox)
+    path = _allocation_probe_path(root, profile, sandbox, candidate_sha)
     inflight_paths = [
-        _allocation_inflight_path(root, profile, candidate_sha),
+        _allocation_inflight_path(root, profile, sandbox, candidate_sha),
         *(
-            _allocation_node_inflight_path(root, profile, candidate_sha, node)
+            _allocation_node_inflight_path(root, profile, sandbox, candidate_sha, node)
             for node in profile.allowed_nodes
         ),
     ]
     if any(item.exists() for item in inflight_paths):
         raise PolicyError("allocation-side Slurm probe still has an inflight job")
     matrix = _load_allocation_state(
-        _allocation_matrix_path(root, profile, candidate_sha),
+        _allocation_matrix_path(root, profile, sandbox, candidate_sha),
         enforce_root_ownership=root == Path("/"),
     )
     if matrix is None:
@@ -4591,6 +6598,7 @@ def _allocation_probe_readback_unlocked(
     _validate_allocation_matrix(
         matrix,
         profile,
+        sandbox=sandbox,
         candidate_sha=candidate_sha,
         binding=candidate_binding,
         runtime_attestation=runtime_attestation,
@@ -4634,6 +6642,7 @@ def _allocation_probe_readback_unlocked(
         "generation_expires_at",
         "candidate_sha",
         "candidate_tree",
+        "sandbox",
         "cluster",
         "controller",
         "submit_host",
@@ -4658,6 +6667,7 @@ def _allocation_probe_readback_unlocked(
         or not isinstance(worker_env_binding, Mapping)
         or not isinstance(evidence_binding, Mapping)
         or payload.get("candidate_sha") != candidate_sha
+        or payload.get("sandbox") != sandbox
         or payload.get("generation_id") != generation_id
         or payload.get("generation_started_at") != generation_started_at.isoformat()
         or payload.get("generation_expires_at") != generation_expires_at.isoformat()
@@ -4669,7 +6679,7 @@ def _allocation_probe_readback_unlocked(
         or payload.get("submit_host") != profile.submit_host
         or payload.get("allowed_nodes") != list(profile.allowed_nodes)
         or payload.get("host_aliases") != dict(profile.host_aliases)
-        or payload.get("account") != profile.child_accounts[0]
+        or payload.get("account") != account
         or payload.get("qos") != profile.qos
         or payload.get("expected_pool") != expected_pool
         or payload.get("expected_concurrency") != expected_concurrency
@@ -4702,6 +6712,7 @@ def _allocation_probe_readback_unlocked(
             or evidence.get("host") != profile.host_aliases[node]
             or evidence.get("job_name")
             != _allocation_job_name(
+                sandbox,
                 candidate_sha,
                 node,
                 attempt,
@@ -4709,7 +6720,8 @@ def _allocation_probe_readback_unlocked(
             )
             or re.fullmatch(r"[1-9][0-9]*", str(evidence.get("job_id", ""))) is None
             or evidence.get("state") != "COMPLETED"
-            or evidence.get("account") != profile.child_accounts[0]
+            or evidence.get("sandbox") != sandbox
+            or evidence.get("account") != account
             or evidence.get("qos") != profile.qos
             or evidence.get("batch_uid") != worker_env_binding["uid"]
             or evidence.get("batch_gid") != worker_env_binding["gid"]
@@ -4725,6 +6737,8 @@ def _allocation_probe_readback_unlocked(
             or compute_check
             != {
                 "schema_version": 1,
+                "sandbox": sandbox,
+                "account": account,
                 "candidate_sha": candidate_sha,
                 "candidate_tree": repository["candidate_tree"],
                 "host": profile.host_aliases[node],
@@ -4763,6 +6777,7 @@ def _allocation_probe_readback_candidate_locked(
     root: Path,
     profile: Profile,
     *,
+    sandbox: str,
     candidate_sha: str,
     candidate_binding: Mapping[str, Any],
     runtime_attestation: Mapping[str, Any],
@@ -4772,12 +6787,14 @@ def _allocation_probe_readback_candidate_locked(
     with _allocation_probe_lock(
         root,
         profile,
+        sandbox,
         candidate_sha,
         enforce_root_ownership=root == Path("/"),
     ):
         return _allocation_probe_readback_unlocked(
             root,
             profile,
+            sandbox=sandbox,
             candidate_sha=candidate_sha,
             candidate_binding=candidate_binding,
             runtime_attestation=runtime_attestation,
@@ -4790,28 +6807,30 @@ def allocation_probe_readback(
     root: Path,
     profile: Profile,
     *,
+    sandbox: str,
     candidate_sha: str,
     candidate_binding: Mapping[str, Any],
     runtime_attestation: Mapping[str, Any],
     expected_pool: str,
     expected_concurrency: int,
 ) -> dict[str, Any]:
-    with _domain_lock(root, profile):
-        return _allocation_probe_readback_candidate_locked(
-            root,
-            profile,
-            candidate_sha=candidate_sha,
-            candidate_binding=candidate_binding,
-            runtime_attestation=runtime_attestation,
-            expected_pool=expected_pool,
-            expected_concurrency=expected_concurrency,
-        )
+    return _allocation_probe_readback_candidate_locked(
+        root,
+        profile,
+        sandbox=sandbox,
+        candidate_sha=candidate_sha,
+        candidate_binding=candidate_binding,
+        runtime_attestation=runtime_attestation,
+        expected_pool=expected_pool,
+        expected_concurrency=expected_concurrency,
+    )
 
 
 def _live_readback_unlocked(
     root: Path,
     profile: Profile,
     *,
+    sandbox: str | None,
     candidate_sha: str,
     require_probe: bool,
     check_accounting: bool = True,
@@ -4869,7 +6888,8 @@ def _live_readback_unlocked(
     accounting = _accounting_readback(profile) if check_accounting else None
     if require_allocation_probe:
         if (
-            candidate_binding is None
+            sandbox is None
+            or candidate_binding is None
             or runtime_attestation is None
             or expected_pool is None
             or expected_concurrency is None
@@ -4878,6 +6898,7 @@ def _live_readback_unlocked(
         allocation = _allocation_probe_readback_candidate_locked(
             root,
             profile,
+            sandbox=sandbox,
             candidate_sha=candidate_sha,
             candidate_binding=candidate_binding,
             runtime_attestation=runtime_attestation,
@@ -4901,6 +6922,7 @@ def live_readback(
     root: Path,
     profile: Profile,
     *,
+    sandbox: str | None,
     candidate_sha: str,
     require_probe: bool,
     check_accounting: bool = True,
@@ -4915,6 +6937,7 @@ def live_readback(
         return _live_readback_unlocked(
             root,
             profile,
+            sandbox=sandbox,
             candidate_sha=candidate_sha,
             require_probe=require_probe,
             check_accounting=check_accounting,
@@ -4934,13 +6957,15 @@ def _recover_orphan(
     slurm_node: str | None,
 ) -> dict[str, Any] | None:
     path = _journal_path(root, profile)
-    journal = _load_journal(path)
+    journal = _load_policy_journal(
+        path,
+        root=root,
+        profile=profile,
+        slurm_node=slurm_node,
+    )
     if journal is None:
         return journal
-    snapshot_raw = journal.get("snapshot")
-    if not isinstance(snapshot_raw, str):
-        raise PolicyError("orphan Slurm policy journal lacks a snapshot")
-    snapshot = _validate_snapshot_path(root, Path(snapshot_raw))
+    snapshot = _validate_snapshot_path(root, Path(journal["snapshot"]))
     accounting_raw = journal.get("accounting_snapshot")
     if accounting_raw is None:
         accounting_snapshot = None
@@ -4957,6 +6982,13 @@ def _recover_orphan(
         if not isinstance(rollback_target, str):
             raise PolicyError("orphan Slurm policy rollback target is invalid")
         _validate_snapshot_path(root, Path(rollback_target))
+    _snapshot_manifest_rows(root, snapshot)
+    archive_accounting = snapshot / "accounting-cas.json"
+    if accounting_snapshot is None:
+        if archive_accounting.exists() or archive_accounting.is_symlink():
+            raise PolicyError("orphan Slurm policy snapshot has unexpected accounting state")
+    else:
+        _validated_accounting_snapshot(profile, accounting_snapshot)
     if journal.get("phase") in {"committed", "rolled_back"}:
         return journal
     try:
@@ -4993,6 +7025,12 @@ def _validate_live_apply(
             raise PolicyError("live apply requires root")
         if slurm_node is None:
             raise PolicyError(f"host {host!r} is outside the reviewed node allowlist")
+        live_config = _parse_key_values(_run(("scontrol", "show", "config")))
+        if live_config.get("ClusterName") != profile.cluster:
+            raise PolicyError("live Slurm cluster identity does not match the profile")
+        controllers = _split_csv(live_config.get("SlurmctldHost", ""))
+        if controllers and profile.controller.lower() not in {item.lower() for item in controllers}:
+            raise PolicyError("live Slurm controller identity does not match the profile")
         if apply_accounting and slurm_node != profile.controller:
             raise PolicyError("accounting apply is controller-only")
         if apply_accounting:
@@ -5025,7 +7063,7 @@ def apply(
     )
     with _domain_lock(root, profile):
         _recover_orphan(root, profile, slurm_node=slurm_node)
-        _host, slurm_node = _validate_live_apply(
+        host, slurm_node = _validate_live_apply(
             root,
             profile,
             candidate_sha=candidate,
@@ -5047,10 +7085,13 @@ def apply(
             _accounting_snapshot(root, profile, snapshot) if apply_accounting else None
         )
         journal_path = _journal_path(root, profile)
+        created_at = datetime.now(UTC).isoformat()
         journal: dict[str, Any] = {
             "schema_version": 1,
             "operation": "apply",
             "cluster": profile.cluster,
+            "host": host,
+            "slurm_node": slurm_node,
             "candidate_sha": candidate,
             "snapshot": str(snapshot),
             "accounting_snapshot": (
@@ -5059,7 +7100,8 @@ def apply(
             "restart": restart,
             "apply_accounting": apply_accounting,
             "phase": "prepared",
-            "created_at": datetime.now(UTC).isoformat(),
+            "created_at": created_at,
+            "updated_at": created_at,
         }
         _write_journal(journal_path, journal)
         try:
@@ -5073,7 +7115,10 @@ def apply(
             if apply_accounting:
                 if accounting_snapshot is None:
                     raise PolicyError("Loom accounting CAS snapshot is missing")
-                accounting_payload = _load_accounting_snapshot(accounting_snapshot)
+                accounting_payload = _validated_accounting_snapshot(
+                    profile,
+                    accounting_snapshot,
+                )
                 _apply_accounting(profile, accounting_payload)
             _advance_journal(journal_path, journal, "accounting_applied")
             if restart:
@@ -5085,6 +7130,7 @@ def apply(
                 live = _live_readback_unlocked(
                     root,
                     profile,
+                    sandbox=None,
                     candidate_sha=candidate,
                     require_probe=False,
                     check_accounting=apply_accounting,
@@ -5144,7 +7190,7 @@ def rollback(
     )
     with _domain_lock(root, profile):
         _recover_orphan(root, profile, slurm_node=slurm_node)
-        _host, slurm_node = _validate_live_apply(
+        host, slurm_node = _validate_live_apply(
             root,
             profile,
             candidate_sha=current_candidate,
@@ -5152,8 +7198,17 @@ def rollback(
             apply_accounting=False,
         )
         journal_path = _journal_path(root, profile)
-        previous = _load_journal(journal_path)
-        if previous is None or previous.get("phase") != "committed":
+        previous = _load_policy_journal(
+            journal_path,
+            root=root,
+            profile=profile,
+            slurm_node=slurm_node,
+        )
+        if (
+            previous is None
+            or previous.get("phase") != "committed"
+            or previous.get("operation") != "apply"
+        ):
             raise PolicyError("no committed Slurm policy transaction is available to roll back")
         target_raw = previous.get("snapshot")
         if not isinstance(target_raw, str):
@@ -5181,10 +7236,13 @@ def rollback(
             if previous_accounting is not None
             else None
         )
+        created_at = datetime.now(UTC).isoformat()
         transaction: dict[str, Any] = {
             "schema_version": 1,
             "operation": "rollback",
             "cluster": profile.cluster,
+            "host": host,
+            "slurm_node": slurm_node,
             "candidate_sha": current_candidate,
             "snapshot": str(current_snapshot),
             "accounting_snapshot": (
@@ -5194,7 +7252,8 @@ def rollback(
             "restart": root == Path("/"),
             "apply_accounting": current_accounting is not None,
             "phase": "prepared",
-            "created_at": datetime.now(UTC).isoformat(),
+            "created_at": created_at,
+            "updated_at": created_at,
         }
         _write_journal(journal_path, transaction)
         try:
@@ -5271,18 +7330,20 @@ def _parser() -> argparse.ArgumentParser:
         choices=(
             "plan",
             "check",
+            "node-check",
             "apply",
             "rollback",
+            "materialize-runtime-proof",
             "allocation-probe",
             "allocation-node-check",
         ),
     )
     parser.add_argument("--profile", type=Path, required=True)
+    parser.add_argument("--sandbox")
     parser.add_argument("--root", type=Path, default=Path("/"))
     parser.add_argument("--candidate-sha")
     parser.add_argument("--candidate-root", type=Path)
     parser.add_argument("--worker-env", type=Path)
-    parser.add_argument("--runtime-receipt", type=Path)
     parser.add_argument("--batch-uid", type=int)
     parser.add_argument("--batch-gid", type=int)
     parser.add_argument("--expected-tree")
@@ -5308,7 +7369,41 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         profile = load_profile(args.profile)
         candidate = args.candidate_sha or source_candidate_sha()
-        if args.command == "allocation-node-check":
+        if args.command in {
+            "check",
+            "node-check",
+            "materialize-runtime-proof",
+            "allocation-probe",
+            "allocation-node-check",
+        }:
+            if args.sandbox is None:
+                raise PolicyError(f"{args.command} requires --sandbox")
+            _sandbox_account(profile, args.sandbox)
+        if args.command == "node-check":
+            if args.root != Path("/"):
+                raise PolicyError("node check requires the live root")
+            _sandbox_account(profile, args.sandbox)
+            _host, slurm_node = _validate_live_apply(
+                args.root,
+                profile,
+                candidate_sha=candidate,
+                restart=False,
+                apply_accounting=False,
+            )
+            with _domain_lock(args.root, profile):
+                result = plan(args.root, profile, candidate_sha=candidate)
+                if not result["file_plan"]["converged"]:
+                    sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")
+                    return 1
+                result["live_readback"] = _live_readback_unlocked(
+                    args.root,
+                    profile,
+                    sandbox=None,
+                    candidate_sha=candidate,
+                    require_probe=False,
+                    check_accounting=slurm_node == profile.controller,
+                )
+        elif args.command == "allocation-node-check":
             required = {
                 "candidate_root": args.candidate_root,
                 "worker_env": args.worker_env,
@@ -5326,6 +7421,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise PolicyError("allocation-node-check requires every exact binding")
             result = allocation_node_check(
                 profile,
+                sandbox=args.sandbox,
                 candidate_sha=candidate,
                 candidate_root=args.candidate_root,
                 worker_env=args.worker_env,
@@ -5339,6 +7435,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                 expected_concurrency=args.expected_concurrency,
                 result_path=args.result_path,
             )
+        elif args.command == "materialize-runtime-proof" and args.execute:
+            if args.root != Path("/"):
+                raise PolicyError("runtime proof materialization requires the live root")
+            verify_source_candidate(candidate)
+            repository = Path(__file__).resolve().parents[2]
+            candidate_tree = (
+                _git_read(
+                    repository,
+                    "rev-parse",
+                    "--verify",
+                    f"{candidate}^{{tree}}",
+                )
+                .decode("ascii")
+                .strip()
+            )
+            result = materialize_runtime_proof(
+                args.root,
+                profile,
+                sandbox=args.sandbox,
+                candidate_sha=candidate,
+                candidate_tree=candidate_tree,
+            )
         elif args.command == "apply" and args.execute:
             result = apply(
                 args.root,
@@ -5349,32 +7467,36 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         elif args.command == "rollback" and args.execute:
             result = rollback(args.root, profile, candidate_sha=candidate)
+        elif args.command == "materialize-runtime-proof":
+            raise PolicyError("materialize-runtime-proof requires --execute")
         elif args.command == "allocation-probe" and args.execute:
             if (
-                args.candidate_root is None
+                args.sandbox is None
+                or args.candidate_root is None
                 or args.worker_env is None
-                or args.runtime_receipt is None
                 or args.batch_uid is None
                 or args.batch_gid is None
                 or args.expected_pool is None
                 or args.expected_concurrency is None
             ):
                 raise PolicyError(
-                    "allocation-probe requires candidate, receipt, identity, pool, and concurrency",
+                    "allocation-probe requires candidate, identity, pool, and concurrency",
                 )
             result = run_allocation_probe(
                 args.root,
                 profile,
+                sandbox=args.sandbox,
                 candidate_sha=candidate,
                 candidate_root=args.candidate_root,
                 worker_env=args.worker_env,
-                runtime_receipt=args.runtime_receipt,
                 batch_uid=args.batch_uid,
                 batch_gid=args.batch_gid,
                 expected_pool=args.expected_pool,
                 expected_concurrency=args.expected_concurrency,
                 timeout_seconds=args.allocation_timeout_seconds,
             )
+        elif args.command == "allocation-probe":
+            raise PolicyError("allocation-probe requires --execute")
         else:
             check_lock = (
                 _domain_lock(args.root, profile)
@@ -5392,16 +7514,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if args.root == Path("/"):
                     verify_source_candidate(candidate)
                     if (
-                        args.candidate_root is None
+                        args.sandbox is None
+                        or args.candidate_root is None
                         or args.worker_env is None
-                        or args.runtime_receipt is None
                         or args.batch_uid is None
                         or args.batch_gid is None
                         or args.expected_pool is None
                         or args.expected_concurrency is None
                     ):
                         raise PolicyError(
-                            "live check requires candidate, receipt, identity, pool, and concurrency",
+                            "live check requires candidate, identity, pool, and concurrency",
                         )
                     binding = strict_candidate_binding(
                         args.candidate_root,
@@ -5411,8 +7533,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         expected_batch_gid=args.batch_gid,
                     )
                     runtime_attestation = _runtime_attestation_binding(
-                        args.runtime_receipt,
+                        args.root,
                         profile,
+                        sandbox=args.sandbox,
                         candidate_sha=candidate,
                         candidate_tree=binding["repository"]["candidate_tree"],
                         candidate_root=args.candidate_root,
@@ -5422,6 +7545,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     result["live_readback"] = _live_readback_unlocked(
                         args.root,
                         profile,
+                        sandbox=args.sandbox,
                         candidate_sha=candidate,
                         require_probe=True,
                         check_accounting=True,

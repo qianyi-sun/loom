@@ -722,6 +722,12 @@ def _bootstrap_policy_body(
     policy = payload.get("policy")
     if not isinstance(policy, dict):
         raise AdapterError("autoscaler policy template policy is invalid")
+    if (
+        policy.get("enabled") is not True
+        or policy.get("min_slots") != 0
+        or policy.get("max_slots") != config.max_slots_bound
+    ):
+        raise AdapterError("autoscaler policy template reviewed capacity drifted")
     body = cast(
         dict[str, Any],
         json.loads(
@@ -761,6 +767,13 @@ def _bootstrap_policy_body(
         or job_pids_max < container_pids * concurrency
     ):
         raise AdapterError("autoscaler policy job PID budget is below concurrency bound")
+    # The checked-in template describes the reviewed activated capacity.  A
+    # bootstrap must still be fail-closed until a current broker handoff is
+    # bound and independently validated by the adapter.
+    body["enabled"] = False
+    body["min_slots"] = 0
+    body["max_slots"] = 0
+    body["disabled_reason"] = "shared_capacity_handoff_disabled"
     return body
 
 

@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 from contextlib import nullcontext
+from datetime import UTC, datetime, timedelta
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
@@ -13,6 +14,66 @@ from scripts.ops import shared_capacity_runtime_host as host
 
 SHA = "a" * 40
 TREE = "b" * 40
+NOW = datetime(2026, 7, 29, 12, 0, tzinfo=UTC)
+ADAPTER_CANDIDATES = {
+    "qianyi": {"sha": SHA, "tree": TREE},
+    "hongjian": {"sha": "c" * 40, "tree": "d" * 40},
+    "devansh": {"sha": "e" * 40, "tree": "f" * 40},
+}
+
+
+def _platform_evidence(
+    *,
+    candidates: dict[str, dict[str, str]] | None = None,
+    completed_at: datetime = NOW,
+) -> tuple[dict[str, object], dict[str, object]]:
+    evidence: dict[str, object] = {
+        "schema_version": 1,
+        "kind": "loom.developer-sandbox.platform-health-evidence",
+        "session_id": "1" * 32,
+        "candidates": candidates if candidates is not None else ADAPTER_CANDIDATES,
+        "policy_capacity": {
+            "oldlab": {"max_slots": 20},
+            "gb10": {
+                "max_slots": 112,
+                "requested_cpus": 16,
+                "requested_memory_mib": 92000,
+                "requested_concurrency": 8,
+                "reserved_cpu_cores_per_node": 4,
+                "reserved_memory_mib_per_node": 23000,
+            },
+        },
+        "zero_orphans": True,
+        "completed_at": completed_at.isoformat().replace("+00:00", "Z"),
+        "expires_at": (completed_at + host.PLATFORM_HEALTH_EVIDENCE_TTL)
+        .isoformat()
+        .replace("+00:00", "Z"),
+    }
+    evidence["payload_sha256"] = host._sha256(host._canonical_json(evidence))
+    current: dict[str, object] = {
+        "schema_version": 1,
+        "session_id": "1" * 32,
+        "evidence_path": (
+            str(host.PLATFORM_HEALTH_ROOT / "sessions" / ("1" * 32) / "evidence.json")
+        ),
+        "payload_sha256": evidence["payload_sha256"],
+    }
+    return evidence, current
+
+
+def _binding_readback(instance: str) -> subprocess.CompletedProcess[str]:
+    sandbox, pool = instance.rsplit("-", 1)
+    payload = {
+        "pool": pool,
+        "sandbox": sandbox,
+        **ADAPTER_CANDIDATES[sandbox],
+    }
+    return subprocess.CompletedProcess(
+        ("candidate-python",),
+        0,
+        stdout=host._canonical_json(payload).decode(),
+        stderr="",
+    )
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -440,23 +501,165 @@ def test_activation_preflight_checks_broker_and_all_six_receipts(
 ) -> None:
     candidate = host.Candidate(SHA, TREE, Path(f"/opt/candidates/{SHA}/repo"))
     calls: list[tuple[str, tuple[str, ...]]] = []
+
+    def fake_candidate_python(
+        _candidate: host.Candidate,
+        code: str,
+        *args: str,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append((code, args))
+        if code == host._ADAPTER_BINDING_READBACK:
+            return _binding_readback(Path(args[0]).stem)
+        return subprocess.CompletedProcess(("candidate-python",), 0, stdout="", stderr="")
+
     monkeypatch.setattr(
         host,
         "_run_candidate_python",
-        lambda value, code, *args: calls.append((code, args)),
+        fake_candidate_python,
+    )
+    monkeypatch.setattr(
+        host,
+        "_validate_platform_health_activation_gate",
+        lambda value, bindings: calls.append(
+            (
+                "platform-health",
+                (value.sha, value.tree, json.dumps(bindings, sort_keys=True)),
+            ),
+        ),
     )
 
     host._activation_preflight(candidate, transaction_id="1" * 32)
 
-    assert len(calls) == 7
-    assert calls[0][0] == host._BROKER_PREFLIGHT
-    assert calls[0][1] == (str(host.SUPERVISOR_CONFIG_PATH), SHA, "1" * 32)
-    adapter_calls = calls[1:]
+    assert len(calls) == 14
+    assert all(code == host._ADAPTER_BINDING_READBACK for code, _args in calls[:6])
+    assert calls[6] == (
+        "platform-health",
+        (SHA, TREE, json.dumps(ADAPTER_CANDIDATES, sort_keys=True)),
+    )
+    assert calls[7][0] == host._BROKER_PREFLIGHT
+    assert calls[7][1] == (str(host.SUPERVISOR_CONFIG_PATH), SHA, "1" * 32)
+    adapter_calls = calls[8:]
     assert all(code == host._ADAPTER_PREFLIGHT for code, _args in adapter_calls)
     assert {Path(args[0]).stem for _code, args in adapter_calls} == set(host.INSTANCES)
-    assert all(args[1:] == (SHA, TREE) for _code, args in adapter_calls)
+    for _code, args in adapter_calls:
+        sandbox, _pool = Path(args[0]).stem.rsplit("-", 1)
+        assert args[1:] == (
+            ADAPTER_CANDIDATES[sandbox]["sha"],
+            ADAPTER_CANDIDATES[sandbox]["tree"],
+        )
     assert "_load_admin_token" in host._ADAPTER_PREFLIGHT
     assert "_validate_runtime_attestation" in host._ADAPTER_PREFLIGHT
+
+
+def test_platform_health_gate_binds_candidate_and_reviewed_positive_headroom(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = host.Candidate(SHA, TREE, Path(f"/opt/candidates/{SHA}/repo"))
+    evidence, current = _platform_evidence()
+    monkeypatch.setattr(
+        host,
+        "_platform_health_json",
+        lambda _path, *, label: current if "pointer" in label else evidence,
+    )
+
+    host._validate_platform_health_activation_gate(
+        candidate,
+        ADAPTER_CANDIDATES,
+        now=NOW,
+    )
+
+    capacity = evidence["policy_capacity"]
+    assert isinstance(capacity, dict)
+    gb10 = capacity["gb10"]
+    assert isinstance(gb10, dict)
+    gb10["requested_cpus"] = 20
+    unsigned = {key: value for key, value in evidence.items() if key != "payload_sha256"}
+    evidence["payload_sha256"] = host._sha256(host._canonical_json(unsigned))
+    current["payload_sha256"] = evidence["payload_sha256"]
+    with pytest.raises(host.RuntimeHostError, match="activation gate"):
+        host._validate_platform_health_activation_gate(
+            candidate,
+            ADAPTER_CANDIDATES,
+            now=NOW,
+        )
+
+
+@pytest.mark.parametrize("attack", ["expired", "future", "missing", "extra", "one-drift"])
+def test_platform_health_gate_rejects_before_broker_mutation(
+    attack: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidates = json.loads(json.dumps(ADAPTER_CANDIDATES))
+    adapters = json.loads(json.dumps(ADAPTER_CANDIDATES))
+    completed_at = NOW
+    if attack == "expired":
+        completed_at = NOW - host.PLATFORM_HEALTH_EVIDENCE_TTL
+    elif attack == "future":
+        completed_at = NOW + timedelta(minutes=1)
+    elif attack == "missing":
+        del candidates["devansh"]
+    elif attack == "extra":
+        candidates["foreign"] = {"sha": "1" * 40, "tree": "2" * 40}
+    else:
+        adapters["devansh"] = {"sha": "1" * 40, "tree": "2" * 40}
+    evidence, current = _platform_evidence(
+        candidates=candidates,
+        completed_at=completed_at,
+    )
+    candidate = host.Candidate(SHA, TREE, Path(f"/opt/candidates/{SHA}/repo"))
+    mutations: list[str] = []
+    monkeypatch.setattr(host, "_adapter_candidate_bindings", lambda _value: adapters)
+    monkeypatch.setattr(host, "_platform_health_now", lambda _value: NOW)
+    monkeypatch.setattr(
+        host,
+        "_platform_health_json",
+        lambda _path, *, label: current if "pointer" in label else evidence,
+    )
+    monkeypatch.setattr(
+        host,
+        "_run_candidate_python",
+        lambda *_args: mutations.append("candidate-program"),
+    )
+
+    with pytest.raises(host.RuntimeHostError):
+        host._activation_preflight(candidate, transaction_id="1" * 32)
+
+    assert mutations == []
+
+
+def test_adapter_candidate_bindings_require_exact_two_pool_agreement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = host.Candidate(SHA, TREE, Path(f"/opt/candidates/{SHA}/repo"))
+    monkeypatch.setattr(
+        host,
+        "_run_candidate_python",
+        lambda _candidate, _code, path: _binding_readback(Path(path).stem),
+    )
+
+    assert host._adapter_candidate_bindings(candidate) == ADAPTER_CANDIDATES
+
+    def drifted_readback(
+        _candidate: host.Candidate,
+        _code: str,
+        path: str,
+    ) -> subprocess.CompletedProcess[str]:
+        instance = Path(path).stem
+        completed = _binding_readback(instance)
+        if instance == "hongjian-oldlab":
+            payload = json.loads(completed.stdout)
+            payload["sha"] = "1" * 40
+            return subprocess.CompletedProcess(
+                completed.args,
+                0,
+                stdout=host._canonical_json(payload).decode(),
+                stderr="",
+            )
+        return completed
+
+    monkeypatch.setattr(host, "_run_candidate_python", drifted_readback)
+    with pytest.raises(host.RuntimeHostError, match="drifted across pools"):
+        host._adapter_candidate_bindings(candidate)
 
 
 @pytest.mark.parametrize(
@@ -466,6 +669,7 @@ def test_activation_preflight_checks_broker_and_all_six_receipts(
         ("broker-open", host._BROKER_OPEN, 2),
         ("broker-retire", host._BROKER_RETIRE, 4),
         ("adapter-preflight", host._ADAPTER_PREFLIGHT, 3),
+        ("adapter-binding-readback", host._ADAPTER_BINDING_READBACK, 1),
         ("generation-readback", host._GENERATION_READBACK, 1),
         ("activated-adapter-readback", host._ACTIVATED_ADAPTER_READBACK, 3),
     ),
@@ -844,6 +1048,7 @@ def test_activation_failure_restores_installed_inactive_snapshot(
         },
     )
     monkeypatch.setattr(host, "check", lambda *args, **kwargs: {"status": "pass"})
+    monkeypatch.setattr(host, "_activation_gate_preflight", lambda value: ADAPTER_CANDIDATES)
     monkeypatch.setattr(host, "_activation_preflight", lambda value, **kwargs: None)
     monkeypatch.setattr(
         host,
@@ -867,6 +1072,43 @@ def test_activation_failure_restores_installed_inactive_snapshot(
 
     assert restored == [journal_path]
     assert candidate_repo == host.CANDIDATE_PARENT / SHA / "repo"
+
+
+def test_activation_rejects_authority_gate_before_transaction_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mutations: list[str] = []
+    monkeypatch.setattr(host, "_require_live_host", lambda: None)
+    monkeypatch.setattr(host, "_lock", nullcontext)
+    monkeypatch.setattr(host, "_recover_orphan", lambda: None)
+    monkeypatch.setattr(host, "_reject_orphan_stages", lambda: None)
+    monkeypatch.setattr(
+        host,
+        "_load_json",
+        lambda path, label: {
+            "candidate_sha": SHA,
+            "candidate_tree": TREE,
+            "activation_status": "installed",
+        },
+    )
+    monkeypatch.setattr(host, "check", lambda *args, **kwargs: {"status": "pass"})
+    monkeypatch.setattr(
+        host,
+        "_activation_gate_preflight",
+        lambda _candidate: (_ for _ in ()).throw(
+            host.RuntimeHostError("platform-health activation gate is not satisfied"),
+        ),
+    )
+    monkeypatch.setattr(
+        host,
+        "_write_journal",
+        lambda *_args, **_kwargs: mutations.append("journal"),
+    )
+
+    with pytest.raises(host.RuntimeHostError, match="activation gate"):
+        host.activate(SHA)
+
+    assert mutations == []
 
 
 def test_activated_rollback_reopens_fence_only_after_external_and_local_restore(
@@ -910,8 +1152,9 @@ def test_activated_rollback_reopens_fence_only_after_external_and_local_restore(
     monkeypatch.setattr(
         host,
         "_restore_local_transaction",
-        lambda item, data, **kwargs: events.append("local-restored")
-        or (transaction_id, "install", SHA, TREE),
+        lambda item, data, **kwargs: (
+            events.append("local-restored") or (transaction_id, "install", SHA, TREE)
+        ),
     )
     monkeypatch.setattr(
         host,
@@ -926,8 +1169,7 @@ def test_activated_rollback_reopens_fence_only_after_external_and_local_restore(
     monkeypatch.setattr(
         host,
         "_update_journal",
-        lambda item, data, phase: data.update(phase=phase)
-        or events.append(f"phase:{phase}"),
+        lambda item, data, phase: data.update(phase=phase) or events.append(f"phase:{phase}"),
     )
     monkeypatch.setattr(
         host,
@@ -981,8 +1223,7 @@ def test_activated_rollback_partial_drain_failure_keeps_fence_and_journal(
     monkeypatch.setattr(
         host,
         "_update_journal",
-        lambda item, data, phase: data.update(phase=phase)
-        or events.append(f"phase:{phase}"),
+        lambda item, data, phase: data.update(phase=phase) or events.append(f"phase:{phase}"),
     )
     monkeypatch.setattr(
         host,
@@ -1139,16 +1380,11 @@ def test_persisted_disk_recovery_survives_public_program_restore_and_resumes(
             events.append("six-lanes-terminal")
 
         recovery._verify_activated_capacity_drained = verify_six_lanes
-        recovery._restore_local_transaction = (
-            lambda path, data, **kwargs: events.append("local-restored")
-            or ("1" * 32, "install", SHA, TREE)
+        recovery._restore_local_transaction = lambda path, data, **kwargs: (
+            events.append("local-restored") or ("1" * 32, "install", SHA, TREE)
         )
-        recovery._open_activation_admission = (
-            lambda candidate, token: events.append("fence-open")
-        )
-        recovery._update_journal = (
-            lambda path, data, phase: data.update(phase=phase)
-        )
+        recovery._open_activation_admission = lambda candidate, token: events.append("fence-open")
+        recovery._update_journal = lambda path, data, phase: data.update(phase=phase)
         recovery._fsync_directory = lambda path: events.append("journal-cleared")
         recovery._recover_orphan = lambda: recovery._resume_activated_rollback(
             journal_path,

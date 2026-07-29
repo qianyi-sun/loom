@@ -1,0 +1,87 @@
+#!/bin/sh
+set -eu
+
+POLICY=/etc/loom/developer-sandbox-node-authority.json
+CURRENT=/var/lib/loom-staging-external-slurm-authority/current.json
+SOURCE=/usr/local/lib/loom-staging-external-slurm-authority/staging_external_slurm_acceptance_authority.py
+RUNTIME_ROOT=/opt/loom-staging-runner/candidates
+
+candidate_sha=
+candidate_tree=
+previous=
+for argument in "$@"; do
+    if [ "$previous" = "--candidate-sha" ]; then
+        candidate_sha=$argument
+    elif [ "$previous" = "--candidate-tree" ]; then
+        candidate_tree=$argument
+    fi
+    previous=$argument
+done
+
+if [ -z "$candidate_sha" ] && [ "${1-}" = "verify-current" ]; then
+    candidate_sha=$(
+        /usr/bin/python3 -I -c \
+            'import json,sys; value=json.load(open(sys.argv[1], encoding="ascii")).get("candidate_sha",""); print(value)' \
+            "$CURRENT"
+    )
+    candidate_tree=$(
+        /usr/bin/python3 -I -c \
+            'import json,sys; value=json.load(open(sys.argv[1], encoding="ascii")).get("candidate_tree",""); print(value)' \
+            "$CURRENT"
+    )
+fi
+
+case "$candidate_sha" in
+    *[!0-9a-f]*|"")
+        echo "error: exact candidate SHA is required" >&2
+        exit 1
+        ;;
+esac
+[ "${#candidate_sha}" -eq 40 ] || {
+    echo "error: exact candidate SHA is required" >&2
+    exit 1
+}
+
+installed_sha=$(
+    /usr/bin/python3 -I -c \
+        'import json,sys; value=json.load(open(sys.argv[1], encoding="ascii")).get("source_sha",""); print(value)' \
+        "$POLICY"
+)
+installed_tree=$(
+    /usr/bin/python3 -I -c \
+        'import json,sys; value=json.load(open(sys.argv[1], encoding="ascii")).get("source_tree",""); print(value)' \
+        "$POLICY"
+)
+[ "$installed_sha" = "$candidate_sha" ] || {
+    echo "error: installed authority is not the exact candidate" >&2
+    exit 1
+}
+if [ -n "$candidate_tree" ]; then
+    case "$candidate_tree" in
+        *[!0-9a-f]*|"")
+            echo "error: exact candidate tree is required" >&2
+            exit 1
+            ;;
+    esac
+    [ "${#candidate_tree}" -eq 40 ] && [ "$installed_tree" = "$candidate_tree" ] || {
+        echo "error: installed authority is not the exact candidate tree" >&2
+        exit 1
+    }
+fi
+
+[ -f "$SOURCE" ] && [ ! -L "$SOURCE" ] || {
+    echo "error: fixed authority source is unavailable" >&2
+    exit 1
+}
+runtime_link="$RUNTIME_ROOT/$candidate_sha/venv/bin/python"
+[ -x "$runtime_link" ] || {
+    echo "error: exact candidate runtime is unavailable" >&2
+    exit 1
+}
+runtime_prefix=$("$runtime_link" -I -c 'import sys; print(sys.prefix)')
+[ "$runtime_prefix" = "$RUNTIME_ROOT/$candidate_sha/venv" ] || {
+    echo "error: exact candidate runtime escaped its candidate venv" >&2
+    exit 1
+}
+
+exec "$runtime_link" -I "$SOURCE" "$@"

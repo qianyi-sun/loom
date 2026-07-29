@@ -12,6 +12,7 @@ import json
 import re
 import shlex
 import time
+import tomllib
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -31,15 +32,17 @@ _HOST_RE = re.compile(r"trt-gb10-(?:[1-9]|1[0-5])\Z")
 _SERVICE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@-]*[.]service\Z")
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _KNOWN_HOSTS = Path("/etc/loom/staging-rollout-gb10-known-hosts")
-_SHARED_ROOT = PurePosixPath("/shared_work2/qianyi/.loom-staging-rollout/worker-repos")
+_LEGACY_SHARED_ROOT = PurePosixPath("/shared_work2/qianyi/.loom-staging-rollout/worker-repos")
+_LEGACY_UNIT_ROOT = PurePosixPath("deploy/worker-pools/gb10")
 _LEGACY_SERVICE = "loom-gb10-worker.service"
-_UNIT_ROOT = PurePosixPath("deploy/worker-pools/gb10")
 _FIXED_REPO = PurePosixPath("/home/qianyi/loom-worker-build-staging")
 _FIXED_ENV_FILE = _FIXED_REPO / ".env"
 _FIXED_NODE_AGENT_SERVICE = "loom-gb10-node-agent.service"
-# Shared candidate Git reads traverse live NFS. Keep ordinary remote probes at
-# ten seconds, but give exact shared-source reads a bounded tail-latency budget.
-_REMOTE_SHARED_GIT_TIMEOUT_SECONDS = 30
+_RETIREMENT_UNITS = (
+    _LEGACY_SERVICE,
+    _FIXED_NODE_AGENT_SERVICE,
+    "loom-gb10-node-agent.timer",
+)
 # Installed transports retry transient single-bastion SSH failures. Six attempts
 # with a 2s pause tolerate the connection storms the fleet observe competes with
 # (the 30s autoscaler cadence) while keeping the total per-host budget bounded.
@@ -47,7 +50,11 @@ _INSTALLED_OBSERVE_ATTEMPTS = 6
 _INSTALLED_OBSERVE_INTERVAL_SECONDS = 2.0
 _FIXED_IDENTITY = Path("/var/lib/loom-staging-rollout/gb10-deploy-ed25519")
 _MAX_OUTPUT_BYTES = 64 * 1024
-_MUTATION_ORDER = (
+_RETIREMENT_MUTATION_ORDER = (
+    GB10MutationKind.LEGACY_RETIRE,
+    GB10MutationKind.SERVICE_TIMER,
+)
+_LEGACY_MUTATION_ORDER = (
     GB10MutationKind.CHECKOUT,
     GB10MutationKind.ENVIRONMENT,
     GB10MutationKind.UNITS,
@@ -85,25 +92,34 @@ class GB10TransportTarget:
     """One fixed release-managed host from the installed staging inventory."""
 
     ssh_target: str
-    repo_path: PurePosixPath
-    env_file_path: PurePosixPath
+    repo_path: PurePosixPath | None
+    env_file_path: PurePosixPath | None
     node_agent_service: str
+    retirement_only: bool = False
 
     def __post_init__(self) -> None:
-        repo = PurePosixPath(self.repo_path)
-        env_file = PurePosixPath(self.env_file_path)
+        repo = None if self.repo_path is None else PurePosixPath(self.repo_path)
+        env_file = None if self.env_file_path is None else PurePosixPath(self.env_file_path)
         if (
             _HOST_RE.fullmatch(self.ssh_target) is None
             or _SERVICE_RE.fullmatch(self.node_agent_service) is None
-            or not repo.is_absolute()
-            or not env_file.is_absolute()
-            or ".." in repo.parts
-            or ".." in env_file.parts
-            or env_file.parent != repo
-            or env_file.name != ".env"
-            or repo != _FIXED_REPO
-            or env_file != _FIXED_ENV_FILE
             or self.node_agent_service != _FIXED_NODE_AGENT_SERVICE
+            or (self.retirement_only and (repo is not None or env_file is not None))
+            or (
+                not self.retirement_only
+                and (
+                    repo is None
+                    or env_file is None
+                    or not repo.is_absolute()
+                    or not env_file.is_absolute()
+                    or ".." in repo.parts
+                    or ".." in env_file.parts
+                    or env_file.parent != repo
+                    or env_file.name != ".env"
+                    or repo != _FIXED_REPO
+                    or env_file != _FIXED_ENV_FILE
+                )
+            )
         ):
             raise ValueError("GB10 transport target is outside fixed authority")
         object.__setattr__(self, "repo_path", repo)
@@ -324,9 +340,10 @@ class FixedGB10SSHTransport:
         plan: FinalGatePlan,
         operations: tuple[GB10MutationKind, ...],
     ) -> bool:
-        expected_order = tuple(
-            operation for operation in _MUTATION_ORDER if operation in operations
+        mutation_order = (
+            _RETIREMENT_MUTATION_ORDER if target.retirement_only else _LEGACY_MUTATION_ORDER
         )
+        expected_order = tuple(operation for operation in mutation_order if operation in operations)
         if (
             not operations
             or len(set(operations)) != len(operations)
@@ -411,12 +428,106 @@ def _remote_observation_command(target: GB10TransportTarget, plan: FinalGatePlan
     return "python3 -c " + shlex.quote(_remote_observation_source(target, plan))
 
 
-def _remote_observation_source(target: GB10TransportTarget, plan: FinalGatePlan) -> str:
+def _retirement_observation_source(
+    target: GB10TransportTarget,
+    plan: FinalGatePlan,
+) -> str:
+    """Read back only the durable absence of every legacy user authority."""
+    units = (_LEGACY_SERVICE, target.node_agent_service, target.timer)
+    return f"""import json
+import os
+import pathlib
+import stat
+import subprocess
+
+units = {units!r}
+candidate_sha = {plan.candidate_sha!r}
+candidate_tree = {plan.candidate_tree!r}
+plan_digest = {plan.plan_digest!r}
+state = pathlib.Path.home() / ".local/state/loom-staging-rollout/gb10-authority-retirement.json"
+unit_root = pathlib.Path.home() / ".config/systemd/user"
+
+def run(argv):
+    return subprocess.run(argv, check=False, capture_output=True, text=True, timeout=10,
+                          env={{"HOME": str(pathlib.Path.home()), "LANG": "C.UTF-8",
+                          "LC_ALL": "C.UTF-8", "PATH": "/usr/local/bin:/usr/bin:/bin",
+                          "XDG_RUNTIME_DIR": "/run/user/" + str(os.getuid())}})
+
+def absent(path):
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+def retired(unit):
+    active = run(["systemctl", "--user", "is-active", unit])
+    enabled = run(["systemctl", "--user", "is-enabled", unit])
+    return (active.stdout.strip() not in {{"active", "activating", "reloading"}}
+            and enabled.stdout.strip() not in {{"enabled", "enabled-runtime", "linked",
+                                               "linked-runtime", "alias"}})
+
+def committed():
+    try:
+        item = state.lstat()
+        raw = state.read_bytes()
+        payload = json.loads(raw)
+    except (OSError, json.JSONDecodeError):
+        return False
+    canonical = (json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                            ensure_ascii=True) + "\\n").encode("ascii")
+    return bool(stat.S_ISREG(item.st_mode) and not stat.S_ISLNK(item.st_mode)
+                and item.st_uid == os.getuid() and item.st_nlink == 1
+                and stat.S_IMODE(item.st_mode) == 0o600 and raw == canonical
+                and payload.get("schema_version") == 1
+                and payload.get("kind") == "loom.gb10-user-authority-retirement"
+                and payload.get("phase") == "committed"
+                and payload.get("candidate_sha") == candidate_sha
+                and payload.get("candidate_tree") == candidate_tree
+                and payload.get("plan_digest") == plan_digest
+                and payload.get("units") == list(units))
+
+boot_id = "unavailable"
+try:
+    boot_id = pathlib.Path("/proc/sys/kernel/random/boot_id").read_text(
+        encoding="ascii").strip()
+except OSError:
+    pass
+manager = run(["systemctl", "--user", "show", "--property=Version", "--value"])
+linger = run(["loginctl", "show-user", str(os.getuid()), "--property=Linger", "--value"])
+baseline_ready = bool(boot_id != "unavailable" and manager.returncode == 0
+                      and manager.stdout.strip() and linger.returncode == 0
+                      and linger.stdout.strip() == "yes")
+legacy_absent = retired(units[0]) and absent(unit_root / units[0])
+all_absent = all(absent(unit_root / unit) for unit in units)
+dropins_absent = absent(unit_root / (units[2] + ".d"))
+retirement_exact = bool(all(retired(unit) for unit in units)
+                        and all_absent and dropins_absent and committed())
+
+print(json.dumps({{
+    "baseline_ready": baseline_ready,
+    "boot_id": boot_id,
+    "candidate_source_exact": True,
+    "checkout_exact": True,
+    "environment_exact": True,
+    "legacy_absent": legacy_absent,
+    "service_timer_exact": retirement_exact,
+    "service_timer_transient": False,
+    "units_exact": True,
+}}, sort_keys=True, separators=(",", ":")))"""
+
+
+def _legacy_observation_source(target: GB10TransportTarget, plan: FinalGatePlan) -> str:
+    """Preserve the bounded legacy user-checkout observation contract."""
+    if target.repo_path is None or target.env_file_path is None:
+        raise ValueError("legacy GB10 target paths are unavailable")
     image_tag = f"staging-{plan.candidate_sha[:7]}"
-    shared = _SHARED_ROOT / f"loom-remote-worker-{image_tag}"
-    service = target.node_agent_service
-    timer = target.timer
-    unit_paths = tuple(str(_UNIT_ROOT / unit) for unit in (service, timer))
+    shared = _LEGACY_SHARED_ROOT / f"loom-remote-worker-{image_tag}"
+    units = tuple(
+        str(_LEGACY_UNIT_ROOT / unit) for unit in (target.node_agent_service, target.timer)
+    )
     return f"""import json
 import os
 import pathlib
@@ -429,152 +540,96 @@ image_tag = {image_tag!r}
 shared = pathlib.Path({str(shared)!r})
 repo = pathlib.Path({str(target.repo_path)!r})
 env_file = pathlib.Path({str(target.env_file_path)!r})
-service = {service!r}
-timer = {timer!r}
+service = {target.node_agent_service!r}
+timer = {target.timer!r}
 legacy = {_LEGACY_SERVICE!r}
-unit_paths = {unit_paths!r}
+unit_paths = {units!r}
 
-def run(argv, *, cwd=None, timeout_seconds=10):
+def run(argv, *, cwd=None):
     return subprocess.run(argv, cwd=cwd, check=False, capture_output=True, text=True,
-                          timeout=timeout_seconds,
-                          env={{"HOME": str(pathlib.Path.home()), "LANG": "C.UTF-8",
-                          "LC_ALL": "C.UTF-8", "PATH": "/usr/local/bin:/usr/bin:/bin",
+                          timeout=30, env={{"HOME": str(pathlib.Path.home()),
+                          "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
+                          "PATH": "/usr/local/bin:/usr/bin:/bin",
                           "XDG_RUNTIME_DIR": "/run/user/" + str(os.getuid())}})
 
-def git(root, *args):
-    result = run(["git", "-c", f"safe.directory={{root}}", "-C", str(root), *args],
-                 timeout_seconds={_REMOTE_SHARED_GIT_TIMEOUT_SECONDS})
-    return result.stdout.strip() if result.returncode == 0 and not result.stderr else None
-
-def plain_directory(path):
+def git_exact(root, *, whole_tree):
     try:
-        item = path.lstat()
+        item = root.lstat()
     except OSError:
         return False
-    return stat.S_ISDIR(item.st_mode) and not stat.S_ISLNK(item.st_mode)
+    if not stat.S_ISDIR(item.st_mode) or stat.S_ISLNK(item.st_mode):
+        return False
+    prefix = ["git", "-c", f"safe.directory={{root}}", "-C", str(root)]
+    head = run([*prefix, "rev-parse", "HEAD"])
+    tree = run([*prefix, "rev-parse", "HEAD^{{tree}}"])
+    status = run([*prefix, "status", "--porcelain=v1",
+                  "--untracked-files=all" if whole_tree else "--untracked-files=no"])
+    return (head.returncode == tree.returncode == status.returncode == 0
+            and not head.stderr and not tree.stderr and not status.stderr
+            and head.stdout.strip() == candidate_sha
+            and tree.stdout.strip() == candidate_tree and not status.stdout.strip())
 
-def read_regular(path):
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
+def environment_exact():
     try:
-        before = os.fstat(descriptor)
-        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
-                or before.st_size < 0 or before.st_size > 1024 * 1024):
-            raise OSError("unsafe unit source")
-        chunks = []
-        remaining = before.st_size
-        while remaining:
-            chunk = os.read(descriptor, min(65536, remaining))
-            if not chunk:
-                raise OSError("short unit source")
-            chunks.append(chunk); remaining -= len(chunk)
-        after = os.fstat(descriptor)
-        if ((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
-                != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)):
-            raise OSError("unstable unit source")
-        return b"".join(chunks)
-    finally:
-        os.close(descriptor)
-
-def exact_repo(root, *, whole_tree):
-    if not plain_directory(root):
-        return False
-    if git(root, "rev-parse", "HEAD") != candidate_sha:
-        return False
-    if git(root, "rev-parse", "HEAD^{{tree}}") != candidate_tree:
-        return False
-    status_args = ("status", "--porcelain=v1", "--untracked-files=all") if whole_tree else (
-        "status", "--porcelain=v1", "--untracked-files=no", "--", *unit_paths)
-    return git(root, *status_args) == ""
-
-def exact_environment():
-    try:
-        item = env_file.lstat()
-        if not stat.S_ISREG(item.st_mode) or stat.S_ISLNK(item.st_mode):
-            return False
         values = {{}}
         for line in env_file.read_text(encoding="utf-8").splitlines():
             if "=" not in line or line.lstrip().startswith("#"):
                 continue
             key, value = line.split("=", 1)
-            key = key.strip()
-            if key in values:
+            if key.strip() in values:
                 return False
-            values[key] = value
+            values[key.strip()] = value
     except (OSError, UnicodeError):
         return False
     return all(values.get(key) == image_tag for key in (
         "IMAGE_TAG", "ENV_CONFIG_VERSION", "LOOM_IMAGE_TAG",
         "LOOM_WORKER_ENV_CONFIG_VERSION"))
 
-def exact_units():
-    for relative in unit_paths:
-        source = repo / relative
-        destination = pathlib.Path.home() / ".config/systemd/user" / pathlib.Path(relative).name
-        try:
-            src = source.lstat(); dst = destination.lstat()
-            if (not stat.S_ISREG(src.st_mode) or stat.S_ISLNK(src.st_mode)
-                    or not stat.S_ISREG(dst.st_mode) or stat.S_ISLNK(dst.st_mode)
-                    or stat.S_IMODE(dst.st_mode) != 0o644
-                    or read_regular(source) != read_regular(destination)):
-                return False
-        except OSError:
-            return False
-    return True
+def units_exact():
+    try:
+        return all(
+            (repo / relative).read_bytes()
+            == (pathlib.Path.home() / ".config/systemd/user"
+                / pathlib.Path(relative).name).read_bytes()
+            for relative in unit_paths)
+    except OSError:
+        return False
 
-def properties(unit, names):
-    result = run(["systemctl", "--user", "show", unit, *[f"--property={{name}}" for name in names]])
-    if result.returncode != 0:
-        return None
-    parsed = {{}}
-    for line in result.stdout.splitlines():
-        key, sep, value = line.partition("=")
-        if sep:
-            parsed[key] = value
-    return parsed if set(parsed) == set(names) else None
+def active(unit):
+    result = run(["systemctl", "--user", "is-active", unit])
+    return result.returncode == 0 and result.stdout.strip() == "active"
 
-boot_id = "unavailable"
+def enabled(unit):
+    result = run(["systemctl", "--user", "is-enabled", unit])
+    return result.returncode == 0 and result.stdout.strip() == "enabled"
+
 try:
-    boot_id = pathlib.Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+    boot_id = pathlib.Path("/proc/sys/kernel/random/boot_id").read_text(
+        encoding="ascii").strip()
 except OSError:
-    pass
-manager = run(["systemctl", "--user", "show", "--property=Version", "--value"])
-linger = run(["loginctl", "show-user", str(os.getuid()), "--property=Linger", "--value"])
-baseline_ready = bool(boot_id != "unavailable" and manager.returncode == 0
-                      and manager.stdout.strip() and linger.returncode == 0
-                      and linger.stdout.strip() == "yes")
-service_props = properties(service, ["LoadState", "Type", "Result", "ExecMainStatus", "NeedDaemonReload"])
-timer_props = properties(timer, ["LoadState", "ActiveState", "SubState", "Unit", "NeedDaemonReload"])
-timer_enabled = run(["systemctl", "--user", "is-enabled", timer])
-service_timer_exact = bool(service_props == {{"LoadState": "loaded", "Type": "oneshot",
-    "Result": "success", "ExecMainStatus": "0", "NeedDaemonReload": "no"}}
-    and timer_props == {{"LoadState": "loaded", "ActiveState": "active",
-    "SubState": "waiting", "Unit": service, "NeedDaemonReload": "no"}}
-    and timer_enabled.returncode == 0 and timer_enabled.stdout.strip() == "enabled")
-service_timer_transient = bool(service_props is not None
-    and service_props.get("LoadState") == "loaded"
-    and service_props.get("Type") == "oneshot"
-    and service_props.get("NeedDaemonReload") == "no"
-    and timer_props == {{"LoadState": "loaded", "ActiveState": "active",
-    "SubState": "running", "Unit": service, "NeedDaemonReload": "no"}}
-    and timer_enabled.returncode == 0 and timer_enabled.stdout.strip() == "enabled")
-legacy_enabled = run(["systemctl", "--user", "is-enabled", legacy])
-legacy_props = properties(legacy, ["LoadState", "ActiveState", "SubState"])
-legacy_absent = bool(legacy_enabled.returncode != 0 and (
-    legacy_props is None or (legacy_props.get("ActiveState") not in {{"active", "activating"}}
-    and legacy_props.get("SubState") != "running")))
-
+    boot_id = "unavailable"
+baseline_ready = bool(boot_id != "unavailable"
+    and run(["loginctl", "show-user", str(os.getuid()),
+             "--property=Linger", "--value"]).stdout.strip() == "yes")
+legacy_absent = not active(legacy) and not enabled(legacy)
+service_timer_exact = active(timer) and enabled(timer) and not active(legacy)
 print(json.dumps({{
     "baseline_ready": baseline_ready,
     "boot_id": boot_id,
-    "candidate_source_exact": exact_repo(shared, whole_tree=True),
-    "checkout_exact": exact_repo(repo, whole_tree=False),
-    "environment_exact": exact_environment(),
+    "candidate_source_exact": git_exact(shared, whole_tree=True),
+    "checkout_exact": git_exact(repo, whole_tree=False),
+    "environment_exact": environment_exact(),
     "legacy_absent": legacy_absent,
     "service_timer_exact": service_timer_exact,
-    "service_timer_transient": service_timer_transient,
-    "units_exact": exact_units(),
+    "service_timer_transient": False,
+    "units_exact": units_exact(),
 }}, sort_keys=True, separators=(",", ":")))"""
+
+
+def _remote_observation_source(target: GB10TransportTarget, plan: FinalGatePlan) -> str:
+    if target.retirement_only:
+        return _retirement_observation_source(target, plan)
+    return _legacy_observation_source(target, plan)
 
 
 def _remote_apply_command(
@@ -585,19 +640,166 @@ def _remote_apply_command(
     return "python3 -c " + shlex.quote(_remote_apply_source(target, plan, operations))
 
 
-def _remote_apply_source(
+def _retirement_apply_source(
     target: GB10TransportTarget,
     plan: FinalGatePlan,
     operations: tuple[GB10MutationKind, ...],
 ) -> str:
+    """Render one lock+journal roll-forward retirement transaction."""
+    units = (_LEGACY_SERVICE, target.node_agent_service, target.timer)
+    return f"""import fcntl
+import json
+import os
+import pathlib
+import stat
+import subprocess
+import tempfile
+
+candidate_sha = {plan.candidate_sha!r}
+candidate_tree = {plan.candidate_tree!r}
+plan_digest = {plan.plan_digest!r}
+expected_boot_id = {plan.gb10_boot_ids[target.ssh_target]!r}
+operations = {tuple(operation.value for operation in operations)!r}
+units = {units!r}
+state_root = pathlib.Path.home() / ".local/state/loom-staging-rollout"
+receipt = state_root / "gb10-authority-retirement.json"
+lock_path = state_root / "gb10-authority-retirement.lock"
+unit_root = pathlib.Path.home() / ".config/systemd/user"
+
+def run(argv):
+    return subprocess.run(argv, check=False, capture_output=True, text=True, timeout=30,
+                          env={{"HOME": str(pathlib.Path.home()), "LANG": "C.UTF-8",
+                          "LC_ALL": "C.UTF-8", "PATH": "/usr/local/bin:/usr/bin:/bin",
+                          "XDG_RUNTIME_DIR": "/run/user/" + str(os.getuid())}})
+
+def canonical(payload):
+    return (json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                       ensure_ascii=True) + "\\n").encode("ascii")
+
+def ensure_state_root():
+    cursor = pathlib.Path.home()
+    for part in (".local", "state", "loom-staging-rollout"):
+        cursor = cursor / part
+        if os.path.lexists(cursor):
+            item = cursor.lstat()
+            if (not stat.S_ISDIR(item.st_mode) or stat.S_ISLNK(item.st_mode)
+                    or item.st_uid != os.getuid() or stat.S_IMODE(item.st_mode) & 0o022):
+                raise SystemExit(1)
+        else:
+            os.mkdir(cursor, 0o700)
+        os.chmod(cursor, 0o700)
+
+def atomic_write(path, payload):
+    parent = path.parent.lstat()
+    if (not stat.S_ISDIR(parent.st_mode) or stat.S_ISLNK(parent.st_mode)
+            or parent.st_uid != os.getuid() or stat.S_IMODE(parent.st_mode) != 0o700):
+        raise SystemExit(1)
+    if os.path.lexists(path) and stat.S_ISLNK(path.lstat().st_mode):
+        raise SystemExit(1)
+    descriptor, temporary = tempfile.mkstemp(prefix=".gb10-retirement.", dir=path.parent)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb", closefd=True) as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        parent_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+def retired(unit):
+    active = run(["systemctl", "--user", "is-active", unit])
+    enabled = run(["systemctl", "--user", "is-enabled", unit])
+    return (active.stdout.strip() not in {{"active", "activating", "reloading"}}
+            and enabled.stdout.strip() not in {{"enabled", "enabled-runtime", "linked",
+                                               "linked-runtime", "alias"}})
+
+if (pathlib.Path("/proc/sys/kernel/random/boot_id").read_text(
+        encoding="ascii").strip() != expected_boot_id
+        or not operations
+        or any(operation not in ("legacy-retire", "service-timer")
+               for operation in operations)
+        or run(["loginctl", "show-user", str(os.getuid()),
+                "--property=Linger", "--value"]).stdout.strip() != "yes"):
+    raise SystemExit(1)
+
+ensure_state_root()
+lock_descriptor = os.open(
+    lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0), 0o600)
+try:
+    os.fchmod(lock_descriptor, 0o600)
+    fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+    planned = {{
+        "schema_version": 1,
+        "kind": "loom.gb10-user-authority-retirement",
+        "phase": "planned",
+        "candidate_sha": candidate_sha,
+        "candidate_tree": candidate_tree,
+        "plan_digest": plan_digest,
+        "units": list(units),
+    }}
+    atomic_write(receipt, canonical(planned))
+    for unit in units:
+        run(["systemctl", "--user", "disable", "--now", unit])
+        run(["systemctl", "--user", "stop", unit])
+        run(["systemctl", "--user", "reset-failed", unit])
+    dropin = unit_root / (units[2] + ".d")
+    if os.path.lexists(dropin):
+        item = dropin.lstat()
+        if not stat.S_ISDIR(item.st_mode) or stat.S_ISLNK(item.st_mode):
+            raise SystemExit(1)
+        entries = {{entry.name for entry in dropin.iterdir()}}
+        if entries not in (set(), {{"deploy-window.conf"}}):
+            raise SystemExit(1)
+        if entries:
+            leaf = dropin / "deploy-window.conf"
+            if leaf.is_symlink() or not leaf.is_file():
+                raise SystemExit(1)
+            leaf.unlink()
+        dropin.rmdir()
+    for unit in units:
+        path = unit_root / unit
+        if os.path.lexists(path):
+            item = path.lstat()
+            if not (stat.S_ISREG(item.st_mode) or stat.S_ISLNK(item.st_mode)):
+                raise SystemExit(1)
+            path.unlink()
+    if run(["systemctl", "--user", "daemon-reload"]).returncode != 0:
+        raise SystemExit(1)
+    for unit in units:
+        if not retired(unit) or os.path.lexists(unit_root / unit):
+            raise SystemExit(1)
+    if os.path.lexists(dropin):
+        raise SystemExit(1)
+    committed = dict(planned)
+    committed["phase"] = "committed"
+    atomic_write(receipt, canonical(committed))
+finally:
+    os.close(lock_descriptor)
+"""
+
+
+def _legacy_apply_source(
+    target: GB10TransportTarget,
+    plan: FinalGatePlan,
+    operations: tuple[GB10MutationKind, ...],
+) -> str:
+    """Preserve the fixed legacy checkout/env/unit convergence boundary."""
+    if target.repo_path is None or target.env_file_path is None:
+        raise ValueError("legacy GB10 target paths are unavailable")
     image_tag = f"staging-{plan.candidate_sha[:7]}"
-    shared = _SHARED_ROOT / f"loom-remote-worker-{image_tag}"
-    upload_pack = f"/usr/bin/git -c safe.directory={shared}/.git upload-pack"
-    service = target.node_agent_service
-    timer = target.timer
-    unit_paths = tuple(str(_UNIT_ROOT / unit) for unit in (service, timer))
-    operation_values = tuple(operation.value for operation in operations)
-    expected_boot_id = plan.gb10_boot_ids[target.ssh_target]
+    shared = _LEGACY_SHARED_ROOT / f"loom-remote-worker-{image_tag}"
+    unit_paths = tuple(
+        str(_LEGACY_UNIT_ROOT / unit) for unit in (target.node_agent_service, target.timer)
+    )
     return f"""import os
 import pathlib
 import stat
@@ -608,15 +810,14 @@ candidate_sha = {plan.candidate_sha!r}
 candidate_tree = {plan.candidate_tree!r}
 image_tag = {image_tag!r}
 shared = pathlib.Path({str(shared)!r})
-upload_pack = {upload_pack!r}
 repo = pathlib.Path({str(target.repo_path)!r})
 env_file = pathlib.Path({str(target.env_file_path)!r})
-service = {service!r}
-timer = {timer!r}
+service = {target.node_agent_service!r}
+timer = {target.timer!r}
 legacy = {_LEGACY_SERVICE!r}
 unit_paths = {unit_paths!r}
-operations = {operation_values!r}
-expected_boot_id = {expected_boot_id!r}
+operations = {tuple(operation.value for operation in operations)!r}
+expected_boot_id = {plan.gb10_boot_ids[target.ssh_target]!r}
 
 def run(argv, *, cwd=None):
     result = subprocess.run(argv, cwd=cwd, check=False, capture_output=True, text=True,
@@ -627,10 +828,9 @@ def run(argv, *, cwd=None):
     if result.returncode != 0:
         raise SystemExit(1)
 
-def output(argv, *, timeout_seconds=20):
+def output(argv):
     result = subprocess.run(argv, check=False, capture_output=True, text=True,
-                            timeout=timeout_seconds,
-                            env={{"HOME": str(pathlib.Path.home()),
+                            timeout=30, env={{"HOME": str(pathlib.Path.home()),
                             "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
                             "PATH": "/usr/local/bin:/usr/bin:/bin",
                             "XDG_RUNTIME_DIR": "/run/user/" + str(os.getuid())}})
@@ -638,121 +838,79 @@ def output(argv, *, timeout_seconds=20):
         raise SystemExit(1)
     return result.stdout.strip()
 
-def exact_shared_source():
+def exact_shared():
     item = shared.lstat()
-    if not stat.S_ISDIR(item.st_mode) or stat.S_ISLNK(item.st_mode):
-        return False
     prefix = ["git", "-c", f"safe.directory={{shared}}", "-C", str(shared)]
-    return (output([*prefix, "rev-parse", "HEAD"],
-                   timeout_seconds={_REMOTE_SHARED_GIT_TIMEOUT_SECONDS}) == candidate_sha
-            and output([*prefix, "rev-parse", "HEAD^{{tree}}"],
-                       timeout_seconds={_REMOTE_SHARED_GIT_TIMEOUT_SECONDS}) == candidate_tree
-            and output([*prefix, "status", "--porcelain=v1", "--untracked-files=all"],
-                       timeout_seconds={_REMOTE_SHARED_GIT_TIMEOUT_SECONDS}) == "")
+    return (stat.S_ISDIR(item.st_mode) and not stat.S_ISLNK(item.st_mode)
+            and output([*prefix, "rev-parse", "HEAD"]) == candidate_sha
+            and output([*prefix, "rev-parse", "HEAD^{{tree}}"]) == candidate_tree
+            and output([*prefix, "status", "--porcelain=v1",
+                        "--untracked-files=all"]) == "")
 
-def ensure_user_directory(path):
-    home = pathlib.Path.home()
-    relative = path.relative_to(home)
-    cursor = home
-    for part in relative.parts:
-        cursor = cursor / part
-        if os.path.lexists(cursor):
-            item = cursor.lstat()
-            if (not stat.S_ISDIR(item.st_mode) or stat.S_ISLNK(item.st_mode)
-                    or item.st_uid != os.getuid()):
-                raise SystemExit(1)
-        else:
-            os.mkdir(cursor, 0o700)
-
-def read_regular(path):
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
-    try:
-        before = os.fstat(descriptor)
-        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
-                or before.st_size < 0 or before.st_size > 1024 * 1024):
-            raise SystemExit(1)
-        chunks = []; remaining = before.st_size
-        while remaining:
-            chunk = os.read(descriptor, min(65536, remaining))
-            if not chunk:
-                raise SystemExit(1)
-            chunks.append(chunk); remaining -= len(chunk)
-        after = os.fstat(descriptor)
-        if ((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
-                != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)):
-            raise SystemExit(1)
-        return b"".join(chunks)
-    finally:
-        os.close(descriptor)
+def regular(path):
+    item = path.lstat()
+    if (not stat.S_ISREG(item.st_mode) or stat.S_ISLNK(item.st_mode)
+            or item.st_nlink != 1 or item.st_size > 1024 * 1024):
+        raise SystemExit(1)
+    return path.read_bytes()
 
 def atomic_write(path, payload, mode):
-    if not path.parent.exists():
-        ensure_user_directory(path.parent)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     parent = path.parent.lstat()
     if not stat.S_ISDIR(parent.st_mode) or stat.S_ISLNK(parent.st_mode):
         raise SystemExit(1)
-    if os.path.lexists(path) and stat.S_ISLNK(path.lstat().st_mode):
-        raise SystemExit(1)
-    fd, temporary = tempfile.mkstemp(prefix=".loom-rollout-", dir=path.parent)
+    descriptor, temporary = tempfile.mkstemp(prefix=".loom-rollout-", dir=path.parent)
     try:
-        os.fchmod(fd, mode)
-        with os.fdopen(fd, "wb", closefd=True) as stream:
+        os.fchmod(descriptor, mode)
+        with os.fdopen(descriptor, "wb", closefd=True) as stream:
             stream.write(payload); stream.flush(); os.fsync(stream.fileno())
         os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try: os.fsync(directory)
-        finally: os.close(directory)
     finally:
         try: os.unlink(temporary)
         except FileNotFoundError: pass
 
-if (pathlib.Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
-        != expected_boot_id or not exact_shared_source()
+if (pathlib.Path("/proc/sys/kernel/random/boot_id").read_text(
+        encoding="ascii").strip() != expected_boot_id or not exact_shared()
         or output(["loginctl", "show-user", str(os.getuid()),
                    "--property=Linger", "--value"]) != "yes"):
     raise SystemExit(1)
 
 for operation in operations:
     if operation == "checkout":
-        if not (repo / ".git").is_dir() or not shared.is_dir():
+        if not (repo / ".git").is_dir():
             raise SystemExit(1)
         run(["git", "-c", "protocol.file.allow=always", "-c", "fetch.fsckObjects=true",
              "-C", str(repo), "fetch", "--quiet", "--no-tags", "--no-recurse-submodules",
-             "--no-write-fetch-head", f"--upload-pack={{upload_pack}}",
              str(shared), candidate_sha])
         run(["git", "-C", str(repo), "checkout", "--detach", candidate_sha])
     elif operation == "environment":
-        existing = (read_regular(env_file).decode("utf-8").splitlines()
+        existing = (regular(env_file).decode("utf-8").splitlines()
                     if os.path.lexists(env_file) else [])
         updates = {{key: image_tag for key in ("IMAGE_TAG", "ENV_CONFIG_VERSION",
             "LOOM_IMAGE_TAG", "LOOM_WORKER_ENV_CONFIG_VERSION")}}
-        output = []; seen = set()
+        rendered = []; seen = set()
         for line in existing:
             if "=" not in line or line.lstrip().startswith("#"):
-                output.append(line); continue
+                rendered.append(line); continue
             key = line.split("=", 1)[0].strip()
             if key in updates:
                 if key in seen: raise SystemExit(1)
-                output.append(f"{{key}}={{updates[key]}}"); seen.add(key)
-            else: output.append(line)
-        output.extend(f"{{key}}={{value}}" for key, value in updates.items() if key not in seen)
-        atomic_write(env_file, ("\\n".join(output) + "\\n").encode(), 0o600)
+                rendered.append(f"{{key}}={{updates[key]}}"); seen.add(key)
+            else: rendered.append(line)
+        rendered.extend(f"{{key}}={{value}}" for key, value in updates.items()
+                        if key not in seen)
+        atomic_write(env_file, ("\\n".join(rendered) + "\\n").encode(), 0o600)
     elif operation == "units":
         for relative in unit_paths:
             source = repo / relative
-            destination = pathlib.Path.home() / ".config/systemd/user" / pathlib.Path(relative).name
-            item = source.lstat()
-            if not stat.S_ISREG(item.st_mode) or stat.S_ISLNK(item.st_mode):
-                raise SystemExit(1)
-            atomic_write(destination, read_regular(source), 0o644)
+            destination = (pathlib.Path.home() / ".config/systemd/user"
+                           / pathlib.Path(relative).name)
+            atomic_write(destination, regular(source), 0o644)
     elif operation == "legacy-retire":
-        enabled = subprocess.run(["systemctl", "--user", "is-enabled", legacy],
-            check=False, capture_output=True, text=True, timeout=10)
-        if enabled.returncode == 0:
-            run(["systemctl", "--user", "disable", "--now", legacy])
+        subprocess.run(["systemctl", "--user", "disable", "--now", legacy],
+            check=False, capture_output=True, text=True, timeout=30)
         subprocess.run(["systemctl", "--user", "reset-failed", legacy],
-            check=False, capture_output=True, text=True, timeout=10)
+            check=False, capture_output=True, text=True, timeout=30)
     elif operation == "service-timer":
         run(["systemctl", "--user", "daemon-reload"])
         run(["systemctl", "--user", "start", service])
@@ -763,10 +921,49 @@ for operation in operations:
 """
 
 
+def _remote_apply_source(
+    target: GB10TransportTarget,
+    plan: FinalGatePlan,
+    operations: tuple[GB10MutationKind, ...],
+) -> str:
+    if target.retirement_only:
+        return _retirement_apply_source(target, plan, operations)
+    return _legacy_apply_source(target, plan, operations)
+
+
 def _hash_json(payload: object) -> str:
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def _external_retirement_profile(cluster_config_path: Path, profile_value: object) -> bool:
+    if not isinstance(profile_value, str) or not profile_value:
+        return False
+    profile_path = Path(profile_value)
+    if not profile_path.is_absolute():
+        profile_path = cluster_config_path.parent / profile_path
+    profile_path = profile_path.resolve(strict=False)
+    try:
+        payload = profile_path.read_bytes()
+        raw = tomllib.loads(payload.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError("GB10 installed environment profile is unavailable") from exc
+    prerequisites = raw.get("external_slurm_runner_prerequisites")
+    desired = raw.get("gb10_worker_pool_desired_states")
+    return bool(
+        isinstance(prerequisites, dict)
+        and prerequisites.get("pools") == ["gb10"]
+        and prerequisites.get("require_external_allocation_authority") is True
+        and isinstance(desired, list)
+        and len(desired) == 1
+        and isinstance(desired[0], dict)
+        and desired[0].get("pool_name") == "gb10"
+        and desired[0].get("target_slots") == 0
+        and isinstance(desired[0].get("host_intents"), dict)
+        and set(desired[0]["host_intents"]) == {f"trt-gb10-{number}" for number in range(1, 16)}
+        and set(desired[0]["host_intents"].values()) == {"stopped"}
+    )
 
 
 def build_fixed_gb10_ssh_transport(
@@ -796,6 +993,10 @@ def build_fixed_gb10_ssh_transport(
     ssh_config_value = getattr(pool, "ssh_config", None) if pool is not None else None
     identity_value = getattr(pool, "ssh_identity_file", None) if pool is not None else None
     certificate_value = getattr(pool, "ssh_certificate_file", None) if pool is not None else None
+    retirement_only = _external_retirement_profile(
+        cluster_config_path,
+        getattr(cluster, "env_state_profile", None),
+    )
     if (
         not isinstance(raw_hosts, Sequence)
         or isinstance(raw_hosts, (str, bytes))
@@ -806,29 +1007,38 @@ def build_fixed_gb10_ssh_transport(
         raise ValueError("GB10 installed cluster authority is incomplete")
     targets: list[GB10TransportTarget] = []
     for raw in raw_hosts:
-        if not isinstance(raw, dict) or set(raw) - {
-            "ssh_target",
-            "repo_path",
-            "env_file_path",
-            "repo_url",
-            "node_agent_service",
-        }:
+        allowed_fields = (
+            {"ssh_target", "node_agent_service"}
+            if retirement_only
+            else {
+                "ssh_target",
+                "repo_path",
+                "env_file_path",
+                "repo_url",
+                "node_agent_service",
+            }
+        )
+        if not isinstance(raw, dict) or set(raw) - allowed_fields:
             raise ValueError("GB10 installed host authority is invalid")
         ssh_target = raw.get("ssh_target")
+        service = raw.get("node_agent_service")
+        if not all(isinstance(value, str) and value for value in (ssh_target, service)):
+            raise ValueError("GB10 installed host fields are invalid")
         repo_path = raw.get("repo_path")
         env_file_path = raw.get("env_file_path")
-        service = raw.get("node_agent_service")
-        if not all(
-            isinstance(value, str) and value
-            for value in (ssh_target, repo_path, env_file_path, service)
+        if not retirement_only and not all(
+            isinstance(value, str) and value for value in (repo_path, env_file_path)
         ):
-            raise ValueError("GB10 installed host fields are invalid")
+            raise ValueError("GB10 installed legacy host fields are invalid")
         targets.append(
             GB10TransportTarget(
                 ssh_target=str(ssh_target),
-                repo_path=PurePosixPath(str(repo_path)),
-                env_file_path=PurePosixPath(str(env_file_path)),
+                repo_path=(None if repo_path is None else PurePosixPath(str(repo_path))),
+                env_file_path=(
+                    None if env_file_path is None else PurePosixPath(str(env_file_path))
+                ),
                 node_agent_service=str(service),
+                retirement_only=retirement_only,
             )
         )
     if {target.ssh_target for target in targets} != set(expected_hosts):

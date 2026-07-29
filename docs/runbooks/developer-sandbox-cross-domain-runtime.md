@@ -6,9 +6,16 @@ domains. Identical path strings do not imply shared storage: the publisher
 converges and verifies each domain separately.
 
 This is a root/admin installation path for issue #1023. It does not grant
-Qianyi (or any other user) sudo on GB10, activate a worker, submit a Slurm job,
-or authorize staging/production. If the GB10 root path is unavailable,
-publication remains fail-closed.
+Qianyi (or any other user) general sudo on GB10, activate a worker, submit a
+Slurm job, or authorize staging/production. Every peer first requires the
+external-root exact-tree bootstrap documented in
+`docs/runbooks/developer-sandboxes.md`. After bootstrap, oldlab2 may invoke
+only the fixed node-authority `transact` and `check` commands; it never receives
+raw `install`, `tar`, `rm`, `chown`, `chmod`, `python3`, or candidate-path
+authority. If that fixed GB10 authority is unavailable, publication remains
+fail-closed. Docker group membership is not a bootstrap fallback.
+Changing the pinned source tree uses the same runbook's journaled direct-root
+`upgrade`; manual deletion or in-place source replacement is unsupported.
 
 ## Stable identity and path contract
 
@@ -32,23 +39,26 @@ Each domain has a separate private runtime env:
 /shared_work/loom/runtime/sandboxes/<sandbox>/<SHA>/worker-gb10.env
 ```
 
-The env is `root:loom-sandbox-<sandbox>` mode `0640`; its sandbox and SHA
-parents are mode `2750` with the same dedicated group. `sharedwork` never gets
-secret-env access.
+The env is owned by a fixed non-login `loom-sandbox-<sandbox>` batch service
+identity at mode `0600`; its sandbox and SHA parents are mode `2750` with that
+identity's dedicated primary group. `sharedwork`, the human developer account,
+and other sandbox service identities never get secret-env access.
 
-The checked-in groups have fixed GIDs:
+The checked-in batch identities have fixed UID/GID pairs:
 
-| Sandbox | Stable group | GID | Local member |
-| --- | --- | ---: | --- |
-| qianyi | `loom-sandbox-qianyi` | 31021 | `qianyi` |
-| hongjian | `loom-sandbox-hongjian` | 31022 | `hongjian` |
-| devansh | `loom-sandbox-devansh` | 31023 | `devansh` |
+| Sandbox | Non-login batch identity | UID:GID |
+| --- | --- | ---: |
+| qianyi | `loom-sandbox-qianyi` | `31021:31021` |
+| hongjian | `loom-sandbox-hongjian` | `31022:31022` |
+| devansh | `loom-sandbox-devansh` | `31023:31023` |
 
-Group membership is converged by local account name. The tool never copies or
-compares the human user's numeric UID between nodes, so Devansh resolving as
-2011, 2012, or 2501 cannot change the NFS authorization contract. A fixed GID
-collision, missing local account, unexpected dedicated-group member, or
-`sharedwork` GID drift fails before publication.
+The node authority creates only these fixed service identities with
+`/nonexistent` and `/usr/sbin/nologin`, after proving both numbers are free.
+Every peer compares its local passwd/group identity, the NFS inode, and the env
+owner UID/GID before the publisher signs an attestation. Human UID drift
+therefore cannot become an NFS authorization input. Any UID/GID collision,
+login-capable metadata, explicit dedicated-group member, cross-peer identity
+drift, or `sharedwork` GID drift fails before publication.
 
 The existing `loom-rollout` identity is not part of this contract. Its absence
 on an OLDLAB client cannot silently become a numeric-UID authorization.
@@ -170,8 +180,9 @@ Repeat with `--domain gb10` and its domain-local source/env seed on
 `gx10-01c7`. Do not copy the OLDLAB candidate directory or env through the Mac:
 resolve and publish the exact SHA independently in each NFS domain.
 
-The publisher performs mandatory readback on every configured peer using the
-installed root helper through `ssh ... sudo -n`. It verifies:
+The publisher performs mandatory readback on every configured peer through the
+installed fixed node-authority transport and its read-only `check` action. It
+verifies:
 
 - peer hostname matches inventory;
 - candidate HEAD/tree, owner, group, mode, and write protection;
@@ -290,11 +301,12 @@ advisory lock:
 
 While holding that lock, it first unlinks any prior combined receipt for the
 same sandbox/SHA and fsyncs the parent directory. It then reads and verifies
-the fleet proof, fetches both domain inputs over SSH, verifies pinned key IDs,
-Ed25519 signatures, canonical digests, freshness, complete peer sets,
-non-regressing generations, and the same sandbox, SHA, tree, and fleet digest.
-Every check remains under the lock. Only then does it atomically write and
-fsync the root-only mode-`0600` receipt and its parent:
+the fleet proof, fetches both domain inputs through the node authority's
+bounded `export-domain-attestation` action, verifies pinned key IDs, Ed25519
+signatures, canonical digests, freshness, complete peer sets, non-regressing
+generations, and the same sandbox, SHA, tree, and fleet digest. Every check
+remains under the lock. Only then does it atomically write and fsync the
+root-only mode-`0600` receipt and its parent:
 
 ```text
 /var/lib/loom-shared-capacity/runtime-attestations/<sandbox>/<SHA>/combined.json
@@ -305,9 +317,10 @@ Its closed top-level schema is `schema_version`, `kind`, `sandbox`,
 and `payload_sha256`. Each domain row contains only source paths,
 payload/signature SHA-256, pinned key ID, generation, and publication/expiry
 times. It expires no later than either input or 15 minutes after collection.
-Any fleet, SSH, root, signature, freshness, identity, peer, or non-regression
-failure leaves no activatable combined receipt: the previous receipt was
-durably revoked before validation began and no replacement is written.
+Any fleet, transport, root, signature, freshness, identity, peer, or
+non-regression failure leaves no activatable combined receipt: the previous
+receipt was durably revoked before validation began and no replacement is
+written.
 
 Digest construction is exact: serialize the object *without*
 `payload_sha256` as UTF-8 JSON using sorted keys, `ensure_ascii=true`, and
@@ -374,7 +387,7 @@ Ready, update `scripts/ops/developer_sandbox_host.py` to:
   `/shared_work/loom/candidates/sandboxes/<sandbox>/<SHA>`;
 - consume the OLDLAB private env only from
   `/shared_work/loom/runtime/sandboxes/<sandbox>/<SHA>/worker-oldlab.env`,
-  require `root:loom-sandbox-<sandbox>` mode `0640`, and never copy TLS PEM
+  require `loom-sandbox-<sandbox>:loom-sandbox-<sandbox>` mode `0600`, and never copy TLS PEM
   content from NFS;
 - retain the local owner-private
   `/srv/loom/developer-sandboxes/<sandbox>` Compose state separately.

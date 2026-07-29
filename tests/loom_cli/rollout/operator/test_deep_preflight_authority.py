@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,6 +8,7 @@ import pytest
 
 from loom_cli.rollout.operator import deep_preflight_authority as authority_module
 from loom_cli.rollout.operator.deep_preflight_authority import (
+    AdmissionPreparationLifecycle,
     DeepPreflightAuthority,
     RuntimePurpose,
 )
@@ -142,6 +143,47 @@ def test_mutation_epoch_authority_fails_closed(tmp_path: Path) -> None:
         authority.current_mutation_epoch()
 
 
+def test_admission_preparation_is_exact_bounded_and_refreshes_after_ttl() -> None:
+    candidate = _candidate()
+    clock = [datetime(2026, 7, 19, 12, tzinfo=UTC)]
+    prepared: list[CandidateBinding] = []
+    lifecycle = AdmissionPreparationLifecycle(
+        prepare=prepared.append,
+        now=lambda: clock[0],
+        ttl=timedelta(minutes=5),
+    )
+
+    with pytest.raises(ValueError, match="not freshly prepared"):
+        lifecycle.require_fresh(candidate)
+    lifecycle.prepare_admission(candidate)
+    lifecycle.require_fresh(candidate)
+    lifecycle.prepare_admission(candidate)
+    assert prepared == [candidate]
+
+    clock[0] += timedelta(minutes=5, seconds=1)
+    with pytest.raises(ValueError, match="not freshly prepared"):
+        lifecycle.require_fresh(candidate)
+    lifecycle.prepare_admission(candidate)
+    assert prepared == [candidate, candidate]
+
+
+def test_failed_admission_producer_never_publishes_freshness() -> None:
+    candidate = _candidate()
+
+    def fail(_candidate: CandidateBinding) -> None:
+        raise RuntimeError("producer failed")
+
+    lifecycle = AdmissionPreparationLifecycle(
+        prepare=fail,
+        now=lambda: datetime(2026, 7, 19, 12, tzinfo=UTC),
+    )
+
+    with pytest.raises(RuntimeError, match="producer failed"):
+        lifecycle.prepare_admission(candidate)
+    with pytest.raises(ValueError, match="not freshly prepared"):
+        lifecycle.require_fresh(candidate)
+
+
 def test_final_admission_rebuilds_exact_admission_plan(monkeypatch: pytest.MonkeyPatch) -> None:
     candidate = _candidate()
     purposes: list[RuntimePurpose] = []
@@ -175,11 +217,16 @@ def test_final_admission_rebuilds_exact_admission_plan(monkeypatch: pytest.Monke
         return "admitted"
 
     monkeypatch.setattr(authority_module, "validate_final_attestation", validate)
+    prepared: list[CandidateBinding] = []
     authority = DeepPreflightAuthority(
         sources_factory=sources,  # type: ignore[arg-type]
         attestation_store=Store(),  # type: ignore[arg-type]
         read_mutation_epoch=lambda: 7,
         now=lambda: datetime(2026, 7, 19, 12, tzinfo=UTC),
+        admission_preparation=AdmissionPreparationLifecycle(
+            prepare=prepared.append,
+            now=lambda: datetime(2026, 7, 19, 12, tzinfo=UTC),
+        ),
     )
 
     result = authority.admit_final(
@@ -190,6 +237,7 @@ def test_final_admission_rebuilds_exact_admission_plan(monkeypatch: pytest.Monke
     )
 
     assert result == "admitted"
+    assert prepared == [candidate]
     assert purposes == [RuntimePurpose.ADMISSION]
     assert captured["digest"] == "3" * 64
     assert captured["candidate"] == candidate

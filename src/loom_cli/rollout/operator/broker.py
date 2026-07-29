@@ -199,6 +199,7 @@ class BrokerDependencies:
     known_secrets: Callable[[], Iterable[str]]
     authorize_preflight: Callable[[CandidateBinding], PreflightPipelineResult] | None = None
     assess_preflight: Callable[[CandidateBinding, int], PreflightAssessment] | None = None
+    prepare_admission: Callable[[CandidateBinding], None] | None = None
     read_mutation_epoch: Callable[[], int] | None = None
     new_backup_job_id: Callable[[], str] | None = None
     new_payload_id: Callable[[], str] | None = None
@@ -545,11 +546,14 @@ def _start_staged(
     """Publish one short-lock detached checkpoint job after Tier 0-2."""
     assert dependencies.assess_preflight is not None
     assert dependencies.read_mutation_epoch is not None
+    candidate = dependencies.bind_candidate()
+    if dependencies.prepare_admission is None:
+        return _safe_error(dependencies, "staging admission preparation is not configured")
+    dependencies.prepare_admission(candidate)
     report = dependencies.preflight()
     if not report.passed:
         _write_json(dependencies.stderr, report.to_dict())
         return 1
-    candidate = dependencies.bind_candidate()
     mutation_epoch = dependencies.read_mutation_epoch()
     if type(mutation_epoch) is not int or mutation_epoch < 0:
         raise ValueError("staging mutation epoch is invalid")
@@ -1786,6 +1790,7 @@ def _default_dependencies(config: OperatorConfig) -> BrokerDependencies:
             service_uid=service_uid,
         ),
         assess_preflight=deep_preflight.assess,
+        prepare_admission=deep_preflight.prepare_admission,
         read_mutation_epoch=deep_preflight.current_mutation_epoch,
         manifest_ownership=manifest_ownership,
         lifecycle_capacity=lifecycle_capacity,

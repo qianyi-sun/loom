@@ -19,6 +19,8 @@ spec:
           env:
             - name: LOOM_WORKER_CANDIDATE_SHA
               value: ""
+            - name: LOOM_WORKER_CGROUP_PARENT
+              value: ""
             - name: LOOM_WORKER_CLAIM_POLL_INTERVAL_SEC
               value: "1.0"
             - name: LOOM_WORKER_COMPOSE_PROJECT
@@ -75,6 +77,8 @@ spec:
                   key: minio-secret-key
             - name: LOOM_WORKER_PRE_START_HEARTBEAT_INTERVAL_SEC
               value: "60.0"
+            - name: LOOM_WORKER_REQUIRE_CGROUP_PARENT
+              value: "False"
             - name: LOOM_WORKER_SANDBOX_IDENTITY
               value: ""
             - name: LOOM_WORKER_SANDBOX_ISOLATION
@@ -122,6 +126,7 @@ spec:
                 secretKeyRef:
                   name: loom-secrets
                   key: worker-token
+                  optional: true
             - name: LOOM_WORKER_TRAJECTORY_CACHE_DIR
               value: "/var/lib/loom/trajectories"
             - name: LOOM_WORKER_TRIAL_CACHE_BASE_IMAGE_PULL_TIMEOUT_SEC

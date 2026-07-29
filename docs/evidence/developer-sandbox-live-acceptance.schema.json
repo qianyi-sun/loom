@@ -1,15 +1,17 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://loom.example/schemas/developer-sandbox-live-acceptance-v1.json",
-  "title": "Candidate-bound developer sandbox live acceptance evidence",
+  "$id": "https://loom.example/schemas/developer-sandbox-live-acceptance-v2.json",
+  "title": "Multi-candidate developer sandbox live acceptance evidence",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schema_version",
-    "candidate",
+    "candidates",
+    "promotion_candidate",
     "session",
     "topology",
     "state_machine",
+    "overlap_windows",
     "cross_sandbox_negative",
     "capacity_samples",
     "large_batch_bursts",
@@ -18,36 +20,36 @@
     "peer_workloads",
     "storage_io",
     "fault_recovery",
+    "staging_pressure_reclaim",
+    "platform_health",
     "invariants"
   ],
   "properties": {
     "schema_version": {
-      "const": 1
+      "const": 2
     },
-    "candidate": {
+    "candidates": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "sha",
-        "tree",
-        "runtime_receipts"
+        "qianyi",
+        "hongjian",
+        "devansh"
       ],
       "properties": {
-        "sha": {
-          "$ref": "#/$defs/fullSha"
+        "qianyi": {
+          "$ref": "#/$defs/sandboxCandidate"
         },
-        "tree": {
-          "$ref": "#/$defs/fullSha"
+        "hongjian": {
+          "$ref": "#/$defs/sandboxCandidate"
         },
-        "runtime_receipts": {
-          "type": "array",
-          "minItems": 3,
-          "maxItems": 300,
-          "items": {
-            "$ref": "#/$defs/runtimeReceipt"
-          }
+        "devansh": {
+          "$ref": "#/$defs/sandboxCandidate"
         }
       }
+    },
+    "promotion_candidate": {
+      "$ref": "#/$defs/promotionCandidate"
     },
     "session": {
       "type": "object",
@@ -142,23 +144,31 @@
         "slot_budgets": {
           "const": {
             "oldlab": 20,
-            "gb10": 140
+            "gb10": 112
           }
         },
         "pending_slot_budgets": {
           "const": {
             "oldlab": 10,
-            "gb10": 30
+            "gb10": 24
           }
         }
       }
     },
     "state_machine": {
       "type": "array",
-      "minItems": 10,
-      "maxItems": 10,
+      "minItems": 33,
+      "maxItems": 33,
       "items": {
         "$ref": "#/$defs/phase"
+      }
+    },
+    "overlap_windows": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "$ref": "#/$defs/overlapWindow"
       }
     },
     "cross_sandbox_negative": {
@@ -171,16 +181,16 @@
     },
     "capacity_samples": {
       "type": "array",
-      "minItems": 48,
-      "maxItems": 48,
+      "minItems": 54,
+      "maxItems": 54,
       "items": {
         "$ref": "#/$defs/capacitySample"
       }
     },
     "large_batch_bursts": {
       "type": "array",
-      "minItems": 2,
-      "maxItems": 2,
+      "minItems": 6,
+      "maxItems": 6,
       "items": {
         "$ref": "#/$defs/burst"
       }
@@ -223,6 +233,62 @@
       "maxItems": 4,
       "items": {
         "$ref": "#/$defs/faultRecovery"
+      }
+    },
+    "staging_pressure_reclaim": {
+      "$ref": "#/$defs/stagingPressureReclaim"
+    },
+    "platform_health": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authority_evidence",
+        "trusted_receipt"
+      ],
+      "properties": {
+        "authority_evidence": {
+          "type": "object",
+          "required": [
+            "schema_version",
+            "kind",
+            "session_id",
+            "candidates",
+            "collector_host",
+            "checkpoints",
+            "mixed_jobs",
+            "cancelled_jobs",
+            "crashed_jobs",
+            "node_intervals",
+            "policy_capacity",
+            "zero_orphans",
+            "completed_at",
+            "payload_sha256"
+          ]
+        },
+        "trusted_receipt": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "receipt_sha256",
+            "authority_payload_sha256",
+            "source_host",
+            "observed_at"
+          ],
+          "properties": {
+            "receipt_sha256": {
+              "$ref": "#/$defs/digest"
+            },
+            "authority_payload_sha256": {
+              "$ref": "#/$defs/digest"
+            },
+            "source_host": {
+              "const": "trt-eai-oldlab-2"
+            },
+            "observed_at": {
+              "$ref": "#/$defs/timestamp"
+            }
+          }
+        }
       }
     },
     "invariants": {
@@ -327,6 +393,327 @@
         "devansh"
       ]
     },
+    "sandboxCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sha",
+        "tree",
+        "runtime_receipts"
+      ],
+      "properties": {
+        "sha": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "tree": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "runtime_receipts": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/runtimeReceipt"
+          }
+        }
+      }
+    },
+    "promotionCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sha",
+        "tree",
+        "staging_regression",
+        "trusted_receipt"
+      ],
+      "properties": {
+        "sha": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "tree": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "staging_regression": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "phase",
+            "candidate_sha",
+            "candidate_tree",
+            "started_at",
+            "finished_at",
+            "status",
+            "checkpoint_sha256"
+          ],
+          "properties": {
+            "phase": {
+              "const": "promotion_staging_regression"
+            },
+            "candidate_sha": {
+              "$ref": "#/$defs/fullSha"
+            },
+            "candidate_tree": {
+              "$ref": "#/$defs/fullSha"
+            },
+            "started_at": {
+              "$ref": "#/$defs/timestamp"
+            },
+            "finished_at": {
+              "$ref": "#/$defs/timestamp"
+            },
+            "status": {
+              "const": "pass"
+            },
+            "checkpoint_sha256": {
+              "$ref": "#/$defs/digest"
+            }
+          }
+        },
+        "trusted_receipt": {
+          "$ref": "#/$defs/promotionReceiptReference"
+        }
+      }
+    },
+    "overlapReceiptReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "receipt_sha256"
+      ],
+      "properties": {
+        "sequence": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "receipt_sha256": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "promotionReceiptReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "receipt_sha256",
+        "source_host",
+        "rollout_id",
+        "result",
+        "observed_at"
+      ],
+      "properties": {
+        "receipt_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "source_host": {
+          "const": "trt-eai-oldlab-1"
+        },
+        "rollout_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        },
+        "result": {
+          "const": "pass"
+        },
+        "observed_at": {
+          "$ref": "#/$defs/timestamp"
+        }
+      }
+    },
+    "stagingPressureReclaim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authority_evidence",
+        "trusted_receipt"
+      ],
+      "properties": {
+        "authority_evidence": {
+          "$ref": "#/$defs/stagingPressureAuthorityReceipt"
+        },
+        "trusted_receipt": {
+          "$ref": "#/$defs/stagingPressureReceiptReference"
+        }
+      }
+    },
+    "stagingPressureAuthorityReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "kind",
+        "environment",
+        "pool",
+        "partition",
+        "source_host",
+        "submit_host",
+        "sequence",
+        "session_id",
+        "acceptance_session_id",
+        "session_sha256",
+        "candidate_sha",
+        "candidate_tree",
+        "issued_at",
+        "evidence"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "kind": {
+          "const": "loom.staging-pressure-reclaim.receipt"
+        },
+        "environment": {
+          "const": "staging"
+        },
+        "pool": {
+          "const": "gb10"
+        },
+        "partition": {
+          "const": "gb10"
+        },
+        "source_host": {
+          "const": "trt-eai-oldlab-1"
+        },
+        "submit_host": {
+          "const": "trt-gb10-1"
+        },
+        "sequence": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "session_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "acceptance_session_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "session_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "candidate_sha": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "candidate_tree": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "issued_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "evidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "registry_before",
+            "interrupted_trial_before",
+            "claim_probe_before",
+            "slurm_before",
+            "foreign_peer_snapshot",
+            "pressure_on",
+            "claim_fence",
+            "registry_terminal",
+            "interrupted_trial_retryable",
+            "slurm_during",
+            "pressure_off",
+            "claim_recovered",
+            "claim_probe_requeued",
+            "slurm_after",
+            "foreign_peer_zero_impact"
+          ],
+          "properties": {
+            "registry_before": {
+              "type": "array",
+              "minItems": 1
+            },
+            "interrupted_trial_before": {
+              "type": "object"
+            },
+            "claim_probe_before": {
+              "type": "object"
+            },
+            "slurm_before": {
+              "type": "object"
+            },
+            "foreign_peer_snapshot": {
+              "type": "array"
+            },
+            "pressure_on": {
+              "type": "object"
+            },
+            "claim_fence": {
+              "type": "object"
+            },
+            "registry_terminal": {
+              "type": "array",
+              "minItems": 1
+            },
+            "interrupted_trial_retryable": {
+              "type": "object"
+            },
+            "slurm_during": {
+              "type": "object"
+            },
+            "pressure_off": {
+              "type": "object"
+            },
+            "claim_recovered": {
+              "type": "object"
+            },
+            "claim_probe_requeued": {
+              "type": "object"
+            },
+            "slurm_after": {
+              "type": "object"
+            },
+            "foreign_peer_zero_impact": {
+              "const": true
+            }
+          }
+        }
+      }
+    },
+    "stagingPressureReceiptReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "receipt_sha256",
+        "authority_session_id",
+        "authority_receipt_sha256",
+        "authority_signature_sha256",
+        "authority_key_id",
+        "sequence",
+        "source_host",
+        "observed_at"
+      ],
+      "properties": {
+        "receipt_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "authority_session_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "authority_receipt_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "authority_signature_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "authority_key_id": {
+          "$ref": "#/$defs/digest"
+        },
+        "sequence": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "source_host": {
+          "const": "trt-eai-oldlab-1"
+        },
+        "observed_at": {
+          "$ref": "#/$defs/timestamp"
+        }
+      }
+    },
     "pool": {
       "enum": [
         "oldlab",
@@ -337,6 +724,7 @@
       "enum": [
         "preflight",
         "baseline",
+        "multi_candidate_overlap",
         "large_batch_burst",
         "fairness_contention",
         "mixed_non_loom",
@@ -356,6 +744,7 @@
       "additionalProperties": false,
       "required": [
         "phase",
+        "sandbox",
         "candidate_sha",
         "candidate_tree",
         "started_at",
@@ -367,6 +756,9 @@
       "properties": {
         "phase": {
           "$ref": "#/$defs/phaseName"
+        },
+        "sandbox": {
+          "$ref": "#/$defs/sandbox"
         },
         "candidate_sha": {
           "$ref": "#/$defs/fullSha"
@@ -390,6 +782,295 @@
         },
         "checkpoint_sha256": {
           "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "jobAllocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cpu_cores",
+        "memory_bytes",
+        "pids",
+        "gpu_count",
+        "tres",
+        "exclusive"
+      ],
+      "properties": {
+        "cpu_cores": {
+          "$ref": "#/$defs/positiveNumber"
+        },
+        "memory_bytes": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "pids": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "gpu_count": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "tres": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "exclusive": {
+          "const": false
+        }
+      }
+    },
+    "jobReadback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sandbox",
+        "pool",
+        "candidate_sha",
+        "candidate_tree",
+        "job_id",
+        "account",
+        "user",
+        "job_name",
+        "node",
+        "state",
+        "allocation",
+        "observed_at"
+      ],
+      "properties": {
+        "sandbox": {
+          "$ref": "#/$defs/sandbox"
+        },
+        "pool": {
+          "$ref": "#/$defs/pool"
+        },
+        "candidate_sha": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "candidate_tree": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "job_id": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(?:_[0-9]+)?$"
+        },
+        "account": {
+          "type": "string",
+          "pattern": "^loom-dev-(?:qianyi|hongjian|devansh)$"
+        },
+        "user": {
+          "type": "string",
+          "pattern": "^loom-sandbox-(?:qianyi|hongjian|devansh)$"
+        },
+        "job_name": {
+          "type": "string",
+          "pattern": "^loom-sandbox-(?:qianyi|hongjian|devansh)-[0-9a-f]{12}-[A-Za-z0-9_.-]+$",
+          "maxLength": 128
+        },
+        "node": {
+          "$ref": "#/$defs/node"
+        },
+        "state": {
+          "const": "RUNNING"
+        },
+        "allocation": {
+          "$ref": "#/$defs/jobAllocation"
+        },
+        "observed_at": {
+          "$ref": "#/$defs/timestamp"
+        }
+      }
+    },
+    "serviceReadback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sandbox",
+        "candidate_sha",
+        "candidate_tree",
+        "unit",
+        "active_state",
+        "sub_state",
+        "observed_at"
+      ],
+      "properties": {
+        "sandbox": {
+          "$ref": "#/$defs/sandbox"
+        },
+        "candidate_sha": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "candidate_tree": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "unit": {
+          "type": "string",
+          "pattern": "^loom-developer-sandbox-(?:qianyi|hongjian|devansh)\\.service$"
+        },
+        "active_state": {
+          "const": "active"
+        },
+        "sub_state": {
+          "const": "running"
+        },
+        "observed_at": {
+          "$ref": "#/$defs/timestamp"
+        }
+      }
+    },
+    "capacityBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "lease_epoch",
+        "observation_sequence",
+        "sample_sha256"
+      ],
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "lease_epoch": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "observation_sequence": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "sample_sha256": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "overlapWindow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "phase",
+        "pool",
+        "started_at",
+        "finished_at",
+        "observations"
+      ],
+      "properties": {
+        "phase": {
+          "const": "multi_candidate_overlap"
+        },
+        "pool": {
+          "$ref": "#/$defs/pool"
+        },
+        "started_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "finished_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "observations": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "sandbox",
+              "candidate_sha",
+              "candidate_tree",
+              "active_candidate_sha",
+              "active_candidate_tree",
+              "service_unit",
+              "service_active",
+              "service_readback",
+              "service_readback_sha256",
+              "job_id",
+              "job_active",
+              "slurm_account",
+              "slurm_user",
+              "job_name",
+              "job_readback",
+              "job_readback_sha256",
+              "capacity_binding",
+              "trusted_receipt",
+              "node",
+              "active_from",
+              "active_until",
+              "observed_at"
+            ],
+            "properties": {
+              "sandbox": {
+                "$ref": "#/$defs/sandbox"
+              },
+              "candidate_sha": {
+                "$ref": "#/$defs/fullSha"
+              },
+              "candidate_tree": {
+                "$ref": "#/$defs/fullSha"
+              },
+              "active_candidate_sha": {
+                "$ref": "#/$defs/fullSha"
+              },
+              "active_candidate_tree": {
+                "$ref": "#/$defs/fullSha"
+              },
+              "service_unit": {
+                "type": "string",
+                "pattern": "^loom-developer-sandbox-(?:qianyi|hongjian|devansh)\\.service$"
+              },
+              "service_active": {
+                "const": true
+              },
+              "service_readback": {
+                "$ref": "#/$defs/serviceReadback"
+              },
+              "service_readback_sha256": {
+                "$ref": "#/$defs/digest"
+              },
+              "job_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]*(?:_[0-9]+)?$"
+              },
+              "job_active": {
+                "const": true
+              },
+              "slurm_account": {
+                "type": "string",
+                "pattern": "^loom-dev-(?:qianyi|hongjian|devansh)$"
+              },
+              "slurm_user": {
+                "type": "string",
+                "pattern": "^loom-sandbox-(?:qianyi|hongjian|devansh)$"
+              },
+              "job_name": {
+                "type": "string",
+                "pattern": "^loom-sandbox-(?:qianyi|hongjian|devansh)-[0-9a-f]{12}-[A-Za-z0-9_.-]+$",
+                "maxLength": 128
+              },
+              "job_readback": {
+                "$ref": "#/$defs/jobReadback"
+              },
+              "job_readback_sha256": {
+                "$ref": "#/$defs/digest"
+              },
+              "capacity_binding": {
+                "$ref": "#/$defs/capacityBinding"
+              },
+              "trusted_receipt": {
+                "$ref": "#/$defs/overlapReceiptReference"
+              },
+              "node": {
+                "$ref": "#/$defs/node"
+              },
+              "active_from": {
+                "$ref": "#/$defs/timestamp"
+              },
+              "active_until": {
+                "$ref": "#/$defs/timestamp"
+              },
+              "observed_at": {
+                "$ref": "#/$defs/timestamp"
+              }
+            }
+          }
         }
       }
     },
@@ -470,8 +1151,10 @@
         "source",
         "target",
         "resource",
-        "candidate_sha",
-        "candidate_tree",
+        "source_candidate_sha",
+        "source_candidate_tree",
+        "target_candidate_sha",
+        "target_candidate_tree",
         "observed_at",
         "denied"
       ],
@@ -495,10 +1178,16 @@
             "result_path"
           ]
         },
-        "candidate_sha": {
+        "source_candidate_sha": {
           "$ref": "#/$defs/fullSha"
         },
-        "candidate_tree": {
+        "source_candidate_tree": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "target_candidate_sha": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "target_candidate_tree": {
           "$ref": "#/$defs/fullSha"
         },
         "observed_at": {
@@ -519,6 +1208,12 @@
         "pool",
         "candidate_sha",
         "candidate_tree",
+        "job_id",
+        "account",
+        "user",
+        "job_name",
+        "node",
+        "allocation",
         "request_id",
         "lease_epoch",
         "observation_sequence",
@@ -547,6 +1242,29 @@
         },
         "candidate_tree": {
           "$ref": "#/$defs/fullSha"
+        },
+        "job_id": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(?:_[0-9]+)?$"
+        },
+        "account": {
+          "type": "string",
+          "pattern": "^loom-dev-(?:qianyi|hongjian|devansh)$"
+        },
+        "user": {
+          "type": "string",
+          "pattern": "^loom-sandbox-(?:qianyi|hongjian|devansh)$"
+        },
+        "job_name": {
+          "type": "string",
+          "pattern": "^loom-sandbox-(?:qianyi|hongjian|devansh)-[0-9a-f]{12}-[A-Za-z0-9_.-]+$",
+          "maxLength": 128
+        },
+        "node": {
+          "$ref": "#/$defs/node"
+        },
+        "allocation": {
+          "$ref": "#/$defs/jobAllocation"
         },
         "request_id": {
           "type": "string",
@@ -582,6 +1300,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "sandbox",
         "pool",
         "phase",
         "candidate_sha",
@@ -601,6 +1320,9 @@
         "node_trial_counts"
       ],
       "properties": {
+        "sandbox": {
+          "$ref": "#/$defs/sandbox"
+        },
         "pool": {
           "$ref": "#/$defs/pool"
         },
@@ -677,8 +1399,6 @@
       "required": [
         "pool",
         "phase",
-        "candidate_sha",
-        "candidate_tree",
         "started_at",
         "finished_at",
         "window_seconds",
@@ -692,12 +1412,6 @@
         },
         "phase": {
           "const": "fairness_contention"
-        },
-        "candidate_sha": {
-          "$ref": "#/$defs/fullSha"
-        },
-        "candidate_tree": {
-          "$ref": "#/$defs/fullSha"
         },
         "started_at": {
           "$ref": "#/$defs/timestamp"
@@ -725,6 +1439,8 @@
             "additionalProperties": false,
             "required": [
               "sandbox",
+              "candidate_sha",
+              "candidate_tree",
               "requested_slots",
               "granted_slots_total",
               "grant_cycles",
@@ -735,6 +1451,12 @@
             "properties": {
               "sandbox": {
                 "$ref": "#/$defs/sandbox"
+              },
+              "candidate_sha": {
+                "$ref": "#/$defs/fullSha"
+              },
+              "candidate_tree": {
+                "$ref": "#/$defs/fullSha"
               },
               "requested_slots": {
                 "$ref": "#/$defs/positiveInteger"
@@ -997,8 +1719,6 @@
       "additionalProperties": false,
       "required": [
         "pool",
-        "candidate_sha",
-        "candidate_tree",
         "job_id",
         "account",
         "baseline",
@@ -1010,12 +1730,6 @@
       "properties": {
         "pool": {
           "$ref": "#/$defs/pool"
-        },
-        "candidate_sha": {
-          "$ref": "#/$defs/fullSha"
-        },
-        "candidate_tree": {
-          "$ref": "#/$defs/fullSha"
         },
         "job_id": {
           "type": "string",
@@ -1051,8 +1765,6 @@
       "additionalProperties": false,
       "required": [
         "domain",
-        "candidate_sha",
-        "candidate_tree",
         "baseline_observed_at",
         "minimum_observed_at",
         "after_observed_at",
@@ -1072,12 +1784,6 @@
       "properties": {
         "domain": {
           "$ref": "#/$defs/pool"
-        },
-        "candidate_sha": {
-          "$ref": "#/$defs/fullSha"
-        },
-        "candidate_tree": {
-          "$ref": "#/$defs/fullSha"
         },
         "baseline_observed_at": {
           "$ref": "#/$defs/timestamp"

@@ -28,7 +28,7 @@ import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -45,6 +45,9 @@ STATE_ROOT = Path("/var/lib/loom-shared-capacity")
 INSTALLER_ROOT = STATE_ROOT / "runtime-host-installer"
 JOURNAL_ROOT = INSTALLER_ROOT / "transactions"
 STATE_PATH = INSTALLER_ROOT / "state.json"
+PLATFORM_HEALTH_ROOT = Path(
+    "/var/lib/loom-developer-sandbox-platform-health-authority",
+)
 ACTIVE_JOURNAL_PATH = INSTALLER_ROOT / "active-transaction.json"
 RECOVERY_PROGRAM_PATH = INSTALLER_ROOT / "runtime-host-recovery"
 LOCK_PATH = Path("/run/loom-shared-capacity-runtime-host.lock")
@@ -84,6 +87,11 @@ INSTANCES = (
     "devansh-gb10",
     "devansh-oldlab",
 )
+SANDBOXES = ("qianyi", "hongjian", "devansh")
+POOLS = ("gb10", "oldlab")
+PLATFORM_HEALTH_EVIDENCE_TTL = timedelta(minutes=15)
+PLATFORM_HEALTH_ACTIVATION_MINIMUM_REMAINING = timedelta(minutes=5)
+PLATFORM_HEALTH_MAX_CLOCK_SKEW = timedelta(seconds=5)
 SUPERVISOR_SERVICE = "loom-shared-capacity-supervisor.service"
 SUPERVISOR_TIMER = "loom-shared-capacity-supervisor.timer"
 ADAPTER_TIMERS = tuple(f"loom-shared-capacity-adapter@{instance}.timer" for instance in INSTANCES)
@@ -862,6 +870,164 @@ def _load_json(path: Path, label: str) -> dict[str, Any]:
     return payload
 
 
+def _platform_health_json(path: Path, *, label: str) -> dict[str, Any]:
+    try:
+        relative = path.relative_to(PLATFORM_HEALTH_ROOT)
+    except ValueError as exc:
+        raise RuntimeHostError(f"{label} path escaped its authority root") from exc
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        directory = os.open(PLATFORM_HEALTH_ROOT, flags)
+    except OSError as exc:
+        raise RuntimeHostError(f"{label} authority root is unavailable") from exc
+    try:
+        for part in relative.parts[:-1]:
+            metadata = os.fstat(directory)
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or (metadata.st_uid, metadata.st_gid) != (0, 0)
+                or stat.S_IMODE(metadata.st_mode) & 0o022
+            ):
+                raise RuntimeHostError(f"{label} authority directory is unsafe")
+            child = os.open(part, flags, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        metadata = os.fstat(directory)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or (metadata.st_uid, metadata.st_gid) != (0, 0)
+            or stat.S_IMODE(metadata.st_mode) & 0o022
+        ):
+            raise RuntimeHostError(f"{label} authority directory is unsafe")
+        descriptor = os.open(
+            relative.parts[-1],
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory,
+        )
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink != 1
+                or (opened.st_uid, opened.st_gid) != (0, 0)
+                or stat.S_IMODE(opened.st_mode) != 0o600
+                or opened.st_size > 16 * 1024 * 1024
+            ):
+                raise RuntimeHostError(f"{label} authority file is unsafe")
+            raw = b""
+            while len(raw) <= 16 * 1024 * 1024:
+                chunk = os.read(descriptor, 65536)
+                if not chunk:
+                    break
+                raw += chunk
+            if len(raw) > 16 * 1024 * 1024:
+                raise RuntimeHostError(f"{label} authority file is too large")
+        finally:
+            os.close(descriptor)
+    except RuntimeHostError:
+        raise
+    except OSError as exc:
+        raise RuntimeHostError(f"{label} authority file is unavailable") from exc
+    finally:
+        os.close(directory)
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeHostError(f"{label} authority file is invalid") from exc
+    if not isinstance(payload, dict) or raw != _canonical_json(payload):
+        raise RuntimeHostError(f"{label} authority file is not canonical")
+    return payload
+
+
+def _platform_health_timestamp(value: object, *, label: str) -> datetime:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise RuntimeHostError(f"{label} timestamp is invalid")
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError as exc:
+        raise RuntimeHostError(f"{label} timestamp is invalid") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        raise RuntimeHostError(f"{label} timestamp is invalid")
+    return parsed.astimezone(UTC)
+
+
+def _platform_health_now(now: datetime | None) -> datetime:
+    current = datetime.now(UTC) if now is None else now
+    if current.tzinfo is None or current.utcoffset() is None:
+        raise RuntimeHostError("platform-health trusted clock is invalid")
+    return current.astimezone(UTC)
+
+
+def _validate_platform_health_activation_gate(
+    candidate: Candidate,
+    adapter_candidates: Mapping[str, Mapping[str, str]],
+    *,
+    now: datetime | None = None,
+) -> None:
+    current = _platform_health_json(
+        PLATFORM_HEALTH_ROOT / "current.json",
+        label="platform-health current pointer",
+    )
+    session_id = current.get("session_id")
+    evidence_path = PLATFORM_HEALTH_ROOT / "sessions" / str(session_id) / "evidence.json"
+    if (
+        set(current) != {"schema_version", "session_id", "evidence_path", "payload_sha256"}
+        or current.get("schema_version") != 1
+        or re.fullmatch(r"[0-9a-f]{32}", str(session_id)) is None
+        or current.get("evidence_path") != str(evidence_path)
+        or re.fullmatch(r"[0-9a-f]{64}", str(current.get("payload_sha256"))) is None
+    ):
+        raise RuntimeHostError("platform-health current pointer is invalid")
+    evidence = _platform_health_json(
+        evidence_path,
+        label="platform-health evidence",
+    )
+    unsigned = {key: value for key, value in evidence.items() if key != "payload_sha256"}
+    candidates = evidence.get("candidates")
+    capacity = evidence.get("policy_capacity")
+    current_time = _platform_health_now(now)
+    completed_at = _platform_health_timestamp(
+        evidence.get("completed_at"),
+        label="platform-health completed_at",
+    )
+    expires_at = _platform_health_timestamp(
+        evidence.get("expires_at"),
+        label="platform-health expires_at",
+    )
+    if (
+        evidence.get("schema_version") != 1
+        or evidence.get("kind") != "loom.developer-sandbox.platform-health-evidence"
+        or evidence.get("session_id") != session_id
+        or evidence.get("payload_sha256") != current["payload_sha256"]
+        or evidence.get("payload_sha256") != _sha256(_canonical_json(unsigned))
+        or not isinstance(candidates, dict)
+        or set(candidates) != set(SANDBOXES)
+        or any(
+            not isinstance(candidates[sandbox], dict)
+            or set(candidates[sandbox]) != {"sha", "tree"}
+            or SHA_RE.fullmatch(str(candidates[sandbox].get("sha"))) is None
+            or SHA_RE.fullmatch(str(candidates[sandbox].get("tree"))) is None
+            for sandbox in SANDBOXES
+        )
+        or len({candidates[sandbox]["sha"] for sandbox in SANDBOXES}) != len(SANDBOXES)
+        or candidates != adapter_candidates
+        or {"sha": candidate.sha, "tree": candidate.tree} not in candidates.values()
+        or expires_at - completed_at != PLATFORM_HEALTH_EVIDENCE_TTL
+        or completed_at > current_time + PLATFORM_HEALTH_MAX_CLOCK_SKEW
+        or expires_at <= current_time + PLATFORM_HEALTH_ACTIVATION_MINIMUM_REMAINING
+        or evidence.get("zero_orphans") is not True
+        or not isinstance(capacity, dict)
+        or capacity.get("oldlab", {}).get("max_slots") != 20
+        or capacity.get("gb10", {}).get("max_slots") != 112
+        or capacity.get("gb10", {}).get("requested_cpus") != 16
+        or capacity.get("gb10", {}).get("requested_memory_mib") != 92000
+        or capacity.get("gb10", {}).get("requested_concurrency") != 8
+        or capacity.get("gb10", {}).get("reserved_cpu_cores_per_node") != 4
+        or capacity.get("gb10", {}).get("reserved_memory_mib_per_node") != 23000
+    ):
+        raise RuntimeHostError("platform-health activation gate is not satisfied")
+
+
 def _active_journal() -> tuple[Path, dict[str, Any]] | None:
     if not ACTIVE_JOURNAL_PATH.exists():
         return None
@@ -1008,9 +1174,8 @@ def _recover_orphan() -> None:
     if active is None:
         return
     path, payload = active
-    if (
-        payload.get("operation") == "install"
-        and str(payload.get("phase", "")).startswith("rollback-")
+    if payload.get("operation") == "install" and str(payload.get("phase", "")).startswith(
+        "rollback-"
     ):
         _resume_activated_rollback(path, payload)
         return
@@ -1592,6 +1757,26 @@ _validate_zero_worker_status(
 )
 """
 
+_ADAPTER_BINDING_READBACK = """
+import json
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from scripts.ops.shared_capacity_adapter import _load_sandbox_binding, load_config
+config = load_config(Path(sys.argv[2]))
+binding = _load_sandbox_binding(config)
+print(json.dumps(
+    {
+        "pool": config.pool_name,
+        "sandbox": config.sandbox,
+        "sha": binding.sha,
+        "tree": binding.tree,
+    },
+    sort_keys=True,
+    separators=(",", ":"),
+))
+"""
+
 _GENERATION_READBACK = """
 import sys
 from pathlib import Path
@@ -1711,9 +1896,49 @@ _EMBEDDED_PROGRAM_ARGUMENT_COUNTS = {
     _BROKER_OPEN: 2,
     _BROKER_RETIRE: 4,
     _ADAPTER_PREFLIGHT: 3,
+    _ADAPTER_BINDING_READBACK: 1,
     _GENERATION_READBACK: 1,
     _ACTIVATED_ADAPTER_READBACK: 3,
 }
+
+
+def _adapter_candidate_bindings(candidate: Candidate) -> dict[str, dict[str, str]]:
+    by_sandbox: dict[str, dict[str, str]] = {}
+    observed_instances: set[str] = set()
+    for instance in INSTANCES:
+        completed = _run_candidate_python(
+            candidate,
+            _ADAPTER_BINDING_READBACK,
+            str(ADAPTER_CONFIG_ROOT / f"{instance}.toml"),
+        )
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeHostError("adapter candidate binding readback is invalid") from exc
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"pool", "sandbox", "sha", "tree"}
+            or completed.stdout.encode() != _canonical_json(payload)
+            or payload.get("sandbox") not in SANDBOXES
+            or payload.get("pool") not in POOLS
+            or instance != f"{payload.get('sandbox')}-{payload.get('pool')}"
+            or SHA_RE.fullmatch(str(payload.get("sha"))) is None
+            or SHA_RE.fullmatch(str(payload.get("tree"))) is None
+            or instance in observed_instances
+        ):
+            raise RuntimeHostError("adapter candidate binding readback is invalid")
+        observed_instances.add(instance)
+        binding = {"sha": str(payload["sha"]), "tree": str(payload["tree"])}
+        sandbox = str(payload["sandbox"])
+        existing = by_sandbox.get(sandbox)
+        if existing is not None and existing != binding:
+            raise RuntimeHostError("sandbox adapter candidate bindings drifted across pools")
+        by_sandbox[sandbox] = binding
+    if observed_instances != set(INSTANCES) or set(by_sandbox) != set(SANDBOXES):
+        raise RuntimeHostError("adapter candidate binding set is not closed")
+    if len({binding["sha"] for binding in by_sandbox.values()}) != len(SANDBOXES):
+        raise RuntimeHostError("sandbox adapter candidate bindings are not unique")
+    return by_sandbox
 
 
 def _activation_preflight(
@@ -1721,6 +1946,7 @@ def _activation_preflight(
     *,
     transaction_id: str,
 ) -> None:
+    adapter_candidates = _activation_gate_preflight(candidate)
     _run_candidate_python(
         candidate,
         _BROKER_PREFLIGHT,
@@ -1729,13 +1955,23 @@ def _activation_preflight(
         transaction_id,
     )
     for instance in INSTANCES:
+        sandbox, _pool = instance.rsplit("-", 1)
+        binding = adapter_candidates[sandbox]
         _run_candidate_python(
             candidate,
             _ADAPTER_PREFLIGHT,
             str(ADAPTER_CONFIG_ROOT / f"{instance}.toml"),
-            candidate.sha,
-            candidate.tree,
+            binding["sha"],
+            binding["tree"],
         )
+
+
+def _activation_gate_preflight(
+    candidate: Candidate,
+) -> dict[str, dict[str, str]]:
+    adapter_candidates = _adapter_candidate_bindings(candidate)
+    _validate_platform_health_activation_gate(candidate, adapter_candidates)
+    return adapter_candidates
 
 
 def _open_activation_admission(
@@ -2061,6 +2297,7 @@ def activation_plan(sha: str) -> dict[str, Any]:
         "candidate_sha": sha,
         "steps": [
             "verify-installed-inactive-exact-candidate",
+            "require-candidate-bound-platform-health-and-reviewed-capacity-receipt",
             "journal-and-fence-new-broker-requests-by-transaction",
             "require-six-terminal-disabled-zero-handoffs-and-zero-broker-counters",
             "validate-six-config-secret-combined-receipt-and-zero-cp-policies",
@@ -2098,6 +2335,7 @@ def activate(sha: str) -> dict[str, Any]:
         if state.get("activation_status") != "installed":
             raise RuntimeHostError("runtime-host activation state is invalid")
         check(candidate, activation_mode="installed")
+        _activation_gate_preflight(candidate)
         journal_path, journal = _write_journal(candidate, operation="activate")
         try:
             _update_journal(journal_path, journal, "activation-closing-admission")

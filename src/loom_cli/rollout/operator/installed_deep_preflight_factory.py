@@ -410,13 +410,13 @@ def build_installed_deep_preflight_composition(
 
         return render
 
-    def shared_mount() -> GB10SharedMountReadiness:
+    def shared_mount(binding: dict[str, int]) -> GB10SharedMountReadiness:
         return probe_gb10_shared_mount_readonly(
             commands.simple,
             ssh_config=inputs.gb10_ssh_config,
             identity=inputs.gb10_identity,
             hosts=tuple(target.ssh_target for target in inputs.gb10_targets),
-            binding=inputs.gb10_mount_binding,
+            binding=binding,
             max_concurrency=GB10_PREFLIGHT_FLEET_CONCURRENCY,
         )
 
@@ -545,6 +545,7 @@ def build_installed_deep_preflight_composition(
         read_mutation_epoch=readonly.mutation_epoch,
         read_database_schema_revision=lambda: mutation_epoch_evidence().schema_revision,
         now=now,
+        prepare_admission_run=commands.prepare_admission,
     )
 
 

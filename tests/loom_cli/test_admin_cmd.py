@@ -1413,13 +1413,13 @@ def test_environment_state_apply_puts_profile_resources(
 
     assert rc == 0
     assert [item["url"] for item in captured] == [
-        "http://cp:8080/admin/worker-pool-autoscaler-policies/staging/gb10",
         "http://cp:8080/admin/gb10-worker-pools/staging/gb10/desired-state",
+        "http://cp:8080/admin/worker-pool-autoscaler-policies/staging/gb10",
     ]
     assert captured[0]["headers"]["Authorization"] == "Bearer admin-secret"
-    assert captured[0]["json"]["actuator"] == "slurm"
-    assert captured[0]["json"]["actuator_config"]["partition"] == "gb10"
-    assert captured[1]["json"]["image_tag"] == "staging-57a7509"
+    assert captured[0]["json"]["image_tag"] == "staging-57a7509"
+    assert captured[1]["json"]["actuator"] == "slurm"
+    assert captured[1]["json"]["actuator_config"]["partition"] == "gb10"
     assert "Applied environment state staging" in capsys.readouterr().out
 
 
