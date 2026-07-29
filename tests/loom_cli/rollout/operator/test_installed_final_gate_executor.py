@@ -15,6 +15,9 @@ from loom_cli.rollout.operator.installed_final_gate_executor import (
     InstalledFinalGateExecutor,
 )
 from loom_cli.rollout.operator.protected_apply_executor import PROTECTED_KUBECONFIG_PATH
+from loom_cli.rollout.operator.protected_environment_state_component import (
+    HttpxProtectedEnvironmentStateTransport,
+)
 from loom_cli.rollout.operator.staging_smoke_authority import staging_smoke_authority
 from loom_cli.rollout.preflight_contract import CheckOperation
 from tests.loom_cli.rollout.operator.test_checkpoint_inventory_provider import _config
@@ -239,4 +242,8 @@ def test_installed_protected_dispatch_binds_fixed_candidate_and_supervisor_trans
     assert captured["candidate_root"] == executor.config.runner_repo
     assert captured["external_supervisor_transport"] is sentinel_supervisor
     assert captured["gb10_transport"] is sentinel_gb10
+    environment_state = captured["environment_state_transport"]
+    assert isinstance(environment_state, HttpxProtectedEnvironmentStateTransport)
+    assert environment_state.candidate_root == executor.config.runner_repo
+    assert environment_state.cp_url == executor.config.cp_url
     assert captured["service_uid"] == os.geteuid()

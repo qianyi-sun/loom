@@ -21,6 +21,9 @@ from loom_cli.rollout.operator.protected_apply_executor import (
     MigrationEpochProtectedApplyExecutor,
     SubprocessProtectedApplyCommandRunner,
 )
+from loom_cli.rollout.operator.protected_environment_state_component import (
+    EnvironmentStateEvidence,
+)
 from loom_cli.rollout.preflight_contract import CheckOperation
 from tests.loom_cli.rollout.operator.test_protected_external_supervisor_component import (
     _bound_artifact,
@@ -142,6 +145,26 @@ class GB10Fleet:
         self.exact = True
 
 
+class EnvironmentState:
+    def __init__(self, *, desired_exact: bool = False, runtime_exact: bool | None = None) -> None:
+        self.desired_exact = desired_exact
+        self.runtime_exact = desired_exact if runtime_exact is None else runtime_exact
+        self.calls: list[str] = []
+
+    def observe(self, _plan, *, include_runtime):
+        self.calls.append("environment-runtime-read" if include_runtime else "environment-read")
+        return EnvironmentStateEvidence(
+            desired_exact=self.desired_exact,
+            runtime_exact=self.runtime_exact if include_runtime else self.desired_exact,
+            evidence_digest="e" * 64,
+        )
+
+    def apply(self, _plan):
+        self.calls.append("environment-apply")
+        self.desired_exact = True
+        self.runtime_exact = True
+
+
 class ExternalSupervisors:
     def __init__(self, *, exact: bool = False, fail_reconcile: bool = False) -> None:
         self.exact = exact
@@ -236,6 +259,7 @@ def test_executor_orders_epoch_before_nonlegacy_migration_and_recovers(
         service_uid=os.geteuid(),
         runner=runner,
         gb10_transport=GB10Fleet(),
+        environment_state_transport=EnvironmentState(),
         candidate_root=tmp_path / "candidate",
         external_supervisor_transport=supervisors,
         production_defaults_request=_defaults_request,
@@ -270,6 +294,7 @@ def test_executor_reconciles_old_supervisor_prefix_before_any_new_mutation(
         service_uid=os.geteuid(),
         runner=runner,
         gb10_transport=GB10Fleet(),
+        environment_state_transport=EnvironmentState(),
         candidate_root=tmp_path / "candidate",
         external_supervisor_transport=supervisors,
         production_defaults_request=_defaults_request,
@@ -297,6 +322,7 @@ def test_executor_orders_legacy_migration_before_epoch_bootstrap(tmp_path: Path)
         service_uid=os.geteuid(),
         runner=runner,
         gb10_transport=GB10Fleet(),
+        environment_state_transport=EnvironmentState(),
         candidate_root=tmp_path / "candidate",
         external_supervisor_transport=ExternalSupervisors(),
         production_defaults_request=_defaults_request,
@@ -310,9 +336,10 @@ def test_executor_orders_legacy_migration_before_epoch_bootstrap(tmp_path: Path)
     assert roots[0].name == "00-database-migration"
     assert roots[1].name == "01-mutation-epoch-claim"
     assert roots[2].name == "02-staging-manifests"
-    assert roots[3].name == "03-gb10-candidate"
-    assert roots[4].name == "04-production-defaults"
-    assert roots[5].name == "05-external-supervisors"
+    assert roots[3].name == "03-environment-state"
+    assert roots[4].name == "04-gb10-candidate"
+    assert roots[5].name == "05-production-defaults"
+    assert roots[6].name == "06-external-supervisors"
 
 
 def test_executor_rejects_non_apply_operation(tmp_path: Path) -> None:
@@ -321,6 +348,7 @@ def test_executor_rejects_non_apply_operation(tmp_path: Path) -> None:
         service_uid=os.geteuid(),
         runner=Runner(revision="0069", epoch=7),
         gb10_transport=GB10Fleet(),
+        environment_state_transport=EnvironmentState(),
         candidate_root=tmp_path / "candidate",
         external_supervisor_transport=ExternalSupervisors(),
     )
@@ -336,11 +364,13 @@ def test_convergence_reuses_exact_classifiers_without_mutating(tmp_path: Path) -
     runner.plan_digest = plan.plan_digest
     gb10 = GB10Fleet()
     supervisors = ExternalSupervisors()
+    environment_state = EnvironmentState()
     applied = MigrationEpochProtectedApplyExecutor(
         state_root=state,
         service_uid=os.geteuid(),
         runner=runner,
         gb10_transport=gb10,
+        environment_state_transport=environment_state,
         candidate_root=tmp_path / "candidate",
         external_supervisor_transport=supervisors,
         production_defaults_request=_defaults_request,
@@ -352,6 +382,7 @@ def test_convergence_reuses_exact_classifiers_without_mutating(tmp_path: Path) -
         service_uid=os.geteuid(),
         runner=runner,
         gb10_transport=gb10,
+        environment_state_transport=environment_state,
         candidate_root=tmp_path / "candidate",
         external_supervisor_transport=supervisors,
         production_defaults_request=_defaults_request,
@@ -378,9 +409,11 @@ def test_convergence_reports_drift_without_applying(tmp_path: Path) -> None:
         service_uid=os.geteuid(),
         runner=runner,
         gb10_transport=GB10Fleet(exact=False),
+        environment_state_transport=EnvironmentState(desired_exact=True),
         candidate_root=tmp_path / "candidate",
         external_supervisor_transport=ExternalSupervisors(exact=False),
         production_defaults_request=_defaults_request,
+        environment_state_attempts=1,
     )("final.convergence", CheckOperation.VERIFY, plan)
 
     assert not result.ready
@@ -388,6 +421,7 @@ def test_convergence_reports_drift_without_applying(tmp_path: Path) -> None:
         "database-migration",
         "mutation-epoch-claim",
         "staging-manifests",
+        "environment-state",
         "gb10-candidate",
         "production-defaults",
         "external-supervisors",
@@ -395,11 +429,45 @@ def test_convergence_reports_drift_without_applying(tmp_path: Path) -> None:
     assert all(not call.endswith("-apply") for call in runner.calls)
 
 
+def test_convergence_waits_boundedly_for_worker_runtime(tmp_path: Path) -> None:
+    plan = _plan(tmp_path)
+    runner = Runner(revision="0072", epoch=8)
+    runner.plan_digest = plan.plan_digest
+    runner.manifest_status = 0
+    environment_state = EnvironmentState(desired_exact=True, runtime_exact=False)
+    sleeps: list[float] = []
+
+    def converge_after_one_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        environment_state.runtime_exact = True
+
+    supervisors = ExternalSupervisors(exact=True)
+    supervisors.plan_digest = plan.plan_digest
+    supervisors.attestation_digest = plan.attestation_digest
+    result = KubernetesProtectedConvergenceExecutor(
+        service_uid=os.geteuid(),
+        runner=runner,
+        gb10_transport=GB10Fleet(exact=True),
+        environment_state_transport=environment_state,
+        candidate_root=tmp_path / "candidate",
+        external_supervisor_transport=supervisors,
+        production_defaults_request=_defaults_request,
+        environment_state_attempts=3,
+        environment_state_interval_seconds=0.25,
+        sleep=converge_after_one_sleep,
+    )("final.convergence", CheckOperation.VERIFY, plan)
+
+    assert result.ready
+    assert sleeps == [0.25]
+    assert environment_state.calls == ["environment-runtime-read"] * 2
+
+
 def test_convergence_rejects_mutating_or_wrong_check_operation(tmp_path: Path) -> None:
     executor = KubernetesProtectedConvergenceExecutor(
         service_uid=os.geteuid(),
         runner=Runner(revision="0072", epoch=8),
         gb10_transport=GB10Fleet(exact=True),
+        environment_state_transport=EnvironmentState(desired_exact=True),
         candidate_root=tmp_path / "candidate",
         external_supervisor_transport=ExternalSupervisors(exact=True),
     )

@@ -31,6 +31,7 @@ FINAL_PREDICATE_IDS = MappingProxyType(
             "protected.epoch-claim",
             "protected.migration-artifact",
             "protected.manifest-artifact",
+            "protected.environment-state",
             "protected.production-defaults",
             "protected.external-supervisor-artifact",
             "protected.external-supervisor-predecessor",
@@ -43,6 +44,7 @@ FINAL_PREDICATE_IDS = MappingProxyType(
         "final.convergence": (
             "convergence.migration-live",
             "convergence.manifests-live",
+            "convergence.environment-state-live",
             "convergence.defaults-live",
             "convergence.external-supervisor-live",
             "convergence.external-supervisor-active-pointer",

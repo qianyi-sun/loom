@@ -27,6 +27,9 @@ from .protected_apply_executor import (
     MigrationEpochProtectedApplyExecutor,
     SubprocessProtectedApplyCommandRunner,
 )
+from .protected_environment_state_component import (
+    HttpxProtectedEnvironmentStateTransport,
+)
 from .protected_external_supervisor_transport import (
     build_fixed_external_supervisor_transport,
 )
@@ -160,12 +163,19 @@ class InstalledFinalGateExecutor:
             external_supervisors = build_fixed_external_supervisor_transport(
                 service_uid=self.service_uid
             )
+            environment_state = HttpxProtectedEnvironmentStateTransport(
+                candidate_root=self.config.runner_repo,
+                admin_token_path=Path(self.config.admin_token_source.removeprefix("file:")),
+                cp_url=self.config.cp_url,
+                service_uid=self.service_uid,
+            )
         if check_id == "final.protected-apply":
             return MigrationEpochProtectedApplyExecutor(
                 state_root=self.config.state_root,
                 service_uid=self.service_uid,
                 runner=protected_runner,
                 gb10_transport=gb10,
+                environment_state_transport=environment_state,
                 candidate_root=self.config.runner_repo,
                 external_supervisor_transport=external_supervisors,
             )(check_id, operation, plan)
@@ -174,6 +184,7 @@ class InstalledFinalGateExecutor:
                 service_uid=self.service_uid,
                 runner=protected_runner,
                 gb10_transport=gb10,
+                environment_state_transport=environment_state,
                 candidate_root=self.config.runner_repo,
                 external_supervisor_transport=external_supervisors,
             )(check_id, operation, plan)
