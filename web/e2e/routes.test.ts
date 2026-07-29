@@ -45,7 +45,14 @@ for (const role of Object.keys(routes) as BrowserRole[]) {
           count: 2,
         });
       }
-      if (path.startsWith("/auth/") || path.startsWith("/invites/")) {
+      // Expired setup/reset/invite token lookups emit 404 console noise.
+      // /auth/login is ordinary signed-out onboarding and must not inherit
+      // that expectation (it only shares the /auth/ prefix).
+      if (
+        path.startsWith("/auth/setup") ||
+        path.startsWith("/auth/reset") ||
+        path.startsWith("/invites/")
+      ) {
         failureSink.expectDiagnostic({
           kind: "console",
           level: "error",
