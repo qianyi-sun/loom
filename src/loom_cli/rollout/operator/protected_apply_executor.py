@@ -11,7 +11,8 @@ import hashlib
 import json
 import os
 import subprocess
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -25,6 +26,10 @@ from .protected_apply_journal import (
     ComponentState,
     ComponentTerminal,
     ProtectedApplyJournal,
+)
+from .protected_environment_state_component import (
+    ProtectedEnvironmentStateComponent,
+    ProtectedEnvironmentStateTransport,
 )
 from .protected_epoch_component import (
     KubernetesProtectedEpochComponent,
@@ -251,6 +256,7 @@ class MigrationEpochProtectedApplyExecutor:
     service_uid: int
     runner: ProtectedApplyCommandRunner
     gb10_transport: ProtectedGB10FleetTransport
+    environment_state_transport: ProtectedEnvironmentStateTransport
     candidate_root: Path
     external_supervisor_transport: ProtectedExternalSupervisorTransport
     production_defaults_request: ProductionDefaultsTransport = field(
@@ -310,6 +316,10 @@ class MigrationEpochProtectedApplyExecutor:
             transport=self.gb10_transport,
             epoch_guard=epoch.classify,
         ).component(plan)
+        environment_state = ProtectedEnvironmentStateComponent(
+            transport=self.environment_state_transport,
+            epoch_guard=epoch.classify,
+        ).component(plan)
         external_supervisors = ProtectedExternalSupervisorComponent(
             candidate_root=self.candidate_root,
             transport=self.external_supervisor_transport,
@@ -320,6 +330,7 @@ class MigrationEpochProtectedApplyExecutor:
                 migration,
                 epoch,
                 manifests,
+                environment_state,
                 gb10,
                 production_defaults,
                 external_supervisors,
@@ -329,6 +340,7 @@ class MigrationEpochProtectedApplyExecutor:
                 epoch,
                 migration,
                 manifests,
+                environment_state,
                 gb10,
                 production_defaults,
                 external_supervisors,
@@ -362,8 +374,12 @@ class KubernetesProtectedConvergenceExecutor:
     service_uid: int
     runner: ProtectedApplyCommandRunner
     gb10_transport: ProtectedGB10FleetTransport
+    environment_state_transport: ProtectedEnvironmentStateTransport
     candidate_root: Path
     external_supervisor_transport: ProtectedExternalSupervisorTransport
+    environment_state_attempts: int = 121
+    environment_state_interval_seconds: float = 5.0
+    sleep: Callable[[float], None] = time.sleep
     production_defaults_request: ProductionDefaultsTransport = field(
         default_factory=HttpxProductionDefaultsTransport
     )
@@ -373,6 +389,9 @@ class KubernetesProtectedConvergenceExecutor:
             self.service_uid < 0
             or not self.candidate_root.is_absolute()
             or ".." in self.candidate_root.parts
+            or not 1 <= self.environment_state_attempts <= 721
+            or not 0 <= self.environment_state_interval_seconds <= 30
+            or not callable(self.sleep)
         ):
             raise ValueError("protected convergence authority is invalid")
 
@@ -391,6 +410,10 @@ class KubernetesProtectedConvergenceExecutor:
             runner=self.runner,
             environment=environment,
         )
+        environment_state_component = ProtectedEnvironmentStateComponent(
+            transport=self.environment_state_transport,
+            epoch_guard=epoch.classify,
+        )
         observations = {
             "database-migration": KubernetesProtectedMigrationComponent(
                 runner=self.runner,
@@ -404,6 +427,10 @@ class KubernetesProtectedConvergenceExecutor:
                 service_uid=self.service_uid,
                 epoch_guard=epoch.classify,
             ).classify(plan),
+            "environment-state": self._environment_state_observation(
+                environment_state_component,
+                plan,
+            ),
             "gb10-candidate": ProtectedGB10CandidateComponent(
                 transport=self.gb10_transport,
                 epoch_guard=epoch.classify,
@@ -431,6 +458,8 @@ class KubernetesProtectedConvergenceExecutor:
             blockers["mutation-epoch-claim"] = "protected-epoch-not-exact"
         if observations["staging-manifests"].observed_epoch != expected_epoch:
             blockers["staging-manifests"] = "protected-epoch-not-exact"
+        if observations["environment-state"].observed_epoch != expected_epoch:
+            blockers["environment-state"] = "protected-epoch-not-exact"
         if observations["gb10-candidate"].observed_epoch != expected_epoch:
             blockers["gb10-candidate"] = "protected-epoch-not-exact"
         if observations["production-defaults"].observed_epoch != expected_epoch:
@@ -447,6 +476,19 @@ class KubernetesProtectedConvergenceExecutor:
             protected_mutation=False,
             blockers=blockers,
         )
+
+    def _environment_state_observation(
+        self,
+        component: ProtectedEnvironmentStateComponent,
+        plan: FinalGatePlan,
+    ) -> ComponentObservation:
+        observation = component.classify_runtime(plan)
+        for _attempt in range(1, self.environment_state_attempts):
+            if observation.state in {ComponentState.EXACT, ComponentState.DRIFTED}:
+                break
+            self.sleep(self.environment_state_interval_seconds)
+            observation = component.classify_runtime(plan)
+        return observation
 
 
 def _terminal_evidence_digest(terminals: Mapping[str, ComponentTerminal]) -> str:
