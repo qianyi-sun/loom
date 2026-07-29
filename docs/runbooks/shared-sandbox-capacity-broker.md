@@ -346,6 +346,16 @@ attestation reference. A Control-Plane-only receipt is insufficient. Formal
 `external_runner` compatibility evidence remains an independent activation
 prerequisite owned outside this adapter; the receipt does not replace it.
 
+`loom-developer-sandbox-attestation-renewal.timer` runs every five minutes and
+re-executes the exact candidate's fleet check, both domain publishers, and the
+combined collector. It does not extend or rewrite an old receipt. Each verified
+result is copied to an immutable root-owned mode-`0600` history record under
+`.../<sandbox>/<SHA>/renewals/`, with a monotonic generation and digest link to
+the previous record. The adapter continues to consume only the current
+`combined.json`; the immutable series is the liveness evidence used by the
+long-running acceptance gate. A reboot or manual sandbox-service start also
+rebuilds an expired proof before lifecycle convergence.
+
 Run one supervisor cycle manually:
 
 ```bash

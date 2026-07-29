@@ -1,0 +1,25 @@
+[Unit]
+Description=Renew exact-candidate developer sandbox runtime attestations
+Requires=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/local/libexec/loom-developer-sandbox-host renew-attestations --sandbox all --execute
+TimeoutStartSec=10min
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/etc/loom/developer-sandboxes/desired
+ReadWritePaths=/run/loom-developer-sandbox-installer
+ReadWritePaths=/var/lib/loom-developer-sandbox-installer
+ReadWritePaths=/var/lib/loom-developer-sandbox-links/attestations
+ReadWritePaths=/var/lib/loom-shared-capacity/runtime-attestations
+ReadWritePaths=/shared_work/loom/runtime/sandboxes

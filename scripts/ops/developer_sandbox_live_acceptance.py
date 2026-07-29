@@ -35,6 +35,7 @@ MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SCHEMA = REPO_ROOT / "docs/evidence/developer-sandbox-live-acceptance.schema.json"
 STATE_ROOT = Path("/var/lib/loom-developer-sandbox-live-acceptance")
+RUNTIME_ATTESTATION_ROOT = Path("/var/lib/loom-shared-capacity/runtime-attestations")
 REQUIRED_OWNER_UID = 0
 REQUIRED_OWNER_GID = 0
 SUBMIT_HOST = "trt-eai-oldlab-2"
@@ -237,23 +238,61 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
         failures.append("live acceptance was not explicitly execute-acknowledged")
 
     receipts = evidence["candidate"]["runtime_receipts"]
-    if {receipt["sandbox"] for receipt in receipts} != set(SANDBOXES) or len(
-        receipts,
-    ) != len(SANDBOXES):
+    if {receipt["sandbox"] for receipt in receipts} != set(SANDBOXES):
         failures.append("runtime receipts do not cover the exact sandbox set")
+    receipts_by_sandbox: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for receipt in receipts:
-        if receipt["candidate_sha"] != candidate_sha or receipt["candidate_tree"] != candidate_tree:
-            failures.append(f"{receipt['sandbox']} runtime receipt candidate does not match")
-        try:
-            receipt_collected = _timestamp(receipt["collected_at"])
-            receipt_expires = _timestamp(receipt["expires_at"])
-        except ValueError:
-            failures.append(f"{receipt['sandbox']} runtime receipt timestamp is invalid")
-            continue
-        if receipt_collected > started_at or receipt_expires < completed_at:
-            failures.append(
-                f"{receipt['sandbox']} runtime receipt does not cover the session",
-            )
+        receipts_by_sandbox[receipt["sandbox"]].append(receipt)
+    for sandbox in SANDBOXES:
+        chain = sorted(
+            receipts_by_sandbox[sandbox],
+            key=lambda item: item["renewal_generation"],
+        )
+        coverage_until: datetime | None = None
+        previous_receipt: Mapping[str, Any] | None = None
+        for receipt in chain:
+            if (
+                receipt["candidate_sha"] != candidate_sha
+                or receipt["candidate_tree"] != candidate_tree
+            ):
+                failures.append(f"{sandbox} runtime receipt candidate does not match")
+            try:
+                receipt_collected = _timestamp(receipt["collected_at"])
+                receipt_expires = _timestamp(receipt["expires_at"])
+            except ValueError:
+                failures.append(f"{sandbox} runtime receipt timestamp is invalid")
+                continue
+            if (
+                receipt_expires <= receipt_collected
+                or (receipt_expires - receipt_collected).total_seconds() > 900
+            ):
+                failures.append(f"{sandbox} runtime receipt interval is invalid")
+            if previous_receipt is None:
+                if receipt_collected > started_at:
+                    failures.append(f"{sandbox} runtime receipt chain starts after the session")
+            else:
+                if (
+                    receipt["renewal_generation"]
+                    <= previous_receipt["renewal_generation"]
+                ):
+                    failures.append(f"{sandbox} runtime receipt generation does not advance")
+                if (
+                    receipt["previous_payload_sha256"]
+                    != previous_receipt["payload_sha256"]
+                ):
+                    failures.append(f"{sandbox} runtime receipt chain link is invalid")
+                if any(
+                    receipt["domain_generations"][domain]
+                    <= previous_receipt["domain_generations"][domain]
+                    for domain in POOLS
+                ):
+                    failures.append(f"{sandbox} domain receipt generation does not advance")
+                if coverage_until is not None and receipt_collected > coverage_until:
+                    failures.append(f"{sandbox} runtime receipt chain has a liveness gap")
+            coverage_until = receipt_expires
+            previous_receipt = receipt
+        if not chain or coverage_until is None or coverage_until < completed_at:
+            failures.append(f"{sandbox} runtime receipt chain does not cover the session")
 
     topology = evidence["topology"]
     if tuple(topology["sandboxes"]) != SANDBOXES:
@@ -812,6 +851,268 @@ def _secure_json_load(path: Path) -> Any:
         raise AcceptanceError("acceptance state file contains invalid JSON") from exc
 
 
+def _runtime_attestation_bytes(path: Path) -> bytes:
+    root = RUNTIME_ATTESTATION_ROOT
+    try:
+        relative = path.relative_to(root)
+    except ValueError as exc:
+        raise AcceptanceError("runtime receipt is outside the root-owned history") from exc
+    if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        raise AcceptanceError("runtime receipt path is invalid")
+    descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    root_parts = root.parts[1:]
+    try:
+        for index, part in enumerate((*root_parts, *relative.parts[:-1])):
+            child = os.open(
+                part,
+                os.O_RDONLY
+                | os.O_DIRECTORY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=descriptor,
+            )
+            os.close(descriptor)
+            descriptor = child
+            if index >= len(root_parts) - 1:
+                metadata = os.fstat(descriptor)
+                if (
+                    metadata.st_uid != REQUIRED_OWNER_UID
+                    or metadata.st_gid != REQUIRED_OWNER_GID
+                    or stat.S_IMODE(metadata.st_mode) & 0o022
+                ):
+                    raise AcceptanceError("runtime receipt directory is unsafe")
+        leaf = relative.parts[-1]
+        receipt_fd = os.open(
+            leaf,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=descriptor,
+        )
+        try:
+            opened = os.fstat(receipt_fd)
+            rebound = os.stat(leaf, dir_fd=descriptor, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink != 1
+                or opened.st_uid != REQUIRED_OWNER_UID
+                or opened.st_gid != REQUIRED_OWNER_GID
+                or stat.S_IMODE(opened.st_mode) != 0o600
+                or (opened.st_dev, opened.st_ino) != (rebound.st_dev, rebound.st_ino)
+            ):
+                raise AcceptanceError("runtime receipt file is unsafe")
+            chunks: list[bytes] = []
+            remaining = MAX_ARTIFACT_BYTES + 1
+            while remaining:
+                chunk = os.read(receipt_fd, remaining)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            data = b"".join(chunks)
+            if len(data) > MAX_ARTIFACT_BYTES:
+                raise AcceptanceError("runtime receipt exceeds the size limit")
+            return data
+        finally:
+            os.close(receipt_fd)
+    except AcceptanceError:
+        raise
+    except OSError as exc:
+        raise AcceptanceError("cannot read root-owned runtime receipt") from exc
+    finally:
+        os.close(descriptor)
+
+
+def _verify_trusted_runtime_receipts(evidence: Mapping[str, Any]) -> None:
+    candidate = evidence["candidate"]
+    sha = candidate["sha"]
+    tree = candidate["tree"]
+    for reference in candidate["runtime_receipts"]:
+        sandbox = reference["sandbox"]
+        generation = reference["renewal_generation"]
+        digest = reference["payload_sha256"]
+        expected_path = (
+            RUNTIME_ATTESTATION_ROOT
+            / sandbox
+            / sha
+            / "renewals"
+            / f"{generation:020d}-{digest}.json"
+        )
+        if reference["path"] != str(expected_path):
+            raise AcceptanceError("runtime receipt path does not match its identity")
+        raw = _runtime_attestation_bytes(expected_path)
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise AcceptanceError("runtime receipt is invalid JSON") from exc
+        if not isinstance(payload, dict) or raw != _canonical_bytes(payload):
+            raise AcceptanceError("runtime receipt is not canonical")
+        required = {
+            "schema_version",
+            "kind",
+            "sandbox",
+            "candidate_sha",
+            "candidate_tree",
+            "renewal_generation",
+            "previous_payload_sha256",
+            "collected_at",
+            "expires_at",
+            "domain_generations",
+            "fleet_attestation",
+            "combined_receipt",
+            "payload_sha256",
+        }
+        if set(payload) != required:
+            raise AcceptanceError("runtime receipt fields are invalid")
+        unsigned = {key: value for key, value in payload.items() if key != "payload_sha256"}
+        actual_digest = hashlib.sha256(
+            json.dumps(
+                unsigned,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode(),
+        ).hexdigest()
+        compared = {
+            "sandbox",
+            "candidate_sha",
+            "candidate_tree",
+            "renewal_generation",
+            "previous_payload_sha256",
+            "collected_at",
+            "expires_at",
+            "domain_generations",
+            "payload_sha256",
+        }
+        if (
+            payload["schema_version"] != 1
+            or payload["kind"] != "loom.developer-runtime-attestation-renewal"
+            or actual_digest != digest
+            or any(payload[key] != reference[key] for key in compared)
+        ):
+            raise AcceptanceError("runtime receipt identity or digest is invalid")
+        combined = payload["combined_receipt"]
+        fleet_proof = payload["fleet_attestation"]
+        if not isinstance(combined, dict):
+            raise AcceptanceError("runtime receipt combined proof is invalid")
+        combined_required = {
+            "schema_version",
+            "kind",
+            "sandbox",
+            "candidate_sha",
+            "candidate_tree",
+            "collector",
+            "fleet_attestation",
+            "domains",
+            "payload_sha256",
+        }
+        if set(combined) != combined_required:
+            raise AcceptanceError("runtime receipt combined proof fields are invalid")
+        combined_unsigned = {
+            key: value for key, value in combined.items() if key != "payload_sha256"
+        }
+        combined_digest = hashlib.sha256(
+            json.dumps(
+                combined_unsigned,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode(),
+        ).hexdigest()
+        collector = combined.get("collector")
+        domains = combined.get("domains")
+        fleet = combined.get("fleet_attestation")
+        expected_fleet_nodes = (
+            "oldlab-1",
+            "oldlab-2",
+            "oldlab-3",
+            "oldlab-4",
+            "oldlab-5",
+            "trt-gb10-1",
+            "trt-gb10-2",
+            "trt-gb10-3",
+            "trt-gb10-4",
+            "trt-gb10-5",
+            "trt-gb10-6",
+            "trt-gb10-8",
+            "trt-gb10-9",
+            "trt-gb10-10",
+            "trt-gb10-11",
+            "trt-gb10-12",
+            "trt-gb10-13",
+            "trt-gb10-14",
+            "trt-gb10-15",
+        )
+        if (
+            combined["schema_version"] != 1
+            or combined["kind"] != "loom.developer-runtime-combined-activation"
+            or combined["sandbox"] != sandbox
+            or combined["candidate_sha"] != sha
+            or combined["candidate_tree"] != tree
+            or combined.get("payload_sha256") != combined_digest
+            or not isinstance(collector, dict)
+            or collector.get("collected_at") != reference["collected_at"]
+            or collector.get("expires_at") != reference["expires_at"]
+            or not isinstance(domains, dict)
+            or set(domains) != set(POOLS)
+            or not isinstance(fleet, dict)
+            or fleet.get("path")
+            != str(
+                Path("/var/lib/loom-developer-sandbox-links/attestations")
+                / sandbox
+                / sha
+                / "fleet.json",
+            )
+        ):
+            raise AcceptanceError("runtime receipt combined proof binding is invalid")
+        for domain in POOLS:
+            row = domains.get(domain)
+            base = f"/var/lib/loom-developer-domain-attestations/{sandbox}/{sha}"
+            if (
+                not isinstance(row, dict)
+                or row.get("generation") != reference["domain_generations"][domain]
+                or row.get("manifest_path") != f"{base}/{domain}.json"
+                or row.get("signature_path") != f"{base}/{domain}.sig"
+            ):
+                raise AcceptanceError("runtime receipt domain coverage is invalid")
+        if not isinstance(fleet_proof, dict):
+            raise AcceptanceError("runtime receipt fleet proof is invalid")
+        fleet_unsigned = {
+            key: value for key, value in fleet_proof.items() if key != "payload_sha256"
+        }
+        fleet_digest = "sha256:" + hashlib.sha256(
+            json.dumps(
+                fleet_unsigned,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode(),
+        ).hexdigest()
+        fleet_nodes = fleet_proof.get("nodes")
+        fleet_server = fleet_proof.get("server")
+        fleet_bundle = fleet_proof.get("bundle_generation")
+        if (
+            fleet_proof.get("sandbox") != sandbox
+            or fleet_proof.get("candidate_sha") != sha
+            or fleet_proof.get("payload_sha256") != fleet_digest
+            or fleet.get("payload_sha256") != fleet_digest
+            or fleet_proof.get("generated_at") != fleet.get("generated_at")
+            or fleet_proof.get("expires_at") != fleet.get("expires_at")
+            or fleet_proof.get("eligible_nodes") != list(expected_fleet_nodes)
+            or not isinstance(fleet_nodes, dict)
+            or set(fleet_nodes) != set(expected_fleet_nodes)
+            or not isinstance(fleet_server, dict)
+            or fleet_server.get("node") != "oldlab-2"
+            or fleet_server.get("unit_active") is not True
+            or fleet_server.get("active_candidate_sha") != sha
+            or not isinstance(fleet_bundle, dict)
+            or fleet_bundle.get("candidate_sha") != sha
+            or any(
+                not isinstance(node, dict) or node.get("candidate_sha") != sha
+                for node in fleet_nodes.values()
+            )
+        ):
+            raise AcceptanceError("runtime receipt fleet host coverage is invalid")
+
+
 def _fsync_secure_file(path: Path) -> None:
     """Re-establish leaf and directory durability for an idempotent replay."""
 
@@ -1187,6 +1488,7 @@ def finalize_session(
             or evidence["session"]["id"] != session_id
         ):
             raise AcceptanceError("final evidence does not match the session identity")
+        _verify_trusted_runtime_receipts(evidence)
         for index, phase in enumerate(PHASES):
             checkpoint = _secure_json_load(
                 _session_dir(session_id) / "checkpoints" / f"{index:02d}-{phase}.json",

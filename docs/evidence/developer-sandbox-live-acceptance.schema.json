@@ -42,7 +42,7 @@
         "runtime_receipts": {
           "type": "array",
           "minItems": 3,
-          "maxItems": 3,
+          "maxItems": 300,
           "items": {
             "$ref": "#/$defs/runtimeReceipt"
           }
@@ -400,6 +400,9 @@
         "sandbox",
         "candidate_sha",
         "candidate_tree",
+        "path",
+        "renewal_generation",
+        "previous_payload_sha256",
         "collected_at",
         "expires_at",
         "payload_sha256",
@@ -414,6 +417,23 @@
         },
         "candidate_tree": {
           "$ref": "#/$defs/fullSha"
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^/.+/renewals/[0-9]{20}-[0-9a-f]{64}\\.json$"
+        },
+        "renewal_generation": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "previous_payload_sha256": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "collected_at": {
           "$ref": "#/$defs/timestamp"

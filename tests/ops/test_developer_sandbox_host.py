@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -130,6 +131,16 @@ def test_private_root_convergence_rejects_symlink(tmp_path: Path) -> None:
         host.ensure_private_roots(profile, _current_identity("qianyi"))
 
     assert stat.S_IMODE(target.stat().st_mode) != 0o700
+
+
+def test_combined_receipt_reader_does_not_follow_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "combined-target.json"
+    target.write_text("{}\n", encoding="utf-8")
+    receipt = tmp_path / "combined.json"
+    receipt.symlink_to(target)
+
+    with pytest.raises(host.HostConvergeError, match="unavailable"):
+        host._read_combined_receipt_bytes(receipt)
 
 
 def test_private_root_convergence_does_not_follow_raced_child_symlink(
@@ -393,6 +404,218 @@ def test_systemd_entry_is_fixed_and_replayable() -> None:
     assert "EnvironmentFile=" not in unit
     assert "RemainAfterExit=" not in unit
     assert "WantedBy=multi-user.target" in unit
+
+
+def test_attestation_renewal_timer_is_persistent_and_bounded() -> None:
+    root = Path(__file__).resolve().parents[2] / "deploy/developer-sandboxes"
+    service = (
+        root / "loom-developer-sandbox-attestation-renewal.service"
+    ).read_text(encoding="utf-8")
+    timer = (
+        root / "loom-developer-sandbox-attestation-renewal.timer"
+    ).read_text(encoding="utf-8")
+
+    assert (
+        "ExecStart=/usr/local/libexec/loom-developer-sandbox-host "
+        "renew-attestations --sandbox all --execute"
+    ) in service
+    assert "User=root" in service
+    assert "UMask=0077" in service
+    assert "OnUnitActiveSec=5min" in timer
+    assert "Persistent=true" in timer
+    assert "WantedBy=timers.target" in timer
+
+
+def test_runtime_attestation_history_is_monotonic_and_candidate_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _temporary_profile(tmp_path)
+    tree = "b" * 40
+    monkeypatch.setattr(host, "COMBINED_RECEIPT_ROOT", tmp_path / "attestations")
+    monkeypatch.setattr(host, "RENEWAL_STATE_ROOT", tmp_path / "renewal-state")
+    monkeypatch.setattr(host.os, "fchown", lambda *_args: None)
+    monkeypatch.setattr(host, "_read_combined_receipt_bytes", lambda path: path.read_bytes())
+
+    def private_directory(path: Path) -> None:
+        path.mkdir(parents=True, mode=0o700, exist_ok=True)
+        path.chmod(0o700)
+
+    monkeypatch.setattr(host, "_ensure_root_private_directory", private_directory)
+
+    def receipt(
+        candidate: str,
+        *,
+        minute: int,
+        generation: int,
+        embedded_candidate: str | None = None,
+    ) -> host.ActivationReceipt:
+        collected = datetime(2026, 7, 28, tzinfo=UTC) + timedelta(minutes=minute)
+        expires = collected + timedelta(minutes=15)
+        fleet_unsigned = {
+            "schema_version": 1,
+            "sandbox": profile.sandbox,
+            "candidate_sha": embedded_candidate or candidate,
+            "generated_at": collected.isoformat(),
+            "expires_at": expires.isoformat(),
+            "eligible_nodes": list(host.ELIGIBLE_LINK_NODES),
+            "bundle_generation": {"candidate_sha": embedded_candidate or candidate},
+            "server": {
+                "node": "oldlab-2",
+                "unit_active": True,
+                "active_candidate_sha": embedded_candidate or candidate,
+            },
+            "nodes": {
+                node: {"candidate_sha": embedded_candidate or candidate}
+                for node in host.ELIGIBLE_LINK_NODES
+            },
+        }
+        fleet_digest = "sha256:" + hashlib.sha256(
+            json.dumps(
+                fleet_unsigned,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode(),
+        ).hexdigest()
+        fleet_payload = {**fleet_unsigned, "payload_sha256": fleet_digest}
+        fleet_path = (
+            host.COMBINED_RECEIPT_ROOT
+            / profile.sandbox
+            / candidate
+            / "fleet.json"
+        )
+        fleet_path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        fleet_path.write_text(json.dumps(fleet_payload), encoding="utf-8")
+        combined_unsigned = {
+            "schema_version": 1,
+            "kind": "loom.developer-runtime-combined-activation",
+            "sandbox": profile.sandbox,
+            "candidate_sha": embedded_candidate or candidate,
+            "candidate_tree": tree,
+            "collector": {
+                "hostname": host.EXPECTED_HOSTNAME,
+                "collected_at": collected.isoformat(),
+                "expires_at": expires.isoformat(),
+            },
+            "fleet_attestation": {
+                "path": str(fleet_path),
+                "payload_sha256": fleet_digest,
+                "generated_at": collected.isoformat(),
+                "expires_at": expires.isoformat(),
+            },
+            "domains": {
+                "oldlab": {"generation": generation},
+                "gb10": {"generation": generation},
+            },
+        }
+        digest = hashlib.sha256(
+            json.dumps(
+                combined_unsigned,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode(),
+        ).hexdigest()
+        combined = {**combined_unsigned, "payload_sha256": digest}
+        path = host.combined_receipt_path(profile, candidate)
+        path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                combined,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return host.ActivationReceipt(
+            path=path,
+            payload_sha256=digest,
+            fleet_payload_sha256=fleet_digest,
+            expires_at=expires,
+        )
+
+    first_receipt = receipt(SHA, minute=0, generation=1)
+    real_atomic_write = host._atomic_write
+    crashed = False
+
+    def crash_after_history(
+        path: Path,
+        content: bytes,
+        *,
+        mode: int,
+        identity: host.Identity | None = None,
+    ) -> None:
+        nonlocal crashed
+        if path == host._renewal_state_file(profile) and not crashed:
+            crashed = True
+            raise host.HostConvergeError("simulated state-write crash")
+        real_atomic_write(path, content, mode=mode, identity=identity)
+
+    monkeypatch.setattr(host, "_atomic_write", crash_after_history)
+    with pytest.raises(host.HostConvergeError, match="simulated state-write crash"):
+        host._archive_runtime_attestation(profile, SHA, tree, first_receipt)
+    monkeypatch.setattr(host, "_atomic_write", real_atomic_write)
+    first = host._archive_runtime_attestation(profile, SHA, tree, first_receipt)
+    second_receipt = receipt(SHA, minute=10, generation=2)
+    second = host._archive_runtime_attestation(profile, SHA, tree, second_receipt)
+
+    assert first["renewal_generation"] == 1
+    assert second["renewal_generation"] == 2
+    assert second["previous_payload_sha256"] == first["payload_sha256"]
+    assert stat.S_IMODE(Path(second["path"]).stat().st_mode) == 0o600
+    with pytest.raises(host.HostConvergeError, match="replay"):
+        host._archive_runtime_attestation(profile, SHA, tree, second_receipt)
+
+    other = "c" * 40
+    with pytest.raises(host.HostConvergeError, match="binding"):
+        host._archive_runtime_attestation(
+            profile,
+            other,
+            tree,
+            receipt(other, minute=20, generation=1, embedded_candidate=SHA),
+        )
+
+
+def test_service_converge_rebuilds_expired_attestation_before_lifecycle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _temporary_profile(tmp_path)
+    desired = {"candidate_sha": SHA}
+    refreshed = _receipt(profile, SHA)
+    events: list[str] = []
+    monkeypatch.setattr(host, "_identity", lambda user, _group: _current_identity(user))
+    monkeypatch.setattr(host, "verify_candidate_root", lambda *_args: None)
+    monkeypatch.setattr(host, "verify_candidate", lambda *_args: "b" * 40)
+    monkeypatch.setattr(host, "verify_worker_runtime_env", lambda *_args: None)
+    monkeypatch.setattr(
+        host,
+        "verify_combined_receipt",
+        lambda *_args: (_ for _ in ()).throw(host.HostConvergeError("expired")),
+    )
+    monkeypatch.setattr(
+        host,
+        "_renew_attestation_locked",
+        lambda *_args, **_kwargs: events.append("renew") or refreshed,
+    )
+    monkeypatch.setattr(host, "_load_json", lambda *_args: {"candidate_sha": SHA})
+    monkeypatch.setattr(host, "_validate_desired_binding", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(host, "ensure_secret_files", lambda *_args: None)
+    monkeypatch.setattr(host, "_sandbox_state_sha", lambda *_args: SHA)
+    monkeypatch.setattr(
+        host,
+        "_invoke_lifecycle",
+        lambda _profile, _sha, operation: events.append(operation),
+    )
+    monkeypatch.setattr(host, "bootstrap_runtime_tokens", lambda *_args: False)
+    monkeypatch.setattr(host, "verify_listening_ports", lambda *_args: None)
+
+    host._service_converge_locked(profile, desired)
+
+    assert events == ["renew", "update", "check"]
 
 
 def test_cli_plan_is_non_mutating_and_secret_safe(capsys: pytest.CaptureFixture[str]) -> None:
@@ -824,6 +1047,7 @@ def test_empty_namespace_first_install_materializes_before_prepare_and_attest(
         "verify_combined_receipt",
         lambda *_args: _receipt(profile, SHA),
     )
+    monkeypatch.setattr(host, "_archive_runtime_attestation", lambda *_args: None)
     monkeypatch.setattr(host, "write_desired", lambda *_args: None)
     monkeypatch.setattr(
         host,

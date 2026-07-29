@@ -72,11 +72,169 @@ def _request_id(index: int) -> str:
     return str(uuid.UUID(int=index))
 
 
+def _runtime_receipts(candidate: str, tree: str) -> list[dict[str, Any]]:
+    receipts: list[dict[str, Any]] = []
+    for sandbox_index, sandbox in enumerate(ACCEPTANCE.SANDBOXES, start=1):
+        previous: str | None = None
+        for generation, minute in enumerate((0, 10, 20, 30, 40), start=1):
+            collected_at = _iso(minute)
+            expires_at = _iso(minute + 15)
+            fleet_nodes = (
+                "oldlab-1",
+                "oldlab-2",
+                "oldlab-3",
+                "oldlab-4",
+                "oldlab-5",
+                "trt-gb10-1",
+                "trt-gb10-2",
+                "trt-gb10-3",
+                "trt-gb10-4",
+                "trt-gb10-5",
+                "trt-gb10-6",
+                "trt-gb10-8",
+                "trt-gb10-9",
+                "trt-gb10-10",
+                "trt-gb10-11",
+                "trt-gb10-12",
+                "trt-gb10-13",
+                "trt-gb10-14",
+                "trt-gb10-15",
+            )
+            fleet_unsigned = {
+                "schema_version": 1,
+                "sandbox": sandbox,
+                "candidate_sha": candidate,
+                "generated_at": collected_at,
+                "expires_at": expires_at,
+                "eligible_nodes": list(fleet_nodes),
+                "bundle_generation": {"candidate_sha": candidate},
+                "server": {
+                    "node": "oldlab-2",
+                    "unit_active": True,
+                    "active_candidate_sha": candidate,
+                },
+                "nodes": {
+                    node: {"candidate_sha": candidate} for node in fleet_nodes
+                },
+            }
+            fleet_proof = dict(fleet_unsigned)
+            fleet_proof["payload_sha256"] = "sha256:" + hashlib.sha256(
+                json.dumps(
+                    fleet_unsigned,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode(),
+            ).hexdigest()
+            domains = {
+                domain: {
+                    "manifest_path": (
+                        f"/var/lib/loom-developer-domain-attestations/"
+                        f"{sandbox}/{candidate}/{domain}.json"
+                    ),
+                    "signature_path": (
+                        f"/var/lib/loom-developer-domain-attestations/"
+                        f"{sandbox}/{candidate}/{domain}.sig"
+                    ),
+                    "payload_sha256": f"{sandbox_index * 100 + generation:064x}",
+                    "signature_sha256": f"{sandbox_index * 1000 + generation:064x}",
+                    "key_id": f"{sandbox_index * 10000 + generation:064x}",
+                    "generation": sandbox_index * 100 + generation,
+                    "published_at": collected_at,
+                    "expires_at": expires_at,
+                }
+                for domain in ACCEPTANCE.POOLS
+            }
+            combined_unsigned = {
+                "schema_version": 1,
+                "kind": "loom.developer-runtime-combined-activation",
+                "sandbox": sandbox,
+                "candidate_sha": candidate,
+                "candidate_tree": tree,
+                "collector": {
+                    "hostname": ACCEPTANCE.SUBMIT_HOST,
+                    "collected_at": collected_at,
+                    "expires_at": expires_at,
+                },
+                "fleet_attestation": {
+                    "path": (
+                        "/var/lib/loom-developer-sandbox-links/attestations/"
+                        f"{sandbox}/{candidate}/fleet.json"
+                    ),
+                    "payload_sha256": fleet_proof["payload_sha256"],
+                    "generated_at": collected_at,
+                    "expires_at": expires_at,
+                },
+                "domains": domains,
+            }
+            combined = dict(combined_unsigned)
+            combined["payload_sha256"] = hashlib.sha256(
+                json.dumps(
+                    combined_unsigned,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode(),
+            ).hexdigest()
+            wrapper_unsigned = {
+                "schema_version": 1,
+                "kind": "loom.developer-runtime-attestation-renewal",
+                "sandbox": sandbox,
+                "candidate_sha": candidate,
+                "candidate_tree": tree,
+                "renewal_generation": generation,
+                "previous_payload_sha256": previous,
+                "collected_at": collected_at,
+                "expires_at": expires_at,
+                "domain_generations": {
+                    domain: domains[domain]["generation"] for domain in ACCEPTANCE.POOLS
+                },
+                "fleet_attestation": fleet_proof,
+                "combined_receipt": combined,
+            }
+            digest = hashlib.sha256(
+                json.dumps(
+                    wrapper_unsigned,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode(),
+            ).hexdigest()
+            receipts.append(
+                {
+                    "sandbox": sandbox,
+                    "candidate_sha": candidate,
+                    "candidate_tree": tree,
+                    "path": str(
+                        ACCEPTANCE.RUNTIME_ATTESTATION_ROOT
+                        / sandbox
+                        / candidate
+                        / "renewals"
+                        / f"{generation:020d}-{digest}.json",
+                    ),
+                    "renewal_generation": generation,
+                    "previous_payload_sha256": previous,
+                    "collected_at": collected_at,
+                    "expires_at": expires_at,
+                    "payload_sha256": digest,
+                    "domain_generations": wrapper_unsigned["domain_generations"],
+                    "_wrapper": {**wrapper_unsigned, "payload_sha256": digest},
+                },
+            )
+            previous = digest
+    return receipts
+
+
 def _patch_live_host(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(ACCEPTANCE, "STATE_ROOT", tmp_path / "state")
+    monkeypatch.setattr(
+        ACCEPTANCE,
+        "RUNTIME_ATTESTATION_ROOT",
+        tmp_path / "runtime-attestations",
+    )
     monkeypatch.setattr(ACCEPTANCE, "REQUIRED_OWNER_UID", os.getuid())
     monkeypatch.setattr(ACCEPTANCE, "REQUIRED_OWNER_GID", os.getgid())
     monkeypatch.setattr(ACCEPTANCE.os, "geteuid", lambda: 0)
@@ -327,26 +485,15 @@ def _evidence() -> dict[str, Any]:
                 },
             },
         )
+    runtime_receipts = _runtime_receipts(candidate, tree)
+    for receipt in runtime_receipts:
+        receipt.pop("_wrapper")
     return {
         "schema_version": 1,
         "candidate": {
             "sha": candidate,
             "tree": tree,
-            "runtime_receipts": [
-                {
-                    "sandbox": sandbox,
-                    "candidate_sha": candidate,
-                    "candidate_tree": tree,
-                    "collected_at": _iso(0),
-                    "expires_at": _iso(60),
-                    "payload_sha256": f"{index + 500:064x}",
-                    "domain_generations": {
-                        "oldlab": 10,
-                        "gb10": 20,
-                    },
-                }
-                for index, sandbox in enumerate(ACCEPTANCE.SANDBOXES)
-            ],
+            "runtime_receipts": runtime_receipts,
         },
         "session": {
             "id": session_id,
@@ -467,6 +614,13 @@ def _journaled_evidence(
     session_id = state["session_id"]
     evidence = _evidence()
     evidence["session"]["id"] = session_id
+    for receipt in _runtime_receipts(evidence["candidate"]["sha"], evidence["candidate"]["tree"]):
+        wrapper = receipt.pop("_wrapper")
+        assert receipt in evidence["candidate"]["runtime_receipts"]
+        path = Path(receipt["path"])
+        path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        path.write_bytes(ACCEPTANCE._canonical_bytes(wrapper))
+        path.chmod(0o600)
     phase_dir = tmp_path / "phase-inputs"
     phase_dir.mkdir()
     for index, phase in enumerate(ACCEPTANCE.PHASES):
@@ -589,6 +743,84 @@ def test_complete_session_seals_verified_evidence(
     assert len(complete["evidence_sha256"]) == 64
     sealed = tmp_path / "state/sessions" / session_id / "evidence.json"
     assert json.loads(sealed.read_text(encoding="utf-8")) == evidence
+
+
+def test_runtime_receipt_series_covers_longer_than_single_ttl() -> None:
+    evidence = _evidence()
+
+    assert _failures(evidence) == []
+    for sandbox in ACCEPTANCE.SANDBOXES:
+        chain = [
+            receipt
+            for receipt in evidence["candidate"]["runtime_receipts"]
+            if receipt["sandbox"] == sandbox
+        ]
+        assert len(chain) == 5
+        assert ACCEPTANCE._timestamp(chain[0]["collected_at"]) <= ACCEPTANCE._timestamp(
+            evidence["session"]["started_at"],
+        )
+        assert ACCEPTANCE._timestamp(chain[-1]["expires_at"]) >= ACCEPTANCE._timestamp(
+            evidence["session"]["completed_at"],
+        )
+
+
+def test_runtime_receipt_series_rejects_missing_renewal_gap() -> None:
+    evidence = _evidence()
+    evidence["candidate"]["runtime_receipts"] = [
+        receipt
+        for receipt in evidence["candidate"]["runtime_receipts"]
+        if not (receipt["sandbox"] == "qianyi" and receipt["renewal_generation"] == 2)
+    ]
+
+    assert "qianyi runtime receipt chain link is invalid" in _failures(evidence)
+    assert "qianyi runtime receipt chain has a liveness gap" in _failures(evidence)
+
+
+def test_finalize_reads_root_owned_receipt_instead_of_trusting_caller(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id, evidence, evidence_path, schema = _journaled_evidence(
+        tmp_path,
+        monkeypatch,
+    )
+    reference = evidence["candidate"]["runtime_receipts"][0]
+    path = Path(reference["path"])
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["expires_at"] = _iso(60)
+    path.write_bytes(ACCEPTANCE._canonical_bytes(payload))
+
+    with pytest.raises(ACCEPTANCE.AcceptanceError, match="identity or digest"):
+        ACCEPTANCE.finalize_session(
+            session_id,
+            evidence_path,
+            schema,
+            execute=True,
+        )
+
+
+def test_finalize_rejects_missing_root_owned_renewal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id, evidence, evidence_path, schema = _journaled_evidence(
+        tmp_path,
+        monkeypatch,
+    )
+    missing = next(
+        receipt
+        for receipt in evidence["candidate"]["runtime_receipts"]
+        if receipt["sandbox"] == "hongjian" and receipt["renewal_generation"] == 3
+    )
+    Path(missing["path"]).unlink()
+
+    with pytest.raises(ACCEPTANCE.AcceptanceError, match="root-owned runtime receipt"):
+        ACCEPTANCE.finalize_session(
+            session_id,
+            evidence_path,
+            schema,
+            execute=True,
+        )
 
 
 def test_state_tree_is_closed_root_only_and_rejects_symlinks(

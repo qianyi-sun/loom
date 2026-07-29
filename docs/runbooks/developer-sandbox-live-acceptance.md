@@ -29,9 +29,12 @@ The verifier rejects changes to this topology:
 - excluded node: `trt-gb10-7`.
 
 All phase, capacity, burst, runtime-envelope, and fault records bind the same
-full candidate SHA. The session also binds the full Git tree and one fresh
-combined oldlab+GB10 runtime receipt for each sandbox. Every receipt must cover
-the complete acceptance window. Evidence is closed-schema, secret-free,
+full candidate SHA. The session also binds the full Git tree and a continuous
+root-owned renewal chain of combined oldlab+GB10 runtime receipts for each
+sandbox. Each short-lived receipt covers at most 15 minutes; successive
+generations must advance both domain generations, link the previous immutable
+receipt digest, overlap without a liveness gap, and collectively cover the
+complete acceptance window. Evidence is closed-schema, secret-free,
 timezone-qualified, and collected no later than five minutes after the final
 readback.
 
@@ -46,8 +49,8 @@ Before creating a session, record all of the following outside the artifact:
 
 1. the separately authorized live test window;
 2. the exact merged candidate SHA and tree;
-3. fresh combined runtime receipts for all three sandboxes and both NFS
-   domains;
+3. the persistent renewal timer is active and a fresh combined runtime receipt
+   generation exists for all three sandboxes and both NFS domains;
 4. installed capacity broker, six adapters, supervisor, Slurm policy, cgroup
    guard, and remote-link readbacks for that exact candidate;
 5. a healthy non-Loom peer workload in each Slurm domain;

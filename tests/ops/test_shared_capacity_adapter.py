@@ -343,6 +343,7 @@ def test_apply_is_candidate_bound_persistent_and_idempotent(tmp_path: Path) -> N
     }
     unsigned = dict(observed)
     digest = unsigned.pop("payload_sha256")
+
     assert (
         digest
         == hashlib.sha256(
@@ -367,6 +368,38 @@ def test_apply_is_candidate_bound_persistent_and_idempotent(tmp_path: Path) -> N
         "GET",
         "GET",
     ]
+
+
+def test_periodic_receipt_renewal_keeps_adapter_enabled_beyond_thirty_minutes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, _ = _fixture(tmp_path)
+    control_plane = FakeControlPlane(_policy())
+    current_path: Path | None = None
+    monkeypatch.setattr(adapter, "_validate_runtime_attestation", REAL_VALIDATE_RUNTIME_ATTESTATION)
+    monkeypatch.setattr(
+        adapter,
+        "_secure_runtime_attestation_file",
+        lambda _path, *, config: current_path,
+    )
+
+    reports = []
+    receipt_digests: list[str] = []
+    for minutes in (0, 10, 20, 30, 40):
+        now = datetime(2026, 7, 28, 14, 0, tzinfo=UTC) + timedelta(minutes=minutes)
+        current_path = _write_receipt(config, now=now)
+        receipt_digests.append(json.loads(current_path.read_text())["payload_sha256"])
+        reports.append(adapter.run_cycle(config, now=now, http_json=control_plane))
+
+    assert all(report["enabled"] is True for report in reports)
+    assert control_plane.policy["enabled"] is True
+    assert len(set(receipt_digests)) == len(receipt_digests)
+    assert not any(
+        call["body"]["enabled"] is False
+        for call in control_plane.calls
+        if call["method"] == "PUT"
+    )
 
 
 def test_adapter_rejects_overlapping_invocations(tmp_path: Path) -> None:

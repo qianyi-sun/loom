@@ -54,6 +54,7 @@ PROFILE_CONFIG_ROOT = CONFIG_ROOT / "profiles"
 TRANSACTION_ROOT = Path("/var/lib/loom-developer-sandbox-installer/transactions")
 TRANSACTION_LOCK_ROOT = Path("/run/loom-developer-sandbox-installer")
 SOURCE_STAGING_ROOT = Path("/var/lib/loom-developer-sandbox-installer/source")
+RENEWAL_STATE_ROOT = Path("/var/lib/loom-developer-sandbox-installer/renewals")
 COMBINED_RECEIPT_ROOT = Path("/var/lib/loom-shared-capacity/runtime-attestations")
 FLEET_ATTESTATION_ROOT = Path("/var/lib/loom-developer-sandbox-links/attestations")
 REMOTE_LINK_ISSUANCE_ROOT = Path("/var/lib/loom/developer-sandbox-links/issuance")
@@ -61,8 +62,15 @@ REMOTE_LINK_SERVER_ROOT = Path("/etc/loom/developer-sandbox-links/server")
 DOMAIN_RUNTIME_PROGRAM = Path("/usr/local/libexec/loom-developer-domain-runtime")
 DOMAIN_RUNTIME_CONFIG = Path("/etc/loom/developer-runtime-domains.toml")
 UNIT_PATH = Path("/etc/systemd/system/loom-developer-sandbox@.service")
+RENEWAL_SERVICE_PATH = Path(
+    "/etc/systemd/system/loom-developer-sandbox-attestation-renewal.service",
+)
+RENEWAL_TIMER_PATH = Path(
+    "/etc/systemd/system/loom-developer-sandbox-attestation-renewal.timer",
+)
 INSTALLED_PROGRAM = Path("/usr/local/libexec/loom-developer-sandbox-host")
 UNIT_NAME = "loom-developer-sandbox@{sandbox}.service"
+RENEWAL_TIMER = "loom-developer-sandbox-attestation-renewal.timer"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 FINGERPRINT_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -374,17 +382,21 @@ def _fsync_directory(path: Path) -> None:
 
 
 def _ensure_root_private_directory(path: Path) -> None:
-    path.mkdir(parents=True, mode=0o700, exist_ok=True)
-    os.chown(path, 0, 0)
-    os.chmod(path, 0o700)
-    metadata = path.lstat()
-    if (
-        not stat.S_ISDIR(metadata.st_mode)
-        or stat.S_ISLNK(metadata.st_mode)
-        or stat.S_IMODE(metadata.st_mode) != 0o700
-        or (metadata.st_uid, metadata.st_gid) != (0, 0)
-    ):
-        raise HostConvergeError(f"root-private directory did not converge: {path}")
+    descriptor = _open_absolute_directory(path, create=True)
+    try:
+        os.fchown(descriptor, 0, 0)
+        os.fchmod(descriptor, 0o700)
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+            or (metadata.st_uid, metadata.st_gid) != (0, 0)
+        ):
+            raise HostConvergeError(f"root-private directory did not converge: {path}")
+    except OSError as exc:
+        raise HostConvergeError(f"root-private directory did not converge: {path}") from exc
+    finally:
+        os.close(descriptor)
 
 
 def _assert_secure_file(path: Path, identity: Identity, label: str) -> None:
@@ -871,6 +883,46 @@ def verify_worker_runtime_env(
         raise HostConvergeError("OLDLAB worker runtime env binding is invalid")
 
 
+def _read_combined_receipt_bytes(path: Path) -> bytes:
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
+        )
+        opened = os.fstat(descriptor)
+        rebound = path.lstat()
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or (opened.st_uid, opened.st_gid) != (0, 0)
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or (opened.st_dev, opened.st_ino) != (rebound.st_dev, rebound.st_ino)
+        ):
+            raise HostConvergeError("combined activation receipt metadata is invalid")
+        chunks: list[bytes] = []
+        size = 0
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > 8 * 1024 * 1024:
+                raise HostConvergeError("combined activation receipt is too large")
+        after = path.lstat()
+        if (opened.st_dev, opened.st_ino) != (after.st_dev, after.st_ino):
+            raise HostConvergeError("combined activation receipt changed during read")
+        return b"".join(chunks)
+    except HostConvergeError:
+        raise
+    except OSError as exc:
+        raise HostConvergeError("combined activation receipt is unavailable") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def verify_combined_receipt(
     profile: Profile,
     sha: str,
@@ -880,19 +932,7 @@ def verify_combined_receipt(
 ) -> ActivationReceipt:
     now = (now or datetime.now(UTC)).astimezone(UTC)
     path = combined_receipt_path(profile, sha)
-    try:
-        metadata = path.lstat()
-        raw = path.read_bytes()
-    except OSError as exc:
-        raise HostConvergeError("combined activation receipt is unavailable") from exc
-    if (
-        stat.S_ISLNK(metadata.st_mode)
-        or not stat.S_ISREG(metadata.st_mode)
-        or metadata.st_nlink != 1
-        or (metadata.st_uid, metadata.st_gid) != (0, 0)
-        or stat.S_IMODE(metadata.st_mode) != 0o600
-    ):
-        raise HostConvergeError("combined activation receipt metadata is invalid")
+    raw = _read_combined_receipt_bytes(path)
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -1031,6 +1071,287 @@ def verify_combined_receipt(
     )
 
 
+def _renewal_state_file(profile: Profile) -> Path:
+    return RENEWAL_STATE_ROOT / f"{profile.sandbox}.json"
+
+
+def _write_root_exclusive(path: Path, content: bytes) -> None:
+    descriptor = -1
+    try:
+        with _seized_directory(path.parent, create=True) as parent_fd:
+            try:
+                descriptor = os.open(
+                    path.name,
+                    os.O_WRONLY
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=parent_fd,
+                )
+            except FileExistsError as exc:
+                if _read_combined_receipt_bytes(path) != content:
+                    raise HostConvergeError(
+                        "renewal history generation already exists with different bytes",
+                    ) from exc
+                return
+            view = memoryview(content)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise HostConvergeError("renewal history write made no progress")
+                view = view[written:]
+            os.fchown(descriptor, 0, 0)
+            os.fchmod(descriptor, 0o600)
+            os.fsync(descriptor)
+            opened = os.fstat(descriptor)
+            rebound = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(rebound.st_mode)
+                or (opened.st_dev, opened.st_ino) != (rebound.st_dev, rebound.st_ino)
+            ):
+                raise HostConvergeError("renewal history binding changed")
+            os.fsync(parent_fd)
+    except HostConvergeError:
+        raise
+    except OSError as exc:
+        raise HostConvergeError("could not persist renewal history") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _archive_runtime_attestation(
+    profile: Profile,
+    sha: str,
+    tree: str,
+    receipt: ActivationReceipt,
+) -> dict[str, Any]:
+    try:
+        raw = _read_combined_receipt_bytes(receipt.path)
+        combined = json.loads(raw)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HostConvergeError("combined activation receipt is unavailable") from exc
+    if not isinstance(combined, dict):
+        raise HostConvergeError("combined activation receipt is invalid")
+    canonical = (
+        json.dumps(
+            combined,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode()
+        + b"\n"
+    )
+    unsigned_combined = {
+        key: value for key, value in combined.items() if key != "payload_sha256"
+    }
+    combined_digest = hashlib.sha256(
+        json.dumps(
+            unsigned_combined,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode(),
+    ).hexdigest()
+    if (
+        raw != canonical
+        or combined.get("sandbox") != profile.sandbox
+        or combined.get("candidate_sha") != sha
+        or combined.get("candidate_tree") != tree
+        or combined.get("payload_sha256") != combined_digest
+        or receipt.payload_sha256 != combined_digest
+    ):
+        raise HostConvergeError("combined activation receipt binding is invalid")
+    collector = combined.get("collector")
+    domains = combined.get("domains")
+    fleet_reference = combined.get("fleet_attestation")
+    if (
+        not isinstance(collector, dict)
+        or not isinstance(domains, dict)
+        or not isinstance(fleet_reference, dict)
+    ):
+        raise HostConvergeError("combined activation receipt sections are invalid")
+    collected_at = _parse_attestation_time(collector.get("collected_at"), "collected_at")
+    combined_expires = _parse_attestation_time(collector.get("expires_at"), "expires_at")
+    if combined_expires != receipt.expires_at:
+        raise HostConvergeError("combined activation receipt expiry binding is invalid")
+    fleet_path = fleet_reference.get("path")
+    if not isinstance(fleet_path, str):
+        raise HostConvergeError("combined fleet receipt path is invalid")
+    try:
+        fleet_payload = json.loads(_read_combined_receipt_bytes(Path(fleet_path)))
+    except json.JSONDecodeError as exc:
+        raise HostConvergeError("fleet attestation is invalid") from exc
+    if not isinstance(fleet_payload, dict):
+        raise HostConvergeError("fleet attestation is invalid")
+    fleet_unsigned = {
+        key: value for key, value in fleet_payload.items() if key != "payload_sha256"
+    }
+    fleet_digest = "sha256:" + hashlib.sha256(
+        json.dumps(
+            fleet_unsigned,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode(),
+    ).hexdigest()
+    fleet_nodes = fleet_payload.get("nodes")
+    fleet_bundle = fleet_payload.get("bundle_generation")
+    fleet_server = fleet_payload.get("server")
+    if (
+        fleet_payload.get("sandbox") != profile.sandbox
+        or fleet_payload.get("candidate_sha") != sha
+        or fleet_payload.get("payload_sha256") != fleet_digest
+        or fleet_digest != receipt.fleet_payload_sha256
+        or fleet_reference.get("payload_sha256") != fleet_digest
+        or fleet_payload.get("generated_at") != fleet_reference.get("generated_at")
+        or fleet_payload.get("expires_at") != fleet_reference.get("expires_at")
+        or fleet_payload.get("eligible_nodes") != list(ELIGIBLE_LINK_NODES)
+        or not isinstance(fleet_nodes, dict)
+        or set(fleet_nodes) != set(ELIGIBLE_LINK_NODES)
+        or not isinstance(fleet_bundle, dict)
+        or fleet_bundle.get("candidate_sha") != sha
+        or not isinstance(fleet_server, dict)
+        or fleet_server.get("active_candidate_sha") != sha
+        or fleet_server.get("node") != "oldlab-2"
+        or fleet_server.get("unit_active") is not True
+        or any(
+            not isinstance(node, dict) or node.get("candidate_sha") != sha
+            for node in fleet_nodes.values()
+        )
+    ):
+        raise HostConvergeError("fleet attestation host coverage is invalid")
+    try:
+        domain_generations = {
+            domain: int(domains[domain]["generation"])
+            for domain in ("oldlab", "gb10")
+        }
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HostConvergeError("combined activation receipt generations are invalid") from exc
+    previous = _load_json(_renewal_state_file(profile), "attestation renewal state")
+    generation = 1
+    previous_digest: str | None = None
+    if previous is not None:
+        _exact_keys(
+            previous,
+            {
+                "schema_version",
+                "sandbox",
+                "candidate_sha",
+                "candidate_tree",
+                "renewal_generation",
+                "renewal_payload_sha256",
+                "combined_payload_sha256",
+                "collected_at",
+                "expires_at",
+                "domain_generations",
+            },
+            "attestation renewal state",
+        )
+        prior_generation = previous.get("renewal_generation")
+        previous_digest = previous.get("renewal_payload_sha256")
+        previous_combined_digest = previous.get("combined_payload_sha256")
+        previous_sha = previous.get("candidate_sha")
+        previous_tree = previous.get("candidate_tree")
+        previous_domains = previous.get("domain_generations")
+        if (
+            previous.get("schema_version") != 1
+            or previous.get("sandbox") != profile.sandbox
+            or not isinstance(previous_sha, str)
+            or SHA_RE.fullmatch(previous_sha) is None
+            or not isinstance(previous_tree, str)
+            or SHA_RE.fullmatch(previous_tree) is None
+            or type(prior_generation) is not int
+            or prior_generation < 1
+            or not isinstance(previous_digest, str)
+            or DIGEST_RE.fullmatch(previous_digest) is None
+            or not isinstance(previous_combined_digest, str)
+            or DIGEST_RE.fullmatch(previous_combined_digest) is None
+            or not isinstance(previous_domains, dict)
+            or set(previous_domains) != {"oldlab", "gb10"}
+            or any(
+                type(previous_domains[domain]) is not int
+                or previous_domains[domain] < 1
+                for domain in ("oldlab", "gb10")
+            )
+        ):
+            raise HostConvergeError("attestation renewal state is invalid")
+        if previous_combined_digest == receipt.payload_sha256:
+            raise HostConvergeError("attestation renewal replay did not produce fresh proof")
+        previous_collected = _parse_attestation_time(
+            previous.get("collected_at"),
+            "previous renewal collected_at",
+        )
+        if collected_at <= previous_collected:
+            raise HostConvergeError("attestation renewal time did not advance")
+        if previous_sha == sha:
+            if previous_tree != tree or any(
+                domain_generations[domain] <= previous_domains[domain]
+                for domain in ("oldlab", "gb10")
+            ):
+                raise HostConvergeError("domain attestation generation did not advance")
+        generation = prior_generation + 1
+
+    unsigned = {
+        "schema_version": 1,
+        "kind": "loom.developer-runtime-attestation-renewal",
+        "sandbox": profile.sandbox,
+        "candidate_sha": sha,
+        "candidate_tree": tree,
+        "renewal_generation": generation,
+        "previous_payload_sha256": previous_digest,
+        "collected_at": collected_at.isoformat(),
+        "expires_at": receipt.expires_at.isoformat(),
+        "domain_generations": domain_generations,
+        "fleet_attestation": fleet_payload,
+        "combined_receipt": combined,
+    }
+    payload = dict(unsigned)
+    payload["payload_sha256"] = hashlib.sha256(
+        json.dumps(unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(),
+    ).hexdigest()
+    content = (
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"
+    ).encode()
+    history = (
+        COMBINED_RECEIPT_ROOT
+        / profile.sandbox
+        / sha
+        / "renewals"
+        / f"{generation:020d}-{payload['payload_sha256']}.json"
+    )
+    _write_root_exclusive(history, content)
+    state = {
+        "schema_version": 1,
+        "sandbox": profile.sandbox,
+        "candidate_sha": sha,
+        "candidate_tree": tree,
+        "renewal_generation": generation,
+        "renewal_payload_sha256": payload["payload_sha256"],
+        "combined_payload_sha256": receipt.payload_sha256,
+        "collected_at": collected_at.isoformat(),
+        "expires_at": receipt.expires_at.isoformat(),
+        "domain_generations": domain_generations,
+    }
+    _ensure_root_private_directory(RENEWAL_STATE_ROOT)
+    _atomic_write(
+        _renewal_state_file(profile),
+        (json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n").encode(),
+        mode=0o600,
+    )
+    return {
+        "path": str(history),
+        "payload_sha256": payload["payload_sha256"],
+        "previous_payload_sha256": previous_digest,
+        "renewal_generation": generation,
+        "collected_at": collected_at.isoformat(),
+        "expires_at": receipt.expires_at.isoformat(),
+        "domain_generations": domain_generations,
+    }
+
+
 def _desired_payload(
     profile: Profile,
     sha: str,
@@ -1120,6 +1441,18 @@ def _install_assets(source_root: Path) -> None:
     _atomic_write(
         UNIT_PATH,
         (profiles_root / "loom-developer-sandbox@.service").read_bytes(),
+        mode=0o644,
+    )
+    _atomic_write(
+        RENEWAL_SERVICE_PATH,
+        (
+            profiles_root / "loom-developer-sandbox-attestation-renewal.service"
+        ).read_bytes(),
+        mode=0o644,
+    )
+    _atomic_write(
+        RENEWAL_TIMER_PATH,
+        (profiles_root / "loom-developer-sandbox-attestation-renewal.timer").read_bytes(),
         mode=0o644,
     )
     for sandbox in SANDBOXES:
@@ -1359,6 +1692,31 @@ def _validate_desired_binding(
         raise HostConvergeError("sandbox desired rollback binding is invalid")
 
 
+def _renew_attestation_locked(
+    profile: Profile,
+    *,
+    sha: str,
+    tree: str,
+) -> ActivationReceipt:
+    relative_program = "scripts/ops/developer_sandbox_remote_link_host.py"
+    _run_candidate_program(
+        profile,
+        sha,
+        relative_program,
+        "fleet-check",
+        "--sandbox",
+        profile.sandbox,
+        "--candidate-sha",
+        sha,
+        "--execute",
+    )
+    _publish_domain_attestations(profile, sha, tree)
+    receipt = verify_combined_receipt(profile, sha, tree)
+    _archive_runtime_attestation(profile, sha, tree, receipt)
+    write_desired(profile, sha, tree, receipt)
+    return receipt
+
+
 def _service_converge_locked(
     profile: Profile,
     desired: Mapping[str, Any],
@@ -1371,14 +1729,29 @@ def _service_converge_locked(
     verify_candidate_root(profile, authority)
     tree = verify_candidate(profile, profile.candidate_root / sha, sha, authority)
     verify_worker_runtime_env(profile, sha, runtime_group)
-    receipt = verify_combined_receipt(profile, sha, tree)
-    _validate_desired_binding(
-        profile,
-        desired,
-        sha=sha,
-        tree=tree,
-        receipt=receipt,
-    )
+    try:
+        receipt = verify_combined_receipt(profile, sha, tree)
+        _validate_desired_binding(
+            profile,
+            desired,
+            sha=sha,
+            tree=tree,
+            receipt=receipt,
+        )
+    except HostConvergeError as receipt_error:
+        receipt = _renew_attestation_locked(profile, sha=sha, tree=tree)
+        refreshed = _load_json(profile.desired_file, "sandbox desired state")
+        if refreshed is None:
+            raise HostConvergeError(
+                "renewed sandbox desired state is absent",
+            ) from receipt_error
+        _validate_desired_binding(
+            profile,
+            refreshed,
+            sha=sha,
+            tree=tree,
+            receipt=receipt,
+        )
     ensure_secret_files(profile, owner)
     current = _sandbox_state_sha(profile)
     if current is None:
@@ -1448,6 +1821,43 @@ def service_check(sandbox: str) -> None:
     verify_secret_files(profile, _identity(sandbox, SHARED_GROUP))
     _invoke_lifecycle(profile, sha, "check")
     verify_listening_ports(profile)
+
+
+def renew_attestations(profiles: Sequence[Profile], *, execute: bool) -> None:
+    if not execute:
+        raise HostConvergeError("attestation renewal requires --execute")
+    _require_live_host()
+    verify_nfs_mount()
+    verify_state_parent()
+    renewed: list[str] = []
+    with _install_lock():
+        for profile in profiles:
+            with _activation_lock(profile):
+                desired = _load_json(profile.desired_file, "sandbox desired state")
+                if desired is None:
+                    continue
+                sha = desired.get("candidate_sha")
+                if not isinstance(sha, str) or SHA_RE.fullmatch(sha) is None:
+                    raise HostConvergeError(
+                        f"{profile.sandbox} desired candidate SHA is invalid",
+                    )
+                authority = _identity("root", SHARED_GROUP)
+                verify_candidate_root(profile, authority)
+                tree = verify_candidate(
+                    profile,
+                    profile.candidate_root / sha,
+                    sha,
+                    authority,
+                )
+                verify_worker_runtime_env(
+                    profile,
+                    sha,
+                    _identity(profile.sandbox, f"loom-sandbox-{profile.sandbox}"),
+                )
+                _renew_attestation_locked(profile, sha=sha, tree=tree)
+                renewed.append(profile.sandbox)
+    if not renewed:
+        raise HostConvergeError("no installed sandbox desired state was found")
 
 
 def verify_listening_ports(profile: Profile) -> None:
@@ -2958,6 +3368,7 @@ def _install_materialized(
                 _publish_domain_attestations(profile, sha, tree)
                 verify_worker_runtime_env(profile, sha, runtime_group)
                 receipt = verify_combined_receipt(profile, sha, tree)
+                _archive_runtime_attestation(profile, sha, tree, receipt)
                 _write_transaction(
                     profile,
                     sha=sha,
@@ -3001,6 +3412,8 @@ def _install_materialized(
                             "recovery both failed",
                         ) from recovery_exc
             raise
+    if candidates:
+        _run(("systemctl", "enable", "--now", RENEWAL_TIMER))
 
 
 def install(profiles: Sequence[Profile], sha: str) -> None:
@@ -3039,6 +3452,9 @@ def _parser() -> argparse.ArgumentParser:
     for command in ("service-converge", "service-check"):
         child = subparsers.add_parser(command)
         child.add_argument("--sandbox", choices=SANDBOXES, required=True)
+    renew = subparsers.add_parser("renew-attestations")
+    renew.add_argument("--sandbox", choices=(*SANDBOXES, "all"), default="all")
+    renew.add_argument("--execute", action="store_true")
     return parser
 
 
@@ -3051,6 +3467,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "service-check":
             service_check(args.sandbox)
             result = {"status": "succeeded", "sandbox": args.sandbox}
+        elif args.command == "renew-attestations":
+            profiles = load_profiles()
+            selected = _select_profiles(profiles, args.sandbox)
+            renew_attestations(selected, execute=args.execute)
+            result = {
+                "status": "succeeded",
+                "sandboxes": [profile.sandbox for profile in selected],
+            }
         else:
             profiles = load_profiles()
             selected = _select_profiles(profiles, args.sandbox)

@@ -1,0 +1,12 @@
+[Unit]
+Description=Keep developer sandbox runtime attestations continuously live
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=15s
+Persistent=true
+Unit=loom-developer-sandbox-attestation-renewal.service
+
+[Install]
+WantedBy=timers.target

@@ -231,6 +231,11 @@ runtime/fleet authority. The matrix validates its digest, selected domain
 generation and manifest signature digest, exact profile host coverage, and
 the fleet's exact 5 OLDLAB plus 14 GB10 closed set. Receipt, manifest,
 signature, or fleet path/digest/generation/host drift fails before submission.
+The installed five-minute persistent renewal timer regenerates that proof from
+the exact candidate rather than extending its 15-minute expiry. Every
+generation is also archived as an immutable root-owned receipt linked to its
+predecessor, so a fairness run longer than one receipt TTL can prove continuous
+liveness without accepting caller-provided timestamps or digests.
 The receipt is prerequisite evidence, not a substitute for the allocation:
 inside every `srun`, the candidate's own policy program rechecks raw Git tree
 bytes, the exact env device/inode/content digest and effective
