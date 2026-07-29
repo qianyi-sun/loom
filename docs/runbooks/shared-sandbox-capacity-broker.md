@@ -560,6 +560,26 @@ restoring, restored-with-fence, and admission-open phases. Recovery resumes the
 recorded phase; a timeout, adapter failure, readback failure, or host restart
 keeps the recoverable journal and admission fence in place.
 
+Before closing admission, rollback copies the exact candidate's installer to
+the fixed root-owned mode-`0700` recovery entrypoint
+`/var/lib/loom-shared-capacity/runtime-host-installer/runtime-host-recovery`,
+records its path and digest in the journal, and validates that binding on every
+resume. This entrypoint is deliberately outside the install snapshot and
+remains available after the public `/usr/local/libexec` program has been
+restored to an older version or removed. After an interruption, resume from the
+disk entrypoint rather than an old public wrapper:
+
+```bash
+sudo /var/lib/loom-shared-capacity/runtime-host-installer/runtime-host-recovery \
+  recover \
+  --execute
+```
+
+The recovery command takes the same installer lock and resumes only the exact
+active journal; it does not infer a transaction from operator input. The
+root-owned recovery entrypoint remains as the durable bootstrap for later
+inspection and is refreshed by the next activated rollback.
+
 Only after external capacity is proven retired does rollback restore the local
 snapshot. It then reopens only its exact broker fence, records that durable
 phase, and removes a journal-owned candidate last. `install` refuses to replace

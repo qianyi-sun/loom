@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import subprocess
+import sys
 from contextlib import nullcontext
+from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
 import pytest
@@ -888,6 +891,7 @@ def test_activated_rollback_reopens_fence_only_after_external_and_local_restore(
         "_validate_transaction",
         lambda item, data: (transaction_id, "install", SHA, TREE, {}, {}),
     )
+    monkeypatch.setattr(host, "_validate_rollback_recovery", lambda data: None)
     monkeypatch.setattr(
         host,
         "_request_capacity_retirement",
@@ -961,6 +965,7 @@ def test_activated_rollback_partial_drain_failure_keeps_fence_and_journal(
         "_validate_transaction",
         lambda item, data: (transaction_id, "install", SHA, TREE, {}, {}),
     )
+    monkeypatch.setattr(host, "_validate_rollback_recovery", lambda data: None)
     monkeypatch.setattr(
         host,
         "_request_capacity_retirement",
@@ -1020,6 +1025,7 @@ def test_activated_rollback_resumes_after_local_restore_before_opening_fence(
         "_validate_transaction",
         lambda item, data: (transaction_id, "install", SHA, TREE, {}, {}),
     )
+    monkeypatch.setattr(host, "_validate_rollback_recovery", lambda data: None)
     monkeypatch.setattr(
         host,
         "_open_activation_admission",
@@ -1052,6 +1058,122 @@ def test_activated_rollback_resumes_after_local_restore_before_opening_fence(
     assert events == ["fence-open", "candidate-removed"]
     assert payload["phase"] == "rolled-back"
     assert not active.exists()
+
+
+@pytest.mark.parametrize(
+    "previous_program",
+    (b"#!/bin/sh\nexit 99\n", None),
+    ids=("old-public-program", "removed-public-program"),
+)
+def test_persisted_disk_recovery_survives_public_program_restore_and_resumes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    previous_program: bytes | None,
+) -> None:
+    recovery_path = tmp_path / "runtime-host-recovery"
+    public_program = tmp_path / "runtime-host"
+    journal_path = tmp_path / "journal.json"
+    active_path = tmp_path / "active.json"
+    active_path.write_text("{}\n", encoding="utf-8")
+    source = Path(host.__file__).read_bytes()
+    payload: dict[str, object] = {
+        "transaction_id": "1" * 32,
+        "operation": "install",
+        "phase": "committed",
+        "candidate_sha": SHA,
+        "candidate_tree": TREE,
+        "candidate_previously_existed": True,
+    }
+    candidate = host.Candidate(SHA, TREE, host.REPO_ROOT)
+
+    def atomic_write(path: Path, content: bytes, *, mode: int) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        path.chmod(mode)
+
+    monkeypatch.setattr(host, "RECOVERY_PROGRAM_PATH", recovery_path)
+    monkeypatch.setattr(host, "_read_candidate_file", lambda *args: source)
+    monkeypatch.setattr(host, "_atomic_write", atomic_write)
+    monkeypatch.setattr(
+        host,
+        "_update_journal",
+        lambda path, data, phase: data.update(phase=phase),
+    )
+
+    host._prepare_rollback_recovery(journal_path, payload, candidate)
+    host._validate_rollback_recovery(payload)
+    if previous_program is not None:
+        public_program.write_bytes(previous_program)
+    payload["phase"] = "rollback-drained"
+
+    module_name = "persisted_shared_capacity_recovery"
+    spec = importlib.util.spec_from_loader(
+        module_name,
+        SourceFileLoader(module_name, str(recovery_path)),
+    )
+    assert spec is not None and spec.loader is not None
+    recovery = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = recovery
+    try:
+        spec.loader.exec_module(recovery)
+        events: list[str] = []
+        report = _retirement_report(state="terminal")
+        recovery.RECOVERY_PROGRAM_PATH = recovery_path
+        recovery.ACTIVE_JOURNAL_PATH = active_path
+        recovery.INSTALLER_ROOT = tmp_path
+        recovery._require_live_host = lambda: None
+        recovery._lock = nullcontext
+        recovery._active_journal = lambda: (journal_path, payload)
+        recovery._validate_transaction = lambda path, data: (
+            "1" * 32,
+            "install",
+            SHA,
+            TREE,
+            {},
+            {},
+        )
+
+        def verify_six_lanes(_candidate: object, _token: str) -> None:
+            assert recovery._retirement_is_drained(report, SHA)
+            events.append("six-lanes-terminal")
+
+        recovery._verify_activated_capacity_drained = verify_six_lanes
+        recovery._restore_local_transaction = (
+            lambda path, data, **kwargs: events.append("local-restored")
+            or ("1" * 32, "install", SHA, TREE)
+        )
+        recovery._open_activation_admission = (
+            lambda candidate, token: events.append("fence-open")
+        )
+        recovery._update_journal = (
+            lambda path, data, phase: data.update(phase=phase)
+        )
+        recovery._fsync_directory = lambda path: events.append("journal-cleared")
+        recovery._recover_orphan = lambda: recovery._resume_activated_rollback(
+            journal_path,
+            payload,
+        )
+
+        assert recovery.main(("recover", "--execute")) == 0
+    finally:
+        sys.modules.pop(spec.name, None)
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "recovered"
+    assert events == [
+        "six-lanes-terminal",
+        "local-restored",
+        "fence-open",
+        "journal-cleared",
+    ]
+    assert payload["phase"] == "rolled-back"
+    assert not active_path.exists()
+    if previous_program is None:
+        assert not public_program.exists()
+    else:
+        assert public_program.read_bytes() == previous_program
+    assert recovery_path.exists()
 
 
 def test_install_refuses_to_replace_an_activated_runtime(

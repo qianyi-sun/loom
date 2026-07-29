@@ -46,6 +46,7 @@ INSTALLER_ROOT = STATE_ROOT / "runtime-host-installer"
 JOURNAL_ROOT = INSTALLER_ROOT / "transactions"
 STATE_PATH = INSTALLER_ROOT / "state.json"
 ACTIVE_JOURNAL_PATH = INSTALLER_ROOT / "active-transaction.json"
+RECOVERY_PROGRAM_PATH = INSTALLER_ROOT / "runtime-host-recovery"
 LOCK_PATH = Path("/run/loom-shared-capacity-runtime-host.lock")
 CANDIDATE_PARENT = Path("/opt/loom-shared-capacity/candidates")
 CURRENT_LINK = Path("/opt/loom-shared-capacity/current")
@@ -801,6 +802,54 @@ def _write_journal(
 def _update_journal(path: Path, payload: dict[str, Any], phase: str) -> None:
     payload["phase"] = phase
     _atomic_write(path, _canonical_json(payload), mode=0o600)
+
+
+def _prepare_rollback_recovery(
+    path: Path,
+    payload: dict[str, Any],
+    candidate: Candidate,
+) -> None:
+    content = _read_candidate_file(
+        candidate,
+        Path("scripts/ops/shared_capacity_runtime_host.py"),
+    )
+    try:
+        compile(content, str(RECOVERY_PROGRAM_PATH), "exec")
+    except (SyntaxError, ValueError) as exc:
+        raise RuntimeHostError("rollback recovery program is invalid") from exc
+    _atomic_write(RECOVERY_PROGRAM_PATH, content, mode=0o700)
+    payload["rollback_recovery_path"] = str(RECOVERY_PROGRAM_PATH)
+    payload["rollback_recovery_sha256"] = _sha256(content)
+    _update_journal(path, payload, "rollback-recovery-ready")
+
+
+def _validate_rollback_recovery(payload: Mapping[str, Any]) -> None:
+    digest = payload.get("rollback_recovery_sha256")
+    if (
+        payload.get("rollback_recovery_path") != str(RECOVERY_PROGRAM_PATH)
+        or not isinstance(digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+    ):
+        raise RuntimeHostError("rollback recovery binding is invalid")
+    try:
+        metadata = RECOVERY_PROGRAM_PATH.lstat()
+        content = RECOVERY_PROGRAM_PATH.read_bytes()
+    except OSError as exc:
+        raise RuntimeHostError("rollback recovery program is unavailable") from exc
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or metadata.st_uid != os.geteuid()
+        or metadata.st_gid != os.getegid()
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+        or _sha256(content) != digest
+    ):
+        raise RuntimeHostError("rollback recovery program is unsafe or drifted")
+    try:
+        compile(content, str(RECOVERY_PROGRAM_PATH), "exec")
+    except (SyntaxError, ValueError) as exc:
+        raise RuntimeHostError("rollback recovery program is invalid") from exc
 
 
 def _load_json(path: Path, label: str) -> dict[str, Any]:
@@ -1777,8 +1826,12 @@ def _complete_activated_rollback(
     )
     if operation != "install":
         raise RuntimeHostError("activated rollback transaction is invalid")
+    _validate_rollback_recovery(payload)
     candidate = _rollback_candidate(payload)
     phase = payload.get("phase")
+    if phase == "rollback-recovery-ready":
+        _update_journal(path, payload, "rollback-closing-admission")
+        phase = "rollback-closing-admission"
     if phase == "rollback-closing-admission":
         _request_capacity_retirement(candidate, transaction_id)
         _update_journal(path, payload, "rollback-draining")
@@ -1818,6 +1871,7 @@ def _resume_activated_rollback(
     payload: dict[str, Any],
 ) -> None:
     if payload.get("phase") not in {
+        "rollback-recovery-ready",
         "rollback-closing-admission",
         "rollback-draining",
         "rollback-drained",
@@ -2086,6 +2140,7 @@ def rollback_plan(sha: str) -> dict[str, Any]:
         "mutation_authorized": False,
         "candidate_sha": sha,
         "steps": [
+            "persist-and-journal-root-owned-recovery-entrypoint",
             "journal-and-persistently-fence-new-broker-requests",
             "cancel-only-the-six-exact-candidate-sandbox-pool-requests",
             "reconcile-and-read-back-six-terminal-zero-handoffs",
@@ -2125,7 +2180,11 @@ def rollback(sha: str) -> dict[str, Any]:
             mode=0o600,
         )
         if activation_status == "activated":
-            _update_journal(path, payload, "rollback-closing-admission")
+            _prepare_rollback_recovery(
+                path,
+                payload,
+                _rollback_candidate(payload),
+            )
             _complete_activated_rollback(path, payload)
         else:
             _restore_transaction(path, payload)
@@ -2134,6 +2193,24 @@ def rollback(sha: str) -> dict[str, Any]:
             "status": "rolled-back",
             "candidate_sha": sha,
             "capacity_enabled_by_installer": False,
+        }
+
+
+def recover() -> dict[str, Any]:
+    _require_live_host()
+    with _lock():
+        active = _active_journal()
+        if active is None:
+            return {
+                "schema_version": 1,
+                "status": "no-active-transaction",
+            }
+        transaction_id = active[1].get("transaction_id")
+        _recover_orphan()
+        return {
+            "schema_version": 1,
+            "status": "recovered",
+            "transaction_id": transaction_id,
         }
 
 
@@ -2160,6 +2237,8 @@ def _parser() -> argparse.ArgumentParser:
     rollback_parser = subparsers.add_parser("rollback")
     rollback_parser.add_argument("--candidate-sha", required=True)
     rollback_parser.add_argument("--execute", action="store_true")
+    recover_parser = subparsers.add_parser("recover")
+    recover_parser.add_argument("--execute", action="store_true")
     return parser
 
 
@@ -2194,8 +2273,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     source=CANDIDATE_PARENT / args.candidate_sha / "repo",
                 )
                 result = check(candidate, activation_mode=args.mode)
-        elif args.execute:
+        elif args.command == "rollback" and args.execute:
             result = rollback(args.candidate_sha)
+        elif args.command == "recover" and args.execute:
+            result = recover()
+        elif args.command == "recover":
+            result = {
+                "schema_version": 1,
+                "artifact_type": "shared-capacity-runtime-host-recovery-plan",
+                "mutation_authorized": False,
+                "entrypoint": str(RECOVERY_PROGRAM_PATH),
+            }
         else:
             result = rollback_plan(args.candidate_sha)
         sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")
