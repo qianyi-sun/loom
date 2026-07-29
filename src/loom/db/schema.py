@@ -60,6 +60,15 @@ class Team(Base):
         Text,
         nullable=True,
     )
+    # Explicit opt-in for public account-request discovery/submission (#775).
+    # Default false: internal and smoke Teams stay private unless an admin
+    # enables the policy. Never auto-enable via migration or bootstrap.
+    public_registration_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+    )
 
 
 class TeamQuota(Base):

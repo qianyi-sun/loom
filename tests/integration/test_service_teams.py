@@ -12,7 +12,7 @@ import httpx
 import pytest
 from botocore.config import Config
 from fastapi import FastAPI
-from sqlalchemy import create_engine, delete, insert
+from sqlalchemy import create_engine, delete, func, insert, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -372,10 +372,76 @@ async def test_admin_cannot_mutate_the_deployment_only_canary_team(
                     "resume-submissions",
                 )
             ],
+            *[
+                await ac.post(
+                    f"/api/v1/admin/teams/{TASKSET_FENCE_CANARY_TEAM_ID}/"
+                    f"public-registration/{action}",
+                    headers=_admin_headers(),
+                )
+                for action in ("enable", "disable")
+            ],
         ]
 
-    assert [response.status_code for response in responses] == [403] * 5
+    assert [response.status_code for response in responses] == [403] * 7
     assert all(response.json()["detail"] == "team is deployment-only" for response in responses)
+
+
+async def test_admin_public_registration_policy_audits_and_blocks_admin_team(
+    teams_setup: tuple[FastAPI, str, str, UUID, UUID],
+) -> None:
+    app, _raw, _team_a_str, team_a, _team_b = teams_setup
+    async with app.state.session_factory() as session:
+        admin_team = (await session.execute(
+            select(Team).where(func.lower(Team.name) == "admin"),
+        )).scalar_one_or_none()
+        if admin_team is None:
+            admin_team_id = uuid4()
+            session.add(Team(id=admin_team_id, name="admin"))
+            session.add(TeamQuota(team_id=admin_team_id))
+            await session.commit()
+        else:
+            admin_team_id = admin_team.id
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        enabled = await ac.post(
+            f"/api/v1/admin/teams/{team_a}/public-registration/enable",
+            headers=_admin_headers("ops-admin"),
+        )
+        noop = await ac.post(
+            f"/api/v1/admin/teams/{team_a}/public-registration/enable",
+            headers=_admin_headers("ops-admin"),
+        )
+        disabled = await ac.post(
+            f"/api/v1/admin/teams/{team_a}/public-registration/disable",
+            headers=_admin_headers("ops-admin"),
+        )
+        blocked = await ac.post(
+            f"/api/v1/admin/teams/{admin_team_id}/public-registration/enable",
+            headers=_admin_headers("ops-admin"),
+        )
+        audit = await ac.get(
+            "/api/v1/admin/audit-events?limit=20",
+            headers=_admin_headers(),
+        )
+
+    assert enabled.status_code == 200, enabled.text
+    assert enabled.json()["public_registration_enabled"] is True
+    assert noop.status_code == 200, noop.text
+    assert disabled.status_code == 200, disabled.text
+    assert disabled.json()["public_registration_enabled"] is False
+    assert blocked.status_code == 403, blocked.text
+    assert "admin team" in blocked.json()["detail"]
+
+    actions = [
+        event["action"] for event in audit.json()["items"]
+        if event["target_type"] == "team" and event["target_id"] == str(team_a)
+    ]
+    assert "team.public_registration.enable" in actions
+    assert "team.public_registration.disable" in actions
+    assert actions.count("team.public_registration.enable") == 1
 
 
 async def test_admin_can_list_create_and_rename_internal_teams(

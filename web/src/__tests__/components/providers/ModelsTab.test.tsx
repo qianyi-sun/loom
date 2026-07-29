@@ -46,8 +46,30 @@ function renderTab(models: unknown[]) {
 }
 
 describe("ModelsTab", () => {
-  beforeEach(() => window.localStorage.setItem("loom_token", "t"));
-  afterEach(() => vi.restoreAllMocks());
+  beforeEach(() => {
+    const store = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        store.set(key, value);
+      },
+      removeItem: (key: string) => {
+        store.delete(key);
+      },
+      clear: () => {
+        store.clear();
+      },
+      key: () => null,
+      get length() {
+        return store.size;
+      },
+    });
+    window.localStorage.setItem("loom_token", "t");
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
 
   it("renders a row per model with hidden state", async () => {
     renderTab([
@@ -115,6 +137,36 @@ describe("ModelsTab", () => {
         ([url]) => url.endsWith("/models/refresh"),
       );
       expect(refreshCalls.length).toBeGreaterThan(0);
+    });
+  });
+
+  it("surfaces refresh failure and points operators to Add manual model", async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.includes("/models/refresh")) {
+        return Promise.resolve(new Response(JSON.stringify({
+          detail: {
+            code: "upstream_non_json",
+            message:
+              "Models unavailable for this connection: upstream returned a non-JSON /models response. Add a model manually if you know the ID.",
+            upstream_http_status: 200,
+          },
+        }), { status: 502 }));
+      }
+      return Promise.resolve(new Response(JSON.stringify({ items: [] }), { status: 200 }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <ModelsTab id="abc" />
+      </QueryClientProvider>,
+    );
+    const user = userEvent.setup();
+    await waitFor(() => screen.getByRole("button", { name: /^refresh$/i }));
+    await user.click(screen.getByRole("button", { name: /^refresh$/i }));
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent(/non-JSON/i);
+      expect(screen.getByRole("alert")).toHaveTextContent(/Add manual model/i);
     });
   });
 

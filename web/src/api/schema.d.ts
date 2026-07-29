@@ -1132,6 +1132,8 @@ export interface components {
       disabled_reason?: string | null;
       submissions_paused_at?: string | null;
       submissions_paused_reason?: string | null;
+      /** Explicit opt-in for public account-request discovery (#775). */
+      public_registration_enabled: boolean;
       quota: components["schemas"]["TeamQuota"] | null;
       members: components["schemas"]["TeamMember"][];
       user_members?: components["schemas"]["TeamUserMember"][];

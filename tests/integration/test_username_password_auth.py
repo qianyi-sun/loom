@@ -126,7 +126,10 @@ async def username_auth_app(
     with sl() as session:
         admin_team_id = _ensure_admin_seed(session)
         research_team_name = f"Research-{uuid4().hex[:8]}"
-        research_team = Team(name=research_team_name)
+        research_team = Team(
+            name=research_team_name,
+            public_registration_enabled=True,
+        )
         session.add(research_team)
         session.flush()
         session.add(TeamQuota(team_id=research_team.id))
@@ -538,3 +541,72 @@ async def test_member_cannot_use_admin_account_routes(
 
     assert create_team.status_code == 403, create_team.text
     assert approve.status_code == 403, approve.text
+
+
+async def test_private_team_uuid_cannot_bypass_public_registration(
+    username_auth_app: tuple[FastAPI, UUID, str],
+) -> None:
+    """Remembered private Team UUIDs must not register (#775)."""
+    app, public_team_id, _public_name = username_auth_app
+    private_id = uuid4()
+    async with app.state.session_factory() as session:
+        session.add(Team(id=private_id, name=f"Private-{private_id.hex[:8]}"))
+        session.add(TeamQuota(team_id=private_id))
+        await session.commit()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as client:
+        teams = await client.get("/api/v1/auth/public-teams")
+        assert teams.status_code == 200
+        listed_ids = {item["id"] for item in teams.json()["items"]}
+        assert str(public_team_id) in listed_ids
+        assert str(private_id) not in listed_ids
+
+        denied = await client.post(
+            "/api/v1/auth/registration-requests",
+            json={"username": "PrivateBypass", "team_id": str(private_id)},
+        )
+        assert denied.status_code == 404
+        assert denied.json()["detail"] == "team not found"
+
+
+async def test_registration_rejects_after_concurrent_policy_disable(
+    username_auth_app: tuple[FastAPI, UUID, str],
+) -> None:
+    """Policy flip before commit must fail closed with the same 404 (#775)."""
+    app, team_id, _team_name = username_auth_app
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as client:
+        admin_me = await _login(client, username="Qianyi", password=ADMIN_PASSWORD)
+        csrf = str(admin_me["csrf_token"])
+
+        disabled = await client.post(
+            f"/api/v1/admin/teams/{team_id}/public-registration/disable",
+            headers={"X-Loom-CSRF": csrf, "X-Loom-Admin-Actor": "ops-admin"},
+        )
+        assert disabled.status_code == 200, disabled.text
+        assert disabled.json()["public_registration_enabled"] is False
+
+        # Idempotent same-value retry does not emit a second audit event.
+        again = await client.post(
+            f"/api/v1/admin/teams/{team_id}/public-registration/disable",
+            headers={"X-Loom-CSRF": csrf, "X-Loom-Admin-Actor": "ops-admin"},
+        )
+        assert again.status_code == 200, again.text
+
+        teams = await client.get("/api/v1/auth/public-teams")
+        assert str(team_id) not in {item["id"] for item in teams.json()["items"]}
+
+        denied = await client.post(
+            "/api/v1/auth/registration-requests",
+            json={"username": "StaleSelect", "team_id": str(team_id)},
+        )
+        assert denied.status_code == 404
+        assert denied.json()["detail"] == "team not found"
+
+        enabled = await client.post(
+            f"/api/v1/admin/teams/{team_id}/public-registration/enable",
+            headers={"X-Loom-CSRF": csrf, "X-Loom-Admin-Actor": "ops-admin"},
+        )
+        assert enabled.status_code == 200, enabled.text
+        assert enabled.json()["public_registration_enabled"] is True

@@ -166,7 +166,7 @@ describe("Layout", () => {
       return jsonResponse({ detail: `unhandled ${url}` }, 404);
     });
     const user = userEvent.setup();
-    renderWithProviders(<App />, { route: "/settings" });
+    renderWithProviders(<App />, { route: "/auth/login" });
     expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
     await user.type(screen.getByLabelText("Username"), "Owner");
     await user.type(screen.getByLabelText("Password"), "long-passphrase-1");

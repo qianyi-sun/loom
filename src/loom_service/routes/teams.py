@@ -121,6 +121,7 @@ async def _serialize_team(session: AsyncSession, team: Team) -> dict[str, Any]:
             if team.submissions_paused_at else None
         ),
         "submissions_paused_reason": team.submissions_paused_reason,
+        "public_registration_enabled": bool(team.public_registration_enabled),
         "quota": quota_payload,
         "members": [
             {
@@ -299,6 +300,82 @@ async def update_admin_team(
         await session.rollback()
         raise HTTPException(status_code=409, detail="team name already exists") from exc
     return await _serialize_team(session, team)
+
+
+async def _set_public_registration(
+    *,
+    request: Request,
+    session: AsyncSession,
+    actor: str,
+    team_id: UUID,
+    enabled: bool,
+) -> dict[str, Any]:
+    """Enable or disable public account-request discovery for a Team (#775)."""
+    _require_mutable_team(team_id)
+    team = await _load_team(session, team_id)
+    if team.name.lower() == "admin":
+        raise HTTPException(
+            status_code=403,
+            detail="admin team cannot enable public registration",
+        )
+
+    old = bool(team.public_registration_enabled)
+    if old == enabled:
+        # Idempotent same-value retry: no audit event.
+        return await _serialize_team(session, team)
+
+    team.public_registration_enabled = enabled
+    await session.flush()
+    await write_admin_audit_event(
+        session,
+        actor=actor,
+        action=(
+            "team.public_registration.enable"
+            if enabled else "team.public_registration.disable"
+        ),
+        target_type="team",
+        target_id=str(team_id),
+        request=request,
+        metadata={"old": old, "new": enabled},
+    )
+    await session.commit()
+    return await _serialize_team(session, team)
+
+
+@router.post("/admin/teams/{team_id}/public-registration/enable")
+async def enable_public_registration(
+    request: Request,
+    sc: AdminSessionAndCtx,
+    team_id: UUID,
+    x_loom_admin_actor: str | None = Header(default=None),
+) -> dict[str, Any]:
+    session, _ctx = sc
+    actor = require_admin_actor(x_loom_admin_actor)
+    return await _set_public_registration(
+        request=request,
+        session=session,
+        actor=actor,
+        team_id=team_id,
+        enabled=True,
+    )
+
+
+@router.post("/admin/teams/{team_id}/public-registration/disable")
+async def disable_public_registration(
+    request: Request,
+    sc: AdminSessionAndCtx,
+    team_id: UUID,
+    x_loom_admin_actor: str | None = Header(default=None),
+) -> dict[str, Any]:
+    session, _ctx = sc
+    actor = require_admin_actor(x_loom_admin_actor)
+    return await _set_public_registration(
+        request=request,
+        session=session,
+        actor=actor,
+        team_id=team_id,
+        enabled=False,
+    )
 
 
 @router.post("/admin/teams/{team_id}/disable")

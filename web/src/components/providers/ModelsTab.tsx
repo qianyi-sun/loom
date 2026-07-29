@@ -127,6 +127,20 @@ export default function ModelsTab({ id, connectionName }: ModelsTabProps): JSX.E
           </Button>
         </div>
       </div>
+      {refresh.isError ? (
+        <div
+          className="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800"
+          role="alert"
+        >
+          <p>
+            {(refresh.error as { detail?: string } | null)?.detail
+              ?? "Could not refresh models from upstream."}
+          </p>
+          <p className="mt-1 text-red-700">
+            Use <strong>Add manual model</strong> if you know the model ID.
+          </p>
+        </div>
+      ) : null}
       <DocsCallout title="Model picker guidance" tone="info">
         <p>
           Refreshed visible models appear in New Batch. Hide noisy upstream

@@ -1092,11 +1092,14 @@ async def refresh_models(
         )
     except UpstreamModelFetchError as e:
         # 502 — operator's upstream is the source of the failure, not
-        # loom_service itself. Carry along the http_status when we have
-        # one so the CLI can render a useful hint.
-        detail = f"upstream /models fetch failed: {e}"
+        # loom_service itself. Structured detail so the SPA can show a
+        # typed message (#918) without embedding upstream HTML bodies.
+        detail: dict[str, object] = {
+            "code": e.error_code,
+            "message": str(e),
+        }
         if e.http_status is not None:
-            detail += f" (upstream HTTP {e.http_status})"
+            detail["upstream_http_status"] = e.http_status
         raise HTTPException(status_code=502, detail=detail) from e
 
     upstream_set = set(upstream_ids)

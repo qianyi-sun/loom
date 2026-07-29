@@ -965,16 +965,17 @@ knob you need.
    failures should appear as distinct classes/root causes rather than one
    generic platform failure.
 
-9. **Approve account requests into fixed teams.** Public registration is
-   default-closed. A researcher can submit an account request without a bearer
-   token; the team must already exist:
+9. **Approve account requests into opted-in teams.** Public registration is
+   default-closed per Team (`public_registration_enabled=false`). A researcher
+   can only discover and request Teams an admin has explicitly enabled. Private
+   remembered UUIDs return `404 team not found`:
    ```bash
    curl -X POST https://loom.example.com/api/v1/auth/registration-requests \
      -H "Content-Type: application/json" \
      -d '{"username":"Mark", "team_id":"00000000-0000-0000-0000-000000000000"}'
    ```
-   Internal teams are admin-managed ahead of time. List or create them before
-   approving a request:
+   Internal teams are admin-managed ahead of time. List or create them, then
+   enable public registration before approving a request:
    ```bash
    curl https://loom.example.com/api/v1/admin/teams \
      -H "Authorization: Bearer $ADMIN_TOKEN"
@@ -5168,7 +5169,7 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    remains blocking until its success or failure is observed. Each final client
    URL must equal the requested route; only an explicitly anonymous root with
    exactly one exact `${routePath}/api/v1/auth/me` fetch/XHR `401` in that phase
-   may use the canonical `${routePath}/settings` login fallback. Chromium's
+   may use the canonical `${routePath}/auth/login` login fallback. Chromium's
    post-response `ERR_ABORTED` is tolerated only when paired by request identity
    to that one delivered `401`; an unpaired network failure, a `204`,
    malformed `200`, `5xx`, network failure, or mixed response set fails rather
@@ -5286,8 +5287,9 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    required after every rollout because public ingress can pass while private
    worker tunnels are down.
 5. **Invite-only onboarding.** From the operator/admin browser session, confirm
-   fixed teams such as Team A and Team B exist, then submit username requests
-   for each team. Approve each request in Admin access -> Accounts, open the
+   Teams that should accept public requests have public registration enabled,
+   then submit username requests for each team from `/auth/login`. Approve each
+   request in Admin access -> Accounts, open the
    setup link in a fresh browser profile, set a password, and confirm the user
    lands in the selected team without seeing raw API credentials. Generated
    setup/reset links must already use the public HTTPS route base from

@@ -525,11 +525,12 @@ combinations for the same task need rerun.
 Use this path when working through the public UI.
 
 > **Need an account?** Staging uses admin-approved username/password
-> accounts (no email, no automatic mail). On the sign-in page, use the
-> **Request account** card: enter a username, pick an existing team, and
-> wait for an admin to approve and share the one-time password setup link.
-> If the team you need doesn't exist, ask an admin to create it first.
-> Full flow: [Web sessions and teams](#web-sessions-and-teams).
+> accounts (no email, no automatic mail). Open `/auth/login`, use the
+> **Request account** card: enter a username, pick a team that allows public
+> registration, and wait for an admin to approve and share the one-time
+> password setup link. If the team you need is missing or private, ask an
+> admin to create it and enable public registration. Full flow:
+> [Web sessions and teams](#web-sessions-and-teams).
 
 1. Open [https://yylx.world/dev](https://yylx.world/dev) or your local Loom URL. First production uses [https://yylx.world/prod](https://yylx.world/prod).
 2. Sign in and select the team that owns the run.

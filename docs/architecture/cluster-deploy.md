@@ -293,7 +293,7 @@ cross-origin font cannot hold the gate open, while a pending cross-origin script
 remains blocking until it succeeds or its failure is observed. The main
 document response must retain the requested route after the
 expected exact-prefix `308`; once authentication settles, the client URL must
-remain that route. The sole fallback is canonical `${routePath}/settings` when
+remain that route. The sole fallback is canonical `${routePath}/auth/login` when
 the root explicitly reports `anonymous` and that same browser phase observed
 exactly one exact `${routePath}/api/v1/auth/me` fetch/XHR response with status
 `401`, with no unpaired network failure or competing response for that URL. If

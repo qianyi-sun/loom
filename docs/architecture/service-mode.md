@@ -612,10 +612,11 @@ Core pages include:
   breakdown table; `daytona_compute_seconds` + `daytona_cost_usd`
   surfaced via a CTE join against `cloud_compute_records` (see
   `src/loom_service/routes/usage.py`)
-- **Settings** — signed-out username/password login, account request,
-  password-reset request, and CLI onboarding; signed-in current team, role,
-  team switcher, joined browser members, role-aware setup links, and API-token
-  summaries
+- **Settings** — authenticated Team/session settings. Signed-out onboarding
+  (username/password login, account request, password-reset request, CLI
+  guidance) lives at `/auth/login`; legacy signed-out `/settings` redirects
+  there. Authenticated Settings keeps current team, role, team switcher, joined
+  browser members, role-aware setup links, and API-token summaries
 - **Admin access** — account setup/reset approvals, fixed-team maintenance,
   owner/team-admin legacy invite create/list/revoke/resend, and one-time
   API-token reveal with CLI setup commands. The page is split into role-aware
