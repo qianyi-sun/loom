@@ -81,6 +81,48 @@ def test_component_applies_desired_state_before_accepting_exact() -> None:
     assert transport.calls == ["desired-read", "desired-read", "apply", "desired-read"]
 
 
+def test_apply_is_idempotent_when_desired_state_already_at_target() -> None:
+    # #1081: when the desired environment-state is already at the target for this
+    # candidate (a prior/concurrent same-candidate apply advanced it, or a
+    # re-run after it was advanced), apply must be a no-op, not a crash. The
+    # protected apply reaches this because classify observed READY earlier and
+    # the state became exact before apply ran.
+    transport = _StateTransport()
+    transport.desired_exact = True
+    component = ProtectedEnvironmentStateComponent(
+        transport=transport,
+        epoch_guard=_epoch,
+    )
+    plan = _plan()
+
+    component.apply(plan)  # must not raise
+
+    assert "apply" not in transport.calls  # no redundant mutation was issued
+    assert component.classify_desired(plan).state is ComponentState.EXACT
+
+
+def test_apply_still_fails_closed_when_epoch_ownership_changed() -> None:
+    # The idempotent no-op must not weaken the epoch guard: a changed mutation
+    # epoch before apply still fail-closes.
+    transport = _StateTransport()
+    transport.desired_exact = True
+
+    def _drifted_epoch(_plan) -> ComponentObservation:
+        return ComponentObservation(
+            state=ComponentState.DRIFTED,
+            evidence_digest="c" * 64,
+            observed_epoch=8,
+        )
+
+    component = ProtectedEnvironmentStateComponent(
+        transport=transport,
+        epoch_guard=_drifted_epoch,
+    )
+
+    with pytest.raises(RuntimeError, match="epoch ownership changed before apply"):
+        component.apply(_plan())
+
+
 def test_runtime_classification_stays_nonexact_after_desired_state_is_written() -> None:
     transport = _StateTransport()
     transport.desired_exact = True
