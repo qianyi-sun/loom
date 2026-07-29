@@ -22,8 +22,8 @@ const passingObservation = {
   routePrefix: "/dev",
   initialDocumentUrl: "https://yylx.world/dev/monitor",
   reloadDocumentUrl: "https://yylx.world/dev/monitor",
-  initialSettledUrl: "https://yylx.world/dev/settings",
-  reloadSettledUrl: "https://yylx.world/dev/settings",
+  initialSettledUrl: "https://yylx.world/dev/auth/login",
+  reloadSettledUrl: "https://yylx.world/dev/auth/login",
   initialAuthSettled: true,
   reloadAuthSettled: true,
   initialAuthState: "anonymous",
@@ -171,7 +171,7 @@ test("unexpected document URL fails canonicalization", () => {
   );
 });
 
-test("same-prefix client redirects other than anonymous settings fail", () => {
+test("same-prefix client redirects other than anonymous auth/login fail", () => {
   const errors = validateObservation({
     ...passingObservation,
     reloadSettledUrl: "https://yylx.world/dev/monitor/other",
@@ -179,7 +179,7 @@ test("same-prefix client redirects other than anonymous settings fail", () => {
   expect(errors).toContain("browser settled on an unexpected client URL");
 });
 
-test("anonymous settings is the only explicit client redirect fallback", () => {
+test("anonymous auth/login is the only explicit client redirect fallback", () => {
   const base = {
     expectedUrl: "https://yylx.world/dev/monitor",
     expectedOrigin: "https://yylx.world",
@@ -198,35 +198,36 @@ test("anonymous settings is the only explicit client redirect fallback", () => {
   expect(
     settledUrlAllowed({
       ...base,
-      actualUrl: "https://yylx.world/dev/settings",
+      actualUrl: "https://yylx.world/dev/auth/login",
     }),
   ).toBe(true);
   for (const actualUrl of [
     "https://yylx.world/dev/other",
-    "https://yylx.world/dev/settings?next=/monitor",
-    "https://yylx.world/prod/settings",
-    "https://other.example/dev/settings",
+    "https://yylx.world/dev/settings",
+    "https://yylx.world/dev/auth/login?next=/monitor",
+    "https://yylx.world/prod/auth/login",
+    "https://other.example/dev/auth/login",
   ]) {
     expect(settledUrlAllowed({ ...base, actualUrl })).toBe(false);
   }
   expect(
     settledUrlAllowed({
       ...base,
-      actualUrl: "https://yylx.world/dev/settings",
+      actualUrl: "https://yylx.world/dev/auth/login",
       authState: "authenticated",
     }),
   ).toBe(false);
   expect(
     settledUrlAllowed({
       ...base,
-      actualUrl: "https://yylx.world/dev/settings",
+      actualUrl: "https://yylx.world/dev/auth/login",
       authSettled: false,
     }),
   ).toBe(false);
   expect(
     settledUrlAllowed({
       ...base,
-      actualUrl: "https://yylx.world/dev/settings",
+      actualUrl: "https://yylx.world/dev/auth/login",
       anonymousAuthValid: false,
     }),
   ).toBe(false);

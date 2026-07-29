@@ -234,7 +234,7 @@ export function settledUrlAllowed({
   if (!authSettled || authState !== "anonymous" || !anonymousAuthValid) {
     return false;
   }
-  return actual.href === new URL(`${routePrefix}/settings`, expectedOrigin).href;
+  return actual.href === new URL(`${routePrefix}/auth/login`, expectedOrigin).href;
 }
 
 async function settledRootSnapshot(page, activity, timeoutMs) {
