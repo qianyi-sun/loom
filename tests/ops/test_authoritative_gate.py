@@ -2369,6 +2369,11 @@ def test_natural_merge_after_terminal_patch_does_not_reopen_success() -> None:
 def test_merge_between_pull_snapshot_and_authority_read_preserves_success() -> None:
     class MergeDuringAuthorityReadClient(FakeGitHubClient):
         merge_on_authority_read = False
+        authority_association_states: list[tuple[str, ...]]
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.authority_association_states = []
 
         def list_pull_requests_for_commit(self, head_sha: str) -> Sequence[Mapping[str, Any]]:
             if self.merge_on_authority_read:
@@ -2376,7 +2381,11 @@ def test_merge_between_pull_snapshot_and_authority_read_preserves_success() -> N
                 self.pull["state"] = "closed"
                 self.pull["merged"] = True
                 self.pull["merged_at"] = "2026-07-22T10:05:00Z"
-            return super().list_pull_requests_for_commit(head_sha)
+            associated = super().list_pull_requests_for_commit(head_sha)
+            self.authority_association_states.append(
+                tuple(str(item.get("state") or "") for item in associated)
+            )
+            return associated
 
     client = MergeDuringAuthorityReadClient()
     current = generation()
@@ -2398,6 +2407,7 @@ def test_merge_between_pull_snapshot_and_authority_read_preserves_success() -> N
     assert check["status"] == "completed"
     assert check["conclusion"] == "success"
     assert not check_payload_is_pending(check)
+    assert client.authority_association_states[-1] == ("closed",)
 
 
 def test_converted_to_draft_trusted_event_revokes_terminal_success() -> None:
