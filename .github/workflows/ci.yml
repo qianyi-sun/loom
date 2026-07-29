@@ -249,6 +249,7 @@ jobs:
         with:
           version: "0.11.26"
           checksum: ${{ matrix.uv_checksum }}
+          manifest-file: ${{ startsWith(runner.name, 'oldlab5-kvm-') && 'http://127.0.0.1:8181/uv.ndjson' || '' }}
           enable-cache: true
           save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
           cache-dependency-glob: uv.lock
@@ -280,7 +281,8 @@ jobs:
 
   lint-and-static:
     name: lint-and-static
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ fromJSON(vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
     needs: workflow-plan
     timeout-minutes: 12
     if: >-
@@ -294,6 +296,7 @@ jobs:
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
+          manifest-file: ${{ startsWith(runner.name, 'oldlab5-kvm-') && 'http://127.0.0.1:8181/uv.ndjson' || '' }}
           enable-cache: true
           save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
           cache-dependency-glob: uv.lock
@@ -323,7 +326,8 @@ jobs:
 
   tests-root:
     name: tests-root (${{ matrix.shard }})
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ fromJSON(vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
     needs: workflow-plan
     timeout-minutes: 15
     if: >-
@@ -349,6 +353,7 @@ jobs:
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
+          manifest-file: ${{ startsWith(runner.name, 'oldlab5-kvm-') && 'http://127.0.0.1:8181/uv.ndjson' || '' }}
           enable-cache: true
           save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
           cache-dependency-glob: uv.lock
@@ -466,7 +471,8 @@ jobs:
 
   tests-packages:
     name: tests-packages
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ fromJSON(vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
     needs: workflow-plan
     timeout-minutes: 10
     if: >-
@@ -480,6 +486,7 @@ jobs:
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
+          manifest-file: ${{ startsWith(runner.name, 'oldlab5-kvm-') && 'http://127.0.0.1:8181/uv.ndjson' || '' }}
           enable-cache: true
           save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
           cache-dependency-glob: uv.lock
@@ -515,7 +522,8 @@ jobs:
 
   runtime-payload:
     name: runtime-payload
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ fromJSON(vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
     needs: workflow-plan
     timeout-minutes: 10
     if: >-
@@ -576,6 +584,7 @@ jobs:
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
+          manifest-file: ${{ startsWith(runner.name, 'oldlab5-kvm-') && 'http://127.0.0.1:8181/uv.ndjson' || '' }}
           enable-cache: true
           save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
           cache-dependency-glob: uv.lock
@@ -670,7 +679,8 @@ jobs:
   # for both toolchains without increasing Python CI latency.
   go-checks:
     name: go-checks
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ fromJSON(vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
     needs: workflow-plan
     if: needs.workflow-plan.outputs.gate_mode == 'full'
     steps:
@@ -698,7 +708,8 @@ jobs:
   # supported viewports with strict browser failure ledgers and axe.
   web-checks:
     name: web-checks
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ fromJSON(vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
     needs: workflow-plan
     timeout-minutes: 20
     if: >-
@@ -770,7 +781,8 @@ jobs:
   # ~10 min and the planner selects each tier from paths or opt-in labels.
   integration:
     name: integration (${{ matrix.shard }})
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ fromJSON(vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
     needs: workflow-plan
     timeout-minutes: 20
     if: >-
@@ -794,6 +806,7 @@ jobs:
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
+          manifest-file: ${{ startsWith(runner.name, 'oldlab5-kvm-') && 'http://127.0.0.1:8181/uv.ndjson' || '' }}
           enable-cache: true
           save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
           cache-dependency-glob: uv.lock
@@ -843,7 +856,8 @@ jobs:
   # paths, the `ci:integration-docker` label, or a workflow_dispatch input.
   integration-docker:
     name: integration-docker
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ fromJSON(vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
     needs: workflow-plan
     timeout-minutes: 40
     if: >-
@@ -857,6 +871,7 @@ jobs:
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
+          manifest-file: ${{ startsWith(runner.name, 'oldlab5-kvm-') && 'http://127.0.0.1:8181/uv.ndjson' || '' }}
           enable-cache: true
           save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
           cache-dependency-glob: uv.lock
@@ -906,6 +921,7 @@ jobs:
         with:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
+          manifest-file: ${{ startsWith(runner.name, 'oldlab5-kvm-') && 'http://127.0.0.1:8181/uv.ndjson' || '' }}
           enable-cache: true
           save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
           cache-dependency-glob: uv.lock

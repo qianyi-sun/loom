@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -108,6 +109,93 @@ SOURCE_PLAN_CONTRACTS = {
 
 def _normalized_expression(value: str) -> str:
     return " ".join(value.split())
+
+
+ACCELERATOR_RUNS_ON = (
+    "${{ fromJSON(vars.LOOM_CI_ACCELERATOR_RUNS_ON || "
+    """'["ubuntu-latest"]') }}"""
+)
+OLDLAB_UV_MANIFEST = (
+    "${{ startsWith(runner.name, 'oldlab5-kvm-') && "
+    "'http://127.0.0.1:8181/uv.ndjson' || '' }}"
+)
+
+ACCELERATED_JOBS = {
+    ".github/workflows/ci.yml": {
+        "lint-and-static",
+        "tests-root",
+        "tests-packages",
+        "runtime-payload",
+        "go-checks",
+        "web-checks",
+        "integration",
+        "integration-docker",
+    },
+    ".github/workflows/images.yml": {"build"},
+    ".github/workflows/cluster-smoke.yml": {"smoke"},
+    ".github/workflows/staging-smoke.yml": {"smoke", "system-smoke"},
+    ".github/workflows/cluster-deploy-spikes.yml": {
+        "docker-only-spikes",
+        "k8s-spikes",
+    },
+}
+
+GITHUB_HOSTED_CONTROL_JOBS = {
+    ".github/workflows/ci.yml": {
+        "workflow-plan",
+        "fast-checks",
+        "coverage-summary",
+        "repository-checks",
+    },
+    ".github/workflows/images.yml": {"plan", "publish", "images-gate"},
+    ".github/workflows/cluster-smoke.yml": {"plan", "cluster-smoke-gate"},
+    ".github/workflows/staging-smoke.yml": {"plan", "staging-smoke-gate"},
+}
+
+
+def test_profitable_ci_jobs_use_opt_in_accelerator_with_hosted_default() -> None:
+    for workflow_path, job_ids in ACCELERATED_JOBS.items():
+        jobs = _workflow(workflow_path)["jobs"]
+        for job_id in job_ids:
+            assert jobs[job_id]["runs-on"] == ACCELERATOR_RUNS_ON
+
+
+def test_accelerated_workflows_use_local_uv_manifest_only_on_oldlab() -> None:
+    workflow_paths = (
+        ".github/workflows/ci.yml",
+        ".github/workflows/cluster-smoke.yml",
+        ".github/workflows/staging-smoke.yml",
+    )
+
+    for workflow_path in workflow_paths:
+        setup_steps = [
+            step
+            for job in _workflow(workflow_path)["jobs"].values()
+            for step in job.get("steps", [])
+            if str(step.get("uses", "")).startswith("astral-sh/setup-uv@")
+        ]
+        assert setup_steps
+        for step in setup_steps:
+            assert step["with"]["manifest-file"] == OLDLAB_UV_MANIFEST
+
+
+def test_planners_gates_publish_and_aggregation_stay_github_hosted() -> None:
+    for workflow_path, job_ids in GITHUB_HOSTED_CONTROL_JOBS.items():
+        jobs = _workflow(workflow_path)["jobs"]
+        for job_id in job_ids:
+            assert jobs[job_id]["runs-on"] == "ubuntu-latest"
+
+
+def test_coverage_artifacts_map_hosted_and_oldlab_checkout_roots() -> None:
+    config = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    paths = config["tool"]["coverage"]["paths"]
+
+    for path_group, source_root in (("source", "src"), ("packages", "packages")):
+        assert paths[path_group] == [
+            source_root,
+            f"/home/runner/work/*/*/{source_root}",
+            f"/opt/actions-runner/_work/*/*/{source_root}",
+        ]
 
 
 def test_source_workflows_share_authoritative_generation_marker() -> None:
@@ -1364,6 +1452,14 @@ def test_staging_build_and_load_share_manifest_owned_image_matrix() -> None:
     assert 'row["image_name"]' in load_script
     assert "builds=(" not in build_script
     assert "for image_name in loom-" not in load_script
+    assert 'if ! docker image inspect "$base_image"' in load_script
+    assert 'docker pull "$base_image"' in load_script
+    assert load_script.index('docker image inspect "$base_image"') < (
+        load_script.index('docker pull "$base_image"')
+    )
+    assert load_script.index('docker pull "$base_image"') < load_script.index(
+        'kind load docker-image "$base_image"',
+    )
     assert "< <(python3" not in build_script
     assert "< <(python3" not in load_script
     assert 'done < "$build_rows"' in build_script

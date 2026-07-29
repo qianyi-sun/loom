@@ -1,0 +1,28 @@
+schema_version = 1
+repository = "qianyi-sun/loom"
+expected_hostname = "trt-eai-oldlab-5"
+state_root = "/var/lib/loom-ci-runner-pool"
+cache_root = "/var/cache/loom-ci-runner-pool"
+qemu_image = "loom-ci-runner-qemu:ubuntu-24.04-v1"
+runner_name_prefix = "oldlab5-kvm"
+slots = 11
+vcpus_per_slot = 8
+memory_mib_per_slot = 6144
+disk_gib_per_slot = 64
+reconcile_seconds = 30
+host_cpu_budget = 22
+host_memory_budget_mib = 81920
+
+labels = [
+  "self-hosted",
+  "linux",
+  "x64",
+  "loom-ci",
+  "oldlab-5",
+  "ephemeral-kvm",
+]
+
+cloud_image_url = "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-amd64.img"
+cloud_image_sha256 = "d1940f7d69d343355e183dff1e08a59852d32e7309baa7a4bad8365b11b005ac"
+actions_runner_url = "https://github.com/actions/runner/releases/download/v2.336.0/actions-runner-linux-x64-2.336.0.tar.gz"
+actions_runner_sha256 = "04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d"
