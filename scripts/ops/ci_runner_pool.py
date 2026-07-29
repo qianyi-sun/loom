@@ -64,6 +64,7 @@ UV_MANIFEST_NAME = "uv.ndjson"
 UV_MANIFEST_URL = f"http://127.0.0.1:{UV_ASSET_PORT}/{UV_MANIFEST_NAME}"
 GUEST_BASE_IMAGES = (
     "alpine:3.19",
+    "alpine:3.20",
     "alpine/socat:1.7.4.4",
     "bitnamilegacy/pgbouncer:1.24.0",
     "busybox:latest",
@@ -71,6 +72,7 @@ GUEST_BASE_IMAGES = (
     "envoyproxy/envoy:v1.30-latest",
     "golang:1.23-alpine",
     "kindest/node:v1.31.0",
+    "minio/minio:RELEASE.2022-12-02T19-19-22Z",
     "minio/minio:latest",
     "moby/buildkit:buildx-stable-1",
     "nginxinc/nginx-unprivileged:1.27-alpine",
@@ -84,6 +86,7 @@ GUEST_BASE_IMAGES = (
     "python:3.11-slim",
     "python:3.12-bookworm",
     "python:3.12-slim",
+    "testcontainers/ryuk:0.8.1",
     "tonistiigi/binfmt:latest",
 )
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
