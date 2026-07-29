@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import inspect
 import json
 import re
 import tomllib
@@ -438,6 +439,9 @@ def test_golden_guest_seeds_images_without_retaining_registry_credentials(
 
 
 def test_golden_mirror_covers_ci_dockerhub_inputs() -> None:
+    from testcontainers.core.config import testcontainers_config
+    from testcontainers.minio import MinioContainer
+
     def dockerhub_ref(raw_ref: str) -> str | None:
         ref = raw_ref.split("@", 1)[0]
         if not ref or ref.startswith(("$", "loom-")):
@@ -458,6 +462,20 @@ def test_golden_mirror_covers_ci_dockerhub_inputs() -> None:
         "postgres:16-alpine",
         "tonistiigi/binfmt:latest",
     }
+    minio_default = inspect.signature(MinioContainer.__init__).parameters["image"].default
+    assert isinstance(minio_default, str)
+    expected.update((minio_default, testcontainers_config.ryuk_image))
+
+    image_call = re.compile(
+        r"(?:DockerContainer|DockerDriver|PostgresContainer)\(\s*"
+        r"(?:image\s*=\s*)?[\"']([^\"']+)",
+    )
+    for test_root in (Path("tests/integration"), Path("tests/contract")):
+        for path in test_root.rglob("*.py"):
+            for raw_ref in image_call.findall(path.read_text(encoding="utf-8")):
+                if (ref := dockerhub_ref(raw_ref)) is not None:
+                    expected.add(ref)
+
     manifest = tomllib.loads(
         Path("config/component-ownership.toml").read_text(encoding="utf-8"),
     )
