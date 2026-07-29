@@ -1240,4 +1240,194 @@ describe("AdminAccess", () => {
       )).toBe(false);
     });
   });
+
+  it("confirms public-registration enable/disable with per-row pending and error isolation", async () => {
+    const teams = [
+      {
+        id: "team-private",
+        name: "Private Lab",
+        created_at: "2026-06-16T00:00:00Z",
+        disabled_at: null,
+        disabled_reason: null,
+        submissions_paused_at: null,
+        submissions_paused_reason: null,
+        public_registration_enabled: false,
+        quota: null,
+        members: [],
+        user_members: [],
+      },
+      {
+        id: "team-public",
+        name: "Public Lab",
+        created_at: "2026-06-16T00:00:00Z",
+        disabled_at: null,
+        disabled_reason: null,
+        submissions_paused_at: null,
+        submissions_paused_reason: null,
+        public_registration_enabled: true,
+        quota: null,
+        members: [],
+        user_members: [],
+      },
+      {
+        id: "team-admin",
+        name: "admin",
+        created_at: "2026-06-16T00:00:00Z",
+        disabled_at: null,
+        disabled_reason: null,
+        submissions_paused_at: null,
+        submissions_paused_reason: null,
+        public_registration_enabled: false,
+        quota: null,
+        members: [],
+        user_members: [],
+      },
+    ];
+    let enableGate: Promise<Response> | null = null;
+    let resolveEnable!: (value: Response) => void;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/auth/me")) {
+          return jsonResponse(platformAdminMe);
+        }
+        if (
+          url.endsWith("/api/v1/admin/teams/team-private/public-registration/enable") &&
+          init?.method === "POST"
+        ) {
+          if (enableGate) {
+            return enableGate;
+          }
+          teams[0] = { ...teams[0], public_registration_enabled: true };
+          return jsonResponse(teams[0]);
+        }
+        if (
+          url.endsWith("/api/v1/admin/teams/team-public/public-registration/disable") &&
+          init?.method === "POST"
+        ) {
+          return jsonResponse({ detail: "audit insert failed" }, 500);
+        }
+        if (url.endsWith("/api/v1/admin/teams")) {
+          return jsonResponse({ items: teams });
+        }
+        if (url.includes("/api/v1/admin/registration-requests")) {
+          return jsonResponse({ items: [] });
+        }
+        if (url.includes("/api/v1/admin/team-registrations")) {
+          return jsonResponse({ items: [] });
+        }
+        if (url.includes("/api/v1/admin/password-reset-requests")) {
+          return jsonResponse({ items: [] });
+        }
+        if (url.includes("/api/v1/admin/audit-events")) {
+          return jsonResponse({ items: [], next_cursor: null });
+        }
+        if (url.includes("/api/v1/invites")) {
+          return jsonResponse({ items: [] });
+        }
+        if (url.endsWith("/api/v1/tokens")) {
+          return jsonResponse({ items: [] });
+        }
+        return jsonResponse({ detail: `unhandled ${url}` }, 404);
+      },
+    );
+    const user = userEvent.setup();
+
+    renderWithProviders(<AdminAccess />);
+    await user.type(await screen.findByLabelText("Admin actor"), "qianyi");
+    await user.click(screen.getByRole("tab", { name: "Teams" }));
+
+    const privateRow = (await screen.findByLabelText("Team name for Private Lab")).closest("tr");
+    const publicRow = screen.getByLabelText("Team name for Public Lab").closest("tr");
+    const adminRow = screen.getByLabelText("Team name for admin").closest("tr");
+    expect(privateRow).not.toBeNull();
+    expect(publicRow).not.toBeNull();
+    expect(adminRow).not.toBeNull();
+    expect(within(privateRow!).getByText("Private")).toBeInTheDocument();
+    expect(within(publicRow!).getByText("Enabled")).toBeInTheDocument();
+    expect(
+      within(adminRow!).queryByRole("button", { name: /public registration/i }),
+    ).toBeNull();
+
+    enableGate = new Promise<Response>((resolve) => {
+      resolveEnable = resolve;
+    });
+    await user.click(
+      within(privateRow!).getByRole("button", { name: "Enable public registration" }),
+    );
+    const enableDialog = screen.getByRole("dialog", {
+      name: "Enable public registration",
+    });
+    expect(enableDialog).toHaveTextContent("Private Lab");
+    await user.click(
+      within(enableDialog).getByRole("button", { name: "Enable public registration" }),
+    );
+    expect(await screen.findByRole("button", { name: "Enabling…" })).toBeDisabled();
+    // Modal marks the page inert; still assert sibling row stays usable.
+    expect(
+      within(publicRow!).getByRole("button", {
+        name: "Disable public registration",
+        hidden: true,
+      }),
+    ).not.toBeDisabled();
+    expect(
+      within(privateRow!).getByRole("button", {
+        name: "Enable public registration",
+        hidden: true,
+      }),
+    ).toBeDisabled();
+
+    teams[0] = { ...teams[0], public_registration_enabled: true };
+    resolveEnable(jsonResponse(teams[0]));
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(
+        screen.getByLabelText("Team name for Private Lab").closest("tr"),
+      ).toHaveTextContent("Enabled");
+    });
+    const privateRowAfterEnable = screen
+      .getByLabelText("Team name for Private Lab")
+      .closest("tr");
+    expect(
+      within(privateRowAfterEnable!).getByRole("button", {
+        name: "Disable public registration",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      fetchSpy.mock.calls.some(([input, init]) =>
+        String(input).endsWith(
+          "/api/v1/admin/teams/team-private/public-registration/enable",
+        ) &&
+        init?.method === "POST" &&
+        (init.headers as Record<string, string>)["X-Loom-Admin-Actor"] === "qianyi",
+      ),
+    ).toBe(true);
+
+    const publicRowAfter = screen.getByLabelText("Team name for Public Lab").closest("tr");
+    expect(publicRowAfter).not.toBeNull();
+    await user.click(
+      within(publicRowAfter!).getByRole("button", {
+        name: "Disable public registration",
+      }),
+    );
+    const disableDialog = screen.getByRole("dialog", {
+      name: "Disable public registration",
+    });
+    expect(disableDialog).toHaveTextContent("Public Lab");
+    await user.click(
+      within(disableDialog).getByRole("button", {
+        name: "Disable public registration",
+      }),
+    );
+    // Dialog + row both surface the mutation error while the dialog stays open.
+    expect(
+      await screen.findAllByText("audit insert failed"),
+    ).not.toHaveLength(0);
+    expect(publicRowAfter).toHaveTextContent("audit insert failed");
+    const privateRowAfter = screen
+      .getByLabelText("Team name for Private Lab")
+      .closest("tr");
+    expect(privateRowAfter).not.toHaveTextContent("audit insert failed");
+    expect(publicRowAfter).toHaveTextContent("Enabled");
+  });
 });

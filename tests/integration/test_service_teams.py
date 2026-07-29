@@ -444,6 +444,101 @@ async def test_admin_public_registration_policy_audits_and_blocks_admin_team(
     assert actions.count("team.public_registration.enable") == 1
 
 
+async def test_public_registration_policy_rolls_back_when_audit_write_fails(
+    teams_setup: tuple[FastAPI, str, str, UUID, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Audit failure must not commit a public-registration policy change (#775)."""
+    import loom_service.routes.teams as teams_routes
+
+    app, _raw, _team_a_str, team_a, _team_b = teams_setup
+    original_audit = teams_routes.write_admin_audit_event
+
+    async def _raise_audit_error(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("audit insert failed")
+
+    monkeypatch.setattr(
+        teams_routes,
+        "write_admin_audit_event",
+        _raise_audit_error,
+        raising=False,
+    )
+
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        failed_enable = await ac.post(
+            f"/api/v1/admin/teams/{team_a}/public-registration/enable",
+            headers=_admin_headers("ops-admin"),
+        )
+        listed_after_enable = await ac.get(
+            "/api/v1/admin/teams",
+            headers=_admin_headers(),
+        )
+
+    assert failed_enable.status_code == 500, failed_enable.text
+    team_row = next(
+        item for item in listed_after_enable.json()["items"]
+        if item["id"] == str(team_a)
+    )
+    assert team_row["public_registration_enabled"] is False
+
+    async with app.state.session_factory() as session:
+        db_team = await session.get(Team, team_a)
+        assert db_team is not None
+        assert db_team.public_registration_enabled is False
+
+    # Enable for real, then prove disable also rolls back on audit failure.
+    monkeypatch.setattr(
+        teams_routes,
+        "write_admin_audit_event",
+        original_audit,
+        raising=False,
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        enabled = await ac.post(
+            f"/api/v1/admin/teams/{team_a}/public-registration/enable",
+            headers=_admin_headers("ops-admin"),
+        )
+    assert enabled.status_code == 200, enabled.text
+    assert enabled.json()["public_registration_enabled"] is True
+
+    monkeypatch.setattr(
+        teams_routes,
+        "write_admin_audit_event",
+        _raise_audit_error,
+        raising=False,
+    )
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://svc",
+    ) as ac:
+        failed_disable = await ac.post(
+            f"/api/v1/admin/teams/{team_a}/public-registration/disable",
+            headers=_admin_headers("ops-admin"),
+        )
+        listed_after_disable = await ac.get(
+            "/api/v1/admin/teams",
+            headers=_admin_headers(),
+        )
+
+    assert failed_disable.status_code == 500, failed_disable.text
+    team_row = next(
+        item for item in listed_after_disable.json()["items"]
+        if item["id"] == str(team_a)
+    )
+    assert team_row["public_registration_enabled"] is True
+
+    async with app.state.session_factory() as session:
+        db_team = await session.get(Team, team_a)
+        assert db_team is not None
+        assert db_team.public_registration_enabled is True
+
+
 async def test_admin_can_list_create_and_rename_internal_teams(
     teams_setup: tuple[FastAPI, str, str, UUID, UUID],
 ) -> None:
