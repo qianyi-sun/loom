@@ -111,7 +111,7 @@
   },
   "upstream_timeout_sec": {
     "annotation": "<class 'float'>",
-    "default": "120.0",
+    "default": "200.0",
     "required": false
   }
 }

@@ -42,7 +42,7 @@ class GatewaySettings(BaseSettings):
     rate_card_cache_ttl_sec: int = 300
     step_jwt_signing_key: SecretStr
     together_api_key: SecretStr | None = None
-    upstream_timeout_sec: float = 120.0
+    upstream_timeout_sec: float = 200.0
 
 
 GatewaySettings.model_rebuild()
