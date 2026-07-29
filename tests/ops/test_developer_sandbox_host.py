@@ -860,6 +860,61 @@ def test_rollback_waits_for_the_global_install_serialization(
     assert not failures
 
 
+def test_attestation_timer_waits_for_the_recovery_activation_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _temporary_profile(tmp_path)
+    gate = threading.Lock()
+    attempted = threading.Event()
+    renewed = threading.Event()
+    failures: list[BaseException] = []
+
+    @contextmanager
+    def install_lock() -> object:
+        yield
+
+    @contextmanager
+    def activation_lock(_profile: host.Profile) -> object:
+        attempted.set()
+        with gate:
+            yield
+
+    monkeypatch.setattr(host, "_require_live_host", lambda: None)
+    monkeypatch.setattr(host, "verify_nfs_mount", lambda: None)
+    monkeypatch.setattr(host, "verify_state_parent", lambda: None)
+    monkeypatch.setattr(host, "_install_lock", install_lock)
+    monkeypatch.setattr(host, "_activation_lock", activation_lock)
+    monkeypatch.setattr(host, "_load_json", lambda *_args: {"candidate_sha": SHA})
+    monkeypatch.setattr(host, "_identity", lambda user, _group: _current_identity(user))
+    monkeypatch.setattr(host, "verify_candidate_root", lambda *_args: None)
+    monkeypatch.setattr(host, "verify_candidate", lambda *_args: "b" * 40)
+    monkeypatch.setattr(host, "verify_worker_runtime_env", lambda *_args: None)
+    monkeypatch.setattr(
+        host,
+        "_renew_attestation_locked",
+        lambda *_args, **_kwargs: renewed.set(),
+    )
+
+    def run_timer() -> None:
+        try:
+            host.renew_attestations((profile,), execute=True)
+        except BaseException as exc:
+            failures.append(exc)
+
+    gate.acquire()
+    worker = threading.Thread(target=run_timer)
+    worker.start()
+    assert attempted.wait(timeout=1)
+    assert not renewed.is_set()
+    gate.release()
+    worker.join(timeout=1)
+
+    assert not worker.is_alive()
+    assert renewed.is_set()
+    assert not failures
+
+
 def test_rollback_after_attestation_ttl_renews_before_positive_readiness(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -944,7 +999,9 @@ def test_rollback_after_attestation_ttl_renews_before_positive_readiness(
     def check(_sandbox: str) -> None:
         persisted = json.loads(profile.desired_file.read_text(encoding="utf-8"))
         assert persisted["combined_receipt_sha256"] == fresh.payload_sha256
-        assert host._transaction_payload(profile)["phase"] == "domains-proved"
+        transaction = host._transaction_payload(profile)
+        assert transaction["phase"] == "domains-proved"
+        assert transaction["target_receipt_sha256"] == fresh.payload_sha256
         events.append("fresh-check")
 
     monkeypatch.setattr(host, "service_check", check)
@@ -964,7 +1021,7 @@ def test_rollback_after_attestation_ttl_renews_before_positive_readiness(
     assert not host._transaction_file(profile).exists()
 
 
-def test_rollback_crash_after_link_switch_recovers_and_can_retry(
+def test_rollback_crash_after_target_renew_recovers_and_can_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -975,16 +1032,19 @@ def test_rollback_crash_after_link_switch_recovers_and_can_retry(
     current_sha = "b" * 40
     target_sha = "c" * 40
     target_tree = "d" * 40
+    current_tree = "e" * 40
     previous = {
         "schema_version": 1,
         "sandbox": profile.sandbox,
         "candidate_sha": current_sha,
+        "candidate_tree": current_tree,
         "previous_sha": target_sha,
     }
     replacement = {
         "schema_version": 1,
         "sandbox": profile.sandbox,
         "candidate_sha": target_sha,
+        "candidate_tree": target_tree,
         "previous_sha": current_sha,
     }
     monkeypatch.setattr(host, "DESIRED_ROOT", tmp_path / "desired")
@@ -1025,6 +1085,12 @@ def test_rollback_crash_after_link_switch_recovers_and_can_retry(
     monkeypatch.setattr(host, "_desired_payload", lambda *_args, **_kwargs: replacement)
     monkeypatch.setattr(host, "_current_relay_sha", lambda _profile: current_sha)
     monkeypatch.setattr(host, "_run", lambda *_args, **_kwargs: None)
+    target_fresh = _receipt(profile, target_sha)
+    monkeypatch.setattr(
+        host,
+        "_renew_attestation_locked",
+        lambda *_args, **_kwargs: target_fresh,
+    )
     switched: list[str] = []
     monkeypatch.setattr(
         host,
@@ -1035,7 +1101,7 @@ def test_rollback_crash_after_link_switch_recovers_and_can_retry(
 
     def write_then_crash(*args: object, **kwargs: object) -> None:
         write_transaction(*args, **kwargs)
-        if kwargs["phase"] == "link-installed":
+        if kwargs["phase"] == "domains-proved":
             raise SimulatedCrash
 
     monkeypatch.setattr(host, "_write_transaction", write_then_crash)
@@ -1047,9 +1113,17 @@ def test_rollback_crash_after_link_switch_recovers_and_can_retry(
     transaction = host._transaction_payload(profile)
     assert transaction is not None
     assert transaction["operation"] == "rollback"
-    assert transaction["phase"] == "link-installed"
+    assert transaction["phase"] == "domains-proved"
+    assert transaction["target_receipt_sha256"] == target_fresh.payload_sha256
     assert switched == [target_sha]
     events: list[str] = []
+    monkeypatch.setattr(
+        host,
+        "_invalidate_exact_live_receipt",
+        lambda _profile, sha, _tree, *, journal_digest: events.append(
+            f"invalidate:{sha}:{journal_digest}",
+        ),
+    )
     monkeypatch.setattr(
         host,
         "_invoke_lifecycle",
@@ -1065,11 +1139,22 @@ def test_rollback_crash_after_link_switch_recovers_and_can_retry(
         "_invalidate_receipt",
         lambda *_args: events.append("unexpected-invalidate"),
     )
+    monkeypatch.setattr(
+        host,
+        "_renew_attestation_locked",
+        lambda _profile, *, sha, tree: events.append(f"renew:{sha}:{tree}")
+        or _receipt(profile, sha),
+    )
 
     host._recover_transaction(profile, transaction)
 
     assert json.loads(profile.desired_file.read_text(encoding="utf-8")) == previous
-    assert events == [f"update:{current_sha}", f"relay:{current_sha}"]
+    assert events == [
+        f"invalidate:{target_sha}:{target_fresh.payload_sha256}",
+        f"update:{current_sha}",
+        f"relay:{current_sha}",
+        f"renew:{current_sha}:{current_tree}",
+    ]
     assert not host._transaction_file(profile).exists()
 
     monkeypatch.setattr(host, "_write_transaction", write_transaction)
@@ -1084,6 +1169,205 @@ def test_rollback_crash_after_link_switch_recovers_and_can_retry(
     host.rollback(profile, target_sha)
 
     assert not host._transaction_file(profile).exists()
+
+
+def test_failed_post_renew_recovery_invalidates_target_then_refreshes_current(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _temporary_profile(tmp_path)
+    current_sha = "b" * 40
+    current_tree = "c" * 40
+    target_sha = "d" * 40
+    target_tree = "e" * 40
+    target_digest = "f" * 64
+    previous = {
+        "candidate_sha": current_sha,
+        "candidate_tree": current_tree,
+    }
+    events: list[str] = []
+    monkeypatch.setattr(
+        host,
+        "_invalidate_exact_live_receipt",
+        lambda _profile, sha, tree, *, journal_digest: events.append(
+            f"invalidate:{sha}:{tree}:{journal_digest}",
+        ),
+    )
+    monkeypatch.setattr(
+        host,
+        "_atomic_write",
+        lambda *_args, **_kwargs: events.append("restore-desired"),
+    )
+    monkeypatch.setattr(
+        host,
+        "_invoke_lifecycle",
+        lambda _profile, sha, operation: events.append(f"{operation}:{sha}"),
+    )
+    monkeypatch.setattr(
+        host,
+        "_restore_relay",
+        lambda _profile, sha, _target: events.append(f"relay:{sha}"),
+    )
+    monkeypatch.setattr(
+        host,
+        "_renew_attestation_locked",
+        lambda _profile, *, sha, tree: events.append(f"renew:{sha}:{tree}")
+        or _receipt(profile, sha),
+    )
+    monkeypatch.setattr(
+        host,
+        "_remove_transaction",
+        lambda _profile: events.append("remove-journal"),
+    )
+
+    host._recover_transaction(
+        profile,
+        {
+            "operation": "rollback",
+            "candidate_sha": target_sha,
+            "candidate_tree": target_tree,
+            "phase": "domains-proved",
+            "previous_desired": previous,
+            "previous_relay_sha": current_sha,
+            "target_receipt_sha256": target_digest,
+        },
+    )
+
+    assert events == [
+        f"invalidate:{target_sha}:{target_tree}:{target_digest}",
+        "restore-desired",
+        f"update:{current_sha}",
+        f"relay:{current_sha}",
+        f"renew:{current_sha}:{current_tree}",
+        "remove-journal",
+    ]
+
+
+def test_failed_current_refresh_invalidates_current_and_keeps_journal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _temporary_profile(tmp_path)
+    current_sha = "b" * 40
+    current_tree = "c" * 40
+    target_sha = "d" * 40
+    target_tree = "e" * 40
+    invalidated: list[str] = []
+    monkeypatch.setattr(
+        host,
+        "_invalidate_exact_live_receipt",
+        lambda _profile, sha, _tree, *, journal_digest: invalidated.append(sha),
+    )
+    monkeypatch.setattr(host, "_atomic_write", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(host, "_invoke_lifecycle", lambda *_args: None)
+    monkeypatch.setattr(host, "_restore_relay", lambda *_args: None)
+    monkeypatch.setattr(
+        host,
+        "_renew_attestation_locked",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            host.HostConvergeError("current proof unavailable"),
+        ),
+    )
+    monkeypatch.setattr(
+        host,
+        "_remove_transaction",
+        lambda _profile: pytest.fail("failed recovery must retain its journal"),
+    )
+
+    with pytest.raises(host.HostConvergeError, match="current proof unavailable"):
+        host._recover_transaction(
+            profile,
+            {
+                "operation": "rollback",
+                "candidate_sha": target_sha,
+                "candidate_tree": target_tree,
+                "phase": "domains-proved",
+                "previous_desired": {
+                    "candidate_sha": current_sha,
+                    "candidate_tree": current_tree,
+                },
+                "previous_relay_sha": current_sha,
+                "target_receipt_sha256": "f" * 64,
+            },
+        )
+
+    assert invalidated == [target_sha, current_sha]
+
+
+def test_exact_live_receipt_invalidation_is_idempotent_and_preserves_foreign(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _temporary_profile(tmp_path)
+    target_sha = "b" * 40
+    target_tree = "c" * 40
+    monkeypatch.setattr(host, "COMBINED_RECEIPT_ROOT", tmp_path / "attestations")
+    monkeypatch.setattr(host, "DESIRED_ROOT", tmp_path / "desired")
+    path = host.combined_receipt_path(profile, target_sha)
+    path.parent.mkdir(parents=True, mode=0o700)
+
+    def write(candidate_sha: str) -> str:
+        unsigned = {
+            "schema_version": 1,
+            "kind": "loom.developer-runtime-combined-activation",
+            "sandbox": profile.sandbox,
+            "candidate_sha": candidate_sha,
+            "candidate_tree": target_tree,
+        }
+        payload = {
+            **unsigned,
+            "payload_sha256": hashlib.sha256(
+                json.dumps(
+                    unsigned,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode(),
+            ).hexdigest(),
+        }
+        path.write_text(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        path.chmod(0o600)
+        return str(payload["payload_sha256"])
+
+    write("d" * 40)
+    with pytest.raises(host.HostConvergeError, match="does not match"):
+        host._invalidate_exact_live_receipt(
+            profile,
+            target_sha,
+            target_tree,
+            journal_digest=None,
+        )
+    assert path.exists()
+
+    exact_digest = write(target_sha)
+    profile.desired_file.parent.mkdir(parents=True)
+    profile.desired_file.write_text(
+        json.dumps(
+            {
+                "candidate_sha": target_sha,
+                "candidate_tree": target_tree,
+                "combined_receipt_sha256": exact_digest,
+            },
+        ),
+        encoding="utf-8",
+    )
+    profile.desired_file.chmod(0o600)
+    host._invalidate_exact_live_receipt(
+        profile,
+        target_sha,
+        target_tree,
+        journal_digest="0" * 64,
+    )
+    host._invalidate_exact_live_receipt(
+        profile,
+        target_sha,
+        target_tree,
+        journal_digest=None,
+    )
+    assert not path.exists()
 
 
 def test_service_converge_leaves_pending_rollback_for_link_and_fresh_proof(

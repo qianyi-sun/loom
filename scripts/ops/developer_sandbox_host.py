@@ -3205,7 +3205,7 @@ def rollback(profile: Profile, target_sha: str) -> None:
                     previous_desired=desired,
                     previous_relay_sha=previous_relay,
                 )
-                _renew_attestation_locked(
+                target_receipt = _renew_attestation_locked(
                     profile,
                     sha=target_sha,
                     tree=target_tree,
@@ -3218,6 +3218,7 @@ def rollback(profile: Profile, target_sha: str) -> None:
                     phase="domains-proved",
                     previous_desired=desired,
                     previous_relay_sha=previous_relay,
+                    target_receipt_sha256=target_receipt.payload_sha256,
                 )
                 service_check(profile.sandbox)
                 _write_transaction(
@@ -3228,6 +3229,7 @@ def rollback(profile: Profile, target_sha: str) -> None:
                     phase="committed",
                     previous_desired=desired,
                     previous_relay_sha=previous_relay,
+                    target_receipt_sha256=target_receipt.payload_sha256,
                 )
                 _remove_transaction(profile)
         except Exception:
@@ -3359,6 +3361,7 @@ def _write_transaction(
     phase: str,
     previous_desired: Mapping[str, Any] | None,
     previous_relay_sha: str | None,
+    target_receipt_sha256: str | None = None,
 ) -> None:
     now = datetime.now(UTC)
     existing = _load_json(_transaction_file(profile), "sandbox activation transaction")
@@ -3379,8 +3382,12 @@ def _write_transaction(
             existing.get("expires_at"),
             "transaction expires_at",
         )
+        if target_receipt_sha256 is None:
+            existing_receipt = existing.get("target_receipt_sha256")
+            if isinstance(existing_receipt, str):
+                target_receipt_sha256 = existing_receipt
     payload = {
-        "schema_version": 2,
+        "schema_version": 3,
         "sandbox": profile.sandbox,
         "operation": operation,
         "candidate_sha": sha,
@@ -3390,6 +3397,7 @@ def _write_transaction(
         "expires_at": expires_at.isoformat(),
         "previous_desired": dict(previous_desired) if previous_desired is not None else None,
         "previous_relay_sha": previous_relay_sha,
+        "target_receipt_sha256": target_receipt_sha256,
     }
     _ensure_root_private_directory(TRANSACTION_ROOT)
     _atomic_write(
@@ -3415,8 +3423,10 @@ def _transaction_payload(profile: Profile) -> dict[str, Any] | None:
         "previous_desired",
         "previous_relay_sha",
     }
-    if schema_version == 2:
+    if schema_version in {2, 3}:
         expected_keys.add("operation")
+    if schema_version == 3:
+        expected_keys.add("target_receipt_sha256")
     _exact_keys(
         payload,
         expected_keys,
@@ -3424,7 +3434,7 @@ def _transaction_payload(profile: Profile) -> dict[str, Any] | None:
     )
     operation = payload.get("operation", "install")
     if (
-        schema_version not in {1, 2}
+        schema_version not in {1, 2, 3}
         or payload["sandbox"] != profile.sandbox
         or operation not in {"install", "rollback"}
         or SHA_RE.fullmatch(str(payload["candidate_sha"])) is None
@@ -3447,11 +3457,31 @@ def _transaction_payload(profile: Profile) -> dict[str, Any] | None:
             payload["previous_relay_sha"] is not None
             and SHA_RE.fullmatch(str(payload["previous_relay_sha"])) is None
         )
+        or (
+            schema_version == 3
+            and payload["target_receipt_sha256"] is not None
+            and (
+                not isinstance(payload["target_receipt_sha256"], str)
+                or DIGEST_RE.fullmatch(payload["target_receipt_sha256"]) is None
+            )
+        )
+        or (
+            operation != "rollback"
+            and schema_version == 3
+            and payload["target_receipt_sha256"] is not None
+        )
+        or (
+            operation == "rollback"
+            and schema_version == 3
+            and payload["phase"] in {"domains-proved", "committed"}
+            and payload["target_receipt_sha256"] is None
+        )
     ):
         raise HostConvergeError("sandbox activation transaction binding is invalid")
     _parse_attestation_time(payload["started_at"], "transaction started_at")
     _parse_attestation_time(payload["expires_at"], "transaction expires_at")
     payload["operation"] = operation
+    payload["target_receipt_sha256"] = payload.get("target_receipt_sha256")
     return payload
 
 
@@ -3515,6 +3545,118 @@ def _invalidate_receipt(profile: Profile, sha: str) -> None:
     _fsync_directory(path.parent)
 
 
+def _invalidate_exact_live_receipt(
+    profile: Profile,
+    sha: str,
+    tree: str,
+    *,
+    journal_digest: str | None,
+) -> None:
+    path = combined_receipt_path(profile, sha)
+    parent_fd = -1
+    descriptor = -1
+    try:
+        try:
+            parent_fd = _open_absolute_directory(path.parent, create=False)
+        except FileNotFoundError:
+            return
+        try:
+            descriptor = os.open(
+                path.name,
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
+                dir_fd=parent_fd,
+            )
+        except FileNotFoundError:
+            return
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or (opened.st_uid, opened.st_gid) != (os.geteuid(), os.getegid())
+            or stat.S_IMODE(opened.st_mode) != 0o600
+        ):
+            raise HostConvergeError("live activation receipt metadata is invalid")
+        chunks: list[bytes] = []
+        size = 0
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > 8 * 1024 * 1024:
+                raise HostConvergeError("live activation receipt is too large")
+        raw = b"".join(chunks)
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise HostConvergeError("live activation receipt is invalid") from exc
+        if not isinstance(payload, dict):
+            raise HostConvergeError("live activation receipt is invalid")
+        canonical = (
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode()
+            + b"\n"
+        )
+        digest = payload.get("payload_sha256")
+        unsigned = {key: value for key, value in payload.items() if key != "payload_sha256"}
+        expected_digest = hashlib.sha256(
+            json.dumps(
+                unsigned,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode(),
+        ).hexdigest()
+        if (
+            raw != canonical
+            or payload.get("schema_version") != 1
+            or payload.get("kind") != "loom.developer-runtime-combined-activation"
+            or payload.get("sandbox") != profile.sandbox
+            or payload.get("candidate_sha") != sha
+            or payload.get("candidate_tree") != tree
+            or not isinstance(digest, str)
+            or digest != expected_digest
+        ):
+            raise HostConvergeError(
+                "live activation receipt does not match the rollback transaction",
+            )
+        if journal_digest is not None and DIGEST_RE.fullmatch(journal_digest) is None:
+            raise HostConvergeError("rollback target receipt journal binding is invalid")
+        if journal_digest is not None and digest != journal_digest:
+            desired = _load_json(profile.desired_file, "sandbox desired state")
+            if (
+                desired is None
+                or desired.get("candidate_sha") != sha
+                or desired.get("candidate_tree") != tree
+                or desired.get("combined_receipt_sha256") != digest
+            ):
+                raise HostConvergeError(
+                    "live activation receipt advanced outside the rollback transaction",
+                )
+        rebound = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(rebound.st_mode)
+            or (rebound.st_dev, rebound.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise HostConvergeError("live activation receipt changed during invalidation")
+        os.unlink(path.name, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+    except HostConvergeError:
+        raise
+    except OSError as exc:
+        raise HostConvergeError("could not invalidate live activation receipt") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if parent_fd >= 0:
+            os.close(parent_fd)
+
+
 def _recover_transaction(profile: Profile, transaction: Mapping[str, Any]) -> None:
     if transaction.get("phase") == "committed":
         _remove_transaction(profile)
@@ -3523,6 +3665,13 @@ def _recover_transaction(profile: Profile, transaction: Mapping[str, Any]) -> No
     operation = str(transaction.get("operation", "install"))
     previous = transaction["previous_desired"]
     previous_relay = transaction["previous_relay_sha"]
+    if operation == "rollback":
+        _invalidate_exact_live_receipt(
+            profile,
+            sha,
+            str(transaction["candidate_tree"]),
+            journal_digest=transaction.get("target_receipt_sha256"),
+        )
     if previous is None:
         if profile.desired_file.exists():
             profile.desired_file.unlink()
@@ -3536,7 +3685,18 @@ def _recover_transaction(profile: Profile, transaction: Mapping[str, Any]) -> No
                 raise
     else:
         previous_sha = previous.get("candidate_sha")
-        if not isinstance(previous_sha, str) or SHA_RE.fullmatch(previous_sha) is None:
+        previous_tree = previous.get("candidate_tree")
+        if (
+            not isinstance(previous_sha, str)
+            or SHA_RE.fullmatch(previous_sha) is None
+            or (
+                operation == "rollback"
+                and (
+                    not isinstance(previous_tree, str)
+                    or SHA_RE.fullmatch(previous_tree) is None
+                )
+            )
+        ):
             raise HostConvergeError("previous desired state in transaction is invalid")
         _atomic_write(
             profile.desired_file,
@@ -3547,6 +3707,22 @@ def _recover_transaction(profile: Profile, transaction: Mapping[str, Any]) -> No
     _restore_relay(profile, previous_relay, sha)
     if operation == "install":
         _invalidate_receipt(profile, sha)
+    elif previous is not None:
+        assert isinstance(previous_tree, str)
+        try:
+            _renew_attestation_locked(
+                profile,
+                sha=previous_sha,
+                tree=previous_tree,
+            )
+        except Exception:
+            _invalidate_exact_live_receipt(
+                profile,
+                previous_sha,
+                previous_tree,
+                journal_digest=None,
+            )
+            raise
     _remove_transaction(profile)
 
 

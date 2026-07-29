@@ -930,6 +930,26 @@ def test_combined_runtime_attestation_closed_schema_and_digest(
     assert digest == payload["payload_sha256"]
 
 
+def test_combined_runtime_attestation_rejects_removed_live_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, _ = _fixture(tmp_path)
+    missing = config.runtime_attestation_root / config.sandbox / SHA / "combined.json"
+    monkeypatch.setattr(
+        adapter,
+        "_secure_runtime_attestation_file",
+        lambda _path, *, config: missing,
+    )
+
+    with pytest.raises(adapter.AdapterError, match="unreadable"):
+        REAL_VALIDATE_RUNTIME_ATTESTATION(
+            config,
+            candidate=adapter.CandidateBinding(SHA, TREE),
+            now=datetime(2026, 7, 28, 14, 0, tzinfo=UTC),
+        )
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
