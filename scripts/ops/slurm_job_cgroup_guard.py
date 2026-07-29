@@ -21,7 +21,7 @@ import sys
 import tempfile
 import time
 from collections import OrderedDict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -33,7 +33,11 @@ _COMMENT_RE = re.compile(r"^loom-cgroup-v1:pids=([1-9][0-9]{0,8})$")
 _REQUIRED_CONTROLLERS = frozenset({"cpu", "memory", "pids"})
 _MAX_WALKED_DIRECTORIES = 100_000
 _MAX_JOB_RECORD_CACHE = 10_000
+_MAX_CONFIG_BYTES = 1 << 20
 _CANDIDATE_RE = re.compile(r"^[0-9a-f]{40}$")
+_SANDBOX_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+_SANDBOXES = ("qianyi", "hongjian", "devansh")
+_ACCOUNTS = frozenset(f"loom-dev-{sandbox}" for sandbox in _SANDBOXES)
 DEFAULT_STATUS_PATH = Path(
     "/var/lib/loom-developer-sandbox-slurm-policy/guard-status.json",
 )
@@ -44,17 +48,30 @@ class GuardError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class CandidateBinding:
+    account: str
+    sandbox: str
+    service_user: str
+    candidate_sha: str
+    candidate_tree: str
+
+
+@dataclass(frozen=True, slots=True)
 class GuardConfig:
     cluster: str
     controller: str
     submit_host: str
     allowed_nodes: frozenset[str]
-    candidate_sha: str
+    candidate_bindings: Mapping[str, CandidateBinding]
+    candidate_set_sha256: str
     config_sha256: str
     pids_max: int
-    allowed_accounts: frozenset[str]
     poll_interval_seconds: float
     require_gpu_probe: bool
+
+    @property
+    def allowed_accounts(self) -> frozenset[str]:
+        return frozenset(self.candidate_bindings)
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +83,7 @@ class JobRecord:
     job_name: str = ""
     batch_host: str = ""
     node_list: str = ""
+    user: str = ""
 
 
 JobLookup = Callable[[str], JobRecord]
@@ -95,18 +113,92 @@ class BoundedJobLookup:
                 del self._records[job_id]
 
 
+def _read_bound_config(path: Path) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise GuardError("guard config is unavailable or invalid") from exc
+    try:
+        opened = os.fstat(descriptor)
+        linked = path.lstat()
+        expected_uid, expected_gid = os.geteuid(), os.getegid()
+        if (
+            stat.S_ISLNK(linked.st_mode)
+            or not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(linked.st_mode)
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or stat.S_IMODE(linked.st_mode) != 0o600
+            or opened.st_uid != expected_uid
+            or opened.st_gid != expected_gid
+            or linked.st_uid != expected_uid
+            or linked.st_gid != expected_gid
+            or opened.st_nlink != 1
+            or linked.st_nlink != 1
+            or (opened.st_dev, opened.st_ino) != (linked.st_dev, linked.st_ino)
+            or not 0 <= opened.st_size <= _MAX_CONFIG_BYTES
+        ):
+            raise GuardError("guard config metadata is unsafe")
+        content = bytearray()
+        while True:
+            chunk = os.read(descriptor, 65536)
+            if not chunk:
+                break
+            content.extend(chunk)
+            if len(content) > _MAX_CONFIG_BYTES:
+                raise GuardError("guard config is too large")
+        after = os.fstat(descriptor)
+        rebound = path.lstat()
+        identity = (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_mode,
+            opened.st_uid,
+            opened.st_gid,
+            opened.st_nlink,
+            opened.st_size,
+            opened.st_mtime_ns,
+            opened.st_ctime_ns,
+        )
+        if identity != (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_uid,
+            after.st_gid,
+            after.st_nlink,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ) or identity != (
+            rebound.st_dev,
+            rebound.st_ino,
+            rebound.st_mode,
+            rebound.st_uid,
+            rebound.st_gid,
+            rebound.st_nlink,
+            rebound.st_size,
+            rebound.st_mtime_ns,
+            rebound.st_ctime_ns,
+        ):
+            raise GuardError("guard config changed during read")
+        if len(content) != opened.st_size:
+            raise GuardError("guard config size changed during read")
+        return bytes(content)
+    except OSError as exc:
+        raise GuardError("guard config is unavailable or invalid") from exc
+    finally:
+        os.close(descriptor)
+
+
 def load_config(path: Path) -> GuardConfig:
     try:
-        metadata = path.lstat()
-        raw = path.read_bytes()
+        raw = _read_bound_config(path)
         payload = json.loads(raw)
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except (UnicodeError, json.JSONDecodeError) as exc:
         raise GuardError("guard config is unavailable or invalid") from exc
     if (
-        stat.S_ISLNK(metadata.st_mode)
-        or not stat.S_ISREG(metadata.st_mode)
-        or stat.S_IMODE(metadata.st_mode) != 0o600
-        or not isinstance(payload, dict)
+        not isinstance(payload, dict)
         or set(payload)
         != {
             "schema_version",
@@ -114,22 +206,22 @@ def load_config(path: Path) -> GuardConfig:
             "controller",
             "submit_host",
             "allowed_nodes",
-            "candidate_sha",
+            "candidate_bindings",
+            "candidate_set_sha256",
             "pids_max",
-            "allowed_accounts",
             "poll_interval_seconds",
             "require_gpu_probe",
         }
-        or payload.get("schema_version") != 1
+        or payload.get("schema_version") != 2
     ):
         raise GuardError("guard config does not match the closed schema")
     cluster = payload.get("cluster")
     controller = payload.get("controller")
     submit_host = payload.get("submit_host")
     allowed_nodes = payload.get("allowed_nodes")
-    candidate_sha = payload.get("candidate_sha")
+    raw_bindings = payload.get("candidate_bindings")
+    candidate_set_sha256 = payload.get("candidate_set_sha256")
     pids_max = payload.get("pids_max")
-    accounts = payload.get("allowed_accounts")
     interval = payload.get("poll_interval_seconds")
     require_gpu_probe = payload.get("require_gpu_probe")
     if not isinstance(cluster, str) or not cluster or any(char.isspace() for char in cluster):
@@ -147,15 +239,67 @@ def load_config(path: Path) -> GuardConfig:
         raise GuardError("guard Slurm route is invalid")
     if type(pids_max) is not int or not 1 <= pids_max <= 100_000_000:
         raise GuardError("guard pids_max is invalid")
-    if not isinstance(candidate_sha, str) or _CANDIDATE_RE.fullmatch(candidate_sha) is None:
-        raise GuardError("guard candidate SHA is invalid")
     if (
-        not isinstance(accounts, list)
-        or len(accounts) != 3
-        or len(accounts) != len(set(accounts))
-        or not all(isinstance(item, str) and _ACCOUNT_RE.fullmatch(item) for item in accounts)
+        not isinstance(raw_bindings, dict)
+        or set(raw_bindings) != _ACCOUNTS
+        or any(
+            not isinstance(account, str)
+            or _ACCOUNT_RE.fullmatch(account) is None
+            or not isinstance(binding, dict)
+            or set(binding)
+            != {
+                "sandbox",
+                "service_user",
+                "candidate_sha",
+                "candidate_tree",
+            }
+            for account, binding in raw_bindings.items()
+        )
     ):
-        raise GuardError("guard accounts are invalid")
+        raise GuardError("guard candidate bindings are invalid")
+    candidate_bindings: dict[str, CandidateBinding] = {}
+    for account, raw_binding in raw_bindings.items():
+        sandbox = raw_binding.get("sandbox")
+        service_user = raw_binding.get("service_user")
+        candidate_sha = raw_binding.get("candidate_sha")
+        candidate_tree = raw_binding.get("candidate_tree")
+        if (
+            not isinstance(sandbox, str)
+            or _SANDBOX_RE.fullmatch(sandbox) is None
+            or account != f"loom-dev-{sandbox}"
+            or not isinstance(service_user, str)
+            or service_user != f"loom-sandbox-{sandbox}"
+            or not isinstance(candidate_sha, str)
+            or _CANDIDATE_RE.fullmatch(candidate_sha) is None
+            or not isinstance(candidate_tree, str)
+            or _CANDIDATE_RE.fullmatch(candidate_tree) is None
+        ):
+            raise GuardError("guard candidate bindings are invalid")
+        candidate_bindings[account] = CandidateBinding(
+            account=account,
+            sandbox=sandbox,
+            service_user=service_user,
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+        )
+    candidate_shas = {
+        binding.candidate_sha for binding in candidate_bindings.values()
+    }
+    candidate_labels = {candidate_sha[:12] for candidate_sha in candidate_shas}
+    if (
+        {binding.sandbox for binding in candidate_bindings.values()} != set(_SANDBOXES)
+        or len(candidate_shas) != 3
+        or len(candidate_labels) != 3
+    ):
+        raise GuardError("guard candidate bindings must be pairwise distinct")
+    canonical_bindings = json.dumps(
+        raw_bindings,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+    expected_set_sha256 = hashlib.sha256(canonical_bindings).hexdigest()
+    if candidate_set_sha256 != expected_set_sha256:
+        raise GuardError("guard candidate-set digest is invalid")
     if (
         isinstance(interval, bool)
         or not isinstance(interval, (int, float))
@@ -169,10 +313,10 @@ def load_config(path: Path) -> GuardConfig:
         controller=controller,
         submit_host=submit_host,
         allowed_nodes=frozenset(node.lower() for node in allowed_nodes),
-        candidate_sha=candidate_sha,
+        candidate_bindings=candidate_bindings,
+        candidate_set_sha256=expected_set_sha256,
         config_sha256=hashlib.sha256(raw).hexdigest(),
         pids_max=pids_max,
-        allowed_accounts=frozenset(accounts),
         poll_interval_seconds=float(interval),
         require_gpu_probe=require_gpu_probe,
     )
@@ -244,6 +388,7 @@ def _job_record(job_id: str) -> JobRecord:
         "JobName": [],
         "BatchHost": [],
         "NodeList": [],
+        "UserId": [],
     }
     for field in values:
         values[field] = re.findall(rf"(?:^|\s){field}=(\S+)", completed.stdout)
@@ -259,6 +404,7 @@ def _job_record(job_id: str) -> JobRecord:
         job_name=values["JobName"][0],
         batch_host=values["BatchHost"][0],
         node_list=values["NodeList"][0],
+        user=values["UserId"][0].partition("(")[0],
     )
 
 
@@ -295,17 +441,25 @@ def apply_job_limit(
         raise GuardError("Loom cgroup job comment is invalid")
     if record.account not in config.allowed_accounts:
         raise GuardError("Loom cgroup job account is not allowed")
+    binding = config.candidate_bindings[record.account]
+    if record.user != binding.service_user:
+        raise GuardError("Loom cgroup job user does not match its sandbox account")
     if int(match.group(1)) != config.pids_max:
         raise GuardError("Loom cgroup job PID ceiling differs from host policy")
-    candidate_label = config.candidate_sha[:12]
-    if (
-        not record.job_name.startswith("loom-")
-        or (
-            config.candidate_sha not in record.job_name
-            and f"-{candidate_label}-" not in record.job_name
-        )
-    ):
-        raise GuardError("Loom job name is not bound to the host candidate")
+    candidate_label = binding.candidate_sha[:12]
+    node = record.node_list.lower()
+    regular_job_name = (
+        f"loom-sandbox-{binding.sandbox}-{candidate_label}-{node}"
+    )
+    allocation_job_name = re.fullmatch(
+        (
+            rf"loom827-{re.escape(binding.sandbox)}-{candidate_label}-"
+            rf"{re.escape(node)}-g[0-9a-f]{{64}}-a[1-9][0-9]*"
+        ),
+        record.job_name,
+    )
+    if record.job_name != regular_job_name and allocation_job_name is None:
+        raise GuardError("Loom job name is not bound to its sandbox candidate")
     if (
         record.batch_host.lower() not in config.allowed_nodes
         or record.node_list.lower() not in config.allowed_nodes
@@ -375,6 +529,10 @@ def read_resource_probe(
     """Read back finite controls from the real Slurm job cgroup."""
 
     try:
+        binding = config.candidate_bindings[record.account]
+    except KeyError as exc:
+        raise GuardError("job resource probe account is not allowed") from exc
+    try:
         cpu_max = (job_path / "cpu.max").read_text(encoding="utf-8").strip()
         memory_max = (job_path / "memory.max").read_text(encoding="utf-8").strip()
         pids_max = (job_path / "pids.max").read_text(encoding="utf-8").strip()
@@ -394,7 +552,12 @@ def read_resource_probe(
         "cluster": config.cluster,
         "controller": config.controller,
         "submit_host": config.submit_host,
-        "candidate_sha": config.candidate_sha,
+        "account": record.account,
+        "sandbox": binding.sandbox,
+        "service_user": binding.service_user,
+        "candidate_sha": binding.candidate_sha,
+        "candidate_tree": binding.candidate_tree,
+        "candidate_set_sha256": config.candidate_set_sha256,
         "job_name": record.job_name,
         "batch_host": record.batch_host,
         "node_list": record.node_list,
@@ -418,7 +581,7 @@ def scan_once(
         "unrelated": 0,
         "failed": 0,
         "failures": [],
-        "resource_probe": None,
+        "resource_probes": {},
     }
     discovered = discover_job_cgroups(cgroup_root)
     if isinstance(job_lookup, BoundedJobLookup):
@@ -431,7 +594,7 @@ def scan_once(
                 probe = read_resource_probe(job_path, record=record, config=config)
                 result["verified"] += 1
                 probe["observed_at"] = datetime.now(UTC).isoformat()
-                result["resource_probe"] = probe
+                result["resource_probes"][record.account] = probe
             else:
                 result["unrelated"] += 1
         except GuardError as exc:
@@ -455,9 +618,9 @@ def write_status(
     result: dict[str, Any],
 ) -> None:
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "timestamp": datetime.now(UTC).isoformat(),
-        "candidate_sha": config.candidate_sha,
+        "candidate_set_sha256": config.candidate_set_sha256,
         "config_sha256": config.config_sha256,
         **result,
     }
@@ -485,7 +648,7 @@ def failed_status(reason: str) -> dict[str, Any]:
         "unrelated": 0,
         "failed": 1,
         "failures": [{"job_id": None, "reason": reason}],
-        "resource_probe": None,
+        "resource_probes": {},
     }
 
 
@@ -495,7 +658,7 @@ def daemon_iteration(
     status_path: Path,
     job_lookup: JobLookup,
     cgroup_root: Path = Path("/sys/fs/cgroup"),
-    last_resource_probe: dict[str, Any] | None = None,
+    last_resource_probes: Mapping[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     try:
         if _cluster_name() != config.cluster:
@@ -503,8 +666,11 @@ def daemon_iteration(
         result = scan_once(config, cgroup_root=cgroup_root, job_lookup=job_lookup)
     except GuardError as exc:
         result = failed_status(str(exc))
-    if result["resource_probe"] is None and last_resource_probe is not None:
-        result["resource_probe"] = last_resource_probe
+    if last_resource_probes is not None:
+        result["resource_probes"] = {
+            **last_resource_probes,
+            **result["resource_probes"],
+        }
     write_status(status_path, config=config, result=result)
     return result
 
@@ -532,16 +698,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")
             return int(result["failed"] > 0)
         lookup = BoundedJobLookup()
-        last_resource_probe: dict[str, Any] | None = None
+        last_resource_probes: dict[str, dict[str, Any]] = {}
         while True:
             result = daemon_iteration(
                 config,
                 status_path=args.status,
                 job_lookup=lookup,
-                last_resource_probe=last_resource_probe,
+                last_resource_probes=last_resource_probes,
             )
-            if isinstance(result["resource_probe"], dict):
-                last_resource_probe = result["resource_probe"]
+            last_resource_probes = dict(result["resource_probes"])
             if result["verified"] or result["failed"]:
                 sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")
                 sys.stdout.flush()

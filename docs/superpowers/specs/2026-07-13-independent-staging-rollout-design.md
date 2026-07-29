@@ -12,6 +12,11 @@ rollout, capacity, release-gate, and smoke require every one of the other 14
 active hosts / 140 slots. Node 7 stays stopped and cannot be restored by a
 runtime flag; re-admission requires a separate merged change and fresh evidence.
 
+Owner correction (2026-07-29): the amendment above is superseded. Node 7 is a
+normal infrastructure and capacity candidate; acceptance covers all 15 hosts
+with `excluded_nodes=[]`. Busy work is preserved by candidate-owned
+drain/quiescence, never cancellation or preemption.
+
 This design implements the operator-independence portion of #803. Hongjian and
 Devansh must each be able to update Loom staging after code has merged without
 asking Qianyi to provide credentials, start a process, refresh a backup, or

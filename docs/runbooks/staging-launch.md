@@ -634,12 +634,12 @@ special files, or a
 non-exact resolved SHA fail closed. Publication is no-replace and immutable:
 an exact existing target is accepted only after full index/physical-tree
 validation, and drift is never replaced or implicitly cleaned during rollout
-or resume. Broker preflight verifies the fixed 14 active nodes can read/search
+or resume. Broker preflight verifies all 15 nodes can read/search
 but not write the root. After publish and before environment-state apply, step
 11 streams trusted verifier bytes over protected SSH stdin (never from the
-target) and requires all 14 nodes to agree on exact HEAD, clean status,
+target) and requires all 15 nodes to agree on exact HEAD, clean status,
 index/modes, deterministic tracked-file readability, and content identity.
-The 13 clients must report the exact NFSv4 source and `trt-gb10-2` the ext4
+The 14 clients must report the exact NFSv4 source and `trt-gb10-2` the ext4
 backend; mount/device/inode values remain sanitized evidence. Private worker
 env and token sources stay platform-dev-local mode `0600` files.
 The external Slurm autoscaler also treats release-state drift as a fail-closed
@@ -693,10 +693,14 @@ node-agent service and timer must match the installed units, and the timer must
 be enabled and active/waiting. After the rollout session disconnects, wait more
 than one timer period, stop one declared-active canary worker, and require the
 same candidate image and a fresh linked heartbeat to return within the next
-period. A stopped/excluded host, including the current node 7 exception, must
-not return. Do not leave a legacy production node-agent timer sharing the
-staging tunnel ports or Compose root; fence or isolate it before connectivity
-is restored.
+period. Any host that a future reviewed policy explicitly stops must not
+return. The 2026-07-29 owner correction removes node 7's prior static
+exception: all 15 GB10 hosts are infrastructure- and capacity-eligible, and
+acceptance records `excluded_nodes=[]`. If a host is busy, the
+candidate-owned drain/quiescence gate defers disruptive convergence without
+cancelling or preempting external jobs. Do not leave a legacy production
+node-agent timer sharing the staging tunnel ports or Compose root; fence or
+isolate it before connectivity is restored.
 
 For OLDLAB 1-5, use the committed staged files in
 `deploy/worker-pools/oldlab/` as the source of truth for included nodes,

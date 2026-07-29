@@ -1823,7 +1823,7 @@ def test_systemd_launch_uses_exact_isolated_transient_unit_and_budget() -> None:
     assert outcome.details == {
         "latency-ms": "125",
         "gb10-evidence-sha256": PassingGB10RehearsalTransport._evidence().evidence_digest,
-        "gb10-host-count": "14",
+        "gb10-host-count": "15",
         "status": "active",
         "unit": plan.resources.systemd_unit,
     }

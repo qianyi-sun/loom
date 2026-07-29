@@ -521,15 +521,16 @@ GB10/OLDLAB machines remain shared physical capacity. The release contract is
 belongs to production, staging/dev has `staging_slots = 0`, and any staging borrow must
 be explicit, bounded to at most one slot per host, and drained back before the
 borrow window ends. The physical v1.0 GB10 inventory remains all 15 hosts at 10
-slots each, but #822 marks node 7 unreachable and assigns it zero production or
-staging slots. Staging's current fail-closed active set is the other 14 hosts /
-140 slots. The repo-owned `deploy/worker-pools/gb10/ssh_config` routes
+slots each. The 2026-07-29 owner correction supersedes #822's static node 7
+exclusion: all 15 hosts are infrastructure- and capacity-eligible, for a
+150-slot ceiling, and acceptance records `excluded_nodes=[]`. The repo-owned
+`deploy/worker-pools/gb10/ssh_config` routes
 the private `trt-gb10-2..15` addresses on port `22` through
 `ProxyJump trt-gb10-1`; `trt-gb10-1` is the only public entrypoint and uses
 port `2221`.
-The manifest represents node 7 as `unreachable` until its separate merged
-re-admission gate passes; it can also represent future `staging_draining` and
-`host_draining` states when live evidence requires them.
+The candidate-owned drain/quiescence gate can represent a temporarily busy
+host as draining while it defers disruptive convergence. It must never cancel
+or preempt an external job.
 
 Generate the secret-safe desired-vs-observed evidence before a production
 promotion:
@@ -1033,7 +1034,7 @@ Recommended idle-exit values:
 |---|---:|---|
 | Fixed Kubernetes worker | unset | Keep baseline capacity online. |
 | Dev or staging elastic Slurm | 300 seconds | Release idle allocations quickly while preserving short queue bursts. |
-| Staging GB10 release-managed Compose | 7200 seconds | Keep all 14 active hosts fresh through bounded-parallel prep, release-gate, and smoke validation while #822 excludes node 7. |
+| Staging GB10 release-managed Compose | 7200 seconds | Keep all 15 hosts fresh through bounded-parallel prep, candidate-owned quiescence, release-gate, and smoke validation. |
 | Production OLDLAB elastic Slurm | 600-900 seconds | Avoid churn during real batch bursts; use 900 seconds when submissions are bursty. |
 
 Keep Slurm `--time` as a hard upper bound even when idle-exit is enabled.
@@ -1531,8 +1532,10 @@ environment/pool authority.
 For GB10, use the same Slurm actuator rather than the legacy `gb10` actuator
 for normal capacity. The backend remains `docker` because each worker runs
 Docker sandboxes, while the autoscaler actuator is `slurm` because capacity is
-requested and released through the GB10 Slurm partition. While #822 excludes
-node 7, the declared 14-node, 10-slot shape has a ceiling of 140 slots:
+requested and released through the GB10 Slurm partition. The staging
+sandbox's declared 15-node, 8-slot shape has a ceiling of 120 Slurm slots.
+The physical/legacy node-agent ceiling remains 150 and is not the external
+Slurm policy:
 
 ```json
 {
@@ -1540,7 +1543,7 @@ node 7, the declared 14-node, 10-slot shape has a ceiling of 140 slots:
   "enabled": false,
   "disabled_reason": "#827: service identity and exact-candidate allocation attestation are not yet proven for every allowed GB10 node",
   "min_slots": 0,
-  "max_slots": 140,
+  "max_slots": 120,
   "actuator_config": {
     "backend": "docker",
     "cpu_arch": "arm64",
@@ -1552,6 +1555,7 @@ node 7, the declared 14-node, 10-slot shape has a ceiling of 140 slots:
       "trt-gb10-4",
       "trt-gb10-5",
       "trt-gb10-6",
+      "trt-gb10-7",
       "trt-gb10-8",
       "trt-gb10-9",
       "trt-gb10-10",
@@ -1565,11 +1569,11 @@ node 7, the declared 14-node, 10-slot shape has a ceiling of 140 slots:
     "repo_dir": "/shared_work2/qianyi/.loom-staging-rollout/worker-repos/loom-remote-worker-${IMAGE_TAG}",
     "requested_cpus": 20,
     "requested_memory_mib": 115000,
-    "requested_concurrency": 10,
-    "max_jobs": 14,
+    "requested_concurrency": 8,
+    "max_jobs": 15,
     "pending_job_cap": 2,
     "time_limit": "2-00:00:00",
-    "exclusive": true
+    "exclusive": false
   }
 }
 ```
@@ -1594,7 +1598,7 @@ singular command name it always executes a complete, resumable matrix. Each
 declared node receives its own non-exclusive `sbatch` and `srun` with an
 explicit Slurm `NodeName` from `allowed_nodes`; the compute OS hostname is
 separately checked against `host_aliases[node]`. The command binds the fresh
-combined 19-node runtime receipt and repeats raw candidate/env, Docker,
+combined 20-node infrastructure runtime receipt and repeats raw candidate/env, Docker,
 allocation-cgroup, and resolved Compose checks inside each allocation. A
 missing, duplicate, foreign, failed, timed out, cancelled, route-drifted,
 receipt-drifted, or cgroup-unbound node prevents publication of the final pass
@@ -1644,8 +1648,8 @@ Install/check runs a bounded, self-cleaning private-claim/access-gate/publish/
 collision probe as the service identity before accepting the NFS publication
 contract.
 
-Broker preflight checks the fixed 14 active GB10 nodes against the root as the
-`qianyi` consumer. The 13 NFS clients must report the exact source and NFSv4
+Broker preflight checks all 15 GB10 nodes against the root as the `qianyi`
+consumer. The 14 NFS clients must report the exact source and NFSv4
 identity, while `trt-gb10-2` must report its ext4 export backend. After
 publication and before environment-state apply, step 11 reads the verifier
 from the exact resolved commit's Git blob, not the mutable rollout worktree,

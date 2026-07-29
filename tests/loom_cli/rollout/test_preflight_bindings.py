@@ -96,11 +96,31 @@ def _executions() -> tuple[CheckExecution, ...]:
                 "runtime-ready": True,
             },
         ),
-        _execution("gb10.shared-mount", {"mount-digest": "2" * 64}),
-        _execution("gb10.candidate-source", {"source-digest": "1" * 64}),
+        _execution(
+            "gb10.shared-mount",
+            {
+                "mount-digest": "2" * 64,
+                "receipt-digest": "a" * 64,
+                "receipt-generation": 1,
+            },
+        ),
+        _execution(
+            "gb10.candidate-source",
+            {
+                "source-digest": "1" * 64,
+                "infrastructure-receipt-digest": "a" * 64,
+                "receipt-generation": 1,
+            },
+        ),
         _execution(
             "gb10.host-readiness",
-            {"inventory-digest": "3" * 64, "boot-ids": {"gb10-1": "boot-1"}},
+            {
+                "inventory-digest": "3" * 64,
+                "boot-ids": {"gb10-1": "boot-1"},
+                "node-receipt-digests": {"gb10-1": "b" * 64},
+                "receipt-digest": "a" * 64,
+                "receipt-generation": 1,
+            },
         ),
         _execution(
             "browser.runtime",
@@ -174,6 +194,41 @@ def test_derives_complete_bindings_only_from_exact_evidence() -> None:
         target_unit_sha256=systemd.evidence["supervisor-unit-digests"],  # type: ignore[arg-type]
         target_unit_set_digest=str(systemd.evidence["supervisor-unit-set-digest"]),
     )
+
+
+def test_external_receipt_refresh_preserves_stable_attestation_bindings() -> None:
+    first = _executions()
+    refreshed = list(first)
+    for check_id in (
+        "gb10.shared-mount",
+        "gb10.candidate-source",
+        "gb10.host-readiness",
+    ):
+        index = next(
+            index
+            for index, execution in enumerate(refreshed)
+            if execution.check_id == check_id
+        )
+        evidence = dict(refreshed[index].evidence)
+        evidence["receipt-generation"] = 2
+        if "receipt-digest" in evidence:
+            evidence["receipt-digest"] = "c" * 64
+        if "infrastructure-receipt-digest" in evidence:
+            evidence["infrastructure-receipt-digest"] = "c" * 64
+        if "node-receipt-digests" in evidence:
+            evidence["node-receipt-digests"] = {"gb10-1": "d" * 64}
+        refreshed[index] = replace(
+            refreshed[index],
+            evidence=MappingProxyType(evidence),
+            evidence_hash="4" * 64,
+        )
+
+    before = derive_attestation_bindings(_context(), first)
+    after = derive_attestation_bindings(_context(), refreshed)
+
+    assert after.gb10_mount_digest == before.gb10_mount_digest
+    assert after.gb10_unit_digest == before.gb10_unit_digest
+    assert after.gb10_boot_ids == before.gb10_boot_ids
 
 
 def test_restore_verified_lease_overrides_prebackup_reuse_evidence() -> None:

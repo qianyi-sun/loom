@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -58,8 +59,8 @@ def test_profiles_are_closed_and_collision_free() -> None:
         == 9
     )
     assert all(len(profile.services) == 3 for profile in profiles)
-    assert len(host.ELIGIBLE_NODES) == 19
-    assert "trt-gb10-7" not in host.ELIGIBLE_NODES
+    assert len(host.INFRASTRUCTURE_LINK_NODES) == 20
+    assert "trt-gb10-7" in host.INFRASTRUCTURE_LINK_NODES
 
 
 def test_server_config_rejects_loopback_target_drift(tmp_path: Path) -> None:
@@ -208,7 +209,7 @@ def test_prepare_and_install_candidate_credentials_are_exact_and_host_local(
 
     assert (issuance / "server" / "server-key.pem").stat().st_mode & 0o777 == 0o600
     assert len(tuple((issuance / "clients").iterdir())) == len(
-        host.ELIGIBLE_NODES,
+        host.INFRASTRUCTURE_LINK_NODES,
     )
     node_source = issuance / "clients" / "oldlab-1"
     cert_text = host._certificate_text(node_source / "client.pem")
@@ -306,7 +307,7 @@ def _valid_attestation(profile: host.Profile) -> dict[str, object]:
                 for service in profile.services
             },
         }
-        for node in host.ELIGIBLE_NODES
+        for node in host.INFRASTRUCTURE_LINK_NODES
     }
     payload: dict[str, object] = {
         "schema_version": 1,
@@ -316,7 +317,7 @@ def _valid_attestation(profile: host.Profile) -> dict[str, object]:
         "expires_at": (generated + timedelta(seconds=host.ATTESTATION_TTL_SECONDS))
         .isoformat()
         .replace("+00:00", "Z"),
-        "eligible_nodes": list(host.ELIGIBLE_NODES),
+        "eligible_nodes": list(host.INFRASTRUCTURE_LINK_NODES),
         "bundle_generation": {
             "candidate_sha": SHA,
             "ca_fingerprint": fingerprint,
@@ -358,7 +359,9 @@ def test_fleet_attestation_persists_only_complete_fresh_closed_schema(
 
     assert destination.stat().st_mode & 0o777 == 0o600
     assert destination.name == "fleet.json"
-    assert destination.read_text(encoding="utf-8").count("trt-gb10-7") == 0
+    persisted = json.loads(destination.read_text(encoding="utf-8"))
+    assert "trt-gb10-7" in persisted["eligible_nodes"]
+    assert persisted["nodes"]["trt-gb10-7"]["node"] == "trt-gb10-7"
 
 
 def test_fleet_attestation_rejects_missing_node_or_stale_payload(

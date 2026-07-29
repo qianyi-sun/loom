@@ -1,13 +1,15 @@
 #!/usr/bin/python3 -I
-"""Fixed root authority for one exact-tree developer-sandbox node candidate.
+"""Fixed host-root authority for one exact developer-sandbox node candidate.
 
-An external root administrator bootstraps this program from a clean,
-root-owned exact checkout.  The installed runtime exposes only ``transact`` and
+A persistent root channel bootstraps this program from a clean, root-owned
+exact checkout.  The channel may be host root or the repository's one-shot
+Docker/chroot bootstrap.  The installed runtime exposes only ``transact`` and
 ``check`` through two fixed sudoers commands.  Requests arrive on stdin as a
 closed canonical envelope; no path, program, user, or secret is accepted in
-argv or the inherited environment.  A different source tree is admitted only
-through the direct-root ``upgrade`` transaction, which snapshots and restores
-the installed authority without reinitializing runtime receipts or journals.
+argv or the inherited environment.  A different SHA or tree is admitted only
+through the persistent-root ``upgrade`` transaction, which snapshots and
+restores the installed authority without reinitializing runtime receipts or
+journals.
 """
 
 from __future__ import annotations
@@ -74,6 +76,19 @@ NODE_TRANSPORT: Final = Path(
     "/usr/local/libexec/loom-developer-sandbox-node-transport",
 )
 STAGE_ROOT: Final = Path("/run/loom-developer-sandbox-node-authority")
+NODE_AUTHORITY_TMPFILES_SOURCE_RELATIVE: Final = Path(
+    "deploy/developer-sandboxes/loom-developer-sandbox-node-authority.tmpfiles.conf",
+)
+NODE_AUTHORITY_TMPFILES: Final = Path(
+    "/etc/tmpfiles.d/loom-developer-sandbox-node-authority.conf",
+)
+NODE_AUTHORITY_TMPFILES_DIRECTORIES: Final = (
+    (Path("run/loom-developer-sandbox-node-authority"), 0o700),
+)
+STAGING_SHARED_TMPFILES_DIRECTORIES: Final = (
+    (Path("srv/loom"), 0o755),
+    (Path("srv/loom/staging-shared"), 0o755),
+)
 UPGRADE_ROOT: Final = STATE_ROOT / "upgrades"
 UPGRADE_ACTIVE: Final = STATE_ROOT / "upgrade-active.json"
 UPGRADE_JOURNAL: Final = STATE_ROOT / "upgrade-journal.jsonl"
@@ -89,6 +104,15 @@ LIVE_AUTHORITY_RELATIVE: Final = Path(
 PLATFORM_HEALTH_AUTHORITY_RELATIVE: Final = Path(
     "scripts/ops/developer_sandbox_platform_health_authority.py",
 )
+CAPACITY_CONTRACT_RELATIVE: Final = Path(
+    "scripts/ops/developer_sandbox_capacity_contract.py",
+)
+OLDLAB_CAPACITY_POLICY_RELATIVE: Final = Path(
+    "deploy/developer-sandboxes/shared-capacity-policies/oldlab.toml",
+)
+GB10_CAPACITY_POLICY_RELATIVE: Final = Path(
+    "deploy/developer-sandboxes/shared-capacity-policies/gb10.toml",
+)
 PLATFORM_HEALTH_CONFIG_RELATIVE: Final = Path(
     "deploy/developer-sandboxes/platform-health-authority.toml",
 )
@@ -97,6 +121,12 @@ PLATFORM_HEALTH_SERVICE_RELATIVE: Final = Path(
 )
 PLATFORM_HEALTH_SUDOERS_RELATIVE: Final = Path(
     "deploy/developer-sandboxes/loom-developer-sandbox-platform-health-authority.sudoers",
+)
+SLURM_RECOVERY_SERVICE_RELATIVE: Final = Path(
+    "deploy/slurm/loom-developer-sandbox-slurm-recovery.service",
+)
+SLURM_RECOVERY_TIMER_RELATIVE: Final = Path(
+    "deploy/slurm/loom-developer-sandbox-slurm-recovery.timer",
 )
 STAGING_PRESSURE_AUTHORITY_RELATIVE: Final = Path(
     "scripts/ops/staging_pressure_reclaim_authority.py",
@@ -143,6 +173,10 @@ MAX_PAYLOAD_BYTES: Final = 64 * 1024 * 1024
 SHA_RE: Final = frozenset("0123456789abcdef")
 SANDBOXES: Final = frozenset({"qianyi", "hongjian", "devansh"})
 STAGING_SCOPE: Final = "staging"
+STAGING_BOOT_ID_PATH: Final = Path("/proc/sys/kernel/random/boot_id")
+STAGING_BOOT_ID_RE: Final = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z",
+)
 DOMAINS: Final = frozenset({"oldlab", "gb10"})
 TRANSACT_ACTIONS: Final = frozenset(
     {
@@ -193,6 +227,14 @@ STAGING_ACTIONS: Final = frozenset(
         "staging-pressure-reclaim-observe",
     },
 )
+SLURM_ACTIONS: Final = frozenset(
+    {
+        "slurm-node-converge",
+        "slurm-controller-converge",
+        "slurm-rollback",
+        "slurm-check",
+    },
+)
 UPGRADE_PHASES: Final = frozenset(
     {
         "prepared",
@@ -211,9 +253,9 @@ PAYLOAD_KIND: Final = {
     "attest": "attestation-seed",
     "rollback": "none",
     "persist-fleet-attestation": "fleet-attestation-json",
-    "slurm-node-converge": "none",
-    "slurm-controller-converge": "none",
-    "slurm-rollback": "none",
+    "slurm-node-converge": "slurm-candidate-set-json",
+    "slurm-controller-converge": "slurm-candidate-set-json",
+    "slurm-rollback": "slurm-candidate-set-json",
     "collect-live-overlap": "live-overlap-collection-json",
     "staging-allocation-bootstrap": "staging-infrastructure-operation-request",
     "staging-allocation-probe": "staging-allocation-probe-request",
@@ -229,7 +271,7 @@ PAYLOAD_KIND: Final = {
     "inspect-link-server": "none",
     "export-domain-attestation": "none",
     "export-runtime-proof-artifact": "runtime-proof-artifact-id",
-    "slurm-check": "none",
+    "slurm-check": "slurm-candidate-set-json",
     "observe-live-overlap-job": "live-overlap-job-json",
     "observe-platform-health-node": "platform-health-node-json",
     "staging-pressure-reclaim-observe": "staging-pressure-reclaim-observe-request",
@@ -364,9 +406,7 @@ STAGING_INFRASTRUCTURE_RECEIPT_FIELDS: Final = {
     "mount_contract",
     "result",
 }
-STAGING_INFRASTRUCTURE_NODES: Final = tuple(
-    f"trt-gb10-{index}" for index in (1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15)
-)
+STAGING_INFRASTRUCTURE_NODES: Final = tuple(f"trt-gb10-{index}" for index in range(1, 16))
 STAGING_INFRASTRUCTURE_MAX_TRANSACTION_SECONDS: Final = 3660
 STAGING_PRESSURE_OBSERVE_FIELDS: Final = {
     "schema_version",
@@ -387,9 +427,11 @@ STAGING_PRESSURE_OBSERVE_FIELDS: Final = {
 }
 SOURCE_ASSETS: Final = (
     Path("scripts/ops/developer_sandbox_node_authority.py"),
+    Path("scripts/ops/developer_sandbox_node_docker_request.py"),
     Path("scripts/ops/developer_sandbox_node_transport.py"),
     LIVE_AUTHORITY_RELATIVE,
     PLATFORM_HEALTH_AUTHORITY_RELATIVE,
+    CAPACITY_CONTRACT_RELATIVE,
     STAGING_PRESSURE_AUTHORITY_RELATIVE,
     HOST_AUTHORITY_RELATIVE,
     DOMAIN_RUNTIME_RELATIVE,
@@ -400,6 +442,8 @@ SOURCE_ASSETS: Final = (
     RUNTIME_CONFIG_RELATIVE,
     Path("deploy/developer-sandboxes/node-authority-transport.toml"),
     PLATFORM_HEALTH_CONFIG_RELATIVE,
+    OLDLAB_CAPACITY_POLICY_RELATIVE,
+    GB10_CAPACITY_POLICY_RELATIVE,
     STAGING_PRESSURE_CONFIG_RELATIVE,
     STAGING_PRESSURE_SERVICE_RELATIVE,
     STAGING_PRESSURE_SUDOERS_RELATIVE,
@@ -409,6 +453,7 @@ SOURCE_ASSETS: Final = (
     STAGING_EXTERNAL_SERVICE_RELATIVE,
     STAGING_EXTERNAL_SUDOERS_RELATIVE,
     STAGING_EXTERNAL_WRAPPER_RELATIVE,
+    NODE_AUTHORITY_TMPFILES_SOURCE_RELATIVE,
     Path(r"deploy/developer-sandboxes/srv-loom-staging\x2dshared.mount"),
     Path("deploy/developer-sandboxes/loom-staging-shared.tmpfiles.conf"),
     PLATFORM_HEALTH_SERVICE_RELATIVE,
@@ -420,16 +465,28 @@ SOURCE_ASSETS: Final = (
     Path("deploy/slurm/developer-sandboxes/oldlab.toml"),
     Path("deploy/slurm/developer-sandboxes/gb10.toml"),
     Path("deploy/slurm/loom-slurm-job-cgroup-guard.service"),
+    SLURM_RECOVERY_SERVICE_RELATIVE,
+    SLURM_RECOVERY_TIMER_RELATIVE,
     SUDOERS_RELATIVE,
+)
+SOURCE_ASSET_PARENT_PATHS: Final = tuple(
+    sorted(
+        {parent for asset in SOURCE_ASSETS for parent in asset.parents if parent != Path(".")},
+        key=lambda path: (len(path.parts), path.as_posix()),
+    ),
 )
 MIGRATABLE_EXTERNAL_SOURCE_ASSETS: Final = frozenset(
     {
+        Path("scripts/ops/developer_sandbox_node_docker_request.py"),
+        SLURM_RECOVERY_SERVICE_RELATIVE,
+        SLURM_RECOVERY_TIMER_RELATIVE,
         STAGING_EXTERNAL_AUTHORITY_RELATIVE,
         STAGING_EXTERNAL_CONSUMER_RELATIVE,
         STAGING_EXTERNAL_CONFIG_RELATIVE,
         STAGING_EXTERNAL_SERVICE_RELATIVE,
         STAGING_EXTERNAL_SUDOERS_RELATIVE,
         STAGING_EXTERNAL_WRAPPER_RELATIVE,
+        NODE_AUTHORITY_TMPFILES_SOURCE_RELATIVE,
         Path(r"deploy/developer-sandboxes/srv-loom-staging\x2dshared.mount"),
         Path("deploy/developer-sandboxes/loom-staging-shared.tmpfiles.conf"),
     },
@@ -437,12 +494,25 @@ MIGRATABLE_EXTERNAL_SOURCE_ASSETS: Final = frozenset(
 PLATFORM_HEALTH_LIBEXEC: Final = Path(
     "/usr/local/libexec/loom-developer-sandbox-platform-health-authority",
 )
+CAPACITY_CONTRACT_LIBEXEC: Final = Path(
+    "/usr/local/libexec/scripts/ops/developer_sandbox_capacity_contract.py",
+)
 PLATFORM_HEALTH_SERVICE: Final = Path(
     "/etc/systemd/system/loom-developer-sandbox-platform-health-authority.service",
 )
 PLATFORM_HEALTH_SUDOERS: Final = Path(
     "/etc/sudoers.d/loom-developer-sandbox-platform-health-authority",
 )
+SLURM_RECOVERY_LIBEXEC: Final = Path(
+    "/usr/local/libexec/loom-developer-sandbox-slurm-recovery",
+)
+SLURM_RECOVERY_SERVICE: Final = Path(
+    "/etc/systemd/system/loom-developer-sandbox-slurm-recovery.service",
+)
+SLURM_RECOVERY_TIMER: Final = Path(
+    "/etc/systemd/system/loom-developer-sandbox-slurm-recovery.timer",
+)
+SLURM_RECOVERY_TIMER_UNIT: Final = "loom-developer-sandbox-slurm-recovery.timer"
 STAGING_PRESSURE_LIBEXEC: Final = Path(
     "/usr/local/libexec/loom-staging-pressure-reclaim-authority",
 )
@@ -484,9 +554,33 @@ STAGING_EXTERNAL_TMPFILES: Final = Path(
 )
 SYSTEM_INSTALL_ASSETS: Final = (
     (
+        Path("scripts/ops/developer_sandbox_slurm_policy.py"),
+        SLURM_RECOVERY_LIBEXEC,
+        0o755,
+        0o755,
+    ),
+    (
+        SLURM_RECOVERY_SERVICE_RELATIVE,
+        SLURM_RECOVERY_SERVICE,
+        0o644,
+        0o755,
+    ),
+    (
+        SLURM_RECOVERY_TIMER_RELATIVE,
+        SLURM_RECOVERY_TIMER,
+        0o644,
+        0o755,
+    ),
+    (
         PLATFORM_HEALTH_AUTHORITY_RELATIVE,
         PLATFORM_HEALTH_LIBEXEC,
         0o755,
+        0o755,
+    ),
+    (
+        CAPACITY_CONTRACT_RELATIVE,
+        CAPACITY_CONTRACT_LIBEXEC,
+        0o644,
         0o755,
     ),
     (
@@ -573,6 +667,12 @@ SYSTEM_INSTALL_ASSETS: Final = (
         0o644,
         0o755,
     ),
+    (
+        NODE_AUTHORITY_TMPFILES_SOURCE_RELATIVE,
+        NODE_AUTHORITY_TMPFILES,
+        0o644,
+        0o755,
+    ),
 )
 NODE_HOSTNAMES: Final = {
     **{f"oldlab-{index}": f"trt-eai-oldlab-{index}" for index in range(1, 6)},
@@ -582,6 +682,7 @@ NODE_HOSTNAMES: Final = {
     "trt-gb10-4": "gx10-0d93",
     "trt-gb10-5": "gx10-1036",
     "trt-gb10-6": "gx10-1000",
+    "trt-gb10-7": "gx10-0faf",
     "trt-gb10-8": "gx10-db22",
     "trt-gb10-9": "gx10-16f6",
     "trt-gb10-10": "gx10-0f82",
@@ -591,6 +692,28 @@ NODE_HOSTNAMES: Final = {
     "trt-gb10-14": "gx10-0a49",
     "trt-gb10-15": "gx10-0152",
 }
+BOOTSTRAP_DIRECTORIES: Final = (
+    (SOURCE_ROOT.parent, 0o755, 0o755),
+    (SOURCE_ROOT, 0o755, 0o755),
+    *((SOURCE_ROOT / parent, 0o755, 0o755) for parent in SOURCE_ASSET_PARENT_PATHS),
+    (LIBEXEC.parent, 0o755, 0o755),
+    (POLICY.parent, 0o755, 0o755),
+    (SUDOERS.parent, 0o755, 0o755),
+    (PLATFORM_HEALTH_SERVICE.parent, 0o755, 0o755),
+    (STAGING_EXTERNAL_INSTALL_ROOT, 0o755, 0o755),
+    (STAGING_EXTERNAL_CONSUMER.parent, 0o755, 0o755),
+    (STAGING_EXTERNAL_CONFIG.parent, 0o700, 0o755),
+    (STATE_ROOT, 0o700, 0o755),
+    (RECEIPT_ROOT, 0o700, 0o700),
+    (STAGING_BROKER_ROOT, 0o700, 0o700),
+    (STAGING_ACCOUNTING_ROOT, 0o700, 0o700),
+    (STAGING_INFRASTRUCTURE_PRODUCER_ROOT, 0o700, 0o700),
+    (STAGING_INFRASTRUCTURE_PRODUCER_RECEIPTS, 0o700, 0o700),
+    (STAGING_INFRASTRUCTURE_RECEIPT_ROOT, 0o700, 0o700),
+    (STAGING_INFRASTRUCTURE_INSTALL_GENERATIONS, 0o700, 0o700),
+    (UPGRADE_ROOT, 0o700, 0o700),
+    (STAGE_ROOT, 0o700, 0o755),
+)
 SLURM_CLUSTER: Final = {"oldlab": "trt-oldlab", "gb10": "trt-gb10"}
 SLURM_CONTROLLER: Final = {"oldlab": "oldlab-1", "gb10": "trt-gb10-1"}
 SLURM_PROFILE_NAME: Final = {"oldlab": "oldlab.toml", "gb10": "gb10.toml"}
@@ -644,6 +767,12 @@ SLURM_POLICY_JOURNAL_COMMON_FIELDS: Final = {
     "host",
     "slurm_node",
     "candidate_sha",
+    "candidate_set_sha256",
+    "candidate_bindings",
+    "transaction_id",
+    "candidate_set_generation",
+    "candidate_set_convergence_id",
+    "candidate_set_payload_sha256",
     "snapshot",
     "accounting_snapshot",
     "restart",
@@ -664,16 +793,6 @@ CLIENT_ARCHIVE_FILES: Final = {
     "minio-secret-key",
 }
 ATTESTATION_ARCHIVE_FILES: Final = {"worker.env", "fleet.json"}
-CONTAINER_MARKERS: Final = (Path("/.dockerenv"), Path("/run/.containerenv"))
-CONTAINER_CGROUP_PATHS: Final = (Path("/proc/self/cgroup"), Path("/proc/1/cgroup"))
-CONTAINER_CGROUP_TOKENS: Final = (
-    "docker",
-    "kubepods",
-    "containerd",
-    "podman",
-    "libpod",
-    "lxc",
-)
 RUNTIME_PROOF_ARTIFACT_NAMES: Final = frozenset(
     {
         "combined.json",
@@ -698,7 +817,7 @@ RUNTIME_PROOF_ARTIFACT_SOURCES: Final = {
 }
 MAX_HELPER_STDOUT_BYTES: Final = 1536 * 1024
 MAX_FLEET_ATTESTATION_BYTES: Final = 1 << 20
-AUDIT_LOGINUID: Final = Path("/proc/self/loginuid")
+MAX_SLURM_POLICY_SURFACE_BYTES: Final = 1 << 20
 
 
 class NodeAuthorityError(RuntimeError):
@@ -805,82 +924,6 @@ def _node_for_hostname(hostname: str) -> str:
     return matches[0]
 
 
-def _read_container_cgroup(path: Path) -> str:
-    try:
-        lexical = path.lstat()
-        descriptor = os.open(
-            path,
-            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
-        )
-    except OSError as exc:
-        raise NodeAuthorityError(
-            "direct external root cgroup identity is unavailable",
-        ) from exc
-    try:
-        before = os.fstat(descriptor)
-        payload = _read_fd_twice(
-            descriptor,
-            limit=64 * 1024,
-            error="direct external root cgroup identity is invalid",
-        )
-        after = os.fstat(descriptor)
-        current = path.lstat()
-        if (
-            not stat.S_ISREG(before.st_mode)
-            or stat.S_ISLNK(lexical.st_mode)
-            or _metadata_identity(lexical) != _metadata_identity(before)
-            or _metadata_identity(before) != _metadata_identity(after)
-            or _metadata_identity(after) != _metadata_identity(current)
-        ):
-            raise NodeAuthorityError("direct external root cgroup identity is invalid")
-    except OSError as exc:
-        raise NodeAuthorityError(
-            "direct external root cgroup identity is unavailable",
-        ) from exc
-    finally:
-        os.close(descriptor)
-    try:
-        decoded = payload.decode("utf-8").lower()
-    except UnicodeDecodeError as exc:
-        raise NodeAuthorityError("direct external root cgroup identity is invalid") from exc
-    if not decoded.strip():
-        raise NodeAuthorityError("direct external root cgroup identity is ambiguous")
-    return decoded
-
-
-def _reject_containerized_root(
-    *,
-    marker_paths: Sequence[Path] = CONTAINER_MARKERS,
-    cgroup_paths: Sequence[Path] = CONTAINER_CGROUP_PATHS,
-) -> None:
-    if "container" in os.environ:
-        raise NodeAuthorityError(
-            "node authority bootstrap/upgrade requires a direct external root administrator",
-        )
-    for marker in marker_paths:
-        try:
-            marker.lstat()
-        except FileNotFoundError:
-            continue
-        except OSError as exc:
-            raise NodeAuthorityError(
-                "direct external root container marker is unavailable",
-            ) from exc
-        raise NodeAuthorityError(
-            "node authority bootstrap/upgrade requires a direct external root administrator",
-        )
-    if len(cgroup_paths) != len(CONTAINER_CGROUP_PATHS) or len(set(cgroup_paths)) != len(
-        CONTAINER_CGROUP_PATHS
-    ):
-        raise NodeAuthorityError("direct external root cgroup identity is ambiguous")
-    for path in cgroup_paths:
-        cgroup = _read_container_cgroup(path)
-        if any(token in cgroup for token in CONTAINER_CGROUP_TOKENS):
-            raise NodeAuthorityError(
-                "node authority bootstrap/upgrade requires a direct external root administrator",
-            )
-
-
 def _read_all_stdin() -> bytes:
     raw = sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1)
     if len(raw) > MAX_REQUEST_BYTES:
@@ -933,55 +976,6 @@ def _read_fd_twice(
     return payloads[0]
 
 
-def _read_audit_loginuid(path: Path = AUDIT_LOGINUID) -> int:
-    try:
-        lexical = path.lstat()
-        descriptor = os.open(
-            path,
-            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
-        )
-    except OSError as exc:
-        raise NodeAuthorityError(
-            "direct external root audit identity is unavailable",
-        ) from exc
-    try:
-        before = os.fstat(descriptor)
-        payload = _read_fd_twice(
-            descriptor,
-            limit=32,
-            error="direct external root audit identity is invalid",
-        )
-        after = os.fstat(descriptor)
-        current = path.lstat()
-        if (
-            not stat.S_ISREG(before.st_mode)
-            or stat.S_ISLNK(lexical.st_mode)
-            or _metadata_identity(lexical) != _metadata_identity(before)
-            or _metadata_identity(before) != _metadata_identity(after)
-            or _metadata_identity(after) != _metadata_identity(current)
-        ):
-            raise NodeAuthorityError(
-                "direct external root audit identity is invalid",
-            )
-    except OSError as exc:
-        raise NodeAuthorityError(
-            "direct external root audit identity is unavailable",
-        ) from exc
-    finally:
-        os.close(descriptor)
-    try:
-        value = payload.decode("ascii").strip()
-    except UnicodeDecodeError as exc:
-        raise NodeAuthorityError(
-            "direct external root audit identity is invalid",
-        ) from exc
-    if value != "0":
-        raise NodeAuthorityError(
-            "direct external root audit identity is not root",
-        )
-    return 0
-
-
 def _safe_root_file(path: Path, *, mode: int, limit: int = MAX_REQUEST_BYTES) -> bytes:
     try:
         lexical = path.lstat()
@@ -1022,7 +1016,7 @@ def _safe_root_directory(path: Path, *, mode: int) -> None:
     try:
         metadata = path.lstat()
     except OSError as exc:
-        raise NodeAuthorityError("node authority directory is unavailable") from exc
+        raise NodeAuthorityError(f"node authority directory is unavailable: {path}") from exc
     if (
         not stat.S_ISDIR(metadata.st_mode)
         or stat.S_ISLNK(metadata.st_mode)
@@ -1030,7 +1024,7 @@ def _safe_root_directory(path: Path, *, mode: int) -> None:
         or metadata.st_gid != 0
         or stat.S_IMODE(metadata.st_mode) != mode
     ):
-        raise NodeAuthorityError("node authority directory metadata is unsafe")
+        raise NodeAuthorityError(f"node authority directory metadata is unsafe: {path}")
 
 
 def _ensure_root_directory(
@@ -1063,6 +1057,14 @@ def _ensure_root_directory(
                 ) from exc
         raise
     return True
+
+
+def _ensure_stage_root() -> None:
+    _ensure_root_directory(
+        STAGE_ROOT,
+        mode=0o700,
+        parent_mode=0o755,
+    )
 
 
 def _atomic_install(
@@ -1252,6 +1254,8 @@ def _system_service_paths() -> frozenset[Path]:
         for relative, target, _mode, _parent_mode in SYSTEM_INSTALL_ASSETS
         if relative
         in {
+            SLURM_RECOVERY_SERVICE_RELATIVE,
+            SLURM_RECOVERY_TIMER_RELATIVE,
             PLATFORM_HEALTH_SERVICE_RELATIVE,
             STAGING_PRESSURE_SERVICE_RELATIVE,
             STAGING_EXTERNAL_SERVICE_RELATIVE,
@@ -1293,6 +1297,64 @@ def _systemd_daemon_reload() -> None:
         raise NodeAuthorityError("node authority systemd daemon reload failed safely")
 
 
+def _systemd_enable_recovery_timer(*, start: bool) -> None:
+    argv = ["/usr/bin/systemctl", "enable"]
+    if start:
+        argv.append("--now")
+    argv.extend(("--quiet", SLURM_RECOVERY_TIMER_UNIT))
+    result = subprocess.run(
+        argv,
+        env=_clean_env(),
+        check=False,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise NodeAuthorityError("Slurm recovery timer enable failed safely")
+
+
+def _systemd_disable_recovery_timer() -> None:
+    result = subprocess.run(
+        (
+            "/usr/bin/systemctl",
+            "disable",
+            "--now",
+            "--quiet",
+            SLURM_RECOVERY_TIMER_UNIT,
+        ),
+        env=_clean_env(),
+        check=False,
+        capture_output=True,
+    )
+    if result.returncode not in {0, 1}:
+        raise NodeAuthorityError("Slurm recovery timer disable failed safely")
+
+
+def _validate_recovery_timer(*, require_active: bool) -> None:
+    states = ("is-enabled", "is-active") if require_active else ("is-enabled",)
+    for state in states:
+        result = subprocess.run(
+            ("/usr/bin/systemctl", state, "--quiet", SLURM_RECOVERY_TIMER_UNIT),
+            env=_clean_env(),
+            check=False,
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            raise NodeAuthorityError(f"Slurm recovery timer is not {state.removeprefix('is-')}")
+
+
+def _sync_recovery_timer_after_restore() -> None:
+    recovery_paths = (
+        SLURM_RECOVERY_LIBEXEC,
+        SLURM_RECOVERY_SERVICE,
+        SLURM_RECOVERY_TIMER,
+    )
+    if all(path.exists() and not path.is_symlink() for path in recovery_paths):
+        _systemd_enable_recovery_timer(start=True)
+        _validate_recovery_timer(require_active=True)
+    else:
+        _systemd_disable_recovery_timer()
+
+
 def _validate_system_install_sources() -> None:
     for relative, _target, _mode, _parent_mode in SYSTEM_INSTALL_ASSETS:
         source = SOURCE_ROOT / relative
@@ -1302,29 +1364,108 @@ def _validate_system_install_sources() -> None:
             STAGING_EXTERNAL_SUDOERS_RELATIVE,
         }:
             _validate_sudoers(source, label="source")
-        elif relative == Path(
-            "deploy/developer-sandboxes/loom-staging-shared.tmpfiles.conf",
-        ):
-            _validate_tmpfiles(source, apply=False)
+        elif relative in {
+            NODE_AUTHORITY_TMPFILES_SOURCE_RELATIVE,
+            Path("deploy/developer-sandboxes/loom-staging-shared.tmpfiles.conf"),
+        }:
+            expected_directories = (
+                NODE_AUTHORITY_TMPFILES_DIRECTORIES
+                if relative == NODE_AUTHORITY_TMPFILES_SOURCE_RELATIVE
+                else STAGING_SHARED_TMPFILES_DIRECTORIES
+            )
+            _validate_tmpfiles(
+                source,
+                apply=False,
+                expected_directories=expected_directories,
+            )
 
 
-def _validate_tmpfiles(path: Path, *, apply: bool) -> None:
-    argv = ["/usr/bin/systemd-tmpfiles", "--create"]
-    if not apply:
-        argv.append("--dry-run")
-    argv.append(str(path))
-    validation = subprocess.run(
-        tuple(argv),
-        env=_clean_env(),
-        check=False,
-        capture_output=True,
+def _validate_tmpfiles(
+    path: Path,
+    *,
+    apply: bool,
+    expected_directories: tuple[tuple[Path, int], ...],
+) -> None:
+    if (
+        not expected_directories
+        or len({relative for relative, _mode in expected_directories})
+        != len(expected_directories)
+        or any(
+            relative.is_absolute()
+            or not relative.parts
+            or any(part in {"", ".", ".."} for part in relative.parts)
+            or mode not in {0o700, 0o755}
+            for relative, mode in expected_directories
+        )
+    ):
+        raise NodeAuthorityError("staging shared tmpfiles validation contract is invalid")
+    expected_payload = b"".join(
+        (
+            f"d /{relative.as_posix()} {mode:04o} root root -\n".encode(
+                "ascii",
+            )
+        )
+        for relative, mode in expected_directories
     )
-    if validation.returncode != 0:
-        raise NodeAuthorityError("staging shared tmpfiles policy is invalid")
+    try:
+        payload = (
+            _safe_root_file(path, mode=0o644, limit=4096)
+            if apply
+            else path.read_bytes()
+        )
+    except OSError as exc:
+        raise NodeAuthorityError("staging shared tmpfiles policy is unavailable") from exc
+    if payload != expected_payload:
+        raise NodeAuthorityError("staging shared tmpfiles policy is not an exact closed policy")
+    if apply and path.parent != Path("/etc/tmpfiles.d"):
+        raise NodeAuthorityError("staging shared tmpfiles boot policy path is unsafe")
+    _ensure_stage_root()
+    argv = ["/usr/bin/systemd-tmpfiles", "--create"]
+    validation_root: Path | None = None
+    if not apply:
+        validation_root = STAGE_ROOT / f"tmpfiles-validation-{uuid.uuid4().hex}"
+        if not _ensure_root_directory(
+            validation_root,
+            mode=0o700,
+            parent_mode=0o700,
+        ):
+            raise NodeAuthorityError("staging shared tmpfiles validation root collided")
+        argv.append(f"--root={validation_root}")
+    # A basename makes systemd-tmpfiles use its normal boot-time configuration
+    # precedence. The exact root-owned /etc readback above is therefore the
+    # effective policy even if a lower-priority vendor copy remains installed.
+    argv.append(path.name if apply else str(path))
+    try:
+        validation = subprocess.run(
+            tuple(argv),
+            env=_clean_env(),
+            check=False,
+            capture_output=True,
+        )
+        if validation.returncode != 0:
+            raise NodeAuthorityError("staging shared tmpfiles policy is invalid")
+        readback_root = Path("/") if validation_root is None else validation_root
+        for relative, mode in expected_directories:
+            _safe_root_directory(readback_root / relative, mode=mode)
+    finally:
+        if validation_root is not None:
+            _safe_root_directory(validation_root, mode=0o700)
+            try:
+                shutil.rmtree(validation_root)
+            except OSError as exc:
+                raise NodeAuthorityError(
+                    "staging shared tmpfiles validation cleanup failed safely",
+                ) from exc
+            if validation_root.exists() or validation_root.is_symlink():
+                raise NodeAuthorityError(
+                    "staging shared tmpfiles validation cleanup failed safely",
+                )
 
 
 def _ensure_system_install_directories() -> None:
     for directory, mode, parent_mode in (
+        (CAPACITY_CONTRACT_LIBEXEC.parent.parent, 0o755, 0o755),
+        (CAPACITY_CONTRACT_LIBEXEC.parent, 0o755, 0o755),
         (STAGING_EXTERNAL_INSTALL_ROOT, 0o755, 0o755),
         (STAGING_EXTERNAL_CONSUMER.parent, 0o755, 0o755),
         (STAGING_EXTERNAL_CONFIG.parent, 0o700, 0o755),
@@ -1363,6 +1504,13 @@ def _validate_system_install_assets(
         )
     if not allow_absent and len(readbacks) != len(SYSTEM_INSTALL_ASSETS):
         raise NodeAuthorityError("node authority system install is incomplete")
+    recovery_targets = {
+        SLURM_RECOVERY_LIBEXEC,
+        SLURM_RECOVERY_SERVICE,
+        SLURM_RECOVERY_TIMER,
+    }
+    if recovery_targets.issubset({Path(row["path"]) for row in readbacks}):
+        _validate_recovery_timer(require_active=False)
     return tuple(readbacks)
 
 
@@ -1406,8 +1554,18 @@ def _system_install_assets(
         _validate_sudoers(target, label="installed")
     for service in _system_service_paths():
         _validate_systemd_service(service, label="installed")
-    _validate_tmpfiles(STAGING_EXTERNAL_TMPFILES, apply=True)
+    _validate_tmpfiles(
+        NODE_AUTHORITY_TMPFILES,
+        apply=True,
+        expected_directories=NODE_AUTHORITY_TMPFILES_DIRECTORIES,
+    )
+    _validate_tmpfiles(
+        STAGING_EXTERNAL_TMPFILES,
+        apply=True,
+        expected_directories=STAGING_SHARED_TMPFILES_DIRECTORIES,
+    )
     _systemd_daemon_reload()
+    _systemd_enable_recovery_timer(start=False)
     return _validate_system_install_assets()
 
 
@@ -1861,6 +2019,7 @@ def _restore_upgrade_snapshot(snapshot: UpgradeSnapshot) -> None:
         )
         _validate_sudoers(path, label="restored")
     _systemd_daemon_reload()
+    _sync_recovery_timer_after_restore()
     restored = _read_policy()
     _validate_runtime_assets(
         restored,
@@ -2200,6 +2359,7 @@ def _parse_request(raw: bytes, *, verb: str, policy: AuthorityPolicy) -> Request
         or not _is_sha(payload.get("candidate_tree"))
         or (
             requested_action not in STAGING_ACTIONS
+            and requested_action not in SLURM_ACTIONS
             and payload.get("candidate_tree") != policy.source_tree
         )
         or payload.get("payload_kind") != PAYLOAD_KIND.get(requested_action)
@@ -2243,6 +2403,76 @@ def _parse_request(raw: bytes, *, verb: str, policy: AuthorityPolicy) -> Request
             or decoded != _canonical(fleet)
         ):
             raise NodeAuthorityError("fleet attestation payload is invalid")
+    if payload["payload_kind"] == "slurm-candidate-set-json":
+        try:
+            candidate_set = json.loads(decoded)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise NodeAuthorityError("Slurm candidate-set payload is invalid") from exc
+        bindings = (
+            candidate_set.get("candidate_bindings")
+            if isinstance(candidate_set, dict)
+            else None
+        )
+        expected_sandboxes = {"qianyi", "hongjian", "devansh"}
+        expected_accounts = {
+            f"loom-dev-{sandbox}": sandbox for sandbox in expected_sandboxes
+        }
+        if (
+            not isinstance(candidate_set, dict)
+            or decoded != _canonical(candidate_set)
+            or set(candidate_set)
+            != {
+                "schema_version",
+                "kind",
+                "candidate_set_sha256",
+                "candidate_bindings",
+                "generation",
+                "convergence_id",
+            }
+            or candidate_set.get("schema_version") != 2
+            or candidate_set.get("kind") != "loom.developer-sandbox.slurm-candidate-set"
+            or type(candidate_set.get("generation")) is not int
+            or candidate_set["generation"] < 1
+            or not _is_sha(candidate_set.get("convergence_id"), length=64)
+            or not isinstance(bindings, dict)
+            or set(bindings) != set(expected_accounts)
+            or any(
+                not isinstance(bindings[account], dict)
+                or set(bindings[account])
+                != {
+                    "sandbox",
+                    "service_user",
+                    "candidate_sha",
+                    "candidate_tree",
+                }
+                or bindings[account].get("sandbox") != sandbox
+                or bindings[account].get("service_user") != f"loom-sandbox-{sandbox}"
+                or not _is_sha(bindings[account].get("candidate_sha"))
+                or not _is_sha(bindings[account].get("candidate_tree"))
+                for account, sandbox in expected_accounts.items()
+            )
+            or len(
+                {
+                    str(bindings[account]["candidate_sha"])
+                    for account in expected_accounts
+                },
+            )
+            != 3
+            or len(
+                {
+                    str(bindings[account]["candidate_sha"])[:12]
+                    for account in expected_accounts
+                },
+            )
+            != 3
+            or candidate_set.get("candidate_set_sha256")
+            != hashlib.sha256(_canonical(bindings).rstrip(b"\n")).hexdigest()
+            or bindings["loom-dev-qianyi"].get("candidate_sha")
+            != payload["candidate_sha"]
+            or bindings["loom-dev-qianyi"].get("candidate_tree")
+            != payload["candidate_tree"]
+        ):
+            raise NodeAuthorityError("Slurm candidate-set payload is invalid")
     if payload["payload_kind"] in {
         "live-overlap-collection-json",
         "live-overlap-job-json",
@@ -2281,7 +2511,6 @@ def _parse_request(raw: bytes, *, verb: str, policy: AuthorityPolicy) -> Request
             or not isinstance(live_payload.get("job_name"), str)
             or re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", live_payload["job_name"]) is None
             or not isinstance(live_payload.get("node"), str)
-            or live_payload.get("node") == "trt-gb10-7"
             or re.fullmatch(r"[1-9][0-9]*(?:_[0-9]+)?", str(live_payload.get("job_id"))) is None
             or any(
                 not isinstance(live_payload.get(field), int)
@@ -2423,8 +2652,7 @@ def _parse_request(raw: bytes, *, verb: str, policy: AuthorityPolicy) -> Request
                 payload["payload_kind"] == "staging-allocation-submit-request"
                 and staging_payload.get("requested_node")
                 not in {
-                    f"trt-gb10-{index}"
-                    for index in (1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15)
+                    f"trt-gb10-{index}" for index in range(1, 16)
                 }
             )
         ):
@@ -2445,7 +2673,7 @@ def _parse_request(raw: bytes, *, verb: str, policy: AuthorityPolicy) -> Request
             or re.fullmatch(r"[1-9][0-9]*", str(staging_cancel.get("job_id"))) is None
             or staging_cancel.get("requested_node")
             not in {
-                f"trt-gb10-{index}" for index in (1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15)
+                f"trt-gb10-{index}" for index in range(1, 16)
             }
             or staging_cancel.get("candidate_sha") != payload["candidate_sha"]
             or staging_cancel.get("candidate_tree") != payload["candidate_tree"]
@@ -2533,17 +2761,15 @@ def _parse_request(raw: bytes, *, verb: str, policy: AuthorityPolicy) -> Request
         node != ("oldlab-2" if domain == "oldlab" else "trt-gb10-1")
     ):
         raise NodeAuthorityError("live overlap observation is source-host-only")
-    if requested_action == "observe-platform-health-node" and node == "trt-gb10-7":
-        raise NodeAuthorityError("platform-health observation excludes trt-gb10-7")
     if requested_action == "staging-pressure-reclaim-observe" and (
         node != "trt-gb10-1" or domain != "gb10"
     ):
         raise NodeAuthorityError("staging pressure observation is GB10 controller-only")
     if requested_action == "staging-allocation-bootstrap" and (
-        domain != "gb10" or not node.startswith("trt-gb10-") or node == "trt-gb10-7"
+        domain != "gb10" or node not in STAGING_INFRASTRUCTURE_NODES
     ):
         raise NodeAuthorityError(
-            "staging allocation bootstrap is restricted to the 14-node GB10 set",
+            "staging allocation bootstrap is restricted to the GB10 infrastructure set",
         )
     if requested_action == "staging-shared-source-bootstrap" and (
         domain != "gb10" or node != "trt-gb10-2"
@@ -2594,13 +2820,7 @@ def _parse_request(raw: bytes, *, verb: str, policy: AuthorityPolicy) -> Request
         raise NodeAuthorityError(
             "staging allocation broker is restricted to the fixed GB10 submit host",
         )
-    slurm_actions = {
-        "slurm-node-converge",
-        "slurm-controller-converge",
-        "slurm-rollback",
-        "slurm-check",
-    }
-    if requested_action in slurm_actions:
+    if requested_action in SLURM_ACTIONS:
         expected_domain = "oldlab" if node.startswith("oldlab-") else "gb10"
         if domain != expected_domain:
             raise NodeAuthorityError("Slurm node domain binding is invalid")
@@ -2835,7 +3055,7 @@ def _run_fixed_input(argv: Sequence[str], payload: bytes) -> dict[str, Any]:
 
 
 def _prepare_stage(request: Request) -> Path:
-    _safe_root_directory(STAGE_ROOT, mode=0o700)
+    _ensure_stage_root()
     path = STAGE_ROOT / request.request_id
     try:
         path.mkdir(mode=0o700)
@@ -2941,6 +3161,12 @@ def _slurm_policy_argv(request: Request, command: str) -> tuple[str, ...]:
         raise NodeAuthorityError("Slurm policy command binding is invalid")
     domain = str(request.payload["domain"])
     candidate = _slurm_candidate_root(request)
+    try:
+        candidate_set = json.loads(request.payload_bytes)
+        bindings = candidate_set["candidate_bindings"]
+    except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise NodeAuthorityError("Slurm candidate-set binding is invalid") from exc
+    bindings_json = json.dumps(bindings, sort_keys=True, separators=(",", ":"))
     argv = [
         "/usr/bin/python3",
         "-I",
@@ -2950,6 +3176,16 @@ def _slurm_policy_argv(request: Request, command: str) -> tuple[str, ...]:
         str(candidate / "deploy/slurm/developer-sandboxes" / SLURM_PROFILE_NAME[domain]),
         "--candidate-sha",
         str(request.payload["candidate_sha"]),
+        "--candidate-bindings-json",
+        bindings_json,
+        "--transaction-id",
+        request.request_id,
+        "--candidate-set-generation",
+        str(candidate_set["generation"]),
+        "--candidate-set-convergence-id",
+        str(candidate_set["convergence_id"]),
+        "--candidate-set-payload-sha256",
+        str(request.payload["payload_sha256"]),
     ]
     if command == "node-check":
         argv.extend(
@@ -3079,30 +3315,112 @@ def _staging_broker_argv(request: Request) -> tuple[str, ...]:
     return tuple(argv)
 
 
-def _validate_slurm_candidate(request: Request) -> None:
-    result = _run_fixed(
-        _domain_argv(
-            request,
-            "inspect-candidate",
-            "--domain",
-            str(request.payload["domain"]),
-            "--sandbox",
-            str(request.payload["sandbox"]),
-            "--candidate-sha",
-            str(request.payload["candidate_sha"]),
-            "--candidate-tree",
-            str(request.payload["candidate_tree"]),
-        ),
+def _validate_slurm_candidate(request: Request, policy: AuthorityPolicy) -> None:
+    candidate_set = json.loads(request.payload_bytes)
+    bindings = candidate_set["candidate_bindings"]
+    surface = (
+        "scripts/ops/developer_sandbox_slurm_policy.py",
+        "scripts/ops/slurm_job_cgroup_guard.py",
+        f"deploy/slurm/developer-sandboxes/{SLURM_PROFILE_NAME[str(request.payload['domain'])]}",
+        "deploy/slurm/loom-slurm-job-cgroup-guard.service",
     )
-    if (
-        result.get("operation") != "inspect-candidate"
-        or result.get("domain") != request.payload["domain"]
-        or result.get("sandbox") != request.payload["sandbox"]
-        or result.get("candidate_sha") != request.payload["candidate_sha"]
-        or result.get("candidate_tree") != request.payload["candidate_tree"]
-        or result.get("candidate_clean") is not True
-    ):
-        raise NodeAuthorityError("Slurm candidate readback binding is invalid")
+    surface_identities: list[tuple[str, ...]] = []
+    for sandbox in ("qianyi", "hongjian", "devansh"):
+        binding = bindings[f"loom-dev-{sandbox}"]
+        result = _run_fixed(
+            _domain_argv(
+                request,
+                "inspect-candidate",
+                "--domain",
+                str(request.payload["domain"]),
+                "--sandbox",
+                sandbox,
+                "--candidate-sha",
+                str(binding["candidate_sha"]),
+                "--candidate-tree",
+                str(binding["candidate_tree"]),
+            ),
+        )
+        if (
+            result.get("operation") != "inspect-candidate"
+            or result.get("domain") != request.payload["domain"]
+            or result.get("sandbox") != sandbox
+            or result.get("candidate_sha") != binding["candidate_sha"]
+            or result.get("candidate_tree") != binding["candidate_tree"]
+            or result.get("candidate_clean") is not True
+        ):
+            raise NodeAuthorityError("Slurm candidate readback binding is invalid")
+        candidate_root = (
+            Path("/shared_work/loom/candidates/sandboxes")
+            / sandbox
+            / str(binding["candidate_sha"])
+        )
+        identities: list[str] = []
+        for relative in surface:
+            git_prefix = (
+                "git",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.attributesFile=/dev/null",
+                "-c",
+                f"safe.directory={candidate_root}",
+                "-C",
+                str(candidate_root),
+            )
+            object_name = f"{binding['candidate_sha']}:{relative}"
+            try:
+                sized = subprocess.run(
+                    (*git_prefix, "cat-file", "-s", object_name),
+                    env=_clean_env(),
+                    check=False,
+                    capture_output=True,
+                    timeout=30,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise NodeAuthorityError(
+                    "Slurm candidate policy surface is unavailable",
+                ) from exc
+            try:
+                object_size = int(sized.stdout.decode("ascii").strip())
+            except (UnicodeDecodeError, ValueError) as exc:
+                raise NodeAuthorityError(
+                    "Slurm candidate policy surface size is invalid",
+                ) from exc
+            if (
+                sized.returncode != 0
+                or sized.stderr
+                or not 0 <= object_size <= MAX_SLURM_POLICY_SURFACE_BYTES
+            ):
+                raise NodeAuthorityError("Slurm candidate policy surface size is invalid")
+            try:
+                completed = subprocess.run(
+                    (*git_prefix, "show", object_name),
+                    env=_clean_env(),
+                    check=False,
+                    capture_output=True,
+                    timeout=30,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise NodeAuthorityError(
+                    "Slurm candidate policy surface is unavailable",
+                ) from exc
+            if (
+                completed.returncode != 0
+                or completed.stderr
+                or len(completed.stdout) != object_size
+            ):
+                raise NodeAuthorityError("Slurm candidate policy surface is unavailable")
+            identity = hashlib.sha256(completed.stdout).hexdigest()
+            expected_identity = policy.asset_sha256.get(relative)
+            if identity != expected_identity:
+                raise NodeAuthorityError(
+                    "Slurm candidate policy surface differs from installed authority",
+                )
+            identities.append(identity)
+        surface_identities.append(tuple(identities))
+    if len(set(surface_identities)) != 1:
+        raise NodeAuthorityError("Slurm candidate policy surfaces are incompatible")
 
 
 def _validated_slurm_snapshot_path(value: object) -> Path:
@@ -3312,7 +3630,13 @@ def _slurm_policy_journal_payload(
     snapshot: Path,
     require_accounting: bool,
     rollback_target: Path | None = None,
+    transaction_id: str | None = None,
+    expected_phase: str = "committed",
 ) -> dict[str, Any]:
+    if expected_phase not in {"committed", "rolled_back"} or (
+        expected_phase == "rolled_back" and operation != "rollback"
+    ):
+        raise NodeAuthorityError("Slurm policy journal phase binding is invalid")
     try:
         payload = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -3323,6 +3647,10 @@ def _slurm_policy_journal_payload(
     domain = str(request.payload["domain"])
     node = str(request.payload["node"])
     cluster = SLURM_CLUSTER[domain]
+    try:
+        candidate_set = json.loads(request.payload_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise NodeAuthorityError("Slurm candidate-set payload is invalid") from exc
     expected_accounting = str(snapshot / "accounting-cas.json") if require_accounting else None
     if (
         not isinstance(payload, dict)
@@ -3334,11 +3662,17 @@ def _slurm_policy_journal_payload(
         or payload.get("host") != NODE_HOSTNAMES[node]
         or payload.get("slurm_node") != node
         or payload.get("candidate_sha") != request.payload["candidate_sha"]
+        or payload.get("candidate_set_sha256") != candidate_set.get("candidate_set_sha256")
+        or payload.get("candidate_bindings") != candidate_set.get("candidate_bindings")
+        or payload.get("transaction_id") != (transaction_id or request.request_id)
+        or payload.get("candidate_set_generation") != candidate_set.get("generation")
+        or payload.get("candidate_set_convergence_id") != candidate_set.get("convergence_id")
+        or payload.get("candidate_set_payload_sha256") != request.payload["payload_sha256"]
         or payload.get("snapshot") != str(snapshot)
         or payload.get("accounting_snapshot") != expected_accounting
         or payload.get("restart") is not True
         or payload.get("apply_accounting") is not require_accounting
-        or payload.get("phase") != "committed"
+        or payload.get("phase") != expected_phase
         or not isinstance(payload.get("created_at"), str)
         or not isinstance(payload.get("updated_at"), str)
     ):
@@ -3411,21 +3745,57 @@ def _validate_prior_slurm_binding(request: Request, prior: Mapping[str, Any]) ->
         raise NodeAuthorityError("Slurm rollback receipt binding is invalid")
     journal = SLURM_TRANSACTION_ROOT / f"{SLURM_CLUSTER[domain]}.json"
     journal_bytes = _safe_root_file(journal, mode=0o600, limit=1 << 20)
-    if hashlib.sha256(journal_bytes).hexdigest() != match.group(2):
-        raise NodeAuthorityError("Slurm rollback journal identity advanced")
     try:
         untrusted = json.loads(journal_bytes)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise NodeAuthorityError("Slurm rollback journal is invalid") from exc
+    require_accounting = request.payload["node"] == SLURM_CONTROLLER[domain]
+    if (
+        isinstance(untrusted, dict)
+        and untrusted.get("operation") == "rollback"
+        and untrusted.get("phase") in {"committed", "rolled_back"}
+        and untrusted.get("transaction_id") == request.request_id
+    ):
+        recovery_snapshot = _validated_slurm_snapshot_path(untrusted.get("snapshot"))
+        restored_snapshot = _validated_slurm_snapshot_path(untrusted.get("rollback_target"))
+        _slurm_policy_journal_payload(
+            request,
+            journal_bytes,
+            operation="rollback",
+            snapshot=recovery_snapshot,
+            require_accounting=require_accounting,
+            rollback_target=restored_snapshot,
+            expected_phase=str(untrusted["phase"]),
+        )
+        manifest_bytes = _slurm_snapshot_manifest_bytes(restored_snapshot)
+        archive_identity = _validate_slurm_snapshot_archive_inventory(
+            restored_snapshot,
+            manifest_bytes,
+            journal={
+                "apply_accounting": require_accounting,
+                "accounting_snapshot": (
+                    str(restored_snapshot / "accounting-cas.json")
+                    if require_accounting
+                    else None
+                ),
+            },
+            cluster=SLURM_CLUSTER[domain],
+            require_accounting=require_accounting,
+        )
+        if archive_identity != match.group(3):
+            raise NodeAuthorityError("Slurm rollback restored snapshot identity drifted")
+        return
+    if hashlib.sha256(journal_bytes).hexdigest() != match.group(2):
+        raise NodeAuthorityError("Slurm rollback journal identity advanced")
     snapshot_raw = untrusted.get("snapshot") if isinstance(untrusted, dict) else None
     snapshot_path = _validated_slurm_snapshot_path(snapshot_raw)
-    require_accounting = request.payload["node"] == SLURM_CONTROLLER[domain]
     journal_payload = _slurm_policy_journal_payload(
         request,
         journal_bytes,
         operation="apply",
         snapshot=snapshot_path,
         require_accounting=require_accounting,
+        transaction_id=str(prior["request_id"]),
     )
     manifest_bytes = _slurm_snapshot_manifest_bytes(snapshot_path)
     archive_identity = _validate_slurm_snapshot_archive_inventory(
@@ -3729,12 +4099,40 @@ def _staging_accounting_readback() -> None:
         raise NodeAuthorityError("staging allocation accounting association is unavailable")
 
 
+def _staging_boot_id() -> str:
+    try:
+        descriptor = os.open(
+            STAGING_BOOT_ID_PATH,
+            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+        )
+    except OSError as exc:
+        raise NodeAuthorityError("staging node boot identity is unavailable") from exc
+    try:
+        before = os.fstat(descriptor)
+        raw = os.read(descriptor, 129)
+        after = os.fstat(descriptor)
+    except OSError as exc:
+        raise NodeAuthorityError("staging node boot identity cannot be read") from exc
+    finally:
+        os.close(descriptor)
+    try:
+        value = raw.decode("ascii").strip()
+    except UnicodeDecodeError as exc:
+        raise NodeAuthorityError("staging node boot identity is invalid") from exc
+    if (
+        len(raw) > 128
+        or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+        or STAGING_BOOT_ID_RE.fullmatch(value) is None
+    ):
+        raise NodeAuthorityError("staging node boot identity is invalid")
+    return value
+
+
 def _staging_allocation_bootstrap(request: Request) -> dict[str, Any]:
     if (
         request.action != "staging-allocation-bootstrap"
         or request.payload["domain"] != "gb10"
-        or request.payload["node"] not in NODE_HOSTNAMES
-        or request.payload["node"] == "trt-gb10-7"
+        or request.payload["node"] not in STAGING_INFRASTRUCTURE_NODES
     ):
         raise NodeAuthorityError("staging allocation bootstrap request is invalid")
     mount = _staging_mount_readback()
@@ -3791,6 +4189,7 @@ def _staging_allocation_bootstrap(request: Request) -> dict[str, Any]:
         "kind": "loom.staging-external-slurm.node-bootstrap",
         "node": request.payload["node"],
         "canonical_host": NODE_HOSTNAMES[str(request.payload["node"])],
+        "boot_id": _staging_boot_id(),
         "user": STAGING_SERVICE_USER,
         "uid": account.pw_uid,
         "gid": account.pw_gid,
@@ -3803,6 +4202,7 @@ def _staging_allocation_bootstrap(request: Request) -> dict[str, Any]:
         "env_root": str(STAGING_SHARED_PATHS[1]),
         "result_root": str(STAGING_SHARED_PATHS[2]),
         "mount": mount,
+        "mount_digest": hashlib.sha256(_canonical(mount)).hexdigest(),
         "path_readback": converged["namespace"],
         "status": "converged",
     }
@@ -3875,13 +4275,17 @@ def _staging_shared_source_bootstrap(request: Request) -> dict[str, Any]:
                 "inode": metadata.st_ino,
             },
         )
-    return {
+    result = {
         "schema_version": SCHEMA_VERSION,
         "kind": "loom.staging-shared-source-bootstrap",
         "node": "trt-gb10-2",
         "canonical_host": NODE_HOSTNAMES["trt-gb10-2"],
         "paths": readbacks,
         "status": "converged",
+    }
+    return {
+        **result,
+        "source_digest": hashlib.sha256(_canonical(result)).hexdigest(),
     }
 
 
@@ -4093,7 +4497,7 @@ def _staging_accounting_state(snapshot: Mapping[str, Any]) -> dict[str, bool]:
             len(row) != 6
             or row[0] != "loom-staging"
             or set(item for item in row[1].split(",") if item) != {"DenyOnLimit"}
-            or row[2:4] != ["14", "14"]
+            or row[2:4] != ["15", "15"]
             or row[4:] != ["", ""]
         ):
             raise NodeAuthorityError("staging accounting QoS drifted")
@@ -4261,8 +4665,8 @@ def _staging_accounting_converge(request: Request) -> tuple[dict[str, Any], str]
                 "qos",
                 "name=loom-staging",
                 "flags=DenyOnLimit",
-                "maxjobspu=14",
-                "maxsubmitjobspu=14",
+                "maxjobspu=15",
+                "maxsubmitjobspu=15",
             )
         journal["phase"] = "qos"
         journal["updated_at"] = datetime.now(UTC).isoformat()
@@ -4345,8 +4749,8 @@ def _staging_accounting_converge(request: Request) -> tuple[dict[str, Any], str]
         "qos": {
             "name": "loom-staging",
             "flags": ["DenyOnLimit"],
-            "max_jobs_per_user": 14,
-            "max_submit_jobs_per_user": 14,
+            "max_jobs_per_user": 15,
+            "max_submit_jobs_per_user": 15,
             "group_tres": None,
             "max_tres": None,
         },
@@ -4620,10 +5024,32 @@ def _validate_staging_infrastructure_receipt(
         expected_inner_payload = json.loads(
             base64.b64decode(expected["payload_base64"], validate=True),
         )
+        inner_receipt = operation.get("inner_receipt") if isinstance(operation, dict) else None
         expected_inner_receipt = (
             f"staging-accounting/v1/{expected_inner_payload['request_id']}"
             if action == "staging-slurm-accounting-converge"
             else None
+        )
+        inner_receipt_valid = (
+            inner_receipt == expected_inner_receipt
+            if action == "staging-slurm-accounting-converge"
+            else (
+                re.fullmatch(
+                    r"staging-shared-source-bootstrap/v1/[0-9a-f]{64}",
+                    str(inner_receipt),
+                )
+                is not None
+                if action == "staging-shared-source-bootstrap"
+                else re.fullmatch(
+                    (
+                        r"staging-allocation-bootstrap/v1/"
+                        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+                        r"[0-9a-f]{4}-[0-9a-f]{12}/[0-9a-f]{64}"
+                    ),
+                    str(inner_receipt),
+                )
+                is not None
+            )
         )
         if (
             not isinstance(operation, dict)
@@ -4643,7 +5069,7 @@ def _validate_staging_infrastructure_receipt(
                 )
             )
             or not _is_sha(operation.get("result_sha256"), length=64)
-            or operation.get("inner_receipt") != expected_inner_receipt
+            or not inner_receipt_valid
             or operation.get("status") != "succeeded"
             or completed_at is None
             or completed_at < requested_at
@@ -5082,7 +5508,10 @@ def _staging_infrastructure_converge(
     )
 
 
-def _execute_request(request: Request) -> tuple[dict[str, Any], str | None]:
+def _execute_request(
+    request: Request,
+    policy: AuthorityPolicy,
+) -> tuple[dict[str, Any], str | None]:
     payload = request.payload
     action = request.action
     domain = str(payload["domain"])
@@ -5090,9 +5519,17 @@ def _execute_request(request: Request) -> tuple[dict[str, Any], str | None]:
     sha = str(payload["candidate_sha"])
     tree = str(payload["candidate_tree"])
     if action == "staging-allocation-bootstrap":
-        return _staging_allocation_bootstrap(request), None
+        result = _staging_allocation_bootstrap(request)
+        return (
+            result,
+            (
+                "staging-allocation-bootstrap/v1/"
+                f"{result['boot_id']}/{result['mount_digest']}"
+            ),
+        )
     if action == "staging-shared-source-bootstrap":
-        return _staging_shared_source_bootstrap(request), None
+        result = _staging_shared_source_bootstrap(request)
+        return result, f"staging-shared-source-bootstrap/v1/{result['source_digest']}"
     if action == "staging-allocation-submit":
         return _staging_broker_submit(request)
     if action == "staging-allocation-cancel":
@@ -5155,9 +5592,9 @@ def _execute_request(request: Request) -> tuple[dict[str, Any], str | None]:
             or result.get("slurm_account") != "loom-staging"
             or result.get("qos") != "loom-staging"
             or result.get("allowed_nodes")
-            != [f"trt-gb10-{index}" for index in (1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15)]
+            != [f"trt-gb10-{index}" for index in range(1, 16)]
             or not isinstance(result.get("nodes"), list)
-            or len(result["nodes"]) != 14
+            or len(result["nodes"]) != 15
             or result.get("result") != "pass"
         ):
             raise NodeAuthorityError("staging allocation probe readback is invalid")
@@ -5208,7 +5645,7 @@ def _execute_request(request: Request) -> tuple[dict[str, Any], str | None]:
             None,
         )
     if action in {"slurm-node-converge", "slurm-controller-converge"}:
-        _validate_slurm_candidate(request)
+        _validate_slurm_candidate(request, policy)
         result = _run_fixed(_slurm_policy_argv(request, "apply"))
         return result, _slurm_policy_binding(request, result, snapshot_field="snapshot")
     if action == "slurm-rollback":
@@ -5229,7 +5666,7 @@ def _execute_request(request: Request) -> tuple[dict[str, Any], str | None]:
         ):
             raise NodeAuthorityError("Slurm rollback receipt is invalid")
         _validate_prior_slurm_binding(request, prior)
-        _validate_slurm_candidate(request)
+        _validate_slurm_candidate(request, policy)
         result = _run_fixed(_slurm_policy_argv(request, "rollback"))
         return (
             result,
@@ -5391,7 +5828,7 @@ def _execute_request(request: Request) -> tuple[dict[str, Any], str | None]:
             raise NodeAuthorityError("node authority stage cleanup failed safely") from exc
 
 
-def _execute_check(request: Request) -> dict[str, Any]:
+def _execute_check(request: Request, policy: AuthorityPolicy) -> dict[str, Any]:
     payload = request.payload
     action = str(payload["action"])
     if action == "observe-platform-health-node":
@@ -5524,7 +5961,7 @@ def _execute_check(request: Request) -> dict[str, Any]:
             raise NodeAuthorityError("staging pressure observation readback is invalid")
         return result
     if action == "slurm-check":
-        _validate_slurm_candidate(request)
+        _validate_slurm_candidate(request, policy)
         result = _run_fixed(_slurm_policy_argv(request, "node-check"))
         if (
             result.get("cluster") != SLURM_CLUSTER[str(payload["domain"])]
@@ -5611,7 +6048,7 @@ def dispatch(
         _validate_runtime_assets(policy)
         request = _parse_request(raw, verb=verb, policy=policy)
         if verb == "check":
-            result = _execute_check(request)
+            result = _execute_check(request, policy)
             return {
                 "schema_version": SCHEMA_VERSION,
                 "request_id": request.request_id,
@@ -5623,7 +6060,7 @@ def dispatch(
             if not _journal_contains(existing):
                 _append_journal(existing)
             return existing
-        result, inner_receipt = _execute_request(request)
+        result, inner_receipt = _execute_request(request, policy)
         receipt = {
             "schema_version": SCHEMA_VERSION,
             "request_id": request.request_id,
@@ -5646,29 +6083,43 @@ def dispatch(
         os.close(descriptor)
 
 
-def _validate_direct_root_source(
+def _require_persistent_root_view(
+    *,
+    root_path: Path = Path("/"),
+    pid1_root_path: Path = Path("/proc/1/root"),
+    pid1_comm_path: Path = Path("/proc/1/comm"),
+) -> None:
+    if os.getuid() != 0 or os.geteuid() != 0:
+        raise NodeAuthorityError(
+            "node authority bootstrap/upgrade requires persistent host-root authority",
+        )
+    try:
+        root = root_path.stat()
+        pid1_root = pid1_root_path.stat()
+        pid1_comm = pid1_comm_path.read_text(encoding="ascii").strip()
+    except OSError as exc:
+        raise NodeAuthorityError(
+            "persistent host-root systemd view is unavailable",
+        ) from exc
+    if (root.st_dev, root.st_ino) != (pid1_root.st_dev, pid1_root.st_ino) or pid1_comm != "systemd":
+        raise NodeAuthorityError("persistent host-root systemd view is invalid")
+
+
+def _validate_persistent_root_source(
     source_sha: str,
     source_tree: str,
     *,
-    loginuid_path: Path = AUDIT_LOGINUID,
-    marker_paths: Sequence[Path] = CONTAINER_MARKERS,
-    cgroup_paths: Sequence[Path] = CONTAINER_CGROUP_PATHS,
+    root_path: Path = Path("/"),
+    pid1_root_path: Path = Path("/proc/1/root"),
+    pid1_comm_path: Path = Path("/proc/1/comm"),
 ) -> str:
-    if (
-        os.getuid() != 0
-        or os.geteuid() != 0
-        or any(name.startswith("SUDO_") for name in os.environ)
-        or not _is_sha(source_sha)
-        or not _is_sha(source_tree)
-    ):
-        raise NodeAuthorityError(
-            "node authority bootstrap/upgrade requires a direct external root administrator",
-        )
-    _read_audit_loginuid(loginuid_path)
-    _reject_containerized_root(
-        marker_paths=marker_paths,
-        cgroup_paths=cgroup_paths,
+    _require_persistent_root_view(
+        root_path=root_path,
+        pid1_root_path=pid1_root_path,
+        pid1_comm_path=pid1_comm_path,
     )
+    if not _is_sha(source_sha) or not _is_sha(source_tree):
+        raise NodeAuthorityError("node authority candidate identity is invalid")
     if (
         _git("rev-parse", "--verify", "HEAD") != source_sha
         or _git("rev-parse", "--verify", "HEAD^{tree}") != source_tree
@@ -5676,6 +6127,21 @@ def _validate_direct_root_source(
     ):
         raise NodeAuthorityError("bootstrap source is not the clean exact candidate")
     return _node_for_hostname(_hostname())
+
+
+def validate_install() -> dict[str, Any]:
+    _require_persistent_root_view()
+    policy = _read_policy()
+    system_installs = _validate_runtime_assets(policy)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "action": "validate-install",
+        "node": policy.node,
+        "source_sha": policy.source_sha,
+        "source_tree": policy.source_tree,
+        "system_installs": list(system_installs or ()),
+        "status": "succeeded",
+    }
 
 
 def _ensure_upgrade_state() -> None:
@@ -5737,10 +6203,11 @@ def _recover_upgrade_if_needed() -> str | None:
 
 
 def upgrade(source_sha: str, source_tree: str) -> dict[str, Any]:
-    node = _validate_direct_root_source(source_sha, source_tree)
+    node = _validate_persistent_root_source(source_sha, source_tree)
     assets = _exact_source_assets(source_sha, source_tree)
     descriptor = _open_lock(exclusive=True)
     try:
+        _ensure_stage_root()
         _ensure_upgrade_state()
         recovered = _recover_upgrade_if_needed()
         old_policy = _read_policy()
@@ -5753,7 +6220,13 @@ def upgrade(source_sha: str, source_tree: str) -> dict[str, Any]:
         system_install_complete = old_system_installs is None or len(old_system_installs) == len(
             SYSTEM_INSTALL_ASSETS
         )
-        if old_policy.source_tree == source_tree and system_install_complete:
+        if (
+            old_policy.source_sha == source_sha
+            and old_policy.source_tree == source_tree
+            and system_install_complete
+        ):
+            _systemd_enable_recovery_timer(start=True)
+            _validate_recovery_timer(require_active=True)
             return {
                 "schema_version": SCHEMA_VERSION,
                 "action": "upgrade",
@@ -5784,7 +6257,8 @@ def upgrade(source_sha: str, source_tree: str) -> dict[str, Any]:
             _upgrade_journal_append(
                 _upgrade_event(snapshot, "admission-disabled"),
             )
-            for directory in (SOURCE_ROOT / "src", SOURCE_ROOT / "src/loom_cli"):
+            for relative_parent in SOURCE_ASSET_PARENT_PATHS:
+                directory = SOURCE_ROOT / relative_parent
                 if _ensure_root_directory(
                     directory,
                     mode=0o755,
@@ -5835,6 +6309,8 @@ def upgrade(source_sha: str, source_tree: str) -> dict[str, Any]:
             _write_upgrade_active(snapshot, "committed")
             _upgrade_journal_append(_upgrade_event(snapshot, "committed"))
             _remove_upgrade_active()
+            _systemd_enable_recovery_timer(start=True)
+            _validate_recovery_timer(require_active=True)
             return {
                 "schema_version": SCHEMA_VERSION,
                 "action": "upgrade",
@@ -5880,7 +6356,7 @@ def upgrade(source_sha: str, source_tree: str) -> dict[str, Any]:
 
 
 def bootstrap(source_sha: str, source_tree: str) -> dict[str, Any]:
-    node = _validate_direct_root_source(source_sha, source_tree)
+    node = _validate_persistent_root_source(source_sha, source_tree)
     assets = _exact_source_assets(source_sha, source_tree)
     created_directories: list[Path] = []
     created_files: list[Path] = []
@@ -5890,37 +6366,7 @@ def bootstrap(source_sha: str, source_tree: str) -> dict[str, Any]:
         if target.exists() or target.is_symlink()
     }
     try:
-        for directory, mode in (
-            (SOURCE_ROOT.parent, 0o755),
-            (SOURCE_ROOT, 0o755),
-            (SOURCE_ROOT / "scripts", 0o755),
-            (SOURCE_ROOT / "scripts/ops", 0o755),
-            (SOURCE_ROOT / "src", 0o755),
-            (SOURCE_ROOT / "src/loom_cli", 0o755),
-            (SOURCE_ROOT / "deploy", 0o755),
-            (SOURCE_ROOT / "deploy/developer-sandboxes", 0o755),
-            (SOURCE_ROOT / "deploy/developer-sandboxes/remote-links", 0o755),
-            (SOURCE_ROOT / "deploy/slurm", 0o755),
-            (SOURCE_ROOT / "deploy/slurm/developer-sandboxes", 0o755),
-            (LIBEXEC.parent, 0o755),
-            (POLICY.parent, 0o755),
-            (SUDOERS.parent, 0o755),
-            (PLATFORM_HEALTH_SERVICE.parent, 0o755),
-            (STAGING_EXTERNAL_INSTALL_ROOT, 0o755),
-            (STAGING_EXTERNAL_CONSUMER.parent, 0o755),
-            (STAGING_EXTERNAL_CONFIG.parent, 0o700),
-            (STATE_ROOT, 0o700),
-            (RECEIPT_ROOT, 0o700),
-            (STAGING_BROKER_ROOT, 0o700),
-            (STAGING_ACCOUNTING_ROOT, 0o700),
-            (STAGING_INFRASTRUCTURE_PRODUCER_ROOT, 0o700),
-            (STAGING_INFRASTRUCTURE_PRODUCER_RECEIPTS, 0o700),
-            (STAGING_INFRASTRUCTURE_RECEIPT_ROOT, 0o700),
-            (STAGING_INFRASTRUCTURE_INSTALL_GENERATIONS, 0o700),
-            (UPGRADE_ROOT, 0o700),
-            (STAGE_ROOT, 0o700),
-        ):
-            parent_mode = 0o700 if directory.parent == STATE_ROOT else 0o755
+        for directory, mode, parent_mode in BOOTSTRAP_DIRECTORIES:
             if _ensure_root_directory(
                 directory,
                 mode=mode,
@@ -5962,6 +6408,8 @@ def bootstrap(source_sha: str, source_tree: str) -> dict[str, Any]:
         _validate_sudoers(SUDOERS, label="installed node authority")
         policy = _read_policy()
         _validate_runtime_assets(policy)
+        _systemd_enable_recovery_timer(start=True)
+        _validate_recovery_timer(require_active=True)
         return {
             "schema_version": SCHEMA_VERSION,
             "action": "bootstrap",
@@ -5972,6 +6420,11 @@ def bootstrap(source_sha: str, source_tree: str) -> dict[str, Any]:
             "status": "succeeded",
         }
     except Exception:
+        if SLURM_RECOVERY_TIMER not in preexisting_system_paths:
+            try:
+                _systemd_disable_recovery_timer()
+            except Exception:
+                pass
         for _relative, target, mode, parent_mode in reversed(SYSTEM_INSTALL_ASSETS):
             if target in preexisting_system_paths:
                 continue
@@ -6006,6 +6459,7 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("transact", allow_abbrev=False)
     subparsers.add_parser("check", allow_abbrev=False)
+    subparsers.add_parser("validate-install", allow_abbrev=False)
     for command in ("bootstrap", "upgrade"):
         install = subparsers.add_parser(command, allow_abbrev=False)
         install.add_argument("--candidate-sha", required=True)
@@ -6025,7 +6479,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "mutation_authorized": False,
                     "candidate_sha": args.candidate_sha,
                     "candidate_tree": args.candidate_tree,
-                    "external_root_required": True,
+                    "persistent_host_root_required": True,
+                    "supported_root_channels": ["direct", "docker-chroot"],
                 }
             else:
                 result = (
@@ -6033,6 +6488,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if args.command == "bootstrap"
                     else upgrade(args.candidate_sha, args.candidate_tree)
                 )
+        elif args.command == "validate-install":
+            result = validate_install()
         else:
             result = dispatch(args.command, _read_all_stdin())
         sys.stdout.write(json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n")

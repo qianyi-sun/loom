@@ -7,7 +7,7 @@ import os
 import stat
 import subprocess
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -22,6 +22,12 @@ PROFILE = REPO_ROOT / "deploy/slurm/developer-sandboxes/oldlab.toml"
 GB10_PROFILE = REPO_ROOT / "deploy/slurm/developer-sandboxes/gb10.toml"
 TEST_GENERATION_ID = "0" * 64
 SANDBOX = "qianyi"
+TRANSACTION = {
+    "transaction_id": "1" * 64,
+    "generation": 1,
+    "convergence_id": "2" * 64,
+    "payload_sha256": "3" * 64,
+}
 
 
 def _generation_window() -> tuple[str, str]:
@@ -65,7 +71,7 @@ def _root(tmp_path: Path) -> Path:
     return root
 
 
-def test_live_apply_revalidates_cluster_controller_and_quiescence(
+def test_live_apply_revalidates_cluster_and_controller(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     loaded = policy.load_profile(PROFILE)
@@ -76,21 +82,17 @@ def test_live_apply_revalidates_cluster_controller_and_quiescence(
         ("scontrol", "show", "config"): (
             "ClusterName = trt-oldlab\nSlurmctldHost = TRT-EAI-OLDLAB-1\n"
         ),
-        ("squeue", "-h", "-w", "trt-EAI-OLDLAB-2"): "123\n",
-        ("docker", "ps", "-q"): "",
     }
     monkeypatch.setattr(policy, "_run", lambda argv: responses[tuple(argv)])
 
-    with pytest.raises(policy.PolicyError, match="still has Slurm jobs"):
-        policy._validate_live_apply(
-            Path("/"),
-            loaded,
-            candidate_sha="a" * 40,
-            restart=True,
-            apply_accounting=False,
-        )
+    assert policy._validate_live_apply(
+        Path("/"),
+        loaded,
+        candidate_sha="a" * 40,
+        restart=True,
+        apply_accounting=False,
+    ) == ("trt-eai-oldlab-2", "trt-EAI-OLDLAB-2")
 
-    responses[("squeue", "-h", "-w", "trt-EAI-OLDLAB-2")] = ""
     responses[("scontrol", "show", "config")] = (
         "ClusterName = wrong-cluster\nSlurmctldHost = TRT-EAI-OLDLAB-1\n"
     )
@@ -104,10 +106,1256 @@ def test_live_apply_revalidates_cluster_controller_and_quiescence(
         )
 
 
+def _mock_slurm_admission(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    initial_state: str,
+    initial_reason: str,
+) -> tuple[dict[str, str], list[tuple[str, ...]]]:
+    admission = {"state": initial_state, "reason": initial_reason}
+    commands: list[tuple[str, ...]] = []
+
+    monkeypatch.setattr(
+        policy,
+        "_slurm_node_admission",
+        lambda _node: (admission["state"], admission["reason"]),
+    )
+
+    def run(argv: tuple[str, ...] | list[str]) -> str:
+        command = tuple(argv)
+        commands.append(command)
+        if command[:2] != ("scontrol", "update"):
+            raise AssertionError(command)
+        state = next(item.split("=", 1)[1] for item in command if item.startswith("State="))
+        if state == "DRAIN":
+            admission["state"] = "IDLE+DRAIN"
+            admission["reason"] = next(
+                item.split("=", 1)[1] for item in command if item.startswith("Reason=")
+            )
+        elif state == "RESUME":
+            admission["state"] = "IDLE"
+            admission["reason"] = "None"
+        else:
+            raise AssertionError(command)
+        return ""
+
+    monkeypatch.setattr(policy, "_run", run)
+    monkeypatch.setattr(policy, "_canonical_host", lambda: "gx10-0faf")
+    return admission, commands
+
+
+def test_slurm_node_admission_parses_exact_oneline_state_and_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        policy,
+        "_run",
+        lambda argv: (
+            "NodeName=trt-gb10-7 Arch=aarch64 State=ALLOCATED+DRAIN "
+            "CfgTRES=cpu=20 Reason=loom-sandbox-policy:aaaaaaaaaaaa:bbbbbbbbbbbbbbbb "
+            "[root@2026-07-29T12:00:00]\n"
+            if tuple(argv) == ("scontrol", "show", "node", "trt-gb10-7", "-o")
+            else pytest.fail(str(tuple(argv)))
+        ),
+    )
+
+    assert policy._slurm_node_admission("trt-gb10-7") == (
+        "ALLOCATED+DRAIN",
+        "loom-sandbox-policy:aaaaaaaaaaaa:bbbbbbbbbbbbbbbb [root@2026-07-29T12:00:00]",
+    )
+
+
+def test_slurm_node_admission_rejects_wrong_node_or_ambiguous_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outputs = iter(
+        (
+            "NodeName=trt-gb10-8 State=IDLE Reason=None\n",
+            "NodeName=trt-gb10-7 State=IDLE Reason=None\n"
+            "NodeName=trt-gb10-7 State=IDLE Reason=None\n",
+        ),
+    )
+    monkeypatch.setattr(policy, "_run", lambda _argv: next(outputs))
+
+    with pytest.raises(policy.PolicyError, match="admission readback"):
+        policy._slurm_node_admission("trt-gb10-7")
+    with pytest.raises(policy.PolicyError, match="admission readback"):
+        policy._slurm_node_admission("trt-gb10-7")
+
+
+def test_restart_drain_is_candidate_owned_reused_after_crash_and_released(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(GB10_PROFILE)
+    root = tmp_path / "root"
+    admission, commands = _mock_slurm_admission(
+        monkeypatch,
+        initial_state="IDLE",
+        initial_reason="None",
+    )
+
+    first = policy._acquire_restart_drain(
+        root,
+        loaded,
+        slurm_node="trt-gb10-7",
+        candidate_sha="a" * 40,
+    )
+    replayed = policy._acquire_restart_drain(
+        root,
+        loaded,
+        slurm_node="trt-gb10-7",
+        candidate_sha="a" * 40,
+    )
+
+    assert replayed == first
+    assert first["owned"] is True
+    assert first["prior_state"] == "IDLE"
+    assert first["prior_reason"] == "None"
+    assert admission["state"] == "IDLE+DRAIN"
+    assert sum("State=DRAIN" in command for command in commands) == 1
+
+    policy._release_restart_drain(root, loaded, replayed)
+
+    assert admission == {"state": "IDLE", "reason": "None"}
+    assert commands[-1] == (
+        "scontrol",
+        "update",
+        "NodeName=trt-gb10-7",
+        "State=RESUME",
+    )
+    persisted = policy._load_drain_journal(
+        root,
+        loaded,
+        slurm_node="trt-gb10-7",
+    )
+    assert persisted is not None
+    assert persisted["phase"] == "released"
+
+
+@pytest.mark.parametrize(
+    ("state", "reason"),
+    (
+        ("IDLE+DRAIN", "maintenance"),
+        ("DOWN", "hardware"),
+    ),
+)
+def test_restart_drain_defers_preexisting_foreign_drain_or_down(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+    reason: str,
+) -> None:
+    loaded = policy.load_profile(GB10_PROFILE)
+    root = tmp_path / "root"
+    admission, commands = _mock_slurm_admission(
+        monkeypatch,
+        initial_state=state,
+        initial_reason=reason,
+    )
+
+    with pytest.raises(policy.PolicyError, match="foreign DRAIN/DOWN"):
+        policy._acquire_restart_drain(
+            root,
+            loaded,
+            slurm_node="trt-gb10-7",
+            candidate_sha="a" * 40,
+        )
+
+    assert admission == {"state": state, "reason": reason}
+    assert commands == []
+    assert not policy._drain_journal_path(root, loaded).exists()
+
+
+def test_restart_drain_never_resumes_changed_or_down_owned_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(GB10_PROFILE)
+    root = tmp_path / "root"
+    admission, commands = _mock_slurm_admission(
+        monkeypatch,
+        initial_state="IDLE",
+        initial_reason="None",
+    )
+    drain = policy._acquire_restart_drain(
+        root,
+        loaded,
+        slurm_node="trt-gb10-7",
+        candidate_sha="a" * 40,
+    )
+    admission["reason"] = "foreign-maintenance"
+
+    with pytest.raises(policy.PolicyError, match="reason changed"):
+        policy._release_restart_drain(root, loaded, drain)
+
+    assert not any("State=RESUME" in command for command in commands)
+    persisted = policy._load_drain_journal(
+        root,
+        loaded,
+        slurm_node="trt-gb10-7",
+    )
+    assert persisted is not None
+    assert persisted["phase"] == "release_failed"
+
+
+def test_restart_quiescence_waits_for_slurm_docker_and_gpu_without_cancel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(GB10_PROFILE)
+    root = tmp_path / "root"
+    _admission, commands = _mock_slurm_admission(
+        monkeypatch,
+        initial_state="IDLE",
+        initial_reason="None",
+    )
+    drain = policy._acquire_restart_drain(
+        root,
+        loaded,
+        slurm_node="trt-gb10-7",
+        candidate_sha="a" * 40,
+    )
+    observations = iter(
+        (
+            {"slurm_jobs": True, "docker_containers": True, "gpu_processes": True},
+            {"slurm_jobs": False, "docker_containers": False, "gpu_processes": False},
+        ),
+    )
+    monkeypatch.setattr(policy, "_restart_activity", lambda *_args: next(observations))
+    monkeypatch.setattr(policy.time, "sleep", lambda _seconds: None)
+
+    policy._wait_for_restart_quiescence(root, loaded, drain)
+
+    assert drain["phase"] == "quiesced"
+    assert not any(command and command[0] in {"scancel", "docker"} for command in commands)
+
+
+def test_restart_quiescence_timeout_keeps_owned_drain_for_safe_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(GB10_PROFILE)
+    root = tmp_path / "root"
+    admission, commands = _mock_slurm_admission(
+        monkeypatch,
+        initial_state="ALLOCATED",
+        initial_reason="None",
+    )
+    drain = policy._acquire_restart_drain(
+        root,
+        loaded,
+        slurm_node="trt-gb10-7",
+        candidate_sha="a" * 40,
+    )
+    monkeypatch.setattr(
+        policy,
+        "_restart_activity",
+        lambda *_args: {
+            "slurm_jobs": True,
+            "docker_containers": False,
+            "gpu_processes": True,
+        },
+    )
+    monkeypatch.setattr(policy, "_RESTART_QUIESCE_TIMEOUT_SECONDS", 0.0)
+
+    with pytest.raises(policy.PolicyError, match="slurm_jobs, gpu_processes"):
+        policy._wait_for_restart_quiescence(root, loaded, drain)
+
+    assert admission["state"] == "IDLE+DRAIN"
+    assert not any("State=RESUME" in command for command in commands)
+    persisted = policy._load_drain_journal(
+        root,
+        loaded,
+        slurm_node="trt-gb10-7",
+    )
+    assert persisted is not None
+    assert persisted["phase"] == "drained"
+
+
+def test_restart_activity_probes_gpu_only_for_gpu_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gb10 = policy.load_profile(GB10_PROFILE)
+    oldlab = policy.load_profile(PROFILE)
+    calls: list[tuple[str, ...]] = []
+
+    def run(argv: tuple[str, ...] | list[str]) -> str:
+        command = tuple(argv)
+        calls.append(command)
+        return {
+            ("squeue", "-h", "-w", "trt-gb10-7"): "123\n",
+            ("docker", "ps", "-q"): "container\n",
+            (
+                "nvidia-smi",
+                "--query-compute-apps=pid",
+                "--format=csv,noheader,nounits",
+            ): "456\n",
+            ("squeue", "-h", "-w", "oldlab-2"): "",
+        }[command]
+
+    monkeypatch.setattr(policy, "_run", run)
+
+    assert policy._restart_activity(gb10, "trt-gb10-7") == {
+        "slurm_jobs": True,
+        "docker_containers": True,
+        "gpu_processes": True,
+    }
+    assert policy._restart_activity(oldlab, "oldlab-2") == {
+        "slurm_jobs": False,
+        "docker_containers": True,
+        "gpu_processes": False,
+    }
+    assert sum(command[0] == "nvidia-smi" for command in calls) == 1
+
+
+def test_persistent_recovery_replays_exact_candidate_journal_and_releases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(GB10_PROFILE)
+    offline_root = tmp_path / "offline"
+    _admission, _commands = _mock_slurm_admission(
+        monkeypatch,
+        initial_state="IDLE",
+        initial_reason="None",
+    )
+    drain = policy._acquire_restart_drain(
+        offline_root,
+        loaded,
+        slurm_node="trt-gb10-7",
+        candidate_sha="a" * 40,
+        operation="apply",
+        apply_accounting=False,
+    )
+    candidate_policy = tmp_path / "candidate/developer_sandbox_slurm_policy.py"
+    candidate_profile = tmp_path / "candidate/gb10.toml"
+    monkeypatch.setattr(policy.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        policy,
+        "_load_journal",
+        lambda path: drain if path.name == "trt-gb10.json" else None,
+    )
+    monkeypatch.setattr(
+        policy,
+        "_recovery_candidate",
+        lambda _root, payload: (
+            loaded,
+            candidate_policy,
+            candidate_profile,
+        ),
+    )
+    replayed: list[dict[str, object]] = []
+    released = dict(drain)
+
+    def recover(
+        policy_path: Path,
+        profile_path: Path,
+        payload: dict[str, object],
+    ) -> None:
+        assert policy_path == candidate_policy
+        assert profile_path == candidate_profile
+        replayed.append(dict(payload))
+        released["phase"] = "released"
+
+    monkeypatch.setattr(policy, "_run_recovery_candidate", recover)
+    loads = iter((drain, released))
+    monkeypatch.setattr(policy, "_load_drain_journal", lambda *_args, **_kwargs: next(loads))
+
+    report = policy.recover_pending_drains()
+
+    assert [(item["operation"], item["candidate_sha"]) for item in replayed] == [
+        ("apply", "a" * 40),
+    ]
+    assert report["recovered"] == [
+        {
+            "cluster": "trt-gb10",
+            "candidate_sha": "a" * 40,
+            "operation": "apply",
+            "phase": "released",
+        },
+    ]
+
+
+def test_recovery_candidate_invocation_has_no_cancellation_or_override_surface(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def run(argv: list[str], **kwargs: object) -> object:
+        calls.append((argv, kwargs))
+        return type("Completed", (), {"returncode": 0})()
+
+    monkeypatch.setattr(policy.subprocess, "run", run)
+    bindings = policy._offline_candidate_bindings(
+        policy.load_profile(GB10_PROFILE),
+        "a" * 40,
+    )
+    policy._run_recovery_candidate(
+        Path("/candidate/scripts/ops/developer_sandbox_slurm_policy.py"),
+        Path("/candidate/deploy/slurm/developer-sandboxes/gb10.toml"),
+        {
+            "operation": "apply",
+            "candidate_sha": "a" * 40,
+            "candidate_bindings": bindings,
+            "transaction_id": "1" * 64,
+            "candidate_set_generation": 1,
+            "candidate_set_convergence_id": "2" * 64,
+            "candidate_set_payload_sha256": "3" * 64,
+            "apply_accounting": True,
+        },
+    )
+
+    argv, kwargs = calls[0]
+    assert argv == [
+        "/usr/bin/python3",
+        "-I",
+        "-B",
+        "/candidate/scripts/ops/developer_sandbox_slurm_policy.py",
+        "apply",
+        "--profile",
+        "/candidate/deploy/slurm/developer-sandboxes/gb10.toml",
+        "--candidate-sha",
+        "a" * 40,
+        "--candidate-bindings-json",
+        json.dumps(bindings, sort_keys=True, separators=(",", ":")),
+        "--transaction-id",
+        "1" * 64,
+        "--candidate-set-generation",
+        "1",
+        "--candidate-set-convergence-id",
+        "2" * 64,
+        "--candidate-set-payload-sha256",
+        "3" * 64,
+        "--execute",
+        "--restart",
+        "--apply-accounting",
+    ]
+    assert kwargs["stdin"] is policy.subprocess.DEVNULL
+    assert kwargs["stdout"] is policy.subprocess.DEVNULL
+    assert all(token not in argv for token in ("scancel", "stop", "kill", "--root"))
+
+
+def test_live_apply_busy_timeout_precedes_snapshot_and_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(GB10_PROFILE)
+    drain = {"phase": "drained"}
+    monkeypatch.setattr(
+        policy,
+        "_validate_live_apply",
+        lambda *_args, **_kwargs: ("gx10-0faf", "trt-gb10-7"),
+    )
+    monkeypatch.setattr(policy, "_domain_lock", lambda *_args: nullcontext())
+    monkeypatch.setattr(policy, "_recover_orphan", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        policy,
+        "desired_files",
+        lambda *_args, **_kwargs: {Path("/etc/docker/daemon.json"): "{}\n"},
+    )
+    monkeypatch.setattr(policy, "_run", lambda _argv: "")
+    monkeypatch.setattr(policy, "_acquire_restart_drain", lambda *_args, **_kwargs: drain)
+    monkeypatch.setattr(
+        policy,
+        "_wait_for_restart_quiescence",
+        lambda *_args: (_ for _ in ()).throw(policy.PolicyError("node remains busy")),
+    )
+    monkeypatch.setattr(
+        policy,
+        "_snapshot",
+        lambda *_args: pytest.fail("busy retry must not create a snapshot"),
+    )
+    monkeypatch.setattr(
+        policy,
+        "_write_journal",
+        lambda *_args: pytest.fail("busy retry must not create a transaction journal"),
+    )
+    monkeypatch.setattr(
+        policy,
+        "_release_restart_drain",
+        lambda *_args: pytest.fail("busy timeout must retain its owned drain for timer retry"),
+    )
+
+    with pytest.raises(policy.PolicyError, match="node remains busy"):
+        policy.apply(
+            Path("/"),
+            loaded,
+            restart=True,
+            apply_accounting=False,
+            candidate_sha="a" * 40,
+            candidate_bindings=policy._offline_candidate_bindings(loaded, "a" * 40),
+            **TRANSACTION,
+        )
+
+
+def test_live_rollback_busy_timeout_precedes_snapshot_and_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(GB10_PROFILE)
+    drain = {"phase": "drained"}
+    target = Path(
+        "/var/lib/loom-developer-sandbox-slurm-policy/"
+        "snapshots/20260729T120000.000000Z",
+    )
+    monkeypatch.setattr(
+        policy,
+        "_validate_live_apply",
+        lambda *_args, **_kwargs: ("gx10-0faf", "trt-gb10-7"),
+    )
+    monkeypatch.setattr(policy, "_domain_lock", lambda *_args: nullcontext())
+    monkeypatch.setattr(policy, "_recover_orphan", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        policy,
+        "_load_policy_journal",
+        lambda *_args, **_kwargs: {
+            "phase": "committed",
+            "operation": "apply",
+            "snapshot": str(target),
+                "accounting_snapshot": None,
+                "candidate_set_generation": 1,
+                "candidate_set_convergence_id": "2" * 64,
+                "candidate_set_payload_sha256": "3" * 64,
+        },
+    )
+    monkeypatch.setattr(policy, "_validate_snapshot_path", lambda *_args: target)
+    monkeypatch.setattr(policy, "desired_files", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(policy, "_acquire_restart_drain", lambda *_args, **_kwargs: drain)
+    monkeypatch.setattr(
+        policy,
+        "_wait_for_restart_quiescence",
+        lambda *_args: (_ for _ in ()).throw(policy.PolicyError("node remains busy")),
+    )
+    monkeypatch.setattr(
+        policy,
+        "_snapshot",
+        lambda *_args: pytest.fail("busy retry must not create a recovery snapshot"),
+    )
+    monkeypatch.setattr(
+        policy,
+        "_write_journal",
+        lambda *_args: pytest.fail("busy retry must not replace the committed transaction"),
+    )
+    monkeypatch.setattr(
+        policy,
+        "_release_restart_drain",
+        lambda *_args: pytest.fail("busy timeout must retain its owned drain for timer retry"),
+    )
+
+    with pytest.raises(policy.PolicyError, match="node remains busy"):
+        policy.rollback(
+            Path("/"),
+            loaded,
+            candidate_sha="a" * 40,
+            candidate_bindings=policy._offline_candidate_bindings(loaded, "a" * 40),
+            **TRANSACTION,
+        )
+
+
+def test_pretransaction_snapshot_failure_releases_owned_drain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(GB10_PROFILE)
+    drain = {"phase": "quiesced"}
+    released: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        policy,
+        "_validate_live_apply",
+        lambda *_args, **_kwargs: ("gx10-0faf", "trt-gb10-7"),
+    )
+    monkeypatch.setattr(policy, "_domain_lock", lambda *_args: nullcontext())
+    monkeypatch.setattr(policy, "_recover_orphan", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        policy,
+        "desired_files",
+        lambda *_args, **_kwargs: {Path("/etc/docker/daemon.json"): "{}\n"},
+    )
+    monkeypatch.setattr(policy, "_run", lambda _argv: "")
+    monkeypatch.setattr(policy, "_acquire_restart_drain", lambda *_args, **_kwargs: drain)
+    monkeypatch.setattr(policy, "_wait_for_restart_quiescence", lambda *_args: None)
+    monkeypatch.setattr(
+        policy,
+        "_snapshot",
+        lambda *_args: (_ for _ in ()).throw(policy.PolicyError("snapshot failed")),
+    )
+    monkeypatch.setattr(
+        policy,
+        "_release_restart_drain",
+        lambda _root, _profile, payload: released.append(payload),
+    )
+    monkeypatch.setattr(
+        policy,
+        "_write_journal",
+        lambda *_args: pytest.fail("snapshot failure must not create a transaction journal"),
+    )
+
+    with pytest.raises(policy.PolicyError, match="snapshot failed"):
+        policy.apply(
+            Path("/"),
+            loaded,
+            restart=True,
+            apply_accounting=False,
+            candidate_sha="a" * 40,
+            candidate_bindings=policy._offline_candidate_bindings(loaded, "a" * 40),
+            **TRANSACTION,
+        )
+    assert released == [drain]
+
+
+def test_committed_apply_transaction_replay_is_read_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(GB10_PROFILE)
+    bindings = policy._offline_candidate_bindings(loaded, "a" * 40)
+    snapshot = Path(
+        "/var/lib/loom-developer-sandbox-slurm-policy/"
+        "snapshots/20260729T120000.000000Z",
+    )
+    committed = {
+        "phase": "committed",
+        "operation": "apply",
+        "candidate_sha": "a" * 40,
+        "candidate_set_sha256": policy._candidate_set_sha256(bindings),
+        "candidate_bindings": bindings,
+        "transaction_id": TRANSACTION["transaction_id"],
+        "candidate_set_generation": TRANSACTION["generation"],
+        "candidate_set_convergence_id": TRANSACTION["convergence_id"],
+        "candidate_set_payload_sha256": TRANSACTION["payload_sha256"],
+        "snapshot": str(snapshot),
+        "restart": True,
+        "apply_accounting": False,
+    }
+    released: list[dict[str, object]] = []
+    events: list[str] = []
+    monkeypatch.setattr(
+        policy,
+        "_validate_live_apply",
+        lambda *_args, **_kwargs: ("gx10-0faf", "trt-gb10-7"),
+    )
+    monkeypatch.setattr(policy, "_domain_lock", lambda *_args: nullcontext())
+    monkeypatch.setattr(policy, "_recover_orphan", lambda *_args, **_kwargs: committed)
+    monkeypatch.setattr(policy, "desired_files", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(policy, "_validate_snapshot_path", lambda *_args: snapshot)
+    monkeypatch.setattr(
+        policy,
+        "_live_readback_unlocked",
+        lambda *_args, **_kwargs: events.append("readback") or {"converged": True},
+    )
+    monkeypatch.setattr(
+        policy,
+        "_release_committed_transaction_drain",
+        lambda _root, _profile, **kwargs: (
+            events.append("release"),
+            released.append(dict(kwargs["journal"])),
+        ),
+    )
+    monkeypatch.setattr(
+        policy,
+        "plan",
+        lambda *_args, **_kwargs: {
+            "schema_version": 1,
+            "cluster": loaded.cluster,
+            "file_plan": {"converged": True},
+        },
+    )
+    monkeypatch.setattr(
+        policy,
+        "_acquire_restart_drain",
+        lambda *_args, **_kwargs: pytest.fail("replay must not drain"),
+    )
+    monkeypatch.setattr(
+        policy,
+        "_snapshot",
+        lambda *_args, **_kwargs: pytest.fail("replay must not snapshot"),
+    )
+
+    result = policy.apply(
+        Path("/"),
+        loaded,
+        restart=True,
+        apply_accounting=False,
+        candidate_sha="a" * 40,
+        candidate_bindings=bindings,
+        **TRANSACTION,
+    )
+
+    assert result["replayed"] is True
+    assert result["snapshot"] == str(snapshot)
+    assert released == [committed]
+    assert events == ["readback", "release"]
+
+    released.clear()
+    monkeypatch.setattr(
+        policy,
+        "_live_readback_unlocked",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            policy.PolicyError("simulated replay drift"),
+        ),
+    )
+    with pytest.raises(policy.PolicyError, match="simulated replay drift"):
+        policy.apply(
+            Path("/"),
+            loaded,
+            restart=True,
+            apply_accounting=False,
+            candidate_sha="a" * 40,
+            candidate_bindings=bindings,
+            **TRANSACTION,
+        )
+    assert released == []
+
+
+def test_same_generation_different_transaction_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(GB10_PROFILE)
+    bindings = policy._offline_candidate_bindings(loaded, "a" * 40)
+    committed = {
+        "phase": "committed",
+        "operation": "apply",
+        "candidate_sha": "a" * 40,
+        "candidate_set_sha256": policy._candidate_set_sha256(bindings),
+        "candidate_bindings": bindings,
+        "transaction_id": "9" * 64,
+        "candidate_set_generation": 1,
+        "candidate_set_convergence_id": "8" * 64,
+        "candidate_set_payload_sha256": "7" * 64,
+    }
+    monkeypatch.setattr(
+        policy,
+        "_validate_live_apply",
+        lambda *_args, **_kwargs: ("gx10-0faf", "trt-gb10-7"),
+    )
+    monkeypatch.setattr(policy, "_domain_lock", lambda *_args: nullcontext())
+    monkeypatch.setattr(policy, "_recover_orphan", lambda *_args, **_kwargs: committed)
+    monkeypatch.setattr(policy, "desired_files", lambda *_args, **_kwargs: {})
+
+    with pytest.raises(policy.PolicyError, match="generation regressed or skipped"):
+        policy.apply(
+            Path("/"),
+            loaded,
+            restart=True,
+            apply_accounting=False,
+            candidate_sha="a" * 40,
+            candidate_bindings=bindings,
+            **TRANSACTION,
+        )
+
+
+def test_timer_completed_rollback_transaction_replay_is_read_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(GB10_PROFILE)
+    bindings = policy._offline_candidate_bindings(loaded, "a" * 40)
+    recovery = Path(
+        "/var/lib/loom-developer-sandbox-slurm-policy/"
+        "snapshots/20260729T120001.000000Z",
+    )
+    restored = Path(
+        "/var/lib/loom-developer-sandbox-slurm-policy/"
+        "snapshots/20260729T120000.000000Z",
+    )
+    committed = {
+        "phase": "committed",
+        "operation": "rollback",
+        "candidate_sha": "a" * 40,
+        "candidate_set_sha256": policy._candidate_set_sha256(bindings),
+        "candidate_bindings": bindings,
+        "transaction_id": TRANSACTION["transaction_id"],
+        "candidate_set_generation": TRANSACTION["generation"],
+        "candidate_set_convergence_id": TRANSACTION["convergence_id"],
+        "candidate_set_payload_sha256": TRANSACTION["payload_sha256"],
+        "snapshot": str(recovery),
+        "rollback_target": str(restored),
+        "restart": True,
+        "apply_accounting": True,
+    }
+    released: list[dict[str, object]] = []
+    accounting: list[Path] = []
+    events: list[str] = []
+    monkeypatch.setattr(
+        policy,
+        "_validate_live_apply",
+        lambda *_args, **_kwargs: ("gx10-0faf", "trt-gb10-7"),
+    )
+    monkeypatch.setattr(policy, "_domain_lock", lambda *_args: nullcontext())
+    monkeypatch.setattr(policy, "_recover_orphan", lambda *_args, **_kwargs: committed)
+    monkeypatch.setattr(
+        policy,
+        "_validate_snapshot_path",
+        lambda _root, path: path,
+    )
+    monkeypatch.setattr(
+        policy,
+        "_snapshot_readback",
+        lambda _root, path: (
+            events.append("readback") or {"converged": True, "snapshot": str(path)}
+        ),
+    )
+    monkeypatch.setattr(
+        policy,
+        "_release_committed_transaction_drain",
+        lambda _root, _profile, **kwargs: (
+            events.append("release"),
+            released.append(dict(kwargs["journal"])),
+        ),
+    )
+    monkeypatch.setattr(
+        policy,
+        "_validate_accounting_snapshot_path",
+        lambda _root, _snapshot, path: path,
+    )
+    monkeypatch.setattr(
+        policy,
+        "_accounting_snapshot_matches",
+        lambda _profile, path: (events.append("accounting"), accounting.append(path)),
+    )
+    monkeypatch.setattr(
+        policy,
+        "_acquire_restart_drain",
+        lambda *_args, **_kwargs: pytest.fail("rollback replay must not drain"),
+    )
+    monkeypatch.setattr(
+        policy,
+        "_restore_snapshot",
+        lambda *_args, **_kwargs: pytest.fail("rollback replay must not restore twice"),
+    )
+
+    result = policy.rollback(
+        Path("/"),
+        loaded,
+        candidate_sha="a" * 40,
+        candidate_bindings=bindings,
+        **TRANSACTION,
+    )
+
+    assert result["replayed"] is True
+    assert result["restored_snapshot"] == str(restored)
+    assert result["recovery_snapshot"] == str(recovery)
+    assert released == [committed]
+    assert accounting == [restored / "accounting-cas.json"]
+    assert events == ["readback", "accounting", "release"]
+
+    released.clear()
+    monkeypatch.setattr(
+        policy,
+        "_accounting_snapshot_matches",
+        lambda *_args: (_ for _ in ()).throw(
+            policy.PolicyError("simulated accounting drift"),
+        ),
+    )
+    with pytest.raises(policy.PolicyError, match="simulated accounting drift"):
+        policy.rollback(
+            Path("/"),
+            loaded,
+            candidate_sha="a" * 40,
+            candidate_bindings=bindings,
+            **TRANSACTION,
+        )
+    assert released == []
+
+
+def test_committed_replay_releases_only_its_exact_pending_drain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(GB10_PROFILE)
+    bindings = policy._offline_candidate_bindings(loaded, "a" * 40)
+    journal: dict[str, object] = {
+        "restart": True,
+        "operation": "apply",
+        "apply_accounting": False,
+        "candidate_sha": "a" * 40,
+        "candidate_set_sha256": policy._candidate_set_sha256(bindings),
+        "candidate_bindings": bindings,
+        "transaction_id": TRANSACTION["transaction_id"],
+        "candidate_set_generation": TRANSACTION["generation"],
+        "candidate_set_convergence_id": TRANSACTION["convergence_id"],
+        "candidate_set_payload_sha256": TRANSACTION["payload_sha256"],
+    }
+    drain = {**journal, "phase": "transacting"}
+    released: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        policy,
+        "_load_drain_journal",
+        lambda *_args, **_kwargs: drain,
+    )
+
+    def release(
+        _root: Path,
+        _profile: policy.Profile,
+        payload: dict[str, object],
+    ) -> None:
+        released.append(dict(payload))
+        payload["phase"] = "released"
+
+    monkeypatch.setattr(policy, "_release_restart_drain", release)
+
+    policy._release_committed_transaction_drain(
+        Path("/"),
+        loaded,
+        slurm_node="trt-gb10-7",
+        journal=journal,
+    )
+
+    assert released == [{**journal, "phase": "transacting"}]
+
+    released.clear()
+    journal["operation"] = "rollback"
+    journal["apply_accounting"] = True
+    drain.update(
+        {
+            "operation": "rollback",
+            "apply_accounting": False,
+            "transaction_id": TRANSACTION["transaction_id"],
+            "phase": "transacting",
+        },
+    )
+    policy._release_committed_transaction_drain(
+        Path("/"),
+        loaded,
+        slurm_node="trt-gb10-7",
+        journal=journal,
+    )
+    assert released == [{**drain, "phase": "transacting"}]
+
+    drain["phase"] = "transacting"
+    drain["transaction_id"] = "9" * 64
+    with pytest.raises(policy.PolicyError, match="drain identity drifted"):
+        policy._release_committed_transaction_drain(
+            Path("/"),
+            loaded,
+            slurm_node="trt-gb10-7",
+            journal=journal,
+        )
+
+
+def test_interrupted_rollback_recovery_can_retry_same_exact_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(GB10_PROFILE)
+    bindings = policy._offline_candidate_bindings(loaded, "a" * 40)
+    target = Path(
+        "/var/lib/loom-developer-sandbox-slurm-policy/"
+        "snapshots/20260729T120000.000000Z",
+    )
+    recovered_snapshot = Path(
+        "/var/lib/loom-developer-sandbox-slurm-policy/"
+        "snapshots/20260729T120001.000000Z",
+    )
+    retry_snapshot = Path(
+        "/var/lib/loom-developer-sandbox-slurm-policy/"
+        "snapshots/20260729T120002.000000Z",
+    )
+    recovered = {
+        "phase": "rolled_back",
+        "operation": "rollback",
+        "candidate_sha": "a" * 40,
+        "candidate_set_sha256": policy._candidate_set_sha256(bindings),
+        "candidate_bindings": bindings,
+        "transaction_id": TRANSACTION["transaction_id"],
+        "candidate_set_generation": TRANSACTION["generation"],
+        "candidate_set_convergence_id": TRANSACTION["convergence_id"],
+        "candidate_set_payload_sha256": TRANSACTION["payload_sha256"],
+        "snapshot": str(recovered_snapshot),
+        "rollback_target": str(target),
+        "restart": True,
+        "apply_accounting": False,
+        "accounting_snapshot": None,
+    }
+    drain = {"phase": "quiesced"}
+    restored: list[Path] = []
+    released: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        policy,
+        "_validate_live_apply",
+        lambda *_args, **_kwargs: ("gx10-0faf", "trt-gb10-7"),
+    )
+    monkeypatch.setattr(policy, "_domain_lock", lambda *_args: nullcontext())
+    monkeypatch.setattr(policy, "_recover_orphan", lambda *_args, **_kwargs: recovered)
+    monkeypatch.setattr(
+        policy,
+        "_load_policy_journal",
+        lambda *_args, **_kwargs: pytest.fail("retry must use the recovered rollback target"),
+    )
+    monkeypatch.setattr(policy, "_validate_snapshot_path", lambda _root, path: path)
+    monkeypatch.setattr(policy, "desired_files", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(policy, "_acquire_restart_drain", lambda *_args, **_kwargs: drain)
+    monkeypatch.setattr(policy, "_wait_for_restart_quiescence", lambda *_args: None)
+    monkeypatch.setattr(policy, "_snapshot", lambda *_args, **_kwargs: retry_snapshot)
+    monkeypatch.setattr(policy, "_mark_restart_drain_transacting", lambda *_args: None)
+    monkeypatch.setattr(policy, "_write_journal", lambda *_args: None)
+    monkeypatch.setattr(
+        policy,
+        "_restore_snapshot",
+        lambda _root, path: restored.append(path),
+    )
+    monkeypatch.setattr(policy, "_restore_services", lambda *_args: None)
+    monkeypatch.setattr(
+        policy,
+        "_snapshot_readback",
+        lambda _root, path: {"converged": True, "snapshot": str(path)},
+    )
+    monkeypatch.setattr(
+        policy,
+        "_advance_journal",
+        lambda _path, payload, phase: payload.__setitem__("phase", phase),
+    )
+    monkeypatch.setattr(
+        policy,
+        "_release_restart_drain",
+        lambda _root, _profile, payload: released.append(dict(payload)),
+    )
+
+    result = policy.rollback(
+        Path("/"),
+        loaded,
+        candidate_sha="a" * 40,
+        candidate_bindings=bindings,
+        **TRANSACTION,
+    )
+
+    assert restored == [target]
+    assert released == [drain]
+    assert result["phase"] == "committed"
+    assert result["restored_snapshot"] == str(target)
+    assert result["recovery_snapshot"] == str(retry_snapshot)
+
+
+def test_controller_rollback_orphan_recovery_keeps_drain_accounting_flag_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(GB10_PROFILE)
+    bindings = policy._offline_candidate_bindings(loaded, "a" * 40)
+    recovery = Path(
+        "/var/lib/loom-developer-sandbox-slurm-policy/"
+        "snapshots/20260729T120001.000000Z",
+    )
+    target = Path(
+        "/var/lib/loom-developer-sandbox-slurm-policy/"
+        "snapshots/20260729T120000.000000Z",
+    )
+    journal = {
+        "phase": "files_written",
+        "operation": "rollback",
+        "candidate_sha": "a" * 40,
+        "candidate_set_sha256": policy._candidate_set_sha256(bindings),
+        "candidate_bindings": bindings,
+        "transaction_id": TRANSACTION["transaction_id"],
+        "candidate_set_generation": TRANSACTION["generation"],
+        "candidate_set_convergence_id": TRANSACTION["convergence_id"],
+        "candidate_set_payload_sha256": TRANSACTION["payload_sha256"],
+        "snapshot": str(recovery),
+        "accounting_snapshot": str(recovery / "accounting-cas.json"),
+        "rollback_target": str(target),
+        "restart": True,
+        "apply_accounting": True,
+    }
+    acquired: list[dict[str, object]] = []
+    drain = {"phase": "drained"}
+    monkeypatch.setattr(policy, "_load_policy_journal", lambda *_args, **_kwargs: journal)
+    monkeypatch.setattr(policy, "_validate_snapshot_path", lambda _root, path: path)
+    monkeypatch.setattr(
+        policy,
+        "_validate_accounting_snapshot_path",
+        lambda _root, _snapshot, path: path,
+    )
+    monkeypatch.setattr(policy, "_snapshot_manifest_rows", lambda *_args: [])
+    monkeypatch.setattr(policy, "_validated_accounting_snapshot", lambda *_args: {})
+
+    def acquire(*_args: object, **kwargs: object) -> dict[str, object]:
+        acquired.append(dict(kwargs))
+        return drain
+
+    monkeypatch.setattr(policy, "_acquire_restart_drain", acquire)
+    monkeypatch.setattr(policy, "_wait_for_restart_quiescence", lambda *_args: None)
+    monkeypatch.setattr(policy, "_mark_restart_drain_transacting", lambda *_args: None)
+    monkeypatch.setattr(policy, "_restore_snapshot", lambda *_args: None)
+    monkeypatch.setattr(policy, "_restore_accounting", lambda *_args: None)
+    monkeypatch.setattr(policy, "_restore_services", lambda *_args: None)
+    monkeypatch.setattr(policy, "_snapshot_readback", lambda *_args: {})
+    monkeypatch.setattr(policy, "_accounting_snapshot_matches", lambda *_args: None)
+    monkeypatch.setattr(
+        policy,
+        "_advance_journal",
+        lambda _path, payload, phase: payload.__setitem__("phase", phase),
+    )
+    monkeypatch.setattr(policy, "_release_restart_drain", lambda *_args: None)
+
+    recovered = policy._recover_orphan(
+        Path("/"),
+        loaded,
+        slurm_node="trt-gb10-1",
+    )
+
+    assert recovered is journal
+    assert recovered["phase"] == "rolled_back"
+    assert len(acquired) == 1
+    assert acquired[0]["operation"] == "rollback"
+    assert acquired[0]["apply_accounting"] is False
+
+
+def test_terminal_legacy_policy_journal_is_archived_durably(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    loaded = policy.load_profile(PROFILE)
+    files = policy.desired_files(root, loaded, candidate_sha="a" * 40)
+    snapshot = policy._snapshot(root, files)
+    path = policy._journal_path(root, loaded)
+    now = datetime.now(UTC).isoformat()
+    legacy = {
+        "schema_version": 1,
+        "operation": "apply",
+        "cluster": loaded.cluster,
+        "host": policy._canonical_host(),
+        "slurm_node": None,
+        "candidate_sha": "a" * 40,
+        "snapshot": str(snapshot),
+        "accounting_snapshot": None,
+        "restart": False,
+        "apply_accounting": False,
+        "phase": "committed",
+        "created_at": now,
+        "updated_at": now,
+    }
+    policy._write_journal(path, legacy)
+
+    assert policy._load_policy_journal(
+        path,
+        root=root,
+        profile=loaded,
+        slurm_node=None,
+    ) is None
+    assert not path.exists()
+    archives = list((path.parent / "legacy").glob("*.json"))
+    assert len(archives) == 1
+    assert policy._load_journal(archives[0]) == legacy
+
+
+def test_nonterminal_legacy_policy_journal_fails_closed(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    loaded = policy.load_profile(PROFILE)
+    files = policy.desired_files(root, loaded, candidate_sha="a" * 40)
+    snapshot = policy._snapshot(root, files)
+    path = policy._journal_path(root, loaded)
+    now = datetime.now(UTC).isoformat()
+    legacy = {
+        "schema_version": 1,
+        "operation": "apply",
+        "cluster": loaded.cluster,
+        "host": policy._canonical_host(),
+        "slurm_node": None,
+        "candidate_sha": "a" * 40,
+        "snapshot": str(snapshot),
+        "accounting_snapshot": None,
+        "restart": False,
+        "apply_accounting": False,
+        "phase": "prepared",
+        "created_at": now,
+        "updated_at": now,
+    }
+    policy._write_journal(path, legacy)
+
+    with pytest.raises(policy.PolicyError, match="nonterminal legacy"):
+        policy._load_policy_journal(
+            path,
+            root=root,
+            profile=loaded,
+            slurm_node=None,
+        )
+
+
+def test_released_legacy_drain_is_archived_only_after_idle_readback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _root(tmp_path)
+    loaded = policy.load_profile(PROFILE)
+    path = policy._drain_journal_path(root, loaded)
+    now = datetime.now(UTC).isoformat()
+    legacy = {
+        "schema_version": 1,
+        "kind": "loom.developer-sandbox.slurm-restart-drain",
+        "cluster": loaded.cluster,
+        "host": policy._canonical_host(),
+        "slurm_node": "oldlab-2",
+        "candidate_sha": "a" * 40,
+        "candidate_tree": "b" * 40,
+        "candidate_root": "/shared_work/loom/candidates/sandboxes/qianyi/" + "a" * 40,
+        "profile_relative": "deploy/slurm/developer-sandboxes/oldlab.toml",
+        "operation": "apply",
+        "apply_accounting": False,
+        "ownership_token": "c" * 64,
+        "ownership_reason": "loom-sandbox-policy:" + "a" * 12 + ":" + "c" * 16,
+        "owned": True,
+        "prior_state": "IDLE",
+        "prior_reason": "",
+        "phase": "released",
+        "created_at": now,
+        "updated_at": now,
+    }
+    policy._write_journal(path, legacy)
+    monkeypatch.setattr(policy, "_slurm_node_admission", lambda _node: ("IDLE", ""))
+
+    assert policy._load_drain_journal(
+        root,
+        loaded,
+        slurm_node="oldlab-2",
+    ) is None
+    assert not path.exists()
+    assert len(list((path.parent / "legacy").glob("*.json"))) == 1
+
+
+def test_legacy_guard_status_is_versioned_and_fresh(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    loaded = policy.load_profile(PROFILE)
+    config = {
+        "schema_version": 1,
+        "cluster": loaded.cluster,
+        "controller": loaded.controller,
+        "submit_host": loaded.submit_host,
+        "allowed_nodes": list(loaded.allowed_nodes),
+        "candidate_sha": "a" * 40,
+        "pids_max": loaded.job_pids_max,
+        "allowed_accounts": sorted(loaded.child_accounts),
+        "poll_interval_seconds": 0.2,
+        "require_gpu_probe": False,
+    }
+    config_sha256 = hashlib.sha256(
+        (json.dumps(config, sort_keys=True) + "\n").encode(),
+    ).hexdigest()
+    status = root / policy._GUARD_STATUS_RELATIVE
+    status.parent.mkdir(parents=True)
+    status.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "timestamp": datetime.now(UTC).isoformat(),
+                "candidate_sha": "a" * 40,
+                "config_sha256": config_sha256,
+                "scanned": 0,
+                "verified": 0,
+                "unrelated": 0,
+                "failed": 0,
+                "failures": [],
+                "resource_probe": None,
+            },
+            sort_keys=True,
+        )
+        + "\n",
+    )
+    status.chmod(0o600)
+
+    assert policy._legacy_guard_status_readback(
+        root,
+        loaded,
+        config=config,
+        expected_config_sha256=config_sha256,
+    )["failed"] == 0
+
+
 def test_profile_is_exact_three_sandbox_fairshare_contract() -> None:
     loaded = policy.load_profile(PROFILE)
 
     assert loaded.cluster == "trt-oldlab"
+    assert loaded.infrastructure_nodes == loaded.allowed_nodes
     assert loaded.child_accounts == (
         "loom-dev-qianyi",
         "loom-dev-hongjian",
@@ -120,6 +1368,33 @@ def test_profile_is_exact_three_sandbox_fairshare_contract() -> None:
     )
     assert loaded.docker_cgroup_driver == "cgroupfs"
     assert loaded.slurm["accounting_storage_enforce"] == ("associations,limits,qos,safe")
+
+
+def test_candidate_bindings_reject_colliding_job_label_prefixes() -> None:
+    loaded = policy.load_profile(PROFILE)
+    bindings = {
+        "loom-dev-qianyi": {
+            "sandbox": "qianyi",
+            "service_user": "loom-sandbox-qianyi",
+            "candidate_sha": "1" * 12 + "a" * 28,
+            "candidate_tree": "a" * 40,
+        },
+        "loom-dev-hongjian": {
+            "sandbox": "hongjian",
+            "service_user": "loom-sandbox-hongjian",
+            "candidate_sha": "1" * 12 + "b" * 28,
+            "candidate_tree": "b" * 40,
+        },
+        "loom-dev-devansh": {
+            "sandbox": "devansh",
+            "service_user": "loom-sandbox-devansh",
+            "candidate_sha": "2" * 40,
+            "candidate_tree": "c" * 40,
+        },
+    }
+
+    with pytest.raises(policy.PolicyError, match="pairwise distinct"):
+        policy._candidate_bindings(loaded, bindings)
 
 
 def test_profile_rejects_personal_login_users(tmp_path: Path) -> None:
@@ -141,7 +1416,99 @@ def test_gb10_profile_maps_connection_aliases_to_canonical_hosts() -> None:
 
     assert policy._slurm_node_for_host(loaded, "gx10-01c7") == "trt-gb10-1"
     assert policy._slurm_node_for_host(loaded, "trt-gb10-1") is None
-    assert "trt-gb10-7" not in loaded.host_aliases
+    assert loaded.infrastructure_nodes == tuple(f"trt-gb10-{index}" for index in range(1, 16))
+    assert loaded.allowed_nodes == loaded.infrastructure_nodes
+    assert loaded.host_aliases["trt-gb10-7"] == "gx10-0faf"
+    assert policy._slurm_node_for_host(loaded, "gx10-0faf") == "trt-gb10-7"
+    assert policy._allowed_host_aliases(loaded)["trt-gb10-7"] == "gx10-0faf"
+
+
+def test_gb10_guard_and_capacity_artifacts_include_full_infrastructure_fleet(
+    tmp_path: Path,
+) -> None:
+    loaded = policy.load_profile(GB10_PROFILE)
+    root = _root(tmp_path)
+
+    rendered = policy.desired_files(root, loaded, candidate_sha="a" * 40)
+    guard = json.loads(
+        rendered[root / "etc/loom/slurm-job-cgroup-guard.json"],
+    )
+    plan = policy.plan(root, loaded, candidate_sha="a" * 40)
+
+    assert "trt-gb10-7" in guard["allowed_nodes"]
+    assert "gx10-0faf" in guard["allowed_nodes"]
+    assert plan["infrastructure_nodes"] == list(loaded.infrastructure_nodes)
+    assert plan["allowed_nodes"] == list(loaded.allowed_nodes)
+
+
+def test_runtime_proof_inventory_and_capacity_include_full_gb10_fleet() -> None:
+    assert len(policy._RUNTIME_FLEET_NODES) == 20
+    assert "trt-gb10-7" in policy._RUNTIME_FLEET_NODES
+    assert len(policy._RUNTIME_DOMAIN_HOSTS["gb10"]) == 15
+    assert "gx10-0faf" in policy._RUNTIME_DOMAIN_HOSTS["gb10"]
+
+    loaded = policy.load_profile(GB10_PROFILE)
+    assert "trt-gb10-7" in loaded.allowed_nodes
+    assert policy._allowed_host_aliases(loaded)["trt-gb10-7"] == "gx10-0faf"
+
+
+def test_profile_rejects_capacity_node_outside_infrastructure_inventory(
+    tmp_path: Path,
+) -> None:
+    profile = tmp_path / "gb10.toml"
+    profile.write_text(
+        GB10_PROFILE.read_text(encoding="utf-8").replace(
+            '  "trt-gb10-1",\n',
+            "",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(policy.PolicyError, match="subset of infrastructure_nodes"):
+        policy.load_profile(profile)
+
+
+def test_profile_requires_aliases_for_exact_infrastructure_inventory(
+    tmp_path: Path,
+) -> None:
+    profile = tmp_path / "gb10.toml"
+    profile.write_text(
+        GB10_PROFILE.read_text(encoding="utf-8").replace(
+            'trt-gb10-7 = "gx10-0faf"\n',
+            "",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(policy.PolicyError, match="every infrastructure Slurm node"):
+        policy.load_profile(profile)
+
+
+def test_live_validation_accepts_infrastructure_only_node(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(GB10_PROFILE)
+    monkeypatch.setattr(policy, "verify_source_candidate", lambda _sha: None)
+    monkeypatch.setattr(policy.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(policy, "_canonical_host", lambda: "gx10-0faf")
+    monkeypatch.setattr(
+        policy,
+        "_run",
+        lambda argv: (
+            "ClusterName = trt-gb10\nSlurmctldHost = trt-gb10-1\n"
+            if tuple(argv) == ("scontrol", "show", "config")
+            else ""
+        ),
+    )
+
+    assert policy._validate_live_apply(
+        Path("/"),
+        loaded,
+        candidate_sha="a" * 40,
+        restart=False,
+        apply_accounting=False,
+    ) == ("gx10-0faf", "trt-gb10-7")
 
 
 def test_render_preserves_unrelated_settings_and_removes_duplicate_keys(
@@ -975,6 +2342,35 @@ def test_service_reload_failure_restores_files(
     assert (root / "etc/docker/daemon.json").read_text() == original
 
 
+def test_restart_stops_guard_before_invalidating_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(GB10_PROFILE)
+    events: list[tuple[str, ...]] = []
+
+    def run_status(argv: tuple[str, ...]) -> tuple[int, str]:
+        events.append(tuple(argv))
+        return (3, "inactive") if argv[1] == "is-active" else (0, "")
+
+    monkeypatch.setattr(policy, "_run_status", run_status)
+    monkeypatch.setattr(
+        policy,
+        "_invalidate_guard_status",
+        lambda _root: events.append(("invalidate-status",)),
+    )
+    monkeypatch.setattr(policy, "_run", lambda argv: events.append(tuple(argv)) or "")
+
+    policy._restart_services(loaded, "trt-gb10-7")
+
+    assert events[:3] == [
+        ("systemctl", "stop", "loom-slurm-job-cgroup-guard.service"),
+        ("systemctl", "is-active", "loom-slurm-job-cgroup-guard.service"),
+        ("invalidate-status",),
+    ]
+    assert ("systemctl", "start", "loom-slurm-job-cgroup-guard.service") in events
+    assert ("systemctl", "restart", "loom-slurm-job-cgroup-guard.service") not in events
+
+
 def _live_outputs(profile: policy.Profile) -> dict[str, str]:
     slurm = "\n".join(
         f"{key} = {profile.slurm[field]}" for key, field in policy._SLURM_KEYS.items()
@@ -1017,26 +2413,35 @@ def test_live_readback_rejects_effective_slurm_drift(
         candidate_sha=candidate,
     )
     desired = policy.desired_files(root, loaded, candidate_sha=candidate)
+    bindings = policy._offline_candidate_bindings(loaded, candidate)
+    candidate_set_sha256 = policy._candidate_set_sha256(bindings)
     guard_config = root / "etc/loom/slurm-job-cgroup-guard.json"
     status = {
-        "schema_version": 1,
+        "schema_version": 2,
         "timestamp": datetime.now(UTC).isoformat(),
-        "candidate_sha": candidate,
+        "candidate_set_sha256": candidate_set_sha256,
         "config_sha256": policy._sha256(desired[guard_config].encode()),
         "scanned": 1,
         "verified": 1,
         "unrelated": 0,
         "failed": 0,
         "failures": [],
-        "resource_probe": {
-            "job_id": "123",
-            "candidate_sha": candidate,
-            "observed_at": datetime.now(UTC).isoformat(),
-            "cpu_max": "200000 100000",
-            "memory_max": "8388608000",
-            "pids_max": "32768",
-            "gpu_tres": "not-required",
-            "gpu_verified": True,
+        "resource_probes": {
+            "loom-dev-qianyi": {
+                "job_id": "123",
+                "account": "loom-dev-qianyi",
+                "sandbox": "qianyi",
+                "service_user": "loom-sandbox-qianyi",
+                "candidate_sha": candidate,
+                "candidate_tree": candidate,
+                "candidate_set_sha256": candidate_set_sha256,
+                "observed_at": datetime.now(UTC).isoformat(),
+                "cpu_max": "200000 100000",
+                "memory_max": "8388608000",
+                "pids_max": "32768",
+                "gpu_tres": "not-required",
+                "gpu_verified": True,
+            },
         },
     }
     status_path = root / policy._GUARD_STATUS_RELATIVE
@@ -1066,8 +2471,9 @@ def test_live_readback_rejects_effective_slurm_drift(
     assert policy.live_readback(
         root,
         loaded,
-        sandbox=None,
+        sandbox="qianyi",
         candidate_sha=candidate,
+        candidate_bindings=bindings,
         require_probe=True,
     )["converged"]
 
@@ -1079,34 +2485,112 @@ def test_live_readback_rejects_effective_slurm_drift(
         policy.live_readback(
             root,
             loaded,
-            sandbox=None,
+            sandbox="qianyi",
             candidate_sha=candidate,
+            candidate_bindings=bindings,
             require_probe=True,
         )
 
 
 def test_guard_all_failed_status_is_not_accepted_as_live_health(tmp_path: Path) -> None:
     path = tmp_path / policy._GUARD_STATUS_RELATIVE
+    loaded = policy.load_profile(PROFILE)
+    bindings = policy._offline_candidate_bindings(loaded, "e" * 40)
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "timestamp": datetime.now(UTC).isoformat(),
-        "candidate_sha": "e" * 40,
+        "candidate_set_sha256": policy._candidate_set_sha256(bindings),
         "config_sha256": "f" * 64,
         "scanned": 3,
         "verified": 0,
         "unrelated": 0,
         "failed": 3,
         "failures": [{"job_id": "1", "reason": "readback failed"}],
-        "resource_probe": None,
+        "resource_probes": {},
     }
     policy._atomic_write(path, json.dumps(payload) + "\n", mode=0o600)
 
     with pytest.raises(policy.PolicyError, match="failed or drifted"):
         policy._guard_status_readback(
             tmp_path,
-            candidate_sha="e" * 40,
+            candidate_bindings=bindings,
             expected_config_sha256="f" * 64,
             require_probe=True,
+            sandbox="qianyi",
+        )
+
+
+@pytest.mark.parametrize("future_field", ("status", "probe"))
+def test_guard_readback_rejects_future_dated_status_or_probe(
+    tmp_path: Path,
+    future_field: str,
+) -> None:
+    path = tmp_path / policy._GUARD_STATUS_RELATIVE
+    loaded = policy.load_profile(PROFILE)
+    bindings = policy._offline_candidate_bindings(loaded, "e" * 40)
+    candidate_set_sha256 = policy._candidate_set_sha256(bindings)
+    now = datetime.now(UTC)
+    future = now + policy._GUARD_MAX_CLOCK_SKEW + timedelta(minutes=1)
+    payload = {
+        "schema_version": 2,
+        "timestamp": (future if future_field == "status" else now).isoformat(),
+        "candidate_set_sha256": candidate_set_sha256,
+        "config_sha256": "f" * 64,
+        "scanned": 1,
+        "verified": 1,
+        "unrelated": 0,
+        "failed": 0,
+        "failures": [],
+        "resource_probes": {
+            "loom-dev-qianyi": {
+                "account": "loom-dev-qianyi",
+                "sandbox": "qianyi",
+                "service_user": "loom-sandbox-qianyi",
+                "candidate_sha": bindings["loom-dev-qianyi"]["candidate_sha"],
+                "candidate_tree": bindings["loom-dev-qianyi"]["candidate_tree"],
+                "candidate_set_sha256": candidate_set_sha256,
+                "observed_at": (future if future_field == "probe" else now).isoformat(),
+            },
+        },
+    }
+    policy._atomic_write(path, json.dumps(payload) + "\n", mode=0o600)
+
+    with pytest.raises(policy.PolicyError, match="stale"):
+        policy._guard_status_readback(
+            tmp_path,
+            candidate_bindings=bindings,
+            expected_config_sha256="f" * 64,
+            require_probe=True,
+            sandbox="qianyi",
+        )
+
+
+def test_guard_readback_rejects_status_before_restart_boundary(tmp_path: Path) -> None:
+    path = tmp_path / policy._GUARD_STATUS_RELATIVE
+    loaded = policy.load_profile(PROFILE)
+    bindings = policy._offline_candidate_bindings(loaded, "e" * 40)
+    observed = datetime.now(UTC)
+    payload = {
+        "schema_version": 2,
+        "timestamp": observed.isoformat(),
+        "candidate_set_sha256": policy._candidate_set_sha256(bindings),
+        "config_sha256": "f" * 64,
+        "scanned": 0,
+        "verified": 0,
+        "unrelated": 0,
+        "failed": 0,
+        "failures": [],
+        "resource_probes": {},
+    }
+    policy._atomic_write(path, json.dumps(payload) + "\n", mode=0o600)
+
+    with pytest.raises(policy.PolicyError, match="stale"):
+        policy._guard_status_readback(
+            tmp_path,
+            candidate_bindings=bindings,
+            expected_config_sha256="f" * 64,
+            require_probe=False,
+            not_before=observed + timedelta(microseconds=1),
         )
 
 
@@ -1120,11 +2604,31 @@ def _git(repo: Path, *args: str) -> str:
     return completed.stdout.strip()
 
 
+def _trust_ambient_tmp_ancestors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actual_lstat = Path.lstat
+    ambient_ancestors = frozenset(tmp_path.parents)
+
+    def lstat_without_ambient_write_bits(path: Path) -> os.stat_result:
+        metadata = actual_lstat(path)
+        if path not in ambient_ancestors:
+            return metadata
+        fields = list(metadata)
+        fields[0] &= ~0o022
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(Path, "lstat", lstat_without_ambient_write_bits)
+
+
 def _strict_candidate_fixture(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     *,
     attributes: str | None = None,
 ) -> tuple[Path, Path, str]:
+    _trust_ambient_tmp_ancestors(tmp_path, monkeypatch)
     repository = tmp_path / "candidate"
     repository.mkdir(mode=0o755)
     _git(repository, "init", "-q")
@@ -1144,8 +2648,19 @@ def _strict_candidate_fixture(
     return repository, worker_env, candidate
 
 
-def test_strict_candidate_binding_reads_raw_tree_and_private_env(tmp_path: Path) -> None:
-    repository, worker_env, candidate = _strict_candidate_fixture(tmp_path)
+def test_strict_candidate_binding_reads_raw_tree_and_private_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ambient = tmp_path / "ambient"
+    ambient.mkdir()
+    ambient.chmod(0o777)
+    trusted_case_root = ambient / "trusted-case"
+    trusted_case_root.mkdir()
+    repository, worker_env, candidate = _strict_candidate_fixture(
+        trusted_case_root,
+        monkeypatch,
+    )
 
     binding = policy.strict_candidate_binding(
         repository,
@@ -1168,9 +2683,10 @@ def test_strict_candidate_binding_reads_raw_tree_and_private_env(tmp_path: Path)
 @pytest.mark.parametrize("flag", ("--skip-worktree", "--assume-unchanged"))
 def test_strict_candidate_rejects_hidden_index_flags(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     flag: str,
 ) -> None:
-    repository, worker_env, candidate = _strict_candidate_fixture(tmp_path)
+    repository, worker_env, candidate = _strict_candidate_fixture(tmp_path, monkeypatch)
     _git(repository, "update-index", flag, "tracked.txt")
 
     with pytest.raises(policy.PolicyError, match="skip-worktree or assume-unchanged"):
@@ -1184,9 +2700,10 @@ def test_strict_candidate_rejects_hidden_index_flags(
 @pytest.mark.parametrize("mutation", ("extra", "raw-drift"))
 def test_strict_candidate_rejects_extra_files_and_raw_byte_drift(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     mutation: str,
 ) -> None:
-    repository, worker_env, candidate = _strict_candidate_fixture(tmp_path)
+    repository, worker_env, candidate = _strict_candidate_fixture(tmp_path, monkeypatch)
     if mutation == "extra":
         (repository / "ignored-or-untracked.txt").write_text("extra\n")
         expected = "extra or missing"
@@ -1202,9 +2719,13 @@ def test_strict_candidate_rejects_extra_files_and_raw_byte_drift(
         )
 
 
-def test_strict_candidate_rejects_clean_filter_interference(tmp_path: Path) -> None:
+def test_strict_candidate_rejects_clean_filter_interference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     repository, worker_env, candidate = _strict_candidate_fixture(
         tmp_path,
+        monkeypatch,
         attributes="*.txt filter=unsafe-clean\n",
     )
 
@@ -1216,8 +2737,11 @@ def test_strict_candidate_rejects_clean_filter_interference(tmp_path: Path) -> N
         )
 
 
-def test_strict_candidate_rejects_symlink_parent_and_nonprivate_env(tmp_path: Path) -> None:
-    repository, worker_env, candidate = _strict_candidate_fixture(tmp_path)
+def test_strict_candidate_rejects_symlink_parent_and_nonprivate_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, worker_env, candidate = _strict_candidate_fixture(tmp_path, monkeypatch)
     alias = tmp_path / "candidate-alias"
     alias.symlink_to(repository, target_is_directory=True)
 
@@ -1257,13 +2781,34 @@ def test_strict_candidate_rejects_symlink_parent_and_nonprivate_env(tmp_path: Pa
 )
 def test_strict_candidate_rejects_duplicate_or_invalid_env_keys(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     contents: str,
 ) -> None:
-    repository, worker_env, candidate = _strict_candidate_fixture(tmp_path)
+    repository, worker_env, candidate = _strict_candidate_fixture(tmp_path, monkeypatch)
     worker_env.write_text(contents)
     worker_env.chmod(0o600)
 
     with pytest.raises(policy.PolicyError, match=r"duplicate|invalid"):
+        policy.strict_candidate_binding(
+            repository,
+            worker_env,
+            candidate_sha=candidate,
+        )
+
+
+def test_strict_candidate_rejects_writable_descendant_below_ambient_tmp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unsafe = tmp_path / "unsafe"
+    unsafe.mkdir()
+    unsafe.chmod(0o777)
+    repository, worker_env, candidate = _strict_candidate_fixture(unsafe, monkeypatch)
+
+    with pytest.raises(
+        policy.PolicyError,
+        match="trusted path chain must not be group/world writable",
+    ):
         policy.strict_candidate_binding(
             repository,
             worker_env,
@@ -2312,7 +3857,10 @@ def test_allocation_matrix_sbatch_explicitly_targets_every_declared_host() -> No
     for node, command in zip(loaded.allowed_nodes, commands, strict=True):
         assert f"--nodelist={node}" in command
         assert "--oversubscribe" in command
-        assert f"--job-name=loom827-{SANDBOX}-{node.lower()}-g{TEST_GENERATION_ID}-a1" in command
+        assert (
+            f"--job-name=loom827-{SANDBOX}-{candidate[:12]}-{node.lower()}-"
+            f"g{TEST_GENERATION_ID}-a1"
+        ) in command
         assert f"--nodelist={node}" in command[-1]
         assert "/bin/sleep" not in command[-1]
         assert "allocation-node-check" in command[-1]
@@ -2324,17 +3872,24 @@ def test_allocation_node_check_binds_raw_inputs_docker_and_compose(
 ) -> None:
     loaded = policy.load_profile(PROFILE)
     candidate = "8" * 40
+    batch_uid = os.getuid()
+    batch_gid = os.getgid()
     compose_calls: list[tuple[str, ...]] = []
     monkeypatch.setenv("SLURM_JOB_ID", "123")
-    monkeypatch.setattr(policy.os, "geteuid", lambda: 501)
-    monkeypatch.setattr(policy.os, "getegid", lambda: 20)
+    monkeypatch.setattr(policy.os, "geteuid", lambda: batch_uid)
+    monkeypatch.setattr(policy.os, "getegid", lambda: batch_gid)
 
     def service_identity(user: str) -> object:
         assert user == "loom-sandbox-qianyi"
-        return type("Identity", (), {"pw_uid": 501, "pw_gid": 20})()
+        return type("Identity", (), {"pw_uid": batch_uid, "pw_gid": batch_gid})()
 
     monkeypatch.setattr(policy.pwd, "getpwnam", service_identity)
     monkeypatch.setattr(policy, "_canonical_host", lambda: "trt-eai-oldlab-1")
+    monkeypatch.setattr(
+        policy,
+        "_worker_capacity_contract",
+        lambda *_args: ("oldlab", 4),
+    )
     monkeypatch.setattr(
         policy,
         "strict_candidate_binding",
@@ -2353,7 +3908,7 @@ def test_allocation_node_check_binds_raw_inputs_docker_and_compose(
         lambda *_args, **_kwargs: {
             "LOOM_WORKER_CANDIDATE_SHA": candidate,
             "LOOM_WORKER_POOL_NAME": "oldlab",
-            "LOOM_WORKER_MAX_CONCURRENT": "1",
+            "LOOM_WORKER_MAX_CONCURRENT": "4",
         },
     )
     monkeypatch.setattr(policy, "_run", lambda *_args, **_kwargs: "cgroupfs\n")
@@ -2399,11 +3954,11 @@ def test_allocation_node_check_binds_raw_inputs_docker_and_compose(
         expected_tree="7" * 40,
         expected_env_inode=2,
         expected_env_sha256="6" * 64,
-        batch_uid=501,
-        batch_gid=20,
+        batch_uid=batch_uid,
+        batch_gid=batch_gid,
         expected_host="trt-eai-oldlab-1",
         expected_pool="oldlab",
-        expected_concurrency=1,
+        expected_concurrency=4,
         result_path=tmp_path / "result.json",
     )
 
@@ -2413,6 +3968,27 @@ def test_allocation_node_check_binds_raw_inputs_docker_and_compose(
     assert compose_calls[1][-3:] == ("config", "--format", "json")
     assert "docker-compose.remote-worker.sandbox-link.yml" in " ".join(compose_calls[1])
     assert json.loads((tmp_path / "result.json").read_text()) == result
+
+
+def test_worker_capacity_binding_comes_from_checked_in_candidate_policy() -> None:
+    repository = Path(__file__).resolve().parents[2]
+
+    assert policy._worker_capacity_contract(
+        policy.load_profile(PROFILE),
+        repository,
+    ) == ("oldlab", 4)
+    assert policy._worker_capacity_contract(
+        policy.load_profile(GB10_PROFILE),
+        repository,
+    ) == ("gb10", 8)
+
+    with pytest.raises(policy.PolicyError, match="operator pool/concurrency assertion"):
+        policy._require_worker_capacity_assertion(
+            policy.load_profile(PROFILE),
+            repository,
+            expected_pool="oldlab",
+            expected_concurrency=1,
+        )
 
 
 @pytest.mark.parametrize("mutation", ("foreign", "duplicate", "missing"))
@@ -3983,6 +5559,7 @@ def test_public_live_readback_holds_domain_lock(
         loaded,
         sandbox=None,
         candidate_sha="c" * 40,
+        candidate_bindings=policy._offline_candidate_bindings(loaded, "c" * 40),
         require_probe=False,
     ) == {"converged": True}
     assert events == ["domain-enter", "readback", "domain-exit"]

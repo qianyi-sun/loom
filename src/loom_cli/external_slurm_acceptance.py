@@ -19,7 +19,7 @@ import subprocess
 import tomllib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +65,7 @@ _AUTHORITY_CONFIG_FIELDS = frozenset(
         "supervisor_service",
         "supervisor_timer",
         "max_age_seconds",
+        "infrastructure_nodes",
         "allowed_nodes",
         "installation",
         "infrastructure",
@@ -86,9 +87,7 @@ _FIXED_INSTALLATION = {
     "required_modules": ["loom_cli", "cryptography"],
 }
 _FIXED_INFRASTRUCTURE = {
-    "receipt_root": (
-        "/var/lib/loom-developer-sandbox-node-authority/staging-infrastructure"
-    ),
+    "receipt_root": ("/var/lib/loom-developer-sandbox-node-authority/staging-infrastructure"),
     "source_controller": "oldlab-2",
     "source_controller_host": "trt-eai-oldlab-2",
     "max_age_seconds": 3600,
@@ -142,6 +141,7 @@ class ExternalSlurmAuthorityConfig:
     broker_sandbox: str
     broker_submit_action: str
     broker_cancel_action: str
+    infrastructure_nodes: tuple[str, ...]
     allowed_nodes: tuple[str, ...]
     host_aliases: dict[str, str]
     repository_template: str
@@ -250,7 +250,7 @@ def load_authority_config(
         )
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         raise ExternalSlurmAcceptanceError("authority config is invalid TOML") from exc
-    if set(raw) != _AUTHORITY_CONFIG_FIELDS:
+    if frozenset(raw) != _AUTHORITY_CONFIG_FIELDS:
         raise ExternalSlurmAcceptanceError(
             "authority config must contain the exact closed set of top-level fields"
         )
@@ -287,6 +287,8 @@ def load_authority_config(
         raise ExternalSlurmAcceptanceError(
             "authority config infrastructure table must match the fixed convergence authority"
         )
+    allowed_nodes = _clean_string_array(raw, "allowed_nodes")
+    infrastructure_nodes = _clean_string_array(raw, "infrastructure_nodes")
     config = ExternalSlurmAuthorityConfig(
         environment=_clean_string(raw, "environment"),
         pool=_clean_string(raw, "pool"),
@@ -335,7 +337,8 @@ def load_authority_config(
         broker_sandbox=_clean_string(submission_broker, "sandbox"),
         broker_submit_action=_clean_string(submission_broker, "submit_action"),
         broker_cancel_action=_clean_string(submission_broker, "cancel_action"),
-        allowed_nodes=_clean_string_array(raw, "allowed_nodes"),
+        infrastructure_nodes=infrastructure_nodes,
+        allowed_nodes=allowed_nodes,
         host_aliases={
             str(key): str(value)
             for key, value in host_aliases.items()
@@ -439,17 +442,23 @@ def load_authority_config(
         or config.probe_action != "staging-allocation-probe"
     ):
         raise ExternalSlurmAcceptanceError("authority config submission broker binding is invalid")
-    if len(config.allowed_nodes) != 14 or "trt-gb10-7" in config.allowed_nodes:
+    expected_infrastructure_nodes = tuple(f"trt-gb10-{index}" for index in range(1, 16))
+    if config.allowed_nodes != expected_infrastructure_nodes:
         raise ExternalSlurmAcceptanceError(
-            "authority config must contain the exact 14-node GB10 acceptance set"
+            "authority config must contain the exact 15-node GB10 acceptance set"
+        )
+    if config.infrastructure_nodes != expected_infrastructure_nodes:
+        raise ExternalSlurmAcceptanceError(
+            "authority config must contain the exact 15-node GB10 infrastructure set"
         )
     if (
-        set(config.host_aliases) != set(config.allowed_nodes)
-        or len(set(config.host_aliases.values())) != len(config.allowed_nodes)
+        not set(config.allowed_nodes).issubset(config.infrastructure_nodes)
+        or set(config.host_aliases) != set(config.infrastructure_nodes)
+        or len(set(config.host_aliases.values())) != len(config.infrastructure_nodes)
         or any(not value for value in config.host_aliases.values())
     ):
         raise ExternalSlurmAcceptanceError(
-            "authority config host_aliases must match the exact GB10 node set"
+            "authority config host_aliases must match the infrastructure node set"
         )
     return config
 
@@ -465,6 +474,251 @@ def canonical_json_bytes(payload: Mapping[str, Any]) -> bytes:
         )
         + "\n"
     ).encode("utf-8")
+
+
+INFRASTRUCTURE_VERIFICATION_FIELDS = frozenset(
+    {
+        "schema_version",
+        "kind",
+        "candidate_sha",
+        "candidate_tree",
+        "generation",
+        "convergence_id",
+        "requested_at",
+        "request_sha256",
+        "receipt_path",
+        "payload_sha256",
+        "source_controller",
+        "source_controller_host",
+        "created_at",
+        "expires_at",
+        "source_bootstrap",
+        "accounting",
+        "infrastructure_nodes",
+        "node_bootstraps",
+        "mount_contract",
+        "mount_digests",
+        "mount_digest",
+        "source_digest",
+        "boot_ids",
+        "node_count",
+        "result",
+    }
+)
+INFRASTRUCTURE_OPERATION_FIELDS = frozenset(
+    {
+        "action",
+        "node",
+        "request_id",
+        "payload_sha256",
+        "result_sha256",
+        "inner_receipt",
+        "completed_at",
+        "status",
+    }
+)
+_BOOT_ID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z"
+)
+
+
+def infrastructure_mount_digest(
+    mount_contract: Mapping[str, Any],
+) -> str:
+    """Return the stable mount binding shared by producer and consumers."""
+
+    return hashlib.sha256(
+        canonical_json_bytes({"mount_contract": dict(mount_contract)})
+    ).hexdigest()
+
+
+def infrastructure_candidate_source_digest(
+    *,
+    candidate_sha: str,
+    candidate_tree: str,
+    unit_set_digest: str,
+) -> str:
+    """Return the stable candidate/unit-source binding for external-v2."""
+
+    return hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "candidate_sha": candidate_sha,
+                "candidate_tree": candidate_tree,
+                "unit_set_digest": unit_set_digest,
+            }
+        )
+    ).hexdigest()
+
+
+def validate_infrastructure_verification_summary(
+    payload: Mapping[str, Any],
+    *,
+    candidate_sha: str,
+    candidate_tree: str,
+    receipt_path: str,
+    expected_hosts: Sequence[str],
+    expected_mount_contract: Mapping[str, Any],
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Validate the exact root-producer summary consumed by external-v2."""
+
+    hosts = tuple(expected_hosts)
+    boot_ids = payload.get("boot_ids")
+    mount_digests = payload.get("mount_digests")
+    node_bootstraps = payload.get("node_bootstraps")
+    infrastructure_nodes = payload.get("infrastructure_nodes")
+    source = payload.get("source_bootstrap")
+    accounting = payload.get("accounting")
+    if (
+        set(payload) != INFRASTRUCTURE_VERIFICATION_FIELDS
+        or payload.get("schema_version") != 1
+        or payload.get("kind") != "staging_external_slurm_infrastructure_verification"
+        or payload.get("candidate_sha") != candidate_sha
+        or payload.get("candidate_tree") != candidate_tree
+        or isinstance(payload.get("generation"), bool)
+        or not isinstance(payload.get("generation"), int)
+        or payload["generation"] < 1
+        or _GENERATION_ID_RE.fullmatch(str(payload.get("convergence_id"))) is None
+        or _GENERATION_ID_RE.fullmatch(str(payload.get("request_sha256"))) is None
+        or payload.get("receipt_path") != receipt_path
+        or _GENERATION_ID_RE.fullmatch(str(payload.get("payload_sha256"))) is None
+        or payload.get("source_controller") != "oldlab-2"
+        or payload.get("source_controller_host") != "trt-eai-oldlab-2"
+        or infrastructure_nodes != list(hosts)
+        or payload.get("node_count") != len(hosts)
+        or payload.get("mount_contract") != dict(expected_mount_contract)
+        or not isinstance(mount_digests, dict)
+        or set(mount_digests) != set(hosts)
+        or any(
+            not isinstance(value, str) or _GENERATION_ID_RE.fullmatch(value) is None
+            for value in mount_digests.values()
+        )
+        or payload.get("mount_digest")
+        != infrastructure_mount_digest(expected_mount_contract)
+        or _GENERATION_ID_RE.fullmatch(str(payload.get("source_digest"))) is None
+        or not isinstance(boot_ids, dict)
+        or set(boot_ids) != set(hosts)
+        or any(
+            not isinstance(value, str) or _BOOT_ID_RE.fullmatch(value) is None
+            for value in boot_ids.values()
+        )
+        or len(set(boot_ids.values())) != len(hosts)
+        or payload.get("result") != "pass"
+        or not isinstance(source, dict)
+        or set(source) != INFRASTRUCTURE_OPERATION_FIELDS
+        or not isinstance(accounting, dict)
+        or set(accounting) != INFRASTRUCTURE_OPERATION_FIELDS
+        or not isinstance(node_bootstraps, list)
+        or len(node_bootstraps) != len(hosts)
+        or any(
+            not isinstance(item, dict) or set(item) != INFRASTRUCTURE_OPERATION_FIELDS
+            for item in node_bootstraps
+        )
+    ):
+        raise ExternalSlurmAcceptanceError(
+            "infrastructure verification summary binding is invalid"
+        )
+    expected_request = {
+        "schema_version": 1,
+        "kind": "loom.staging-external-slurm.infrastructure-converge-request",
+        "candidate_sha": candidate_sha,
+        "candidate_tree": candidate_tree,
+        "convergence_id": payload["convergence_id"],
+        "requested_at": payload.get("requested_at"),
+    }
+    if payload["request_sha256"] != hashlib.sha256(
+        canonical_json_bytes(expected_request)
+    ).hexdigest():
+        raise ExternalSlurmAcceptanceError(
+            "infrastructure verification request binding is invalid"
+        )
+    operations = (
+        (source, "staging-shared-source-bootstrap", "trt-gb10-2"),
+        (accounting, "staging-slurm-accounting-converge", "trt-gb10-1"),
+        *tuple(
+            (item, "staging-allocation-bootstrap", host)
+            for item, host in zip(node_bootstraps, hosts, strict=True)
+        ),
+    )
+    completed: list[datetime] = []
+    for item, action, host in operations:
+        inner = item.get("inner_receipt")
+        valid_inner = (
+            re.fullmatch(r"staging-shared-source-bootstrap/v1/[0-9a-f]{64}", str(inner))
+            is not None
+            if action == "staging-shared-source-bootstrap"
+            else (
+                re.fullmatch(r"staging-accounting/v1/[0-9a-f]{64}", str(inner))
+                is not None
+                if action == "staging-slurm-accounting-converge"
+                else re.fullmatch(
+                    (
+                        r"staging-allocation-bootstrap/v1/"
+                        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+                        r"[0-9a-f]{4}-[0-9a-f]{12}/[0-9a-f]{64}"
+                    ),
+                    str(inner),
+                )
+                is not None
+            )
+        )
+        if (
+            item.get("action") != action
+            or item.get("node") != host
+            or item.get("status") != "succeeded"
+            or _GENERATION_ID_RE.fullmatch(str(item.get("request_id"))) is None
+            or _GENERATION_ID_RE.fullmatch(str(item.get("payload_sha256"))) is None
+            or _GENERATION_ID_RE.fullmatch(str(item.get("result_sha256"))) is None
+            or not valid_inner
+        ):
+            raise ExternalSlurmAcceptanceError(
+                "infrastructure verification operation binding is invalid"
+            )
+        try:
+            completed.append(_parse_timestamp(item.get("completed_at"), "completed_at"))
+        except ExternalSlurmAcceptanceError as exc:
+            raise ExternalSlurmAcceptanceError(
+                "infrastructure verification operation timestamp is invalid"
+            ) from exc
+    source_inner = str(source["inner_receipt"]).rsplit("/", 1)[-1]
+    if payload["source_digest"] != source_inner:
+        raise ExternalSlurmAcceptanceError(
+            "infrastructure verification source digest is invalid"
+        )
+    for item, host in zip(node_bootstraps, hosts, strict=True):
+        _prefix, boot_id, mount_digest = str(item["inner_receipt"]).rsplit("/", 2)
+        if boot_ids[host] != boot_id or mount_digests[host] != mount_digest:
+            raise ExternalSlurmAcceptanceError(
+                "infrastructure verification node evidence is invalid"
+            )
+    if now is not None and (now.tzinfo is None or now.utcoffset() is None):
+        raise ExternalSlurmAcceptanceError(
+            "infrastructure verification trusted clock is invalid"
+        )
+    requested = _parse_timestamp(payload.get("requested_at"), "requested_at")
+    created = _parse_timestamp(payload.get("created_at"), "created_at")
+    expires = _parse_timestamp(payload.get("expires_at"), "expires_at")
+    observed = None if now is None else now.astimezone(UTC)
+    if (
+        requested > completed[0]
+        or completed != sorted(completed)
+        or completed[-1] > created
+        or not created < expires
+        or expires - created > timedelta(seconds=3600)
+        or (
+            observed is not None
+            and (
+                created > observed + timedelta(seconds=30)
+                or expires <= observed
+                or observed - created > timedelta(seconds=3600)
+            )
+        )
+    ):
+        raise ExternalSlurmAcceptanceError(
+            "infrastructure verification summary lifetime is invalid"
+        )
+    return dict(payload)
 
 
 def authority_paths(
@@ -654,7 +908,7 @@ def validate_authority_payload(
         raise ExternalSlurmAcceptanceError("authority receipt lifetime exceeds policy")
     rows = payload.get("nodes")
     if not isinstance(rows, list) or len(rows) != len(config.allowed_nodes):
-        raise ExternalSlurmAcceptanceError("authority node matrix must cover 14 nodes")
+        raise ExternalSlurmAcceptanceError("authority node matrix must cover 15 nodes")
     expected_nodes = list(config.allowed_nodes)
     actual_nodes: list[str] = []
     for index, row in enumerate(rows):
@@ -737,7 +991,7 @@ def validate_authority_payload(
             )
     if actual_nodes != expected_nodes:
         raise ExternalSlurmAcceptanceError(
-            "authority node matrix must match the ordered 14-node set"
+            "authority node matrix must match the ordered 15-node set"
         )
     if payload.get("result") != "pass":
         raise ExternalSlurmAcceptanceError("authority result is not pass")

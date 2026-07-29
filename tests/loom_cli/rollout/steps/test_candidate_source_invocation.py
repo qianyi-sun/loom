@@ -2411,8 +2411,8 @@ def test_gb10_prep_external_authority_mode_accepts_only_exact_profile(
     ("original", "replacement"),
     (
         (
-            "require_external_allocation_authority = true",
-            "require_external_allocation_authority = false",
+            "materialize = true\nrequire_external_allocation_authority = true",
+            "materialize = true\nrequire_external_allocation_authority = false",
         ),
         ("target_slots = 0", "target_slots = 1"),
         (
@@ -2432,7 +2432,16 @@ def test_gb10_prep_declared_external_authority_drift_never_downgrades_to_legacy(
     ctx, profile = _external_authority_profile(tmp_path, monkeypatch)
     payload = profile.read_text(encoding="utf-8")
     assert original in payload
-    profile.write_text(payload.replace(original, replacement, 1), encoding="utf-8")
+    mutated = payload.replace(original, replacement, 1)
+    profile.write_text(mutated, encoding="utf-8")
+    if original.startswith("materialize = true"):
+        parsed = tomllib.loads(mutated)
+        assert (
+            parsed["external_slurm_runner_prerequisites"][
+                "require_external_allocation_authority"
+            ]
+            is False
+        )
 
     with pytest.raises(CandidateToolingError, match="exact closed contract"):
         _external_authority_retirement_mode(
@@ -4182,7 +4191,7 @@ def test_current_candidate_worker_binding_is_stable_across_heartbeat_timestamps(
                             "updated_at": timestamp,
                             "host_intents": {
                                 "trt-gb10-1": "active",
-                                "trt-gb10-7": "stopped",
+                                "trt-gb10-2": "stopped",
                             },
                         }
                     ],

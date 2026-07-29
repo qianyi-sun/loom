@@ -100,7 +100,7 @@ def _worker_boundary() -> dict[str, object]:
     return {
         "summary": {
             "checked_hosts": 14,
-            "checked_host_names": [f"trt-gb10-{number}" for number in range(1, 16) if number != 7],
+            "checked_host_names": [f"trt-gb10-{number}" for number in range(1, 16)],
             "ssh_failed_hosts": [],
             "docker_ps_failed_hosts": [],
             "hosts_without_containers": [],

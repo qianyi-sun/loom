@@ -6,7 +6,12 @@ from the operator. The installed exact-tree node authority exposes one fixed
 `collect-live-overlap` transaction on `trt-eai-oldlab-2` and one fixed
 `observe-live-overlap-job` check on each pool's source host. OLDLAB is observed
 from `trt-eai-oldlab-2`; GB10 is observed from `trt-gb10-1` (`gx10-01c7`).
-`trt-gb10-7` is absent from every allowed-node set and is rejected explicitly.
+The 2026-07-29 owner correction supersedes #822's static exclusion:
+`trt-gb10-7` is in the same infrastructure, workload, and capacity-eligible
+set as every other GB10 node. Live acceptance covers all 15 nodes with
+`excluded_nodes=[]`. If node 7 is busy, the candidate-owned drain/quiescence
+gate defers disruptive convergence and must never cancel or preempt an
+external job.
 
 The producer consumes the already-installed adapter config
 `/etc/loom/shared-capacity-adapters/<sandbox>-<pool>.toml`. Its complete content

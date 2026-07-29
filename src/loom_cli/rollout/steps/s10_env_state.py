@@ -1122,7 +1122,7 @@ def _prepare_probe_activate_external_slurm_authority(
             payload.get("result") != "pass"
             or payload.get("candidate_sha") != ctx.resolved_sha
             or payload.get("candidate_tree") != candidate_tree
-            or payload.get("node_count") != 14
+            or payload.get("node_count") != 15
         ):
             raise ExternalSlurmAcceptanceAuthorityError(
                 "external Slurm authority activation summary does not bind the candidate"

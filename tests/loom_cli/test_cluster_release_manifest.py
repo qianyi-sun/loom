@@ -83,10 +83,10 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
         "max_concurrent = 10\n"
         'env_config_version = "${ENV_CONFIG_VERSION}"\n'
         'source_git_commit = "${GIT_SHA}"\n'
-        "target_slots = 140\n"
+        "target_slots = 10\n"
         "[gb10_worker_pool_desired_states.host_intents]\n"
         'trt-gb10-1 = "active"\n'
-        'trt-gb10-7 = "stopped"\n'
+        'trt-gb10-2 = "stopped"\n'
         "[catalog_provisioning]\n"
         "required = true\n"
         'command = "loom datasets register skilllearnbench --hf-org PRHW '
@@ -199,10 +199,10 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
             "max_concurrent": 10,
             "env_config_version": "staging-abc123",
             "source_git_commit": "a" * 40,
-            "target_slots": 140,
+            "target_slots": 10,
             "host_intents": {
                 "trt-gb10-1": "active",
-                "trt-gb10-7": "stopped",
+                "trt-gb10-2": "stopped",
             },
         },
     ]

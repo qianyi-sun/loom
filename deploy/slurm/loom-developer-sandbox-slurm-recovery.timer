@@ -1,0 +1,13 @@
+[Unit]
+Description=Retry candidate-owned developer sandbox Slurm maintenance recovery
+
+[Timer]
+OnBootSec=45s
+OnUnitInactiveSec=30s
+AccuracySec=5s
+RandomizedDelaySec=5s
+Persistent=true
+Unit=loom-developer-sandbox-slurm-recovery.service
+
+[Install]
+WantedBy=timers.target

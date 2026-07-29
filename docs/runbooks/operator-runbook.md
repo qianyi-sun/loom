@@ -762,9 +762,11 @@ knob you need.
    pools, mint tokens, or read live credentials. The default manifest assigns
    every eligible GB10/OLDLAB slot to production and leaves staging/dev at zero
    borrowed slots. The physical v1.0 inventory remains all 15 GB10 hosts at 10
-   slots each. While #822 is open, node 7 is `unreachable`, production receives
-   zero slots from it, and staging declares the other 14 hosts / 140 slots as
-   its fail-closed active set. The repo-owned GB10 SSH topology uses
+   slots each. The 2026-07-29 owner correction supersedes #822's static
+   exclusion: all 15 hosts are infrastructure- and capacity-eligible, for 150
+   slots, and acceptance records `excluded_nodes=[]`. A candidate-owned
+   drain/quiescence gate defers disruptive convergence on any busy host without
+   cancelling or preempting external work. The repo-owned GB10 SSH topology uses
    `trt-gb10-1` as its sole public
    entrypoint on port `2221` and reaches private `trt-gb10-2..15` on port `22`
    through `ProxyJump trt-gb10-1`. When an observed worker
@@ -876,8 +878,8 @@ knob you need.
    because it proves no external worker target was declared. A GB10 desired
    state without `[gb10_pool]` hosts is also a release-contract error because
    rollout step 12 would have no actual hosts to prepare. For the v1.0 staging
-   gate, the current profile enumerates all 14 active GB10 hosts while the
-   repo-owned SSH config retains the full 15-host inventory.
+   gate, the current profile and repo-owned SSH config both enumerate all 15
+   GB10 hosts, and the acceptance artifact records `excluded_nodes=[]`.
    `deploy/environments/staging.cluster.toml` points `[gb10_pool].ssh_config` at that config
    plus `[gb10_pool].ssh_identity_file` at a platform-dev-local deploy
    identity. Step 12 therefore does not depend on `platform-dev` having
@@ -2016,9 +2018,9 @@ dirty, wrongly owned, writable, or wrong-origin checkout must be inspected and
 recreated as a new root-owned path rather than repaired in place.
 
 Once per newly generated service-key lifecycle, use one explicitly approved
-Ed25519 admin identity as the bootstrap channel to the exact 14-host active
+Ed25519 admin identity as the bootstrap channel to the exact 15-host active
 set. The fixed 15-host topology remains validated, and a migrated legacy
-revocation ledger can retain all 15 hosts until node 7 is reachable. The
+revocation ledger must cover all 15 hosts. The
 identity must be an absolute, single-link, mode-0600 regular file under its
 same-owner mode-0700 parent. The tool derives its public key with the fixed
 system `ssh-keygen`; it never copies or prints either private key.
@@ -2109,9 +2111,11 @@ construct that argv from a validated private envelope.
 The broker intentionally does not use `ssh -A`. Step 12 authenticates with the
 service-owned `/var/lib/loom-staging-rollout/gb10-deploy-ed25519` declared by
 the candidate-bound cluster config. The private file is mode 0600, is never
-shared with operators, and is not committed or printed. While #822 is open,
-every rollout keeps the merged 14-active-host fail-closed gate and refuses a
-runtime re-addition of node 7. Host checkout, env update, legacy worker
+shared with operators, and is not committed or printed. Every rollout keeps
+the merged all-15-host fail-closed gate. A busy host remains capacity-eligible,
+but candidate-owned drain/quiescence must complete before disruptive
+convergence and must never cancel or preempt external jobs. Host checkout, env
+update, legacy worker
 retirement, and node-agent start remain ordered per host while the fixed broker
 policy bounds concurrency across independent hosts.
 
@@ -2133,9 +2137,9 @@ sudo ./scripts/ops/staging_rollout_host.py uninstall --retain-ledger
 
 Uninstall removes admission, takes the maintenance/launch lock, refuses an
 active request, and revokes only the recorded service public key from every
-host in the root-owned revocation ledger. New #822-era installs record the 14
-active hosts; a legacy ledger can retain all 15 until node 7 is reachable and
-its old trust is removed. Only installer-recorded ACLs/memberships/linger and
+host in the root-owned revocation ledger. Current installs and migrated legacy
+ledgers both record all 15 hosts. Only installer-recorded
+ACLs/memberships/linger and
 generated key/runtime state are removed, while each recorded ACL preimage is
 restored, including removal of a wholly installer-created default ACL. A
 pre-existing service ACL is never removed merely because its mask required
@@ -2332,8 +2336,8 @@ upload-pack is bound only to that candidate's exact `.git` directory derived
 from the attested SHA. This avoids Git's cross-owner rejection without changing
 shared ownership or any global, system, or user Git configuration.
 
-Before request creation the broker also checks the exact 14 active GB10 SSH
-targets as `qianyi`: the 13 clients must expose the exact NFSv4 source and
+Before request creation the broker also checks the exact 15 GB10 SSH targets
+as `qianyi`: the 14 clients must expose the exact NFSv4 source and
 mount identity, `trt-gb10-2` must expose the ext4 backend, and the shared root
 must have the fixed owner/group/mode and
 be readable/searchable but not writable. Immediately after the one-time
@@ -2581,7 +2585,7 @@ desired state.
 | 09 | migrate | candidate-source `loom cluster render-migration`, apply the rendered Postgres/MinIO stateful substrate plus static worker trajectory PV/PVC from step 07 and wait for those StatefulSets, then apply/wait for the migration Job (#332, #206). This keeps missing-kind recovery restartable without starting application Deployments before Alembic and without leaving protected preflight with a partial critical PVC set. |
 | 10 | cluster-up | candidate-source `loom cluster up --backup-manifest <path> --recover-sandbox-deadlines --sandbox-deadline-max-pods 4` using the same manifest and broker-bound traversal ceilings verified by step 05 and preflighted by step 08. Running this immediately after migration recreates the Control Plane before env-state uses the CP API during missing-kind recovery (#203 fix for updated replicas, #206 bounded kind/containerd sandbox-deadline retry). |
 | 11 | env-state | candidate-source `loom admin environment-state apply`, then required profile `catalog_provisioning.command` via protected env/env-source inputs and a rollout-owned private cache namespace, then `loom admin environment-state check --admin-token <source> --expect-admin-token-fingerprint <fingerprint>` (#331 fix for stop-on-disable, #533 guard for scoped admin token drift, #543 catalog-owned GB10 smoke task provisioning). Before the apply, rollout waits for the private CP URL's `/healthz` and records `control-plane-readiness.json`, so cluster-up pod recreation and managed tunnel restarts cannot race the env-state mutation. Pure GB10 node-status convergence drift is recorded and deferred because step 12 has not started node-agent apply yet; mixed drift still fails immediately. |
-| 12 | gb10-prep | SSH ×N hosts after desired-state apply: require `Linger=yes` before any unit mutation; fetch, checkout, write env file, retire the legacy `loom-gb10-worker.service`; install the candidate service+timer; remove only the exact known legacy `deploy-window.conf` timer override (unknown or extra drop-ins fail closed); daemon-reload; start the node-agent once; enable/restart its timer; then verify installed bytes, absence of effective drop-ins, and live systemd state. The node-agent service is `Type=oneshot`, so success is `Result=success` / `ExecMainStatus=0` even when it is `inactive/dead`; the timer must finish loaded, enabled, active/waiting, point at that service, and need no daemon reload. Tier 0 may admit the exact loaded/enabled `active/elapsed` restart state as protected-repairable only when every other manager, linger, service, and timer predicate matches; prep must then converge it to waiting. This step intentionally runs after step 11 so a host-local node-agent cannot apply a stale Control Plane desired-state row (#593). Under #822, prep targets the exact 14-host active set and leaves node 7 stopped/unreachable. After rollout, disconnect SSH, wait more than one timer period, stop one active canary worker, and require periodic recovery plus a fresh heartbeat while node 7 remains absent. |
+| 12 | gb10-prep | SSH ×N hosts after desired-state apply: require `Linger=yes` before any unit mutation; fetch, checkout, write env file, retire the legacy `loom-gb10-worker.service`; install the candidate service+timer; remove only the exact known legacy `deploy-window.conf` timer override (unknown or extra drop-ins fail closed); daemon-reload; start the node-agent once; enable/restart its timer; then verify installed bytes, absence of effective drop-ins, and live systemd state. The node-agent service is `Type=oneshot`, so success is `Result=success` / `ExecMainStatus=0` even when it is `inactive/dead`; the timer must finish loaded, enabled, active/waiting, point at that service, and need no daemon reload. Tier 0 may admit the exact loaded/enabled `active/elapsed` restart state as protected-repairable only when every other manager, linger, service, and timer predicate matches; prep must then converge it to waiting. This step intentionally runs after step 11 so a host-local node-agent cannot apply a stale Control Plane desired-state row (#593). The 2026-07-29 owner correction requires the exact all-15-host set with `excluded_nodes=[]`; candidate-owned drain/quiescence defers a disruptive host step while external work is active and never cancels or preempts that work. After rollout, disconnect SSH, wait more than one timer period, stop one acceptance-owned canary worker, and require periodic recovery plus a fresh heartbeat across all 15 hosts. |
 | 13 | production-defaults | candidate-source `loom admin rate-cards sync-yibuapi --format json`, then `loom providers update/show` for hosted provider pricing defaults declared in the environment-state profile, using `--service-token <source>` in an isolated CLI config derived from the rollout route. This keeps DB-backed cost-attribution defaults from disappearing after a fresh rollout without depending on ambient operator login state. |
 | 14 | release-gate | record `image-identities-<image-tag>.json` for rollout-managed rendered images, candidate-source `loom cluster release-manifest --expected-image-identities-json ...` → `release-manifest-<image-tag>.json`, and—only for the fixed staging root `/data/loom-staging`—ask Docker to prune unused images and build cache older than 24 hours before measuring storage headroom. The cleanup writes `staging-host-cache-retention.json`, fails closed on either Docker command, and revalidates the exact candidate image identities before continuing. Then run `loom cluster minio-storage-preflight --output minio-storage-preflight-<image-tag>.json`, require non-empty GB10 desired state for `current-gb10` rollouts, collect GB10 status from the manifest's `control_plane_environment`, rerun `loom admin environment-state check --format json`, and finally `loom cluster release-gate --manifest <that file> --minio-storage-preflight <that storage artifact>` (#339 fix for stale kind-import, #536 guard for GB10 status token drift, #593 post-prep env-state recheck). GB10 convergence mismatches are retried for up to 15 minutes so a just-triggered node-agent apply can report the new image/env/source state before the gate fails. This retry window includes release-target mismatches returned directly by `loom admin gb10-workers status`, such as a worker registration that exists before its first fresh heartbeat lands. Active GB10 hosts must also show a linked fresh active docker worker registration (`worker_id`, `worker_status=active`, `worker_fresh=true`, `worker_backend_names` contains `docker`), because smoke/admin submission uses `/api/v1/backends`, not node-agent metadata alone. |
 | 15 | smoke | HTTP health + smoke identity + benchmarks + smoke task lookup. Default `user-token` mode submits a user-owned trial and checks trajectory/usage; `admin-on-behalf` mode submits an audited represented-user batch through the admin API, uses a batch-compatible current-GB10 default task, and polls batch success. |
@@ -4864,12 +4868,12 @@ older status. The GB10 check uses the same
 listing or inspection, or no running inspected worker container on any active
 host are release-gate failures. The remote probe uses `docker ps` without
 `-a`, so stopped or exited historical containers do not count as coverage.
-Under the #822 quarantine, the exact active
-staging set is `trt-gb10-1` through `trt-gb10-15` excluding `trt-gb10-7` (14
-hosts); node 7 remains in the physical 15-host inventory but is declared
-`stopped` and must not appear in the active HF boundary probe until the
-quarantine is deliberately removed through a merged change. The evidence
-therefore records the sorted, actual SSH targets in `checked_host_names`, plus
+The 2026-07-29 owner correction supersedes the #822 quarantine. The exact
+active staging set is `trt-gb10-1` through `trt-gb10-15` with
+`excluded_nodes=[]`; all 15 hosts must appear in the active HF boundary probe.
+A candidate-owned drain/quiescence gate defers disruptive convergence while
+external work is active and must never cancel or preempt that work. The
+evidence records the sorted, actual SSH targets in `checked_host_names`, plus
 `docker_ps_failed_hosts` and `hosts_without_containers`, so a matching count
 cannot hide a wrong or partially inspected host set. The remote worker probe is
 sent to `python3 -` over SSH stdin rather than embedded as a multiline
@@ -4931,12 +4935,12 @@ The generated artifact has this shape:
     "direct_hf_egress_required": false,
     "materialized_from_internal_source": true,
     "gb10_hf_token_check_summary": {
-      "checked_hosts": 14,
+      "checked_hosts": 15,
       "checked_host_names": [
         "trt-gb10-1", "trt-gb10-10", "trt-gb10-11", "trt-gb10-12",
         "trt-gb10-13", "trt-gb10-14", "trt-gb10-15", "trt-gb10-2",
         "trt-gb10-3", "trt-gb10-4", "trt-gb10-5", "trt-gb10-6",
-        "trt-gb10-8", "trt-gb10-9"
+        "trt-gb10-7", "trt-gb10-8", "trt-gb10-9"
       ],
       "ssh_failed_hosts": [],
       "docker_ps_failed_hosts": [],
@@ -4944,7 +4948,7 @@ The generated artifact has this shape:
       "env_file_missing_hosts": [],
       "env_file_hf_token_present_hosts": [],
       "hosts_with_container_hf_token_present": [],
-      "containers_checked": 14,
+      "containers_checked": 15,
       "inspect_failed": []
     }
   },
@@ -6429,10 +6433,12 @@ activate a reduced profile, substitute TB2.0, or merge incomplete evidence.
   summaries and metrics group the hosts together. Keep Docker data-root, worker
   trajectory cache, benchmark cache, and trial scratch on each node's local
   ext4 disk; do not put those hot paths on `/shared_work`. Current staging
-  validation uses 14 active hosts (all of `trt-gb10-1..15` except node 7) at
-  `LOOM_WORKER_MAX_CONCURRENT=10`, for 140 configured ARM64 slots. Node 7
-  remains stopped under #822 until merged re-admission. Every shared-staging
-  rollout must use the broker,
+  sandbox validation uses all 15 `trt-gb10-1..15` hosts at
+  `LOOM_WORKER_MAX_CONCURRENT=8`, for 120 configured ARM64 Slurm slots, with
+  `excluded_nodes=[]`. If a host is busy, candidate-owned drain/quiescence
+  defers disruptive convergence without cancelling or preempting external
+  work. The 150-slot figure elsewhere is the physical/legacy node-agent
+  ceiling, not the sandbox policy. Every shared-staging rollout must use the broker,
   which applies and checks the versioned environment profile, verifies the
   OLDLAB tunnel and Slurm prerequisites, prepares all declared GB10 hosts, and
   evaluates the release gate inside the candidate-bound request envelope.
@@ -6526,7 +6532,7 @@ activate a reduced profile, substitute TB2.0, or merge incomplete evidence.
   only releases allocations after queue drain.
 - Release-managed staging GB10 Docker Compose workers use a 7200-second idle
   window from `deploy/environment-state/staging.toml`. That is the validation
-  lease bound for the exact 14 active hosts x 10 slots gate; shorter values can let early
+  lease bound for the exact 15 hosts x 10 slots gate; shorter values can let early
   hosts exit during bounded-parallel prep before release-gate observes fresh
   workers.
 - For shared OLDLAB and GB10 pools, prefer the worker-pool autoscaler over

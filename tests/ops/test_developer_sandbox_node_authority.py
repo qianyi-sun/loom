@@ -6,6 +6,7 @@ import io
 import json
 import os
 import pwd
+import stat
 import tarfile
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
@@ -65,7 +66,16 @@ def _staging_infrastructure_receipt(
                 "inner_receipt": (
                     f"staging-accounting/v1/{inner['request_id']}"
                     if action == "staging-slurm-accounting-converge"
-                    else None
+                    else (
+                        f"staging-shared-source-bootstrap/v1/{'a' * 64}"
+                        if action == "staging-shared-source-bootstrap"
+                        else (
+                            "staging-allocation-bootstrap/v1/"
+                            f"{int(node.rsplit('-', 1)[1]):08x}-0000-4000-8000-"
+                            f"{int(node.rsplit('-', 1)[1]):012x}/"
+                            f"{hashlib.sha256(f'mount:{node}'.encode()).hexdigest()}"
+                        )
+                    )
                 ),
                 "completed_at": authority._timestamp(
                     observed - timedelta(seconds=20 - index),
@@ -270,6 +280,26 @@ def _slurm_policy_journal(
     rollback_target: Path | None = None,
 ) -> bytes:
     domain = "oldlab" if node.startswith("oldlab-") else "gb10"
+    action = (
+        "slurm-rollback"
+        if operation == "rollback"
+        else (
+            "slurm-controller-converge"
+            if node == authority.SLURM_CONTROLLER[domain]
+            else "slurm-node-converge"
+        )
+    )
+    request = authority._parse_request(
+        _request(
+            action=action,
+            node=node,
+            domain=domain,
+            prior_request_id="c" * 64 if operation == "rollback" else None,
+        ),
+        verb="transact",
+        policy=_policy(node),
+    )
+    candidate_set = json.loads(request.payload_bytes)
     payload: dict[str, object] = {
         "schema_version": 1,
         "operation": operation,
@@ -277,6 +307,12 @@ def _slurm_policy_journal(
         "host": authority.NODE_HOSTNAMES[node],
         "slurm_node": node,
         "candidate_sha": SHA,
+        "candidate_set_sha256": candidate_set["candidate_set_sha256"],
+        "candidate_bindings": candidate_set["candidate_bindings"],
+        "transaction_id": request.request_id,
+        "candidate_set_generation": candidate_set["generation"],
+        "candidate_set_convergence_id": candidate_set["convergence_id"],
+        "candidate_set_payload_sha256": request.payload["payload_sha256"],
         "snapshot": str(snapshot),
         "accounting_snapshot": str(snapshot / "accounting-cas.json") if accounting else None,
         "restart": True,
@@ -328,6 +364,42 @@ def _request(
     prior_request_id: str | None = None,
 ) -> bytes:
     if action in {
+        "slurm-node-converge",
+        "slurm-controller-converge",
+        "slurm-rollback",
+        "slurm-check",
+    } and payload_kind == "none":
+        bindings = {
+            f"loom-dev-{sandbox_name}": {
+                "sandbox": sandbox_name,
+                "service_user": f"loom-sandbox-{sandbox_name}",
+                "candidate_sha": candidate_sha,
+                "candidate_tree": TREE,
+            }
+            for sandbox_name, candidate_sha in (
+                ("qianyi", SHA),
+                ("hongjian", "c" * 40),
+                ("devansh", "d" * 40),
+            )
+        }
+        payload_kind = "slurm-candidate-set-json"
+        payload_bytes = authority._canonical(
+            {
+                "schema_version": 2,
+                "kind": "loom.developer-sandbox.slurm-candidate-set",
+                "candidate_set_sha256": hashlib.sha256(
+                    json.dumps(
+                        bindings,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("ascii"),
+                ).hexdigest(),
+                "candidate_bindings": bindings,
+                "generation": 1,
+                "convergence_id": "e" * 64,
+            },
+        )
+    if action in {
         "export-runtime-proof-artifact",
         "staging-pressure-reclaim-observe",
     }:
@@ -357,6 +429,36 @@ def _request(
         payload_bytes=payload_bytes,
         prior_request_id=prior_request_id,
     )
+
+
+def _rebind_request(
+    raw: bytes,
+    *,
+    qianyi_tree: str | None = None,
+    candidate_shas: dict[str, str] | None = None,
+) -> bytes:
+    body = json.loads(raw)
+    if body["payload_kind"] == "slurm-candidate-set-json":
+        candidate_set = json.loads(
+            base64.b64decode(body["payload_base64"], validate=True),
+        )
+        bindings = candidate_set["candidate_bindings"]
+        if qianyi_tree is not None:
+            bindings["loom-dev-qianyi"]["candidate_tree"] = qianyi_tree
+        for sandbox, candidate_sha in (candidate_shas or {}).items():
+            bindings[f"loom-dev-{sandbox}"]["candidate_sha"] = candidate_sha
+        candidate_set["candidate_set_sha256"] = hashlib.sha256(
+            json.dumps(bindings, sort_keys=True, separators=(",", ":")).encode("ascii"),
+        ).hexdigest()
+        payload_bytes = authority._canonical(candidate_set)
+        body["payload_base64"] = base64.b64encode(payload_bytes).decode("ascii")
+        body["payload_sha256"] = hashlib.sha256(payload_bytes).hexdigest()
+        body["candidate_sha"] = bindings["loom-dev-qianyi"]["candidate_sha"]
+        body["candidate_tree"] = bindings["loom-dev-qianyi"]["candidate_tree"]
+    elif qianyi_tree is not None:
+        body["candidate_tree"] = qianyi_tree
+    body["request_id"] = authority._request_digest(body)
+    return authority._canonical(body)
 
 
 def test_sudoers_exposes_only_two_exact_no_environment_commands() -> None:
@@ -473,16 +575,70 @@ def test_slurm_authority_assets_and_node_inventory_are_closed() -> None:
         Path("deploy/slurm/developer-sandboxes/oldlab.toml"),
         Path("deploy/slurm/developer-sandboxes/gb10.toml"),
         Path("deploy/slurm/loom-slurm-job-cgroup-guard.service"),
+        authority.SLURM_RECOVERY_SERVICE_RELATIVE,
+        authority.SLURM_RECOVERY_TIMER_RELATIVE,
     }.issubset(set(authority.SOURCE_ASSETS))
-    assert "trt-gb10-7" not in authority.NODE_HOSTNAMES
+    assert authority.NODE_HOSTNAMES["trt-gb10-7"] == "gx10-0faf"
+    assert authority.STAGING_INFRASTRUCTURE_NODES == tuple(
+        f"trt-gb10-{index}" for index in range(1, 16)
+    )
+    assert {
+        authority.SLURM_RECOVERY_SERVICE_RELATIVE,
+        authority.SLURM_RECOVERY_TIMER_RELATIVE,
+    }.issubset(authority.MIGRATABLE_EXTERNAL_SOURCE_ASSETS)
+
+
+def test_slurm_recovery_systemd_contract_is_root_persistent_and_has_no_kill_surface() -> None:
+    service = authority.SLURM_RECOVERY_SERVICE_RELATIVE.read_text(encoding="utf-8")
+    timer = authority.SLURM_RECOVERY_TIMER_RELATIVE.read_text(encoding="utf-8")
+
+    assert "User=root" in service
+    assert "Group=root" in service
+    assert "UMask=0077" in service
+    assert (
+        "ExecStart=/usr/bin/python3 -I -B "
+        "/usr/local/libexec/loom-developer-sandbox-slurm-recovery "
+        "recover-drain --execute"
+    ) in service
+    assert "OnBootSec=45s" in timer
+    assert "OnUnitInactiveSec=30s" in timer
+    assert "Persistent=true" in timer
+    assert "WantedBy=timers.target" in timer
+    for forbidden in ("scancel", "docker stop", "docker kill", "State=DOWN"):
+        assert forbidden not in service
+        assert forbidden not in timer
 
 
 def test_live_authority_system_install_mapping_is_fixed_and_complete() -> None:
     expected_prefix = (
         (
+            Path("scripts/ops/developer_sandbox_slurm_policy.py"),
+            authority.SLURM_RECOVERY_LIBEXEC,
+            0o755,
+            0o755,
+        ),
+        (
+            authority.SLURM_RECOVERY_SERVICE_RELATIVE,
+            authority.SLURM_RECOVERY_SERVICE,
+            0o644,
+            0o755,
+        ),
+        (
+            authority.SLURM_RECOVERY_TIMER_RELATIVE,
+            authority.SLURM_RECOVERY_TIMER,
+            0o644,
+            0o755,
+        ),
+        (
             authority.PLATFORM_HEALTH_AUTHORITY_RELATIVE,
             Path("/usr/local/libexec/loom-developer-sandbox-platform-health-authority"),
             0o755,
+            0o755,
+        ),
+        (
+            authority.CAPACITY_CONTRACT_RELATIVE,
+            Path("/usr/local/libexec/scripts/ops/developer_sandbox_capacity_contract.py"),
+            0o644,
             0o755,
         ),
         (
@@ -574,6 +730,12 @@ def test_live_authority_system_install_mapping_is_fixed_and_complete() -> None:
             0o644,
             0o755,
         ),
+        (
+            authority.NODE_AUTHORITY_TMPFILES_SOURCE_RELATIVE,
+            authority.NODE_AUTHORITY_TMPFILES,
+            0o644,
+            0o755,
+        ),
     )
     assert {
         relative for relative, _target, _mode, _parent in authority.SYSTEM_INSTALL_ASSETS
@@ -642,7 +804,13 @@ def test_system_install_orders_validation_activation_reload_and_readback(
         lambda: events.append("validate-sudoers-sources"),
     )
     monkeypatch.setattr(authority, "_ensure_system_install_directories", lambda: None)
-    monkeypatch.setattr(authority, "_validate_tmpfiles", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        authority,
+        "_validate_tmpfiles",
+        lambda path, *, apply, expected_directories: events.append(
+            f"tmpfiles:{apply}:{path}:{expected_directories}",
+        ),
+    )
     monkeypatch.setattr(
         authority,
         "_validate_systemd_service",
@@ -665,6 +833,11 @@ def test_system_install_orders_validation_activation_reload_and_readback(
     )
     monkeypatch.setattr(
         authority,
+        "_systemd_enable_recovery_timer",
+        lambda *, start: events.append(f"recovery-enabled:{start}"),
+    )
+    monkeypatch.setattr(
+        authority,
         "_validate_system_install_assets",
         lambda **_kwargs: events.append("readback") or readback,
     )
@@ -684,7 +857,370 @@ def test_system_install_orders_validation_activation_reload_and_readback(
         events.index(f"replace:{sudoers}") for sudoers in authority._system_sudoers_paths()
     )
     assert last_libexec_or_config < first_service < first_sudoers
-    assert events[-2:] == ["daemon-reload", "readback"]
+    assert events[-5:] == [
+        "tmpfiles:True:"
+        f"{authority.NODE_AUTHORITY_TMPFILES}:"
+        f"{authority.NODE_AUTHORITY_TMPFILES_DIRECTORIES}",
+        "tmpfiles:True:"
+        f"{authority.STAGING_EXTERNAL_TMPFILES}:"
+        f"{authority.STAGING_SHARED_TMPFILES_DIRECTORIES}",
+        "daemon-reload",
+        "recovery-enabled:False",
+        "readback",
+    ]
+
+
+def test_node_authority_tmpfiles_asset_is_exact_upgrade_managed_and_persistent() -> None:
+    assert authority.NODE_AUTHORITY_TMPFILES_SOURCE_RELATIVE.read_text(encoding="utf-8") == (
+        "d /run/loom-developer-sandbox-node-authority 0700 root root -\n"
+    )
+    assert authority.NODE_AUTHORITY_TMPFILES_SOURCE_RELATIVE in authority.SOURCE_ASSETS
+    assert authority.NODE_AUTHORITY_TMPFILES_SOURCE_RELATIVE in (
+        authority.MIGRATABLE_EXTERNAL_SOURCE_ASSETS
+    )
+    assert (
+        authority.NODE_AUTHORITY_TMPFILES_SOURCE_RELATIVE,
+        authority.NODE_AUTHORITY_TMPFILES,
+        0o644,
+        0o755,
+    ) in authority.SYSTEM_INSTALL_ASSETS
+    assert authority.NODE_AUTHORITY_TMPFILES == Path(
+        "/etc/tmpfiles.d/loom-developer-sandbox-node-authority.conf",
+    )
+    assert (authority.NODE_AUTHORITY_TMPFILES, 0o644, 0o755) in authority._managed_assets()
+
+
+def test_system_install_validates_both_tmpfiles_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checked: list[tuple[Path, bool, tuple[tuple[Path, int], ...]]] = []
+    monkeypatch.setattr(authority, "_validate_sudoers", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        authority,
+        "_validate_tmpfiles",
+        lambda path, *, apply, expected_directories: checked.append(
+            (path, apply, expected_directories),
+        ),
+    )
+
+    authority._validate_system_install_sources()
+
+    assert checked == [
+        (
+            authority.SOURCE_ROOT / Path(
+                "deploy/developer-sandboxes/loom-staging-shared.tmpfiles.conf",
+            ),
+            False,
+            authority.STAGING_SHARED_TMPFILES_DIRECTORIES,
+        ),
+        (
+            authority.SOURCE_ROOT / authority.NODE_AUTHORITY_TMPFILES_SOURCE_RELATIVE,
+            False,
+            authority.NODE_AUTHORITY_TMPFILES_DIRECTORIES,
+        ),
+    ]
+
+
+def test_tmpfiles_source_validation_uses_an_isolated_root_and_cleans_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage_root = tmp_path / "stage"
+    policy = tmp_path / "policy.conf"
+    policy.write_text(
+        "d /srv/loom 0755 root root -\nd /srv/loom/staging-shared 0755 root root -\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(authority, "STAGE_ROOT", stage_root)
+    ensured: list[tuple[Path, int, int]] = []
+
+    def ensure(path: Path, *, mode: int, parent_mode: int) -> bool:
+        ensured.append((path, mode, parent_mode))
+        if path.exists():
+            return False
+        path.mkdir(mode=mode)
+        return True
+
+    monkeypatch.setattr(authority, "_ensure_root_directory", ensure)
+    checked: list[tuple[Path, int]] = []
+    monkeypatch.setattr(
+        authority,
+        "_safe_root_directory",
+        lambda path, *, mode: checked.append((path, mode)),
+    )
+
+    def run(
+        argv: Sequence[str],
+        **_kwargs: object,
+    ) -> object:
+        assert "--dry-run" not in argv
+        roots = [value for value in argv if value.startswith("--root=")]
+        assert len(roots) == 1
+        validation_root = Path(roots[0].partition("=")[2])
+        (validation_root / "srv/loom/staging-shared").mkdir(parents=True)
+        return type("Result", (), {"returncode": 0})()
+
+    monkeypatch.setattr(authority.subprocess, "run", run)
+
+    authority._validate_tmpfiles(
+        policy,
+        apply=False,
+        expected_directories=authority.STAGING_SHARED_TMPFILES_DIRECTORIES,
+    )
+
+    assert ensured[0] == (stage_root, 0o700, 0o755)
+    assert checked[-1][0].parent == stage_root
+    assert checked[-1][1] == 0o700
+    assert not tuple(stage_root.iterdir())
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    ("extra", "duplicate", "wrong-type"),
+    ids=("extra", "duplicate", "wrong-type"),
+)
+@pytest.mark.parametrize(
+    "expected_directories",
+    (
+        authority.NODE_AUTHORITY_TMPFILES_DIRECTORIES,
+        authority.STAGING_SHARED_TMPFILES_DIRECTORIES,
+    ),
+    ids=("node", "staging"),
+)
+def test_tmpfiles_apply_rejects_non_closed_policy_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+    invalid: str,
+    expected_directories: tuple[tuple[Path, int], ...],
+) -> None:
+    exact_lines = [
+        f"d /{relative.as_posix()} {mode:04o} root root -\n"
+        for relative, mode in expected_directories
+    ]
+    if invalid == "extra":
+        exact_lines.append("d /tmp/extra 0700 root root -\n")
+    elif invalid == "duplicate":
+        exact_lines.append(exact_lines[0])
+    else:
+        exact_lines[0] = f"D{exact_lines[0][1:]}"
+    policy = "".join(exact_lines).encode("ascii")
+    installed = Path("/etc/tmpfiles.d") / (
+        "loom-developer-sandbox-node-authority.conf"
+        if expected_directories == authority.NODE_AUTHORITY_TMPFILES_DIRECTORIES
+        else "loom-staging-shared.conf"
+    )
+    monkeypatch.setattr(authority, "_safe_root_file", lambda *_args, **_kwargs: policy)
+    monkeypatch.setattr(
+        authority,
+        "_ensure_stage_root",
+        lambda: pytest.fail("closed policy must be checked before stage creation"),
+    )
+    monkeypatch.setattr(
+        authority.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail(
+            "non-closed policy must not reach systemd-tmpfiles",
+        ),
+    )
+
+    with pytest.raises(authority.NodeAuthorityError, match="exact closed policy"):
+        authority._validate_tmpfiles(
+            installed,
+            apply=True,
+            expected_directories=expected_directories,
+        )
+
+
+def test_tmpfiles_apply_uses_boot_resolution_and_exact_etc_readback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = b"d /run/loom-developer-sandbox-node-authority 0700 root root -\n"
+    installed = Path("/etc/tmpfiles.d/loom-developer-sandbox-node-authority.conf")
+    readbacks: list[tuple[Path, int, int]] = []
+    commands: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        authority,
+        "_safe_root_file",
+        lambda path, *, mode, limit: (
+            readbacks.append((path, mode, limit)) or policy
+        ),
+    )
+    monkeypatch.setattr(authority, "_ensure_stage_root", lambda: None)
+    monkeypatch.setattr(authority, "_safe_root_directory", lambda *_args, **_kwargs: None)
+
+    def run(argv: Sequence[str], **_kwargs: object) -> object:
+        commands.append(tuple(argv))
+        return type("Result", (), {"returncode": 0})()
+
+    monkeypatch.setattr(authority.subprocess, "run", run)
+
+    authority._validate_tmpfiles(
+        installed,
+        apply=True,
+        expected_directories=authority.NODE_AUTHORITY_TMPFILES_DIRECTORIES,
+    )
+
+    assert readbacks == [(installed, 0o644, 4096)]
+    assert commands == [
+        (
+            "/usr/bin/systemd-tmpfiles",
+            "--create",
+            "loom-developer-sandbox-node-authority.conf",
+        ),
+    ]
+
+
+def test_tmpfiles_apply_rejects_non_etc_boot_policy_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = b"d /run/loom-developer-sandbox-node-authority 0700 root root -\n"
+    monkeypatch.setattr(authority, "_safe_root_file", lambda *_args, **_kwargs: policy)
+    monkeypatch.setattr(
+        authority,
+        "_ensure_stage_root",
+        lambda: pytest.fail("boot path must be checked before stage creation"),
+    )
+    monkeypatch.setattr(
+        authority.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail(
+            "unsafe boot path must not reach systemd-tmpfiles",
+        ),
+    )
+
+    with pytest.raises(authority.NodeAuthorityError, match="boot policy path"):
+        authority._validate_tmpfiles(
+            Path("/usr/lib/tmpfiles.d/loom-developer-sandbox-node-authority.conf"),
+            apply=True,
+            expected_directories=authority.NODE_AUTHORITY_TMPFILES_DIRECTORIES,
+        )
+
+
+def test_tmpfiles_source_validation_cleans_isolated_root_after_rejection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage_root = tmp_path / "stage"
+    stage_root.mkdir()
+    policy = tmp_path / "policy.conf"
+    policy.write_text("invalid\n", encoding="utf-8")
+    monkeypatch.setattr(authority, "STAGE_ROOT", stage_root)
+    monkeypatch.setattr(
+        authority,
+        "_ensure_root_directory",
+        lambda path, **_kwargs: False if path.exists() else path.mkdir() is None,
+    )
+    monkeypatch.setattr(authority, "_safe_root_directory", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        authority.subprocess,
+        "run",
+        lambda *_args, **_kwargs: type("Result", (), {"returncode": 1})(),
+    )
+
+    with pytest.raises(authority.NodeAuthorityError, match="tmpfiles policy"):
+        authority._validate_tmpfiles(
+            policy,
+            apply=False,
+            expected_directories=authority.STAGING_SHARED_TMPFILES_DIRECTORIES,
+        )
+
+    assert not tuple(stage_root.iterdir())
+
+
+def test_node_tmpfiles_source_validation_recreates_stage_root_after_reboot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage_root = tmp_path / "run" / "loom-developer-sandbox-node-authority"
+    stage_root.parent.mkdir(mode=0o755)
+    policy = tmp_path / "node-authority.conf"
+    policy.write_text(
+        "d /run/loom-developer-sandbox-node-authority 0700 root root -\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(authority, "STAGE_ROOT", stage_root)
+    original_safe = authority._safe_root_directory
+
+    def safe_directory(path: Path, *, mode: int) -> None:
+        if tmp_path in path.parents or path == tmp_path:
+            try:
+                metadata = path.lstat()
+            except OSError as exc:
+                raise authority.NodeAuthorityError("test directory is unavailable") from exc
+            if not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != mode:
+                raise authority.NodeAuthorityError("test directory metadata is unsafe")
+            return
+        original_safe(path, mode=mode)
+
+    def run(argv: Sequence[str], **_kwargs: object) -> object:
+        validation_root = Path(
+            next(value for value in argv if value.startswith("--root=")).partition("=")[2],
+        )
+        target = validation_root / authority.NODE_AUTHORITY_TMPFILES_DIRECTORIES[0][0]
+        target.mkdir(parents=True, mode=0o700)
+        target.chmod(0o700)
+        return type("Result", (), {"returncode": 0})()
+
+    monkeypatch.setattr(authority, "_safe_root_directory", safe_directory)
+    monkeypatch.setattr(authority.os, "chown", lambda *_args: None)
+    monkeypatch.setattr(authority.subprocess, "run", run)
+
+    authority._validate_tmpfiles(
+        policy,
+        apply=False,
+        expected_directories=authority.NODE_AUTHORITY_TMPFILES_DIRECTORIES,
+    )
+
+    assert stage_root.is_dir()
+    assert stat.S_IMODE(stage_root.stat().st_mode) == 0o700
+    assert not tuple(stage_root.iterdir())
+
+
+@pytest.mark.parametrize("invalid", ("missing", "wrong-mode"))
+def test_node_tmpfiles_source_validation_rejects_missing_or_unsafe_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid: str,
+) -> None:
+    stage_root = tmp_path / "run" / "loom-developer-sandbox-node-authority"
+    stage_root.parent.mkdir(mode=0o755)
+    policy = tmp_path / "node-authority.conf"
+    policy.write_text(
+        "d /run/loom-developer-sandbox-node-authority 0700 root root -\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(authority, "STAGE_ROOT", stage_root)
+
+    def safe_directory(path: Path, *, mode: int) -> None:
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            raise authority.NodeAuthorityError("test directory is unavailable") from exc
+        if not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != mode:
+            raise authority.NodeAuthorityError("test directory metadata is unsafe")
+
+    def run(argv: Sequence[str], **_kwargs: object) -> object:
+        validation_root = Path(
+            next(value for value in argv if value.startswith("--root=")).partition("=")[2],
+        )
+        if invalid == "wrong-mode":
+            target = validation_root / authority.NODE_AUTHORITY_TMPFILES_DIRECTORIES[0][0]
+            target.mkdir(parents=True, mode=0o755)
+            target.chmod(0o755)
+        return type("Result", (), {"returncode": 0})()
+
+    monkeypatch.setattr(authority, "_safe_root_directory", safe_directory)
+    monkeypatch.setattr(authority.os, "chown", lambda *_args: None)
+    monkeypatch.setattr(authority.subprocess, "run", run)
+
+    with pytest.raises(authority.NodeAuthorityError, match=r"unavailable|unsafe"):
+        authority._validate_tmpfiles(
+            policy,
+            apply=False,
+            expected_directories=authority.NODE_AUTHORITY_TMPFILES_DIRECTORIES,
+        )
+
+    assert stage_root.is_dir()
+    assert not tuple(stage_root.iterdir())
 
 
 def _platform_health_payload(
@@ -1037,19 +1573,19 @@ def test_staging_broker_submit_is_staging_scoped_and_fixed() -> None:
             verb="transact",
             policy=_policy("trt-gb10-1"),
         )
-    with pytest.raises(authority.NodeAuthorityError, match="payload"):
-        authority._parse_request(
-            _request(
-                action="staging-allocation-submit",
-                node="trt-gb10-1",
-                domain="gb10",
-                sandbox="staging",
-                payload_kind="staging-allocation-submit-request",
-                payload_bytes=_staging_submit_payload("trt-gb10-7"),
-            ),
-            verb="transact",
-            policy=_policy("trt-gb10-1"),
-        )
+    node_seven = authority._parse_request(
+        _request(
+            action="staging-allocation-submit",
+            node="trt-gb10-1",
+            domain="gb10",
+            sandbox="staging",
+            payload_kind="staging-allocation-submit-request",
+            payload_bytes=_staging_submit_payload("trt-gb10-7"),
+        ),
+        verb="transact",
+        policy=_policy("trt-gb10-1"),
+    )
+    assert json.loads(node_seven.payload_bytes)["requested_node"] == "trt-gb10-7"
 
 
 def test_staging_broker_cancel_uses_the_same_fixed_controller_route() -> None:
@@ -1253,12 +1789,21 @@ def test_staging_accounting_recovery_rejects_snapshot_digest_drift(
         authority._staging_accounting_recover()
 
 
-def test_staging_bootstrap_is_14_node_only_and_returns_fixed_roots(
+@pytest.mark.parametrize(
+    ("node", "canonical_host"),
+    [
+        ("trt-gb10-2", "gx10-0fca"),
+        ("trt-gb10-7", "gx10-0faf"),
+    ],
+)
+def test_staging_bootstrap_covers_infrastructure_nodes_and_returns_fixed_roots(
     monkeypatch: pytest.MonkeyPatch,
+    node: str,
+    canonical_host: str,
 ) -> None:
     operation_envelope = authority._staging_infrastructure_operation_envelope(
         action="staging-allocation-bootstrap",
-        node="trt-gb10-2",
+        node=node,
         candidate_sha=SHA,
         candidate_tree=TREE,
         convergence_id="3" * 64,
@@ -1271,14 +1816,14 @@ def test_staging_bootstrap_is_14_node_only_and_returns_fixed_roots(
     request = authority._parse_request(
         _request(
             action="staging-allocation-bootstrap",
-            node="trt-gb10-2",
+            node=node,
             domain="gb10",
             sandbox="staging",
             payload_kind="staging-infrastructure-operation-request",
             payload_bytes=operation_payload,
         ),
         verb="transact",
-        policy=_policy("trt-gb10-2"),
+        policy=_policy(node),
     )
     account = pwd.struct_passwd(
         (
@@ -1312,12 +1857,17 @@ def test_staging_bootstrap_is_14_node_only_and_returns_fixed_roots(
     monkeypatch.setattr(authority, "_staging_accounting_readback", lambda: None)
     monkeypatch.setattr(
         authority,
+        "_staging_boot_id",
+        lambda: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    )
+    monkeypatch.setattr(
+        authority,
         "_run_fixed",
         lambda _argv: {
             "schema_version": 1,
             "kind": "staging_external_slurm_identity_bootstrap",
-            "node": "trt-gb10-2",
-            "canonical_host": "gx10-0fca",
+            "node": node,
+            "canonical_host": canonical_host,
             "service_identity": {
                 "username": "loom-staging-worker",
                 "group": "loom-staging-worker",
@@ -1349,7 +1899,11 @@ def test_staging_bootstrap_is_14_node_only_and_returns_fixed_roots(
 
     result = authority._staging_allocation_bootstrap(request)
 
-    assert result["canonical_host"] == "gx10-0fca"
+    assert result["canonical_host"] == canonical_host
+    assert result["boot_id"] == "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    assert result["mount_digest"] == hashlib.sha256(
+        authority._canonical(result["mount"])
+    ).hexdigest()
     assert result["supplementary_groups"] == ["docker"]
     assert result["repository_root"] == "/srv/loom/staging-shared/candidates"
     assert result["env_root"] == "/srv/loom/staging-shared/generated"
@@ -1398,6 +1952,118 @@ def test_slurm_actions_bind_domain_and_controller_role() -> None:
             authority._parse_request(raw, verb=verb, policy=policy)
 
 
+def test_slurm_request_allows_new_tree_but_other_actions_remain_exact_tree_bound() -> None:
+    new_tree = "f" * 40
+    parsed = authority._parse_request(
+        _rebind_request(
+            _request(action="slurm-node-converge", node="oldlab-2"),
+            qianyi_tree=new_tree,
+        ),
+        verb="transact",
+        policy=_policy("oldlab-2"),
+    )
+
+    assert parsed.payload["candidate_tree"] == new_tree
+    with pytest.raises(authority.NodeAuthorityError, match="request binding"):
+        authority._parse_request(
+            _rebind_request(_request(action="host-converge"), qianyi_tree=new_tree),
+            verb="transact",
+            policy=_policy(),
+        )
+
+
+def test_slurm_request_rejects_colliding_job_label_prefixes() -> None:
+    with pytest.raises(authority.NodeAuthorityError, match="candidate-set"):
+        authority._parse_request(
+            _rebind_request(
+                _request(action="slurm-node-converge", node="oldlab-2"),
+                candidate_shas={
+                    "qianyi": "1" * 12 + "a" * 28,
+                    "hongjian": "1" * 12 + "b" * 28,
+                    "devansh": "2" * 40,
+                },
+            ),
+            verb="transact",
+            policy=_policy("oldlab-2"),
+        )
+
+
+def test_slurm_candidate_surface_must_equal_installed_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    new_tree = "f" * 40
+    request = authority._parse_request(
+        _rebind_request(
+            _request(action="slurm-node-converge", node="oldlab-2"),
+            qianyi_tree=new_tree,
+        ),
+        verb="transact",
+        policy=_policy("oldlab-2"),
+    )
+    surface = (
+        "scripts/ops/developer_sandbox_slurm_policy.py",
+        "scripts/ops/slurm_job_cgroup_guard.py",
+        "deploy/slurm/developer-sandboxes/oldlab.toml",
+        "deploy/slurm/loom-slurm-job-cgroup-guard.service",
+    )
+    blobs = {relative: f"installed:{relative}".encode("ascii") for relative in surface}
+    asset_sha256 = dict(_policy("oldlab-2").asset_sha256)
+    asset_sha256.update(
+        {
+            relative: hashlib.sha256(content).hexdigest()
+            for relative, content in blobs.items()
+        },
+    )
+    installed = authority.AuthorityPolicy(
+        source_sha=SHA,
+        source_tree=TREE,
+        node="oldlab-2",
+        asset_sha256=asset_sha256,
+    )
+
+    def run_fixed(argv: tuple[str, ...]) -> dict[str, object]:
+        arguments = list(argv)
+
+        def value(flag: str) -> str:
+            return arguments[arguments.index(flag) + 1]
+
+        return {
+            "operation": "inspect-candidate",
+            "domain": value("--domain"),
+            "sandbox": value("--sandbox"),
+            "candidate_sha": value("--candidate-sha"),
+            "candidate_tree": value("--candidate-tree"),
+            "candidate_clean": True,
+        }
+
+    def run(argv: tuple[str, ...], **_kwargs: object) -> object:
+        relative = argv[-1].split(":", 1)[1]
+        stdout = (
+            f"{len(blobs[relative])}\n".encode("ascii")
+            if "cat-file" in argv
+            else blobs[relative]
+        )
+        return type(
+            "Completed",
+            (),
+            {"returncode": 0, "stderr": b"", "stdout": stdout},
+        )()
+
+    monkeypatch.setattr(authority, "_run_fixed", run_fixed)
+    monkeypatch.setattr(authority.subprocess, "run", run)
+
+    authority._validate_slurm_candidate(request, installed)
+
+    incompatible = authority.AuthorityPolicy(
+        source_sha=installed.source_sha,
+        source_tree=installed.source_tree,
+        node=installed.node,
+        asset_sha256={**installed.asset_sha256, surface[0]: "0" * 64},
+    )
+    with pytest.raises(authority.NodeAuthorityError, match="installed authority"):
+        authority._validate_slurm_candidate(request, incompatible)
+
+
 def test_slurm_policy_argv_is_fully_derived_and_has_no_override_surface() -> None:
     compute = authority._parse_request(
         _request(action="slurm-node-converge", node="oldlab-2"),
@@ -1416,6 +2082,12 @@ def test_slurm_policy_argv_is_fully_derived_and_has_no_override_surface() -> Non
     )
 
     candidate = f"/shared_work/loom/candidates/sandboxes/qianyi/{SHA}"
+    bindings_json = json.dumps(
+        json.loads(compute.payload_bytes)["candidate_bindings"],
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    candidate_set = json.loads(compute.payload_bytes)
     assert authority._slurm_policy_argv(compute, "apply") == (
         "/usr/bin/python3",
         "-I",
@@ -1425,6 +2097,16 @@ def test_slurm_policy_argv_is_fully_derived_and_has_no_override_surface() -> Non
         f"{candidate}/deploy/slurm/developer-sandboxes/oldlab.toml",
         "--candidate-sha",
         SHA,
+        "--candidate-bindings-json",
+        bindings_json,
+        "--transaction-id",
+        compute.request_id,
+        "--candidate-set-generation",
+        "1",
+        "--candidate-set-convergence-id",
+        str(candidate_set["convergence_id"]),
+        "--candidate-set-payload-sha256",
+        str(compute.payload["payload_sha256"]),
         "--execute",
         "--restart",
     )
@@ -1439,6 +2121,7 @@ def test_slurm_policy_argv_is_fully_derived_and_has_no_override_surface() -> Non
         "--candidate-sha",
         SHA,
     )
+    assert check_argv[8:10] == ("--candidate-bindings-json", bindings_json)
     assert check_argv[-2:] == ("--sandbox", "qianyi")
     for argv in (
         authority._slurm_policy_argv(compute, "apply"),
@@ -1513,14 +2196,75 @@ def test_slurm_rollback_requires_exact_current_journal_and_snapshot_binding(
     )
     authority._validate_prior_slurm_binding(
         parsed,
-        {"inner_receipt": binding},
+        {"request_id": apply_request.request_id, "inner_receipt": binding},
     )
 
     payloads[journal_path] = journal.replace(b'"phase":"committed"', b'"phase":"verified"')
     with pytest.raises(authority.NodeAuthorityError, match="advanced"):
         authority._validate_prior_slurm_binding(
             parsed,
-            {"inner_receipt": binding},
+            {"request_id": apply_request.request_id, "inner_receipt": binding},
+        )
+
+
+def test_slurm_rollback_accepts_exact_rolled_back_journal_for_safe_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transactions = tmp_path / "transactions"
+    recovery = tmp_path / "snapshots" / "20260728T010204.000000Z"
+    target = tmp_path / "snapshots" / "20260728T010203.000000Z"
+    journal_path = transactions / "trt-oldlab.json"
+    transactions.mkdir()
+    recovery.mkdir(parents=True)
+    target.mkdir()
+    manifest = _slurm_snapshot_manifest()
+    (recovery / "manifest.json").write_bytes(manifest)
+    (target / "manifest.json").write_bytes(manifest)
+    request = authority._parse_request(
+        _request(
+            action="slurm-rollback",
+            node="oldlab-2",
+            prior_request_id="c" * 64,
+        ),
+        verb="transact",
+        policy=_policy("oldlab-2"),
+    )
+    journal = _slurm_policy_journal(
+        recovery,
+        node="oldlab-2",
+        operation="rollback",
+        rollback_target=target,
+    ).replace(b'"phase":"committed"', b'"phase":"rolled_back"')
+    journal_path.write_bytes(journal)
+    binding = (
+        "slurm-policy-v1:trt-oldlab:"
+        + "f" * 64
+        + ":"
+        + _slurm_archive_identity(manifest)
+    )
+    monkeypatch.setattr(authority, "SLURM_TRANSACTION_ROOT", transactions)
+    monkeypatch.setattr(authority, "SLURM_SNAPSHOT_ROOT", target.parent)
+    monkeypatch.setattr(authority, "SLURM_STATE_ROOT", tmp_path)
+    monkeypatch.setattr(authority, "_safe_root_directory", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        authority,
+        "_safe_root_file",
+        lambda path, **_kwargs: path.read_bytes(),
+    )
+
+    authority._validate_prior_slurm_binding(
+        request,
+        {"request_id": "d" * 64, "inner_receipt": binding},
+    )
+
+    drifted = json.loads(journal)
+    drifted["candidate_set_generation"] = 2
+    journal_path.write_bytes(authority._canonical(drifted))
+    with pytest.raises(authority.NodeAuthorityError, match="binding"):
+        authority._validate_prior_slurm_binding(
+            request,
+            {"request_id": "d" * 64, "inner_receipt": binding},
         )
 
 
@@ -1533,6 +2277,10 @@ def test_slurm_rollback_requires_exact_current_journal_and_snapshot_binding(
         "restart",
         "snapshot",
         "accounting",
+        "transaction-id",
+        "generation",
+        "convergence-id",
+        "payload-digest",
         "timestamp",
         "noncanonical",
     ],
@@ -1561,6 +2309,14 @@ def test_slurm_policy_journal_binding_is_canonical_closed_and_host_bound(
     elif mutation == "accounting":
         payload["apply_accounting"] = True
         payload["accounting_snapshot"] = str(snapshot / "accounting-cas.json")
+    elif mutation == "transaction-id":
+        payload["transaction_id"] = "f" * 64
+    elif mutation == "generation":
+        payload["candidate_set_generation"] = 2
+    elif mutation == "convergence-id":
+        payload["candidate_set_convergence_id"] = "f" * 64
+    elif mutation == "payload-digest":
+        payload["candidate_set_payload_sha256"] = "f" * 64
     elif mutation == "timestamp":
         payload["updated_at"] = "2026-07-28T00:00:00+00:00"
     raw = (
@@ -1839,7 +2595,7 @@ def test_slurm_receipt_cas_rejects_replaced_accounting_snapshot(
     )
     authority._validate_prior_slurm_binding(
         rollback_request,
-        {"inner_receipt": binding},
+        {"request_id": apply_request.request_id, "inner_receipt": binding},
     )
 
     replacement = authority._canonical(
@@ -1854,7 +2610,7 @@ def test_slurm_receipt_cas_rejects_replaced_accounting_snapshot(
     with pytest.raises(authority.NodeAuthorityError, match="snapshot identity drifted"):
         authority._validate_prior_slurm_binding(
             rollback_request,
-            {"inner_receipt": binding},
+            {"request_id": apply_request.request_id, "inner_receipt": binding},
         )
 
 
@@ -1896,7 +2652,10 @@ def test_link_authority_actions_are_node_domain_and_payload_bound(
             }
         ),
     )
-    result, receipt = authority._execute_request(persisted)
+    result, receipt = authority._execute_request(
+        persisted,
+        _policy(str(persisted.payload["node"])),
+    )
     assert receipt is None
     assert result["payload_sha256"] == fleet_digest
     assert calls == [
@@ -1926,7 +2685,10 @@ def test_link_authority_actions_are_node_domain_and_payload_bound(
         },
     )
     with pytest.raises(authority.NodeAuthorityError, match="readback"):
-        authority._execute_request(persisted)
+        authority._execute_request(
+            persisted,
+            _policy(str(persisted.payload["node"])),
+        )
 
     noncanonical = json.dumps(
         {"schema_version": 1, "fleet": "proof"},
@@ -2005,7 +2767,10 @@ def test_link_inspections_call_only_the_fixed_local_helper(
         lambda argv: calls.append(tuple(argv)) or {"status": "checked"},
     )
 
-    assert authority._execute_check(request) == {"status": "checked"}
+    assert authority._execute_check(
+        request,
+        _policy(str(request.payload["node"])),
+    ) == {"status": "checked"}
     expected = [
         "/usr/bin/python3",
         str(authority.SOURCE_ROOT / authority.REMOTE_LINK_HOST_RELATIVE),
@@ -2041,7 +2806,10 @@ def test_runtime_proof_check_rejects_artifact_source_cross_binding(
     )
 
     with pytest.raises(authority.NodeAuthorityError, match="artifact identity"):
-        authority._execute_check(request)
+        authority._execute_check(
+            request,
+            _policy(str(request.payload["node"])),
+        )
 
 
 def _live_collection_payload() -> bytes:
@@ -2197,9 +2965,15 @@ def test_live_overlap_actions_call_only_the_fixed_installed_helper(
         }
 
     monkeypatch.setattr(authority, "_run_fixed_input", fixed_input)
-    result, inner = authority._execute_request(collection)
+    result, inner = authority._execute_request(
+        collection,
+        _policy(str(collection.payload["node"])),
+    )
     assert inner == result["path"]
-    assert authority._execute_check(observed)["kind"] == (
+    assert authority._execute_check(
+        observed,
+        _policy(str(observed.payload["node"])),
+    )["kind"] == (
         "loom.developer-sandbox.live-slurm-observation"
     )
     assert calls[0][0] == (
@@ -2252,178 +3026,85 @@ def test_runtime_invoker_requires_exact_sudo_identity_and_command(
             authority._validate_invoker("transact", changed)
 
 
-def test_bootstrap_and_upgrade_require_direct_root_and_have_no_docker_fallback(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(authority.os, "geteuid", lambda: 0)
-    monkeypatch.setenv("SUDO_USER", "qianyi")
-    with pytest.raises(authority.NodeAuthorityError, match="external root administrator"):
-        authority.bootstrap(SHA, TREE)
-    with pytest.raises(authority.NodeAuthorityError, match="external root administrator"):
-        authority.upgrade(SHA, TREE)
-
-
-def test_direct_root_gate_rejects_sudo_env_i_via_loginuid(
+def test_persistent_root_gate_accepts_docker_chroot_authority(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    loginuid = tmp_path / "loginuid"
-    loginuid.write_bytes(b"1000\n")
-    loginuid.chmod(0o600)
-    for name in tuple(os.environ):
-        if name.startswith("SUDO_"):
-            monkeypatch.delenv(name, raising=False)
+    pid1_comm = tmp_path / "comm"
+    pid1_comm.write_text("systemd\n", encoding="ascii")
     monkeypatch.setattr(authority.os, "getuid", lambda: 0)
     monkeypatch.setattr(authority.os, "geteuid", lambda: 0)
-
-    with pytest.raises(authority.NodeAuthorityError, match="audit identity is not root"):
-        authority._validate_direct_root_source(
-            SHA,
-            TREE,
-            loginuid_path=loginuid,
-        )
-
-    loginuid.write_bytes(b"4294967295\n")
-    with pytest.raises(authority.NodeAuthorityError, match="audit identity is not root"):
-        authority._validate_direct_root_source(
-            SHA,
-            TREE,
-            loginuid_path=loginuid,
-        )
-
-
-def _host_cgroup_pair(tmp_path: Path) -> tuple[Path, Path]:
-    paths = (tmp_path / "self-cgroup", tmp_path / "pid1-cgroup")
-    for path in paths:
-        path.write_bytes(b"0::/system.slice/sshd.service\n")
-        path.chmod(0o600)
-    return paths
-
-
-@pytest.mark.parametrize("container_value", ["podman", ""])
-def test_direct_root_gate_rejects_container_environment(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    container_value: str,
-) -> None:
-    monkeypatch.setenv("container", container_value)
-    with pytest.raises(authority.NodeAuthorityError, match="external root"):
-        authority._reject_containerized_root(
-            marker_paths=(),
-            cgroup_paths=_host_cgroup_pair(tmp_path),
-        )
-
-
-@pytest.mark.parametrize("marker_name", [".dockerenv", ".containerenv"])
-def test_direct_root_gate_rejects_container_markers(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    marker_name: str,
-) -> None:
-    monkeypatch.delenv("container", raising=False)
-    marker = tmp_path / marker_name
-    marker.write_bytes(b"")
-    marker.chmod(0o600)
-
-    with pytest.raises(authority.NodeAuthorityError, match="external root"):
-        authority._reject_containerized_root(
-            marker_paths=(marker,),
-            cgroup_paths=_host_cgroup_pair(tmp_path),
-        )
-
-
-@pytest.mark.parametrize("token", sorted(authority.CONTAINER_CGROUP_TOKENS))
-def test_direct_root_gate_rejects_every_container_cgroup_pattern(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    token: str,
-) -> None:
-    monkeypatch.delenv("container", raising=False)
-    self_cgroup, pid1_cgroup = _host_cgroup_pair(tmp_path)
-    self_cgroup.write_bytes(f"0::/{token}/scope\n".encode())
-
-    with pytest.raises(authority.NodeAuthorityError, match="external root"):
-        authority._reject_containerized_root(
-            marker_paths=(),
-            cgroup_paths=(self_cgroup, pid1_cgroup),
-        )
-
-
-@pytest.mark.parametrize("failure", ["missing", "empty", "symlink", "single"])
-def test_direct_root_gate_fails_closed_on_ambiguous_cgroup_identity(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    failure: str,
-) -> None:
-    monkeypatch.delenv("container", raising=False)
-    self_cgroup, pid1_cgroup = _host_cgroup_pair(tmp_path)
-    if failure == "missing":
-        pid1_cgroup.unlink()
-    elif failure == "empty":
-        pid1_cgroup.write_bytes(b"")
-    elif failure == "symlink":
-        pid1_cgroup.unlink()
-        pid1_cgroup.symlink_to(self_cgroup)
-    elif failure == "single":
-        with pytest.raises(authority.NodeAuthorityError, match="ambiguous"):
-            authority._reject_containerized_root(
-                marker_paths=(),
-                cgroup_paths=(self_cgroup,),
-            )
-        return
-
-    with pytest.raises(
-        authority.NodeAuthorityError,
-        match=r"cgroup identity is (?:unavailable|ambiguous)",
-    ):
-        authority._reject_containerized_root(
-            marker_paths=(),
-            cgroup_paths=(self_cgroup, pid1_cgroup),
-        )
-
-
-@pytest.mark.parametrize("mutation", ["rename", "rewrite"])
-def test_container_cgroup_rejects_post_read_path_or_byte_drift(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    mutation: str,
-) -> None:
-    cgroup = tmp_path / "cgroup"
-    cgroup.write_bytes(b"0::/system.slice/sshd.service\n")
-    cgroup.chmod(0o600)
-    replacement = tmp_path / "replacement"
-    replacement.write_bytes(b"0::/changed.slice\n")
-    replacement.chmod(0o600)
-    original_read = authority._read_fd_twice
-
-    def mutate_after_read(
-        descriptor: int,
-        *,
-        limit: int,
-        error: str,
-    ) -> bytes:
-        payload = original_read(descriptor, limit=limit, error=error)
-        if mutation == "rename":
-            replacement.replace(cgroup)
-        else:
-            cgroup.write_bytes(b"0::/rewritten.slice\n")
-            cgroup.chmod(0o600)
-        return payload
-
-    monkeypatch.setattr(authority, "_read_fd_twice", mutate_after_read)
-    with pytest.raises(authority.NodeAuthorityError, match="cgroup identity is invalid"):
-        authority._read_container_cgroup(cgroup)
-
-
-def test_direct_root_gate_accepts_two_stable_host_cgroups(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("container", raising=False)
-    authority._reject_containerized_root(
-        marker_paths=(),
-        cgroup_paths=_host_cgroup_pair(tmp_path),
+    monkeypatch.setenv("SUDO_USER", "qianyi")
+    monkeypatch.setenv("container", "docker")
+    monkeypatch.setattr(
+        authority,
+        "_git",
+        lambda *args: SHA if args[-1] == "HEAD" else TREE if args[-1] == "HEAD^{tree}" else "",
     )
+    monkeypatch.setattr(authority, "_hostname", lambda: "trt-eai-oldlab-1")
+    monkeypatch.setattr(authority, "_node_for_hostname", lambda _host: "oldlab-1")
+
+    assert (
+        authority._validate_persistent_root_source(
+            SHA,
+            TREE,
+            root_path=tmp_path,
+            pid1_root_path=tmp_path,
+            pid1_comm_path=pid1_comm,
+        )
+        == "oldlab-1"
+    )
+
+
+def test_persistent_root_gate_rejects_nonroot_or_nonhost_systemd_view(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pid1_comm = tmp_path / "comm"
+    pid1_comm.write_text("systemd\n", encoding="ascii")
+    other_root = tmp_path / "other-root"
+    other_root.mkdir()
+    monkeypatch.setattr(authority.os, "getuid", lambda: 1000)
+    monkeypatch.setattr(authority.os, "geteuid", lambda: 1000)
+    with pytest.raises(authority.NodeAuthorityError, match="host-root authority"):
+        authority._validate_persistent_root_source(
+            SHA,
+            TREE,
+            root_path=tmp_path,
+            pid1_root_path=tmp_path,
+            pid1_comm_path=pid1_comm,
+        )
+
+    monkeypatch.setattr(authority.os, "getuid", lambda: 0)
+    monkeypatch.setattr(authority.os, "geteuid", lambda: 0)
+    with pytest.raises(authority.NodeAuthorityError, match="systemd view is invalid"):
+        authority._validate_persistent_root_source(
+            SHA,
+            TREE,
+            root_path=tmp_path,
+            pid1_root_path=other_root,
+            pid1_comm_path=pid1_comm,
+        )
+
+
+def test_validate_install_reuses_persistent_root_gate_and_exact_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = _policy()
+    installs = ({"path": "/etc/systemd/system/example.service"},)
+    monkeypatch.setattr(authority, "_require_persistent_root_view", lambda: None)
+    monkeypatch.setattr(authority, "_read_policy", lambda: policy)
+    monkeypatch.setattr(authority, "_validate_runtime_assets", lambda current: installs)
+
+    assert authority.validate_install() == {
+        "schema_version": authority.SCHEMA_VERSION,
+        "action": "validate-install",
+        "node": policy.node,
+        "source_sha": policy.source_sha,
+        "source_tree": policy.source_tree,
+        "system_installs": list(installs),
+        "status": "succeeded",
+    }
 
 
 def test_source_asset_rejects_unsafe_parent_and_symlink(
@@ -2471,6 +3152,18 @@ def test_source_asset_rejects_post_read_identity_or_byte_drift(
     replacement.chmod(0o600)
     monkeypatch.setattr(authority, "REPO_ROOT", repo)
     original_read = authority._read_fd_twice
+    original_safe_source_directory = authority._safe_source_directory
+    trusted_test_ancestors = frozenset(
+        authority._metadata_identity(parent.stat()) for parent in repo.absolute().parents
+    )
+    monkeypatch.setattr(
+        authority,
+        "_safe_source_directory",
+        lambda metadata, *, expected_uid: (
+            original_safe_source_directory(metadata, expected_uid=expected_uid)
+            or authority._metadata_identity(metadata) in trusted_test_ancestors
+        ),
+    )
 
     def mutate_after_read(
         descriptor: int,
@@ -2549,7 +3242,7 @@ def _prepare_upgrade_mocks(
     policies = iter((old, new))
     monkeypatch.setattr(
         authority,
-        "_validate_direct_root_source",
+        "_validate_persistent_root_source",
         lambda _sha, _tree: "oldlab-1",
     )
     monkeypatch.setattr(
@@ -2603,6 +3296,17 @@ def _prepare_upgrade_mocks(
         authority,
         "_unlink_root_file",
         lambda *_args, **_kwargs: events.append("admission-disabled") or b"old",
+    )
+    monkeypatch.setattr(
+        authority,
+        "_system_sudoers_paths",
+        lambda: frozenset(
+            {
+                tmp_path / "platform-health.sudoers",
+                tmp_path / "staging-pressure.sudoers",
+                tmp_path / "staging-external.sudoers",
+            },
+        ),
     )
     monkeypatch.setattr(
         authority,
@@ -2670,6 +3374,46 @@ def test_upgrade_disables_admission_replaces_atomically_and_preserves_state(
     assert "restored" not in events
 
 
+def test_upgrade_after_reboot_recreates_private_stage_root_after_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _old, _new, _snapshot, events = _prepare_upgrade_mocks(tmp_path, monkeypatch)
+    stage_root = tmp_path / "run" / "loom-developer-sandbox-node-authority"
+    stage_root.parent.mkdir(mode=0o755)
+    lock = tmp_path / "lock"
+    monkeypatch.setattr(authority, "STAGE_ROOT", stage_root)
+    monkeypatch.setattr(
+        authority,
+        "_open_lock",
+        lambda **_kwargs: events.append("lock") or os.open(lock, os.O_RDONLY),
+    )
+
+    def ensure_directory(
+        path: Path,
+        *,
+        mode: int,
+        parent_mode: int,
+    ) -> bool:
+        if path != stage_root:
+            return False
+        events.append("stage-root")
+        assert mode == 0o700
+        assert parent_mode == 0o755
+        path.mkdir(mode=mode)
+        path.chmod(mode)
+        return True
+
+    monkeypatch.setattr(authority, "_ensure_root_directory", ensure_directory)
+
+    report = authority.upgrade("e" * 40, "d" * 40)
+
+    assert report["changed"] is True
+    assert events[:3] == ["lock", "stage-root", "upgrade-state"]
+    assert stage_root.is_dir()
+    assert stat.S_IMODE(stage_root.stat().st_mode) == 0o700
+
+
 def test_upgrade_failure_restores_snapshot_and_records_rollback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2690,6 +3434,56 @@ def test_upgrade_failure_restores_snapshot_and_records_rollback(
     assert "journal:rolled-back" in events
     assert events[-1] == "active-removed"
     assert f"install:{authority.SUDOERS}" not in events
+
+
+def test_upgrade_creates_all_source_parents_and_removes_them_after_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _old, _new, _snapshot, events = _prepare_upgrade_mocks(tmp_path, monkeypatch)
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    source_parents = (
+        Path("src"),
+        Path("src/loom_cli"),
+        Path("src/loom_cli/rollout"),
+    )
+    monkeypatch.setattr(authority, "SOURCE_ROOT", source_root)
+    monkeypatch.setattr(authority, "SOURCE_ASSET_PARENT_PATHS", source_parents)
+
+    ensured: list[Path] = []
+
+    def ensure_directory(
+        path: Path,
+        *,
+        mode: int,
+        parent_mode: int,
+    ) -> bool:
+        if path == authority.STAGE_ROOT:
+            assert mode == 0o700
+            assert parent_mode == 0o755
+            return False
+        assert mode == 0o755
+        assert parent_mode == 0o755
+        path.mkdir()
+        ensured.append(path)
+        return True
+
+    monkeypatch.setattr(authority, "_ensure_root_directory", ensure_directory)
+
+    def replace(path: Path, *_args: object, **_kwargs: object) -> None:
+        events.append(f"replace:{path}")
+        if path == authority.LIBEXEC:
+            raise authority.NodeAuthorityError("injected replacement failure")
+
+    monkeypatch.setattr(authority, "_atomic_replace", replace)
+
+    with pytest.raises(authority.NodeAuthorityError, match="rolled back"):
+        authority.upgrade("e" * 40, "d" * 40)
+
+    expected = [source_root / relative for relative in source_parents]
+    assert ensured == expected
+    assert all(not path.exists() for path in expected)
 
 
 def test_upgrade_system_install_failure_restores_the_combined_snapshot(
@@ -2774,19 +3568,45 @@ def test_upgrade_journal_rejects_noncanonical_foreign_records(
         authority._validate_upgrade_journal()
 
 
-def test_upgrade_same_tree_is_idempotent_and_never_disables_admission(
+def test_upgrade_same_sha_and_tree_is_idempotent_and_never_disables_admission(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     old, _new, _snapshot, events = _prepare_upgrade_mocks(tmp_path, monkeypatch)
     monkeypatch.setattr(authority, "_read_policy", lambda: old)
 
-    report = authority.upgrade("e" * 40, TREE)
+    report = authority.upgrade(SHA, TREE)
 
     assert report["changed"] is False
+    assert report["source_sha"] == SHA
     assert report["source_tree"] == TREE
     assert "snapshot" not in events
     assert "admission-disabled" not in events
+
+
+def test_upgrade_same_tree_new_sha_rebinds_candidate_transactionally(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old, _new, snapshot, events = _prepare_upgrade_mocks(tmp_path, monkeypatch)
+    rebound = authority.AuthorityPolicy(
+        source_sha="e" * 40,
+        source_tree=TREE,
+        node=old.node,
+        asset_sha256=old.asset_sha256,
+    )
+    policies = iter((old, rebound))
+    monkeypatch.setattr(authority, "_read_policy", lambda: next(policies))
+
+    report = authority.upgrade("e" * 40, TREE)
+
+    assert report["changed"] is True
+    assert report["source_sha"] == "e" * 40
+    assert report["source_tree"] == TREE
+    assert report["snapshot"] == str(snapshot.root)
+    assert "snapshot" in events
+    assert "admission-disabled" in events
+    assert events[-3:] == ["active:committed", "journal:committed", "active-removed"]
 
 
 @pytest.mark.parametrize(
@@ -2846,11 +3666,12 @@ def test_interrupted_upgrade_recovery_is_snapshot_and_state_bound(
 
 
 @pytest.mark.parametrize(
-    ("phase", "verb"),
+    ("phase", "verb", "stage_present"),
     [
-        (phase, verb)
+        (phase, verb, stage_present)
         for phase in ("prepared", "admission-disabled", "assets-replaced", "committed")
         for verb in ("transact", "check")
+        for stage_present in (False, True)
     ],
 )
 def test_runtime_fails_closed_for_every_active_upgrade_phase_without_state_drift(
@@ -2858,18 +3679,28 @@ def test_runtime_fails_closed_for_every_active_upgrade_phase_without_state_drift
     monkeypatch: pytest.MonkeyPatch,
     phase: str,
     verb: str,
+    stage_present: bool,
 ) -> None:
     active = tmp_path / "upgrade-active.json"
     active.write_bytes(authority._canonical({"phase": phase}))
     active.chmod(0o600)
     lock = tmp_path / "lock"
     lock.write_bytes(b"")
+    stage_root = tmp_path / "run" / "loom-developer-sandbox-node-authority"
+    stage_root.parent.mkdir(mode=0o755)
+    stage_before: tuple[int, bytes] | None = None
+    if stage_present:
+        stage_root.mkdir(mode=0o700)
+        sentinel = stage_root / "sentinel"
+        sentinel.write_bytes(b"unchanged")
+        stage_before = (stat.S_IMODE(stage_root.stat().st_mode), sentinel.read_bytes())
     high_value = {
         "journal_sha256": "1" * 64,
         "receipts": {"request.json": "2" * 64},
     }
     before = json.loads(json.dumps(high_value))
     monkeypatch.setattr(authority, "UPGRADE_ACTIVE", active)
+    monkeypatch.setattr(authority, "STAGE_ROOT", stage_root)
     monkeypatch.setattr(authority, "_validate_invoker", lambda *_args: None)
     monkeypatch.setattr(
         authority,
@@ -2895,6 +3726,14 @@ def test_runtime_fails_closed_for_every_active_upgrade_phase_without_state_drift
     with pytest.raises(authority.NodeAuthorityError, match="admission"):
         authority.dispatch(verb, b"request", environ={})
     assert high_value == before
+    if stage_before is None:
+        assert not stage_root.exists()
+    else:
+        assert (
+            stat.S_IMODE(stage_root.stat().st_mode),
+            (stage_root / "sentinel").read_bytes(),
+        ) == stage_before
+        assert {path.name for path in stage_root.iterdir()} == {"sentinel"}
 
 
 def test_runtime_takes_authority_lock_before_policy_and_request_validation(
@@ -2977,6 +3816,48 @@ def test_private_state_writers_require_private_parent_mode(
     ]
 
 
+def test_transact_stage_after_reboot_recreates_private_runtime_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = authority._parse_request(
+        _request(),
+        verb="transact",
+        policy=_policy(),
+    )
+    stage_root = tmp_path / "run" / "loom-developer-sandbox-node-authority"
+    stage_root.parent.mkdir(mode=0o755)
+    monkeypatch.setattr(authority, "STAGE_ROOT", stage_root)
+    ensured: list[tuple[Path, int, int]] = []
+
+    def ensure_directory(
+        path: Path,
+        *,
+        mode: int,
+        parent_mode: int,
+    ) -> bool:
+        ensured.append((path, mode, parent_mode))
+        path.mkdir(mode=mode)
+        path.chmod(mode)
+        return True
+
+    def safe_directory(path: Path, *, mode: int) -> None:
+        metadata = path.lstat()
+        if not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != mode:
+            raise authority.NodeAuthorityError("test directory metadata is unsafe")
+
+    monkeypatch.setattr(authority, "_ensure_root_directory", ensure_directory)
+    monkeypatch.setattr(authority, "_safe_root_directory", safe_directory)
+    monkeypatch.setattr(authority.os, "chown", lambda *_args: None)
+
+    stage = authority._prepare_stage(request)
+
+    assert ensured == [(stage_root, 0o700, 0o755)]
+    assert stage == stage_root / request.request_id
+    assert stat.S_IMODE(stage_root.stat().st_mode) == 0o700
+    assert stat.S_IMODE(stage.stat().st_mode) == 0o700
+
+
 def test_private_child_directory_accepts_private_parent(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3003,6 +3884,23 @@ def test_private_child_directory_accepts_private_parent(
     assert checked[0] == (child, 0o700)
     assert checked[1] == (parent, 0o700)
     assert checked[-1] == (child, 0o700)
+
+
+def test_bootstrap_directory_plan_preserves_private_parent_modes() -> None:
+    plan = {
+        path: (mode, parent_mode) for path, mode, parent_mode in authority.BOOTSTRAP_DIRECTORIES
+    }
+
+    assert plan[authority.STATE_ROOT] == (0o700, 0o755)
+    assert plan[authority.STAGING_INFRASTRUCTURE_PRODUCER_ROOT] == (0o700, 0o700)
+    assert plan[authority.STAGING_INFRASTRUCTURE_PRODUCER_RECEIPTS] == (0o700, 0o700)
+    assert plan[authority.STAGING_INFRASTRUCTURE_RECEIPT_ROOT] == (0o700, 0o700)
+    assert plan[authority.STAGING_INFRASTRUCTURE_INSTALL_GENERATIONS] == (0o700, 0o700)
+    assert plan[authority.STAGE_ROOT] == (0o700, 0o755)
+    assert {
+        authority.SOURCE_ROOT / parent for parent in authority.SOURCE_ASSET_PARENT_PATHS
+    }.issubset(plan)
+    assert all((authority.SOURCE_ROOT / asset).parent in plan for asset in authority.SOURCE_ASSETS)
 
 
 def _archive(members: list[tuple[tarfile.TarInfo, bytes]]) -> bytes:
@@ -3099,7 +3997,10 @@ def test_check_dispatches_only_fixed_domain_runtime_actions(
         lambda argv: calls.append(tuple(argv)) or {"operation": action},
     )
 
-    assert authority._execute_check(request) == {"operation": action}
+    assert authority._execute_check(
+        request,
+        _policy(str(request.payload["node"])),
+    ) == {"operation": action}
     assert calls[0][0:3] == (
         "/usr/bin/python3",
         str(authority.SOURCE_ROOT / authority.DOMAIN_RUNTIME_RELATIVE),
@@ -3135,7 +4036,10 @@ def test_fixed_helpers_never_execute_a_candidate_or_request_supplied_program(
         return {"operation": "materialize", "receipt": "/var/lib/fixed/receipt.json"}
 
     monkeypatch.setattr(authority, "_run_fixed", run)
-    authority._execute_request(request)
+    authority._execute_request(
+        request,
+        _policy(str(request.payload["node"])),
+    )
 
     assert calls[0][0:3] == (
         "/usr/bin/python3",
@@ -3256,4 +4160,7 @@ def test_rollback_is_bound_to_a_prior_root_receipt_and_fixed_state_root(
         },
     )
     with pytest.raises(authority.NodeAuthorityError, match=r"unavailable|path"):
-        authority._execute_request(request)
+        authority._execute_request(
+            request,
+            _policy(str(request.payload["node"])),
+        )

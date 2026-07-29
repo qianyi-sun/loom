@@ -14,6 +14,7 @@ Live observation capture remains a separately authorized operator action.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -39,6 +40,14 @@ REQUIRED_RESOURCES = frozenset(
 REQUIRED_CLEANUP_EVENTS = frozenset(
     {"cancellation", "ttl_expiry", "worker_crash", "submit_host_restart"},
 )
+GATE6_SANDBOXES = ("qianyi", "hongjian", "devansh")
+GATE6_POOLS = ("oldlab", "gb10")
+GATE6_POOL_CONCURRENCY = {"oldlab": 4, "gb10": 8}
+GATE6_POOL_NODES = {
+    "oldlab": tuple(f"trt-eai-oldlab-{index}" for index in range(1, 6)),
+    "gb10": tuple(f"trt-gb10-{index}" for index in range(1, 16)),
+}
+GATE6_CLUSTERS = {"oldlab": "trt-oldlab", "gb10": "trt-gb10"}
 
 _SECRET_KEY_RE = re.compile(
     r"(?:authorization|credential|password|private[_-]?key|access[_-]?key|"
@@ -306,6 +315,416 @@ def verify_evidence(evidence: Any, schema: Mapping[str, Any]) -> list[str]:
     if failures or not isinstance(evidence, Mapping):
         return failures
     return _semantic_failures(evidence)
+
+
+def _canonical_bytes(value: Any) -> bytes:
+    return (
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        + "\n"
+    ).encode()
+
+
+def _digest(value: Any) -> str:
+    return hashlib.sha256(_canonical_bytes(value)).hexdigest()
+
+
+def _gate6_matrix_failures(
+    matrix: Any,
+    *,
+    sandbox: str,
+    pool: str,
+    candidate: Mapping[str, str],
+) -> list[str]:
+    """Validate the immutable allocation-probe result used by gate 6.
+
+    The Slurm policy collector owns the detailed receipt schema.  This bridge
+    independently rechecks the candidate, pool, concurrency, and complete node
+    set so a valid receipt from another candidate or a partial fleet cannot be
+    replayed into acceptance.
+    """
+
+    failures: list[str] = []
+    if not isinstance(matrix, Mapping):
+        return [f"{sandbox}/{pool} allocation matrix is not an object"]
+    nodes = matrix.get("nodes")
+    allowed_nodes = matrix.get("allowed_nodes")
+    runtime = matrix.get("runtime_attestation")
+    binding = matrix.get("candidate_binding")
+    repository = binding.get("repository") if isinstance(binding, Mapping) else None
+    expected_nodes = GATE6_POOL_NODES[pool]
+    observed_allowed = (
+        tuple(str(node).lower() for node in allowed_nodes)
+        if isinstance(allowed_nodes, list)
+        else ()
+    )
+    observed_rows = (
+        tuple(str(row.get("node", "")).lower() for row in nodes if isinstance(row, Mapping))
+        if isinstance(nodes, list)
+        else ()
+    )
+    if (
+        matrix.get("schema_version") != 1
+        or matrix.get("artifact_type") != "developer-sandbox-slurm-allocation-matrix"
+        or matrix.get("candidate_sha") != candidate["sha"]
+        or matrix.get("candidate_tree") != candidate["tree"]
+        or matrix.get("sandbox") != sandbox
+        or matrix.get("cluster") != GATE6_CLUSTERS[pool]
+        or matrix.get("expected_pool") != pool
+        or matrix.get("expected_concurrency") != GATE6_POOL_CONCURRENCY[pool]
+        or matrix.get("account") != f"loom-dev-{sandbox}"
+        or matrix.get("closed_world_verified") is not True
+        or observed_allowed != expected_nodes
+        or observed_rows != expected_nodes
+        or len(set(observed_rows)) != len(expected_nodes)
+        or not isinstance(repository, Mapping)
+        or repository.get("candidate_sha") != candidate["sha"]
+        or repository.get("candidate_tree") != candidate["tree"]
+        or not isinstance(runtime, Mapping)
+        or runtime.get("sandbox") != sandbox
+        or runtime.get("candidate_sha") != candidate["sha"]
+        or runtime.get("candidate_tree") != candidate["tree"]
+        or runtime.get("domain") != pool
+    ):
+        failures.append(f"{sandbox}/{pool} allocation matrix binding is invalid")
+        return failures
+    assert isinstance(nodes, list)
+    for row in nodes:
+        if not isinstance(row, Mapping):
+            failures.append(f"{sandbox}/{pool} allocation matrix row is invalid")
+            continue
+        compute = row.get("compute_check")
+        if (
+            row.get("sandbox") != sandbox
+            or row.get("state") != "COMPLETED"
+            or row.get("account") != f"loom-dev-{sandbox}"
+            or row.get("sbatch_verified") is not True
+            or row.get("srun_verified") is not True
+            or row.get("nonexclusive") is not True
+            or str(row.get("explicit_nodelist", "")).lower()
+            != str(row.get("node", "")).lower()
+            or not isinstance(compute, Mapping)
+            or compute.get("sandbox") != sandbox
+            or compute.get("candidate_sha") != candidate["sha"]
+            or compute.get("candidate_tree") != candidate["tree"]
+            or compute.get("pool") != pool
+            or compute.get("concurrency") != GATE6_POOL_CONCURRENCY[pool]
+            or compute.get("cgroup_guard_verified") is not True
+            or compute.get("compose_verified") is not True
+            or (pool == "gb10" and row.get("gpu_verified") is not True)
+        ):
+            failures.append(f"{sandbox}/{pool} allocation matrix row proof is invalid")
+    return failures
+
+
+def _gate6_pair_artifact(
+    live: Mapping[str, Any],
+    platform: Mapping[str, Any],
+    *,
+    sandbox: str,
+    pool: str,
+) -> dict[str, Any]:
+    """Losslessly materialize one v1-shaped pair from native authority fields."""
+
+    gate = platform["gate6_observations"]
+    soak = gate["soak"]
+    jobs = [
+        row
+        for row in platform["mixed_jobs"]
+        if row["sandbox"] == sandbox
+        and (
+            ("oldlab" if str(row["node"]).lower().startswith("trt-eai-oldlab-") else "gb10")
+            == pool
+        )
+    ]
+    devices = [
+        row
+        for row in gate["device_isolation"]
+        if row["sandbox"] == sandbox and row["pool"] == pool
+    ]
+    headroom = [
+        row
+        for row in soak["pair_headroom"]
+        if row["sandbox"] == sandbox and row["pool"] == pool
+    ]
+    if len(jobs) != 1 or len(devices) != 1 or len(headroom) != 1:
+        raise AcceptanceError(f"{sandbox}/{pool} native gate-6 coverage is not exact")
+    job = jobs[0]
+    device = devices[0]
+    observed_headroom = headroom[0]
+    candidate = live["candidates"][sandbox]
+    if (
+        job["candidate_sha"] != candidate["sha"]
+        or device["job_id"] != job["job_id"]
+        or device["node"] != job["node"]
+    ):
+        raise AcceptanceError(f"{sandbox}/{pool} native gate-6 identity is inconsistent")
+    containers = [
+        {
+            "role": item["role"],
+            "container_id": item["container_id"],
+            "name": item["name"],
+            "pid": item["pid"],
+            "labels": item["identity_labels"],
+            "cgroup_parent": item["cgroup_parent"],
+            "cgroup_path": item["observed_cgroup_path"],
+            "limits": {
+                key: item["limits"][key] for key in ("cpu_cores", "memory_bytes", "pids")
+            },
+            "device_ids": item["limits"]["gpu_ids"],
+        }
+        for item in job["containers"]
+    ]
+    cleanup = [
+        {
+            "event": item["event"],
+            "observed_within_seconds": item["observed_within_seconds"],
+            "live_containers": item["live_containers"],
+            "live_jobs": item["live_jobs"],
+            "durable_trial_state": item["durable_trial_state"],
+            "retryable_interrupted_trials": item["retryable_interrupted_trials"],
+        }
+        for item in gate["cleanup"]
+    ]
+    mixed_checkpoint = next(
+        item for item in platform["checkpoints"] if item["checkpoint"] == "mixed_non_loom"
+    )
+    allocation = job["allocation"]
+    cgroup = job["cgroup"]
+    return {
+        "schema_version": 1,
+        "collected_at": mixed_checkpoint["observed_at"],
+        "candidate_sha": candidate["sha"],
+        "sandbox": sandbox,
+        "node": {
+            "hostname": device["host"],
+            "slurm_node_name": job["node"],
+        },
+        "job": {
+            "job_id": job["job_id"],
+            "candidate_sha": candidate["sha"],
+            "sandbox": sandbox,
+            "node": job["node"],
+            "compose_project": job["compose_project"],
+            "allocation": {
+                "cpu_cores": allocation["cpu_cores"],
+                "memory_bytes": allocation["memory_bytes"],
+                "pids": allocation["pids"],
+                "gpu_ids": device["allocated_ids"],
+                "tres": allocation["tres"],
+            },
+        },
+        "containers": containers,
+        "cgroup": {
+            "job_path": cgroup["job_path"],
+            "controllers": cgroup["controllers"],
+            "delegated": cgroup["delegated"],
+            "cpu_cores_max": cgroup["cpu_cores_max"],
+            "memory_bytes_max": cgroup["memory_bytes_max"],
+            "pids_max": cgroup["pids_max"],
+        },
+        "aggregate_caps": {
+            key: job["aggregate_limits"][key] for key in ("cpu_cores", "memory_bytes", "pids")
+        },
+        "devices": {
+            "allocated_ids": device["allocated_ids"],
+            "all_allocated_usable": device["all_allocated_usable"],
+            "unallocated_denied": device["unallocated_denied"],
+        },
+        "headroom": {
+            "duration_seconds": soak["duration_seconds"],
+            "required_duration_seconds": 1800,
+            "sample_count": soak["sample_count"],
+            "required_sample_count": 30,
+            "min_free_cpu_cores": observed_headroom["min_free_cpu_cores"],
+            "required_free_cpu_cores": 4,
+            "min_free_memory_bytes": observed_headroom["min_free_memory_bytes"],
+            "required_free_memory_bytes": 16_000_000_000,
+            "max_pid_usage_ratio": observed_headroom["max_pid_usage_ratio"],
+            "max_allowed_pid_usage_ratio": 0.7,
+            "observed_peak_concurrency": observed_headroom["observed_peak_concurrency"],
+            "reviewed_max_concurrency": GATE6_POOL_CONCURRENCY[pool],
+            "kube_api_healthy": soak["kube_api_healthy"],
+            "minio_quorum_healthy": soak["minio_quorum_healthy"],
+            "longhorn_healthy": soak["longhorn_healthy"],
+            "within_reviewed_envelope": observed_headroom["within_reviewed_envelope"],
+        },
+        "negative_isolation": {
+            "sandboxes": list(GATE6_SANDBOXES),
+            "checks": [
+                {
+                    "source": item["source"],
+                    "target": item["target"],
+                    "resource": item["resource"],
+                    "denied": item["denied"],
+                }
+                for item in live["cross_sandbox_negative"]
+            ],
+        },
+        "soak": {
+            key: soak[key]
+            for key in (
+                "duration_seconds",
+                "required_duration_seconds",
+                "sample_count",
+                "required_sample_count",
+                "workloads",
+                "trial_success_ratio",
+                "minimum_trial_success_ratio",
+                "resource_envelope_breaches",
+                "kube_api_healthy",
+                "minio_quorum_healthy",
+                "longhorn_healthy",
+                "non_loom_slurm_healthy",
+            )
+        },
+        "cleanup": {"max_cleanup_seconds": 300, "checkpoints": cleanup},
+    }
+
+
+def _build_gate6_bundle(
+    live: Any,
+    platform: Any,
+    matrices: Mapping[tuple[str, str], Any],
+    schema: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[tuple[str, str], dict[str, Any]]]:
+    """Verify finalized native sources and return their canonical gate-6 bundle.
+
+    GB10 pairs are passed through the unchanged v1 schema and semantic
+    verifier.  OLDLAB has no GPU by design, while v1 requires at least one GPU
+    ID, so it follows the same strict semantic checks with an explicit
+    zero-device contract instead of inventing a device.
+    """
+
+    _scan_for_secrets(live)
+    _scan_for_secrets(platform)
+    if not isinstance(live, Mapping) or not isinstance(platform, Mapping):
+        raise AcceptanceError("gate-6 sources must be objects")
+    if (
+        live.get("schema_version") != 2
+        or len(live.get("state_machine", [])) != 33
+        or live.get("topology", {}).get("excluded_nodes") != []
+        or tuple(live.get("topology", {}).get("eligible_nodes", ()))
+        != (*GATE6_POOL_NODES["oldlab"], *GATE6_POOL_NODES["gb10"])
+        or "trt-gb10-7" not in live.get("topology", {}).get("eligible_nodes", ())
+        or platform.get("session_id") != live.get("session", {}).get("id")
+        or platform.get("candidates")
+        != {
+            sandbox: {
+                "sha": live["candidates"][sandbox]["sha"],
+                "tree": live["candidates"][sandbox]["tree"],
+            }
+            for sandbox in GATE6_SANDBOXES
+        }
+    ):
+        raise AcceptanceError("finalized live/platform gate-6 binding is invalid")
+    expected_pairs = {(sandbox, pool) for sandbox in GATE6_SANDBOXES for pool in GATE6_POOLS}
+    if set(matrices) != expected_pairs:
+        raise AcceptanceError("gate-6 allocation matrix set is incomplete")
+    failures = [
+        failure
+        for sandbox, pool in sorted(expected_pairs)
+        for failure in _gate6_matrix_failures(
+            matrices[(sandbox, pool)],
+            sandbox=sandbox,
+            pool=pool,
+            candidate=live["candidates"][sandbox],
+        )
+    ]
+    if failures:
+        raise AcceptanceError(failures[0])
+
+    pair_artifacts: dict[tuple[str, str], dict[str, Any]] = {}
+    for sandbox, pool in sorted(expected_pairs):
+        artifact = _gate6_pair_artifact(live, platform, sandbox=sandbox, pool=pool)
+        pair_artifacts[(sandbox, pool)] = artifact
+        if pool == "gb10":
+            pair_failures = verify_evidence(artifact, schema)
+            if pair_failures:
+                raise AcceptanceError(f"{sandbox}/gb10 v1 verification failed")
+        else:
+            # v1's non-empty GPU array is intentionally inapplicable to a
+            # CPU-only pool.  Remove only that schema mismatch, then preserve
+            # every semantic check and require native zero-device proof.
+            device = artifact["devices"]
+            if (
+                artifact["job"]["allocation"]["gpu_ids"] != []
+                or any(container["device_ids"] for container in artifact["containers"])
+                or device
+                != {
+                    "allocated_ids": [],
+                    "all_allocated_usable": True,
+                    "unallocated_denied": True,
+                }
+            ):
+                raise AcceptanceError(f"{sandbox}/oldlab zero-device proof failed")
+            semantic_failures = _semantic_failures(artifact)
+            # _semantic_failures itself supports an empty allocation and still
+            # enforces roles, cgroups, headroom, isolation, soak, and cleanup.
+            if semantic_failures:
+                raise AcceptanceError(f"{sandbox}/oldlab semantic verification failed")
+
+    matrix_refs = [
+        {
+            "sandbox": sandbox,
+            "pool": pool,
+            "candidate_sha": live["candidates"][sandbox]["sha"],
+            "candidate_tree": live["candidates"][sandbox]["tree"],
+            "matrix_sha256": _digest(matrices[(sandbox, pool)]),
+            "node_count": len(GATE6_POOL_NODES[pool]),
+            "closed_world_verified": True,
+        }
+        for sandbox, pool in sorted(expected_pairs)
+    ]
+    artifact_refs = [
+        {
+            "sandbox": sandbox,
+            "pool": pool,
+            "verification": "nonexclusive-v1" if pool == "gb10" else "oldlab-zero-device",
+            "artifact_sha256": _digest(pair_artifacts[(sandbox, pool)]),
+        }
+        for sandbox, pool in sorted(expected_pairs)
+    ]
+    unsigned = {
+        "schema_version": 1,
+        "kind": "loom.developer-sandbox.gate6-acceptance",
+        "session_id": live["session"]["id"],
+        "candidates": {
+            sandbox: {
+                "sha": live["candidates"][sandbox]["sha"],
+                "tree": live["candidates"][sandbox]["tree"],
+            }
+            for sandbox in GATE6_SANDBOXES
+        },
+        "live_evidence_sha256": _digest(live),
+        "platform_health_sha256": platform["payload_sha256"],
+        "state_machine_phase_count": 33,
+        "excluded_nodes": [],
+        "allocation_matrices": matrix_refs,
+        "pair_artifacts": artifact_refs,
+        "status": "pass",
+    }
+    return {**unsigned, "payload_sha256": _digest(unsigned)}, pair_artifacts
+
+
+def build_gate6_bundle(
+    live: Any,
+    platform: Any,
+    matrices: Mapping[tuple[str, str], Any],
+    schema: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[tuple[str, str], dict[str, Any]]]:
+    """Fail closed around the strict gate-6 source verifier."""
+
+    try:
+        return _build_gate6_bundle(live, platform, matrices, schema)
+    except AcceptanceError:
+        raise
+    except (KeyError, TypeError, ValueError, StopIteration) as exc:
+        raise AcceptanceError("gate-6 native evidence is incomplete") from exc
 
 
 def acceptance_plan() -> dict[str, Any]:

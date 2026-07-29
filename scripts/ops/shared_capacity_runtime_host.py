@@ -30,13 +30,31 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, cast
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+IMPORT_ROOT = (
+    REPO_ROOT
+    if (REPO_ROOT / "scripts/ops/developer_sandbox_capacity_contract.py").is_file()
+    else Path(__file__).resolve().parent
+)
+if str(IMPORT_ROOT) not in sys.path:
+    sys.path.insert(0, str(IMPORT_ROOT))
+
+from scripts.ops.developer_sandbox_capacity_contract import (  # noqa: E402, I001
+    CAPACITY_POLICY_SOURCES as PLATFORM_POLICY_SOURCES,
+    CapacityContractError,
+    load_capacity_policy,
+    load_platform_health_contract,
+)
+
 SOURCE_PROFILE = REPO_ROOT / "deploy/developer-sandboxes/shared-capacity-runtime-host.toml"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 EXPECTED_HOSTNAME = "trt-eai-oldlab-2"
 PROGRAM_PATH = Path("/usr/local/libexec/loom-shared-capacity-runtime-host")
+CAPACITY_CONTRACT_PATH = Path(
+    "/usr/local/libexec/scripts/ops/developer_sandbox_capacity_contract.py",
+)
 PROFILE_PATH = Path("/etc/loom/shared-capacity-runtime-host.toml")
 CONFIG_ROOT = Path("/etc/loom")
 ADAPTER_CONFIG_ROOT = CONFIG_ROOT / "shared-capacity-adapters"
@@ -49,6 +67,7 @@ PLATFORM_HEALTH_ROOT = Path(
     "/var/lib/loom-developer-sandbox-platform-health-authority",
 )
 ACTIVE_JOURNAL_PATH = INSTALLER_ROOT / "active-transaction.json"
+ACCEPTANCE_OPERATION_PATH = INSTALLER_ROOT / "acceptance-operation.json"
 RECOVERY_PROGRAM_PATH = INSTALLER_ROOT / "runtime-host-recovery"
 LOCK_PATH = Path("/run/loom-shared-capacity-runtime-host.lock")
 CANDIDATE_PARENT = Path("/opt/loom-shared-capacity/candidates")
@@ -89,6 +108,33 @@ INSTANCES = (
 )
 SANDBOXES = ("qianyi", "hongjian", "devansh")
 POOLS = ("gb10", "oldlab")
+ACCEPTANCE_PHASES = (
+    "multi_candidate_overlap",
+    "large_batch_burst",
+    "fairness_contention",
+    "mixed_non_loom",
+    "cancel_cleanup",
+    "ttl_cleanup",
+    "submit_host_restart",
+    "worker_crash",
+)
+ACCEPTANCE_CONTRACT_TTL_SECONDS = 86400
+ACCEPTANCE_DEFAULT_PHASE_TTL_SECONDS = 7200
+ACCEPTANCE_MIXED_NON_LOOM_TTL_SECONDS = 21600
+ACCEPTANCE_TTL_CLEANUP_SECONDS = 120
+LIVE_PHASES = (
+    "preflight",
+    "baseline",
+    "multi_candidate_overlap",
+    "large_batch_burst",
+    "fairness_contention",
+    "mixed_non_loom",
+    "cancel_cleanup",
+    "ttl_cleanup",
+    "submit_host_restart",
+    "worker_crash",
+    "final_drain",
+)
 PLATFORM_HEALTH_EVIDENCE_TTL = timedelta(minutes=15)
 PLATFORM_HEALTH_ACTIVATION_MINIMUM_REMAINING = timedelta(minutes=5)
 PLATFORM_HEALTH_MAX_CLOCK_SKEW = timedelta(seconds=5)
@@ -335,6 +381,10 @@ def _canonical_json(payload: Mapping[str, Any]) -> bytes:
     return (json.dumps(dict(payload), sort_keys=True, separators=(",", ":")) + "\n").encode()
 
 
+def _canonical_json_value(payload: Any) -> bytes:
+    return (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
 def _fsync_directory(path: Path) -> None:
     descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
     try:
@@ -407,6 +457,13 @@ def _validate_profile_bytes(content: bytes) -> dict[str, Any]:
         "candidate_parent",
         "current_link",
         "state_root",
+        "bootstrap_requires_zero_capacity",
+        "positive_admission_requires_platform_health",
+        "acceptance_contract_ttl_seconds",
+        "acceptance_default_phase_ttl_seconds",
+        "acceptance_mixed_non_loom_ttl_seconds",
+        "acceptance_ttl_cleanup_seconds",
+        "acceptance_phases",
         "adapter_instances",
         "slurm_domains",
     }
@@ -427,6 +484,16 @@ def _validate_profile_bytes(content: bytes) -> dict[str, Any]:
         or raw.get("candidate_parent") != str(CANDIDATE_PARENT)
         or raw.get("current_link") != str(CURRENT_LINK)
         or raw.get("state_root") != str(STATE_ROOT)
+        or raw.get("bootstrap_requires_zero_capacity") is not True
+        or raw.get("positive_admission_requires_platform_health") is not True
+        or raw.get("acceptance_contract_ttl_seconds")
+        != ACCEPTANCE_CONTRACT_TTL_SECONDS
+        or raw.get("acceptance_default_phase_ttl_seconds")
+        != ACCEPTANCE_DEFAULT_PHASE_TTL_SECONDS
+        or raw.get("acceptance_mixed_non_loom_ttl_seconds")
+        != ACCEPTANCE_MIXED_NON_LOOM_TTL_SECONDS
+        or raw.get("acceptance_ttl_cleanup_seconds") != ACCEPTANCE_TTL_CLEANUP_SECONDS
+        or raw.get("acceptance_phases") != list(ACCEPTANCE_PHASES)
         or raw.get("adapter_instances") != list(INSTANCES)
         or raw.get("slurm_domains") != expected_domains
     ):
@@ -509,6 +576,13 @@ def _desired_files(candidate: Candidate) -> dict[Path, tuple[bytes, int]]:
             ),
             0o755,
         ),
+        CAPACITY_CONTRACT_PATH: (
+            _read_candidate_file(
+                candidate,
+                Path("scripts/ops/developer_sandbox_capacity_contract.py"),
+            ),
+            0o644,
+        ),
         PROFILE_PATH: (
             _read_candidate_file(
                 candidate,
@@ -564,6 +638,15 @@ def _desired_files(candidate: Candidate) -> dict[Path, tuple[bytes, int]]:
             _read_candidate_file(candidate, relative),
             0o600,
         )
+    try:
+        compile(files[PROGRAM_PATH][0], str(PROGRAM_PATH), "exec")
+        compile(
+            files[CAPACITY_CONTRACT_PATH][0],
+            str(CAPACITY_CONTRACT_PATH),
+            "exec",
+        )
+    except (SyntaxError, ValueError) as exc:
+        raise RuntimeHostError("candidate runtime-host Python asset is invalid") from exc
     return files
 
 
@@ -763,6 +846,7 @@ def _capture_files(paths: Sequence[Path]) -> dict[str, dict[str, Any]]:
 def _snapshot_paths() -> tuple[Path, ...]:
     return (
         PROGRAM_PATH,
+        CAPACITY_CONTRACT_PATH,
         PROFILE_PATH,
         SUPERVISOR_CONFIG_PATH,
         *(ADAPTER_CONFIG_ROOT / f"{instance}.toml" for instance in INSTANCES),
@@ -776,9 +860,18 @@ def _write_journal(
     candidate: Candidate,
     *,
     operation: str,
+    admission_token: str | None = None,
 ) -> tuple[Path, dict[str, Any]]:
-    if operation not in {"install", "activate"}:
+    if operation not in {"install", "activate", "admit"}:
         raise RuntimeHostError("runtime-host transaction operation is invalid")
+    if operation == "install":
+        if admission_token is not None:
+            raise RuntimeHostError("install transaction cannot own an admission token")
+    elif (
+        not isinstance(admission_token, str)
+        or re.fullmatch(r"[0-9a-f]{32}", admission_token) is None
+    ):
+        raise RuntimeHostError("runtime-host admission binding is invalid")
     transaction_id = uuid.uuid4().hex
     _ensure_directory(STATE_ROOT, mode=0o700)
     _ensure_directory(INSTALLER_ROOT, mode=0o700)
@@ -798,6 +891,8 @@ def _write_journal(
         "files": _capture_files(_snapshot_paths()),
         "units": {unit: _systemctl_state(unit) for unit in ALL_UNITS},
     }
+    if admission_token is not None:
+        payload["admission_token"] = admission_token
     _atomic_write(path, _canonical_json(payload), mode=0o600)
     _atomic_write(
         ACTIVE_JOURNAL_PATH,
@@ -958,12 +1053,333 @@ def _platform_health_now(now: datetime | None) -> datetime:
     return current.astimezone(UTC)
 
 
+def _candidate_platform_policy(
+    candidate: Candidate,
+    pool: str,
+) -> tuple[dict[str, Any], str]:
+    try:
+        health = load_platform_health_contract(candidate.source)
+        contract = load_capacity_policy(
+            candidate.source,
+            pool,
+            expected_nodes=(
+                tuple(health.host_aliases[node] for node in health.oldlab_nodes)
+                if pool == "oldlab"
+                else health.capacity_gb10_nodes
+            ),
+        )
+    except CapacityContractError as exc:
+        raise RuntimeHostError(str(exc)) from exc
+    return dict(contract.values), contract.source_sha256
+
+
+def _validate_gate6_observations(
+    value: object,
+    candidates: Mapping[str, Mapping[str, str]],
+) -> bool:
+    if not isinstance(value, dict) or set(value) != {
+        "soak",
+        "device_isolation",
+        "cleanup",
+    }:
+        return False
+    soak = value.get("soak")
+    devices = value.get("device_isolation")
+    cleanup = value.get("cleanup")
+    soak_fields = {
+        "started_at",
+        "completed_at",
+        "duration_seconds",
+        "sample_count",
+        "required_duration_seconds",
+        "required_sample_count",
+        "workloads",
+        "trial_success_numerator",
+        "trial_success_denominator",
+        "trial_success_ratio",
+        "minimum_trial_success_ratio",
+        "trial_outcomes",
+        "resource_envelope_breaches",
+        "kube_api_healthy",
+        "minio_quorum_healthy",
+        "longhorn_healthy",
+        "non_loom_slurm_healthy",
+        "pair_headroom",
+    }
+    if (
+        not isinstance(soak, dict)
+        or set(soak) != soak_fields
+        or not isinstance(soak.get("duration_seconds"), int)
+        or isinstance(soak.get("duration_seconds"), bool)
+        or soak["duration_seconds"] < 14_400
+        or not isinstance(soak.get("sample_count"), int)
+        or isinstance(soak.get("sample_count"), bool)
+        or soak["sample_count"] < 120
+        or soak.get("required_duration_seconds") != 14_400
+        or soak.get("required_sample_count") != 120
+        or soak.get("workloads")
+        != ["loom", "non_loom_slurm", "kubernetes", "minio", "longhorn"]
+        or not isinstance(soak.get("trial_success_numerator"), int)
+        or isinstance(soak.get("trial_success_numerator"), bool)
+        or soak["trial_success_numerator"] < len(INSTANCES)
+        or not isinstance(soak.get("trial_success_denominator"), int)
+        or isinstance(soak.get("trial_success_denominator"), bool)
+        or soak["trial_success_denominator"] < len(INSTANCES)
+        or not isinstance(soak.get("trial_success_ratio"), (int, float))
+        or isinstance(soak.get("trial_success_ratio"), bool)
+        or not 0.95 <= soak["trial_success_ratio"] <= 1
+        or soak.get("minimum_trial_success_ratio") != 0.95
+        or not isinstance(soak.get("trial_outcomes"), list)
+        or soak.get("resource_envelope_breaches") != 0
+        or any(
+            soak.get(field) is not True
+            for field in (
+                "kube_api_healthy",
+                "minio_quorum_healthy",
+                "longhorn_healthy",
+                "non_loom_slurm_healthy",
+            )
+        )
+        or not isinstance(soak.get("pair_headroom"), list)
+    ):
+        return False
+    try:
+        started = _platform_health_timestamp(
+            soak["started_at"],
+            label="gate6 soak started_at",
+        )
+        completed = _platform_health_timestamp(
+            soak["completed_at"],
+            label="gate6 soak completed_at",
+        )
+    except RuntimeHostError:
+        return False
+    if int((completed - started).total_seconds()) != soak["duration_seconds"]:
+        return False
+    pair_fields = {
+        "sandbox",
+        "pool",
+        "min_free_cpu_cores",
+        "min_free_memory_bytes",
+        "max_pid_usage_ratio",
+        "observed_peak_concurrency",
+        "within_reviewed_envelope",
+    }
+    pairs = soak["pair_headroom"]
+    expected_pairs = {(sandbox, pool) for sandbox in SANDBOXES for pool in POOLS}
+    outcome_fields = {
+        "sandbox",
+        "pool",
+        "candidate_sha",
+        "candidate_tree",
+        "terminal_trial_count",
+        "succeeded_trial_count",
+        "failed_trial_count",
+        "cancelled_trial_count",
+        "retried_trial_count",
+        "retry_attempt_count",
+        "success_ratio",
+    }
+    outcome_count_fields = {
+        "terminal_trial_count",
+        "succeeded_trial_count",
+        "failed_trial_count",
+        "cancelled_trial_count",
+        "retried_trial_count",
+        "retry_attempt_count",
+    }
+    outcomes = soak["trial_outcomes"]
+    if (
+        len(outcomes) != len(INSTANCES)
+        or {
+            (row.get("sandbox"), row.get("pool"))
+            for row in outcomes
+            if isinstance(row, dict)
+        }
+        != expected_pairs
+        or any(
+            not isinstance(row, dict)
+            or set(row) != outcome_fields
+            or not isinstance(row.get("sandbox"), str)
+            or row["sandbox"] not in candidates
+            or row.get("candidate_sha") != candidates[row["sandbox"]]["sha"]
+            or row.get("candidate_tree") != candidates[row["sandbox"]]["tree"]
+            or any(
+                not isinstance(row.get(field), int)
+                or isinstance(row.get(field), bool)
+                or row[field] < 0
+                for field in outcome_count_fields
+            )
+            or row["terminal_trial_count"] <= 0
+            or row["terminal_trial_count"]
+            != row["succeeded_trial_count"]
+            + row["failed_trial_count"]
+            + row["cancelled_trial_count"]
+            or row["retried_trial_count"] > row["terminal_trial_count"]
+            or row["retry_attempt_count"] < row["retried_trial_count"]
+            or not isinstance(row.get("success_ratio"), (int, float))
+            or isinstance(row.get("success_ratio"), bool)
+            or not 0.95 <= row["success_ratio"] <= 1
+            or row["success_ratio"]
+            != row["succeeded_trial_count"] / row["terminal_trial_count"]
+            for row in outcomes
+        )
+        or soak["trial_success_numerator"]
+        != sum(row["succeeded_trial_count"] for row in outcomes)
+        or soak["trial_success_denominator"]
+        != sum(row["terminal_trial_count"] for row in outcomes)
+        or soak["trial_success_ratio"]
+        != soak["trial_success_numerator"] / soak["trial_success_denominator"]
+    ):
+        return False
+    if (
+        len(pairs) != len(INSTANCES)
+        or {
+            (row.get("sandbox"), row.get("pool"))
+            for row in pairs
+            if isinstance(row, dict)
+        }
+        != expected_pairs
+        or any(
+            not isinstance(row, dict)
+            or set(row) != pair_fields
+            or not isinstance(row.get("min_free_cpu_cores"), (int, float))
+            or isinstance(row.get("min_free_cpu_cores"), bool)
+            or row["min_free_cpu_cores"] < 0
+            or not isinstance(row.get("min_free_memory_bytes"), int)
+            or isinstance(row.get("min_free_memory_bytes"), bool)
+            or row["min_free_memory_bytes"] < 0
+            or not isinstance(row.get("max_pid_usage_ratio"), (int, float))
+            or isinstance(row.get("max_pid_usage_ratio"), bool)
+            or not 0 <= row["max_pid_usage_ratio"] <= 1
+            or not isinstance(row.get("observed_peak_concurrency"), int)
+            or isinstance(row.get("observed_peak_concurrency"), bool)
+            or row["observed_peak_concurrency"] < 1
+            or row.get("within_reviewed_envelope") is not True
+            for row in pairs
+        )
+    ):
+        return False
+    device_fields = {
+        "sandbox",
+        "pool",
+        "job_id",
+        "node",
+        "host",
+        "allocated_ids",
+        "all_allocated_usable",
+        "unallocated_denied",
+        "proof",
+    }
+    proof_fields = {
+        "method",
+        "allocated_probe_container_ids",
+        "denial_probe_container_ids",
+        "observed_at",
+    }
+    if (
+        not isinstance(devices, list)
+        or len(devices) != len(INSTANCES)
+        or {
+            (row.get("sandbox"), row.get("pool"))
+            for row in devices
+            if isinstance(row, dict)
+        }
+        != expected_pairs
+        or any(
+            not isinstance(row, dict)
+            or set(row) != device_fields
+            or not isinstance(row.get("job_id"), str)
+            or not row["job_id"]
+            or not isinstance(row.get("node"), str)
+            or not row["node"]
+            or not isinstance(row.get("host"), str)
+            or not row["host"]
+            or not isinstance(row.get("allocated_ids"), list)
+            or len(row["allocated_ids"]) != len(set(row["allocated_ids"]))
+            or any(not isinstance(item, str) or not item for item in row["allocated_ids"])
+            or row.get("all_allocated_usable") is not True
+            or row.get("unallocated_denied") is not True
+            or not isinstance(row.get("proof"), dict)
+            or set(row["proof"]) != proof_fields
+            or not isinstance(row["proof"].get("method"), str)
+            or not row["proof"]["method"]
+            or not isinstance(row["proof"].get("allocated_probe_container_ids"), list)
+            or not isinstance(row["proof"].get("denial_probe_container_ids"), list)
+            for row in devices
+        )
+    ):
+        return False
+    try:
+        for row in devices:
+            _platform_health_timestamp(
+                row["proof"]["observed_at"],
+                label="gate6 device observed_at",
+            )
+    except RuntimeHostError:
+        return False
+    cleanup_fields = {
+        "event",
+        "checkpoint",
+        "job_ids",
+        "terminal_states",
+        "observed_within_seconds",
+        "maximum_cleanup_seconds",
+        "live_jobs",
+        "live_containers",
+        "durable_trial_state",
+        "retryable_interrupted_trials",
+        "observed_at",
+    }
+    event_checkpoints = {
+        "cancellation": "cancel_cleanup",
+        "ttl_expiry": "ttl_cleanup",
+        "worker_crash": "worker_crash",
+        "submit_host_restart": "submit_host_restart",
+    }
+    if (
+        not isinstance(cleanup, list)
+        or len(cleanup) != len(event_checkpoints)
+        or {row.get("event") for row in cleanup if isinstance(row, dict)}
+        != set(event_checkpoints)
+        or any(
+            not isinstance(row, dict)
+            or set(row) != cleanup_fields
+            or row.get("checkpoint")
+            != event_checkpoints.get(cast(str, row.get("event")))
+            or not isinstance(row.get("job_ids"), list)
+            or not row["job_ids"]
+            or not isinstance(row.get("terminal_states"), list)
+            or not row["terminal_states"]
+            or not isinstance(row.get("observed_within_seconds"), int)
+            or isinstance(row.get("observed_within_seconds"), bool)
+            or not 0 <= row["observed_within_seconds"] <= 300
+            or row.get("maximum_cleanup_seconds") != 300
+            or row.get("live_jobs") != 0
+            or row.get("live_containers") != 0
+            or row.get("durable_trial_state") is not True
+            or row.get("retryable_interrupted_trials") is not True
+            for row in cleanup
+        )
+    ):
+        return False
+    try:
+        for row in cleanup:
+            _platform_health_timestamp(
+                row["observed_at"],
+                label="gate6 cleanup observed_at",
+            )
+    except RuntimeHostError:
+        return False
+    return True
+
+
 def _validate_platform_health_activation_gate(
     candidate: Candidate,
     adapter_candidates: Mapping[str, Mapping[str, str]],
     *,
     now: datetime | None = None,
-) -> None:
+) -> tuple[str, str]:
     current = _platform_health_json(
         PLATFORM_HEALTH_ROOT / "current.json",
         label="platform-health current pointer",
@@ -985,6 +1401,46 @@ def _validate_platform_health_activation_gate(
     unsigned = {key: value for key, value in evidence.items() if key != "payload_sha256"}
     candidates = evidence.get("candidates")
     capacity = evidence.get("policy_capacity")
+    recommendation = evidence.get("oldlab_capacity_recommendation")
+    gate6_observations = evidence.get("gate6_observations")
+    expected_policy = {pool: _candidate_platform_policy(candidate, pool) for pool in POOLS}
+    try:
+        health_contract = load_platform_health_contract(candidate.source)
+    except CapacityContractError as exc:
+        raise RuntimeHostError(str(exc)) from exc
+    oldlab_capacity = capacity.get("oldlab") if isinstance(capacity, dict) else None
+    gb10_capacity = capacity.get("gb10") if isinstance(capacity, dict) else None
+    extra_capacity_fields = {
+        "minimum_node_cpu_cores",
+        "minimum_node_memory_bytes",
+        "reserved_cpu_cores_per_node",
+        "reserved_memory_mib_per_node",
+    }
+    capacity_fields = set(expected_policy["oldlab"][0]) | extra_capacity_fields
+    derivation = recommendation.get("derivation") if isinstance(recommendation, dict) else None
+    gb10_minimum_cpu = (
+        gb10_capacity.get("minimum_node_cpu_cores") if isinstance(gb10_capacity, dict) else None
+    )
+    gb10_minimum_memory = (
+        gb10_capacity.get("minimum_node_memory_bytes") if isinstance(gb10_capacity, dict) else None
+    )
+    gb10_headroom_is_typed = (
+        isinstance(gb10_minimum_cpu, int)
+        and not isinstance(gb10_minimum_cpu, bool)
+        and isinstance(gb10_minimum_memory, int)
+        and not isinstance(gb10_minimum_memory, bool)
+    )
+    expected_gb10_reserved_cpu = (
+        cast(int, gb10_minimum_cpu) - expected_policy["gb10"][0]["requested_cpus"]
+        if gb10_headroom_is_typed
+        else None
+    )
+    expected_gb10_reserved_memory_mib = (
+        cast(int, gb10_minimum_memory) // 1024**2
+        - expected_policy["gb10"][0]["requested_memory_mib"]
+        if gb10_headroom_is_typed
+        else None
+    )
     current_time = _platform_health_now(now)
     completed_at = _platform_health_timestamp(
         evidence.get("completed_at"),
@@ -997,6 +1453,26 @@ def _validate_platform_health_activation_gate(
     if (
         evidence.get("schema_version") != 1
         or evidence.get("kind") != "loom.developer-sandbox.platform-health-evidence"
+        or set(evidence)
+        != {
+            "schema_version",
+            "kind",
+            "session_id",
+            "candidates",
+            "collector_host",
+            "checkpoints",
+            "mixed_jobs",
+            "cancelled_jobs",
+            "crashed_jobs",
+            "node_intervals",
+            "policy_capacity",
+            "oldlab_capacity_recommendation",
+            "gate6_observations",
+            "zero_orphans",
+            "completed_at",
+            "expires_at",
+            "payload_sha256",
+        }
         or evidence.get("session_id") != session_id
         or evidence.get("payload_sha256") != current["payload_sha256"]
         or evidence.get("payload_sha256") != _sha256(_canonical_json(unsigned))
@@ -1016,16 +1492,80 @@ def _validate_platform_health_activation_gate(
         or completed_at > current_time + PLATFORM_HEALTH_MAX_CLOCK_SKEW
         or expires_at <= current_time + PLATFORM_HEALTH_ACTIVATION_MINIMUM_REMAINING
         or evidence.get("zero_orphans") is not True
+        or not _validate_gate6_observations(gate6_observations, adapter_candidates)
         or not isinstance(capacity, dict)
-        or capacity.get("oldlab", {}).get("max_slots") != 20
-        or capacity.get("gb10", {}).get("max_slots") != 112
-        or capacity.get("gb10", {}).get("requested_cpus") != 16
-        or capacity.get("gb10", {}).get("requested_memory_mib") != 92000
-        or capacity.get("gb10", {}).get("requested_concurrency") != 8
-        or capacity.get("gb10", {}).get("reserved_cpu_cores_per_node") != 4
-        or capacity.get("gb10", {}).get("reserved_memory_mib_per_node") != 23000
+        or set(capacity) != set(POOLS)
+        or not isinstance(oldlab_capacity, dict)
+        or not isinstance(gb10_capacity, dict)
+        or set(oldlab_capacity) != capacity_fields
+        or set(gb10_capacity) != capacity_fields
+        or any(
+            pool_capacity.get(key) != expected_policy[pool][0][key]
+            for pool, pool_capacity in (
+                ("oldlab", oldlab_capacity),
+                ("gb10", gb10_capacity),
+            )
+            for key in expected_policy[pool][0]
+        )
+        or oldlab_capacity.get("reserved_cpu_cores_per_node")
+        != health_contract.minimum_oldlab_free_cpu_cores
+        or oldlab_capacity.get("reserved_memory_mib_per_node")
+        != health_contract.minimum_oldlab_free_memory_bytes // 1024**2
+        or not gb10_headroom_is_typed
+        or gb10_capacity.get("reserved_cpu_cores_per_node") != expected_gb10_reserved_cpu
+        or gb10_capacity.get("reserved_memory_mib_per_node") != expected_gb10_reserved_memory_mib
+        or not isinstance(recommendation, dict)
+        or set(recommendation)
+        != {"schema_version", "pool", "source", "source_sha256", "values", "derivation"}
+        or recommendation.get("schema_version") != 1
+        or recommendation.get("pool") != "oldlab"
+        or recommendation.get("source") != PLATFORM_POLICY_SOURCES["oldlab"]
+        or recommendation.get("source_sha256") != expected_policy["oldlab"][1]
+        or recommendation.get("values") != oldlab_capacity
+        or not isinstance(derivation, dict)
+        or set(derivation)
+        != {
+            "method",
+            "measured_node_count",
+            "minimum_observed_node_cpu_cores",
+            "minimum_observed_node_memory_bytes",
+            "minimum_observed_free_cpu_cores",
+            "minimum_observed_free_memory_bytes",
+            "minimum_required_free_cpu_cores",
+            "minimum_required_free_memory_bytes",
+            "maximum_allowed_cpu_busy_ratio",
+            "all_nodes_passed",
+        }
+        or derivation.get("method") != "installed-shared-capacity-policy-v1"
+        or derivation.get("measured_node_count") != len(health_contract.oldlab_nodes)
+        or derivation.get("minimum_observed_node_cpu_cores")
+        != oldlab_capacity.get("minimum_node_cpu_cores")
+        or derivation.get("minimum_observed_node_memory_bytes")
+        != oldlab_capacity.get("minimum_node_memory_bytes")
+        or derivation.get("minimum_required_free_cpu_cores")
+        != health_contract.minimum_oldlab_free_cpu_cores
+        or derivation.get("minimum_required_free_memory_bytes")
+        != health_contract.minimum_oldlab_free_memory_bytes
+        or derivation.get("maximum_allowed_cpu_busy_ratio")
+        != health_contract.maximum_cpu_busy_ratio
+        or derivation.get("all_nodes_passed") is not True
+        or not isinstance(derivation.get("minimum_observed_free_cpu_cores"), (int, float))
+        or isinstance(derivation.get("minimum_observed_free_cpu_cores"), bool)
+        or derivation["minimum_observed_free_cpu_cores"]
+        < health_contract.minimum_oldlab_free_cpu_cores
+        or not isinstance(derivation.get("minimum_observed_free_memory_bytes"), int)
+        or isinstance(derivation.get("minimum_observed_free_memory_bytes"), bool)
+        or derivation["minimum_observed_free_memory_bytes"]
+        < health_contract.minimum_oldlab_free_memory_bytes
     ):
         raise RuntimeHostError("platform-health activation gate is not satisfied")
+    rebuilt_sha256, gate6_sha256 = _verify_platform_health_authority_evidence(
+        candidate,
+        evidence_path,
+    )
+    if rebuilt_sha256 != evidence["payload_sha256"]:
+        raise RuntimeHostError("platform-health authority evidence drifted")
+    return str(evidence["payload_sha256"]), gate6_sha256
 
 
 def _active_journal() -> tuple[Path, dict[str, Any]] | None:
@@ -1098,7 +1638,7 @@ def _validate_transaction(
         not isinstance(transaction_id, str)
         or re.fullmatch(r"[0-9a-f]{32}", transaction_id) is None
         or path != JOURNAL_ROOT / f"{transaction_id}.json"
-        or operation not in {"install", "activate"}
+        or operation not in {"install", "activate", "admit"}
         or not isinstance(sha, str)
         or SHA_RE.fullmatch(sha) is None
         or not isinstance(tree, str)
@@ -1150,7 +1690,24 @@ def _restore_transaction(
     path: Path,
     payload: dict[str, Any],
 ) -> None:
-    transaction_id, operation, sha, tree = _restore_local_transaction(
+    operation = payload.get("operation")
+    admission_token = payload.get("admission_token")
+    if operation in {"activate", "admit"}:
+        if (
+            not isinstance(admission_token, str)
+            or re.fullmatch(r"[0-9a-f]{32}", admission_token) is None
+        ):
+            raise RuntimeHostError("runtime-host admission binding is invalid")
+        if operation == "admit":
+            candidate = Candidate(
+                sha=str(payload.get("candidate_sha")),
+                tree=str(payload.get("candidate_tree")),
+                source=CANDIDATE_PARENT / str(payload.get("candidate_sha")) / "repo",
+            )
+            _close_activation_admission(candidate, admission_token)
+            _drain_activated_capacity(candidate, admission_token)
+            _verify_activated_capacity_drained(candidate, admission_token)
+    _transaction_id, operation, sha, tree = _restore_local_transaction(
         path,
         payload,
         remove_candidate=True,
@@ -1163,7 +1720,7 @@ def _restore_transaction(
                 tree=tree,
                 source=CANDIDATE_PARENT / sha / "repo",
             ),
-            transaction_id,
+            str(admission_token),
         )
     ACTIVE_JOURNAL_PATH.unlink(missing_ok=True)
     _fsync_directory(INSTALLER_ROOT)
@@ -1171,40 +1728,28 @@ def _restore_transaction(
 
 def _recover_orphan() -> None:
     active = _active_journal()
-    if active is None:
-        return
-    path, payload = active
-    if payload.get("operation") == "install" and str(payload.get("phase", "")).startswith(
-        "rollback-"
-    ):
-        _resume_activated_rollback(path, payload)
-        return
-    if payload.get("phase") == "committed":
-        if payload.get("operation") == "activate":
-            sha = payload.get("candidate_sha")
-            tree = payload.get("candidate_tree")
-            transaction_id = payload.get("transaction_id")
-            if (
-                not isinstance(sha, str)
-                or SHA_RE.fullmatch(sha) is None
-                or not isinstance(tree, str)
-                or SHA_RE.fullmatch(tree) is None
-                or not isinstance(transaction_id, str)
-                or re.fullmatch(r"[0-9a-f]{32}", transaction_id) is None
-            ):
-                raise RuntimeHostError("committed activation journal is invalid")
-            _open_activation_admission(
-                Candidate(
-                    sha=sha,
-                    tree=tree,
-                    source=CANDIDATE_PARENT / sha / "repo",
-                ),
-                transaction_id,
-            )
-        ACTIVE_JOURNAL_PATH.unlink(missing_ok=True)
-        _fsync_directory(INSTALLER_ROOT)
-        return
-    _restore_transaction(path, payload)
+    if active is not None:
+        path, payload = active
+        if payload.get("operation") == "install" and str(
+            payload.get("phase", ""),
+        ).startswith("rollback-"):
+            _resume_activated_rollback(path, payload)
+        elif payload.get("operation") == "admit" and payload.get("phase") in {
+            "admission-authorized",
+            "admission-open",
+            "state-activated",
+        }:
+            try:
+                _resume_admission(path, payload)
+            except Exception:
+                _restore_transaction(path, payload)
+                raise
+        elif payload.get("phase") == "committed":
+            ACTIVE_JOURNAL_PATH.unlink(missing_ok=True)
+            _fsync_directory(INSTALLER_ROOT)
+        else:
+            _restore_transaction(path, payload)
+    _recover_acceptance_operation()
 
 
 def _reject_orphan_stages() -> None:
@@ -1342,6 +1887,8 @@ def _materialize_candidate(candidate: Candidate, staging_path: Path) -> bool:
 
 
 def _publish_files(candidate: Candidate) -> None:
+    _ensure_directory(CAPACITY_CONTRACT_PATH.parent.parent, mode=0o755)
+    _ensure_directory(CAPACITY_CONTRACT_PATH.parent, mode=0o755)
     for path, (content, mode) in _desired_files(candidate).items():
         _atomic_write(path, content, mode=mode)
     _atomic_symlink(CURRENT_LINK, f"candidates/{candidate.sha}")
@@ -1415,10 +1962,27 @@ def _candidate_broker_state_db(candidate: Candidate) -> Path:
     return path
 
 
+def _validate_candidate_sha_set(
+    candidate_shas: Mapping[str, Any],
+) -> dict[str, str]:
+    if (
+        set(candidate_shas) != set(SANDBOXES)
+        or any(
+            not isinstance(candidate_shas.get(sandbox), str)
+            or SHA_RE.fullmatch(str(candidate_shas[sandbox])) is None
+            for sandbox in SANDBOXES
+        )
+        or len({str(candidate_shas[sandbox]) for sandbox in SANDBOXES}) != len(SANDBOXES)
+    ):
+        raise RuntimeHostError("sandbox candidate SHA set is invalid")
+    return {sandbox: str(candidate_shas[sandbox]) for sandbox in SANDBOXES}
+
+
 def _retirement_request_ids(
     report: Mapping[str, Any],
-    candidate_sha: str,
+    candidate_shas: Mapping[str, Any],
 ) -> tuple[str, ...]:
+    exact_shas = _validate_candidate_sha_set(candidate_shas)
     records = report.get("requests")
     if not isinstance(records, list):
         raise RuntimeHostError("broker retirement report is invalid")
@@ -1447,10 +2011,12 @@ def _retirement_request_ids(
 
     retire: list[str] = []
     for instance, lane_records in by_instance.items():
+        sandbox, _pool = instance.rsplit("-", 1)
+        expected_sha = exact_shas[sandbox]
         exact = [
             (request, lease)
             for request, lease in lane_records
-            if request.get("candidate_sha") == candidate_sha
+            if request.get("candidate_sha") == expected_sha
         ]
         if not exact:
             raise RuntimeHostError(f"broker retirement lane is missing: {instance}")
@@ -1463,7 +2029,7 @@ def _retirement_request_ids(
             raise RuntimeHostError(f"broker retirement lane is ambiguous: {instance}")
         if nonterminal:
             request, _lease = nonterminal[0]
-            if request.get("candidate_sha") != candidate_sha:
+            if request.get("candidate_sha") != expected_sha:
                 raise RuntimeHostError(
                     f"broker retirement lane belongs to another candidate: {instance}",
                 )
@@ -1473,9 +2039,10 @@ def _retirement_request_ids(
 
 def _retirement_is_drained(
     report: Mapping[str, Any],
-    candidate_sha: str,
+    candidate_shas: Mapping[str, Any],
 ) -> bool:
-    outstanding = _retirement_request_ids(report, candidate_sha)
+    exact_shas = _validate_candidate_sha_set(candidate_shas)
+    outstanding = _retirement_request_ids(report, exact_shas)
     records = report.get("requests")
     aggregate = report.get("aggregate")
     if not isinstance(records, list) or not isinstance(aggregate, dict):
@@ -1487,7 +2054,11 @@ def _retirement_is_drained(
         lease = record.get("lease")
         if not isinstance(request, dict) or not isinstance(lease, dict):
             raise RuntimeHostError("broker retirement request is invalid")
-        if request.get("candidate_sha") != candidate_sha:
+        sandbox = request.get("sandbox")
+        pool = request.get("pool")
+        if sandbox not in exact_shas or f"{sandbox}-{pool}" not in INSTANCES:
+            continue
+        if request.get("candidate_sha") != exact_shas[str(sandbox)]:
             continue
         if request.get("state") != "terminal" or any(
             lease.get(field) != 0
@@ -1517,8 +2088,9 @@ def _retirement_is_drained(
 def _validate_zero_broker_handoffs(
     report: Mapping[str, Any],
     selected: Mapping[str, Any],
-    candidate_sha: str,
+    candidate_shas: Mapping[str, Any],
 ) -> None:
+    exact_shas = _validate_candidate_sha_set(candidate_shas)
     if set(selected) != set(INSTANCES):
         raise RuntimeHostError("broker activation preflight is not closed-world")
     records = report.get("requests")
@@ -1540,19 +2112,25 @@ def _validate_zero_broker_handoffs(
         requests[request_id] = request
         leases[request_id] = lease
     for instance in INSTANCES:
+        sandbox, _pool = instance.rsplit("-", 1)
+        expected_sha = exact_shas[sandbox]
         handoff = selected.get(instance)
         if (
             not isinstance(handoff, dict)
             or handoff.get("enabled") is not False
             or handoff.get("min_slots") != 0
             or handoff.get("max_slots") != 0
-            or handoff.get("candidate_sha") != candidate_sha
+            or handoff.get("candidate_sha") != expected_sha
         ):
             raise RuntimeHostError("activation requires six zero-capacity handoffs")
         request_id = str(handoff.get("request_id"))
         request = requests.get(request_id)
         lease = leases.get(request_id)
-        if request is None or request.get("state") != "terminal":
+        if (
+            request is None
+            or request.get("state") != "terminal"
+            or request.get("candidate_sha") != expected_sha
+        ):
             raise RuntimeHostError("activation requires terminal zero-capacity requests")
         if lease is None or any(
             lease.get(field) != 0 for field in ("pending_slots", "active_slots", "draining_slots")
@@ -1639,7 +2217,25 @@ def _validate_zero_worker_status(
             raise RuntimeHostError("control-plane still has a live Slurm worker job")
 
 
+def _validate_zero_adapter_state(
+    handoff: Any,
+    state: Mapping[str, Any],
+) -> None:
+    if (
+        getattr(handoff, "enabled", None) is not False
+        or getattr(handoff, "min_slots", None) != 0
+        or getattr(handoff, "max_slots", None) != 0
+    ):
+        raise RuntimeHostError("bootstrap adapter handoff is not disabled at zero")
+    if any(
+        state.get(field) != 0
+        for field in ("pending_slots", "active_slots", "draining_slots")
+    ):
+        raise RuntimeHostError("bootstrap adapter state still has live capacity")
+
+
 _BROKER_PREFLIGHT = """
+import json
 import sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
@@ -1651,12 +2247,13 @@ from scripts.ops.shared_capacity_supervisor import (
     load_config,
 )
 config = load_config(Path(sys.argv[2]))
+candidate_shas = json.loads(sys.argv[3])
 broker = SharedCapacityBroker(config.state_db)
 broker.close_admission(sys.argv[4])
 report = broker.status()
 _validate_report_budgets(report, config)
 selected = _publication_handoffs(report, config)
-_validate_zero_broker_handoffs(report, selected, sys.argv[3])
+_validate_zero_broker_handoffs(report, selected, candidate_shas)
 """
 
 _BROKER_OPEN = """
@@ -1667,7 +2264,292 @@ from loom_control_plane.shared_capacity_broker import SharedCapacityBroker
 SharedCapacityBroker(Path(sys.argv[2])).open_admission(sys.argv[3])
 """
 
+_BROKER_CLOSE = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from loom_control_plane.shared_capacity_broker import SharedCapacityBroker
+SharedCapacityBroker(Path(sys.argv[2])).close_admission(sys.argv[3])
+"""
+
+_BROKER_ADMISSION_READBACK = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from loom_control_plane.shared_capacity_broker import SharedCapacityBroker
+broker = SharedCapacityBroker(Path(sys.argv[2]))
+broker.initialize()
+connection = broker._connect()
+try:
+    fence = broker._admission_fence(connection)
+finally:
+    connection.close()
+print("open" if fence is None else fence)
+"""
+
+_PLATFORM_HEALTH_AUTHORITY_REBUILD = """
+import hashlib
+import json
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from scripts.ops.developer_sandbox_platform_health_authority import (
+    _load_receipts,
+    _load_samples,
+    _secure_json,
+    _verify_checkpoints,
+    load_config,
+)
+from scripts.ops.developer_sandbox_live_acceptance import (
+    NONEXCLUSIVE_SCHEMA,
+    PHASE_CHECKPOINTS,
+    POOLS,
+    SANDBOXES,
+    SLURM_POLICY_STATE_ROOT,
+    _canonical_bytes,
+    _checkpoint_payload,
+    _gate6_matrix_path,
+    _gate6_runtime_domain_bindings,
+    _load_schema,
+    _secure_json_load,
+    _session_dir,
+    _session_state_unlocked,
+    _trusted_authority_json,
+    gate6_verifier,
+    verify_evidence,
+)
+repo = Path(sys.argv[1])
+evidence_path = Path(sys.argv[2])
+config = load_config(
+    repo / "deploy/developer-sandboxes/platform-health-authority.toml",
+)
+receipts = _load_receipts(evidence_path.parent)
+if not receipts:
+    raise RuntimeError("platform-health receipt set is empty")
+samples = _load_samples(
+    config,
+    evidence_path.parent,
+    session_id=receipts[0]["session_id"],
+    candidates=receipts[0]["candidates"],
+)
+rebuilt = _verify_checkpoints(
+    config,
+    receipts,
+    require_complete=True,
+    samples=samples,
+)
+existing, _raw = _secure_json(
+    evidence_path,
+    label="platform-health final evidence",
+)
+if rebuilt is None or existing != rebuilt:
+    raise RuntimeError("platform-health final evidence does not rebuild exactly")
+session_id = existing["session_id"]
+state = _session_state_unlocked(session_id)
+if (
+    state["status"] != "complete"
+    or state["next_phase_index"] != len(PHASE_CHECKPOINTS)
+    or state["completed_phases"]
+    != [f"{sandbox}:{phase}" for phase, sandbox in PHASE_CHECKPOINTS]
+    or state["candidates"] != existing["candidates"]
+):
+    raise RuntimeError("live acceptance session is not complete")
+live_evidence_path = _session_dir(session_id) / "evidence.json"
+live_evidence = _secure_json_load(live_evidence_path)
+if verify_evidence(live_evidence, _load_schema()):
+    raise RuntimeError("live acceptance final evidence is invalid")
+if (
+    live_evidence["session"]["id"] != session_id
+    or {
+        sandbox: {
+            "sha": live_evidence["candidates"][sandbox]["sha"],
+            "tree": live_evidence["candidates"][sandbox]["tree"],
+        }
+        for sandbox in SANDBOXES
+    }
+    != state["candidates"]
+):
+    raise RuntimeError("live acceptance candidate binding drifted")
+checkpoint_root = _session_dir(session_id) / "checkpoints"
+expected_names = {
+    f"{index:02d}-{sandbox}-{phase}.json"
+    for index, (phase, sandbox) in enumerate(PHASE_CHECKPOINTS)
+}
+if {path.name for path in checkpoint_root.iterdir()} != expected_names:
+    raise RuntimeError("live acceptance checkpoint journal is incomplete")
+for index, (phase, sandbox) in enumerate(PHASE_CHECKPOINTS):
+    checkpoint = _secure_json_load(
+        checkpoint_root / f"{index:02d}-{sandbox}-{phase}.json",
+    )
+    phase_evidence = live_evidence["state_machine"][index]
+    canonical_phase = {
+        key: value for key, value in phase_evidence.items() if key != "checkpoint_sha256"
+    }
+    actual_digest = hashlib.sha256(_canonical_bytes(canonical_phase)).hexdigest()
+    if (
+        checkpoint != _checkpoint_payload(session_id, canonical_phase, actual_digest)
+        or phase_evidence["checkpoint_sha256"] != actual_digest
+    ):
+        raise RuntimeError("live acceptance checkpoint journal drifted")
+live_digest = hashlib.sha256(_canonical_bytes(live_evidence)).hexdigest()
+if state["evidence_sha256"] != live_digest:
+    raise RuntimeError("live acceptance final digest drifted")
+if "gate6_sha256" not in state:
+    raise RuntimeError("live acceptance gate 6 is not sealed")
+matrices = {}
+for sandbox in SANDBOXES:
+    candidate_sha = state["candidates"][sandbox]["sha"]
+    for pool in POOLS:
+        matrix_path = _gate6_matrix_path(sandbox, pool, candidate_sha)
+        matrices[(sandbox, pool)] = _trusted_authority_json(
+            matrix_path,
+            SLURM_POLICY_STATE_ROOT,
+            label="allocation-matrix",
+        )
+runtime_bindings = _gate6_runtime_domain_bindings(live_evidence)
+for pair, matrix in matrices.items():
+    runtime = matrix.get("runtime_attestation")
+    if not isinstance(runtime, dict) or (
+        runtime.get("receipt_sha256"),
+        runtime.get("domain_payload_sha256"),
+        runtime.get("domain_signature_sha256"),
+        runtime.get("domain_generation"),
+    ) not in runtime_bindings[pair]:
+        raise RuntimeError("gate-6 allocation matrix runtime binding drifted")
+rebuilt_bundle, rebuilt_pairs = gate6_verifier.build_gate6_bundle(
+    live_evidence,
+    existing,
+    matrices,
+    gate6_verifier._load_schema(NONEXCLUSIVE_SCHEMA),
+)
+gate_root = _session_dir(session_id) / "gate6"
+stored_bundle = _secure_json_load(gate_root / "acceptance.json")
+if (
+    stored_bundle != rebuilt_bundle
+    or state["gate6_sha256"] != rebuilt_bundle["payload_sha256"]
+):
+    raise RuntimeError("live acceptance gate-6 bundle drifted")
+for pair, artifact in rebuilt_pairs.items():
+    sandbox, pool = pair
+    if _secure_json_load(
+        gate_root / f"{sandbox}-{pool}.nonexclusive.json",
+    ) != artifact:
+        raise RuntimeError("live acceptance gate-6 pair artifact drifted")
+print(json.dumps(
+    {
+        "gate6_sha256": rebuilt_bundle["payload_sha256"],
+        "platform_health_sha256": existing["payload_sha256"],
+    },
+    sort_keys=True,
+    separators=(",", ":"),
+))
+"""
+
+_ACCEPTANCE_SESSION_READBACK = """
+import json
+import sys
+sys.path.insert(0, sys.argv[1])
+from scripts.ops.developer_sandbox_live_acceptance import (
+    PHASES,
+    PHASE_CHECKPOINTS,
+    _session_state_unlocked,
+)
+state = _session_state_unlocked(sys.argv[2])
+print(json.dumps(
+    {
+        "session_id": state["session_id"],
+        "status": state["status"],
+        "candidates": state["candidates"],
+        "next_phase_index": state["next_phase_index"],
+        "phase_checkpoints": len(PHASE_CHECKPOINTS),
+        "phases": list(PHASES),
+    },
+    sort_keys=True,
+    separators=(",", ":"),
+))
+"""
+
+_ACCEPTANCE_OPEN = """
+import json
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from loom_control_plane.shared_capacity_broker import SharedCapacityBroker
+broker = SharedCapacityBroker(Path(sys.argv[2]))
+contract = broker.open_acceptance_admission(
+    token=sys.argv[3],
+    contract=json.loads(sys.argv[4]),
+)
+print(json.dumps(contract, sort_keys=True, separators=(",", ":")))
+"""
+
+_ACCEPTANCE_COHORT = """
+import json
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from loom_control_plane.shared_capacity_broker import SharedCapacityBroker
+rows = SharedCapacityBroker(Path(sys.argv[2])).request_acceptance_cohort(
+    token=sys.argv[3],
+    session_id=sys.argv[4],
+    phase=sys.argv[5],
+)
+print(json.dumps(rows, sort_keys=True, separators=(",", ":")))
+"""
+
+_ACCEPTANCE_COHORT_STATUS = """
+import json
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from loom_control_plane.shared_capacity_broker import SharedCapacityBroker
+rows = SharedCapacityBroker(Path(sys.argv[2])).acceptance_cohort_status(
+    token=sys.argv[3],
+    session_id=sys.argv[4],
+    phase=sys.argv[5],
+)
+print(json.dumps(rows, sort_keys=True, separators=(",", ":")))
+"""
+
+_ACCEPTANCE_CANCEL = """
+import json
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from loom_control_plane.shared_capacity_broker import SharedCapacityBroker
+row = SharedCapacityBroker(Path(sys.argv[2])).cancel_acceptance_request(
+    token=sys.argv[3],
+    session_id=sys.argv[4],
+    phase=sys.argv[5],
+    sandbox=sys.argv[6],
+    pool=sys.argv[7],
+)
+print(json.dumps(row, sort_keys=True, separators=(",", ":")))
+"""
+
+_ACCEPTANCE_CLOSE = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from loom_control_plane.shared_capacity_broker import SharedCapacityBroker
+SharedCapacityBroker(Path(sys.argv[2])).close_acceptance_admission(
+    token=sys.argv[3],
+    session_id=sys.argv[4],
+)
+"""
+
+_ACCEPTANCE_CONTRACT_READBACK = """
+import json
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from loom_control_plane.shared_capacity_broker import SharedCapacityBroker
+contract = SharedCapacityBroker(Path(sys.argv[2])).acceptance_contract()
+print(json.dumps(contract, sort_keys=True, separators=(",", ":")))
+"""
+
 _BROKER_RETIRE = """
+import json
 import sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
@@ -1681,17 +2563,52 @@ from scripts.ops.shared_capacity_supervisor import (
     load_config,
 )
 config = load_config(Path(sys.argv[2]))
+candidate_shas = json.loads(sys.argv[3])
 if config.state_db != Path(sys.argv[5]):
     raise RuntimeError("broker retirement authority binding mismatch")
 broker = SharedCapacityBroker(config.state_db)
 broker.close_admission(sys.argv[4])
 report = broker.status()
 _validate_report_budgets(report, config)
-for request_id in _retirement_request_ids(report, sys.argv[3]):
+for request_id in _retirement_request_ids(report, candidate_shas):
     broker.cancel(request_id, reason="runtime_host_rollback")
 report = broker.status()
 _validate_report_budgets(report, config)
-print("drained" if _retirement_is_drained(report, sys.argv[3]) else "pending")
+print("drained" if _retirement_is_drained(report, candidate_shas) else "pending")
+"""
+
+_ACCEPTANCE_RETIRE = """
+import json
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from loom_control_plane.shared_capacity_broker import SharedCapacityBroker
+from scripts.ops.shared_capacity_runtime_host import _retirement_is_drained
+from scripts.ops.shared_capacity_supervisor import (
+    _validate_report_budgets,
+    load_config,
+)
+config = load_config(Path(sys.argv[2]))
+candidate_shas = json.loads(sys.argv[3])
+if config.state_db != Path(sys.argv[6]):
+    raise RuntimeError("acceptance retirement authority binding mismatch")
+broker = SharedCapacityBroker(config.state_db)
+broker.close_admission(sys.argv[4])
+contract = broker.acceptance_contract()
+if (
+    contract is None
+    or contract["admission_token"] != sys.argv[4]
+    or contract["session_id"] != sys.argv[5]
+    or contract["candidate_shas"] != candidate_shas
+):
+    raise RuntimeError("acceptance retirement contract binding mismatch")
+broker.retire_acceptance_requests(
+    token=sys.argv[4],
+    session_id=sys.argv[5],
+)
+report = broker.status()
+_validate_report_budgets(report, config)
+print("drained" if _retirement_is_drained(report, candidate_shas) else "pending")
 """
 
 _ADAPTER_PREFLIGHT = """
@@ -1832,6 +2749,7 @@ from scripts.ops.shared_capacity_adapter import (
     load_handoff,
 )
 from scripts.ops.shared_capacity_runtime_host import (
+    _validate_zero_adapter_state,
     _validate_zero_cp_policy,
     _validate_zero_worker_status,
 )
@@ -1839,6 +2757,9 @@ config = load_config(Path(sys.argv[2]))
 candidate = _load_sandbox_binding(config)
 if candidate.sha != sys.argv[3] or candidate.tree != sys.argv[4]:
     raise RuntimeError("activated sandbox candidate binding mismatch")
+if sys.argv[5] not in {"allow-positive", "require-zero"}:
+    raise RuntimeError("activated adapter readback mode is invalid")
+require_zero = sys.argv[5] == "require-zero"
 handoff = load_handoff(config)
 state = _load_adapter_state(config.adapter_state_path)
 if state is None:
@@ -1870,7 +2791,9 @@ if (
     or state.get("applied_max_slots") != handoff.max_slots
 ):
     raise RuntimeError("activated adapter state is not current")
-if not handoff.enabled:
+if require_zero:
+    _validate_zero_adapter_state(handoff, state)
+if require_zero or not handoff.enabled:
     _validate_zero_cp_policy(policy, candidate_sha=candidate.sha)
     worker_status = _http_json(
         method="GET",
@@ -1884,7 +2807,7 @@ if not handoff.enabled:
         environment=config.environment,
         pool_name=config.pool_name,
     )
-    if any(
+    if not require_zero and any(
         state.get(field) != 0
         for field in ("pending_slots", "active_slots", "draining_slots")
     ):
@@ -1894,12 +2817,204 @@ if not handoff.enabled:
 _EMBEDDED_PROGRAM_ARGUMENT_COUNTS = {
     _BROKER_PREFLIGHT: 3,
     _BROKER_OPEN: 2,
+    _BROKER_CLOSE: 2,
+    _BROKER_ADMISSION_READBACK: 1,
+    _PLATFORM_HEALTH_AUTHORITY_REBUILD: 1,
+    _ACCEPTANCE_SESSION_READBACK: 1,
+    _ACCEPTANCE_OPEN: 3,
+    _ACCEPTANCE_COHORT: 4,
+    _ACCEPTANCE_COHORT_STATUS: 4,
+    _ACCEPTANCE_CANCEL: 6,
+    _ACCEPTANCE_CLOSE: 3,
+    _ACCEPTANCE_CONTRACT_READBACK: 1,
     _BROKER_RETIRE: 4,
+    _ACCEPTANCE_RETIRE: 5,
     _ADAPTER_PREFLIGHT: 3,
     _ADAPTER_BINDING_READBACK: 1,
     _GENERATION_READBACK: 1,
-    _ACTIVATED_ADAPTER_READBACK: 3,
+    _ACTIVATED_ADAPTER_READBACK: 4,
 }
+
+
+def _verify_platform_health_authority_evidence(
+    candidate: Candidate,
+    evidence_path: Path,
+) -> tuple[str, str]:
+    completed = _run_candidate_python(
+        candidate,
+        _PLATFORM_HEALTH_AUTHORITY_REBUILD,
+        str(evidence_path),
+    )
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeHostError("platform-health authority rebuild is invalid") from exc
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"gate6_sha256", "platform_health_sha256"}
+        or completed.stdout.encode() != _canonical_json(payload)
+        or re.fullmatch(r"[0-9a-f]{64}", str(payload.get("gate6_sha256"))) is None
+        or re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(payload.get("platform_health_sha256")),
+        )
+        is None
+    ):
+        raise RuntimeHostError("platform-health authority rebuild is invalid")
+    return str(payload["platform_health_sha256"]), str(payload["gate6_sha256"])
+
+
+def _acceptance_session_readback(
+    candidate: Candidate,
+    session_id: str,
+) -> dict[str, Any]:
+    if re.fullmatch(r"[0-9a-f]{32}", session_id) is None:
+        raise RuntimeHostError("acceptance session identity is invalid")
+    completed = _run_candidate_python(
+        candidate,
+        _ACCEPTANCE_SESSION_READBACK,
+        session_id,
+    )
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeHostError("acceptance session readback is invalid") from exc
+    if (
+        not isinstance(payload, dict)
+        or set(payload)
+        != {
+            "session_id",
+            "status",
+            "candidates",
+            "next_phase_index",
+            "phase_checkpoints",
+            "phases",
+        }
+        or completed.stdout.encode() != _canonical_json(payload)
+        or payload.get("session_id") != session_id
+        or payload.get("status") not in {"running", "complete"}
+        or payload.get("phases") != list(LIVE_PHASES)
+        or payload.get("phase_checkpoints") != len(LIVE_PHASES) * len(SANDBOXES)
+        or not isinstance(payload.get("next_phase_index"), int)
+        or isinstance(payload.get("next_phase_index"), bool)
+        or not isinstance(payload.get("candidates"), dict)
+    ):
+        raise RuntimeHostError("acceptance session readback is invalid")
+    return payload
+
+
+def _acceptance_candidate_shas(
+    candidate: Candidate,
+    session: Mapping[str, Any],
+) -> dict[str, str]:
+    adapter_candidates = _adapter_candidate_bindings(candidate)
+    if session.get("candidates") != adapter_candidates:
+        raise RuntimeHostError("acceptance session candidate set drifted")
+    return {
+        sandbox: adapter_candidates[sandbox]["sha"] for sandbox in SANDBOXES
+    }
+
+
+def _acceptance_contract(
+    candidate: Candidate,
+    *,
+    admission_token: str,
+    session: Mapping[str, Any],
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    candidate_shas = _acceptance_candidate_shas(candidate, session)
+    policies = {
+        pool: _candidate_platform_policy(candidate, pool)[0] for pool in POOLS
+    }
+    current = _platform_health_now(now)
+    return {
+        "schema_version": 1,
+        "admission_token": admission_token,
+        "session_id": session["session_id"],
+        "candidate_shas": candidate_shas,
+        "phases": list(ACCEPTANCE_PHASES),
+        "target_slots": {
+            pool: policies[pool]["requested_concurrency"] for pool in POOLS
+        },
+        "ttl_seconds": {
+            phase: (
+                ACCEPTANCE_TTL_CLEANUP_SECONDS
+                if phase == "ttl_cleanup"
+                else (
+                    ACCEPTANCE_MIXED_NON_LOOM_TTL_SECONDS
+                    if phase == "mixed_non_loom"
+                    else ACCEPTANCE_DEFAULT_PHASE_TTL_SECONDS
+                )
+            )
+            for phase in ACCEPTANCE_PHASES
+        },
+        "pool_slot_budgets": {
+            pool: policies[pool]["slot_budget"] for pool in POOLS
+        },
+        "pool_pending_slot_budgets": {
+            pool: policies[pool]["pending_slot_budget"] for pool in POOLS
+        },
+        "expires_at": (
+            current + timedelta(seconds=ACCEPTANCE_CONTRACT_TTL_SECONDS)
+        ).isoformat(),
+    }
+
+
+def _acceptance_contract_readback(candidate: Candidate) -> dict[str, Any] | None:
+    completed = _run_candidate_python(
+        candidate,
+        _ACCEPTANCE_CONTRACT_READBACK,
+        str(_candidate_broker_state_db(candidate)),
+    )
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeHostError("acceptance contract readback is invalid") from exc
+    if completed.stdout.encode() != _canonical_json_value(payload):
+        raise RuntimeHostError("acceptance contract readback is not canonical")
+    if payload is not None and not isinstance(payload, dict):
+        raise RuntimeHostError("acceptance contract readback is invalid")
+    return payload
+
+
+def _require_acceptance_phase_prefix(
+    session: Mapping[str, Any],
+    phase: str,
+) -> int:
+    if phase not in LIVE_PHASES:
+        raise RuntimeHostError("acceptance phase is invalid")
+    start = LIVE_PHASES.index(phase) * len(SANDBOXES)
+    next_index = session.get("next_phase_index")
+    if (
+        session.get("status") != "running"
+        or not isinstance(next_index, int)
+        or isinstance(next_index, bool)
+        or next_index not in range(start, start + len(SANDBOXES))
+    ):
+        raise RuntimeHostError("acceptance phase prefix is not current")
+    return next_index - start
+
+
+def _run_acceptance_program(
+    candidate: Candidate,
+    code: str,
+    *args: str,
+) -> Any:
+    completed = _run_candidate_python(
+        candidate,
+        code,
+        str(_candidate_broker_state_db(candidate)),
+        *args,
+    )
+    if not completed.stdout:
+        return None
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeHostError("acceptance broker result is invalid") from exc
+    if completed.stdout.encode() != _canonical_json_value(payload):
+        raise RuntimeHostError("acceptance broker result is not canonical")
+    return payload
 
 
 def _adapter_candidate_bindings(candidate: Candidate) -> dict[str, dict[str, str]]:
@@ -1946,12 +3061,15 @@ def _activation_preflight(
     *,
     transaction_id: str,
 ) -> None:
-    adapter_candidates = _activation_gate_preflight(candidate)
+    adapter_candidates = _adapter_candidate_bindings(candidate)
+    candidate_shas = {
+        sandbox: adapter_candidates[sandbox]["sha"] for sandbox in SANDBOXES
+    }
     _run_candidate_python(
         candidate,
         _BROKER_PREFLIGHT,
         str(SUPERVISOR_CONFIG_PATH),
-        candidate.sha,
+        json.dumps(candidate_shas, sort_keys=True, separators=(",", ":")),
         transaction_id,
     )
     for instance in INSTANCES:
@@ -1966,12 +3084,15 @@ def _activation_preflight(
         )
 
 
-def _activation_gate_preflight(
+def _positive_capacity_admission_gate(
     candidate: Candidate,
-) -> dict[str, dict[str, str]]:
+) -> tuple[dict[str, dict[str, str]], str, str]:
     adapter_candidates = _adapter_candidate_bindings(candidate)
-    _validate_platform_health_activation_gate(candidate, adapter_candidates)
-    return adapter_candidates
+    payload_sha256, gate6_sha256 = _validate_platform_health_activation_gate(
+        candidate,
+        adapter_candidates,
+    )
+    return adapter_candidates, payload_sha256, gate6_sha256
 
 
 def _open_activation_admission(
@@ -1986,21 +3107,75 @@ def _open_activation_admission(
     )
 
 
+def _close_activation_admission(
+    candidate: Candidate,
+    transaction_id: str,
+) -> None:
+    _run_candidate_python(
+        candidate,
+        _BROKER_CLOSE,
+        str(_candidate_broker_state_db(candidate)),
+        transaction_id,
+    )
+
+
+def _admission_fence(candidate: Candidate) -> str | None:
+    completed = _run_candidate_python(
+        candidate,
+        _BROKER_ADMISSION_READBACK,
+        str(_candidate_broker_state_db(candidate)),
+    )
+    value = completed.stdout.strip()
+    if value == "open":
+        return None
+    if re.fullmatch(r"[0-9a-f]{32}", value) is None:
+        raise RuntimeHostError("broker admission fence readback is invalid")
+    return value
+
+
 def _request_capacity_retirement(
     candidate: Candidate,
     transaction_id: str,
 ) -> str:
+    adapter_candidates = _adapter_candidate_bindings(candidate)
+    candidate_shas = {
+        sandbox: adapter_candidates[sandbox]["sha"] for sandbox in SANDBOXES
+    }
     completed = _run_candidate_python(
         candidate,
         _BROKER_RETIRE,
         str(SUPERVISOR_CONFIG_PATH),
-        candidate.sha,
+        json.dumps(candidate_shas, sort_keys=True, separators=(",", ":")),
         transaction_id,
         str(_candidate_broker_state_db(candidate)),
     )
     status = completed.stdout.strip()
     if status not in {"pending", "drained"}:
         raise RuntimeHostError("broker retirement status is invalid")
+    return status
+
+
+def _request_acceptance_retirement(
+    candidate: Candidate,
+    transaction_id: str,
+    session_id: str,
+) -> str:
+    adapter_candidates = _adapter_candidate_bindings(candidate)
+    candidate_shas = {
+        sandbox: adapter_candidates[sandbox]["sha"] for sandbox in SANDBOXES
+    }
+    completed = _run_candidate_python(
+        candidate,
+        _ACCEPTANCE_RETIRE,
+        str(SUPERVISOR_CONFIG_PATH),
+        json.dumps(candidate_shas, sort_keys=True, separators=(",", ":")),
+        transaction_id,
+        session_id,
+        str(_candidate_broker_state_db(candidate)),
+    )
+    status = completed.stdout.strip()
+    if status not in {"pending", "drained"}:
+        raise RuntimeHostError("acceptance retirement status is invalid")
     return status
 
 
@@ -2019,11 +3194,51 @@ def _drain_activated_capacity(
         _request_capacity_retirement(candidate, transaction_id)
         _run_retirement_cycle()
         if _request_capacity_retirement(candidate, transaction_id) == "drained":
-            _activated_adapter_readback(candidate)
+            _activated_adapter_readback(candidate, require_zero=True)
             return
         if cycle + 1 < RETIREMENT_MAX_CYCLES:
             time.sleep(RETIREMENT_POLL_SECONDS)
     raise RuntimeHostError("shared-capacity retirement did not drain before timeout")
+
+
+def _drain_acceptance_capacity(
+    candidate: Candidate,
+    transaction_id: str,
+    session_id: str,
+) -> None:
+    for cycle in range(RETIREMENT_MAX_CYCLES):
+        _request_acceptance_retirement(candidate, transaction_id, session_id)
+        _run_retirement_cycle()
+        if (
+            _request_acceptance_retirement(
+                candidate,
+                transaction_id,
+                session_id,
+            )
+            == "drained"
+        ):
+            _activated_adapter_readback(candidate, require_zero=True)
+            return
+        if cycle + 1 < RETIREMENT_MAX_CYCLES:
+            time.sleep(RETIREMENT_POLL_SECONDS)
+    raise RuntimeHostError("acceptance retirement did not drain before timeout")
+
+
+def _verify_acceptance_capacity_drained(
+    candidate: Candidate,
+    transaction_id: str,
+    session_id: str,
+) -> None:
+    if (
+        _request_acceptance_retirement(
+            candidate,
+            transaction_id,
+            session_id,
+        )
+        != "drained"
+    ):
+        raise RuntimeHostError("acceptance retirement regressed before phase transition")
+    _activated_adapter_readback(candidate, require_zero=True)
 
 
 def _verify_activated_capacity_drained(
@@ -2032,7 +3247,7 @@ def _verify_activated_capacity_drained(
 ) -> None:
     if _request_capacity_retirement(candidate, transaction_id) != "drained":
         raise RuntimeHostError("shared-capacity retirement regressed before local restore")
-    _activated_adapter_readback(candidate)
+    _activated_adapter_readback(candidate, require_zero=True)
 
 
 def _rollback_candidate(payload: Mapping[str, Any]) -> Candidate:
@@ -2136,20 +3351,348 @@ def _activate_units(candidate: Candidate) -> None:
         _run(("systemctl", "enable", "--now", timer))
 
 
-def _activated_adapter_readback(candidate: Candidate) -> None:
+def _activated_adapter_readback(
+    candidate: Candidate,
+    *,
+    require_zero: bool,
+) -> None:
+    adapter_candidates = _adapter_candidate_bindings(candidate)
     _run_candidate_python(
         candidate,
         _GENERATION_READBACK,
         str(SUPERVISOR_CONFIG_PATH),
     )
     for instance in INSTANCES:
+        sandbox, _pool = instance.rsplit("-", 1)
+        binding = adapter_candidates[sandbox]
         _run_candidate_python(
             candidate,
             _ACTIVATED_ADAPTER_READBACK,
             str(ADAPTER_CONFIG_ROOT / f"{instance}.toml"),
-            candidate.sha,
-            candidate.tree,
+            binding["sha"],
+            binding["tree"],
+            "require-zero" if require_zero else "allow-positive",
         )
+
+
+def _acceptance_operation_candidate(
+    payload: Mapping[str, Any],
+) -> tuple[Candidate, dict[str, Any], str]:
+    state = _load_json(STATE_PATH, "runtime-host state")
+    sha = state.get("candidate_sha")
+    tree = state.get("candidate_tree")
+    token = state.get("transaction_id")
+    if (
+        not isinstance(sha, str)
+        or SHA_RE.fullmatch(sha) is None
+        or not isinstance(tree, str)
+        or SHA_RE.fullmatch(tree) is None
+        or not isinstance(token, str)
+        or re.fullmatch(r"[0-9a-f]{32}", token) is None
+        or payload.get("candidate_sha") != sha
+        or payload.get("candidate_tree") != tree
+        or payload.get("admission_token") != token
+    ):
+        raise RuntimeHostError("acceptance operation candidate binding is invalid")
+    return (
+        Candidate(sha=sha, tree=tree, source=CANDIDATE_PARENT / sha / "repo"),
+        state,
+        token,
+    )
+
+
+def _write_acceptance_operation(payload: Mapping[str, Any]) -> None:
+    if ACCEPTANCE_OPERATION_PATH.exists() or ACCEPTANCE_OPERATION_PATH.is_symlink():
+        raise RuntimeHostError("another acceptance operation is active")
+    _atomic_write(
+        ACCEPTANCE_OPERATION_PATH,
+        _canonical_json(payload),
+        mode=0o600,
+    )
+
+
+def _update_acceptance_operation(
+    payload: dict[str, Any],
+    step: str,
+) -> None:
+    updated = dict(payload)
+    updated["step"] = step
+    _validate_acceptance_operation(updated)
+    _atomic_write(
+        ACCEPTANCE_OPERATION_PATH,
+        _canonical_json(updated),
+        mode=0o600,
+    )
+    payload.clear()
+    payload.update(updated)
+
+
+def _clear_acceptance_operation() -> None:
+    ACCEPTANCE_OPERATION_PATH.unlink(missing_ok=True)
+    _fsync_directory(INSTALLER_ROOT)
+
+
+def _load_acceptance_operation() -> dict[str, Any]:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(ACCEPTANCE_OPERATION_PATH, flags)
+    except OSError as exc:
+        raise RuntimeHostError("acceptance operation is unavailable") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_gid != os.getegid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise RuntimeHostError("acceptance operation metadata is unsafe")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            content = handle.read(1024 * 1024 + 1)
+        if len(content) > 1024 * 1024:
+            raise RuntimeHostError("acceptance operation is too large")
+        try:
+            payload = json.loads(content)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeHostError("acceptance operation is invalid") from exc
+        if (
+            not isinstance(payload, dict)
+            or content != _canonical_json(payload)
+        ):
+            raise RuntimeHostError("acceptance operation is not canonical")
+        return payload
+    finally:
+        os.close(descriptor)
+
+
+def _validate_acceptance_operation(payload: Mapping[str, Any]) -> None:
+    operation = payload.get("operation")
+    common = {
+        "schema_version",
+        "operation",
+        "candidate_sha",
+        "candidate_tree",
+        "admission_token",
+        "session_id",
+    }
+    expected = {
+        "open": common | {"contract", "step"},
+        "cohort": common | {"phase", "mode", "step", "checkpoint_offset"},
+        "cancel": common | {"phase", "sandbox", "pool"},
+        "close": common,
+    }
+    if (
+        operation not in expected
+        or set(payload) != expected[cast(str, operation)]
+        or payload.get("schema_version") != 1
+        or SHA_RE.fullmatch(str(payload.get("candidate_sha"))) is None
+        or SHA_RE.fullmatch(str(payload.get("candidate_tree"))) is None
+        or re.fullmatch(r"[0-9a-f]{32}", str(payload.get("admission_token"))) is None
+        or re.fullmatch(r"[0-9a-f]{32}", str(payload.get("session_id"))) is None
+    ):
+        raise RuntimeHostError("acceptance operation is invalid")
+    if operation == "open" and not isinstance(payload.get("contract"), dict):
+        raise RuntimeHostError("acceptance open contract is invalid")
+    if operation == "open" and payload.get("step") not in {
+        "prepared",
+        "contract-open",
+        "state-active",
+        "rolling-back",
+    }:
+        raise RuntimeHostError("acceptance open operation is invalid")
+    if operation == "cohort" and (
+        payload.get("phase") not in ACCEPTANCE_PHASES
+        or payload.get("mode") not in {"replay", "rotate"}
+        or payload.get("step") not in {
+            "prepared",
+            "rotation-drained",
+            "cohort-created",
+            "cohort-ready",
+        }
+        or payload.get("checkpoint_offset") not in {0, 1, 2}
+        or (
+            payload.get("mode") == "rotate"
+            and payload.get("checkpoint_offset") != 0
+        )
+        or (
+            payload.get("mode") == "replay"
+            and payload.get("step") != "cohort-ready"
+        )
+    ):
+        raise RuntimeHostError("acceptance cohort operation is invalid")
+    if operation == "cancel" and (
+        payload.get("phase") != "cancel_cleanup"
+        or payload.get("sandbox") not in SANDBOXES
+        or payload.get("pool") not in POOLS
+    ):
+        raise RuntimeHostError("acceptance cancel operation is invalid")
+
+
+def _resume_acceptance_operation() -> dict[str, Any] | None:
+    if not ACCEPTANCE_OPERATION_PATH.exists():
+        return None
+    payload = _load_acceptance_operation()
+    _validate_acceptance_operation(payload)
+    operation = payload.get("operation")
+    session_id = payload.get("session_id")
+    candidate, state, token = _acceptance_operation_candidate(payload)
+    if operation == "open":
+        contract = payload.get("contract")
+        if not isinstance(contract, dict):
+            raise RuntimeHostError("acceptance open contract is invalid")
+        step = payload.get("step")
+        if step == "prepared":
+            observed = _run_acceptance_program(
+                candidate,
+                _ACCEPTANCE_OPEN,
+                token,
+                json.dumps(contract, sort_keys=True, separators=(",", ":")),
+            )
+            if observed != contract:
+                raise RuntimeHostError("acceptance open contract readback drifted")
+            _update_acceptance_operation(payload, "contract-open")
+            step = "contract-open"
+        if step == "contract-open":
+            updated = dict(state)
+            updated["activation_status"] = "acceptance-active"
+            updated["acceptance_session_id"] = session_id
+            updated["acceptance_contract_sha256"] = _sha256(_canonical_json(contract))
+            _atomic_write(STATE_PATH, _canonical_json(updated), mode=0o600)
+            state = updated
+            _update_acceptance_operation(payload, "state-active")
+            step = "state-active"
+        if step == "state-active":
+            try:
+                report = check(candidate, activation_mode="acceptance-active")
+            except Exception:
+                _update_acceptance_operation(payload, "rolling-back")
+                step = "rolling-back"
+        if step == "rolling-back":
+            _close_activation_admission(candidate, token)
+            _drain_acceptance_capacity(candidate, token, str(session_id))
+            _verify_acceptance_capacity_drained(
+                candidate,
+                token,
+                str(session_id),
+            )
+            _run_acceptance_program(
+                candidate,
+                _ACCEPTANCE_CLOSE,
+                token,
+                str(session_id),
+            )
+            updated = dict(state)
+            updated["activation_status"] = "bootstrap-active"
+            updated.pop("acceptance_session_id", None)
+            updated.pop("acceptance_contract_sha256", None)
+            _atomic_write(STATE_PATH, _canonical_json(updated), mode=0o600)
+            report = check(candidate, activation_mode="bootstrap-active")
+            report = {
+                **report,
+                "acceptance_open_rolled_back": True,
+            }
+    elif operation == "cohort":
+        phase = payload.get("phase")
+        if phase not in ACCEPTANCE_PHASES:
+            raise RuntimeHostError("acceptance cohort operation is invalid")
+        step = payload.get("step")
+        if payload.get("mode") == "rotate" and step == "prepared":
+            _drain_acceptance_capacity(candidate, token, str(session_id))
+            _verify_acceptance_capacity_drained(
+                candidate,
+                token,
+                str(session_id),
+            )
+            _update_acceptance_operation(payload, "rotation-drained")
+            step = "rotation-drained"
+        if payload.get("mode") == "rotate" and step == "rotation-drained":
+            try:
+                _run_acceptance_program(
+                    candidate,
+                    _ACCEPTANCE_COHORT,
+                    token,
+                    str(session_id),
+                    str(phase),
+                )
+            except Exception:
+                _clear_acceptance_operation()
+                raise
+            _update_acceptance_operation(payload, "cohort-created")
+        rows = _run_acceptance_program(
+            candidate,
+            _ACCEPTANCE_COHORT_STATUS,
+            token,
+            str(session_id),
+            str(phase),
+        )
+        if not isinstance(rows, list) or len(rows) != len(INSTANCES):
+            raise RuntimeHostError("acceptance cohort is not closed-world")
+        report = {
+            "schema_version": 1,
+            "status": "pass",
+            "operation": "acceptance-cohort",
+            "session_id": session_id,
+            "phase": phase,
+            "requests": rows,
+        }
+    elif operation == "cancel":
+        phase = payload.get("phase")
+        sandbox = payload.get("sandbox")
+        pool = payload.get("pool")
+        if (
+            phase != "cancel_cleanup"
+            or sandbox not in SANDBOXES
+            or pool not in POOLS
+        ):
+            raise RuntimeHostError("acceptance cancel operation is invalid")
+        row = _run_acceptance_program(
+            candidate,
+            _ACCEPTANCE_CANCEL,
+            token,
+            str(session_id),
+            str(phase),
+            str(sandbox),
+            str(pool),
+        )
+        if not isinstance(row, dict):
+            raise RuntimeHostError("acceptance cancel result is invalid")
+        report = {
+            "schema_version": 1,
+            "status": "pass",
+            "operation": "acceptance-cancel",
+            "session_id": session_id,
+            "phase": phase,
+            "sandbox": sandbox,
+            "pool": pool,
+            "request": row,
+        }
+    else:
+        _close_activation_admission(candidate, token)
+        _drain_acceptance_capacity(candidate, token, str(session_id))
+        _verify_acceptance_capacity_drained(
+            candidate,
+            token,
+            str(session_id),
+        )
+        _run_acceptance_program(
+            candidate,
+            _ACCEPTANCE_CLOSE,
+            token,
+            str(session_id),
+        )
+        updated = dict(state)
+        updated["activation_status"] = "bootstrap-active"
+        updated.pop("acceptance_session_id", None)
+        updated.pop("acceptance_contract_sha256", None)
+        _atomic_write(STATE_PATH, _canonical_json(updated), mode=0o600)
+        report = check(candidate, activation_mode="bootstrap-active")
+    _clear_acceptance_operation()
+    return report
+
+
+def _recover_acceptance_operation() -> None:
+    _resume_acceptance_operation()
 
 
 def check(
@@ -2157,7 +3700,12 @@ def check(
     *,
     activation_mode: str = "installed",
 ) -> dict[str, Any]:
-    if activation_mode not in {"installed", "activated"}:
+    if activation_mode not in {
+        "installed",
+        "bootstrap-active",
+        "acceptance-active",
+        "activated",
+    }:
         raise RuntimeHostError("runtime-host check mode is invalid")
     _verify_installed_candidate(candidate)
     desired = _desired_files(candidate)
@@ -2183,6 +3731,8 @@ def check(
         (JOURNAL_ROOT, 0o700),
         (INSTALLER_ROOT / "uv-cache", 0o700),
         (ADAPTER_CONFIG_ROOT, 0o755),
+        (CAPACITY_CONTRACT_PATH.parent.parent, 0o755),
+        (CAPACITY_CONTRACT_PATH.parent, 0o755),
     ):
         metadata = directory.lstat()
         if (
@@ -2200,7 +3750,12 @@ def check(
     _reject_orphan_unit_files()
     for unit, fragment_path in UNIT_FRAGMENT_PATHS.items():
         _validate_unit_fragment(unit, fragment_path)
-    if activation_mode == "installed":
+    runtime_active = activation_mode in {
+        "bootstrap-active",
+        "acceptance-active",
+        "activated",
+    }
+    if not runtime_active:
         for unit in ALL_UNITS:
             if _systemctl_state(unit) != {"enabled": False, "active": False}:
                 raise RuntimeHostError(f"managed unit is not fail-closed: {unit}")
@@ -2211,7 +3766,10 @@ def check(
         for service in ALL_SERVICES:
             if _service_result(service) != ("success", "0"):
                 raise RuntimeHostError(f"managed service result failed: {service}")
-        _activated_adapter_readback(candidate)
+        _activated_adapter_readback(
+            candidate,
+            require_zero=activation_mode == "bootstrap-active",
+        )
     installed_state = _load_json(STATE_PATH, "runtime-host state")
     if (
         installed_state.get("candidate_sha") != candidate.sha
@@ -2219,6 +3777,34 @@ def check(
         or installed_state.get("activation_status") != activation_mode
     ):
         raise RuntimeHostError("runtime-host state candidate drifted")
+    admission_token = installed_state.get("transaction_id")
+    if runtime_active:
+        if (
+            not isinstance(admission_token, str)
+            or re.fullmatch(r"[0-9a-f]{32}", admission_token) is None
+        ):
+            raise RuntimeHostError("runtime-host admission binding is invalid")
+        observed_fence = _admission_fence(candidate)
+        if (
+            activation_mode in {"bootstrap-active", "acceptance-active"}
+            and observed_fence != admission_token
+        ):
+            raise RuntimeHostError("closed general admission fence drifted")
+        if activation_mode == "activated" and observed_fence is not None:
+            raise RuntimeHostError("positive-capacity admission remains fenced")
+        acceptance_contract = _acceptance_contract_readback(candidate)
+        if activation_mode == "acceptance-active":
+            if (
+                not isinstance(acceptance_contract, dict)
+                or acceptance_contract.get("session_id")
+                != installed_state.get("acceptance_session_id")
+                or acceptance_contract.get("admission_token") != admission_token
+                or installed_state.get("acceptance_contract_sha256")
+                != _sha256(_canonical_json(acceptance_contract))
+            ):
+                raise RuntimeHostError("acceptance-active contract drifted")
+        elif acceptance_contract is not None:
+            raise RuntimeHostError("acceptance contract exists outside acceptance-active state")
     return {
         "schema_version": 1,
         "status": "pass",
@@ -2227,12 +3813,14 @@ def check(
         "candidate_root": str(candidate.root),
         "instances": list(INSTANCES),
         "activation_status": activation_mode,
-        "timers_active": len(ALL_TIMERS) if activation_mode == "activated" else 0,
+        "timers_active": len(ALL_TIMERS) if runtime_active else 0,
         "managed_units_disabled_and_inactive": (
             len(ALL_UNITS) if activation_mode == "installed" else 0
         ),
         "capacity_enabled_by_install_command": False,
-        "adapter_activation_authorized": activation_mode == "activated",
+        "adapter_activation_authorized": runtime_active,
+        "positive_capacity_admission_authorized": activation_mode == "activated",
+        "acceptance_only_admission_authorized": activation_mode == "acceptance-active",
         "capacity_enabled_by_installer": False,
     }
 
@@ -2244,7 +3832,11 @@ def install(candidate: Candidate) -> dict[str, Any]:
         _recover_orphan()
         if STATE_PATH.exists() or STATE_PATH.is_symlink():
             current_state = _load_json(STATE_PATH, "runtime-host state")
-            if current_state.get("activation_status") == "activated":
+            if current_state.get("activation_status") in {
+                "bootstrap-active",
+                "acceptance-active",
+                "activated",
+            }:
                 raise RuntimeHostError(
                     "activated runtime must be retired through rollback before install",
                 )
@@ -2297,16 +3889,16 @@ def activation_plan(sha: str) -> dict[str, Any]:
         "candidate_sha": sha,
         "steps": [
             "verify-installed-inactive-exact-candidate",
-            "require-candidate-bound-platform-health-and-reviewed-capacity-receipt",
-            "journal-and-fence-new-broker-requests-by-transaction",
+            "journal-and-fence-new-broker-requests-by-installed-transaction",
             "require-six-terminal-disabled-zero-handoffs-and-zero-broker-counters",
             "validate-six-config-secret-combined-receipt-and-zero-cp-policies",
             "run-supervisor-once-and-read-back-complete-generation",
             "enable-supervisor-timer",
             "run-and-enable-six-adapter-timers",
-            "commit-activated-state-before-releasing-exact-admission-fence",
+            "commit-bootstrap-active-state-with-exact-admission-fence-closed",
             "rollback-to-all-disabled-on-any-failure",
         ],
+        "positive_capacity_admission_authorized": False,
     }
 
 
@@ -2330,43 +3922,427 @@ def activate(sha: str) -> dict[str, Any]:
             tree=tree,
             source=CANDIDATE_PARENT / sha / "repo",
         )
-        if state.get("activation_status") == "activated":
-            return check(candidate, activation_mode="activated")
+        if state.get("activation_status") in {
+            "bootstrap-active",
+            "acceptance-active",
+            "activated",
+        }:
+            return check(candidate, activation_mode=str(state["activation_status"]))
         if state.get("activation_status") != "installed":
             raise RuntimeHostError("runtime-host activation state is invalid")
         check(candidate, activation_mode="installed")
-        _activation_gate_preflight(candidate)
-        journal_path, journal = _write_journal(candidate, operation="activate")
+        admission_token = state.get("transaction_id")
+        if (
+            not isinstance(admission_token, str)
+            or re.fullmatch(r"[0-9a-f]{32}", admission_token) is None
+        ):
+            raise RuntimeHostError("runtime-host admission binding is invalid")
+        journal_path, journal = _write_journal(
+            candidate,
+            operation="activate",
+            admission_token=admission_token,
+        )
         try:
             _update_journal(journal_path, journal, "activation-closing-admission")
             _activation_preflight(
                 candidate,
-                transaction_id=str(journal["transaction_id"]),
+                transaction_id=admission_token,
             )
             _update_journal(journal_path, journal, "activation-preflight-passed")
             _activate_units(candidate)
             _update_journal(journal_path, journal, "units-activated")
             activated_state = dict(state)
-            activated_state["activation_status"] = "activated"
-            activated_state["activated_at"] = datetime.now(UTC).isoformat()
+            activated_state["activation_status"] = "bootstrap-active"
+            activated_state["bootstrap_activated_at"] = datetime.now(UTC).isoformat()
             activated_state["activation_transaction_id"] = journal["transaction_id"]
             _atomic_write(
                 STATE_PATH,
                 _canonical_json(activated_state),
                 mode=0o600,
             )
-            report = check(candidate, activation_mode="activated")
+            report = check(candidate, activation_mode="bootstrap-active")
             _update_journal(journal_path, journal, "committed")
-            _open_activation_admission(
-                candidate,
-                str(journal["transaction_id"]),
-            )
             ACTIVE_JOURNAL_PATH.unlink(missing_ok=True)
             _fsync_directory(INSTALLER_ROOT)
             return report
         except Exception:
             _restore_transaction(journal_path, journal)
             raise
+
+
+def admission_plan(sha: str) -> dict[str, Any]:
+    if SHA_RE.fullmatch(sha) is None:
+        raise RuntimeHostError("admission requires the installed full candidate SHA")
+    return {
+        "schema_version": 1,
+        "artifact_type": "shared-capacity-runtime-host-admission-plan",
+        "mutation_authorized": False,
+        "candidate_sha": sha,
+        "steps": [
+            "verify-bootstrap-active-runtime-and-exact-closed-admission-fence",
+            "require-fresh-complete-candidate-bound-platform-health-live-evidence",
+            "re-read-six-zero-handoffs-policies-workers-and-adapter-state",
+            "persist-evidence-digest-before-opening-admission",
+            "release-only-the-installed-transaction-admission-fence",
+            "commit-positive-capacity-admitted-state",
+        ],
+        "positive_capacity_admission_authorized": False,
+    }
+
+
+def _resume_admission(
+    path: Path,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    (
+        _transaction_id,
+        operation,
+        sha,
+        tree,
+        _files,
+        _units,
+    ) = _validate_transaction(path, payload)
+    admission_token = payload.get("admission_token")
+    evidence_sha256 = payload.get("platform_health_payload_sha256")
+    gate6_sha256 = payload.get("gate6_payload_sha256")
+    if (
+        operation != "admit"
+        or not isinstance(admission_token, str)
+        or re.fullmatch(r"[0-9a-f]{32}", admission_token) is None
+        or not isinstance(evidence_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", evidence_sha256) is None
+        or not isinstance(gate6_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", gate6_sha256) is None
+    ):
+        raise RuntimeHostError("positive-capacity admission journal is invalid")
+    candidate = Candidate(
+        sha=sha,
+        tree=tree,
+        source=CANDIDATE_PARENT / sha / "repo",
+    )
+    phase = payload.get("phase")
+    if phase in {"admission-authorized", "admission-open", "state-activated"}:
+        _close_activation_admission(candidate, admission_token)
+        (
+            _adapter_candidates,
+            current_evidence_sha256,
+            current_gate6_sha256,
+        ) = _positive_capacity_admission_gate(candidate)
+        if (
+            current_evidence_sha256 != evidence_sha256
+            or current_gate6_sha256 != gate6_sha256
+        ):
+            raise RuntimeHostError("positive-capacity admission evidence digest drifted")
+        _activated_adapter_readback(candidate, require_zero=True)
+        if _admission_fence(candidate) != admission_token:
+            raise RuntimeHostError("positive-capacity admission fence drifted")
+        _open_activation_admission(candidate, admission_token)
+        if phase == "admission-authorized":
+            _update_journal(path, payload, "admission-open")
+        phase = "admission-open"
+    if phase == "admission-open":
+        state = _load_json(STATE_PATH, "runtime-host state")
+        if (
+            state.get("candidate_sha") != sha
+            or state.get("candidate_tree") != tree
+            or state.get("transaction_id") != admission_token
+            or state.get("activation_status") not in {"bootstrap-active", "activated"}
+        ):
+            raise RuntimeHostError("positive-capacity admission state drifted")
+        activated_state = dict(state)
+        activated_state["activation_status"] = "activated"
+        activated_state["admitted_at"] = datetime.now(UTC).isoformat()
+        activated_state["platform_health_payload_sha256"] = evidence_sha256
+        activated_state["gate6_payload_sha256"] = gate6_sha256
+        activated_state["admission_transaction_id"] = payload["transaction_id"]
+        _atomic_write(STATE_PATH, _canonical_json(activated_state), mode=0o600)
+        _update_journal(path, payload, "state-activated")
+        phase = "state-activated"
+    if phase == "state-activated":
+        report = check(candidate, activation_mode="activated")
+        _update_journal(path, payload, "committed")
+        ACTIVE_JOURNAL_PATH.unlink(missing_ok=True)
+        _fsync_directory(INSTALLER_ROOT)
+        return report
+    raise RuntimeHostError("positive-capacity admission journal phase is invalid")
+
+
+def admit(sha: str) -> dict[str, Any]:
+    _require_live_host()
+    if SHA_RE.fullmatch(sha) is None:
+        raise RuntimeHostError("admission requires the installed full candidate SHA")
+    with _lock():
+        _recover_orphan()
+        _reject_orphan_stages()
+        state = _load_json(STATE_PATH, "runtime-host state")
+        tree = state.get("candidate_tree")
+        admission_token = state.get("transaction_id")
+        if (
+            state.get("candidate_sha") != sha
+            or not isinstance(tree, str)
+            or SHA_RE.fullmatch(tree) is None
+            or not isinstance(admission_token, str)
+            or re.fullmatch(r"[0-9a-f]{32}", admission_token) is None
+        ):
+            raise RuntimeHostError("admission SHA does not match the installed candidate")
+        candidate = Candidate(
+            sha=sha,
+            tree=tree,
+            source=CANDIDATE_PARENT / sha / "repo",
+        )
+        if state.get("activation_status") == "activated":
+            return check(candidate, activation_mode="activated")
+        if state.get("activation_status") != "bootstrap-active":
+            raise RuntimeHostError("positive-capacity admission requires bootstrap-active state")
+        check(candidate, activation_mode="bootstrap-active")
+        (
+            _adapter_candidates,
+            evidence_sha256,
+            gate6_sha256,
+        ) = _positive_capacity_admission_gate(candidate)
+        journal_path, journal = _write_journal(
+            candidate,
+            operation="admit",
+            admission_token=admission_token,
+        )
+        try:
+            _update_journal(journal_path, journal, "admission-validating")
+            _activated_adapter_readback(candidate, require_zero=True)
+            if _admission_fence(candidate) != admission_token:
+                raise RuntimeHostError("positive-capacity admission fence drifted")
+            journal["platform_health_payload_sha256"] = evidence_sha256
+            journal["gate6_payload_sha256"] = gate6_sha256
+            _update_journal(journal_path, journal, "admission-authorized")
+            return _resume_admission(journal_path, journal)
+        except Exception:
+            _restore_transaction(journal_path, journal)
+            raise
+
+
+def acceptance_plan(command: str, *, session_id: str) -> dict[str, Any]:
+    if command not in {"acceptance-open", "acceptance-cohort", "acceptance-cancel", "acceptance-close"}:
+        raise RuntimeHostError("acceptance operation is invalid")
+    if re.fullmatch(r"[0-9a-f]{32}", session_id) is None:
+        raise RuntimeHostError("acceptance session identity is invalid")
+    return {
+        "schema_version": 1,
+        "artifact_type": f"shared-capacity-runtime-host-{command}-plan",
+        "mutation_authorized": False,
+        "session_id": session_id,
+        "general_positive_capacity_admission_authorized": False,
+        "fixed_sandboxes": list(SANDBOXES),
+        "fixed_pools": list(POOLS),
+        "fixed_phases": list(ACCEPTANCE_PHASES),
+        "fixed_phase_ttl_seconds": {
+            phase: (
+                ACCEPTANCE_TTL_CLEANUP_SECONDS
+                if phase == "ttl_cleanup"
+                else (
+                    ACCEPTANCE_MIXED_NON_LOOM_TTL_SECONDS
+                    if phase == "mixed_non_loom"
+                    else ACCEPTANCE_DEFAULT_PHASE_TTL_SECONDS
+                )
+            )
+            for phase in ACCEPTANCE_PHASES
+        },
+    }
+
+
+def _acceptance_state_candidate(
+    *,
+    session_id: str,
+    activation_status: str,
+) -> tuple[Candidate, dict[str, Any], str]:
+    if re.fullmatch(r"[0-9a-f]{32}", session_id) is None:
+        raise RuntimeHostError("acceptance session identity is invalid")
+    state = _load_json(STATE_PATH, "runtime-host state")
+    sha = state.get("candidate_sha")
+    tree = state.get("candidate_tree")
+    token = state.get("transaction_id")
+    if (
+        state.get("activation_status") != activation_status
+        or not isinstance(sha, str)
+        or SHA_RE.fullmatch(sha) is None
+        or not isinstance(tree, str)
+        or SHA_RE.fullmatch(tree) is None
+        or not isinstance(token, str)
+        or re.fullmatch(r"[0-9a-f]{32}", token) is None
+    ):
+        raise RuntimeHostError("acceptance runtime state is invalid")
+    if (
+        activation_status == "acceptance-active"
+        and state.get("acceptance_session_id") != session_id
+    ):
+        raise RuntimeHostError("acceptance session binding drifted")
+    return (
+        Candidate(sha=sha, tree=tree, source=CANDIDATE_PARENT / sha / "repo"),
+        state,
+        token,
+    )
+
+
+def _acceptance_operation_payload(
+    *,
+    operation: str,
+    candidate: Candidate,
+    admission_token: str,
+    session_id: str,
+    extra: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "operation": operation,
+        "candidate_sha": candidate.sha,
+        "candidate_tree": candidate.tree,
+        "admission_token": admission_token,
+        "session_id": session_id,
+    }
+    if extra is not None:
+        payload.update(extra)
+    _validate_acceptance_operation(payload)
+    return payload
+
+
+def acceptance_open(session_id: str) -> dict[str, Any]:
+    _require_live_host()
+    with _lock():
+        _recover_orphan()
+        candidate, _state, token = _acceptance_state_candidate(
+            session_id=session_id,
+            activation_status="bootstrap-active",
+        )
+        check(candidate, activation_mode="bootstrap-active")
+        session = _acceptance_session_readback(candidate, session_id)
+        required_open_index = (
+            LIVE_PHASES.index("multi_candidate_overlap") * len(SANDBOXES)
+        )
+        if (
+            session.get("status") != "running"
+            or not isinstance(session.get("next_phase_index"), int)
+            or isinstance(session.get("next_phase_index"), bool)
+            or session["next_phase_index"] != required_open_index
+        ):
+            raise RuntimeHostError("acceptance opening prefix is invalid")
+        contract = _acceptance_contract(
+            candidate,
+            admission_token=token,
+            session=session,
+        )
+        payload = _acceptance_operation_payload(
+            operation="open",
+            candidate=candidate,
+            admission_token=token,
+            session_id=session_id,
+            extra={"contract": contract, "step": "prepared"},
+        )
+        _write_acceptance_operation(payload)
+        report = _resume_acceptance_operation()
+        if report is None:
+            raise RuntimeHostError("acceptance open did not converge")
+        if report.get("acceptance_open_rolled_back") is True:
+            raise RuntimeHostError("acceptance open failed and rolled back safely")
+        return report
+
+
+def acceptance_cohort(session_id: str, phase: str) -> dict[str, Any]:
+    _require_live_host()
+    with _lock():
+        _recover_orphan()
+        candidate, _state, token = _acceptance_state_candidate(
+            session_id=session_id,
+            activation_status="acceptance-active",
+        )
+        check(candidate, activation_mode="acceptance-active")
+        session = _acceptance_session_readback(candidate, session_id)
+        checkpoint_offset = _require_acceptance_phase_prefix(session, phase)
+        existing = _run_acceptance_program(
+            candidate,
+            _ACCEPTANCE_COHORT_STATUS,
+            token,
+            session_id,
+            phase,
+        )
+        if existing is not None and (
+            not isinstance(existing, list) or len(existing) != len(INSTANCES)
+        ):
+            raise RuntimeHostError("acceptance cohort readback is invalid")
+        if checkpoint_offset > 0 and existing is None:
+            raise RuntimeHostError(
+                "acceptance cohort must exist before the first phase checkpoint",
+            )
+        mode = "replay" if existing is not None else "rotate"
+        payload = _acceptance_operation_payload(
+            operation="cohort",
+            candidate=candidate,
+            admission_token=token,
+            session_id=session_id,
+            extra={
+                "phase": phase,
+                "mode": mode,
+                "step": "cohort-ready" if mode == "replay" else "prepared",
+                "checkpoint_offset": checkpoint_offset,
+            },
+        )
+        _write_acceptance_operation(payload)
+        report = _resume_acceptance_operation()
+        if report is None:
+            raise RuntimeHostError("acceptance cohort did not converge")
+        return report
+
+
+def acceptance_cancel(
+    session_id: str,
+    *,
+    phase: str,
+    sandbox: str,
+    pool: str,
+) -> dict[str, Any]:
+    _require_live_host()
+    with _lock():
+        _recover_orphan()
+        candidate, _state, token = _acceptance_state_candidate(
+            session_id=session_id,
+            activation_status="acceptance-active",
+        )
+        check(candidate, activation_mode="acceptance-active")
+        session = _acceptance_session_readback(candidate, session_id)
+        _require_acceptance_phase_prefix(session, phase)
+        payload = _acceptance_operation_payload(
+            operation="cancel",
+            candidate=candidate,
+            admission_token=token,
+            session_id=session_id,
+            extra={"phase": phase, "sandbox": sandbox, "pool": pool},
+        )
+        _write_acceptance_operation(payload)
+        report = _resume_acceptance_operation()
+        if report is None:
+            raise RuntimeHostError("acceptance cancel did not converge")
+        return report
+
+
+def acceptance_close(session_id: str) -> dict[str, Any]:
+    _require_live_host()
+    with _lock():
+        _recover_orphan()
+        candidate, _state, token = _acceptance_state_candidate(
+            session_id=session_id,
+            activation_status="acceptance-active",
+        )
+        check(candidate, activation_mode="acceptance-active")
+        session = _acceptance_session_readback(candidate, session_id)
+        _require_acceptance_phase_prefix(session, "final_drain")
+        payload = _acceptance_operation_payload(
+            operation="close",
+            candidate=candidate,
+            admission_token=token,
+            session_id=session_id,
+        )
+        _write_acceptance_operation(payload)
+        report = _resume_acceptance_operation()
+        if report is None:
+            raise RuntimeHostError("acceptance close did not converge")
+        return report
 
 
 def rollback_plan(sha: str) -> dict[str, Any]:
@@ -2410,14 +4386,18 @@ def rollback(sha: str) -> dict[str, Any]:
         if payload.get("phase") != "committed" or payload.get("candidate_sha") != sha:
             raise RuntimeHostError("runtime-host rollback transaction is invalid")
         activation_status = state.get("activation_status")
-        if activation_status not in {"activated", "installed"}:
+        if activation_status == "acceptance-active":
+            raise RuntimeHostError(
+                "runtime-host acceptance must be closed before rollback",
+            )
+        if activation_status not in {"bootstrap-active", "activated", "installed"}:
             raise RuntimeHostError("runtime-host rollback activation state is invalid")
         _atomic_write(
             ACTIVE_JOURNAL_PATH,
             _canonical_json({"transaction_id": transaction_id}),
             mode=0o600,
         )
-        if activation_status == "activated":
+        if activation_status in {"bootstrap-active", "activated"}:
             _prepare_rollback_recovery(
                 path,
                 payload,
@@ -2438,12 +4418,20 @@ def recover() -> dict[str, Any]:
     _require_live_host()
     with _lock():
         active = _active_journal()
-        if active is None:
+        acceptance_active = (
+            ACCEPTANCE_OPERATION_PATH.exists()
+            or ACCEPTANCE_OPERATION_PATH.is_symlink()
+        )
+        if active is None and not acceptance_active:
             return {
                 "schema_version": 1,
                 "status": "no-active-transaction",
             }
-        transaction_id = active[1].get("transaction_id")
+        transaction_id = (
+            active[1].get("transaction_id")
+            if active is not None
+            else "acceptance-operation"
+        )
         _recover_orphan()
         return {
             "schema_version": 1,
@@ -2464,11 +4452,28 @@ def _parser() -> argparse.ArgumentParser:
     activate_parser = subparsers.add_parser("activate")
     activate_parser.add_argument("--candidate-sha", required=True)
     activate_parser.add_argument("--execute", action="store_true")
+    admit_parser = subparsers.add_parser("admit")
+    admit_parser.add_argument("--candidate-sha", required=True)
+    admit_parser.add_argument("--execute", action="store_true")
+    for command in ("acceptance-open", "acceptance-close"):
+        acceptance_parser = subparsers.add_parser(command)
+        acceptance_parser.add_argument("--session-id", required=True)
+        acceptance_parser.add_argument("--execute", action="store_true")
+    cohort_parser = subparsers.add_parser("acceptance-cohort")
+    cohort_parser.add_argument("--session-id", required=True)
+    cohort_parser.add_argument("--phase", choices=ACCEPTANCE_PHASES, required=True)
+    cohort_parser.add_argument("--execute", action="store_true")
+    cancel_parser = subparsers.add_parser("acceptance-cancel")
+    cancel_parser.add_argument("--session-id", required=True)
+    cancel_parser.add_argument("--phase", choices=("cancel_cleanup",), required=True)
+    cancel_parser.add_argument("--sandbox", choices=SANDBOXES, required=True)
+    cancel_parser.add_argument("--pool", choices=POOLS, required=True)
+    cancel_parser.add_argument("--execute", action="store_true")
     check_parser = subparsers.add_parser("check")
     check_parser.add_argument("--candidate-sha", required=True)
     check_parser.add_argument(
         "--mode",
-        choices=("installed", "activated"),
+        choices=("installed", "bootstrap-active", "acceptance-active", "activated"),
         default="installed",
     )
     check_parser.add_argument("--execute", action="store_true")
@@ -2494,6 +4499,37 @@ def main(argv: Sequence[str] | None = None) -> int:
                 activate(args.candidate_sha)
                 if args.execute
                 else activation_plan(args.candidate_sha)
+            )
+        elif args.command == "admit":
+            result = admit(args.candidate_sha) if args.execute else admission_plan(args.candidate_sha)
+        elif args.command == "acceptance-open":
+            result = (
+                acceptance_open(args.session_id)
+                if args.execute
+                else acceptance_plan(args.command, session_id=args.session_id)
+            )
+        elif args.command == "acceptance-cohort":
+            result = (
+                acceptance_cohort(args.session_id, args.phase)
+                if args.execute
+                else acceptance_plan(args.command, session_id=args.session_id)
+            )
+        elif args.command == "acceptance-cancel":
+            result = (
+                acceptance_cancel(
+                    args.session_id,
+                    phase=args.phase,
+                    sandbox=args.sandbox,
+                    pool=args.pool,
+                )
+                if args.execute
+                else acceptance_plan(args.command, session_id=args.session_id)
+            )
+        elif args.command == "acceptance-close":
+            result = (
+                acceptance_close(args.session_id)
+                if args.execute
+                else acceptance_plan(args.command, session_id=args.session_id)
             )
         elif args.command == "check":
             if not args.execute:

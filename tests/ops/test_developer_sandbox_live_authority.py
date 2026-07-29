@@ -91,11 +91,10 @@ def test_observe_slurm_job_returns_only_exact_sanitized_allocation(
     ("mutation", "message"),
     [
         ({"user": "qianyi"}, "request binding"),
-        ({"node": "trt-gb10-7"}, "request binding"),
         ({"candidate_tree": "../tree"}, "request binding"),
     ],
 )
-def test_observe_rejects_personal_user_forbidden_node_and_unbound_tree(
+def test_observe_rejects_personal_user_and_unbound_tree(
     monkeypatch: pytest.MonkeyPatch,
     mutation: dict[str, Any],
     message: str,
@@ -176,7 +175,7 @@ def _policy() -> dict[str, Any]:
         "pool_name": "gb10",
         "actuator": "slurm",
         "enabled": True,
-        "max_slots": 140,
+        "max_slots": 120,
         "actuator_config": {
             "shared_capacity_managed": True,
             "candidate_sha": SHA,
@@ -260,7 +259,7 @@ def _prepare_collect(
         admin_secret_file=Path("/fixed/admin.toml"),
         observation_path=Path("/fixed/capacity.json"),
         sandbox_state_path=Path("/fixed/sandbox-state.json"),
-        max_slots_bound=140,
+        max_slots_bound=120,
         timeout_seconds=10,
     )
     monkeypatch.setattr(authority, "_load_adapter_config", lambda *_args: config)

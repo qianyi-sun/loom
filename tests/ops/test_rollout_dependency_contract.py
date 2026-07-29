@@ -78,7 +78,7 @@ def test_independent_staging_operator_runbook_is_merged_only_and_complete() -> N
     assert "**Shared-staging invariant:**" in runbook
     assert "`refs/heads/dev`" in runbook
     assert "Unmerged pull" in runbook
-    assert "all 14 active GB10 hosts" in runbook
+    assert "all 15 GB10 hosts" in runbook
     assert "#822" in runbook
     assert "merged revert on `dev`" in runbook
     assert (
@@ -122,7 +122,8 @@ def test_independent_staging_adr_and_launch_gate_preserve_acceptance_boundary() 
     ).read_text(encoding="utf-8")
 
     assert "Status: accepted" in adr
-    assert "all 14 active GB10 hosts" in adr
+    assert "Superseded operational amendment (2026-07-29)" in adr
+    assert "requires all 15 nodes with `excluded_nodes=[]`" in adr
     assert "#822" in adr
     assert "only after the implementation has merged into\n`dev`" in adr
     assert "freshly fetched `refs/heads/dev`" in launch

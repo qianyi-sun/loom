@@ -28,16 +28,27 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, cast
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from jsonschema import Draft202012Validator, FormatChecker
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.ops.developer_sandbox_capacity_contract import (  # noqa: E402, I001
+    CAPACITY_POLICY_SOURCES as PLATFORM_POLICY_SOURCES,
+    CapacityContractError,
+    load_capacity_policy,
+    load_platform_health_contract,
+)
+from scripts.ops import nonexclusive_slurm_acceptance as gate6_verifier  # noqa: E402
+
 SCHEMA_VERSION = 2
 MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
-REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SCHEMA = REPO_ROOT / "docs/evidence/developer-sandbox-live-acceptance.schema.json"
 STATE_ROOT = Path("/var/lib/loom-developer-sandbox-live-acceptance")
 RUNTIME_ATTESTATION_ROOT = Path("/var/lib/loom-shared-capacity/runtime-attestations")
@@ -49,6 +60,8 @@ LIVE_AUTHORITY_ROOT = Path(
 PLATFORM_HEALTH_AUTHORITY_ROOT = Path(
     "/var/lib/loom-developer-sandbox-platform-health-authority",
 )
+SLURM_POLICY_STATE_ROOT = Path("/var/lib/loom-developer-sandbox-slurm-policy")
+NONEXCLUSIVE_SCHEMA = REPO_ROOT / "docs/evidence/nonexclusive-slurm-acceptance-v1.schema.json"
 PROMOTION_AUTHORITY_RECEIPT = Path(
     "/var/lib/loom-staging-rollout/acceptance/promotion.json",
 )
@@ -74,8 +87,20 @@ SANDBOX_SERVICE_USERS = {
 MAX_OVERLAP_CAPACITY_AGE_SECONDS = 120
 MAX_OVERLAP_COLLECTION_SPAN_SECONDS = 30
 PLATFORM_HEALTH_EVIDENCE_TTL = timedelta(minutes=15)
-POOL_SLOT_BUDGETS = {"oldlab": 20, "gb10": 112}
+POOL_SLOT_BUDGETS = {"oldlab": 20, "gb10": 120}
 POOL_PENDING_BUDGETS = {"oldlab": 10, "gb10": 24}
+INFRASTRUCTURE_NODES = (
+    "trt-eai-oldlab-1",
+    "trt-eai-oldlab-2",
+    "trt-eai-oldlab-3",
+    "trt-eai-oldlab-4",
+    "trt-eai-oldlab-5",
+    *(f"trt-gb10-{index}" for index in range(1, 16)),
+)
+RUNTIME_FLEET_INFRASTRUCTURE_NODES = (
+    *(f"oldlab-{index}" for index in range(1, 6)),
+    *(f"trt-gb10-{index}" for index in range(1, 16)),
+)
 EXPECTED_NODES = (
     "trt-eai-oldlab-1",
     "trt-eai-oldlab-2",
@@ -88,6 +113,7 @@ EXPECTED_NODES = (
     "trt-gb10-4",
     "trt-gb10-5",
     "trt-gb10-6",
+    "trt-gb10-7",
     "trt-gb10-8",
     "trt-gb10-9",
     "trt-gb10-10",
@@ -96,6 +122,10 @@ EXPECTED_NODES = (
     "trt-gb10-13",
     "trt-gb10-14",
     "trt-gb10-15",
+)
+PLATFORM_HEALTH_NODE_KEYS = (
+    *(f"oldlab-{index}" for index in range(1, 6)),
+    *(f"trt-gb10-{index}" for index in range(1, 16)),
 )
 PHASES = (
     "preflight",
@@ -148,6 +178,18 @@ _SECRET_VALUE_PATTERNS = (
     re.compile(r"(?i)(X-Amz-Signature|AWSAccessKeyId|Signature)=[^&\s]+"),
     re.compile(r"://([^:/@\s]+):([^@\s]+)@"),
 )
+
+
+def _platform_policy_contract(pool: str) -> tuple[dict[str, Any], str]:
+    try:
+        contract = load_capacity_policy(
+            REPO_ROOT,
+            pool,
+            expected_nodes=(EXPECTED_NODES[:5] if pool == "oldlab" else EXPECTED_NODES[5:]),
+        )
+    except CapacityContractError as exc:
+        raise AcceptanceError(str(exc)) from exc
+    return dict(contract.values), contract.source_sha256
 
 
 class AcceptanceError(ValueError):
@@ -352,10 +394,12 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
         failures.append("sandbox topology is not the fixed three-sandbox set")
     if tuple(topology["pools"]) != POOLS:
         failures.append("pool topology is not the fixed oldlab/gb10 set")
+    if tuple(topology["infrastructure_nodes"]) != INFRASTRUCTURE_NODES:
+        failures.append("infrastructure node topology is incomplete or reordered")
     if tuple(topology["eligible_nodes"]) != EXPECTED_NODES:
         failures.append("eligible node topology is incomplete or reordered")
-    if topology["excluded_nodes"] != ["trt-gb10-7"]:
-        failures.append("the quarantined GB10 node exclusion is not exact")
+    if topology["excluded_nodes"] != []:
+        failures.append("the eligible node topology contains an exclusion")
     if topology["slot_budgets"] != POOL_SLOT_BUDGETS:
         failures.append("pool slot budgets do not match the reviewed contract")
     if topology["pending_slot_budgets"] != POOL_PENDING_BUDGETS:
@@ -386,6 +430,25 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
     for phase_identity in expected_phase_order:
         phase = phase_by_identity[phase_identity]
         sandbox = phase["sandbox"]
+        trial_batches = phase.get("trial_batches")
+        if (
+            (phase["phase"] == "mixed_non_loom")
+            != (
+                isinstance(trial_batches, dict)
+                and set(trial_batches) == set(POOLS)
+                and all(
+                    isinstance(batch_id, str)
+                    and re.fullmatch(
+                        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+                        r"[0-9a-f]{4}-[0-9a-f]{12}",
+                        batch_id,
+                    )
+                    is not None
+                    for batch_id in trial_batches.values()
+                )
+            )
+        ):
+            failures.append(f"{phase['phase']} soak trial-batch manifest is invalid")
         if not _candidate_matches(evidence, phase, sandbox):
             failures.append(f"{phase['phase']} is not bound to the exact candidate")
         try:
@@ -404,6 +467,14 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
             failures.append("state-machine checkpoint digest is duplicated")
         checkpoint_digests.add(phase["checkpoint_sha256"])
         previous_by_sandbox[sandbox] = phase_finished
+    mixed_batch_ids = [
+        batch_id
+        for phase in phases
+        if phase["phase"] == "mixed_non_loom"
+        for batch_id in phase["trial_batches"].values()
+    ]
+    if len(mixed_batch_ids) != len(set(mixed_batch_ids)):
+        failures.append("mixed-workload soak batch identity is duplicated")
     if (
         phase_by_identity
         and max(_timestamp(phase["finished_at"]) for phase in phase_by_identity.values())
@@ -1180,8 +1251,9 @@ def acceptance_plan() -> dict[str, Any]:
         "submit_host": SUBMIT_HOST,
         "sandboxes": list(SANDBOXES),
         "pools": list(POOLS),
+        "infrastructure_nodes": list(INFRASTRUCTURE_NODES),
         "eligible_nodes": list(EXPECTED_NODES),
-        "excluded_nodes": ["trt-gb10-7"],
+        "excluded_nodes": [],
         "state_machine": list(PHASES),
         "faults": list(FAULTS),
         "requirements": [
@@ -1213,7 +1285,7 @@ def acceptance_plan() -> dict[str, Any]:
             "Stop before pressure if the non-Loom baseline is unhealthy.",
             "Stop on capacity overshoot, duplicate observation, or cgroup escape.",
             "Stop and drain on peer disruption, storage error, or freshness failure.",
-            "Never use trt-gb10-7 and never add --exclusive.",
+            "Never restart or admit new work on a busy node and never add --exclusive.",
         ],
     }
 
@@ -1623,27 +1695,7 @@ def _verify_trusted_runtime_receipt(
     collector = combined.get("collector")
     domains = combined.get("domains")
     fleet = combined.get("fleet_attestation")
-    expected_fleet_nodes = (
-        "oldlab-1",
-        "oldlab-2",
-        "oldlab-3",
-        "oldlab-4",
-        "oldlab-5",
-        "trt-gb10-1",
-        "trt-gb10-2",
-        "trt-gb10-3",
-        "trt-gb10-4",
-        "trt-gb10-5",
-        "trt-gb10-6",
-        "trt-gb10-8",
-        "trt-gb10-9",
-        "trt-gb10-10",
-        "trt-gb10-11",
-        "trt-gb10-12",
-        "trt-gb10-13",
-        "trt-gb10-14",
-        "trt-gb10-15",
-    )
+    expected_fleet_nodes = RUNTIME_FLEET_INFRASTRUCTURE_NODES
     if (
         combined["schema_version"] != 1
         or combined["kind"] != "loom.developer-runtime-combined-activation"
@@ -1912,6 +1964,7 @@ def _session_state_unlocked(session_id: str) -> dict[str, Any]:
     if not isinstance(state, dict) or frozenset(state) not in {
         frozenset(base_keys),
         frozenset((*base_keys, "evidence_sha256")),
+        frozenset((*base_keys, "evidence_sha256", "gate6_sha256")),
     }:
         raise AcceptanceError("session state has an invalid closed shape")
     completed = state["completed_phases"]
@@ -1985,9 +2038,13 @@ def _session_state_unlocked(session_id: str) -> dict[str, Any]:
             or state["promotion_receipt_sha256"] is None
             or state["platform_health_receipt_sha256"] is None
             or state["staging_pressure_receipt_sha256"] is None
+            or (
+                "gate6_sha256" in state
+                and _DIGEST_RE.fullmatch(str(state["gate6_sha256"])) is None
+            )
         ):
             raise AcceptanceError("complete session state is invalid")
-    elif "evidence_sha256" in state:
+    elif "evidence_sha256" in state or "gate6_sha256" in state:
         raise AcceptanceError("running session state contains a final digest")
     return state
 
@@ -2069,6 +2126,8 @@ def _phase_payload(
         "deadline_seconds",
         "status",
     }
+    if phase == "mixed_non_loom":
+        required.add("trial_batches")
     if not isinstance(payload, dict) or set(payload) != required:
         raise AcceptanceError("phase evidence has an invalid closed shape")
     if (
@@ -2077,6 +2136,23 @@ def _phase_payload(
         or payload["candidate_sha"] != state["candidates"][sandbox]["sha"]
         or payload["candidate_tree"] != state["candidates"][sandbox]["tree"]
         or payload["status"] != "pass"
+        or (
+            phase == "mixed_non_loom"
+            and (
+                not isinstance(payload.get("trial_batches"), dict)
+                or set(payload["trial_batches"]) != set(POOLS)
+                or any(
+                    not isinstance(batch_id, str)
+                    or re.fullmatch(
+                        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+                        r"[0-9a-f]{4}-[0-9a-f]{12}",
+                        batch_id,
+                    )
+                    is None
+                    for batch_id in payload["trial_batches"].values()
+                )
+            )
+        )
         or not isinstance(payload["deadline_seconds"], int)
         or isinstance(payload["deadline_seconds"], bool)
         or payload["deadline_seconds"] < 1
@@ -2099,7 +2175,7 @@ def _checkpoint_payload(
     phase_payload: Mapping[str, Any],
     digest: str,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "schema_version": SCHEMA_VERSION,
         "session_id": session_id,
         "sandbox": phase_payload["sandbox"],
@@ -2110,6 +2186,10 @@ def _checkpoint_payload(
         "status": "pass",
         "evidence_sha256": digest,
     }
+    if phase_payload["phase"] == "mixed_non_loom":
+        payload["trial_batches"] = dict(phase_payload["trial_batches"])
+        payload["phase_started_at"] = phase_payload["started_at"]
+    return payload
 
 
 def checkpoint_session(
@@ -2951,25 +3031,91 @@ def _validate_platform_health_authority(
         "crashed_jobs",
         "node_intervals",
         "policy_capacity",
+        "oldlab_capacity_recommendation",
         "zero_orphans",
         "completed_at",
         "expires_at",
         "payload_sha256",
     }
+    gate6_observations = authority.get("gate6_observations")
+    gate6_enabled = gate6_observations is not None
     unsigned = {key: value for key, value in authority.items() if key != "payload_sha256"}
     checkpoints = authority.get("checkpoints")
     mixed_jobs = authority.get("mixed_jobs")
     intervals = authority.get("node_intervals")
     policy_capacity = authority.get("policy_capacity")
+    recommendation = authority.get("oldlab_capacity_recommendation")
+    expected_policy = {pool: _platform_policy_contract(pool) for pool in POOLS}
+    try:
+        health_contract = load_platform_health_contract(REPO_ROOT)
+    except CapacityContractError as exc:
+        raise AcceptanceError(str(exc)) from exc
+    oldlab_capacity = policy_capacity.get("oldlab") if isinstance(policy_capacity, dict) else None
+    gb10_capacity = policy_capacity.get("gb10") if isinstance(policy_capacity, dict) else None
+    capacity_extra_fields = {
+        "minimum_node_cpu_cores",
+        "minimum_node_memory_bytes",
+        "reserved_cpu_cores_per_node",
+        "reserved_memory_mib_per_node",
+    }
+    expected_capacity_fields = set(expected_policy["oldlab"][0]) | capacity_extra_fields
+    derivation_fields = {
+        "method",
+        "measured_node_count",
+        "minimum_observed_node_cpu_cores",
+        "minimum_observed_node_memory_bytes",
+        "minimum_observed_free_cpu_cores",
+        "minimum_observed_free_memory_bytes",
+        "minimum_required_free_cpu_cores",
+        "minimum_required_free_memory_bytes",
+        "maximum_allowed_cpu_busy_ratio",
+        "all_nodes_passed",
+    }
+    derivation = recommendation.get("derivation") if isinstance(recommendation, dict) else None
+    gb10_minimum_cpu = (
+        gb10_capacity.get("minimum_node_cpu_cores") if isinstance(gb10_capacity, dict) else None
+    )
+    gb10_minimum_memory = (
+        gb10_capacity.get("minimum_node_memory_bytes") if isinstance(gb10_capacity, dict) else None
+    )
+    gb10_headroom_is_typed = (
+        isinstance(gb10_minimum_cpu, int)
+        and not isinstance(gb10_minimum_cpu, bool)
+        and isinstance(gb10_minimum_memory, int)
+        and not isinstance(gb10_minimum_memory, bool)
+    )
+    expected_gb10_reserved_cpu = (
+        cast(int, gb10_minimum_cpu) - expected_policy["gb10"][0]["requested_cpus"]
+        if gb10_headroom_is_typed
+        else None
+    )
+    expected_gb10_reserved_memory_mib = (
+        cast(int, gb10_minimum_memory) // 1024**2
+        - expected_policy["gb10"][0]["requested_memory_mib"]
+        if gb10_headroom_is_typed
+        else None
+    )
     expected_checkpoints = (
-        "baseline",
-        "mixed_non_loom",
-        "cancel_cleanup",
-        "worker_crash",
-        "final_drain",
+        (
+            "baseline",
+            "mixed_non_loom",
+            "cancel_cleanup",
+            "ttl_cleanup",
+            "submit_host_restart",
+            "worker_crash",
+            "final_drain",
+        )
+        if gate6_enabled
+        else (
+            "baseline",
+            "mixed_non_loom",
+            "cancel_cleanup",
+            "worker_crash",
+            "final_drain",
+        )
     )
     if (
-        set(authority) != required
+        set(authority) != (required | ({"gate6_observations"} if gate6_enabled else set()))
         or authority.get("schema_version") != 1
         or authority.get("kind") != "loom.developer-sandbox.platform-health-evidence"
         or authority.get("session_id") != session_id
@@ -2984,19 +3130,62 @@ def _validate_platform_health_authority(
         or not isinstance(mixed_jobs, list)
         or len(mixed_jobs) != len(SANDBOXES) * len(POOLS)
         or not isinstance(intervals, dict)
-        or set(intervals) != set(EXPECTED_NODES)
+        or set(intervals) != set(PLATFORM_HEALTH_NODE_KEYS)
         or not isinstance(policy_capacity, dict)
-        or policy_capacity.get("oldlab", {}).get("max_slots") != 20
-        or policy_capacity.get("gb10", {}).get("max_slots") != 112
-        or policy_capacity.get("gb10", {}).get("requested_cpus") != 16
-        or policy_capacity.get("gb10", {}).get("requested_memory_mib") != 92000
-        or policy_capacity.get("gb10", {}).get("requested_concurrency") != 8
-        or policy_capacity.get("gb10", {}).get("reserved_cpu_cores_per_node") != 4
-        or policy_capacity.get("gb10", {}).get("reserved_memory_mib_per_node") != 23000
+        or set(policy_capacity) != set(POOLS)
+        or not isinstance(oldlab_capacity, dict)
+        or not isinstance(gb10_capacity, dict)
+        or set(oldlab_capacity) != expected_capacity_fields
+        or set(gb10_capacity) != expected_capacity_fields
+        or any(
+            capacity.get(key) != expected_policy[pool][0][key]
+            for pool, capacity in (("oldlab", oldlab_capacity), ("gb10", gb10_capacity))
+            for key in expected_policy[pool][0]
+        )
+        or oldlab_capacity.get("reserved_cpu_cores_per_node")
+        != health_contract.minimum_oldlab_free_cpu_cores
+        or oldlab_capacity.get("reserved_memory_mib_per_node")
+        != health_contract.minimum_oldlab_free_memory_bytes // 1024**2
+        or not gb10_headroom_is_typed
+        or gb10_capacity.get("reserved_cpu_cores_per_node") != expected_gb10_reserved_cpu
+        or gb10_capacity.get("reserved_memory_mib_per_node") != expected_gb10_reserved_memory_mib
+        or not isinstance(recommendation, dict)
+        or set(recommendation)
+        != {"schema_version", "pool", "source", "source_sha256", "values", "derivation"}
+        or recommendation.get("schema_version") != 1
+        or recommendation.get("pool") != "oldlab"
+        or recommendation.get("source") != PLATFORM_POLICY_SOURCES["oldlab"]
+        or recommendation.get("source_sha256") != expected_policy["oldlab"][1]
+        or recommendation.get("values") != oldlab_capacity
+        or not isinstance(derivation, dict)
+        or set(derivation) != derivation_fields
+        or derivation.get("method") != "installed-shared-capacity-policy-v1"
+        or derivation.get("measured_node_count") != len(health_contract.oldlab_nodes)
+        or derivation.get("minimum_observed_node_cpu_cores")
+        != oldlab_capacity.get("minimum_node_cpu_cores")
+        or derivation.get("minimum_observed_node_memory_bytes")
+        != oldlab_capacity.get("minimum_node_memory_bytes")
+        or derivation.get("minimum_required_free_cpu_cores")
+        != health_contract.minimum_oldlab_free_cpu_cores
+        or derivation.get("minimum_required_free_memory_bytes")
+        != health_contract.minimum_oldlab_free_memory_bytes
+        or derivation.get("maximum_allowed_cpu_busy_ratio")
+        != health_contract.maximum_cpu_busy_ratio
+        or derivation.get("all_nodes_passed") is not True
+        or not isinstance(derivation.get("minimum_observed_free_cpu_cores"), (int, float))
+        or isinstance(derivation.get("minimum_observed_free_cpu_cores"), bool)
+        or derivation["minimum_observed_free_cpu_cores"]
+        < health_contract.minimum_oldlab_free_cpu_cores
+        or not isinstance(derivation.get("minimum_observed_free_memory_bytes"), int)
+        or isinstance(derivation.get("minimum_observed_free_memory_bytes"), bool)
+        or derivation["minimum_observed_free_memory_bytes"]
+        < health_contract.minimum_oldlab_free_memory_bytes
         or authority.get("zero_orphans") is not True
     ):
         raise AcceptanceError("platform-health authority evidence is invalid")
     combinations: set[tuple[str, str]] = set()
+    compose_projects: set[str] = set()
+    compose_networks: set[str] = set()
     for job in mixed_jobs:
         if not isinstance(job, dict):
             raise AcceptanceError("platform-health mixed job evidence is invalid")
@@ -3007,6 +3196,11 @@ def _validate_platform_health_authority(
         allocation = job.get("allocation")
         cgroup = job.get("cgroup")
         containers = job.get("containers")
+        policy = expected_policy[pool][0]
+        job_id = job.get("job_id")
+        job_path = cgroup.get("job_path") if isinstance(cgroup, dict) else None
+        networks = job.get("compose_networks")
+        project = job.get("compose_project")
         if (
             sandbox not in SANDBOXES
             or node not in EXPECTED_NODES
@@ -3014,6 +3208,10 @@ def _validate_platform_health_authority(
             or job.get("candidate_sha") != candidate.get("sha")
             or not isinstance(allocation, dict)
             or allocation.get("exclusive") is not False
+            or allocation.get("cpu_cores") != policy["requested_cpus"]
+            or allocation.get("memory_bytes") != policy["requested_memory_mib"] * 1024**2
+            or allocation.get("pids") != policy["job_pids_max"]
+            or allocation.get("gpu_count") != (1 if policy["gpu_tres"] else 0)
             or any(
                 not isinstance(allocation.get(field), int)
                 or isinstance(allocation[field], bool)
@@ -3027,14 +3225,158 @@ def _validate_platform_health_authority(
             )
             or not isinstance(cgroup, dict)
             or set(cgroup.get("controllers", ())) != {"cpu", "memory", "pids"}
+            or cgroup.get("slurm_job_id") != job_id
+            or not isinstance(job_path, str)
+            or f"job_{job_id}" not in PurePosixPath(job_path).parts
+            or not isinstance(cgroup.get("slurm_pid_cgroup_paths"), list)
+            or not cgroup["slurm_pid_cgroup_paths"]
+            or any(
+                not isinstance(path, str) or not _strict_descendant(path, job_path)
+                for path in cgroup["slurm_pid_cgroup_paths"]
+            )
+            or cgroup.get("cpu_cores_max") != allocation.get("cpu_cores")
+            or cgroup.get("memory_bytes_max") != allocation.get("memory_bytes")
+            or cgroup.get("pids_max") != allocation.get("pids")
             or not isinstance(containers, list)
             or {container.get("role") for container in containers if isinstance(container, dict)}
             != set(CONTAINER_ROLES)
+            or len(containers) != len(CONTAINER_ROLES)
+            or any(
+                not isinstance(container, dict)
+                or container.get("cgroup_parent") != job_path
+                or not _strict_descendant(
+                    str(container.get("observed_cgroup_path")),
+                    job_path,
+                )
+                or container.get("limits", {}).get("cpu_cores") != policy["container_cpus"]
+                or container.get("limits", {}).get("memory_bytes")
+                != policy["container_memory_mib"] * 1024**2
+                or container.get("limits", {}).get("pids") != policy["container_pids"]
+                for container in containers
+            )
+            or (
+                gate6_enabled
+                and (
+                    not isinstance(job.get("host"), str)
+                    or not job["host"]
+                    or cgroup.get("delegated") is not True
+                    or set(cgroup.get("delegated_controllers", ()))
+                    != {"cpu", "memory", "pids"}
+                    or not isinstance(cgroup.get("pids_current"), int)
+                    or isinstance(cgroup.get("pids_current"), bool)
+                    or cgroup["pids_current"] < 0
+                    or cgroup["pids_current"] > cgroup["pids_max"]
+                    or not isinstance(job.get("device_probe"), dict)
+                    or any(
+                        not isinstance(container, dict)
+                        or set(container.get("identity_labels", {}))
+                        != {
+                            "loom.sandbox",
+                            "loom.candidate_sha",
+                            "loom.slurm_job_id",
+                            "loom.compose_project",
+                        }
+                        or not isinstance(container.get("name"), str)
+                        or not container["name"]
+                        for container in containers
+                    )
+                )
+            )
+            or not isinstance(project, str)
+            or not project
+            or project in compose_projects
+            or not isinstance(networks, list)
+            or not networks
+            or any(
+                not isinstance(network, str)
+                or not network.startswith(f"{project}_")
+                or network in compose_networks
+                for network in networks
+            )
         ):
             raise AcceptanceError("platform-health mixed job evidence is invalid")
         combinations.add((sandbox, pool))
+        compose_projects.add(project)
+        compose_networks.update(networks)
     if combinations != {(sandbox, pool) for sandbox in SANDBOXES for pool in POOLS}:
         raise AcceptanceError("platform-health mixed job coverage is incomplete")
+    if gate6_enabled:
+        if (
+            not isinstance(gate6_observations, dict)
+            or set(gate6_observations) != {"soak", "device_isolation", "cleanup"}
+            or not isinstance(gate6_observations.get("soak"), dict)
+            or gate6_observations["soak"].get("required_duration_seconds") != 14_400
+            or gate6_observations["soak"].get("required_sample_count") != 120
+            or gate6_observations["soak"].get("minimum_trial_success_ratio") != 0.95
+            or gate6_observations["soak"].get("duration_seconds", 0) < 14_400
+            or gate6_observations["soak"].get("sample_count", 0) < 120
+            or gate6_observations["soak"].get("resource_envelope_breaches") != 0
+            or not isinstance(gate6_observations.get("device_isolation"), list)
+            or {
+                (row.get("sandbox"), row.get("pool"))
+                for row in gate6_observations["device_isolation"]
+                if isinstance(row, dict)
+            }
+            != {(sandbox, pool) for sandbox in SANDBOXES for pool in POOLS}
+            or len(gate6_observations["device_isolation"]) != len(SANDBOXES) * len(POOLS)
+            or not isinstance(gate6_observations.get("cleanup"), list)
+            or {row.get("event") for row in gate6_observations["cleanup"] if isinstance(row, dict)}
+            != {"cancellation", "ttl_expiry", "worker_crash", "submit_host_restart"}
+            or len(gate6_observations["cleanup"]) != 4
+        ):
+            raise AcceptanceError("platform-health gate-6 evidence is invalid")
+        soak = gate6_observations["soak"]
+        outcomes = soak.get("trial_outcomes")
+        numerator = soak.get("trial_success_numerator")
+        denominator = soak.get("trial_success_denominator")
+        if (
+            not isinstance(outcomes, list)
+            or len(outcomes) != len(SANDBOXES) * len(POOLS)
+            or {
+                (row.get("sandbox"), row.get("pool"))
+                for row in outcomes
+                if isinstance(row, dict)
+            }
+            != {(sandbox, pool) for sandbox in SANDBOXES for pool in POOLS}
+            or not isinstance(numerator, int)
+            or isinstance(numerator, bool)
+            or not isinstance(denominator, int)
+            or isinstance(denominator, bool)
+            or denominator <= 0
+            or any(
+                not isinstance(row, dict)
+                or any(
+                    not isinstance(row.get(field), int)
+                    or isinstance(row.get(field), bool)
+                    or row[field] < 0
+                    for field in (
+                        "terminal_trial_count",
+                        "succeeded_trial_count",
+                        "failed_trial_count",
+                        "cancelled_trial_count",
+                        "retried_trial_count",
+                        "retry_attempt_count",
+                    )
+                )
+                for row in outcomes
+            )
+            or any(
+                row.get("terminal_trial_count")
+                != row.get("succeeded_trial_count", 0)
+                + row.get("failed_trial_count", 0)
+                + row.get("cancelled_trial_count", 0)
+                or row.get("terminal_trial_count", 0) <= 0
+                or row.get("success_ratio")
+                != row.get("succeeded_trial_count", 0) / row.get("terminal_trial_count", 1)
+                for row in outcomes
+            )
+            or numerator
+            != sum(row.get("succeeded_trial_count", 0) for row in outcomes)
+            or denominator != sum(row.get("terminal_trial_count", 0) for row in outcomes)
+            or soak.get("trial_success_ratio") != numerator / denominator
+            or soak["trial_success_ratio"] < soak["minimum_trial_success_ratio"]
+        ):
+            raise AcceptanceError("platform-health trial outcome accounting is invalid")
     if not authority.get("cancelled_jobs") or not authority.get("crashed_jobs"):
         raise AcceptanceError("platform-health cleanup evidence is incomplete")
     try:
@@ -3468,6 +3810,132 @@ def finalize_session(
         return state
 
 
+def _gate6_matrix_path(sandbox: str, pool: str, candidate_sha: str) -> Path:
+    cluster = {"oldlab": "trt-oldlab", "gb10": "trt-gb10"}[pool]
+    return (
+        SLURM_POLICY_STATE_ROOT
+        / "allocation-probes"
+        / cluster
+        / sandbox
+        / f"{candidate_sha}.json"
+    )
+
+
+def _gate6_runtime_domain_bindings(
+    evidence: Mapping[str, Any],
+) -> dict[tuple[str, str], set[tuple[str, str, str, int]]]:
+    bindings: dict[tuple[str, str], set[tuple[str, str, str, int]]] = {
+        (sandbox, pool): set() for sandbox in SANDBOXES for pool in POOLS
+    }
+    for sandbox in SANDBOXES:
+        for reference in evidence["candidates"][sandbox]["runtime_receipts"]:
+            raw = _runtime_attestation_bytes(Path(reference["path"]))
+            try:
+                wrapper = json.loads(raw)
+                combined = wrapper["combined_receipt"]
+            except (KeyError, json.JSONDecodeError, TypeError) as exc:
+                raise AcceptanceError("trusted runtime receipt cannot bind gate 6") from exc
+            if raw != _canonical_bytes(wrapper):
+                raise AcceptanceError("trusted runtime receipt is not canonical")
+            for pool in POOLS:
+                domain = combined["domains"][pool]
+                bindings[(sandbox, pool)].add(
+                    (
+                        combined["payload_sha256"],
+                        domain["payload_sha256"],
+                        domain["signature_sha256"],
+                        domain["generation"],
+                    ),
+                )
+    return bindings
+
+
+def seal_gate6(
+    session_id: str,
+    schema: Mapping[str, Any],
+    nonexclusive_schema: Mapping[str, Any],
+    *,
+    execute: bool,
+) -> dict[str, Any]:
+    """Seal the exact finalized session and native authorities into gate 6."""
+
+    _require_execute(execute)
+    with _session_lock(session_id, exclusive=True):
+        state = _session_state_unlocked(session_id)
+        if state["status"] != "complete":
+            raise AcceptanceError("gate 6 requires a finalized acceptance session")
+        evidence = _secure_json_load(_session_dir(session_id) / "evidence.json")
+        failures = verify_evidence(evidence, schema)
+        if failures:
+            raise AcceptanceError("finalized evidence failed gate-6 verification")
+        evidence_digest = hashlib.sha256(_canonical_bytes(evidence)).hexdigest()
+        if state["evidence_sha256"] != evidence_digest:
+            raise AcceptanceError("finalized evidence digest drifted before gate 6")
+        _verify_trusted_runtime_receipts(evidence)
+        _verify_overlap_session_receipts(session_id, evidence, state)
+        _verify_promotion_session_receipt(session_id, evidence, state)
+        _verify_platform_health_session_receipt(session_id, evidence, state)
+        _verify_staging_pressure_session_receipt(session_id, evidence, state)
+
+        platform_path = (
+            PLATFORM_HEALTH_AUTHORITY_ROOT / "sessions" / session_id / "evidence.json"
+        )
+        platform = _trusted_authority_json(
+            platform_path,
+            PLATFORM_HEALTH_AUTHORITY_ROOT,
+            label="platform-health",
+        )
+        if platform != evidence["platform_health"]["authority_evidence"]:
+            raise AcceptanceError("platform-health gate-6 authority drifted")
+
+        matrices: dict[tuple[str, str], dict[str, Any]] = {}
+        for sandbox in SANDBOXES:
+            candidate_sha = state["candidates"][sandbox]["sha"]
+            for pool in POOLS:
+                path = _gate6_matrix_path(sandbox, pool, candidate_sha)
+                matrices[(sandbox, pool)] = _trusted_authority_json(
+                    path,
+                    SLURM_POLICY_STATE_ROOT,
+                    label="allocation-matrix",
+                )
+        runtime_bindings = _gate6_runtime_domain_bindings(evidence)
+        for pair, matrix in matrices.items():
+            runtime = matrix.get("runtime_attestation")
+            if not isinstance(runtime, dict) or (
+                runtime.get("receipt_sha256"),
+                runtime.get("domain_payload_sha256"),
+                runtime.get("domain_signature_sha256"),
+                runtime.get("domain_generation"),
+            ) not in runtime_bindings[pair]:
+                raise AcceptanceError("allocation matrix is not bound to a trusted runtime receipt")
+        try:
+            bundle, pair_artifacts = gate6_verifier.build_gate6_bundle(
+                evidence,
+                platform,
+                matrices,
+                nonexclusive_schema,
+            )
+        except gate6_verifier.AcceptanceError as exc:
+            raise AcceptanceError(str(exc)) from exc
+
+        gate_root = _session_dir(session_id) / "gate6"
+        _ensure_secure_directory(gate_root)
+        for (sandbox, pool), artifact in sorted(pair_artifacts.items()):
+            _write_or_verify_secure(
+                gate_root / f"{sandbox}-{pool}.nonexclusive.json",
+                artifact,
+            )
+        _write_or_verify_secure(gate_root / "acceptance.json", bundle)
+        gate6_digest = bundle["payload_sha256"]
+        if state.get("gate6_sha256") is not None:
+            if state["gate6_sha256"] != gate6_digest:
+                raise AcceptanceError("sealed gate-6 digest does not match")
+            return state
+        state["gate6_sha256"] = gate6_digest
+        _atomic_write(_session_dir(session_id) / "state.json", state)
+        return state
+
+
 def _report(evidence: Any, schema: Mapping[str, Any]) -> dict[str, Any]:
     failures = verify_evidence(evidence, schema)
     if failures:
@@ -3558,6 +4026,9 @@ def _parser() -> argparse.ArgumentParser:
     finalize.add_argument("--session-id", required=True)
     finalize.add_argument("--evidence", type=Path, required=True)
     finalize.add_argument("--execute", action="store_true")
+    gate6 = subparsers.add_parser("session-seal-gate6", allow_abbrev=False)
+    gate6.add_argument("--session-id", required=True)
+    gate6.add_argument("--execute", action="store_true")
     return parser
 
 
@@ -3640,6 +4111,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.session_id,
                     args.evidence,
                     schema,
+                    execute=args.execute,
+                ),
+            )
+            return 0
+        if command == "session-seal-gate6":
+            _emit(
+                seal_gate6(
+                    args.session_id,
+                    schema,
+                    gate6_verifier._load_schema(NONEXCLUSIVE_SCHEMA),
                     execute=args.execute,
                 ),
             )

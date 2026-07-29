@@ -28,6 +28,24 @@ supervisor_service = "loom-autoscaler-gb10-staging.service"
 supervisor_timer = "loom-autoscaler-gb10-staging.timer"
 max_age_seconds = 900
 
+infrastructure_nodes = [
+  "trt-gb10-1",
+  "trt-gb10-2",
+  "trt-gb10-3",
+  "trt-gb10-4",
+  "trt-gb10-5",
+  "trt-gb10-6",
+  "trt-gb10-7",
+  "trt-gb10-8",
+  "trt-gb10-9",
+  "trt-gb10-10",
+  "trt-gb10-11",
+  "trt-gb10-12",
+  "trt-gb10-13",
+  "trt-gb10-14",
+  "trt-gb10-15",
+]
+
 allowed_nodes = [
   "trt-gb10-1",
   "trt-gb10-2",
@@ -35,6 +53,7 @@ allowed_nodes = [
   "trt-gb10-4",
   "trt-gb10-5",
   "trt-gb10-6",
+  "trt-gb10-7",
   "trt-gb10-8",
   "trt-gb10-9",
   "trt-gb10-10",
@@ -65,6 +84,7 @@ trt-gb10-3 = "gx10-0f0d"
 trt-gb10-4 = "gx10-0d93"
 trt-gb10-5 = "gx10-1036"
 trt-gb10-6 = "gx10-1000"
+trt-gb10-7 = "gx10-0faf"
 trt-gb10-8 = "gx10-db22"
 trt-gb10-9 = "gx10-16f6"
 trt-gb10-10 = "gx10-0f82"

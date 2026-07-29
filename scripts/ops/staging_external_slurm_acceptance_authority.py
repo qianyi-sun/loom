@@ -111,6 +111,10 @@ authority_paths = _consumer.authority_paths
 canonical_json_bytes = _consumer.canonical_json_bytes
 load_authority_config = _consumer.load_authority_config
 validate_authority_payload = _consumer.validate_authority_payload
+validate_infrastructure_verification_summary = (
+    _consumer.validate_infrastructure_verification_summary
+)
+infrastructure_mount_digest = _consumer.infrastructure_mount_digest
 verify_authority = _consumer.verify_authority
 
 _MAX_PROBE_BYTES = 2 * 1024 * 1024
@@ -557,9 +561,7 @@ def _fsync_directory(path: Path) -> None:
 
 def _install_key_file_no_replace(path: Path, payload: bytes, *, mode: int) -> bool:
     """Persist one root key leaf without ever replacing an existing inode."""
-    temporary = path.with_name(
-        f".{path.name}.tmp-{os.getpid()}-{secrets.token_hex(8)}"
-    )
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}-{secrets.token_hex(8)}")
     flags = (
         os.O_WRONLY
         | os.O_CREAT
@@ -570,18 +572,14 @@ def _install_key_file_no_replace(path: Path, payload: bytes, *, mode: int) -> bo
     try:
         descriptor = os.open(temporary, flags, 0o600)
     except OSError as exc:
-        raise ExternalSlurmAcceptanceError(
-            "authority key staging failed safely"
-        ) from exc
+        raise ExternalSlurmAcceptanceError("authority key staging failed safely") from exc
     try:
         try:
             view = memoryview(payload)
             while view:
                 written = os.write(descriptor, view)
                 if written <= 0:
-                    raise ExternalSlurmAcceptanceError(
-                        "authority key write failed safely"
-                    )
+                    raise ExternalSlurmAcceptanceError("authority key write failed safely")
                 view = view[written:]
             os.fchown(descriptor, 0, 0)
             os.fchmod(descriptor, mode)
@@ -629,11 +627,7 @@ def _read_key_leaf(
         label=label,
         mode=mode,
     )
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:
@@ -713,9 +707,7 @@ def _converge_signing_keypair(
         label="authority public key",
     )
     if public_exists and not private_exists:
-        raise ExternalSlurmAcceptanceError(
-            "authority public key exists without its private key"
-        )
+        raise ExternalSlurmAcceptanceError("authority public key exists without its private key")
     if not private_exists:
         generated = Ed25519PrivateKey.generate()
         installed = _install_key_file_no_replace(
@@ -1664,10 +1656,32 @@ def _validate_infrastructure_transport_receipt(
         requested_at=requested_at,
     )
     outer = json.loads(envelope)
+    inner_receipt = receipt.get("inner_receipt") if isinstance(receipt, dict) else None
     expected_inner = (
         f"staging-accounting/v1/{inner_request_id}"
         if action == "staging-slurm-accounting-converge"
         else None
+    )
+    inner_receipt_valid = (
+        inner_receipt == expected_inner
+        if action == "staging-slurm-accounting-converge"
+        else (
+            re.fullmatch(
+                r"staging-shared-source-bootstrap/v1/[0-9a-f]{64}",
+                str(inner_receipt),
+            )
+            is not None
+            if action == "staging-shared-source-bootstrap"
+            else re.fullmatch(
+                (
+                    r"staging-allocation-bootstrap/v1/"
+                    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+                    r"[0-9a-f]{4}-[0-9a-f]{12}/[0-9a-f]{64}"
+                ),
+                str(inner_receipt),
+            )
+            is not None
+        )
     )
     if (
         not isinstance(receipt, dict)
@@ -1683,7 +1697,7 @@ def _validate_infrastructure_transport_receipt(
         or receipt.get("candidate_tree") != candidate_tree
         or receipt.get("payload_sha256") != outer["payload_sha256"]
         or _DIGEST_RE.fullmatch(str(receipt.get("result_sha256"))) is None
-        or receipt.get("inner_receipt") != expected_inner
+        or not inner_receipt_valid
         or not isinstance(receipt.get("completed_at"), str)
         or receipt.get("status") != "succeeded"
     ):
@@ -1843,7 +1857,9 @@ def _load_infrastructure_receipt(
         requested_at=payload["requested_at"],
     )
     node_bootstraps = payload.get("node_bootstraps")
-    if not isinstance(node_bootstraps, list) or len(node_bootstraps) != len(config.allowed_nodes):
+    if not isinstance(node_bootstraps, list) or len(node_bootstraps) != len(
+        config.infrastructure_nodes
+    ):
         raise ExternalSlurmAcceptanceError("fixed infrastructure receipt node set mismatch")
     node_completed = [
         _validate_infrastructure_transport_receipt(
@@ -1856,7 +1872,11 @@ def _load_infrastructure_receipt(
             convergence_id=payload["convergence_id"],
             requested_at=payload["requested_at"],
         )
-        for node, receipt in zip(config.allowed_nodes, node_bootstraps, strict=True)
+        for node, receipt in zip(
+            config.infrastructure_nodes,
+            node_bootstraps,
+            strict=True,
+        )
     ]
     created_at = _parse_utc(
         payload.get("created_at"),
@@ -1911,7 +1931,14 @@ def _infrastructure_summary(
     *,
     payload_sha256: str,
 ) -> dict[str, Any]:
-    return {
+    source_digest = str(payload["source_bootstrap"]["inner_receipt"]).rsplit("/", 1)[-1]
+    boot_ids: dict[str, str] = {}
+    mount_digests: dict[str, str] = {}
+    for receipt in payload["node_bootstraps"]:
+        _prefix, boot_id, mount_digest = str(receipt["inner_receipt"]).rsplit("/", 2)
+        boot_ids[str(receipt["node"])] = boot_id
+        mount_digests[str(receipt["node"])] = mount_digest
+    summary = {
         "schema_version": 1,
         "kind": "staging_external_slurm_infrastructure_verification",
         "candidate_sha": payload["candidate_sha"],
@@ -1928,13 +1955,29 @@ def _infrastructure_summary(
         "expires_at": payload["expires_at"],
         "source_bootstrap": _infrastructure_transport_summary(payload["source_bootstrap"]),
         "accounting": _infrastructure_transport_summary(payload["accounting"]),
+        "infrastructure_nodes": [receipt["node"] for receipt in payload["node_bootstraps"]],
         "node_bootstraps": [
             _infrastructure_transport_summary(receipt) for receipt in payload["node_bootstraps"]
         ],
         "mount_contract": payload["mount_contract"],
+        "mount_digests": mount_digests,
+        "mount_digest": infrastructure_mount_digest(payload["mount_contract"]),
+        "source_digest": source_digest,
+        "boot_ids": boot_ids,
         "node_count": len(payload["node_bootstraps"]),
         "result": "pass",
     }
+    return cast(
+        dict[str, Any],
+        validate_infrastructure_verification_summary(
+            summary,
+            candidate_sha=str(payload["candidate_sha"]),
+            candidate_tree=str(payload["candidate_tree"]),
+            receipt_path=str(_infrastructure_receipt_path(str(payload["candidate_sha"]))),
+            expected_hosts=tuple(str(receipt["node"]) for receipt in payload["node_bootstraps"]),
+            expected_mount_contract=payload["mount_contract"],
+        ),
+    )
 
 
 def verify_infrastructure(
@@ -2312,10 +2355,7 @@ def _verified_signing_key(
     )
     if private_public != installed_public:
         raise ExternalSlurmAcceptanceError("authority private/public key pair does not match")
-    challenge = (
-        b"loom-staging-external-slurm-authority-key-readback-v1\0"
-        + secrets.token_bytes(32)
-    )
+    challenge = b"loom-staging-external-slurm-authority-key-readback-v1\0" + secrets.token_bytes(32)
     try:
         public.verify(private.sign(challenge), challenge)
     except InvalidSignature as exc:

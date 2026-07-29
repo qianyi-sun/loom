@@ -98,7 +98,7 @@ def test_plan_covers_all_fixed_paths_ports_and_nfs_readbacks_without_secrets() -
     assert "loom_admin_" not in encoded
 
 
-def test_slurm_maintenance_inventory_is_controller_last_and_excludes_node7() -> None:
+def test_slurm_maintenance_inventory_is_controller_last_and_includes_node7() -> None:
     assert host._slurm_node_order("oldlab") == (
         "oldlab-2",
         "oldlab-3",
@@ -107,7 +107,7 @@ def test_slurm_maintenance_inventory_is_controller_last_and_excludes_node7() -> 
         "oldlab-1",
     )
     assert host._slurm_node_order("gb10")[-1] == "trt-gb10-1"
-    assert "trt-gb10-7" not in host._slurm_node_order("gb10")
+    assert set(host._slurm_node_order("gb10")) == {f"trt-gb10-{index}" for index in range(1, 16)}
 
 
 def test_slurm_maintenance_journal_rejects_symlink_and_hardlink(
@@ -183,6 +183,61 @@ def test_slurm_maintenance_busy_resume_reuses_receipts_and_keeps_controller_last
     monkeypatch.setattr(host, "SLURM_MAINTENANCE_ROOT", tmp_path / "slurm")
     monkeypatch.setattr(host, "_require_live_host", lambda: None)
     monkeypatch.setattr(host, "_slurm_maintenance_tree", lambda _profile, _sha: "b" * 40)
+    install_lock_held = False
+
+    @contextmanager
+    def install_lock() -> object:
+        nonlocal install_lock_held
+        assert install_lock_held is False
+        install_lock_held = True
+        try:
+            yield
+        finally:
+            install_lock_held = False
+
+    monkeypatch.setattr(host, "_install_lock", install_lock)
+    candidate_bindings = {
+        f"loom-dev-{sandbox}": {
+            "sandbox": sandbox,
+            "service_user": f"loom-sandbox-{sandbox}",
+            "candidate_sha": candidate,
+            "candidate_tree": "b" * 40,
+        }
+        for sandbox, candidate in zip(
+            host.SANDBOXES,
+            (SHA, "c" * 40, "d" * 40),
+            strict=True,
+        )
+    }
+
+    def candidate_set(
+        *,
+        generation: int = 1,
+        convergence_id: str | None = None,
+    ) -> tuple[dict[str, object], bytes]:
+        assert install_lock_held is True
+        payload: dict[str, object] = {
+            "schema_version": 2,
+            "kind": "loom.developer-sandbox.slurm-candidate-set",
+            "candidate_set_sha256": hashlib.sha256(
+                json.dumps(
+                    candidate_bindings,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("ascii"),
+            ).hexdigest(),
+            "candidate_bindings": candidate_bindings,
+            "generation": generation,
+            "convergence_id": convergence_id or "e" * 64,
+        }
+        return (
+            payload,
+            (
+                json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode("ascii"),
+        )
+
+    monkeypatch.setattr(host, "_slurm_candidate_set", candidate_set)
     monkeypatch.setattr(host, "_slurm_maintenance_lock", lambda _domain: nullcontext())
     monkeypatch.setattr(
         host,
@@ -191,6 +246,7 @@ def test_slurm_maintenance_busy_resume_reuses_receipts_and_keeps_controller_last
     )
     calls: list[tuple[str, str, str | None]] = []
     busy = {"enabled": True}
+    rollback_busy = {"enabled": False}
 
     def authority_request(
         _profile: host.Profile,
@@ -200,13 +256,27 @@ def test_slurm_maintenance_busy_resume_reuses_receipts_and_keeps_controller_last
         action: str,
         sha: str,
         tree: str,
+        candidate_set_bytes: bytes | None = None,
         prior_request_id: str | None = None,
     ) -> tuple[dict[str, object], str]:
         del domain, sha, tree
+        assert install_lock_held is True
+        assert candidate_set_bytes is not None
         calls.append((node, action, prior_request_id))
         if busy["enabled"] and node == "oldlab-3" and action == "slurm-node-converge":
             raise host.HostConvergeError("node still has Slurm jobs; drain and retry")
-        request_id = hashlib.sha256(f"{node}:{action}:{prior_request_id}".encode()).hexdigest()
+        if rollback_busy["enabled"] and node == "oldlab-3" and action == "slurm-rollback":
+            raise host.HostConvergeError("pending recovery timer has not completed")
+        request_id = hashlib.sha256(
+            b":".join(
+                (
+                    node.encode(),
+                    action.encode(),
+                    str(prior_request_id).encode(),
+                    candidate_set_bytes,
+                ),
+            ),
+        ).hexdigest()
         if action == "slurm-check":
             return (
                 {
@@ -252,6 +322,11 @@ def test_slurm_maintenance_busy_resume_reuses_receipts_and_keeps_controller_last
     assert not any(node == "oldlab-1" for node, _action, _prior in calls)
 
     calls.clear()
+    with pytest.raises(host.HostConvergeError, match="completed candidate-set"):
+        host.slurm_maintenance_rollback(profile, SHA, "oldlab")
+    assert calls == []
+
+    calls.clear()
     busy["enabled"] = False
     completed = host.slurm_maintenance_converge(profile, SHA, "oldlab")
     assert completed["phase"] == "completed"
@@ -268,24 +343,60 @@ def test_slurm_maintenance_busy_resume_reuses_receipts_and_keeps_controller_last
         for node in host._slurm_node_order("oldlab")
     )
 
+    calls.clear()
+    checked = host.slurm_maintenance_check(profile, SHA, "oldlab")
+    assert checked["status"] == "succeeded"
+    assert checked["generation"] == completed["generation"]
+    assert checked["convergence_id"] == completed["convergence_id"]
+    assert checked["candidate_set_sha256"] == completed["candidate_set_sha256"]
+    assert [node for node, action, _prior in calls if action == "slurm-check"] == list(
+        host._slurm_node_order("oldlab"),
+    )
+
     converge_receipts = {
         node: completed["nodes"][node]["converge_receipt"]
         for node in host._slurm_node_order("oldlab")
     }
     repeated = host.slurm_maintenance_converge(profile, SHA, "oldlab")
+    assert repeated["generation"] == completed["generation"] + 1
+    assert repeated["convergence_id"] != completed["convergence_id"]
     assert {
         node: repeated["nodes"][node]["converge_receipt"]
         for node in host._slurm_node_order("oldlab")
-    } == converge_receipts
+    } != converge_receipts
 
     calls.clear()
+    incomplete = json.loads(json.dumps(repeated))
+    incomplete["nodes"]["oldlab-3"]["converge_receipt"] = None
+    host._write_slurm_maintenance_state(path, incomplete)
+    with pytest.raises(host.HostConvergeError, match="every converge authority receipt"):
+        host.slurm_maintenance_rollback(profile, SHA, "oldlab")
+    assert calls == []
+    host._write_slurm_maintenance_state(path, repeated)
+
+    rollback_busy["enabled"] = True
+    with pytest.raises(host.HostConvergeError, match="pending recovery timer"):
+        host.slurm_maintenance_rollback(profile, SHA, "oldlab")
+    interrupted = json.loads(path.read_text(encoding="ascii"))
+    assert interrupted["phase"] == "blocked"
+    assert interrupted["last_failure"]["action"] == "slurm-rollback"
+    assert interrupted["nodes"]["oldlab-2"]["rollback_receipt"] is not None
+    assert interrupted["nodes"]["oldlab-3"]["rollback_receipt"] is None
+    assert not any(node == "oldlab-1" for node, _action, _prior in calls)
+
+    calls.clear()
+    rollback_busy["enabled"] = False
     rolled_back = host.slurm_maintenance_rollback(profile, SHA, "oldlab")
     assert rolled_back["phase"] == "rolled-back"
     rollback_calls = [row for row in calls if row[1] == "slurm-rollback"]
     assert [node for node, _action, _prior in rollback_calls] == list(
-        reversed(host._slurm_node_order("oldlab")),
+        host._slurm_node_order("oldlab"),
     )
     assert all(prior is not None for _node, _action, prior in rollback_calls)
+
+    calls.clear()
+    assert host.slurm_maintenance_rollback(profile, SHA, "oldlab") == rolled_back
+    assert calls == []
 
 
 def test_sandbox_batch_identity_is_fixed_nonlogin_service(
@@ -669,6 +780,9 @@ def test_attestation_renewal_timer_is_persistent_and_bounded() -> None:
         encoding="utf-8"
     )
     timer = (root / "loom-developer-sandbox-attestation-renewal.timer").read_text(encoding="utf-8")
+    tmpfiles = (root / "loom-developer-sandbox-installer.tmpfiles.conf").read_text(
+        encoding="utf-8",
+    )
 
     assert (
         "ExecStart=/usr/local/libexec/loom-developer-sandbox-host "
@@ -685,12 +799,247 @@ def test_attestation_renewal_timer_is_persistent_and_bounded() -> None:
     assert "OnUnitActiveSec=5min" in timer
     assert "Persistent=true" in timer
     assert "WantedBy=timers.target" in timer
+    assert tmpfiles == "d /run/loom-developer-sandbox-installer 0700 root root -\n"
+    assert "RuntimeDirectory=" not in service
+    assert "ReadWritePaths=/run/loom-developer-sandbox-installer" in service
 
     sandbox_unit = (root / "loom-developer-sandbox@.service").read_text(encoding="utf-8")
     link_unit = (root / "loom-developer-sandbox-link@.service").read_text(encoding="utf-8")
     assert "loom-developer-sandbox-link@" not in sandbox_unit
     assert "After=network-online.target loom-developer-sandbox@%i.service" in link_unit
     assert "Requires=loom-developer-sandbox@%i.service" in link_unit
+
+
+def test_installer_tmpfiles_install_applies_exact_source_and_reads_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.conf"
+    source.write_text(
+        "d /run/loom-developer-sandbox-installer 0700 root root -\n",
+        encoding="utf-8",
+    )
+    target = tmp_path / "installed.conf"
+    state: dict[str, bytes] = {}
+    events: list[str] = []
+    monkeypatch.setattr(host, "INSTALLER_TMPFILES_PATH", target)
+    monkeypatch.setattr(
+        host,
+        "_read_optional_tmpfiles_asset",
+        lambda path: state.get(str(path)),
+    )
+
+    def write(path: Path, payload: bytes, *, mode: int) -> None:
+        assert path == target
+        assert mode == 0o644
+        state[str(path)] = payload
+        events.append("installed")
+
+    monkeypatch.setattr(host, "_atomic_write", write)
+
+    def run(argv: tuple[str, ...], **_kwargs: object) -> object:
+        assert argv == ("systemd-tmpfiles", "--create", str(target))
+        events.append("applied")
+        return type("Completed", (), {"stdout": "", "returncode": 0})()
+
+    monkeypatch.setattr(host, "_run", run)
+    monkeypatch.setattr(
+        host,
+        "_validate_installer_runtime_directory",
+        lambda: events.append("runtime-readback"),
+    )
+
+    host._install_tmpfiles_asset(source)
+
+    assert state[str(target)] == source.read_bytes()
+    assert events == ["installed", "applied", "runtime-readback"]
+
+
+@pytest.mark.parametrize("previous", (None, b"d /run/prior 0700 root root -\n"))
+def test_installer_tmpfiles_install_failure_rolls_back_exact_prior_asset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    previous: bytes | None,
+) -> None:
+    source = tmp_path / "source.conf"
+    source.write_text(
+        "d /run/loom-developer-sandbox-installer 0700 root root -\n",
+        encoding="utf-8",
+    )
+    target = tmp_path / "installed.conf"
+    state: dict[str, bytes] = {}
+    events: list[str] = []
+    if previous is not None:
+        state[str(target)] = previous
+    monkeypatch.setattr(host, "INSTALLER_TMPFILES_PATH", target)
+    monkeypatch.setattr(
+        host,
+        "_read_optional_tmpfiles_asset",
+        lambda path: state.get(str(path)),
+    )
+    runtime_snapshot = host._InstallerRuntimeSnapshot(
+        present=True,
+        device=1,
+        inode=2,
+        uid=0,
+        gid=0,
+        mode=0o700,
+    )
+    monkeypatch.setattr(
+        host,
+        "_snapshot_installer_runtime_directory",
+        lambda: runtime_snapshot,
+    )
+
+    def write(path: Path, payload: bytes, *, mode: int) -> None:
+        assert mode == 0o644
+        state[str(path)] = payload
+
+    monkeypatch.setattr(host, "_atomic_write", write)
+    monkeypatch.setattr(
+        host,
+        "_run",
+        lambda *_args, **_kwargs: events.append("apply")
+        or type("Completed", (), {"stdout": "", "returncode": 0})(),
+    )
+    validation_calls = 0
+
+    def reject_runtime() -> None:
+        nonlocal validation_calls
+        validation_calls += 1
+        raise host.HostConvergeError("runtime unsafe")
+
+    monkeypatch.setattr(host, "_validate_installer_runtime_directory", reject_runtime)
+    monkeypatch.setattr(
+        host,
+        "_validate_restored_installer_runtime",
+        lambda snapshot: events.append(f"restored-runtime:{snapshot.present}"),
+    )
+    monkeypatch.setattr(
+        Path,
+        "unlink",
+        lambda path, *, missing_ok=False: state.pop(str(path), None),
+    )
+    monkeypatch.setattr(host, "_fsync_directory", lambda *_args: None)
+
+    with pytest.raises(host.HostConvergeError, match="failed and was rolled back"):
+        host._install_tmpfiles_asset(source)
+
+    assert state.get(str(target)) == previous
+    assert validation_calls == 1
+    assert events[-1] == "restored-runtime:True"
+    assert events.count("apply") == (2 if previous is not None else 1)
+
+
+def test_installer_tmpfiles_source_is_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "deploy/developer-sandboxes/loom-developer-sandbox-installer.tmpfiles.conf"
+    )
+    assert source.read_bytes() == (
+        b"d /run/loom-developer-sandbox-installer 0700 root root -\n"
+    )
+    invalid = tmp_path / "invalid.conf"
+    invalid.write_text("d /run/loom-developer-sandbox-installer 0755 root root -\n")
+    monkeypatch.setattr(host, "INSTALLER_TMPFILES_PATH", tmp_path / "installed.conf")
+
+    with pytest.raises(host.HostConvergeError, match="source is invalid"):
+        host._install_tmpfiles_asset(invalid)
+
+
+def _tmpfiles_install_source(tmp_path: Path) -> Path:
+    source = tmp_path / "candidate"
+    scripts = source / "scripts/ops"
+    profiles = source / "deploy/developer-sandboxes"
+    scripts.mkdir(parents=True)
+    profiles.mkdir(parents=True)
+    (scripts / "developer_sandbox_host.py").write_text("program\n", encoding="utf-8")
+    for name in (
+        "loom-developer-sandbox@.service",
+        "loom-developer-sandbox-attestation-renewal.service",
+        "loom-developer-sandbox-attestation-renewal.timer",
+        "qianyi.toml",
+        "hongjian.toml",
+        "devansh.toml",
+    ):
+        (profiles / name).write_text(f"{name}\n", encoding="utf-8")
+    (profiles / "loom-developer-sandbox-installer.tmpfiles.conf").write_text(
+        "d /run/loom-developer-sandbox-installer 0700 root root -\n",
+        encoding="utf-8",
+    )
+    return source
+
+
+def test_install_assets_defers_tmpfiles_until_every_candidate_write_succeeds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _tmpfiles_install_source(tmp_path)
+    events: list[str] = []
+    monkeypatch.setattr(host, "_ensure_root_private_directory", lambda *_args: None)
+
+    def write(path: Path, _payload: bytes, *, mode: int) -> None:
+        events.append(f"write:{path}:{mode:o}")
+        if path == host.RENEWAL_TIMER_PATH:
+            raise host.HostConvergeError("later asset failed")
+
+    monkeypatch.setattr(host, "_atomic_write", write)
+    monkeypatch.setattr(
+        host,
+        "_install_tmpfiles_asset",
+        lambda *_args: events.append("tmpfiles") or None,
+    )
+
+    with pytest.raises(host.HostConvergeError, match="later asset failed"):
+        host._install_assets(source)
+
+    assert "tmpfiles" not in events
+
+
+def test_install_assets_rolls_back_tmpfiles_when_daemon_reload_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _tmpfiles_install_source(tmp_path)
+    events: list[str] = []
+    snapshot = host._InstallerTmpfilesSnapshot(
+        config=None,
+        runtime=host._InstallerRuntimeSnapshot(False, None, None, None, None, None),
+    )
+    monkeypatch.setattr(host, "_ensure_root_private_directory", lambda *_args: None)
+    monkeypatch.setattr(
+        host,
+        "_atomic_write",
+        lambda path, _payload, *, mode: events.append(f"write:{path}:{mode:o}"),
+    )
+    monkeypatch.setattr(
+        host,
+        "_install_tmpfiles_asset",
+        lambda *_args: events.append("tmpfiles") or snapshot,
+    )
+
+    def reload(argv: tuple[str, ...], **_kwargs: object) -> object:
+        assert argv == ("systemctl", "daemon-reload")
+        events.append("daemon-reload")
+        raise host.HostConvergeError("reload failed")
+
+    monkeypatch.setattr(host, "_run", reload)
+    monkeypatch.setattr(
+        host,
+        "_restore_tmpfiles_asset",
+        lambda restored: events.append(f"rollback:{restored is snapshot}"),
+    )
+
+    with pytest.raises(
+        host.HostConvergeError,
+        match="asset reload failed and tmpfiles was rolled back",
+    ):
+        host._install_assets(source)
+
+    assert events[-3:] == ["tmpfiles", "daemon-reload", "rollback:True"]
 
 
 def test_runtime_attestation_history_is_monotonic_and_candidate_bound(
@@ -1733,7 +2082,7 @@ def test_empty_namespace_first_install_materializes_before_prepare_and_attest(
 
     def verify(*_args: object) -> str:
         assert events[:2] == ["bootstrap-empty-domain-roots", "materialize-no-fleet"]
-        events.append("verify-19-node-candidate")
+        events.append("verify-20-node-candidate")
         return source_tree
 
     monkeypatch.setattr(host, "verify_candidate", verify)
@@ -2111,7 +2460,11 @@ def test_domain_attest_sends_fixed_worker_and_fleet_seed_archive(
 
     monkeypatch.setattr(Path, "lstat", lstat)
     monkeypatch.setattr(host, "FLEET_ATTESTATION_ROOT", fleet_root)
-    monkeypatch.setattr(host, "_worker_env_seed", lambda _profile, _sha: b"ENV=reference\n")
+    monkeypatch.setattr(
+        host,
+        "_worker_env_seed",
+        lambda _profile, _sha, domain: f"POOL={domain}\n".encode(),
+    )
     monkeypatch.setattr(host, "_node_authority", authority_call)
     monkeypatch.setattr(
         host,
@@ -2122,7 +2475,7 @@ def test_domain_attest_sends_fixed_worker_and_fleet_seed_archive(
     host._publish_domain_attestations(profile, SHA, tree)
 
     assert len(envelopes) == 2
-    for envelope in envelopes:
+    for envelope, domain in zip(envelopes, ("oldlab", "gb10"), strict=True):
         assert envelope["payload_kind"] == "attestation-seed"
         payload = base64.b64decode(str(envelope["payload_base64"]), validate=True)
         with tarfile.open(fileobj=io.BytesIO(payload), mode="r:") as archive:
@@ -2130,10 +2483,31 @@ def test_domain_attest_sends_fixed_worker_and_fleet_seed_archive(
                 "worker.env",
                 "fleet.json",
             }
-            assert archive.extractfile("worker.env").read() == b"ENV=reference\n"
+            assert archive.extractfile("worker.env").read() == f"POOL={domain}\n".encode()
             assert archive.extractfile("fleet.json").read() == b'{"fleet":"proof"}\n'
     assert "--candidate-tree" in collect_calls[0]
     assert tree in collect_calls[0]
+
+
+@pytest.mark.parametrize("sandbox", host.SANDBOXES)
+def test_worker_env_seed_uses_checked_in_domain_capacity_contract(
+    tmp_path: Path,
+    sandbox: str,
+) -> None:
+    profile = _temporary_profile(tmp_path, sandbox)
+
+    def parse(payload: bytes) -> dict[str, str]:
+        return dict(line.split("=", 1) for line in payload.decode().splitlines())
+
+    oldlab = parse(host._worker_env_seed(profile, SHA, "oldlab"))
+    gb10 = parse(host._worker_env_seed(profile, SHA, "gb10"))
+
+    assert oldlab["LOOM_WORKER_POOL_NAME"] == "oldlab"
+    assert oldlab["LOOM_WORKER_MAX_CONCURRENT"] == "4"
+    assert gb10["LOOM_WORKER_POOL_NAME"] == "gb10"
+    assert gb10["LOOM_WORKER_MAX_CONCURRENT"] == "8"
+    assert oldlab["LOOM_WORKER_SANDBOX_IDENTITY"] == sandbox
+    assert gb10["LOOM_WORKER_CANDIDATE_SHA"] == SHA
 
 
 def test_host_installer_and_profiles_require_the_full_ci_matrix() -> None:
@@ -2193,3 +2567,8 @@ def test_staging_allocation_config_separates_producer_batch_and_system_mount() -
     assert config.repository_root == config.shared_mount_target / "candidates"
     assert config.worker_env_root == config.shared_mount_target / "generated"
     assert config.result_root == config.shared_mount_target / "results"
+    assert config.infrastructure_nodes == tuple(f"trt-gb10-{index}" for index in range(1, 16))
+    assert config.allowed_nodes == config.infrastructure_nodes
+    assert set(config.host_aliases) == set(config.infrastructure_nodes)
+    assert config.host_aliases["trt-gb10-7"] == "gx10-0faf"
+    assert "trt-gb10-7" in config.allowed_nodes

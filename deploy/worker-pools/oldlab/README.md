@@ -128,12 +128,30 @@ Supporting layout, shared across environments:
 - Kubeconfig: `/etc/loom/kubeconfig/<environment>.yaml`.
 - Health check: `systemctl --user is-active loom-autoscaler-oldlab-<env>.timer`.
 
-The development OLDLAB supervisor ships `enabled=false` and `active=false`
-(fail-closed): applying the profile writes the unit files but does not enable or
-start the timer. Activation follows the same #827 (external-Slurm acceptance)
-and #896 (container-isolation) gates that release the OLDLAB pool itself. There
-is no committed OLDLAB supervisor for staging or production yet; those are a
-tracked follow-up.
+The development and staging OLDLAB supervisors are committed with
+`enabled=false` and `active=false` (fail-closed): applying either profile writes
+the unit files but does not enable or start the timer. Production does not yet
+carry an OLDLAB supervisor. Do not enable the staging pool or timer merely
+because #896 evidence exists. Activation requires all of the following to pass
+for the exact candidate and checked-in values:
+
+1. verified platform-health evidence imported from its fixed root-owned path,
+   including the deterministic OLDLAB capacity recommendation;
+2. #827 external-allocation authority wired for the OLDLAB pool, not only GB10;
+3. the repository capacity-promotion check exact-matching that evidence to both
+   the OLDLAB autoscaler policy and supervisor desired state.
+
+Keep both rows disabled on any missing, stale, candidate-mismatched, or
+config-mismatched input. Promotion creates a reviewed repository change; it
+does not install, apply, enable, or start the live supervisor.
+`scripts/ops/developer_sandbox_capacity_promotion.py check` verifies either
+that exact fail-closed state or a fully provenance-bound enabled repository
+state without reading live root paths. Its `render` command accepts no paths or
+capacity overrides, requires fresh fixed-root evidence plus the exact disabled
+base, and prints the complete proposed `deploy/environment-state/staging.toml`
+unified diff to stdout. That same diff adds OLDLAB to the external prerequisite
+set and uses the shared staging generated-env directory. Runtime activation
+independently requires new fresh current evidence.
 
 To temporarily exclude a node, remove it from both `worker-plan.csv` and
 `LOOM_CP_SLURM_WORKER_CONTROLLER_ALLOWED_NODES`, or lower

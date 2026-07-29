@@ -3,6 +3,22 @@ expected_hostname = "trt-eai-oldlab-2"
 candidate_parent = "/opt/loom-shared-capacity/candidates"
 current_link = "/opt/loom-shared-capacity/current"
 state_root = "/var/lib/loom-shared-capacity"
+bootstrap_requires_zero_capacity = true
+positive_admission_requires_platform_health = true
+acceptance_contract_ttl_seconds = 86400
+acceptance_default_phase_ttl_seconds = 7200
+acceptance_mixed_non_loom_ttl_seconds = 21600
+acceptance_ttl_cleanup_seconds = 120
+acceptance_phases = [
+  "multi_candidate_overlap",
+  "large_batch_burst",
+  "fairness_contention",
+  "mixed_non_loom",
+  "cancel_cleanup",
+  "ttl_cleanup",
+  "submit_host_restart",
+  "worker_crash",
+]
 adapter_instances = [
   "qianyi-gb10",
   "qianyi-oldlab",

@@ -12,6 +12,8 @@ from pathlib import Path
 import pytest
 from scripts.ops import developer_sandbox_node_transport as transport
 
+RUNBOOK = Path(__file__).resolve().parents[2] / "docs/runbooks/developer-sandbox-node-transport.md"
+
 
 def _public_key(seed: int = 1) -> bytes:
     algorithm = b"ssh-ed25519"
@@ -46,6 +48,38 @@ def _fixture_file(path: Path, payload: bytes, mode: int) -> Path:
     path.write_bytes(payload)
     path.chmod(mode)
     return path
+
+
+def _allow_ambient_tmp_ancestors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Trust only pre-existing writable ancestors of pytest's temporary root."""
+    safe_external_directory = transport._safe_external_directory
+    ambient_writable_ancestors: set[tuple[int, int]] = set()
+    for ancestor in tmp_path.parents:
+        metadata = ancestor.stat()
+        if (
+            stat.S_ISDIR(metadata.st_mode)
+            and metadata.st_uid in {0, os.getuid()}
+            and stat.S_IMODE(metadata.st_mode) & 0o022
+        ):
+            ambient_writable_ancestors.add((metadata.st_dev, metadata.st_ino))
+
+    def safe(
+        metadata: os.stat_result,
+        *,
+        expected_uid: int,
+    ) -> bool:
+        return (
+            safe_external_directory(
+                metadata,
+                expected_uid=expected_uid,
+            )
+            or (metadata.st_dev, metadata.st_ino) in ambient_writable_ancestors
+        )
+
+    monkeypatch.setattr(transport, "_safe_external_directory", safe)
 
 
 def _simulate_root_filesystem(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -107,7 +141,7 @@ def _simulate_root_filesystem(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(transport, "ROOT_UID", uid)
     monkeypatch.setattr(transport, "ROOT_GID", gid)
     monkeypatch.setattr(transport.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(transport, "_require_direct_external_root", lambda: None)
+    monkeypatch.setattr(transport, "_require_persistent_install_root", lambda: None)
     monkeypatch.setattr(transport, "_hostname", lambda: "trt-eai-oldlab-2")
 
 
@@ -115,6 +149,7 @@ def _bootstrap_oldlab2(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[transport.Layout, dict[str, Path], dict[str, Path], Path]:
+    _allow_ambient_tmp_ancestors(tmp_path, monkeypatch)
     _simulate_root_filesystem(monkeypatch)
     config = transport.load_config()
     layout = _layout(tmp_path)
@@ -162,12 +197,13 @@ def _bootstrap_oldlab2(
     return layout, identities, public_keys, known_hosts
 
 
-def test_checked_in_route_is_closed_and_excludes_quarantined_node() -> None:
+def test_checked_in_route_is_closed_and_includes_infrastructure_only_node() -> None:
     config = transport.load_config()
 
-    assert len(config.nodes) == 19
-    assert transport.FORBIDDEN_NODE not in config.nodes
+    assert len(config.nodes) == 20
+    assert config.nodes["trt-gb10-7"].hostname == "gx10-0faf"
     assert config.roles["oldlab2-controller"].verbs == {"transact", "check"}
+    assert "trt-gb10-7" in config.roles["oldlab2-controller"].targets
     assert config.roles["oldlab1-publisher"].verbs == {"transact", "check"}
     assert set(config.roles["oldlab1-publisher"].targets) == {
         "oldlab-1",
@@ -181,27 +217,150 @@ def test_checked_in_route_is_closed_and_excludes_quarantined_node() -> None:
     assert set(config.roles["gb10-1-publisher"].targets) >= {
         "oldlab-1",
         "oldlab-2",
+        "trt-gb10-7",
     }
     assert config.roles["gb10-1-oldlab-jump"].targets == ("oldlab-2",)
     assert config.roles["oldlab2-gb10-jump"].kind == "proxy"
     assert set(config.roles["oldlab2-gb10-jump"].targets) == {
-        f"trt-gb10-{index}" for index in (2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15)
+        f"trt-gb10-{index}" for index in range(2, 16)
     }
 
 
-def test_route_config_rejects_forbidden_node_even_when_toml_is_valid(
-    tmp_path: Path,
+def test_bootstrap_inventory_is_secret_free_canonical_and_machine_derived(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    payload = transport.CHECKED_IN_CONFIG.read_text(encoding="utf-8").replace(
-        'name = "trt-gb10-8"',
-        'name = "trt-gb10-7"',
-        1,
+    config = transport.load_config()
+    monkeypatch.setattr(
+        transport,
+        "_require_persistent_install_root",
+        lambda: pytest.fail("read-only inventory attempted to require root"),
     )
-    path = tmp_path / "routes.toml"
-    path.write_text(payload, encoding="utf-8")
 
-    with pytest.raises(transport.TransportError, match="forbidden node"):
-        transport.load_config(path)
+    report = transport.bootstrap_inventory()
+
+    assert set(report) == {
+        "schema_version",
+        "kind",
+        "source",
+        "mutation_authorized",
+        "informational_only",
+        "node_count",
+        "initiator_count",
+        "excluded_nodes",
+        "nodes",
+        "initiators",
+    }
+    assert report == {
+        "schema_version": 1,
+        "kind": "loom.developer-sandbox.node-transport-bootstrap-inventory",
+        "source": "deploy/developer-sandboxes/node-authority-transport.toml",
+        "mutation_authorized": False,
+        "informational_only": True,
+        "node_count": 20,
+        "initiator_count": 3,
+        "excluded_nodes": [],
+        "nodes": [
+            {
+                "node": node,
+                "canonical_hostname": config.nodes[node].hostname,
+                "server_roles": sorted(transport._server_roles(config, node)),
+            }
+            for node in config.nodes
+        ],
+        "initiators": [
+            {
+                "node": initiator,
+                "canonical_hostname": config.nodes[initiator].hostname,
+                "client_roles": sorted(transport._client_roles(config, initiator)),
+                "required_known_hosts_endpoints": sorted(
+                    transport._required_known_hosts(config, initiator),
+                ),
+            }
+            for initiator in ("oldlab-1", "oldlab-2", "trt-gb10-1")
+        ],
+    }
+    assert {row["node"] for row in report["nodes"]} == set(config.nodes)
+    assert not {
+        "request_id",
+        "receipt",
+        "status",
+        "execute",
+        "identity_path",
+        "private_key",
+        "public_key",
+        "known_hosts_path",
+    } & set(report)
+
+    assert transport.main(["bootstrap-inventory"]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert captured.out == transport._canonical_json(report).decode("ascii")
+
+    parser = transport._parser()
+    for forbidden in ("--execute", "--identity", "--known-hosts", "/tmp/input"):
+        with pytest.raises(SystemExit):
+            parser.parse_args(["bootstrap-inventory", forbidden])
+
+
+def test_runbook_role_matrix_and_publisher_verbs_match_checked_in_config() -> None:
+    config = transport.load_config()
+    lines = RUNBOOK.read_text(encoding="utf-8").splitlines()
+    assert (
+        "python3 scripts/ops/developer_sandbox_node_transport.py bootstrap-inventory"
+        in "\n".join(lines)
+    )
+    assert "The output is informational inventory, not an authority receipt" in "\n".join(lines)
+    groups = (
+        ("`oldlab-1`", ("oldlab-1",)),
+        ("`oldlab-2`", ("oldlab-2",)),
+        (
+            "`oldlab-3` through `oldlab-5`",
+            tuple(f"oldlab-{index}" for index in range(3, 6)),
+        ),
+        ("`trt-gb10-1`", ("trt-gb10-1",)),
+        (
+            "`trt-gb10-2` through `trt-gb10-15`",
+            tuple(f"trt-gb10-{index}" for index in range(2, 16)),
+        ),
+    )
+    assert {node for _label, nodes in groups for node in nodes} == set(config.nodes)
+    expected_role_table = [
+        "| Server node(s) | Exact public-key roles |",
+        "| --- | --- |",
+    ]
+    for label, nodes in groups:
+        role_sets = {tuple(sorted(transport._server_roles(config, node))) for node in nodes}
+        assert len(role_sets) == 1
+        rendered_roles = ", ".join(f"`{role}`" for role in role_sets.pop())
+        expected_role_table.append(f"| {label} | {rendered_roles} |")
+    role_table_start = lines.index(expected_role_table[0])
+    assert lines[role_table_start : role_table_start + len(expected_role_table)] == (
+        expected_role_table
+    )
+    assert lines[role_table_start + len(expected_role_table)] == ""
+
+    publisher_roles = ("oldlab1-publisher", "gb10-1-publisher")
+    expected_verb_table = [
+        "| Publisher authority role | Exact verbs |",
+        "| --- | --- |",
+        *[
+            "| `{role}` | {verbs} |".format(
+                role=role,
+                verbs=", ".join(f"`{verb}`" for verb in sorted(config.roles[role].verbs)),
+            )
+            for role in publisher_roles
+        ],
+    ]
+    verb_table_start = lines.index(expected_verb_table[0])
+    assert lines[verb_table_start : verb_table_start + len(expected_verb_table)] == (
+        expected_verb_table
+    )
+    assert lines[verb_table_start + len(expected_verb_table)] == ""
+    assert config.roles["oldlab1-publisher"].verbs == {"check", "transact"}
+    assert config.roles["gb10-1-publisher"].verbs == {"check"}
+    assert "`oldlab1-publisher` may perform its fixed publication transactions" in "\n".join(lines)
+    assert "`gb10-1-publisher` is check-only" in "\n".join(lines)
 
 
 def test_routes_distinguish_oldlab2_jump_from_gb10_direct_access() -> None:
@@ -210,6 +369,20 @@ def test_routes_distinguish_oldlab2_jump_from_gb10_direct_access() -> None:
     controller = config.route("oldlab-2", "trt-gb10-14")
     publisher = config.route("trt-gb10-1", "trt-gb10-14")
 
+    assert config.route("oldlab-1", "oldlab-1") == transport.Route(
+        initiator="oldlab-1",
+        node="oldlab-1",
+        address="192.168.50.103",
+        port=22,
+        jump=None,
+    )
+    assert config.route("oldlab-2", "oldlab-1") == transport.Route(
+        initiator="oldlab-2",
+        node="oldlab-1",
+        address="192.168.50.103",
+        port=22,
+        jump=None,
+    )
     assert controller == transport.Route(
         initiator="oldlab-2",
         node="trt-gb10-14",
@@ -218,6 +391,20 @@ def test_routes_distinguish_oldlab2_jump_from_gb10_direct_access() -> None:
         jump="trt-gb10-1",
     )
     assert publisher.jump is None
+    assert config.route("oldlab-2", "trt-gb10-7") == transport.Route(
+        initiator="oldlab-2",
+        node="trt-gb10-7",
+        address="192.168.20.77",
+        port=22,
+        jump="trt-gb10-1",
+    )
+    assert config.route("trt-gb10-1", "trt-gb10-7") == transport.Route(
+        initiator="trt-gb10-1",
+        node="trt-gb10-7",
+        address="192.168.20.77",
+        port=22,
+        jump=None,
+    )
     assert config.route("oldlab-2", "trt-gb10-1").port == 2221
     assert config.route("trt-gb10-1", "oldlab-1") == transport.Route(
         initiator="trt-gb10-1",
@@ -243,6 +430,7 @@ def test_routes_distinguish_oldlab2_jump_from_gb10_direct_access() -> None:
             ("authority", "check"),
         ),
         ("oldlab2-gb10-jump", "proxy trt-gb10-14", ("proxy", "trt-gb10-14")),
+        ("oldlab2-gb10-jump", "proxy trt-gb10-7", ("proxy", "trt-gb10-7")),
     ],
 )
 def test_forced_dispatch_maps_only_closed_commands(
@@ -268,7 +456,7 @@ def test_forced_dispatch_maps_only_closed_commands(
             "oldlab2-controller",
             "/usr/bin/sudo -n /usr/local/libexec/loom-developer-sandbox-node-authority check extra",
         ),
-        ("oldlab2-gb10-jump", "proxy trt-gb10-7"),
+        ("oldlab2-gb10-jump", "proxy trt-gb10-16"),
         ("oldlab2-gb10-jump", "proxy trt-gb10-14 22"),
         ("oldlab2-gb10-jump", "sh"),
     ],
@@ -340,7 +528,7 @@ def test_local_authority_uses_qianyi_then_the_fixed_sudo_command(
         return subprocess.CompletedProcess(argv, 0, b'{"status":"succeeded"}\n', b"")
 
     monkeypatch.setattr(transport.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(transport, "_require_direct_external_root", lambda: None)
+    monkeypatch.setattr(transport, "_require_persistent_install_root", lambda: None)
     monkeypatch.setattr(transport, "_hostname", lambda: "trt-eai-oldlab-2")
     monkeypatch.setattr(transport, "validate_client_install", lambda _layout: {})
 
@@ -362,6 +550,7 @@ def test_client_bootstrap_plan_pins_external_assets_without_mutation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _allow_ambient_tmp_ancestors(tmp_path, monkeypatch)
     config = transport.load_config()
     layout = _layout(tmp_path)
     source = tmp_path / "source"
@@ -389,7 +578,7 @@ def test_client_bootstrap_plan_pins_external_assets_without_mutation(
     )
 
     monkeypatch.setattr(transport.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(transport, "_require_direct_external_root", lambda: None)
+    monkeypatch.setattr(transport, "_require_persistent_install_root", lambda: None)
     monkeypatch.setattr(transport, "_hostname", lambda: "trt-eai-oldlab-2")
 
     result = transport.bootstrap_client(
@@ -412,6 +601,7 @@ def test_server_bootstrap_plan_does_not_create_ssh_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _allow_ambient_tmp_ancestors(tmp_path, monkeypatch)
     config = transport.load_config()
     layout = _layout(tmp_path)
     source = tmp_path / "source"
@@ -423,7 +613,7 @@ def test_server_bootstrap_plan_does_not_create_ssh_directory(
     }
 
     monkeypatch.setattr(transport.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(transport, "_require_direct_external_root", lambda: None)
+    monkeypatch.setattr(transport, "_require_persistent_install_root", lambda: None)
     monkeypatch.setattr(transport, "_hostname", lambda: "gx10-01c7")
 
     result = transport.bootstrap_server(
@@ -457,6 +647,7 @@ def test_identity_and_public_key_must_match(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _allow_ambient_tmp_ancestors(tmp_path, monkeypatch)
     config = transport.load_config()
     layout = _layout(tmp_path)
     source = tmp_path / "source"
@@ -474,7 +665,7 @@ def test_identity_and_public_key_must_match(
         0o600,
     )
     monkeypatch.setattr(transport.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(transport, "_require_direct_external_root", lambda: None)
+    monkeypatch.setattr(transport, "_require_persistent_install_root", lambda: None)
     monkeypatch.setattr(transport, "_hostname", lambda: "trt-eai-oldlab-2")
 
     with pytest.raises(transport.TransportError, match="do not match"):
@@ -791,7 +982,9 @@ def test_upgrade_errors_and_reports_never_expose_private_key_bytes(
 
 def test_external_asset_rejects_writable_or_symlink_parent(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _allow_ambient_tmp_ancestors(tmp_path, monkeypatch)
     writable = tmp_path / "writable"
     writable.mkdir(mode=0o777)
     writable.chmod(0o777)
@@ -822,119 +1015,48 @@ def test_external_asset_rejects_writable_or_symlink_parent(
         )
 
 
-def test_direct_root_gate_uses_audit_loginuid_even_without_sudo_environment(
+def test_persistent_install_root_accepts_docker_chroot_authority(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    for name in tuple(os.environ):
-        if name.startswith("SUDO_"):
-            monkeypatch.delenv(name, raising=False)
+    pid1_comm = tmp_path / "comm"
+    pid1_comm.write_text("systemd\n", encoding="ascii")
+    monkeypatch.setenv("SUDO_USER", "qianyi")
+    monkeypatch.setenv("container", "docker")
 
-    loginuid = _fixture_file(tmp_path / "loginuid", b"1000\n", 0o600)
-    for value in (b"1000\n", b"4294967295\n"):
-        loginuid.write_bytes(value)
-        with pytest.raises(transport.TransportError, match="audit identity is not root"):
-            transport._require_direct_external_root(
-                loginuid_path=loginuid,
-                uid=0,
-                euid=0,
-            )
-
-    loginuid.write_bytes(b"0\n")
-    monkeypatch.setenv("SUDO_USER", "root")
-    with pytest.raises(transport.TransportError, match="external root"):
-        transport._require_direct_external_root(
-            loginuid_path=loginuid,
-            uid=0,
-            euid=0,
-        )
-
-    monkeypatch.delenv("SUDO_USER")
-    missing = tmp_path / "missing-loginuid"
-    with pytest.raises(transport.TransportError, match="unavailable"):
-        transport._require_direct_external_root(
-            loginuid_path=missing,
-            uid=0,
-            euid=0,
-        )
-
-
-@pytest.mark.parametrize(
-    "marker_name",
-    [".dockerenv", ".containerenv"],
-)
-def test_direct_root_gate_rejects_container_markers(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    marker_name: str,
-) -> None:
-    monkeypatch.delenv("container", raising=False)
-    loginuid = _fixture_file(tmp_path / "loginuid", b"0\n", 0o600)
-    marker = _fixture_file(tmp_path / marker_name, b"", 0o600)
-    cgroup = _fixture_file(tmp_path / "cgroup", b"0::/system.slice/sshd.service\n", 0o600)
-
-    with pytest.raises(transport.TransportError, match="external root"):
-        transport._require_direct_external_root(
-            loginuid_path=loginuid,
-            marker_paths=(marker,),
-            cgroup_paths=(cgroup,),
-            uid=0,
-            euid=0,
-        )
-
-
-@pytest.mark.parametrize(
-    "token",
-    ["docker", "kubepods", "containerd", "podman"],
-)
-def test_direct_root_gate_rejects_container_cgroups(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    token: str,
-) -> None:
-    monkeypatch.delenv("container", raising=False)
-    loginuid = _fixture_file(tmp_path / "loginuid", b"0\n", 0o600)
-    cgroup = _fixture_file(tmp_path / "cgroup", f"0::/{token}/scope\n".encode(), 0o600)
-
-    with pytest.raises(transport.TransportError, match="external root"):
-        transport._require_direct_external_root(
-            loginuid_path=loginuid,
-            marker_paths=(),
-            cgroup_paths=(cgroup,),
-            uid=0,
-            euid=0,
-        )
-
-
-def test_direct_root_gate_requires_readable_non_container_cgroup_identity(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("container", raising=False)
-    loginuid = _fixture_file(tmp_path / "loginuid", b"0\n", 0o600)
-    host_cgroup = _fixture_file(
-        tmp_path / "host-cgroup",
-        b"0::/system.slice/sshd.service\n",
-        0o600,
-    )
-    missing = tmp_path / "missing-cgroup"
-
-    with pytest.raises(transport.TransportError, match="cgroup identity is unavailable"):
-        transport._require_direct_external_root(
-            loginuid_path=loginuid,
-            marker_paths=(),
-            cgroup_paths=(missing,),
-            uid=0,
-            euid=0,
-        )
-
-    transport._require_direct_external_root(
-        loginuid_path=loginuid,
-        marker_paths=(),
-        cgroup_paths=(host_cgroup,),
+    transport._require_persistent_install_root(
+        root_path=tmp_path,
+        pid1_root_path=tmp_path,
+        pid1_comm_path=pid1_comm,
         uid=0,
         euid=0,
     )
+
+
+def test_persistent_install_root_rejects_nonroot_or_nonhost_systemd_view(
+    tmp_path: Path,
+) -> None:
+    pid1_comm = tmp_path / "comm"
+    pid1_comm.write_text("systemd\n", encoding="ascii")
+    other_root = tmp_path / "other-root"
+    other_root.mkdir()
+
+    with pytest.raises(transport.TransportError, match="host-root authority"):
+        transport._require_persistent_install_root(
+            root_path=tmp_path,
+            pid1_root_path=tmp_path,
+            pid1_comm_path=pid1_comm,
+            uid=1000,
+            euid=1000,
+        )
+    with pytest.raises(transport.TransportError, match="systemd view is invalid"):
+        transport._require_persistent_install_root(
+            root_path=tmp_path,
+            pid1_root_path=other_root,
+            pid1_comm_path=pid1_comm,
+            uid=0,
+            euid=0,
+        )
 
 
 @pytest.mark.parametrize("mutation", ["rename", "rewrite"])
@@ -943,6 +1065,7 @@ def test_external_asset_rejects_post_read_path_or_byte_drift(
     monkeypatch: pytest.MonkeyPatch,
     mutation: str,
 ) -> None:
+    _allow_ambient_tmp_ancestors(tmp_path, monkeypatch)
     source = tmp_path / "safe-source"
     source.mkdir(mode=0o700)
     asset = _fixture_file(source / "asset", b"original", 0o600)
@@ -1055,6 +1178,6 @@ def test_program_source_contains_no_key_generation_or_accept_new() -> None:
     assert "StrictHostKeyChecking=accept-new" not in source
     assert "SSH_AUTH_SOCK" not in source
     assert "PasswordAuthentication=yes" not in source
-    assert "trt-gb10-7" not in transport.CHECKED_IN_CONFIG.read_text(encoding="utf-8")
+    assert "trt-gb10-7" in transport.CHECKED_IN_CONFIG.read_text(encoding="utf-8")
     assert stat.S_IMODE(Path(transport.__file__).stat().st_mode) == 0o755
     assert Path(transport.__file__).read_bytes().startswith(b"#!/usr/bin/python3 -I\n")

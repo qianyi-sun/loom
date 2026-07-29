@@ -167,7 +167,7 @@ def _fixture(
                 f'adapter_state_path = "{state_path}"',
                 f'sandbox_state_path = "{sandbox_state_path}"',
                 f'runtime_attestation_root = "{root / "runtime-attestations"}"',
-                "max_slots_bound = 112",
+                "max_slots_bound = 120",
                 "timeout_seconds = 10",
                 "",
             ),
@@ -1413,7 +1413,7 @@ def test_checked_in_configs_cover_three_sandboxes_and_two_pools() -> None:
     assert len({item.observation_path for item in configs}) == 6
     assert len({item.adapter_state_path for item in configs}) == 6
     assert {(item.pool_name, item.max_slots_bound) for item in configs} == {
-        ("gb10", 112),
+        ("gb10", 120),
         ("oldlab", 20),
     }
     for config in configs:
@@ -1461,11 +1461,11 @@ def test_checked_in_gb10_slice_preserves_burst_and_node_headroom() -> None:
     actuator = policy["actuator_config"]
     capacity = profile["capacity"]
 
-    assert template["slot_budget"] == policy["max_slots"] == 112
+    assert template["slot_budget"] == policy["max_slots"] == 120
     assert actuator["requested_concurrency"] == 8
     assert actuator["requested_cpus"] == actuator["container_cpus"] * 8 == 16
     assert actuator["requested_memory_mib"] == actuator["container_memory_mib"] * 8 == 92000
-    assert actuator["max_jobs"] * actuator["requested_concurrency"] == 112
+    assert actuator["max_jobs"] * actuator["requested_concurrency"] == 120
     assert capacity["gpu_tres_per_slot"] * actuator["requested_concurrency"] == 1
     assert actuator["requested_cpus"] < 20
     assert actuator["requested_memory_mib"] < 115000

@@ -34,11 +34,11 @@ REVOCATION_LEDGER_PATH = Path("/etc/loom/staging-rollout-gb10-trust-revocation.j
 LIFECYCLE_LOCK_PATH = Path("/etc/loom/staging-rollout-gb10-trust.lock")
 _INHERITED_LOCK_FD_ENV = "LOOM_GB10_TRUST_LOCK_FD"
 _EXPECTED_HOSTS = tuple(f"trt-gb10-{number}" for number in range(1, 16))
-_EXCLUDED_HOSTS = frozenset({"trt-gb10-7"})
+_EXCLUDED_HOSTS: frozenset[str] = frozenset()
 _ACTIVE_HOSTS = tuple(host for host in _EXPECTED_HOSTS if host not in _EXCLUDED_HOSTS)
 _EXPECTED_HOSTNAMES = (
     "207.35.188.227",
-    *(f"192.168.20.{number}" for number in range(12, 26)),
+    *("192.168.20.77" if number == 7 else f"192.168.20.{number + 10}" for number in range(2, 16)),
 )
 _EXPECTED_PORTS = (2221,) + (22,) * 14
 _EXPECTED_REMOTE_USER = "qianyi"
@@ -612,7 +612,14 @@ def _validate_known_hosts_authority(payload: bytes) -> None:
     entries = [line for line in lines if line and not line.startswith("#")]
     expected_hosts = (
         "[207.35.188.227]:2221,trt-gb10-1",
-        *(f"192.168.20.{number + 10},trt-gb10-{number}" for number in range(2, 16)),
+        *(
+            (
+                "192.168.20.77,trt-gb10-7"
+                if number == 7
+                else f"192.168.20.{number + 10},trt-gb10-{number}"
+            )
+            for number in range(2, 16)
+        ),
     )
     if len(entries) != len(expected_hosts):
         raise TrustConfigurationError("GB10 known-hosts authority must contain exactly 15 hosts")

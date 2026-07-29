@@ -1,11 +1,12 @@
 #!/usr/bin/python3 -I
 """Fixed, key-isolated transport for developer-sandbox node authority.
 
-This program deliberately has no general SSH surface.  A direct external root
-administrator supplies pre-existing root-owned identities, matching public
-keys, and a pinned known_hosts file.  Bootstrap copies those assets to fixed
-root-owned paths and records their digests.  Runtime callers may select only a
-closed node and one of the node authority's two fixed verbs.
+This program deliberately has no general SSH surface.  A persistent host-root
+bootstrap channel supplies pre-existing root-owned identities, matching public
+keys, and a pinned known_hosts file.  That channel may be a direct root session
+or the repository's one-shot Docker/chroot bootstrap.  Bootstrap copies those
+assets to fixed root-owned paths and records their digests.  Runtime callers
+may select only a closed node and one of the node authority's two fixed verbs.
 
 The same installed program is the forced command for the dedicated public
 keys.  Authority roles map exactly to ``transact`` or ``check``.  The GB10
@@ -59,7 +60,6 @@ DEFAULT_INVOKE_TIMEOUT_SECONDS: Final = 120
 INFRASTRUCTURE_CONVERGE_TIMEOUT_SECONDS: Final = 3600
 NAME_RE: Final = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 ROLE_RE: Final = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
-FORBIDDEN_NODE: Final = "trt-gb10-7"
 ALLOWED_VERBS: Final = frozenset({"transact", "check"})
 SSH: Final = "/usr/bin/ssh"
 SUDO: Final = "/usr/bin/sudo"
@@ -67,17 +67,6 @@ RUNUSER: Final = "/usr/sbin/runuser"
 SSH_KEYGEN: Final = "/usr/bin/ssh-keygen"
 ROOT_UID: Final = 0
 ROOT_GID: Final = 0
-AUDIT_LOGINUID: Final = Path("/proc/self/loginuid")
-CONTAINER_MARKERS: Final = (Path("/.dockerenv"), Path("/run/.containerenv"))
-CONTAINER_CGROUP_PATHS: Final = (Path("/proc/self/cgroup"), Path("/proc/1/cgroup"))
-CONTAINER_CGROUP_TOKENS: Final = (
-    "docker",
-    "kubepods",
-    "containerd",
-    "podman",
-    "libpod",
-    "lxc",
-)
 REQUEST_FIELDS: Final = {
     "schema_version",
     "request_id",
@@ -318,8 +307,8 @@ def _load_config_payload(raw: bytes) -> TransportConfig:
         payload = tomllib.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         raise TransportError("transport route configuration is unavailable") from exc
-    if len(raw) > MAX_ASSET_BYTES or FORBIDDEN_NODE.encode() in raw:
-        raise TransportError("transport route configuration contains a forbidden node")
+    if len(raw) > MAX_ASSET_BYTES:
+        raise TransportError("transport route configuration exceeds its size bound")
     root = _exact_dict(
         payload,
         {
@@ -662,131 +651,30 @@ def _validate_external_parent_chain(path: Path, *, expected_uid: int) -> None:
             os.close(descriptor)
 
 
-def _read_audit_loginuid(path: Path = AUDIT_LOGINUID) -> int:
-    try:
-        lexical = path.lstat()
-        descriptor = os.open(
-            path,
-            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
-        )
-    except OSError as exc:
-        raise TransportError(
-            "direct external root audit identity is unavailable",
-        ) from exc
-    try:
-        before = os.fstat(descriptor)
-        payload = _read_external_fd_twice(descriptor, limit=32)
-        after = os.fstat(descriptor)
-        current = path.lstat()
-        if (
-            not stat.S_ISREG(before.st_mode)
-            or stat.S_ISLNK(lexical.st_mode)
-            or _metadata_identity(lexical) != _metadata_identity(before)
-            or _metadata_identity(before) != _metadata_identity(after)
-            or _metadata_identity(after) != _metadata_identity(current)
-        ):
-            raise TransportError("direct external root audit identity is invalid")
-    except OSError as exc:
-        raise TransportError(
-            "direct external root audit identity is unavailable",
-        ) from exc
-    finally:
-        os.close(descriptor)
-    try:
-        value = payload.decode("ascii").strip()
-    except UnicodeDecodeError as exc:
-        raise TransportError("direct external root audit identity is invalid") from exc
-    if value != "0":
-        raise TransportError("direct external root audit identity is not root")
-    return 0
-
-
-def _read_container_cgroup(path: Path) -> str:
-    try:
-        lexical = path.lstat()
-        descriptor = os.open(
-            path,
-            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
-        )
-    except OSError as exc:
-        raise TransportError(
-            "direct external root cgroup identity is unavailable",
-        ) from exc
-    try:
-        before = os.fstat(descriptor)
-        payload = _read_external_fd_twice(descriptor, limit=64 * 1024)
-        after = os.fstat(descriptor)
-        current = path.lstat()
-        if (
-            not stat.S_ISREG(before.st_mode)
-            or stat.S_ISLNK(lexical.st_mode)
-            or _metadata_identity(lexical) != _metadata_identity(before)
-            or _metadata_identity(before) != _metadata_identity(after)
-            or _metadata_identity(after) != _metadata_identity(current)
-        ):
-            raise TransportError("direct external root cgroup identity is invalid")
-    except OSError as exc:
-        raise TransportError(
-            "direct external root cgroup identity is unavailable",
-        ) from exc
-    finally:
-        os.close(descriptor)
-    try:
-        return payload.decode("utf-8").lower()
-    except UnicodeDecodeError as exc:
-        raise TransportError("direct external root cgroup identity is invalid") from exc
-
-
-def _reject_containerized_root(
+def _require_persistent_install_root(
     *,
-    marker_paths: Sequence[Path] = CONTAINER_MARKERS,
-    cgroup_paths: Sequence[Path] = CONTAINER_CGROUP_PATHS,
-) -> None:
-    if os.environ.get("container"):
-        raise TransportError(
-            "transport operation requires a direct external root administrator",
-        )
-    for marker in marker_paths:
-        try:
-            marker.lstat()
-        except FileNotFoundError:
-            continue
-        except OSError as exc:
-            raise TransportError(
-                "direct external root container marker is unavailable",
-            ) from exc
-        raise TransportError(
-            "transport operation requires a direct external root administrator",
-        )
-    if not cgroup_paths:
-        raise TransportError("direct external root cgroup identity is unavailable")
-    for path in cgroup_paths:
-        cgroup = _read_container_cgroup(path)
-        if any(token in cgroup for token in CONTAINER_CGROUP_TOKENS):
-            raise TransportError(
-                "transport operation requires a direct external root administrator",
-            )
-
-
-def _require_direct_external_root(
-    *,
-    loginuid_path: Path = AUDIT_LOGINUID,
-    marker_paths: Sequence[Path] = CONTAINER_MARKERS,
-    cgroup_paths: Sequence[Path] = CONTAINER_CGROUP_PATHS,
+    root_path: Path = Path("/"),
+    pid1_root_path: Path = Path("/proc/1/root"),
+    pid1_comm_path: Path = Path("/proc/1/comm"),
     uid: int | None = None,
     euid: int | None = None,
 ) -> None:
     real_uid = os.getuid() if uid is None else uid
     effective_uid = os.geteuid() if euid is None else euid
-    if real_uid != 0 or effective_uid != 0 or any(name.startswith("SUDO_") for name in os.environ):
+    if real_uid != 0 or effective_uid != 0:
         raise TransportError(
-            "transport operation requires a direct external root administrator",
+            "transport operation requires persistent host-root authority",
         )
-    _read_audit_loginuid(loginuid_path)
-    _reject_containerized_root(
-        marker_paths=marker_paths,
-        cgroup_paths=cgroup_paths,
-    )
+    try:
+        root = root_path.stat()
+        pid1_root = pid1_root_path.stat()
+        pid1_comm = pid1_comm_path.read_text(encoding="ascii").strip()
+    except OSError as exc:
+        raise TransportError(
+            "persistent host-root systemd view is unavailable",
+        ) from exc
+    if (root.st_dev, root.st_ino) != (pid1_root.st_dev, pid1_root.st_ino) or pid1_comm != "systemd":
+        raise TransportError("persistent host-root systemd view is invalid")
 
 
 def _decode_public_key(payload: bytes) -> tuple[bytes, str]:
@@ -1024,7 +912,7 @@ def bootstrap_client(
     expected_root_uid: int = 0,
     public_resolver: Callable[[Path], bytes] = _derive_public_key,
 ) -> dict[str, Any]:
-    _require_direct_external_root()
+    _require_persistent_install_root()
     layout = default_layout() if layout is None else layout
     route_payload = _safe_external_file(
         CHECKED_IN_CONFIG,
@@ -1144,6 +1032,41 @@ def _server_roles(config: TransportConfig, node: str) -> set[str]:
     return roles
 
 
+def bootstrap_inventory() -> dict[str, Any]:
+    """Render the secret-free, non-authoritative external bootstrap checklist."""
+    config = load_config()
+    initiators = sorted({role.initiator for role in config.roles.values()})
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "loom.developer-sandbox.node-transport-bootstrap-inventory",
+        "source": "deploy/developer-sandboxes/node-authority-transport.toml",
+        "mutation_authorized": False,
+        "informational_only": True,
+        "node_count": len(config.nodes),
+        "initiator_count": len(initiators),
+        "excluded_nodes": [],
+        "nodes": [
+            {
+                "node": node,
+                "canonical_hostname": config.nodes[node].hostname,
+                "server_roles": sorted(_server_roles(config, node)),
+            }
+            for node in config.nodes
+        ],
+        "initiators": [
+            {
+                "node": initiator,
+                "canonical_hostname": config.nodes[initiator].hostname,
+                "client_roles": sorted(_client_roles(config, initiator)),
+                "required_known_hosts_endpoints": sorted(
+                    _required_known_hosts(config, initiator),
+                ),
+            }
+            for initiator in initiators
+        ],
+    }
+
+
 def _authorized_key_line(role: Role, public_key: bytes) -> str:
     key = public_key.decode("ascii").strip()
     command = f"{LIBEXEC} forced {role.name}"
@@ -1209,7 +1132,7 @@ def bootstrap_server(
     layout: Layout | None = None,
     expected_root_uid: int = 0,
 ) -> dict[str, Any]:
-    _require_direct_external_root()
+    _require_persistent_install_root()
     layout = default_layout() if layout is None else layout
     route_payload = _safe_external_file(
         CHECKED_IN_CONFIG,
@@ -1928,7 +1851,7 @@ def upgrade(
     expected_root_uid: int = 0,
     public_resolver: Callable[[Path], bytes] = _derive_public_key,
 ) -> dict[str, Any]:
-    _require_direct_external_root()
+    _require_persistent_install_root()
     layout = default_layout() if layout is None else layout
     if not _exists(layout.config) or not _exists(layout.libexec):
         raise TransportError("transport upgrade requires an installed transport")
@@ -2566,6 +2489,8 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    subparsers.add_parser("bootstrap-inventory", allow_abbrev=False)
+
     client = subparsers.add_parser("bootstrap-client", allow_abbrev=False)
     client.add_argument("--identity", action="append", default=[], metavar="ROLE=PATH")
     client.add_argument("--public-key", action="append", default=[], metavar="ROLE=PATH")
@@ -2610,7 +2535,9 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(list(argv) if argv is not None else None)
     try:
-        if args.command == "bootstrap-client":
+        if args.command == "bootstrap-inventory":
+            sys.stdout.buffer.write(_canonical_json(bootstrap_inventory()))
+        elif args.command == "bootstrap-client":
             report = bootstrap_client(
                 identity_sources=_parse_role_paths(args.identity, "identity"),
                 public_key_sources=_parse_role_paths(args.public_key, "public key"),

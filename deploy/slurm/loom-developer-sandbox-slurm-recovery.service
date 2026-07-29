@@ -1,0 +1,24 @@
+[Unit]
+Description=Recover candidate-owned developer sandbox Slurm maintenance
+After=network-online.target remote-fs.target docker.service slurmd.service
+Wants=network-online.target remote-fs.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/bin/python3 -I -B /usr/local/libexec/loom-developer-sandbox-slurm-recovery recover-drain --execute
+TimeoutStartSec=5min
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+

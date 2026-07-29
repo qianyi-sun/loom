@@ -49,12 +49,18 @@ broker service identity is installed. In that bootstrap state, only a
 root-invoked broker may initialize the database. Never grant a sandbox account
 write access to the broker authority.
 
-## One-time node-authority bootstrap
+## Persistent node-authority bootstrap
 
-The oldlab2 installer does not require, request, or emulate general remote
-root. Before the first candidate can be installed, an external root
-administrator must install the fixed node authority on every declared OLDLAB
-and GB10 peer from a clean, root-owned checkout of the exact candidate tree:
+Before the first candidate can be installed, persist the fixed node authority
+on every declared OLDLAB and GB10 peer. The supported root channels are either
+a host-root session or the repository's one-shot Docker bootstrap. Docker
+daemon access is treated as the initial host-root authority: the container
+chroots into a writable bind of the host root, installs the fixed authority on
+the host, performs installed-state readback, and exits. Docker is not a
+runtime dependency after that transaction.
+
+From a clean, root-owned checkout of the exact candidate tree, the direct
+channel is:
 
 ```bash
 python3 scripts/ops/developer_sandbox_node_authority.py bootstrap \
@@ -67,13 +73,58 @@ python3 scripts/ops/developer_sandbox_node_authority.py bootstrap \
   --execute
 ```
 
-Plan mode is read-only. Execute mode rejects sudo-derived invocation, requires
-the local canonical node identity, verifies exact clean Git SHA/tree and
-root-owned non-writable source assets, installs the fixed source, policy,
-lock/journal/receipt roots, wrapper, and finally the validated sudoers file.
-It rolls back only files and directories created by a failed attempt. Docker
-group membership, a privileged container, a host-root bind, raw root SSH, or a
-temporary `NOPASSWD` grant is not an accepted substitute for this bootstrap.
+Plan mode is read-only. Execute mode requires a persistent host-root view of
+PID 1/systemd, the local canonical node identity, exact clean Git SHA/tree, and
+root-owned non-writable source assets. It installs the fixed source, policy,
+lock/journal/receipt roots, wrapper, systemd assets, and finally the validated
+sudoers file. It rolls back only files and directories created by a failed
+attempt.
+
+Where direct root login is unavailable, use
+`deploy/developer-sandboxes/Containerfile.node-bootstrap` and the fixed
+`developer_sandbox_node_docker_bootstrap.py` entrypoint. Build the image from
+the exact candidate for the node architecture and record its immutable image
+content ID. Run it once with `--rm`, `--privileged`, host PID/UTS/cgroup
+namespaces, `--network=none`, a writable `/` bind at `/host`, and read-only
+binds for the canonical request, exact Git bundle, and closed trust-input
+directory. Render schema-version-2 requests with the checked-in
+`developer_sandbox_node_docker_request.py`; it hashes trust inputs without
+emitting their contents and binds the candidate SHA/tree, bundle digest,
+expected node, action, transport expectation, operation ID, and every input
+digest. Reuse an operation ID only for an exact retry; generate a new ID for
+each later readback or lifecycle phase. Never delete or rewrite an earlier
+receipt to accommodate changed installed state. The entrypoint accepts no argv or shell,
+accepts the closed infrastructure inventory `oldlab-1` through `oldlab-5` and
+`trt-gb10-1` through `trt-gb10-15`, creates a root-owned exact checkout under
+host `/run`, and writes its non-secret receipt below
+`/var/lib/loom-developer-sandbox-node-bootstrap/receipts/`.
+
+Bootstrap `trt-gb10-7` as a normal member of the complete 15-node
+infrastructure and capacity-eligible set. The 2026-07-29 owner correction
+supersedes #822's static exclusion. If node 7 is busy, the candidate-owned
+drain/quiescence gate defers disruptive convergence and must never cancel or
+preempt an external job.
+
+The runtime command shape is fixed; substitute only absolute paths to the
+already-rendered inputs and the immutable local image content ID:
+
+```bash
+docker run --rm --privileged \
+  --pid=host --uts=host --cgroupns=host \
+  --network=none --read-only \
+  --mount type=bind,src=/,dst=/host,bind-propagation=rslave \
+  --mount type=bind,src="${REQUEST_JSON}",dst=/run/loom-node-bootstrap/request.json,readonly \
+  --mount type=bind,src="${CANDIDATE_BUNDLE}",dst=/run/loom-node-bootstrap/candidate.bundle,readonly \
+  --mount type=bind,src="${TRUST_INPUT_DIR}",dst=/run/loom-node-bootstrap/input,readonly \
+  "${BOOTSTRAP_IMAGE_ID}"
+```
+
+Do not append an argv, shell, Docker socket, restart policy, network, or
+additional mount. `authority-bootstrap` and `authority-upgrade` require an
+empty trust directory. Server/client transport actions accept only the role
+filenames derived from the checked-in inventory. A successful container
+report is followed by host-state `validate-install`, `check-server`, and where
+applicable `check-client`; success is not inferred from container exit alone.
 
 The installed sudoers surface contains only:
 
@@ -93,10 +144,10 @@ programs, persists an idempotent root-owned receipt plus fsynced journal record,
 and retains the inner domain-runtime receipt needed by the existing targeted
 rollback. `check` accepts only the read-only exact-candidate inspection action.
 
-The policy pins the installed source tree. A squash-merged commit with that
-same tree can be consumed under its own exact SHA. Upgrade a different reviewed
-tree through the direct-external-root surface; never delete or overwrite the
-installed authority by hand:
+The policy pins both installed source SHA and tree. A squash-merged commit with
+the same tree but a different SHA is transactionally rebound and must not be
+treated as an unchanged installation. Upgrade through either persistent root
+channel; never delete or overwrite the installed authority by hand:
 
 ```bash
 python3 scripts/ops/developer_sandbox_node_authority.py upgrade \
@@ -109,8 +160,8 @@ python3 scripts/ops/developer_sandbox_node_authority.py upgrade \
   --execute
 ```
 
-Upgrade has no sudoers entry and rejects sudo-derived execution exactly like
-bootstrap. It first verifies the old policy, wrapper, sudoers, fixed source,
+Upgrade has no runtime sudoers entry. It first verifies the old policy,
+wrapper, sudoers, fixed source,
 host binding, lock, journal, receipt inventory, and the clean root-owned new
 checkout. Under the existing exclusive runtime lock it recovers any prior
 interrupted upgrade, snapshots every replaceable authority asset, records the
@@ -125,7 +176,7 @@ the old tree or is revalidated against the new tree.
 Any ordinary failure restores the exact snapshot with old sudoers last,
 revalidates the old identity, proves the primary journal and all receipts are
 byte-identical, and records `rolled-back`. A process crash leaves the active
-transaction and snapshot for the next direct-root `upgrade` invocation to
+transaction and snapshot for the next persistent-root `upgrade` invocation to
 recover. If both upgrade and snapshot restoration fail, sudoers remains absent
 and the active evidence is retained for external-root repair. Successful and
 rolled-back snapshots remain under
@@ -187,11 +238,11 @@ The installer performs these bounded steps:
    absent or terminal, journal a root-owned bounded prepare transaction, and
    temporarily converge only the exact candidate's loopback stack without
    writing desired or lifecycle state;
-7. install the exact relay locally and send all 19 host-local client bundles
+7. install the exact relay locally and send all 20 host-local client bundles
    over encrypted transport to the fixed node authority, never to a raw remote
    root command; then require every route, TLS identity, and Control
    Plane/Gateway/MinIO health check before persisting a fresh fleet proof;
-8. invoke `attest` on each publisher only after the fresh 19-node fleet proof
+8. invoke `attest` on each publisher only after the fresh 20-node fleet proof
    exists; it republishes the secret-free reference env from a root-private
    seed, rechecks all domain peers, signs the domain receipt, and the collector
    closed-schema verifies both domain inputs into one fresh combined receipt;
@@ -422,6 +473,10 @@ non-secret worker settings plus these exact candidate-bound references:
 LOOM_WORKER_CONTROL_PLANE_URL=http://sandbox-link:8080
 LOOM_WORKER_GATEWAY_URL=http://sandbox-link:9100
 LOOM_WORKER_MINIO_ENDPOINT=http://sandbox-link:9000
+LOOM_WORKER_SANDBOX_IDENTITY=<sandbox>
+LOOM_WORKER_CANDIDATE_SHA=<SHA>
+LOOM_WORKER_POOL_NAME=<oldlab|gb10>
+LOOM_WORKER_MAX_CONCURRENT=<4 for oldlab|8 for gb10>
 LOOM_SANDBOX_LINK_CP_UPSTREAM=https://192.168.50.14:<cp-port>
 LOOM_SANDBOX_LINK_GATEWAY_UPSTREAM=https://192.168.50.14:<gateway-port>
 LOOM_SANDBOX_LINK_MINIO_UPSTREAM=https://192.168.50.14:<minio-port>
@@ -432,6 +487,11 @@ LOOM_WORKER_CP_TLS_CA_FILE_HOST=/etc/loom/developer-sandbox-links/clients/<sandb
 LOOM_WORKER_CP_TLS_CERT_FILE_HOST=/etc/loom/developer-sandbox-links/clients/<sandbox>/<SHA>/client.pem
 LOOM_WORKER_CP_TLS_KEY_FILE_HOST=/etc/loom/developer-sandbox-links/clients/<sandbox>/<SHA>/client-key.pem
 ```
+
+The pool/concurrency pair comes only from the exact candidate's checked-in
+shared-capacity policy (`requested_concurrency=4` for OLDLAB and `8` for GB10).
+The domain publisher validates that contract and rejects a seed for the other
+NFS/Slurm domain; these values are not operator-tunable publication inputs.
 
 It must not contain raw worker, MinIO, provider, API, password, or key
 credentials. Validate both the OLDLAB and GB10 copies:
@@ -491,8 +551,10 @@ All mutation commands are plan-only without `--execute`.
      --execute
    ```
 
-   Repeat for all five OLDLAB nodes and the 14 configured GB10 nodes. GB10-7
-   is not in the current capacity inventory and must not silently broaden it.
+   Repeat for all five OLDLAB nodes and all 15 GB10 infrastructure nodes.
+   GB10-7 is a normal infrastructure and capacity-eligible member. If it is
+   busy, candidate-owned drain/quiescence defers disruptive convergence
+   without cancelling or preempting the external job.
 
 4. Confirm the sandbox itself is healthy, both env copies validate, and all
    clients are installed. Activate exactly one server SHA:
@@ -505,7 +567,7 @@ All mutation commands are plan-only without `--execute`.
 5. The root-installed sandbox host installer now performs the fleet gate
    internally; there is no standalone fleet or SSH command. It sends the
    closed `inspect-link-client` check envelope through the installed
-   node-authority transport to all 19 eligible nodes, then sends
+   node-authority transport to all 20 infrastructure link nodes, then sends
    `inspect-link-server` only to `oldlab-2`. The host validates the complete
    response schemas, exact node/domain/candidate identity, route, TLS version,
    certificate fingerprints, secret-file metadata, and all three service
@@ -519,10 +581,12 @@ All mutation commands are plan-only without `--execute`.
    gate. A green transaction atomically persists a root-owned mode-`0600`
    receipt at
    `/var/lib/loom-developer-sandbox-links/attestations/<sandbox>/<SHA>/fleet.json`.
-   Its canonical digest binds the exact five OLDLAB and 14 GB10 nodes, oldlab2
-   relay state, all three listeners, bundle generation, and 15-minute expiry.
-   Do not enable capacity from a missing, stale, incomplete, or digest-mismatched
-   receipt.
+   Its canonical digest binds the exact five OLDLAB and 15 GB10 infrastructure
+   nodes, oldlab2 relay state, all three listeners, bundle generation, and
+   15-minute expiry. It proves the complete all-15 GB10 capacity-eligible set
+   with `excluded_nodes=[]`. Do not enable capacity from a missing, stale,
+   incomplete, or
+   digest-mismatched receipt.
 
 ### Rollback and readback
 

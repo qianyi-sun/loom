@@ -374,10 +374,9 @@ def test_checked_in_authority_config_is_fixed_to_staging_and_all_gb10_nodes() ->
     assert config.source_host == "trt-eai-oldlab-1"
     assert config.submit_host == "trt-gb10-1"
     assert config.controller == "trt-gb10-1"
-    assert len(config.allowed_nodes) == 14
-    assert config.allowed_nodes == tuple(
-        f"trt-gb10-{index}" for index in range(1, 16) if index != 7
-    )
+    assert config.infrastructure_nodes == tuple(f"trt-gb10-{index}" for index in range(1, 16))
+    assert len(config.allowed_nodes) == 15
+    assert config.allowed_nodes == config.infrastructure_nodes
     assert config.probe_action == "staging-allocation-probe"
 
 
@@ -475,7 +474,16 @@ def _infrastructure_transport_receipt(
         "inner_receipt": (
             f"staging-accounting/v1/{inner_request_id}"
             if action == "staging-slurm-accounting-converge"
-            else None
+            else (
+                f"staging-shared-source-bootstrap/v1/{'a' * 64}"
+                if action == "staging-shared-source-bootstrap"
+                else (
+                    "staging-allocation-bootstrap/v1/"
+                    f"{int(node.rsplit('-', 1)[1]):08x}-0000-4000-8000-"
+                    f"{int(node.rsplit('-', 1)[1]):012x}/"
+                    f"{hashlib.sha256(f'mount:{node}'.encode()).hexdigest()}"
+                )
+            )
         ),
         "completed_at": authority._timestamp(completed_at),
         "status": "succeeded",
@@ -540,7 +548,7 @@ def _infrastructure_payload(
                 convergence_id=convergence_id,
                 requested_at=requested_at,
             )
-            for index, node in enumerate(config.allowed_nodes)
+            for index, node in enumerate(config.infrastructure_nodes)
         ],
         "mount_contract": authority._expected_infrastructure_mount_contract(config),
         "result": "pass",
@@ -632,7 +640,7 @@ def test_converge_infrastructure_retries_active_id_then_refreshes_after_success(
             "generation": len(envelopes),
             "receipt_path": f"/receipt/{len(envelopes)}",
             "payload_sha256": "f" * 64,
-            "node_count": 14,
+            "node_count": 15,
             "source_controller": "oldlab-2",
             "source_controller_host": "trt-eai-oldlab-2",
         },
@@ -692,13 +700,22 @@ def test_infrastructure_receipt_accepts_exact_closed_ordered_contract(
         "expires_at",
         "source_bootstrap",
         "accounting",
+        "infrastructure_nodes",
         "node_bootstraps",
         "mount_contract",
+        "mount_digests",
+        "mount_digest",
+        "source_digest",
+        "boot_ids",
         "node_count",
         "result",
     }
-    assert summary["node_count"] == 14
-    assert [row["node"] for row in summary["node_bootstraps"]] == list(config.allowed_nodes)
+    assert summary["node_count"] == 15
+    assert summary["infrastructure_nodes"] == list(config.infrastructure_nodes)
+    assert [row["node"] for row in summary["node_bootstraps"]] == list(config.infrastructure_nodes)
+    assert set(summary["boot_ids"]) == set(config.infrastructure_nodes)
+    assert set(summary["mount_digests"]) == set(config.infrastructure_nodes)
+    assert summary["source_digest"] == "a" * 64
     assert summary["receipt_path"] == str(path)
 
 
@@ -936,6 +953,7 @@ def test_deploy_assets_install_only_fixed_authority_program() -> None:
         "deploy/developer-sandboxes/loom-staging-shared.tmpfiles.conf",
     }
     raw_config = tomllib.loads(CONFIG.read_text(encoding="utf-8"))
+    assert raw_config["infrastructure_nodes"] == [f"trt-gb10-{index}" for index in range(1, 16)]
     assert raw_config["installation"] == {
         "source_root": "/opt/loom-developer-sandbox-node-authority/source",
         "candidate_runtime_template": (

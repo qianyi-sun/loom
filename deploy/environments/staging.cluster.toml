@@ -44,8 +44,8 @@ taskset_transform_network_isolated = false
 untrusted_workload_isolation = false
 
 [gb10_pool]
-# #822: trt-gb10-7 remains in the fixed SSH inventory but is not an active
-# rollout target. Re-admission requires a separate merged change and evidence.
+# All fixed inventory hosts are rollout-eligible. Runtime activation still
+# fails closed on host health and current workload-safety checks.
 ssh_config = "../worker-pools/gb10/ssh_config"
 ssh_identity_file = "/var/lib/loom-staging-rollout/gb10-deploy-ed25519"
 hosts = [
@@ -55,6 +55,7 @@ hosts = [
   { ssh_target = "trt-gb10-4", node_agent_service = "loom-gb10-node-agent.service" },
   { ssh_target = "trt-gb10-5", node_agent_service = "loom-gb10-node-agent.service" },
   { ssh_target = "trt-gb10-6", node_agent_service = "loom-gb10-node-agent.service" },
+  { ssh_target = "trt-gb10-7", node_agent_service = "loom-gb10-node-agent.service" },
   { ssh_target = "trt-gb10-8", node_agent_service = "loom-gb10-node-agent.service" },
   { ssh_target = "trt-gb10-9", node_agent_service = "loom-gb10-node-agent.service" },
   { ssh_target = "trt-gb10-10", node_agent_service = "loom-gb10-node-agent.service" },

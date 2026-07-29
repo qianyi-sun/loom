@@ -94,6 +94,7 @@
       "required": [
         "sandboxes",
         "pools",
+        "infrastructure_nodes",
         "eligible_nodes",
         "excluded_nodes",
         "slot_budgets",
@@ -113,6 +114,30 @@
             "gb10"
           ]
         },
+        "infrastructure_nodes": {
+          "const": [
+            "trt-eai-oldlab-1",
+            "trt-eai-oldlab-2",
+            "trt-eai-oldlab-3",
+            "trt-eai-oldlab-4",
+            "trt-eai-oldlab-5",
+            "trt-gb10-1",
+            "trt-gb10-2",
+            "trt-gb10-3",
+            "trt-gb10-4",
+            "trt-gb10-5",
+            "trt-gb10-6",
+            "trt-gb10-7",
+            "trt-gb10-8",
+            "trt-gb10-9",
+            "trt-gb10-10",
+            "trt-gb10-11",
+            "trt-gb10-12",
+            "trt-gb10-13",
+            "trt-gb10-14",
+            "trt-gb10-15"
+          ]
+        },
         "eligible_nodes": {
           "const": [
             "trt-eai-oldlab-1",
@@ -126,6 +151,7 @@
             "trt-gb10-4",
             "trt-gb10-5",
             "trt-gb10-6",
+            "trt-gb10-7",
             "trt-gb10-8",
             "trt-gb10-9",
             "trt-gb10-10",
@@ -137,14 +163,12 @@
           ]
         },
         "excluded_nodes": {
-          "const": [
-            "trt-gb10-7"
-          ]
+          "const": []
         },
         "slot_budgets": {
           "const": {
             "oldlab": 20,
-            "gb10": 112
+            "gb10": 120
           }
         },
         "pending_slot_budgets": {
@@ -247,23 +271,7 @@
       ],
       "properties": {
         "authority_evidence": {
-          "type": "object",
-          "required": [
-            "schema_version",
-            "kind",
-            "session_id",
-            "candidates",
-            "collector_host",
-            "checkpoints",
-            "mixed_jobs",
-            "cancelled_jobs",
-            "crashed_jobs",
-            "node_intervals",
-            "policy_capacity",
-            "zero_orphans",
-            "completed_at",
-            "payload_sha256"
-          ]
+          "$ref": "#/$defs/platformHealthAuthority"
         },
         "trusted_receipt": {
           "type": "object",
@@ -737,11 +745,37 @@
     },
     "node": {
       "type": "string",
-      "pattern": "^trt-(?:eai-oldlab-[1-5]|gb10-(?:[1-6]|8|9|1[0-5]))$"
+      "pattern": "^trt-(?:eai-oldlab-[1-5]|gb10-(?:[1-9]|1[0-5]))$"
     },
     "phase": {
       "type": "object",
       "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "phase": {
+                "const": "mixed_non_loom"
+              }
+            },
+            "required": [
+              "phase"
+            ]
+          },
+          "then": {
+            "required": [
+              "trial_batches"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "trial_batches"
+              ]
+            }
+          }
+        }
+      ],
       "required": [
         "phase",
         "sandbox",
@@ -779,6 +813,24 @@
         },
         "status": {
           "const": "pass"
+        },
+        "trial_batches": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "oldlab",
+            "gb10"
+          ],
+          "properties": {
+            "oldlab": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "gb10": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
         },
         "checkpoint_sha256": {
           "$ref": "#/$defs/digest"
@@ -1065,6 +1117,1207 @@
               },
               "active_until": {
                 "$ref": "#/$defs/timestamp"
+              },
+              "observed_at": {
+                "$ref": "#/$defs/timestamp"
+              }
+            }
+          }
+        }
+      }
+    },
+    "platformHealthCandidateIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sha",
+        "tree"
+      ],
+      "properties": {
+        "sha": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "tree": {
+          "$ref": "#/$defs/fullSha"
+        }
+      }
+    },
+    "platformHealthNodeKey": {
+      "type": "string",
+      "pattern": "^(?:oldlab-[1-5]|trt-gb10-(?:[1-9]|1[0-5]))$"
+    },
+    "platformHealthCheckpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "checkpoint",
+        "checkpoint_group",
+        "observed_at",
+        "payload_sha256"
+      ],
+      "properties": {
+        "sequence": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "checkpoint": {
+          "enum": [
+            "baseline",
+            "mixed_non_loom",
+            "cancel_cleanup",
+            "ttl_cleanup",
+            "submit_host_restart",
+            "worker_crash",
+            "final_drain"
+          ]
+        },
+        "checkpoint_group": {
+          "enum": [
+            "baseline",
+            "during",
+            "after"
+          ]
+        },
+        "observed_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "payload_sha256": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "platformHealthAllocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cpu_cores",
+        "memory_bytes",
+        "pids",
+        "gpu_count",
+        "tres",
+        "exclusive"
+      ],
+      "properties": {
+        "cpu_cores": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "memory_bytes": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "pids": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "gpu_count": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "tres": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "exclusive": {
+          "const": false
+        }
+      }
+    },
+    "platformHealthResourceLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cpu_cores",
+        "memory_bytes",
+        "pids",
+        "gpu_count",
+        "gpu_ids"
+      ],
+      "properties": {
+        "cpu_cores": {
+          "$ref": "#/$defs/positiveNumber"
+        },
+        "memory_bytes": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "pids": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "gpu_count": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "gpu_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+          }
+        }
+      }
+    },
+    "platformHealthAggregateLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cpu_cores",
+        "memory_bytes",
+        "pids",
+        "gpu_count"
+      ],
+      "properties": {
+        "cpu_cores": {
+          "$ref": "#/$defs/positiveNumber"
+        },
+        "memory_bytes": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "pids": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "gpu_count": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        }
+      }
+    },
+    "platformHealthCgroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "job_path",
+        "slurm_job_id",
+        "slurm_pid_cgroup_paths",
+        "controllers",
+        "cpu_cores_max",
+        "memory_bytes_max",
+        "pids_max"
+      ],
+      "properties": {
+        "job_path": {
+          "$ref": "#/$defs/cgroupPath"
+        },
+        "slurm_job_id": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(?:_[0-9]+)?$"
+        },
+        "slurm_pid_cgroup_paths": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/cgroupPath"
+          }
+        },
+        "controllers": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "cpu",
+              "memory",
+              "pids"
+            ]
+          }
+        },
+        "cpu_cores_max": {
+          "$ref": "#/$defs/positiveNumber"
+        },
+        "memory_bytes_max": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "pids_max": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "delegated_controllers": {
+          "type": "array",
+          "minItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "cpu",
+              "memory",
+              "pids"
+            ]
+          }
+        },
+        "delegated": {
+          "const": true
+        },
+        "pids_current": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        }
+      }
+    },
+    "platformHealthContainer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "container_id",
+        "role",
+        "sandbox",
+        "candidate_sha",
+        "job_id",
+        "compose_project",
+        "compose_networks",
+        "pid",
+        "cgroup_parent",
+        "observed_cgroup_path",
+        "limits"
+      ],
+      "properties": {
+        "container_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{12,64}$"
+        },
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        },
+        "role": {
+          "enum": [
+            "worker",
+            "trial",
+            "verifier",
+            "sidecar"
+          ]
+        },
+        "sandbox": {
+          "$ref": "#/$defs/sandbox"
+        },
+        "candidate_sha": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "job_id": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(?:_[0-9]+)?$"
+        },
+        "compose_project": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+        },
+        "identity_labels": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "loom.sandbox",
+            "loom.candidate_sha",
+            "loom.slurm_job_id",
+            "loom.compose_project"
+          ],
+          "properties": {
+            "loom.sandbox": {
+              "$ref": "#/$defs/sandbox"
+            },
+            "loom.candidate_sha": {
+              "$ref": "#/$defs/fullSha"
+            },
+            "loom.slurm_job_id": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*(?:_[0-9]+)?$"
+            },
+            "loom.compose_project": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+            }
+          }
+        },
+        "compose_networks": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+          }
+        },
+        "pid": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "cgroup_parent": {
+          "$ref": "#/$defs/cgroupPath"
+        },
+        "observed_cgroup_path": {
+          "$ref": "#/$defs/cgroupPath"
+        },
+        "limits": {
+          "$ref": "#/$defs/platformHealthResourceLimits"
+        }
+      }
+    },
+    "platformHealthDeviceProbe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "allocated_ids",
+        "all_allocated_usable",
+        "unallocated_denied",
+        "allocated_probe_container_ids",
+        "denial_probe_container_ids"
+      ],
+      "properties": {
+        "method": {
+          "enum": [
+            "docker-nvidia-smi-and-device-denial-v1",
+            "docker-no-device-exposure-v1"
+          ]
+        },
+        "allocated_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+          }
+        },
+        "all_allocated_usable": {
+          "const": true
+        },
+        "unallocated_denied": {
+          "const": true
+        },
+        "allocated_probe_container_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{12,64}$"
+          }
+        },
+        "denial_probe_container_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{12,64}$"
+          }
+        }
+      }
+    },
+    "platformHealthMixedJob": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "job_id",
+        "job_name",
+        "sandbox",
+        "candidate_sha",
+        "account",
+        "user",
+        "node",
+        "state",
+        "allocation",
+        "compose_project",
+        "compose_networks",
+        "cgroup",
+        "containers",
+        "aggregate_limits"
+      ],
+      "properties": {
+        "job_id": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(?:_[0-9]+)?$"
+        },
+        "job_name": {
+          "type": "string",
+          "pattern": "^loom-(?:qianyi|hongjian|devansh)-[0-9a-f]{12}-[A-Za-z0-9_.-]+$",
+          "maxLength": 256
+        },
+        "sandbox": {
+          "$ref": "#/$defs/sandbox"
+        },
+        "candidate_sha": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "account": {
+          "type": "string",
+          "pattern": "^loom-dev-(?:qianyi|hongjian|devansh)$"
+        },
+        "user": {
+          "type": "string",
+          "pattern": "^loom-sandbox-(?:qianyi|hongjian|devansh)$"
+        },
+        "node": {
+          "$ref": "#/$defs/node"
+        },
+        "host": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9.-]{0,127}$"
+        },
+        "state": {
+          "const": "RUNNING"
+        },
+        "allocation": {
+          "$ref": "#/$defs/platformHealthAllocation"
+        },
+        "compose_project": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+        },
+        "compose_networks": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+          }
+        },
+        "cgroup": {
+          "$ref": "#/$defs/platformHealthCgroup"
+        },
+        "containers": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "$ref": "#/$defs/platformHealthContainer"
+          }
+        },
+        "aggregate_limits": {
+          "$ref": "#/$defs/platformHealthAggregateLimits"
+        },
+        "device_probe": {
+          "$ref": "#/$defs/platformHealthDeviceProbe"
+        }
+      }
+    },
+    "platformHealthTerminalJob": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "job_id",
+        "job_name",
+        "state",
+        "node",
+        "sandbox",
+        "candidate_sha"
+      ],
+      "properties": {
+        "job_id": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(?:_[0-9]+)?$"
+        },
+        "job_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "state": {
+          "enum": [
+            "CANCELLED",
+            "FAILED",
+            "NODE_FAIL",
+            "OUT_OF_MEMORY",
+            "TIMEOUT",
+            "COMPLETED"
+          ]
+        },
+        "node": {
+          "$ref": "#/$defs/node"
+        },
+        "sandbox": {
+          "$ref": "#/$defs/sandbox"
+        },
+        "candidate_sha": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "ended_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "elapsed_seconds": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        }
+      }
+    },
+    "platformHealthNodeInterval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cpu_busy_ratio",
+        "minimum_cpu_cores_available",
+        "minimum_memory_bytes_available",
+        "read_bytes",
+        "write_bytes"
+      ],
+      "properties": {
+        "cpu_busy_ratio": {
+          "$ref": "#/$defs/ratio"
+        },
+        "minimum_cpu_cores_available": {
+          "type": "number",
+          "minimum": 0
+        },
+        "minimum_memory_bytes_available": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "read_bytes": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "write_bytes": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        }
+      }
+    },
+    "platformHealthPolicyCapacity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_slots",
+        "requested_cpus",
+        "requested_memory_mib",
+        "requested_concurrency",
+        "max_jobs",
+        "pending_job_cap",
+        "container_cpus",
+        "container_memory_mib",
+        "container_pids",
+        "job_pids_max",
+        "exclusive",
+        "external_runner",
+        "shared_capacity_managed",
+        "gpu_tres",
+        "minimum_node_cpu_cores",
+        "minimum_node_memory_bytes",
+        "reserved_cpu_cores_per_node",
+        "reserved_memory_mib_per_node"
+      ],
+      "properties": {
+        "max_slots": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "requested_cpus": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "requested_memory_mib": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "requested_concurrency": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "max_jobs": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "pending_job_cap": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "container_cpus": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "container_memory_mib": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "container_pids": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "job_pids_max": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "exclusive": {
+          "const": false
+        },
+        "external_runner": {
+          "const": true
+        },
+        "shared_capacity_managed": {
+          "const": true
+        },
+        "gpu_tres": {
+          "type": "string",
+          "pattern": "^(?:|gpu:[1-9][0-9]*)$"
+        },
+        "minimum_node_cpu_cores": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "minimum_node_memory_bytes": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "reserved_cpu_cores_per_node": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "reserved_memory_mib_per_node": {
+          "$ref": "#/$defs/positiveInteger"
+        }
+      }
+    },
+    "platformHealthRecommendation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "pool",
+        "source",
+        "source_sha256",
+        "values",
+        "derivation"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "pool": {
+          "const": "oldlab"
+        },
+        "source": {
+          "const": "deploy/developer-sandboxes/shared-capacity-policies/oldlab.toml"
+        },
+        "source_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "values": {
+          "$ref": "#/$defs/platformHealthPolicyCapacity"
+        },
+        "derivation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "measured_node_count",
+            "minimum_observed_node_cpu_cores",
+            "minimum_observed_node_memory_bytes",
+            "minimum_observed_free_cpu_cores",
+            "minimum_observed_free_memory_bytes",
+            "minimum_required_free_cpu_cores",
+            "minimum_required_free_memory_bytes",
+            "maximum_allowed_cpu_busy_ratio",
+            "all_nodes_passed"
+          ],
+          "properties": {
+            "method": {
+              "const": "installed-shared-capacity-policy-v1"
+            },
+            "measured_node_count": {
+              "const": 5
+            },
+            "minimum_observed_node_cpu_cores": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "minimum_observed_node_memory_bytes": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "minimum_observed_free_cpu_cores": {
+              "$ref": "#/$defs/positiveNumber"
+            },
+            "minimum_observed_free_memory_bytes": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "minimum_required_free_cpu_cores": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "minimum_required_free_memory_bytes": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "maximum_allowed_cpu_busy_ratio": {
+              "$ref": "#/$defs/ratio"
+            },
+            "all_nodes_passed": {
+              "const": true
+            }
+          }
+        }
+      }
+    },
+    "platformHealthAuthority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "kind",
+        "session_id",
+        "candidates",
+        "collector_host",
+        "checkpoints",
+        "mixed_jobs",
+        "cancelled_jobs",
+        "crashed_jobs",
+        "node_intervals",
+        "policy_capacity",
+        "oldlab_capacity_recommendation",
+        "zero_orphans",
+        "completed_at",
+        "expires_at",
+        "payload_sha256"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "kind": {
+          "const": "loom.developer-sandbox.platform-health-evidence"
+        },
+        "session_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "candidates": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "qianyi",
+            "hongjian",
+            "devansh"
+          ],
+          "properties": {
+            "qianyi": {
+              "$ref": "#/$defs/platformHealthCandidateIdentity"
+            },
+            "hongjian": {
+              "$ref": "#/$defs/platformHealthCandidateIdentity"
+            },
+            "devansh": {
+              "$ref": "#/$defs/platformHealthCandidateIdentity"
+            }
+          }
+        },
+        "collector_host": {
+          "const": "trt-eai-oldlab-2"
+        },
+        "checkpoints": {
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 7,
+          "items": {
+            "$ref": "#/$defs/platformHealthCheckpoint"
+          }
+        },
+        "mixed_jobs": {
+          "type": "array",
+          "minItems": 6,
+          "maxItems": 6,
+          "items": {
+            "$ref": "#/$defs/platformHealthMixedJob"
+          }
+        },
+        "cancelled_jobs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/platformHealthTerminalJob"
+          }
+        },
+        "crashed_jobs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/platformHealthTerminalJob"
+          }
+        },
+        "node_intervals": {
+          "type": "object",
+          "minProperties": 20,
+          "maxProperties": 20,
+          "propertyNames": {
+            "$ref": "#/$defs/platformHealthNodeKey"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/platformHealthNodeInterval"
+          }
+        },
+        "policy_capacity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "oldlab",
+            "gb10"
+          ],
+          "properties": {
+            "oldlab": {
+              "$ref": "#/$defs/platformHealthPolicyCapacity"
+            },
+            "gb10": {
+              "$ref": "#/$defs/platformHealthPolicyCapacity"
+            }
+          }
+        },
+        "oldlab_capacity_recommendation": {
+          "$ref": "#/$defs/platformHealthRecommendation"
+        },
+        "gate6_observations": {
+          "$ref": "#/$defs/platformHealthGate6Observations"
+        },
+        "zero_orphans": {
+          "const": true
+        },
+        "completed_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "payload_sha256": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "platformHealthGate6Observations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "soak",
+        "device_isolation",
+        "cleanup"
+      ],
+      "properties": {
+        "soak": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "started_at",
+            "completed_at",
+            "duration_seconds",
+            "sample_count",
+            "required_duration_seconds",
+            "required_sample_count",
+            "workloads",
+            "trial_success_numerator",
+            "trial_success_denominator",
+            "trial_success_ratio",
+            "minimum_trial_success_ratio",
+            "trial_outcomes",
+            "resource_envelope_breaches",
+            "kube_api_healthy",
+            "minio_quorum_healthy",
+            "longhorn_healthy",
+            "non_loom_slurm_healthy",
+            "pair_headroom"
+          ],
+          "properties": {
+            "started_at": {
+              "$ref": "#/$defs/timestamp"
+            },
+            "completed_at": {
+              "$ref": "#/$defs/timestamp"
+            },
+            "duration_seconds": {
+              "type": "integer",
+              "minimum": 14400
+            },
+            "sample_count": {
+              "type": "integer",
+              "minimum": 120
+            },
+            "required_duration_seconds": {
+              "const": 14400
+            },
+            "required_sample_count": {
+              "const": 120
+            },
+            "workloads": {
+              "const": [
+                "loom",
+                "non_loom_slurm",
+                "kubernetes",
+                "minio",
+                "longhorn"
+              ]
+            },
+            "trial_success_numerator": {
+              "type": "integer",
+              "minimum": 6
+            },
+            "trial_success_denominator": {
+              "type": "integer",
+              "minimum": 6
+            },
+            "trial_success_ratio": {
+              "type": "number",
+              "minimum": 0.95,
+              "maximum": 1
+            },
+            "minimum_trial_success_ratio": {
+              "const": 0.95
+            },
+            "trial_outcomes": {
+              "type": "array",
+              "minItems": 6,
+              "maxItems": 6,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "sandbox",
+                  "pool",
+                  "candidate_sha",
+                  "candidate_tree",
+                  "terminal_trial_count",
+                  "succeeded_trial_count",
+                  "failed_trial_count",
+                  "cancelled_trial_count",
+                  "retried_trial_count",
+                  "retry_attempt_count",
+                  "success_ratio"
+                ],
+                "properties": {
+                  "sandbox": {
+                    "$ref": "#/$defs/sandbox"
+                  },
+                  "pool": {
+                    "$ref": "#/$defs/pool"
+                  },
+                  "candidate_sha": {
+                    "$ref": "#/$defs/fullSha"
+                  },
+                  "candidate_tree": {
+                    "$ref": "#/$defs/fullSha"
+                  },
+                  "terminal_trial_count": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "succeeded_trial_count": {
+                    "$ref": "#/$defs/nonnegativeInteger"
+                  },
+                  "failed_trial_count": {
+                    "$ref": "#/$defs/nonnegativeInteger"
+                  },
+                  "cancelled_trial_count": {
+                    "$ref": "#/$defs/nonnegativeInteger"
+                  },
+                  "retried_trial_count": {
+                    "$ref": "#/$defs/nonnegativeInteger"
+                  },
+                  "retry_attempt_count": {
+                    "$ref": "#/$defs/nonnegativeInteger"
+                  },
+                  "success_ratio": {
+                    "type": "number",
+                    "minimum": 0.95,
+                    "maximum": 1
+                  }
+                }
+              }
+            },
+            "resource_envelope_breaches": {
+              "const": 0
+            },
+            "kube_api_healthy": {
+              "const": true
+            },
+            "minio_quorum_healthy": {
+              "const": true
+            },
+            "longhorn_healthy": {
+              "const": true
+            },
+            "non_loom_slurm_healthy": {
+              "const": true
+            },
+            "pair_headroom": {
+              "type": "array",
+              "minItems": 6,
+              "maxItems": 6,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "sandbox",
+                  "pool",
+                  "min_free_cpu_cores",
+                  "min_free_memory_bytes",
+                  "max_pid_usage_ratio",
+                  "observed_peak_concurrency",
+                  "within_reviewed_envelope"
+                ],
+                "properties": {
+                  "sandbox": {
+                    "$ref": "#/$defs/sandbox"
+                  },
+                  "pool": {
+                    "$ref": "#/$defs/pool"
+                  },
+                  "min_free_cpu_cores": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "min_free_memory_bytes": {
+                    "$ref": "#/$defs/nonnegativeInteger"
+                  },
+                  "max_pid_usage_ratio": {
+                    "$ref": "#/$defs/ratio"
+                  },
+                  "observed_peak_concurrency": {
+                    "$ref": "#/$defs/positiveInteger"
+                  },
+                  "within_reviewed_envelope": {
+                    "const": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        "device_isolation": {
+          "type": "array",
+          "minItems": 6,
+          "maxItems": 6,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "sandbox",
+              "pool",
+              "job_id",
+              "node",
+              "host",
+              "allocated_ids",
+              "all_allocated_usable",
+              "unallocated_denied",
+              "proof"
+            ],
+            "properties": {
+              "sandbox": {
+                "$ref": "#/$defs/sandbox"
+              },
+              "pool": {
+                "$ref": "#/$defs/pool"
+              },
+              "job_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]*(?:_[0-9]+)?$"
+              },
+              "node": {
+                "$ref": "#/$defs/node"
+              },
+              "host": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9.-]{0,127}$"
+              },
+              "allocated_ids": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+                }
+              },
+              "all_allocated_usable": {
+                "const": true
+              },
+              "unallocated_denied": {
+                "const": true
+              },
+              "proof": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "method",
+                  "allocated_probe_container_ids",
+                  "denial_probe_container_ids",
+                  "observed_at"
+                ],
+                "properties": {
+                  "method": {
+                    "enum": [
+                      "docker-nvidia-smi-and-device-denial-v1",
+                      "docker-no-device-exposure-v1"
+                    ]
+                  },
+                  "allocated_probe_container_ids": {
+                    "type": "array",
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{12,64}$"
+                    }
+                  },
+                  "denial_probe_container_ids": {
+                    "type": "array",
+                    "minItems": 1,
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{12,64}$"
+                    }
+                  },
+                  "observed_at": {
+                    "$ref": "#/$defs/timestamp"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "cleanup": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "event",
+              "checkpoint",
+              "job_ids",
+              "terminal_states",
+              "observed_within_seconds",
+              "maximum_cleanup_seconds",
+              "live_jobs",
+              "live_containers",
+              "durable_trial_state",
+              "retryable_interrupted_trials",
+              "observed_at"
+            ],
+            "properties": {
+              "event": {
+                "enum": [
+                  "cancellation",
+                  "ttl_expiry",
+                  "worker_crash",
+                  "submit_host_restart"
+                ]
+              },
+              "checkpoint": {
+                "enum": [
+                  "cancel_cleanup",
+                  "ttl_cleanup",
+                  "worker_crash",
+                  "submit_host_restart"
+                ]
+              },
+              "job_ids": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*(?:_[0-9]+)?$"
+                }
+              },
+              "terminal_states": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {
+                  "enum": [
+                    "CANCELLED",
+                    "FAILED",
+                    "NODE_FAIL",
+                    "OUT_OF_MEMORY",
+                    "TIMEOUT",
+                    "COMPLETED"
+                  ]
+                }
+              },
+              "observed_within_seconds": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 300
+              },
+              "maximum_cleanup_seconds": {
+                "const": 300
+              },
+              "live_jobs": {
+                "const": 0
+              },
+              "live_containers": {
+                "const": 0
+              },
+              "durable_trial_state": {
+                "const": true
+              },
+              "retryable_interrupted_trials": {
+                "const": true
               },
               "observed_at": {
                 "$ref": "#/$defs/timestamp"

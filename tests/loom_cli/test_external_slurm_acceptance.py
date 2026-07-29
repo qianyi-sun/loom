@@ -27,7 +27,8 @@ TREE = "b" * 40
 PROFILE_SHA = "c" * 64
 GENERATION_ID = "f" * 64
 NOW = datetime(2026, 7, 29, 12, 0, tzinfo=UTC)
-NODES = tuple(f"trt-gb10-{index}" for index in range(1, 16) if index != 7)
+NODES = tuple(f"trt-gb10-{index}" for index in range(1, 16))
+INFRASTRUCTURE_NODES = tuple(f"trt-gb10-{index}" for index in range(1, 16))
 CONFIG = Path("deploy/developer-sandboxes/staging-external-slurm-authority.toml")
 
 
@@ -74,8 +75,9 @@ def _config(tmp_path: Path) -> ExternalSlurmAuthorityConfig:
         broker_sandbox="staging",
         broker_submit_action="staging-allocation-submit",
         broker_cancel_action="staging-allocation-cancel",
+        infrastructure_nodes=INFRASTRUCTURE_NODES,
         allowed_nodes=NODES,
-        host_aliases={node: f"host-{index}" for index, node in enumerate(NODES)},
+        host_aliases={node: f"host-{index}" for index, node in enumerate(INFRASTRUCTURE_NODES)},
         repository_template=("/srv/loom/staging-shared/candidates/loom-remote-worker-{image_tag}"),
         worker_env_template=(
             "/srv/loom/staging-shared/generated/staging-gb10-worker-{image_tag}.env"
@@ -215,7 +217,7 @@ def _write_signed(
     (config.artifact_root / "current.json").write_bytes(canonical_json_bytes(current))
 
 
-def test_verify_authority_accepts_signed_exact_fourteen_node_closed_receipt(
+def test_verify_authority_accepts_signed_exact_fifteen_node_closed_receipt(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
@@ -231,7 +233,7 @@ def test_verify_authority_accepts_signed_exact_fourteen_node_closed_receipt(
     )
 
     assert verified.payload["result"] == "pass"
-    assert len(verified.payload["nodes"]) == 14
+    assert len(verified.payload["nodes"]) == 15
     assert len(verified.key_id) == 64
 
 
@@ -293,7 +295,7 @@ def test_verify_authority_rejects_current_pointer_digest_drift(tmp_path: Path) -
 @pytest.mark.parametrize(
     ("mutation", "match"),
     [
-        (lambda payload: payload["nodes"].pop(), "cover 14 nodes"),
+        (lambda payload: payload["nodes"].pop(), "cover 15 nodes"),
         (
             lambda payload: payload["nodes"][0].update(cleanup_verified=False),
             "cleanup_verified mismatch",
@@ -445,4 +447,57 @@ def test_load_authority_config_rejects_unknown_top_level_fields(tmp_path: Path) 
     path.write_text(text.replace("[installation]", "unknown_contract = true\n\n[installation]", 1))
 
     with pytest.raises(ExternalSlurmAcceptanceError, match="closed set"):
+        load_authority_config(path)
+
+
+def test_checked_in_config_uses_full_infrastructure_for_allocation() -> None:
+    config = load_authority_config(CONFIG)
+
+    assert config.infrastructure_nodes == INFRASTRUCTURE_NODES
+    assert config.allowed_nodes == NODES
+    assert "trt-gb10-7" in config.infrastructure_nodes
+    assert "trt-gb10-7" in config.allowed_nodes
+    assert set(config.host_aliases) == set(config.infrastructure_nodes)
+    assert config.host_aliases["trt-gb10-7"] == "gx10-0faf"
+
+
+def test_load_authority_config_rejects_missing_infrastructure_inventory(
+    tmp_path: Path,
+) -> None:
+    lines = CONFIG.read_text(encoding="utf-8").splitlines(keepends=True)
+    legacy: list[str] = []
+    skipping_infrastructure_nodes = False
+    for line in lines:
+        if line == "infrastructure_nodes = [\n":
+            skipping_infrastructure_nodes = True
+            continue
+        if skipping_infrastructure_nodes:
+            if line == "]\n":
+                skipping_infrastructure_nodes = False
+            continue
+        if line.startswith("trt-gb10-7 = "):
+            continue
+        legacy.append(line)
+    path = tmp_path / "legacy-authority.toml"
+    path.write_text("".join(legacy), encoding="utf-8")
+
+    with pytest.raises(
+        ExternalSlurmAcceptanceError,
+        match="exact closed set",
+    ):
+        load_authority_config(path)
+
+
+def test_load_authority_config_rejects_incomplete_infrastructure_aliases(
+    tmp_path: Path,
+) -> None:
+    text = CONFIG.read_text(encoding="utf-8")
+    assert 'trt-gb10-7 = "gx10-0faf"\n' in text
+    path = tmp_path / "authority.toml"
+    path.write_text(
+        text.replace('trt-gb10-7 = "gx10-0faf"\n', "", 1),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ExternalSlurmAcceptanceError, match="host_aliases"):
         load_authority_config(path)

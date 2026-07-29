@@ -13,6 +13,7 @@ max_clock_skew_seconds = 5
 minimum_oldlab_free_cpu_cores = 4
 minimum_oldlab_free_memory_bytes = 17179869184
 maximum_cpu_busy_ratio = 0.85
+capacity_policy_sources = { oldlab = "deploy/developer-sandboxes/shared-capacity-policies/oldlab.toml", gb10 = "deploy/developer-sandboxes/shared-capacity-policies/gb10.toml" }
 
 oldlab_nodes = [
   "oldlab-1",
@@ -29,6 +30,7 @@ gb10_nodes = [
   "trt-gb10-4",
   "trt-gb10-5",
   "trt-gb10-6",
+  "trt-gb10-7",
   "trt-gb10-8",
   "trt-gb10-9",
   "trt-gb10-10",
@@ -51,6 +53,7 @@ trt-gb10-3 = "gx10-0f0d"
 trt-gb10-4 = "gx10-0d93"
 trt-gb10-5 = "gx10-1036"
 trt-gb10-6 = "gx10-1000"
+trt-gb10-7 = "gx10-0faf"
 trt-gb10-8 = "gx10-db22"
 trt-gb10-9 = "gx10-16f6"
 trt-gb10-10 = "gx10-0f82"

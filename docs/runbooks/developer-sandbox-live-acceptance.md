@@ -26,10 +26,18 @@ The verifier rejects changes to this topology:
 
 - submit host: `trt-eai-oldlab-2`;
 - sandboxes: `qianyi`, `hongjian`, and `devansh`;
-- pools: `oldlab` (20 slots, 10 pending) and `gb10` (140 slots, 30 pending);
+- pools: `oldlab` (20 slots, 10 pending) and `gb10` (120 slots, 24 pending);
 - OLDLAB nodes 1 through 5;
-- GB10 nodes 1 through 6 and 8 through 15;
-- excluded node: `trt-gb10-7`.
+- GB10 infrastructure nodes 1 through 15;
+- production workload-eligible GB10 nodes 1 through 15;
+- excluded nodes: none (`excluded_nodes=[]`).
+
+The 2026-07-29 owner correction supersedes #822's temporary static exclusion
+of `trt-gb10-7`. Node 7 now has the same infrastructure and capacity
+eligibility as every other GB10 node. When it is busy, the candidate-owned
+drain/quiescence gate defers disruptive convergence until acceptance-owned
+work is quiescent; the acceptance procedure must never cancel or preempt an
+external job. The complete acceptance boundary remains all 15 GB10 nodes.
 
 The pre-merge `candidates` map is closed-world: it contains exactly `qianyi`,
 `hongjian`, and `devansh`, each with a full SHA, full tree, and that sandbox's
@@ -39,6 +47,14 @@ Every sandbox phase, capacity sample, burst, runtime envelope, fairness
 participant, fault row, and overlap observation binds the corresponding map
 entry. A receipt stored under one sandbox but naming another sandbox's
 candidate fails.
+
+The Slurm cgroup guard uses the same closed map as one atomic cluster
+generation. For each sandbox, acceptance must read back a fresh probe under
+that sandbox's exact `loom-dev-<sandbox>` account and fixed
+`loom-sandbox-<sandbox>` Slurm `UserId`; the probe's SHA/tree and candidate-set
+digest must match the map. One global SHA, an allowed-SHA list, a legacy
+schema-v1 config, a partial/hybrid map, or a probe borrowed from another
+account fails acceptance.
 
 Each short-lived receipt covers at most 15 minutes; successive generations
 must advance both domain generations, link the previous immutable receipt
@@ -248,12 +264,138 @@ and its sudoers policy at
 fixed collector completes all checkpoints, import its immutable
 `/var/lib/loom-developer-sandbox-platform-health-authority/sessions/<SESSION_ID>/evidence.json`:
 
+The collector is the supported Gate-6 materializer; do not hand-author the old
+non-exclusive JSON shape. Collect the seven ordered checkpoints `baseline`,
+`mixed_non_loom`, `cancel_cleanup`, `ttl_cleanup`, `submit_host_restart`,
+`worker_crash`, and `final_drain`. Between `mixed_non_loom` and
+`cancel_cleanup`, invoke the fixed `sample` command at least 120 times across
+at least four hours:
+
+The phase evidence supplied to each of the three `mixed_non_loom`
+checkpoints must include a closed `trial_batches` object with the exact
+`oldlab` and `gb10` soak batch UUIDs returned by that sandbox's workload
+submission. These are six distinct soak batches; they are not the earlier
+`large_batch_burst` batches. The root checkpoint journal persists this
+manifest with the sandbox candidate SHA/tree, and later samples accept no
+replacement batch or caller-selected database.
+
+```bash
+sudo /usr/local/libexec/loom-developer-sandbox-platform-health-authority \
+  sample --session-id <SESSION_ID> --execute
+```
+
+Each invocation rereads the exact six sandbox/pool jobs through the fixed
+root-owned node transport, plus Slurm/Docker/cgroup, Kubernetes, MinIO,
+Longhorn, non-Loom peer, CPU/memory/PID, and GPU-device authorities. It appends
+one canonical mode-`0600` sample to a digest-chained journal. A crash or
+disconnect does not erase prior samples: rerun the same command, and the
+collector verifies and resumes the exact chain. The four-hour interval may
+span bounded Slurm job rotation because the checked-in QoS has a two-hour wall
+limit, but every sample must still contain exactly one candidate-bound job for
+each of the six pairs. Any duplicate, foreign candidate, excluded node,
+missing node 7, device-isolation failure, peer failure, or envelope breach is
+a hard stop.
+
+Trial success is read from durable Loom trial rows, not inferred from Slurm
+job exit status. On `oldlab-2`, the collector verifies each candidate's
+root-owned combined activation receipt, exact desired state, and current
+`sandbox-state.json`. It requires all three to name the same candidate
+SHA/tree and Compose project, then resolves exactly one healthy `postgres`
+container whose Compose config path/hash and creation/start generation precede
+that lifecycle record. The resulting container, desired-state, lifecycle, and
+receipt digests are retained in every sample.
+
+The fixed read-only query selects **all** trials from the two manifest batch
+UUIDs; it has no `finished_at` lower bound and uses left joins for worker and
+Slurm attribution. Thus an early-finished, unclaimed, pending, or otherwise
+unattributed trial cannot disappear from the census or denominator. Batch
+creation must fall within the root checkpoint's `mixed_non_loom` phase window.
+Every terminal trial must bind its batch, sandbox, candidate, pool, and a
+Slurm job observed in the sample chain. Trial UUIDs and terminal snapshots are
+monotonic. The final sample requires every trial in every fixed batch to be
+terminal with a finish time; any queued, claimed, or running row blocks Gate
+6. Missing attribution, a foreign batch, duplicate identity, or drift is a
+hard stop. The final success ratio is `succeeded / (succeeded + failed +
+cancelled)` globally and for every sandbox/pool pair, with a non-zero
+denominator and a minimum of `0.95`; `attempt_count - 1` is retained as retry
+attribution.
+
+The final authority evidence includes the exact seven checkpoints and a closed
+`gate6_observations` object. It requires allocated-GPU usability and
+unallocated-device denial on GB10, explicit zero-device exposure and denial on
+OLDLAB, and root accounting for cancellation, TTL expiry, submit-host restart,
+and worker crash with zero remaining jobs or containers. Node `trt-gb10-7` is
+part of the 15-node GB10 closed world; a busy node defers collection until
+existing work finishes and is never statically excluded or preempted.
+
 ```bash
 sudo python scripts/ops/developer_sandbox_live_acceptance.py \
   session-record-platform-health \
   --session-id <SESSION_ID> \
   --execute
 ```
+
+### Capacity recommendation and repository promotion
+
+The platform-health receipt is evidence, not permission to activate OLDLAB.
+Its capacity recommendation must be derived deterministically from the
+complete fixed OLDLAB node set and must retain the exact candidate, topology,
+headroom, and source-receipt binding. A missing node, stale receipt, failed
+checkpoint, candidate mismatch, or non-deterministic/manual capacity value is a
+hard stop.
+
+Use the repo-only capacity-promotion tool from the exact candidate checkout.
+It has no path, value, `--execute`, or activation override. Its only inputs are:
+
+- checked-in `deploy/environment-state/staging.toml`;
+- checked-in
+  `deploy/developer-sandboxes/shared-capacity-policies/oldlab.toml`;
+- root-owned
+  `/var/lib/loom-developer-sandbox-platform-health-authority/current.json`;
+- the exact
+  `/var/lib/loom-developer-sandbox-platform-health-authority/sessions/<SESSION_ID>/evidence.json`
+  named by that closed current pointer.
+
+The stable operation order is:
+
+```bash
+python scripts/ops/developer_sandbox_capacity_promotion.py check
+python scripts/ops/developer_sandbox_capacity_promotion.py render \
+  > /tmp/developer-sandbox-oldlab-capacity.patch
+# Review and apply the patch through the normal repository workflow.
+python scripts/ops/developer_sandbox_capacity_promotion.py check
+```
+
+`check` is deliberately offline and accepts exactly two repository states. The
+first is the committed fail-closed profile: empty evidence bindings,
+provisional disabled OLDLAB values, and a disabled/inactive supervisor. The
+second is an enabled profile whose historical provenance has a closed
+session-to-fixed-evidence-path binding, payload digest, three-candidate-set
+digest, recorded expiry, policy-source digest, and recommendation digest, and
+whose capacity values, external allocation prerequisite, and supervisor state
+exact-match the checked-in policy. Any hybrid, malformed, or config-drifted
+state fails. A recorded historical expiry does not invalidate repository
+provenance; `check` never reads `/var/lib`.
+
+`render`, unlike `check`, reads the fixed root path and requires the current
+evidence to be fresh. Its input repository must still be the exact disabled
+profile: empty promotion bindings, provisional OLDLAB values, GB10-only
+external prerequisites, and a disabled/inactive OLDLAB supervisor. One
+deterministic diff then binds provenance, writes the final measured capacity
+values, adds OLDLAB to the external-authority prerequisite set, moves its env
+file under `/srv/loom/staging-shared/generated`, broadens the fixed template
+glob to the two named pools, and enables the desired policy and supervisor
+together. It emits that diff only on stdout; it does not write the staging
+profile, install files, apply environment state, enable a live pool, start a
+timer, or mutate authority state. Apply and commit the reviewed diff through
+the normal PR path.
+
+After merge, rerun offline `check` on the exact merged candidate, then generate
+new fresh merged-candidate live acceptance for the runtime-host and activation
+gates. Those live gates re-read current root evidence and enforce freshness;
+they do not rewrite the checked-in historical provenance. The `/tmp` patch
+above is process-only and should be deleted after the repository change is
+applied.
 
 The staging pressure producer is separately installed at
 `/usr/local/libexec/loom-staging-pressure-reclaim-authority`, with fixed config
@@ -458,6 +600,34 @@ phase digest, rebuilds the complete expected checkpoint through the same
 session/sandbox/candidate/tree/status metadata constructor used at collection time,
 and requires exact object equality with the root-owned journal. Editing only a
 checkpoint's session, phase, candidate, tree, status, or digest fails.
+
+After finalization, seal Gate 6 from fixed authorities:
+
+```bash
+sudo python scripts/ops/developer_sandbox_live_acceptance.py \
+  session-seal-gate6 \
+  --session-id <SESSION_ID> \
+  --execute
+```
+
+This command accepts no caller-selected evidence paths. It rereads the sealed
+33/33 live artifact, its trusted receipts, the root-owned platform-health
+authority, and the six exact allocation matrices under
+`/var/lib/loom-developer-sandbox-slurm-policy/allocation-probes`. Every matrix
+must bind its own F/H/D candidate, reviewed pool concurrency (`oldlab=4`,
+`gb10=8`), and the complete 5/15-node set with `excluded_nodes=[]`. The three
+GB10 pair artifacts pass the unchanged non-exclusive v1 schema and semantic
+verifier. OLDLAB cannot pass that schema's mandatory non-empty GPU list, so the
+same Gate-6 verifier instead requires a native empty allocation plus positive
+zero-device exposure and denial proof; it never invents a GPU ID.
+
+The command writes six canonical pair artifacts and
+`gate6/acceptance.json` under the protected session directory, records
+`gate6_sha256` in the closed session state, and is idempotent only for exact
+bytes. Missing phase 33/33, candidate drift, node 7 omission, a non-empty
+exclusion list, partial matrix, missing worker/trial/verifier/sidecar, short
+soak, failed negative isolation, incomplete cleanup, or receipt mismatch fails
+closed.
 
 ## Failure and cleanup
 

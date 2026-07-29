@@ -1,6 +1,6 @@
 schema_version = 1
 pool_name = "gb10"
-slot_budget = 112
+slot_budget = 120
 pending_slot_budget = 24
 job_pids_max = 65536
 
@@ -8,7 +8,7 @@ job_pids_max = 65536
 actuator = "slurm"
 enabled = true
 min_slots = 0
-max_slots = 112
+max_slots = 120
 scale_up_threshold_slots = 1
 scale_down_idle_seconds = 600
 scale_up_cooldown_seconds = 60
@@ -27,6 +27,7 @@ allowed_nodes = [
   "trt-gb10-4",
   "trt-gb10-5",
   "trt-gb10-6",
+  "trt-gb10-7",
   "trt-gb10-8",
   "trt-gb10-9",
   "trt-gb10-10",
@@ -41,7 +42,7 @@ repo_dir = "/shared_work/loom/candidates/sandboxes/${SANDBOX}/${CANDIDATE_SHA}"
 requested_cpus = 16
 requested_memory_mib = 92000
 requested_concurrency = 8
-max_jobs = 14
+max_jobs = 15
 pending_job_cap = 3
 time_limit = "02:00:00"
 exclusive = false

@@ -49,8 +49,9 @@ def _repository(tmp_path: Path) -> tuple[Path, str]:
     return repo, _git(repo, "rev-parse", "HEAD")
 
 
-def _env_text(sandbox: str, sha: str) -> str:
+def _env_text(sandbox: str, sha: str, *, domain: str = "oldlab") -> str:
     root = f"/etc/loom/developer-sandbox-links/clients/{sandbox}/{sha}"
+    concurrency = {"oldlab": 4, "gb10": 8}[domain]
     return "\n".join(
         (
             "LOOM_WORKER_CONTROL_PLANE_URL=http://sandbox-link:8080",
@@ -58,6 +59,8 @@ def _env_text(sandbox: str, sha: str) -> str:
             "LOOM_WORKER_MINIO_ENDPOINT=http://sandbox-link:9000",
             f"LOOM_WORKER_SANDBOX_IDENTITY={sandbox}",
             f"LOOM_WORKER_CANDIDATE_SHA={sha}",
+            f"LOOM_WORKER_POOL_NAME={domain}",
+            f"LOOM_WORKER_MAX_CONCURRENT={concurrency}",
             f"LOOM_WORKER_TOKEN_FILE_HOST={root}/worker-token",
             f"LOOM_WORKER_MINIO_ACCESS_KEY_FILE_HOST={root}/minio-access-key",
             f"LOOM_WORKER_MINIO_SECRET_KEY_FILE_HOST={root}/minio-secret-key",
@@ -85,6 +88,14 @@ def test_checked_in_contract_has_two_independent_domains_and_stable_groups() -> 
     )
     assert config.domains["oldlab"].worker_env_name == "worker-oldlab.env"
     assert config.domains["gb10"].worker_env_name == "worker-gb10.env"
+    assert (
+        config.domains["oldlab"].worker_pool_name,
+        config.domains["oldlab"].worker_max_concurrent,
+    ) == ("oldlab", 4)
+    assert (
+        config.domains["gb10"].worker_pool_name,
+        config.domains["gb10"].worker_max_concurrent,
+    ) == ("gb10", 8)
     assert {group.gid for group in config.sandbox_groups.values()} == {
         31021,
         31022,
@@ -101,7 +112,9 @@ def test_checked_in_contract_has_two_independent_domains_and_stable_groups() -> 
         "gateway": 26100,
         "minio": 26900,
     }
-    assert "trt-gb10-7" not in {peer.ssh_target for peer in config.domains["gb10"].peers}
+    gb10_peers = {peer.ssh_target: peer.hostname for peer in config.domains["gb10"].peers}
+    assert len(gb10_peers) == 15
+    assert gb10_peers["trt-gb10-7"] == "gx10-0faf"
 
 
 def test_peer_check_envelope_is_canonical_for_the_fixed_node_authority() -> None:
@@ -452,6 +465,7 @@ def test_env_references_reject_tls_material_or_wrong_candidate(tmp_path: Path) -
     with pytest.raises(runtime.ConvergenceError, match="forbidden raw secret"):
         runtime._parse_env_references(
             seed,
+            domain=runtime.load_config(_CONFIG).domains["oldlab"],
             sandbox="qianyi",
             sha="a" * 40,
         )
@@ -477,7 +491,12 @@ def test_env_references_reject_every_raw_secret_class(
     seed.write_text(_env_text("qianyi", sha) + raw_line + "\n", encoding="utf-8")
 
     with pytest.raises(runtime.ConvergenceError, match="forbidden raw secret"):
-        runtime._parse_env_references(seed, sandbox="qianyi", sha=sha)
+        runtime._parse_env_references(
+            seed,
+            domain=runtime.load_config(_CONFIG).domains["oldlab"],
+            sandbox="qianyi",
+            sha=sha,
+        )
 
 
 def test_env_references_reject_unknown_nonsecret_field(tmp_path: Path) -> None:
@@ -486,7 +505,27 @@ def test_env_references_reject_unknown_nonsecret_field(tmp_path: Path) -> None:
     seed.write_text(_env_text("qianyi", sha) + "UNDECLARED_FLAG=1\n", encoding="utf-8")
 
     with pytest.raises(runtime.ConvergenceError, match="exact closed schema"):
-        runtime._parse_env_references(seed, sandbox="qianyi", sha=sha)
+        runtime._parse_env_references(
+            seed,
+            domain=runtime.load_config(_CONFIG).domains["oldlab"],
+            sandbox="qianyi",
+            sha=sha,
+        )
+
+
+def test_env_references_reject_cross_domain_pool_binding(tmp_path: Path) -> None:
+    sha = "a" * 40
+    seed = tmp_path / "worker.env"
+    seed.write_text(_env_text("qianyi", sha, domain="oldlab"), encoding="utf-8")
+    config = runtime.load_config(_CONFIG)
+
+    with pytest.raises(runtime.ConvergenceError, match="LOOM_WORKER_POOL_NAME"):
+        runtime._parse_env_references(
+            seed,
+            domain=config.domains["gb10"],
+            sandbox="qianyi",
+            sha=sha,
+        )
 
 
 def test_stable_service_identity_requires_fixed_nonlogin_uid_gid(
@@ -613,7 +652,7 @@ def _fleet_payload(
             },
             "services": service_rows,
         }
-        for node in runtime._ELIGIBLE_LINK_NODES
+        for node in runtime._INFRASTRUCTURE_LINK_NODES
     }
     payload: dict[str, object] = {
         "schema_version": 1,
@@ -621,7 +660,7 @@ def _fleet_payload(
         "candidate_sha": sha,
         "generated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "expires_at": (now + timedelta(minutes=15)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "eligible_nodes": list(runtime._ELIGIBLE_LINK_NODES),
+        "eligible_nodes": list(runtime._INFRASTRUCTURE_LINK_NODES),
         "bundle_generation": {
             "candidate_sha": sha,
             "ca_fingerprint": ca_fingerprint,
@@ -672,7 +711,7 @@ def _fleet_reference(
     }
 
 
-def test_fleet_attestation_requires_full_19_node_three_relay_contract() -> None:
+def test_fleet_attestation_requires_full_20_node_three_relay_contract() -> None:
     config = runtime.load_config(_CONFIG)
     now = datetime(2026, 7, 28, 16, 0, tzinfo=UTC)
     sha = "a" * 40
@@ -686,7 +725,8 @@ def test_fleet_attestation_requires_full_19_node_three_relay_contract() -> None:
         now=now + timedelta(seconds=30),
     )
 
-    assert len(verified["nodes"]) == 19
+    assert len(verified["nodes"]) == 20
+    assert "trt-gb10-7" in verified["nodes"]
     assert set(verified["server"]["services"]) == {
         "control-plane",
         "gateway",
@@ -782,6 +822,9 @@ def _domain_manifest(
             "user": group.member,
             "mode": "0600",
             "candidate_sha": sha,
+            "worker_pool_name": domain.worker_pool_name,
+            "worker_max_concurrent": domain.worker_max_concurrent,
+            "capacity_policy_source": domain.capacity_policy_source,
             "local_urls": {
                 "control-plane": "http://sandbox-link:8080",
                 "gateway": "http://sandbox-link:9100",

@@ -69,7 +69,7 @@ _RUNTIME_PROOF_ARTIFACT_NAMES = frozenset(
     },
 )
 _RUNTIME_PROOF_ARTIFACT_MAX_BYTES = 1 << 20
-_ELIGIBLE_LINK_NODES = (
+_INFRASTRUCTURE_LINK_NODES = (
     "oldlab-1",
     "oldlab-2",
     "oldlab-3",
@@ -81,6 +81,7 @@ _ELIGIBLE_LINK_NODES = (
     "trt-gb10-4",
     "trt-gb10-5",
     "trt-gb10-6",
+    "trt-gb10-7",
     "trt-gb10-8",
     "trt-gb10-9",
     "trt-gb10-10",
@@ -156,6 +157,9 @@ class Peer:
 class Domain:
     name: str
     worker_env_name: str
+    worker_pool_name: str
+    worker_max_concurrent: int
+    capacity_policy_source: str
     candidate_root: Path
     runtime_root: Path
     publisher_hostname: str
@@ -206,6 +210,9 @@ _GROUP_KEYS = {
 }
 _DOMAIN_KEYS = {
     "worker_env_name",
+    "worker_pool_name",
+    "worker_max_concurrent",
+    "capacity_policy_source",
     "candidate_root",
     "runtime_root",
     "publisher_hostname",
@@ -324,6 +331,20 @@ def load_config(path: Path) -> RuntimeConfig:
         env_name = item["worker_env_name"]
         if env_name != f"worker-{name}.env":
             raise ConvergenceError(f"domains.{name}.worker_env_name is invalid")
+        worker_pool_name = item["worker_pool_name"]
+        worker_max_concurrent = item["worker_max_concurrent"]
+        capacity_policy_source = item["capacity_policy_source"]
+        expected_capacity_policy_source = (
+            f"deploy/developer-sandboxes/shared-capacity-policies/{name}.toml"
+        )
+        expected_worker_max_concurrent = 4 if name == "oldlab" else 8
+        if (
+            worker_pool_name != name
+            or type(worker_max_concurrent) is not int
+            or worker_max_concurrent != expected_worker_max_concurrent
+            or capacity_policy_source != expected_capacity_policy_source
+        ):
+            raise ConvergenceError(f"domains.{name} worker capacity binding is invalid")
         peers_raw = item["peers"]
         if not isinstance(peers_raw, list) or not peers_raw:
             raise ConvergenceError(f"domains.{name}.peers must not be empty")
@@ -359,6 +380,9 @@ def load_config(path: Path) -> RuntimeConfig:
         domains[name] = Domain(
             name=name,
             worker_env_name=env_name,
+            worker_pool_name=worker_pool_name,
+            worker_max_concurrent=worker_max_concurrent,
+            capacity_policy_source=capacity_policy_source,
             candidate_root=candidate_root,
             runtime_root=runtime_root,
             publisher_hostname=publisher,
@@ -416,7 +440,7 @@ def _authority_envelope(
 ) -> str:
     if (
         action not in {"inspect-candidate", "inspect-local", "export-domain-attestation"}
-        or node not in _ELIGIBLE_LINK_NODES
+        or node not in _INFRASTRUCTURE_LINK_NODES
         or domain not in ALLOWED_DOMAINS
         or sandbox not in ALLOWED_SANDBOXES
     ):
@@ -605,6 +629,7 @@ def _secure_seed(path: Path, *, require_root_owner: bool = False) -> Path:
 def _parse_env_references(
     path: Path,
     *,
+    domain: Domain,
     sandbox: str,
     sha: str,
 ) -> dict[str, str]:
@@ -629,6 +654,8 @@ def _parse_env_references(
         "LOOM_WORKER_MINIO_ENDPOINT": "http://sandbox-link:9000",
         "LOOM_WORKER_SANDBOX_IDENTITY": sandbox,
         "LOOM_WORKER_CANDIDATE_SHA": sha,
+        "LOOM_WORKER_POOL_NAME": domain.worker_pool_name,
+        "LOOM_WORKER_MAX_CONCURRENT": str(domain.worker_max_concurrent),
         "LOOM_WORKER_TOKEN_FILE_HOST": f"{bundle_root}/worker-token",
         "LOOM_WORKER_MINIO_ACCESS_KEY_FILE_HOST": f"{bundle_root}/minio-access-key",
         "LOOM_WORKER_MINIO_SECRET_KEY_FILE_HOST": f"{bundle_root}/minio-secret-key",
@@ -968,6 +995,7 @@ def publish_plan(
     seed = _secure_seed(env_seed)
     _parse_env_references(
         seed,
+        domain=domain,
         sandbox=sandbox,
         sha=identity.sha,
     )
@@ -1724,7 +1752,7 @@ def _verify_fleet_attestation(
         fleet["schema_version"] != SCHEMA_VERSION
         or fleet["sandbox"] != sandbox
         or fleet["candidate_sha"] != sha
-        or fleet["eligible_nodes"] != list(_ELIGIBLE_LINK_NODES)
+        or fleet["eligible_nodes"] != list(_INFRASTRUCTURE_LINK_NODES)
     ):
         raise ConvergenceError("remote-link fleet identity is invalid")
     digest = fleet.pop("payload_sha256")
@@ -1816,7 +1844,7 @@ def _verify_fleet_attestation(
         }:
             raise ConvergenceError("remote-link server service contract is invalid")
 
-    if set(nodes) != set(_ELIGIBLE_LINK_NODES):
+    if set(nodes) != set(_INFRASTRUCTURE_LINK_NODES):
         raise ConvergenceError("remote-link fleet node set is incomplete")
     secret_files = {
         name: {"present": True, "uid": 0, "gid": 0, "mode": "0600"}
@@ -1830,7 +1858,7 @@ def _verify_fleet_attestation(
     service_readback = {
         name: {"listener_port": port, "health": "ok"} for name, port in listener_ports.items()
     }
-    for node in _ELIGIBLE_LINK_NODES:
+    for node in _INFRASTRUCTURE_LINK_NODES:
         row = nodes[node]
         if not isinstance(row, dict):
             raise ConvergenceError("remote-link fleet node is invalid")
@@ -2310,6 +2338,9 @@ def _emit_attestation(
             "user": group.member,
             "mode": "0600",
             "candidate_sha": identity.sha,
+            "worker_pool_name": domain.worker_pool_name,
+            "worker_max_concurrent": domain.worker_max_concurrent,
+            "capacity_policy_source": domain.capacity_policy_source,
             "local_urls": {
                 "control-plane": "http://sandbox-link:8080",
                 "gateway": "http://sandbox-link:9100",
@@ -2499,6 +2530,9 @@ def _verify_domain_attestation(
             "user",
             "mode",
             "candidate_sha",
+            "worker_pool_name",
+            "worker_max_concurrent",
+            "capacity_policy_source",
             "local_urls",
             "oldlab2_upstreams",
             "host_references",
@@ -2514,6 +2548,9 @@ def _verify_domain_attestation(
         or runtime_env["user"] != group.member
         or runtime_env["mode"] != "0600"
         or runtime_env["candidate_sha"] != sha
+        or runtime_env["worker_pool_name"] != domain.worker_pool_name
+        or runtime_env["worker_max_concurrent"] != domain.worker_max_concurrent
+        or runtime_env["capacity_policy_source"] != domain.capacity_policy_source
         or runtime_env["local_urls"]
         != {
             "control-plane": "http://sandbox-link:8080",
@@ -3239,6 +3276,7 @@ def _converge_publish_locked(
         seed = _secure_seed(env_seed, require_root_owner=True)
         _parse_env_references(
             seed,
+            domain=domain,
             sandbox=sandbox,
             sha=identity.sha,
         )
@@ -3340,7 +3378,7 @@ def attest_plan(
     paths = runtime_paths(domain, sandbox, identity.sha)
     _verify_candidate(paths.candidate, identity, config.shared_gid)
     seed = _secure_seed(env_seed)
-    _parse_env_references(seed, sandbox=sandbox, sha=identity.sha)
+    _parse_env_references(seed, domain=domain, sandbox=sandbox, sha=identity.sha)
     return {
         "schema_version": SCHEMA_VERSION,
         "operation": "attest",
@@ -3398,7 +3436,12 @@ def _converge_attest_locked(
         receipt["status"] = "mutating"
         _write_json(receipt_path, receipt)
         seed = _secure_seed(env_seed, require_root_owner=True)
-        _parse_env_references(seed, sandbox=sandbox, sha=identity.sha)
+        _parse_env_references(
+            seed,
+            domain=domain,
+            sandbox=sandbox,
+            sha=identity.sha,
+        )
         if not paths.env.exists() or paths.env.read_bytes() != seed.read_bytes():
             _atomic_env_write(
                 seed,

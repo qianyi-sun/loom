@@ -19,9 +19,13 @@ non-login batch identity `loom-staging-worker` (31024:31024, `/nonexistent`,
 account and QoS are pinned in
 `deploy/developer-sandboxes/staging-external-slurm-authority.toml`.
 
-The acceptance set is exactly `trt-gb10-1..15`, excluding
-`trt-gb10-7`. Neither an operator nor the candidate can select a smaller node
-set, another submit host, another account, or another evidence root.
+The persistent infrastructure and allocation acceptance set is exactly
+`trt-gb10-1..15`, with `excluded_nodes=[]`. The 2026-07-29 owner correction
+supersedes #822's static exclusion of `trt-gb10-7`. Neither an operator nor the
+candidate can select a smaller set, choose another submit host, another
+account, or another evidence root. A candidate-owned drain/quiescence gate
+defers disruptive convergence while any host has external work and must never
+cancel or preempt that work.
 
 On first `bootstrap`, the fixed root authority persistently generates an
 Ed25519 key pair when both key files are absent. It installs the private key as
@@ -76,7 +80,7 @@ sudo -n /usr/local/libexec/loom-staging-external-slurm-authority \
 
 It sends one closed transaction to oldlab2. Oldlab2 serially converges
 `trt-gb10-2` shared-source ownership, `trt-gb10-1` accounting, and the exact
-ordered fourteen-node bootstrap set; node 7 is never addressable. Oldlab2 then
+ordered fifteen-node infrastructure bootstrap set including node 7. Oldlab2 then
 sends the aggregate to oldlab1, which deep-verifies and atomically installs
 `/var/lib/loom-developer-sandbox-node-authority/staging-infrastructure/<candidate-sha>.json`
 as root:root `0600`.
@@ -96,11 +100,13 @@ identity, starts the exact NFSv4 mount
 `192.168.20.12:/shared_work2/loom/staging` at
 `/srv/loom/staging-shared`, and reads back source, filesystem type, target,
 device, and root inode. The same system mount and identity must converge on
-`oldlab1` and all fourteen GB10 nodes; `trt-gb10-2` uses the same self-NFS
+`oldlab1` and all fifteen GB10 infrastructure nodes; `trt-gb10-2` uses the same self-NFS
 submount identity, not its local export path. Final roots are exactly
 `candidates`, `generated`, and `results` below that mount and are owned by
-31024:31024. A directory under `/shared_work2/qianyi` is never an authority
-surface.
+31024:31024 on `oldlab1` and all fifteen GB10 infrastructure nodes. Node 7 is
+admitted through the same 15-node allocation and health contract after its
+candidate-owned quiescence gate passes. A directory under
+`/shared_work2/qianyi` is never an authority surface.
 
 ## Prepare, probe, activate
 
@@ -116,7 +122,7 @@ environment-state mutation:
    publishes with `renameat2(RENAME_NOREPLACE)`. Its root-owned journal supports
    recovery without overwriting or deleting foreign content. Raw repository
    tree and worker-env digest are read back from the final system namespace.
-3. `probe` invokes the fixed allocation action for all fourteen nodes. Every
+3. `probe` invokes the fixed allocation action for all fifteen nodes. Every
    node row must prove `sbatch`, `srun`, exact candidate/tree and paths, worker
    registration and at least two bounded heartbeats, ordered cancel,
    stop/terminal timestamps, Slurm `COMPLETED`, mount/inode binding, and zero

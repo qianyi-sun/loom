@@ -203,7 +203,7 @@ def test_prepare_admission_uses_only_fixed_exact_candidate_root_command(
         "convergence_id": "c" * 64,
         "generation": 1,
         "kind": "staging_external_slurm_infrastructure_convergence",
-        "node_count": 14,
+        "node_count": 15,
         "receipt_path": (
             "/var/lib/loom-developer-sandbox-node-authority/staging-infrastructure/"
             + "a" * 40
@@ -284,7 +284,7 @@ def test_prepare_admission_rejects_untrusted_producer_output(
             "convergence_id": "c" * 64,
             "generation": 1,
             "kind": "staging_external_slurm_infrastructure_convergence",
-            "node_count": 14,
+            "node_count": 15,
             "receipt_path": (
                 "/var/lib/loom-developer-sandbox-node-authority/staging-infrastructure/"
                 + "a" * 40
@@ -330,7 +330,7 @@ def test_prepare_admission_rejects_noncanonical_producer_output(tmp_path: Path) 
         "convergence_id": "c" * 64,
         "generation": 1,
         "kind": "staging_external_slurm_infrastructure_convergence",
-        "node_count": 14,
+        "node_count": 15,
         "receipt_path": (
             "/var/lib/loom-developer-sandbox-node-authority/staging-infrastructure/"
             + "a" * 40

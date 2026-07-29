@@ -28,11 +28,12 @@ the exact merged candidate:
 6. the candidate-bound acceptance artifact passes
    `scripts/ops/nonexclusive_slurm_acceptance.py verify`.
 
-The host Docker cgroup driver cannot be changed while jobs or containers are
-active. A rollout must drain one node, verify zero Slurm jobs and zero running
-Docker containers on that node, apply the checked-in profile through the
-supported host converger, restart Docker and `slurmd`, and read back the
-effective settings before moving to the next node. The controller is changed
+The host Docker cgroup driver cannot be changed while jobs, containers, or GPU
+compute processes are active. The supported host converger takes a
+candidate-owned Slurm drain for one node, waits for all three activity classes
+to clear, applies the checked-in profile, restarts Docker and `slurmd`, and
+reads back the effective settings before moving to the next node. A foreign
+DRAIN/DOWN is preserved and blocks the transaction. The controller is changed
 last. Do not edit `/etc/slurm`, `/etc/docker/daemon.json`, or SlurmDB
 associations by hand.
 
@@ -41,12 +42,17 @@ Prolog runs outside cgroups and runs before `PrologFlags=Contain` creates the
 extern step, so a Prolog cannot safely set the eventual job cgroup. The
 converger therefore installs and enables the persistent
 `loom-slurm-job-cgroup-guard.service`, not a Prolog. The root guard discovers
-only exact `job_<id>` directories beneath a Slurm scope, looks up that exact
-job through the local Slurm controller, and accepts only one of the three
-reviewed child accounts plus the fixed `loom-cgroup-v1:pids=<N>` grammar. It
-then enables the `cpu`, `memory`, and `pids` subtree controllers and lowers
-`pids.max` to the cluster profile's exact value. The batch entry waits for
-that exact readback before starting Docker.
+only exact `job_<id>` directories beneath a Slurm scope and looks up that exact
+job through the local Slurm controller. Its closed schema-v2 configuration
+contains exactly the three `loom-dev-<sandbox>` accounts, each bound to its
+fixed `loom-sandbox-<sandbox>` service user and that sandbox's own SHA/tree.
+The three SHAs must be pairwise distinct and the complete map is protected by
+one candidate-set digest. The guard accepts the fixed
+`loom-cgroup-v1:pids=<N>` grammar only when account, `UserId`, job-name SHA,
+and candidate-set binding all agree. It then enables the `cpu`, `memory`, and
+`pids` subtree controllers and lowers `pids.max` to the cluster profile's
+exact value. The batch entry waits for that exact readback before starting
+Docker.
 
 A malformed Loom comment, wrong account, wrong ceiling, ambiguous job
 identity, mismatched cgroup, missing controller, or drifted readback therefore
@@ -61,25 +67,23 @@ the host `docker` group is not scheduler-administration authority.
 
 ## Convergence
 
-Render the secret-free plan on each target host:
+Render the secret-free atomic-set plan from the installed oldlab-2 authority:
 
 ```bash
-python scripts/ops/developer_sandbox_slurm_policy.py plan \
-  --profile deploy/slurm/developer-sandboxes/oldlab.toml
+sudo /usr/local/libexec/loom-developer-sandbox-host slurm-converge \
+  --domain oldlab --sandbox all --candidate-sha <QIANYI_SHA>
 ```
 
-`apply` remains plan-only unless `--execute` is present. On a drained compute
-node, apply and restart the local daemons:
-
-```bash
-sudo python scripts/ops/developer_sandbox_slurm_policy.py apply \
-  --profile deploy/slurm/developer-sandboxes/oldlab.toml \
-  --execute --restart
-```
-
-The command refuses the restart while any Slurm job or Docker container remains
-on the node. It validates the desired Docker daemon configuration before the
-atomic writes. Every pass holds the persistent per-cluster administration lock
+Mutation remains disabled unless `--execute` is present. The authority records
+the exact candidate-set/profile/operation binding in a root-private drain
+journal before taking each node drain. If the node remains busy,
+the root-installed `loom-developer-sandbox-slurm-recovery.timer` retries the
+same closed operation every 30 seconds and after boot; once the node is
+quiescent it completes the transaction and resumes only its own drain. It
+never calls `scancel`, stops a container, kills a GPU process, resumes a
+foreign drain, or accepts a caller-selected recovery path. It validates the
+desired Docker daemon configuration before the atomic writes. Every pass holds
+the persistent per-cluster administration lock
 at `/var/lib/loom-developer-sandbox-slurm-policy/locks/<cluster>.lock` across
 recovery, preflight, every mutation, and final readback. The lock and its
 non-symlink parent chain are root-owned; the lock has exact mode `0600`, is
@@ -131,27 +135,23 @@ same-field write was overwritten inside the unavoidable database-command
 race. Direct `sacctmgr` mutation is therefore unsupported and invalidates the
 transaction evidence.
 
-The live command binds the installed guard configuration and status to the
-exact source candidate SHA and refuses a dirty or mismatched policy checkout.
-Supply the binding explicitly when operating a materialized candidate:
-
-```bash
-sudo python scripts/ops/developer_sandbox_slurm_policy.py apply \
-  --profile deploy/slurm/developer-sandboxes/oldlab.toml \
-  --candidate-sha "$EXACT_CANDIDATE_SHA" \
-  --execute --restart
-```
+The live command binds the installed guard configuration and status to one
+atomic candidate-set transition. Direct live policy CLI use without the
+canonical three-account binding is rejected. Use the fleet maintenance
+authority below; it derives the binding from all three root-owned installed
+desired states and refuses a dirty, partial, legacy, hybrid, duplicated-SHA,
+or cross-account map.
 
 The OLDLAB and GB10 profiles cap opted-in jobs at 32768 and 65536 PIDs,
 respectively; `plan` reports the bound before any mutation. A restart pass
 also daemon-reloads, enables, and starts the cgroup guard. Unit activity alone
 is not health. On every scan the guard atomically publishes a root-only status
-record containing its timestamp, candidate/config digests, scanned/verified/
-failed counts, bounded failure reasons, and the last real job resource probe.
-The final live check requires that status to be fresh and failure-free and
-requires a real opted-in job probe with finite CPU, memory, and PID cgroup
-readback; the GB10 profile additionally requires a positive allocated GPU TRES
-readback.
+record containing its timestamp, candidate-set/config digests,
+scanned/verified/failed counts, bounded failure reasons, and the last real job
+resource probe independently for each account. The final live check requires
+that status to be fresh and failure-free and requires the selected sandbox's
+account-bound job probe with finite CPU, memory, and PID cgroup readback; the
+GB10 profile additionally requires a positive allocated GPU TRES readback.
 
 After the collector publishes a fresh combined receipt, materialize a complete
 proof bundle on each profile's exact submit host. Fetches use only the
@@ -210,20 +210,17 @@ sudo python scripts/ops/developer_sandbox_slurm_policy.py allocation-probe \
   --batch-uid "$EXPECTED_BATCH_UID" \
   --batch-gid "$EXPECTED_BATCH_GID" \
   --expected-pool oldlab \
-  --expected-concurrency 1 \
+  --expected-concurrency 4 \
   --execute
 
-sudo python scripts/ops/developer_sandbox_slurm_policy.py check \
-  --profile deploy/slurm/developer-sandboxes/oldlab.toml \
-  --sandbox "$SANDBOX_USER" \
-  --candidate-sha "$EXACT_CANDIDATE_SHA" \
-  --candidate-root "$EXACT_CANDIDATE_ROOT" \
-  --worker-env "$PRIVATE_WORKER_ENV" \
-  --batch-uid "$EXPECTED_BATCH_UID" \
-  --batch-gid "$EXPECTED_BATCH_GID" \
-  --expected-pool oldlab \
-  --expected-concurrency 1
 ```
+
+`--expected-pool` and `--expected-concurrency` are assertions, not overrides.
+Both the submit-side probe and compute-side checker re-read the exact
+candidate's checked-in shared-capacity policy and runtime-domain contract.
+OLDLAB is bound to `oldlab`/`4`; GB10 is bound to `gb10`/`8`. Any CLI value,
+published env, profile inventory, or cross-domain source that disagrees fails
+before the allocation matrix can be accepted.
 
 `--sandbox` is mandatory for proof materialization, allocation probing,
 compute-side checking, and strict live readback. It remains the logical label
@@ -306,11 +303,14 @@ SHA/tree, submit cluster/controller/host, numeric batch UID/GID, pool,
 concurrency, and candidate/env metadata.
 
 The required combined runtime receipt is root-owned mode `0600`, canonical,
-fresh, candidate-bound, and collected from the existing 19-node domain
+fresh, candidate-bound, and collected from the 20-node domain
 runtime/fleet authority. The matrix validates its digest, selected domain
 generation and manifest signature digest, exact profile host coverage, and
-the fleet's exact 5 OLDLAB plus 14 GB10 closed set. Receipt, manifest,
+the fleet's exact 5 OLDLAB plus 15 GB10 infrastructure set. Receipt, manifest,
 signature, or fleet path/digest/generation/host drift fails before submission.
+The allocation matrix uses the complete 15-node GB10 infrastructure and
+production-eligible set. The 2026-07-29 owner correction supersedes #822's
+static node 7 exclusion, and acceptance requires `excluded_nodes=[]`.
 The installed five-minute persistent renewal timer regenerates that proof from
 the exact candidate rather than extending its 15-minute expiry. Every
 generation is also archived as an immutable root-owned receipt linked to its
@@ -352,32 +352,18 @@ accounting/fair-share settings, `cgroup.conf`, Docker's cgroup driver, guard
 enablement/activity/fresh health, and the exact QoS, account hierarchy,
 per-user associations, fair-share, and group TRES returned by `sacctmgr`.
 
-Run the controller last. The controller invocation may also converge the
-parent account, equal-share child accounts, user associations, aggregate TRES
-budget, and QoS:
-
-```bash
-sudo python scripts/ops/developer_sandbox_slurm_policy.py apply \
-  --profile deploy/slurm/developer-sandboxes/oldlab.toml \
-  --execute --restart --apply-accounting
-```
+The fleet authority runs the controller last. Its controller invocation also
+converges the parent account, equal-share child accounts, user associations,
+aggregate TRES budget, and QoS.
 
 Repeat with `gb10.toml` only from the independently authorized GB10
 administrator path. A failed or partial pass is rerun idempotently; do not
 repair SlurmDB rows or daemon JSON by hand, and do not bypass the shared
 administration lock with direct `sacctmgr`.
 
-To restore the file snapshot and exact Loom-owned accounting fields from the
-last committed transaction, use the same locked, journaled path:
-
-```bash
-sudo python scripts/ops/developer_sandbox_slurm_policy.py rollback \
-  --profile deploy/slurm/developer-sandboxes/oldlab.toml \
-  --candidate-sha "$EXACT_CANDIDATE_SHA" \
-  --execute
-```
-
-Rollback also reloads/reconfigures services, performs live readback, and
+The fleet rollback command below restores the file snapshot and exact
+Loom-owned accounting fields from the last committed candidate-set
+transaction. It reloads/reconfigures services, performs live readback, and
 automatically restores the pre-rollback state if any rollback phase fails. Do
 not delete or edit the journal or snapshot tree by hand.
 
@@ -385,41 +371,61 @@ not delete or edit the journal or snapshot tree by hand.
 
 Do not run the policy CLI directly across the fleet. The persistent installer
 exposes a maintenance-window command whose only caller inputs are the closed
-domain, sandbox, and exact candidate SHA:
+domain, the literal `all` sandbox set, and qianyi's exact authority SHA:
 
 ```bash
 sudo /usr/local/libexec/loom-developer-sandbox-host slurm-converge \
-  --domain oldlab --sandbox qianyi --candidate-sha <SHA> --execute
+  --domain oldlab --sandbox all --candidate-sha <QIANYI_SHA> --execute
 sudo /usr/local/libexec/loom-developer-sandbox-host slurm-check \
-  --domain oldlab --sandbox qianyi --candidate-sha <SHA> --execute
+  --domain oldlab --sandbox all --candidate-sha <QIANYI_SHA> --execute
 ```
 
-The node authority derives the candidate root, domain profile, live root,
-restart, and controller accounting behavior. No caller-provided profile,
-root, path, accounting, restart, or arbitrary policy flag reaches the node.
-The policy independently revalidates sandbox profile membership, the
-candidate, physical hostname, Slurm node, cluster/controller identity, and
-zero-job/zero-container drain precondition. GB10 node 7 is outside the closed
-inventory.
+The host captures all three exact desired SHA/tree bindings once, assigns a
+durable generation and convergence ID, and sends the same canonical payload
+to every node. The node authority independently inspects all three shared
+candidate roots and requires their policy/profile/guard/unit surfaces to be
+byte-compatible before invoking the qianyi authority copy. The node authority
+then derives the domain profile, live root, restart, and controller accounting
+behavior. No caller-provided profile, root, path, accounting, restart, or
+arbitrary policy flag reaches the node. The policy independently revalidates
+the complete account map, physical hostname, Slurm node,
+cluster/controller identity, and candidate-owned zero-job/zero-container drain
+precondition. GB10 node 7 is in
+the same infrastructure and production allocation set as its peers. If an
+external job keeps the host busy, convergence waits; it must never cancel or
+preempt that job.
 
-The host journal advances compute nodes first and writes each exact authority
-receipt before continuing. A busy or foreign job/container stops the pass
-without cancellation. Rerunning the same command replays and compares the
-committed receipts; the controller runs only after every compute receipt and
-check readback exists. A final check covers every node. The journal remains on
-failure so the pass is resumable.
+Candidate-set capture, converge, check, and rollback hold the same global
+installer lock used by desired-state activation for their entire pass, then
+take the per-domain maintenance lock. An install therefore cannot replace one
+of the three desired SHA/tree bindings after capture while fleet work is still
+using it.
+
+The single per-domain candidate-set journal advances compute nodes first and
+writes each exact authority receipt before continuing. A busy or foreign
+job/container stops the whole set transition without cancellation. Retrying a
+blocked generation reuses its captured convergence ID and receipts. Starting
+a new converge after completion increments the generation and mints a new
+convergence ID, so old success receipts cannot mask later host drift. The
+controller runs only after every compute receipt and check readback exists. A
+final check covers every node. The journal remains on failure so the pass is
+resumable.
 
 Rollback is receipt-owned and candidate-bound:
 
 ```bash
 sudo /usr/local/libexec/loom-developer-sandbox-host slurm-rollback \
-  --domain oldlab --sandbox qianyi --candidate-sha <SHA> --execute
+  --domain oldlab --sandbox all --candidate-sha <QIANYI_SHA> --execute
 ```
 
 Each rollback envelope names only the prior authority request ID. The node
 authority rejects a different node/domain/sandbox/candidate/tree or an
 advanced policy journal/snapshot digest. It never accepts a snapshot or
-journal path from the host command.
+journal path from the host command. A new rollback is admitted only from a
+completed candidate-set pass with a converge receipt for every node; it never
+skips a node whose persistent recovery timer may still finish later. An
+already-started rollback remains resumable from its exact journal receipts and,
+like converge, restores compute nodes before the controller.
 
 ## Fair-share contract
 

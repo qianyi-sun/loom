@@ -5,15 +5,20 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
-import re
 import stat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType
+from typing import Any
 
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
+from loom_cli.external_slurm_acceptance import (
+    ExternalSlurmAcceptanceError,
+    infrastructure_candidate_source_digest,
+    validate_infrastructure_verification_summary,
+)
 from loom_cli.rollout.browser_runtime_readiness import (
     CommandRunner as BrowserCommandRunner,
 )
@@ -1260,10 +1265,7 @@ def build_backup_rotation_capacity_check(
             # retires the prior active, restoring capacity. A genuine backlog
             # (stuck retirements) still leaves >= 2 payloads once the own
             # candidate is excluded and stays blocked.
-            if (
-                blockers.get("transient-limit") == "reached"
-                and state.payload_count - 1 < 2
-            ):
+            if blockers.get("transient-limit") == "reached" and state.payload_count - 1 < 2:
                 del blockers["transient-limit"]
         if state.evidence_digest != expected_rotation_digest:
             blockers["rotation-digest"] = "drifted"
@@ -1728,7 +1730,6 @@ def build_gb10_shared_mount_check(
     )
 
 
-
 def build_external_gb10_stage_boundary_checks(
     run: CommandRunner,
     *,
@@ -1747,34 +1748,6 @@ def build_external_gb10_stage_boundary_checks(
         "/var/lib/loom-developer-sandbox-node-authority/"
         f"staging-infrastructure/{expected_candidate_sha}.json"
     )
-    summary_fields = {
-        "schema_version",
-        "kind",
-        "candidate_sha",
-        "candidate_tree",
-        "receipt_path",
-        "payload_sha256",
-        "source_controller",
-        "source_controller_host",
-        "created_at",
-        "expires_at",
-        "source_bootstrap",
-        "accounting",
-        "node_bootstraps",
-        "mount_contract",
-        "node_count",
-        "result",
-    }
-    operation_fields = {
-        "action",
-        "node",
-        "request_id",
-        "payload_sha256",
-        "result_sha256",
-        "inner_receipt",
-        "completed_at",
-        "status",
-    }
     mount_contract = {
         "source": "192.168.20.12:/shared_work2/loom/staging",
         "target": "/srv/loom/staging-shared",
@@ -1794,8 +1767,7 @@ def build_external_gb10_stage_boundary_checks(
     if (
         tuple(target.ssh_target for target in targets) != ACTIVE_GB10_HOSTS
         or any(
-            len(value) != 64
-            or any(character not in "0123456789abcdef" for character in value)
+            len(value) != 64 or any(character not in "0123456789abcdef" for character in value)
             for value in (expected_profile_digest, expected_mount_binding_digest)
         )
         or len(expected_candidate_sha) != 40
@@ -1803,7 +1775,7 @@ def build_external_gb10_stage_boundary_checks(
     ):
         raise ValueError("external GB10 stage boundary is invalid")
 
-    def receipt() -> dict[str, object] | None:
+    def receipt() -> dict[str, Any] | None:
         try:
             result = run(
                 (
@@ -1829,115 +1801,24 @@ def build_external_gb10_stage_boundary_checks(
             payload = json.loads(result.stdout)
         except (TypeError, json.JSONDecodeError):
             return None
-        if (
-            not isinstance(payload, dict)
-            or set(payload) != summary_fields
-            or payload.get("schema_version") != 1
-            or payload.get("kind")
-            != "staging_external_slurm_infrastructure_verification"
-            or payload.get("candidate_sha") != expected_candidate_sha
-            or payload.get("candidate_tree") != expected_candidate_tree
-            or payload.get("receipt_path") != expected_receipt_path
-            or payload.get("source_controller") != "oldlab-2"
-            or payload.get("source_controller_host") != "trt-eai-oldlab-2"
-            or payload.get("node_count") != 14
-            or payload.get("mount_contract") != mount_contract
-            or payload.get("result") != "pass"
-            or re.fullmatch(r"[0-9a-f]{64}", str(payload.get("payload_sha256")))
-            is None
-        ):
-            return None
-        source = payload.get("source_bootstrap")
-        accounting = payload.get("accounting")
-        nodes = payload.get("node_bootstraps")
-        if (
-            not isinstance(source, dict)
-            or set(source) != operation_fields
-            or not isinstance(accounting, dict)
-            or set(accounting) != operation_fields
-            or not isinstance(nodes, list)
-            or len(nodes) != 14
-            or any(not isinstance(item, dict) or set(item) != operation_fields for item in nodes)
-        ):
-            return None
-        expected_operations = (
-            (
-                source,
-                "staging-shared-source-bootstrap",
-                "trt-gb10-2",
-                None,
-            ),
-            (
-                accounting,
-                "staging-slurm-accounting-converge",
-                "trt-gb10-1",
-                None,
-            ),
-            *tuple(
-                (
-                    item,
-                    "staging-allocation-bootstrap",
-                    host,
-                    None,
-                )
-                for item, host in zip(nodes, expected_hosts, strict=True)
-            ),
-        )
-        completed: list[datetime] = []
-        for item, action, host, _unused in expected_operations:
-            inner = item.get("inner_receipt")
-            if (
-                item.get("action") != action
-                or item.get("node") != host
-                or item.get("status") != "succeeded"
-                or re.fullmatch(r"[0-9a-f]{64}", str(item.get("request_id"))) is None
-                or re.fullmatch(r"[0-9a-f]{64}", str(item.get("payload_sha256"))) is None
-                or re.fullmatch(r"[0-9a-f]{64}", str(item.get("result_sha256"))) is None
-                or (
-                    action == "staging-slurm-accounting-converge"
-                    and re.fullmatch(r"staging-accounting/v1/[0-9a-f]{64}", str(inner))
-                    is None
-                )
-                or (action != "staging-slurm-accounting-converge" and inner is not None)
-            ):
-                return None
-            try:
-                completed.append(
-                    datetime.fromisoformat(
-                        str(item["completed_at"]).replace("Z", "+00:00")
-                    )
-                )
-            except ValueError:
-                return None
         try:
-            created = datetime.fromisoformat(
-                str(payload["created_at"]).replace("Z", "+00:00")
+            return validate_infrastructure_verification_summary(
+                payload,
+                candidate_sha=expected_candidate_sha,
+                candidate_tree=expected_candidate_tree,
+                receipt_path=expected_receipt_path,
+                expected_hosts=expected_hosts,
+                expected_mount_contract=mount_contract,
+                now=now(),
             )
-            expires = datetime.fromisoformat(
-                str(payload["expires_at"]).replace("Z", "+00:00")
-            )
-            current = now()
-        except ValueError:
+        except (ExternalSlurmAcceptanceError, TypeError, ValueError):
             return None
-        if (
-            any(value.tzinfo is None for value in (*completed, created, expires, current))
-            or completed != sorted(completed)
-            or completed[-1] > created
-            or created > current + timedelta(seconds=30)
-            or not current < expires
-            or (expires - created).total_seconds() > 3600
-            or (current - created).total_seconds() > 3600
-        ):
-            return None
-        return payload
 
     def base_context_ready(context: CheckContext) -> bool:
         return bool(
             context.bindings["gb10.inventory-digest"] == expected_inventory
-            and context.bindings["gb10.mount-binding.sha256"]
-            == expected_mount_binding_digest
-            and context.bindings["gb10.external-profile.sha256"]
-            == expected_profile_digest
+            and context.bindings["gb10.mount-binding.sha256"] == expected_mount_binding_digest
+            and context.bindings["gb10.external-profile.sha256"] == expected_profile_digest
         )
 
     def mount_probe(context: CheckContext) -> CheckProbe:
@@ -1956,10 +1837,10 @@ def build_external_gb10_stage_boundary_checks(
             evidence={
                 "binding-digest": expected_mount_binding_digest,
                 "profile-digest": expected_profile_digest,
-                "receipt-digest": (
-                    "0" * 64 if payload is None else str(payload["payload_sha256"])
-                ),
+                "receipt-digest": ("0" * 64 if payload is None else str(payload["payload_sha256"])),
+                "receipt-generation": 0 if payload is None else int(payload["generation"]),
                 "mount-contract-digest": contract_digest,
+                "mount-digest": "0" * 64 if payload is None else str(payload["mount_digest"]),
             },
         )
 
@@ -1980,7 +1861,9 @@ def build_external_gb10_stage_boundary_checks(
                 EvidenceField("binding-digest", "sha256"),
                 EvidenceField("profile-digest", "sha256"),
                 EvidenceField("receipt-digest", "sha256"),
+                EvidenceField("receipt-generation", "integer"),
                 EvidenceField("mount-contract-digest", "sha256"),
+                EvidenceField("mount-digest", "sha256"),
             ),
             timeout_seconds=30,
             freshness_ttl_seconds=120,
@@ -2011,9 +1894,22 @@ def build_external_gb10_stage_boundary_checks(
                 "candidate-sha": expected_candidate_sha,
                 "candidate-tree": expected_candidate_tree,
                 "unit-set-digest": units.unit_set_digest if units is not None else "0" * 64,
+                "source-digest": (
+                    "0" * 64
+                    if payload is None or units is None
+                    else infrastructure_candidate_source_digest(
+                        candidate_sha=expected_candidate_sha,
+                        candidate_tree=expected_candidate_tree,
+                        unit_set_digest=units.unit_set_digest,
+                    )
+                ),
+                "infrastructure-source-digest": (
+                    "0" * 64 if payload is None else str(payload["source_digest"])
+                ),
                 "infrastructure-receipt-digest": (
                     "0" * 64 if payload is None else str(payload["payload_sha256"])
                 ),
+                "receipt-generation": 0 if payload is None else int(payload["generation"]),
             },
         )
 
@@ -2036,7 +1932,10 @@ def build_external_gb10_stage_boundary_checks(
                 EvidenceField("candidate-sha", "string"),
                 EvidenceField("candidate-tree", "string"),
                 EvidenceField("unit-set-digest", "sha256"),
+                EvidenceField("source-digest", "sha256"),
+                EvidenceField("infrastructure-source-digest", "sha256"),
                 EvidenceField("infrastructure-receipt-digest", "sha256"),
+                EvidenceField("receipt-generation", "integer"),
             ),
             timeout_seconds=30,
             freshness_ttl_seconds=120,
@@ -2064,10 +1963,10 @@ def build_external_gb10_stage_boundary_checks(
             evidence={
                 "host-count": len(node_digests),
                 "inventory-digest": expected_inventory,
+                "boot-ids": {} if payload is None else dict(payload["boot_ids"]),
                 "node-receipt-digests": node_digests,
-                "receipt-digest": (
-                    "0" * 64 if payload is None else str(payload["payload_sha256"])
-                ),
+                "receipt-digest": ("0" * 64 if payload is None else str(payload["payload_sha256"])),
+                "receipt-generation": 0 if payload is None else int(payload["generation"]),
             },
         )
 
@@ -2087,12 +1986,14 @@ def build_external_gb10_stage_boundary_checks(
             evidence_schema=(
                 EvidenceField("host-count", "integer"),
                 EvidenceField("inventory-digest", "sha256"),
+                EvidenceField("boot-ids", "string-map"),
                 EvidenceField("node-receipt-digests", "string-map"),
                 EvidenceField("receipt-digest", "sha256"),
+                EvidenceField("receipt-generation", "integer"),
             ),
             timeout_seconds=30,
             freshness_ttl_seconds=120,
-            remediation="restore the exact current 14-node infrastructure receipt",
+            remediation="restore the exact current 15-node active-host readiness receipt",
             secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
         ),
         implementation_version="external-v2",

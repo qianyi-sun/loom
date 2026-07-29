@@ -10,8 +10,12 @@ The checked-in route authority is
 `deploy/developer-sandboxes/node-authority-transport.toml`. It contains only
 the closed node names, canonical hostnames, IP addresses, ports, initiators,
 verbs, and jump relationships. It contains no public key, private key,
-password, agent socket, token, or secret. The quarantined `trt-gb10-7` node is
-absent from the node, route, role, and proxy sets.
+password, agent socket, token, or secret. `trt-gb10-7` is included in this
+infrastructure inventory so it receives the same persistent authority,
+transport, systemd, shared-path, and capacity foundation as the other GB10
+hosts. The 2026-07-29 owner correction supersedes #822's static exclusion.
+When node 7 is busy, the candidate-owned drain/quiescence gate delays
+disruptive convergence without cancelling or preempting external jobs.
 
 Runtime transport has these fixed properties:
 
@@ -27,20 +31,57 @@ Runtime transport has these fixed properties:
   runtime-proof sources on OLDLAB1/2;
 - the separate GB10 jump key has no SSH forwarding privilege. Its forced
   command maps a closed target name to one fixed internal address on port 22
-  and relays that byte stream. It has no mapping for node 7 or another port.
+  and relays that byte stream. The node 7 mapping is fixed to
+  `192.168.20.77:22`; no role can select another address or port.
 
-OLDLAB2 reaches OLDLAB directly on `192.168.50.13` through
-`192.168.50.17`. It reaches `trt-gb10-1` at `207.35.188.227:2221`, then uses
-the forced jump stream for the declared GB10 internal addresses. The GB10
-publisher on `gx10-01c7` reaches its declared peers directly on the
-`192.168.20.0/24` network. For runtime proof only, it reaches OLDLAB1 at
-`207.35.188.227:2321`, then uses OLDLAB1's forced closed proxy to OLDLAB2 at
-`192.168.50.14:22`. No other OLDLAB target or port is mapped.
+OLDLAB1 uses `192.168.50.103` for its LAN self-route. OLDLAB2 reaches OLDLAB1
+at that same address and reaches OLDLAB2 through OLDLAB5 directly on
+`192.168.50.14` through `192.168.50.17`. It reaches `trt-gb10-1` at
+`207.35.188.227:2221`, then uses the forced jump stream for the declared GB10
+internal addresses. The GB10 publisher on `gx10-01c7` reaches its declared
+peers directly on the `192.168.20.0/24` network. For runtime proof only, it
+reaches OLDLAB1 at `207.35.188.227:2321`, then uses OLDLAB1's forced closed
+proxy to OLDLAB2 at `192.168.50.14:22`. No other OLDLAB target or port is
+mapped.
 
-## External-root bootstrap
+## Persistent-root bootstrap
 
-The tool never generates a key. A direct external root administrator must
-provide:
+Before handling any trust asset, render the complete ceremony checklist:
+
+```bash
+python3 scripts/ops/developer_sandbox_node_transport.py bootstrap-inventory
+```
+
+This command needs no root authority and accepts no argument, path, trust
+asset, secret, or execution flag. It reads only the checked-in route config and
+emits closed canonical JSON containing all 20 canonical node/hostname rows,
+each node's exact server roles, the three initiators' exact client roles and
+required known-host endpoint tokens, and an empty transport-exclusion set.
+The output is informational inventory, not an authority receipt, installation
+attestation, host-key pin, or mutation authorization.
+
+The JSON inventory is the machine source of truth for the external ceremony.
+The human-readable role and verb tables below are contract-tested projections
+of the same checked-in config; do not maintain a separate hand-written role
+list.
+
+Every one-shot Docker/chroot request uses bootstrap envelope schema version 2
+and includes a caller-generated 64-hex `operation_id`. The request digest binds
+that identifier together with the action, exact candidate, node, bundle, and
+closed input inventory. Reuse one operation ID only to replay the same
+operation and expected result. Generate a new operation ID for a later
+readback or lifecycle phase so that authority-only, transport-installed, and
+post-convergence evidence remain separate immutable receipts; never delete or
+rewrite an earlier receipt to make a changed readback fit.
+Use `scripts/ops/developer_sandbox_node_docker_request.py` to render the
+canonical envelope. For readback, bind `--transport-expectation absent` before
+transport installation, `server` on server-only nodes after installation, and
+`client-server` on the three initiators. The renderer emits only digests and
+public metadata; run it through the Docker-root ceremony when its closed input
+directory contains a private identity.
+
+The tool never generates a key. A host-root administrator, including the
+repository's one-shot Docker/chroot bootstrap channel, must provide:
 
 1. one root-owned mode-`0600` identity file for every role required by the
    current initiator;
@@ -75,8 +116,17 @@ On `trt-eai-oldlab-1`, bootstrap the `oldlab1-publisher` client role with the
 same command shape and its exact OLDLAB direct-route known-hosts set. On
 `trt-gb10-1`, bootstrap the `gb10-1-publisher` and
 `gb10-1-oldlab-jump` client roles with the same command shape and their exact
-GB10/OLDLAB route known-hosts set. Both publisher authority roles are
-check-only; the jump role can relay only the fixed OLDLAB2 endpoint.
+GB10/OLDLAB route known-hosts set. Their authority verbs are closed to the
+checked-in role policy:
+
+| Publisher authority role | Exact verbs |
+| --- | --- |
+| `oldlab1-publisher` | `check`, `transact` |
+| `gb10-1-publisher` | `check` |
+
+Thus `oldlab1-publisher` may perform its fixed publication transactions and
+checks, while `gb10-1-publisher` is check-only. The separate jump role can
+relay only the fixed OLDLAB2 endpoint.
 
 Each target separately receives only the public keys required by its closed
 server role. The following table is the complete machine-derived
@@ -88,14 +138,16 @@ the row exactly:
 | `oldlab-1` | `gb10-1-oldlab-jump`, `gb10-1-publisher`, `oldlab1-publisher`, `oldlab2-controller` |
 | `oldlab-2` | `gb10-1-publisher`, `oldlab1-publisher`, `oldlab2-controller` |
 | `oldlab-3` through `oldlab-5` | `oldlab1-publisher`, `oldlab2-controller` |
-| `trt-gb10-1` | `gb10-1-publisher`, `oldlab2-controller`, `oldlab2-gb10-jump` |
-| `trt-gb10-2` through `trt-gb10-6`, and `trt-gb10-8` through `trt-gb10-15` | `gb10-1-publisher`, `oldlab2-controller` |
+| `trt-gb10-1` | `gb10-1-publisher`, `oldlab1-publisher`, `oldlab2-controller`, `oldlab2-gb10-jump` |
+| `trt-gb10-2` through `trt-gb10-15` | `gb10-1-publisher`, `oldlab2-controller` |
 
 In particular, the GB10 submit publisher adds
 `gb10-1-publisher` authority to OLDLAB1/2 and the
 `gb10-1-oldlab-jump` proxy on OLDLAB1. Those keys are not optional additions
-to an earlier controller-only server bootstrap. `trt-gb10-7` has no row and
-must not receive a managed transport key.
+to an earlier controller-only server bootstrap. `trt-gb10-7` receives the same
+managed server roles as every other non-controller GB10 host. That host-side
+foundation is part of the same all-15 infrastructure and capacity-eligible
+contract.
 
 ```bash
 python3 scripts/ops/developer_sandbox_node_transport.py bootstrap-server \
@@ -107,30 +159,23 @@ bootstrap installs the root-owned forced-command program and policy, atomically
 preserves unrelated `qianyi` authorized-key entries, and rejects a changed or
 duplicate managed marker.
 
-Both plan modes are read-only. Planning and execution both use an auditable
-direct-login operational gate because planning reads the private trust inputs:
-real UID and effective UID must both be zero, no `SUDO_*` marker may be
-present, and Linux audit `/proc/self/loginuid` must exist and equal zero.
-Consequently `sudo env -i` and equivalent environment clearing do not satisfy
-the gate. The gate also rejects `/.dockerenv`, `/run/.containerenv`, an
-explicit container environment, and Docker, containerd, Kubernetes, Podman,
-libpod, or LXC cgroup identities. Both `/proc/self/cgroup` and
-`/proc/1/cgroup` must be readable and stable; absence or ambiguity fails
-closed, so a privileged container or host-root bind is not a bootstrap path.
-The candidate checkout, every source asset and external trust asset,
-and every parent component must remain root-owned,
-non-symlinked, and not group/world writable through descriptor-pinned
-readback. Copied authority bytes are also compared with the exact requested
-Git commit blobs.
+Both plan and execution require real and effective UID zero plus a persistent
+host-root view whose `/` is the root of visible PID 1 and whose PID 1 is
+systemd. This admits either host root or the fixed one-shot Docker/chroot
+channel; it does not require a direct-root login. The Docker transaction uses
+the exact-candidate image entrypoint and read-only request, Git bundle, and
+trust-input mounts described in `developer-sandboxes.md`. It copies trust
+inputs into a root-owned host `/run` stage before invoking these functions.
+The container exits after installed-state readback and is never part of
+runtime transport.
 
-This gate is deliberately not described as cryptographic separation from an
-actor who already has arbitrary root: such an actor can in principle alter or
-bypass any local userspace check. Authorization remains the external
-administrator's reviewed direct-login procedure and the independently
-provided fixed identities, public keys, and host pins. Existing installed
-identities, host pins, policy, or managed authorized-key entries are never
-silently rotated or overwritten. Rotation requires a separately reviewed
-candidate and explicit external-root operation.
+The candidate checkout, every source asset and external trust asset, and every
+parent component remain root-owned, non-symlinked, and not group/world writable
+through descriptor-pinned readback. Copied authority bytes are compared with
+the exact requested Git commit blobs. Existing installed identities, host
+pins, policy, or managed authorized-key entries are never silently rotated or
+overwritten. Rotation requires a separately reviewed candidate and explicit
+persistent-root transaction.
 
 ## Transactional upgrade
 
@@ -165,15 +210,15 @@ transaction. The node-authority dispatcher checks that marker immediately
 after acquiring its shared/exclusive runtime lock and before reading policy or
 accepting a request. Therefore a crash in `prepared`, `admission-disabled`,
 `assets-replaced`, or `committed` state cannot admit a transaction or read-only
-check; only a later direct-root upgrade invocation may consume and recover the
+check; only a later persistent-root upgrade invocation may consume and recover the
 marker. Program, route, policy, public-key, host-pin, and managed
 authorized-key updates use fsynced atomic replacement; the dispatcher is
-replaced last. A failed readback restores the snapshot. A later direct-root
+replaced last. A failed readback restores the snapshot. A later persistent-root
 `upgrade --execute` rolls back an interrupted pre-commit transaction or
 finalizes a fully committed one before evaluating the new candidate.
 
 When both node authority and transport change, upgrade node authority first by
-its direct-root transaction, read it back locally, then upgrade transport and
+its persistent-root transaction, read it back locally, then upgrade transport and
 read back both transport roles. This ordering leaves the old forced transport
 pointing only at a fully valid authority. Do not widen sudoers or temporarily
 install an unrestricted SSH path to bridge the two upgrades.
@@ -209,7 +254,10 @@ non-controller nodes, `slurm-controller-converge` only for `oldlab-1` or
 `trt-gb10-1`, read-only `slurm-check`, and receipt-bound `slurm-rollback`.
 The transport carries no profile, root, restart, accounting, path, or
 arbitrary flag. Node and domain must match the installed authority policy, and
-`trt-gb10-7` has no route or authority identity.
+`trt-gb10-7` has a persistent route and authority identity for infrastructure
+convergence, readback, and capacity operation. Disruptive convergence remains
+subject to the candidate-owned drain/quiescence gate; an external job must
+never be cancelled or preempted to make the gate pass.
 
 The host-side fleet journal is the only orchestration surface. It calls
 compute nodes first, persists each authority receipt and check readback,

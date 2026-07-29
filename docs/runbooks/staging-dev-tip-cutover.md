@@ -6,7 +6,7 @@ sealed candidate `e833dd3` (serving `/dev`) to the tip of `dev` (serving
 `/staging`), in one coordinated maintenance window.
 
 This is a high-blast-radius operation — it moves the public `yylx.world` route,
-migrates the live staging database, and renames the worker pool across 14 GB10
+migrates the live staging database, and renames the worker pool across all 15 GB10
 hosts. Run it as a supervised window with the abort path in hand, not
 unattended.
 
@@ -45,7 +45,7 @@ outside the window):
    `0070` (capacity) and conflict on the existing table. The migration must
    `stamp 0072` first (accept the content it has), then run `0073`. If the
    driver does not do this, step 4 includes the manual stamp.
-2. **How the dev candidate is materialized on the 14 GB10 shared checkouts**
+2. **How the dev candidate is materialized on all 15 GB10 shared checkouts**
    (`gb10.candidate-source`): via the `loom-staging-rollout-gb10-trust` broker
    command, the driver's GB10 prep step, or the shared-repo export authority
    (#890/#891). Confirm which, and that the operator has the access.
@@ -90,8 +90,9 @@ Run `loom-staging-rollout preflight` and clear each remaining blocker:
   sudo systemctl start loom-rollout-credential-refresh.service
   kubectl -n loom-staging get pod loom-minio-0
   ```
-- **`gb10.candidate-source.drift` (×14)** — materialize the dev candidate on the
-  GB10 shared checkouts (mechanism per precondition #2).
+- **`gb10.candidate-source.drift`** — materialize the dev candidate on all 15
+  GB10 shared checkouts and refresh the aggregate candidate-source receipt
+  (mechanism per precondition #2).
 - **`external-supervisor.predecessor.drift`** — provision/restore the #907
   supervisor authority for the dev candidate.
 - **`backup.lease.ineligible` / `backup.rotation-capacity.blocked`** — ensure a

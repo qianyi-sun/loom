@@ -47,6 +47,10 @@ name = "trt-gb10-6"
 hostname = "gx10-1000"
 
 [[nodes]]
+name = "trt-gb10-7"
+hostname = "gx10-0faf"
+
+[[nodes]]
 name = "trt-gb10-8"
 hostname = "gx10-db22"
 
@@ -95,6 +99,7 @@ targets = [
   "trt-gb10-4",
   "trt-gb10-5",
   "trt-gb10-6",
+  "trt-gb10-7",
   "trt-gb10-8",
   "trt-gb10-9",
   "trt-gb10-10",
@@ -133,6 +138,7 @@ targets = [
   "trt-gb10-4",
   "trt-gb10-5",
   "trt-gb10-6",
+  "trt-gb10-7",
   "trt-gb10-8",
   "trt-gb10-9",
   "trt-gb10-10",
@@ -163,6 +169,7 @@ targets = [
   "trt-gb10-4",
   "trt-gb10-5",
   "trt-gb10-6",
+  "trt-gb10-7",
   "trt-gb10-8",
   "trt-gb10-9",
   "trt-gb10-10",
@@ -176,7 +183,7 @@ targets = [
 [[routes]]
 initiator = "oldlab-1"
 node = "oldlab-1"
-address = "192.168.50.13"
+address = "192.168.50.103"
 port = 22
 jump = ""
 
@@ -218,7 +225,7 @@ jump = ""
 [[routes]]
 initiator = "oldlab-2"
 node = "oldlab-1"
-address = "192.168.50.13"
+address = "192.168.50.103"
 port = 22
 jump = ""
 
@@ -289,6 +296,13 @@ jump = "trt-gb10-1"
 initiator = "oldlab-2"
 node = "trt-gb10-6"
 address = "192.168.20.16"
+port = 22
+jump = "trt-gb10-1"
+
+[[routes]]
+initiator = "oldlab-2"
+node = "trt-gb10-7"
+address = "192.168.20.77"
 port = 22
 jump = "trt-gb10-1"
 
@@ -401,6 +415,13 @@ jump = ""
 initiator = "trt-gb10-1"
 node = "trt-gb10-6"
 address = "192.168.20.16"
+port = 22
+jump = ""
+
+[[routes]]
+initiator = "trt-gb10-1"
+node = "trt-gb10-7"
+address = "192.168.20.77"
 port = 22
 jump = ""
 

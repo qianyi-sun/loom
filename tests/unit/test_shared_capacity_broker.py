@@ -191,6 +191,247 @@ def test_persisted_admission_fence_blocks_only_new_requests_until_exact_release(
     assert _request(restarted, SandboxId.HONGJIAN)
 
 
+def _acceptance_contract(clock: Clock, *, expires_in: int = 3600) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "admission_token": "1" * 32,
+        "session_id": "2" * 32,
+        "candidate_shas": {
+            "qianyi": SHA_A,
+            "hongjian": SHA_B,
+            "devansh": SHA_C,
+        },
+        "phases": [
+            "multi_candidate_overlap",
+            "large_batch_burst",
+            "fairness_contention",
+            "cancel_cleanup",
+            "ttl_cleanup",
+            "submit_host_restart",
+        ],
+        "target_slots": {"gb10": 8, "oldlab": 4},
+        "ttl_seconds": {
+            "multi_candidate_overlap": 3600,
+            "large_batch_burst": 3600,
+            "fairness_contention": 3600,
+            "cancel_cleanup": 600,
+            "ttl_cleanup": 120,
+            "submit_host_restart": 3600,
+        },
+        "pool_slot_budgets": {"gb10": 120, "oldlab": 20},
+        "pool_pending_slot_budgets": {"gb10": 24, "oldlab": 10},
+        "expires_at": (clock.now + timedelta(seconds=expires_in))
+        .isoformat()
+        .replace("+00:00", "Z"),
+    }
+
+
+def _open_acceptance(broker: SharedCapacityBroker, clock: Clock) -> dict[str, object]:
+    contract = _acceptance_contract(clock)
+    broker.close_admission("1" * 32)
+    broker.open_acceptance_admission(token="1" * 32, contract=contract)
+    return contract
+
+
+def test_acceptance_fairness_cohort_is_atomic_distinct_and_general_stays_fenced(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    broker = _broker(tmp_path, clock)
+    _open_acceptance(broker, clock)
+
+    cohort = broker.request_acceptance_cohort(
+        token="1" * 32,
+        session_id="2" * 32,
+        phase="fairness_contention",
+    )
+
+    assert len(cohort) == 6
+    assert {
+        (
+            row["request"]["sandbox"],  # type: ignore[index]
+            row["request"]["pool"],  # type: ignore[index]
+            row["request"]["candidate_sha"],  # type: ignore[index]
+        )
+        for row in cohort
+    } == {
+        ("qianyi", "gb10", SHA_A),
+        ("qianyi", "oldlab", SHA_A),
+        ("hongjian", "gb10", SHA_B),
+        ("hongjian", "oldlab", SHA_B),
+        ("devansh", "gb10", SHA_C),
+        ("devansh", "oldlab", SHA_C),
+    }
+    with pytest.raises(BrokerError, match="fenced during runtime activation"):
+        _request(broker, SandboxId.QIANYI, candidate_sha=SHA_A, pool="oldlab")
+    with pytest.raises(BrokerError, match="outside the active contract"):
+        broker.request_acceptance_cohort(
+            token="1" * 32,
+            session_id="2" * 32,
+            phase="final_drain",
+        )
+    assert len(broker.status()["requests"]) == 6
+
+
+def test_acceptance_cancel_is_exact_owned_and_not_broad_generic_routing(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    broker = _broker(tmp_path, clock)
+    _open_acceptance(broker, clock)
+    cohort = broker.request_acceptance_cohort(
+        token="1" * 32,
+        session_id="2" * 32,
+        phase="cancel_cleanup",
+    )
+    target = next(
+        row
+        for row in cohort
+        if row["request"]["sandbox"] == "hongjian"  # type: ignore[index]
+        and row["request"]["pool"] == "gb10"  # type: ignore[index]
+    )
+
+    with pytest.raises(BrokerError, match="exact acceptance cancel"):
+        broker.cancel(str(target["request"]["id"]))  # type: ignore[index]
+    with pytest.raises(BrokerError, match="unavailable"):
+        broker.cancel_acceptance_request(
+            token="1" * 32,
+            session_id="2" * 32,
+            phase="fairness_contention",
+            sandbox="hongjian",
+            pool="gb10",
+        )
+    cancelled = broker.cancel_acceptance_request(
+        token="1" * 32,
+        session_id="2" * 32,
+        phase="cancel_cleanup",
+        sandbox="hongjian",
+        pool="gb10",
+    )
+    assert cancelled["request"]["id"] == target["request"]["id"]  # type: ignore[index]
+    assert cancelled["request"]["cancel_requested"] is True  # type: ignore[index]
+    other = next(
+        row
+        for row in broker.status()["requests"]
+        if row["request"]["sandbox"] == "qianyi"  # type: ignore[index]
+        and row["request"]["pool"] == "gb10"  # type: ignore[index]
+    )
+    assert other["request"]["cancel_requested"] is False  # type: ignore[index]
+
+
+def test_acceptance_phase_rotation_retires_before_next_atomic_cohort(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    broker = _broker(tmp_path, clock)
+    _open_acceptance(broker, clock)
+    prior_ids: set[str] = set()
+    for phase in (
+        "multi_candidate_overlap",
+        "large_batch_burst",
+        "fairness_contention",
+    ):
+        assert broker.acceptance_cohort_status(
+            token="1" * 32,
+            session_id="2" * 32,
+            phase=phase,
+        ) is None
+        broker.retire_acceptance_requests(
+            token="1" * 32,
+            session_id="2" * 32,
+        )
+        cohort = broker.request_acceptance_cohort(
+            token="1" * 32,
+            session_id="2" * 32,
+            phase=phase,
+        )
+        current_ids = {
+            str(row["request"]["id"])  # type: ignore[index]
+            for row in cohort
+        }
+        assert len(current_ids) == 6
+        assert current_ids.isdisjoint(prior_ids)
+        assert [
+            row["request"]["id"]  # type: ignore[index]
+            for row in broker.request_acceptance_cohort(
+                token="1" * 32,
+                session_id="2" * 32,
+                phase=phase,
+            )
+        ] == [row["request"]["id"] for row in cohort]  # type: ignore[index]
+        nonterminal_by_lane: dict[tuple[str, str], int] = {}
+        for row in broker.status()["requests"]:
+            request = row["request"]  # type: ignore[index]
+            if request["state"] != "terminal":  # type: ignore[index]
+                lane = (str(request["sandbox"]), str(request["pool"]))  # type: ignore[index]
+                nonterminal_by_lane[lane] = nonterminal_by_lane.get(lane, 0) + 1
+        assert all(count <= 1 for count in nonterminal_by_lane.values())
+        prior_ids.update(current_ids)
+
+
+def test_acceptance_ttl_never_refreshes_and_restart_replay_is_same_request(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    broker = _broker(tmp_path, clock)
+    _open_acceptance(broker, clock)
+    ttl_first = broker.request_acceptance_cohort(
+        token="1" * 32,
+        session_id="2" * 32,
+        phase="ttl_cleanup",
+    )
+    ttl_ids = [row["request"]["id"] for row in ttl_first]  # type: ignore[index]
+    ttl_expiry = [row["request"]["expires_at"] for row in ttl_first]  # type: ignore[index]
+    clock.advance(seconds=121)
+    ttl_replay = broker.request_acceptance_cohort(
+        token="1" * 32,
+        session_id="2" * 32,
+        phase="ttl_cleanup",
+    )
+    assert [row["request"]["id"] for row in ttl_replay] == ttl_ids  # type: ignore[index]
+    assert [row["request"]["expires_at"] for row in ttl_replay] == ttl_expiry  # type: ignore[index]
+
+    broker.retire_acceptance_requests(
+        token="1" * 32,
+        session_id="2" * 32,
+    )
+    restart_first = broker.request_acceptance_cohort(
+        token="1" * 32,
+        session_id="2" * 32,
+        phase="submit_host_restart",
+    )
+    restarted = _broker(tmp_path, clock)
+    restart_replay = restarted.request_acceptance_cohort(
+        token="1" * 32,
+        session_id="2" * 32,
+        phase="submit_host_restart",
+    )
+    assert [row["request"]["id"] for row in restart_replay] == [  # type: ignore[index]
+        row["request"]["id"] for row in restart_first  # type: ignore[index]
+    ]
+
+
+def test_expired_acceptance_contract_blocks_new_cohort_without_opening_general(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    broker = _broker(tmp_path, clock)
+    contract = _acceptance_contract(clock, expires_in=60)
+    broker.close_admission("1" * 32)
+    broker.open_acceptance_admission(token="1" * 32, contract=contract)
+    clock.advance(seconds=61)
+
+    with pytest.raises(BrokerError, match="expired"):
+        broker.request_acceptance_cohort(
+            token="1" * 32,
+            session_id="2" * 32,
+            phase="multi_candidate_overlap",
+        )
+    with pytest.raises(BrokerError, match="fenced during runtime activation"):
+        _request(broker, SandboxId.QIANYI)
+    assert broker.acceptance_contract() == contract
+
+
 def test_v1_authority_upgrades_observation_replay_state_in_place(
     tmp_path: Path,
 ) -> None:

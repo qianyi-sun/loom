@@ -34,6 +34,9 @@ upstream_minio_port = 28900
 
 [domains.oldlab]
 worker_env_name = "worker-oldlab.env"
+worker_pool_name = "oldlab"
+worker_max_concurrent = 4
+capacity_policy_source = "deploy/developer-sandboxes/shared-capacity-policies/oldlab.toml"
 candidate_root = "/shared_work/loom/candidates/sandboxes"
 runtime_root = "/shared_work/loom/runtime/sandboxes"
 publisher_hostname = "trt-eai-oldlab-1"
@@ -60,6 +63,9 @@ hostname = "trt-eai-oldlab-5"
 
 [domains.gb10]
 worker_env_name = "worker-gb10.env"
+worker_pool_name = "gb10"
+worker_max_concurrent = 8
+capacity_policy_source = "deploy/developer-sandboxes/shared-capacity-policies/gb10.toml"
 candidate_root = "/shared_work/loom/candidates/sandboxes"
 runtime_root = "/shared_work/loom/runtime/sandboxes"
 publisher_hostname = "gx10-01c7"
@@ -87,6 +93,10 @@ hostname = "gx10-1036"
 [[domains.gb10.peers]]
 ssh_target = "trt-gb10-6"
 hostname = "gx10-1000"
+
+[[domains.gb10.peers]]
+ssh_target = "trt-gb10-7"
+hostname = "gx10-0faf"
 
 [[domains.gb10.peers]]
 ssh_target = "trt-gb10-8"

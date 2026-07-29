@@ -37,7 +37,7 @@ _GB10_RELEASE_UNIT_PATHS = frozenset(
 DEFAULT_SETTLE_ATTEMPTS = 16
 DEFAULT_SETTLE_INTERVAL_SECONDS = 2.0
 FULL_GB10_HOSTS = tuple(f"trt-gb10-{number}" for number in range(1, 16))
-TEMPORARILY_EXCLUDED_GB10_HOSTS = frozenset({"trt-gb10-7"})
+TEMPORARILY_EXCLUDED_GB10_HOSTS: frozenset[str] = frozenset()
 ACTIVE_GB10_HOSTS = tuple(
     host for host in FULL_GB10_HOSTS if host not in TEMPORARILY_EXCLUDED_GB10_HOSTS
 )

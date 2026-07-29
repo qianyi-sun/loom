@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from scripts.ops import staging_external_slurm_acceptance_authority as external_authority
 
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
 from loom_cli.rollout.browser_runtime_readiness import browser_report_schema_digest
@@ -852,32 +853,59 @@ def _external_infrastructure_summary(
     created_at: datetime,
     expires_at: datetime,
 ) -> dict[str, object]:
-    hosts = [f"trt-gb10-{number}" for number in range(1, 16) if number != 7]
+    hosts = [f"trt-gb10-{number}" for number in range(1, 16)]
 
     def operation(action: str, node: str, *, accounting: bool = False) -> dict[str, object]:
+        node_number = int(node.rsplit("-", 1)[1])
         return {
+            "schema_version": 1,
             "action": action,
             "node": node,
+            "domain": "gb10",
+            "sandbox": "staging",
+            "candidate_sha": "1" * 40,
+            "candidate_tree": "2" * 40,
             "request_id": hashlib.sha256(f"{action}:{node}".encode()).hexdigest(),
             "payload_sha256": "4" * 64,
             "result_sha256": hashlib.sha256(node.encode()).hexdigest(),
             "inner_receipt": (
-                f"staging-accounting/v1/{'5' * 64}" if accounting else None
+                f"staging-accounting/v1/{'5' * 64}"
+                if accounting
+                else (
+                    f"staging-shared-source-bootstrap/v1/{'a' * 64}"
+                    if action == "staging-shared-source-bootstrap"
+                    else (
+                        "staging-allocation-bootstrap/v1/"
+                        f"{node_number:08x}-0000-4000-8000-{node_number:012x}/"
+                        f"{hashlib.sha256(f'mount:{node}'.encode()).hexdigest()}"
+                    )
+                )
             ),
             "completed_at": created_at.isoformat().replace("+00:00", "Z"),
             "status": "succeeded",
         }
 
-    return {
+    requested_at = (created_at - timedelta(seconds=30)).isoformat().replace("+00:00", "Z")
+    convergence_id = "d" * 64
+    converge_request = {
         "schema_version": 1,
-        "kind": "staging_external_slurm_infrastructure_verification",
+        "kind": "loom.staging-external-slurm.infrastructure-converge-request",
         "candidate_sha": "1" * 40,
         "candidate_tree": "2" * 40,
-        "receipt_path": (
-            "/var/lib/loom-developer-sandbox-node-authority/"
-            f"staging-infrastructure/{'1' * 40}.json"
-        ),
-        "payload_sha256": "3" * 64,
+        "convergence_id": convergence_id,
+        "requested_at": requested_at,
+    }
+    receipt = {
+        "schema_version": 1,
+        "kind": "loom.staging-external-slurm.infrastructure-receipt",
+        "candidate_sha": "1" * 40,
+        "candidate_tree": "2" * 40,
+        "generation": 1,
+        "convergence_id": convergence_id,
+        "requested_at": requested_at,
+        "request_sha256": hashlib.sha256(
+            external_authority.canonical_json_bytes(converge_request)
+        ).hexdigest(),
         "source_controller": "oldlab-2",
         "source_controller_host": "trt-eai-oldlab-2",
         "created_at": created_at.isoformat().replace("+00:00", "Z"),
@@ -909,12 +937,25 @@ def _external_infrastructure_summary(
             "result_gid": 31024,
             "result_root_mode": "0o2770",
         },
-        "node_count": 14,
         "result": "pass",
     }
+    return external_authority._infrastructure_summary(
+        receipt,
+        payload_sha256="3" * 64,
+    )
 
 
-@pytest.mark.parametrize("failure", ["missing", "tampered", "stale"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "missing",
+        "tampered",
+        "stale",
+        "source-digest",
+        "boot-id",
+        "mount-digest",
+    ],
+)
 def test_external_gb10_infrastructure_receipt_fails_closed(
     failure: str,
 ) -> None:
@@ -927,6 +968,16 @@ def test_external_gb10_infrastructure_receipt_fails_closed(
         payload["node_count"] = 13
     elif failure == "stale":
         payload["expires_at"] = (current - timedelta(seconds=1)).isoformat()
+    elif failure == "source-digest":
+        payload["source_digest"] = "f" * 64
+    elif failure == "boot-id":
+        boot_ids = payload["boot_ids"]
+        assert isinstance(boot_ids, dict)
+        boot_ids["trt-gb10-1"] = "ffffffff-ffff-4fff-8fff-ffffffffffff"
+    elif failure == "mount-digest":
+        mount_digests = payload["mount_digests"]
+        assert isinstance(mount_digests, dict)
+        mount_digests["trt-gb10-1"] = "f" * 64
 
     def run(argv: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
         assert argv[:4] == (
@@ -945,7 +996,6 @@ def test_external_gb10_infrastructure_receipt_fails_closed(
             "loom-gb10-node-agent.service",
         )
         for number in range(1, 16)
-        if number != 7
     )
     mount, _candidate, _host = build_external_gb10_stage_boundary_checks(
         run,
@@ -977,7 +1027,9 @@ def test_external_gb10_infrastructure_receipt_fails_closed(
     assert result.evidence["receipt-digest"] == "0" * 64
 
 
-def test_external_gb10_infrastructure_receipt_accepts_exact_live_producer_summary() -> None:
+def test_external_gb10_infrastructure_receipt_accepts_exact_live_producer_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     current = datetime(2026, 7, 29, 12, 0, tzinfo=UTC)
     payload = _external_infrastructure_summary(
         created_at=current + timedelta(seconds=20),
@@ -993,9 +1045,8 @@ def test_external_gb10_infrastructure_receipt_accepts_exact_live_producer_summar
             "loom-gb10-node-agent.service",
         )
         for number in range(1, 16)
-        if number != 7
     )
-    mount, _candidate, _host = build_external_gb10_stage_boundary_checks(
+    mount, candidate, host = build_external_gb10_stage_boundary_checks(
         run,
         targets=targets,
         expected_profile_digest="6" * 64,
@@ -1007,22 +1058,51 @@ def test_external_gb10_infrastructure_receipt_accepts_exact_live_producer_summar
     )
     context = CheckContext(
         {
+            "candidate.sha": "1" * 40,
+            "candidate.tree": "2" * 40,
             "gb10.external-profile.sha256": "6" * 64,
             "gb10.inventory-digest": gb10_target_inventory_digest(targets),
             "gb10.mount-binding.sha256": "7" * 64,
             "runner.config.sha256": "8" * 64,
         }
     )
-    result = next(
-        item
-        for item in PreflightDag(
-            (_passing_dependency("gb10.ssh-topology"), mount)
-        ).run(context)
-        if item.check_id == mount.spec.check_id
+    monkeypatch.setattr(
+        "loom_cli.rollout.preflight_registered_checks.inspect_systemd_unit_sources",
+        lambda _path: SimpleNamespace(ready=True, unit_set_digest="9" * 64),
     )
+    results = {
+        item.check_id: item
+        for item in PreflightDag(
+            (
+                _passing_dependency("candidate.identity"),
+                _passing_dependency("gb10.ssh-topology"),
+                _passing_dependency("systemd.user-manager"),
+                mount,
+                candidate,
+                host,
+            )
+        ).run(context)
+    }
 
-    assert result.passed
-    assert result.evidence["receipt-digest"] == "3" * 64
+    assert results["gb10.shared-mount"].passed
+    assert results["gb10.shared-mount"].evidence["receipt-digest"] == "3" * 64
+    assert results["gb10.shared-mount"].evidence["mount-digest"] == payload["mount_digest"]
+    assert results["gb10.candidate-source"].passed
+    assert results["gb10.candidate-source"].evidence["source-digest"] != "0" * 64
+    assert results["gb10.host-readiness"].passed
+    assert results["gb10.host-readiness"].evidence["boot-ids"] == payload["boot_ids"]
+    assert results["gb10.host-readiness"].evidence["node-receipt-digests"] == {
+        row["node"]: row["result_sha256"]
+        for row in payload["node_bootstraps"]  # type: ignore[index]
+    }
+    assert all(
+        results[check_id].evidence["receipt-generation"] == 1
+        for check_id in (
+            "gb10.shared-mount",
+            "gb10.candidate-source",
+            "gb10.host-readiness",
+        )
+    )
 
 
 def test_registered_gb10_readiness_check_returns_bound_fleet_evidence() -> None:

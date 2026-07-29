@@ -6,6 +6,8 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
+import stat
 import subprocess
 import sys
 import uuid
@@ -100,27 +102,7 @@ def _runtime_receipts(
     for generation, minute in enumerate((0, 10, 20, 30, 40), start=1):
         collected_at = _iso(minute)
         expires_at = _iso(minute + 15)
-        fleet_nodes = (
-            "oldlab-1",
-            "oldlab-2",
-            "oldlab-3",
-            "oldlab-4",
-            "oldlab-5",
-            "trt-gb10-1",
-            "trt-gb10-2",
-            "trt-gb10-3",
-            "trt-gb10-4",
-            "trt-gb10-5",
-            "trt-gb10-6",
-            "trt-gb10-8",
-            "trt-gb10-9",
-            "trt-gb10-10",
-            "trt-gb10-11",
-            "trt-gb10-12",
-            "trt-gb10-13",
-            "trt-gb10-14",
-            "trt-gb10-15",
-        )
+        fleet_nodes = ACCEPTANCE.RUNTIME_FLEET_INFRASTRUCTURE_NODES
         fleet_unsigned = {
             "schema_version": 1,
             "sandbox": sandbox,
@@ -719,7 +701,92 @@ def _record_trusted_receipts(
 
 
 def _platform_health_authority(evidence: Mapping[str, Any]) -> dict[str, Any]:
-    mixed_jobs = [dict(row) for row in evidence["runtime_envelopes"]]
+    policy_contracts = {
+        pool: ACCEPTANCE._platform_policy_contract(pool) for pool in ACCEPTANCE.POOLS
+    }
+    mixed_jobs: list[dict[str, Any]] = []
+    for row in evidence["runtime_envelopes"]:
+        pool = row["pool"]
+        policy = policy_contracts[pool][0]
+        job_id = row["job_id"]
+        job_path = row["cgroup"]["job_path"]
+        compose_project = f"loom-{row['sandbox']}-{job_id}"
+        compose_networks = [f"{compose_project}_default"]
+        containers = [
+            {
+                "container_id": container["container_id"],
+                "role": container["role"],
+                "sandbox": row["sandbox"],
+                "candidate_sha": row["candidate_sha"],
+                "job_id": job_id,
+                "compose_project": compose_project,
+                "compose_networks": compose_networks,
+                "pid": 2000 + index,
+                "cgroup_parent": job_path,
+                "observed_cgroup_path": container["observed_cgroup_path"],
+                "limits": {
+                    "cpu_cores": policy["container_cpus"],
+                    "memory_bytes": policy["container_memory_mib"] * 1024**2,
+                    "pids": policy["container_pids"],
+                    "gpu_count": 0,
+                    "gpu_ids": [],
+                },
+            }
+            for index, container in enumerate(row["containers"], start=1)
+        ]
+        allocation = {
+            "cpu_cores": policy["requested_cpus"],
+            "memory_bytes": policy["requested_memory_mib"] * 1024**2,
+            "pids": policy["job_pids_max"],
+            "gpu_count": 1 if policy["gpu_tres"] else 0,
+            "tres": row["allocation"]["tres"],
+            "exclusive": False,
+        }
+        mixed_jobs.append(
+            {
+                "job_id": job_id,
+                "job_name": (f"loom-{row['sandbox']}-{row['candidate_sha'][:12]}-{row['node']}"),
+                "sandbox": row["sandbox"],
+                "candidate_sha": row["candidate_sha"],
+                "account": row["account"],
+                "user": f"loom-sandbox-{row['sandbox']}",
+                "node": row["node"],
+                "state": "RUNNING",
+                "allocation": allocation,
+                "compose_project": compose_project,
+                "compose_networks": compose_networks,
+                "cgroup": {
+                    "job_path": job_path,
+                    "slurm_job_id": job_id,
+                    "slurm_pid_cgroup_paths": [f"{job_path}/step_batch"],
+                    "controllers": ["cpu", "memory", "pids"],
+                    "cpu_cores_max": allocation["cpu_cores"],
+                    "memory_bytes_max": allocation["memory_bytes"],
+                    "pids_max": allocation["pids"],
+                },
+                "containers": containers,
+                "aggregate_limits": {
+                    "cpu_cores": len(containers) * policy["container_cpus"],
+                    "memory_bytes": (len(containers) * policy["container_memory_mib"] * 1024**2),
+                    "pids": len(containers) * policy["container_pids"],
+                    "gpu_count": 0,
+                },
+            },
+        )
+    oldlab_capacity = {
+        **policy_contracts["oldlab"][0],
+        "minimum_node_cpu_cores": 24,
+        "minimum_node_memory_bytes": 120 * 1024**3,
+        "reserved_cpu_cores_per_node": 4,
+        "reserved_memory_mib_per_node": 16384,
+    }
+    gb10_capacity = {
+        **policy_contracts["gb10"][0],
+        "minimum_node_cpu_cores": 20,
+        "minimum_node_memory_bytes": 115000 * 1024**2,
+        "reserved_cpu_cores_per_node": 4,
+        "reserved_memory_mib_per_node": 23000,
+    }
     payload: dict[str, Any] = {
         "schema_version": 1,
         "kind": "loom.developer-sandbox.platform-health-evidence",
@@ -761,6 +828,8 @@ def _platform_health_authority(evidence: Mapping[str, Any]) -> dict[str, Any]:
         "cancelled_jobs": [
             {
                 "job_id": "9001",
+                "job_name": "loom-qianyi-cancel",
+                "node": "trt-eai-oldlab-1",
                 "sandbox": "qianyi",
                 "candidate_sha": evidence["candidates"]["qianyi"]["sha"],
                 "state": "CANCELLED",
@@ -769,6 +838,8 @@ def _platform_health_authority(evidence: Mapping[str, Any]) -> dict[str, Any]:
         "crashed_jobs": [
             {
                 "job_id": "9002",
+                "job_name": "loom-hongjian-crash",
+                "node": "trt-eai-oldlab-2",
                 "sandbox": "hongjian",
                 "candidate_sha": evidence["candidates"]["hongjian"]["sha"],
                 "state": "FAILED",
@@ -777,34 +848,34 @@ def _platform_health_authority(evidence: Mapping[str, Any]) -> dict[str, Any]:
         "node_intervals": {
             node: {
                 "cpu_busy_ratio": 0.3,
+                "minimum_cpu_cores_available": 8.0,
                 "minimum_memory_bytes_available": 32_000_000_000,
                 "read_bytes": 1024,
                 "write_bytes": 2048,
             }
-            for node in ACCEPTANCE.EXPECTED_NODES
+            for node in ACCEPTANCE.PLATFORM_HEALTH_NODE_KEYS
         },
         "policy_capacity": {
-            "oldlab": {
-                "max_slots": 20,
-                "requested_cpus": 8,
-                "requested_memory_mib": 32000,
-                "requested_concurrency": 4,
-                "container_cpus": 2,
-                "container_memory_mib": 8000,
-                "minimum_node_cpu_cores": 24,
-                "minimum_node_memory_bytes": 120 * 1024**3,
-            },
-            "gb10": {
-                "max_slots": 112,
-                "requested_cpus": 16,
-                "requested_memory_mib": 92000,
-                "requested_concurrency": 8,
-                "container_cpus": 2,
-                "container_memory_mib": 11500,
-                "reserved_cpu_cores_per_node": 4,
-                "reserved_memory_mib_per_node": 23000,
-                "minimum_node_cpu_cores": 20,
-                "minimum_node_memory_bytes": 115000 * 1024**2,
+            "oldlab": oldlab_capacity,
+            "gb10": gb10_capacity,
+        },
+        "oldlab_capacity_recommendation": {
+            "schema_version": 1,
+            "pool": "oldlab",
+            "source": ACCEPTANCE.PLATFORM_POLICY_SOURCES["oldlab"],
+            "source_sha256": policy_contracts["oldlab"][1],
+            "values": oldlab_capacity,
+            "derivation": {
+                "method": "installed-shared-capacity-policy-v1",
+                "measured_node_count": 5,
+                "minimum_observed_node_cpu_cores": 24,
+                "minimum_observed_node_memory_bytes": 120 * 1024**3,
+                "minimum_observed_free_cpu_cores": 8.0,
+                "minimum_observed_free_memory_bytes": 32 * 1024**3,
+                "minimum_required_free_cpu_cores": 4,
+                "minimum_required_free_memory_bytes": 16 * 1024**3,
+                "maximum_allowed_cpu_busy_ratio": 0.85,
+                "all_nodes_passed": True,
             },
         },
         "zero_orphans": True,
@@ -838,6 +909,74 @@ def test_platform_health_authority_requires_exact_bounded_expiry(attack: str) ->
             session_id=evidence["session"]["id"],
             candidates=evidence["candidates"],
         )
+
+
+@pytest.mark.parametrize(
+    "attack",
+    [
+        "source_digest",
+        "capacity_extra",
+        "recommendation_extra",
+        "slurm_job_id",
+        "forged_parent",
+        "compose_reuse",
+        "network_reuse",
+    ],
+)
+def test_platform_health_authority_rejects_policy_and_isolation_drift(
+    attack: str,
+) -> None:
+    evidence = _evidence()
+    platform = _platform_health_authority(evidence)
+    if attack == "source_digest":
+        platform["oldlab_capacity_recommendation"]["source_sha256"] = "f" * 64
+    elif attack == "capacity_extra":
+        platform["policy_capacity"]["oldlab"]["unexpected"] = 1
+    elif attack == "recommendation_extra":
+        platform["oldlab_capacity_recommendation"]["unexpected"] = True
+    elif attack == "slurm_job_id":
+        platform["mixed_jobs"][0]["cgroup"]["slurm_job_id"] = "999"
+    elif attack == "forged_parent":
+        platform["mixed_jobs"][0]["cgroup"]["job_path"] = "/system.slice/slurmstepd.scope/job_999"
+    elif attack == "compose_reuse":
+        platform["mixed_jobs"][1]["compose_project"] = platform["mixed_jobs"][0]["compose_project"]
+    else:
+        platform["mixed_jobs"][1]["compose_networks"] = platform["mixed_jobs"][0][
+            "compose_networks"
+        ]
+    unsigned = {key: value for key, value in platform.items() if key != "payload_sha256"}
+    platform["payload_sha256"] = hashlib.sha256(
+        ACCEPTANCE._canonical_bytes(unsigned),
+    ).hexdigest()
+
+    with pytest.raises(ACCEPTANCE.AcceptanceError):
+        ACCEPTANCE._validate_platform_health_authority(
+            platform,
+            session_id=evidence["session"]["id"],
+            candidates=evidence["candidates"],
+        )
+
+
+def test_platform_health_policy_contract_rejects_extra_source_fields(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for relative in (
+        "deploy/developer-sandboxes/platform-health-authority.toml",
+        *ACCEPTANCE.PLATFORM_POLICY_SOURCES.values(),
+    ):
+        destination = tmp_path / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(REPO_ROOT / relative, destination)
+    oldlab = tmp_path / ACCEPTANCE.PLATFORM_POLICY_SOURCES["oldlab"]
+    oldlab.write_text(
+        oldlab.read_text(encoding="utf-8") + "\nunexpected_policy_drift = true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(ACCEPTANCE, "REPO_ROOT", tmp_path)
+
+    with pytest.raises(ACCEPTANCE.AcceptanceError, match="invalid"):
+        ACCEPTANCE._platform_policy_contract("oldlab")
 
 
 def _runtime_envelope(
@@ -929,8 +1068,7 @@ def _evidence() -> dict[str, Any]:
     for index, (phase, sandbox) in enumerate(ACCEPTANCE.PHASE_CHECKPOINTS):
         phase_start, phase_finish = PHASE_BOUNDS[phase]
         identity = candidate_ids[sandbox]
-        phases.append(
-            {
+        phase_row = {
                 "phase": phase,
                 "sandbox": sandbox,
                 "candidate_sha": identity["sha"],
@@ -940,8 +1078,14 @@ def _evidence() -> dict[str, Any]:
                 "deadline_seconds": (phase_finish - phase_start) * 60,
                 "status": "pass",
                 "checkpoint_sha256": f"{index + 1:064x}",
-            },
-        )
+            }
+        if phase == "mixed_non_loom":
+            sandbox_index = ACCEPTANCE.SANDBOXES.index(sandbox)
+            phase_row["trial_batches"] = {
+                "oldlab": _request_id(500 + sandbox_index * 2),
+                "gb10": _request_id(501 + sandbox_index * 2),
+            }
+        phases.append(phase_row)
     capacity_samples = []
     pair_index = 1
     for sandbox in ACCEPTANCE.SANDBOXES:
@@ -1295,8 +1439,9 @@ def _evidence() -> dict[str, Any]:
         "topology": {
             "sandboxes": list(ACCEPTANCE.SANDBOXES),
             "pools": list(ACCEPTANCE.POOLS),
+            "infrastructure_nodes": list(ACCEPTANCE.INFRASTRUCTURE_NODES),
             "eligible_nodes": list(ACCEPTANCE.EXPECTED_NODES),
-            "excluded_nodes": ["trt-gb10-7"],
+            "excluded_nodes": [],
             "slot_budgets": ACCEPTANCE.POOL_SLOT_BUDGETS.copy(),
             "pending_slot_budgets": ACCEPTANCE.POOL_PENDING_BUDGETS.copy(),
         },
@@ -1414,6 +1559,34 @@ def test_schema_is_valid_and_complete_fixture_passes() -> None:
     Draft202012Validator.check_schema(schema)
 
     assert _failures(_evidence()) == []
+
+
+def test_schema_node_contract_includes_gb10_node7() -> None:
+    schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+
+    validator = Draft202012Validator(schema["$defs"]["node"])
+
+    assert validator.is_valid("trt-gb10-7")
+
+
+@pytest.mark.parametrize(
+    "attack",
+    ["authority_extra", "missing_expiry", "wrong_cgroup_type", "capacity_extra"],
+)
+def test_platform_health_schema_is_closed_and_typed(attack: str) -> None:
+    schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+    evidence = _evidence()
+    authority = evidence["platform_health"]["authority_evidence"]
+    if attack == "authority_extra":
+        authority["unexpected"] = True
+    elif attack == "missing_expiry":
+        del authority["expires_at"]
+    elif attack == "wrong_cgroup_type":
+        authority["mixed_jobs"][0]["cgroup"]["slurm_pid_cgroup_paths"] = "forged"
+    else:
+        authority["policy_capacity"]["oldlab"]["unexpected"] = 1
+
+    assert list(Draft202012Validator(schema).iter_errors(evidence))
 
 
 def test_premerge_candidate_map_requires_three_distinct_sandbox_shas() -> None:
@@ -1583,7 +1756,8 @@ def test_default_plan_is_read_only_fixed_and_complete() -> None:
     assert plan["submit_host"] == "trt-eai-oldlab-2"
     assert plan["sandboxes"] == ["qianyi", "hongjian", "devansh"]
     assert plan["pools"] == ["oldlab", "gb10"]
-    assert plan["excluded_nodes"] == ["trt-gb10-7"]
+    assert plan["infrastructure_nodes"] == list(ACCEPTANCE.INFRASTRUCTURE_NODES)
+    assert plan["excluded_nodes"] == []
     assert plan["state_machine"] == list(ACCEPTANCE.PHASES)
     assert len(plan["stop_rules"]) >= 8
 
@@ -1678,6 +1852,113 @@ def test_complete_session_seals_verified_evidence(
     assert len(complete["evidence_sha256"]) == 64
     sealed = tmp_path / "state/sessions" / session_id / "evidence.json"
     assert json.loads(sealed.read_text(encoding="utf-8")) == evidence
+
+
+def test_gate6_seal_is_root_owned_candidate_bound_and_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id, evidence, evidence_path, schema = _journaled_evidence(
+        tmp_path,
+        monkeypatch,
+    )
+    ACCEPTANCE.finalize_session(session_id, evidence_path, schema, execute=True)
+    slurm_root = tmp_path / "authority/slurm-policy"
+    monkeypatch.setattr(ACCEPTANCE, "SLURM_POLICY_STATE_ROOT", slurm_root)
+    matrices: dict[tuple[str, str], dict[str, Any]] = {}
+    for sandbox in ACCEPTANCE.SANDBOXES:
+        sha = evidence["candidates"][sandbox]["sha"]
+        wrapper = json.loads(
+            Path(evidence["candidates"][sandbox]["runtime_receipts"][-1]["path"]).read_text(),
+        )
+        for pool in ACCEPTANCE.POOLS:
+            combined = wrapper["combined_receipt"]
+            domain = combined["domains"][pool]
+            matrix = {
+                "sandbox": sandbox,
+                "pool": pool,
+                "candidate_sha": sha,
+                "runtime_attestation": {
+                    "receipt_sha256": combined["payload_sha256"],
+                    "domain_payload_sha256": domain["payload_sha256"],
+                    "domain_signature_sha256": domain["signature_sha256"],
+                    "domain_generation": domain["generation"],
+                },
+            }
+            matrices[(sandbox, pool)] = matrix
+            _write_authority_json(
+                ACCEPTANCE._gate6_matrix_path(sandbox, pool, sha),
+                slurm_root,
+                matrix,
+            )
+    bundle = {
+        "schema_version": 1,
+        "kind": "loom.developer-sandbox.gate6-acceptance",
+        "session_id": session_id,
+        "payload_sha256": "7" * 64,
+        "status": "pass",
+    }
+    artifacts = {
+        pair: {"schema_version": 1, "sandbox": pair[0], "pool": pair[1]}
+        for pair in matrices
+    }
+
+    def build(
+        observed_live: Any,
+        observed_platform: Any,
+        observed_matrices: Any,
+        _nonexclusive_schema: Any,
+    ) -> tuple[dict[str, Any], dict[tuple[str, str], dict[str, Any]]]:
+        assert observed_live == evidence
+        assert observed_platform == evidence["platform_health"]["authority_evidence"]
+        assert observed_matrices == matrices
+        return bundle, artifacts
+
+    monkeypatch.setattr(ACCEPTANCE.gate6_verifier, "build_gate6_bundle", build)
+    nonexclusive_schema = ACCEPTANCE.gate6_verifier._load_schema(
+        ACCEPTANCE.NONEXCLUSIVE_SCHEMA,
+    )
+    tampered = copy.deepcopy(matrices[("qianyi", "gb10")])
+    tampered["runtime_attestation"]["receipt_sha256"] = "8" * 64
+    qianyi_sha = evidence["candidates"]["qianyi"]["sha"]
+    qianyi_gb10_path = ACCEPTANCE._gate6_matrix_path("qianyi", "gb10", qianyi_sha)
+    _write_authority_json(qianyi_gb10_path, slurm_root, tampered)
+    with pytest.raises(ACCEPTANCE.AcceptanceError, match="trusted runtime receipt"):
+        ACCEPTANCE.seal_gate6(
+            session_id,
+            schema,
+            nonexclusive_schema,
+            execute=True,
+        )
+    _write_authority_json(
+        qianyi_gb10_path,
+        slurm_root,
+        matrices[("qianyi", "gb10")],
+    )
+
+    first = ACCEPTANCE.seal_gate6(
+        session_id,
+        schema,
+        nonexclusive_schema,
+        execute=True,
+    )
+    second = ACCEPTANCE.seal_gate6(
+        session_id,
+        schema,
+        nonexclusive_schema,
+        execute=True,
+    )
+
+    assert first == second
+    assert first["gate6_sha256"] == "7" * 64
+    gate_root = tmp_path / "state/sessions" / session_id / "gate6"
+    assert json.loads((gate_root / "acceptance.json").read_text()) == bundle
+    assert stat.S_IMODE((gate_root / "acceptance.json").stat().st_mode) == 0o600
+    assert sorted(path.name for path in gate_root.glob("*.nonexclusive.json")) == [
+        f"{sandbox}-{pool}.nonexclusive.json"
+        for sandbox in sorted(ACCEPTANCE.SANDBOXES)
+        for pool in sorted(ACCEPTANCE.POOLS)
+    ]
 
 
 def test_staging_pressure_semantics_reject_candidate_and_session_drift() -> None:
@@ -2033,6 +2314,32 @@ def test_finalize_rejects_stale_trusted_overlap_receipt(
             evidence,
             state,
         )
+
+
+def test_mixed_phase_checkpoint_persists_exact_soak_batch_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id, evidence, _evidence_path, _schema = _journaled_evidence(
+        tmp_path,
+        monkeypatch,
+    )
+    checkpoint = json.loads(
+        (
+            tmp_path
+            / "state/sessions"
+            / session_id
+            / "checkpoints/15-qianyi-mixed_non_loom.json"
+        ).read_text(encoding="utf-8"),
+    )
+    phase = next(
+        row
+        for row in evidence["state_machine"]
+        if row["phase"] == "mixed_non_loom" and row["sandbox"] == "qianyi"
+    )
+
+    assert checkpoint["trial_batches"] == phase["trial_batches"]
+    assert set(checkpoint["trial_batches"]) == {"oldlab", "gb10"}
 
 
 def test_finalize_rejects_self_consistent_capacity_drift_from_root_receipt(

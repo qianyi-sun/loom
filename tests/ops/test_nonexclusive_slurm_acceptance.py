@@ -377,6 +377,358 @@ def test_negative_isolation_requires_every_ordered_pair_and_denial() -> None:
 
     assert any("negative isolation matrix" in item for item in failures)
 
+
+def _gate6_sources() -> tuple[
+    dict[str, Any],
+    dict[str, Any],
+    dict[tuple[str, str], dict[str, Any]],
+]:
+    candidates = {
+        "qianyi": {"sha": "a" * 40, "tree": "b" * 40},
+        "hongjian": {"sha": "c" * 40, "tree": "d" * 40},
+        "devansh": {"sha": "e" * 40, "tree": "f" * 40},
+    }
+    sandboxes = list(ACCEPTANCE.GATE6_SANDBOXES)
+    checks = [
+        {"source": source, "target": target, "resource": resource, "denied": True}
+        for source in sandboxes
+        for target in sandboxes
+        if source != target
+        for resource in ("worker_identity", "object_store", "result_path")
+    ]
+    live: dict[str, Any] = {
+        "schema_version": 2,
+        "session": {"id": "1" * 32},
+        "candidates": candidates,
+        "state_machine": [{"phase": index} for index in range(33)],
+        "topology": {
+            "eligible_nodes": [
+                *ACCEPTANCE.GATE6_POOL_NODES["oldlab"],
+                *ACCEPTANCE.GATE6_POOL_NODES["gb10"],
+            ],
+            "excluded_nodes": [],
+        },
+        "cross_sandbox_negative": checks,
+    }
+    platform_jobs: list[dict[str, Any]] = []
+    devices: list[dict[str, Any]] = []
+    pair_headroom: list[dict[str, Any]] = []
+    matrices: dict[tuple[str, str], dict[str, Any]] = {}
+    for sandbox_index, sandbox in enumerate(sandboxes, start=1):
+        candidate = candidates[sandbox]
+        for pool_index, pool in enumerate(ACCEPTANCE.GATE6_POOLS, start=1):
+            job_id = str(1000 + sandbox_index * 10 + pool_index)
+            node = (
+                ACCEPTANCE.GATE6_POOL_NODES["oldlab"][0]
+                if pool == "oldlab"
+                else ACCEPTANCE.GATE6_POOL_NODES["gb10"][0]
+            )
+            host = f"{pool}-{sandbox}-host"
+            job_path = f"/slurm/job_{job_id}"
+            project = f"loom-{sandbox}-{job_id}"
+            gpu_ids = [] if pool == "oldlab" else ["GPU-0"]
+            containers = []
+            for role_index, role in enumerate(
+                ("worker", "trial", "verifier", "sidecar"),
+                start=1,
+            ):
+                container_gpu_ids = gpu_ids if role == "trial" else []
+                containers.append(
+                    {
+                        "container_id": f"{sandbox_index}{pool_index}{role_index:010d}",
+                        "name": f"{project}-{role}",
+                        "role": role,
+                        "sandbox": sandbox,
+                        "candidate_sha": candidate["sha"],
+                        "job_id": job_id,
+                        "compose_project": project,
+                        "compose_networks": [f"{project}_default"],
+                        "identity_labels": {
+                            "loom.sandbox": sandbox,
+                            "loom.candidate_sha": candidate["sha"],
+                            "loom.slurm_job_id": job_id,
+                            "loom.compose_project": project,
+                        },
+                        "pid": 2000 + role_index,
+                        "cgroup_parent": job_path,
+                        "observed_cgroup_path": (
+                            f"{job_path}/docker/{sandbox_index}{pool_index}{role_index:010d}"
+                        ),
+                        "limits": {
+                            "cpu_cores": 1,
+                            "memory_bytes": 1_000_000_000,
+                            "pids": 128,
+                            "gpu_count": len(container_gpu_ids),
+                            "gpu_ids": container_gpu_ids,
+                        },
+                    },
+                )
+            allocation = {
+                "cpu_cores": 8 if pool == "oldlab" else 16,
+                "memory_bytes": 32_000_000_000 if pool == "oldlab" else 92_000_000_000,
+                "pids": 32_768 if pool == "oldlab" else 65_536,
+                "gpu_count": len(gpu_ids),
+                "tres": (
+                    "cpu=8,mem=32000M"
+                    if pool == "oldlab"
+                    else "cpu=16,mem=92000M,gres/gpu=1"
+                ),
+                "exclusive": False,
+            }
+            platform_jobs.append(
+                {
+                    "job_id": job_id,
+                    "job_name": f"loom-{sandbox}-{candidate['sha'][:12]}-{node}",
+                    "sandbox": sandbox,
+                    "candidate_sha": candidate["sha"],
+                    "account": f"loom-dev-{sandbox}",
+                    "user": f"loom-sandbox-{sandbox}",
+                    "node": node,
+                    "state": "RUNNING",
+                    "allocation": allocation,
+                    "compose_project": project,
+                    "compose_networks": [f"{project}_default"],
+                    "cgroup": {
+                        "job_path": job_path,
+                        "slurm_job_id": job_id,
+                        "slurm_pid_cgroup_paths": [f"{job_path}/step_batch"],
+                        "controllers": ["cpu", "memory", "pids"],
+                        "delegated": True,
+                        "cpu_cores_max": allocation["cpu_cores"],
+                        "memory_bytes_max": allocation["memory_bytes"],
+                        "pids_max": allocation["pids"],
+                    },
+                    "containers": containers,
+                    "aggregate_limits": {
+                        "cpu_cores": 4,
+                        "memory_bytes": 4_000_000_000,
+                        "pids": 512,
+                        "gpu_count": len(gpu_ids),
+                    },
+                },
+            )
+            devices.append(
+                {
+                    "sandbox": sandbox,
+                    "pool": pool,
+                    "job_id": job_id,
+                    "node": node,
+                    "host": host,
+                    "allocated_ids": gpu_ids,
+                    "all_allocated_usable": True,
+                    "unallocated_denied": True,
+                    "proof": {
+                        "method": (
+                            "docker-no-device-exposure-v1"
+                            if pool == "oldlab"
+                            else "docker-nvidia-smi-and-device-denial-v1"
+                        ),
+                        "allocated_probe_container_ids": (
+                            [] if pool == "oldlab" else [containers[1]["container_id"]]
+                        ),
+                        "denial_probe_container_ids": [containers[0]["container_id"]],
+                        "observed_at": "2026-07-28T04:00:00Z",
+                    },
+                },
+            )
+            pair_headroom.append(
+                {
+                    "sandbox": sandbox,
+                    "pool": pool,
+                    "min_free_cpu_cores": 8,
+                    "min_free_memory_bytes": 32_000_000_000,
+                    "max_pid_usage_ratio": 0.4,
+                    "observed_peak_concurrency": 1,
+                    "within_reviewed_envelope": True,
+                },
+            )
+            nodes = ACCEPTANCE.GATE6_POOL_NODES[pool]
+            matrix_rows = [
+                {
+                    "node": matrix_node,
+                    "sandbox": sandbox,
+                    "state": "COMPLETED",
+                    "account": f"loom-dev-{sandbox}",
+                    "sbatch_verified": True,
+                    "srun_verified": True,
+                    "nonexclusive": True,
+                    "explicit_nodelist": matrix_node,
+                    "gpu_verified": True,
+                    "compute_check": {
+                        "sandbox": sandbox,
+                        "candidate_sha": candidate["sha"],
+                        "candidate_tree": candidate["tree"],
+                        "pool": pool,
+                        "concurrency": ACCEPTANCE.GATE6_POOL_CONCURRENCY[pool],
+                        "cgroup_guard_verified": True,
+                        "compose_verified": True,
+                    },
+                }
+                for matrix_node in nodes
+            ]
+            matrices[(sandbox, pool)] = {
+                "schema_version": 1,
+                "artifact_type": "developer-sandbox-slurm-allocation-matrix",
+                "candidate_sha": candidate["sha"],
+                "candidate_tree": candidate["tree"],
+                "sandbox": sandbox,
+                "cluster": ACCEPTANCE.GATE6_CLUSTERS[pool],
+                "expected_pool": pool,
+                "expected_concurrency": ACCEPTANCE.GATE6_POOL_CONCURRENCY[pool],
+                "account": f"loom-dev-{sandbox}",
+                "allowed_nodes": list(nodes),
+                "candidate_binding": {
+                    "repository": {
+                        "candidate_sha": candidate["sha"],
+                        "candidate_tree": candidate["tree"],
+                    },
+                },
+                "runtime_attestation": {
+                    "sandbox": sandbox,
+                    "candidate_sha": candidate["sha"],
+                    "candidate_tree": candidate["tree"],
+                    "domain": pool,
+                },
+                "nodes": matrix_rows,
+                "closed_world_verified": True,
+            }
+    cleanup = [
+        {
+            "event": event,
+            "checkpoint": event,
+            "job_ids": ["1"],
+            "terminal_states": ["COMPLETED"],
+            "observed_within_seconds": 30,
+            "maximum_cleanup_seconds": 300,
+            "live_containers": 0,
+            "live_jobs": 0,
+            "durable_trial_state": True,
+            "retryable_interrupted_trials": True,
+            "observed_at": "2026-07-28T04:00:00Z",
+        }
+        for event in (
+            "cancellation",
+            "ttl_expiry",
+            "worker_crash",
+            "submit_host_restart",
+        )
+    ]
+    soak = {
+        "started_at": "2026-07-28T00:00:00Z",
+        "completed_at": "2026-07-28T04:00:00Z",
+        "duration_seconds": 14_400,
+        "sample_count": 120,
+        "required_duration_seconds": 14_400,
+        "required_sample_count": 120,
+        "workloads": ["loom", "non_loom_slurm", "kubernetes", "minio", "longhorn"],
+        "trial_success_ratio": 0.99,
+        "minimum_trial_success_ratio": 0.95,
+        "resource_envelope_breaches": 0,
+        "kube_api_healthy": True,
+        "minio_quorum_healthy": True,
+        "longhorn_healthy": True,
+        "non_loom_slurm_healthy": True,
+        "pair_headroom": pair_headroom,
+    }
+    platform = {
+        "schema_version": 1,
+        "kind": "loom.developer-sandbox.platform-health-evidence",
+        "session_id": live["session"]["id"],
+        "candidates": candidates,
+        "checkpoints": [
+            {"checkpoint": "mixed_non_loom", "observed_at": "2026-07-28T00:00:00Z"},
+        ],
+        "mixed_jobs": platform_jobs,
+        "gate6_observations": {
+            "soak": soak,
+            "device_isolation": devices,
+            "cleanup": cleanup,
+        },
+        "payload_sha256": "9" * 64,
+    }
+    return live, platform, matrices
+
+
+def _build_gate6(
+    live: dict[str, Any],
+    platform: dict[str, Any],
+    matrices: dict[tuple[str, str], dict[str, Any]],
+) -> tuple[dict[str, Any], dict[tuple[str, str], dict[str, Any]]]:
+    schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+    return ACCEPTANCE.build_gate6_bundle(live, platform, matrices, schema)
+
+
+def test_gate6_bridge_verifies_six_pairs_and_unchanged_gb10_v1() -> None:
+    live, platform, matrices = _gate6_sources()
+
+    bundle, artifacts = _build_gate6(live, platform, matrices)
+
+    assert bundle["status"] == "pass"
+    assert bundle["state_machine_phase_count"] == 33
+    assert len(bundle["allocation_matrices"]) == 6
+    assert len(artifacts) == 6
+    schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+    assert all(
+        ACCEPTANCE.verify_evidence(artifacts[(sandbox, "gb10")], schema) == []
+        for sandbox in ACCEPTANCE.GATE6_SANDBOXES
+    )
+
+
+@pytest.mark.parametrize("attack", ("partial_phases", "node7_omitted", "excluded_node"))
+def test_gate6_bridge_rejects_partial_or_excluded_live_evidence(attack: str) -> None:
+    live, platform, matrices = _gate6_sources()
+    if attack == "partial_phases":
+        live["state_machine"].pop()
+    elif attack == "node7_omitted":
+        live["topology"]["eligible_nodes"].remove("trt-gb10-7")
+    else:
+        live["topology"]["excluded_nodes"] = ["trt-gb10-7"]
+
+    with pytest.raises(ACCEPTANCE.AcceptanceError):
+        _build_gate6(live, platform, matrices)
+
+
+def test_gate6_bridge_rejects_candidate_or_matrix_mismatch() -> None:
+    live, platform, matrices = _gate6_sources()
+    matrices[("qianyi", "gb10")]["candidate_sha"] = "f" * 40
+
+    with pytest.raises(ACCEPTANCE.AcceptanceError, match="matrix binding"):
+        _build_gate6(live, platform, matrices)
+
+
+def test_gate6_bridge_cannot_route_gb10_through_zero_device_branch() -> None:
+    live, platform, matrices = _gate6_sources()
+    gb10 = next(
+        row
+        for row in platform["gate6_observations"]["device_isolation"]
+        if row["sandbox"] == "qianyi" and row["pool"] == "gb10"
+    )
+    gb10["allocated_ids"] = []
+
+    with pytest.raises(ACCEPTANCE.AcceptanceError, match="gb10 v1"):
+        _build_gate6(live, platform, matrices)
+
+
+def test_gate6_bridge_rejects_oldlab_missing_device_denial() -> None:
+    live, platform, matrices = _gate6_sources()
+    oldlab = next(
+        row
+        for row in platform["gate6_observations"]["device_isolation"]
+        if row["sandbox"] == "qianyi" and row["pool"] == "oldlab"
+    )
+    oldlab["unallocated_denied"] = False
+
+    with pytest.raises(ACCEPTANCE.AcceptanceError, match="zero-device"):
+        _build_gate6(live, platform, matrices)
+
+
+def test_gate6_bridge_rejects_missing_native_field() -> None:
+    live, platform, matrices = _gate6_sources()
+    del platform["mixed_jobs"][0]["containers"][0]["identity_labels"]
+
+    with pytest.raises(ACCEPTANCE.AcceptanceError, match="incomplete"):
+        _build_gate6(live, platform, matrices)
+
     evidence = _evidence()
     evidence["sandbox"] = "candidate"
     evidence["job"]["sandbox"] = "candidate"

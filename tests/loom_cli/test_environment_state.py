@@ -2016,14 +2016,14 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
     assert gb10_policy["environment"] == environment
     assert gb10_policy["actuator"] == "slurm"
     assert gb10_policy["min_slots"] == 8
-    assert gb10_policy["max_slots"] == 112
+    assert gb10_policy["max_slots"] == 120
     assert gb10_policy["actuator_config"]["backend"] == "docker"
     assert gb10_policy["actuator_config"]["cpu_arch"] == "arm64"
     assert gb10_policy["actuator_config"]["partition"] == "gb10"
     assert gb10_policy["actuator_config"]["allowed_nodes"] == [
-        f"trt-gb10-{index}" for index in range(1, 16) if index != 7
+        f"trt-gb10-{index}" for index in range(1, 16)
     ]
-    assert gb10_policy["actuator_config"]["max_jobs"] == 14
+    assert gb10_policy["actuator_config"]["max_jobs"] == 15
     assert gb10_policy["actuator_config"]["pending_job_cap"] == 3
     assert gb10_policy["actuator_config"]["requested_cpus"] == 16
     assert gb10_policy["actuator_config"]["requested_memory_mib"] == 92000
@@ -2128,6 +2128,12 @@ def test_committed_development_profile_ships_fail_closed_supervisors() -> None:
     assert gb10["enabled"] is False
     assert gb10["active"] is False
     assert "15450" in gb10["args"]
+    gb10_policy = next(
+        policy for policy in profile.autoscaler_policies if policy["pool_name"] == "gb10"
+    )
+    assert gb10_policy["actuator_config"]["allowed_nodes"] == [
+        f"trt-gb10-{index}" for index in range(1, 16)
+    ]
 
     # Both dev supervisors are fail-closed: neither is enabled nor active.
     assert not any(
@@ -2407,7 +2413,7 @@ def test_staging_profile_activates_gb10_but_keeps_oldlab_fail_closed() -> None:
     assert set(policies) == {"gb10", "oldlab"}
     assert policies["gb10"]["enabled"] is True
     assert policies["gb10"]["min_slots"] == 8
-    assert policies["gb10"]["max_slots"] == 112
+    assert policies["gb10"]["max_slots"] == 120
     assert policies["gb10"]["actuator_config"]["exclusive"] is False
     assert policies["gb10"]["actuator_config"]["candidate_sha"] == "a" * 40
     assert policies["oldlab"]["enabled"] is False

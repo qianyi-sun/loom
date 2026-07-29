@@ -12,6 +12,12 @@
 > smoke. Node 7 remains stopped with no runtime override until a separate
 > merged re-admission change passes fresh evidence.
 
+> **Owner correction (2026-07-29):** The temporary amendment above is
+> superseded. Node 7 is a normal infrastructure and capacity candidate;
+> acceptance covers all 15 hosts with `excluded_nodes=[]`. Busy work is
+> preserved by candidate-owned drain/quiescence, never cancellation or
+> preemption.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Give Qianyi, Hongjian, and Devansh a supported, attributable command that independently deploys only the freshly fetched merged `origin/dev` head to Loom staging.

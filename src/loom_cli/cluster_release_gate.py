@@ -42,15 +42,14 @@ _GB10_DESIRED_CONTRACT_FIELDS = (
     "host_intents",
 )
 _STAGING_GB10_HOST_INTENTS = {
-    **{f"trt-gb10-{index}": "active" for index in range(1, 16) if index != 7},
-    "trt-gb10-7": "stopped",
+    **{f"trt-gb10-{index}": "active" for index in range(1, 16)},
 }
 _STAGING_GB10_RETIRED_HOST_INTENTS = {
     **{f"trt-gb10-{index}": "stopped" for index in range(1, 16)},
 }
 _STAGING_GB10_POOL_NAME = "gb10"
 _STAGING_GB10_MAX_CONCURRENT = 10
-_STAGING_GB10_TARGET_SLOTS = 140
+_STAGING_GB10_TARGET_SLOTS = 150
 _SAFE_WORKLOAD_CONTRACT_ENV_VALUES = frozenset({"internal_trusted", "True", "False"})
 _RAW_SECRET_RE = re.compile(
     r"(?i)\b(?:HF_TOKEN|TOKEN|SECRET|API_KEY|ACCESS_KEY|SECRET_KEY)\s*[:=]\s*"
@@ -869,7 +868,7 @@ def _external_slurm_acceptance_check(
         elif (
             authority_artifact.get("result") != "pass"
             or authority_artifact.get("candidate_sha") != release_sha
-            or authority_artifact.get("node_count") != 14
+            or authority_artifact.get("node_count") != 15
         ):
             dynamic_blockers.append("external_slurm_acceptance_authority_mismatch")
     evidence = {
@@ -1535,7 +1534,7 @@ def _gb10_manifest_policy_mismatches(
         issues.append(
             "staging GB10 host_intents must stop all node-agent workers"
             if requires_retirement
-            else "staging GB10 host_intents must be exact active14 with trt-gb10-7 stopped"
+            else "staging GB10 host_intents must be the exact active 15-node fleet"
         )
     return issues
 

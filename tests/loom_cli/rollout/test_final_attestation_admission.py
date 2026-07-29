@@ -128,6 +128,9 @@ def _checks(
     predecessor_live_digest: str = "d" * 64,
     predecessor_pool_digest: str = "2" * 64,
     gb10_inventory_digest: str = "4" * 64,
+    infrastructure_receipt_digest: str = "1" * 64,
+    infrastructure_receipt_generation: int = 1,
+    node_receipt_digest: str = "2" * 64,
     baseline_ready: bool = True,
 ) -> tuple[RegisteredCheck, ...]:
     predecessor_units = {
@@ -153,18 +156,46 @@ def _checks(
         ),
         _check(
             "gb10.shared-mount",
-            {"mount-digest": "3" * 64},
-            (EvidenceField("mount-digest", "sha256"),),
+            {
+                "mount-digest": "3" * 64,
+                "receipt-digest": infrastructure_receipt_digest,
+                "receipt-generation": infrastructure_receipt_generation,
+            },
+            (
+                EvidenceField("mount-digest", "sha256"),
+                EvidenceField("receipt-digest", "sha256"),
+                EvidenceField("receipt-generation", "integer"),
+            ),
         ),
         _check(
             "gb10.candidate-source",
-            {"source-digest": "b" * 64},
-            (EvidenceField("source-digest", "sha256"),),
+            {
+                "source-digest": "b" * 64,
+                "infrastructure-receipt-digest": infrastructure_receipt_digest,
+                "receipt-generation": infrastructure_receipt_generation,
+            },
+            (
+                EvidenceField("source-digest", "sha256"),
+                EvidenceField("infrastructure-receipt-digest", "sha256"),
+                EvidenceField("receipt-generation", "integer"),
+            ),
         ),
         _check(
             "gb10.host-readiness",
-            {"inventory-digest": gb10_inventory_digest, "boot-ids": {"gb10-1": boot_id}},
-            (EvidenceField("inventory-digest", "sha256"), EvidenceField("boot-ids", "string-map")),
+            {
+                "inventory-digest": gb10_inventory_digest,
+                "boot-ids": {"gb10-1": boot_id},
+                "node-receipt-digests": {"gb10-1": node_receipt_digest},
+                "receipt-digest": infrastructure_receipt_digest,
+                "receipt-generation": infrastructure_receipt_generation,
+            },
+            (
+                EvidenceField("inventory-digest", "sha256"),
+                EvidenceField("boot-ids", "string-map"),
+                EvidenceField("node-receipt-digests", "string-map"),
+                EvidenceField("receipt-digest", "sha256"),
+                EvidenceField("receipt-generation", "integer"),
+            ),
         ),
         _check(
             "external-supervisor.predecessor",
@@ -376,6 +407,33 @@ def test_final_admission_tolerates_gb10_inventory_drift() -> None:
         attestation=_attestation(attested_plan),
         candidate=_candidate(),
         plan=drifted_plan,
+        current_mutation_epoch=7,
+        now=NOW,
+    )
+
+    assert all(execution.passed for execution in admission.tier0_executions)
+
+
+def test_final_admission_tolerates_same_candidate_infrastructure_receipt_refresh() -> None:
+    attested_plan = _plan(
+        _checks(
+            infrastructure_receipt_digest="1" * 64,
+            infrastructure_receipt_generation=1,
+            node_receipt_digest="2" * 64,
+        )
+    )
+    refreshed_plan = _plan(
+        _checks(
+            infrastructure_receipt_digest="3" * 64,
+            infrastructure_receipt_generation=2,
+            node_receipt_digest="4" * 64,
+        )
+    )
+
+    admission = validate_final_attestation(
+        attestation=_attestation(attested_plan),
+        candidate=_candidate(),
+        plan=refreshed_plan,
         current_mutation_epoch=7,
         now=NOW,
     )

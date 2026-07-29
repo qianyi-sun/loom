@@ -428,12 +428,32 @@ def _remote_observation_command(target: GB10TransportTarget, plan: FinalGatePlan
     return "python3 -c " + shlex.quote(_remote_observation_source(target, plan))
 
 
+def _retirement_identity(
+    plan: FinalGatePlan,
+    units: tuple[str, ...],
+) -> str:
+    return _hash_json(
+        {
+            "schema_version": 1,
+            "candidate_sha": plan.candidate_sha,
+            "candidate_tree": plan.candidate_tree,
+            "units": list(units),
+            "durable_absence": {
+                "active_authorities": 0,
+                "installed_unit_files": 0,
+                "timer_dropins": 0,
+            },
+        }
+    )
+
+
 def _retirement_observation_source(
     target: GB10TransportTarget,
     plan: FinalGatePlan,
 ) -> str:
     """Read back only the durable absence of every legacy user authority."""
     units = (_LEGACY_SERVICE, target.node_agent_service, target.timer)
+    retirement_identity = _retirement_identity(plan, units)
     return f"""import json
 import os
 import pathlib
@@ -444,6 +464,7 @@ units = {units!r}
 candidate_sha = {plan.candidate_sha!r}
 candidate_tree = {plan.candidate_tree!r}
 plan_digest = {plan.plan_digest!r}
+retirement_identity = {retirement_identity!r}
 state = pathlib.Path.home() / ".local/state/loom-staging-rollout/gb10-authority-retirement.json"
 unit_root = pathlib.Path.home() / ".config/systemd/user"
 
@@ -484,9 +505,17 @@ def committed():
                 and payload.get("schema_version") == 1
                 and payload.get("kind") == "loom.gb10-user-authority-retirement"
                 and payload.get("phase") == "committed"
+                and set(payload) == {{
+                    "schema_version", "kind", "phase", "candidate_sha",
+                    "candidate_tree", "plan_digest", "retirement_identity", "units"
+                }}
+                and isinstance(payload.get("plan_digest"), str)
+                and len(payload["plan_digest"]) == 64
+                and all(character in "0123456789abcdef"
+                        for character in payload["plan_digest"])
                 and payload.get("candidate_sha") == candidate_sha
                 and payload.get("candidate_tree") == candidate_tree
-                and payload.get("plan_digest") == plan_digest
+                and payload.get("retirement_identity") == retirement_identity
                 and payload.get("units") == list(units))
 
 boot_id = "unavailable"
@@ -595,24 +624,68 @@ def units_exact():
     except OSError:
         return False
 
-def active(unit):
-    result = run(["systemctl", "--user", "is-active", unit])
-    return result.returncode == 0 and result.stdout.strip() == "active"
-
 def enabled(unit):
     result = run(["systemctl", "--user", "is-enabled", unit])
     return result.returncode == 0 and result.stdout.strip() == "enabled"
+
+def properties(unit, names):
+    result = run(["systemctl", "--user", "show", unit,
+                  *[f"--property={{name}}" for name in names]])
+    if result.returncode != 0:
+        return None
+    parsed = {{}}
+    for line in result.stdout.splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            parsed[key] = value
+    return parsed if set(parsed) == set(names) else None
 
 try:
     boot_id = pathlib.Path("/proc/sys/kernel/random/boot_id").read_text(
         encoding="ascii").strip()
 except OSError:
     boot_id = "unavailable"
-baseline_ready = bool(boot_id != "unavailable"
-    and run(["loginctl", "show-user", str(os.getuid()),
-             "--property=Linger", "--value"]).stdout.strip() == "yes")
-legacy_absent = not active(legacy) and not enabled(legacy)
-service_timer_exact = active(timer) and enabled(timer) and not active(legacy)
+manager = run(["systemctl", "--user", "show", "--property=Version", "--value"])
+linger = run(["loginctl", "show-user", str(os.getuid()), "--property=Linger", "--value"])
+baseline_ready = bool(boot_id != "unavailable" and manager.returncode == 0
+                      and manager.stdout.strip() and linger.returncode == 0
+                      and linger.stdout.strip() == "yes")
+service_props = properties(service, [
+    "LoadState", "Type", "Result", "ExecMainStatus", "ActiveState", "SubState",
+    "NeedDaemonReload",
+])
+timer_props = properties(timer, [
+    "LoadState", "ActiveState", "SubState", "Unit", "NeedDaemonReload",
+])
+timer_enabled = enabled(timer)
+service_prepared = bool(service_props is not None
+    and service_props.get("LoadState") == "loaded"
+    and service_props.get("Type") == "oneshot"
+    and service_props.get("Result") == "success"
+    and service_props.get("ExecMainStatus") == "0"
+    and service_props.get("NeedDaemonReload") == "no")
+service_inflight_safe = bool(service_props is not None
+    and service_props.get("LoadState") == "loaded"
+    and service_props.get("Type") == "oneshot"
+    and service_props.get("Result") in {{"", "success"}}
+    and service_props.get("ExecMainStatus") in {{"", "0"}}
+    and service_props.get("ActiveState") != "failed"
+    and service_props.get("SubState") != "failed"
+    and service_props.get("NeedDaemonReload") == "no")
+timer_common = bool(timer_props is not None
+    and timer_props.get("LoadState") == "loaded"
+    and timer_props.get("ActiveState") == "active"
+    and timer_props.get("Unit") == service
+    and timer_props.get("NeedDaemonReload") == "no")
+timer_waiting = bool(timer_common and timer_props.get("SubState") == "waiting")
+timer_firing = bool(timer_common and timer_props.get("SubState") == "running")
+service_timer_exact = bool(service_prepared and timer_waiting and timer_enabled)
+service_timer_transient = bool(service_inflight_safe and timer_firing and timer_enabled)
+legacy_enabled = run(["systemctl", "--user", "is-enabled", legacy])
+legacy_props = properties(legacy, ["LoadState", "ActiveState", "SubState"])
+legacy_absent = bool(legacy_enabled.returncode != 0 and (
+    legacy_props is None or (legacy_props.get("ActiveState") not in {{"active", "activating"}}
+    and legacy_props.get("SubState") != "running")))
 print(json.dumps({{
     "baseline_ready": baseline_ready,
     "boot_id": boot_id,
@@ -621,7 +694,7 @@ print(json.dumps({{
     "environment_exact": environment_exact(),
     "legacy_absent": legacy_absent,
     "service_timer_exact": service_timer_exact,
-    "service_timer_transient": False,
+    "service_timer_transient": service_timer_transient,
     "units_exact": units_exact(),
 }}, sort_keys=True, separators=(",", ":")))"""
 
@@ -647,6 +720,7 @@ def _retirement_apply_source(
 ) -> str:
     """Render one lock+journal roll-forward retirement transaction."""
     units = (_LEGACY_SERVICE, target.node_agent_service, target.timer)
+    retirement_identity = _retirement_identity(plan, units)
     return f"""import fcntl
 import json
 import os
@@ -658,6 +732,7 @@ import tempfile
 candidate_sha = {plan.candidate_sha!r}
 candidate_tree = {plan.candidate_tree!r}
 plan_digest = {plan.plan_digest!r}
+retirement_identity = {retirement_identity!r}
 expected_boot_id = {plan.gb10_boot_ids[target.ssh_target]!r}
 operations = {tuple(operation.value for operation in operations)!r}
 units = {units!r}
@@ -722,6 +797,40 @@ def retired(unit):
             and enabled.stdout.strip() not in {{"enabled", "enabled-runtime", "linked",
                                                "linked-runtime", "alias"}})
 
+def absent(path):
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+def already_committed():
+    try:
+        item = receipt.lstat()
+        raw = receipt.read_bytes()
+        payload = json.loads(raw)
+    except (OSError, json.JSONDecodeError):
+        return False
+    return bool(
+        stat.S_ISREG(item.st_mode) and not stat.S_ISLNK(item.st_mode)
+        and item.st_uid == os.getuid() and item.st_nlink == 1
+        and stat.S_IMODE(item.st_mode) == 0o600
+        and raw == canonical(payload)
+        and set(payload) == {{
+            "schema_version", "kind", "phase", "candidate_sha",
+            "candidate_tree", "plan_digest", "retirement_identity", "units"
+        }}
+        and payload.get("schema_version") == 1
+        and payload.get("kind") == "loom.gb10-user-authority-retirement"
+        and payload.get("phase") == "committed"
+        and payload.get("candidate_sha") == candidate_sha
+        and payload.get("candidate_tree") == candidate_tree
+        and payload.get("retirement_identity") == retirement_identity
+        and payload.get("units") == list(units)
+    )
+
 if (pathlib.Path("/proc/sys/kernel/random/boot_id").read_text(
         encoding="ascii").strip() != expected_boot_id
         or not operations
@@ -737,6 +846,11 @@ lock_descriptor = os.open(
 try:
     os.fchmod(lock_descriptor, 0o600)
     fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+    dropin = unit_root / (units[2] + ".d")
+    if (already_committed() and all(retired(unit) for unit in units)
+            and all(absent(unit_root / unit) for unit in units)
+            and absent(dropin)):
+        raise SystemExit(0)
     planned = {{
         "schema_version": 1,
         "kind": "loom.gb10-user-authority-retirement",
@@ -744,6 +858,7 @@ try:
         "candidate_sha": candidate_sha,
         "candidate_tree": candidate_tree,
         "plan_digest": plan_digest,
+        "retirement_identity": retirement_identity,
         "units": list(units),
     }}
     atomic_write(receipt, canonical(planned))
@@ -751,7 +866,6 @@ try:
         run(["systemctl", "--user", "disable", "--now", unit])
         run(["systemctl", "--user", "stop", unit])
         run(["systemctl", "--user", "reset-failed", unit])
-    dropin = unit_root / (units[2] + ".d")
     if os.path.lexists(dropin):
         item = dropin.lstat()
         if not stat.S_ISDIR(item.st_mode) or stat.S_ISLNK(item.st_mode):

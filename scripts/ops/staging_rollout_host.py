@@ -4082,7 +4082,14 @@ def _validate_known_hosts_authority(payload: bytes) -> None:
     entries = [line for line in lines if line and not line.startswith("#")]
     expected_hosts = (
         "[207.35.188.227]:2221,trt-gb10-1",
-        *(f"192.168.20.{number + 10},trt-gb10-{number}" for number in range(2, 16)),
+        *(
+            (
+                "192.168.20.77,trt-gb10-7"
+                if number == 7
+                else f"192.168.20.{number + 10},trt-gb10-{number}"
+            )
+            for number in range(2, 16)
+        ),
     )
     if len(entries) != len(expected_hosts):
         raise InstallError("GB10 known-hosts authority must contain exactly 15 hosts")

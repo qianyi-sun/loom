@@ -2,8 +2,8 @@
 """Plan, check, and converge developer-sandbox Slurm host policy.
 
 Mutations are local-host only, require root, and are disabled unless
-``--execute`` is present. The caller must drain one node at a time before
-requesting service restarts.
+``--execute`` is present. Live restart transactions own a candidate-bound
+Slurm drain until service readback or rollback finishes.
 """
 
 from __future__ import annotations
@@ -85,6 +85,12 @@ _POLICY_JOURNAL_COMMON_FIELDS = {
     "host",
     "slurm_node",
     "candidate_sha",
+    "candidate_set_sha256",
+    "candidate_bindings",
+    "transaction_id",
+    "candidate_set_generation",
+    "candidate_set_convergence_id",
+    "candidate_set_payload_sha256",
     "snapshot",
     "accounting_snapshot",
     "restart",
@@ -104,9 +110,78 @@ _POLICY_JOURNAL_PHASES = {
     "rollback_failed",
     "recovery_failed",
 }
+_DRAIN_JOURNAL_FIELDS = {
+    "schema_version",
+    "kind",
+    "cluster",
+    "host",
+    "slurm_node",
+    "candidate_sha",
+    "candidate_set_sha256",
+    "candidate_bindings",
+    "transaction_id",
+    "candidate_set_generation",
+    "candidate_set_convergence_id",
+    "candidate_set_payload_sha256",
+    "candidate_tree",
+    "candidate_root",
+    "profile_relative",
+    "operation",
+    "apply_accounting",
+    "ownership_token",
+    "ownership_reason",
+    "owned",
+    "prior_state",
+    "prior_reason",
+    "phase",
+    "created_at",
+    "updated_at",
+}
+_LEGACY_POLICY_JOURNAL_FIELDS = _POLICY_JOURNAL_COMMON_FIELDS - {
+    "candidate_set_sha256",
+    "candidate_bindings",
+    "transaction_id",
+    "candidate_set_generation",
+    "candidate_set_convergence_id",
+    "candidate_set_payload_sha256",
+}
+_LEGACY_DRAIN_JOURNAL_FIELDS = _DRAIN_JOURNAL_FIELDS - {
+    "candidate_set_sha256",
+    "candidate_bindings",
+    "transaction_id",
+    "candidate_set_generation",
+    "candidate_set_convergence_id",
+    "candidate_set_payload_sha256",
+}
+_DRAIN_JOURNAL_PHASES = {
+    "prepared",
+    "drained",
+    "quiesced",
+    "transacting",
+    "released",
+    "release_failed",
+}
+_SLURM_NODE_STATE_RE = re.compile(r"^[A-Z][A-Z0-9_+*~#@-]{0,127}$")
+_DRAIN_TOKEN_RE = re.compile(r"^[0-9a-f]{64}$")
+_DRAIN_REASON_RE = re.compile(
+    r"^loom-sandbox-policy:[0-9a-f]{12}:[0-9a-f]{16}$",
+)
+_RECOVERY_CANDIDATE_ROOT_RE = re.compile(
+    r"^/shared_work/loom/candidates/sandboxes/"
+    r"(?:qianyi|hongjian|devansh)/([0-9a-f]{40})$",
+)
+_RECOVERY_PROFILE_RELATIVE = {
+    "trt-oldlab": "deploy/slurm/developer-sandboxes/oldlab.toml",
+    "trt-gb10": "deploy/slurm/developer-sandboxes/gb10.toml",
+}
+_RECOVERY_POLICY_RELATIVE = "scripts/ops/developer_sandbox_slurm_policy.py"
+_RECOVERY_CLUSTERS = tuple(_RECOVERY_PROFILE_RELATIVE)
+_RESTART_QUIESCE_TIMEOUT_SECONDS = 30.0
+_RESTART_QUIESCE_POLL_SECONDS = 1.0
 _STATE_RELATIVE = Path("var/lib/loom-developer-sandbox-slurm-policy")
 _GUARD_STATUS_RELATIVE = _STATE_RELATIVE / "guard-status.json"
 _GUARD_STATUS_MAX_AGE = timedelta(seconds=30)
+_GUARD_MAX_CLOCK_SKEW = timedelta(seconds=5)
 _ALLOCATION_PROBE_RELATIVE = _STATE_RELATIVE / "allocation-probes"
 _RUNTIME_PROOF_RELATIVE = _STATE_RELATIVE / "runtime-proofs"
 _RUNTIME_PROOF_TRANSACTION_RELATIVE = _STATE_RELATIVE / "runtime-proof-transactions"
@@ -143,6 +218,7 @@ _RUNTIME_DOMAIN_HOSTS = {
         "gx10-0d93",
         "gx10-1036",
         "gx10-1000",
+        "gx10-0faf",
         "gx10-db22",
         "gx10-16f6",
         "gx10-0f82",
@@ -165,6 +241,7 @@ _RUNTIME_FLEET_NODES = (
     "trt-gb10-4",
     "trt-gb10-5",
     "trt-gb10-6",
+    "trt-gb10-7",
     "trt-gb10-8",
     "trt-gb10-9",
     "trt-gb10-10",
@@ -216,6 +293,7 @@ class Profile:
     cluster: str
     controller: str
     submit_host: str
+    infrastructure_nodes: tuple[str, ...]
     allowed_nodes: tuple[str, ...]
     host_aliases: Mapping[str, str]
     slot_budget: int
@@ -254,6 +332,110 @@ def _sandbox_service_user(profile: Profile, sandbox: str) -> str:
     return user
 
 
+def _candidate_bindings(
+    profile: Profile,
+    raw: Mapping[str, Any],
+) -> dict[str, dict[str, str]]:
+    expected_accounts = {
+        _sandbox_account(profile, sandbox): sandbox for sandbox in _SANDBOXES
+    }
+    if set(raw) != set(expected_accounts):
+        raise PolicyError("candidate bindings must cover the exact sandbox accounts")
+    normalized: dict[str, dict[str, str]] = {}
+    for account, sandbox in expected_accounts.items():
+        binding = raw.get(account)
+        service_user = _sandbox_service_user(profile, sandbox)
+        if (
+            not isinstance(binding, Mapping)
+            or set(binding)
+            != {
+                "sandbox",
+                "service_user",
+                "candidate_sha",
+                "candidate_tree",
+            }
+            or binding.get("sandbox") != sandbox
+            or binding.get("service_user") != service_user
+            or _CANDIDATE_RE.fullmatch(str(binding.get("candidate_sha"))) is None
+            or _CANDIDATE_RE.fullmatch(str(binding.get("candidate_tree"))) is None
+        ):
+            raise PolicyError("candidate account binding is invalid")
+        normalized[account] = {
+            "sandbox": sandbox,
+            "service_user": service_user,
+            "candidate_sha": str(binding["candidate_sha"]),
+            "candidate_tree": str(binding["candidate_tree"]),
+        }
+    candidate_shas = {row["candidate_sha"] for row in normalized.values()}
+    if (
+        len(candidate_shas) != len(_SANDBOXES)
+        or len({candidate_sha[:12] for candidate_sha in candidate_shas}) != len(_SANDBOXES)
+    ):
+        raise PolicyError("sandbox candidate SHAs must be pairwise distinct")
+    return normalized
+
+
+def _candidate_set_sha256(bindings: Mapping[str, Mapping[str, str]]) -> str:
+    return hashlib.sha256(
+        json.dumps(bindings, sort_keys=True, separators=(",", ":")).encode("ascii"),
+    ).hexdigest()
+
+
+def _transaction_identity(
+    *,
+    transaction_id: str | None,
+    generation: int | None,
+    convergence_id: str | None,
+    payload_sha256: str | None,
+    required: bool,
+) -> dict[str, str | int]:
+    values = (transaction_id, generation, convergence_id, payload_sha256)
+    if not required and all(value is None for value in values):
+        return {
+            "transaction_id": "0" * 64,
+            "candidate_set_generation": 1,
+            "candidate_set_convergence_id": "0" * 64,
+            "candidate_set_payload_sha256": "0" * 64,
+        }
+    if (
+        re.fullmatch(r"[0-9a-f]{64}", str(transaction_id)) is None
+        or type(generation) is not int
+        or generation < 1
+        or re.fullmatch(r"[0-9a-f]{64}", str(convergence_id)) is None
+        or re.fullmatch(r"[0-9a-f]{64}", str(payload_sha256)) is None
+    ):
+        raise PolicyError("Slurm transaction identity is invalid")
+    return {
+        "transaction_id": str(transaction_id),
+        "candidate_set_generation": generation,
+        "candidate_set_convergence_id": str(convergence_id),
+        "candidate_set_payload_sha256": str(payload_sha256),
+    }
+
+
+def _offline_candidate_bindings(
+    profile: Profile,
+    candidate_sha: str,
+) -> dict[str, dict[str, str]]:
+    """Provide closed schema-v2 fixtures only for non-live planning roots."""
+
+    rows: dict[str, dict[str, str]] = {}
+    for index, sandbox in enumerate(_SANDBOXES):
+        account = _sandbox_account(profile, sandbox)
+        sha = (
+            candidate_sha
+            if index == 0
+            else hashlib.sha256(f"{candidate_sha}:{sandbox}".encode("ascii")).hexdigest()[:40]
+        )
+        rows[account] = {
+            "sandbox": sandbox,
+            "service_user": _sandbox_service_user(profile, sandbox),
+            "candidate_sha": sha,
+            "candidate_tree": candidate_sha,
+        }
+    return _candidate_bindings(profile, rows)
+
+
 def _table(raw: Mapping[str, Any], key: str) -> dict[str, Any]:
     value = raw.get(key)
     if not isinstance(value, dict):
@@ -278,11 +460,12 @@ def load_profile(path: Path) -> Profile:
         raise PolicyError(f"could not load policy profile: {path}") from exc
     if raw.get("schema_version") != 1:
         raise PolicyError("schema_version must be 1")
-    allowed_top_level = {
+    required_top_level = {
         "schema_version",
         "cluster",
         "controller",
         "submit_host",
+        "infrastructure_nodes",
         "allowed_nodes",
         "host_aliases",
         "capacity",
@@ -291,7 +474,7 @@ def load_profile(path: Path) -> Profile:
         "docker",
         "accounting",
     }
-    if set(raw) != allowed_top_level:
+    if set(raw) != required_top_level:
         raise PolicyError("profile has missing or unknown top-level fields")
     capacity = _table(raw, "capacity")
     slurm = _table(raw, "slurm")
@@ -331,14 +514,21 @@ def load_profile(path: Path) -> Profile:
     if set(cgroup) != required_cgroup:
         raise PolicyError("cgroup table has missing or unknown fields")
     allowed_nodes = _strings(raw.get("allowed_nodes"), "allowed_nodes")
+    infrastructure_nodes = _strings(raw.get("infrastructure_nodes"), "infrastructure_nodes")
+    if len(set(infrastructure_nodes)) != len(infrastructure_nodes):
+        raise PolicyError("infrastructure_nodes must be distinct")
+    if len(set(allowed_nodes)) != len(allowed_nodes):
+        raise PolicyError("allowed_nodes must be distinct")
+    if not set(allowed_nodes).issubset(infrastructure_nodes):
+        raise PolicyError("allowed_nodes must be a subset of infrastructure_nodes")
     host_aliases_raw = _table(raw, "host_aliases")
     host_aliases = {
         str(key): str(value).lower()
         for key, value in host_aliases_raw.items()
         if isinstance(key, str) and isinstance(value, str)
     }
-    if set(host_aliases) != set(allowed_nodes):
-        raise PolicyError("host_aliases must map every allowed Slurm node")
+    if set(host_aliases) != set(infrastructure_nodes):
+        raise PolicyError("host_aliases must map every infrastructure Slurm node")
     if len(set(host_aliases.values())) != len(host_aliases):
         raise PolicyError("host_aliases canonical hostnames must be distinct")
     users = _strings(accounting.get("users"), "accounting.users")
@@ -409,6 +599,7 @@ def load_profile(path: Path) -> Profile:
         cluster=cluster,
         controller=controller,
         submit_host=submit_host,
+        infrastructure_nodes=infrastructure_nodes,
         allowed_nodes=allowed_nodes,
         host_aliases=host_aliases,
         slot_budget=capacity["slot_budget"],
@@ -435,8 +626,93 @@ def load_profile(path: Path) -> Profile:
     )
 
 
+def _worker_capacity_contract(
+    profile: Profile,
+    candidate_root: Path,
+) -> tuple[str, int]:
+    """Load the pool/concurrency binding from the exact candidate policy."""
+    domain_by_cluster = {"trt-oldlab": "oldlab", "trt-gb10": "gb10"}
+    domain = domain_by_cluster.get(profile.cluster)
+    if domain is None:
+        raise PolicyError("worker capacity contract cluster is invalid")
+    runtime_path = candidate_root / "deploy/developer-sandboxes/runtime-domains.toml"
+    expected_source = f"deploy/developer-sandboxes/shared-capacity-policies/{domain}.toml"
+    capacity_path = candidate_root / expected_source
+    payloads: list[dict[str, Any]] = []
+    for path, label in (
+        (runtime_path, "runtime-domain contract"),
+        (capacity_path, "capacity policy contract"),
+    ):
+        try:
+            metadata = path.lstat()
+            if (
+                stat.S_ISLNK(metadata.st_mode)
+                or not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_size > 1024 * 1024
+            ):
+                raise PolicyError(f"{label} metadata is invalid")
+            payload = tomllib.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+            raise PolicyError(f"{label} is unavailable or invalid") from exc
+        payloads.append(payload)
+    runtime, capacity = payloads
+    domains = runtime.get("domains")
+    domain_config = domains.get(domain) if isinstance(domains, dict) else None
+    policy = capacity.get("policy")
+    actuator = policy.get("actuator_config") if isinstance(policy, dict) else None
+    if not isinstance(domain_config, dict) or not isinstance(actuator, dict):
+        raise PolicyError("worker capacity contract tables are invalid")
+    concurrency = actuator.get("requested_concurrency")
+    allowed_nodes = actuator.get("allowed_nodes")
+    expected_env = (
+        f"/shared_work/loom/runtime/sandboxes/${{SANDBOX}}/"
+        f"${{CANDIDATE_SHA}}/worker-{domain}.env"
+    )
+    if (
+        runtime.get("schema_version") != 1
+        or domain_config.get("worker_env_name") != f"worker-{domain}.env"
+        or domain_config.get("worker_pool_name") != domain
+        or domain_config.get("capacity_policy_source") != expected_source
+        or domain_config.get("worker_max_concurrent") != concurrency
+        or capacity.get("schema_version") != 1
+        or capacity.get("pool_name") != domain
+        or type(concurrency) is not int
+        or concurrency < 1
+        or not isinstance(allowed_nodes, list)
+        or not all(isinstance(node, str) for node in allowed_nodes)
+        or tuple(node.lower() for node in allowed_nodes)
+        != tuple(node.lower() for node in profile.allowed_nodes)
+        or actuator.get("env_file") != expected_env
+        or actuator.get("candidate_sha") != "${CANDIDATE_SHA}"
+        or actuator.get("slurm_account") != "loom-dev-${SANDBOX}"
+        or capacity.get("slot_budget") != profile.slot_budget
+        or capacity.get("job_pids_max") != profile.job_pids_max
+    ):
+        raise PolicyError("worker capacity contract binding drifted")
+    return domain, concurrency
+
+
+def _require_worker_capacity_assertion(
+    profile: Profile,
+    candidate_root: Path,
+    *,
+    expected_pool: str,
+    expected_concurrency: int,
+) -> tuple[str, int]:
+    pool, concurrency = _worker_capacity_contract(profile, candidate_root)
+    if expected_pool != pool or expected_concurrency != concurrency:
+        raise PolicyError(
+            "operator pool/concurrency assertion differs from the checked-in capacity policy",
+        )
+    return pool, concurrency
+
+
 def _slurm_value(value: str | int) -> str:
     return str(value)
+
+
+def _allowed_host_aliases(profile: Profile) -> dict[str, str]:
+    return {node: profile.host_aliases[node] for node in profile.allowed_nodes}
 
 
 def render_key_value_config(
@@ -973,6 +1249,12 @@ def allocation_node_check(
     )
     if binding["repository"]["candidate_tree"] != expected_tree:
         raise PolicyError("allocation-side candidate tree drifted")
+    pool, concurrency = _require_worker_capacity_assertion(
+        profile,
+        candidate_root,
+        expected_pool=expected_pool,
+        expected_concurrency=expected_concurrency,
+    )
     env_binding = binding["worker_env"]
     if env_binding["inode"] != expected_env_inode or env_binding["sha256"] != expected_env_sha256:
         raise PolicyError("allocation-side worker env binding drifted")
@@ -983,8 +1265,8 @@ def allocation_node_check(
     )
     if (
         values.get("LOOM_WORKER_CANDIDATE_SHA") != candidate_sha
-        or values.get("LOOM_WORKER_POOL_NAME") != expected_pool
-        or values.get("LOOM_WORKER_MAX_CONCURRENT") != str(expected_concurrency)
+        or values.get("LOOM_WORKER_POOL_NAME") != pool
+        or values.get("LOOM_WORKER_MAX_CONCURRENT") != str(concurrency)
     ):
         raise PolicyError("allocation-side worker env effective values drifted")
     docker_driver = _run(("docker", "info", "--format", "{{.CgroupDriver}}"), timeout=30).strip()
@@ -1104,10 +1386,18 @@ def desired_files(
     profile: Profile,
     *,
     candidate_sha: str | None = None,
+    candidate_bindings: Mapping[str, Any] | None = None,
 ) -> dict[Path, str]:
     candidate = candidate_sha or source_candidate_sha()
     if _CANDIDATE_RE.fullmatch(candidate) is None:
         raise PolicyError("candidate SHA must be an exact lowercase Git SHA")
+    if candidate_bindings is None:
+        if root == Path("/"):
+            raise PolicyError("live Slurm policy requires the complete candidate set")
+        bindings = _offline_candidate_bindings(profile, candidate)
+    else:
+        bindings = _candidate_bindings(profile, candidate_bindings)
+    candidate_set_sha256 = _candidate_set_sha256(bindings)
     slurm_path = root / "etc/slurm/slurm.conf"
     daemon_path = root / "etc/docker/daemon.json"
     try:
@@ -1129,19 +1419,19 @@ def desired_files(
         root / "etc/loom/slurm-job-cgroup-guard.json": (
             json.dumps(
                 {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "cluster": profile.cluster,
                     "controller": profile.controller,
                     "submit_host": profile.submit_host,
                     "allowed_nodes": sorted(
                         {
                             *(node.lower() for node in profile.allowed_nodes),
-                            *profile.host_aliases.values(),
+                            *(profile.host_aliases[node] for node in profile.allowed_nodes),
                         },
                     ),
-                    "candidate_sha": candidate,
+                    "candidate_bindings": bindings,
+                    "candidate_set_sha256": candidate_set_sha256,
                     "pids_max": profile.job_pids_max,
-                    "allowed_accounts": sorted(profile.child_accounts),
                     "poll_interval_seconds": 0.2,
                     "require_gpu_probe": profile.gpu_tres_per_slot > 0,
                 },
@@ -1177,9 +1467,20 @@ def plan(
     profile: Profile,
     *,
     candidate_sha: str | None = None,
+    candidate_bindings: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     candidate = candidate_sha or source_candidate_sha()
-    files = desired_files(root, profile, candidate_sha=candidate)
+    files = desired_files(
+        root,
+        profile,
+        candidate_sha=candidate,
+        candidate_bindings=candidate_bindings,
+    )
+    bindings = (
+        _offline_candidate_bindings(profile, candidate)
+        if candidate_bindings is None
+        else _candidate_bindings(profile, candidate_bindings)
+    )
     rows = []
     for path, desired in files.items():
         live = path.read_bytes() if path.exists() else b""
@@ -1206,6 +1507,10 @@ def plan(
         "artifact_type": "developer-sandbox-slurm-policy-plan",
         "cluster": profile.cluster,
         "candidate_sha": candidate,
+        "candidate_set_sha256": _candidate_set_sha256(bindings),
+        "candidate_bindings": bindings,
+        "infrastructure_nodes": list(profile.infrastructure_nodes),
+        "allowed_nodes": list(profile.allowed_nodes),
         "capacity": {
             "slot_budget": profile.slot_budget,
             "pending_slot_budget": profile.pending_slot_budget,
@@ -1732,6 +2037,65 @@ def _load_policy_journal(
     if payload is None:
         return None
     operation = payload.get("operation")
+    legacy_fields = set(_LEGACY_POLICY_JOURNAL_FIELDS)
+    if operation == "rollback":
+        legacy_fields.add("rollback_target")
+    if set(payload) == legacy_fields:
+        if (
+            operation not in {"apply", "rollback"}
+            or payload.get("phase") not in {"committed", "rolled_back"}
+            or payload.get("cluster") != profile.cluster
+            or payload.get("host") != _canonical_host()
+            or payload.get("slurm_node") != slurm_node
+            or _CANDIDATE_RE.fullmatch(str(payload.get("candidate_sha", ""))) is None
+            or type(payload.get("restart")) is not bool
+            or type(payload.get("apply_accounting")) is not bool
+            or not isinstance(payload.get("snapshot"), str)
+            or (
+                payload.get("accounting_snapshot") is not None
+                and not isinstance(payload.get("accounting_snapshot"), str)
+            )
+            or not isinstance(payload.get("created_at"), str)
+            or not isinstance(payload.get("updated_at"), str)
+        ):
+            raise PolicyError("nonterminal legacy Slurm policy journal requires exact recovery")
+        try:
+            created_at = datetime.fromisoformat(payload["created_at"])
+            updated_at = datetime.fromisoformat(payload["updated_at"])
+        except ValueError as exc:
+            raise PolicyError("legacy Slurm policy journal timestamp is invalid") from exc
+        if created_at.tzinfo is None or updated_at.tzinfo is None or updated_at < created_at:
+            raise PolicyError("legacy Slurm policy journal timestamp is invalid")
+        snapshot = _validate_snapshot_path(root, Path(payload["snapshot"]))
+        accounting = payload["accounting_snapshot"]
+        if accounting is not None:
+            _validate_accounting_snapshot_path(root, snapshot, Path(accounting))
+        if payload["apply_accounting"] is not (accounting is not None):
+            raise PolicyError("legacy Slurm policy accounting binding is invalid")
+        rollback_target = payload.get("rollback_target")
+        if operation == "rollback":
+            if not isinstance(rollback_target, str):
+                raise PolicyError("legacy Slurm rollback target is invalid")
+            _validate_snapshot_path(root, Path(rollback_target))
+        elif rollback_target is not None:
+            raise PolicyError("legacy Slurm apply rollback binding is invalid")
+        archive = (
+            path.parent
+            / "legacy"
+            / f"{profile.cluster}-{hashlib.sha256(_canonical_json_bytes(payload)).hexdigest()}.json"
+        )
+        existing = _load_journal(archive)
+        if existing is None:
+            _write_journal(archive, payload)
+        elif existing != payload:
+            raise PolicyError("legacy Slurm policy archive identity collided")
+        path.unlink()
+        _fsync_directory(path.parent)
+        return None
+    try:
+        bindings = _candidate_bindings(profile, payload.get("candidate_bindings", {}))
+    except PolicyError as exc:
+        raise PolicyError("durable Slurm policy candidate-set binding is invalid") from exc
     expected_fields = set(_POLICY_JOURNAL_COMMON_FIELDS)
     if operation == "rollback":
         expected_fields.add("rollback_target")
@@ -1742,6 +2106,20 @@ def _load_policy_journal(
         or payload.get("host") != _canonical_host()
         or payload.get("slurm_node") != slurm_node
         or _CANDIDATE_RE.fullmatch(str(payload.get("candidate_sha", ""))) is None
+        or payload.get("candidate_set_sha256") != _candidate_set_sha256(bindings)
+        or re.fullmatch(r"[0-9a-f]{64}", str(payload.get("transaction_id"))) is None
+        or type(payload.get("candidate_set_generation")) is not int
+        or payload["candidate_set_generation"] < 1
+        or re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(payload.get("candidate_set_convergence_id")),
+        )
+        is None
+        or re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(payload.get("candidate_set_payload_sha256")),
+        )
+        is None
         or type(payload.get("restart")) is not bool
         or type(payload.get("apply_accounting")) is not bool
         or payload.get("phase") not in _POLICY_JOURNAL_PHASES
@@ -2671,15 +3049,28 @@ def _restore_accounting(profile: Profile, path: Path) -> None:
         raise PolicyError("Loom accounting CAS restore readback drifted")
 
 
-def _restart_services(profile: Profile, slurm_node: str) -> None:
+def _stop_guard_before_status_invalidation() -> None:
+    _run_status(("systemctl", "stop", "loom-slurm-job-cgroup-guard.service"))
+    active_code, _active = _run_status(
+        ("systemctl", "is-active", "loom-slurm-job-cgroup-guard.service"),
+    )
+    if active_code == 0:
+        raise PolicyError("cgroup guard remained active before status invalidation")
+
+
+def _restart_services(profile: Profile, slurm_node: str) -> datetime:
+    _stop_guard_before_status_invalidation()
+    _invalidate_guard_status(Path("/"))
+    guard_restart_boundary = datetime.now(UTC)
     _run(("systemctl", "daemon-reload"))
     _run(("systemctl", "enable", "loom-slurm-job-cgroup-guard.service"))
     _run(("systemctl", "restart", "docker"))
     _run(("systemctl", "restart", "slurmd"))
-    _run(("systemctl", "restart", "loom-slurm-job-cgroup-guard.service"))
+    _run(("systemctl", "start", "loom-slurm-job-cgroup-guard.service"))
     if slurm_node == profile.controller:
         _run(("systemctl", "restart", "slurmctld"))
     _run(("scontrol", "reconfigure"))
+    return guard_restart_boundary
 
 
 def _run_status(argv: Sequence[str]) -> tuple[int, str]:
@@ -2696,8 +3087,572 @@ def _run_status(argv: Sequence[str]) -> tuple[int, str]:
     return completed.returncode, completed.stdout
 
 
-def _restore_services(root: Path, profile: Profile, slurm_node: str) -> None:
+def _drain_journal_path(root: Path, profile: Profile) -> Path:
+    return _state_root(root) / "drains" / f"{profile.cluster}.json"
+
+
+def _drain_recovery_binding(
+    root: Path,
+    profile: Profile,
+    *,
+    candidate_sha: str,
+    operation: str,
+    apply_accounting: bool,
+) -> dict[str, Any]:
+    if operation not in {"apply", "rollback"}:
+        raise PolicyError("Slurm restart recovery operation is invalid")
+    if operation == "rollback" and apply_accounting:
+        raise PolicyError("Slurm rollback recovery cannot request accounting apply")
+    profile_relative = _RECOVERY_PROFILE_RELATIVE.get(profile.cluster)
+    if profile_relative is None:
+        raise PolicyError("Slurm restart recovery cluster is invalid")
+    repository = Path(__file__).resolve().parents[2]
+    profile_path = repository / profile_relative
+    if root == Path("/"):
+        match = _RECOVERY_CANDIDATE_ROOT_RE.fullmatch(str(repository))
+        if match is None or match.group(1) != candidate_sha:
+            raise PolicyError("live Slurm recovery candidate root is not exact")
+        _safe_path_chain(repository, leaf_directory=True)
+        _safe_path_chain(repository / _RECOVERY_POLICY_RELATIVE, leaf_directory=False)
+        _safe_path_chain(profile_path, leaf_directory=False)
+        if load_profile(profile_path) != profile:
+            raise PolicyError("live Slurm recovery profile is not the exact candidate profile")
+        candidate_tree = (
+            _git_read(
+                repository,
+                "rev-parse",
+                "--verify",
+                f"{candidate_sha}^{{tree}}",
+            )
+            .decode("ascii")
+            .strip()
+        )
+        if _CANDIDATE_RE.fullmatch(candidate_tree) is None:
+            raise PolicyError("live Slurm recovery candidate tree is invalid")
+    else:
+        candidate_tree = "0" * 40
+    return {
+        "candidate_tree": candidate_tree,
+        "candidate_root": str(repository),
+        "profile_relative": profile_relative,
+        "operation": operation,
+        "apply_accounting": apply_accounting,
+    }
+
+
+def _slurm_node_admission(slurm_node: str) -> tuple[str, str]:
+    raw = _run(("scontrol", "show", "node", slurm_node, "-o"))
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    if len(lines) != 1:
+        raise PolicyError("Slurm node admission readback is invalid")
+    line = lines[0]
+    name_match = re.search(r"(?:^|\s)NodeName=(\S+)", line)
+    state_match = re.search(r"(?:^|\s)State=(\S+)", line)
+    reason_match = re.search(r"(?:^|\s)Reason=(.*)$", line)
+    if (
+        name_match is None
+        or name_match.group(1).lower() != slurm_node.lower()
+        or state_match is None
+        or _SLURM_NODE_STATE_RE.fullmatch(state_match.group(1)) is None
+    ):
+        raise PolicyError("Slurm node admission readback is invalid")
+    reason = reason_match.group(1).strip() if reason_match is not None else ""
+    if len(reason) > 4096 or any(
+        not character.isprintable() and character not in "\t" for character in reason
+    ):
+        raise PolicyError("Slurm node admission reason is invalid")
+    return state_match.group(1), reason
+
+
+def _node_is_drained_or_down(state: str) -> bool:
+    return "DRAIN" in state or "DOWN" in state
+
+
+def _owned_drain_reason_matches(observed: str, expected: str) -> bool:
+    return observed == expected or observed.startswith(f"{expected} ")
+
+
+def _load_drain_journal(
+    root: Path,
+    profile: Profile,
+    *,
+    slurm_node: str,
+) -> dict[str, Any] | None:
+    path = _drain_journal_path(root, profile)
+    payload = _load_journal(path)
+    if payload is None:
+        return None
+    if set(payload) == _LEGACY_DRAIN_JOURNAL_FIELDS:
+        if (
+            payload.get("schema_version") != 1
+            or payload.get("kind") != "loom.developer-sandbox.slurm-restart-drain"
+            or payload.get("cluster") != profile.cluster
+            or payload.get("host") != _canonical_host()
+            or payload.get("slurm_node") != slurm_node
+            or _CANDIDATE_RE.fullmatch(str(payload.get("candidate_sha", ""))) is None
+            or _CANDIDATE_RE.fullmatch(str(payload.get("candidate_tree", ""))) is None
+            or payload.get("operation") not in {"apply", "rollback"}
+            or type(payload.get("apply_accounting")) is not bool
+            or payload.get("phase") != "released"
+            or type(payload.get("owned")) is not bool
+            or not isinstance(payload.get("created_at"), str)
+            or not isinstance(payload.get("updated_at"), str)
+        ):
+            raise PolicyError("nonterminal legacy Slurm drain requires exact recovery")
+        state, _reason = _slurm_node_admission(slurm_node)
+        if _node_is_drained_or_down(state):
+            raise PolicyError("legacy released Slurm drain still owns scheduler state")
+        archive = (
+            path.parent
+            / "legacy"
+            / f"{profile.cluster}-{hashlib.sha256(_canonical_json_bytes(payload)).hexdigest()}.json"
+        )
+        existing = _load_journal(archive)
+        if existing is None:
+            _write_journal(archive, payload)
+        elif existing != payload:
+            raise PolicyError("legacy Slurm drain archive identity collided")
+        path.unlink()
+        _fsync_directory(path.parent)
+        return None
+    try:
+        bindings = _candidate_bindings(profile, payload.get("candidate_bindings", {}))
+    except PolicyError as exc:
+        raise PolicyError("durable Slurm restart candidate-set binding is invalid") from exc
+    if (
+        set(payload) != _DRAIN_JOURNAL_FIELDS
+        or payload.get("schema_version") != 1
+        or payload.get("kind") != "loom.developer-sandbox.slurm-restart-drain"
+        or payload.get("cluster") != profile.cluster
+        or payload.get("host") != _canonical_host()
+        or payload.get("slurm_node") != slurm_node
+        or _CANDIDATE_RE.fullmatch(str(payload.get("candidate_sha", ""))) is None
+        or payload.get("candidate_set_sha256") != _candidate_set_sha256(bindings)
+        or re.fullmatch(r"[0-9a-f]{64}", str(payload.get("transaction_id"))) is None
+        or type(payload.get("candidate_set_generation")) is not int
+        or payload["candidate_set_generation"] < 1
+        or re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(payload.get("candidate_set_convergence_id")),
+        )
+        is None
+        or re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(payload.get("candidate_set_payload_sha256")),
+        )
+        is None
+        or _CANDIDATE_RE.fullmatch(str(payload.get("candidate_tree", ""))) is None
+        or not isinstance(payload.get("candidate_root"), str)
+        or not Path(payload["candidate_root"]).is_absolute()
+        or len(payload["candidate_root"]) > 4096
+        or payload.get("profile_relative")
+        != _RECOVERY_PROFILE_RELATIVE.get(profile.cluster)
+        or payload.get("operation") not in {"apply", "rollback"}
+        or type(payload.get("apply_accounting")) is not bool
+        or (payload.get("operation") == "rollback" and payload.get("apply_accounting") is True)
+        or _DRAIN_TOKEN_RE.fullmatch(str(payload.get("ownership_token", ""))) is None
+        or _DRAIN_REASON_RE.fullmatch(str(payload.get("ownership_reason", ""))) is None
+        or type(payload.get("owned")) is not bool
+        or _SLURM_NODE_STATE_RE.fullmatch(str(payload.get("prior_state", ""))) is None
+        or not isinstance(payload.get("prior_reason"), str)
+        or len(payload["prior_reason"]) > 4096
+        or payload.get("phase") not in _DRAIN_JOURNAL_PHASES
+        or not isinstance(payload.get("created_at"), str)
+        or not isinstance(payload.get("updated_at"), str)
+    ):
+        raise PolicyError("durable Slurm restart drain binding is invalid")
+    try:
+        created_at = datetime.fromisoformat(payload["created_at"])
+        updated_at = datetime.fromisoformat(payload["updated_at"])
+    except ValueError as exc:
+        raise PolicyError("durable Slurm restart drain timestamp is invalid") from exc
+    if (
+        created_at.tzinfo is None
+        or updated_at.tzinfo is None
+        or updated_at < created_at
+        or any(
+            not character.isprintable() and character not in "\t"
+            for character in payload["prior_reason"]
+        )
+    ):
+        raise PolicyError("durable Slurm restart drain binding is invalid")
+    return payload
+
+
+def _advance_drain_journal(
+    root: Path,
+    profile: Profile,
+    payload: dict[str, Any],
+    phase: str,
+) -> None:
+    if phase not in _DRAIN_JOURNAL_PHASES:
+        raise PolicyError("Slurm restart drain phase is invalid")
+    payload["phase"] = phase
+    payload["updated_at"] = datetime.now(UTC).isoformat()
+    _write_journal(_drain_journal_path(root, profile), payload)
+
+
+def _release_restart_drain(
+    root: Path,
+    profile: Profile,
+    payload: dict[str, Any],
+) -> None:
+    if payload.get("phase") == "released":
+        return
+    if payload.get("owned") is not True:
+        _advance_drain_journal(root, profile, payload, "released")
+        return
+    slurm_node = str(payload["slurm_node"])
+    state, reason = _slurm_node_admission(slurm_node)
+    if "DOWN" in state:
+        _advance_drain_journal(root, profile, payload, "release_failed")
+        raise PolicyError("owned Slurm drain became DOWN; preserving scheduler state")
+    if "DRAIN" not in state:
+        _advance_drain_journal(root, profile, payload, "released")
+        return
+    ownership_reason = str(payload["ownership_reason"])
+    if not _owned_drain_reason_matches(reason, ownership_reason):
+        _advance_drain_journal(root, profile, payload, "release_failed")
+        raise PolicyError("owned Slurm drain reason changed; preserving scheduler state")
+    try:
+        _run(("scontrol", "update", f"NodeName={slurm_node}", "State=RESUME"))
+        released_state, _released_reason = _slurm_node_admission(slurm_node)
+    except Exception:
+        _advance_drain_journal(root, profile, payload, "release_failed")
+        raise
+    if _node_is_drained_or_down(released_state):
+        _advance_drain_journal(root, profile, payload, "release_failed")
+        raise PolicyError("owned Slurm drain release readback drifted")
+    _advance_drain_journal(root, profile, payload, "released")
+
+
+def _acquire_restart_drain(
+    root: Path,
+    profile: Profile,
+    *,
+    slurm_node: str,
+    candidate_sha: str,
+    candidate_bindings: Mapping[str, Any] | None = None,
+    transaction_id: str | None = None,
+    generation: int | None = None,
+    convergence_id: str | None = None,
+    payload_sha256: str | None = None,
+    operation: str = "apply",
+    apply_accounting: bool = False,
+) -> dict[str, Any]:
+    if candidate_bindings is None and root == Path("/"):
+        raise PolicyError("live Slurm drain requires the complete candidate set")
+    bindings = (
+        _offline_candidate_bindings(profile, candidate_sha)
+        if candidate_bindings is None
+        else _candidate_bindings(profile, candidate_bindings)
+    )
+    candidate_set_sha256 = _candidate_set_sha256(bindings)
+    transaction = _transaction_identity(
+        transaction_id=transaction_id,
+        generation=generation,
+        convergence_id=convergence_id,
+        payload_sha256=payload_sha256,
+        required=root == Path("/"),
+    )
+    recovery_binding = _drain_recovery_binding(
+        root,
+        profile,
+        candidate_sha=candidate_sha,
+        operation=operation,
+        apply_accounting=apply_accounting,
+    )
+    existing = _load_drain_journal(
+        root,
+        profile,
+        slurm_node=slurm_node,
+    )
+    if existing is not None and existing["phase"] != "released":
+        state, reason = _slurm_node_admission(slurm_node)
+        if (
+            existing["candidate_sha"] != candidate_sha
+            or existing["candidate_set_sha256"] != candidate_set_sha256
+        ):
+            _release_restart_drain(root, profile, existing)
+        elif any(existing[field] != value for field, value in transaction.items()):
+            raise PolicyError("candidate-owned Slurm drain transaction identity drifted")
+        elif any(existing[field] != value for field, value in recovery_binding.items()):
+            raise PolicyError("candidate-owned Slurm drain recovery binding drifted")
+        elif existing["owned"] is True:
+            if "DOWN" in state:
+                raise PolicyError("owned Slurm drain became DOWN; preserving scheduler state")
+            if "DRAIN" in state and _owned_drain_reason_matches(
+                reason,
+                str(existing["ownership_reason"]),
+            ):
+                return existing
+            if "DRAIN" in state:
+                raise PolicyError("owned Slurm drain reason changed; preserving scheduler state")
+            _advance_drain_journal(root, profile, existing, "released")
+        elif _node_is_drained_or_down(state):
+            raise PolicyError(
+                "Slurm node has a foreign DRAIN/DOWN; deferring destructive convergence",
+            )
+        else:
+            _advance_drain_journal(root, profile, existing, "released")
+
+    prior_state, prior_reason = _slurm_node_admission(slurm_node)
+    if _node_is_drained_or_down(prior_state):
+        raise PolicyError(
+            "Slurm node has a foreign DRAIN/DOWN; deferring destructive convergence",
+        )
+    token = hashlib.sha256(os.urandom(32)).hexdigest()
+    ownership_reason = f"loom-sandbox-policy:{candidate_sha[:12]}:{token[:16]}"
+    created_at = datetime.now(UTC).isoformat()
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "kind": "loom.developer-sandbox.slurm-restart-drain",
+        "cluster": profile.cluster,
+        "host": _canonical_host(),
+        "slurm_node": slurm_node,
+        "candidate_sha": candidate_sha,
+        "candidate_set_sha256": candidate_set_sha256,
+        "candidate_bindings": bindings,
+        **transaction,
+        **recovery_binding,
+        "ownership_token": token,
+        "ownership_reason": ownership_reason,
+        "owned": True,
+        "prior_state": prior_state,
+        "prior_reason": prior_reason,
+        "phase": "prepared",
+        "created_at": created_at,
+        "updated_at": created_at,
+    }
+    _write_journal(_drain_journal_path(root, profile), payload)
+    _run(
+        (
+            "scontrol",
+            "update",
+            f"NodeName={slurm_node}",
+            "State=DRAIN",
+            f"Reason={ownership_reason}",
+        ),
+    )
+    drained_state, drained_reason = _slurm_node_admission(slurm_node)
+    if "DRAIN" not in drained_state or not _owned_drain_reason_matches(
+        drained_reason,
+        ownership_reason,
+    ):
+        raise PolicyError("candidate-owned Slurm drain readback drifted")
+    _advance_drain_journal(root, profile, payload, "drained")
+    return payload
+
+
+def _restart_activity(profile: Profile, slurm_node: str) -> dict[str, bool]:
+    slurm_jobs = bool(_run(("squeue", "-h", "-w", slurm_node)).strip())
+    docker_containers = bool(_run(("docker", "ps", "-q")).strip())
+    gpu_processes = False
+    if profile.gpu_tres_per_slot > 0:
+        gpu_processes = bool(
+            _run(
+                (
+                    "nvidia-smi",
+                    "--query-compute-apps=pid",
+                    "--format=csv,noheader,nounits",
+                ),
+            ).strip(),
+        )
+    return {
+        "slurm_jobs": slurm_jobs,
+        "docker_containers": docker_containers,
+        "gpu_processes": gpu_processes,
+    }
+
+
+def _wait_for_restart_quiescence(
+    root: Path,
+    profile: Profile,
+    payload: dict[str, Any],
+) -> None:
+    deadline = time.monotonic() + _RESTART_QUIESCE_TIMEOUT_SECONDS
+    while True:
+        activity = _restart_activity(profile, str(payload["slurm_node"]))
+        active = [name for name, present in activity.items() if present]
+        if not active:
+            _advance_drain_journal(root, profile, payload, "quiesced")
+            return
+        if time.monotonic() >= deadline:
+            raise PolicyError(
+                "node remains busy after candidate-owned drain: " + ", ".join(active),
+            )
+        time.sleep(_RESTART_QUIESCE_POLL_SECONDS)
+
+
+def _mark_restart_drain_transacting(
+    root: Path,
+    profile: Profile,
+    payload: dict[str, Any],
+) -> None:
+    _advance_drain_journal(root, profile, payload, "transacting")
+
+
+def _recovery_candidate(
+    root: Path,
+    payload: Mapping[str, Any],
+) -> tuple[Profile, Path, Path]:
+    cluster = str(payload.get("cluster", ""))
+    candidate_sha = str(payload.get("candidate_sha", ""))
+    candidate_tree = str(payload.get("candidate_tree", ""))
+    candidate_root = Path(str(payload.get("candidate_root", "")))
+    profile_relative = str(payload.get("profile_relative", ""))
+    expected_profile_relative = _RECOVERY_PROFILE_RELATIVE.get(cluster)
+    match = _RECOVERY_CANDIDATE_ROOT_RE.fullmatch(str(candidate_root))
+    if (
+        root != Path("/")
+        or os.geteuid() != 0
+        or expected_profile_relative is None
+        or profile_relative != expected_profile_relative
+        or match is None
+        or match.group(1) != candidate_sha
+        or _CANDIDATE_RE.fullmatch(candidate_tree) is None
+    ):
+        raise PolicyError("durable Slurm recovery candidate binding is invalid")
+    policy_path = candidate_root / _RECOVERY_POLICY_RELATIVE
+    profile_path = candidate_root / profile_relative
+    _safe_path_chain(candidate_root, leaf_directory=True)
+    _safe_path_chain(policy_path, leaf_directory=False)
+    _safe_path_chain(profile_path, leaf_directory=False)
+    if (
+        _git_read(candidate_root, "rev-parse", "--verify", "HEAD").decode("ascii").strip()
+        != candidate_sha
+        or _git_read(
+            candidate_root,
+            "rev-parse",
+            "--verify",
+            f"{candidate_sha}^{{tree}}",
+        )
+        .decode("ascii")
+        .strip()
+        != candidate_tree
+        or _git_read(
+            candidate_root,
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+        )
+    ):
+        raise PolicyError("durable Slurm recovery candidate checkout drifted")
+    profile = load_profile(profile_path)
+    if profile.cluster != cluster:
+        raise PolicyError("durable Slurm recovery profile cluster drifted")
+    return profile, policy_path, profile_path
+
+
+def _run_recovery_candidate(
+    policy_path: Path,
+    profile_path: Path,
+    payload: Mapping[str, Any],
+) -> None:
+    operation = str(payload["operation"])
+    argv = [
+        "/usr/bin/python3",
+        "-I",
+        "-B",
+        str(policy_path),
+        operation,
+        "--profile",
+        str(profile_path),
+        "--candidate-sha",
+        str(payload["candidate_sha"]),
+        "--candidate-bindings-json",
+        json.dumps(
+            payload["candidate_bindings"],
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "--transaction-id",
+        str(payload["transaction_id"]),
+        "--candidate-set-generation",
+        str(payload["candidate_set_generation"]),
+        "--candidate-set-convergence-id",
+        str(payload["candidate_set_convergence_id"]),
+        "--candidate-set-payload-sha256",
+        str(payload["candidate_set_payload_sha256"]),
+        "--execute",
+        "--restart",
+    ]
+    if operation == "apply" and payload["apply_accounting"] is True:
+        argv.append("--apply-accounting")
+    environment = {
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    }
+    try:
+        completed = subprocess.run(
+            argv,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            env=environment,
+            timeout=240,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PolicyError("candidate-bound Slurm recovery failed safely") from exc
+    if completed.returncode != 0:
+        raise PolicyError(
+            f"candidate-bound Slurm recovery deferred with exit code {completed.returncode}",
+        )
+
+
+def recover_pending_drains(root: Path = Path("/")) -> dict[str, Any]:
+    if root != Path("/") or os.geteuid() != 0:
+        raise PolicyError("Slurm drain recovery requires the persistent live root")
+    recovered: list[dict[str, str]] = []
+    for cluster in _RECOVERY_CLUSTERS:
+        path = _state_root(root) / "drains" / f"{cluster}.json"
+        raw = _load_journal(path)
+        if raw is None or raw.get("phase") == "released":
+            continue
+        profile, policy_path, profile_path = _recovery_candidate(root, raw)
+        slurm_node = _slurm_node_for_host(profile, _canonical_host())
+        if slurm_node is None:
+            raise PolicyError("durable Slurm recovery host is outside the candidate profile")
+        payload = _load_drain_journal(
+            root,
+            profile,
+            slurm_node=slurm_node,
+        )
+        if payload is None or payload != raw:
+            raise PolicyError("durable Slurm recovery journal changed during validation")
+        if payload["owned"] is not True:
+            raise PolicyError("foreign Slurm admission state cannot be recovered by Loom")
+        _run_recovery_candidate(policy_path, profile_path, payload)
+        final = _load_drain_journal(
+            root,
+            profile,
+            slurm_node=slurm_node,
+        )
+        if final is None or final["phase"] != "released":
+            raise PolicyError("candidate-bound Slurm recovery did not release its owned drain")
+        recovered.append(
+            {
+                "cluster": cluster,
+                "candidate_sha": str(payload["candidate_sha"]),
+                "operation": str(payload["operation"]),
+                "phase": "released",
+            },
+        )
+    return {
+        "schema_version": 1,
+        "artifact_type": "developer-sandbox-slurm-recovery",
+        "recovered": recovered,
+        "status": "succeeded",
+    }
+
+
+def _restore_services(root: Path, profile: Profile, slurm_node: str) -> datetime:
     guard_unit = root / "etc/systemd/system/loom-slurm-job-cgroup-guard.service"
+    _stop_guard_before_status_invalidation()
+    _invalidate_guard_status(root)
+    guard_restart_boundary = datetime.now(UTC)
     _run(("systemctl", "daemon-reload"))
     if guard_unit.exists():
         _run(("systemctl", "enable", "loom-slurm-job-cgroup-guard.service"))
@@ -2716,10 +3671,11 @@ def _restore_services(root: Path, profile: Profile, slurm_node: str) -> None:
     _run(("systemctl", "restart", "docker"))
     _run(("systemctl", "restart", "slurmd"))
     if guard_unit.exists():
-        _run(("systemctl", "restart", "loom-slurm-job-cgroup-guard.service"))
+        _run(("systemctl", "start", "loom-slurm-job-cgroup-guard.service"))
     if slurm_node == profile.controller:
         _run(("systemctl", "restart", "slurmctld"))
     _run(("scontrol", "reconfigure"))
+    return guard_restart_boundary
 
 
 def _snapshot_readback(root: Path, snapshot: Path) -> dict[str, Any]:
@@ -2864,50 +3820,93 @@ def _accounting_readback(profile: Profile) -> dict[str, Any]:
 def _guard_status_readback(
     root: Path,
     *,
-    candidate_sha: str,
+    candidate_bindings: Mapping[str, Any],
     expected_config_sha256: str,
     require_probe: bool,
+    sandbox: str | None = None,
+    not_before: datetime | None = None,
 ) -> dict[str, Any]:
+    bindings = dict(candidate_bindings)
+    candidate_set_sha256 = _candidate_set_sha256(bindings)
     path = root / _GUARD_STATUS_RELATIVE
     try:
-        metadata = path.lstat()
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        expected_uid, expected_gid = (
+            (0, 0) if root == Path("/") else (os.geteuid(), os.getegid())
+        )
+        raw, _metadata = _read_bound_regular_file(
+            path,
+            expected_uid=expected_uid,
+            expected_gid=expected_gid,
+            expected_mode=0o600,
+            description="cgroup guard status",
+            max_bytes=1 << 20,
+        )
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
         raise PolicyError("cgroup guard status is unavailable") from exc
     if (
-        stat.S_ISLNK(metadata.st_mode)
-        or not stat.S_ISREG(metadata.st_mode)
-        or stat.S_IMODE(metadata.st_mode) != 0o600
-        or not isinstance(payload, dict)
-        or payload.get("schema_version") != 1
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != 2
     ):
         raise PolicyError("cgroup guard status is unsafe")
     try:
         observed = datetime.fromisoformat(str(payload["timestamp"]))
     except (KeyError, ValueError) as exc:
         raise PolicyError("cgroup guard status timestamp is invalid") from exc
-    if observed.tzinfo is None or datetime.now(UTC) - observed.astimezone(UTC) > (
-        _GUARD_STATUS_MAX_AGE
+    now = datetime.now(UTC)
+    normalized_observed = observed.astimezone(UTC) if observed.tzinfo is not None else None
+    normalized_not_before = (
+        not_before.astimezone(UTC)
+        if not_before is not None and not_before.tzinfo is not None
+        else None
+    )
+    if (
+        normalized_observed is None
+        or (not_before is not None and normalized_not_before is None)
+        or (
+            normalized_not_before is not None
+            and normalized_observed < normalized_not_before
+        )
+        or normalized_observed > now + _GUARD_MAX_CLOCK_SKEW
+        or now - normalized_observed > _GUARD_STATUS_MAX_AGE
     ):
         raise PolicyError("cgroup guard status is stale")
     if (
-        payload.get("candidate_sha") != candidate_sha
+        payload.get("candidate_set_sha256") != candidate_set_sha256
         or payload.get("config_sha256") != expected_config_sha256
         or payload.get("failed") != 0
         or payload.get("failures") != []
     ):
         raise PolicyError("cgroup guard status failed or drifted")
     if require_probe:
-        probe = payload.get("resource_probe")
-        if not isinstance(probe, dict) or probe.get("candidate_sha") != candidate_sha:
-            raise PolicyError("cgroup guard lacks a candidate-bound live job probe")
+        if sandbox is None:
+            raise PolicyError("cgroup guard probe readback requires a sandbox")
+        account = f"loom-dev-{sandbox}"
+        binding = bindings.get(account)
+        probes = payload.get("resource_probes")
+        probe = probes.get(account) if isinstance(probes, dict) else None
+        if (
+            not isinstance(binding, Mapping)
+            or not isinstance(probe, dict)
+            or probe.get("account") != account
+            or probe.get("sandbox") != sandbox
+            or probe.get("service_user") != binding.get("service_user")
+            or probe.get("candidate_sha") != binding.get("candidate_sha")
+            or probe.get("candidate_tree") != binding.get("candidate_tree")
+            or probe.get("candidate_set_sha256") != candidate_set_sha256
+        ):
+            raise PolicyError("cgroup guard lacks an account-bound live job probe")
         try:
             probe_observed = datetime.fromisoformat(str(probe["observed_at"]))
         except (KeyError, ValueError) as exc:
             raise PolicyError("cgroup guard job probe timestamp is invalid") from exc
+        normalized_probe = (
+            probe_observed.astimezone(UTC) if probe_observed.tzinfo is not None else None
+        )
         if (
-            probe_observed.tzinfo is None
-            or datetime.now(UTC) - probe_observed.astimezone(UTC) > _ALLOCATION_PROBE_MAX_AGE
+            normalized_probe is None
+            or normalized_probe > now + _GUARD_MAX_CLOCK_SKEW
+            or now - normalized_probe > _ALLOCATION_PROBE_MAX_AGE
         ):
             raise PolicyError("cgroup guard job resource probe is stale")
     return payload
@@ -2916,9 +3915,11 @@ def _guard_status_readback(
 def _wait_for_guard_status(
     root: Path,
     *,
-    candidate_sha: str,
+    candidate_bindings: Mapping[str, Any],
     expected_config_sha256: str,
     require_probe: bool,
+    sandbox: str | None = None,
+    not_before: datetime | None = None,
 ) -> dict[str, Any]:
     deadline = time.monotonic() + 10
     last_error: PolicyError | None = None
@@ -2926,14 +3927,154 @@ def _wait_for_guard_status(
         try:
             return _guard_status_readback(
                 root,
-                candidate_sha=candidate_sha,
+                candidate_bindings=candidate_bindings,
                 expected_config_sha256=expected_config_sha256,
                 require_probe=require_probe,
+                sandbox=sandbox,
+                not_before=not_before,
             )
         except PolicyError as exc:
             last_error = exc
             time.sleep(0.25)
     raise PolicyError("cgroup guard did not publish matching fresh status") from last_error
+
+
+def _invalidate_guard_status(root: Path) -> None:
+    path = root / _GUARD_STATUS_RELATIVE
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or (root == Path("/") and (metadata.st_uid, metadata.st_gid) != (0, 0))
+        or metadata.st_nlink != 1
+    ):
+        raise PolicyError("cgroup guard status cannot be invalidated safely")
+    path.unlink()
+    _fsync_directory(path.parent)
+
+
+def _legacy_guard_status_readback(
+    root: Path,
+    profile: Profile,
+    *,
+    config: Mapping[str, Any],
+    expected_config_sha256: str,
+    not_before: datetime | None = None,
+) -> dict[str, Any]:
+    if (
+        set(config)
+        != {
+            "schema_version",
+            "cluster",
+            "controller",
+            "submit_host",
+            "allowed_nodes",
+            "candidate_sha",
+            "pids_max",
+            "allowed_accounts",
+            "poll_interval_seconds",
+            "require_gpu_probe",
+        }
+        or config.get("schema_version") != 1
+        or config.get("cluster") != profile.cluster
+        or config.get("controller") != profile.controller
+        or config.get("submit_host") != profile.submit_host
+        or _CANDIDATE_RE.fullmatch(str(config.get("candidate_sha"))) is None
+        or config.get("allowed_accounts") != sorted(profile.child_accounts)
+    ):
+        raise PolicyError("restored legacy guard config is invalid")
+    path = root / _GUARD_STATUS_RELATIVE
+    try:
+        expected_uid, expected_gid = (
+            (0, 0) if root == Path("/") else (os.geteuid(), os.getegid())
+        )
+        raw, _metadata = _read_bound_regular_file(
+            path,
+            expected_uid=expected_uid,
+            expected_gid=expected_gid,
+            expected_mode=0o600,
+            description="restored legacy guard status",
+            max_bytes=1 << 20,
+        )
+        payload = json.loads(raw)
+        observed = datetime.fromisoformat(str(payload["timestamp"]))
+    except (KeyError, ValueError, json.JSONDecodeError) as exc:
+        raise PolicyError("restored legacy guard status is unavailable") from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != 1
+        or payload.get("candidate_sha") != config["candidate_sha"]
+        or payload.get("config_sha256") != expected_config_sha256
+        or payload.get("failed") != 0
+        or payload.get("failures") != []
+        or observed.tzinfo is None
+        or (
+            not_before is not None
+            and (
+                not_before.tzinfo is None
+                or observed.astimezone(UTC) < not_before.astimezone(UTC)
+            )
+        )
+        or datetime.now(UTC) - observed.astimezone(UTC) > _GUARD_STATUS_MAX_AGE
+    ):
+        raise PolicyError("restored legacy guard status failed or drifted")
+    return payload
+
+
+def _wait_for_restored_guard_status(
+    root: Path,
+    profile: Profile,
+    *,
+    guard_config: Path,
+    not_before: datetime | None = None,
+) -> dict[str, Any]:
+    expected_uid, expected_gid = (
+        (0, 0) if root == Path("/") else (os.geteuid(), os.getegid())
+    )
+    raw, _metadata = _read_bound_regular_file(
+        guard_config,
+        expected_uid=expected_uid,
+        expected_gid=expected_gid,
+        expected_mode=0o600,
+        description="restored guard config",
+        max_bytes=1 << 20,
+    )
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PolicyError("restored guard config is invalid") from exc
+    deadline = time.monotonic() + 10
+    last_error: PolicyError | None = None
+    while time.monotonic() < deadline:
+        try:
+            if payload.get("schema_version") == 2:
+                bindings = _candidate_bindings(profile, payload["candidate_bindings"])
+                return _guard_status_readback(
+                    root,
+                    candidate_bindings=bindings,
+                    expected_config_sha256=_sha256(raw),
+                    require_probe=False,
+                    not_before=not_before,
+                )
+            if payload.get("schema_version") == 1:
+                return _legacy_guard_status_readback(
+                    root,
+                    profile,
+                    config=payload,
+                    expected_config_sha256=_sha256(raw),
+                    not_before=not_before,
+                )
+            raise PolicyError("restored guard config version is unsupported")
+        except (KeyError, TypeError, PolicyError) as exc:
+            last_error = (
+                exc if isinstance(exc, PolicyError) else PolicyError("restored guard config invalid")
+            )
+            time.sleep(0.25)
+    raise PolicyError("restored guard did not publish matching fresh status") from last_error
 
 
 def _allocation_state_base(root: Path, profile: Profile, sandbox: str) -> Path:
@@ -3228,7 +4369,10 @@ def _allocation_job_name(
     if attempt < 1:
         raise PolicyError("allocation matrix attempt is invalid")
     if _ALLOCATION_GENERATION_RE.fullmatch(generation_id) is not None:
-        job_name = f"loom827-{sandbox}-{safe_node}-g{generation_id}-a{attempt}"
+        job_name = (
+            f"loom827-{sandbox}-{candidate_sha[:12]}-{safe_node}-"
+            f"g{generation_id}-a{attempt}"
+        )
     elif allow_legacy and _LEGACY_ALLOCATION_GENERATION_RE.fullmatch(generation_id):
         job_name = f"loom827-{sandbox}-{candidate_sha}-{safe_node}-g{generation_id}-a{attempt}"
     else:
@@ -5496,7 +6640,7 @@ def _new_allocation_matrix(
         "controller": profile.controller,
         "submit_host": profile.submit_host,
         "allowed_nodes": list(profile.allowed_nodes),
-        "host_aliases": dict(profile.host_aliases),
+        "host_aliases": _allowed_host_aliases(profile),
         "batch_uid": batch_uid,
         "batch_gid": batch_gid,
         "account": _sandbox_account(profile, sandbox),
@@ -5546,7 +6690,7 @@ def _validate_allocation_matrix(
         or matrix.get("controller") != profile.controller
         or matrix.get("submit_host") != profile.submit_host
         or matrix.get("allowed_nodes") != list(profile.allowed_nodes)
-        or matrix.get("host_aliases") != dict(profile.host_aliases)
+        or matrix.get("host_aliases") != _allowed_host_aliases(profile)
         or matrix.get("batch_uid") != batch_uid
         or matrix.get("batch_gid") != batch_gid
         or matrix.get("account") != _sandbox_account(profile, sandbox)
@@ -5593,7 +6737,7 @@ def _validate_allocation_matrix_recovery_binding(
         or matrix.get("controller") != profile.controller
         or matrix.get("submit_host") != profile.submit_host
         or matrix.get("allowed_nodes") != list(profile.allowed_nodes)
-        or matrix.get("host_aliases") != dict(profile.host_aliases)
+        or matrix.get("host_aliases") != _allowed_host_aliases(profile)
         or not (
             _allocation_generation_is_bundle_bound(matrix, sandbox=sandbox)
             or _legacy_allocation_generation_is_bound(matrix, sandbox=sandbox)
@@ -5998,6 +7142,12 @@ def _run_allocation_probe_transaction(
         raise PolicyError("allocation probe batch UID/GID must be non-negative")
     if not 1 <= timeout_seconds <= 600:
         raise PolicyError("allocation probe timeout must be between 1 and 600 seconds")
+    _require_worker_capacity_assertion(
+        profile,
+        candidate_root,
+        expected_pool=expected_pool,
+        expected_concurrency=expected_concurrency,
+    )
     host = _canonical_host()
     submit_node = _slurm_node_for_host(profile, host)
     if submit_node != profile.submit_host:
@@ -6501,7 +7651,7 @@ def _run_allocation_probe_transaction(
         "submit_host": profile.submit_host,
         "submitting_host": host,
         "allowed_nodes": list(profile.allowed_nodes),
-        "host_aliases": dict(profile.host_aliases),
+        "host_aliases": _allowed_host_aliases(profile),
         "batch_uid": batch_uid,
         "batch_gid": batch_gid,
         "account": account,
@@ -6678,7 +7828,7 @@ def _allocation_probe_readback_unlocked(
         or payload.get("controller") != profile.controller
         or payload.get("submit_host") != profile.submit_host
         or payload.get("allowed_nodes") != list(profile.allowed_nodes)
-        or payload.get("host_aliases") != dict(profile.host_aliases)
+        or payload.get("host_aliases") != _allowed_host_aliases(profile)
         or payload.get("account") != account
         or payload.get("qos") != profile.qos
         or payload.get("expected_pool") != expected_pool
@@ -6832,6 +7982,7 @@ def _live_readback_unlocked(
     *,
     sandbox: str | None,
     candidate_sha: str,
+    candidate_bindings: Mapping[str, Any],
     require_probe: bool,
     check_accounting: bool = True,
     wait_for_guard: bool = False,
@@ -6840,8 +7991,15 @@ def _live_readback_unlocked(
     expected_pool: str | None = None,
     expected_concurrency: int | None = None,
     require_allocation_probe: bool = False,
+    guard_not_before: datetime | None = None,
 ) -> dict[str, Any]:
-    desired = desired_files(root, profile, candidate_sha=candidate_sha)
+    bindings = _candidate_bindings(profile, candidate_bindings)
+    desired = desired_files(
+        root,
+        profile,
+        candidate_sha=candidate_sha,
+        candidate_bindings=bindings,
+    )
     slurm = _parse_key_values(_run(("scontrol", "show", "config")))
     expected_slurm = {key: _slurm_value(profile.slurm[field]) for key, field in _SLURM_KEYS.items()}
     for key, expected in expected_slurm.items():
@@ -6881,9 +8039,11 @@ def _live_readback_unlocked(
     guard_reader = _wait_for_guard_status if wait_for_guard else _guard_status_readback
     guard = guard_reader(
         root,
-        candidate_sha=candidate_sha,
+        candidate_bindings=bindings,
         expected_config_sha256=expected_config_sha,
         require_probe=require_probe,
+        sandbox=sandbox,
+        not_before=guard_not_before,
     )
     accounting = _accounting_readback(profile) if check_accounting else None
     if require_allocation_probe:
@@ -6924,6 +8084,7 @@ def live_readback(
     *,
     sandbox: str | None,
     candidate_sha: str,
+    candidate_bindings: Mapping[str, Any],
     require_probe: bool,
     check_accounting: bool = True,
     wait_for_guard: bool = False,
@@ -6939,6 +8100,7 @@ def live_readback(
             profile,
             sandbox=sandbox,
             candidate_sha=candidate_sha,
+            candidate_bindings=candidate_bindings,
             require_probe=require_probe,
             check_accounting=check_accounting,
             wait_for_guard=wait_for_guard,
@@ -6991,6 +8153,27 @@ def _recover_orphan(
         _validated_accounting_snapshot(profile, accounting_snapshot)
     if journal.get("phase") in {"committed", "rolled_back"}:
         return journal
+    drain: dict[str, Any] | None = None
+    if root == Path("/") and journal.get("restart") is True and slurm_node is not None:
+        drain = _acquire_restart_drain(
+            root,
+            profile,
+            slurm_node=slurm_node,
+            candidate_sha=str(journal["candidate_sha"]),
+            candidate_bindings=journal["candidate_bindings"],
+            transaction_id=str(journal["transaction_id"]),
+            generation=int(journal["candidate_set_generation"]),
+            convergence_id=str(journal["candidate_set_convergence_id"]),
+            payload_sha256=str(journal["candidate_set_payload_sha256"]),
+            operation=str(journal["operation"]),
+            apply_accounting=(
+                bool(journal["apply_accounting"])
+                if journal["operation"] == "apply"
+                else False
+            ),
+        )
+        _wait_for_restart_quiescence(root, profile, drain)
+        _mark_restart_drain_transacting(root, profile, drain)
     try:
         _restore_snapshot(root, snapshot)
         if accounting_snapshot is not None:
@@ -7004,6 +8187,8 @@ def _recover_orphan(
         _advance_journal(path, journal, "recovery_failed")
         raise
     _advance_journal(path, journal, "rolled_back")
+    if drain is not None:
+        _release_restart_drain(root, profile, drain)
     return journal
 
 
@@ -7024,7 +8209,7 @@ def _validate_live_apply(
         if os.geteuid() != 0:
             raise PolicyError("live apply requires root")
         if slurm_node is None:
-            raise PolicyError(f"host {host!r} is outside the reviewed node allowlist")
+            raise PolicyError(f"host {host!r} is outside the infrastructure inventory")
         live_config = _parse_key_values(_run(("scontrol", "show", "config")))
         if live_config.get("ClusterName") != profile.cluster:
             raise PolicyError("live Slurm cluster identity does not match the profile")
@@ -7037,12 +8222,91 @@ def _validate_live_apply(
             cluster = _run(("sacctmgr", "-nP", "show", "cluster", "format=Cluster"))
             if profile.cluster not in {line.strip("|") for line in cluster.splitlines()}:
                 raise PolicyError("live Slurm cluster identity does not match the profile")
-        if restart:
-            if _run(("squeue", "-h", "-w", slurm_node)).strip():
-                raise PolicyError("node still has Slurm jobs; drain and retry")
-            if _run(("docker", "ps", "-q")).strip():
-                raise PolicyError("node still has running Docker containers; drain and retry")
     return host, slurm_node
+
+
+def _committed_transaction_matches(
+    journal: Mapping[str, Any] | None,
+    *,
+    operation: str,
+    candidate_sha: str,
+    candidate_bindings: Mapping[str, Mapping[str, str]],
+    transaction: Mapping[str, str | int],
+) -> bool:
+    return bool(
+        journal is not None
+        and journal.get("phase") == "committed"
+        and journal.get("operation") == operation
+        and journal.get("candidate_sha") == candidate_sha
+        and journal.get("candidate_set_sha256") == _candidate_set_sha256(candidate_bindings)
+        and journal.get("candidate_bindings") == candidate_bindings
+        and all(journal.get(field) == value for field, value in transaction.items())
+    )
+
+
+def _transaction_matches(
+    journal: Mapping[str, Any] | None,
+    *,
+    phase: str,
+    operation: str,
+    candidate_sha: str,
+    candidate_bindings: Mapping[str, Mapping[str, str]],
+    transaction: Mapping[str, str | int],
+) -> bool:
+    return bool(
+        journal is not None
+        and journal.get("phase") == phase
+        and journal.get("operation") == operation
+        and journal.get("candidate_sha") == candidate_sha
+        and journal.get("candidate_set_sha256") == _candidate_set_sha256(candidate_bindings)
+        and journal.get("candidate_bindings") == candidate_bindings
+        and all(journal.get(field) == value for field, value in transaction.items())
+    )
+
+
+def _release_committed_transaction_drain(
+    root: Path,
+    profile: Profile,
+    *,
+    slurm_node: str | None,
+    journal: Mapping[str, Any],
+) -> None:
+    if root != Path("/") or journal.get("restart") is not True:
+        return
+    if slurm_node is None:
+        raise PolicyError("committed Slurm transaction lacks an infrastructure node")
+    drain = _load_drain_journal(
+        root,
+        profile,
+        slurm_node=slurm_node,
+    )
+    if drain is None or drain.get("phase") == "released":
+        return
+    exact_fields = (
+        "candidate_sha",
+        "candidate_set_sha256",
+        "candidate_bindings",
+        "transaction_id",
+        "candidate_set_generation",
+        "candidate_set_convergence_id",
+        "candidate_set_payload_sha256",
+        "operation",
+    )
+    expected_drain_apply_accounting = (
+        journal.get("apply_accounting") if journal.get("operation") == "apply" else False
+    )
+    if any(
+        drain.get(field) != journal.get(field) for field in exact_fields
+    ) or drain.get("apply_accounting") is not expected_drain_apply_accounting:
+        raise PolicyError("committed Slurm transaction drain identity drifted")
+    _release_restart_drain(root, profile, drain)
+    final = _load_drain_journal(
+        root,
+        profile,
+        slurm_node=slurm_node,
+    )
+    if final is None or final.get("phase") != "released":
+        raise PolicyError("committed Slurm transaction retained its owned drain")
 
 
 def apply(
@@ -7052,8 +8316,27 @@ def apply(
     restart: bool,
     apply_accounting: bool,
     candidate_sha: str | None = None,
+    candidate_bindings: Mapping[str, Any] | None = None,
+    transaction_id: str | None = None,
+    generation: int | None = None,
+    convergence_id: str | None = None,
+    payload_sha256: str | None = None,
 ) -> dict[str, Any]:
     candidate = candidate_sha or source_candidate_sha()
+    if candidate_bindings is None and root == Path("/"):
+        raise PolicyError("live Slurm apply requires the complete candidate set")
+    bindings = (
+        _offline_candidate_bindings(profile, candidate)
+        if candidate_bindings is None
+        else _candidate_bindings(profile, candidate_bindings)
+    )
+    transaction = _transaction_identity(
+        transaction_id=transaction_id,
+        generation=generation,
+        convergence_id=convergence_id,
+        payload_sha256=payload_sha256,
+        required=root == Path("/"),
+    )
     _host, slurm_node = _validate_live_apply(
         root,
         profile,
@@ -7062,7 +8345,7 @@ def apply(
         apply_accounting=False,
     )
     with _domain_lock(root, profile):
-        _recover_orphan(root, profile, slurm_node=slurm_node)
+        recovered = _recover_orphan(root, profile, slurm_node=slurm_node)
         host, slurm_node = _validate_live_apply(
             root,
             profile,
@@ -7070,7 +8353,58 @@ def apply(
             restart=restart,
             apply_accounting=apply_accounting,
         )
-        files = desired_files(root, profile, candidate_sha=candidate)
+        files = desired_files(
+            root,
+            profile,
+            candidate_sha=candidate,
+            candidate_bindings=bindings,
+        )
+        if root == Path("/") and _committed_transaction_matches(
+            recovered,
+            operation="apply",
+            candidate_sha=candidate,
+            candidate_bindings=bindings,
+            transaction=transaction,
+        ):
+            assert recovered is not None
+            snapshot = _validate_snapshot_path(root, Path(str(recovered["snapshot"])))
+            live = _live_readback_unlocked(
+                root,
+                profile,
+                sandbox=None,
+                candidate_sha=candidate,
+                candidate_bindings=bindings,
+                require_probe=False,
+                check_accounting=apply_accounting,
+                wait_for_guard=True,
+            )
+            _release_committed_transaction_drain(
+                root,
+                profile,
+                slurm_node=slurm_node,
+                journal=recovered,
+            )
+            return {
+                **plan(
+                    root,
+                    profile,
+                    candidate_sha=candidate,
+                    candidate_bindings=bindings,
+                ),
+                "mutation_authorized": True,
+                "snapshot": str(snapshot),
+                "journal": str(_journal_path(root, profile)),
+                "phase": "committed",
+                "restart_requested": restart,
+                "accounting_requested": apply_accounting,
+                "live_readback": live,
+                "replayed": True,
+            }
+        if root == Path("/") and recovered is not None and recovered.get("phase") == "committed":
+            previous_generation = int(recovered["candidate_set_generation"])
+            requested_generation = int(transaction["candidate_set_generation"])
+            if requested_generation != previous_generation + 1:
+                raise PolicyError("Slurm candidate-set generation regressed or skipped")
         if root == Path("/"):
             with tempfile.NamedTemporaryFile(
                 mode="w",
@@ -7080,10 +8414,42 @@ def apply(
                 handle.write(files[root / "etc/docker/daemon.json"])
                 handle.flush()
                 _run(("dockerd", "--validate", "--config-file", handle.name))
-        snapshot = _snapshot(root, files)
-        accounting_snapshot = (
-            _accounting_snapshot(root, profile, snapshot) if apply_accounting else None
-        )
+        drain: dict[str, Any] | None = None
+        if root == Path("/") and restart:
+            if slurm_node is None:
+                raise PolicyError("live restart lacks an infrastructure Slurm node")
+            drain = _acquire_restart_drain(
+                root,
+                profile,
+                slurm_node=slurm_node,
+                candidate_sha=candidate,
+                candidate_bindings=bindings,
+                transaction_id=str(transaction["transaction_id"]),
+                generation=int(transaction["candidate_set_generation"]),
+                convergence_id=str(transaction["candidate_set_convergence_id"]),
+                payload_sha256=str(transaction["candidate_set_payload_sha256"]),
+                operation="apply",
+                apply_accounting=apply_accounting,
+            )
+            _wait_for_restart_quiescence(root, profile, drain)
+        try:
+            snapshot = _snapshot(root, files)
+            accounting_snapshot = (
+                _accounting_snapshot(root, profile, snapshot) if apply_accounting else None
+            )
+        except Exception as exc:
+            if drain is not None:
+                try:
+                    _release_restart_drain(root, profile, drain)
+                except Exception as release_exc:
+                    raise PolicyError(
+                        "Slurm apply pre-transaction failure retained its owned drain",
+                    ) from release_exc
+            if isinstance(exc, PolicyError):
+                raise
+            raise PolicyError("Slurm apply pre-transaction validation failed safely") from exc
+        if drain is not None:
+            _mark_restart_drain_transacting(root, profile, drain)
         journal_path = _journal_path(root, profile)
         created_at = datetime.now(UTC).isoformat()
         journal: dict[str, Any] = {
@@ -7093,6 +8459,9 @@ def apply(
             "host": host,
             "slurm_node": slurm_node,
             "candidate_sha": candidate,
+            "candidate_set_sha256": _candidate_set_sha256(bindings),
+            "candidate_bindings": bindings,
+            **transaction,
             "snapshot": str(snapshot),
             "accounting_snapshot": (
                 str(accounting_snapshot) if accounting_snapshot is not None else None
@@ -7104,6 +8473,7 @@ def apply(
             "updated_at": created_at,
         }
         _write_journal(journal_path, journal)
+        guard_restart_boundary: datetime | None = None
         try:
             for path, content in files.items():
                 _atomic_write(
@@ -7124,7 +8494,7 @@ def apply(
             if restart:
                 if slurm_node is None:
                     raise PolicyError("live restart lacks an allowed Slurm node")
-                _restart_services(profile, slurm_node)
+                guard_restart_boundary = _restart_services(profile, slurm_node)
             _advance_journal(journal_path, journal, "services_reconfigured")
             if root == Path("/"):
                 live = _live_readback_unlocked(
@@ -7132,12 +8502,19 @@ def apply(
                     profile,
                     sandbox=None,
                     candidate_sha=candidate,
+                    candidate_bindings=bindings,
                     require_probe=False,
                     check_accounting=apply_accounting,
                     wait_for_guard=True,
+                    guard_not_before=guard_restart_boundary,
                 )
             else:
-                rendered = plan(root, profile, candidate_sha=candidate)
+                rendered = plan(
+                    root,
+                    profile,
+                    candidate_sha=candidate,
+                    candidate_bindings=bindings,
+                )
                 if not rendered["file_plan"]["converged"]:
                     raise PolicyError("offline Slurm policy write readback drifted")
                 live = {"converged": True, "offline": True}
@@ -7159,11 +8536,20 @@ def apply(
                 raise PolicyError(
                     "Slurm policy apply failed and automatic rollback did not converge",
                 ) from rollback_exc
+            if drain is not None:
+                _release_restart_drain(root, profile, drain)
             if isinstance(exc, PolicyError):
                 raise
             raise PolicyError("Slurm policy apply failed and was rolled back") from exc
+        if drain is not None:
+            _release_restart_drain(root, profile, drain)
     return {
-        **plan(root, profile, candidate_sha=candidate),
+        **plan(
+            root,
+            profile,
+            candidate_sha=candidate,
+            candidate_bindings=bindings,
+        ),
         "mutation_authorized": True,
         "snapshot": str(snapshot),
         "journal": str(journal_path),
@@ -7179,8 +8565,27 @@ def rollback(
     profile: Profile,
     *,
     candidate_sha: str | None = None,
+    candidate_bindings: Mapping[str, Any] | None = None,
+    transaction_id: str | None = None,
+    generation: int | None = None,
+    convergence_id: str | None = None,
+    payload_sha256: str | None = None,
 ) -> dict[str, Any]:
     current_candidate = candidate_sha or source_candidate_sha()
+    if candidate_bindings is None and root == Path("/"):
+        raise PolicyError("live Slurm rollback requires the complete candidate set")
+    bindings = (
+        _offline_candidate_bindings(profile, current_candidate)
+        if candidate_bindings is None
+        else _candidate_bindings(profile, candidate_bindings)
+    )
+    transaction_identity = _transaction_identity(
+        transaction_id=transaction_id,
+        generation=generation,
+        convergence_id=convergence_id,
+        payload_sha256=payload_sha256,
+        required=root == Path("/"),
+    )
     _host, slurm_node = _validate_live_apply(
         root,
         profile,
@@ -7189,7 +8594,7 @@ def rollback(
         apply_accounting=False,
     )
     with _domain_lock(root, profile):
-        _recover_orphan(root, profile, slurm_node=slurm_node)
+        recovered = _recover_orphan(root, profile, slurm_node=slurm_node)
         host, slurm_node = _validate_live_apply(
             root,
             profile,
@@ -7198,23 +8603,98 @@ def rollback(
             apply_accounting=False,
         )
         journal_path = _journal_path(root, profile)
-        previous = _load_policy_journal(
-            journal_path,
-            root=root,
-            profile=profile,
-            slurm_node=slurm_node,
-        )
-        if (
-            previous is None
-            or previous.get("phase") != "committed"
-            or previous.get("operation") != "apply"
+        if root == Path("/") and _committed_transaction_matches(
+            recovered,
+            operation="rollback",
+            candidate_sha=current_candidate,
+            candidate_bindings=bindings,
+            transaction=transaction_identity,
         ):
-            raise PolicyError("no committed Slurm policy transaction is available to roll back")
-        target_raw = previous.get("snapshot")
+            assert recovered is not None
+            restored = _validate_snapshot_path(
+                root,
+                Path(str(recovered["rollback_target"])),
+            )
+            recovery = _validate_snapshot_path(root, Path(str(recovered["snapshot"])))
+            live = _snapshot_readback(root, restored)
+            if recovered.get("apply_accounting") is True:
+                restored_accounting = _validate_accounting_snapshot_path(
+                    root,
+                    restored,
+                    restored / "accounting-cas.json",
+                )
+                _accounting_snapshot_matches(profile, restored_accounting)
+            guard_config = root / "etc/loom/slurm-job-cgroup-guard.json"
+            if guard_config.exists():
+                live["guard"] = _wait_for_restored_guard_status(
+                    root,
+                    profile,
+                    guard_config=guard_config,
+                )
+            _release_committed_transaction_drain(
+                root,
+                profile,
+                slurm_node=slurm_node,
+                journal=recovered,
+            )
+            return {
+                "schema_version": 1,
+                "artifact_type": "developer-sandbox-slurm-policy-rollback",
+                "cluster": profile.cluster,
+                "mutation_authorized": True,
+                "restored_snapshot": str(restored),
+                "recovery_snapshot": str(recovery),
+                "journal": str(journal_path),
+                "phase": "committed",
+                "live_readback": live,
+                "replayed": True,
+            }
+        retry_after_recovery = root == Path("/") and _transaction_matches(
+            recovered,
+            phase="rolled_back",
+            operation="rollback",
+            candidate_sha=current_candidate,
+            candidate_bindings=bindings,
+            transaction=transaction_identity,
+        )
+        previous: dict[str, Any] | None
+        if retry_after_recovery:
+            assert recovered is not None
+            previous = recovered
+            target_raw = previous.get("rollback_target")
+        else:
+            previous = _load_policy_journal(
+                journal_path,
+                root=root,
+                profile=profile,
+                slurm_node=slurm_node,
+            )
+            if (
+                previous is None
+                or previous.get("phase") != "committed"
+                or previous.get("operation") != "apply"
+            ):
+                raise PolicyError("no committed Slurm policy transaction is available to roll back")
+            if any(
+                previous.get(field) != transaction_identity[field]
+                for field in (
+                    "candidate_set_generation",
+                    "candidate_set_convergence_id",
+                    "candidate_set_payload_sha256",
+                )
+            ):
+                raise PolicyError("Slurm rollback candidate-set transaction identity drifted")
+            target_raw = previous.get("snapshot")
         if not isinstance(target_raw, str):
             raise PolicyError("committed Slurm policy transaction lacks a snapshot")
         target = _validate_snapshot_path(root, Path(target_raw))
-        previous_accounting_raw = previous.get("accounting_snapshot")
+        previous_accounting_raw = (
+            str(target / "accounting-cas.json")
+            if retry_after_recovery and previous.get("apply_accounting") is True
+            else None
+            if retry_after_recovery
+            else previous.get("accounting_snapshot")
+        )
         if previous_accounting_raw is None:
             previous_accounting = None
         elif isinstance(previous_accounting_raw, str):
@@ -7229,13 +8709,46 @@ def rollback(
             root,
             profile,
             candidate_sha=current_candidate,
+            candidate_bindings=bindings,
         )
-        current_snapshot = _snapshot(root, current_files)
-        current_accounting = (
-            _accounting_snapshot(root, profile, current_snapshot)
-            if previous_accounting is not None
-            else None
-        )
+        drain: dict[str, Any] | None = None
+        if root == Path("/"):
+            if slurm_node is None:
+                raise PolicyError("live rollback lacks an infrastructure Slurm node")
+            drain = _acquire_restart_drain(
+                root,
+                profile,
+                slurm_node=slurm_node,
+                candidate_sha=current_candidate,
+                candidate_bindings=bindings,
+                transaction_id=str(transaction_identity["transaction_id"]),
+                generation=int(transaction_identity["candidate_set_generation"]),
+                convergence_id=str(transaction_identity["candidate_set_convergence_id"]),
+                payload_sha256=str(transaction_identity["candidate_set_payload_sha256"]),
+                operation="rollback",
+                apply_accounting=False,
+            )
+            _wait_for_restart_quiescence(root, profile, drain)
+        try:
+            current_snapshot = _snapshot(root, current_files)
+            current_accounting = (
+                _accounting_snapshot(root, profile, current_snapshot)
+                if previous_accounting is not None
+                else None
+            )
+        except Exception as exc:
+            if drain is not None:
+                try:
+                    _release_restart_drain(root, profile, drain)
+                except Exception as release_exc:
+                    raise PolicyError(
+                        "Slurm rollback pre-transaction failure retained its owned drain",
+                    ) from release_exc
+            if isinstance(exc, PolicyError):
+                raise
+            raise PolicyError("Slurm rollback pre-transaction validation failed safely") from exc
+        if drain is not None:
+            _mark_restart_drain_transacting(root, profile, drain)
         created_at = datetime.now(UTC).isoformat()
         transaction: dict[str, Any] = {
             "schema_version": 1,
@@ -7244,6 +8757,9 @@ def rollback(
             "host": host,
             "slurm_node": slurm_node,
             "candidate_sha": current_candidate,
+            "candidate_set_sha256": _candidate_set_sha256(bindings),
+            "candidate_bindings": bindings,
+            **transaction_identity,
             "snapshot": str(current_snapshot),
             "accounting_snapshot": (
                 str(current_accounting) if current_accounting is not None else None
@@ -7256,6 +8772,7 @@ def rollback(
             "updated_at": created_at,
         }
         _write_journal(journal_path, transaction)
+        guard_restart_boundary: datetime | None = None
         try:
             _restore_snapshot(root, target)
             _advance_journal(journal_path, transaction, "files_written")
@@ -7265,29 +8782,18 @@ def rollback(
             if root == Path("/"):
                 if slurm_node is None:
                     raise PolicyError("live rollback lacks an allowed Slurm node")
-                _restore_services(root, profile, slurm_node)
+                guard_restart_boundary = _restore_services(root, profile, slurm_node)
             _advance_journal(journal_path, transaction, "services_reconfigured")
             guard_config = root / "etc/loom/slurm-job-cgroup-guard.json"
             live = _snapshot_readback(root, target)
             if previous_accounting is not None:
                 _accounting_snapshot_matches(profile, previous_accounting)
             if guard_config.exists() and root == Path("/"):
-                try:
-                    restored_candidate = json.loads(
-                        guard_config.read_text(encoding="utf-8"),
-                    )["candidate_sha"]
-                except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
-                    raise PolicyError("restored guard candidate binding is invalid") from exc
-                if (
-                    not isinstance(restored_candidate, str)
-                    or _CANDIDATE_RE.fullmatch(restored_candidate) is None
-                ):
-                    raise PolicyError("restored guard candidate binding is invalid")
-                live["guard"] = _wait_for_guard_status(
+                live["guard"] = _wait_for_restored_guard_status(
                     root,
-                    candidate_sha=restored_candidate,
-                    expected_config_sha256=_sha256(guard_config.read_bytes()),
-                    require_probe=False,
+                    profile,
+                    guard_config=guard_config,
+                    not_before=guard_restart_boundary,
                 )
             _advance_journal(journal_path, transaction, "verified")
             _advance_journal(journal_path, transaction, "committed")
@@ -7307,9 +8813,13 @@ def rollback(
                 raise PolicyError(
                     "Slurm policy rollback failed and prior state could not be restored",
                 ) from rollback_exc
+            if drain is not None:
+                _release_restart_drain(root, profile, drain)
             if isinstance(exc, PolicyError):
                 raise
             raise PolicyError("Slurm policy rollback failed safely") from exc
+        if drain is not None:
+            _release_restart_drain(root, profile, drain)
     return {
         "schema_version": 1,
         "artifact_type": "developer-sandbox-slurm-policy-rollback",
@@ -7333,15 +8843,21 @@ def _parser() -> argparse.ArgumentParser:
             "node-check",
             "apply",
             "rollback",
+            "recover-drain",
             "materialize-runtime-proof",
             "allocation-probe",
             "allocation-node-check",
         ),
     )
-    parser.add_argument("--profile", type=Path, required=True)
+    parser.add_argument("--profile", type=Path)
     parser.add_argument("--sandbox")
     parser.add_argument("--root", type=Path, default=Path("/"))
     parser.add_argument("--candidate-sha")
+    parser.add_argument("--candidate-bindings-json")
+    parser.add_argument("--transaction-id")
+    parser.add_argument("--candidate-set-generation", type=int)
+    parser.add_argument("--candidate-set-convergence-id")
+    parser.add_argument("--candidate-set-payload-sha256")
     parser.add_argument("--candidate-root", type=Path)
     parser.add_argument("--worker-env", type=Path)
     parser.add_argument("--batch-uid", type=int)
@@ -7367,8 +8883,48 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(list(argv) if argv is not None else None)
     try:
+        if args.command == "recover-drain":
+            if not args.execute:
+                raise PolicyError("recover-drain requires --execute")
+            if any(
+                value is not None
+                for value in (
+                    args.profile,
+                    args.candidate_sha,
+                    args.candidate_root,
+                    args.worker_env,
+                    args.sandbox,
+                    args.transaction_id,
+                    args.candidate_set_generation,
+                    args.candidate_set_convergence_id,
+                    args.candidate_set_payload_sha256,
+                )
+            ) or args.root != Path("/"):
+                raise PolicyError("recover-drain accepts no caller-selected binding")
+            result = recover_pending_drains()
+            sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")
+            return 0
+        if args.profile is None:
+            raise PolicyError(f"{args.command} requires --profile")
         profile = load_profile(args.profile)
         candidate = args.candidate_sha or source_candidate_sha()
+        candidate_bindings: dict[str, dict[str, str]] | None = None
+        if args.candidate_bindings_json is not None:
+            try:
+                raw_candidate_bindings = json.loads(args.candidate_bindings_json)
+            except json.JSONDecodeError as exc:
+                raise PolicyError("candidate bindings JSON is invalid") from exc
+            if (
+                not isinstance(raw_candidate_bindings, dict)
+                or args.candidate_bindings_json
+                != json.dumps(
+                    raw_candidate_bindings,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            ):
+                raise PolicyError("candidate bindings JSON is not canonical")
+            candidate_bindings = _candidate_bindings(profile, raw_candidate_bindings)
         if args.command in {
             "check",
             "node-check",
@@ -7391,7 +8947,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 apply_accounting=False,
             )
             with _domain_lock(args.root, profile):
-                result = plan(args.root, profile, candidate_sha=candidate)
+                if candidate_bindings is None:
+                    raise PolicyError("node check requires the complete candidate set")
+                result = plan(
+                    args.root,
+                    profile,
+                    candidate_sha=candidate,
+                    candidate_bindings=candidate_bindings,
+                )
                 if not result["file_plan"]["converged"]:
                     sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")
                     return 1
@@ -7400,6 +8963,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     profile,
                     sandbox=None,
                     candidate_sha=candidate,
+                    candidate_bindings=candidate_bindings,
                     require_probe=False,
                     check_accounting=slurm_node == profile.controller,
                 )
@@ -7464,9 +9028,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                 restart=args.restart,
                 apply_accounting=args.apply_accounting,
                 candidate_sha=candidate,
+                candidate_bindings=candidate_bindings,
+                transaction_id=args.transaction_id,
+                generation=args.candidate_set_generation,
+                convergence_id=args.candidate_set_convergence_id,
+                payload_sha256=args.candidate_set_payload_sha256,
             )
         elif args.command == "rollback" and args.execute:
-            result = rollback(args.root, profile, candidate_sha=candidate)
+            result = rollback(
+                args.root,
+                profile,
+                candidate_sha=candidate,
+                candidate_bindings=candidate_bindings,
+                transaction_id=args.transaction_id,
+                generation=args.candidate_set_generation,
+                convergence_id=args.candidate_set_convergence_id,
+                payload_sha256=args.candidate_set_payload_sha256,
+            )
         elif args.command == "materialize-runtime-proof":
             raise PolicyError("materialize-runtime-proof requires --execute")
         elif args.command == "allocation-probe" and args.execute:
@@ -7504,7 +9082,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else nullcontext()
             )
             with check_lock:
-                result = plan(args.root, profile, candidate_sha=candidate)
+                result = plan(
+                    args.root,
+                    profile,
+                    candidate_sha=candidate,
+                    candidate_bindings=candidate_bindings,
+                )
                 if args.command != "check":
                     sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")
                     return 0
@@ -7547,6 +9130,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                         profile,
                         sandbox=args.sandbox,
                         candidate_sha=candidate,
+                        candidate_bindings=(
+                            candidate_bindings
+                            if candidate_bindings is not None
+                            else _offline_candidate_bindings(profile, candidate)
+                        ),
                         require_probe=True,
                         check_accounting=True,
                         candidate_binding=binding,

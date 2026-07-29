@@ -47,7 +47,7 @@ def _fixture(tmp_path: Path) -> tuple[supervisor.SupervisorConfig, Path]:
                 f'supervisor_state_path = "{authority / "supervisor-state.json"}"',
                 f'audit_path = "{authority / "supervisor-audit.jsonl"}"',
                 f'evidence_path = "{authority / "evidence/latest.json"}"',
-                "global_slot_budget = 132",
+                "global_slot_budget = 140",
                 "global_pending_slot_budget = 34",
                 "instances = [",
                 '  "qianyi-gb10", "qianyi-oldlab",',
@@ -55,7 +55,7 @@ def _fixture(tmp_path: Path) -> tuple[supervisor.SupervisorConfig, Path]:
                 '  "devansh-gb10", "devansh-oldlab",',
                 "]",
                 "[pool_slot_budgets]",
-                "gb10 = 112",
+                "gb10 = 120",
                 "oldlab = 20",
                 "[pool_pending_slot_budgets]",
                 "gb10 = 24",
@@ -616,15 +616,15 @@ def test_independent_budget_validation_blocks_publication_after_transaction(
     ("config_replacement", "lease_updates", "aggregate_updates", "message"),
     [
         (
-            ("global_slot_budget = 132", "global_slot_budget = 100"),
+            ("global_slot_budget = 140", "global_slot_budget = 100"),
             {"pending_slots": 0, "active_slots": 101, "committed_slots": 101},
             {"pending_slots": 0, "active_slots": 101, "committed_slots": 101},
             "global budget",
         ),
         (
             None,
-            {"pending_slots": 0, "active_slots": 113, "committed_slots": 113},
-            {"pending_slots": 0, "active_slots": 113, "committed_slots": 113},
+            {"pending_slots": 0, "active_slots": 121, "committed_slots": 121},
+            {"pending_slots": 0, "active_slots": 121, "committed_slots": 121},
             "gb10 budget",
         ),
         (
@@ -696,7 +696,7 @@ def test_restart_rejects_config_digest_change_while_capacity_is_committed(
     _write(
         config_path,
         config_path.read_text().replace(
-            "global_slot_budget = 132",
+            "global_slot_budget = 140",
             "global_slot_budget = 131",
             1,
         ),
@@ -712,13 +712,13 @@ def test_restart_rejects_config_digest_change_while_capacity_is_committed(
 @pytest.mark.parametrize(
     ("old", "new", "message"),
     [
-        ("global_slot_budget = 132", "global_slot_budget = 133", "global_slot"),
+        ("global_slot_budget = 140", "global_slot_budget = 141", "global_slot"),
         (
             "global_pending_slot_budget = 34",
             "global_pending_slot_budget = 35",
             "global_pending",
         ),
-        ("gb10 = 112", "gb10 = 113", "reviewed bound"),
+        ("gb10 = 120", "gb10 = 121", "reviewed bound"),
     ],
 )
 def test_config_rejects_budgets_above_reviewed_bounds(
@@ -752,7 +752,7 @@ def test_checked_in_config_and_exact_candidate_service_renderer(tmp_path: Path) 
     installed = tmp_path / "supervisor.toml"
     _write(installed, checked.read_text())
     config = supervisor.load_config(installed)
-    assert config.pool_slot_budgets == {"gb10": 112, "oldlab": 20}
+    assert config.pool_slot_budgets == {"gb10": 120, "oldlab": 20}
     assert config.pool_pending_slot_budgets == {"gb10": 24, "oldlab": 10}
     assert set(config.instances) == set(supervisor._EXPECTED_INSTANCES)
     template = (

@@ -68,11 +68,14 @@ Existing accepted evidence includes:
 This evidence remains useful only where its scope matches a matrix row. It does
 not substitute for a fresh final-candidate matrix run.
 
-Current operational amendment: #822 temporarily removes `trt-gb10-7` from the
-staging rollout target. Fresh candidate evidence must cover all 14 active hosts
-and 140 slots, while preserving node 7 as stopped/unreachable; the historical
-15-host HF-boundary evidence above remains historical rather than a current
-reachability claim.
+Current operational amendment: the 2026-07-29 owner correction supersedes
+#822's temporary static exclusion. Fresh candidate evidence must cover all 15
+GB10 nodes and the 150-slot physical/legacy node-agent ceiling with
+`excluded_nodes=[]`; the staging sandbox's external Slurm policy is 120 slots
+(15 nodes times 8). `trt-gb10-7` is
+infrastructure- and capacity-eligible like its peers. If it is busy, the
+candidate-owned drain/quiescence gate defers disruptive convergence and must
+not cancel or preempt an external job.
 
 ## Program Structure
 

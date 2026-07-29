@@ -11,10 +11,15 @@ the node-agent remains the host-local convergence mechanism.
   `oldlab1`.
 - Kubernetes namespace: `loom-staging` in `kind-loom-staging`.
 - Worker hosts: `trt-gb10-1` through `trt-gb10-15`.
-- Temporary staging active set: every inventory host except `trt-gb10-7`.
-  Issue #822 records that node as `unreachable`; staging remains fail-closed on
-  the other 14 hosts and 140 slots until a separate merged re-admission change
-  restores the node.
+- Staging sandbox active set: all 15 inventory hosts and 120 Slurm slots
+  (8 per host). The separate 150-slot figure is the physical/legacy
+  node-agent ceiling, not this external Slurm policy. The 2026-07-29
+  owner correction supersedes #822's temporary static exclusion of
+  `trt-gb10-7`; node 7 is infrastructure- and capacity-eligible like every
+  other GB10 node.
+- A busy node is not statically removed. The candidate-owned drain/quiescence
+  gate defers disruptive convergence until acceptance-owned work is quiescent.
+  It must never cancel, preempt, or otherwise disturb an external job.
 - Slurm partition and Loom pool: `gb10` and `gb10`.
 - Release-managed SSH topology:
   `deploy/worker-pools/gb10/ssh_config`. `trt-gb10-1` is the only public
@@ -64,7 +69,8 @@ The driver preserves this order for every active host:
    then enable and restart the periodic timer with bounded host concurrency;
 6. verify the installed unit bytes, linger grant, successful oneshot result,
    and enabled/active/waiting timer;
-7. require all 14 declared active-host reports and fresh linked worker registrations;
+7. require all 15 declared host reports and fresh linked worker registrations,
+   with `excluded_nodes=[]`;
 8. pass environment-state, release-gate, and smoke.
 
 Use only the public broker interface:
@@ -123,13 +129,11 @@ checked-in aliases, literal host addresses, remote user, service identity,
 auth flags, and jump topology. SSH host authentication is pinned to the
 checked-in `known_hosts` authority, installed root-owned at
 `/etc/loom/staging-rollout-gb10-known-hosts`; ambient user or global
-known-hosts state and `accept-new` are not permitted. The fixed physical
-inventory remains all 15 hosts, while the active-host policy may temporarily
-exclude a quarantined host such as `trt-gb10-7` without weakening revocation
-coverage for trust granted under an earlier policy.
-Bootstrap and normal checks target the 14-host active set; the full inventory
-remains authoritative for topology validation, legacy trust cleanup, and later
-#822 re-admission.
+known-hosts state and `accept-new` are not permitted. The fixed physical,
+infrastructure, trust, and capacity inventory is all 15 hosts. Bootstrap,
+normal checks, revocation coverage, and acceptance all use that same set.
+Temporary host activity is handled by the candidate-owned drain/quiescence
+gate, not by changing the checked-in host set.
 
 Use an explicitly approved Ed25519 admin identity to bootstrap the service
 public key once per new service-key lifecycle, or as controlled recovery when
@@ -231,8 +235,8 @@ the candidate-bound release gate before use.
   all 15 hosts.
 - Every worker advertised `cpu_arch=arm64` and pool `gb10`.
 - At that evidence date, declared trial concurrency was 10 per host and 150
-  total slots. The current #822 exception declares 14 active hosts and 140
-  staging slots while retaining node 7 in the physical inventory.
+  total slots. The 2026-07-29 owner correction restores that same all-15
+  capacity-eligible contract and supersedes #822's temporary static exclusion.
 - Canary batch `b18d1a92-909a-443f-a768-f0aae8229cea` finished succeeded;
   trial `6e833772-ae85-4bf0-9621-904cb9bca0ea` ran on `trt-gb10-6` and scored
   `1.0`.
@@ -353,15 +357,18 @@ any completed install evidence cannot use this replacement path.
 ## Health And Scheduling Gates
 
 The broker's environment-state and release-gate artifacts are authoritative.
-They must cover all 14 active desired node reports and all 14 fresh linked
-worker registrations. Node 7 must remain `stopped`/`unreachable` and absent
-from rollout targets. Tunnel health, Docker reachability, source cleanliness,
+They must cover all 15 desired node reports and all 15 fresh linked worker
+registrations, with `excluded_nodes=[]`. Tunnel health, Docker reachability,
+source cleanliness,
 image/env identity, capacity, and worker heartbeat failures on any active host
 remain red; a runtime skip or partially healthy active fleet is not accepted.
 After rollout, close the operator SSH session, wait longer than one timer
 period, stop the worker on one active canary, and require the timer to restore
-the candidate image plus a fresh heartbeat within the next period. Recheck that
-node 7 has no fresh active worker.
+the candidate image plus a fresh heartbeat within the next period. Acceptance
+requires fresh coverage for all 15 hosts, including node 7, and
+`excluded_nodes=[]`. If node 7 has an external job, the candidate-owned
+drain/quiescence gate must defer the disruptive step without cancelling or
+preempting that job.
 
 GB10 workers must not claim legacy tasks that lack `environment.cpu_arch`;
 Loom treats those requirements as `x86_64`. Only tasks explicitly marked

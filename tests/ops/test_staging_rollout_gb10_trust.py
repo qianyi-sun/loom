@@ -31,7 +31,13 @@ def _public_key(seed: int, comment: str = "test-only-public-key") -> bytes:
 def _ssh_config() -> str:
     entries = []
     for number in range(1, 16):
-        hostname = "207.35.188.227" if number == 1 else f"192.168.20.{number + 10}"
+        hostname = (
+            "207.35.188.227"
+            if number == 1
+            else "192.168.20.77"
+            if number == 7
+            else f"192.168.20.{number + 10}"
+        )
         entries.extend([f"Host trt-gb10-{number}", f"  HostName {hostname}"])
         if number == 1:
             entries.append("  Port 2221")
@@ -91,6 +97,8 @@ def _known_hosts_path(tmp_path: Path) -> Path:
         target = (
             "[207.35.188.227]:2221,trt-gb10-1"
             if number == 1
+            else "192.168.20.77,trt-gb10-7"
+            if number == 7
             else f"192.168.20.{number + 10},trt-gb10-{number}"
         )
         fields = _public_key(number).decode("ascii").split()
@@ -188,13 +196,14 @@ def test_inventory_expands_exactly_all_15_targets_and_checked_in_user() -> None:
     inventory = trust.parse_ssh_inventory(_ssh_config())
 
     assert inventory.hosts == tuple(f"trt-gb10-{number}" for number in range(1, 16))
-    assert inventory.active_hosts == tuple(
-        f"trt-gb10-{number}" for number in range(1, 16) if number != 7
-    )
+    assert inventory.active_hosts == inventory.hosts
     assert inventory.remote_user == "qianyi"
     assert inventory.hostnames == (
         "207.35.188.227",
-        *(f"192.168.20.{number}" for number in range(12, 26)),
+        *(
+            "192.168.20.77" if number == 7 else f"192.168.20.{number + 10}"
+            for number in range(2, 16)
+        ),
     )
     assert inventory.ports == (2221,) + (22,) * 14
     assert inventory.proxy_jumps == (None,) + ("trt-gb10-1",) * 14
@@ -205,7 +214,10 @@ def test_inventory_expands_exactly_all_15_targets_and_checked_in_user() -> None:
 def test_physical_topology_digest_is_stable_across_active_policy_transition() -> None:
     inventory = trust.parse_ssh_inventory(_ssh_config())
 
-    changed_policy = replace(inventory, active_hosts=inventory.hosts)
+    changed_policy = replace(
+        inventory,
+        active_hosts=tuple(host for host in inventory.hosts if host != "trt-gb10-7"),
+    )
 
     assert trust._topology_sha256(changed_policy) == trust._topology_sha256(inventory)
     assert trust._active_policy_sha256(changed_policy) != trust._active_policy_sha256(inventory)
@@ -218,13 +230,14 @@ def test_checked_in_inventory_contract_is_exact() -> None:
     inventory = trust.parse_ssh_inventory(checked_in.read_text(encoding="utf-8"))
 
     assert inventory.hosts == tuple(f"trt-gb10-{number}" for number in range(1, 16))
-    assert inventory.active_hosts == tuple(
-        f"trt-gb10-{number}" for number in range(1, 16) if number != 7
-    )
+    assert inventory.active_hosts == inventory.hosts
     assert inventory.remote_user == "qianyi"
     assert inventory.hostnames == (
         "207.35.188.227",
-        *(f"192.168.20.{number}" for number in range(12, 26)),
+        *(
+            "192.168.20.77" if number == 7 else f"192.168.20.{number + 10}"
+            for number in range(2, 16)
+        ),
     )
     assert inventory.ports == (2221,) + (22,) * 14
     assert inventory.proxy_jumps == (None,) + ("trt-gb10-1",) * 14
@@ -246,7 +259,7 @@ def test_checked_in_known_hosts_authority_is_exact() -> None:
     assert len(entries) == 15
     assert entries[0].startswith("[207.35.188.227]:2221,trt-gb10-1 ssh-ed25519 ")
     assert entries[6] == (
-        "192.168.20.17,trt-gb10-7 ssh-ed25519 "
+        "192.168.20.77,trt-gb10-7 ssh-ed25519 "
         "AAAAC3NzaC1lZDI1NTE5AAAAIEcui4I2Lhr2iFgLrvGWYjUEUqUmWPxUHFOkt7fyiOwi"
     )
 
@@ -254,7 +267,7 @@ def test_checked_in_known_hosts_authority_is_exact() -> None:
 @pytest.mark.parametrize(
     "mutation",
     [
-        lambda payload: payload.replace(b"192.168.20.17,trt-gb10-7", b"192.168.20.99,trt-gb10-7"),
+        lambda payload: payload.replace(b"192.168.20.77,trt-gb10-7", b"192.168.20.99,trt-gb10-7"),
         lambda payload: payload.replace(b" ssh-ed25519 ", b" ssh-rsa ", 1),
         lambda payload: b"\n".join(payload.splitlines()[:-1]) + b"\n",
     ],
@@ -488,7 +501,7 @@ def test_legacy_topology_validation_rejects_previous_physical_drift(
     config, public_path, _identity, _public_key_bytes = _write_inputs(tmp_path)
     previous = tmp_path / "previous_ssh_config"
     previous.write_text(
-        _ssh_config().replace("HostName 192.168.20.17", "HostName 192.168.20.99"),
+        _ssh_config().replace("HostName 192.168.20.77", "HostName 192.168.20.99"),
         encoding="utf-8",
     )
     previous.chmod(0o600)
@@ -605,7 +618,11 @@ def test_explicit_active14_to_active15_migration_preserves_revocation_hosts(
     tmp_path: Path,
 ) -> None:
     config, _public_path, _identity, public_key = _write_inputs(tmp_path)
-    inventory14 = trust.parse_ssh_inventory(config.read_text(encoding="utf-8"))
+    inventory15 = trust.parse_ssh_inventory(config.read_text(encoding="utf-8"))
+    inventory14 = replace(
+        inventory15,
+        active_hosts=tuple(host for host in inventory15.hosts if host != "trt-gb10-7"),
+    )
     store = trust.RevocationLedgerStore(
         path=_ledger_path(tmp_path),
         expected_uid=os.geteuid(),
@@ -621,8 +638,6 @@ def test_explicit_active14_to_active15_migration_preserves_revocation_hosts(
         ledger=ledger,
         hosts=inventory14.active_hosts,
     )
-    inventory15 = replace(inventory14, active_hosts=inventory14.hosts)
-
     with pytest.raises(trust.TrustConfigurationError, match="active-policy binding"):
         trust._validate_ledger_binding(
             ledger,
@@ -743,9 +758,9 @@ def test_bootstrap_sends_public_key_only_over_stdin_to_every_host(
     )
 
     assert rc == 0
-    expected_hosts = [f"trt-gb10-{number}" for number in range(2, 16) if number != 7]
+    expected_hosts = [f"trt-gb10-{number}" for number in range(2, 16)]
     expected_hosts.append("trt-gb10-1")
-    assert len(calls) == 14
+    assert len(calls) == 15
     for host, (argv, kwargs) in zip(expected_hosts, calls, strict=True):
         assert argv[-2] == host
         assert argv[:2] == [str(trust.SSH_BINARY), "-F"]
@@ -769,9 +784,7 @@ def test_bootstrap_sends_public_key_only_over_stdin_to_every_host(
     assert report["remote_user"] == "qianyi"
     assert [entry["host"] for entry in report["hosts"]] == expected_hosts
     ledger = trust.RevocationLedger.from_bytes(_ledger_path(tmp_path).read_bytes())
-    assert ledger.revocation_hosts == tuple(
-        f"trt-gb10-{number}" for number in range(1, 16) if number != 7
-    )
+    assert ledger.revocation_hosts == tuple(f"trt-gb10-{number}" for number in range(1, 16))
 
 
 @pytest.mark.parametrize(
@@ -815,7 +828,7 @@ def test_bootstrap_operations_defer_jump_host_after_private_host_failure(
     )
 
     assert rc == 1
-    assert calls == [f"trt-gb10-{number}" for number in range(2, 16) if number != 7]
+    assert calls == [f"trt-gb10-{number}" for number in range(2, 16)]
     report = json.loads(capsys.readouterr().out)
     assert report["hosts"][-1] == {
         "host": "trt-gb10-1",
@@ -848,7 +861,7 @@ def test_rotate_bootstrap_binds_service_and_derived_bootstrap_public_keys(
     )
 
     assert rc == 0
-    expected_hosts = [f"trt-gb10-{number}" for number in range(2, 16) if number != 7]
+    expected_hosts = [f"trt-gb10-{number}" for number in range(2, 16)]
     expected_hosts.append("trt-gb10-1")
     assert [host for host, _ in calls] == expected_hosts
     for _host, kwargs in calls:
@@ -860,7 +873,7 @@ def test_rotate_bootstrap_binds_service_and_derived_bootstrap_public_keys(
         }
     report = json.loads(capsys.readouterr().out)
     assert report["ok"] is True
-    assert [entry["status"] for entry in report["hosts"]] == ["rotated"] * 14
+    assert [entry["status"] for entry in report["hosts"]] == ["rotated"] * 15
 
 
 @pytest.mark.skipif(shutil.which("ssh") is None, reason="OpenSSH client is unavailable")
@@ -1002,8 +1015,7 @@ def test_check_continues_after_partial_host_failure_without_echoing_remote_outpu
     )
 
     assert rc == 1
-    assert len(calls) == 14
-    assert all(argv[-2] != "trt-gb10-7" for argv in calls)
+    assert len(calls) == 15
     captured = capsys.readouterr()
     assert sentinel not in captured.out
     assert sentinel not in captured.err

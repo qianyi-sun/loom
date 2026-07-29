@@ -2,6 +2,13 @@ schema_version = 1
 cluster = "trt-oldlab"
 controller = "TRT-EAI-OLDLAB-1"
 submit_host = "trt-EAI-OLDLAB-2"
+infrastructure_nodes = [
+  "TRT-EAI-OLDLAB-1",
+  "trt-EAI-OLDLAB-2",
+  "trt-eai-oldlab-3",
+  "trt-eai-oldlab-4",
+  "trt-eai-oldlab-5",
+]
 allowed_nodes = [
   "TRT-EAI-OLDLAB-1",
   "trt-EAI-OLDLAB-2",

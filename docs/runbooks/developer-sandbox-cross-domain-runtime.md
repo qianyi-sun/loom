@@ -73,6 +73,8 @@ LOOM_WORKER_GATEWAY_URL=http://sandbox-link:9100
 LOOM_WORKER_MINIO_ENDPOINT=http://sandbox-link:9000
 LOOM_WORKER_SANDBOX_IDENTITY=<sandbox>
 LOOM_WORKER_CANDIDATE_SHA=<SHA>
+LOOM_WORKER_POOL_NAME=<oldlab|gb10>
+LOOM_WORKER_MAX_CONCURRENT=<4 for oldlab|8 for gb10>
 LOOM_WORKER_TOKEN_FILE_HOST=/etc/loom/developer-sandbox-links/clients/<sandbox>/<SHA>/worker-token
 LOOM_WORKER_MINIO_ACCESS_KEY_FILE_HOST=/etc/loom/developer-sandbox-links/clients/<sandbox>/<SHA>/minio-access-key
 LOOM_WORKER_MINIO_SECRET_KEY_FILE_HOST=/etc/loom/developer-sandbox-links/clients/<sandbox>/<SHA>/minio-secret-key
@@ -80,6 +82,14 @@ LOOM_WORKER_CP_TLS_CA_FILE_HOST=/etc/loom/developer-sandbox-links/clients/<sandb
 LOOM_WORKER_CP_TLS_CERT_FILE_HOST=/etc/loom/developer-sandbox-links/clients/<sandbox>/<SHA>/client.pem
 LOOM_WORKER_CP_TLS_KEY_FILE_HOST=/etc/loom/developer-sandbox-links/clients/<sandbox>/<SHA>/client-key.pem
 ```
+
+Pool and concurrency are not publication-time inputs. The host installer reads
+them from the exact candidate's checked-in
+`deploy/developer-sandboxes/shared-capacity-policies/<domain>.toml`, where
+`policy.actuator_config.requested_concurrency` is `4` for OLDLAB and `8` for
+GB10. The runtime-domain closed schema binds the same source, pool, and value;
+an OLDLAB seed cannot be published into GB10 (or vice versa), and an operator
+cannot lower or raise the effective worker concurrency with a CLI override.
 
 The worker addresses only the host-local `sandbox-link` relay. The
 sandbox-specific TLS listeners on oldlab2 and their loopback service targets
@@ -129,9 +139,13 @@ sudo python3 scripts/ops/developer_sandbox_domain_runtime.py host-converge \
   --execute
 ```
 
-Apply the analogous `--domain gb10` command independently on each active GB10
-peer. The inventory intentionally excludes quarantined `trt-gb10-7`. The
-applied command installs:
+Apply the analogous `--domain gb10` command independently on every GB10
+infrastructure peer, including `trt-gb10-7`. This converges identities, shared
+paths, candidate readback, and remote-link prerequisites. The 2026-07-29 owner
+correction supersedes #822's static exclusion: all 15 GB10 peers, including
+node 7, are infrastructure- and capacity-eligible. If a peer is busy, the
+candidate-owned drain/quiescence gate defers disruptive convergence without
+cancelling or preempting external work. The applied command installs:
 
 ```text
 /usr/local/libexec/loom-developer-domain-runtime
@@ -211,10 +225,11 @@ expiry is exactly 900 seconds after generation. A consumer rejects a
 generation more than 30 seconds in the future, more than 60 seconds old, or
 already expired.
 
-`eligible_nodes` is ordered and complete: `oldlab-1` through `oldlab-5`,
-followed by `trt-gb10-1`, `2`, `3`, `4`, `5`, `6`, `8`, `9`, `10`, `11`,
-`12`, `13`, `14`, and `15`. The excluded quarantined `trt-gb10-7` must not
-appear. Each of the 19 node rows binds:
+`eligible_nodes` is ordered and complete for remote-link infrastructure:
+`oldlab-1` through `oldlab-5`, followed by `trt-gb10-1` through
+`trt-gb10-15`, including `trt-gb10-7`. The GB10 subset is the same complete
+capacity-eligible set; no static node exclusion is permitted. Each of the 20
+node rows binds:
 
 - the exact candidate SHA and client URI SAN
   `spiffe://loom/developer-sandbox/<sandbox>/candidate/<SHA>/worker`;
@@ -252,7 +267,8 @@ The JSON and base64 detached signature are `root:root` mode `0644` under
 mode-`0755` roots. The Ed25519 keypair stays publisher-local at
 `/etc/loom/developer-domain-runtime/attestation-keys/<domain>.{key,pub}`;
 the private key and its directory are root-only. The closed manifest binds the
-domain, sandbox, candidate SHA/tree/path/metadata, private env metadata/schema,
+domain, sandbox, candidate SHA/tree/path/metadata, private env metadata/schema
+(including the capacity-policy pool and concurrency binding),
 literal host-local TLS references, publisher generation/key/freshness, and
 complete peer readback. The closed manifest also binds the fleet attestation
 reference, all three local URLs, all three oldlab2 upstream listeners, and all

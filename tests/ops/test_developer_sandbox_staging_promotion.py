@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -14,6 +15,70 @@ SHA = "a" * 40
 TREE = "b" * 40
 REQUEST_ID = "req-0123456789abcdef"
 ROLLOUT_ID = "20260729t010000z-staging-aaaaaaa"
+
+
+@pytest.fixture(autouse=True)
+def _trust_test_owned_tmp_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skip only pytest's ambient /tmp prefix; retain protected descendants."""
+    original = promotion._open_trusted_directory
+    test_root = Path(os.path.abspath(tmp_path))
+
+    def open_trusted_directory(
+        path: Path,
+        *,
+        owner_uids: frozenset[int],
+    ) -> int:
+        absolute = Path(os.path.abspath(path))
+        try:
+            relative = absolute.relative_to(test_root)
+        except ValueError:
+            return original(path, owner_uids=owner_uids)
+        flags = promotion._directory_flags()
+        descriptor = os.open(test_root, flags)
+        current = test_root
+        try:
+            root = os.fstat(descriptor)
+            if (
+                not stat.S_ISDIR(root.st_mode)
+                or root.st_uid not in owner_uids
+                or stat.S_IMODE(root.st_mode) & 0o022
+            ):
+                raise promotion.PromotionError(
+                    "test-owned protected directory authority is unsafe",
+                )
+            for component in relative.parts:
+                current /= component
+                child = os.open(component, flags, dir_fd=descriptor)
+                metadata = os.fstat(child)
+                if (
+                    not stat.S_ISDIR(metadata.st_mode)
+                    or metadata.st_uid not in owner_uids
+                    or stat.S_IMODE(metadata.st_mode) & 0o022
+                ):
+                    os.close(child)
+                    raise promotion.PromotionError(
+                        f"protected directory authority is unsafe: {current}",
+                    )
+                os.close(descriptor)
+                descriptor = child
+            return descriptor
+        except promotion.PromotionError:
+            os.close(descriptor)
+            raise
+        except OSError as exc:
+            os.close(descriptor)
+            raise promotion.PromotionError(
+                f"protected directory is unavailable: {current}",
+            ) from exc
+
+    monkeypatch.setattr(
+        promotion,
+        "_open_trusted_directory",
+        open_trusted_directory,
+    )
 
 
 def _write(path: Path, value: object, *, canonical: bool = False) -> None:
@@ -425,6 +490,19 @@ def test_rejects_link_attacks_on_fixed_source(
         os.link(target, paths["request"])
 
     with pytest.raises(promotion.PromotionError, match=r"authority|unavailable"):
+        _produce(layout)
+
+
+def test_fixture_still_rejects_world_writable_protected_descendant(
+    tmp_path: Path,
+) -> None:
+    unsafe_parent = tmp_path / "var"
+    unsafe_parent.mkdir()
+    unsafe_parent.chmod(0o777)
+    layout = _layout(tmp_path)
+    _build_rollout(layout)
+
+    with pytest.raises(promotion.PromotionError, match="protected directory authority"):
         _produce(layout)
 
 

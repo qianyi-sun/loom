@@ -83,6 +83,9 @@ RENEWAL_SERVICE_PATH = Path(
 RENEWAL_TIMER_PATH = Path(
     "/etc/systemd/system/loom-developer-sandbox-attestation-renewal.timer",
 )
+INSTALLER_TMPFILES_PATH = Path(
+    "/etc/tmpfiles.d/loom-developer-sandbox-installer.conf",
+)
 INSTALLED_PROGRAM = Path("/usr/local/libexec/loom-developer-sandbox-host")
 STAGING_ALLOCATION_CONFIG = Path(
     "/etc/loom/staging-external-slurm-authority/authority.toml",
@@ -116,11 +119,13 @@ RECEIPT_FRESHNESS = timedelta(seconds=60)
 ATTESTATION_TTL = timedelta(minutes=15)
 DOMAIN_PEERS = {
     "oldlab": ("oldlab-1", "oldlab-2", "oldlab-3", "oldlab-4", "oldlab-5"),
-    "gb10": tuple(
-        f"trt-gb10-{index}" for index in (1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15)
-    ),
+    "gb10": tuple(f"trt-gb10-{index}" for index in range(1, 16)),
 }
 DOMAIN_PUBLISHERS = {"oldlab": "oldlab-1", "gb10": "trt-gb10-1"}
+DOMAIN_CAPACITY_NODES = {
+    "oldlab": tuple(f"trt-eai-oldlab-{index}" for index in range(1, 6)),
+    "gb10": tuple(f"trt-gb10-{index}" for index in range(1, 16)),
+}
 ELIGIBLE_LINK_NODES = DOMAIN_PEERS["oldlab"] + DOMAIN_PEERS["gb10"]
 REMOTE_LINK_SERVER_ADDRESS = "192.168.50.14"
 REMOTE_LINK_SERVICE_NAMES = ("control-plane", "gateway", "minio")
@@ -245,6 +250,7 @@ class StagingAllocationConfig:
     result_root: Path
     slurm_account: str
     qos: str
+    infrastructure_nodes: tuple[str, ...]
     allowed_nodes: tuple[str, ...]
     host_aliases: dict[str, str]
     repository_template: str
@@ -367,6 +373,7 @@ def load_staging_allocation_config(
             raise HostConvergeError(f"fixed staging allocation {field} has duplicates")
         return items
 
+    infrastructure_nodes = text_list(raw, "infrastructure_nodes")
     allowed_nodes = text_list(raw, "allowed_nodes")
     aliases = {
         str(node): str(host)
@@ -403,6 +410,7 @@ def load_staging_allocation_config(
         result_root=Path(text(shared_mount, "result_root")),
         slurm_account=text(raw, "slurm_account"),
         qos=text(raw, "qos"),
+        infrastructure_nodes=infrastructure_nodes,
         allowed_nodes=allowed_nodes,
         host_aliases=aliases,
         repository_template=text(candidate_paths, "repository"),
@@ -415,7 +423,8 @@ def load_staging_allocation_config(
             1,
         ),
     )
-    expected_nodes = tuple(f"trt-gb10-{index}" for index in range(1, 16) if index != 7)
+    expected_infrastructure_nodes = tuple(f"trt-gb10-{index}" for index in range(1, 16))
+    expected_allowed_nodes = expected_infrastructure_nodes
     paths = (
         config.producer_home,
         config.producer_shell,
@@ -458,9 +467,11 @@ def load_staging_allocation_config(
         or config.probe_result_root != config.result_root
         or config.slurm_account != "loom-staging"
         or config.qos != "loom-staging"
-        or config.allowed_nodes != expected_nodes
-        or set(config.host_aliases) != set(expected_nodes)
-        or len(set(config.host_aliases.values())) != len(expected_nodes)
+        or config.infrastructure_nodes != expected_infrastructure_nodes
+        or config.allowed_nodes != expected_allowed_nodes
+        or not set(config.allowed_nodes).issubset(config.infrastructure_nodes)
+        or set(config.host_aliases) != set(expected_infrastructure_nodes)
+        or len(set(config.host_aliases.values())) != len(expected_infrastructure_nodes)
         or any(not item.is_absolute() or ".." in item.parts for item in paths)
         or config.job_timeout_seconds > 600
         or config.heartbeat_interval_seconds > 30
@@ -1720,12 +1731,12 @@ def staging_allocation_probe(
             if node in terminal:
                 continue
             rows = _staging_sacct_rows(config, job_id)
-            base = [row for row in rows if len(row) == 10 and row[0] == job_id]
-            step = [row for row in rows if len(row) == 10 and row[0] == f"{job_id}.0"]
+            base_rows = [row for row in rows if len(row) == 10 and row[0] == job_id]
+            step_rows = [row for row in rows if len(row) == 10 and row[0] == f"{job_id}.0"]
             if (
-                len(base) == 1
-                and len(step) == 1
-                and _staging_terminal_state(base[0][2])
+                len(base_rows) == 1
+                and len(step_rows) == 1
+                and _staging_terminal_state(base_rows[0][2])
                 in {
                     "COMPLETED",
                     "FAILED",
@@ -1734,7 +1745,7 @@ def staging_allocation_probe(
                     "OUT_OF_MEMORY",
                     "NODE_FAIL",
                 }
-                and _staging_terminal_state(step[0][2])
+                and _staging_terminal_state(step_rows[0][2])
                 in {
                     "COMPLETED",
                     "FAILED",
@@ -1744,9 +1755,9 @@ def staging_allocation_probe(
                     "NODE_FAIL",
                 }
             ):
-                if base[0][1] != job_name:
+                if base_rows[0][1] != job_name:
                     raise HostConvergeError("staging allocation job name drifted")
-                terminal[node] = (base[0], step[0])
+                terminal[node] = (base_rows[0], step_rows[0])
         if len(terminal) < len(jobs):
             time.sleep(1)
     if len(terminal) != len(jobs):
@@ -3292,16 +3303,163 @@ def write_desired(
     return previous
 
 
+def _validate_installer_runtime_directory() -> None:
+    try:
+        metadata = TRANSACTION_LOCK_ROOT.lstat()
+    except OSError as exc:
+        raise HostConvergeError("sandbox installer runtime directory is unavailable") from exc
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or (metadata.st_uid, metadata.st_gid) != (0, 0)
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        raise HostConvergeError("sandbox installer runtime directory is unsafe")
+
+
+@dataclass(frozen=True)
+class _InstallerRuntimeSnapshot:
+    present: bool
+    device: int | None
+    inode: int | None
+    uid: int | None
+    gid: int | None
+    mode: int | None
+
+
+@dataclass(frozen=True)
+class _InstallerTmpfilesSnapshot:
+    config: bytes | None
+    runtime: _InstallerRuntimeSnapshot
+
+
+def _snapshot_installer_runtime_directory() -> _InstallerRuntimeSnapshot:
+    try:
+        metadata = TRANSACTION_LOCK_ROOT.lstat()
+    except FileNotFoundError:
+        return _InstallerRuntimeSnapshot(False, None, None, None, None, None)
+    except OSError as exc:
+        raise HostConvergeError("sandbox installer runtime directory is unavailable") from exc
+    _validate_installer_runtime_directory()
+    return _InstallerRuntimeSnapshot(
+        True,
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_uid,
+        metadata.st_gid,
+        stat.S_IMODE(metadata.st_mode),
+    )
+
+
+def _validate_restored_installer_runtime(snapshot: _InstallerRuntimeSnapshot) -> None:
+    try:
+        metadata = TRANSACTION_LOCK_ROOT.lstat()
+    except FileNotFoundError:
+        if snapshot.present:
+            raise HostConvergeError(
+                "sandbox installer prior runtime directory was not restored",
+            ) from None
+        return
+    except OSError as exc:
+        raise HostConvergeError("sandbox installer runtime directory is unavailable") from exc
+    _validate_installer_runtime_directory()
+    if snapshot.present and (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_uid,
+        metadata.st_gid,
+        stat.S_IMODE(metadata.st_mode),
+    ) != (
+        snapshot.device,
+        snapshot.inode,
+        snapshot.uid,
+        snapshot.gid,
+        snapshot.mode,
+    ):
+        raise HostConvergeError("sandbox installer prior runtime directory drifted")
+
+
+def _read_optional_tmpfiles_asset(path: Path) -> bytes | None:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise HostConvergeError("sandbox installer tmpfiles asset is unavailable") from exc
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or (metadata.st_uid, metadata.st_gid) != (0, 0)
+        or stat.S_IMODE(metadata.st_mode) != 0o644
+        or metadata.st_nlink != 1
+    ):
+        raise HostConvergeError("sandbox installer tmpfiles asset is unsafe")
+    try:
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise HostConvergeError("sandbox installer tmpfiles asset is unavailable") from exc
+    if len(payload) > 64 * 1024:
+        raise HostConvergeError("sandbox installer tmpfiles asset is unsafe")
+    return payload
+
+
+def _restore_tmpfiles_asset(snapshot: _InstallerTmpfilesSnapshot) -> None:
+    if snapshot.config is None:
+        INSTALLER_TMPFILES_PATH.unlink(missing_ok=True)
+        _fsync_directory(INSTALLER_TMPFILES_PATH.parent)
+    else:
+        _atomic_write(INSTALLER_TMPFILES_PATH, snapshot.config, mode=0o644)
+        _run(("systemd-tmpfiles", "--create", str(INSTALLER_TMPFILES_PATH)))
+    if _read_optional_tmpfiles_asset(INSTALLER_TMPFILES_PATH) != snapshot.config:
+        raise HostConvergeError("sandbox installer prior tmpfiles asset was not restored")
+    # A runtime root created while no prior policy existed may already contain
+    # live lock files. Preserve it, but require the exact safe metadata. Never
+    # delete a shared volatile lock root during rollback.
+    _validate_restored_installer_runtime(snapshot.runtime)
+
+
+def _install_tmpfiles_asset(source: Path) -> _InstallerTmpfilesSnapshot:
+    expected = b"d /run/loom-developer-sandbox-installer 0700 root root -\n"
+    try:
+        payload = source.read_bytes()
+    except OSError as exc:
+        raise HostConvergeError("sandbox installer tmpfiles source is unavailable") from exc
+    if payload != expected:
+        raise HostConvergeError("sandbox installer tmpfiles source is invalid")
+    snapshot = _InstallerTmpfilesSnapshot(
+        config=_read_optional_tmpfiles_asset(INSTALLER_TMPFILES_PATH),
+        runtime=_snapshot_installer_runtime_directory(),
+    )
+    try:
+        _atomic_write(INSTALLER_TMPFILES_PATH, payload, mode=0o644)
+        _run(("systemd-tmpfiles", "--create", str(INSTALLER_TMPFILES_PATH)))
+        installed = _read_optional_tmpfiles_asset(INSTALLER_TMPFILES_PATH)
+        if installed != payload:
+            raise HostConvergeError("sandbox installer tmpfiles install drifted")
+        _validate_installer_runtime_directory()
+        return snapshot
+    except Exception as install_exc:
+        try:
+            _restore_tmpfiles_asset(snapshot)
+        except Exception as rollback_exc:
+            raise HostConvergeError(
+                "sandbox installer tmpfiles install and rollback both failed safely",
+            ) from rollback_exc
+        raise HostConvergeError(
+            "sandbox installer tmpfiles install failed and was rolled back",
+        ) from install_exc
+
+
 def _install_assets(source_root: Path) -> None:
     _ensure_root_private_directory(CONFIG_ROOT)
     _ensure_root_private_directory(DESIRED_ROOT)
     _ensure_root_private_directory(PROFILE_CONFIG_ROOT)
+    profiles_root = source_root / "deploy/developer-sandboxes"
     _atomic_write(
         INSTALLED_PROGRAM,
         (source_root / "scripts/ops/developer_sandbox_host.py").read_bytes(),
         mode=0o755,
     )
-    profiles_root = source_root / "deploy/developer-sandboxes"
     _atomic_write(
         UNIT_PATH,
         (profiles_root / "loom-developer-sandbox@.service").read_bytes(),
@@ -3323,7 +3481,21 @@ def _install_assets(source_root: Path) -> None:
             (profiles_root / f"{sandbox}.toml").read_bytes(),
             mode=0o600,
         )
-    _run(("systemctl", "daemon-reload"))
+    tmpfiles_snapshot = _install_tmpfiles_asset(
+        profiles_root / "loom-developer-sandbox-installer.tmpfiles.conf",
+    )
+    try:
+        _run(("systemctl", "daemon-reload"))
+    except Exception as reload_exc:
+        try:
+            _restore_tmpfiles_asset(tmpfiles_snapshot)
+        except Exception as rollback_exc:
+            raise HostConvergeError(
+                "sandbox installer asset reload and tmpfiles rollback both failed safely",
+            ) from rollback_exc
+        raise HostConvergeError(
+            "sandbox installer asset reload failed and tmpfiles was rolled back",
+        ) from reload_exc
 
 
 def _read_admin_token(path: Path) -> str:
@@ -3889,7 +4061,7 @@ def _node_authority(
 def _slurm_maintenance_file(domain: str, sandbox: str, sha: str) -> Path:
     if domain not in DOMAIN_PEERS or sandbox not in SANDBOXES or SHA_RE.fullmatch(sha) is None:
         raise HostConvergeError("Slurm maintenance identity is invalid")
-    return SLURM_MAINTENANCE_ROOT / f"{domain}-{sandbox}-{sha}.json"
+    return SLURM_MAINTENANCE_ROOT / f"{domain}-candidate-set.json"
 
 
 def _ensure_slurm_maintenance_root(*, create: bool) -> bool:
@@ -4044,22 +4216,115 @@ def _slurm_maintenance_tree(profile: Profile, sha: str) -> str:
     return verify_candidate(profile, profile.candidate_root / sha, sha, authority)
 
 
+def _slurm_candidate_set(
+    *,
+    generation: int = 1,
+    convergence_id: str | None = None,
+) -> tuple[dict[str, Any], bytes]:
+    if generation < 1:
+        raise HostConvergeError("Slurm candidate-set generation is invalid")
+    bindings: dict[str, dict[str, str]] = {}
+    for sandbox in SANDBOXES:
+        profile, desired = _desired_for_service(sandbox)
+        sha = desired.get("candidate_sha")
+        tree = desired.get("candidate_tree")
+        if (
+            not isinstance(sha, str)
+            or SHA_RE.fullmatch(sha) is None
+            or not isinstance(tree, str)
+            or SHA_RE.fullmatch(tree) is None
+        ):
+            raise HostConvergeError("sandbox desired candidate set is invalid")
+        authority = _identity("root", SHARED_GROUP)
+        verify_candidate_root(profile, authority)
+        if verify_candidate(profile, profile.candidate_root / sha, sha, authority) != tree:
+            raise HostConvergeError("sandbox desired candidate tree drifted")
+        receipt = verify_combined_receipt(profile, sha, tree)
+        _validate_desired_binding(
+            profile,
+            desired,
+            sha=sha,
+            tree=tree,
+            receipt=receipt,
+        )
+        bindings[f"loom-dev-{sandbox}"] = {
+            "sandbox": sandbox,
+            "service_user": f"loom-sandbox-{sandbox}",
+            "candidate_sha": sha,
+            "candidate_tree": tree,
+        }
+    if len({row["candidate_sha"] for row in bindings.values()}) != len(SANDBOXES):
+        raise HostConvergeError("sandbox desired candidate SHAs must be pairwise distinct")
+    bindings_bytes = json.dumps(
+        bindings,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+    payload = {
+        "schema_version": 2,
+        "kind": "loom.developer-sandbox.slurm-candidate-set",
+        "candidate_set_sha256": hashlib.sha256(bindings_bytes).hexdigest(),
+        "candidate_bindings": bindings,
+        "generation": generation,
+        "convergence_id": convergence_id or hashlib.sha256(bindings_bytes).hexdigest(),
+    }
+    return (
+        payload,
+        (
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+            + "\n"
+        ).encode("ascii"),
+    )
+
+
 def _new_slurm_maintenance_state(
     profile: Profile,
     *,
     domain: str,
     sha: str,
     tree: str,
+    candidate_set: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if candidate_set is None:
+        bindings = {
+            f"loom-dev-{sandbox}": {
+                "sandbox": sandbox,
+                "service_user": f"loom-sandbox-{sandbox}",
+                "candidate_sha": candidate,
+                "candidate_tree": tree,
+            }
+            for sandbox, candidate in zip(
+                SANDBOXES,
+                (sha, "c" * 40, "d" * 40),
+                strict=True,
+            )
+        }
+        candidate_set = {
+            "candidate_set_sha256": hashlib.sha256(
+                json.dumps(bindings, sort_keys=True, separators=(",", ":")).encode("ascii"),
+            ).hexdigest(),
+            "candidate_bindings": bindings,
+            "generation": 1,
+            "convergence_id": "e" * 64,
+        }
     order = _slurm_node_order(domain)
     controller = DOMAIN_PUBLISHERS[domain]
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "artifact_type": "developer-sandbox-slurm-maintenance-journal",
         "domain": domain,
         "sandbox": profile.sandbox,
         "candidate_sha": sha,
         "candidate_tree": tree,
+        "candidate_set_sha256": candidate_set["candidate_set_sha256"],
+        "candidate_bindings": candidate_set["candidate_bindings"],
+        "generation": candidate_set["generation"],
+        "convergence_id": candidate_set["convergence_id"],
         "controller": controller,
         "node_order": list(order),
         "phase": "running",
@@ -4086,7 +4351,15 @@ def _validate_slurm_maintenance_state(
     domain: str,
     sha: str,
     tree: str,
+    candidate_set: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if candidate_set is None:
+        candidate_set = _new_slurm_maintenance_state(
+            profile,
+            domain=domain,
+            sha=sha,
+            tree=tree,
+        )
     order = _slurm_node_order(domain)
     controller = DOMAIN_PUBLISHERS[domain]
     if (
@@ -4099,6 +4372,10 @@ def _validate_slurm_maintenance_state(
             "sandbox",
             "candidate_sha",
             "candidate_tree",
+            "candidate_set_sha256",
+            "candidate_bindings",
+            "generation",
+            "convergence_id",
             "controller",
             "node_order",
             "phase",
@@ -4106,12 +4383,16 @@ def _validate_slurm_maintenance_state(
             "last_failure",
             "updated_at",
         }
-        or payload.get("schema_version") != 1
+        or payload.get("schema_version") != 2
         or payload.get("artifact_type") != "developer-sandbox-slurm-maintenance-journal"
         or payload.get("domain") != domain
         or payload.get("sandbox") != profile.sandbox
         or payload.get("candidate_sha") != sha
         or payload.get("candidate_tree") != tree
+        or payload.get("candidate_set_sha256") != candidate_set.get("candidate_set_sha256")
+        or payload.get("candidate_bindings") != candidate_set.get("candidate_bindings")
+        or payload.get("generation") != candidate_set.get("generation")
+        or payload.get("convergence_id") != candidate_set.get("convergence_id")
         or payload.get("controller") != controller
         or payload.get("node_order") != list(order)
         or payload.get("phase")
@@ -4187,8 +4468,19 @@ def _slurm_authority_request(
     action: str,
     sha: str,
     tree: str,
+    candidate_set_bytes: bytes | None = None,
     prior_request_id: str | None = None,
 ) -> tuple[dict[str, Any], str]:
+    if candidate_set_bytes is None:
+        candidate_set, candidate_set_bytes = _slurm_candidate_set()
+    else:
+        try:
+            candidate_set = json.loads(candidate_set_bytes)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise HostConvergeError("Slurm candidate-set payload is invalid") from exc
+    qianyi = candidate_set["candidate_bindings"]["loom-dev-qianyi"]
+    if sha != qianyi["candidate_sha"] or tree != qianyi["candidate_tree"]:
+        raise HostConvergeError("Slurm maintenance source is not the candidate-set authority")
     envelope = _node_authority_envelope(
         action=action,
         node=node,
@@ -4196,6 +4488,8 @@ def _slurm_authority_request(
         sandbox=profile.sandbox,
         sha=sha,
         tree=tree,
+        payload_kind="slurm-candidate-set-json",
+        payload_bytes=candidate_set_bytes,
         prior_request_id=prior_request_id,
     )
     request_id = str(json.loads(envelope)["request_id"])
@@ -4216,7 +4510,8 @@ def _slurm_authority_request(
             or response.get("sandbox") != profile.sandbox
             or response.get("candidate_sha") != sha
             or response.get("candidate_tree") != tree
-            or response.get("payload_sha256") != hashlib.sha256(b"").hexdigest()
+            or response.get("payload_sha256")
+            != hashlib.sha256(candidate_set_bytes).hexdigest()
             or DIGEST_RE.fullmatch(str(response.get("result_sha256"))) is None
             or binding is None
             or binding.group(1) != expected_cluster
@@ -4234,6 +4529,7 @@ def _slurm_check_node(
     node: str,
     sha: str,
     tree: str,
+    candidate_set_bytes: bytes,
 ) -> str:
     response, request_id = _slurm_authority_request(
         profile,
@@ -4242,6 +4538,7 @@ def _slurm_check_node(
         action="slurm-check",
         sha=sha,
         tree=tree,
+        candidate_set_bytes=candidate_set_bytes,
     )
     result = response.get("result")
     expected_cluster = "trt-oldlab" if domain == "oldlab" else "trt-gb10"
@@ -4257,26 +4554,52 @@ def _slurm_check_node(
 
 def slurm_maintenance_converge(profile: Profile, sha: str, domain: str) -> dict[str, Any]:
     _require_live_host()
+    with _install_lock():
+        return _slurm_maintenance_converge_locked(profile, sha, domain)
+
+
+def _slurm_maintenance_converge_locked(
+    profile: Profile,
+    sha: str,
+    domain: str,
+) -> dict[str, Any]:
     tree = _slurm_maintenance_tree(profile, sha)
     path = _slurm_maintenance_file(domain, profile.sandbox, sha)
     with _slurm_maintenance_lock(domain):
         raw = _load_slurm_maintenance_file(path)
-        state = (
-            _new_slurm_maintenance_state(
-                profile,
-                domain=domain,
-                sha=sha,
-                tree=tree,
+        if raw is not None and raw.get("phase") in {"running", "blocked"}:
+            candidate_set, candidate_set_bytes = _slurm_candidate_set(
+                generation=int(raw.get("generation", 0)),
+                convergence_id=str(raw.get("convergence_id", "")),
             )
-            if raw is None
-            else _validate_slurm_maintenance_state(
+            if (
+                candidate_set["candidate_set_sha256"] != raw.get("candidate_set_sha256")
+                or candidate_set["candidate_bindings"] != raw.get("candidate_bindings")
+            ):
+                raise HostConvergeError(
+                    "blocked Slurm candidate-set transition differs from desired state",
+                )
+            state = _validate_slurm_maintenance_state(
                 raw,
                 profile,
                 domain=domain,
                 sha=sha,
                 tree=tree,
+                candidate_set=candidate_set,
             )
-        )
+        else:
+            generation = int(raw.get("generation", 0)) + 1 if raw is not None else 1
+            candidate_set, candidate_set_bytes = _slurm_candidate_set(
+                generation=generation,
+                convergence_id=secrets.token_hex(32),
+            )
+            state = _new_slurm_maintenance_state(
+                profile,
+                domain=domain,
+                sha=sha,
+                tree=tree,
+                candidate_set=candidate_set,
+            )
         if state["phase"] in {"rolling-back", "rolled-back"}:
             raise HostConvergeError("Slurm maintenance candidate is rolling back")
         state["phase"] = "running"
@@ -4297,6 +4620,7 @@ def slurm_maintenance_converge(profile: Profile, sha: str, domain: str) -> dict[
                     action=action,
                     sha=sha,
                     tree=tree,
+                    candidate_set_bytes=candidate_set_bytes,
                 )
                 if row["converge_receipt"] is not None:
                     if response != row["converge_receipt"]:
@@ -4311,6 +4635,7 @@ def slurm_maintenance_converge(profile: Profile, sha: str, domain: str) -> dict[
                     node=node,
                     sha=sha,
                     tree=tree,
+                    candidate_set_bytes=candidate_set_bytes,
                 )
                 _write_slurm_maintenance_state(path, state)
             for node in _slurm_node_order(domain):
@@ -4322,6 +4647,7 @@ def slurm_maintenance_converge(profile: Profile, sha: str, domain: str) -> dict[
                     node=node,
                     sha=sha,
                     tree=tree,
+                    candidate_set_bytes=candidate_set_bytes,
                 )
                 _write_slurm_maintenance_state(path, state)
             state["phase"] = "completed"
@@ -4340,20 +4666,49 @@ def slurm_maintenance_converge(profile: Profile, sha: str, domain: str) -> dict[
 
 def slurm_maintenance_check(profile: Profile, sha: str, domain: str) -> dict[str, Any]:
     _require_live_host()
+    with _install_lock():
+        return _slurm_maintenance_check_locked(profile, sha, domain)
+
+
+def _slurm_maintenance_check_locked(
+    profile: Profile,
+    sha: str,
+    domain: str,
+) -> dict[str, Any]:
     tree = _slurm_maintenance_tree(profile, sha)
-    checked = [
-        {
-            "node": node,
-            "request_id": _slurm_check_node(
-                profile,
-                domain=domain,
-                node=node,
-                sha=sha,
-                tree=tree,
-            ),
-        }
-        for node in _slurm_node_order(domain)
-    ]
+    path = _slurm_maintenance_file(domain, profile.sandbox, sha)
+    with _slurm_maintenance_lock(domain):
+        raw = _load_slurm_maintenance_file(path)
+        if not isinstance(raw, dict) or raw.get("phase") != "completed":
+            raise HostConvergeError(
+                "Slurm check requires a completed candidate-set convergence",
+            )
+        candidate_set, candidate_set_bytes = _slurm_candidate_set(
+            generation=int(raw.get("generation", 0)),
+            convergence_id=str(raw.get("convergence_id", "")),
+        )
+        state = _validate_slurm_maintenance_state(
+            raw,
+            profile,
+            domain=domain,
+            sha=sha,
+            tree=tree,
+            candidate_set=candidate_set,
+        )
+        checked = [
+            {
+                "node": node,
+                "request_id": _slurm_check_node(
+                    profile,
+                    domain=domain,
+                    node=node,
+                    sha=sha,
+                    tree=tree,
+                    candidate_set_bytes=candidate_set_bytes,
+                ),
+            }
+            for node in _slurm_node_order(domain)
+        ]
     return {
         "schema_version": 1,
         "artifact_type": "developer-sandbox-slurm-maintenance-check",
@@ -4361,6 +4716,9 @@ def slurm_maintenance_check(profile: Profile, sha: str, domain: str) -> dict[str
         "sandbox": profile.sandbox,
         "candidate_sha": sha,
         "candidate_tree": tree,
+        "candidate_set_sha256": candidate_set["candidate_set_sha256"],
+        "generation": state["generation"],
+        "convergence_id": state["convergence_id"],
         "nodes": checked,
         "status": "succeeded",
     }
@@ -4368,34 +4726,79 @@ def slurm_maintenance_check(profile: Profile, sha: str, domain: str) -> dict[str
 
 def slurm_maintenance_rollback(profile: Profile, sha: str, domain: str) -> dict[str, Any]:
     _require_live_host()
+    with _install_lock():
+        return _slurm_maintenance_rollback_locked(profile, sha, domain)
+
+
+def _slurm_maintenance_rollback_locked(
+    profile: Profile,
+    sha: str,
+    domain: str,
+) -> dict[str, Any]:
     tree = _slurm_maintenance_tree(profile, sha)
     path = _slurm_maintenance_file(domain, profile.sandbox, sha)
     with _slurm_maintenance_lock(domain):
         raw = _load_slurm_maintenance_file(path)
+        if not isinstance(raw, dict):
+            raise HostConvergeError("Slurm maintenance journal is unavailable")
+        candidate_set = {
+            "schema_version": 2,
+            "kind": "loom.developer-sandbox.slurm-candidate-set",
+            "candidate_set_sha256": raw.get("candidate_set_sha256"),
+            "candidate_bindings": raw.get("candidate_bindings"),
+            "generation": raw.get("generation"),
+            "convergence_id": raw.get("convergence_id"),
+        }
+        candidate_set_bytes = (
+            json.dumps(
+                candidate_set,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+            + "\n"
+        ).encode("ascii")
         state = _validate_slurm_maintenance_state(
             raw,
             profile,
             domain=domain,
             sha=sha,
             tree=tree,
+            candidate_set=candidate_set,
         )
+        rollback_resume = state["phase"] == "rolling-back" or (
+            state["phase"] == "blocked"
+            and isinstance(state["last_failure"], dict)
+            and state["last_failure"].get("action") == "slurm-rollback"
+        )
+        if state["phase"] not in {"completed", "rolled-back"} and not rollback_resume:
+            raise HostConvergeError(
+                "Slurm rollback requires a completed candidate-set convergence",
+            )
+        prior_request_ids: dict[str, str] = {}
+        for node in _slurm_node_order(domain):
+            prior = state["nodes"][node]["converge_receipt"]
+            if not isinstance(prior, dict):
+                raise HostConvergeError(
+                    "Slurm rollback requires every converge authority receipt",
+                )
+            prior_request_id = prior.get("request_id")
+            if (
+                not isinstance(prior_request_id, str)
+                or DIGEST_RE.fullmatch(prior_request_id) is None
+            ):
+                raise HostConvergeError("Slurm rollback owned receipt is invalid")
+            prior_request_ids[node] = prior_request_id
+        if state["phase"] == "rolled-back":
+            return state
         state["phase"] = "rolling-back"
         state["last_failure"] = None
         _write_slurm_maintenance_state(path, state)
         current_node = DOMAIN_PUBLISHERS[domain]
         try:
-            for node in reversed(_slurm_node_order(domain)):
+            for node in _slurm_node_order(domain):
                 current_node = node
                 row = state["nodes"][node]
-                prior = row["converge_receipt"]
-                if prior is None:
-                    continue
-                prior_request_id = prior.get("request_id")
-                if (
-                    not isinstance(prior_request_id, str)
-                    or DIGEST_RE.fullmatch(prior_request_id) is None
-                ):
-                    raise HostConvergeError("Slurm rollback owned receipt is invalid")
                 response, _request_id = _slurm_authority_request(
                     profile,
                     domain=domain,
@@ -4403,7 +4806,8 @@ def slurm_maintenance_rollback(profile: Profile, sha: str, domain: str) -> dict[
                     action="slurm-rollback",
                     sha=sha,
                     tree=tree,
-                    prior_request_id=prior_request_id,
+                    candidate_set_bytes=candidate_set_bytes,
+                    prior_request_id=prior_request_ids[node],
                 )
                 if row["rollback_receipt"] is not None:
                     if response != row["rollback_receipt"]:
@@ -5009,7 +5413,51 @@ def _install_remote_link_fleet(
     _collect_and_persist_remote_link_fleet(profile, sha, tree)
 
 
-def _worker_env_seed(profile: Profile, sha: str) -> bytes:
+def _worker_capacity_contract(domain: str) -> tuple[str, int]:
+    """Read the domain worker binding from the exact checked-in capacity policy."""
+    if domain not in DOMAIN_PEERS:
+        raise HostConvergeError("worker capacity domain is invalid")
+    runtime_config = SOURCE_PROFILES / "runtime-domains.toml"
+    try:
+        runtime = tomllib.loads(runtime_config.read_text(encoding="utf-8"))
+        domain_config = runtime["domains"][domain]
+        source = domain_config["capacity_policy_source"]
+        expected_source = f"deploy/developer-sandboxes/shared-capacity-policies/{domain}.toml"
+        if source != expected_source:
+            raise HostConvergeError("worker capacity policy source drifted")
+        capacity_path = REPO_ROOT / source
+        capacity = tomllib.loads(capacity_path.read_text(encoding="utf-8"))
+        actuator = capacity["policy"]["actuator_config"]
+    except (KeyError, OSError, TypeError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+        raise HostConvergeError("worker capacity contract is unavailable or invalid") from exc
+    expected_env = (
+        f"/shared_work/loom/runtime/sandboxes/${{SANDBOX}}/"
+        f"${{CANDIDATE_SHA}}/worker-{domain}.env"
+    )
+    concurrency = actuator.get("requested_concurrency")
+    allowed_nodes = actuator.get("allowed_nodes")
+    if (
+        runtime.get("schema_version") != 1
+        or not isinstance(domain_config, dict)
+        or capacity.get("schema_version") != 1
+        or capacity.get("pool_name") != domain
+        or domain_config.get("worker_pool_name") != domain
+        or domain_config.get("worker_max_concurrent") != concurrency
+        or type(concurrency) is not int
+        or concurrency < 1
+        or not isinstance(allowed_nodes, list)
+        or not all(isinstance(node, str) for node in allowed_nodes)
+        or tuple(node.lower() for node in allowed_nodes) != DOMAIN_CAPACITY_NODES[domain]
+        or actuator.get("env_file") != expected_env
+        or actuator.get("candidate_sha") != "${CANDIDATE_SHA}"
+        or actuator.get("slurm_account") != "loom-dev-${SANDBOX}"
+    ):
+        raise HostConvergeError("worker capacity contract binding drifted")
+    return domain, concurrency
+
+
+def _worker_env_seed(profile: Profile, sha: str, domain: str) -> bytes:
+    pool, concurrency = _worker_capacity_contract(domain)
     bundle = f"/etc/loom/developer-sandbox-links/clients/{profile.sandbox}/{sha}"
     values = {
         "LOOM_WORKER_CONTROL_PLANE_URL": "http://sandbox-link:8080",
@@ -5017,6 +5465,8 @@ def _worker_env_seed(profile: Profile, sha: str) -> bytes:
         "LOOM_WORKER_MINIO_ENDPOINT": "http://sandbox-link:9000",
         "LOOM_WORKER_SANDBOX_IDENTITY": profile.sandbox,
         "LOOM_WORKER_CANDIDATE_SHA": sha,
+        "LOOM_WORKER_POOL_NAME": pool,
+        "LOOM_WORKER_MAX_CONCURRENT": str(concurrency),
         "LOOM_WORKER_TOKEN_FILE_HOST": f"{bundle}/worker-token",
         "LOOM_WORKER_MINIO_ACCESS_KEY_FILE_HOST": f"{bundle}/minio-access-key",
         "LOOM_WORKER_MINIO_SECRET_KEY_FILE_HOST": f"{bundle}/minio-secret-key",
@@ -5057,7 +5507,6 @@ def _publish_domain_attestations(
 ) -> None:
     relative_program = "scripts/ops/developer_sandbox_domain_runtime.py"
     config_relative = "deploy/developer-sandboxes/runtime-domains.toml"
-    seed = _worker_env_seed(profile, sha)
     fleet_path = FLEET_ATTESTATION_ROOT / profile.sandbox / sha / "fleet.json"
     try:
         fleet_metadata = fleet_path.lstat()
@@ -5075,17 +5524,18 @@ def _publish_domain_attestations(
         or len(fleet) > (1 << 20)
     ):
         raise HostConvergeError("fleet attestation seed metadata is invalid")
-    archive_buffer = io.BytesIO()
-    with tarfile.open(fileobj=archive_buffer, mode="w") as archive:
-        for name, content in (("worker.env", seed), ("fleet.json", fleet)):
-            info = tarfile.TarInfo(name)
-            info.size = len(content)
-            info.mode = 0o600
-            info.uid = 0
-            info.gid = 0
-            archive.addfile(info, io.BytesIO(content))
-    attestation_seed = archive_buffer.getvalue()
     for domain in DOMAIN_PEERS:
+        seed = _worker_env_seed(profile, sha, domain)
+        archive_buffer = io.BytesIO()
+        with tarfile.open(fileobj=archive_buffer, mode="w") as archive:
+            for name, content in (("worker.env", seed), ("fleet.json", fleet)):
+                info = tarfile.TarInfo(name)
+                info.size = len(content)
+                info.mode = 0o600
+                info.uid = 0
+                info.gid = 0
+                archive.addfile(info, io.BytesIO(content))
+        attestation_seed = archive_buffer.getvalue()
         publisher = DOMAIN_PUBLISHERS[domain]
         _node_authority(
             publisher,
@@ -6118,7 +6568,7 @@ def _parser() -> argparse.ArgumentParser:
     for command in ("slurm-converge", "slurm-check", "slurm-rollback"):
         child = subparsers.add_parser(command)
         child.add_argument("--domain", choices=tuple(DOMAIN_PEERS), required=True)
-        child.add_argument("--sandbox", choices=SANDBOXES, required=True)
+        child.add_argument("--sandbox", choices=("all",), required=True)
         child.add_argument("--candidate-sha", required=True)
         child.add_argument("--execute", action="store_true")
     for command in ("service-converge", "service-check"):
@@ -6229,6 +6679,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise HostConvergeError("candidate SHA must be full lowercase 40-hex")
             profiles = load_profiles()
             selected = _select_profiles(profiles, args.sandbox)
+            qianyi = next(profile for profile in selected if profile.sandbox == "qianyi")
             result = {
                 "schema_version": 1,
                 "artifact_type": "developer-sandbox-slurm-maintenance-plan",
@@ -6247,7 +6698,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "slurm-check": slurm_maintenance_check,
                     "slurm-rollback": slurm_maintenance_rollback,
                 }[args.command]
-                result = operation(selected[0], args.candidate_sha, args.domain)
+                result = operation(qianyi, args.candidate_sha, args.domain)
         else:
             profiles = load_profiles()
             selected = _select_profiles(profiles, args.sandbox)

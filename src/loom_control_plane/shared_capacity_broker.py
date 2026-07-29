@@ -57,6 +57,10 @@ _OBSERVATION_FIELDS = {
     "terminal_slots",
     "payload_sha256",
 }
+_ACCEPTANCE_META_KEY = "acceptance_capacity_contract"
+_ACCEPTANCE_SESSION_RE = re.compile(r"[0-9a-f]{32}")
+_ACCEPTANCE_PHASE_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+_ACCEPTANCE_POOLS = ("gb10", "oldlab")
 
 
 class BrokerError(ValueError):
@@ -71,6 +75,9 @@ class SandboxId(StrEnum):
     @property
     def environment(self) -> str:
         return f"sandbox-{self.value}"
+
+
+_ACCEPTANCE_SANDBOXES = tuple(item.value for item in SandboxId)
 
 
 class RequestState(StrEnum):
@@ -393,6 +400,90 @@ def _validate_request_input(
     return normalized_sandbox, candidate_sha, pool, purpose, idempotency_key
 
 
+def _validate_acceptance_contract(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise BrokerError("acceptance contract is invalid")
+    required = {
+        "schema_version",
+        "admission_token",
+        "session_id",
+        "candidate_shas",
+        "phases",
+        "target_slots",
+        "ttl_seconds",
+        "pool_slot_budgets",
+        "pool_pending_slot_budgets",
+        "expires_at",
+    }
+    candidate_shas = value.get("candidate_shas")
+    phases = value.get("phases")
+    target_slots = value.get("target_slots")
+    ttl_seconds = value.get("ttl_seconds")
+    slot_budgets = value.get("pool_slot_budgets")
+    pending_budgets = value.get("pool_pending_slot_budgets")
+    if (
+        set(value) != required
+        or value.get("schema_version") != 1
+        or _ADMISSION_FENCE_RE.fullmatch(str(value.get("admission_token"))) is None
+        or _ACCEPTANCE_SESSION_RE.fullmatch(str(value.get("session_id"))) is None
+        or not isinstance(candidate_shas, dict)
+        or set(candidate_shas) != set(_ACCEPTANCE_SANDBOXES)
+        or any(
+            not isinstance(candidate_shas.get(sandbox), str)
+            or _SHA_RE.fullmatch(str(candidate_shas[sandbox])) is None
+            for sandbox in _ACCEPTANCE_SANDBOXES
+        )
+        or len(set(candidate_shas.values())) != len(_ACCEPTANCE_SANDBOXES)
+        or not isinstance(phases, list)
+        or not phases
+        or len(phases) != len(set(phases))
+        or any(
+            not isinstance(phase, str) or _ACCEPTANCE_PHASE_RE.fullmatch(phase) is None
+            for phase in phases
+        )
+        or not isinstance(target_slots, dict)
+        or set(target_slots) != set(_ACCEPTANCE_POOLS)
+        or not isinstance(ttl_seconds, dict)
+        or set(ttl_seconds) != set(phases)
+        or not isinstance(slot_budgets, dict)
+        or set(slot_budgets) != set(_ACCEPTANCE_POOLS)
+        or not isinstance(pending_budgets, dict)
+        or set(pending_budgets) != set(_ACCEPTANCE_POOLS)
+    ):
+        raise BrokerError("acceptance contract is invalid")
+    for pool in _ACCEPTANCE_POOLS:
+        target = target_slots[pool]
+        slot_budget = slot_budgets[pool]
+        pending_budget = pending_budgets[pool]
+        if (
+            isinstance(target, bool)
+            or not isinstance(target, int)
+            or target <= 0
+            or isinstance(slot_budget, bool)
+            or not isinstance(slot_budget, int)
+            or isinstance(pending_budget, bool)
+            or not isinstance(pending_budget, int)
+            or pending_budget < 0
+            or target * len(_ACCEPTANCE_SANDBOXES) > slot_budget
+            or slot_budget > _MAX_BUDGET_SLOTS
+            or pending_budget > _MAX_BUDGET_SLOTS
+        ):
+            raise BrokerError("acceptance contract budgets are invalid")
+    for phase in phases:
+        ttl = ttl_seconds[phase]
+        if (
+            isinstance(ttl, bool)
+            or not isinstance(ttl, int)
+            or not 60 <= ttl <= _MAX_TTL_SECONDS
+        ):
+            raise BrokerError("acceptance contract TTL is invalid")
+    _parse_timestamp(str(value.get("expires_at")))
+    return cast(
+        dict[str, Any],
+        json.loads(json.dumps(value, sort_keys=True, separators=(",", ":"))),
+    )
+
+
 class SharedCapacityBroker:
     """Single persistent authority for all developer-sandbox capacity."""
 
@@ -671,6 +762,576 @@ class SharedCapacityBroker:
         finally:
             connection.close()
 
+    @staticmethod
+    def _acceptance_contract(
+        connection: sqlite3.Connection,
+    ) -> dict[str, Any] | None:
+        row = connection.execute(
+            "SELECT value FROM broker_meta WHERE key = ?",
+            (_ACCEPTANCE_META_KEY,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            value = json.loads(str(row["value"]))
+        except json.JSONDecodeError as exc:
+            raise BrokerError("stored acceptance contract is invalid") from exc
+        contract = _validate_acceptance_contract(value)
+        if str(row["value"]) != json.dumps(
+            contract,
+            sort_keys=True,
+            separators=(",", ":"),
+        ):
+            raise BrokerError("stored acceptance contract is not canonical")
+        return contract
+
+    def open_acceptance_admission(
+        self,
+        *,
+        token: str,
+        contract: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Persist one exact acceptance-only contract while general admission stays fenced."""
+
+        validated = _validate_acceptance_contract(dict(contract))
+        if validated["admission_token"] != token:
+            raise BrokerError("acceptance contract token does not match its fence")
+        now = _utc(self._clock())
+        expires_at = _parse_timestamp(str(validated["expires_at"]))
+        if expires_at <= now or expires_at > now + timedelta(seconds=_MAX_TTL_SECONDS):
+            raise BrokerError("acceptance contract expiry is outside its fixed bound")
+        self.initialize()
+        connection = self._transaction()
+        try:
+            if self._admission_fence(connection) != token:
+                raise BrokerError("acceptance contract requires the exact closed general fence")
+            existing = self._acceptance_contract(connection)
+            if existing is None:
+                connection.execute(
+                    "INSERT INTO broker_meta(key, value) VALUES(?, ?)",
+                    (
+                        _ACCEPTANCE_META_KEY,
+                        json.dumps(validated, sort_keys=True, separators=(",", ":")),
+                    ),
+                )
+            elif existing != validated:
+                raise BrokerError("another acceptance contract is already active")
+            connection.commit()
+            return validated
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _acceptance_request_values(
+        contract: Mapping[str, Any],
+        *,
+        phase: str,
+        sandbox: str,
+        pool: str,
+    ) -> tuple[SandboxId, str, str, int, int, str]:
+        normalized_sandbox = SandboxId(sandbox)
+        candidate_sha = str(contract["candidate_shas"][sandbox])
+        target_slots = int(contract["target_slots"][pool])
+        ttl_seconds = int(contract["ttl_seconds"][phase])
+        purpose = f"developer-sandbox-live-acceptance/{contract['session_id']}/{phase}"
+        idempotency_key = (
+            f"acceptance:{contract['session_id']}:{phase}:{sandbox}:{pool}"
+        )
+        _validate_request_input(
+            sandbox=normalized_sandbox,
+            candidate_sha=candidate_sha,
+            pool=pool,
+            min_slots=0,
+            target_slots=target_slots,
+            ttl_seconds=ttl_seconds,
+            purpose=purpose,
+            preemptible=True,
+            idempotency_key=idempotency_key,
+        )
+        return (
+            normalized_sandbox,
+            candidate_sha,
+            purpose,
+            target_slots,
+            ttl_seconds,
+            idempotency_key,
+        )
+
+    @classmethod
+    def _is_acceptance_owned_request(
+        cls,
+        request: CapacityRequest,
+        contract: Mapping[str, Any],
+    ) -> bool:
+        if request.pool not in _ACCEPTANCE_POOLS:
+            return False
+        for phase in contract["phases"]:
+            values = cls._acceptance_request_values(
+                contract,
+                phase=str(phase),
+                sandbox=request.sandbox.value,
+                pool=request.pool,
+            )
+            if (
+                request.candidate_sha == values[1]
+                and request.min_slots == 0
+                and request.target_slots == values[3]
+                and request.ttl_seconds == values[4]
+                and request.purpose == values[2]
+                and request.preemptible is True
+                and request.idempotency_key == values[5]
+            ):
+                return True
+        return False
+
+    def acceptance_cohort_status(
+        self,
+        *,
+        token: str,
+        session_id: str,
+        phase: str,
+    ) -> list[dict[str, object]] | None:
+        """Read one exact cohort without creating missing requests."""
+
+        self.initialize()
+        connection = self._transaction()
+        try:
+            if self._admission_fence(connection) != token:
+                raise BrokerError("acceptance cohort requires the exact closed general fence")
+            contract = self._acceptance_contract(connection)
+            if (
+                contract is None
+                or contract["admission_token"] != token
+                or contract["session_id"] != session_id
+                or phase not in contract["phases"]
+            ):
+                raise BrokerError("acceptance cohort is outside the active contract")
+            rows: list[tuple[CapacityRequest, CapacityLease]] = []
+            missing = 0
+            for sandbox in _ACCEPTANCE_SANDBOXES:
+                for pool in _ACCEPTANCE_POOLS:
+                    values = self._acceptance_request_values(
+                        contract,
+                        phase=phase,
+                        sandbox=sandbox,
+                        pool=pool,
+                    )
+                    existing = connection.execute(
+                        "SELECT id FROM capacity_requests WHERE idempotency_key = ?",
+                        (values[-1],),
+                    ).fetchone()
+                    if existing is None:
+                        missing += 1
+                        continue
+                    request, lease = _record_from_row(
+                        self._joined_row(connection, existing["id"]),
+                    )
+                    if not self._is_acceptance_owned_request(request, contract):
+                        raise BrokerError("acceptance cohort idempotency binding drifted")
+                    rows.append((request, lease))
+            if missing == len(_ACCEPTANCE_SANDBOXES) * len(_ACCEPTANCE_POOLS):
+                connection.commit()
+                return None
+            if missing or len(rows) != len(_ACCEPTANCE_SANDBOXES) * len(_ACCEPTANCE_POOLS):
+                raise BrokerError("acceptance cohort is partially materialized")
+            rows.sort(key=lambda item: (item[0].sandbox.value, item[0].pool))
+            connection.commit()
+            return [self._public_record(request, lease) for request, lease in rows]
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def retire_acceptance_requests(
+        self,
+        *,
+        token: str,
+        session_id: str,
+    ) -> None:
+        """Cancel only requests owned by the exact active acceptance contract."""
+
+        now_text = _timestamp(_utc(self._clock()))
+        self.initialize()
+        connection = self._transaction()
+        try:
+            if self._admission_fence(connection) != token:
+                raise BrokerError("acceptance retirement requires the exact closed general fence")
+            contract = self._acceptance_contract(connection)
+            if (
+                contract is None
+                or contract["admission_token"] != token
+                or contract["session_id"] != session_id
+            ):
+                raise BrokerError("acceptance retirement is outside the active contract")
+            prefix = f"developer-sandbox-live-acceptance/{session_id}/%"
+            rows = connection.execute(
+                "SELECT id FROM capacity_requests WHERE purpose LIKE ?",
+                (prefix,),
+            ).fetchall()
+            for row in rows:
+                request, lease = _record_from_row(
+                    self._joined_row(connection, row["id"]),
+                )
+                if not self._is_acceptance_owned_request(request, contract):
+                    raise BrokerError("acceptance retirement ownership drifted")
+                if request.state == RequestState.TERMINAL:
+                    continue
+                new_epoch = lease.lease_epoch + (1 if lease.granted_slots != 0 else 0)
+                connection.execute(
+                    """
+                    UPDATE capacity_requests
+                    SET cancel_requested = 1, terminal_reason = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    ("acceptance_phase_rotation", now_text, request.id),
+                )
+                connection.execute(
+                    """
+                    UPDATE capacity_leases
+                    SET lease_epoch = ?, granted_slots = 0, updated_at = ?
+                    WHERE request_id = ?
+                    """,
+                    (new_epoch, now_text, request.id),
+                )
+                self._audit(
+                    connection,
+                    request_id=request.id,
+                    event_type="acceptance_rotation_requested",
+                    occurred_at=now_text,
+                    details={"session_id": session_id, "lease_epoch": new_epoch},
+                )
+            self._refresh_states(connection, now_text=now_text)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def request_acceptance_cohort(
+        self,
+        *,
+        token: str,
+        session_id: str,
+        phase: str,
+    ) -> list[dict[str, object]]:
+        """Atomically create or read the exact six-lane cohort for one bounded phase."""
+
+        if (
+            _ADMISSION_FENCE_RE.fullmatch(token) is None
+            or _ACCEPTANCE_SESSION_RE.fullmatch(session_id) is None
+            or _ACCEPTANCE_PHASE_RE.fullmatch(phase) is None
+        ):
+            raise BrokerError("acceptance cohort identity is invalid")
+        now = _utc(self._clock())
+        now_text = _timestamp(now)
+        self.initialize()
+        connection = self._transaction()
+        try:
+            if self._admission_fence(connection) != token:
+                raise BrokerError("acceptance cohort requires the exact closed general fence")
+            contract = self._acceptance_contract(connection)
+            if (
+                contract is None
+                or contract["admission_token"] != token
+                or contract["session_id"] != session_id
+                or phase not in contract["phases"]
+            ):
+                raise BrokerError("acceptance cohort is outside the active contract")
+            rows: list[tuple[CapacityRequest, CapacityLease]] = []
+            missing: list[
+                tuple[str, str, tuple[SandboxId, str, str, int, int, str]]
+            ] = []
+            for sandbox in _ACCEPTANCE_SANDBOXES:
+                for pool in _ACCEPTANCE_POOLS:
+                    values = self._acceptance_request_values(
+                        contract,
+                        phase=phase,
+                        sandbox=sandbox,
+                        pool=pool,
+                    )
+                    idempotency_key = values[-1]
+                    existing = connection.execute(
+                        "SELECT id FROM capacity_requests WHERE idempotency_key = ?",
+                        (idempotency_key,),
+                    ).fetchone()
+                    if existing is None:
+                        missing.append((sandbox, pool, values))
+                        continue
+                    request, lease = _record_from_row(
+                        self._joined_row(connection, existing["id"]),
+                    )
+                    expected = (
+                        values[0],
+                        values[1],
+                        pool,
+                        0,
+                        values[3],
+                        values[4],
+                        values[2],
+                        True,
+                        values[5],
+                    )
+                    observed = (
+                        request.sandbox,
+                        request.candidate_sha,
+                        request.pool,
+                        request.min_slots,
+                        request.target_slots,
+                        request.ttl_seconds,
+                        request.purpose,
+                        request.preemptible,
+                        request.idempotency_key,
+                    )
+                    if observed != expected:
+                        raise BrokerError("acceptance cohort idempotency binding drifted")
+                    rows.append((request, lease))
+            if missing and rows:
+                raise BrokerError("acceptance cohort is partially materialized")
+            if missing and _parse_timestamp(str(contract["expires_at"])) <= now:
+                raise BrokerError("acceptance contract expired before cohort creation")
+            if missing:
+                prefix = f"developer-sandbox-live-acceptance/{session_id}/%"
+                for row in connection.execute(
+                    """
+                    SELECT id FROM capacity_requests
+                    WHERE purpose LIKE ? AND state != ?
+                    """,
+                    (prefix, RequestState.TERMINAL.value),
+                ).fetchall():
+                    request, _lease = _record_from_row(
+                        self._joined_row(connection, row["id"]),
+                    )
+                    if not self._is_acceptance_owned_request(request, contract):
+                        raise BrokerError("acceptance cohort ownership drifted")
+                    raise BrokerError("previous acceptance cohort is not fully retired")
+            for sandbox, pool, values in missing:
+                (
+                    normalized_sandbox,
+                    candidate_sha,
+                    purpose,
+                    target_slots,
+                    ttl_seconds,
+                    idempotency_key,
+                ) = values
+                request_id = str(uuid4())
+                expires_at = _timestamp(now + timedelta(seconds=ttl_seconds))
+                connection.execute(
+                    """
+                    INSERT INTO capacity_requests(
+                        id, sandbox, candidate_sha, pool, min_slots, target_slots,
+                        ttl_seconds, purpose, preemptible, idempotency_key, state,
+                        created_at, expires_at, updated_at
+                    ) VALUES(?, ?, ?, ?, 0, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        request_id,
+                        normalized_sandbox.value,
+                        candidate_sha,
+                        pool,
+                        target_slots,
+                        ttl_seconds,
+                        purpose,
+                        idempotency_key,
+                        RequestState.PENDING.value,
+                        now_text,
+                        expires_at,
+                        now_text,
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO capacity_leases(request_id, state, updated_at)
+                    VALUES(?, ?, ?)
+                    """,
+                    (request_id, RequestState.PENDING.value, now_text),
+                )
+                self._audit(
+                    connection,
+                    request_id=request_id,
+                    event_type="acceptance_request_created",
+                    occurred_at=now_text,
+                    details={
+                        "session_id": session_id,
+                        "phase": phase,
+                        "sandbox": sandbox,
+                        "pool": pool,
+                        "candidate_sha": candidate_sha,
+                        "target_slots": target_slots,
+                        "ttl_seconds": ttl_seconds,
+                    },
+                )
+                rows.append(
+                    _record_from_row(self._joined_row(connection, request_id)),
+                )
+            if len(rows) != len(_ACCEPTANCE_SANDBOXES) * len(_ACCEPTANCE_POOLS):
+                raise BrokerError("acceptance cohort is not closed-world")
+            rows.sort(key=lambda item: (item[0].sandbox.value, item[0].pool))
+            connection.commit()
+            return [self._public_record(request, lease) for request, lease in rows]
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def cancel_acceptance_request(
+        self,
+        *,
+        token: str,
+        session_id: str,
+        phase: str,
+        sandbox: str,
+        pool: str,
+    ) -> dict[str, object]:
+        """Cancel only the deterministic request owned by one acceptance lane."""
+
+        now_text = _timestamp(_utc(self._clock()))
+        self.initialize()
+        connection = self._transaction()
+        try:
+            if self._admission_fence(connection) != token:
+                raise BrokerError("acceptance cancel requires the exact closed general fence")
+            contract = self._acceptance_contract(connection)
+            if (
+                contract is None
+                or contract["admission_token"] != token
+                or contract["session_id"] != session_id
+                or phase not in contract["phases"]
+                or sandbox not in _ACCEPTANCE_SANDBOXES
+                or pool not in _ACCEPTANCE_POOLS
+            ):
+                raise BrokerError("acceptance cancel is outside the active contract")
+            values = self._acceptance_request_values(
+                contract,
+                phase=phase,
+                sandbox=sandbox,
+                pool=pool,
+            )
+            row = connection.execute(
+                "SELECT id FROM capacity_requests WHERE idempotency_key = ?",
+                (values[-1],),
+            ).fetchone()
+            if row is None:
+                raise BrokerError("acceptance-owned request is unavailable")
+            request, lease = _record_from_row(self._joined_row(connection, row["id"]))
+            if (
+                request.sandbox != values[0]
+                or request.candidate_sha != values[1]
+                or request.pool != pool
+                or request.purpose != values[2]
+                or request.idempotency_key != values[5]
+            ):
+                raise BrokerError("acceptance cancel ownership drifted")
+            if request.state != RequestState.TERMINAL:
+                new_epoch = lease.lease_epoch + (1 if lease.granted_slots != 0 else 0)
+                connection.execute(
+                    """
+                    UPDATE capacity_requests
+                    SET cancel_requested = 1, terminal_reason = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    ("acceptance_cancel_cleanup", now_text, request.id),
+                )
+                connection.execute(
+                    """
+                    UPDATE capacity_leases
+                    SET lease_epoch = ?, granted_slots = 0, updated_at = ?
+                    WHERE request_id = ?
+                    """,
+                    (new_epoch, now_text, request.id),
+                )
+                self._audit(
+                    connection,
+                    request_id=request.id,
+                    event_type="acceptance_cancel_requested",
+                    occurred_at=now_text,
+                    details={
+                        "session_id": session_id,
+                        "phase": phase,
+                        "sandbox": sandbox,
+                        "pool": pool,
+                        "lease_epoch": new_epoch,
+                    },
+                )
+                self._refresh_states(connection, now_text=now_text)
+                request, lease = _record_from_row(
+                    self._joined_row(connection, request.id),
+                )
+            connection.commit()
+            return self._public_record(request, lease)
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def close_acceptance_admission(
+        self,
+        *,
+        token: str,
+        session_id: str,
+    ) -> None:
+        """Remove only a fully drained exact acceptance contract."""
+
+        self.initialize()
+        connection = self._transaction()
+        try:
+            if self._admission_fence(connection) != token:
+                raise BrokerError("acceptance close requires the exact closed general fence")
+            contract = self._acceptance_contract(connection)
+            if contract is None:
+                connection.commit()
+                return
+            if (
+                contract["admission_token"] != token
+                or contract["session_id"] != session_id
+            ):
+                raise BrokerError("acceptance close ownership drifted")
+            purpose_prefix = f"developer-sandbox-live-acceptance/{session_id}/"
+            rows = connection.execute(
+                """
+                SELECT r.id
+                FROM capacity_requests r
+                WHERE r.purpose LIKE ?
+                """,
+                (f"{purpose_prefix}%",),
+            ).fetchall()
+            for row in rows:
+                request, lease = _record_from_row(
+                    self._joined_row(connection, row["id"]),
+                )
+                if request.state != RequestState.TERMINAL or any(
+                    value != 0
+                    for value in (
+                        lease.granted_slots,
+                        lease.pending_slots,
+                        lease.active_slots,
+                        lease.draining_slots,
+                        lease.committed_slots,
+                    )
+                ):
+                    raise BrokerError("acceptance contract still owns live capacity")
+            connection.execute(
+                "DELETE FROM broker_meta WHERE key = ?",
+                (_ACCEPTANCE_META_KEY,),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def acceptance_contract(self) -> dict[str, Any] | None:
+        self.initialize()
+        with self._connect() as connection:
+            return self._acceptance_contract(connection)
+
     def request_capacity(
         self,
         *,
@@ -815,6 +1476,14 @@ class SharedCapacityBroker:
         connection = self._transaction()
         try:
             request, lease = _record_from_row(self._joined_row(connection, request_id))
+            contract = self._acceptance_contract(connection)
+            if (
+                contract is not None
+                and self._is_acceptance_owned_request(request, contract)
+            ):
+                raise BrokerError(
+                    "acceptance-owned request requires the exact acceptance cancel path",
+                )
             if request.state == RequestState.TERMINAL:
                 connection.commit()
                 return self._public_record(request, lease)

@@ -65,7 +65,7 @@ _GB10_NODE_AGENT_UNIT_DIR = PurePosixPath("deploy/worker-pools/gb10")
 _NODE_AGENT_TIMER_SETTLE_ATTEMPTS = 16
 _NODE_AGENT_TIMER_SETTLE_INTERVAL_SECONDS = 2.0
 _EXTERNAL_GB10_HOSTS = tuple(
-    f"trt-gb10-{number}" for number in range(1, 16) if number != 7
+    f"trt-gb10-{number}" for number in range(1, 16)
 )
 
 
@@ -1364,7 +1364,7 @@ class GB10PrepStep(BaseStep):
             external_retirement
             and tuple(host.ssh_target for host in hosts) != _EXTERNAL_GB10_HOSTS
         ):
-            error = "external GB10 retirement inventory is not the exact 14-node fleet"
+            error = "external GB10 retirement inventory is not the exact 15-node fleet"
             step_dir.stderr_path().write_text(error + "\n")
             return RunResult(exit_code=1, error=error)
         concurrency = _gb10_prep_concurrency(

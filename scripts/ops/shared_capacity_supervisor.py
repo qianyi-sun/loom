@@ -36,9 +36,9 @@ from loom_control_plane.shared_capacity_broker import (
 
 _SCHEMA_VERSION = 1
 _SANDBOXES = ("qianyi", "hongjian", "devansh")
-_REVIEWED_POOL_SLOT_BOUNDS = {"gb10": 112, "oldlab": 20}
+_REVIEWED_POOL_SLOT_BOUNDS = {"gb10": 120, "oldlab": 20}
 _REVIEWED_POOL_PENDING_BOUNDS = {"gb10": 24, "oldlab": 10}
-_REVIEWED_GLOBAL_SLOT_BOUND = 132
+_REVIEWED_GLOBAL_SLOT_BOUND = 140
 _REVIEWED_GLOBAL_PENDING_BOUND = 34
 _EXPECTED_INSTANCES = tuple(
     f"{sandbox}-{pool}" for sandbox in _SANDBOXES for pool in _REVIEWED_POOL_SLOT_BOUNDS

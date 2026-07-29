@@ -73,10 +73,8 @@ OLDLAB_NODES = (
     "oldlab-4",
     "oldlab-5",
 )
-GB10_NODES = tuple(
-    f"trt-gb10-{index}" for index in (1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15)
-)
-ELIGIBLE_NODES = OLDLAB_NODES + GB10_NODES
+GB10_INFRASTRUCTURE_NODES = tuple(f"trt-gb10-{index}" for index in range(1, 16))
+INFRASTRUCTURE_LINK_NODES = OLDLAB_NODES + GB10_INFRASTRUCTURE_NODES
 CLIENT_FILES = ("ca.pem", "client.pem", "client-key.pem")
 OPENSSL_PATH = shutil.which("openssl") or "openssl"
 SERVICE_VALUES = {
@@ -615,7 +613,7 @@ def _prepare_rotation_locked(profile: Profile, candidate_sha: str) -> Path:
     server_csr.unlink()
     server_ext.unlink()
 
-    for node in ELIGIBLE_NODES:
+    for node in INFRASTRUCTURE_LINK_NODES:
         node_root = destination / "clients" / node
         _ensure_root_dir(node_root)
         client_key = node_root / "client-key.pem"
@@ -729,9 +727,9 @@ def _validate_existing_issuance(
         client_nodes = {path.name for path in clients.iterdir()}
     except OSError as exc:
         raise LinkHostError("candidate issuance clients are unavailable") from exc
-    if client_nodes != set(ELIGIBLE_NODES):
+    if client_nodes != set(INFRASTRUCTURE_LINK_NODES):
         raise LinkHostError("candidate issuance client inventory is incomplete")
-    for node in ELIGIBLE_NODES:
+    for node in INFRASTRUCTURE_LINK_NODES:
         root = clients / node
         _validate_issuance_directory(root)
         for name, mode in (
@@ -882,7 +880,7 @@ def _install_client_locked(
     minio_access_key_source: Path,
     minio_secret_key_source: Path,
 ) -> Path:
-    if node not in ELIGIBLE_NODES:
+    if node not in INFRASTRUCTURE_LINK_NODES:
         raise LinkHostError("client node is not in the closed inventory")
     _run(
         (
@@ -1319,9 +1317,9 @@ def _persist_attestation_locked(
         or payload.get("schema_version") != 1
         or payload.get("sandbox") != profile.sandbox
         or payload.get("candidate_sha") != candidate_sha
-        or payload.get("eligible_nodes") != list(ELIGIBLE_NODES)
+        or payload.get("eligible_nodes") != list(INFRASTRUCTURE_LINK_NODES)
         or not isinstance(nodes, dict)
-        or set(nodes) != set(ELIGIBLE_NODES)
+        or set(nodes) != set(INFRASTRUCTURE_LINK_NODES)
         or payload.get("payload_sha256") != _attestation_digest(payload)
     ):
         raise LinkHostError("fleet attestation does not match the closed schema")
@@ -1384,7 +1382,7 @@ def _persist_attestation_locked(
         "secret_files",
         "services",
     }
-    for node in ELIGIBLE_NODES:
+    for node in INFRASTRUCTURE_LINK_NODES:
         node_payload = nodes.get(node)
         if (
             not isinstance(node_payload, dict)
@@ -1460,7 +1458,7 @@ def _plan(args: argparse.Namespace, profile: Profile, candidate_sha: str) -> dic
             }
             for service in profile.services
         },
-        "eligible_nodes": list(ELIGIBLE_NODES),
+        "eligible_nodes": list(INFRASTRUCTURE_LINK_NODES),
         "shared_filesystem_secrets": False,
         "requires_root": args.command != "validate-env",
     }
@@ -1495,13 +1493,21 @@ def build_parser() -> argparse.ArgumentParser:
         if command == "install-server":
             child.add_argument("--credential-source", type=Path, required=True)
         if command == "install-client":
-            child.add_argument("--node", choices=ELIGIBLE_NODES, required=True)
+            child.add_argument(
+                "--node",
+                choices=INFRASTRUCTURE_LINK_NODES,
+                required=True,
+            )
             child.add_argument("--credential-source", type=Path, required=True)
             child.add_argument("--worker-token-file", type=Path, required=True)
             child.add_argument("--minio-access-key-file", type=Path, required=True)
             child.add_argument("--minio-secret-key-file", type=Path, required=True)
         if command == "check-client":
-            child.add_argument("--node", choices=ELIGIBLE_NODES, required=True)
+            child.add_argument(
+                "--node",
+                choices=INFRASTRUCTURE_LINK_NODES,
+                required=True,
+            )
         if command == "validate-env":
             child.add_argument("--env-file", type=Path, required=True)
     return parser

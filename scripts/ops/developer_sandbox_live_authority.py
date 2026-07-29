@@ -321,7 +321,7 @@ def _load_adapter_config(sandbox: str, pool: str) -> AdapterConfig:
         "adapter_state_path": f"/var/lib/loom-shared-capacity/adapters/{sandbox}-{pool}.json",
         "sandbox_state_path": str(SANDBOX_ROOT / sandbox / "sandbox-state.json"),
         "runtime_attestation_root": "/var/lib/loom-shared-capacity/runtime-attestations",
-        "max_slots_bound": 20 if pool == "oldlab" else 140,
+        "max_slots_bound": 20 if pool == "oldlab" else 120,
         "timeout_seconds": 10,
     }
     if set(payload) != EXPECTED_ADAPTER_FIELDS or payload != expected:
@@ -334,7 +334,7 @@ def _load_adapter_config(sandbox: str, pool: str) -> AdapterConfig:
         admin_secret_file=SANDBOX_ROOT / sandbox / "secrets/admin.toml",
         observation_path=CAPACITY_ROOT / f"{sandbox}-{pool}.json",
         sandbox_state_path=SANDBOX_ROOT / sandbox / "sandbox-state.json",
-        max_slots_bound=20 if pool == "oldlab" else 140,
+        max_slots_bound=20 if pool == "oldlab" else 120,
         timeout_seconds=10.0,
     )
 
@@ -514,7 +514,6 @@ def _active_job(
         or not isinstance(node, str)
         or not isinstance(allowed_nodes, list)
         or node not in allowed_nodes
-        or node == "trt-gb10-7"
         or (config.pool == "oldlab" and not node.startswith("trt-eai-oldlab-"))
         or (config.pool == "gb10" and not node.startswith("trt-gb10-"))
         or not isinstance(job.get("requested_cpus"), int)
@@ -803,7 +802,6 @@ def observe_slurm_job(
         or request.get("user") != SERVICE_USERS.get(str(request.get("sandbox")))
         or SAFE_JOB_RE.fullmatch(str(request.get("job_name"))) is None
         or not isinstance(request.get("node"), str)
-        or request.get("node") == "trt-gb10-7"
         or (
             request.get("pool") == "oldlab"
             and not str(request.get("node")).startswith("trt-eai-oldlab-")

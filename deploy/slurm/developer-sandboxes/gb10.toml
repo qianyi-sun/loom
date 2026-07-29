@@ -2,6 +2,23 @@ schema_version = 1
 cluster = "trt-gb10"
 controller = "trt-gb10-1"
 submit_host = "trt-gb10-1"
+infrastructure_nodes = [
+  "trt-gb10-1",
+  "trt-gb10-2",
+  "trt-gb10-3",
+  "trt-gb10-4",
+  "trt-gb10-5",
+  "trt-gb10-6",
+  "trt-gb10-7",
+  "trt-gb10-8",
+  "trt-gb10-9",
+  "trt-gb10-10",
+  "trt-gb10-11",
+  "trt-gb10-12",
+  "trt-gb10-13",
+  "trt-gb10-14",
+  "trt-gb10-15",
+]
 allowed_nodes = [
   "trt-gb10-1",
   "trt-gb10-2",
@@ -9,6 +26,7 @@ allowed_nodes = [
   "trt-gb10-4",
   "trt-gb10-5",
   "trt-gb10-6",
+  "trt-gb10-7",
   "trt-gb10-8",
   "trt-gb10-9",
   "trt-gb10-10",
@@ -26,6 +44,7 @@ trt-gb10-3 = "gx10-0f0d"
 trt-gb10-4 = "gx10-0d93"
 trt-gb10-5 = "gx10-1036"
 trt-gb10-6 = "gx10-1000"
+trt-gb10-7 = "gx10-0faf"
 trt-gb10-8 = "gx10-db22"
 trt-gb10-9 = "gx10-16f6"
 trt-gb10-10 = "gx10-0f82"
@@ -36,7 +55,7 @@ trt-gb10-14 = "gx10-0a49"
 trt-gb10-15 = "gx10-0152"
 
 [capacity]
-slot_budget = 112
+slot_budget = 120
 pending_slot_budget = 24
 cpus_per_slot = 2
 memory_mib_per_slot = 11500
@@ -79,6 +98,6 @@ fairshare = 1
 qos = "loom-dev"
 qos_priority = 0
 qos_max_wall = "02:00:00"
-qos_max_jobs_per_user = 14
-qos_max_submit_jobs_per_user = 28
-parent_group_tres = ["cpu=224", "mem=1288G", "gres/gpu=14"]
+qos_max_jobs_per_user = 15
+qos_max_submit_jobs_per_user = 30
+parent_group_tres = ["cpu=240", "mem=1380G", "gres/gpu=15"]

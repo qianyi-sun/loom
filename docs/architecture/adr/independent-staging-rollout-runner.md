@@ -6,6 +6,15 @@ Date: 2026-07-13
 
 Tracking: [#803](https://github.com/qianyi-sun/loom/issues/803)
 
+> **Superseded operational amendment (2026-07-29).** The owner correction on
+> 2026-07-29 supersedes #822's temporary static exclusion described below.
+> `trt-gb10-7` is now part of the same 15-node infrastructure and
+> capacity-eligible set as every other GB10 node, and current acceptance
+> requires all 15 nodes with `excluded_nodes=[]`. When the node is busy, the
+> candidate-owned drain/quiescence gate defers disruptive convergence; it must
+> never cancel or preempt an external job. The #822-era paragraphs in this ADR
+> are retained only as historical decision context.
+
 Temporary amendment (2026-07-14): [#822](https://github.com/qianyi-sun/loom/issues/822)
 keeps the full 15-host SSH/trust inventory but excludes `trt-gb10-7` from the
 active staging target. Until a separate merged re-admission change passes, the

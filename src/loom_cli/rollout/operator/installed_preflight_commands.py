@@ -331,7 +331,7 @@ def _load_admission_result(rendered: str) -> dict[str, object]:
         or payload.get("kind") != "staging_external_slurm_infrastructure_convergence"
         or payload.get("result") != "pass"
         or payload.get("bootstrap_status") != "converged"
-        or payload.get("node_count") != 14
+        or payload.get("node_count") != 15
         or payload.get("source_controller") != "oldlab-2"
         or payload.get("source_controller_host") != "trt-eai-oldlab-2"
         or not isinstance(payload.get("candidate_sha"), str)

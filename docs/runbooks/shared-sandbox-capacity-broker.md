@@ -57,7 +57,7 @@ python scripts/ops/shared_capacity_broker.py \
   --candidate-sha 0123456789abcdef0123456789abcdef01234567 \
   --pool gb10 \
   --min-slots 20 \
-  --target-slots 140 \
+  --target-slots 120 \
   --ttl-minutes 120 \
   --purpose large-batch-runtime-validation \
   --idempotency-key qianyi-gb10-runtime-validation-001 \
@@ -75,11 +75,11 @@ The submit-host supervisor supplies reviewed physical budgets on every pass:
 python scripts/ops/shared_capacity_broker.py \
   --state-db /var/lib/loom-shared-capacity/broker.sqlite3 \
   reconcile \
-  --global-budget 160 \
-  --pool-budget gb10=140 \
+  --global-budget 140 \
+  --pool-budget gb10=120 \
   --pool-budget oldlab=20 \
-  --global-pending-budget 40 \
-  --pool-pending-budget gb10=30 \
+  --global-pending-budget 34 \
+  --pool-pending-budget gb10=24 \
   --pool-pending-budget oldlab=10
 ```
 
@@ -144,7 +144,7 @@ process from the broker:
   request ID, and monotonically increasing lease epoch before calling the
   sandbox Control Plane;
 - each adapter config has a reviewed `max_slots_bound`; the checked-in GB10
-  bound is `140` and the OLDLAB bound is `20`, and a larger handoff is rejected
+  bound is `120` and the OLDLAB bound is `20`, and a larger handoff is rejected
   before any Control Plane call;
 - the adapter reads the sandbox's `sandbox-state.json` and requires the local
   autoscaler policy's `actuator_config.candidate_sha` to match that same SHA
@@ -265,8 +265,8 @@ One invocation performs this ordered cycle:
    equal the configured budgets and all of these bounds hold:
 
    ```text
-   global slots <= 160       global pending <= 40
-   gb10 slots <= 140         gb10 pending <= 30
+   global slots <= 140       global pending <= 34
+   gb10 slots <= 120         gb10 pending <= 24
    oldlab slots <= 20        oldlab pending <= 10
    ```
 
@@ -478,6 +478,44 @@ sudo /usr/local/libexec/loom-shared-capacity-runtime-host activate \
 
 sudo /usr/local/libexec/loom-shared-capacity-runtime-host check \
   --candidate-sha <FULL_LOWERCASE_40_CHAR_SHA> \
+  --mode bootstrap-active \
+  --execute
+
+# After the exact F/H/D session has completed preflight and baseline, open only
+# at multi_candidate_overlap offset zero. General broker admission stays fenced.
+sudo /usr/local/libexec/loom-shared-capacity-runtime-host acceptance-open \
+  --session-id <32_LOWERCASE_HEX_SESSION_ID> \
+  --execute
+
+# Before the first checkpoint for each capacity phase, atomically create the
+# fixed three-sandbox by two-pool cohort. There are no slot/TTL/purpose
+# overrides. Replaying this command returns the same six requests.
+sudo /usr/local/libexec/loom-shared-capacity-runtime-host acceptance-cohort \
+  --session-id <32_LOWERCASE_HEX_SESSION_ID> \
+  --phase fairness_contention \
+  --execute
+
+# The only acceptance cancellation wrapper is one exact cancel_cleanup lane.
+sudo /usr/local/libexec/loom-shared-capacity-runtime-host acceptance-cancel \
+  --session-id <32_LOWERCASE_HEX_SESSION_ID> \
+  --phase cancel_cleanup \
+  --sandbox qianyi \
+  --pool gb10 \
+  --execute
+
+# Run at the final_drain phase prefix, before its first sandbox checkpoint.
+sudo /usr/local/libexec/loom-shared-capacity-runtime-host acceptance-close \
+  --session-id <32_LOWERCASE_HEX_SESSION_ID> \
+  --execute
+
+# Run only after all 33 checkpoints, the seven-checkpoint platform authority,
+# and the final Gate-6 bundle have been sealed.
+sudo /usr/local/libexec/loom-shared-capacity-runtime-host admit \
+  --candidate-sha <FULL_LOWERCASE_40_CHAR_SHA> \
+  --execute
+
+sudo /usr/local/libexec/loom-shared-capacity-runtime-host check \
+  --candidate-sha <FULL_LOWERCASE_40_CHAR_SHA> \
   --mode activated \
   --execute
 ```
@@ -508,7 +546,7 @@ pre-existing nonzero handoff.
 SHA/tree and inactive state, the broker database and current handoff bindings,
 all six exact configs, each referenced mode-`0600` admin secret file, each
 sandbox-state candidate binding, and all six fresh combined cross-domain
-runtime receipts. First activation additionally requires six explicit
+runtime receipts. Bootstrap activation additionally requires six explicit
 `enabled=false`, `min_slots=0`, `max_slots=0` broker handoffs, zero broker
 pending/active/draining/committed slots, and six Control Plane policies already
 disabled at max zero with zero last pending/actual/draining/occupied/queued
@@ -523,19 +561,107 @@ while that fence exists; an exact idempotent replay of an already recorded
 request remains read-only. The zero gate requires the six selected requests to
 be terminal, so a request racing the fence either commits first and makes
 activation fail closed, or is rejected before insertion. The converger keeps
-the fence through supervisor/adapter startup, activated-state readback, and the
-durable `committed` journal update. It releases only its exact transaction token
-after that commit. Crash recovery idempotently releases a committed fence or
-restores the inactive snapshot before releasing a rolled-back fence; another
-transaction's fence is never removed.
+the fence through supervisor/adapter startup and the durable
+`bootstrap-active` readback. A successful bootstrap deliberately leaves that
+fence closed: the running supervisor and adapters can establish the baseline
+needed by live acceptance, but they cannot receive a new capacity request.
+The exact fence token is part of the initial `prepared` journal written before
+the active-transaction pointer is published. Crash recovery therefore preserves
+the committed bootstrap fence or restores the inactive snapshot before
+releasing a failed bootstrap's exact fence, including a crash immediately after
+initial journal publication; another transaction's fence is never removed.
 
 Activation then runs the supervisor once, validates its complete atomic
 generation against fresh broker status, enables the supervisor timer, and
 starts/enables each adapter timer in the closed order. Any failure restores the
 pre-activation all-disabled unit snapshot while the zero-capacity CP policies
-remain zero. Only `check --mode activated` accepts enabled timers and successful
-service results; it also re-reads each adapter state and Control Plane policy
-and requires either zero state or the exact current broker handoff binding.
+remain zero. `check --mode bootstrap-active` accepts enabled timers and
+successful service results only while the exact installed-transaction admission
+fence remains closed. It re-reads each adapter state and Control Plane policy and
+requires the handoff to remain `enabled=false`, `min_slots=0`, `max_slots=0`,
+the Control Plane policy and worker status to remain zero, and the adapter's
+pending/active/draining counters to remain zero. An enabled handoff fails this
+check even if its current counters happen to be zero.
+
+Live acceptance uses a narrower, root-owned state between bootstrap and
+general admission. `acceptance-open` binds one existing live session, the exact
+three distinct candidate SHAs, all six sandbox/pool lanes, reviewed pool
+budgets, a fixed phase allowlist, fixed `7200`-second phase TTLs, a fixed
+`21600`-second `mixed_non_loom` TTL that covers the required four-hour soak,
+and a fixed `120`-second `ttl_cleanup` TTL. The contract expires after 24 hours
+and cannot be refreshed. The open boundary is accepted only after preflight
+and baseline have completed, at `multi_candidate_overlap` offset zero; offsets
+one and two are rejected rather than turning a late call into an acceptance
+contract. Expiry blocks creation of another cohort but never opens general
+admission.
+
+`acceptance-cohort` has no free-form capacity inputs. Under one SQLite
+`BEGIN IMMEDIATE`, it creates or re-reads exactly the three-sandbox by two-pool
+cohort for the current phase. Its deterministic purpose and idempotency keys
+are derived from the session, phase, sandbox, and pool. Before a new phase is
+created, the fixed operation journal retires the preceding phase, drives the
+supervisor/adapters until all six lanes are terminal and zero, proves at most
+one nonterminal request per lane, and only then atomically creates the next
+six. A first create is allowed only at the zero-checkpoint prefix. The one- and
+two-checkpoint prefixes are replay-only and require the exact existing six
+request IDs, so a late invocation cannot fabricate the missing start of a
+phase. General `request` remains fenced. Generic broker `cancel` rejects
+contract-owned requests. Rotation, close, and failed-open compensation use a
+separate embedded retirement command bound to the exact acceptance token and
+session; it cannot retire general broker work. Generic activated rollback
+continues to use the generic retirement interface and cannot impersonate that
+acceptance authority. The only
+acceptance cancellation command is bound to the same session,
+`cancel_cleanup`, and one exact sandbox/pool lane; the generic cancel interface
+does not become an acceptance bypass.
+
+Each acceptance mutation first writes the fixed root-owned mode-`0600`
+`/var/lib/loom-shared-capacity/runtime-host-installer/acceptance-operation.json`.
+The runtime recovery command replays that exact operation after a process or
+submit-host restart. An interrupted phase rotation resumes the same drain or
+same idempotent six-request create. If opening the contract reaches
+`acceptance-active` but its final readback fails, the journal enters a
+compensating path that keeps general admission closed, drains to six-zero,
+removes the exact contract, and restores `bootstrap-active`; recovery therefore
+cannot loop forever on a half-open state. `acceptance-close` is authorized only at the
+`final_drain` prefix. It re-closes the general fence, drains the exact
+three-candidate/six-lane set, proves all six broker, handoff, Control Plane,
+worker, and adapter counters zero, removes only the matching acceptance
+contract, and returns to `bootstrap-active`. Rollback and install remain
+fail-closed while `acceptance-active`.
+
+`admit` is the separate positive-capacity boundary. It is accepted only from
+`bootstrap-active`, while the exact fence is still closed. It revalidates the
+three distinct candidate bindings and the complete, fresh platform-health/live
+evidence. The candidate verifier rebuilds all seven platform-health checkpoints
+from immutable authority receipts plus the complete ordered soak-sample
+hash-chain and also requires the matching live session
+to be finalized, strict-schema valid, and backed by the exact 33
+phase/sandbox checkpoint journal. It requires the live session's sealed
+`gate6_sha256`, reconstructs the Gate-6 bundle from the finalized live
+evidence, platform authority, all six root-owned allocation matrices, and
+trusted runtime receipt bindings, then exact-matches the stored bundle and six
+pair artifacts. The runtime additionally validates the exact six
+sandbox/pool trial-outcome summaries: every row must match its sandbox
+candidate SHA/tree, terminal counts must equal succeeded plus failed plus
+cancelled, retry counts and attempts must be internally consistent, and the
+global numerator/denominator must reproduce the recorded success ratio. It
+then re-reads the six zero adapter/Control Plane/worker
+states and persists both the platform-health and Gate-6 digests in a root-owned
+admission journal before releasing the installed transaction's fence.
+
+Every recovery attempt first re-closes the exact fence, reruns that complete
+fresh evidence gate, exact-matches both persisted digests, and repeats the
+six-zero readback before reopening. Stale, changed, partial-seven, partial-33,
+or unsealed/rebound Gate-6
+evidence cannot be replayed after an interruption. If anything fails after the
+fence opened, the converger closes it, cancels and drains the exact
+three-candidate/six-lane request set, proves six zero handoffs, policies,
+workers, and adapter counters, and only then restores `bootstrap-active`. No
+bootstrap command accepts work, and no missing, stale, partial, or
+candidate-mismatched evidence can authorize `admit`.
+`check --mode activated` requires the fence to be open and reports positive
+capacity admission as authorized.
 
 The installed host profile is closed-world. It names exactly six instances and
 records two independent scheduler routes: OLDLAB submits on
@@ -563,9 +689,10 @@ enabled/active state, and removes the current candidate only when the journal
 proves it did not pre-exist. An activated candidate uses an additional durable
 retirement sequence. The retained install transaction first becomes the active
 rollback journal and closes broker admission with that exact transaction ID.
-It cancels only the current candidate's request in each of the exact three
-sandboxes by two pools; a nonterminal request for another candidate fails
-closed and is never cancelled.
+It derives the exact candidate set from the installed two-pool adapter bindings
+and cancels only qianyi's F, Hongjian's H, and Devansh's D request in each
+sandbox's two pools; a mismatched or foreign nonterminal request fails closed
+and is never cancelled.
 
 While the fence remains closed, rollback repeatedly runs the supported
 supervisor and six adapter service cycles. It does not restore local files until
@@ -669,11 +796,11 @@ Then reconcile it with the same reviewed budgets:
 python scripts/ops/shared_capacity_broker.py \
   --state-db /var/lib/loom-shared-capacity/broker.sqlite3 \
   reconcile \
-  --global-budget 160 \
-  --pool-budget gb10=140 \
+  --global-budget 140 \
+  --pool-budget gb10=120 \
   --pool-budget oldlab=20 \
-  --global-pending-budget 40 \
-  --pool-pending-budget gb10=30 \
+  --global-pending-budget 34 \
+  --pool-pending-budget gb10=24 \
   --pool-pending-budget oldlab=10 \
   --observations-json /var/lib/loom-shared-capacity/observations.json
 ```

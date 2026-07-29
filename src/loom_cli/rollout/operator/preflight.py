@@ -56,7 +56,7 @@ _REQUIRED_ROLLOUT_SUBDIRECTORIES = (
 FULL_GB10_HOSTS = gb10_readiness_module.FULL_GB10_HOSTS
 TEMPORARILY_EXCLUDED_GB10_HOSTS = gb10_readiness_module.TEMPORARILY_EXCLUDED_GB10_HOSTS
 ACTIVE_GB10_HOSTS = gb10_readiness_module.ACTIVE_GB10_HOSTS
-EXPECTED_GB10_SSH_CONFIG_SHA256 = "7ac3cbe20670762590b9efe4daea46126caa823f192e060be109b96350e82b4e"
+EXPECTED_GB10_SSH_CONFIG_SHA256 = "87748bfc52b81ec1a954dfbf98e87661916eb8eeb77b26222c118efd2d792df2"
 _SHARED_REPOSITORY_ROOT = Path("/srv/loom/staging-shared/candidates")
 _SYSTEM_SHARED_REPOSITORY_SOURCE = "192.168.20.12:/shared_work2/loom/staging"
 _LEGACY_SHARED_REPOSITORY_SOURCE = "192.168.20.12:/shared_work2"
@@ -472,9 +472,7 @@ def load_external_gb10_authority_profile(
     desired = raw.get("gb10_worker_pool_desired_states")
     policies = raw.get("worker_pool_autoscaler_policies")
     supervisors = raw.get("external_slurm_autoscaler_supervisors")
-    expected_intents = {
-        f"trt-gb10-{number}": "stopped" for number in range(1, 16)
-    }
+    expected_intents = {f"trt-gb10-{number}": "stopped" for number in range(1, 16)}
     if (
         raw.get("environment") != "staging"
         or not isinstance(prerequisites, dict)
@@ -618,9 +616,7 @@ def _system_shared_repository_binding(
         if (
             right_fields[0] != "nfs4"
             or right_fields[1] != _SYSTEM_SHARED_REPOSITORY_SOURCE
-            or not {"rw", "nosuid", "nodev", "noexec"}.issubset(
-                mount_options | super_options
-            )
+            or not {"rw", "nosuid", "nodev", "noexec"}.issubset(mount_options | super_options)
             or "hard" not in super_options
         ):
             return None
@@ -1236,16 +1232,10 @@ def collect_preflight(
         if service_uid >= 0
         else None
     )
-    if (
-        gb10_ok
-        and gb10 is not None
-        and shared_binding is not None
-        and external_profile is not None
-    ):
+    if gb10_ok and gb10 is not None and shared_binding is not None and external_profile is not None:
         shared_evidence = hashlib.sha256(
             (
-                shared_repository_binding_digest(shared_binding)
-                + external_profile.profile_digest
+                shared_repository_binding_digest(shared_binding) + external_profile.profile_digest
             ).encode("ascii")
         ).hexdigest()
     elif gb10_ok and gb10 is not None and shared_binding is not None:
