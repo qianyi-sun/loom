@@ -75,10 +75,15 @@ http {
 }
 EOF
 
+# Pin nginx away from mutable nginx:alpine. Hub has returned manifests whose
+# layer blobs 404 (content descriptor not found), which fails this spike with
+# docker exit 125 even when spike 01/04 pass (#1089).
+NGINX_IMAGE="${LOOM_SPIKE_NGINX_IMAGE:-nginx:1.27-alpine}"
+docker pull "$NGINX_IMAGE" >/dev/null
 docker run -d --name "$SERVER" --network "$NET" \
   --mount "type=bind,source=$CA_DIR,target=/etc/loom-ca,readonly" \
   --mount "type=bind,source=$CA_DIR/nginx.conf,target=/etc/nginx/nginx.conf,readonly" \
-  nginx:alpine >/dev/null
+  "$NGINX_IMAGE" >/dev/null
 
 # Wait for nginx to start.
 for i in {1..20}; do
