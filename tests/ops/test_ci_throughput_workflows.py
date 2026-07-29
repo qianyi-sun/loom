@@ -1452,6 +1452,14 @@ def test_staging_build_and_load_share_manifest_owned_image_matrix() -> None:
     assert 'row["image_name"]' in load_script
     assert "builds=(" not in build_script
     assert "for image_name in loom-" not in load_script
+    assert 'if ! docker image inspect "$base_image"' in load_script
+    assert 'docker pull "$base_image"' in load_script
+    assert load_script.index('docker image inspect "$base_image"') < (
+        load_script.index('docker pull "$base_image"')
+    )
+    assert load_script.index('docker pull "$base_image"') < load_script.index(
+        'kind load docker-image "$base_image"',
+    )
     assert "< <(python3" not in build_script
     assert "< <(python3" not in load_script
     assert 'done < "$build_rows"' in build_script

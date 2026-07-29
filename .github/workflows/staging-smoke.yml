@@ -402,7 +402,11 @@ jobs:
             postgres:16 \
             prometheuscommunity/pgbouncer-exporter:v0.12.1
           do
-            docker image inspect "$base_image" >/dev/null
+            # oldlab guests take the fast path through their sealed local
+            # mirror; GitHub-hosted fallback runners pull only when absent.
+            if ! docker image inspect "$base_image" >/dev/null 2>&1; then
+              docker pull "$base_image"
+            fi
             kind load docker-image "$base_image" --name loom-staging
           done
 
