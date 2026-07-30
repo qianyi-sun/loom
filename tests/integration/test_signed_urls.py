@@ -112,7 +112,7 @@ def test_signed_url_uses_configured_artifacts_bucket(
     postgres_url: str,
     artifact_seed: tuple,
 ):  # type: ignore[no-untyped-def]
-    team_a, _, trial_a, _, raw_a, _, _ = artifact_seed
+    _, _, trial_a, _, raw_a, _, _ = artifact_seed
     for k, v in {
         "LOOM_CP_DB_URL": postgres_url,
         "LOOM_CP_MINIO_ENDPOINT": "http://minio:9000",

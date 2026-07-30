@@ -4,6 +4,11 @@
     "default": "None",
     "required": false
   },
+  "artifacts_bucket": {
+    "annotation": "<class 'str'>",
+    "default": "'artifacts'",
+    "required": false
+  },
   "bind_host": {
     "annotation": "<class 'str'>",
     "default": "'0.0.0.0'",
@@ -247,6 +252,11 @@
   "storage_backend": {
     "annotation": "<class 'str'>",
     "default": "'minio'",
+    "required": false
+  },
+  "trajectories_bucket": {
+    "annotation": "<class 'str'>",
+    "default": "'trajectories'",
     "required": false
   },
   "trial_retry_default_backoff_base_sec": {
