@@ -21,4 +21,3 @@ ProtectControlGroups=true
 LockPersonality=true
 RestrictRealtime=true
 SystemCallArchitectures=native
-
