@@ -26,6 +26,7 @@ from typing import Any, Final
 
 SCHEMA_VERSION: Final = 1
 NODE: Final = "oldlab-2"
+CANONICAL_HOSTNAME: Final = "trt-eai-oldlab-2"
 REPO_ROOT: Final = Path(__file__).absolute().parents[2]
 MANIFEST_RELATIVE: Final = Path(
     "deploy/developer-sandboxes/developer-environment-authority.install.toml"
@@ -1764,10 +1765,17 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _require_canonical_root() -> None:
+    hostname = socket.gethostname().split(".", 1)[0].casefold()
+    if os.getuid() != 0 or os.geteuid() != 0 or hostname != CANONICAL_HOSTNAME:
+        raise AuthorityInstallerError(
+            f"installer requires canonical {CANONICAL_HOSTNAME} root",
+        )
+
+
 def execute(argv: Sequence[str] | None = None) -> dict[str, Any]:
     arguments = _parser().parse_args(list(argv) if argv is not None else None)
-    if os.getuid() != 0 or os.geteuid() != 0 or socket.gethostname().split(".", 1)[0] != NODE:
-        raise AuthorityInstallerError("installer requires canonical oldlab-2 root")
+    _require_canonical_root()
     installer = AuthorityInstaller(
         filesystem_root=Path("/"),
         source_root=REPO_ROOT,

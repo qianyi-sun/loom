@@ -147,7 +147,11 @@ and exits. Docker is not a runtime dependency after that transaction.
 The Python bootstrap/upgrade implementation is an internal image entrypoint,
 not an operator command. It requires a persistent host-root view of PID
 1/systemd, the local canonical node identity, exact clean Git SHA/tree, and
-root-owned non-writable source assets. It installs the fixed source, policy,
+regular single-link request/bundle/trust inputs with fixed safe modes, exact
+digests, and independent read-only bind mounts. The authenticated Docker
+operator may stage those external inputs; the entrypoint detects metadata
+drift while reading them and copies them into a root-owned, mode-`0700`
+host-stage before use. It installs the fixed source, policy,
 lock/journal/receipt roots, wrapper, systemd assets, and finally the validated
 sudoers file. It rolls back only files and directories created by a failed
 attempt.

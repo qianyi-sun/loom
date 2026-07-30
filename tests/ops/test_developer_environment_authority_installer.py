@@ -772,9 +772,8 @@ def test_readback_rejects_asset_unknown_file_symlink_and_socket_parent_drift(
         )
 
 
-def test_manifest_drift_and_wrong_host_fail_closed(
+def test_manifest_drift_fails_closed(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     filesystem_root: Path,
 ) -> None:
     source = _candidate_source(tmp_path, "candidate-one")
@@ -793,16 +792,29 @@ def test_manifest_drift_and_wrong_host_fail_closed(
             candidate_tree=TREE_ONE,
         )
 
+
+def test_canonical_physical_hostname_is_case_normalized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(installer.os, "getuid", lambda: 0)
     monkeypatch.setattr(installer.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(installer.socket, "gethostname", lambda: "oldlab-3")
-    with pytest.raises(installer.AuthorityInstallerError, match="oldlab-2"):
-        installer.execute(
-            [
-                "environment-authority-readback",
-                "--candidate-sha",
-                SHA_ONE,
-                "--candidate-tree",
-                TREE_ONE,
-            ]
-        )
+    monkeypatch.setattr(
+        installer.socket,
+        "gethostname",
+        lambda: "TRT-EAI-OLDLAB-2.internal.example",
+    )
+
+    installer._require_canonical_root()
+
+
+@pytest.mark.parametrize("hostname", ["oldlab-2", "trt-eai-oldlab-3"])
+def test_logical_or_wrong_physical_hostname_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    hostname: str,
+) -> None:
+    monkeypatch.setattr(installer.os, "getuid", lambda: 0)
+    monkeypatch.setattr(installer.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(installer.socket, "gethostname", lambda: hostname)
+
+    with pytest.raises(installer.AuthorityInstallerError, match="trt-eai-oldlab-2"):
+        installer._require_canonical_root()
