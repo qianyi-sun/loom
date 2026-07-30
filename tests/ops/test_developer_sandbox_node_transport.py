@@ -8,9 +8,11 @@ import stat
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from scripts.ops import developer_environment_registry as registry
+from scripts.ops import developer_sandbox_node_authority as node_authority
 from scripts.ops import developer_sandbox_node_transport as transport
 
 RUNBOOK = Path(__file__).resolve().parents[2] / "docs/runbooks/developer-sandbox-node-transport.md"
@@ -508,6 +510,103 @@ def test_authorized_key_is_forced_and_restricted() -> None:
     assert "permitopen" not in line
 
 
+def test_real_server_identity_chain_reads_only_public_policy_then_uses_exact_sudo(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout, _identities, _public_keys, _known_hosts = _bootstrap_oldlab2(
+        tmp_path,
+        monkeypatch,
+    )
+    operator_uid = layout.operator_uid
+    operator_gid = layout.operator_gid
+    captured: dict[str, object] = {}
+
+    assert stat.S_IMODE(layout.root.stat().st_mode) == transport.INSTALL_ROOT_MODE
+    assert stat.S_IMODE(layout.config.stat().st_mode) == transport.ROUTE_CONFIG_MODE
+    assert stat.S_IMODE(layout.server_policy.stat().st_mode) == transport.SERVER_POLICY_MODE
+    assert stat.S_IMODE(layout.identities.stat().st_mode) == 0o700
+    assert stat.S_IMODE(layout.known_hosts.stat().st_mode) == 0o600
+    assert stat.S_IMODE(layout.client_policy.stat().st_mode) == 0o600
+    assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in layout.identities.iterdir())
+
+    managed_line = next(
+        line
+        for line in layout.authorized_keys.read_text(encoding="utf-8").splitlines()
+        if line.endswith("loom-developer-sandbox-transport:oldlab2-controller")
+    )
+    assert (
+        'restrict,command="/usr/local/libexec/loom-developer-sandbox-node-transport '
+        'forced oldlab2-controller"'
+    ) in managed_line
+
+    monkeypatch.setattr(transport.os, "geteuid", lambda: 0)
+    with pytest.raises(transport.TransportError, match="caller is not the operator"):
+        transport.forced("oldlab2-controller", layout=layout)
+
+    monkeypatch.setattr(transport.os, "geteuid", lambda: operator_uid)
+    monkeypatch.setenv(
+        "SSH_ORIGINAL_COMMAND",
+        "/usr/bin/sudo -n /usr/local/libexec/loom-developer-sandbox-node-authority check",
+    )
+
+    class ExecCapturedError(RuntimeError):
+        pass
+
+    def capture_exec(path: str, argv: list[str], environ: dict[str, str]) -> None:
+        captured.update(path=path, argv=argv, environ=environ)
+        raise ExecCapturedError
+
+    monkeypatch.setattr(transport.os, "execve", capture_exec)
+    with pytest.raises(ExecCapturedError):
+        transport.forced("oldlab2-controller", layout=layout)
+
+    assert captured == {
+        "path": "/usr/bin/sudo",
+        "argv": [
+            "/usr/bin/sudo",
+            "-n",
+            "/usr/local/libexec/loom-developer-sandbox-node-authority",
+            "check",
+        ],
+        "environ": transport._clean_env(),
+    }
+    assert "SSH_ORIGINAL_COMMAND" not in captured["environ"]
+    assert not any(key.startswith("SUDO_") for key in captured["environ"])
+
+    monkeypatch.setattr(transport.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        node_authority.pwd,
+        "getpwnam",
+        lambda _name: SimpleNamespace(pw_uid=operator_uid, pw_gid=operator_gid),
+    )
+    node_authority._validate_invoker(
+        "check",
+        {
+            "SUDO_USER": "qianyi",
+            "SUDO_UID": str(operator_uid),
+            "SUDO_GID": str(operator_gid),
+            "SUDO_COMMAND": ("/usr/local/libexec/loom-developer-sandbox-node-authority check"),
+        },
+    )
+    with pytest.raises(
+        node_authority.NodeAuthorityError,
+        match="invocation is not approved",
+    ):
+        node_authority._validate_invoker(
+            "check",
+            {
+                "SUDO_USER": "root",
+                "SUDO_UID": "0",
+                "SUDO_GID": "0",
+                "SUDO_COMMAND": (
+                    "/usr/bin/sudo -n /usr/local/libexec/"
+                    "loom-developer-sandbox-node-authority check"
+                ),
+            },
+        )
+
+
 def test_ssh_argv_has_no_ambient_agent_password_or_user_override(
     tmp_path: Path,
 ) -> None:
@@ -893,6 +992,150 @@ def test_upgrade_updates_client_and_server_transactionally_and_is_idempotent(
     assert repeat["status"] == "succeeded"
 
 
+def test_upgrade_migrates_exact_legacy_server_visibility_and_replays(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout, _identities, public_keys, _known_hosts_path = _bootstrap_oldlab2(
+        tmp_path,
+        monkeypatch,
+    )
+    layout.config.chmod(0o600)
+    layout.server_policy.chmod(0o600)
+    layout.root.chmod(0o700)
+
+    plan = transport.upgrade(
+        identity_sources={},
+        public_key_sources={},
+        known_hosts_source=None,
+        execute=False,
+        layout=layout,
+        expected_root_uid=os.getuid(),
+        public_resolver=lambda path: public_keys[path.name.removesuffix(".identity")].read_bytes(),
+    )
+    assert plan["changed"] is True
+
+    applied = transport.upgrade(
+        identity_sources={},
+        public_key_sources={},
+        known_hosts_source=None,
+        execute=True,
+        layout=layout,
+        expected_root_uid=os.getuid(),
+        public_resolver=lambda path: public_keys[path.name.removesuffix(".identity")].read_bytes(),
+    )
+    assert applied["status"] == "succeeded"
+    assert stat.S_IMODE(layout.root.stat().st_mode) == transport.INSTALL_ROOT_MODE
+    assert stat.S_IMODE(layout.config.stat().st_mode) == transport.ROUTE_CONFIG_MODE
+    assert stat.S_IMODE(layout.server_policy.stat().st_mode) == transport.SERVER_POLICY_MODE
+    assert stat.S_IMODE(layout.known_hosts.stat().st_mode) == 0o600
+    assert stat.S_IMODE(layout.client_policy.stat().st_mode) == 0o600
+    assert stat.S_IMODE(layout.identities.stat().st_mode) == 0o700
+
+    replay = transport.upgrade(
+        identity_sources={},
+        public_key_sources={},
+        known_hosts_source=None,
+        execute=True,
+        layout=layout,
+        expected_root_uid=os.getuid(),
+        public_resolver=lambda path: public_keys[path.name.removesuffix(".identity")].read_bytes(),
+    )
+    assert replay["changed"] is False
+    assert replay["status"] == "succeeded"
+
+
+@pytest.mark.parametrize(
+    ("root_mode", "config_mode", "server_policy_mode"),
+    [
+        (0o700, transport.ROUTE_CONFIG_MODE, 0o600),
+        (transport.INSTALL_ROOT_MODE, 0o600, transport.SERVER_POLICY_MODE),
+    ],
+)
+def test_upgrade_rejects_partially_migrated_visibility(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    root_mode: int,
+    config_mode: int,
+    server_policy_mode: int,
+) -> None:
+    layout, _identities, public_keys, _known_hosts_path = _bootstrap_oldlab2(
+        tmp_path,
+        monkeypatch,
+    )
+    layout.config.chmod(config_mode)
+    layout.server_policy.chmod(server_policy_mode)
+    layout.root.chmod(root_mode)
+
+    with pytest.raises(transport.TransportError, match="metadata is unsafe"):
+        transport.upgrade(
+            identity_sources={},
+            public_key_sources={},
+            known_hosts_source=None,
+            execute=False,
+            layout=layout,
+            expected_root_uid=os.getuid(),
+            public_resolver=lambda path: public_keys[
+                path.name.removesuffix(".identity")
+            ].read_bytes(),
+        )
+
+
+def test_legacy_visibility_migration_rollback_restores_exact_old_modes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout, _identities, public_keys, _known_hosts_path = _bootstrap_oldlab2(
+        tmp_path,
+        monkeypatch,
+    )
+    layout.config.chmod(0o600)
+    layout.server_policy.chmod(0o600)
+    layout.root.chmod(0o700)
+    validate_server = transport.validate_server_install
+    saw_new_modes = False
+
+    def fail_new_server(
+        current_layout: transport.Layout | None = None,
+        *,
+        _allow_upgrade: bool = False,
+        _allow_legacy_modes: bool = False,
+    ) -> dict[str, object]:
+        nonlocal saw_new_modes
+        assert current_layout is not None
+        if (
+            stat.S_IMODE(current_layout.root.stat().st_mode) == transport.INSTALL_ROOT_MODE
+            and not _allow_legacy_modes
+        ):
+            saw_new_modes = True
+            raise transport.TransportError("injected migrated readback failure")
+        return validate_server(
+            current_layout,
+            _allow_upgrade=_allow_upgrade,
+            _allow_legacy_modes=_allow_legacy_modes,
+        )
+
+    monkeypatch.setattr(transport, "validate_server_install", fail_new_server)
+    with pytest.raises(transport.TransportError, match="rolled back"):
+        transport.upgrade(
+            identity_sources={},
+            public_key_sources={},
+            known_hosts_source=None,
+            execute=True,
+            layout=layout,
+            expected_root_uid=os.getuid(),
+            public_resolver=lambda path: public_keys[
+                path.name.removesuffix(".identity")
+            ].read_bytes(),
+        )
+
+    assert saw_new_modes is True
+    assert stat.S_IMODE(layout.root.stat().st_mode) == 0o700
+    assert stat.S_IMODE(layout.config.stat().st_mode) == 0o600
+    assert stat.S_IMODE(layout.server_policy.stat().st_mode) == 0o600
+    assert not layout.upgrade_active.exists()
+
+
 def test_upgrade_failure_rolls_back_and_runtime_is_closed_while_active(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -915,6 +1158,7 @@ def test_upgrade_failure_rolls_back_and_runtime_is_closed_while_active(
         current_layout: transport.Layout | None = None,
         *,
         _allow_upgrade: bool = False,
+        _allow_legacy_modes: bool = False,
     ) -> dict[str, object]:
         nonlocal saw_closed_runtime
         assert current_layout is not None
@@ -923,7 +1167,11 @@ def test_upgrade_failure_rolls_back_and_runtime_is_closed_while_active(
                 validate_client(current_layout)
             saw_closed_runtime = True
             raise transport.TransportError("injected readback failure")
-        return validate_client(current_layout, _allow_upgrade=_allow_upgrade)
+        return validate_client(
+            current_layout,
+            _allow_upgrade=_allow_upgrade,
+            _allow_legacy_modes=_allow_legacy_modes,
+        )
 
     monkeypatch.setattr(transport, "validate_client_install", fail_new_install)
     with pytest.raises(transport.TransportError, match="rolled back"):
@@ -972,6 +1220,7 @@ def test_upgrade_recovers_prepared_crash_before_new_attempt(
         new_identity_roles=set(),
         old_config_sha256=transport._asset_digest(config_payload),
         new_config_sha256=transport._asset_digest(config_payload),
+        old_install_root_mode=transport.INSTALL_ROOT_MODE,
         client_installed=True,
         server_installed=True,
     )
@@ -980,8 +1229,8 @@ def test_upgrade_recovers_prepared_crash_before_new_attempt(
     transport._replace_installed(
         layout.config,
         b"not a valid route config\n",
-        mode=0o600,
-        parent_mode=0o700,
+        mode=transport.ROUTE_CONFIG_MODE,
+        parent_mode=transport.INSTALL_ROOT_MODE,
     )
 
     result = transport.upgrade(

@@ -68,6 +68,9 @@ RUNUSER: Final = "/usr/sbin/runuser"
 SSH_KEYGEN: Final = "/usr/bin/ssh-keygen"
 ROOT_UID: Final = 0
 ROOT_GID: Final = 0
+INSTALL_ROOT_MODE: Final = 0o755
+ROUTE_CONFIG_MODE: Final = 0o644
+SERVER_POLICY_MODE: Final = 0o644
 REQUEST_FIELDS: Final = {
     "schema_version",
     "request_id",
@@ -280,6 +283,7 @@ class UpgradeSnapshot:
     entries: tuple[Mapping[str, Any], ...]
     old_config_sha256: str
     new_config_sha256: str
+    old_install_root_mode: int
     roles: tuple[str, ...]
     new_identity_roles: tuple[str, ...]
     client_installed: bool
@@ -1051,11 +1055,11 @@ def bootstrap_client(
     }
     if not execute:
         return result
-    _ensure_directory(layout.root, mode=0o700)
+    _ensure_directory(layout.root, mode=INSTALL_ROOT_MODE)
     _ensure_directory(layout.identities, mode=0o700)
     _ensure_directory(layout.public_keys, mode=0o755)
     _ensure_directory(layout.libexec.parent, mode=0o755)
-    _install_once(layout.config, route_payload, mode=0o600)
+    _install_once(layout.config, route_payload, mode=ROUTE_CONFIG_MODE)
     _install_once(layout.libexec, program_payload, mode=0o755)
     _install_once(layout.known_hosts, known_hosts, mode=0o600)
     for role in sorted(required_roles):
@@ -1234,7 +1238,7 @@ def bootstrap_server(
     }
     if not execute:
         return result
-    _ensure_directory(layout.root, mode=0o700)
+    _ensure_directory(layout.root, mode=INSTALL_ROOT_MODE)
     _ensure_directory(layout.public_keys, mode=0o755)
     _ensure_directory(layout.libexec.parent, mode=0o755)
     _ensure_directory(
@@ -1243,7 +1247,7 @@ def bootstrap_server(
         uid=layout.operator_uid,
         gid=layout.operator_gid,
     )
-    _install_once(layout.config, route_payload, mode=0o600)
+    _install_once(layout.config, route_payload, mode=ROUTE_CONFIG_MODE)
     _install_once(layout.libexec, program_payload, mode=0o755)
     for role_name in sorted(required_roles):
         _install_once(layout.public_key(role_name), public_keys[role_name], mode=0o644)
@@ -1269,16 +1273,25 @@ def bootstrap_server(
             uid=layout.operator_uid,
             gid=layout.operator_gid,
         )
-    _install_once(layout.server_policy, _canonical_json(policy), mode=0o600)
+    _install_once(
+        layout.server_policy,
+        _canonical_json(policy),
+        mode=SERVER_POLICY_MODE,
+    )
     validate_server_install(layout)
     result["status"] = "succeeded"
     return result
 
 
-def _read_policy(path: Path, fields: set[str]) -> dict[str, Any]:
+def _read_policy(
+    path: Path,
+    fields: set[str],
+    *,
+    mode: int = 0o600,
+) -> dict[str, Any]:
     raw = _safe_external_file(
         path,
-        modes=frozenset({0o600}),
+        modes=frozenset({mode}),
         limit=MAX_ASSET_BYTES,
     )
     try:
@@ -1306,6 +1319,56 @@ def _installed_asset(
     )
 
 
+def _install_root_mode(
+    layout: Layout,
+    *,
+    allowed: frozenset[int] = frozenset({INSTALL_ROOT_MODE}),
+) -> int:
+    try:
+        metadata = layout.root.lstat()
+    except OSError as exc:
+        raise TransportError("transport install root is unavailable") from exc
+    mode = stat.S_IMODE(metadata.st_mode)
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != ROOT_UID
+        or metadata.st_gid != ROOT_GID
+        or mode not in allowed
+    ):
+        raise TransportError("transport install directory metadata is unsafe")
+    return mode
+
+
+def _set_install_root_mode(
+    layout: Layout,
+    *,
+    expected: frozenset[int],
+    target: int,
+) -> None:
+    current = _install_root_mode(layout, allowed=expected)
+    if current == target:
+        return
+    descriptor = os.open(
+        layout.root,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
+    )
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != ROOT_UID
+            or metadata.st_gid != ROOT_GID
+            or stat.S_IMODE(metadata.st_mode) != current
+        ):
+            raise TransportError("transport install directory changed during mode migration")
+        os.fchmod(descriptor, target)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    _install_root_mode(layout, allowed=frozenset({target}))
+
+
 def _reject_active_upgrade(layout: Layout) -> None:
     if layout.upgrade_active.exists() or layout.upgrade_active.is_symlink():
         raise TransportError("transport runtime admission is disabled during upgrade")
@@ -1315,11 +1378,19 @@ def validate_client_install(
     layout: Layout | None = None,
     *,
     _allow_upgrade: bool = False,
+    _allow_legacy_modes: bool = False,
 ) -> dict[str, Any]:
     layout = default_layout() if layout is None else layout
+    _install_root_mode(
+        layout,
+        allowed=frozenset({0o700 if _allow_legacy_modes else INSTALL_ROOT_MODE}),
+    )
     if not _allow_upgrade:
         _reject_active_upgrade(layout)
-    config_payload = _installed_asset(layout.config, mode=0o600)
+    config_payload = _installed_asset(
+        layout.config,
+        mode=0o600 if _allow_legacy_modes else ROUTE_CONFIG_MODE,
+    )
     program_payload = _installed_asset(layout.libexec, mode=0o755)
     known_hosts = _installed_asset(layout.known_hosts, mode=0o600)
     config = load_config(layout.config)
@@ -1380,11 +1451,19 @@ def validate_server_install(
     layout: Layout | None = None,
     *,
     _allow_upgrade: bool = False,
+    _allow_legacy_modes: bool = False,
 ) -> dict[str, Any]:
     layout = default_layout() if layout is None else layout
+    _install_root_mode(
+        layout,
+        allowed=frozenset({0o700 if _allow_legacy_modes else INSTALL_ROOT_MODE}),
+    )
     if not _allow_upgrade:
         _reject_active_upgrade(layout)
-    config_payload = _installed_asset(layout.config, mode=0o600)
+    config_payload = _installed_asset(
+        layout.config,
+        mode=0o600 if _allow_legacy_modes else ROUTE_CONFIG_MODE,
+    )
     program_payload = _installed_asset(layout.libexec, mode=0o755)
     config = load_config(layout.config)
     node = config.node_for_hostname(_hostname())
@@ -1399,6 +1478,7 @@ def validate_server_install(
             "public_key_fingerprints",
             "authorized_keys_sha256",
         },
+        mode=0o600 if _allow_legacy_modes else SERVER_POLICY_MODE,
     )
     if (
         policy["node"] != node
@@ -1467,8 +1547,12 @@ def _installed_roles(
     return client_roles, server_roles
 
 
-def _validate_install_root_inventory(layout: Layout) -> None:
-    _ensure_directory(layout.root, mode=0o700)
+def _validate_install_root_inventory(
+    layout: Layout,
+    *,
+    root_mode: int = INSTALL_ROOT_MODE,
+) -> None:
+    _install_root_mode(layout, allowed=frozenset({root_mode}))
     allowed = {
         layout.config.name,
         layout.known_hosts.name,
@@ -1505,22 +1589,36 @@ def _upgrade_paths(
     *,
     client_installed: bool,
     server_installed: bool,
+    install_root_mode: int = INSTALL_ROOT_MODE,
 ) -> list[tuple[Path, int, int, int, int]]:
+    legacy_modes = install_root_mode == 0o700
     paths = [
-        (layout.config, 0o600, 0, 0, 0o700),
+        (
+            layout.config,
+            0o600 if legacy_modes else ROUTE_CONFIG_MODE,
+            0,
+            0,
+            install_root_mode,
+        ),
         (layout.libexec, 0o755, 0, 0, 0o755),
     ]
     if client_installed:
         paths.extend(
             [
-                (layout.known_hosts, 0o600, 0, 0, 0o700),
-                (layout.client_policy, 0o600, 0, 0, 0o700),
+                (layout.known_hosts, 0o600, 0, 0, install_root_mode),
+                (layout.client_policy, 0o600, 0, 0, install_root_mode),
             ],
         )
     if server_installed:
         paths.extend(
             [
-                (layout.server_policy, 0o600, 0, 0, 0o700),
+                (
+                    layout.server_policy,
+                    0o600 if legacy_modes else SERVER_POLICY_MODE,
+                    0,
+                    0,
+                    install_root_mode,
+                ),
                 (
                     layout.authorized_keys,
                     0o600,
@@ -1544,6 +1642,7 @@ def _snapshot_manifest(snapshot: UpgradeSnapshot) -> bytes:
             "upgrade_id": snapshot.upgrade_id,
             "old_config_sha256": snapshot.old_config_sha256,
             "new_config_sha256": snapshot.new_config_sha256,
+            "old_install_root_mode": f"{snapshot.old_install_root_mode:04o}",
             "roles": list(snapshot.roles),
             "new_identity_roles": list(snapshot.new_identity_roles),
             "client_installed": snapshot.client_installed,
@@ -1561,6 +1660,7 @@ def _prepare_upgrade_snapshot(
     new_identity_roles: set[str],
     old_config_sha256: str,
     new_config_sha256: str,
+    old_install_root_mode: int,
     client_installed: bool,
     server_installed: bool,
 ) -> UpgradeSnapshot:
@@ -1597,6 +1697,7 @@ def _prepare_upgrade_snapshot(
         entries=tuple(entries),
         old_config_sha256=old_config_sha256,
         new_config_sha256=new_config_sha256,
+        old_install_root_mode=old_install_root_mode,
         roles=tuple(sorted(roles)),
         new_identity_roles=tuple(sorted(new_identity_roles)),
         client_installed=client_installed,
@@ -1627,6 +1728,7 @@ def _load_upgrade_snapshot(layout: Layout, root: Path) -> UpgradeSnapshot:
         "upgrade_id",
         "old_config_sha256",
         "new_config_sha256",
+        "old_install_root_mode",
         "roles",
         "new_identity_roles",
         "client_installed",
@@ -1653,6 +1755,7 @@ def _load_upgrade_snapshot(layout: Layout, root: Path) -> UpgradeSnapshot:
             or re.fullmatch(r"[0-9a-f]{64}", payload[field]) is None
             for field in ("old_config_sha256", "new_config_sha256")
         )
+        or payload.get("old_install_root_mode") not in {"0700", "0755"}
         or raw != _canonical_json(payload)
     ):
         raise TransportError("transport upgrade snapshot is invalid")
@@ -1662,6 +1765,7 @@ def _load_upgrade_snapshot(layout: Layout, root: Path) -> UpgradeSnapshot:
         set(payload["new_identity_roles"]),
         client_installed=payload["client_installed"],
         server_installed=payload["server_installed"],
+        install_root_mode=int(payload["old_install_root_mode"], 8),
     )
     if len(payload["entries"]) != len(expected_paths):
         raise TransportError("transport upgrade snapshot inventory is invalid")
@@ -1706,6 +1810,7 @@ def _load_upgrade_snapshot(layout: Layout, root: Path) -> UpgradeSnapshot:
         entries=tuple(payload["entries"]),
         old_config_sha256=payload["old_config_sha256"],
         new_config_sha256=payload["new_config_sha256"],
+        old_install_root_mode=int(payload["old_install_root_mode"], 8),
         roles=tuple(payload["roles"]),
         new_identity_roles=tuple(payload["new_identity_roles"]),
         client_installed=payload["client_installed"],
@@ -1714,6 +1819,10 @@ def _load_upgrade_snapshot(layout: Layout, root: Path) -> UpgradeSnapshot:
 
 
 def _write_upgrade_active(layout: Layout, snapshot: UpgradeSnapshot, phase: str) -> None:
+    root_mode = _install_root_mode(
+        layout,
+        allowed=frozenset({0o700, INSTALL_ROOT_MODE}),
+    )
     payload = _canonical_json(
         {
             "schema_version": SCHEMA_VERSION,
@@ -1723,10 +1832,15 @@ def _write_upgrade_active(layout: Layout, snapshot: UpgradeSnapshot, phase: str)
         },
     )
     if _exists(layout.upgrade_active):
-        _replace_installed(layout.upgrade_active, payload, mode=0o600, parent_mode=0o700)
+        _replace_installed(
+            layout.upgrade_active,
+            payload,
+            mode=0o600,
+            parent_mode=root_mode,
+        )
     else:
         _install_once(layout.upgrade_active, payload, mode=0o600)
-        _fsync_directory(layout.root, mode=0o700)
+        _fsync_directory(layout.root, mode=root_mode)
 
 
 def _read_upgrade_active(layout: Layout) -> tuple[UpgradeSnapshot, str] | None:
@@ -1792,7 +1906,10 @@ def _append_upgrade_journal(
 
 
 def _ensure_upgrade_state(layout: Layout) -> None:
-    _ensure_directory(layout.root, mode=0o700)
+    _install_root_mode(
+        layout,
+        allowed=frozenset({0o700, INSTALL_ROOT_MODE}),
+    )
     _ensure_directory(layout.upgrade_root, mode=0o700)
     for path in (layout.upgrade_lock, layout.upgrade_journal):
         if not _exists(path):
@@ -1830,14 +1947,23 @@ def _ensure_upgrade_state(layout: Layout) -> None:
 
 
 def _remove_active(layout: Layout) -> None:
+    root_mode = _install_root_mode(
+        layout,
+        allowed=frozenset({0o700, INSTALL_ROOT_MODE}),
+    )
     _remove_installed(
         layout.upgrade_active,
         mode=0o600,
-        parent_mode=0o700,
+        parent_mode=root_mode,
     )
 
 
 def _restore_upgrade_snapshot(layout: Layout, snapshot: UpgradeSnapshot) -> None:
+    _set_install_root_mode(
+        layout,
+        expected=frozenset({0o700, INSTALL_ROOT_MODE}),
+        target=snapshot.old_install_root_mode,
+    )
     for entry in snapshot.entries:
         path = Path(str(entry["path"]))
         mode = int(str(entry["mode"]), 8)
@@ -1864,9 +1990,17 @@ def _restore_upgrade_snapshot(layout: Layout, snapshot: UpgradeSnapshot) -> None
                 parent_gid=layout.operator_gid if path.parent.name == ".ssh" else 0,
             )
     if snapshot.client_installed:
-        validate_client_install(layout, _allow_upgrade=True)
+        validate_client_install(
+            layout,
+            _allow_upgrade=True,
+            _allow_legacy_modes=snapshot.old_install_root_mode == 0o700,
+        )
     if snapshot.server_installed:
-        validate_server_install(layout, _allow_upgrade=True)
+        validate_server_install(
+            layout,
+            _allow_upgrade=True,
+            _allow_legacy_modes=snapshot.old_install_root_mode == 0o700,
+        )
 
 
 def _recover_upgrade(layout: Layout) -> str | None:
@@ -1914,8 +2048,19 @@ def upgrade(
         _reject_active_upgrade(layout)
     try:
         recovered = _recover_upgrade(layout) if execute else None
-        _validate_install_root_inventory(layout)
-        old_config_payload = _installed_asset(layout.config, mode=0o600)
+        old_install_root_mode = _install_root_mode(
+            layout,
+            allowed=frozenset({0o700, INSTALL_ROOT_MODE}),
+        )
+        legacy_modes = old_install_root_mode == 0o700
+        _validate_install_root_inventory(
+            layout,
+            root_mode=old_install_root_mode,
+        )
+        old_config_payload = _installed_asset(
+            layout.config,
+            mode=0o600 if legacy_modes else ROUTE_CONFIG_MODE,
+        )
         old_program_payload = _installed_asset(layout.libexec, mode=0o755)
         old_config = load_config(layout.config)
         old_node = old_config.node_for_hostname(_hostname())
@@ -1924,9 +2069,17 @@ def upgrade(
         if not client_installed and not server_installed:
             raise TransportError("transport installed role is unavailable")
         if client_installed:
-            validate_client_install(layout, _allow_upgrade=True)
+            validate_client_install(
+                layout,
+                _allow_upgrade=True,
+                _allow_legacy_modes=legacy_modes,
+            )
         if server_installed:
-            validate_server_install(layout, _allow_upgrade=True)
+            validate_server_install(
+                layout,
+                _allow_upgrade=True,
+                _allow_legacy_modes=legacy_modes,
+            )
         old_client_roles, old_server_roles = _installed_roles(
             layout,
             old_config,
@@ -2105,8 +2258,13 @@ def upgrade(
             )
             or (
                 server_policy is not None
-                and _installed_asset(layout.server_policy, mode=0o600) != server_policy
+                and _installed_asset(
+                    layout.server_policy,
+                    mode=0o600 if legacy_modes else SERVER_POLICY_MODE,
+                )
+                != server_policy
             )
+            or legacy_modes
         )
         result: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
@@ -2135,18 +2293,25 @@ def upgrade(
                 new_identity_roles,
                 client_installed=client_installed,
                 server_installed=server_installed,
+                install_root_mode=old_install_root_mode,
             ),
             roles=all_roles,
             new_identity_roles=new_identity_roles,
             old_config_sha256=_asset_digest(old_config_payload),
             new_config_sha256=_asset_digest(route_payload),
+            old_install_root_mode=old_install_root_mode,
             client_installed=client_installed,
             server_installed=server_installed,
         )
         try:
             _write_upgrade_active(layout, snapshot, "prepared")
             _append_upgrade_journal(layout, snapshot, "prepared")
-            _replace_installed(layout.config, route_payload, mode=0o600, parent_mode=0o700)
+            _replace_installed(
+                layout.config,
+                route_payload,
+                mode=ROUTE_CONFIG_MODE,
+                parent_mode=old_install_root_mode,
+            )
             for role in sorted(new_identity_roles):
                 _replace_installed(
                     layout.identity(role),
@@ -2172,13 +2337,13 @@ def upgrade(
                     layout.known_hosts,
                     known_hosts,
                     mode=0o600,
-                    parent_mode=0o700,
+                    parent_mode=old_install_root_mode,
                 )
                 _replace_installed(
                     layout.client_policy,
                     client_policy,
                     mode=0o600,
-                    parent_mode=0o700,
+                    parent_mode=old_install_root_mode,
                 )
             if server_policy is not None and authorized_keys is not None:
                 _replace_installed(
@@ -2192,12 +2357,17 @@ def upgrade(
                 _replace_installed(
                     layout.server_policy,
                     server_policy,
-                    mode=0o600,
-                    parent_mode=0o700,
+                    mode=SERVER_POLICY_MODE,
+                    parent_mode=old_install_root_mode,
                 )
             # Replace the dispatcher last. The active marker keeps both the old
             # and new program fail closed while the transaction is incomplete.
             _replace_installed(layout.libexec, program_payload, mode=0o755, parent_mode=0o755)
+            _set_install_root_mode(
+                layout,
+                expected=frozenset({old_install_root_mode}),
+                target=INSTALL_ROOT_MODE,
+            )
             _write_upgrade_active(layout, snapshot, "assets-replaced")
             _append_upgrade_journal(layout, snapshot, "assets-replaced")
             if client_installed:

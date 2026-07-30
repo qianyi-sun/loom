@@ -27,6 +27,19 @@ Runtime transport has these fixed properties:
 - authority keys have a `restrict` forced-command entry and can invoke only
   `/usr/local/libexec/loom-developer-sandbox-node-authority transact` or
   `check`;
+- sshd runs that forced dispatcher as `qianyi`. The root-owned transport
+  install directory is mode `0755`, and only the secret-free `routes.toml` and
+  `server-policy.json` are mode `0644`, so the dispatcher can validate its
+  installed server identity before acting. Private identities, `known_hosts`,
+  `client-policy.json`, upgrade records, and snapshots remain root-only
+  (`0600` files below private `0700` directories where applicable);
+- the dispatcher parses `SSH_ORIGINAL_COMMAND` before privilege transition and
+  executes only the existing exact node-authority sudo command for `transact`
+  or `check`. It passes a clean environment and does not preserve
+  `SSH_ORIGINAL_COMMAND` or any `SUDO_*` state through sudo. The node authority
+  independently requires the exact `qianyi` sudo caller, UID/GID, verb, and
+  `SUDO_COMMAND`; there is one sudo transition, no nested sudo, and no
+  wildcard-argument sudo rule;
 - the GB10 publisher role can invoke only `check`, including the fixed
   runtime-proof sources on OLDLAB1/2;
 - the separate GB10 jump key has no SSH forwarding privilege. Its forced
@@ -157,7 +170,10 @@ python3 scripts/ops/developer_sandbox_node_transport.py bootstrap-server \
 Substitute all and only the roles in the target's table row. The server
 bootstrap installs the root-owned forced-command program and policy, atomically
 preserves unrelated `qianyi` authorized-key entries, and rejects a changed or
-duplicate managed marker.
+duplicate managed marker. The public modes above reveal only the checked-in
+route contract, public-key fingerprints, and the managed `authorized_keys`
+digest; they expose no private key, host-key database, request payload, client
+identity policy, or authority state.
 
 Both plan and execution require real and effective UID zero plus a persistent
 host-root view whose `/` is the root of visible PID 1 and whose PID 1 is
@@ -216,6 +232,10 @@ authorized-key updates use fsynced atomic replacement; the dispatcher is
 replaced last. A failed readback restores the snapshot. A later persistent-root
 `upgrade --execute` rolls back an interrupted pre-commit transaction or
 finalizes a fully committed one before evaluating the new candidate.
+The upgrade explicitly admits the previous exact `0700` install-root plus
+`0600` route/server-policy generation, snapshots those modes, migrates them
+transactionally to `0755`/`0644`, and restores the old modes as well as bytes
+on rollback. Mixed or partially widened legacy metadata is rejected.
 
 When both node authority and transport change, upgrade node authority first by
 its persistent-root transaction, read it back locally, then upgrade transport and
