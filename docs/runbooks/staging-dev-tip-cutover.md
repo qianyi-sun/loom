@@ -17,7 +17,7 @@ Three changes are mutually coupled and must land together:
 - **Route.** dev tip serves `/staging`; the live env serves `/dev`. The web
   image is prefix-stable but the *deployed* `e833dd3` image only accepts
   `/dev` — so the route only moves when dev-tip's image deploys.
-- **DB schema.** dev tip's migration head is `0075`; live staging is stamped
+- **DB schema.** dev tip's migration head is `0076`; live staging is stamped
   `0069` on a pre-#857 lineage (see the divergence in #949). The reconcile
   migration `0073` (#951) plus a one-time stamp bring them together.
 - **Pool identity.** dev tip renames the worker pool `gb10-arm64` → `gb10`
@@ -118,7 +118,7 @@ alembic -c migrations/alembic.ini stamp 0072
 ```
 
 Then run the rollout, which performs — atomically — backup → build images → kind
-load → GB10 prep → **migrate (`upgrade head` → `0075`: includes the `0073`
+load → GB10 prep → **migrate (`upgrade head` → `0076`: includes the `0073`
 benchmark-profile, `prod_pressure_state`, and `gb10-arm64`→`gb10` reconciliation,
 then persists Slurm containment identity, exact resource requests, and durable
 shared-capacity lease retirement state)** →
@@ -134,7 +134,7 @@ loom-staging-rollout start
 curl -sk -o /dev/null -w "/staging -> %{http_code}\n" https://yylx.world/staging/api/v1/health   # expect 200
 curl -sk -o /dev/null -w "/dev -> %{http_code}\n" https://yylx.world/dev/                          # expect 308/404
 kubectl -n loom-staging exec loom-postgres-0 -c postgres -- \
-  psql -U loom -d loom -tAc "select version_num from alembic_version;"                             # expect 0075
+  psql -U loom -d loom -tAc "select version_num from alembic_version;"                             # expect 0076
 kubectl -n loom-staging exec loom-postgres-0 -c postgres -- \
   psql -U loom -d loom -tAc "select distinct pool_name from worker_pool_autoscaler_policies;"      # expect gb10
 ```

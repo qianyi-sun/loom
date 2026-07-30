@@ -1,4 +1,4 @@
-"""Migration 0075: durable shared-capacity lease retirement state."""
+"""Migration 0076: durable shared-capacity lease retirement state."""
 
 from __future__ import annotations
 
@@ -17,25 +17,28 @@ def _cfg(url: str) -> Config:
     return config
 
 
-def test_0075_adds_and_reversibly_drops_capacity_lease_state(
+def test_0076_adds_and_reversibly_drops_capacity_lease_state(
     isolated_migration_postgres_url: str,
 ) -> None:
     config = _cfg(isolated_migration_postgres_url)
     engine = create_engine(isolated_migration_postgres_url)
 
-    command.downgrade(config, "0074")
+    command.downgrade(config, "0075")
     columns = {
         column["name"] for column in inspect(engine).get_columns("worker_pool_autoscaler_policies")
     }
     assert "capacity_lease_state" not in columns
+    assert "public_registration_enabled" in {
+        column["name"] for column in inspect(engine).get_columns("teams")
+    }
 
-    command.upgrade(config, "0075")
+    command.upgrade(config, "0076")
     columns = {
         column["name"] for column in inspect(engine).get_columns("worker_pool_autoscaler_policies")
     }
     assert "capacity_lease_state" in columns
 
-    command.downgrade(config, "0074")
+    command.downgrade(config, "0075")
     columns = {
         column["name"] for column in inspect(engine).get_columns("worker_pool_autoscaler_policies")
     }
