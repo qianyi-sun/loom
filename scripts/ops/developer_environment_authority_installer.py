@@ -48,6 +48,12 @@ REGISTRY_ADMIN: Final = Path("/usr/local/libexec/scripts/ops/developer_environme
 SOCKET_UNIT: Final = "loom-developer-environment-authority.socket"
 RENEWAL_TIMER_UNIT: Final = "loom-developer-sandbox-attestation-renewal.timer"
 NODE_TRANSPORT: Final = Path("/usr/local/libexec/loom-developer-sandbox-node-transport")
+NODE_AUTHORITY_POLICY: Final = Path("/etc/loom/developer-sandbox-node-authority.json")
+NODE_CAPACITY_CONTRACT_RELATIVE: Final = Path("scripts/ops/developer_sandbox_capacity_contract.py")
+NODE_CAPACITY_CONTRACT: Final = Path(
+    "/usr/local/libexec/scripts/ops/developer_sandbox_capacity_contract.py"
+)
+NODE_CAPACITY_CONTRACT_MODE: Final = 0o644
 CAPACITY_RUNTIME_STATE: Final = Path(
     "/var/lib/loom-shared-capacity/runtime-host-installer/state.json"
 )
@@ -185,11 +191,6 @@ EXPECTED_ASSETS: Final = {
     (
         "src/loom_control_plane/shared_capacity_broker.py",
         "/usr/local/libexec/loom-runtime-python/loom_control_plane/shared_capacity_broker.py",
-        "0444",
-    ),
-    (
-        "scripts/ops/developer_sandbox_capacity_contract.py",
-        "/usr/local/libexec/scripts/ops/developer_sandbox_capacity_contract.py",
         "0444",
     ),
     (
@@ -671,7 +672,11 @@ class AuthorityInstaller:
         )
         tracked = sorted(
             {source for source, _destination, _mode in EXPECTED_ASSETS}
-            | {MANIFEST_RELATIVE.as_posix(), INSTALLER_RELATIVE.as_posix()}
+            | {
+                MANIFEST_RELATIVE.as_posix(),
+                INSTALLER_RELATIVE.as_posix(),
+                NODE_CAPACITY_CONTRACT_RELATIVE.as_posix(),
+            }
         )
         status = self._checked(
             "/usr/bin/git",
@@ -1086,6 +1091,7 @@ class AuthorityInstaller:
                 "source_tree",
                 "manifest_sha256",
                 "asset_digests",
+                "node_capacity_contract_sha256",
                 "installed_at",
                 "status",
             }
@@ -1100,6 +1106,7 @@ class AuthorityInstaller:
                 SHA256_RE.fullmatch(str(digest)) is None
                 for digest in value["asset_digests"].values()
             )
+            or SHA256_RE.fullmatch(str(value.get("node_capacity_contract_sha256"))) is None
             or not isinstance(value.get("installed_at"), str)
             or value.get("status") != "installed"
             or raw != _canonical(value)
@@ -1162,7 +1169,8 @@ class AuthorityInstaller:
                 path.name
                 for path in python_destinations
                 if path.parent == Path("/usr/local/libexec/scripts/ops")
-            },
+            }
+            | {NODE_CAPACITY_CONTRACT.name},
             Path("/usr/local/libexec/loom-runtime-python"): {"loom_control_plane"},
             Path("/usr/local/libexec/loom-runtime-python/loom_control_plane"): {
                 path.name
@@ -1250,6 +1258,61 @@ class AuthorityInstaller:
             or not isinstance(report.get("public_key_fingerprints"), dict)
         ):
             raise AuthorityInstallerError("node authority transport prerequisite is invalid")
+
+    def _validate_node_capacity_contract_prerequisite(
+        self,
+        *,
+        candidate_sha: str,
+        candidate_tree: str,
+    ) -> str:
+        self._validate_installed_ancestry(NODE_AUTHORITY_POLICY)
+        policy_raw = _read_regular(
+            self._host(NODE_AUTHORITY_POLICY),
+            limit=MAX_STATE_BYTES,
+            expected_uid=self.expected_uid,
+            expected_gid=self.expected_gid,
+            expected_mode=0o600,
+        )
+        try:
+            policy = json.loads(policy_raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise AuthorityInstallerError("node authority policy prerequisite is invalid") from exc
+        if (
+            not isinstance(policy, dict)
+            or set(policy)
+            != {
+                "schema_version",
+                "source_sha",
+                "source_tree",
+                "node",
+                "asset_sha256",
+            }
+            or policy.get("schema_version") != SCHEMA_VERSION
+            or policy.get("source_sha") != candidate_sha
+            or policy.get("source_tree") != candidate_tree
+            or policy.get("node") != NODE
+            or not isinstance(policy.get("asset_sha256"), dict)
+            or policy_raw != _canonical(policy)
+        ):
+            raise AuthorityInstallerError("node authority policy prerequisite is invalid")
+        self._validate_installed_ancestry(NODE_CAPACITY_CONTRACT)
+        installed = _read_regular(
+            self._host(NODE_CAPACITY_CONTRACT),
+            limit=MAX_ASSET_BYTES,
+            expected_uid=self.expected_uid,
+            expected_gid=self.expected_gid,
+            expected_mode=NODE_CAPACITY_CONTRACT_MODE,
+        )
+        candidate = _read_regular(
+            self.source_root / NODE_CAPACITY_CONTRACT_RELATIVE,
+            limit=MAX_ASSET_BYTES,
+        )
+        if installed != candidate:
+            raise AuthorityInstallerError("node authority capacity contract prerequisite drifted")
+        digest = _digest(installed)
+        if policy["asset_sha256"].get(NODE_CAPACITY_CONTRACT_RELATIVE.as_posix()) != digest:
+            raise AuthorityInstallerError("node authority capacity contract prerequisite drifted")
+        return digest
 
     def _validate_capacity_runtime_state(self) -> bytes:
         raw = _read_regular(
@@ -1565,6 +1628,12 @@ class AuthorityInstaller:
         self._verify_assets(assets, installed["asset_digests"])
         self._validate_capacity_runtime_state()
         self._validate_transport_prerequisite()
+        node_capacity_contract_sha256 = self._validate_node_capacity_contract_prerequisite(
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+        )
+        if installed["node_capacity_contract_sha256"] != node_capacity_contract_sha256:
+            raise AuthorityInstallerError("installed authority prerequisite binding drifted")
         group_gid = self._ensure_group()
         self._checked("/usr/bin/systemctl", "is-active", "--quiet", SOCKET_UNIT)
         self._checked("/usr/bin/systemctl", "is-active", "--quiet", RENEWAL_TIMER_UNIT)
@@ -1597,6 +1666,7 @@ class AuthorityInstaller:
             "source_tree": candidate_tree,
             "manifest_sha256": manifest_sha256,
             "installed_asset_digests": dict(installed["asset_digests"]),
+            "node_capacity_contract_sha256": node_capacity_contract_sha256,
             "registry_snapshot_sha256": registry_digest,
             "status": "succeeded",
         }
@@ -1620,6 +1690,10 @@ class AuthorityInstaller:
         self.recover()
         self._validate_transport_prerequisite()
         self._verify_candidate(candidate_sha, candidate_tree)
+        node_capacity_contract_sha256 = self._validate_node_capacity_contract_prerequisite(
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+        )
         manifest_raw, assets = self._load_assets()
         manifest_sha256 = _digest(manifest_raw)
         if action == "environment-authority-readback":
@@ -1716,11 +1790,20 @@ class AuthorityInstaller:
                 "source_tree": candidate_tree,
                 "manifest_sha256": manifest_sha256,
                 "asset_digests": asset_digests,
+                "node_capacity_contract_sha256": node_capacity_contract_sha256,
                 "installed_at": _timestamp(),
                 "status": "installed",
             }
             self._atomic_write(INSTALLED_PATH, _canonical(installed_record), 0o600)
             self._verify_assets(assets, asset_digests)
+            if (
+                self._validate_node_capacity_contract_prerequisite(
+                    candidate_sha=candidate_sha,
+                    candidate_tree=candidate_tree,
+                )
+                != node_capacity_contract_sha256
+            ):
+                raise AuthorityInstallerError("node authority capacity contract prerequisite raced")
             self._append_journal(
                 {
                     "transaction_id": transaction_id,
@@ -1744,6 +1827,7 @@ class AuthorityInstaller:
             "source_tree": candidate_tree,
             "manifest_sha256": manifest_sha256,
             "installed_asset_digests": asset_digests,
+            "node_capacity_contract_sha256": node_capacity_contract_sha256,
             "registry_snapshot_sha256": registry_digest,
             "idempotent": False,
             "status": "succeeded",

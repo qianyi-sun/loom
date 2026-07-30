@@ -28,6 +28,13 @@ ADAPTER_CANDIDATES = {
 CANDIDATE_SHAS = {sandbox: binding["sha"] for sandbox, binding in ADAPTER_CANDIDATES.items()}
 TEST_SANDBOXES = tuple(ADAPTER_CANDIDATES)
 TEST_INSTANCES = tuple(f"{sandbox}-{pool}" for sandbox in TEST_SANDBOXES for pool in host.POOLS)
+REAL_NODE_CAPACITY_PREREQUISITE = host._validate_node_capacity_contract_prerequisite
+REAL_FIXED_REGISTRY_PREREQUISITE = host._validate_fixed_registry_node_capacity_prerequisite
+NODE_BINDING = {
+    "node_authority_source_sha": SHA,
+    "node_authority_source_tree": TREE,
+    "node_capacity_contract_sha256": "7" * 64,
+}
 
 
 @pytest.fixture(autouse=True)
@@ -67,6 +74,16 @@ def _registry_cohort(monkeypatch: pytest.MonkeyPatch) -> None:
             environments=environments,
             provisioning_environments=environments,
         ),
+    )
+    monkeypatch.setattr(
+        host,
+        "_validate_node_capacity_contract_prerequisite",
+        lambda candidate: "7" * 64,
+    )
+    monkeypatch.setattr(
+        host,
+        "_validate_fixed_registry_node_capacity_prerequisite",
+        lambda: dict(NODE_BINDING),
     )
 
 
@@ -399,6 +416,7 @@ def test_clean_fixed_runtime_reconciles_first_provisioning_environment_fail_clos
         }
         state = json.loads(state_path.read_text(encoding="ascii"))
         assert state["activation_status"] == "installed"
+        assert all(state[field] == value for field, value in NODE_BINDING.items())
         assert state["runtime_manifest"]["environments"][0]["runtime_id"] == runtime_id
         return {"status": "ready", "runtime_id": runtime_id}
 
@@ -414,6 +432,148 @@ def test_clean_fixed_runtime_reconciles_first_provisioning_environment_fail_clos
         or "qianyi" in " ".join(command)
         for command in commands
     )
+    committed_state = state_path.read_bytes()
+    committed_files = {
+        path: path.read_bytes()
+        for path in (
+            host.SUPERVISOR_CONFIG_PATH,
+            *host._environment_configs("e-fourth"),
+        )
+    }
+    prerequisite_calls = 0
+
+    def racing_prerequisite() -> dict[str, str]:
+        nonlocal prerequisite_calls
+        prerequisite_calls += 1
+        return (
+            dict(NODE_BINDING)
+            if prerequisite_calls == 1
+            else {
+                **NODE_BINDING,
+                "node_capacity_contract_sha256": "8" * 64,
+            }
+        )
+
+    def drifted_check(
+        runtime_id: str,
+        *,
+        require_admission_open: bool = True,
+    ) -> dict[str, object]:
+        assert runtime_id == "e-fourth"
+        assert require_admission_open is False
+        observed = racing_prerequisite()
+        current = json.loads(state_path.read_text(encoding="ascii"))
+        if any(current.get(field) != value for field, value in observed.items()):
+            raise host.RuntimeHostError("fixed registry capacity prerequisite binding drifted")
+        return {"status": "ready", "runtime_id": runtime_id}
+
+    monkeypatch.setattr(
+        host,
+        "_validate_fixed_registry_node_capacity_prerequisite",
+        racing_prerequisite,
+    )
+    monkeypatch.setattr(host, "check_registry_environment", drifted_check)
+    with pytest.raises(host.RuntimeHostError, match="prerequisite binding drifted"):
+        host.reconcile_registry_environment("e-fourth")
+
+    assert state_path.read_bytes() == committed_state
+    assert all(path.read_bytes() == payload for path, payload in committed_files.items())
+    journal_path = tmp_path / "journals/e-fourth.json"
+    assert journal_path.exists()
+
+    monkeypatch.setattr(
+        host,
+        "_validate_fixed_registry_node_capacity_prerequisite",
+        lambda: dict(NODE_BINDING),
+    )
+    monkeypatch.setattr(host, "check_registry_environment", check)
+    assert host.reconcile_registry_environment("e-fourth") == {
+        "status": "ready",
+        "runtime_id": "e-fourth",
+    }
+    assert not journal_path.exists()
+
+
+def test_fixed_registry_check_rejects_node_prerequisite_binding_drift_before_configs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = host._cohort().provisioning_environments[0]
+    state_path = tmp_path / "state.json"
+    state_path.write_bytes(
+        host._canonical_json(
+            {
+                "schema_version": 1,
+                "activation_status": "installed",
+                **NODE_BINDING,
+            }
+        )
+    )
+    monkeypatch.setattr(host, "STATE_PATH", state_path)
+    monkeypatch.setattr(
+        host,
+        "_registry_environment",
+        lambda *_args, **_kwargs: environment,
+    )
+    monkeypatch.setattr(
+        host,
+        "_validate_fixed_registry_node_capacity_prerequisite",
+        lambda: {
+            **NODE_BINDING,
+            "node_capacity_contract_sha256": "8" * 64,
+        },
+    )
+
+    with pytest.raises(host.RuntimeHostError, match="prerequisite binding drifted"):
+        host.check_registry_environment(environment.runtime_id)
+
+
+def test_fixed_registry_reconcile_prerequisite_failure_precedes_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = host._cohort().provisioning_environments[0]
+    state_path = tmp_path / "state.json"
+    initial = (
+        b'{"activation_status":"installed","admission_state":"closed",'
+        b'"installation_mode":"fixed-registry-runtime","schema_version":1}\n'
+    )
+    state_path.write_bytes(initial)
+    writes: list[Path] = []
+    monkeypatch.setattr(host, "STATE_PATH", state_path)
+    monkeypatch.setattr(host, "ENVIRONMENT_RECONCILE_ROOT", tmp_path / "journals")
+    monkeypatch.setattr(host, "_require_live_host", lambda: None)
+    monkeypatch.setattr(host, "_lock", nullcontext)
+    monkeypatch.setattr(host, "_recover_orphan", lambda: None)
+    monkeypatch.setattr(
+        host,
+        "_registry_environment",
+        lambda *_args, **_kwargs: environment,
+    )
+    monkeypatch.setattr(
+        host,
+        "environment_admission_readback",
+        lambda _runtime_id: "1" * 32,
+    )
+    monkeypatch.setattr(
+        host,
+        "_validate_fixed_registry_node_capacity_prerequisite",
+        lambda: (_ for _ in ()).throw(
+            host.RuntimeHostError("fixed registry capacity prerequisite drifted")
+        ),
+    )
+    monkeypatch.setattr(
+        host,
+        "_atomic_write",
+        lambda path, *_args, **_kwargs: writes.append(path),
+    )
+
+    with pytest.raises(host.RuntimeHostError, match="prerequisite drifted"):
+        host.reconcile_registry_environment(environment.runtime_id)
+
+    assert state_path.read_bytes() == initial
+    assert writes == []
+    assert not (tmp_path / "journals").exists()
 
 
 def _platform_capacity() -> tuple[
@@ -991,6 +1151,178 @@ def test_exact_candidate_blob_survives_source_after_verify_tamper(
     with pytest.raises(host.RuntimeHostError):
         host._validate_repository(repo, sha)
     assert host._read_candidate_file(candidate, Path("payload")) == b"candidate\n"
+
+
+def test_runtime_host_treats_capacity_contract_as_node_owned_prerequisite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = b"def exact_contract():\n    return True\n"
+    digest = host._sha256(contract)
+    candidate = host.Candidate(SHA, TREE, host.REPO_ROOT)
+    policy = host._canonical_json(
+        {
+            "schema_version": 1,
+            "source_sha": SHA,
+            "source_tree": TREE,
+            "node": "oldlab-2",
+            "asset_sha256": {
+                host.CAPACITY_CONTRACT_RELATIVE.as_posix(): digest,
+            },
+        }
+    )
+
+    monkeypatch.setattr(
+        host,
+        "_validate_node_capacity_contract_prerequisite",
+        REAL_NODE_CAPACITY_PREREQUISITE,
+    )
+    monkeypatch.setattr(
+        host,
+        "_read_node_authority_file",
+        lambda path, **_kwargs: policy if path == host.NODE_AUTHORITY_POLICY_PATH else contract,
+    )
+    monkeypatch.setattr(
+        host,
+        "_read_candidate_file",
+        lambda _candidate, relative: (
+            contract
+            if relative == host.CAPACITY_CONTRACT_RELATIVE
+            else (_ for _ in ()).throw(AssertionError(relative))
+        ),
+    )
+
+    assert host._validate_node_capacity_contract_prerequisite(candidate) == digest
+    assert host.CAPACITY_CONTRACT_PATH not in host._snapshot_paths()
+
+
+@pytest.mark.parametrize("drift", ("policy-candidate", "policy-digest", "content"))
+def test_runtime_host_rejects_node_capacity_prerequisite_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    drift: str,
+) -> None:
+    expected = b"def exact_contract():\n    return True\n"
+    installed = b"def drifted_contract():\n    return False\n" if drift == "content" else expected
+    digest = host._sha256(expected)
+    candidate = host.Candidate(SHA, TREE, host.REPO_ROOT)
+    policy = host._canonical_json(
+        {
+            "schema_version": 1,
+            "source_sha": "c" * 40 if drift == "policy-candidate" else SHA,
+            "source_tree": TREE,
+            "node": "oldlab-2",
+            "asset_sha256": {
+                host.CAPACITY_CONTRACT_RELATIVE.as_posix(): (
+                    "d" * 64 if drift == "policy-digest" else digest
+                ),
+            },
+        }
+    )
+    monkeypatch.setattr(
+        host,
+        "_validate_node_capacity_contract_prerequisite",
+        REAL_NODE_CAPACITY_PREREQUISITE,
+    )
+    monkeypatch.setattr(
+        host,
+        "_read_node_authority_file",
+        lambda path, **_kwargs: policy if path == host.NODE_AUTHORITY_POLICY_PATH else installed,
+    )
+    monkeypatch.setattr(host, "_read_candidate_file", lambda *_args: expected)
+
+    with pytest.raises(host.RuntimeHostError, match="prerequisite"):
+        host._validate_node_capacity_contract_prerequisite(candidate)
+
+
+@pytest.mark.parametrize("drift", (None, "policy-candidate", "installed-digest", "content"))
+def test_fixed_registry_runtime_binds_environment_and_node_authorities(
+    monkeypatch: pytest.MonkeyPatch,
+    drift: str | None,
+) -> None:
+    expected = b"def exact_contract():\n    return True\n"
+    contract = b"def drifted_contract():\n    return False\n" if drift == "content" else expected
+    digest = host._sha256(expected)
+    installed = host._canonical_json(
+        {
+            "schema_version": 1,
+            "kind": "loom.developer-environment.authority-installed",
+            "source_sha": SHA,
+            "source_tree": TREE,
+            "manifest_sha256": "6" * 64,
+            "asset_digests": {"/usr/local/bin/tool": "5" * 64},
+            "node_capacity_contract_sha256": ("4" * 64 if drift == "installed-digest" else digest),
+            "installed_at": "2026-07-29T12:00:00Z",
+            "status": "installed",
+        }
+    )
+    policy = host._canonical_json(
+        {
+            "schema_version": 1,
+            "source_sha": "c" * 40 if drift == "policy-candidate" else SHA,
+            "source_tree": TREE,
+            "node": "oldlab-2",
+            "asset_sha256": {
+                host.CAPACITY_CONTRACT_RELATIVE.as_posix(): digest,
+            },
+        }
+    )
+    payloads = {
+        host.ENVIRONMENT_AUTHORITY_INSTALLED_PATH: installed,
+        host.NODE_AUTHORITY_POLICY_PATH: policy,
+        host.CAPACITY_CONTRACT_PATH: contract,
+    }
+    monkeypatch.setattr(
+        host,
+        "_validate_fixed_registry_node_capacity_prerequisite",
+        REAL_FIXED_REGISTRY_PREREQUISITE,
+    )
+    monkeypatch.setattr(
+        host,
+        "_read_node_authority_file",
+        lambda path, **_kwargs: payloads[path],
+    )
+
+    if drift is not None:
+        with pytest.raises(host.RuntimeHostError, match="prerequisite"):
+            host._validate_fixed_registry_node_capacity_prerequisite()
+        return
+    assert host._validate_fixed_registry_node_capacity_prerequisite() == {
+        "node_authority_source_sha": SHA,
+        "node_authority_source_tree": TREE,
+        "node_capacity_contract_sha256": digest,
+    }
+
+
+def test_runtime_host_publish_never_writes_node_owned_capacity_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = host.Candidate(SHA, TREE, host.REPO_ROOT)
+    managed = Path("/etc/loom/runtime-host-owned")
+    writes: list[Path] = []
+    monkeypatch.setattr(
+        host,
+        "_desired_files",
+        lambda _candidate: {managed: (b"owned\n", 0o600)},
+    )
+    monkeypatch.setattr(
+        host,
+        "_atomic_write",
+        lambda path, _content, *, mode: writes.append(path),
+    )
+    monkeypatch.setattr(host, "_atomic_symlink", lambda *_args: None)
+
+    host._publish_files(candidate)
+
+    assert writes == [managed]
+    assert host.CAPACITY_CONTRACT_PATH not in writes
+
+
+def test_runtime_host_desired_and_rollback_sets_exclude_node_owned_contract() -> None:
+    sha = host._git(host.REPO_ROOT, "rev-parse", "HEAD")
+    tree = host._git(host.REPO_ROOT, "rev-parse", "HEAD^{tree}")
+    candidate = host.Candidate(sha, tree, host.REPO_ROOT)
+
+    assert host.CAPACITY_CONTRACT_PATH not in host._desired_files(candidate)
+    assert host.CAPACITY_CONTRACT_PATH not in host._snapshot_paths()
 
 
 def test_git_verification_environment_ignores_host_configuration() -> None:

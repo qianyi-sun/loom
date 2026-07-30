@@ -714,7 +714,12 @@ def test_existing_receipt_is_replay_bound_without_rewriting_timestamp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     request = _request()
-    result = {"node": "oldlab-1", "status": "succeeded"}
+    result = {
+        "node": "oldlab-1",
+        "source_sha": SHA,
+        "source_tree": TREE,
+        "status": "succeeded",
+    }
     receipt_root = tmp_path / "receipts"
     receipt_root.mkdir()
     monkeypatch.setattr(bootstrap, "HOST_RECEIPT_ROOT", receipt_root)
@@ -728,7 +733,7 @@ def test_existing_receipt_is_replay_bound_without_rewriting_timestamp(
     )
 
     with pytest.raises(bootstrap.DockerNodeBootstrapError, match="replay drifted"):
-        bootstrap._write_receipt(request, {"node": "oldlab-2", "status": "succeeded"})
+        bootstrap._write_receipt(request, {**result, "idempotent": True})
 
 
 def test_distinct_operation_ids_preserve_successive_readback_receipts(
@@ -736,16 +741,29 @@ def test_distinct_operation_ids_preserve_successive_readback_receipts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     first_request = _request(action="readback", operation_id="1" * 64)
-    second_request = _request(action="readback", operation_id="2" * 64)
+    second_request = _request(
+        action="readback",
+        operation_id="2" * 64,
+        transport_expectation="client-server",
+    )
     first_result = {
         "node": "oldlab-1",
+        "source_sha": SHA,
+        "source_tree": TREE,
         "transport_client": None,
+        "transport_server": None,
         "status": "succeeded",
     }
     second_result = {
         "node": "oldlab-1",
+        "source_sha": SHA,
+        "source_tree": TREE,
         "transport_client": {
             "initiator": "oldlab-1",
+            "status": "succeeded",
+        },
+        "transport_server": {
+            "node": "oldlab-1",
             "status": "succeeded",
         },
         "status": "succeeded",
@@ -779,6 +797,7 @@ def test_environment_authority_receipt_binds_installed_assets_and_registry(
         "source_sha": SHA,
         "source_tree": TREE,
         "installed_asset_digests": {"/usr/local/bin/tool": "e" * 64},
+        "node_capacity_contract_sha256": "d" * 64,
         "registry_snapshot_sha256": "f" * 64,
         "status": "succeeded",
     }
@@ -789,11 +808,121 @@ def test_environment_authority_receipt_binds_installed_assets_and_registry(
     receipt = bootstrap._write_receipt(request, result)
 
     assert receipt["installed_asset_digests"] == result["installed_asset_digests"]
+    assert receipt["node_capacity_contract_sha256"] == "d" * 64
     assert receipt["registry_snapshot_sha256"] == "f" * 64
     assert bootstrap._write_receipt(request, result) == receipt
 
     with pytest.raises(bootstrap.DockerNodeBootstrapError, match="receipt evidence"):
         bootstrap._write_receipt(request, {**result, "registry_snapshot_sha256": "bad"})
+    with pytest.raises(bootstrap.DockerNodeBootstrapError, match="receipt evidence"):
+        bootstrap._write_receipt(
+            request,
+            {**result, "node_capacity_contract_sha256": "bad"},
+        )
+
+
+def test_exact_request_replay_returns_persisted_environment_result_without_rerun(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(action="environment-authority-bootstrap", node="oldlab-2")
+    result = {
+        "schema_version": 1,
+        "action": request["action"],
+        "node": "oldlab-2",
+        "source_sha": SHA,
+        "source_tree": TREE,
+        "installed_asset_digests": {"/usr/local/bin/tool": "e" * 64},
+        "node_capacity_contract_sha256": "d" * 64,
+        "registry_snapshot_sha256": "f" * 64,
+        "idempotent": False,
+        "status": "succeeded",
+    }
+    receipt_root = tmp_path / "receipts"
+    receipt_root.mkdir()
+    monkeypatch.setattr(bootstrap, "HOST_RECEIPT_ROOT", receipt_root)
+    calls = {"prepare": 0, "action": 0, "cleanup": 0}
+    stage = tmp_path / "stage"
+
+    def prepare(
+        _request: dict[str, Any],
+        _bundle: bytes,
+    ) -> tuple[Path, Path]:
+        calls["prepare"] += 1
+        return stage, stage / "source"
+
+    def action(
+        _request: dict[str, Any],
+        _stage: Path,
+    ) -> dict[str, Any]:
+        calls["action"] += 1
+        return result
+
+    monkeypatch.setattr(bootstrap, "_prepare_stage", prepare)
+    monkeypatch.setattr(bootstrap, "_run_chroot_action", action)
+    monkeypatch.setattr(
+        bootstrap,
+        "_remove_stage",
+        lambda _stage: calls.__setitem__("cleanup", calls["cleanup"] + 1),
+    )
+
+    first = bootstrap._execute_locked(request, b"bundle")
+    replay = bootstrap._execute_locked(request, b"bundle")
+
+    assert replay == first
+    assert replay["result"]["idempotent"] is False
+    assert calls == {"prepare": 1, "action": 1, "cleanup": 1}
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ("result", "result-sha", "projection"),
+)
+def test_receipt_tamper_fails_before_stage_or_host_action(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tamper: str,
+) -> None:
+    request = _request(action="environment-authority-bootstrap", node="oldlab-2")
+    result = {
+        "schema_version": 1,
+        "action": request["action"],
+        "node": "oldlab-2",
+        "source_sha": SHA,
+        "source_tree": TREE,
+        "installed_asset_digests": {"/usr/local/bin/tool": "e" * 64},
+        "node_capacity_contract_sha256": "d" * 64,
+        "registry_snapshot_sha256": "f" * 64,
+        "idempotent": False,
+        "status": "succeeded",
+    }
+    receipt_root = tmp_path / "receipts"
+    receipt_root.mkdir()
+    monkeypatch.setattr(bootstrap, "HOST_RECEIPT_ROOT", receipt_root)
+    bootstrap._write_receipt(request, result)
+    path = receipt_root / f"{request['request_id']}.json"
+    receipt = json.loads(path.read_bytes())
+    if tamper == "result":
+        receipt["result"]["idempotent"] = True
+    elif tamper == "result-sha":
+        receipt["result_sha256"] = "0" * 64
+    else:
+        receipt["node_capacity_contract_sha256"] = "0" * 64
+    path.write_bytes(bootstrap._canonical(receipt))
+    path.chmod(0o600)
+    monkeypatch.setattr(
+        bootstrap,
+        "_prepare_stage",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("stage must not run")),
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "_run_chroot_action",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("action must not run")),
+    )
+
+    with pytest.raises(bootstrap.DockerNodeBootstrapError, match="replay drifted"):
+        bootstrap._execute_locked(request, b"bundle")
 
 
 def test_containerfile_is_fixed_multiarch_one_shot_without_runtime_daemon() -> None:

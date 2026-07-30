@@ -59,6 +59,15 @@ PROGRAM_PATH = Path("/usr/local/libexec/loom-shared-capacity-runtime-host")
 CAPACITY_CONTRACT_PATH = Path(
     "/usr/local/libexec/scripts/ops/developer_sandbox_capacity_contract.py",
 )
+CAPACITY_CONTRACT_RELATIVE = Path(
+    "scripts/ops/developer_sandbox_capacity_contract.py",
+)
+NODE_AUTHORITY_POLICY_PATH = Path(
+    "/etc/loom/developer-sandbox-node-authority.json",
+)
+ENVIRONMENT_AUTHORITY_INSTALLED_PATH = Path(
+    "/var/lib/loom-developer-environment-authority-installer/installed.json",
+)
 REGISTRY_CONTRACT_PATH = Path(
     "/usr/local/libexec/scripts/ops/developer_environment_registry.py",
 )
@@ -1390,6 +1399,165 @@ def _read_candidate_file(candidate: Candidate, relative: Path) -> bytes:
     )
 
 
+def _read_node_authority_file(
+    path: Path,
+    *,
+    mode: int,
+    label: str,
+) -> bytes:
+    current = Path("/")
+    for part in path.relative_to("/").parts[:-1]:
+        current /= part
+        try:
+            metadata = current.lstat()
+        except OSError as exc:
+            raise RuntimeHostError(f"{label} ancestry is unavailable") from exc
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or (metadata.st_uid, metadata.st_gid) != (0, 0)
+            or stat.S_IMODE(metadata.st_mode) & 0o022
+        ):
+            raise RuntimeHostError(f"{label} ancestry is unsafe")
+    try:
+        raw = registry_contract._read_regular(path, limit=4 * 1024 * 1024)
+        metadata = path.lstat()
+    except (OSError, registry_contract.RegistryError) as exc:
+        raise RuntimeHostError(f"{label} is unavailable") from exc
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or (metadata.st_uid, metadata.st_gid) != (0, 0)
+        or stat.S_IMODE(metadata.st_mode) != mode
+    ):
+        raise RuntimeHostError(f"{label} metadata is unsafe")
+    return raw
+
+
+def _validate_node_capacity_contract_prerequisite(candidate: Candidate) -> str:
+    policy_raw = _read_node_authority_file(
+        NODE_AUTHORITY_POLICY_PATH,
+        mode=0o600,
+        label="node authority policy prerequisite",
+    )
+    try:
+        policy = json.loads(policy_raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeHostError("node authority policy prerequisite is invalid") from exc
+    if (
+        not isinstance(policy, dict)
+        or set(policy)
+        != {
+            "schema_version",
+            "source_sha",
+            "source_tree",
+            "node",
+            "asset_sha256",
+        }
+        or policy.get("schema_version") != 1
+        or policy.get("source_sha") != candidate.sha
+        or policy.get("source_tree") != candidate.tree
+        or policy.get("node") != "oldlab-2"
+        or not isinstance(policy.get("asset_sha256"), dict)
+        or policy_raw != _canonical_json(policy)
+    ):
+        raise RuntimeHostError("node authority policy prerequisite is invalid")
+    installed = _read_node_authority_file(
+        CAPACITY_CONTRACT_PATH,
+        mode=0o644,
+        label="node authority capacity contract prerequisite",
+    )
+    expected = _read_candidate_file(candidate, CAPACITY_CONTRACT_RELATIVE)
+    try:
+        compile(expected, str(CAPACITY_CONTRACT_PATH), "exec")
+    except (SyntaxError, ValueError) as exc:
+        raise RuntimeHostError("candidate capacity contract is invalid") from exc
+    digest = _sha256(installed)
+    if (
+        installed != expected
+        or policy["asset_sha256"].get(CAPACITY_CONTRACT_RELATIVE.as_posix()) != digest
+    ):
+        raise RuntimeHostError("node authority capacity contract prerequisite drifted")
+    return digest
+
+
+def _validate_fixed_registry_node_capacity_prerequisite() -> dict[str, str]:
+    installed_raw = _read_node_authority_file(
+        ENVIRONMENT_AUTHORITY_INSTALLED_PATH,
+        mode=0o600,
+        label="environment authority installed prerequisite",
+    )
+    policy_raw = _read_node_authority_file(
+        NODE_AUTHORITY_POLICY_PATH,
+        mode=0o600,
+        label="node authority policy prerequisite",
+    )
+    contract = _read_node_authority_file(
+        CAPACITY_CONTRACT_PATH,
+        mode=0o644,
+        label="node authority capacity contract prerequisite",
+    )
+    try:
+        installed = json.loads(installed_raw)
+        policy = json.loads(policy_raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeHostError("fixed registry capacity prerequisite is invalid") from exc
+    if (
+        not isinstance(installed, dict)
+        or set(installed)
+        != {
+            "schema_version",
+            "kind",
+            "source_sha",
+            "source_tree",
+            "manifest_sha256",
+            "asset_digests",
+            "node_capacity_contract_sha256",
+            "installed_at",
+            "status",
+        }
+        or installed.get("schema_version") != 1
+        or installed.get("kind") != "loom.developer-environment.authority-installed"
+        or SHA_RE.fullmatch(str(installed.get("source_sha"))) is None
+        or SHA_RE.fullmatch(str(installed.get("source_tree"))) is None
+        or DIGEST_RE.fullmatch(str(installed.get("manifest_sha256"))) is None
+        or not isinstance(installed.get("asset_digests"), dict)
+        or not installed["asset_digests"]
+        or DIGEST_RE.fullmatch(str(installed.get("node_capacity_contract_sha256"))) is None
+        or not isinstance(installed.get("installed_at"), str)
+        or installed.get("status") != "installed"
+        or installed_raw != _canonical_json(installed)
+        or not isinstance(policy, dict)
+        or set(policy)
+        != {
+            "schema_version",
+            "source_sha",
+            "source_tree",
+            "node",
+            "asset_sha256",
+        }
+        or policy.get("schema_version") != 1
+        or policy.get("source_sha") != installed["source_sha"]
+        or policy.get("source_tree") != installed["source_tree"]
+        or policy.get("node") != "oldlab-2"
+        or not isinstance(policy.get("asset_sha256"), dict)
+        or policy_raw != _canonical_json(policy)
+    ):
+        raise RuntimeHostError("fixed registry capacity prerequisite is invalid")
+    digest = _sha256(contract)
+    if (
+        digest != installed["node_capacity_contract_sha256"]
+        or policy["asset_sha256"].get(CAPACITY_CONTRACT_RELATIVE.as_posix()) != digest
+    ):
+        raise RuntimeHostError("fixed registry capacity prerequisite drifted")
+    return {
+        "node_authority_source_sha": cast(str, installed["source_sha"]),
+        "node_authority_source_tree": cast(str, installed["source_tree"]),
+        "node_capacity_contract_sha256": digest,
+    }
+
+
 def _render_service(template: bytes, candidate: Candidate) -> bytes:
     token = b"${GIT_SHA}"
     if template.count(token) != 4:
@@ -1546,6 +1714,10 @@ def _render_adapter_config(environment: RuntimeEnvironment, pool: str) -> bytes:
 
 
 def _desired_files(candidate: Candidate) -> dict[Path, tuple[bytes, int]]:
+    capacity_contract = _read_candidate_file(
+        candidate,
+        CAPACITY_CONTRACT_RELATIVE,
+    )
     files: dict[Path, tuple[bytes, int]] = {
         PROGRAM_PATH: (
             _read_candidate_file(
@@ -1553,13 +1725,6 @@ def _desired_files(candidate: Candidate) -> dict[Path, tuple[bytes, int]]:
                 Path("scripts/ops/shared_capacity_runtime_host.py"),
             ),
             0o755,
-        ),
-        CAPACITY_CONTRACT_PATH: (
-            _read_candidate_file(
-                candidate,
-                Path("scripts/ops/developer_sandbox_capacity_contract.py"),
-            ),
-            0o644,
         ),
         REGISTRY_CONTRACT_PATH: (
             _read_candidate_file(
@@ -1626,11 +1791,7 @@ def _desired_files(candidate: Candidate) -> dict[Path, tuple[bytes, int]]:
         )
     try:
         compile(files[PROGRAM_PATH][0], str(PROGRAM_PATH), "exec")
-        compile(
-            files[CAPACITY_CONTRACT_PATH][0],
-            str(CAPACITY_CONTRACT_PATH),
-            "exec",
-        )
+        compile(capacity_contract, str(CAPACITY_CONTRACT_PATH), "exec")
         compile(
             files[REGISTRY_CONTRACT_PATH][0],
             str(REGISTRY_CONTRACT_PATH),
@@ -1840,7 +2001,6 @@ def _capture_files(paths: Sequence[Path]) -> dict[str, dict[str, Any]]:
 def _snapshot_paths() -> tuple[Path, ...]:
     return (
         PROGRAM_PATH,
-        CAPACITY_CONTRACT_PATH,
         REGISTRY_CONTRACT_PATH,
         PROFILE_PATH,
         SUPERVISOR_CONFIG_PATH,
@@ -2881,8 +3041,6 @@ def _materialize_candidate(candidate: Candidate, staging_path: Path) -> bool:
 
 
 def _publish_files(candidate: Candidate) -> None:
-    _ensure_directory(CAPACITY_CONTRACT_PATH.parent.parent, mode=0o755)
-    _ensure_directory(CAPACITY_CONTRACT_PATH.parent, mode=0o755)
     for path, (content, mode) in _desired_files(candidate).items():
         _atomic_write(path, content, mode=mode)
     _atomic_symlink(CURRENT_LINK, f"candidates/{candidate.sha}")
@@ -4772,6 +4930,7 @@ def check(
     }:
         raise RuntimeHostError("runtime-host check mode is invalid")
     _verify_installed_candidate(candidate)
+    node_capacity_contract_sha256 = _validate_node_capacity_contract_prerequisite(candidate)
     desired = _desired_files(candidate)
     for path, (content, mode) in desired.items():
         try:
@@ -4842,6 +5001,9 @@ def check(
     if (
         installed_state.get("candidate_sha") != candidate.sha
         or installed_state.get("candidate_tree") != candidate.tree
+        or installed_state.get("node_authority_source_sha") != candidate.sha
+        or installed_state.get("node_authority_source_tree") != candidate.tree
+        or installed_state.get("node_capacity_contract_sha256") != node_capacity_contract_sha256
         or installed_state.get("activation_status") != activation_mode
         or installed_manifest.environments != _cohort().environments
         or installed_manifest.provisioning_environments != _cohort().provisioning_environments
@@ -4886,6 +5048,9 @@ def check(
         "candidate_sha": candidate.sha,
         "candidate_tree": candidate.tree,
         "candidate_root": str(candidate.root),
+        "node_authority_source_sha": candidate.sha,
+        "node_authority_source_tree": candidate.tree,
+        "node_capacity_contract_sha256": node_capacity_contract_sha256,
         "instances": list(_instances()),
         "provisioning_instances": list(_provisioning_instances()),
         **_registry_binding(),
@@ -5347,6 +5512,7 @@ def reconcile_registry_environment(runtime_id: str) -> dict[str, Any]:
             raise RuntimeHostError("environment admission is not fail-closed")
         _recover_orphan()
         _recover_environment_reconcile(runtime_id)
+        node_binding = _validate_fixed_registry_node_capacity_prerequisite()
         state = (
             _load_json(STATE_PATH, "runtime-host state")
             if STATE_PATH.exists()
@@ -5398,6 +5564,7 @@ def reconcile_registry_environment(runtime_id: str) -> dict[str, Any]:
             "registry_payload_sha256": _cohort().payload_sha256,
             "candidate_sha": environment.candidate_sha,
             "candidate_tree": environment.candidate_tree,
+            **node_binding,
             "files": previous_files,
             "units": previous_units,
             "state_b64": (
@@ -5437,6 +5604,7 @@ def reconcile_registry_environment(runtime_id: str) -> dict[str, Any]:
                     _run(("systemctl", "enable", "--now", timer))
             updated = dict(state)
             updated.update(_registry_binding())
+            updated.update(node_binding)
             updated["runtime_manifest"] = _runtime_manifest()
             _atomic_write(STATE_PATH, _canonical_json(updated), mode=0o600)
             report = check_registry_environment(
@@ -5464,6 +5632,9 @@ def check_registry_environment(
 ) -> dict[str, Any]:
     environment = _registry_environment(runtime_id, provisioning=True)
     state = _load_json(STATE_PATH, "runtime-host state")
+    node_binding = _validate_fixed_registry_node_capacity_prerequisite()
+    if any(state.get(field) != value for field, value in node_binding.items()):
+        raise RuntimeHostError("fixed registry capacity prerequisite binding drifted")
     activation_status = state.get("activation_status")
     admission_fence = environment_admission_readback(runtime_id)
     if environment.state == "deploying" and admission_fence is None:
@@ -5509,6 +5680,7 @@ def check_registry_environment(
         "candidate_id": environment.candidate_id,
         "candidate_sha": environment.candidate_sha,
         "candidate_tree": environment.candidate_tree,
+        **node_binding,
         "resource_generation": environment.resource_generation,
         **_registry_binding(),
         "instances": [f"{runtime_id}-{pool}" for pool in POOLS],
@@ -5828,6 +6000,7 @@ def install(candidate: Candidate) -> dict[str, Any]:
         _reject_orphan_configs()
         _loaded_managed_units()
         _installed_managed_unit_files()
+        node_capacity_contract_sha256 = _validate_node_capacity_contract_prerequisite(candidate)
         journal_path, journal = _write_journal(candidate, operation="install")
         try:
             _stop_units()
@@ -5846,6 +6019,9 @@ def install(candidate: Candidate) -> dict[str, Any]:
                 "schema_version": 1,
                 "candidate_sha": candidate.sha,
                 "candidate_tree": candidate.tree,
+                "node_authority_source_sha": candidate.sha,
+                "node_authority_source_tree": candidate.tree,
+                "node_capacity_contract_sha256": node_capacity_contract_sha256,
                 "activation_status": "installed",
                 "installed_at": datetime.now(UTC).isoformat(),
                 "transaction_id": journal["transaction_id"],

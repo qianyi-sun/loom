@@ -29,7 +29,7 @@ INSTALLED_IMPORT_FILES: Final = {
     INSTALLED_MODULE_ROOT / "scripts/ops/__init__.py": 0o444,
     INSTALLED_MODULE_ROOT / "scripts/ops/developer_environment_acceptance_probe.py": 0o444,
     INSTALLED_MODULE_ROOT / "scripts/ops/developer_environment_registry.py": 0o555,
-    INSTALLED_MODULE_ROOT / "scripts/ops/developer_sandbox_capacity_contract.py": 0o444,
+    INSTALLED_MODULE_ROOT / "scripts/ops/developer_sandbox_capacity_contract.py": 0o644,
     INSTALLED_MODULE_ROOT / "scripts/ops/developer_sandbox_host.py": 0o444,
     INSTALLED_MODULE_ROOT / "scripts/ops/shared_capacity_runtime_host.py": 0o444,
 }

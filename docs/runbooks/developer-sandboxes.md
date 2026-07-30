@@ -156,6 +156,19 @@ lock/journal/receipt roots, wrapper, systemd assets, and finally the validated
 sudoers file. It rolls back only files and directories created by a failed
 attempt.
 
+The node authority is the single installer and lifecycle owner of
+`/usr/local/libexec/scripts/ops/developer_sandbox_capacity_contract.py`.
+The environment authority on `oldlab-2` consumes that file as an exact-candidate
+prerequisite: bootstrap, upgrade, and readback require a root-owned, mode-`0644`,
+single-link regular file with safe ancestry and bytes identical to the bound
+candidate. Neither the environment-authority transaction nor the shared-capacity
+runtime-host transaction backs up, replaces, chmods, removes, or rolls back this
+node-owned contract. Both validate the node policy's exact SHA/tree and persist
+the prerequisite digest separately from their own installed-asset digests.
+Therefore install or upgrade node authority before either consumer, and treat
+prerequisite drift as a node-authority repair rather than a consumer rollback
+target.
+
 Use
 `deploy/developer-sandboxes/Containerfile.node-bootstrap` and the fixed
 `developer_sandbox_node_docker_bootstrap.py` entrypoint. Build the image from
@@ -173,7 +186,11 @@ receipt to accommodate changed installed state. The entrypoint accepts no argv o
 accepts the closed infrastructure inventory `oldlab-1` through `oldlab-5` and
 `trt-gb10-1` through `trt-gb10-15`, creates a root-owned exact checkout under
 host `/run`, and writes its non-secret receipt below
-`/var/lib/loom-developer-sandbox-node-bootstrap/receipts/`.
+`/var/lib/loom-developer-sandbox-node-bootstrap/receipts/`. Each receipt embeds
+the complete canonical child result plus its digest. Under the host lock, an
+exact request replay validates and returns that persisted result before staging
+or invoking any host action, so a lost container response cannot change
+idempotency evidence or repeat the mutation.
 
 Bootstrap `trt-gb10-7` as a normal member of the complete 15-node
 infrastructure and capacity-eligible set. The 2026-07-29 owner correction

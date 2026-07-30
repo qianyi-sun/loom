@@ -173,13 +173,6 @@ owner = "root"
 group = "root"
 
 [[asset]]
-source = "scripts/ops/developer_sandbox_capacity_contract.py"
-destination = "/usr/local/libexec/scripts/ops/developer_sandbox_capacity_contract.py"
-mode = "0444"
-owner = "root"
-group = "root"
-
-[[asset]]
 source = "deploy/developer-sandboxes/loom-developer-environment-capacity-authority"
 destination = "/usr/local/libexec/loom-developer-environment-capacity-authority"
 mode = "0555"

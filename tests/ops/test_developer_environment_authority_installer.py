@@ -34,7 +34,8 @@ def _candidate_source(tmp_path: Path, name: str) -> Path:
     source = tmp_path / name
     repository = Path(__file__).resolve().parents[2]
     paths = {relative for relative, _destination, _mode in installer.EXPECTED_ASSETS} | {
-        installer.MANIFEST_RELATIVE.as_posix()
+        installer.MANIFEST_RELATIVE.as_posix(),
+        installer.NODE_CAPACITY_CONTRACT_RELATIVE.as_posix(),
     }
     for relative in paths:
         destination = source / relative
@@ -188,6 +189,32 @@ def _authority_installer(
     transport.write_bytes(b"#!/bin/sh\nexit 0\n")
     transport.chmod(0o755)
     os.chown(transport, uid, gid)
+    capacity_contract = filesystem_root / installer.NODE_CAPACITY_CONTRACT.relative_to("/")
+    capacity_contract.parent.mkdir(parents=True, exist_ok=True)
+    capacity_contract.write_bytes(
+        (source_root / installer.NODE_CAPACITY_CONTRACT_RELATIVE).read_bytes()
+    )
+    capacity_contract.chmod(installer.NODE_CAPACITY_CONTRACT_MODE)
+    os.chown(capacity_contract, uid, gid)
+    node_policy = filesystem_root / installer.NODE_AUTHORITY_POLICY.relative_to("/")
+    node_policy.parent.mkdir(parents=True, exist_ok=True)
+    node_policy.write_bytes(
+        installer._canonical(
+            {
+                "schema_version": installer.SCHEMA_VERSION,
+                "source_sha": SHA_TWO if "candidate-two" in source_root.name else SHA_ONE,
+                "source_tree": TREE_TWO if "candidate-two" in source_root.name else TREE_ONE,
+                "node": installer.NODE,
+                "asset_sha256": {
+                    installer.NODE_CAPACITY_CONTRACT_RELATIVE.as_posix(): installer._digest(
+                        capacity_contract.read_bytes()
+                    )
+                },
+            }
+        )
+    )
+    node_policy.chmod(0o600)
+    os.chown(node_policy, uid, gid)
     value = installer.AuthorityInstaller(
         filesystem_root=filesystem_root,
         source_root=source_root,
@@ -269,6 +296,9 @@ def test_bootstrap_replay_and_readback_install_closed_fixed_assets(
         source_root=source,
         runner=commands,
     )
+    node_contract = filesystem_root / installer.NODE_CAPACITY_CONTRACT.relative_to("/")
+    node_contract_before = node_contract.stat()
+    node_contract_payload = node_contract.read_bytes()
 
     first = authority.install(
         action="environment-authority-bootstrap",
@@ -292,7 +322,16 @@ def test_bootstrap_replay_and_readback_install_closed_fixed_assets(
     assert replay["idempotent"] is True
     assert readback["action"] == "environment-authority-readback"
     assert first["installed_asset_digests"] == readback["installed_asset_digests"]
+    assert first["node_capacity_contract_sha256"] == installer._digest(
+        (source / installer.NODE_CAPACITY_CONTRACT_RELATIVE).read_bytes()
+    )
+    assert first["node_capacity_contract_sha256"] == readback["node_capacity_contract_sha256"]
     assert first["registry_snapshot_sha256"] == readback["registry_snapshot_sha256"]
+    assert str(installer.NODE_CAPACITY_CONTRACT) not in installer.FIXED_DESTINATIONS
+    assert str(installer.NODE_CAPACITY_CONTRACT) not in installer.MANAGED_DESTINATIONS
+    assert node_contract.read_bytes() == node_contract_payload
+    assert node_contract.stat().st_ino == node_contract_before.st_ino
+    assert stat.S_IMODE(node_contract.stat().st_mode) == installer.NODE_CAPACITY_CONTRACT_MODE
     for relative, destination, rendered_mode in installer.EXPECTED_ASSETS:
         installed = filesystem_root / destination.removeprefix("/")
         assert installed.read_bytes() == (source / relative).read_bytes()
@@ -324,6 +363,200 @@ def test_bootstrap_replay_and_readback_install_closed_fixed_assets(
     assert "ProcSubset=pid" not in authority_unit
     assert "ReadOnlyPaths=/var/run/docker.sock" in authority_unit
     assert "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6" in authority_unit
+
+
+@pytest.mark.parametrize(
+    "drift",
+    (
+        "missing",
+        "content",
+        "mode",
+        "symlink",
+        "hardlink",
+        "unsafe-ancestor",
+        "policy-candidate",
+    ),
+)
+def test_node_owned_capacity_contract_prerequisite_fails_before_transaction(
+    tmp_path: Path,
+    filesystem_root: Path,
+    drift: str,
+) -> None:
+    source = _candidate_source(tmp_path, f"candidate-{drift}")
+    commands = FakeHostCommands(filesystem_root, os.getgid())
+    authority = _authority_installer(
+        filesystem_root=filesystem_root,
+        source_root=source,
+        runner=commands,
+    )
+    contract = filesystem_root / installer.NODE_CAPACITY_CONTRACT.relative_to("/")
+    if drift == "missing":
+        contract.unlink()
+    elif drift == "content":
+        contract.write_bytes(b"drifted\n")
+        contract.chmod(installer.NODE_CAPACITY_CONTRACT_MODE)
+    elif drift == "mode":
+        contract.chmod(0o600)
+    elif drift == "symlink":
+        contract.unlink()
+        contract.symlink_to(source / installer.NODE_CAPACITY_CONTRACT_RELATIVE)
+    elif drift == "hardlink":
+        peer = contract.with_name("developer_sandbox_capacity_contract.peer")
+        contract.rename(peer)
+        os.link(peer, contract)
+    elif drift == "unsafe-ancestor":
+        contract.parent.chmod(0o775)
+    else:
+        policy = filesystem_root / installer.NODE_AUTHORITY_POLICY.relative_to("/")
+        payload = installer.json.loads(policy.read_bytes())
+        payload["source_sha"] = SHA_TWO
+        policy.write_bytes(installer._canonical(payload))
+        policy.chmod(0o600)
+
+    with pytest.raises(installer.AuthorityInstallerError):
+        authority.install(
+            action="environment-authority-bootstrap",
+            candidate_sha=SHA_ONE,
+            candidate_tree=TREE_ONE,
+        )
+
+    assert not (filesystem_root / installer.ACTIVE_PATH.relative_to("/")).exists()
+    assert not (filesystem_root / installer.JOURNAL_PATH.relative_to("/")).exists()
+    assert not (filesystem_root / installer.INSTALLED_PATH.relative_to("/")).exists()
+    assert all(
+        not (filesystem_root / Path(destination).relative_to("/")).exists()
+        for destination in installer.FIXED_DESTINATIONS
+    )
+
+
+def test_readback_rejects_node_capacity_contract_drift(
+    tmp_path: Path,
+    filesystem_root: Path,
+) -> None:
+    source = _candidate_source(tmp_path, "candidate-one")
+    commands = FakeHostCommands(filesystem_root, os.getgid())
+    authority = _authority_installer(
+        filesystem_root=filesystem_root,
+        source_root=source,
+        runner=commands,
+    )
+    authority.install(
+        action="environment-authority-bootstrap",
+        candidate_sha=SHA_ONE,
+        candidate_tree=TREE_ONE,
+    )
+    contract = filesystem_root / installer.NODE_CAPACITY_CONTRACT.relative_to("/")
+    contract.write_bytes(b"drifted after install\n")
+    contract.chmod(installer.NODE_CAPACITY_CONTRACT_MODE)
+
+    with pytest.raises(installer.AuthorityInstallerError, match="prerequisite drifted"):
+        authority.install(
+            action="environment-authority-readback",
+            candidate_sha=SHA_ONE,
+            candidate_tree=TREE_ONE,
+        )
+
+
+def test_upgrade_prerequisite_drift_preserves_old_environment_then_resumes(
+    tmp_path: Path,
+    filesystem_root: Path,
+) -> None:
+    first_source = _candidate_source(tmp_path, "candidate-one")
+    commands = FakeHostCommands(filesystem_root, os.getgid())
+    first = _authority_installer(
+        filesystem_root=filesystem_root,
+        source_root=first_source,
+        runner=commands,
+    )
+    first.install(
+        action="environment-authority-bootstrap",
+        candidate_sha=SHA_ONE,
+        candidate_tree=TREE_ONE,
+    )
+    installed_path = filesystem_root / installer.INSTALLED_PATH.relative_to("/")
+    journal_path = filesystem_root / installer.JOURNAL_PATH.relative_to("/")
+    old_installed = installed_path.read_bytes()
+    old_journal = journal_path.read_bytes()
+
+    second_source = _candidate_source(tmp_path, "candidate-two")
+    second = _authority_installer(
+        filesystem_root=filesystem_root,
+        source_root=second_source,
+        runner=commands,
+    )
+    contract = filesystem_root / installer.NODE_CAPACITY_CONTRACT.relative_to("/")
+    contract.write_bytes(b"drifted before upgrade\n")
+    contract.chmod(installer.NODE_CAPACITY_CONTRACT_MODE)
+
+    with pytest.raises(installer.AuthorityInstallerError, match="prerequisite drifted"):
+        second.install(
+            action="environment-authority-upgrade",
+            candidate_sha=SHA_TWO,
+            candidate_tree=TREE_TWO,
+        )
+
+    assert installed_path.read_bytes() == old_installed
+    assert journal_path.read_bytes() == old_journal
+    assert not (filesystem_root / installer.ACTIVE_PATH.relative_to("/")).exists()
+
+    contract.write_bytes((second_source / installer.NODE_CAPACITY_CONTRACT_RELATIVE).read_bytes())
+    contract.chmod(installer.NODE_CAPACITY_CONTRACT_MODE)
+    resumed = second.install(
+        action="environment-authority-upgrade",
+        candidate_sha=SHA_TWO,
+        candidate_tree=TREE_TWO,
+    )
+    assert resumed["source_sha"] == SHA_TWO
+    assert resumed["status"] == "succeeded"
+
+
+def test_prerequisite_race_rolls_back_before_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    filesystem_root: Path,
+) -> None:
+    source = _candidate_source(tmp_path, "candidate-one")
+    commands = FakeHostCommands(filesystem_root, os.getgid())
+    authority = _authority_installer(
+        filesystem_root=filesystem_root,
+        source_root=source,
+        runner=commands,
+    )
+    contract = filesystem_root / installer.NODE_CAPACITY_CONTRACT.relative_to("/")
+    validate = authority._validate_node_capacity_contract_prerequisite
+    calls = 0
+
+    def race(*, candidate_sha: str, candidate_tree: str) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            contract.write_bytes(b"raced during environment transaction\n")
+            contract.chmod(installer.NODE_CAPACITY_CONTRACT_MODE)
+        return validate(candidate_sha=candidate_sha, candidate_tree=candidate_tree)
+
+    monkeypatch.setattr(
+        authority,
+        "_validate_node_capacity_contract_prerequisite",
+        race,
+    )
+    with pytest.raises(installer.AuthorityInstallerError, match="prerequisite drifted"):
+        authority.install(
+            action="environment-authority-bootstrap",
+            candidate_sha=SHA_ONE,
+            candidate_tree=TREE_ONE,
+        )
+
+    assert not (filesystem_root / installer.ACTIVE_PATH.relative_to("/")).exists()
+    assert not (filesystem_root / installer.INSTALLED_PATH.relative_to("/")).exists()
+    journal = (filesystem_root / installer.JOURNAL_PATH.relative_to("/")).read_text(
+        encoding="ascii"
+    )
+    assert '"phase":"rolled-back"' in journal
+    assert '"phase":"committed"' not in journal
+    assert all(
+        not (filesystem_root / Path(destination).relative_to("/")).exists()
+        for destination in installer.FIXED_DESTINATIONS
+    )
 
 
 def test_readback_rejects_group_writable_installed_import_ancestor(

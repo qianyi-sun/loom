@@ -252,6 +252,11 @@ def _install_runtime_host_fixture(
     base_config = RootMetadataPath(config_root / "shared-capacity-supervisor.base.toml")
     rendered_config = RootMetadataPath(config_root / "shared-capacity-supervisor.toml")
     state_path = RootMetadataPath(state_root / "installer/state.json")
+    node_binding = {
+        "node_authority_source_sha": "a" * 40,
+        "node_authority_source_tree": "b" * 40,
+        "node_capacity_contract_sha256": "c" * 64,
+    }
 
     _write_supervisor_base(base_config, authority_root)
     state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -262,6 +267,7 @@ def _install_runtime_host_fixture(
                 "activation_status": "activated",
                 "installation_mode": "fixed-registry-runtime",
                 "admission_state": "open",
+                **node_binding,
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -292,6 +298,11 @@ def _install_runtime_host_fixture(
     monkeypatch.setattr(runtime_host, "_require_live_host", lambda: None)
     monkeypatch.setattr(runtime_host, "_lock", nullcontext)
     monkeypatch.setattr(runtime_host.os, "chown", lambda *_args: None)
+    monkeypatch.setattr(
+        runtime_host,
+        "_validate_fixed_registry_node_capacity_prerequisite",
+        lambda: dict(node_binding),
+    )
 
     def run_host(
         argv: Sequence[str],

@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Final
 
 SCHEMA_VERSION: Final = 2
+RECEIPT_SCHEMA_VERSION: Final = 3
 KIND: Final = "loom.developer-sandbox.node-docker-bootstrap"
 HOST_ROOT: Final = Path("/host")
 REQUEST_PATH: Final = Path("/run/loom-node-bootstrap/request.json")
@@ -49,6 +50,7 @@ MAX_REQUEST_BYTES: Final = 256 * 1024
 MAX_BUNDLE_BYTES: Final = 256 * 1024 * 1024
 MAX_INPUT_BYTES: Final = 2 * 1024 * 1024
 MAX_CHILD_REPORT_BYTES: Final = 2 * 1024 * 1024
+MAX_RECEIPT_BYTES: Final = MAX_CHILD_REPORT_BYTES + MAX_REQUEST_BYTES
 MAX_FIXED_COMMAND_STDERR_BYTES: Final = 64 * 1024
 MAX_HOST_ERROR_BYTES: Final = 4096
 SHA_RE: Final = re.compile(r"^[0-9a-f]{40}$")
@@ -717,6 +719,63 @@ def _validate_action_result(
         raise DockerNodeBootstrapError("Docker bootstrap child candidate evidence drifted")
 
 
+def _validate_readback_result(
+    request: Mapping[str, Any],
+    result: Mapping[str, Any],
+) -> None:
+    _validate_action_result(request, result)
+    if request["action"] != "readback":
+        return
+    client_result = result.get("transport_client")
+    server_result = result.get("transport_server")
+    expectation = request["transport_expectation"]
+    if (
+        (expectation == "absent" and (client_result is not None or server_result is not None))
+        or (expectation == "server" and (client_result is not None or server_result is None))
+        or (expectation == "client-server" and (client_result is None or server_result is None))
+    ):
+        raise DockerNodeBootstrapError("Docker bootstrap transport readback is incomplete")
+    for transport_result, binding_field in (
+        (client_result, "initiator"),
+        (server_result, "node"),
+    ):
+        if transport_result is not None and (
+            not isinstance(transport_result, Mapping)
+            or transport_result.get("status") != "succeeded"
+            or transport_result.get(binding_field) != request["expected_node"]
+        ):
+            raise DockerNodeBootstrapError("Docker bootstrap transport readback is invalid")
+
+
+def _validate_environment_receipt_result(
+    request: Mapping[str, Any],
+    result: Mapping[str, Any],
+) -> None:
+    if request["action"] not in ENVIRONMENT_AUTHORITY_ACTIONS:
+        return
+    if (
+        not isinstance(result.get("installed_asset_digests"), dict)
+        or not result["installed_asset_digests"]
+        or any(
+            not isinstance(destination, str)
+            or not destination.startswith("/")
+            or SHA256_RE.fullmatch(str(digest)) is None
+            for destination, digest in result["installed_asset_digests"].items()
+        )
+        or SHA256_RE.fullmatch(str(result.get("node_capacity_contract_sha256"))) is None
+        or SHA256_RE.fullmatch(str(result.get("registry_snapshot_sha256"))) is None
+    ):
+        raise DockerNodeBootstrapError("Docker bootstrap environment receipt evidence is invalid")
+
+
+def _validate_receipt_result(
+    request: Mapping[str, Any],
+    result: Mapping[str, Any],
+) -> None:
+    _validate_readback_result(request, result)
+    _validate_environment_receipt_result(request, result)
+
+
 def _run_chroot_action(request: Mapping[str, Any], stage: Path) -> dict[str, Any]:
     argv, cwd = _fixed_action_argv(request, stage)
     authority_result = _run_host_python(argv, cwd)
@@ -747,97 +806,96 @@ def _run_chroot_action(request: Mapping[str, Any], stage: Path) -> dict[str, Any
         "transport_server": server_result,
         "status": "succeeded",
     }
-    _validate_action_result(request, result)
-    expectation = request["transport_expectation"]
-    if (
-        (expectation == "absent" and (client_result is not None or server_result is not None))
-        or (expectation == "server" and (client_result is not None or server_result is None))
-        or (expectation == "client-server" and (client_result is None or server_result is None))
-    ):
-        raise DockerNodeBootstrapError("Docker bootstrap transport readback is incomplete")
-    for transport_result, binding_field in (
-        (client_result, "initiator"),
-        (server_result, "node"),
-    ):
-        if transport_result is not None and (
-            transport_result.get("status") != "succeeded"
-            or transport_result.get(binding_field) != request["expected_node"]
-        ):
-            raise DockerNodeBootstrapError("Docker bootstrap transport readback is invalid")
+    _validate_readback_result(request, result)
     return result
 
 
-def _write_receipt(request: Mapping[str, Any], result: Mapping[str, Any]) -> dict[str, Any]:
+def _receipt_environment_fields(request: Mapping[str, Any]) -> set[str]:
+    if request["action"] not in ENVIRONMENT_AUTHORITY_ACTIONS:
+        return set()
+    return {
+        "installed_asset_digests",
+        "node_capacity_contract_sha256",
+        "registry_snapshot_sha256",
+    }
+
+
+def _read_receipt(
+    request: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
     path = HOST_RECEIPT_ROOT / f"{request['request_id']}.json"
-    result_digest = _digest(_canonical(result))
-    environment_action = request["action"] in ENVIRONMENT_AUTHORITY_ACTIONS
-    environment_fields = (
-        {"installed_asset_digests", "registry_snapshot_sha256"} if environment_action else set()
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise DockerNodeBootstrapError("Docker bootstrap receipt is unavailable") from exc
+    raw = _read_regular(
+        path,
+        limit=MAX_RECEIPT_BYTES,
+        allowed_modes=frozenset({0o600}),
     )
-    if environment_action and (
-        not isinstance(result.get("installed_asset_digests"), dict)
-        or not result["installed_asset_digests"]
-        or any(
-            not isinstance(destination, str)
-            or not destination.startswith("/")
-            or SHA256_RE.fullmatch(str(digest)) is None
-            for destination, digest in result["installed_asset_digests"].items()
-        )
-        or SHA256_RE.fullmatch(str(result.get("registry_snapshot_sha256"))) is None
+    try:
+        receipt = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DockerNodeBootstrapError("Docker bootstrap receipt is invalid") from exc
+    environment_fields = _receipt_environment_fields(request)
+    expected_fields = {
+        "schema_version",
+        "kind",
+        "request_id",
+        "operation_id",
+        "action",
+        "candidate_sha",
+        "candidate_tree",
+        "expected_node",
+        "result",
+        "result_sha256",
+        "completed_at",
+        "status",
+    } | environment_fields
+    result = receipt.get("result") if isinstance(receipt, dict) else None
+    if not isinstance(result, dict):
+        raise DockerNodeBootstrapError("Docker bootstrap receipt replay drifted")
+    try:
+        _validate_receipt_result(request, result)
+        result_digest = _digest(_canonical(result))
+    except (TypeError, UnicodeEncodeError, ValueError) as exc:
+        raise DockerNodeBootstrapError("Docker bootstrap receipt replay drifted") from exc
+    if (
+        set(receipt) != expected_fields
+        or raw != _canonical(receipt)
+        or receipt.get("schema_version") != RECEIPT_SCHEMA_VERSION
+        or receipt.get("kind") != "loom.developer-sandbox.node-docker-bootstrap-receipt"
+        or receipt.get("request_id") != request["request_id"]
+        or receipt.get("operation_id") != request["operation_id"]
+        or receipt.get("action") != request["action"]
+        or receipt.get("candidate_sha") != request["candidate_sha"]
+        or receipt.get("candidate_tree") != request["candidate_tree"]
+        or receipt.get("expected_node") != request["expected_node"]
+        or receipt.get("result_sha256") != result_digest
+        or any(receipt.get(field) != result.get(field) for field in environment_fields)
+        or not isinstance(receipt.get("completed_at"), str)
+        or receipt.get("status") != "succeeded"
     ):
-        raise DockerNodeBootstrapError("Docker bootstrap environment receipt evidence is invalid")
-    if path.exists():
-        existing_raw = _read_regular(
-            path,
-            limit=MAX_REQUEST_BYTES,
-            allowed_modes=frozenset({0o600}),
-        )
-        try:
-            existing = json.loads(existing_raw)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise DockerNodeBootstrapError("Docker bootstrap receipt is invalid") from exc
-        if (
-            not isinstance(existing, dict)
-            or set(existing)
-            != {
-                "schema_version",
-                "kind",
-                "request_id",
-                "operation_id",
-                "action",
-                "candidate_sha",
-                "candidate_tree",
-                "expected_node",
-                "result_sha256",
-                "completed_at",
-                "status",
-            }
-            | environment_fields
-            or existing_raw != _canonical(existing)
-            or existing.get("schema_version") != SCHEMA_VERSION
-            or existing.get("kind") != "loom.developer-sandbox.node-docker-bootstrap-receipt"
-            or existing.get("request_id") != request["request_id"]
-            or existing.get("operation_id") != request["operation_id"]
-            or existing.get("action") != request["action"]
-            or existing.get("candidate_sha") != request["candidate_sha"]
-            or existing.get("candidate_tree") != request["candidate_tree"]
-            or existing.get("expected_node") != request["expected_node"]
-            or existing.get("result_sha256") != result_digest
-            or (
-                environment_action
-                and (
-                    existing.get("installed_asset_digests") != result["installed_asset_digests"]
-                    or existing.get("registry_snapshot_sha256")
-                    != result["registry_snapshot_sha256"]
-                )
-            )
-            or not isinstance(existing.get("completed_at"), str)
-            or existing.get("status") != "succeeded"
-        ):
+        raise DockerNodeBootstrapError("Docker bootstrap receipt replay drifted")
+    return receipt, result
+
+
+def _write_receipt(request: Mapping[str, Any], result: Mapping[str, Any]) -> dict[str, Any]:
+    _validate_receipt_result(request, result)
+    result_payload = dict(result)
+    result_digest = _digest(_canonical(result_payload))
+    environment_fields = _receipt_environment_fields(request)
+    existing = _read_receipt(request)
+    if existing is not None:
+        receipt, stored_result = existing
+        if stored_result != result_payload:
             raise DockerNodeBootstrapError("Docker bootstrap receipt replay drifted")
-        return existing
+        return receipt
+    environment_action = request["action"] in ENVIRONMENT_AUTHORITY_ACTIONS
     receipt = {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": RECEIPT_SCHEMA_VERSION,
         "kind": "loom.developer-sandbox.node-docker-bootstrap-receipt",
         "request_id": request["request_id"],
         "operation_id": request["operation_id"],
@@ -845,21 +903,30 @@ def _write_receipt(request: Mapping[str, Any], result: Mapping[str, Any]) -> dic
         "candidate_sha": request["candidate_sha"],
         "candidate_tree": request["candidate_tree"],
         "expected_node": request["expected_node"],
+        "result": result_payload,
         "result_sha256": result_digest,
         "completed_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "status": "succeeded",
     }
     if environment_action:
-        receipt["installed_asset_digests"] = result["installed_asset_digests"]
-        receipt["registry_snapshot_sha256"] = result["registry_snapshot_sha256"]
+        for field in environment_fields:
+            receipt[field] = result_payload[field]
     payload = _canonical(receipt)
+    if len(payload) > MAX_RECEIPT_BYTES:
+        raise DockerNodeBootstrapError("Docker bootstrap receipt exceeds its size bound")
+    path = HOST_RECEIPT_ROOT / f"{request['request_id']}.json"
     temporary_descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{request['request_id']}.",
         dir=HOST_RECEIPT_ROOT,
     )
     try:
         os.fchmod(temporary_descriptor, 0o600)
-        os.write(temporary_descriptor, payload)
+        view = memoryview(payload)
+        while view:
+            written = os.write(temporary_descriptor, view)
+            if written < 1:
+                raise DockerNodeBootstrapError("Docker bootstrap receipt publication failed safely")
+            view = view[written:]
         os.fsync(temporary_descriptor)
     finally:
         os.close(temporary_descriptor)
@@ -880,6 +947,44 @@ def _write_receipt(request: Mapping[str, Any], result: Mapping[str, Any]) -> dic
     finally:
         Path(temporary_name).unlink(missing_ok=True)
     return receipt
+
+
+def _report(
+    request: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "action": request["action"],
+        "candidate_sha": request["candidate_sha"],
+        "candidate_tree": request["candidate_tree"],
+        "node": request["expected_node"],
+        "request_id": request["request_id"],
+        "operation_id": request["operation_id"],
+        "receipt": dict(receipt),
+        "result": dict(result),
+        "status": "succeeded",
+    }
+
+
+def _execute_locked(
+    request: Mapping[str, Any],
+    bundle_payload: bytes,
+) -> dict[str, Any]:
+    existing = _read_receipt(request)
+    if existing is not None:
+        receipt, result = existing
+        return _report(request, receipt, result)
+    stage: Path | None = None
+    try:
+        stage, _source = _prepare_stage(request, bundle_payload)
+        result = _run_chroot_action(request, stage)
+        receipt = _write_receipt(request, result)
+        return _report(request, receipt, result)
+    finally:
+        if stage is not None:
+            _remove_stage(stage)
 
 
 def execute() -> dict[str, Any]:
@@ -904,27 +1009,10 @@ def execute() -> dict[str, Any]:
     ):
         os.close(lock)
         raise DockerNodeBootstrapError("Docker bootstrap lock is unsafe")
-    stage: Path | None = None
     try:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        stage, _source = _prepare_stage(request, bundle_payload)
-        result = _run_chroot_action(request, stage)
-        receipt = _write_receipt(request, result)
-        return {
-            "schema_version": SCHEMA_VERSION,
-            "action": request["action"],
-            "candidate_sha": request["candidate_sha"],
-            "candidate_tree": request["candidate_tree"],
-            "node": request["expected_node"],
-            "request_id": request["request_id"],
-            "operation_id": request["operation_id"],
-            "receipt": receipt,
-            "result": result,
-            "status": "succeeded",
-        }
+        return _execute_locked(request, bundle_payload)
     finally:
-        if stage is not None:
-            _remove_stage(stage)
         os.close(lock)
 
 
