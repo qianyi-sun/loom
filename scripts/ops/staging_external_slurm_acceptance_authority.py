@@ -26,7 +26,7 @@ import socket
 import stat
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -1593,6 +1593,7 @@ def _transport_argv(
     config: ExternalSlurmAuthorityConfig,
     *,
     node: str,
+    verb: str = "transact",
 ) -> list[str]:
     return [
         str(config.broker_transport),
@@ -1600,7 +1601,7 @@ def _transport_argv(
         "--node",
         node,
         "--verb",
-        "transact",
+        verb,
     ]
 
 
@@ -2966,6 +2967,278 @@ def verify_current(config: ExternalSlurmAuthorityConfig) -> dict[str, Any]:
     return result
 
 
+def _broker_envelope(
+    config: ExternalSlurmAuthorityConfig,
+    *,
+    action: str,
+    payload_kind: str,
+    inner: Mapping[str, Any],
+) -> bytes:
+    inner_bytes = canonical_json_bytes(inner)
+    unsigned = {
+        "schema_version": 1,
+        "action": action,
+        "node": config.broker_node,
+        "domain": config.broker_domain,
+        "sandbox": config.broker_sandbox,
+        "candidate_sha": inner["candidate_sha"],
+        "candidate_tree": inner["candidate_tree"],
+        "payload_kind": payload_kind,
+        "payload_sha256": hashlib.sha256(inner_bytes).hexdigest(),
+        "payload_base64": base64.b64encode(inner_bytes).decode("ascii"),
+        "prior_request_id": None,
+    }
+    return canonical_json_bytes(
+        {
+            **unsigned,
+            "request_id": hashlib.sha256(canonical_json_bytes(unsigned)).hexdigest(),
+        }
+    )
+
+
+def _broker_candidate(
+    config: ExternalSlurmAuthorityConfig,
+    *,
+    candidate_sha: str,
+    candidate_tree: str,
+) -> None:
+    if (
+        config.environment != "staging"
+        or config.pool != "gb10"
+        or config.cluster != "trt-gb10"
+        or config.controller != "trt-gb10-1"
+        or config.submit_host != "trt-gb10-1"
+        or config.broker_node != "trt-gb10-1"
+        or config.broker_domain != "gb10"
+        or config.broker_sandbox != "staging"
+        or _OBJECT_ID_RE.fullmatch(candidate_sha) is None
+        or _OBJECT_ID_RE.fullmatch(candidate_tree) is None
+    ):
+        raise ExternalSlurmAcceptanceError("fixed staging GB10 broker identity is invalid")
+
+
+def _broker_invoke(
+    config: ExternalSlurmAuthorityConfig,
+    *,
+    verb: str,
+    envelope: bytes,
+) -> dict[str, Any]:
+    completed = _run(
+        _transport_argv(config, node=config.broker_node, verb=verb),
+        timeout=config.max_age_seconds,
+        input_text=envelope.decode("ascii"),
+    )
+    if completed.returncode != 0 or len(completed.stdout.encode("utf-8")) > _MAX_PROBE_BYTES:
+        raise ExternalSlurmAcceptanceError("fixed staging allocation broker failed")
+    try:
+        response = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise ExternalSlurmAcceptanceError("fixed staging broker returned invalid JSON") from exc
+    if completed.stderr or not isinstance(response, dict) or response.get("status") != "succeeded":
+        raise ExternalSlurmAcceptanceError("fixed staging broker response is invalid")
+    return response
+
+
+def broker_query(
+    config: ExternalSlurmAuthorityConfig,
+    *,
+    candidate_sha: str,
+    candidate_tree: str,
+    job_ids: Sequence[str],
+    nodes: Sequence[str],
+) -> dict[str, Any]:
+    _require_root()
+    _require_source_host(config)
+    _broker_candidate(
+        config,
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+    )
+    if (
+        len(set(job_ids)) != len(job_ids)
+        or len(set(nodes)) != len(nodes)
+        or len(job_ids) > 64
+        or any(re.fullmatch(r"[1-9][0-9]*", item) is None for item in job_ids)
+        or any(node not in config.allowed_nodes for node in nodes)
+        or (not job_ids and not nodes)
+    ):
+        raise ExternalSlurmAcceptanceError("broker query scope is invalid")
+    request_id = secrets.token_hex(32)
+    envelope = _broker_envelope(
+        config,
+        action=config.broker_query_action,
+        payload_kind="staging-allocation-query-request",
+        inner={
+            "schema_version": 1,
+            "kind": "staging_external_slurm_allocation_query_request",
+            "request_id": request_id,
+            "candidate_sha": candidate_sha,
+            "candidate_tree": candidate_tree,
+            "job_ids": list(job_ids),
+            "nodes": list(nodes),
+        },
+    )
+    outer_request_id = json.loads(envelope)["request_id"]
+    response = _broker_invoke(config, verb="check", envelope=envelope)
+    result = response.get("result")
+    if (
+        response.get("request_id") != outer_request_id
+        or not isinstance(result, dict)
+        or set(result)
+        != {
+            "schema_version",
+            "kind",
+            "request_id",
+            "candidate_sha",
+            "candidate_tree",
+            "cluster",
+            "controller",
+            "submit_host",
+            "jobs",
+            "nodes",
+        }
+        or result.get("schema_version") != 1
+        or result.get("kind") != "staging_external_slurm_broker_query"
+        or result.get("request_id") != request_id
+        or result.get("candidate_sha") != candidate_sha
+        or result.get("candidate_tree") != candidate_tree
+        or result.get("cluster") != config.cluster
+        or result.get("controller") != config.controller
+        or result.get("submit_host") != config.submit_host
+        or not isinstance(result.get("jobs"), list)
+        or not isinstance(result.get("nodes"), list)
+    ):
+        raise ExternalSlurmAcceptanceError("broker query response binding is invalid")
+    return {
+        "schema_version": 1,
+        "kind": "staging_external_slurm_broker_query",
+        "candidate_sha": candidate_sha,
+        "candidate_tree": candidate_tree,
+        "cluster": config.cluster,
+        "controller": config.controller,
+        "submit_host": config.submit_host,
+        "jobs": result.get("jobs"),
+        "nodes": result.get("nodes"),
+    }
+
+
+def broker_submit(
+    config: ExternalSlurmAuthorityConfig,
+    *,
+    candidate_sha: str,
+    candidate_tree: str,
+    node: str,
+) -> dict[str, Any]:
+    _require_root()
+    _require_source_host(config)
+    _broker_candidate(
+        config,
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+    )
+    if node not in config.allowed_nodes:
+        raise ExternalSlurmAcceptanceError("broker submission node is outside GB10")
+    request_id = secrets.token_hex(32)
+    envelope = _broker_envelope(
+        config,
+        action=config.broker_submit_action,
+        payload_kind="staging-allocation-submit-request",
+        inner={
+            "schema_version": 1,
+            "kind": "staging_external_slurm_allocation_submit_request",
+            "request_id": request_id,
+            "candidate_sha": candidate_sha,
+            "candidate_tree": candidate_tree,
+            "requested_node": node,
+        },
+    )
+    response = _broker_invoke(config, verb="transact", envelope=envelope)
+    receipt = response.get("inner_receipt")
+    match = re.fullmatch(
+        rf"staging-broker/v1/submission/{request_id}/(?P<job_id>[1-9][0-9]*)",
+        str(receipt),
+    )
+    if (
+        response.get("request_id") != json.loads(envelope)["request_id"]
+        or response.get("action") != config.broker_submit_action
+        or match is None
+    ):
+        raise ExternalSlurmAcceptanceError("broker submission response binding is invalid")
+    return {
+        "schema_version": 1,
+        "kind": "staging_external_slurm_broker_submission",
+        "candidate_sha": candidate_sha,
+        "candidate_tree": candidate_tree,
+        "cluster": config.cluster,
+        "controller": config.controller,
+        "submit_host": config.submit_host,
+        "request_id": request_id,
+        "job_id": match.group("job_id"),
+        "node": node,
+    }
+
+
+def broker_cancel(
+    config: ExternalSlurmAuthorityConfig,
+    *,
+    candidate_sha: str,
+    candidate_tree: str,
+    submit_request_id: str,
+    job_id: str,
+    node: str,
+) -> dict[str, Any]:
+    _require_root()
+    _require_source_host(config)
+    _broker_candidate(
+        config,
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+    )
+    if (
+        re.fullmatch(r"[0-9a-f]{64}", submit_request_id) is None
+        or re.fullmatch(r"[1-9][0-9]*", job_id) is None
+        or node not in config.allowed_nodes
+    ):
+        raise ExternalSlurmAcceptanceError("broker cancellation identity is invalid")
+    request_id = secrets.token_hex(32)
+    envelope = _broker_envelope(
+        config,
+        action=config.broker_cancel_action,
+        payload_kind="staging-allocation-cancel-request",
+        inner={
+            "schema_version": 1,
+            "kind": "staging_external_slurm_allocation_cancel_request",
+            "request_id": request_id,
+            "candidate_sha": candidate_sha,
+            "candidate_tree": candidate_tree,
+            "requested_node": node,
+            "job_id": job_id,
+            "submit_request_id": submit_request_id,
+        },
+    )
+    response = _broker_invoke(config, verb="transact", envelope=envelope)
+    if (
+        response.get("request_id") != json.loads(envelope)["request_id"]
+        or response.get("action") != config.broker_cancel_action
+        or response.get("inner_receipt") != f"staging-broker/v1/cancellation/{request_id}"
+    ):
+        raise ExternalSlurmAcceptanceError("broker cancellation response binding is invalid")
+    return {
+        "schema_version": 1,
+        "kind": "staging_external_slurm_broker_cancellation",
+        "candidate_sha": candidate_sha,
+        "candidate_tree": candidate_tree,
+        "cluster": config.cluster,
+        "controller": config.controller,
+        "submit_host": config.submit_host,
+        "request_id": request_id,
+        "submit_request_id": submit_request_id,
+        "job_id": job_id,
+        "node": node,
+        "state": "CANCELLED",
+    }
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(allow_abbrev=False)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -2995,6 +3268,21 @@ def _parser() -> argparse.ArgumentParser:
     )
     converge_parser.add_argument("--candidate-sha", required=True)
     converge_parser.add_argument("--candidate-tree", required=True)
+    query_parser = subparsers.add_parser("broker-query", allow_abbrev=False)
+    query_parser.add_argument("--candidate-sha", required=True)
+    query_parser.add_argument("--candidate-tree", required=True)
+    query_parser.add_argument("--job-id", action="append", default=[])
+    query_parser.add_argument("--node", action="append", default=[])
+    submit_parser = subparsers.add_parser("broker-submit", allow_abbrev=False)
+    submit_parser.add_argument("--candidate-sha", required=True)
+    submit_parser.add_argument("--candidate-tree", required=True)
+    submit_parser.add_argument("--node", required=True)
+    cancel_parser = subparsers.add_parser("broker-cancel", allow_abbrev=False)
+    cancel_parser.add_argument("--candidate-sha", required=True)
+    cancel_parser.add_argument("--candidate-tree", required=True)
+    cancel_parser.add_argument("--submit-request-id", required=True)
+    cancel_parser.add_argument("--job-id", required=True)
+    cancel_parser.add_argument("--node", required=True)
     subparsers.add_parser("verify-current")
     return parser
 
@@ -3044,6 +3332,30 @@ def main(argv: Sequence[str] | None = None) -> int:
                 config,
                 candidate_sha=args.candidate_sha,
                 candidate_tree=args.candidate_tree,
+            )
+        elif args.command == "broker-query":
+            result = broker_query(
+                config,
+                candidate_sha=args.candidate_sha,
+                candidate_tree=args.candidate_tree,
+                job_ids=args.job_id,
+                nodes=args.node,
+            )
+        elif args.command == "broker-submit":
+            result = broker_submit(
+                config,
+                candidate_sha=args.candidate_sha,
+                candidate_tree=args.candidate_tree,
+                node=args.node,
+            )
+        elif args.command == "broker-cancel":
+            result = broker_cancel(
+                config,
+                candidate_sha=args.candidate_sha,
+                candidate_tree=args.candidate_tree,
+                submit_request_id=args.submit_request_id,
+                job_id=args.job_id,
+                node=args.node,
             )
         else:
             result = verify_current(config)

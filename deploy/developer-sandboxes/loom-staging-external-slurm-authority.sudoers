@@ -5,4 +5,7 @@ loom-rollout ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-staging-exter
 loom-rollout ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-staging-external-slurm-authority verify *
 loom-rollout ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-staging-external-slurm-authority verify-infrastructure --candidate-sha * --candidate-tree *
 loom-rollout ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-staging-external-slurm-authority converge-infrastructure --candidate-sha * --candidate-tree *
+loom-rollout ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-staging-external-slurm-authority broker-query *
+loom-rollout ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-staging-external-slurm-authority broker-submit *
+loom-rollout ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-staging-external-slurm-authority broker-cancel *
 loom-rollout ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-staging-external-slurm-authority verify-current

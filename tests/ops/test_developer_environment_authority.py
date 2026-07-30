@@ -10,6 +10,7 @@ import os
 import socket
 import subprocess
 import tarfile
+import threading
 from collections.abc import Callable, Set
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -417,6 +418,16 @@ class _FakeFleetRegistry:
         )
 
 
+class _MutationTrackingFleetRegistry(_FakeFleetRegistry):
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_calls: list[dict[str, Any]] = []
+
+    def register(self, request: dict[str, Any]) -> None:
+        self.register_calls.append(request)
+        raise AssertionError("registry mutation must not start after inventory failure")
+
+
 def test_installed_node_policy_readback_is_canonical_owner_bound_and_nofollow(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -530,6 +541,172 @@ def test_root_authority_collects_all_nodes_through_fixed_sudo_transport(
     )
     assert published["nodes"][11]["node"] == "trt-gb10-7"
     assert published["nodes"][11]["occupied_ids"] == [32_000]
+
+
+def test_fleet_inventory_bounds_shared_gb10_jump_concurrency_without_omitting_nodes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fleet = _FakeFleetRegistry()
+    monkeypatch.setattr(
+        authority,
+        "_read_installed_node_policy",
+        lambda: {
+            "schema_version": 1,
+            "source_sha": "a" * 40,
+            "source_tree": "b" * 40,
+            "node": "oldlab-1",
+            "asset_sha256": {"sealed": "c" * 64},
+        },
+    )
+    lock = threading.Lock()
+    release_jump = threading.Event()
+    jump_limit_reached = threading.Event()
+    all_jump_attempted = threading.Event()
+    called_nodes: list[str] = []
+    active_jump = 0
+    peak_jump = 0
+    limiter_attempts = 0
+    real_bounded_semaphore = threading.BoundedSemaphore
+
+    class TrackingBoundedSemaphore:
+        def __init__(self, value: int) -> None:
+            self._semaphore = real_bounded_semaphore(value)
+
+        def __enter__(self) -> None:
+            nonlocal limiter_attempts
+            with lock:
+                limiter_attempts += 1
+                if limiter_attempts == len(authority.FLEET_INVENTORY_GB10_JUMP_NODES):
+                    all_jump_attempted.set()
+            self._semaphore.acquire()
+
+        def __exit__(self, *_args: object) -> None:
+            self._semaphore.release()
+
+    monkeypatch.setattr(
+        authority.threading,
+        "BoundedSemaphore",
+        TrackingBoundedSemaphore,
+    )
+
+    def run(
+        argv: list[str],
+        **kwargs: Any,
+    ) -> subprocess.CompletedProcess[bytes]:
+        nonlocal active_jump, peak_jump
+        outer = json.loads(kwargs["input"])
+        node = str(outer["node"])
+        is_shared_jump = node in authority.FLEET_INVENTORY_GB10_JUMP_NODES
+        with lock:
+            called_nodes.append(node)
+            if is_shared_jump:
+                active_jump += 1
+                peak_jump = max(peak_jump, active_jump)
+                if active_jump == authority.FLEET_INVENTORY_GB10_JUMP_MAX_INFLIGHT:
+                    jump_limit_reached.set()
+        try:
+            if is_shared_jump and not release_jump.wait(timeout=5):
+                raise AssertionError("shared jump inventory test did not release")
+            response = {
+                "schema_version": 1,
+                "request_id": outer["request_id"],
+                "status": "succeeded",
+                "result": {
+                    "schema_version": 1,
+                    "kind": registry.NODE_IDENTITY_INVENTORY_KIND,
+                    "node": node,
+                    "domain": "oldlab" if node.startswith("oldlab-") else "gb10",
+                    "uid_start": 32_000,
+                    "uid_end": 60_000,
+                    "occupied_ids": [],
+                    "identity_inventory_sha256": hashlib.sha256(
+                        node.encode("ascii"),
+                    ).hexdigest(),
+                    "checked_at": registry._timestamp(),
+                },
+            }
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=authority._canonical(response),
+                stderr=b"",
+            )
+        finally:
+            if is_shared_jump:
+                with lock:
+                    active_jump -= 1
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        refresh = pool.submit(authority._refresh_fleet_identity_inventory, fleet, run=run)
+        assert jump_limit_reached.wait(timeout=5)
+        assert all_jump_attempted.wait(timeout=5)
+        with lock:
+            assert active_jump == authority.FLEET_INVENTORY_GB10_JUMP_MAX_INFLIGHT
+            assert peak_jump == authority.FLEET_INVENTORY_GB10_JUMP_MAX_INFLIGHT
+            assert limiter_attempts == len(authority.FLEET_INVENTORY_GB10_JUMP_NODES)
+        release_jump.set()
+        refresh.result(timeout=10)
+
+    assert set(called_nodes) == set(registry.FLEET_NODES)
+    assert len(called_nodes) == len(registry.FLEET_NODES) == 20
+    assert "trt-gb10-7" in called_nodes
+    assert fleet.published is not None
+
+
+@pytest.mark.parametrize("failed_node", registry.FLEET_NODES)
+def test_any_fleet_inventory_node_failure_precedes_registry_and_deploy_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failed_node: str,
+) -> None:
+    fleet = _MutationTrackingFleetRegistry()
+    deployer = _FakeDeployer()
+    monkeypatch.setattr(
+        authority,
+        "_read_installed_node_policy",
+        lambda: {
+            "schema_version": 1,
+            "source_sha": "a" * 40,
+            "source_tree": "b" * 40,
+            "node": "oldlab-1",
+            "asset_sha256": {"sealed": "c" * 64},
+        },
+    )
+
+    def collect(
+        _snapshot: dict[str, Any],
+        _installed_policy: dict[str, Any],
+        node: str,
+        *,
+        run: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
+    ) -> dict[str, Any]:
+        del run
+        if node == failed_node:
+            raise authority.AuthorityError("fleet identity inventory collection failed")
+        return {"node": node}
+
+    monkeypatch.setattr(authority, "_collect_fleet_inventory_node", collect)
+
+    with pytest.raises(
+        authority.AuthorityError,
+        match="fleet identity inventory collection failed",
+    ):
+        authority._dispatch(
+            {
+                "schema_version": 1,
+                "kind": authority.CREATE_KIND,
+                "idempotency_key": "inventory-failure-create-key",
+            },
+            [],
+            peer=_peer(),
+            authority=fleet,
+            stage_root=tmp_path / "imports",
+            deployer=deployer,
+        )
+
+    assert fleet.published is None
+    assert fleet.register_calls == []
+    assert deployer.calls == []
 
 
 def test_seed_only_registry_bootstraps_inventory_before_first_dynamic_create(

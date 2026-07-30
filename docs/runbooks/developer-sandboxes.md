@@ -100,6 +100,14 @@ key. Inventory absence, staleness, UID/GID collision, partial domain
 convergence, or a busy node fails closed without publishing the environment as
 active.
 
+Every fleet-identity refresh still collects all 20 nodes, including
+`trt-gb10-7`. Direct OLDLAB and `trt-gb10-1` checks remain independently
+scheduled, while at most two checks may simultaneously traverse the shared
+forced proxy on `trt-gb10-1` toward `trt-gb10-2` through `trt-gb10-15`. This
+topology-bound admission is not a retry or direct-SSH fallback. One failed or
+timed-out node aborts the complete refresh before inventory publication,
+registration, candidate import, or deployment mutation.
+
 On the canonical `oldlab-2` authority host, initial port allocation and every
 allowed pre-deployment refresh merge the root-visible TCP/TCP6 listener
 inventory with Docker's published-port reservations. A pristine dynamic
@@ -289,6 +297,11 @@ empty trust directory. Server/client transport actions accept only the role
 filenames derived from the checked-in inventory. A successful container
 report is followed by host-state `validate-install`, `check-server`, and where
 applicable `check-client`; success is not inferred from container exit alone.
+The final `readback` also requires the installed transport program and routes
+to equal the staged exact-candidate bytes and binds their SHA-256 digests beside
+the candidate SHA/tree in the durable receipt. Authority and transport remain
+separate persistent transactions and rollback domains; an authority receipt
+alone is not complete node-stack evidence.
 
 The oldlab-2 Unix socket admits authenticated members of `loom-developers`.
 The root authority then invokes the fixed transport as its single operator,
@@ -882,6 +895,28 @@ runtime receipt identities, ordered pair results, and no secret values.
 Capacity brokerage and the broker→WPAP handoff adapter are documented in
 [`shared-sandbox-capacity-broker.md`](shared-sandbox-capacity-broker.md). This
 sandbox runbook does not configure Slurm packing or enable shared-worker pools.
+
+Staging GB10 steady-state autoscaling is explicitly bound to
+`external_broker = "staging-gb10-v1"` and `cluster = "trt-gb10"`. The
+autoscaler may query, submit, or cancel only through
+`sudo -n /usr/local/libexec/loom-staging-external-slurm-authority broker-*`;
+that root-owned client sends the fixed node transport to controller and submit
+host `trt-gb10-1`. It has no direct `squeue`, `sacct`, `sinfo`, `sbatch`, or
+`scancel` path and no local or OLDLAB fallback. Queries use the read-only
+`check` verb. Job observations and cancellations must resolve through the
+root-owned submission ledger for the exact candidate, so a foreign job is
+never queried, cancelled, or preempted. The fixed eligible set remains all 15
+GB10 nodes, including `trt-gb10-7`; a busy node is skipped without widening
+authority.
+
+Each submit request is serialized by its 64-hex request ID and writes a
+root-owned mode-`0600` WAL below
+`/var/lib/loom-staging-external-slurm-authority/submissions` before `sbatch`.
+The Slurm job name and comment both bind that request ID. On replay, the host
+returns a completed WAL result or recovers the one exact matching job from
+Slurm before it may submit; duplicate matches and identity drift fail closed.
+The controller ledger persists the full validated result, so a crash before
+the outer receipt is published replays without contacting the host or Slurm.
 
 Slurm node convergence is a durable maintenance-window operation driven by the
 root-published registry cohort. The capacity authority first proves identity

@@ -1,24 +1,34 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
+from datetime import UTC, datetime
 
 import pytest
 
 from loom_control_plane.elastic_slurm_worker_controller import (
+    FIXED_EXTERNAL_RUNNER_SAFETY_PROTOCOL,
+    FIXED_EXTERNAL_RUNNER_SAFETY_TAG,
     ElasticSlurmWorkerControllerConfig,
+    FixedExternalSlurmBrokerRunner,
     SlurmNodeCapacityPlan,
     SlurmNodeResource,
     SlurmWorkerCapacitySnapshot,
     SlurmWorkerControllerDecision,
+    SubprocessSlurmCommandRunner,
     build_controller_config,
     build_sbatch_request,
     compute_controller_decision,
+    fixed_external_slurm_broker_safety_binding,
     parse_sinfo_node_resources,
+    require_fixed_external_slurm_broker_runner,
+    run_elastic_slurm_worker_controller_once,
     slurm_compose_project_identity,
     slurm_submission_config_for_node,
     with_node_resource_snapshot,
 )
+from loom_control_plane.slurm_worker_jobs import SlurmWorkerJobObservation
 
 
 def _config(**overrides: object) -> ElasticSlurmWorkerControllerConfig:
@@ -45,6 +55,278 @@ def _config(**overrides: object) -> ElasticSlurmWorkerControllerConfig:
     }
     values.update(overrides)
     return ElasticSlurmWorkerControllerConfig(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_fixed_external_broker_routes_query_submit_cancel_without_local_slurm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sha = "a" * 40
+    tree = "b" * 40
+    config = _config(
+        environment="staging",
+        pool_name="gb10",
+        allowed_nodes=tuple(f"trt-gb10-{index}" for index in range(1, 16)),
+        repo_dir="/srv/loom/staging-shared/candidates/loom-remote-worker-staging-aaaaaaa",
+        partition="gb10",
+        slurm_account="loom-staging",
+        slurm_qos="loom-staging",
+        slurm_cluster="trt-gb10",
+        candidate_sha=sha,
+        candidate_tree=tree,
+        external_broker="staging-gb10-v1",
+        max_jobs=15,
+        pending_job_cap=3,
+    )
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_run_command(args, *, timeout, stdin=None):
+        del timeout, stdin
+        argv = tuple(args)
+        calls.append(argv)
+        assert argv[:3] == (
+            "/usr/bin/sudo",
+            "-n",
+            "/usr/local/libexec/loom-staging-external-slurm-authority",
+        )
+        assert not any(
+            executable in argv for executable in ("sbatch", "squeue", "sacct", "sinfo", "scancel")
+        )
+        command = argv[3]
+        if command == "broker-query" and "--job-id" in argv:
+            payload = {
+                "schema_version": 1,
+                "kind": "staging_external_slurm_broker_query",
+                "candidate_sha": sha,
+                "candidate_tree": tree,
+                "cluster": "trt-gb10",
+                "controller": "trt-gb10-1",
+                "submit_host": "trt-gb10-1",
+                "jobs": [
+                    {
+                        "job_id": "31415",
+                        "submit_request_id": "c" * 64,
+                        "state": "RUNNING",
+                        "nodelist": "trt-gb10-7",
+                        "pending_reason": None,
+                        "observed_at": "2026-07-30T12:00:00Z",
+                    }
+                ],
+                "nodes": [],
+            }
+        elif command == "broker-query":
+            payload = {
+                "schema_version": 1,
+                "kind": "staging_external_slurm_broker_query",
+                "candidate_sha": sha,
+                "candidate_tree": tree,
+                "cluster": "trt-gb10",
+                "controller": "trt-gb10-1",
+                "submit_host": "trt-gb10-1",
+                "jobs": [],
+                "nodes": [
+                    {
+                        "hostname": "trt-gb10-7",
+                        "state": "idle",
+                        "cpus_total": 20,
+                        "free_memory_mib": 110000,
+                        "cpu_load": 0.25,
+                        "idle_cpus": 20,
+                    }
+                ],
+            }
+        elif command == "broker-submit":
+            payload = {
+                "schema_version": 1,
+                "kind": "staging_external_slurm_broker_submission",
+                "candidate_sha": sha,
+                "candidate_tree": tree,
+                "cluster": "trt-gb10",
+                "controller": "trt-gb10-1",
+                "submit_host": "trt-gb10-1",
+                "request_id": "d" * 64,
+                "job_id": "27182",
+                "node": "trt-gb10-8",
+            }
+        else:
+            assert command == "broker-cancel"
+            payload = {
+                "schema_version": 1,
+                "kind": "staging_external_slurm_broker_cancellation",
+                "candidate_sha": sha,
+                "candidate_tree": tree,
+                "cluster": "trt-gb10",
+                "controller": "trt-gb10-1",
+                "submit_host": "trt-gb10-1",
+                "request_id": "e" * 64,
+                "submit_request_id": "c" * 64,
+                "job_id": "31415",
+                "node": "trt-gb10-7",
+                "state": "CANCELLED",
+            }
+        return type("Result", (), {"stdout": json.dumps(payload), "stderr": ""})()
+
+    monkeypatch.setattr(
+        "loom_control_plane.elastic_slurm_worker_controller._run_command",
+        fake_run_command,
+    )
+    runner = FixedExternalSlurmBrokerRunner().bind_config(config)
+
+    assert await runner.query_jobs(("31415",)) == [
+        SlurmWorkerJobObservation(
+            job_id="31415",
+            slurm_state="RUNNING",
+            nodelist="trt-gb10-7",
+            pending_reason=None,
+            observed_at=datetime(2026, 7, 30, 12, 0, tzinfo=UTC),
+        )
+    ]
+    assert await runner.query_node_resources(("trt-gb10-7",)) == {
+        "trt-gb10-7": SlurmNodeResource(
+            hostname="trt-gb10-7",
+            state="idle",
+            cpus_total=20,
+            free_memory_mib=110000,
+            cpu_load=0.25,
+            idle_cpus=20,
+        )
+    }
+    assert await runner.submit_worker(node="trt-gb10-8", config=config) == "27182"
+    await runner.cancel_job("31415")
+    assert [call[3] for call in calls] == [
+        "broker-query",
+        "broker-query",
+        "broker-submit",
+        "broker-cancel",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({"environment": "production"}, "staging"),
+        ({"pool_name": "oldlab"}, "GB10"),
+        ({"slurm_cluster": "trt-oldlab"}, "trt-gb10"),
+        ({"external_broker": ""}, "staging-gb10-v1"),
+    ],
+)
+def test_fixed_external_broker_rejects_any_pool_or_controller_fallback(
+    overrides: dict[str, object],
+    match: str,
+) -> None:
+    values: dict[str, object] = {
+        "environment": "staging",
+        "pool_name": "gb10",
+        "slurm_cluster": "trt-gb10",
+        "candidate_sha": "a" * 40,
+        "candidate_tree": "b" * 40,
+        "external_broker": "staging-gb10-v1",
+    }
+    values.update(overrides)
+    config = _config(**values)
+
+    with pytest.raises(ValueError, match=match):
+        FixedExternalSlurmBrokerRunner().bind_config(config)
+
+
+@pytest.mark.asyncio
+async def test_fixed_external_broker_rejects_success_with_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(
+        environment="staging",
+        pool_name="gb10",
+        allowed_nodes=tuple(f"trt-gb10-{index}" for index in range(1, 16)),
+        slurm_cluster="trt-gb10",
+        candidate_sha="a" * 40,
+        candidate_tree="b" * 40,
+        external_broker="staging-gb10-v1",
+        max_jobs=15,
+        pending_job_cap=3,
+    )
+
+    async def fake_run_command(args, *, timeout, stdin=None):
+        del args, timeout, stdin
+        return type(
+            "Result",
+            (),
+            {
+                "stdout": json.dumps(
+                    {
+                        "schema_version": 1,
+                        "kind": "staging_external_slurm_broker_query",
+                        "candidate_sha": "a" * 40,
+                        "candidate_tree": "b" * 40,
+                        "cluster": "trt-gb10",
+                        "controller": "trt-gb10-1",
+                        "submit_host": "trt-gb10-1",
+                        "jobs": [],
+                        "nodes": [],
+                    }
+                ),
+                "stderr": "unexpected diagnostic",
+            },
+        )()
+
+    monkeypatch.setattr(
+        "loom_control_plane.elastic_slurm_worker_controller._run_command",
+        fake_run_command,
+    )
+
+    with pytest.raises(RuntimeError, match="identity mismatch"):
+        await (
+            FixedExternalSlurmBrokerRunner()
+            .bind_config(config)
+            .query_node_resources(("trt-gb10-7",))
+        )
+
+
+def test_fixed_external_broker_injected_runner_requires_explicit_exact_safety_binding() -> None:
+    config = _config(
+        environment="staging",
+        pool_name="gb10",
+        allowed_nodes=tuple(f"trt-gb10-{index}" for index in range(1, 16)),
+        slurm_cluster="trt-gb10",
+        candidate_sha="a" * 40,
+        candidate_tree="b" * 40,
+        external_broker="staging-gb10-v1",
+    )
+
+    class ExplicitSafeFake:
+        external_runner_safety_protocol = FIXED_EXTERNAL_RUNNER_SAFETY_PROTOCOL
+        external_runner_safety_tag = FIXED_EXTERNAL_RUNNER_SAFETY_TAG
+
+        def external_runner_safety_binding(self):
+            return fixed_external_slurm_broker_safety_binding(config)
+
+    runner = ExplicitSafeFake()
+    assert require_fixed_external_slurm_broker_runner(runner, config) is runner
+
+    runner.external_runner_safety_tag = "unsafe-local-slurm"
+    with pytest.raises(ValueError, match="safety protocol"):
+        require_fixed_external_slurm_broker_runner(runner, config)
+
+
+@pytest.mark.asyncio
+async def test_external_controller_reconcile_rejects_subprocess_runner_before_query_submit_cancel() -> (
+    None
+):
+    config = _config(
+        environment="staging",
+        pool_name="gb10",
+        allowed_nodes=tuple(f"trt-gb10-{index}" for index in range(1, 16)),
+        slurm_cluster="trt-gb10",
+        candidate_sha="a" * 40,
+        candidate_tree="b" * 40,
+        external_broker="staging-gb10-v1",
+    )
+
+    with pytest.raises(ValueError, match="refuses the subprocess runner"):
+        await run_elastic_slurm_worker_controller_once(
+            object(),  # type: ignore[arg-type]
+            config=config,
+            runner=SubprocessSlurmCommandRunner().bind_config(config),
+        )
 
 
 def test_decision_submits_missing_capacity_without_reusing_active_nodes() -> None:

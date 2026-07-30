@@ -11,8 +11,14 @@ import pytest
 from loom.db.schema import WorkerPoolAutoscalerPolicy
 from loom.worker_token import WORKER_AUTH_FINGERPRINT_ENV_KEY, worker_token_fingerprint
 from loom_control_plane.elastic_slurm_worker_controller import (
+    FIXED_EXTERNAL_RUNNER_SAFETY_PROTOCOL,
+    FIXED_EXTERNAL_RUNNER_SAFETY_TAG,
+    ElasticSlurmWorkerControllerConfig,
+    ExternalSlurmBrokerSafetyBinding,
+    FixedExternalSlurmBrokerRunner,
     SlurmNodeResource,
     build_sbatch_request,
+    fixed_external_slurm_broker_safety_binding,
 )
 from loom_control_plane.worker_pool_autoscaler import (
     AutoscalerDecision,
@@ -23,6 +29,7 @@ from loom_control_plane.worker_pool_autoscaler import (
     _apply_slurm_release_drained,
     _apply_slurm_scale_up,
     _clean_nonempty,
+    _default_slurm_runner,
     _load_observation,
     _persist_decision,
     _policy_to_config,
@@ -34,9 +41,27 @@ from loom_control_plane.worker_pool_autoscaler import (
     autoscaler_policy_to_dict,
     compute_autoscaler_decision,
     fetch_autoscaler_status,
+    reconcile_worker_pool_autoscaler_once,
     select_slurm_qos,
     upsert_autoscaler_policy,
 )
+
+
+def _fixed_external_actuator_config() -> dict[str, object]:
+    return {
+        "allowed_nodes": [f"trt-gb10-{index}" for index in range(1, 16)],
+        "env_file": "/secure/staging.env",
+        "repo_dir": "/srv/loom/staging-shared/candidates/exact",
+        "requested_concurrency": 8,
+        "requested_cpus": 16,
+        "requested_memory_mib": 92_000,
+        "max_jobs": 15,
+        "pending_job_cap": 3,
+        "cluster": "trt-gb10",
+        "external_runner": True,
+        "external_broker": "staging-gb10-v1",
+        "candidate_sha": "a" * 40,
+    }
 
 
 def test_select_slurm_qos_uses_boost_below_min() -> None:
@@ -269,12 +294,32 @@ class _FakeSession:
 
 
 class _FakeSlurmRunner:
+    external_runner_safety_protocol = FIXED_EXTERNAL_RUNNER_SAFETY_PROTOCOL
+    external_runner_safety_tag = FIXED_EXTERNAL_RUNNER_SAFETY_TAG
+
     def __init__(self) -> None:
         self.submitted_nodes: list[str] = []
         self.submitted_configs: list[Any] = []
         self.cancelled_job_ids: list[str] = []
         self.fail_submit_nodes: set[str] = set()
         self.node_resources: dict[str, SlurmNodeResource] = {}
+        self._external_binding: ExternalSlurmBrokerSafetyBinding | None = None
+
+    def bind_external(
+        self,
+        config: ElasticSlurmWorkerControllerConfig,
+    ) -> _FakeSlurmRunner:
+        self._external_binding = fixed_external_slurm_broker_safety_binding(config)
+        return self
+
+    def external_runner_safety_binding(self) -> ExternalSlurmBrokerSafetyBinding:
+        if self._external_binding is None:
+            raise RuntimeError("fake external runner is not explicitly bound")
+        return self._external_binding
+
+    async def query_jobs(self, job_ids: tuple[str, ...]) -> list[Any]:
+        del job_ids
+        return []
 
     async def submit_worker(self, *, node: str, config: Any) -> str:
         self.submitted_nodes.append(node)
@@ -898,6 +943,123 @@ def test_slurm_config_from_policy_threads_registry_systemd_binding() -> None:
     } == _worker_env_from_slurm_config(config)
 
 
+def test_staging_gb10_external_policy_selects_fixed_broker_runner() -> None:
+    row = _policy_row(
+        environment="staging",
+        pool_name="gb10",
+        max_slots=120,
+        actuator_config=_fixed_external_actuator_config(),
+    )
+
+    config = _slurm_config_from_policy(row)
+
+    assert config.external_broker == "staging-gb10-v1"
+    assert isinstance(_default_slurm_runner(config), FixedExternalSlurmBrokerRunner)
+
+
+@pytest.mark.asyncio
+async def test_external_reconcile_accepts_only_explicit_exact_bound_fake_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = _policy_row(
+        environment="staging",
+        pool_name="gb10",
+        min_slots=0,
+        max_slots=120,
+        actuator_config=_fixed_external_actuator_config(),
+    )
+
+    async def refresh(*args: Any, **kwargs: Any) -> tuple[None, set[str]]:
+        del args, kwargs
+        return None, set()
+
+    async def pressure(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        return None
+
+    async def observation(*args: Any, **kwargs: Any) -> AutoscalerObservation:
+        del args, kwargs
+        return _observation()
+
+    monkeypatch.setattr(
+        "loom_control_plane.worker_pool_autoscaler._refresh_slurm_job_registry",
+        refresh,
+    )
+    monkeypatch.setattr(
+        "loom_control_plane.worker_pool_autoscaler._apply_slurm_prod_pressure_drain",
+        pressure,
+    )
+    monkeypatch.setattr(
+        "loom_control_plane.worker_pool_autoscaler._load_observation",
+        observation,
+    )
+
+    with pytest.raises(ValueError, match="safety binding is unavailable"):
+        await reconcile_worker_pool_autoscaler_once(
+            cast(Any, _FakeSession([_FakeResult(scalars=[row])])),
+            environment="staging",
+            slurm_runner=_FakeSlurmRunner(),
+            include_external_policies=True,
+            external_only=True,
+        )
+
+    runner = _FakeSlurmRunner().bind_external(_slurm_config_from_policy(row))
+    decisions = await reconcile_worker_pool_autoscaler_once(
+        cast(Any, _FakeSession([_FakeResult(scalars=[row])])),
+        environment="staging",
+        slurm_runner=runner,
+        include_external_policies=True,
+        external_only=True,
+    )
+    assert len(decisions) == 1
+    assert decisions[0].action == "noop"
+    assert runner.submitted_nodes == []
+    assert runner.cancelled_job_ids == []
+
+
+def test_oldlab_cannot_enable_the_staging_gb10_external_broker() -> None:
+    row = _policy_row(
+        environment="staging",
+        pool_name="oldlab",
+        max_slots=120,
+        actuator_config=_fixed_external_actuator_config(),
+    )
+
+    with pytest.raises(ValueError, match="staging/gb10"):
+        _default_slurm_runner(_slurm_config_from_policy(row))
+
+
+@pytest.mark.parametrize("missing", ["external_broker", "cluster"])
+def test_external_policy_missing_fixed_binding_fails_before_runner_construction(
+    missing: str,
+) -> None:
+    actuator_config = _fixed_external_actuator_config()
+    actuator_config.pop(missing)
+    row = _policy_row(
+        environment="staging",
+        pool_name="gb10",
+        max_slots=120,
+        actuator_config=actuator_config,
+    )
+
+    with pytest.raises(ValueError, match="staging-gb10-v1 on trt-gb10"):
+        _slurm_config_from_policy(row)
+
+
+def test_truthy_nonboolean_external_runner_cannot_bypass_fixed_binding() -> None:
+    actuator_config = _fixed_external_actuator_config()
+    actuator_config["external_runner"] = "true"
+    row = _policy_row(
+        environment="staging",
+        pool_name="gb10",
+        max_slots=120,
+        actuator_config=actuator_config,
+    )
+
+    with pytest.raises(ValueError, match="staging-gb10-v1 on trt-gb10"):
+        _slurm_config_from_policy(row)
+
+
 def test_slurm_config_from_policy_rejects_missing_nonexclusive_job_pids_max() -> None:
     row = _policy_row(
         max_slots=1,
@@ -1140,7 +1302,6 @@ async def test_load_observation_excludes_release_drift_slurm_jobs() -> None:
                 "requested_concurrency": 1,
                 "requested_cpus": 2,
                 "requested_memory_mib": 8192,
-                "external_runner": True,
             },
         ),
         now=now,
@@ -1562,7 +1723,6 @@ async def test_load_observation_excludes_worker_token_release_drift(
                 "requested_concurrency": 1,
                 "requested_cpus": 2,
                 "requested_memory_mib": 8192,
-                "external_runner": True,
             },
         ),
         now=now,

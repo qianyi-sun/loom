@@ -212,6 +212,7 @@ class ExternalSlurmAuthorityConfig:
     probe_result_root: Path
     probe_job_timeout_seconds: int
     probe_heartbeat_interval_seconds: int
+    broker_query_action: str = "staging-allocation-query"
 
 
 @dataclass(frozen=True)
@@ -399,6 +400,7 @@ def load_authority_config(
         broker_node=_clean_string(submission_broker, "node"),
         broker_domain=_clean_string(submission_broker, "domain"),
         broker_sandbox=_clean_string(submission_broker, "sandbox"),
+        broker_query_action=_clean_string(submission_broker, "query_action"),
         broker_submit_action=_clean_string(submission_broker, "submit_action"),
         broker_cancel_action=_clean_string(submission_broker, "cancel_action"),
         infrastructure_nodes=infrastructure_nodes,

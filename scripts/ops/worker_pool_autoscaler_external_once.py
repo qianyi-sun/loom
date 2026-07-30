@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Run one scoped external worker-pool autoscaler reconciliation.
 
-This entrypoint is intended for Slurm submit hosts where the external runner can
-call sbatch/scancel and reach the control-plane database through a local
-port-forward. Keep it pool-scoped so release gates can supervise OLDLAB without
-changing GB10 policy.
+This entrypoint is the fixed staging GB10 control-plane driver. It reaches the
+database through its bounded local port-forward, while every allocation query,
+submission, and cancellation runs through non-interactive sudo to the
+root-owned ``loom-staging-external-slurm-authority`` and from there to
+``trt-gb10-1``. It has no direct ``squeue``/``sbatch``/``scancel``, local Slurm,
+OLDLAB, or alternate-controller fallback.
 """
 
 from __future__ import annotations
@@ -422,6 +424,33 @@ async def _validate_requested_external_policies(
     for row in result.scalars().all():
         actuator_config = row.actuator_config if isinstance(row.actuator_config, dict) else {}
         if actuator_config.get("external_runner") is True:
+            if (
+                environment != "staging"
+                or row.pool_name != "gb10"
+                or actuator_config.get("external_broker") != "staging-gb10-v1"
+                or actuator_config.get("cluster") != "trt-gb10"
+                or not isinstance(actuator_config.get("candidate_sha"), str)
+                or re.fullmatch(
+                    r"[0-9a-f]{40}",
+                    str(actuator_config.get("candidate_sha")),
+                )
+                is None
+                or (
+                    actuator_config.get("candidate_tree") not in {None, ""}
+                    and (
+                        not isinstance(actuator_config.get("candidate_tree"), str)
+                        or re.fullmatch(
+                            r"[0-9a-f]{40}",
+                            str(actuator_config.get("candidate_tree")),
+                        )
+                        is None
+                    )
+                )
+            ):
+                raise ExternalPolicyValidationError(
+                    "external autoscaler policy must bind staging/gb10 to "
+                    "staging-gb10-v1 on trt-gb10 with an exact candidate identity"
+                )
             counts[row.pool_name] += 1
     invalid = sorted(pool_name for pool_name, count in counts.items() if count != 1)
     if invalid:

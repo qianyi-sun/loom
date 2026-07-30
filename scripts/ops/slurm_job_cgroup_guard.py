@@ -31,7 +31,9 @@ from typing import Any
 _JOB_DIR_RE = re.compile(r"^job_([1-9][0-9]*)$")
 _SAFE_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{1,62}$")
 _SANDBOX_RE = re.compile(r"^[a-z][a-z0-9-]{0,47}$")
-_COMMENT_RE = re.compile(r"^loom-cgroup-v1:pids=([1-9][0-9]{0,8})$")
+_COMMENT_RE = re.compile(
+    r"^loom-cgroup-v1:pids=([1-9][0-9]{0,8})(?::r=([0-9a-f]{64}))?$",
+)
 _REQUIRED_CONTROLLERS = frozenset({"cpu", "memory", "pids"})
 _MAX_WALKED_DIRECTORIES = 100_000
 _MAX_JOB_RECORD_CACHE = 10_000
@@ -573,6 +575,23 @@ def apply_job_limit(
         ),
         record.job_name,
     )
+    broker_job_name = re.fullmatch(
+        (
+            rf"loom827-{re.escape(binding.sandbox)}-{candidate_label}-"
+            rf"{re.escape(node)}-x(?P<identity>[0-9a-f]{{64}})"
+        ),
+        record.job_name,
+    )
+    request_id = match.group(2)
+    broker_name_valid = False
+    if broker_job_name is not None and request_id is not None:
+        expected_identity = hashlib.sha256(
+            (
+                f"{binding.candidate_sha}|{node}|{config.candidate_set_sha256}|"
+                f"{binding.resource_generation}|{request_id}"
+            ).encode("ascii"),
+        ).hexdigest()
+        broker_name_valid = broker_job_name.group("identity") == expected_identity
     allocation_name_valid = (
         allocation_job_name is not None
         and int(allocation_job_name.group("generation")) == binding.resource_generation
@@ -581,7 +600,9 @@ def apply_job_limit(
             or allocation_job_name.group("convergence") == config.candidate_set_sha256
         )
     )
-    if (binding.account == "loom-staging" and not allocation_name_valid) or (
+    if (
+        binding.account == "loom-staging" and not allocation_name_valid and not broker_name_valid
+    ) or (
         binding.account != "loom-staging"
         and record.job_name != regular_job_name
         and not allocation_name_valid

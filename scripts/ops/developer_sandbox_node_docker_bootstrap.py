@@ -46,6 +46,12 @@ HOST_TRANSPORT_CLIENT_POLICY: Final = (
 HOST_TRANSPORT_SERVER_POLICY: Final = (
     HOST_ROOT / "etc/loom/developer-sandbox-node-transport/server-policy.json"
 )
+HOST_TRANSPORT_PROGRAM: Final = (
+    HOST_ROOT / "usr/local/libexec/loom-developer-sandbox-node-transport"
+)
+HOST_TRANSPORT_ROUTES: Final = HOST_ROOT / "etc/loom/developer-sandbox-node-transport/routes.toml"
+TRANSPORT_PROGRAM_RELATIVE: Final = Path("scripts/ops/developer_sandbox_node_transport.py")
+TRANSPORT_ROUTES_RELATIVE: Final = Path("deploy/developer-sandboxes/node-authority-transport.toml")
 MAX_REQUEST_BYTES: Final = 256 * 1024
 MAX_BUNDLE_BYTES: Final = 256 * 1024 * 1024
 MAX_INPUT_BYTES: Final = 2 * 1024 * 1024
@@ -728,11 +734,13 @@ def _validate_readback_result(
         return
     client_result = result.get("transport_client")
     server_result = result.get("transport_server")
+    candidate_binding = result.get("transport_candidate_binding")
     expectation = request["transport_expectation"]
     if (
         (expectation == "absent" and (client_result is not None or server_result is not None))
         or (expectation == "server" and (client_result is not None or server_result is None))
         or (expectation == "client-server" and (client_result is None or server_result is None))
+        or (expectation == "absent" and candidate_binding is not None)
     ):
         raise DockerNodeBootstrapError("Docker bootstrap transport readback is incomplete")
     for transport_result, binding_field in (
@@ -745,6 +753,65 @@ def _validate_readback_result(
             or transport_result.get(binding_field) != request["expected_node"]
         ):
             raise DockerNodeBootstrapError("Docker bootstrap transport readback is invalid")
+    if expectation != "absent" and (
+        not isinstance(candidate_binding, Mapping)
+        or set(candidate_binding)
+        != {
+            "schema_version",
+            "kind",
+            "candidate_sha",
+            "candidate_tree",
+            "program_sha256",
+            "route_config_sha256",
+            "status",
+        }
+        or candidate_binding.get("schema_version") != SCHEMA_VERSION
+        or candidate_binding.get("kind") != "loom.developer-sandbox.transport-candidate-binding"
+        or candidate_binding.get("candidate_sha") != request["candidate_sha"]
+        or candidate_binding.get("candidate_tree") != request["candidate_tree"]
+        or SHA256_RE.fullmatch(str(candidate_binding.get("program_sha256"))) is None
+        or SHA256_RE.fullmatch(str(candidate_binding.get("route_config_sha256"))) is None
+        or candidate_binding.get("status") != "succeeded"
+    ):
+        raise DockerNodeBootstrapError("Docker bootstrap transport candidate readback is invalid")
+
+
+def _transport_candidate_binding(
+    request: Mapping[str, Any],
+    stage: Path,
+) -> dict[str, Any]:
+    candidate_root = stage / "source"
+    candidate_program = _read_regular(
+        candidate_root / TRANSPORT_PROGRAM_RELATIVE,
+        limit=MAX_INPUT_BYTES,
+        allowed_modes=frozenset({0o755}),
+    )
+    candidate_routes = _read_regular(
+        candidate_root / TRANSPORT_ROUTES_RELATIVE,
+        limit=MAX_INPUT_BYTES,
+        allowed_modes=frozenset({0o644}),
+    )
+    installed_program = _read_regular(
+        HOST_TRANSPORT_PROGRAM,
+        limit=MAX_INPUT_BYTES,
+        allowed_modes=frozenset({0o755}),
+    )
+    installed_routes = _read_regular(
+        HOST_TRANSPORT_ROUTES,
+        limit=MAX_INPUT_BYTES,
+        allowed_modes=frozenset({0o644}),
+    )
+    if installed_program != candidate_program or installed_routes != candidate_routes:
+        raise DockerNodeBootstrapError("Docker bootstrap transport exact-candidate binding drifted")
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "loom.developer-sandbox.transport-candidate-binding",
+        "candidate_sha": request["candidate_sha"],
+        "candidate_tree": request["candidate_tree"],
+        "program_sha256": _digest(installed_program),
+        "route_config_sha256": _digest(installed_routes),
+        "status": "succeeded",
+    }
 
 
 def _validate_environment_receipt_result(
@@ -795,6 +862,11 @@ def _run_chroot_action(request: Mapping[str, Any], stage: Path) -> dict[str, Any
             ["/usr/bin/python3", "-I", "-B", str(transport), "check-server"],
             cwd,
         )
+    candidate_binding = (
+        None
+        if client_result is None and server_result is None
+        else _transport_candidate_binding(request, stage)
+    )
     result = {
         "schema_version": SCHEMA_VERSION,
         "action": "readback",
@@ -804,6 +876,7 @@ def _run_chroot_action(request: Mapping[str, Any], stage: Path) -> dict[str, Any
         "authority": authority_result,
         "transport_client": client_result,
         "transport_server": server_result,
+        "transport_candidate_binding": candidate_binding,
         "status": "succeeded",
     }
     _validate_readback_result(request, result)

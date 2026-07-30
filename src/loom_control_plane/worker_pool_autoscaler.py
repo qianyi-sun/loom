@@ -29,11 +29,13 @@ from loom.worker_token import (
 )
 from loom_control_plane.elastic_slurm_worker_controller import (
     ElasticSlurmWorkerControllerConfig,
+    FixedExternalSlurmBrokerRunner,
     SlurmWorkerCapacitySnapshot,
     SlurmWorkerCommandRunner,
     SubprocessSlurmCommandRunner,
     build_controller_config,
     compute_controller_decision,
+    require_fixed_external_slurm_broker_runner,
     slurm_compose_project_identity,
     slurm_sandbox_identity,
     slurm_submission_config_for_node,
@@ -824,6 +826,14 @@ def _policy_uses_external_runner(row: WorkerPoolAutoscalerPolicy) -> bool:
     return bool(actor_config.get("external_runner"))
 
 
+def _default_slurm_runner(
+    config: ElasticSlurmWorkerControllerConfig,
+) -> SlurmWorkerCommandRunner:
+    if config.external_broker:
+        return FixedExternalSlurmBrokerRunner().bind_config(config)
+    return SubprocessSlurmCommandRunner().bind_config(config)
+
+
 def _optional_bool(value: object, *, default: bool) -> bool:
     if value is None:
         return default
@@ -1137,7 +1147,7 @@ async def _refresh_slurm_job_registry(
     if not job_ids:
         return None, frozenset()
     config = _slurm_config_from_policy(row)
-    runner = runner or SubprocessSlurmCommandRunner().bind_config(config)
+    runner = runner or _default_slurm_runner(config)
     try:
         observations = await runner.query_jobs(job_ids)
         observed_job_ids = frozenset(
@@ -1236,6 +1246,17 @@ def _slurm_config_from_policy(
     row: WorkerPoolAutoscalerPolicy,
 ) -> ElasticSlurmWorkerControllerConfig:
     actor_config = dict(row.actuator_config or {})
+    external_runner = actor_config.get("external_runner")
+    if external_runner is not None and external_runner is not False:
+        if external_runner is not True or (
+            row.environment != "staging"
+            or row.pool_name != "gb10"
+            or actor_config.get("external_broker") != "staging-gb10-v1"
+            or actor_config.get("cluster") != "trt-gb10"
+        ):
+            raise ValueError(
+                "external Slurm policies must bind staging/gb10 to staging-gb10-v1 on trt-gb10",
+            )
     allowed_nodes_raw = actor_config.get("allowed_nodes", ())
     if isinstance(allowed_nodes_raw, str):
         allowed_nodes_csv = allowed_nodes_raw
@@ -1309,6 +1330,7 @@ def _slurm_config_from_policy(
         candidate_id=str(actor_config.get("candidate_id") or ""),
         candidate_sha=str(actor_config.get("candidate_sha") or ""),
         candidate_tree=str(actor_config.get("candidate_tree") or ""),
+        external_broker=str(actor_config.get("external_broker") or ""),
         gpu_tres=str(actor_config.get("gpu_tres") or ""),
     )
     if config is None:
@@ -1453,7 +1475,7 @@ async def _apply_slurm_scale_up(
             blocked_reason=blocked_reason,
             blocked_details=blocked_details,
         )
-    runner = runner or SubprocessSlurmCommandRunner().bind_config(config)
+    runner = runner or _default_slurm_runner(config)
     recorded_active_jobs = (
         (
             await session.execute(
@@ -1686,7 +1708,7 @@ async def _apply_slurm_release_drained(
             },
         )
     config = _slurm_config_from_policy(current_row)
-    runner = runner or SubprocessSlurmCommandRunner().bind_config(config)
+    runner = runner or _default_slurm_runner(config)
     released_worker_ids = set(decision.worker_ids_to_release)
     release_workers = (
         (
@@ -1909,7 +1931,7 @@ async def _apply_slurm_prod_pressure_drain(
             else str(control.get("last_grace_action") or "wait")
         )
     config = _slurm_config_from_policy(row)
-    runner = runner or SubprocessSlurmCommandRunner().bind_config(config)
+    runner = runner or _default_slurm_runner(config)
 
     active_stmt = select(SlurmWorkerJob).where(
         SlurmWorkerJob.environment == row.environment,
@@ -2468,6 +2490,15 @@ async def reconcile_worker_pool_autoscaler_once(
             continue
         if external_only and not uses_external_runner:
             continue
+        policy_slurm_runner = slurm_runner
+        if row.actuator == "slurm" and uses_external_runner:
+            external_config = _slurm_config_from_policy(row)
+            if policy_slurm_runner is None:
+                policy_slurm_runner = _default_slurm_runner(external_config)
+            policy_slurm_runner = require_fixed_external_slurm_broker_runner(
+                policy_slurm_runner,
+                external_config,
+            )
         actuator_error: str | None = None
         actuator_blocked_reason: str | None = None
         actuator_blocked_details: dict[str, Any] | None = None
@@ -2475,7 +2506,7 @@ async def reconcile_worker_pool_autoscaler_once(
             actuator_error, confirmed_live_job_ids = await _refresh_slurm_job_registry(
                 session,
                 row,
-                runner=slurm_runner,
+                runner=policy_slurm_runner,
                 now=now,
             )
             # Prod-pressure reclaim takes precedence over normal scaling: if the
@@ -2484,7 +2515,7 @@ async def reconcile_worker_pool_autoscaler_once(
             prod_pressure_summary = await _apply_slurm_prod_pressure_drain(
                 session,
                 row,
-                runner=slurm_runner,
+                runner=policy_slurm_runner,
                 now=now,
                 confirmed_live_job_ids=confirmed_live_job_ids,
             )
@@ -2563,7 +2594,7 @@ async def reconcile_worker_pool_autoscaler_once(
                 session,
                 row,
                 decision,
-                runner=slurm_runner,
+                runner=policy_slurm_runner,
                 now=now,
             )
             actuator_error = slurm_result.error
@@ -2589,7 +2620,7 @@ async def reconcile_worker_pool_autoscaler_once(
                 session,
                 row,
                 decision,
-                runner=slurm_runner,
+                runner=policy_slurm_runner,
                 now=now,
                 freshness_sec=freshness_sec,
             )

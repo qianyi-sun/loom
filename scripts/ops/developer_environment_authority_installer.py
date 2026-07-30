@@ -48,6 +48,11 @@ REGISTRY_ADMIN: Final = Path("/usr/local/libexec/scripts/ops/developer_environme
 SOCKET_UNIT: Final = "loom-developer-environment-authority.socket"
 RENEWAL_TIMER_UNIT: Final = "loom-developer-sandbox-attestation-renewal.timer"
 NODE_TRANSPORT: Final = Path("/usr/local/libexec/loom-developer-sandbox-node-transport")
+NODE_TRANSPORT_RELATIVE: Final = Path("scripts/ops/developer_sandbox_node_transport.py")
+NODE_TRANSPORT_ROUTES: Final = Path("/etc/loom/developer-sandbox-node-transport/routes.toml")
+NODE_TRANSPORT_ROUTES_RELATIVE: Final = Path(
+    "deploy/developer-sandboxes/node-authority-transport.toml"
+)
 NODE_AUTHORITY_POLICY: Final = Path("/etc/loom/developer-sandbox-node-authority.json")
 NODE_CAPACITY_CONTRACT_RELATIVE: Final = Path("scripts/ops/developer_sandbox_capacity_contract.py")
 NODE_CAPACITY_CONTRACT: Final = Path(
@@ -686,6 +691,8 @@ class AuthorityInstaller:
                 MANIFEST_RELATIVE.as_posix(),
                 INSTALLER_RELATIVE.as_posix(),
                 NODE_CAPACITY_CONTRACT_RELATIVE.as_posix(),
+                NODE_TRANSPORT_RELATIVE.as_posix(),
+                NODE_TRANSPORT_ROUTES_RELATIVE.as_posix(),
             }
         )
         status = self._checked(
@@ -1416,13 +1423,33 @@ class AuthorityInstaller:
 
     def _validate_transport_prerequisite(self) -> None:
         self._validate_installed_ancestry(NODE_TRANSPORT)
-        _read_regular(
+        installed_program = _read_regular(
             self._host(NODE_TRANSPORT),
             limit=MAX_ASSET_BYTES,
             expected_uid=self.expected_uid,
             expected_gid=self.expected_gid,
             expected_mode=0o755,
         )
+        candidate_program = _read_regular(
+            self.source_root / NODE_TRANSPORT_RELATIVE,
+            limit=MAX_ASSET_BYTES,
+        )
+        self._validate_installed_ancestry(NODE_TRANSPORT_ROUTES)
+        installed_routes = _read_regular(
+            self._host(NODE_TRANSPORT_ROUTES),
+            limit=MAX_ASSET_BYTES,
+            expected_uid=self.expected_uid,
+            expected_gid=self.expected_gid,
+            expected_mode=0o644,
+        )
+        candidate_routes = _read_regular(
+            self.source_root / NODE_TRANSPORT_ROUTES_RELATIVE,
+            limit=MAX_ASSET_BYTES,
+        )
+        if installed_program != candidate_program or installed_routes != candidate_routes:
+            raise AuthorityInstallerError(
+                "node authority transport prerequisite drifted from candidate"
+            )
         raw = self._checked(str(NODE_TRANSPORT), "check-client")
         try:
             report = json.loads(raw)
@@ -1875,8 +1902,8 @@ class AuthorityInstaller:
         self._ensure_directory(TRANSACTION_ROOT, 0o700)
         self._ensure_directory(STATE_ROOT / "xdg-config", 0o700)
         self.recover()
-        self._validate_transport_prerequisite()
         self._verify_candidate(candidate_sha, candidate_tree)
+        self._validate_transport_prerequisite()
         node_capacity_contract_sha256 = self._validate_node_capacity_contract_prerequisite(
             candidate_sha=candidate_sha,
             candidate_tree=candidate_tree,

@@ -46,6 +46,11 @@ NODE_AUTHORITY_POLICY: Final = Path(
 )
 FLEET_BOOTSTRAP_SCOPE: Final = "fleet-bootstrap"
 FLEET_INVENTORY_PROCESS_LOCK: Final = threading.Lock()
+# OLDLAB2 reaches GB10 peers 2-15 through the single forced proxy on
+# trt-gb10-1. Keep those SSH handshakes below that shared endpoint's safe
+# admission width while leaving direct OLDLAB and trt-gb10-1 checks independent.
+FLEET_INVENTORY_GB10_JUMP_NODES: Final = frozenset(f"trt-gb10-{index}" for index in range(2, 16))
+FLEET_INVENTORY_GB10_JUMP_MAX_INFLIGHT: Final = 2
 
 REGISTER_KIND: Final = "loom.developer-environment.register"
 IMPORT_KIND: Final = "loom.developer-environment.candidate-import"
@@ -997,20 +1002,31 @@ def _refresh_fleet_identity_inventory(
     with FLEET_INVENTORY_PROCESS_LOCK:
         snapshot = authority.snapshot()
         installed_policy = _read_installed_node_policy()
+        gb10_jump_limiter = threading.BoundedSemaphore(
+            FLEET_INVENTORY_GB10_JUMP_MAX_INFLIGHT,
+        )
+
+        def collect(node: str) -> dict[str, Any]:
+            if node in FLEET_INVENTORY_GB10_JUMP_NODES:
+                with gb10_jump_limiter:
+                    return _collect_fleet_inventory_node(
+                        snapshot,
+                        installed_policy,
+                        node,
+                        run=run,
+                    )
+            return _collect_fleet_inventory_node(
+                snapshot,
+                installed_policy,
+                node,
+                run=run,
+            )
+
         with ThreadPoolExecutor(
             max_workers=len(registry.FLEET_NODES),
             thread_name_prefix="loom-identity-inventory",
         ) as executor:
-            futures = [
-                executor.submit(
-                    _collect_fleet_inventory_node,
-                    snapshot,
-                    installed_policy,
-                    node,
-                    run=run,
-                )
-                for node in registry.FLEET_NODES
-            ]
+            futures = [executor.submit(collect, node) for node in registry.FLEET_NODES]
             node_results = [future.result() for future in futures]
         authority.publish_fleet_identity_inventory(
             node_results,

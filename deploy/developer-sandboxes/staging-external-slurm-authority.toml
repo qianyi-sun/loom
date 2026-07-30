@@ -109,6 +109,7 @@ transport = "/usr/local/libexec/loom-developer-sandbox-node-transport"
 node = "trt-gb10-1"
 domain = "gb10"
 sandbox = "staging"
+query_action = "staging-allocation-query"
 submit_action = "staging-allocation-submit"
 cancel_action = "staging-allocation-cancel"
 

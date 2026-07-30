@@ -3540,6 +3540,117 @@ def _staging_submit_payload(node: str = "trt-gb10-8") -> bytes:
     )
 
 
+def _staging_query_payload(
+    *,
+    job_ids: tuple[str, ...] = ("31415",),
+    nodes: tuple[str, ...] = ("trt-gb10-7",),
+) -> bytes:
+    return authority._canonical(
+        {
+            "schema_version": 1,
+            "kind": "staging_external_slurm_allocation_query_request",
+            "request_id": "6" * 64,
+            "candidate_sha": SHA,
+            "candidate_tree": TREE,
+            "job_ids": list(job_ids),
+            "nodes": list(nodes),
+        },
+    )
+
+
+def test_staging_broker_query_is_check_only_and_fixed_to_gb10_controller() -> None:
+    request = authority._parse_request(
+        _request(
+            action="staging-allocation-query",
+            node="trt-gb10-1",
+            domain="gb10",
+            sandbox="staging",
+            payload_kind="staging-allocation-query-request",
+            payload_bytes=_staging_query_payload(),
+        ),
+        verb="check",
+        policy=_policy("trt-gb10-1"),
+    )
+
+    assert authority._staging_broker_argv(request) == (
+        "/usr/bin/python3",
+        "-I",
+        "/opt/loom-developer-sandbox-node-authority/source/scripts/ops/developer_sandbox_host.py",
+        "staging-allocation-query",
+        "--candidate-sha",
+        SHA,
+        "--candidate-tree",
+        TREE,
+        "--request-id",
+        "6" * 64,
+        "--job-id",
+        "31415",
+        "--node",
+        "trt-gb10-7",
+    )
+    with pytest.raises(authority.NodeAuthorityError, match="binding"):
+        authority._parse_request(
+            _request(
+                action="staging-allocation-query",
+                node="trt-gb10-1",
+                domain="gb10",
+                sandbox="staging",
+                payload_kind="staging-allocation-query-request",
+                payload_bytes=_staging_query_payload(),
+            ),
+            verb="transact",
+            policy=_policy("trt-gb10-1"),
+        )
+
+
+def test_staging_broker_query_rejects_job_without_exact_candidate_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = authority._parse_request(
+        _request(
+            action="staging-allocation-query",
+            node="trt-gb10-1",
+            domain="gb10",
+            sandbox="staging",
+            payload_kind="staging-allocation-query-request",
+            payload_bytes=_staging_query_payload(),
+        ),
+        verb="check",
+        policy=_policy("trt-gb10-1"),
+    )
+    foreign = {
+        "schema_version": 1,
+        "kind": "loom.staging-allocation-broker-submission",
+        "authority_request_id": "7" * 64,
+        "submit_request_id": "8" * 64,
+        "candidate_sha": "c" * 40,
+        "candidate_tree": "d" * 40,
+        "node": "trt-gb10-7",
+        "job_id": "31415",
+        "job_name": "foreign",
+        "candidate_set_sha256": "9" * 64,
+        "resource_generation": 1,
+        "user": "loom-staging-worker",
+        "account": "loom-staging",
+        "qos": "loom-staging",
+        "submitted_at": "2026-07-30T12:00:00Z",
+        "result_sha256": "a" * 64,
+    }
+    monkeypatch.setattr(
+        authority,
+        "_staging_broker_submission_ledgers",
+        lambda **_kwargs: [foreign],
+    )
+    monkeypatch.setattr(
+        authority,
+        "_run_fixed",
+        lambda _argv: pytest.fail("foreign jobs must not reach the Slurm query"),
+    )
+
+    with pytest.raises(authority.NodeAuthorityError, match="submission ledger"):
+        authority._staging_broker_query(request)
+
+
 def test_staging_broker_submit_is_staging_scoped_and_fixed() -> None:
     request = authority._parse_request(
         _request(
@@ -3600,6 +3711,79 @@ def test_staging_broker_submit_is_staging_scoped_and_fixed() -> None:
         policy=_policy("trt-gb10-1"),
     )
     assert json.loads(node_seven.payload_bytes)["requested_node"] == "trt-gb10-7"
+
+
+def test_staging_broker_submit_receipt_exposes_only_bound_job_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = authority._parse_request(
+        _request(
+            action="staging-allocation-submit",
+            node="trt-gb10-1",
+            domain="gb10",
+            sandbox="staging",
+            payload_kind="staging-allocation-submit-request",
+            payload_bytes=_staging_submit_payload(),
+        ),
+        verb="transact",
+        policy=_policy("trt-gb10-1"),
+    )
+    candidate_set_sha256 = "c" * 64
+    ledgers: list[dict[str, object]] = []
+    host_calls = 0
+
+    def fake_host(_argv: tuple[str, ...]) -> dict[str, object]:
+        nonlocal host_calls
+        host_calls += 1
+        return {
+            "schema_version": 1,
+            "kind": "staging_external_slurm_allocation_submission",
+            "request_id": "2" * 64,
+            "candidate_sha": SHA,
+            "candidate_tree": TREE,
+            "job_id": "27182",
+            "job_name": (
+                f"loom827-staging-{SHA[:12]}-trt-gb10-8-x"
+                + hashlib.sha256(
+                    (f"{SHA}|trt-gb10-8|{candidate_set_sha256}|7|{'2' * 64}").encode("ascii"),
+                ).hexdigest()
+            ),
+            "candidate_set_sha256": candidate_set_sha256,
+            "resource_generation": 7,
+            "docker_cgroup_driver": "systemd",
+            "node": "trt-gb10-8",
+            "cluster": "trt-gb10",
+            "account": "loom-staging",
+            "qos": "loom-staging",
+            "user": "loom-staging-worker",
+            "uid": authority.STAGING_SERVICE_UID,
+            "gid": authority.STAGING_SERVICE_GID,
+            "service_identity": {},
+            "mount": {},
+            "submitted_at": "2026-07-30T12:00:00Z",
+            "status": "submitted",
+        }
+
+    def publish_ledger(_path: Path, payload: bytes, *_args: object, **_kwargs: object) -> bool:
+        ledgers.append(json.loads(payload))
+        return True
+
+    monkeypatch.setattr(
+        authority,
+        "_staging_guard_binding",
+        lambda **_kwargs: {"resource_generation": 7},
+    )
+    monkeypatch.setattr(authority, "_staging_broker_submission_ledgers", lambda: ledgers)
+    monkeypatch.setattr(authority, "_atomic_install", publish_ledger)
+    monkeypatch.setattr(authority, "_run_fixed", fake_host)
+
+    result, inner_receipt = authority._staging_broker_submit(request)
+    replay_result, replay_receipt = authority._staging_broker_submit(request)
+
+    assert inner_receipt == f"staging-broker/v1/submission/{'2' * 64}/27182"
+    assert replay_receipt == inner_receipt
+    assert replay_result == result
+    assert host_calls == 1
 
 
 def test_staging_broker_cancel_uses_the_same_fixed_controller_route() -> None:

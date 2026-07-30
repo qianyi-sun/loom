@@ -59,6 +59,41 @@ def _write_request(
     return path
 
 
+def _install_exact_transport_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    drift_program: bool = False,
+    drift_routes: bool = False,
+) -> Path:
+    repository = Path(__file__).resolve().parents[2]
+    stage = tmp_path / "stage"
+    candidate_root = stage / "source"
+    candidate_program = candidate_root / bootstrap.TRANSPORT_PROGRAM_RELATIVE
+    candidate_routes = candidate_root / bootstrap.TRANSPORT_ROUTES_RELATIVE
+    candidate_program.parent.mkdir(parents=True, exist_ok=True)
+    candidate_routes.parent.mkdir(parents=True, exist_ok=True)
+    candidate_program.write_bytes((repository / bootstrap.TRANSPORT_PROGRAM_RELATIVE).read_bytes())
+    candidate_routes.write_bytes((repository / bootstrap.TRANSPORT_ROUTES_RELATIVE).read_bytes())
+    candidate_program.chmod(0o755)
+    candidate_routes.chmod(0o644)
+
+    installed_program = tmp_path / "host/loom-developer-sandbox-node-transport"
+    installed_routes = tmp_path / "host/routes.toml"
+    installed_program.parent.mkdir(parents=True, exist_ok=True)
+    installed_program.write_bytes(
+        candidate_program.read_bytes() + (b"\n# stale candidate\n" if drift_program else b"")
+    )
+    installed_routes.write_bytes(
+        candidate_routes.read_bytes() + (b"\n# stale candidate\n" if drift_routes else b"")
+    )
+    installed_program.chmod(0o755)
+    installed_routes.chmod(0o644)
+    monkeypatch.setattr(bootstrap, "HOST_TRANSPORT_PROGRAM", installed_program)
+    monkeypatch.setattr(bootstrap, "HOST_TRANSPORT_ROUTES", installed_routes)
+    return stage
+
+
 def test_mountinfo_parser_decodes_host_root_and_read_only_inputs() -> None:
     records = bootstrap._parse_mountinfo(
         "41 1 8:1 / /host rw,relatime - ext4 /dev/root rw\n"
@@ -622,6 +657,7 @@ def test_readback_binds_client_to_initiator_and_server_to_node(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     request = _request(action="readback", transport_expectation="client-server")
+    stage = _install_exact_transport_binding(tmp_path, monkeypatch)
     client_policy = tmp_path / "client-policy.json"
     server_policy = tmp_path / "server-policy.json"
     client_policy.touch()
@@ -660,10 +696,23 @@ def test_readback_binds_client_to_initiator_and_server_to_node(
         lambda *_args, **_kwargs: next(reports),
     )
 
-    result = bootstrap._run_chroot_action(request, tmp_path / "stage")
+    result = bootstrap._run_chroot_action(request, stage)
 
     assert result["transport_client"]["initiator"] == "oldlab-1"
     assert result["transport_server"]["node"] == "oldlab-1"
+    assert result["transport_candidate_binding"] == {
+        "schema_version": bootstrap.SCHEMA_VERSION,
+        "kind": "loom.developer-sandbox.transport-candidate-binding",
+        "candidate_sha": SHA,
+        "candidate_tree": TREE,
+        "program_sha256": hashlib.sha256(
+            (stage / "source" / bootstrap.TRANSPORT_PROGRAM_RELATIVE).read_bytes()
+        ).hexdigest(),
+        "route_config_sha256": hashlib.sha256(
+            (stage / "source" / bootstrap.TRANSPORT_ROUTES_RELATIVE).read_bytes()
+        ).hexdigest(),
+        "status": "succeeded",
+    }
 
 
 def test_readback_rejects_transport_client_initiator_drift(
@@ -671,6 +720,7 @@ def test_readback_rejects_transport_client_initiator_drift(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     request = _request(action="readback", transport_expectation="client-server")
+    stage = _install_exact_transport_binding(tmp_path, monkeypatch)
     client_policy = tmp_path / "client-policy.json"
     server_policy = tmp_path / "server-policy.json"
     client_policy.touch()
@@ -710,7 +760,66 @@ def test_readback_rejects_transport_client_initiator_drift(
     )
 
     with pytest.raises(bootstrap.DockerNodeBootstrapError, match="transport readback"):
-        bootstrap._run_chroot_action(request, tmp_path / "stage")
+        bootstrap._run_chroot_action(request, stage)
+
+
+@pytest.mark.parametrize(
+    ("drift_program", "drift_routes"),
+    [(True, False), (False, True)],
+)
+def test_readback_rejects_self_consistent_transport_from_another_candidate(
+    drift_program: bool,
+    drift_routes: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(action="readback", transport_expectation="server")
+    stage = _install_exact_transport_binding(
+        tmp_path,
+        monkeypatch,
+        drift_program=drift_program,
+        drift_routes=drift_routes,
+    )
+    server_policy = tmp_path / "server-policy.json"
+    server_policy.touch()
+    monkeypatch.setattr(
+        bootstrap,
+        "HOST_TRANSPORT_CLIENT_POLICY",
+        tmp_path / "absent-client-policy.json",
+    )
+    monkeypatch.setattr(bootstrap, "HOST_TRANSPORT_SERVER_POLICY", server_policy)
+    monkeypatch.setattr(
+        bootstrap,
+        "_fixed_action_argv",
+        lambda *_args, **_kwargs: ([], tmp_path / "source"),
+    )
+    reports = iter(
+        (
+            {
+                "action": "validate-install",
+                "node": "oldlab-1",
+                "source_sha": SHA,
+                "source_tree": TREE,
+                "status": "succeeded",
+            },
+            {
+                "action": "check-server",
+                "node": "oldlab-1",
+                "status": "succeeded",
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "_run_host_python",
+        lambda *_args, **_kwargs: next(reports),
+    )
+
+    with pytest.raises(
+        bootstrap.DockerNodeBootstrapError,
+        match="transport exact-candidate binding drifted",
+    ):
+        bootstrap._run_chroot_action(request, stage)
 
 
 def test_readback_requires_the_bound_transport_install_profile(
@@ -792,6 +901,7 @@ def test_distinct_operation_ids_preserve_successive_readback_receipts(
         "source_tree": TREE,
         "transport_client": None,
         "transport_server": None,
+        "transport_candidate_binding": None,
         "status": "succeeded",
     }
     second_result = {
@@ -804,6 +914,15 @@ def test_distinct_operation_ids_preserve_successive_readback_receipts(
         },
         "transport_server": {
             "node": "oldlab-1",
+            "status": "succeeded",
+        },
+        "transport_candidate_binding": {
+            "schema_version": bootstrap.SCHEMA_VERSION,
+            "kind": "loom.developer-sandbox.transport-candidate-binding",
+            "candidate_sha": SHA,
+            "candidate_tree": TREE,
+            "program_sha256": "3" * 64,
+            "route_config_sha256": "4" * 64,
             "status": "succeeded",
         },
         "status": "succeeded",

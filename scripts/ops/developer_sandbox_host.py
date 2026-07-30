@@ -106,6 +106,9 @@ INSTALLED_PROGRAM = Path("/usr/local/libexec/loom-developer-sandbox-host")
 STAGING_ALLOCATION_CONFIG = Path(
     "/etc/loom/staging-external-slurm-authority/authority.toml",
 )
+STAGING_SUBMISSION_WAL_ROOT = Path(
+    "/var/lib/loom-staging-external-slurm-authority/submissions",
+)
 UNIT_NAME = "loom-developer-sandbox@{sandbox}.service"
 RENEWAL_TIMER = "loom-developer-sandbox-attestation-renewal.timer"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -1059,6 +1062,7 @@ def _staging_allocation_job_name(
     node: str,
     candidate_set_sha256: str,
     resource_generation: int,
+    request_id: str,
 ) -> str:
     if (
         SHA_RE.fullmatch(candidate_sha) is None
@@ -1066,12 +1070,208 @@ def _staging_allocation_job_name(
         or DIGEST_RE.fullmatch(candidate_set_sha256) is None
         or type(resource_generation) is not int
         or resource_generation < 1
+        or DIGEST_RE.fullmatch(request_id) is None
     ):
         raise HostConvergeError("staging allocation job identity is invalid")
+    identity = hashlib.sha256(
+        (
+            f"{candidate_sha}|{node}|{candidate_set_sha256}|{resource_generation}|{request_id}"
+        ).encode("ascii"),
+    ).hexdigest()
+    return f"loom827-staging-{candidate_sha[:12]}-{node}-x{identity}"
+
+
+def _staging_allocation_recover_job_id(
+    config: StagingAllocationConfig,
+    *,
+    job_name: str,
+    requested_node: str,
+    request_id: str,
+    prepared_at: str,
+) -> str | None:
+    expected_comment = f"loom-cgroup-v1:pids=65536:r={request_id}"
+    observed: set[str] = set()
+    queued = _run(
+        (
+            "squeue",
+            f"--clusters={config.cluster}",
+            "-h",
+            f"--name={job_name}",
+            f"--user={config.batch_user}",
+            "-o",
+            "%i|%j|%N|%a|%u|%q|%k",
+        ),
+    ).stdout
+    for line in queued.splitlines():
+        if not line.strip():
+            continue
+        row = line.split("|")
+        if len(row) != 7:
+            raise HostConvergeError("staging allocation recovery queue readback is invalid")
+        job_id, name, nodelist, account, user, qos, comment = row
+        if (
+            re.fullmatch(r"[1-9][0-9]*", job_id) is None
+            or name != job_name
+            or nodelist not in {"", "(null)", "None", "N/A", requested_node}
+            or account != config.slurm_account
+            or user != config.batch_user
+            or qos != config.qos
+            or comment != expected_comment
+        ):
+            raise HostConvergeError("staging allocation recovery queue identity drifted")
+        observed.add(job_id)
+    accounting = _run(
+        (
+            "sacct",
+            "-nP",
+            f"--clusters={config.cluster}",
+            f"--starttime={prepared_at}",
+            f"--name={job_name}",
+            "--format=JobIDRaw,JobName,NodeList,Account,User,Cluster,QOS,Comment",
+        ),
+    ).stdout
+    for line in accounting.splitlines():
+        if not line.strip():
+            continue
+        row = line.split("|")
+        if len(row) != 8:
+            raise HostConvergeError("staging allocation recovery accounting readback is invalid")
+        job_id, name, nodelist, account, user, cluster, qos, comment = row
+        if "." in job_id:
+            continue
+        if (
+            re.fullmatch(r"[1-9][0-9]*", job_id) is None
+            or name != job_name
+            or nodelist not in {"", "(null)", "None", "N/A", requested_node}
+            or account != config.slurm_account
+            or user != config.batch_user
+            or cluster != config.cluster
+            or qos != config.qos
+            or comment != expected_comment
+        ):
+            raise HostConvergeError("staging allocation recovery accounting identity drifted")
+        observed.add(job_id)
+    if len(observed) > 1:
+        raise HostConvergeError("staging allocation recovery found duplicate exact jobs")
+    return next(iter(observed), None)
+
+
+def _staging_submission_wal_bytes(payload: Mapping[str, Any]) -> bytes:
     return (
-        f"loom827-staging-{candidate_sha[:12]}-{node}-"
-        f"g{candidate_set_sha256}-a{resource_generation}"
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"
+    ).encode("ascii")
+
+
+def _staging_submission_wal(
+    *,
+    candidate_sha: str,
+    candidate_tree: str,
+    request_id: str,
+    requested_node: str,
+    candidate_set_sha256: str,
+    resource_generation: int,
+    job_name: str,
+    config: StagingAllocationConfig,
+    wrapped: str,
+) -> tuple[Path, dict[str, Any], bool]:
+    _ensure_root_private_directory(STAGING_SUBMISSION_WAL_ROOT)
+    path = STAGING_SUBMISSION_WAL_ROOT / f"{request_id}.json"
+    existed = path.exists() or path.is_symlink()
+    if existed:
+        raw = _read_combined_receipt_bytes(path)
+        try:
+            wal = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise HostConvergeError("staging submission WAL is invalid") from exc
+        unsigned = (
+            {key: value for key, value in wal.items() if key != "payload_sha256"}
+            if isinstance(wal, dict)
+            else {}
+        )
+        if (
+            not isinstance(wal, dict)
+            or raw != _staging_submission_wal_bytes(wal)
+            or wal.get("schema_version") != 1
+            or wal.get("kind") != "staging_external_slurm_submission_wal"
+            or wal.get("candidate_sha") != candidate_sha
+            or wal.get("candidate_tree") != candidate_tree
+            or wal.get("request_id") != request_id
+            or wal.get("requested_node") != requested_node
+            or wal.get("candidate_set_sha256") != candidate_set_sha256
+            or wal.get("resource_generation") != resource_generation
+            or wal.get("job_name") != job_name
+            or wal.get("cluster") != config.cluster
+            or wal.get("partition") != config.partition
+            or wal.get("account") != config.slurm_account
+            or wal.get("qos") != config.qos
+            or wal.get("user") != config.batch_user
+            or wal.get("wrapped") != wrapped
+            or wal.get("phase") not in {"prepared", "submitted"}
+            or not isinstance(wal.get("prepared_at"), str)
+            or hashlib.sha256(_staging_submission_wal_bytes(unsigned)).hexdigest()
+            != wal.get("payload_sha256")
+            or (
+                wal["phase"] == "prepared"
+                and (wal.get("result") is not None or wal.get("result_sha256") is not None)
+            )
+            or (
+                wal["phase"] == "submitted"
+                and (
+                    not isinstance(wal.get("result"), dict)
+                    or DIGEST_RE.fullmatch(str(wal.get("result_sha256"))) is None
+                    or hashlib.sha256(_staging_submission_wal_bytes(wal["result"])).hexdigest()
+                    != wal["result_sha256"]
+                )
+            )
+        ):
+            raise HostConvergeError("staging submission WAL identity drifted")
+        return path, wal, True
+    prepared_at = _staging_timestamp()
+    wal = {
+        "schema_version": 1,
+        "kind": "staging_external_slurm_submission_wal",
+        "candidate_sha": candidate_sha,
+        "candidate_tree": candidate_tree,
+        "request_id": request_id,
+        "requested_node": requested_node,
+        "candidate_set_sha256": candidate_set_sha256,
+        "resource_generation": resource_generation,
+        "job_name": job_name,
+        "cluster": config.cluster,
+        "partition": config.partition,
+        "account": config.slurm_account,
+        "qos": config.qos,
+        "user": config.batch_user,
+        "wrapped": wrapped,
+        "phase": "prepared",
+        "prepared_at": prepared_at,
+        "result": None,
+        "result_sha256": None,
+    }
+    wal["payload_sha256"] = hashlib.sha256(_staging_submission_wal_bytes(wal)).hexdigest()
+    _atomic_write(path, _staging_submission_wal_bytes(wal), mode=0o600)
+    return path, wal, False
+
+
+@contextmanager
+def _staging_submission_lock(request_id: str) -> Iterator[None]:
+    if DIGEST_RE.fullmatch(request_id) is None:
+        raise HostConvergeError("staging submission lock identity is invalid")
+    _ensure_root_private_directory(STAGING_SUBMISSION_WAL_ROOT)
+    descriptor = os.open(
+        STAGING_SUBMISSION_WAL_ROOT / f".{request_id}.lock",
+        os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
     )
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or (metadata.st_uid, metadata.st_gid) != (0, 0):
+            raise HostConvergeError("staging submission lock metadata is invalid")
+        os.fchmod(descriptor, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
 
 
 def _staging_slurm_profile(
@@ -1834,6 +2034,7 @@ def _staging_prepare_result_directory(
     *,
     candidate_sha: str,
     request_id: str,
+    allow_existing: bool = False,
 ) -> Path:
     if SHA_RE.fullmatch(candidate_sha) is None or DIGEST_RE.fullmatch(request_id) is None:
         raise HostConvergeError("staging allocation result identity is invalid")
@@ -1844,7 +2045,7 @@ def _staging_prepare_result_directory(
             os.chown(path, config.batch_uid, config.batch_gid)
             os.chmod(path, 0o700)
         except FileExistsError:
-            if must_create:
+            if must_create and not allow_existing:
                 raise HostConvergeError(
                     "staging allocation request ID was already used",
                 ) from None
@@ -1932,7 +2133,220 @@ def _staging_terminal_state(value: str) -> str:
     return value.split("+", 1)[0].split(" ", 1)[0].strip().upper()
 
 
+def staging_allocation_query(
+    config: StagingAllocationConfig,
+    *,
+    candidate_sha: str,
+    candidate_tree: str,
+    request_id: str,
+    job_ids: tuple[str, ...],
+    nodes: tuple[str, ...],
+) -> dict[str, Any]:
+    if (
+        os.geteuid() != 0
+        or SHA_RE.fullmatch(candidate_sha) is None
+        or SHA_RE.fullmatch(candidate_tree) is None
+        or DIGEST_RE.fullmatch(request_id) is None
+        or (not job_ids and not nodes)
+        or len(job_ids) > 64
+        or len(nodes) > len(config.allowed_nodes)
+        or len(job_ids) != len(set(job_ids))
+        or len(nodes) != len(set(nodes))
+        or any(re.fullmatch(r"[1-9][0-9]*", job_id) is None for job_id in job_ids)
+        or any(node not in config.allowed_nodes for node in nodes)
+        or _staging_allocation_node(config) != config.submit_host
+        or config.cluster != "trt-gb10"
+        or config.submit_host != "trt-gb10-1"
+        or config.controller != "trt-gb10-1"
+    ):
+        raise HostConvergeError("staging allocation query request is invalid")
+    _guard_binding, _candidate_set_sha256 = _staging_candidate_set_identity(
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+    )
+    expected_name = re.compile(
+        rf"loom827-staging-{candidate_sha[:12]}-"
+        r"trt-gb10-(?:[1-9]|1[0-5])-x[0-9a-f]{64}\Z",
+    )
+    observed_at = _staging_timestamp()
+    jobs: dict[str, dict[str, Any]] = {}
+    if job_ids:
+        queued = _run(
+            (
+                "squeue",
+                f"--clusters={config.cluster}",
+                "-h",
+                "-j",
+                ",".join(job_ids),
+                "-o",
+                "%i|%j|%T|%N|%a|%u|%R|%q",
+            ),
+        ).stdout
+        for line in queued.splitlines():
+            if not line.strip():
+                continue
+            row = line.split("|")
+            if len(row) != 8 or row[0] not in job_ids or row[0] in jobs:
+                raise HostConvergeError("staging allocation query queue readback is invalid")
+            job_id, name, state, nodelist, account, user, reason, qos = row
+            if (
+                expected_name.fullmatch(name) is None
+                or account != config.slurm_account
+                or user != config.batch_user
+                or qos != config.qos
+                or re.fullmatch(r"[A-Z_]+", _staging_terminal_state(state)) is None
+                or (
+                    nodelist not in {"", "(null)", "None", "N/A"}
+                    and nodelist not in config.allowed_nodes
+                )
+            ):
+                raise HostConvergeError("staging allocation query queue identity drifted")
+            jobs[job_id] = {
+                "job_id": job_id,
+                "job_name": name,
+                "state": _staging_terminal_state(state),
+                "nodelist": ("" if nodelist in {"", "(null)", "None", "N/A"} else nodelist),
+                "account": account,
+                "user": user,
+                "cluster": config.cluster,
+                "qos": qos,
+                "pending_reason": (None if reason in {"", "(null)", "None", "N/A"} else reason),
+            }
+        missing = tuple(job_id for job_id in job_ids if job_id not in jobs)
+        if missing:
+            rows = _staging_sacct_rows(config, ",".join(missing))
+            for row in rows:
+                if len(row) != 10 or row[0] not in missing or row[0] in jobs:
+                    if len(row) == 10 and "." in row[0]:
+                        continue
+                    raise HostConvergeError(
+                        "staging allocation query accounting readback is invalid",
+                    )
+                (
+                    job_id,
+                    name,
+                    state,
+                    nodelist,
+                    account,
+                    user,
+                    cluster,
+                    qos,
+                    _start,
+                    _end,
+                ) = row
+                if (
+                    expected_name.fullmatch(name) is None
+                    or account != config.slurm_account
+                    or user != config.batch_user
+                    or cluster != config.cluster
+                    or qos != config.qos
+                    or re.fullmatch(r"[A-Z_]+", _staging_terminal_state(state)) is None
+                    or (
+                        nodelist not in {"", "(null)", "None", "N/A"}
+                        and nodelist not in config.allowed_nodes
+                    )
+                ):
+                    raise HostConvergeError(
+                        "staging allocation query accounting identity drifted",
+                    )
+                jobs[job_id] = {
+                    "job_id": job_id,
+                    "job_name": name,
+                    "state": _staging_terminal_state(state),
+                    "nodelist": ("" if nodelist in {"", "(null)", "None", "N/A"} else nodelist),
+                    "account": account,
+                    "user": user,
+                    "cluster": cluster,
+                    "qos": qos,
+                    "pending_reason": None,
+                }
+    resources: dict[str, dict[str, Any]] = {}
+    if nodes:
+        output = _run(
+            (
+                "sinfo",
+                f"--clusters={config.cluster}",
+                "-h",
+                "-N",
+                "-n",
+                ",".join(nodes),
+                "-o",
+                "%N|%T|%c|%m|%e|%O|%C",
+            ),
+        ).stdout
+        for line in output.splitlines():
+            if not line.strip():
+                continue
+            row = line.split("|")
+            if len(row) != 7 or row[0] not in nodes or row[0] in resources:
+                raise HostConvergeError("staging allocation query node readback is invalid")
+            node, state, cpus, _memory, free_memory, cpu_load, cpu_counts = row
+            try:
+                cpus_total = int(cpus)
+                free_memory_mib = 0 if free_memory in {"", "N/A", "(null)"} else int(free_memory)
+                parsed_load = None if cpu_load in {"", "N/A", "(null)"} else float(cpu_load)
+                counts = tuple(int(value) for value in cpu_counts.split("/"))
+            except ValueError as exc:
+                raise HostConvergeError(
+                    "staging allocation query node resources are invalid",
+                ) from exc
+            if (
+                cpus_total < 1
+                or free_memory_mib < 0
+                or (parsed_load is not None and parsed_load < 0)
+                or len(counts) != 4
+                or any(value < 0 for value in counts)
+                or counts[3] != cpus_total
+                or re.fullmatch(r"[A-Za-z0-9_+*~#$@%-]+", state) is None
+            ):
+                raise HostConvergeError(
+                    "staging allocation query node resources are invalid",
+                )
+            resources[node] = {
+                "hostname": node,
+                "state": state,
+                "cpus_total": cpus_total,
+                "free_memory_mib": free_memory_mib,
+                "cpu_load": parsed_load,
+                "idle_cpus": counts[1],
+            }
+        if set(resources) != set(nodes):
+            raise HostConvergeError("staging allocation query node set is incomplete")
+    return {
+        "schema_version": 1,
+        "kind": "staging_external_slurm_allocation_query",
+        "request_id": request_id,
+        "candidate_sha": candidate_sha,
+        "candidate_tree": candidate_tree,
+        "cluster": config.cluster,
+        "controller": config.controller,
+        "submit_host": config.submit_host,
+        "jobs": [jobs[job_id] for job_id in job_ids if job_id in jobs],
+        "nodes": [resources[node] for node in nodes],
+        "observed_at": observed_at,
+        "status": "observed",
+    }
+
+
 def staging_allocation_submit(
+    config: StagingAllocationConfig,
+    *,
+    candidate_sha: str,
+    candidate_tree: str,
+    request_id: str,
+    requested_node: str,
+) -> dict[str, Any]:
+    with _staging_submission_lock(request_id):
+        return _staging_allocation_submit_locked(
+            config,
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+            request_id=request_id,
+            requested_node=requested_node,
+        )
+
+
+def _staging_allocation_submit_locked(
     config: StagingAllocationConfig,
     *,
     candidate_sha: str,
@@ -1966,16 +2380,12 @@ def staging_allocation_submit(
     if driver != profile.docker_cgroup_driver:
         raise HostConvergeError("staging allocation submit Docker driver drifted")
     slurm = _staging_slurm_live_config(config)
-    _staging_prepare_result_directory(
-        config,
-        candidate_sha=candidate_sha,
-        request_id=request_id,
-    )
     job_name = _staging_allocation_job_name(
         candidate_sha=candidate_sha,
         node=requested_node,
         candidate_set_sha256=candidate_set_sha256,
         resource_generation=int(guard_binding["resource_generation"]),
+        request_id=request_id,
     )
     worker = (
         str(INSTALLED_PROGRAM),
@@ -1997,40 +2407,73 @@ def staging_allocation_submit(
             *worker,
         )
     )
-    submitted = _run(
-        (
-            "sbatch",
-            "--parsable",
-            f"--job-name={job_name}",
-            f"--uid={config.batch_user}",
-            f"--account={config.slurm_account}",
-            f"--qos={config.qos}",
-            f"--clusters={config.cluster}",
-            f"--partition={config.partition}",
-            f"--nodelist={requested_node}",
-            "--oversubscribe",
-            "--nodes=1",
-            "--ntasks=1",
-            "--cpus-per-task=2",
-            "--mem=11500M",
-            "--time=12:00:00",
-            "--output=/dev/null",
-            "--error=/dev/null",
-            "--comment=loom-cgroup-v1:pids=65536",
-            "--export=NONE",
-            f"--wrap={wrapped}",
-        ),
-    ).stdout.strip()
-    match = re.fullmatch(r"([1-9][0-9]*)(?:;[A-Za-z0-9_.-]+)?", submitted)
-    if match is None:
-        raise HostConvergeError("staging allocation submit returned no exact job ID")
-    return {
+    wal_path, wal, wal_existed = _staging_submission_wal(
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+        request_id=request_id,
+        requested_node=requested_node,
+        candidate_set_sha256=candidate_set_sha256,
+        resource_generation=int(guard_binding["resource_generation"]),
+        job_name=job_name,
+        config=config,
+        wrapped=wrapped,
+    )
+    _staging_prepare_result_directory(
+        config,
+        candidate_sha=candidate_sha,
+        request_id=request_id,
+        allow_existing=wal_existed,
+    )
+    if wal["phase"] == "submitted":
+        result = wal["result"]
+        if not isinstance(result, dict):
+            raise HostConvergeError("staging submission WAL result is invalid")
+        return result
+    recovered_job_id = _staging_allocation_recover_job_id(
+        config,
+        job_name=job_name,
+        requested_node=requested_node,
+        request_id=request_id,
+        prepared_at=str(wal["prepared_at"]),
+    )
+    if recovered_job_id is None:
+        submitted = _run(
+            (
+                "sbatch",
+                "--parsable",
+                f"--job-name={job_name}",
+                f"--uid={config.batch_user}",
+                f"--account={config.slurm_account}",
+                f"--qos={config.qos}",
+                f"--clusters={config.cluster}",
+                f"--partition={config.partition}",
+                f"--nodelist={requested_node}",
+                "--oversubscribe",
+                "--nodes=1",
+                "--ntasks=1",
+                "--cpus-per-task=2",
+                "--mem=11500M",
+                "--time=12:00:00",
+                "--output=/dev/null",
+                "--error=/dev/null",
+                f"--comment=loom-cgroup-v1:pids=65536:r={request_id}",
+                "--export=NONE",
+                f"--wrap={wrapped}",
+            ),
+        ).stdout.strip()
+        match = re.fullmatch(r"([1-9][0-9]*)(?:;[A-Za-z0-9_.-]+)?", submitted)
+        if match is None:
+            raise HostConvergeError("staging allocation submit returned no exact job ID")
+        job_id = match.group(1)
+    else:
+        job_id = recovered_job_id
+    result = {
         "schema_version": 1,
         "kind": "staging_external_slurm_allocation_submission",
         "request_id": request_id,
         "candidate_sha": candidate_sha,
         "candidate_tree": candidate_tree,
-        "job_id": match.group(1),
+        "job_id": job_id,
         "job_name": job_name,
         "candidate_set_sha256": candidate_set_sha256,
         "resource_generation": guard_binding["resource_generation"],
@@ -2047,6 +2490,22 @@ def staging_allocation_submit(
         "submitted_at": _staging_timestamp(),
         "status": "submitted",
     }
+    submitted_wal = {
+        **wal,
+        "phase": "submitted",
+        "result": result,
+        "result_sha256": hashlib.sha256(_staging_submission_wal_bytes(result)).hexdigest(),
+    }
+    unsigned_wal = {key: value for key, value in submitted_wal.items() if key != "payload_sha256"}
+    submitted_wal["payload_sha256"] = hashlib.sha256(
+        _staging_submission_wal_bytes(unsigned_wal)
+    ).hexdigest()
+    _atomic_write(
+        wal_path,
+        _staging_submission_wal_bytes(submitted_wal),
+        mode=0o600,
+    )
+    return result
 
 
 def staging_allocation_cancel(
@@ -2081,6 +2540,7 @@ def staging_allocation_cancel(
         node=requested_node,
         candidate_set_sha256=candidate_set_sha256,
         resource_generation=int(guard_binding["resource_generation"]),
+        request_id=submit_request_id,
     )
     if (
         len(base) != 1
@@ -2304,6 +2764,7 @@ def staging_allocation_probe(
                 node=node,
                 candidate_set_sha256=candidate_set_sha256,
                 resource_generation=int(guard_binding["resource_generation"]),
+                request_id=request_id,
             )
             node_check = (
                 str(INSTALLED_PROGRAM),
@@ -2344,7 +2805,7 @@ def staging_allocation_probe(
                     "--time=00:04:00",
                     "--output=/dev/null",
                     "--error=/dev/null",
-                    "--comment=loom-cgroup-v1:pids=65536",
+                    f"--comment=loom-cgroup-v1:pids=65536:r={request_id}",
                     "--export=NONE",
                     f"--wrap={wrapped}",
                 )
@@ -4629,6 +5090,7 @@ def _node_authority_envelope(
             "observe-platform-health-node",
             "staging-allocation-bootstrap",
             "staging-allocation-probe",
+            "staging-allocation-query",
             "staging-allocation-submit",
             "staging-allocation-cancel",
             "staging-shared-source-bootstrap",
@@ -7636,6 +8098,7 @@ def _parser() -> argparse.ArgumentParser:
         "staging-allocation-node-check",
         "staging-allocation-worker",
         "staging-allocation-probe",
+        "staging-allocation-query",
         "staging-allocation-submit",
         "staging-allocation-cancel",
     ):
@@ -7643,6 +8106,9 @@ def _parser() -> argparse.ArgumentParser:
         staging.add_argument("--candidate-sha", required=True)
         staging.add_argument("--candidate-tree", required=True)
         staging.add_argument("--request-id", required=True)
+        if command == "staging-allocation-query":
+            staging.add_argument("--job-id", action="append", default=[])
+            staging.add_argument("--node", action="append", default=[])
         if command in {"staging-allocation-probe", "staging-allocation-submit"}:
             if command == "staging-allocation-submit":
                 staging.add_argument("--requested-node", required=True)
@@ -7710,6 +8176,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 candidate_sha=args.candidate_sha,
                 candidate_tree=args.candidate_tree,
                 request_id=args.request_id,
+            )
+        elif args.command == "staging-allocation-query":
+            result = staging_allocation_query(
+                load_staging_allocation_config(),
+                candidate_sha=args.candidate_sha,
+                candidate_tree=args.candidate_tree,
+                request_id=args.request_id,
+                job_ids=tuple(args.job_id),
+                nodes=tuple(args.node),
             )
         elif args.command == "staging-allocation-submit":
             if not args.execute:

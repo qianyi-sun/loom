@@ -37,6 +37,8 @@ def _candidate_source(tmp_path: Path, name: str) -> Path:
     paths = {relative for relative, _destination, _mode in installer.EXPECTED_ASSETS} | {
         installer.MANIFEST_RELATIVE.as_posix(),
         installer.NODE_CAPACITY_CONTRACT_RELATIVE.as_posix(),
+        installer.NODE_TRANSPORT_RELATIVE.as_posix(),
+        installer.NODE_TRANSPORT_ROUTES_RELATIVE.as_posix(),
     }
     for relative in paths:
         destination = source / relative
@@ -187,9 +189,16 @@ def _authority_installer(
     gid = os.getgid()
     transport = filesystem_root / installer.NODE_TRANSPORT.relative_to("/")
     transport.parent.mkdir(parents=True, exist_ok=True)
-    transport.write_bytes(b"#!/bin/sh\nexit 0\n")
+    transport.write_bytes((source_root / installer.NODE_TRANSPORT_RELATIVE).read_bytes())
     transport.chmod(0o755)
     os.chown(transport, uid, gid)
+    transport_routes = filesystem_root / installer.NODE_TRANSPORT_ROUTES.relative_to("/")
+    transport_routes.parent.mkdir(parents=True, exist_ok=True)
+    transport_routes.write_bytes(
+        (source_root / installer.NODE_TRANSPORT_ROUTES_RELATIVE).read_bytes()
+    )
+    transport_routes.chmod(0o644)
+    os.chown(transport_routes, uid, gid)
     capacity_contract = filesystem_root / installer.NODE_CAPACITY_CONTRACT.relative_to("/")
     capacity_contract.parent.mkdir(parents=True, exist_ok=True)
     capacity_contract.write_bytes(
@@ -1100,6 +1109,54 @@ def test_bootstrap_fails_before_enable_when_fixed_transport_is_missing(
         )
 
     assert not any(call[:3] == ("/usr/bin/systemctl", "enable", "--now") for call in commands.calls)
+
+
+@pytest.mark.parametrize(
+    ("relative", "installed"),
+    [
+        (
+            installer.NODE_TRANSPORT_RELATIVE,
+            installer.NODE_TRANSPORT,
+        ),
+        (
+            installer.NODE_TRANSPORT_ROUTES_RELATIVE,
+            installer.NODE_TRANSPORT_ROUTES,
+        ),
+    ],
+)
+def test_bootstrap_rejects_self_consistent_transport_from_another_candidate_before_mutation(
+    relative: Path,
+    installed: Path,
+    tmp_path: Path,
+    filesystem_root: Path,
+) -> None:
+    source = _candidate_source(tmp_path, "candidate-one")
+    commands = FakeHostCommands(filesystem_root, os.getgid())
+    authority = _authority_installer(
+        filesystem_root=filesystem_root,
+        source_root=source,
+        runner=commands,
+    )
+    installed_path = filesystem_root / installed.relative_to("/")
+    installed_path.write_bytes((source / relative).read_bytes() + b"\n# stale candidate\n")
+    installed_path.chmod(0o755 if installed == installer.NODE_TRANSPORT else 0o644)
+
+    with pytest.raises(
+        installer.AuthorityInstallerError,
+        match="transport prerequisite drifted from candidate",
+    ):
+        authority.install(
+            action="environment-authority-bootstrap",
+            candidate_sha=SHA_ONE,
+            candidate_tree=TREE_ONE,
+        )
+
+    state_root = filesystem_root / installer.STATE_ROOT.relative_to("/")
+    assert not (filesystem_root / installer.ACTIVE_PATH.relative_to("/")).exists()
+    assert not (filesystem_root / installer.JOURNAL_PATH.relative_to("/")).exists()
+    assert not (filesystem_root / installer.INSTALLED_PATH.relative_to("/")).exists()
+    assert not any(call[:3] == ("/usr/bin/systemctl", "enable", "--now") for call in commands.calls)
+    assert state_root.is_dir()
 
 
 @pytest.mark.parametrize(

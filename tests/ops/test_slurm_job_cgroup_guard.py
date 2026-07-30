@@ -295,6 +295,92 @@ def test_fixed_staging_job_name_is_candidate_set_and_generation_bound(
     assert result["verified"] == 0
 
 
+def test_fixed_staging_broker_job_name_is_request_comment_bound(tmp_path: Path) -> None:
+    staging = _staging_binding()
+    config = replace(
+        _config({"loom-staging": staging}),
+        cluster="trt-gb10",
+        controller="trt-gb10-1",
+        submit_host="trt-gb10-1",
+        allowed_nodes=frozenset({"trt-gb10-2"}),
+    )
+    request_id = "6" * 64
+    identity = hashlib.sha256(
+        (
+            f"{staging.candidate_sha}|trt-gb10-2|{config.candidate_set_sha256}|"
+            f"{staging.resource_generation}|{request_id}"
+        ).encode("ascii"),
+    ).hexdigest()
+    root, _job_path = _job(tmp_path)
+
+    result = guard.scan_once(
+        config,
+        cgroup_root=root,
+        job_lookup=lambda job_id: guard.JobRecord(
+            job_id=job_id,
+            account="loom-staging",
+            comment=f"loom-cgroup-v1:pids=32768:r={request_id}",
+            job_name=f"loom827-staging-aaaaaaaaaaaa-trt-gb10-2-x{identity}",
+            batch_host="trt-gb10-2",
+            node_list="trt-gb10-2",
+            user=staging.service_user,
+            start_time="2026-07-30T12:00:00",
+        ),
+    )
+
+    assert result["verified"] == 1
+    assert result["failed"] == 0
+
+
+@pytest.mark.parametrize("mutation", ("missing-request", "wrong-request", "wrong-name"))
+def test_fixed_staging_broker_job_rejects_request_identity_drift(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    staging = _staging_binding()
+    config = replace(
+        _config({"loom-staging": staging}),
+        cluster="trt-gb10",
+        controller="trt-gb10-1",
+        submit_host="trt-gb10-1",
+        allowed_nodes=frozenset({"trt-gb10-2"}),
+    )
+    request_id = "6" * 64
+    identity = hashlib.sha256(
+        (
+            f"{staging.candidate_sha}|trt-gb10-2|{config.candidate_set_sha256}|"
+            f"{staging.resource_generation}|{request_id}"
+        ).encode("ascii"),
+    ).hexdigest()
+    comment = f"loom-cgroup-v1:pids=32768:r={request_id}"
+    job_name = f"loom827-staging-aaaaaaaaaaaa-trt-gb10-2-x{identity}"
+    if mutation == "missing-request":
+        comment = "loom-cgroup-v1:pids=32768"
+    elif mutation == "wrong-request":
+        comment = f"loom-cgroup-v1:pids=32768:r={'7' * 64}"
+    else:
+        job_name = job_name[:-1] + ("0" if job_name[-1] != "0" else "1")
+    root, _job_path = _job(tmp_path)
+
+    result = guard.scan_once(
+        config,
+        cgroup_root=root,
+        job_lookup=lambda job_id: guard.JobRecord(
+            job_id=job_id,
+            account="loom-staging",
+            comment=comment,
+            job_name=job_name,
+            batch_host="trt-gb10-2",
+            node_list="trt-gb10-2",
+            user=staging.service_user,
+            start_time="2026-07-30T12:00:00",
+        ),
+    )
+
+    assert result["verified"] == 0
+    assert result["failed"] == 1
+
+
 @pytest.mark.parametrize(
     "mutation",
     (

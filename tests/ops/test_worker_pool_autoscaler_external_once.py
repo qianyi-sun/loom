@@ -19,6 +19,15 @@ ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "ops" / "worker_pool_autoscaler_external_once.py"
 
 
+def _external_config() -> dict[str, object]:
+    return {
+        "external_runner": True,
+        "external_broker": "staging-gb10-v1",
+        "cluster": "trt-gb10",
+        "candidate_sha": "a" * 40,
+    }
+
+
 @pytest.fixture
 def module():
     name = "worker_pool_autoscaler_external_once_test"
@@ -442,7 +451,7 @@ def test_normal_reconcile_validates_db_before_actuation_and_owns_tunnel(
             return [
                 SimpleNamespace(
                     pool_name="gb10",
-                    actuator_config={"external_runner": True},
+                    actuator_config=_external_config(),
                 )
             ]
 
@@ -540,7 +549,7 @@ def test_validate_only_uses_exact_tunnel_and_read_only_policy_query(
             return [
                 SimpleNamespace(
                     pool_name="gb10",
-                    actuator_config={"external_runner": True},
+                    actuator_config=_external_config(),
                 )
             ]
 
@@ -693,7 +702,9 @@ def test_validate_only_mixed_same_pool_counts_only_exact_environment(module: Any
             SimpleNamespace(
                 environment=environment,
                 pool_name="gb10",
-                actuator_config={"external_runner": True},
+                actuator_config=(
+                    _external_config() if environment == "staging" else {"external_runner": True}
+                ),
             )
             for environment in ("production", "staging")
         ]

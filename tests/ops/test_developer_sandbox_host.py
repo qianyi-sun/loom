@@ -2753,6 +2753,202 @@ def test_staging_allocation_config_separates_producer_batch_and_system_mount() -
     assert "trt-gb10-7" in config.allowed_nodes
 
 
+def test_staging_allocation_query_uses_only_fixed_cluster_and_parses_resources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = host.load_staging_allocation_config(
+        Path("deploy/developer-sandboxes/staging-external-slurm-authority.toml"),
+    )
+    commands: list[tuple[str, ...]] = []
+
+    def fake_run(
+        argv: tuple[str, ...] | list[str],
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        command = tuple(argv)
+        commands.append(command)
+        if command[0] == "squeue":
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                (
+                    "31415|loom827-staging-aaaaaaaaaaaa-trt-gb10-7-"
+                    f"x{'d' * 64}|RUNNING|trt-gb10-7|loom-staging|"
+                    "loom-staging-worker|None|loom-staging\n"
+                ),
+                "",
+            )
+        if command[0] == "sinfo":
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                "trt-gb10-7|idle|20|128000|110000|0.25|0/20/0/20\n",
+                "",
+            )
+        pytest.fail(f"unexpected query command: {command}")
+
+    monkeypatch.setattr(host.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(host, "_staging_allocation_node", lambda _config: "trt-gb10-1")
+    monkeypatch.setattr(
+        host,
+        "_staging_candidate_set_identity",
+        lambda **_kwargs: ({"resource_generation": 7}, "c" * 64),
+    )
+    monkeypatch.setattr(host, "_run", fake_run)
+
+    result = host.staging_allocation_query(
+        config,
+        candidate_sha=SHA,
+        candidate_tree="b" * 40,
+        request_id="6" * 64,
+        job_ids=("31415",),
+        nodes=("trt-gb10-7",),
+    )
+
+    assert result["cluster"] == "trt-gb10"
+    assert result["jobs"][0]["job_id"] == "31415"
+    assert result["jobs"][0]["nodelist"] == "trt-gb10-7"
+    assert result["nodes"] == [
+        {
+            "hostname": "trt-gb10-7",
+            "state": "idle",
+            "cpus_total": 20,
+            "free_memory_mib": 110000,
+            "cpu_load": 0.25,
+            "idle_cpus": 20,
+        },
+    ]
+    assert all(f"--clusters={config.cluster}" in command for command in commands)
+    assert [command[0] for command in commands] == ["squeue", "sinfo"]
+
+
+@pytest.mark.parametrize("crash_point", ("after_wal", "after_sbatch"))
+def test_staging_allocation_submit_recovers_without_duplicate_sbatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    crash_point: str,
+) -> None:
+    config = host.load_staging_allocation_config(
+        Path("deploy/developer-sandboxes/staging-external-slurm-authority.toml"),
+    )
+    request_id = "6" * 64
+    candidate_tree = "b" * 40
+    candidate_set = "c" * 64
+    wal_root = tmp_path / "wal"
+    submitted = 0
+    crashed = False
+    prepare_calls: list[bool] = []
+
+    def fake_atomic_write(path: Path, payload: bytes, *, mode: int) -> None:
+        nonlocal crashed
+        decoded = json.loads(payload)
+        if crash_point == "after_sbatch" and decoded.get("phase") == "submitted" and not crashed:
+            crashed = True
+            raise RuntimeError("simulated crash after sbatch")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+        path.chmod(mode)
+
+    def fake_run(
+        argv: tuple[str, ...] | list[str],
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal crashed, submitted
+        command = tuple(argv)
+        if command[:2] == ("docker", "info"):
+            return subprocess.CompletedProcess(command, 0, "systemd\n", "")
+        if command[0] == "squeue":
+            if crash_point == "after_wal" and not crashed:
+                crashed = True
+                raise RuntimeError("simulated crash after WAL")
+            output = ""
+            if crash_point == "after_sbatch" and submitted:
+                job_name = next(
+                    value.split("=", 1)[1]
+                    for value in last_sbatch
+                    if value.startswith("--job-name=")
+                )
+                output = (
+                    f"27182|{job_name}|trt-gb10-8|loom-staging|"
+                    f"loom-staging-worker|loom-staging|"
+                    f"loom-cgroup-v1:pids=65536:r={request_id}\n"
+                )
+            return subprocess.CompletedProcess(command, 0, output, "")
+        if command[0] == "sacct":
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if command[0] == "sbatch":
+            submitted += 1
+            last_sbatch[:] = command
+            return subprocess.CompletedProcess(command, 0, "27182;trt-gb10\n", "")
+        pytest.fail(f"unexpected submit command: {command}")
+
+    last_sbatch: list[str] = []
+    monkeypatch.setattr(host, "STAGING_SUBMISSION_WAL_ROOT", wal_root)
+    monkeypatch.setattr(
+        host, "_ensure_root_private_directory", lambda path: path.mkdir(parents=True, exist_ok=True)
+    )
+    monkeypatch.setattr(host, "_read_combined_receipt_bytes", lambda path: path.read_bytes())
+    monkeypatch.setattr(host, "_atomic_write", fake_atomic_write)
+    monkeypatch.setattr(host.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(host, "_staging_allocation_node", lambda _config: "trt-gb10-1")
+    monkeypatch.setattr(host, "_staging_identity_snapshot", lambda _config: {})
+    monkeypatch.setattr(host, "_converge_staging_shared_namespace", lambda _config: {})
+    monkeypatch.setattr(
+        host,
+        "_staging_candidate_binding",
+        lambda *_args, **_kwargs: {"repository": {"path": "/candidate"}},
+    )
+    monkeypatch.setattr(
+        host,
+        "_staging_slurm_profile",
+        lambda *_args: SimpleNamespace(docker_cgroup_driver="systemd"),
+    )
+    monkeypatch.setattr(
+        host,
+        "_staging_candidate_set_identity",
+        lambda **_kwargs: ({"resource_generation": 7}, candidate_set),
+    )
+    monkeypatch.setattr(
+        host,
+        "_staging_slurm_live_config",
+        lambda _config: {
+            "cluster": "trt-gb10",
+            "account": "loom-staging",
+            "qos": "loom-staging",
+        },
+    )
+    monkeypatch.setattr(
+        host,
+        "_staging_prepare_result_directory",
+        lambda *_args, allow_existing=False, **_kwargs: (
+            prepare_calls.append(allow_existing) or tmp_path
+        ),
+    )
+    monkeypatch.setattr(host, "_run", fake_run)
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        host._staging_allocation_submit_locked(
+            config,
+            candidate_sha=SHA,
+            candidate_tree=candidate_tree,
+            request_id=request_id,
+            requested_node="trt-gb10-8",
+        )
+    result = host._staging_allocation_submit_locked(
+        config,
+        candidate_sha=SHA,
+        candidate_tree=candidate_tree,
+        request_id=request_id,
+        requested_node="trt-gb10-8",
+    )
+
+    assert result["job_id"] == "27182"
+    assert submitted == 1
+    assert prepare_calls == [False, True]
+    assert json.loads((wal_root / f"{request_id}.json").read_bytes())["phase"] == "submitted"
+    assert f"--comment=loom-cgroup-v1:pids=65536:r={request_id}" in last_sbatch
+
+
 def _fixed_staging_binding() -> dict[str, object]:
     return host.slurm_policy.staging_guard_binding_payload(
         candidate_sha=SHA,

@@ -243,6 +243,17 @@ read back both transport roles. This ordering leaves the old forced transport
 pointing only at a fully valid authority. Do not widen sudoers or temporarily
 install an unrestricted SSH path to bridge the two upgrades.
 
+The final Docker `readback` is the node-stack completion boundary, not merely a
+self-consistency check. For every expected transport role it compares the
+installed transport program and route configuration byte-for-byte with the
+staged exact candidate, persists both SHA-256 digests with the candidate
+SHA/tree in the canonical receipt result, and fails closed on a stale but
+internally consistent transport generation. An `authority-upgrade` receipt by
+itself is therefore not node-stack convergence. Keep the authority and
+transport transactions separate: a transport role or endpoint change may
+require its own closed key or `known_hosts` inputs and must retain its
+independent snapshot and rollback domain.
+
 ## Readback and runtime use
 
 After bootstrap, run local checks before the sandbox installer:
@@ -254,7 +265,10 @@ After bootstrap, run local checks before the sandbox installer:
 
 The checks revalidate root ownership, mode, link count, route/config/program
 digests, known-host endpoint closure, identity digests, public fingerprints,
-and the exact forced authorized-key lines. Any drift fails closed.
+and the exact forced authorized-key lines. Any drift fails closed. The
+persistent Docker `readback` additionally binds those installed program and
+route bytes to the exact candidate; standalone `check-client` or
+`check-server` proves only installed-generation self-consistency.
 
 Root-owned callers send the canonical node-authority envelope on stdin:
 

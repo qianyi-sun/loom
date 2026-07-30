@@ -380,6 +380,7 @@ def test_checked_in_authority_config_is_fixed_to_staging_and_all_gb10_nodes() ->
     assert config.allowed_nodes == config.infrastructure_nodes
     assert config.excluded_nodes == ()
     assert config.probe_action == "staging-allocation-probe"
+    assert config.broker_query_action == "staging-allocation-query"
 
 
 def test_probe_transport_and_envelope_are_closed_to_exact_candidate() -> None:
@@ -441,6 +442,252 @@ def test_probe_transport_and_envelope_are_closed_to_exact_candidate() -> None:
     )
     assert parsed.action == "staging-allocation-probe"
     assert json.loads(parsed.payload_bytes) == inner
+
+
+def test_broker_query_envelope_is_check_only_and_exactly_gb10_scoped() -> None:
+    config = load_authority_config(CONFIG)
+    inner = {
+        "schema_version": 1,
+        "kind": "staging_external_slurm_allocation_query_request",
+        "request_id": "1" * 64,
+        "candidate_sha": SHA,
+        "candidate_tree": TREE,
+        "job_ids": ["31415"],
+        "nodes": ["trt-gb10-7"],
+    }
+    envelope = authority._broker_envelope(
+        config,
+        action=config.broker_query_action,
+        payload_kind="staging-allocation-query-request",
+        inner=inner,
+    )
+
+    assert authority._transport_argv(
+        config,
+        node=config.broker_node,
+        verb="check",
+    ) == [
+        "/usr/local/libexec/loom-developer-sandbox-node-transport",
+        "invoke",
+        "--node",
+        "trt-gb10-1",
+        "--verb",
+        "check",
+    ]
+    parsed = node_authority._parse_request(
+        envelope,
+        verb="check",
+        policy=node_authority.AuthorityPolicy(
+            source_sha=SHA,
+            source_tree=TREE,
+            node="trt-gb10-1",
+            asset_sha256={str(path): "c" * 64 for path in node_authority.SOURCE_ASSETS},
+        ),
+    )
+    assert parsed.action == "staging-allocation-query"
+    assert json.loads(parsed.payload_bytes) == inner
+
+
+def test_broker_client_normalizes_query_submit_and_cancel_receipts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_authority_config(CONFIG)
+    monkeypatch.setattr(authority, "_require_root", lambda: None)
+    monkeypatch.setattr(authority, "_require_source_host", lambda _config: None)
+    monkeypatch.setattr(authority, "_broker_candidate", lambda *_args, **_kwargs: None)
+
+    def invoke(
+        _config: ExternalSlurmAuthorityConfig,
+        *,
+        verb: str,
+        envelope: bytes,
+    ) -> dict[str, object]:
+        outer = json.loads(envelope)
+        inner = json.loads(base64.b64decode(outer["payload_base64"], validate=True))
+        if outer["action"] == config.broker_query_action:
+            assert verb == "check"
+            return {
+                "schema_version": 1,
+                "request_id": outer["request_id"],
+                "status": "succeeded",
+                "result": {
+                    "schema_version": 1,
+                    "kind": "staging_external_slurm_broker_query",
+                    "request_id": inner["request_id"],
+                    "candidate_sha": SHA,
+                    "candidate_tree": TREE,
+                    "cluster": "trt-gb10",
+                    "controller": "trt-gb10-1",
+                    "submit_host": "trt-gb10-1",
+                    "jobs": [],
+                    "nodes": [],
+                },
+            }
+        receipt = {
+            config.broker_submit_action: (
+                f"staging-broker/v1/submission/{inner['request_id']}/27182"
+            ),
+            config.broker_cancel_action: (f"staging-broker/v1/cancellation/{inner['request_id']}"),
+        }[outer["action"]]
+        return {
+            "schema_version": 1,
+            "request_id": outer["request_id"],
+            "status": "succeeded",
+            "action": outer["action"],
+            "inner_receipt": receipt,
+        }
+
+    monkeypatch.setattr(authority, "_broker_invoke", invoke)
+
+    query = authority.broker_query(
+        config,
+        candidate_sha=SHA,
+        candidate_tree=TREE,
+        job_ids=("31415",),
+        nodes=("trt-gb10-7",),
+    )
+    submission = authority.broker_submit(
+        config,
+        candidate_sha=SHA,
+        candidate_tree=TREE,
+        node="trt-gb10-7",
+    )
+    cancellation = authority.broker_cancel(
+        config,
+        candidate_sha=SHA,
+        candidate_tree=TREE,
+        submit_request_id=str(submission["request_id"]),
+        job_id=str(submission["job_id"]),
+        node="trt-gb10-7",
+    )
+
+    assert query["kind"] == "staging_external_slurm_broker_query"
+    assert submission["job_id"] == "27182"
+    assert cancellation["state"] == "CANCELLED"
+
+
+def test_broker_query_crosses_root_client_and_node_check_layers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_authority_config(CONFIG)
+    monkeypatch.setattr(authority, "_require_root", lambda: None)
+    monkeypatch.setattr(authority, "_require_source_host", lambda _config: None)
+    monkeypatch.setattr(authority, "_broker_candidate", lambda *_args, **_kwargs: None)
+    ledger = {
+        "submit_request_id": "2" * 64,
+        "candidate_sha": SHA,
+        "candidate_tree": TREE,
+        "node": "trt-gb10-7",
+        "job_id": "31415",
+        "job_name": "loom827-exact-job",
+        "user": "loom-staging-worker",
+        "account": "loom-staging",
+        "qos": "loom-staging",
+    }
+    monkeypatch.setattr(
+        node_authority,
+        "_staging_broker_submission_ledgers",
+        lambda: [ledger],
+    )
+    monkeypatch.setattr(
+        node_authority,
+        "_run_fixed",
+        lambda _argv: {
+            "schema_version": 1,
+            "kind": "staging_external_slurm_allocation_query",
+            "request_id": active_inner["request_id"],
+            "candidate_sha": SHA,
+            "candidate_tree": TREE,
+            "cluster": "trt-gb10",
+            "controller": "trt-gb10-1",
+            "submit_host": "trt-gb10-1",
+            "jobs": [
+                {
+                    "job_id": "31415",
+                    "job_name": ledger["job_name"],
+                    "state": "RUNNING",
+                    "nodelist": "trt-gb10-7",
+                    "account": ledger["account"],
+                    "user": ledger["user"],
+                    "cluster": "trt-gb10",
+                    "qos": ledger["qos"],
+                    "pending_reason": None,
+                }
+            ],
+            "nodes": [],
+            "observed_at": "2026-07-30T12:00:00Z",
+            "status": "observed",
+        },
+    )
+    active_inner: dict[str, object] = {}
+
+    def invoke(
+        _config: ExternalSlurmAuthorityConfig,
+        *,
+        verb: str,
+        envelope: bytes,
+    ) -> dict[str, object]:
+        assert verb == "check"
+        parsed = node_authority._parse_request(
+            envelope,
+            verb="check",
+            policy=node_authority.AuthorityPolicy(
+                source_sha=SHA,
+                source_tree=TREE,
+                node="trt-gb10-1",
+                asset_sha256={str(path): "c" * 64 for path in node_authority.SOURCE_ASSETS},
+            ),
+        )
+        active_inner.update(json.loads(parsed.payload_bytes))
+        return {
+            "schema_version": 1,
+            "request_id": parsed.request_id,
+            "status": "succeeded",
+            "result": node_authority._staging_broker_query(parsed),
+        }
+
+    monkeypatch.setattr(authority, "_broker_invoke", invoke)
+
+    result = authority.broker_query(
+        config,
+        candidate_sha=SHA,
+        candidate_tree=TREE,
+        job_ids=("31415",),
+        nodes=(),
+    )
+
+    assert result["jobs"] == [
+        {
+            "job_id": "31415",
+            "submit_request_id": "2" * 64,
+            "state": "RUNNING",
+            "nodelist": "trt-gb10-7",
+            "pending_reason": None,
+            "observed_at": "2026-07-30T12:00:00Z",
+        }
+    ]
+
+
+def test_broker_transport_rejects_success_with_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_authority_config(CONFIG)
+    monkeypatch.setattr(
+        authority,
+        "_run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout='{"status":"succeeded"}',
+            stderr="unexpected diagnostic",
+        ),
+    )
+
+    with pytest.raises(
+        authority.ExternalSlurmAcceptanceError,
+        match="response is invalid",
+    ):
+        authority._broker_invoke(config, verb="check", envelope=b"{}\n")
 
 
 def test_activate_summary_records_full_node_scope(

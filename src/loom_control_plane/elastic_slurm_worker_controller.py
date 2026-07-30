@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import math
 import re
@@ -113,6 +114,7 @@ class ElasticSlurmWorkerControllerConfig:
     candidate_id: str = ""
     candidate_sha: str = ""
     candidate_tree: str = ""
+    external_broker: str = ""
     gpu_tres: str = ""
     requested_gpus: int = 0
 
@@ -339,6 +341,7 @@ def build_controller_config(
     candidate_id: str = "",
     candidate_sha: str = "",
     candidate_tree: str = "",
+    external_broker: str = "",
     gpu_tres: str = "",
 ) -> ElasticSlurmWorkerControllerConfig | None:
     if not enabled:
@@ -408,6 +411,7 @@ def build_controller_config(
     if candidate_tree and _CANDIDATE_SHA_RE.fullmatch(candidate_tree) is None:
         raise ValueError("candidate_tree must be a 40-character lowercase Git tree")
     docker_cgroup_driver = docker_cgroup_driver.strip()
+    external_broker = external_broker.strip()
     slurm_cluster = slurm_cluster.strip()
     env_id = env_id.strip()
     runtime_id = runtime_id.strip()
@@ -492,6 +496,7 @@ def build_controller_config(
         candidate_id=candidate_id,
         candidate_sha=candidate_sha,
         candidate_tree=candidate_tree,
+        external_broker=external_broker,
         gpu_tres=gpu_tres,
         requested_gpus=requested_gpus,
     )
@@ -1070,6 +1075,329 @@ wait "$compose_pid"
     return SbatchRequest(args=tuple(args), stdin=stdin)
 
 
+_EXTERNAL_BROKER_AUTHORITY = (
+    "/usr/bin/sudo",
+    "-n",
+    "/usr/local/libexec/loom-staging-external-slurm-authority",
+)
+_EXTERNAL_BROKER_ID = "staging-gb10-v1"
+_EXTERNAL_CLUSTER = "trt-gb10"
+_EXTERNAL_CONTROLLER = "trt-gb10-1"
+_SLURM_JOB_ID_RE = re.compile(r"^[1-9][0-9]*$")
+FIXED_EXTERNAL_RUNNER_SAFETY_PROTOCOL = "loom.slurm-worker-command-runner.fixed-external-broker/v1"
+FIXED_EXTERNAL_RUNNER_SAFETY_TAG = "staging-gb10-root-authority"
+
+
+@dataclass(frozen=True)
+class ExternalSlurmBrokerSafetyBinding:
+    protocol: str
+    tag: str
+    authority: tuple[str, ...]
+    environment: str
+    pool_name: str
+    external_broker: str
+    slurm_cluster: str
+    controller: str
+    candidate_sha: str
+    candidate_tree: str
+    allowed_nodes: tuple[str, ...]
+
+
+def _validate_fixed_external_broker_config(
+    config: ElasticSlurmWorkerControllerConfig,
+) -> None:
+    if config.environment != "staging":
+        raise ValueError("external Slurm broker is restricted to staging")
+    if config.pool_name != "gb10":
+        raise ValueError("external Slurm broker is restricted to the GB10 pool")
+    if config.slurm_cluster != _EXTERNAL_CLUSTER:
+        raise ValueError("external Slurm broker requires cluster trt-gb10")
+    if config.external_broker != _EXTERNAL_BROKER_ID:
+        raise ValueError("external Slurm broker must be staging-gb10-v1")
+    if config.allowed_nodes != tuple(f"trt-gb10-{index}" for index in range(1, 16)):
+        raise ValueError("external Slurm broker requires the complete fixed GB10 node set")
+    if _CANDIDATE_SHA_RE.fullmatch(config.candidate_sha) is None:
+        raise ValueError("external Slurm broker requires an exact candidate SHA")
+    if config.candidate_tree and _CANDIDATE_SHA_RE.fullmatch(config.candidate_tree) is None:
+        raise ValueError("external Slurm broker candidate tree is invalid")
+
+
+def fixed_external_slurm_broker_safety_binding(
+    config: ElasticSlurmWorkerControllerConfig,
+) -> ExternalSlurmBrokerSafetyBinding:
+    _validate_fixed_external_broker_config(config)
+    return ExternalSlurmBrokerSafetyBinding(
+        protocol=FIXED_EXTERNAL_RUNNER_SAFETY_PROTOCOL,
+        tag=FIXED_EXTERNAL_RUNNER_SAFETY_TAG,
+        authority=_EXTERNAL_BROKER_AUTHORITY,
+        environment=config.environment,
+        pool_name=config.pool_name,
+        external_broker=config.external_broker,
+        slurm_cluster=config.slurm_cluster,
+        controller=_EXTERNAL_CONTROLLER,
+        candidate_sha=config.candidate_sha,
+        candidate_tree=config.candidate_tree,
+        allowed_nodes=config.allowed_nodes,
+    )
+
+
+def require_fixed_external_slurm_broker_runner(
+    runner: SlurmWorkerCommandRunner,
+    config: ElasticSlurmWorkerControllerConfig,
+) -> SlurmWorkerCommandRunner:
+    expected = fixed_external_slurm_broker_safety_binding(config)
+    if isinstance(runner, SubprocessSlurmCommandRunner):
+        raise ValueError("external Slurm policy refuses the subprocess runner")
+    if (
+        getattr(runner, "external_runner_safety_protocol", None)
+        != FIXED_EXTERNAL_RUNNER_SAFETY_PROTOCOL
+        or getattr(runner, "external_runner_safety_tag", None) != FIXED_EXTERNAL_RUNNER_SAFETY_TAG
+    ):
+        raise ValueError("external Slurm runner safety protocol is invalid")
+    binding_reader = getattr(runner, "external_runner_safety_binding", None)
+    if not callable(binding_reader):
+        raise ValueError("external Slurm runner safety binding is unavailable")
+    try:
+        binding = binding_reader()
+    except Exception as exc:
+        raise ValueError("external Slurm runner safety binding is unavailable") from exc
+    if not isinstance(binding, ExternalSlurmBrokerSafetyBinding) or binding != expected:
+        raise ValueError("external Slurm runner safety binding drifted")
+    return runner
+
+
+class FixedExternalSlurmBrokerRunner:
+    """Fail-closed client for the root-owned staging GB10 allocation broker."""
+
+    external_runner_safety_protocol = FIXED_EXTERNAL_RUNNER_SAFETY_PROTOCOL
+    external_runner_safety_tag = FIXED_EXTERNAL_RUNNER_SAFETY_TAG
+
+    def __init__(self) -> None:
+        self._config: ElasticSlurmWorkerControllerConfig | None = None
+        self._candidate_tree = ""
+        self._submission_by_job: dict[str, tuple[str, str]] = {}
+
+    def bind_config(
+        self,
+        config: ElasticSlurmWorkerControllerConfig,
+    ) -> FixedExternalSlurmBrokerRunner:
+        _validate_fixed_external_broker_config(config)
+        self._config = config
+        self._candidate_tree = config.candidate_tree
+        return self
+
+    def external_runner_safety_binding(self) -> ExternalSlurmBrokerSafetyBinding:
+        return fixed_external_slurm_broker_safety_binding(self._bound_config())
+
+    def _bound_config(self) -> ElasticSlurmWorkerControllerConfig:
+        if self._config is None:
+            raise RuntimeError("external Slurm broker runner is not bound")
+        return self._config
+
+    async def _invoke(self, command: str, extra: Sequence[str]) -> Mapping[str, Any]:
+        config = self._bound_config()
+        if not self._candidate_tree:
+            candidate = await _run_command(
+                ("/usr/bin/git", "-C", config.repo_dir, "rev-parse", "HEAD"),
+                timeout=config.command_timeout_seconds,
+            )
+            candidate_tree = await _run_command(
+                ("/usr/bin/git", "-C", config.repo_dir, "rev-parse", "HEAD^{tree}"),
+                timeout=config.command_timeout_seconds,
+            )
+            if (
+                candidate.stderr
+                or candidate_tree.stderr
+                or candidate.stdout.strip() != config.candidate_sha
+                or _CANDIDATE_SHA_RE.fullmatch(candidate_tree.stdout.strip()) is None
+            ):
+                raise RuntimeError("external Slurm broker repository candidate mismatch")
+            self._candidate_tree = candidate_tree.stdout.strip()
+        result = await _run_command(
+            (
+                *_EXTERNAL_BROKER_AUTHORITY,
+                command,
+                "--candidate-sha",
+                config.candidate_sha,
+                "--candidate-tree",
+                self._candidate_tree,
+                *extra,
+            ),
+            timeout=config.command_timeout_seconds,
+        )
+        try:
+            payload = json.loads(result.stdout)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise RuntimeError("external Slurm broker returned invalid JSON") from exc
+        if (
+            not isinstance(payload, dict)
+            or bool(result.stderr)
+            or payload.get("schema_version") != 1
+            or payload.get("candidate_sha") != config.candidate_sha
+            or payload.get("candidate_tree") != self._candidate_tree
+            or payload.get("cluster") != _EXTERNAL_CLUSTER
+            or payload.get("controller") != _EXTERNAL_CONTROLLER
+            or payload.get("submit_host") != _EXTERNAL_CONTROLLER
+        ):
+            raise RuntimeError("external Slurm broker identity mismatch")
+        return payload
+
+    async def query_jobs(
+        self,
+        job_ids: tuple[str, ...],
+    ) -> list[SlurmWorkerJobObservation]:
+        if not job_ids:
+            return []
+        if len(set(job_ids)) != len(job_ids) or any(
+            _SLURM_JOB_ID_RE.fullmatch(job_id) is None for job_id in job_ids
+        ):
+            raise ValueError("external Slurm broker job IDs are invalid")
+        payload = await self._invoke(
+            "broker-query",
+            tuple(item for job_id in job_ids for item in ("--job-id", job_id)),
+        )
+        if payload.get("kind") != "staging_external_slurm_broker_query":
+            raise RuntimeError("external Slurm broker query kind mismatch")
+        rows = payload.get("jobs")
+        if not isinstance(rows, list):
+            raise RuntimeError("external Slurm broker query jobs are invalid")
+        requested = set(job_ids)
+        observations: dict[str, SlurmWorkerJobObservation] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                raise RuntimeError("external Slurm broker returned an invalid job")
+            job_id = row.get("job_id")
+            submit_request_id = row.get("submit_request_id")
+            node = row.get("nodelist")
+            observed_at = row.get("observed_at")
+            if (
+                not isinstance(job_id, str)
+                or job_id not in requested
+                or job_id in observations
+                or not isinstance(submit_request_id, str)
+                or re.fullmatch(r"[0-9a-f]{64}", submit_request_id) is None
+                or not isinstance(node, str)
+                or node not in self._bound_config().allowed_nodes
+                or not isinstance(row.get("state"), str)
+                or not isinstance(observed_at, str)
+            ):
+                raise RuntimeError("external Slurm broker job identity mismatch")
+            try:
+                observed_time = datetime.fromisoformat(
+                    observed_at.replace("Z", "+00:00")
+                ).astimezone(UTC)
+            except ValueError as exc:
+                raise RuntimeError("external Slurm broker observation time is invalid") from exc
+            pending_reason = row.get("pending_reason")
+            if pending_reason is not None and not isinstance(pending_reason, str):
+                raise RuntimeError("external Slurm broker pending reason is invalid")
+            self._submission_by_job[job_id] = (submit_request_id, node)
+            observations[job_id] = SlurmWorkerJobObservation(
+                job_id=job_id,
+                slurm_state=str(row["state"]),
+                nodelist=node,
+                pending_reason=pending_reason,
+                observed_at=observed_time,
+            )
+        return [observations[job_id] for job_id in job_ids if job_id in observations]
+
+    async def query_node_resources(
+        self,
+        nodes: tuple[str, ...],
+    ) -> dict[str, SlurmNodeResource]:
+        if not nodes:
+            return {}
+        config = self._bound_config()
+        if len(set(nodes)) != len(nodes) or any(node not in config.allowed_nodes for node in nodes):
+            raise ValueError("external Slurm broker nodes are outside the fixed GB10 pool")
+        payload = await self._invoke(
+            "broker-query",
+            tuple(item for node in nodes for item in ("--node", node)),
+        )
+        if payload.get("kind") != "staging_external_slurm_broker_query":
+            raise RuntimeError("external Slurm broker query kind mismatch")
+        rows = payload.get("nodes")
+        if not isinstance(rows, list):
+            raise RuntimeError("external Slurm broker query nodes are invalid")
+        requested = set(nodes)
+        resources: dict[str, SlurmNodeResource] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                raise RuntimeError("external Slurm broker returned an invalid node")
+            node = row.get("hostname")
+            if (
+                not isinstance(node, str)
+                or node not in requested
+                or node in resources
+                or not isinstance(row.get("state"), str)
+                or type(row.get("cpus_total")) is not int
+                or type(row.get("free_memory_mib")) is not int
+                or (
+                    row.get("cpu_load") is not None
+                    and not isinstance(row.get("cpu_load"), (int, float))
+                )
+                or (row.get("idle_cpus") is not None and type(row.get("idle_cpus")) is not int)
+            ):
+                raise RuntimeError("external Slurm broker node identity mismatch")
+            resources[node] = SlurmNodeResource(
+                hostname=node,
+                state=str(row["state"]),
+                cpus_total=int(row["cpus_total"]),
+                free_memory_mib=int(row["free_memory_mib"]),
+                cpu_load=(float(row["cpu_load"]) if row.get("cpu_load") is not None else None),
+                idle_cpus=(int(row["idle_cpus"]) if row.get("idle_cpus") is not None else None),
+            )
+        return {node: resources[node] for node in nodes if node in resources}
+
+    async def submit_worker(
+        self,
+        *,
+        node: str,
+        config: ElasticSlurmWorkerControllerConfig,
+    ) -> str:
+        if config != self._bound_config() or node not in config.allowed_nodes:
+            raise ValueError("external Slurm broker submission is outside the bound policy")
+        payload = await self._invoke("broker-submit", ("--node", node))
+        if payload.get("kind") != "staging_external_slurm_broker_submission":
+            raise RuntimeError("external Slurm broker submission kind mismatch")
+        job_id = payload.get("job_id")
+        request_id = payload.get("request_id")
+        if (
+            not isinstance(job_id, str)
+            or _SLURM_JOB_ID_RE.fullmatch(job_id) is None
+            or not isinstance(request_id, str)
+            or re.fullmatch(r"[0-9a-f]{64}", request_id) is None
+            or payload.get("node") != node
+        ):
+            raise RuntimeError("external Slurm broker submission identity mismatch")
+        self._submission_by_job[job_id] = (request_id, node)
+        return job_id
+
+    async def cancel_job(self, job_id: str) -> None:
+        mapping = self._submission_by_job.get(job_id)
+        if mapping is None:
+            raise RuntimeError("external Slurm broker refuses an unobserved job cancellation")
+        submit_request_id, node = mapping
+        payload = await self._invoke(
+            "broker-cancel",
+            (
+                "--submit-request-id",
+                submit_request_id,
+                "--job-id",
+                job_id,
+                "--node",
+                node,
+            ),
+        )
+        if (
+            payload.get("kind") != "staging_external_slurm_broker_cancellation"
+            or payload.get("submit_request_id") != submit_request_id
+            or payload.get("job_id") != job_id
+            or payload.get("node") != node
+        ):
+            raise RuntimeError("external Slurm broker cancellation identity mismatch")
+
+
 class SubprocessSlurmCommandRunner:
     async def query_jobs(
         self,
@@ -1376,6 +1704,8 @@ async def run_elastic_slurm_worker_controller_once(
     config: ElasticSlurmWorkerControllerConfig,
     runner: SlurmWorkerCommandRunner,
 ) -> SlurmWorkerControllerTickResult:
+    if config.external_broker:
+        runner = require_fixed_external_slurm_broker_runner(runner, config)
     snapshot = await load_capacity_snapshot(session, config)
     if snapshot.active_job_ids:
         try:

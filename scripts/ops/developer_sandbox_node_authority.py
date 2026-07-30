@@ -320,6 +320,7 @@ CHECK_ACTIONS: Final = frozenset(
         "observe-live-overlap-job",
         "observe-platform-health-node",
         "staging-pressure-reclaim-observe",
+        "staging-allocation-query",
     },
 )
 STAGING_ACTIONS: Final = frozenset(
@@ -328,6 +329,7 @@ STAGING_ACTIONS: Final = frozenset(
         "staging-allocation-probe",
         "staging-allocation-submit",
         "staging-allocation-cancel",
+        "staging-allocation-query",
         "staging-shared-source-bootstrap",
         "staging-slurm-accounting-converge",
         "staging-infrastructure-converge",
@@ -375,6 +377,7 @@ PAYLOAD_KIND: Final = {
     "staging-allocation-probe": "staging-allocation-probe-request",
     "staging-allocation-submit": "staging-allocation-submit-request",
     "staging-allocation-cancel": "staging-allocation-cancel-request",
+    "staging-allocation-query": "staging-allocation-query-request",
     "staging-shared-source-bootstrap": "staging-infrastructure-operation-request",
     "staging-slurm-accounting-converge": "staging-infrastructure-operation-request",
     "staging-infrastructure-converge": "staging-infrastructure-converge-request",
@@ -745,6 +748,11 @@ STAGING_ALLOCATION_CANCEL_FIELDS: Final = {
     *STAGING_ALLOCATION_SUBMIT_FIELDS,
     "job_id",
     "submit_request_id",
+}
+STAGING_ALLOCATION_QUERY_FIELDS: Final = {
+    *STAGING_ALLOCATION_PROBE_FIELDS,
+    "job_ids",
+    "nodes",
 }
 STAGING_INFRASTRUCTURE_OPERATION_FIELDS: Final = {
     "schema_version",
@@ -5037,6 +5045,37 @@ def _parse_request(raw: bytes, *, verb: str, policy: AuthorityPolicy) -> Request
             or staging_cancel.get("candidate_tree") != payload["candidate_tree"]
         ):
             raise NodeAuthorityError("staging allocation cancel payload is invalid")
+    if payload["payload_kind"] == "staging-allocation-query-request":
+        try:
+            staging_query = json.loads(decoded)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise NodeAuthorityError("staging allocation query payload is invalid") from exc
+        job_ids = staging_query.get("job_ids") if isinstance(staging_query, dict) else None
+        nodes = staging_query.get("nodes") if isinstance(staging_query, dict) else None
+        allowed_nodes = {f"trt-gb10-{index}" for index in range(1, 16)}
+        if (
+            not isinstance(staging_query, dict)
+            or decoded != _canonical(staging_query)
+            or set(staging_query) != STAGING_ALLOCATION_QUERY_FIELDS
+            or staging_query.get("schema_version") != SCHEMA_VERSION
+            or staging_query.get("kind") != "staging_external_slurm_allocation_query_request"
+            or not _is_sha(staging_query.get("request_id"), length=64)
+            or staging_query.get("candidate_sha") != payload["candidate_sha"]
+            or staging_query.get("candidate_tree") != payload["candidate_tree"]
+            or not isinstance(job_ids, list)
+            or not isinstance(nodes, list)
+            or (not job_ids and not nodes)
+            or len(job_ids) > 64
+            or len(nodes) > len(allowed_nodes)
+            or len(job_ids) != len(set(job_ids))
+            or len(nodes) != len(set(nodes))
+            or any(
+                not isinstance(job_id, str) or re.fullmatch(r"[1-9][0-9]*", job_id) is None
+                for job_id in job_ids
+            )
+            or any(not isinstance(node, str) or node not in allowed_nodes for node in nodes)
+        ):
+            raise NodeAuthorityError("staging allocation query payload is invalid")
     if payload["payload_kind"] == "staging-infrastructure-operation-request":
         try:
             operation_payload = json.loads(decoded)
@@ -5180,6 +5219,15 @@ def _parse_request(raw: bytes, *, verb: str, policy: AuthorityPolicy) -> Request
         raise NodeAuthorityError(
             "staging allocation broker is restricted to the fixed GB10 submit host",
         )
+    if requested_action == "staging-allocation-query" and (
+        domain != "gb10"
+        or node != "trt-gb10-1"
+        or payload["candidate_sha"] != policy.source_sha
+        or payload["candidate_tree"] != policy.source_tree
+    ):
+        raise NodeAuthorityError(
+            "staging allocation query is restricted to the installed GB10 controller",
+        )
     if requested_action in SLURM_ACTIONS:
         expected_domain = "oldlab" if node.startswith("oldlab-") else "gb10"
         if domain != expected_domain:
@@ -5280,7 +5328,8 @@ def _read_receipt(request_id: str) -> dict[str, Any] | None:
         and re.fullmatch(
             r"(?:staging-probe/v1|staging-accounting/v1|"
             r"staging-infrastructure/v1|"
-            r"staging-broker/v1/(?:submission|cancellation))/[0-9a-f]{64}"
+            r"staging-broker/v1/cancellation)/[0-9a-f]{64}"
+            r"|staging-broker/v1/submission/[0-9a-f]{64}(?:/[1-9][0-9]*)?"
             r"|staging-infrastructure-install/v1/[1-9][0-9]*",
             inner,
         )
@@ -6444,7 +6493,11 @@ def _staging_identity_converge_argv(request: Request) -> tuple[str, ...]:
 
 
 def _staging_broker_argv(request: Request) -> tuple[str, ...]:
-    if request.action not in {"staging-allocation-submit", "staging-allocation-cancel"}:
+    if request.action not in {
+        "staging-allocation-query",
+        "staging-allocation-submit",
+        "staging-allocation-cancel",
+    }:
         raise NodeAuthorityError("staging broker command binding is invalid")
     payload = json.loads(request.payload_bytes)
     argv = [
@@ -6458,9 +6511,14 @@ def _staging_broker_argv(request: Request) -> tuple[str, ...]:
         str(payload["candidate_tree"]),
         "--request-id",
         str(payload["request_id"]),
-        "--requested-node",
-        str(payload["requested_node"]),
     ]
+    if request.action == "staging-allocation-query":
+        for job_id in payload["job_ids"]:
+            argv.extend(("--job-id", str(job_id)))
+        for node in payload["nodes"]:
+            argv.extend(("--node", str(node)))
+        return tuple(argv)
+    argv.extend(("--requested-node", str(payload["requested_node"])))
     if request.action == "staging-allocation-cancel":
         argv.extend(
             (
@@ -7473,6 +7531,265 @@ def _staging_broker_submission_path(submit_request_id: str) -> Path:
     return STAGING_BROKER_ROOT / f"{submit_request_id}.json"
 
 
+def _staging_broker_job_name(
+    *,
+    candidate_sha: str,
+    node: str,
+    candidate_set_sha256: str,
+    resource_generation: int,
+    submit_request_id: str,
+) -> str:
+    if (
+        not _is_sha(candidate_sha)
+        or node not in STAGING_INFRASTRUCTURE_NODES
+        or not _is_sha(candidate_set_sha256, length=64)
+        or type(resource_generation) is not int
+        or resource_generation < 1
+        or not _is_sha(submit_request_id, length=64)
+    ):
+        raise NodeAuthorityError("staging broker job identity is invalid")
+    identity = hashlib.sha256(
+        (
+            f"{candidate_sha}|{node}|{candidate_set_sha256}|"
+            f"{resource_generation}|{submit_request_id}"
+        ).encode("ascii"),
+    ).hexdigest()
+    return f"loom827-staging-{candidate_sha[:12]}-{node}-x{identity}"
+
+
+def _staging_broker_submission_ledgers() -> list[dict[str, Any]]:
+    _safe_root_directory(STAGING_BROKER_ROOT, mode=0o700)
+    submissions: list[dict[str, Any]] = []
+    submission_name = re.compile(r"([0-9a-f]{64})\.json\Z")
+    cancel_name = re.compile(r"[0-9a-f]{64}-cancel\.json\Z")
+    expected_fields = {
+        "schema_version",
+        "kind",
+        "authority_request_id",
+        "submit_request_id",
+        "candidate_sha",
+        "candidate_tree",
+        "node",
+        "job_id",
+        "job_name",
+        "candidate_set_sha256",
+        "resource_generation",
+        "user",
+        "account",
+        "qos",
+        "submitted_at",
+        "result_sha256",
+    }
+    try:
+        entries = sorted(STAGING_BROKER_ROOT.iterdir(), key=lambda path: path.name)
+    except OSError as exc:
+        raise NodeAuthorityError("staging broker ledger is unavailable") from exc
+    for path in entries:
+        match = submission_name.fullmatch(path.name)
+        if match is None:
+            if cancel_name.fullmatch(path.name) is not None:
+                continue
+            raise NodeAuthorityError("staging broker ledger contains an unknown entry")
+        raw = _safe_root_file(path, mode=0o600, limit=64 * 1024)
+        try:
+            submission = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise NodeAuthorityError("staging broker submission ledger is invalid") from exc
+        if (
+            not isinstance(submission, dict)
+            or set(submission)
+            not in {
+                frozenset(expected_fields),
+                frozenset({*expected_fields, "intent_sha256", "result"}),
+            }
+            or raw != _canonical(submission)
+            or submission.get("schema_version") != SCHEMA_VERSION
+            or submission.get("kind") != "loom.staging-allocation-broker-submission"
+            or submission.get("submit_request_id") != match.group(1)
+            or not _is_sha(submission.get("authority_request_id"), length=64)
+            or not _is_sha(submission.get("candidate_sha"))
+            or not _is_sha(submission.get("candidate_tree"))
+            or submission.get("node") not in {f"trt-gb10-{index}" for index in range(1, 16)}
+            or re.fullmatch(r"[1-9][0-9]*", str(submission.get("job_id"))) is None
+            or re.fullmatch(r"[A-Za-z0-9_.-]{1,256}", str(submission.get("job_name"))) is None
+            or not _is_sha(submission.get("candidate_set_sha256"), length=64)
+            or type(submission.get("resource_generation")) is not int
+            or submission["resource_generation"] < 1
+            or submission.get("user") != STAGING_SERVICE_USER
+            or submission.get("account") != "loom-staging"
+            or submission.get("qos") != "loom-staging"
+            or _canonical_utc(submission.get("submitted_at")) is None
+            or not _is_sha(submission.get("result_sha256"), length=64)
+            or (
+                "result" in submission
+                and (
+                    not _is_sha(submission.get("intent_sha256"), length=64)
+                    or not isinstance(submission.get("result"), dict)
+                    or hashlib.sha256(_canonical(submission["result"])).hexdigest()
+                    != submission["result_sha256"]
+                )
+            )
+        ):
+            raise NodeAuthorityError("staging broker submission ledger is invalid")
+        submissions.append(submission)
+    return submissions
+
+
+def _staging_broker_query(request: Request) -> dict[str, Any]:
+    inner = json.loads(request.payload_bytes)
+    requested_job_ids = tuple(str(job_id) for job_id in inner["job_ids"])
+    ledgers = _staging_broker_submission_ledgers() if requested_job_ids else []
+    owned: dict[str, dict[str, Any]] = {}
+    for job_id in requested_job_ids:
+        matches = [
+            submission
+            for submission in ledgers
+            if submission.get("job_id") == job_id
+            and submission.get("candidate_sha") == request.payload["candidate_sha"]
+            and submission.get("candidate_tree") == request.payload["candidate_tree"]
+        ]
+        if len(matches) != 1:
+            raise NodeAuthorityError(
+                "staging allocation query escaped its submission ledger",
+            )
+        owned[job_id] = matches[0]
+    result = _run_fixed(_staging_broker_argv(request))
+    expected_fields = {
+        "schema_version",
+        "kind",
+        "request_id",
+        "candidate_sha",
+        "candidate_tree",
+        "cluster",
+        "controller",
+        "submit_host",
+        "jobs",
+        "nodes",
+        "observed_at",
+        "status",
+    }
+    jobs = result.get("jobs") if isinstance(result, dict) else None
+    nodes = result.get("nodes") if isinstance(result, dict) else None
+    if (
+        not isinstance(result, dict)
+        or set(result) != expected_fields
+        or result.get("schema_version") != SCHEMA_VERSION
+        or result.get("kind") != "staging_external_slurm_allocation_query"
+        or result.get("request_id") != inner["request_id"]
+        or result.get("candidate_sha") != request.payload["candidate_sha"]
+        or result.get("candidate_tree") != request.payload["candidate_tree"]
+        or result.get("cluster") != "trt-gb10"
+        or result.get("controller") != "trt-gb10-1"
+        or result.get("submit_host") != "trt-gb10-1"
+        or result.get("status") != "observed"
+        or _canonical_utc(result.get("observed_at")) is None
+        or not isinstance(jobs, list)
+        or not isinstance(nodes, list)
+    ):
+        raise NodeAuthorityError("staging allocation query readback is invalid")
+    normalized_jobs: list[dict[str, Any]] = []
+    seen_jobs: set[str] = set()
+    job_fields = {
+        "job_id",
+        "job_name",
+        "state",
+        "nodelist",
+        "account",
+        "user",
+        "cluster",
+        "qos",
+        "pending_reason",
+    }
+    for job in jobs:
+        job_id = str(job.get("job_id")) if isinstance(job, dict) else ""
+        ledger = owned.get(job_id)
+        pending_reason = job.get("pending_reason") if isinstance(job, dict) else None
+        nodelist = job.get("nodelist") if isinstance(job, dict) else None
+        if (
+            not isinstance(job, dict)
+            or set(job) != job_fields
+            or ledger is None
+            or job_id in seen_jobs
+            or job.get("job_name") != ledger["job_name"]
+            or job.get("account") != ledger["account"]
+            or job.get("user") != ledger["user"]
+            or job.get("cluster") != "trt-gb10"
+            or job.get("qos") != ledger["qos"]
+            or re.fullmatch(r"[A-Z_]+", str(job.get("state"))) is None
+            or nodelist not in {"", ledger["node"]}
+            or (
+                pending_reason is not None
+                and (
+                    not isinstance(pending_reason, str)
+                    or not pending_reason
+                    or "\n" in pending_reason
+                )
+            )
+        ):
+            raise NodeAuthorityError(
+                "staging allocation query escaped its submission ledger",
+            )
+        seen_jobs.add(job_id)
+        normalized_jobs.append(
+            {
+                "job_id": job_id,
+                "submit_request_id": ledger["submit_request_id"],
+                "state": job["state"],
+                "nodelist": ledger["node"],
+                "pending_reason": pending_reason,
+                "observed_at": result["observed_at"],
+            },
+        )
+    requested_nodes = tuple(str(node) for node in inner["nodes"])
+    normalized_nodes: list[dict[str, Any]] = []
+    node_fields = {
+        "hostname",
+        "state",
+        "cpus_total",
+        "free_memory_mib",
+        "cpu_load",
+        "idle_cpus",
+    }
+    if len(nodes) != len(requested_nodes):
+        raise NodeAuthorityError("staging allocation query node set is incomplete")
+    for expected_node, node in zip(requested_nodes, nodes, strict=True):
+        if (
+            not isinstance(node, dict)
+            or set(node) != node_fields
+            or node.get("hostname") != expected_node
+            or not isinstance(node.get("state"), str)
+            or not node["state"]
+            or type(node.get("cpus_total")) is not int
+            or node["cpus_total"] < 1
+            or type(node.get("free_memory_mib")) is not int
+            or node["free_memory_mib"] < 0
+            or (
+                node.get("cpu_load") is not None
+                and (
+                    not isinstance(node["cpu_load"], (int, float))
+                    or isinstance(node["cpu_load"], bool)
+                    or node["cpu_load"] < 0
+                )
+            )
+            or type(node.get("idle_cpus")) is not int
+            or not 0 <= node["idle_cpus"] <= node["cpus_total"]
+        ):
+            raise NodeAuthorityError("staging allocation query node readback is invalid")
+        normalized_nodes.append(dict(node))
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "staging_external_slurm_broker_query",
+        "request_id": inner["request_id"],
+        "candidate_sha": request.payload["candidate_sha"],
+        "candidate_tree": request.payload["candidate_tree"],
+        "cluster": "trt-gb10",
+        "controller": "trt-gb10-1",
+        "submit_host": "trt-gb10-1",
+        "jobs": normalized_jobs,
+        "nodes": normalized_nodes,
+    }
+
+
 def _staging_guard_binding(
     *,
     candidate_sha: str,
@@ -7536,6 +7853,26 @@ def _staging_guard_binding(
 
 def _staging_broker_submit(request: Request) -> tuple[dict[str, Any], str]:
     inner = json.loads(request.payload_bytes)
+    existing = [
+        row
+        for row in _staging_broker_submission_ledgers()
+        if row.get("submit_request_id") == inner["request_id"]
+    ]
+    if existing:
+        if (
+            len(existing) != 1
+            or existing[0].get("authority_request_id") != request.request_id
+            or existing[0].get("candidate_sha") != request.payload["candidate_sha"]
+            or existing[0].get("candidate_tree") != request.payload["candidate_tree"]
+            or existing[0].get("node") != inner["requested_node"]
+            or not isinstance(existing[0].get("result"), dict)
+        ):
+            raise NodeAuthorityError("staging broker submission replay drifted")
+        replay_result = cast(dict[str, Any], existing[0]["result"])
+        return (
+            replay_result,
+            (f"staging-broker/v1/submission/{inner['request_id']}/{replay_result['job_id']}"),
+        )
     binding = _staging_guard_binding(
         candidate_sha=str(request.payload["candidate_sha"]),
         candidate_tree=str(request.payload["candidate_tree"]),
@@ -7574,10 +7911,12 @@ def _staging_broker_submit(request: Request) -> tuple[dict[str, Any], str]:
         or result.get("job_id") is None
         or re.fullmatch(r"[1-9][0-9]*", str(result["job_id"])) is None
         or result.get("job_name")
-        != (
-            f"loom827-staging-{request.payload['candidate_sha'][:12]}-"
-            f"{inner['requested_node']}-g{result.get('candidate_set_sha256')}-"
-            f"a{binding['resource_generation']}"
+        != _staging_broker_job_name(
+            candidate_sha=str(request.payload["candidate_sha"]),
+            node=str(inner["requested_node"]),
+            candidate_set_sha256=str(result.get("candidate_set_sha256")),
+            resource_generation=int(binding["resource_generation"]),
+            submit_request_id=str(inner["request_id"]),
         )
         or not _is_sha(result.get("candidate_set_sha256"), length=64)
         or result.get("resource_generation") != binding["resource_generation"]
@@ -7609,15 +7948,29 @@ def _staging_broker_submit(request: Request) -> tuple[dict[str, Any], str]:
         "qos": "loom-staging",
         "submitted_at": result["submitted_at"],
         "result_sha256": hashlib.sha256(_canonical(result)).hexdigest(),
+        "intent_sha256": hashlib.sha256(request.payload_bytes).hexdigest(),
+        "result": result,
     }
+    ledger_bytes = _canonical(ledger)
     if not _atomic_install(
         _staging_broker_submission_path(inner["request_id"]),
-        _canonical(ledger),
+        ledger_bytes,
         0o600,
         parent_mode=0o700,
     ):
-        raise NodeAuthorityError("staging broker submission identity was already used")
-    return result, f"staging-broker/v1/submission/{inner['request_id']}"
+        if (
+            _safe_root_file(
+                _staging_broker_submission_path(inner["request_id"]),
+                mode=0o600,
+                limit=256 * 1024,
+            )
+            != ledger_bytes
+        ):
+            raise NodeAuthorityError("staging broker submission identity was already used")
+    return (
+        result,
+        f"staging-broker/v1/submission/{inner['request_id']}/{result['job_id']}",
+    )
 
 
 def _staging_broker_cancel(request: Request) -> tuple[dict[str, Any], str]:
@@ -7644,10 +7997,12 @@ def _staging_broker_cancel(request: Request) -> tuple[dict[str, Any], str]:
         or not _is_sha(submission.get("candidate_set_sha256"), length=64)
         or submission.get("resource_generation") != binding["resource_generation"]
         or submission.get("job_name")
-        != (
-            f"loom827-staging-{request.payload['candidate_sha'][:12]}-"
-            f"{inner['requested_node']}-g{submission.get('candidate_set_sha256')}-"
-            f"a{binding['resource_generation']}"
+        != _staging_broker_job_name(
+            candidate_sha=str(request.payload["candidate_sha"]),
+            node=str(inner["requested_node"]),
+            candidate_set_sha256=str(submission.get("candidate_set_sha256")),
+            resource_generation=int(binding["resource_generation"]),
+            submit_request_id=str(inner["submit_request_id"]),
         )
         or submission.get("user") != STAGING_SERVICE_USER
         or submission.get("account") != "loom-staging"
@@ -9510,6 +9865,8 @@ def _identity_inventory(request: Request) -> dict[str, Any]:
 def _execute_check(request: Request, policy: AuthorityPolicy) -> dict[str, Any]:
     payload = request.payload
     action = str(payload["action"])
+    if action == "staging-allocation-query":
+        return _staging_broker_query(request)
     if action == "slurm-identity-preflight":
         local = _identity_preflight(request)
         accounting = _validated_slurm_identity_result(
