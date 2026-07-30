@@ -37,7 +37,6 @@ STAGING_PROFILE = REPO_ROOT / "deploy/environment-state/staging.toml"
 POLICY_SOURCE = "deploy/developer-sandboxes/shared-capacity-policies/oldlab.toml"
 AUTHORITY_ROOT = Path("/var/lib/loom-developer-sandbox-platform-health-authority")
 AUTHORITY_CURRENT = AUTHORITY_ROOT / "current.json"
-SANDBOXES = ("qianyi", "hongjian", "devansh")
 OLDLAB_NODES = tuple(f"trt-eai-oldlab-{index}" for index in range(1, 6))
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -78,12 +77,8 @@ DISABLED_REASON = (
     "exclusive=true is not viable on nodes shared with k3s/MinIO, so the "
     "disable IS the safety gate"
 )
-DISABLED_ENV_TEMPLATE_GLOB = (
-    "/srv/loom/staging-shared/generated/staging-gb10-worker-staging-*.env"
-)
-PROMOTED_ENV_TEMPLATE_GLOB = (
-    "/srv/loom/staging-shared/generated/staging-*-worker-staging-*.env"
-)
+DISABLED_ENV_TEMPLATE_GLOB = "/srv/loom/staging-shared/generated/staging-gb10-worker-staging-*.env"
+PROMOTED_ENV_TEMPLATE_GLOB = "/srv/loom/staging-shared/generated/staging-*-worker-staging-*.env"
 PROMOTED_OLDLAB_ENV_FILE = (
     "/srv/loom/staging-shared/generated/staging-oldlab-worker-${IMAGE_TAG}.env"
 )
@@ -167,11 +162,15 @@ def _policy_contract() -> tuple[dict[str, Any], str]:
 
 
 def _validate_candidates(value: object) -> str:
-    if not isinstance(value, dict) or set(value) != set(SANDBOXES):
+    if (
+        not isinstance(value, dict)
+        or len(value) < 2
+        or any(not isinstance(environment, str) or not environment for environment in value)
+    ):
         raise PromotionError("platform-health candidate set is invalid")
     shas: list[str] = []
-    for sandbox in SANDBOXES:
-        candidate = value.get(sandbox)
+    for environment in sorted(value):
+        candidate = value[environment]
         if (
             not isinstance(candidate, dict)
             or set(candidate) != {"sha", "tree"}
@@ -217,6 +216,9 @@ def _load_promotion_evidence(
         raise PromotionError("platform-health evidence is unavailable or unsafe") from exc
     if not isinstance(evidence, dict):
         raise PromotionError("platform-health evidence is invalid")
+    registry_snapshot = evidence.get("registry_snapshot")
+    if not isinstance(registry_snapshot, dict):
+        raise PromotionError("platform-health registry snapshot is invalid")
     candidates = evidence.get("candidates")
     candidates_sha256 = _validate_candidates(candidates)
     candidate_mapping = cast(Mapping[str, Any], candidates)
@@ -224,6 +226,7 @@ def _load_promotion_evidence(
         live_acceptance._validate_platform_health_authority(
             evidence,
             session_id=session_id,
+            registry_snapshot=registry_snapshot,
             candidates=candidate_mapping,
         )
     except live_acceptance.AcceptanceError as exc:
@@ -454,8 +457,7 @@ def _offline_binding_evidence(
         or promotion.get("enabled") is not True
         or promotion.get("authority_current_path") != str(AUTHORITY_CURRENT)
         or SESSION_RE.fullmatch(str(session_id)) is None
-        or evidence_path
-        != str(AUTHORITY_ROOT / "sessions" / str(session_id) / "evidence.json")
+        or evidence_path != str(AUTHORITY_ROOT / "sessions" / str(session_id) / "evidence.json")
         or DIGEST_RE.fullmatch(str(payload_sha256)) is None
         or DIGEST_RE.fullmatch(str(candidates_sha256)) is None
         or promotion.get("policy_source") != POLICY_SOURCE
@@ -513,17 +515,12 @@ def _validate_enabled(
         or policy.get("drain_timeout_seconds") != 600
         or policy.get("force") is not False
         or not isinstance(actuator, dict)
-        or any(
-            actuator.get(field) != evidence.values[field]
-            for field in PROMOTED_ACTUATOR_FIELDS
-        )
-        or {str(node).lower() for node in actuator.get("allowed_nodes", ())}
-        != set(OLDLAB_NODES)
+        or any(actuator.get(field) != evidence.values[field] for field in PROMOTED_ACTUATOR_FIELDS)
+        or {str(node).lower() for node in actuator.get("allowed_nodes", ())} != set(OLDLAB_NODES)
         or actuator.get("backend") != "docker"
         or actuator.get("cpu_arch") != "x86_64"
         or actuator.get("partition") != ""
-        or actuator.get("env_file")
-        != PROMOTED_OLDLAB_ENV_FILE
+        or actuator.get("env_file") != PROMOTED_OLDLAB_ENV_FILE
         or actuator.get("repo_dir")
         != "/srv/loom/staging-shared/candidates/loom-remote-worker-${IMAGE_TAG}"
         or actuator.get("time_limit") != "02:00:00"
@@ -705,9 +702,13 @@ def _enable_oldlab_supervisor(text: str) -> str:
         raise PromotionError("OLDLAB supervisor table is not unique")
     start, end = matches[0]
     block = text[start:end]
-    if len(re.findall(r"(?m)^enabled = (?:true|false)$", block)) != 1 or len(
-        re.findall(r"(?m)^active = (?:true|false)$", block),
-    ) != 1:
+    if (
+        len(re.findall(r"(?m)^enabled = (?:true|false)$", block)) != 1
+        or len(
+            re.findall(r"(?m)^active = (?:true|false)$", block),
+        )
+        != 1
+    ):
         raise PromotionError("OLDLAB supervisor booleans are invalid")
     block = re.sub(r"(?m)^enabled = (?:true|false)$", "enabled = true", block)
     block = re.sub(r"(?m)^active = (?:true|false)$", "active = true", block)

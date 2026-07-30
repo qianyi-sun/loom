@@ -1,0 +1,62 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -lt 1 ]; then
+  echo "error: unsupported capacity authority command" >&2
+  exit 2
+fi
+
+case "$1" in
+  abort)
+    shift
+    exec /usr/bin/python3 -I -B \
+      /usr/local/libexec/scripts/ops/developer_sandbox_slurm_policy.py \
+      capacity-abort --execute "$@"
+    ;;
+  reconcile)
+    shift
+    exec /usr/bin/python3 -I -B \
+      /usr/local/libexec/scripts/ops/developer_sandbox_slurm_policy.py \
+      capacity-reconcile --execute "$@"
+    ;;
+  reactivate)
+    shift
+    exec /usr/bin/python3 -I -B \
+      /usr/local/libexec/scripts/ops/developer_sandbox_slurm_policy.py \
+      capacity-reactivate --execute "$@"
+    ;;
+  retire)
+    shift
+    exec /usr/bin/python3 -I -B \
+      /usr/local/libexec/scripts/ops/developer_sandbox_slurm_policy.py \
+      capacity-retire --execute "$@"
+    ;;
+  finalize)
+    shift
+    exec /usr/bin/python3 -I -B \
+      /usr/local/libexec/scripts/ops/developer_sandbox_slurm_policy.py \
+      capacity-finalize --execute "$@"
+    ;;
+  finalize-check)
+    shift
+    exec /usr/bin/python3 -I -B \
+      /usr/local/libexec/scripts/ops/developer_sandbox_slurm_policy.py \
+      capacity-finalize-check "$@"
+    ;;
+  rollback)
+    shift
+    exec /usr/bin/python3 -I -B \
+      /usr/local/libexec/scripts/ops/developer_sandbox_slurm_policy.py \
+      capacity-rollback --execute "$@"
+    ;;
+  check)
+    shift
+    exec /usr/bin/python3 -I -B \
+      /usr/local/libexec/scripts/ops/developer_sandbox_slurm_policy.py \
+      capacity-check "$@"
+    ;;
+  *)
+    echo "error: unsupported capacity authority command" >&2
+    exit 2
+    ;;
+esac

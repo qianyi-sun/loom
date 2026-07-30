@@ -9,8 +9,73 @@ from pathlib import Path
 
 import pytest
 import scripts.ops.developer_sandbox_remote_link_host as host
+from scripts.ops import developer_environment_registry as environment_registry
 
 SHA = "a" * 40
+TREE = "b" * 40
+
+
+def _registry_snapshot() -> dict[str, object]:
+    environments: list[dict[str, object]] = []
+    candidates: list[dict[str, object]] = []
+    deployments: list[dict[str, object]] = []
+    for index, sandbox in enumerate(("qianyi", "hongjian", "devansh"), start=0):
+        candidate_id = f"cand-{SHA}"
+        env_id = f"denv-legacy-{index:016x}"
+        environments.append(
+            {
+                "env_id": env_id,
+                "principal_id": f"unix-uid:{31021 + index}",
+                "runtime_id": sandbox,
+                "state": "active",
+                "resource_generation": 2,
+                "current_candidate_id": candidate_id,
+                "ports": {
+                    "control_plane": 20080 + index * 1000,
+                    "llm_gateway": 20100 + index * 1000,
+                    "minio": 20900 + index * 1000,
+                    "relay_control_plane": 26080 + index * 1000,
+                    "relay_gateway": 26100 + index * 1000,
+                    "relay_minio": 26900 + index * 1000,
+                },
+            },
+        )
+        candidates.append(
+            {
+                "candidate_id": candidate_id,
+                "env_id": env_id,
+                "principal_id": f"unix-uid:{31021 + index}",
+                "candidate_sha": SHA,
+                "candidate_tree": TREE,
+            },
+        )
+        deployments.append(
+            {
+                "deployment_id": f"dep-{index:032x}",
+                "env_id": env_id,
+                "principal_id": f"unix-uid:{31021 + index}",
+                "candidate_id": candidate_id,
+                "expected_resource_generation": 1,
+                "applied_resource_generation": 2,
+                "applied_registry_generation": 6,
+                "applied_registry_payload_sha256": "e" * 64,
+                "phase": "committed",
+            },
+        )
+    return {
+        "generation": 7,
+        "payload_sha256": "f" * 64,
+        "environments": environments,
+        "candidates": candidates,
+        "deployments": deployments,
+    }
+
+
+@pytest.fixture(autouse=True)
+def _registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        host, "_load_registry_snapshot", lambda _path=host.REGISTRY_SNAPSHOT: _registry_snapshot()
+    )
 
 
 @contextmanager
@@ -29,8 +94,11 @@ def _valid_env(profile: host.Profile) -> str:
             "LOOM_WORKER_GATEWAY_URL=http://sandbox-link:9100",
             "LOOM_WORKER_MINIO_ENDPOINT=http://sandbox-link:9000",
             f"LOOM_SANDBOX_LINK_CP_UPSTREAM=https://{profile.server_address}:{control_plane.server_port}",
+            f"LOOM_SANDBOX_LINK_CP_EXPECTED_PORT={control_plane.server_port}",
             f"LOOM_SANDBOX_LINK_GATEWAY_UPSTREAM=https://{profile.server_address}:{gateway.server_port}",
+            f"LOOM_SANDBOX_LINK_GATEWAY_EXPECTED_PORT={gateway.server_port}",
             f"LOOM_SANDBOX_LINK_MINIO_UPSTREAM=https://{profile.server_address}:{minio.server_port}",
+            f"LOOM_SANDBOX_LINK_MINIO_EXPECTED_PORT={minio.server_port}",
             f"LOOM_WORKER_TOKEN_FILE_HOST={root / 'worker-token'}",
             f"LOOM_WORKER_MINIO_ACCESS_KEY_FILE_HOST={root / 'minio-access-key'}",
             f"LOOM_WORKER_MINIO_SECRET_KEY_FILE_HOST={root / 'minio-secret-key'}",
@@ -43,7 +111,7 @@ def _valid_env(profile: host.Profile) -> str:
 
 
 def test_profiles_are_closed_and_collision_free() -> None:
-    profiles = [host.load_profile(name) for name in host.SANDBOXES]
+    profiles = [host.load_profile(name) for name in host.registered_sandboxes()]
 
     assert {profile.server_address for profile in profiles} == {"192.168.50.14"}
     assert (
@@ -61,6 +129,175 @@ def test_profiles_are_closed_and_collision_free() -> None:
     assert all(len(profile.services) == 3 for profile in profiles)
     assert len(host.INFRASTRUCTURE_LINK_NODES) == 20
     assert "trt-gb10-7" in host.INFRASTRUCTURE_LINK_NODES
+
+
+def test_fourth_environment_is_discovered_without_a_profile_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _registry_snapshot()
+    environment = dict(snapshot["environments"][0])
+    environment.update(
+        {
+            "env_id": "denv-dynamic-44444444",
+            "principal_id": "unix-uid:31444",
+            "runtime_id": "e-fourth",
+            "resource_generation": 4,
+            "current_candidate_id": "cand-" + "4" * 40,
+            "ports": {
+                "control_plane": 34080,
+                "llm_gateway": 34100,
+                "minio": 34900,
+                "relay_control_plane": 36080,
+                "relay_gateway": 36100,
+                "relay_minio": 36900,
+            },
+        },
+    )
+    snapshot["environments"].append(environment)
+    snapshot["candidates"].append(
+        {
+            "candidate_id": "cand-" + "4" * 40,
+            "env_id": environment["env_id"],
+            "principal_id": environment["principal_id"],
+            "candidate_sha": "4" * 40,
+            "candidate_tree": "5" * 40,
+        },
+    )
+    snapshot["deployments"].append(
+        {
+            "deployment_id": "dep-" + "4" * 32,
+            "env_id": environment["env_id"],
+            "principal_id": environment["principal_id"],
+            "candidate_id": "cand-" + "4" * 40,
+            "expected_resource_generation": 3,
+            "applied_resource_generation": 4,
+            "applied_registry_generation": 6,
+            "applied_registry_payload_sha256": "e" * 64,
+            "phase": "committed",
+        },
+    )
+    monkeypatch.setattr(
+        host, "_load_registry_snapshot", lambda _path=host.REGISTRY_SNAPSHOT: snapshot
+    )
+
+    profile = host.load_profile("e-fourth")
+    assert profile.env_id == "denv-dynamic-44444444"
+    assert profile.service("gateway").server_port == 36100
+    assert "e-fourth" in host.registered_sandboxes()
+
+
+def test_first_committed_registry_generation_is_an_active_link_member(
+    tmp_path: Path,
+) -> None:
+    registry = environment_registry.DeveloperEnvironmentRegistry(tmp_path / "registry.sqlite3")
+    environment = registry.register(
+        {
+            "schema_version": 1,
+            "kind": environment_registry.REGISTER_KIND,
+            "principal_id": "oidc:example:link-binding",
+            "idempotency_key": "link-register-0001",
+            "display_name": "Link binding",
+        }
+    )
+    candidate = registry.import_candidate(
+        {
+            "schema_version": 1,
+            "kind": environment_registry.CANDIDATE_KIND,
+            "principal_id": environment.principal_id,
+            "idempotency_key": "link-candidate-0001",
+            "env_id": environment.env_id,
+            "candidate_sha": "4" * 40,
+            "candidate_tree": "5" * 40,
+            "bundle_sha256": "6" * 64,
+            "bundle_size": 1024,
+            "image_digests": {
+                "amd64": "sha256:" + "7" * 64,
+                "arm64": "sha256:" + "8" * 64,
+            },
+        }
+    )
+    deployment = registry.begin_deployment(
+        {
+            "schema_version": 1,
+            "kind": environment_registry.DEPLOY_KIND,
+            "principal_id": environment.principal_id,
+            "idempotency_key": "link-deployment-0001",
+            "env_id": environment.env_id,
+            "candidate_id": candidate.candidate_id,
+            "expected_resource_generation": environment.resource_generation,
+        }
+    )
+    for expected, following in zip(
+        environment_registry.DEPLOY_PHASES[:-1],
+        environment_registry.DEPLOY_PHASES[1:],
+        strict=True,
+    ):
+        if following == "committed":
+            registry.prepare_deployment_finalization(
+                deployment.deployment_id,
+                principal_id=environment.principal_id,
+                expected_resource_generation=environment.resource_generation,
+            )
+            registry.record_deployment_finalization(
+                deployment.deployment_id,
+                principal_id=environment.principal_id,
+                expected_resource_generation=environment.resource_generation,
+                evidence={
+                    "capacity_finalize_receipt_sha256": "1" * 64,
+                    "capacity_finalize_check_receipt_sha256": "2" * 64,
+                    "runtime_reconcile_receipt_sha256": "3" * 64,
+                    "runtime_prepare_check_receipt_sha256": "4" * 64,
+                    "acceptance_probe_receipt_sha256": "5" * 64,
+                },
+            )
+        registry.advance_deployment(
+            deployment.deployment_id,
+            principal_id=environment.principal_id,
+            expected_phase=expected,
+            next_phase=following,
+            expected_resource_generation=environment.resource_generation,
+        )
+    snapshot = registry.snapshot()
+
+    environment_row, candidate_row, deployment_row = host._registry_environment(
+        environment.runtime_id,
+        snapshot=snapshot,
+        allow_provisioning=False,
+    )
+
+    assert candidate_row["candidate_id"] == candidate.candidate_id
+    assert deployment_row["applied_resource_generation"] == environment_row["resource_generation"]
+
+
+def test_stale_resource_generation_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _registry_snapshot()
+    snapshot["environments"][0]["resource_generation"] = 3
+    monkeypatch.setattr(
+        host, "_load_registry_snapshot", lambda _path=host.REGISTRY_SNAPSHOT: snapshot
+    )
+    with pytest.raises(host.LinkHostError, match="not an admitted"):
+        host.load_profile("qianyi")
+
+
+def test_provisioning_is_separate_from_positive_active_cohort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _registry_snapshot()
+    snapshot["environments"][0]["state"] = "deploying"
+    snapshot["environments"][0]["current_candidate_id"] = None
+    snapshot["deployments"][0]["phase"] = "services-prepared"
+    snapshot["deployments"][0]["expected_resource_generation"] = 2
+    snapshot["deployments"][0]["applied_resource_generation"] = None
+    snapshot["deployments"][0]["applied_registry_generation"] = None
+    snapshot["deployments"][0]["applied_registry_payload_sha256"] = None
+    monkeypatch.setattr(
+        host, "_load_registry_snapshot", lambda _path=host.REGISTRY_SNAPSHOT: snapshot
+    )
+    with pytest.raises(host.LinkHostError, match="not an admitted"):
+        host.load_profile("qianyi")
+    assert host.load_profile("qianyi", allow_provisioning=True).lifecycle_state == "deploying"
 
 
 def test_server_config_rejects_loopback_target_drift(tmp_path: Path) -> None:
@@ -312,7 +549,12 @@ def _valid_attestation(profile: host.Profile) -> dict[str, object]:
     payload: dict[str, object] = {
         "schema_version": 1,
         "sandbox": profile.sandbox,
+        "env_id": profile.env_id,
+        "resource_generation": profile.resource_generation,
+        "registry_generation": profile.registry_generation,
+        "registry_payload_sha256": profile.registry_payload_sha256,
         "candidate_sha": SHA,
+        "candidate_tree": profile.candidate_tree,
         "generated_at": generated.isoformat().replace("+00:00", "Z"),
         "expires_at": (generated + timedelta(seconds=host.ATTESTATION_TTL_SECONDS))
         .isoformat()

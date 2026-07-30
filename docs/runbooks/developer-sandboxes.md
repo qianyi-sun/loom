@@ -1,16 +1,82 @@
-# Candidate-bound developer sandboxes
+# Self-service developer environments
 
-This runbook covers the bounded Docker Compose sandboxes for `qianyi`,
-`hongjian`, and `devansh` on the SSH target `oldlab-2`, including the
-candidate-bound private link used by their OLDLAB and GB10 Slurm workers. The
-capacity broker, Slurm policy, cgroup enforcement, and pressure-drain runbooks
-remain separate. Nothing here authorizes staging or production.
+This runbook covers the persistent developer-environment service on
+`oldlab-2` and its candidate-bound OLDLAB and GB10 execution plane. Any
+authorized member of `loom-developers` can create and operate one isolated
+environment. The service does not contain a developer allowlist or require a
+checked-in per-user profile. Nothing here authorizes staging or production.
 
-The checked-in profiles under `deploy/developer-sandboxes/` reserve a unique
-Compose project, loopback host ports, database, MinIO buckets, provider
-namespace, and state/cache/evidence/runtime roots for each developer. Profile
-validation rejects unknown fields, unsafe roots, non-loopback bindings, and any
-cross-profile collision.
+The root-owned registry derives the principal from the Unix socket peer and
+allocates the immutable environment ID, runtime ID, UID/GID, ports, service
+identity, Compose project, database, volumes, buckets, namespaces, roots,
+cgroup, and Slurm account/QoS. A caller cannot select or override those
+resources. `qianyi`, `hongjian`, and `devansh` are only the initial
+`legacy-v1` migration seed; their checked-in profiles preserve existing
+identities during migration and are never an admission list or the runtime
+cohort.
+
+## Developer workflow
+
+Create a single-head Git bundle for the commit being deployed. Record its
+commit/tree and the already-published immutable multi-architecture image
+digests, then make one authority call:
+
+```bash
+git bundle create ./loom-candidate.bundle HEAD
+
+loom-developer-environment create \
+  --idempotency-key <stable-create-request-id> \
+  --display-name <human-readable-name> \
+  --bundle ./loom-candidate.bundle \
+  --candidate-sha <40-hex-commit> \
+  --candidate-tree <40-hex-tree> \
+  --amd64-image-digest sha256:<64-hex> \
+  --arm64-image-digest sha256:<64-hex>
+```
+
+The authority authenticates the socket peer, verifies and persists the bundle,
+allocates only from the current trusted fleet inventory, and journals
+registration, host services, dual-domain capacity, verification, and commit.
+The same idempotency key is an exact replay only; changed input requires a new
+key. Inventory absence, staleness, UID/GID collision, partial domain
+convergence, or a busy node fails closed without publishing the environment as
+active.
+
+Normal lifecycle operations never take an environment name or resource path:
+
+```bash
+loom-developer-environment check
+
+loom-developer-environment update \
+  --idempotency-key <stable-update-request-id> \
+  --bundle ./loom-candidate.bundle \
+  --candidate-sha <40-hex-commit> \
+  --candidate-tree <40-hex-tree> \
+  --amd64-image-digest sha256:<64-hex> \
+  --arm64-image-digest sha256:<64-hex>
+
+loom-developer-environment rollback \
+  --idempotency-key <stable-rollback-request-id>
+
+loom-developer-environment destroy \
+  --idempotency-key <stable-destroy-request-id>
+```
+
+`destroy` retires only exact registry-owned resources after all owned jobs are
+terminal. It never cancels, preempts, stops, or kills foreign or nonterminal
+jobs. Reboot recovery uses the persisted registry snapshot, deployment journal,
+and `loom-developer-environment@<registry-runtime-id>.service`; adding a fourth
+or later developer requires no repository edit or authority rebuild.
+
+Adding an environment is a pure additive transition: existing candidates,
+ports, identities, Compose projects, adapter and handoff bytes, lease epochs,
+unit states, and active job IDs do not change. Retiring an environment waits
+only for that environment's owned work and resources to become terminal; peers
+continue running and never have to hand off or drain. A later `create` by the
+same principal revives the same stable environment identity with a new
+resource generation, candidate, credentials, and request key. A retired
+identity is never reassigned to another principal, and an old create key or
+secret cannot revive it.
 
 ## Host path contract
 
@@ -28,13 +94,13 @@ declared domain publishers, and removes every local and remote staging copy
 after materialization. A failed remote cleanup is a hard failure with a
 root-owned recovery record, not a warning.
 
-Private cross-domain worker envs are not owned by the human developer
-accounts, whose numeric UIDs are not stable across the fleet. The node
-authority instead converges fixed non-login batch identities
-`loom-sandbox-{qianyi,hongjian,devansh}` at UID/GID
-`31021:31021`, `31022:31022`, and `31023:31023`. Each candidate env is owned
-by its one batch identity at mode `0600`; UID/GID collisions or login-capable
-metadata stop bootstrap before publication.
+Private cross-domain worker envs are not owned by human developer accounts,
+whose numeric UIDs are not stable across the fleet. The registry allocates one
+non-login service identity per environment from the current complete 20-node
+identity inventory. The node authority proves the name and numeric identity are
+either unused everywhere or already exact before it idempotently creates them.
+Each candidate env is owned by that service identity at mode `0600`; collisions
+or login-capable metadata stop convergence before publication.
 
 On `oldlab-2`, `/srv/loom` and `/srv/loom/developer-sandboxes` are
 `root:sharedwork` mode `2750`. Each developer root and its `cache`, `evidence`,
@@ -126,23 +192,30 @@ filenames derived from the checked-in inventory. A successful container
 report is followed by host-state `validate-install`, `check-server`, and where
 applicable `check-client`; success is not inferred from container exit alone.
 
-The installed sudoers surface contains only:
+The oldlab-2 Unix socket admits authenticated members of `loom-developers`.
+The root authority then invokes the fixed transport as its single operator,
+`qianyi`. Remote nodes grant only that transport operator these two commands:
 
 ```text
 qianyi ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-developer-sandbox-node-authority transact
 qianyi ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-developer-sandbox-node-authority check
 ```
 
-There is no wildcard and no permission to run `install`, `tar`, `rm`,
-`chown`, `chmod`, `python3`, a candidate path, or an operator-selected path.
-Both runtime verbs authenticate the exact sudo caller/command and revalidate
+Future developers receive no direct remote sudo or SSH authority. Their only
+entry is the group-owned oldlab-2 socket; its root service uses
+`runuser -u qianyi` and the fixed transport inventory. Remote nodes therefore
+need neither the developer group nor per-developer membership changes. There
+is no wildcard and no permission to run `install`, `tar`, `rm`, `chown`,
+`chmod`, `python3`, a candidate path, or an operator-selected path. Both
+runtime verbs authenticate the exact fixed sudo caller/command and revalidate
 the root-owned policy and every installed asset. `transact` accepts only a
 bounded canonical stdin envelope whose closed schema binds the fixed node,
 domain, sandbox, exact candidate SHA/tree, action, payload digest, and optional
-prior receipt. The authority uses its own root-private stage and fixed installed
-programs, persists an idempotent root-owned receipt plus fsynced journal record,
-and retains the inner domain-runtime receipt needed by the existing targeted
-rollback. `check` accepts only the read-only exact-candidate inspection action.
+prior receipt. The authority uses its own root-private stage and fixed
+installed programs, persists an idempotent root-owned receipt plus fsynced
+journal record, and retains the inner domain-runtime receipt needed by the
+existing targeted rollback. `check` accepts only the read-only exact-candidate
+inspection action.
 
 The policy pins both installed source SHA and tree. A squash-merged commit with
 the same tree but a different SHA is transactionally rebound and must not be
@@ -187,7 +260,25 @@ reinitialized.
 Stop before host installation if any node lacks this exact-tree authority or
 either fixed command fails its readback.
 
-## Persistent host installer
+## Legacy-v1 seed migration reference
+
+The profile- and `--sandbox`-based commands below exist only to migrate the
+three initial `legacy-v1` records without changing their established resource
+identities. They require the explicit `--legacy-v1-seed-migrate` gate and must
+not be used for a new developer. New and updated environments use the
+peer-authenticated workflow above.
+
+Before installing the dynamic authority, its installer opens any existing
+registry database strictly read-only and checks every committed deployment for
+an exact `deployment_finalizations` record. If it reports
+`legacy committed finalization migration required`, stop. Do not delete the
+database, clear committed rows, manufacture receipt digests, or hand-edit the
+schema. Confirm the real root-owned finalization journals first and implement a
+separate evidence-driven migration for that observed database. The normal
+first install is allowed only for a new/empty registry or one with no committed
+pre-finalization rows; this preflight performs no DDL.
+
+### Persistent host installer
 
 `scripts/ops/developer_sandbox_host.py` is the root-side converger for the
 three sandbox stacks. It is plan-only by default and has a fixed repository,
@@ -348,7 +439,17 @@ do not run Alembic downgrade ad hoc. Likewise, never add
 `--delete-volumes` to recovery unless the developer explicitly authorizes
 irreversible sandbox-data deletion.
 
-## Preconditions
+### Legacy-v1 manual workflow
+
+The remaining profile-, fixed-port-, and `--sandbox`-based procedures in this
+section apply only to the three initial `legacy-v1` seed records. They are
+migration and recovery references for preserving those existing identities;
+they are not the create, update, destroy, admission, or capacity workflow for a
+new developer. The current self-service workflow is the registry-generated
+workflow at the top of this runbook, and its cohort may contain any number of
+authorized developers within the configured resource ranges.
+
+#### Preconditions
 
 Materialize a clean candidate checkout at the exact profile path:
 
@@ -375,7 +476,7 @@ Create a separate mode `0600`, non-symlink admin secret TOML with the normal
 `[admin].token` format. The planner validates both files but never reads secret
 values into the child-process environment or prints them in its JSON output.
 
-## Plan first
+#### Plan first
 
 From the candidate checkout, render a mutation-free plan:
 
@@ -411,7 +512,7 @@ Use `--delete-volumes` only when the developer explicitly intends to delete
 that sandbox project's persistent data. No command in this workflow is rollout
 or staging evidence.
 
-## Candidate-bound remote data-plane link
+#### Candidate-bound remote data-plane link
 
 The three sandboxes keep their Control Plane, Gateway, and MinIO host ports
 bound to `127.0.0.1`. Do not change those Compose bindings to `0.0.0.0` or a
@@ -441,7 +542,7 @@ There is no previous-SHA grace set. Activating or rolling back atomically
 switches the `current` symlink to one installed SHA and restarts the relay.
 Every other candidate is rejected before the loopback connection is opened.
 
-### Host-local secret contract
+##### Host-local secret contract
 
 OLDLAB `/shared_work` and GB10 `/shared_work` are independent NFS domains.
 Candidate source and the secret-free worker env can use the same logical paths
@@ -513,7 +614,7 @@ allocation, has positive CPU/memory/PID limits, inherits the job cgroup parent,
 and carries the same sandbox/candidate/job/Compose cleanup labels. Missing,
 writable, malformed, or cross-candidate material fails before registration.
 
-### Plan, install, activate
+##### Plan, install, activate
 
 All mutation commands are plan-only without `--execute`.
 
@@ -588,7 +689,7 @@ All mutation commands are plan-only without `--execute`.
    incomplete, or
    digest-mismatched receipt.
 
-### Rollback and readback
+##### Rollback and readback
 
 Rollback is an explicit atomic switch to a previously installed exact SHA; it
 does not accept old and new certificates simultaneously:
@@ -621,16 +722,10 @@ uv run --no-sync python scripts/validate_developer_sandbox_isolation.py \
    `tests/integration/test_developer_sandbox_crossover.py` (foreign worker/admin
    tokens → 401; foreign MinIO creds / bucket names rejected).
 
-3. Secret-safe probe helper (default dry-run; pass secret **file paths** only):
+3. Secret-safe probe helper (default dry-run):
 
 ```bash
 uv run --no-sync python scripts/ops/developer_sandbox_crossover_probe.py \
-  --qianyi-cp-url http://127.0.0.1:20080 \
-  --qianyi-worker-token-file /secure/qianyi.env \
-  --qianyi-admin-secret-file /secure/qianyi-admin.toml \
-  --hongjian-cp-url http://127.0.0.1:21080 \
-  --hongjian-worker-token-file /secure/hongjian.env \
-  --hongjian-admin-secret-file /secure/hongjian-admin.toml \
   --write-evidence /tmp/a3-crossover-dry-run.json
 ```
 
@@ -638,53 +733,38 @@ Dry-run / CI dual-stack negatives are **not** live A3 host evidence and are
 **not** `#896` soak evidence. Evidence JSON records fingerprints and status
 codes only — never raw `loom_w_*` / admin / MinIO secrets.
 
-Live `--execute` is fail-closed: it binds CP/MinIO URLs to the exact reviewed
-profile loopback endpoints, requires mode-`0600` single-link non-symlink secret
-files owned by root for link bundles or by the exact sandbox account for its
-private admin/state files, requires complete MinIO negatives plus
-same-sandbox positive controls for all three sandboxes, and requires one
-candidate SHA and tree that match every `sandbox-state.json`, exact clean Git
-candidate readback, remote-link fleet binding, and fresh OLDLAB+GB10 combined
-activation receipt. Run the live probe as root on `oldlab-2`, immediately after
-the cross-domain collector has published
-`/var/lib/loom-shared-capacity/runtime-attestations/<sandbox>/<sha>/combined.json`:
+Live `--execute` is fail-closed. It verifies the fixed root-owned
+`/var/lib/loom-developer-environment-registry/current-snapshot.json`, selects
+every active environment whose current candidate has a latest committed
+deployment, and requires at least two environments. Loopback endpoints,
+private state/secret paths, buckets, service identities, and each environment's
+candidate SHA/tree come only from that snapshot. Candidate SHAs may differ.
+The probe runs every ordered foreign pair plus same-environment positive
+controls, verifies exact clean candidate checkouts and fresh OLDLAB+GB10
+combined activation receipts, then re-reads both authorities to reject a
+concurrent generation change. Run it as root on `oldlab-2`:
 
 ```bash
 uv run --no-sync python scripts/ops/developer_sandbox_crossover_probe.py \
   --execute \
-  --profiles-dir deploy/developer-sandboxes \
-  --candidate-sha <FULL_LOWERCASE_40_CHAR_SHA> \
-  --qianyi-worker-token-file /etc/loom/developer-sandbox-links/clients/qianyi/<SHA>/worker-token \
-  --qianyi-admin-secret-file /srv/loom/developer-sandboxes/qianyi/secrets/admin.toml \
-  --qianyi-minio-access-key-file /etc/loom/developer-sandbox-links/clients/qianyi/<SHA>/minio-access-key \
-  --qianyi-minio-secret-key-file /etc/loom/developer-sandbox-links/clients/qianyi/<SHA>/minio-secret-key \
-  --hongjian-worker-token-file /etc/loom/developer-sandbox-links/clients/hongjian/<SHA>/worker-token \
-  --hongjian-admin-secret-file /srv/loom/developer-sandboxes/hongjian/secrets/admin.toml \
-  --hongjian-minio-access-key-file /etc/loom/developer-sandbox-links/clients/hongjian/<SHA>/minio-access-key \
-  --hongjian-minio-secret-key-file /etc/loom/developer-sandbox-links/clients/hongjian/<SHA>/minio-secret-key \
-  --devansh-worker-token-file /etc/loom/developer-sandbox-links/clients/devansh/<SHA>/worker-token \
-  --devansh-admin-secret-file /srv/loom/developer-sandboxes/devansh/secrets/admin.toml \
-  --devansh-minio-access-key-file /etc/loom/developer-sandbox-links/clients/devansh/<SHA>/minio-access-key \
-  --devansh-minio-secret-key-file /etc/loom/developer-sandbox-links/clients/devansh/<SHA>/minio-secret-key \
   --write-evidence /tmp/a3-crossover-execute.json
 ```
 
-Optional `--<sandbox>-cp-url` / `--<sandbox>-minio-endpoint` overrides are
-accepted only when they exactly equal the reviewed profile endpoints. The
-probe never accepts the worker-side `sandbox-link` URLs or oldlab2 relay
-listener URLs as overrides: credentials are sent only to each target
-sandbox's local loopback CP/MinIO services, while the required combined
-receipt proves that the same candidate is installed through the candidate-bound
-remote-link and dual-NFS runtime paths.
+There are no per-developer endpoint, path, bucket, secret, or candidate CLI
+flags. Credentials are sent only to each registry-selected environment's local
+loopback CP/MinIO services. Evidence embeds the verified registry projection,
+source generation/digest, exact environment-candidate bindings, sanitized
+runtime receipt identities, ordered pair results, and no secret values.
 
 ### Profile identity notes
 
-- `provider_connection_namespace` (`sandbox-<owner>`) is profile identity today;
-  there is no `src/` runtime consumer that enforces it yet.
-- `object_store.task_bucket` / planner `LOOM_DEV_TASK_BUCKET` name MinIO task
-  buckets for ops; Compose wires trajectories/artifacts buckets into
-  `loom-service`. Do not treat unset compose task-bucket env as a security
-  boundary.
+- These notes apply only to the `legacy-v1` migration profiles.
+- Dynamic environments derive provider and bucket identities from `env_id`;
+  runtime, Compose, broker, and acceptance consume the registry projection
+  rather than profile files.
+- Storage credentials, namespace separation, network separation, and the live
+  ordered-pair crossover are all required boundaries; a bucket name by itself
+  is not an authorization boundary.
 
 ## Shared capacity brokerage
 
@@ -692,14 +772,15 @@ Capacity brokerage and the broker→WPAP handoff adapter are documented in
 [`shared-sandbox-capacity-broker.md`](shared-sandbox-capacity-broker.md). This
 sandbox runbook does not configure Slurm packing or enable shared-worker pools.
 
-Slurm node convergence is a separate, durable maintenance-window operation.
-Use `developer_sandbox_host.py slurm-converge`, `slurm-check`, and
-`slurm-rollback` with one sandbox, domain, and exact candidate SHA. The
-orchestrator persists compute receipts before moving on, runs the controller
-last, stops safely on busy/foreign work without cancelling it, and resumes by
-replaying the exact receipt. The node authority fixes the policy profile,
-candidate/runtime paths, restart/accounting semantics, and sandbox identity;
-operators cannot inject those values through the envelope or CLI. See
+Slurm node convergence is a durable maintenance-window operation driven by the
+root-published registry cohort. The capacity authority first proves identity
+availability on all 20 nodes, idempotently converges exact non-login service
+identities, then converges each controller before its complete compute set. It
+persists every receipt, stops safely on busy or foreign work without cancelling
+it, and resumes only by replaying the exact candidate and registry binding.
+The node authority fixes topology, candidate/runtime paths,
+restart/accounting semantics, and the registry-derived identity; developers
+and operators cannot inject those values through the envelope or CLI. See
 [`developer-sandbox-slurm-policy.md`](developer-sandbox-slurm-policy.md) for
 the full drain, readback, and exact-owned rollback contract.
 

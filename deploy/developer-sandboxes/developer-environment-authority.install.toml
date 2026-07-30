@@ -1,0 +1,313 @@
+schema_version = 1
+kind = "loom.developer-environment.authority-install"
+socket_group = "loom-developers"
+accepted_membership_groups = ["loom-developers"]
+membership_migration_from = ["sharedwork"]
+
+[[asset]]
+source = "scripts/ops/developer_environment_registry.py"
+destination = "/usr/local/libexec/scripts/ops/developer_environment_registry.py"
+mode = "0555"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "scripts/ops/developer_environment_authority.py"
+destination = "/usr/local/libexec/loom-developer-environment/developer_environment_authority.py"
+mode = "0555"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "scripts/ops/developer_environment_authority_installer.py"
+destination = "/usr/local/libexec/loom-developer-environment/developer_environment_authority_installer.py"
+mode = "0555"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "scripts/ops/developer_environment_cli.py"
+destination = "/usr/local/bin/loom-developer-environment"
+mode = "0555"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "scripts/ops/developer_environment_deploy.py"
+destination = "/usr/local/libexec/loom-developer-environment-deploy"
+mode = "0555"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "scripts/ops/developer_environment_runtime_authority.py"
+destination = "/usr/local/libexec/scripts/ops/developer_environment_runtime_authority.py"
+mode = "0444"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "deploy/developer-sandboxes/loom-developer-environment-runtime-authority"
+destination = "/usr/local/libexec/loom-developer-environment-runtime-authority"
+mode = "0555"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "deploy/developer-sandboxes/loom-installed-python-package-init.py"
+destination = "/usr/local/libexec/scripts/__init__.py"
+mode = "0444"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "deploy/developer-sandboxes/loom-installed-python-package-init.py"
+destination = "/usr/local/libexec/scripts/ops/__init__.py"
+mode = "0444"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "scripts/ops/developer_environment_acceptance_probe.py"
+destination = "/usr/local/libexec/scripts/ops/developer_environment_acceptance_probe.py"
+mode = "0444"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "scripts/ops/developer_environment_runtime_retire.py"
+destination = "/usr/local/libexec/scripts/ops/developer_environment_runtime_retire.py"
+mode = "0444"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "scripts/ops/developer_environment_runtime_retire.py"
+destination = "/usr/local/libexec/loom-developer-environment-runtime-retire"
+mode = "0555"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "scripts/ops/developer_sandbox_host.py"
+destination = "/usr/local/libexec/scripts/ops/developer_sandbox_host.py"
+mode = "0444"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "scripts/ops/developer_sandbox_slurm_policy.py"
+destination = "/usr/local/libexec/scripts/ops/developer_sandbox_slurm_policy.py"
+mode = "0555"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "scripts/ops/developer_sandbox_remote_link_host.py"
+destination = "/usr/local/libexec/loom-developer-sandbox-remote-link-host"
+mode = "0555"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "scripts/ops/developer_sandbox_remote_link.py"
+destination = "/usr/local/libexec/loom-developer-sandbox-remote-link"
+mode = "0555"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "scripts/ops/developer_sandbox_domain_runtime.py"
+destination = "/usr/local/libexec/loom-developer-domain-runtime"
+mode = "0555"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "scripts/ops/shared_capacity_runtime_host.py"
+destination = "/usr/local/libexec/scripts/ops/shared_capacity_runtime_host.py"
+mode = "0444"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "scripts/ops/developer_sandbox_platform_health_authority.py"
+destination = "/usr/local/libexec/scripts/ops/developer_sandbox_platform_health_authority.py"
+mode = "0444"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "scripts/ops/developer_sandbox_live_acceptance.py"
+destination = "/usr/local/libexec/scripts/ops/developer_sandbox_live_acceptance.py"
+mode = "0444"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "scripts/ops/shared_capacity_adapter.py"
+destination = "/usr/local/libexec/scripts/ops/shared_capacity_adapter.py"
+mode = "0555"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "scripts/ops/shared_capacity_supervisor.py"
+destination = "/usr/local/libexec/scripts/ops/shared_capacity_supervisor.py"
+mode = "0444"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "src/loom_control_plane/__init__.py"
+destination = "/usr/local/libexec/loom-runtime-python/loom_control_plane/__init__.py"
+mode = "0444"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "src/loom_control_plane/shared_capacity_broker.py"
+destination = "/usr/local/libexec/loom-runtime-python/loom_control_plane/shared_capacity_broker.py"
+mode = "0444"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "scripts/ops/developer_sandbox_capacity_contract.py"
+destination = "/usr/local/libexec/scripts/ops/developer_sandbox_capacity_contract.py"
+mode = "0444"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "deploy/developer-sandboxes/loom-developer-environment-capacity-authority"
+destination = "/usr/local/libexec/loom-developer-environment-capacity-authority"
+mode = "0555"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "deploy/developer-sandboxes/developer-environment-registry-seed.toml"
+destination = "/usr/local/share/loom/developer-environment-registry-seed.toml"
+mode = "0444"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "deploy/developer-sandboxes/loom-developer-environment-authority.service"
+destination = "/etc/systemd/system/loom-developer-environment-authority.service"
+mode = "0644"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "deploy/developer-sandboxes/loom-developer-environment@.service"
+destination = "/etc/systemd/system/loom-developer-environment@.service"
+mode = "0644"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "deploy/developer-sandboxes/loom-developer-sandbox-attestation-renewal.service"
+destination = "/etc/systemd/system/loom-developer-sandbox-attestation-renewal.service"
+mode = "0644"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "deploy/developer-sandboxes/loom-developer-sandbox-attestation-renewal.timer"
+destination = "/etc/systemd/system/loom-developer-sandbox-attestation-renewal.timer"
+mode = "0644"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "deploy/developer-sandboxes/loom-developer-sandbox-links.target"
+destination = "/etc/systemd/system/loom-developer-sandbox-links.target"
+mode = "0644"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "deploy/developer-sandboxes/loom-developer-sandbox-link@.service"
+destination = "/etc/systemd/system/loom-developer-sandbox-link@.service"
+mode = "0644"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "deploy/developer-sandboxes/runtime-domains.toml"
+destination = "/etc/loom/developer-runtime-domains.toml"
+mode = "0644"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "deploy/developer-sandboxes/shared-capacity-policies/oldlab.toml"
+destination = "/etc/loom/developer-shared-capacity-policies/oldlab.toml"
+mode = "0644"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "deploy/developer-sandboxes/shared-capacity-policies/gb10.toml"
+destination = "/etc/loom/developer-shared-capacity-policies/gb10.toml"
+mode = "0644"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "deploy/developer-sandboxes/shared-capacity-supervisor/config.toml"
+destination = "/etc/loom/shared-capacity-supervisor.base.toml"
+mode = "0644"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "deploy/developer-sandboxes/loom-developer-shared-capacity-adapter@.service"
+destination = "/etc/systemd/system/loom-shared-capacity-adapter@.service"
+mode = "0644"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "deploy/developer-sandboxes/loom-shared-capacity-adapter@.timer"
+destination = "/etc/systemd/system/loom-shared-capacity-adapter@.timer"
+mode = "0644"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "deploy/developer-sandboxes/loom-developer-shared-capacity-supervisor.service"
+destination = "/etc/systemd/system/loom-shared-capacity-supervisor.service"
+mode = "0644"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "deploy/developer-sandboxes/loom-shared-capacity-supervisor.timer"
+destination = "/etc/systemd/system/loom-shared-capacity-supervisor.timer"
+mode = "0644"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "deploy/developer-sandboxes/loom-developer-environment-authority.socket"
+destination = "/etc/systemd/system/loom-developer-environment-authority.socket"
+mode = "0644"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "deploy/developer-sandboxes/loom-developer-environment-authority.tmpfiles.conf"
+destination = "/etc/tmpfiles.d/loom-developer-environment-authority.conf"
+mode = "0644"
+owner = "root"
+group = "root"
+
+[[asset]]
+source = "deploy/developer-sandboxes/loom-developer-environment-authority.sysusers.conf"
+destination = "/etc/sysusers.d/loom-developer-environment-authority.conf"
+mode = "0644"
+owner = "root"
+group = "root"

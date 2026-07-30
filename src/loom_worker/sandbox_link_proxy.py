@@ -15,14 +15,11 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+RUNTIME_ID_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
+PORT_RE = re.compile(r"^[1-9][0-9]{3,4}$")
 SERVER_ADDRESS = "192.168.50.14"
 TLS_ROOT = Path("/run/loom-sandbox-link")
 TLS_FILES = (TLS_ROOT / "ca.pem", TLS_ROOT / "client.pem", TLS_ROOT / "client-key.pem")
-SANDBOX_PORTS = {
-    "qianyi": (26080, 26100, 26900),
-    "hongjian": (27080, 27100, 27900),
-    "devansh": (28080, 28100, 28900),
-}
 
 
 class SandboxLinkError(RuntimeError):
@@ -60,16 +57,45 @@ def load_links(environ: dict[str, str] | None = None) -> tuple[Link, ...]:
     env = os.environ if environ is None else environ
     sandbox = env.get("LOOM_WORKER_SANDBOX_IDENTITY", "")
     candidate_sha = env.get("LOOM_WORKER_CANDIDATE_SHA", "")
-    if sandbox not in SANDBOX_PORTS or SHA_RE.fullmatch(candidate_sha) is None:
+    if RUNTIME_ID_RE.fullmatch(sandbox) is None or SHA_RE.fullmatch(candidate_sha) is None:
         raise SandboxLinkError("sandbox link identity is invalid")
     definitions = (
-        ("control-plane", "LOOM_SANDBOX_LINK_CP_UPSTREAM", 8080, "/healthz", False),
-        ("gateway", "LOOM_SANDBOX_LINK_GATEWAY_UPSTREAM", 9100, "/healthz", False),
-        ("minio", "LOOM_SANDBOX_LINK_MINIO_UPSTREAM", 9000, "/minio/health/live", True),
+        (
+            "control-plane",
+            "LOOM_SANDBOX_LINK_CP_UPSTREAM",
+            "LOOM_SANDBOX_LINK_CP_EXPECTED_PORT",
+            8080,
+            "/healthz",
+            False,
+        ),
+        (
+            "gateway",
+            "LOOM_SANDBOX_LINK_GATEWAY_UPSTREAM",
+            "LOOM_SANDBOX_LINK_GATEWAY_EXPECTED_PORT",
+            9100,
+            "/healthz",
+            False,
+        ),
+        (
+            "minio",
+            "LOOM_SANDBOX_LINK_MINIO_UPSTREAM",
+            "LOOM_SANDBOX_LINK_MINIO_EXPECTED_PORT",
+            9000,
+            "/minio/health/live",
+            True,
+        ),
     )
     links: list[Link] = []
-    for expected_port, definition in zip(SANDBOX_PORTS[sandbox], definitions, strict=True):
-        name, env_key, local_port, health_path, allow_empty = definition
+    expected_ports: set[int] = set()
+    for definition in definitions:
+        name, env_key, expected_port_key, local_port, health_path, allow_empty = definition
+        raw_expected_port = env.get(expected_port_key, "")
+        if PORT_RE.fullmatch(raw_expected_port) is None:
+            raise SandboxLinkError(f"{name} expected port is invalid")
+        expected_port = int(raw_expected_port)
+        if not 1024 <= expected_port <= 65535 or expected_port in expected_ports:
+            raise SandboxLinkError(f"{name} expected port is invalid")
+        expected_ports.add(expected_port)
         parsed = urlsplit(env.get(env_key, ""))
         if (
             parsed.scheme != "https"

@@ -11,10 +11,12 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from scripts.ops import developer_environment_acceptance_probe_container as probe_container
 from scripts.ops import developer_sandbox_slurm_policy as policy
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -594,8 +596,7 @@ def test_live_rollback_busy_timeout_precedes_snapshot_and_transaction(
     loaded = policy.load_profile(GB10_PROFILE)
     drain = {"phase": "drained"}
     target = Path(
-        "/var/lib/loom-developer-sandbox-slurm-policy/"
-        "snapshots/20260729T120000.000000Z",
+        "/var/lib/loom-developer-sandbox-slurm-policy/snapshots/20260729T120000.000000Z",
     )
     monkeypatch.setattr(
         policy,
@@ -611,10 +612,10 @@ def test_live_rollback_busy_timeout_precedes_snapshot_and_transaction(
             "phase": "committed",
             "operation": "apply",
             "snapshot": str(target),
-                "accounting_snapshot": None,
-                "candidate_set_generation": 1,
-                "candidate_set_convergence_id": "2" * 64,
-                "candidate_set_payload_sha256": "3" * 64,
+            "accounting_snapshot": None,
+            "candidate_set_generation": 1,
+            "candidate_set_convergence_id": "2" * 64,
+            "candidate_set_payload_sha256": "3" * 64,
         },
     )
     monkeypatch.setattr(policy, "_validate_snapshot_path", lambda *_args: target)
@@ -707,8 +708,7 @@ def test_committed_apply_transaction_replay_is_read_only(
     loaded = policy.load_profile(GB10_PROFILE)
     bindings = policy._offline_candidate_bindings(loaded, "a" * 40)
     snapshot = Path(
-        "/var/lib/loom-developer-sandbox-slurm-policy/"
-        "snapshots/20260729T120000.000000Z",
+        "/var/lib/loom-developer-sandbox-slurm-policy/snapshots/20260729T120000.000000Z",
     )
     committed = {
         "phase": "committed",
@@ -847,12 +847,10 @@ def test_timer_completed_rollback_transaction_replay_is_read_only(
     loaded = policy.load_profile(GB10_PROFILE)
     bindings = policy._offline_candidate_bindings(loaded, "a" * 40)
     recovery = Path(
-        "/var/lib/loom-developer-sandbox-slurm-policy/"
-        "snapshots/20260729T120001.000000Z",
+        "/var/lib/loom-developer-sandbox-slurm-policy/snapshots/20260729T120001.000000Z",
     )
     restored = Path(
-        "/var/lib/loom-developer-sandbox-slurm-policy/"
-        "snapshots/20260729T120000.000000Z",
+        "/var/lib/loom-developer-sandbox-slurm-policy/snapshots/20260729T120000.000000Z",
     )
     committed = {
         "phase": "committed",
@@ -887,9 +885,7 @@ def test_timer_completed_rollback_transaction_replay_is_read_only(
     monkeypatch.setattr(
         policy,
         "_snapshot_readback",
-        lambda _root, path: (
-            events.append("readback") or {"converged": True, "snapshot": str(path)}
-        ),
+        lambda _root, path: events.append("readback") or {"converged": True, "snapshot": str(path)},
     )
     monkeypatch.setattr(
         policy,
@@ -1034,16 +1030,13 @@ def test_interrupted_rollback_recovery_can_retry_same_exact_transaction(
     loaded = policy.load_profile(GB10_PROFILE)
     bindings = policy._offline_candidate_bindings(loaded, "a" * 40)
     target = Path(
-        "/var/lib/loom-developer-sandbox-slurm-policy/"
-        "snapshots/20260729T120000.000000Z",
+        "/var/lib/loom-developer-sandbox-slurm-policy/snapshots/20260729T120000.000000Z",
     )
     recovered_snapshot = Path(
-        "/var/lib/loom-developer-sandbox-slurm-policy/"
-        "snapshots/20260729T120001.000000Z",
+        "/var/lib/loom-developer-sandbox-slurm-policy/snapshots/20260729T120001.000000Z",
     )
     retry_snapshot = Path(
-        "/var/lib/loom-developer-sandbox-slurm-policy/"
-        "snapshots/20260729T120002.000000Z",
+        "/var/lib/loom-developer-sandbox-slurm-policy/snapshots/20260729T120002.000000Z",
     )
     recovered = {
         "phase": "rolled_back",
@@ -1126,12 +1119,10 @@ def test_controller_rollback_orphan_recovery_keeps_drain_accounting_flag_false(
     loaded = policy.load_profile(GB10_PROFILE)
     bindings = policy._offline_candidate_bindings(loaded, "a" * 40)
     recovery = Path(
-        "/var/lib/loom-developer-sandbox-slurm-policy/"
-        "snapshots/20260729T120001.000000Z",
+        "/var/lib/loom-developer-sandbox-slurm-policy/snapshots/20260729T120001.000000Z",
     )
     target = Path(
-        "/var/lib/loom-developer-sandbox-slurm-policy/"
-        "snapshots/20260729T120000.000000Z",
+        "/var/lib/loom-developer-sandbox-slurm-policy/snapshots/20260729T120000.000000Z",
     )
     journal = {
         "phase": "files_written",
@@ -1201,7 +1192,7 @@ def test_terminal_legacy_policy_journal_is_archived_durably(tmp_path: Path) -> N
     path = policy._journal_path(root, loaded)
     now = datetime.now(UTC).isoformat()
     legacy = {
-        "schema_version": 1,
+        "schema_version": 2,
         "operation": "apply",
         "cluster": loaded.cluster,
         "host": policy._canonical_host(),
@@ -1217,12 +1208,15 @@ def test_terminal_legacy_policy_journal_is_archived_durably(tmp_path: Path) -> N
     }
     policy._write_journal(path, legacy)
 
-    assert policy._load_policy_journal(
-        path,
-        root=root,
-        profile=loaded,
-        slurm_node=None,
-    ) is None
+    assert (
+        policy._load_policy_journal(
+            path,
+            root=root,
+            profile=loaded,
+            slurm_node=None,
+        )
+        is None
+    )
     assert not path.exists()
     archives = list((path.parent / "legacy").glob("*.json"))
     assert len(archives) == 1
@@ -1294,11 +1288,14 @@ def test_released_legacy_drain_is_archived_only_after_idle_readback(
     policy._write_journal(path, legacy)
     monkeypatch.setattr(policy, "_slurm_node_admission", lambda _node: ("IDLE", ""))
 
-    assert policy._load_drain_journal(
-        root,
-        loaded,
-        slurm_node="oldlab-2",
-    ) is None
+    assert (
+        policy._load_drain_journal(
+            root,
+            loaded,
+            slurm_node="oldlab-2",
+        )
+        is None
+    )
     assert not path.exists()
     assert len(list((path.parent / "legacy").glob("*.json"))) == 1
 
@@ -1343,12 +1340,15 @@ def test_legacy_guard_status_is_versioned_and_fresh(tmp_path: Path) -> None:
     )
     status.chmod(0o600)
 
-    assert policy._legacy_guard_status_readback(
-        root,
-        loaded,
-        config=config,
-        expected_config_sha256=config_sha256,
-    )["failed"] == 0
+    assert (
+        policy._legacy_guard_status_readback(
+            root,
+            loaded,
+            config=config,
+            expected_config_sha256=config_sha256,
+        )["failed"]
+        == 0
+    )
 
 
 def test_profile_is_exact_three_sandbox_fairshare_contract() -> None:
@@ -1370,31 +1370,14 @@ def test_profile_is_exact_three_sandbox_fairshare_contract() -> None:
     assert loaded.slurm["accounting_storage_enforce"] == ("associations,limits,qos,safe")
 
 
-def test_candidate_bindings_reject_colliding_job_label_prefixes() -> None:
+def test_candidate_bindings_allow_same_candidate_and_prefix_across_environments() -> None:
     loaded = policy.load_profile(PROFILE)
-    bindings = {
-        "loom-dev-qianyi": {
-            "sandbox": "qianyi",
-            "service_user": "loom-sandbox-qianyi",
-            "candidate_sha": "1" * 12 + "a" * 28,
-            "candidate_tree": "a" * 40,
-        },
-        "loom-dev-hongjian": {
-            "sandbox": "hongjian",
-            "service_user": "loom-sandbox-hongjian",
-            "candidate_sha": "1" * 12 + "b" * 28,
-            "candidate_tree": "b" * 40,
-        },
-        "loom-dev-devansh": {
-            "sandbox": "devansh",
-            "service_user": "loom-sandbox-devansh",
-            "candidate_sha": "2" * 40,
-            "candidate_tree": "c" * 40,
-        },
-    }
+    bindings = policy._offline_candidate_bindings(loaded, "a" * 40)
+    accounts = sorted(bindings)
+    bindings[accounts[1]]["candidate_sha"] = bindings[accounts[0]]["candidate_sha"]
+    bindings[accounts[1]]["candidate_tree"] = bindings[accounts[0]]["candidate_tree"]
 
-    with pytest.raises(policy.PolicyError, match="pairwise distinct"):
-        policy._candidate_bindings(loaded, bindings)
+    assert policy._candidate_bindings(loaded, bindings) == bindings
 
 
 def test_profile_rejects_personal_login_users(tmp_path: Path) -> None:
@@ -1407,7 +1390,7 @@ def test_profile_rejects_personal_login_users(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    with pytest.raises(policy.PolicyError, match="fixed sandbox service users"):
+    with pytest.raises(policy.PolicyError, match="non-login Loom service users"):
         policy.load_profile(profile)
 
 
@@ -3039,7 +3022,7 @@ def test_three_sandboxes_hold_independent_candidate_locks_and_bind_distinct_shas
         loaded.child_accounts
     )
     for sandbox, service_user, account in zip(
-        policy._SANDBOXES,
+        candidates,
         loaded.users,
         loaded.child_accounts,
         strict=True,
@@ -3130,7 +3113,7 @@ def test_cross_sandbox_runtime_and_legacy_recovery_bindings_fail_closed(
         matrix,
         sandbox="hongjian",
     )
-    with pytest.raises(policy.PolicyError, match="fixed sandbox labels"):
+    with pytest.raises(policy.PolicyError, match="absent or ambiguous"):
         policy._allocation_probe_path(tmp_path, loaded, "foreign", candidate)
 
 
@@ -3858,8 +3841,7 @@ def test_allocation_matrix_sbatch_explicitly_targets_every_declared_host() -> No
         assert f"--nodelist={node}" in command
         assert "--oversubscribe" in command
         assert (
-            f"--job-name=loom827-{SANDBOX}-{candidate[:12]}-{node.lower()}-"
-            f"g{TEST_GENERATION_ID}-a1"
+            f"--job-name=loom827-{SANDBOX}-{candidate[:12]}-{node.lower()}-g{TEST_GENERATION_ID}-a1"
         ) in command
         assert f"--nodelist={node}" in command[-1]
         assert "/bin/sleep" not in command[-1]
@@ -5563,3 +5545,1876 @@ def test_public_live_readback_holds_domain_lock(
         require_probe=False,
     ) == {"converged": True}
     assert events == ["domain-enter", "readback", "domain-exit"]
+
+
+def _capacity_fixture() -> tuple[dict[str, object], dict[str, object]]:
+    request: dict[str, object] = {
+        "schema_version": 1,
+        "kind": "loom.developer-environment.capacity-request",
+        "env_id": "denv-00000001",
+        "principal_id": "github:1001",
+        "deployment_id": f"dep-{'1' * 32}",
+        "candidate_id": f"cand-{'a' * 40}",
+        "candidate_sha": "a" * 40,
+        "candidate_tree": "b" * 40,
+        "resource_generation": 1,
+        "registry_generation": 42,
+        "registry_snapshot_sha256": "c" * 64,
+        "slurm_user": "loom-denv-00000001",
+        "service_group": "loom-denv-00000001",
+        "slurm_account": "lda-00000001",
+        "slurm_qos": "ldq-00000001",
+        "uid": 32_001,
+        "gid": 32_001,
+        "identity_preflight_nodes": {
+            domain: [str(policy._CAPACITY_DOMAINS[domain]["authority_node"])]
+            for domain in ("oldlab", "gb10")
+        },
+        "payload_sha256": "d" * 64,
+    }
+    binding = {
+        "env_id": request["env_id"],
+        "resource_generation": request["resource_generation"],
+        "sandbox": "dev-00000001",
+        "service_user": request["slurm_user"],
+        "slurm_qos": request["slurm_qos"],
+        "candidate_id": request["candidate_id"],
+        "candidate_sha": request["candidate_sha"],
+        "candidate_tree": request["candidate_tree"],
+    }
+    candidate_set: dict[str, object] = {
+        "schema_version": 2,
+        "kind": "loom.developer-sandbox.slurm-candidate-set",
+        "candidate_set_sha256": policy._candidate_set_sha256(
+            {str(request["slurm_account"]): binding},
+        ),
+        "candidate_bindings": {str(request["slurm_account"]): binding},
+        "generation": 42,
+        "convergence_id": "e" * 64,
+        "registry_generation": 42,
+        "registry_payload_sha256": request["registry_snapshot_sha256"],
+    }
+    return request, candidate_set
+
+
+def test_candidate_set_selects_only_latest_applied_committed_registry_binding(
+    tmp_path: Path,
+) -> None:
+    registry = policy._REGISTRY.DeveloperEnvironmentRegistry(tmp_path / "registry.sqlite3")
+    environment = registry.register(
+        {
+            "schema_version": 1,
+            "kind": policy._REGISTRY.REGISTER_KIND,
+            "principal_id": "oidc:example:dynamic-developer",
+            "idempotency_key": "registration-key-dynamic-developer",
+            "display_name": "Dynamic Developer",
+        },
+    )
+    candidates = []
+    for index, digit in enumerate(("a", "b"), start=1):
+        candidate = registry.import_candidate(
+            {
+                "schema_version": 1,
+                "kind": policy._REGISTRY.CANDIDATE_KIND,
+                "principal_id": environment.principal_id,
+                "idempotency_key": f"candidate-key-dynamic-{index}",
+                "env_id": environment.env_id,
+                "candidate_sha": digit * 40,
+                "candidate_tree": str(index + 1) * 40,
+                "bundle_sha256": str(index + 2) * 64,
+                "bundle_size": 1024 + index,
+                "image_digests": {
+                    "amd64": "sha256:" + str(index + 3) * 64,
+                    "arm64": "sha256:" + str(index + 4) * 64,
+                },
+            },
+        )
+        deployment = registry.begin_deployment(
+            {
+                "schema_version": 1,
+                "kind": policy._REGISTRY.DEPLOY_KIND,
+                "principal_id": environment.principal_id,
+                "idempotency_key": f"deployment-key-dynamic-{index}",
+                "env_id": environment.env_id,
+                "candidate_id": candidate.candidate_id,
+                "expected_resource_generation": index,
+            },
+        )
+        for expected, following in zip(
+            policy._REGISTRY.DEPLOY_PHASES[:-1],
+            policy._REGISTRY.DEPLOY_PHASES[1:],
+            strict=True,
+        ):
+            if following == "committed":
+                deployment = registry.prepare_deployment_finalization(
+                    deployment.deployment_id,
+                    principal_id=environment.principal_id,
+                    expected_resource_generation=index,
+                )
+                deployment = registry.record_deployment_finalization(
+                    deployment.deployment_id,
+                    principal_id=environment.principal_id,
+                    expected_resource_generation=index,
+                    evidence={
+                        "capacity_finalize_receipt_sha256": "1" * 64,
+                        "capacity_finalize_check_receipt_sha256": "2" * 64,
+                        "runtime_reconcile_receipt_sha256": "3" * 64,
+                        "runtime_prepare_check_receipt_sha256": "4" * 64,
+                        "acceptance_probe_receipt_sha256": "5" * 64,
+                    },
+                )
+            deployment = registry.advance_deployment(
+                deployment.deployment_id,
+                principal_id=environment.principal_id,
+                expected_phase=expected,
+                next_phase=following,
+                expected_resource_generation=index,
+            )
+        environment = registry.lookup(
+            environment.env_id,
+            principal_id=environment.principal_id,
+        )
+        candidates.append(candidate)
+
+    snapshot = registry.snapshot()
+    candidate_set = policy.slurm_candidate_set_from_snapshot(snapshot)
+    binding = candidate_set["candidate_bindings"][environment.slurm_account]
+
+    assert environment.resource_generation == 3
+    assert binding["resource_generation"] == environment.resource_generation
+    assert binding["candidate_id"] == candidates[-1].candidate_id
+    assert binding["candidate_sha"] == candidates[-1].candidate_sha
+
+
+def _incremental_identity_fixture() -> dict[str, object]:
+    request, candidate_set = _capacity_fixture()
+    return {
+        "schema_version": 2,
+        "kind": "loom.developer-environment.identity-preflight",
+        "env_id": request["env_id"],
+        "principal_id": request["principal_id"],
+        "resource_generation": request["resource_generation"],
+        "service_user": request["slurm_user"],
+        "service_group": request["service_group"],
+        "uid": request["uid"],
+        "gid": request["gid"],
+        "slurm_account": request["slurm_account"],
+        "slurm_qos": request["slurm_qos"],
+        "registry_generation": request["registry_generation"],
+        "registry_payload_sha256": request["registry_snapshot_sha256"],
+        "candidate_set_sha256": candidate_set["candidate_set_sha256"],
+        "revive_journal_sha256": None,
+    }
+
+
+def test_incremental_identity_v1_payload_remains_readable_for_upgrade_replay() -> None:
+    loaded = policy.load_profile(PROFILE)
+    current = _incremental_identity_fixture()
+    legacy = {
+        key: value
+        for key, value in current.items()
+        if key not in {"principal_id", "revive_journal_sha256"}
+    }
+    legacy["schema_version"] = 1
+
+    parsed = policy._incremental_identity_payload(
+        policy._canonical_json_bytes(legacy) + b"\n",
+        loaded,
+    )
+
+    assert parsed == legacy
+    assert set(parsed) == policy._INCREMENTAL_IDENTITY_V1_FIELDS
+
+
+def test_incremental_identity_reconcile_never_restarts_or_touches_peers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    identity = _incremental_identity_fixture()
+    desired = policy._incremental_desired_state(loaded, identity, retired=False)
+    statuses = iter(
+        [
+            ("available", {"qos": None, "account": None, "association": None}),
+            ("exact-existing", desired),
+            ("exact-existing", desired),
+        ],
+    )
+    commands: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        policy,
+        "_incremental_accounting_status",
+        lambda *_args: next(statuses),
+    )
+    monkeypatch.setattr(policy, "_incremental_jobs", lambda *_args: [])
+    monkeypatch.setattr(
+        policy,
+        "_run",
+        lambda argv, **_kwargs: commands.append(tuple(argv)) or "",
+    )
+
+    result = policy.incremental_identity_reconcile(
+        tmp_path,
+        loaded,
+        identity,
+        transaction_id="1" * 64,
+    )
+
+    assert result["status"] == "exact-existing"
+    assert len(commands) == 6
+    flattened = "\n".join(" ".join(command) for command in commands)
+    assert str(identity["slurm_account"]) in flattened
+    assert str(identity["slurm_qos"]) in flattened
+    assert "foreign-account" not in flattened
+    assert all(
+        command[0] == "sacctmgr" and command[1] == "-i" and command[2] in {"add", "modify"}
+        for command in commands
+    )
+    assert not any(
+        forbidden in flattened
+        for forbidden in ("scancel", "scontrol", "systemctl", "restart", "drain", "delete")
+    )
+
+
+def test_incremental_identity_retire_refuses_owned_job_without_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    identity = _incremental_identity_fixture()
+    monkeypatch.setattr(
+        policy,
+        "_incremental_jobs",
+        lambda *_args: [
+            {
+                "job_id": "991",
+                "state": "RUNNING",
+                "account": identity["slurm_account"],
+                "user": identity["service_user"],
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        policy,
+        "_run",
+        lambda *_args, **_kwargs: pytest.fail("retire with an owned job mutated Slurm"),
+    )
+
+    with pytest.raises(policy.PolicyError, match="still owns jobs"):
+        policy.incremental_identity_retire(
+            tmp_path,
+            loaded,
+            identity,
+            transaction_id="2" * 64,
+        )
+
+
+def test_incremental_identity_reconcile_resumes_persisted_partial_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    identity = _incremental_identity_fixture()
+    transaction_id = "7" * 64
+    policy._incremental_transaction(
+        tmp_path,
+        loaded,
+        identity,
+        transaction_id=transaction_id,
+        operation="reconcile",
+        phase="prepared",
+    )
+    desired = policy._incremental_desired_state(loaded, identity, retired=False)
+    statuses = iter([("exact-existing", desired), ("exact-existing", desired)])
+    commands: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        policy,
+        "_incremental_accounting_status",
+        lambda *_args: next(statuses),
+    )
+    monkeypatch.setattr(policy, "_incremental_jobs", lambda *_args: [])
+    monkeypatch.setattr(
+        policy,
+        "_run",
+        lambda argv, **_kwargs: commands.append(tuple(argv)) or "",
+    )
+
+    result = policy.incremental_identity_reconcile(
+        tmp_path,
+        loaded,
+        identity,
+        transaction_id=transaction_id,
+    )
+
+    assert result["status"] == "exact-existing"
+    assert len(commands) == 6
+    transaction = policy._incremental_transaction(
+        tmp_path,
+        loaded,
+        identity,
+        transaction_id=transaction_id,
+        operation="reconcile",
+    )
+    assert transaction is not None
+    assert transaction["phase"] == "committed"
+
+
+def test_incremental_identity_retire_zeroes_only_target_and_persists_tombstone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    identity = _incremental_identity_fixture()
+    active = policy._incremental_desired_state(loaded, identity, retired=False)
+    retired = policy._incremental_desired_state(loaded, identity, retired=True)
+    statuses = iter([("exact-existing", active), ("retired", retired)])
+    commands: list[tuple[str, ...]] = []
+    monkeypatch.setattr(policy, "_incremental_jobs", lambda *_args: [])
+    monkeypatch.setattr(
+        policy,
+        "_incremental_accounting_status",
+        lambda *_args: next(statuses),
+    )
+    monkeypatch.setattr(
+        policy,
+        "_run",
+        lambda argv, **_kwargs: commands.append(tuple(argv)) or "",
+    )
+
+    result = policy.incremental_identity_retire(
+        tmp_path,
+        loaded,
+        identity,
+        transaction_id="3" * 64,
+    )
+
+    assert result["status"] == "retired"
+    assert result["jobs"] == []
+    assert len(commands) == 3
+    flattened = "\n".join(" ".join(command) for command in commands)
+    assert str(identity["slurm_account"]) in flattened
+    assert str(identity["slurm_qos"]) in flattened
+    assert "Fairshare=0" in flattened
+    assert "MaxJobsPerUser=0" in flattened
+    assert "Flags=DenyOnLimit" in flattened
+    assert not any(
+        forbidden in flattened
+        for forbidden in ("foreign-account", "scancel", "delete", "restart", "drain")
+    )
+    tombstone = Path(str(result["tombstone"]))
+    assert tombstone.is_file()
+    assert json.loads(tombstone.read_bytes())["env_id"] == identity["env_id"]
+
+
+def test_incremental_identity_revive_requires_same_owner_and_preserves_tombstone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    identity = {
+        **_incremental_identity_fixture(),
+        "resource_generation": 3,
+        "registry_generation": 44,
+        "registry_payload_sha256": "9" * 64,
+    }
+    tombstone_unsigned = {
+        "schema_version": 1,
+        "kind": "loom.developer-environment.slurm-identity-tombstone",
+        "cluster": loaded.cluster,
+        "env_id": identity["env_id"],
+        "principal_id": identity["principal_id"],
+        "resource_generation": 1,
+        "service_user": identity["service_user"],
+        "service_group": identity["service_group"],
+        "uid": identity["uid"],
+        "gid": identity["gid"],
+        "slurm_account": identity["slurm_account"],
+        "slurm_qos": identity["slurm_qos"],
+        "registry_generation": 43,
+        "registry_payload_sha256": "8" * 64,
+        "state_sha256": "7" * 64,
+        "retired_at": "2026-07-29T12:00:00Z",
+    }
+    tombstone = {
+        **tombstone_unsigned,
+        "payload_sha256": hashlib.sha256(
+            policy._canonical_json_bytes(tombstone_unsigned),
+        ).hexdigest(),
+    }
+    journal_unsigned = {
+        "schema_version": 1,
+        "kind": "loom.developer-environment.revive-journal",
+        "phase": "registered",
+        "env_id": identity["env_id"],
+        "principal_id": identity["principal_id"],
+        "runtime_id": "dev-00000001",
+        "uid": identity["uid"],
+        "gid": identity["gid"],
+        "service_user": identity["service_user"],
+        "service_group": identity["service_group"],
+        "slurm_user": identity["service_user"],
+        "slurm_account": identity["slurm_account"],
+        "slurm_qos": identity["slurm_qos"],
+        "previous_resource_generation": 2,
+        "new_resource_generation": 3,
+        "registry_generation": identity["registry_generation"],
+        "registry_payload_sha256": identity["registry_payload_sha256"],
+        "retire_tombstone_sha256": tombstone["payload_sha256"],
+        "idempotency_key": "revive-key-00000000000001",
+        "created_at": "2026-07-29T12:01:00Z",
+        "updated_at": "2026-07-29T12:01:00Z",
+    }
+    journal = {
+        **journal_unsigned,
+        "payload_sha256": hashlib.sha256(
+            policy._canonical_json_bytes(journal_unsigned),
+        ).hexdigest(),
+    }
+    identity["revive_journal_sha256"] = journal["payload_sha256"]
+    tombstone_path = (
+        tmp_path
+        / "var/lib/loom-developer-sandbox-slurm-policy/identity-tombstones"
+        / loaded.cluster
+        / str(identity["env_id"])
+        / "1.json"
+    )
+    journal_path = (
+        tmp_path
+        / "var/lib/loom-developer-environment-runtime/revive"
+        / f"{identity['env_id']}.json"
+    )
+    tombstone_path.parent.mkdir(parents=True)
+    journal_path.parent.mkdir(parents=True)
+    tombstone_path.write_bytes(policy._canonical_json_bytes(tombstone) + b"\n")
+    journal_path.write_bytes(policy._canonical_json_bytes(journal) + b"\n")
+    tombstone_path.chmod(0o600)
+    journal_path.chmod(0o600)
+    retired = policy._incremental_desired_state(loaded, identity, retired=True)
+    active = policy._incremental_desired_state(loaded, identity, retired=False)
+    statuses = iter(
+        [
+            ("retired", retired),
+            ("exact-existing", active),
+            ("exact-existing", active),
+        ],
+    )
+    commands: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        policy,
+        "_incremental_accounting_status",
+        lambda *_args: next(statuses),
+    )
+    monkeypatch.setattr(policy, "_incremental_jobs", lambda *_args: [])
+    monkeypatch.setattr(
+        policy,
+        "_run",
+        lambda argv, **_kwargs: commands.append(tuple(argv)) or "",
+    )
+
+    result = policy.incremental_identity_reconcile(
+        tmp_path,
+        loaded,
+        identity,
+        transaction_id="8" * 64,
+    )
+
+    assert result["status"] == "exact-existing"
+    assert len(commands) == 6
+    assert json.loads(tombstone_path.read_bytes()) == tombstone
+    revival_path = (
+        tmp_path
+        / "var/lib/loom-developer-sandbox-slurm-policy/identity-revivals"
+        / loaded.cluster
+        / str(identity["env_id"])
+        / "3.json"
+    )
+    revival = json.loads(revival_path.read_bytes())
+    assert revival["principal_id"] == identity["principal_id"]
+    assert revival["retire_tombstone_sha256"] == tombstone["payload_sha256"]
+    assert revival["revive_journal_sha256"] == journal["payload_sha256"]
+
+
+def test_incremental_identity_retired_state_without_revive_journal_stays_fenced(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    identity = _incremental_identity_fixture()
+    retired = policy._incremental_desired_state(loaded, identity, retired=True)
+    monkeypatch.setattr(
+        policy,
+        "_incremental_accounting_status",
+        lambda *_args: ("retired", retired),
+    )
+    monkeypatch.setattr(
+        policy,
+        "_run",
+        lambda *_args, **_kwargs: pytest.fail("fenced identity was mutated"),
+    )
+
+    with pytest.raises(policy.PolicyError, match="lacks a revive journal"):
+        policy.incremental_identity_reconcile(
+            tmp_path,
+            loaded,
+            identity,
+            transaction_id="9" * 64,
+        )
+
+
+def test_capacity_preflight_is_incremental_on_controllers_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, candidate_set = _capacity_fixture()
+    observed: list[tuple[str, str]] = []
+
+    def preflight(
+        domain: str,
+        node: str,
+        *_args: object,
+        **_kwargs: object,
+    ) -> dict[str, str]:
+        observed.append((domain, node))
+        return {"status": "available", "receipt_sha256": "f" * 64}
+
+    monkeypatch.setattr(policy, "_capacity_identity_preflight", preflight)
+
+    oldlab = policy._capacity_domain_preflight(
+        "oldlab",
+        request,
+        candidate_set,
+        program=Path("/fixed-transport"),
+    )
+    gb10 = policy._capacity_domain_preflight(
+        "gb10",
+        request,
+        candidate_set,
+        program=Path("/fixed-transport"),
+    )
+
+    assert set(oldlab) == {"oldlab-1"}
+    assert set(gb10) == {"trt-gb10-1"}
+    assert observed == [("oldlab", "oldlab-1"), ("gb10", "trt-gb10-1")]
+
+
+def test_capacity_identity_preflight_uses_fixed_check_transport_and_exact_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, candidate_set = _capacity_fixture()
+    invoked: list[tuple[str, ...]] = []
+
+    def run(argv: tuple[str, ...], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        invoked.append(tuple(argv))
+        envelope = json.loads(bytes(kwargs["input"]))
+        result = {
+            "schema_version": 1,
+            "kind": "loom.developer-environment.identity-preflight-result",
+            "node": "trt-gb10-1",
+            "domain": "gb10",
+            "env_id": request["env_id"],
+            "service_user": request["slurm_user"],
+            "service_group": request["service_group"],
+            "uid": request["uid"],
+            "gid": request["gid"],
+            "status": "available",
+            "passwd_name": None,
+            "group_name": None,
+            "identity_inventory_sha256": "4" * 64,
+            "local_identity_status": "available",
+            "slurm_accounting_status": "available",
+            "slurm_accounting_receipt_sha256": "5" * 64,
+            "owned_jobs": [],
+            "checked_at": "2026-07-29T12:00:00Z",
+        }
+        response = {
+            "schema_version": 1,
+            "request_id": envelope["request_id"],
+            "status": "succeeded",
+            "result": result,
+        }
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=policy._canonical_json_bytes(response) + b"\n",
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(policy.subprocess, "run", run)
+
+    proof = policy._capacity_identity_preflight(
+        "gb10",
+        "trt-gb10-1",
+        request,
+        candidate_set,
+        program=Path("/usr/local/libexec/fixed-node-transport"),
+    )
+
+    assert invoked == [
+        (
+            "/usr/local/libexec/fixed-node-transport",
+            "invoke",
+            "--node",
+            "trt-gb10-1",
+            "--verb",
+            "check",
+        ),
+    ]
+    assert proof["status"] == "available"
+    assert len(proof["receipt_sha256"]) == 64
+
+
+def test_capacity_identity_converge_uses_fixed_transaction_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, candidate_set = _capacity_fixture()
+    invoked: list[tuple[str, ...]] = []
+
+    def run(argv: tuple[str, ...], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        invoked.append(tuple(argv))
+        envelope = json.loads(bytes(kwargs["input"]))
+        receipt = {
+            "schema_version": 1,
+            "request_id": envelope["request_id"],
+            "action": "slurm-identity-converge",
+            "node": "trt-gb10-1",
+            "domain": "gb10",
+            "sandbox": "dev-00000001",
+            "candidate_sha": request["candidate_sha"],
+            "candidate_tree": request["candidate_tree"],
+            "env_id": request["env_id"],
+            "deployment_id": request["deployment_id"],
+            "resource_generation": request["resource_generation"],
+            "candidate_id": request["candidate_id"],
+            "registry_generation": request["registry_generation"],
+            "registry_payload_sha256": request["registry_snapshot_sha256"],
+            "payload_sha256": envelope["payload_sha256"],
+            "result_sha256": "4" * 64,
+            "inner_receipt": None,
+            "completed_at": "2026-07-29T12:00:00Z",
+            "status": "succeeded",
+        }
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=policy._canonical_json_bytes(receipt) + b"\n",
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(policy.subprocess, "run", run)
+
+    proof = policy._capacity_identity_converge(
+        "gb10",
+        "trt-gb10-1",
+        request,
+        candidate_set,
+        program=Path("/usr/local/libexec/fixed-node-transport"),
+    )
+
+    assert invoked == [
+        (
+            "/usr/local/libexec/fixed-node-transport",
+            "invoke",
+            "--node",
+            "trt-gb10-1",
+            "--verb",
+            "transact",
+        ),
+    ]
+    assert proof["result_sha256"] == "4" * 64
+    assert len(proof["authority_receipt_sha256"]) == 64
+
+
+def test_capacity_identity_retire_requires_exact_controller_tombstone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, candidate_set = _capacity_fixture()
+    invoked: list[tuple[str, ...]] = []
+
+    def run(argv: tuple[str, ...], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        invoked.append(tuple(argv))
+        envelope = json.loads(bytes(kwargs["input"]))
+        receipt = {
+            "schema_version": 1,
+            "request_id": envelope["request_id"],
+            "action": "slurm-identity-retire",
+            "node": "trt-gb10-1",
+            "domain": "gb10",
+            "sandbox": "dev-00000001",
+            "candidate_sha": request["candidate_sha"],
+            "candidate_tree": request["candidate_tree"],
+            "env_id": request["env_id"],
+            "deployment_id": request["deployment_id"],
+            "resource_generation": request["resource_generation"],
+            "candidate_id": request["candidate_id"],
+            "registry_generation": request["registry_generation"],
+            "registry_payload_sha256": request["registry_snapshot_sha256"],
+            "payload_sha256": envelope["payload_sha256"],
+            "result_sha256": "4" * 64,
+            "inner_receipt": (
+                "/var/lib/loom-developer-sandbox-slurm-policy/identity-tombstones/"
+                f"trt-gb10/{request['env_id']}/{request['resource_generation']}.json"
+            ),
+            "completed_at": "2026-07-29T12:00:00Z",
+            "status": "succeeded",
+        }
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=policy._canonical_json_bytes(receipt) + b"\n",
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(policy.subprocess, "run", run)
+
+    proof = policy._capacity_identity_converge(
+        "gb10",
+        "trt-gb10-1",
+        request,
+        candidate_set,
+        program=Path("/usr/local/libexec/fixed-node-transport"),
+        action="slurm-identity-retire",
+    )
+
+    assert invoked == [
+        (
+            "/usr/local/libexec/fixed-node-transport",
+            "invoke",
+            "--node",
+            "trt-gb10-1",
+            "--verb",
+            "transact",
+        ),
+    ]
+    assert proof["action"] == "slurm-identity-retire"
+    assert proof["tombstone"] == (
+        "/var/lib/loom-developer-sandbox-slurm-policy/identity-tombstones/"
+        f"trt-gb10/{request['env_id']}/{request['resource_generation']}.json"
+    )
+
+
+def test_capacity_identity_readback_requires_controller_exact_existing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, candidate_set = _capacity_fixture()
+    nodes = (str(policy._CAPACITY_DOMAINS["oldlab"]["authority_node"]),)
+    transactions = {
+        str(node): {
+            "request_id": hashlib.sha256(str(node).encode()).hexdigest(),
+            "result_sha256": "4" * 64,
+            "authority_receipt_sha256": "5" * 64,
+            "completed_at": "2026-07-29T12:00:00Z",
+        }
+        for node in nodes
+    }
+    observed: list[str] = []
+
+    def preflight(
+        _domain: str,
+        node: str,
+        *_args: object,
+        **_kwargs: object,
+    ) -> dict[str, str]:
+        observed.append(node)
+        return {
+            "status": "exact-existing",
+            "receipt_sha256": hashlib.sha256(f"readback:{node}".encode()).hexdigest(),
+        }
+
+    monkeypatch.setattr(policy, "_capacity_identity_preflight", preflight)
+
+    proof = policy._capacity_domain_identity_readback(
+        "oldlab",
+        request,
+        candidate_set,
+        transactions,
+        program=Path("/fixed-transport"),
+    )
+
+    assert observed == list(nodes)
+    assert set(proof) == set(nodes)
+    assert all(value["status"] == "exact-existing" for value in proof.values())
+
+
+def test_capacity_domain_reuses_incremental_controller_receipt_without_fleet_converge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, candidate_set = _capacity_fixture()
+    monkeypatch.setattr(
+        policy,
+        "_capacity_node_converge",
+        lambda *_args, **_kwargs: pytest.fail("incremental path reached fleet converge"),
+    )
+    nodes = (str(policy._CAPACITY_DOMAINS["gb10"]["authority_node"]),)
+    preflight = {str(node): {"status": "available", "receipt_sha256": "3" * 64} for node in nodes}
+    identity_convergence = {
+        str(node): {
+            "request_id": hashlib.sha256(f"identity:{node}".encode()).hexdigest(),
+            "result_sha256": "4" * 64,
+            "authority_receipt_sha256": "5" * 64,
+            "completed_at": "2026-07-29T12:00:00Z",
+            "status": "exact-existing",
+            "readback_receipt_sha256": "6" * 64,
+        }
+        for node in nodes
+    }
+
+    receipt = policy._capacity_domain_converge(
+        "gb10",
+        request,
+        candidate_set,
+        preflight,
+        identity_convergence,
+        program=Path("/fixed-transport"),
+    )
+
+    assert receipt["identity_preflight"] == preflight
+    assert receipt["identity_convergence"] == identity_convergence
+    assert set(receipt["slurm_convergence"]) == set(nodes)
+    assert receipt["slurm_convergence"]["trt-gb10-1"]["action"] == ("slurm-identity-converge")
+    assert receipt["status"] == "ready"
+
+
+def test_capacity_check_validates_current_registry_and_controller_identity_receipts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, candidate_set = _capacity_fixture()
+    request["payload_sha256"] = hashlib.sha256(
+        policy._canonical_json_bytes(
+            {key: value for key, value in request.items() if key != "payload_sha256"},
+        ),
+    ).hexdigest()
+    snapshot = {
+        "generation": 43,
+        "payload_sha256": "7" * 64,
+        "environments": [
+            {
+                "env_id": request["env_id"],
+                "principal_id": request["principal_id"],
+                "state": "active",
+                "resource_generation": request["resource_generation"],
+                "current_candidate_id": request["candidate_id"],
+                "service_user": request["slurm_user"],
+                "service_group": request["service_group"],
+                "uid": request["uid"],
+                "gid": request["gid"],
+                "slurm_account": request["slurm_account"],
+                "slurm_qos": request["slurm_qos"],
+            },
+        ],
+        "deployments": [
+            {
+                "deployment_id": request["deployment_id"],
+                "env_id": request["env_id"],
+                "principal_id": request["principal_id"],
+                "candidate_id": request["candidate_id"],
+                "expected_resource_generation": int(request["resource_generation"]) - 1,
+                "phase": "committed",
+                "applied_resource_generation": request["resource_generation"],
+                "applied_registry_generation": 42,
+                "applied_registry_payload_sha256": "6" * 64,
+            },
+        ],
+        "candidates": [
+            {
+                "candidate_id": request["candidate_id"],
+                "env_id": request["env_id"],
+                "principal_id": request["principal_id"],
+                "candidate_sha": request["candidate_sha"],
+                "candidate_tree": request["candidate_tree"],
+            },
+        ],
+    }
+    domain_receipts: dict[str, object] = {}
+    for domain, route in policy._CAPACITY_DOMAINS.items():
+        nodes = (str(route["authority_node"]),)
+        preflight = {node: {"status": "available", "receipt_sha256": "1" * 64} for node in nodes}
+        convergence = {
+            node: {
+                "request_id": hashlib.sha256(f"{domain}:{node}".encode()).hexdigest(),
+                "result_sha256": "2" * 64,
+                "authority_receipt_sha256": "3" * 64,
+                "completed_at": "2026-07-29T12:00:00Z",
+                "status": "exact-existing",
+                "readback_receipt_sha256": "4" * 64,
+            }
+            for node in nodes
+        }
+        slurm = {
+            node: {
+                "action": "slurm-identity-converge",
+                "request_id": hashlib.sha256(f"slurm:{domain}:{node}".encode()).hexdigest(),
+                "result_sha256": hashlib.sha256(f"result:{domain}:{node}".encode()).hexdigest(),
+                "authority_receipt_sha256": hashlib.sha256(
+                    f"authority:{domain}:{node}".encode(),
+                ).hexdigest(),
+                "completed_at": "2026-07-29T12:00:00Z",
+            }
+            for node in nodes
+        }
+        domain_receipts[domain] = {
+            "status": "ready",
+            "cluster": route["cluster"],
+            "controller": route["controller"],
+            "submit_host": route["submit_host"],
+            **{
+                field: request[field]
+                for field in (
+                    "env_id",
+                    "slurm_user",
+                    "service_group",
+                    "uid",
+                    "gid",
+                    "slurm_account",
+                    "slurm_qos",
+                    "candidate_sha",
+                    "candidate_tree",
+                    "registry_snapshot_sha256",
+                )
+            },
+            "policy_generation": request["registry_generation"],
+            "policy_sha256": hashlib.sha256(
+                policy._canonical_json_bytes(
+                    {node: proof["result_sha256"] for node, proof in slurm.items()},
+                ),
+            ).hexdigest(),
+            "authority_receipt_sha256": hashlib.sha256(
+                policy._canonical_json_bytes(
+                    {
+                        "identity_convergence": convergence,
+                        "slurm_convergence": slurm,
+                    },
+                ),
+            ).hexdigest(),
+            "slurm_convergence": slurm,
+            "slurm_convergence_sha256": hashlib.sha256(
+                policy._canonical_json_bytes(slurm),
+            ).hexdigest(),
+            "completed_at": "2026-07-29T12:00:00Z",
+            "identity_preflight": preflight,
+            "identity_preflight_sha256": hashlib.sha256(
+                policy._canonical_json_bytes(preflight),
+            ).hexdigest(),
+            "identity_convergence": convergence,
+            "identity_convergence_sha256": hashlib.sha256(
+                policy._canonical_json_bytes(convergence),
+            ).hexdigest(),
+        }
+    unsigned_receipt = {
+        "schema_version": 1,
+        "kind": "loom.developer-environment.capacity-receipt",
+        "status": "acceptance-prepared",
+        "request_sha256": request["payload_sha256"],
+        **{
+            field: request[field]
+            for field in (
+                "env_id",
+                "principal_id",
+                "deployment_id",
+                "candidate_id",
+                "candidate_sha",
+                "candidate_tree",
+                "resource_generation",
+                "registry_generation",
+                "registry_snapshot_sha256",
+                "slurm_user",
+                "service_group",
+                "slurm_account",
+                "slurm_qos",
+                "uid",
+                "gid",
+            )
+        },
+        "domains": domain_receipts,
+    }
+    receipt = {
+        **unsigned_receipt,
+        "payload_sha256": hashlib.sha256(
+            policy._canonical_json_bytes(unsigned_receipt),
+        ).hexdigest(),
+    }
+    receipt_raw = policy._canonical_json_bytes(receipt) + b"\n"
+    current_candidate_set = {
+        **candidate_set,
+        "generation": snapshot["generation"],
+        "registry_generation": snapshot["generation"],
+        "registry_payload_sha256": snapshot["payload_sha256"],
+    }
+    monkeypatch.setattr(
+        policy,
+        "_capacity_request",
+        lambda *_args, **_kwargs: (request, b"request\n"),
+    )
+    monkeypatch.setattr(
+        policy,
+        "_read_registry_snapshot",
+        lambda *_args, **_kwargs: snapshot,
+    )
+    monkeypatch.setattr(
+        policy,
+        "slurm_candidate_set_from_snapshot",
+        lambda _snapshot, **_kwargs: current_candidate_set,
+    )
+    monkeypatch.setattr(
+        policy,
+        "_read_bound_regular_file",
+        lambda *_args, **_kwargs: (receipt_raw, None),
+    )
+
+    result = policy.check_capacity(
+        str(request["deployment_id"]),
+        root=Path("/fixed-capacity"),
+        registry_snapshot=Path("/fixed-registry"),
+        require_root_ownership=False,
+    )
+
+    assert result["status"] == "activated"
+    assert result["registry_generation"] == 43
+    assert result["identity_node_count"] == 2
+    assert result["domains"] == ["oldlab", "gb10"]
+    assert result["capacity_receipt_sha256"] == receipt["payload_sha256"]
+
+
+def test_capacity_reconcile_orders_global_preflight_identity_readback_then_slurm(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, candidate_set = _capacity_fixture()
+    events: list[str] = []
+
+    monkeypatch.setattr(
+        policy,
+        "_capacity_request",
+        lambda *_args, **_kwargs: (request, b"request\n"),
+    )
+    monkeypatch.setattr(
+        policy,
+        "_read_registry_snapshot",
+        lambda *_args, **_kwargs: {"generation": 42},
+    )
+    monkeypatch.setattr(
+        policy,
+        "_capacity_registry_binding",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        policy,
+        "slurm_candidate_set_from_snapshot",
+        lambda _snapshot, **_kwargs: candidate_set,
+    )
+
+    def preflight(domain: str, *_args: object, **_kwargs: object) -> dict[str, object]:
+        events.append(f"preflight:{domain}")
+        return {"node": {"status": "available", "receipt_sha256": "1" * 64}}
+
+    def identities(domain: str, *_args: object, **_kwargs: object) -> dict[str, object]:
+        events.append(f"identity:{domain}")
+        return {"node": {"request_id": "2" * 64}}
+
+    def readback(domain: str, *_args: object, **_kwargs: object) -> dict[str, object]:
+        events.append(f"readback:{domain}")
+        return {"node": {"status": "exact-existing"}}
+
+    def slurm(domain: str, *_args: object, **_kwargs: object) -> dict[str, object]:
+        events.append(f"slurm:{domain}")
+        return {"status": "ready"}
+
+    monkeypatch.setattr(policy, "_capacity_domain_preflight", preflight)
+    monkeypatch.setattr(policy, "_capacity_domain_identity_converge", identities)
+    monkeypatch.setattr(policy, "_capacity_domain_identity_readback", readback)
+    monkeypatch.setattr(policy, "_capacity_domain_converge", slurm)
+
+    result = policy.reconcile_capacity(
+        str(request["deployment_id"]),
+        root=tmp_path / "capacity",
+        registry_snapshot=tmp_path / "registry.json",
+        program=Path("/fixed-transport"),
+        require_root_ownership=False,
+    )
+
+    assert result["status"] == "prepared"
+    assert events == [
+        "preflight:oldlab",
+        "preflight:gb10",
+        "identity:oldlab",
+        "identity:gb10",
+        "readback:oldlab",
+        "readback:gb10",
+        "slurm:oldlab",
+        "slurm:gb10",
+    ]
+
+
+def test_capacity_registry_binding_separates_precommit_and_final_generation() -> None:
+    request, _candidate_set = _capacity_fixture()
+    deploying = {
+        "generation": request["registry_generation"],
+        "payload_sha256": request["registry_snapshot_sha256"],
+        "environments": [
+            {
+                "env_id": request["env_id"],
+                "principal_id": request["principal_id"],
+                "state": "deploying",
+                "resource_generation": request["resource_generation"],
+                "current_candidate_id": None,
+                "slurm_user": request["slurm_user"],
+                "service_user": request["slurm_user"],
+                "service_group": request["service_group"],
+                "slurm_account": request["slurm_account"],
+                "slurm_qos": request["slurm_qos"],
+                "uid": request["uid"],
+                "gid": request["gid"],
+            },
+        ],
+        "deployments": [
+            {
+                "deployment_id": request["deployment_id"],
+                "env_id": request["env_id"],
+                "candidate_id": request["candidate_id"],
+                "principal_id": request["principal_id"],
+                "expected_resource_generation": request["resource_generation"],
+                "phase": "runtime-started",
+            },
+        ],
+        "candidates": [
+            {
+                "candidate_id": request["candidate_id"],
+                "env_id": request["env_id"],
+                "principal_id": request["principal_id"],
+                "candidate_sha": request["candidate_sha"],
+                "candidate_tree": request["candidate_tree"],
+            },
+        ],
+    }
+    assert (
+        policy._capacity_registry_binding(
+            request,
+            deploying,
+            committed=False,
+        )["state"]
+        == "deploying"
+    )
+
+    final_request = {
+        **request,
+        "resource_generation": int(request["resource_generation"]) + 1,
+        "registry_generation": 43,
+        "registry_snapshot_sha256": "e" * 64,
+    }
+    finalizing = json.loads(json.dumps(deploying))
+    finalizing["generation"] = 43
+    finalizing["payload_sha256"] = "e" * 64
+    finalizing["deployments"][0]["phase"] = "verified"
+    finalizing["deployments"][0]["applied_resource_generation"] = final_request[
+        "resource_generation"
+    ]
+    finalizing["deployments"][0]["applied_registry_generation"] = 42
+    finalizing["deployments"][0]["applied_registry_payload_sha256"] = "f" * 64
+    assert (
+        policy._capacity_registry_binding(
+            final_request,
+            finalizing,
+            committed=True,
+        )["state"]
+        == "deploying"
+    )
+    with pytest.raises(policy.PolicyError, match="stale"):
+        policy._capacity_registry_binding(
+            request,
+            finalizing,
+            committed=False,
+        )
+
+
+def test_capacity_finalize_uses_committed_mode_without_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    def reconcile(*args: object, **kwargs: object) -> dict[str, object]:
+        observed["args"] = args
+        observed["kwargs"] = kwargs
+        return {"status": "ready"}
+
+    monkeypatch.setattr(policy, "reconcile_capacity", reconcile)
+    result = policy.finalize_capacity(
+        "dep-" + "1" * 32,
+        root=Path("/fixed-capacity"),
+        registry_snapshot=Path("/fixed-registry"),
+        program=Path("/fixed-transport"),
+        require_root_ownership=False,
+    )
+    assert result == {"status": "ready"}
+    assert observed["kwargs"] == {
+        "root": Path("/fixed-capacity"),
+        "registry_snapshot": Path("/fixed-registry"),
+        "program": Path("/fixed-transport"),
+        "require_root_ownership": False,
+        "committed": True,
+    }
+
+
+def test_capacity_abort_retires_only_domain_controllers_and_persists_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, candidate_set = _capacity_fixture()
+    observed: list[str] = []
+    monkeypatch.setattr(
+        policy,
+        "_capacity_request",
+        lambda *_args, **_kwargs: (request, b"request\n"),
+    )
+    monkeypatch.setattr(
+        policy,
+        "_read_registry_snapshot",
+        lambda *_args, **_kwargs: {"generation": request["registry_generation"]},
+    )
+    monkeypatch.setattr(
+        policy,
+        "_capacity_registry_binding",
+        lambda *_args, **kwargs: (
+            observed.append(f"binding:{kwargs['committed']}") or {"state": "deploying"}
+        ),
+    )
+    monkeypatch.setattr(
+        policy,
+        "slurm_candidate_set_from_snapshot",
+        lambda *_args, **kwargs: (
+            observed.append(f"candidate-set:{kwargs['include_provisioning']}") or candidate_set
+        ),
+    )
+
+    def retire(
+        domain: str,
+        *_args: object,
+        **_kwargs: object,
+    ) -> dict[str, dict[str, str]]:
+        observed.append(f"retire:{domain}")
+        controller = str(policy._CAPACITY_DOMAINS[domain]["authority_node"])
+        return {
+            controller: {
+                "request_id": hashlib.sha256(domain.encode()).hexdigest(),
+                "result_sha256": "4" * 64,
+                "authority_receipt_sha256": "5" * 64,
+                "completed_at": "2026-07-29T12:00:00Z",
+                "action": "slurm-identity-retire",
+                "tombstone": (
+                    "/var/lib/loom-developer-sandbox-slurm-policy/"
+                    f"identity-tombstones/{policy._CAPACITY_DOMAINS[domain]['cluster']}/"
+                    f"{request['env_id']}/{request['resource_generation']}.json"
+                ),
+            },
+        }
+
+    monkeypatch.setattr(policy, "_capacity_domain_identity_retire", retire)
+    root = tmp_path / "capacity"
+    receipt = policy.abort_capacity(
+        str(request["deployment_id"]),
+        root=root,
+        registry_snapshot=tmp_path / "registry.json",
+        program=Path("/fixed-transport"),
+        require_root_ownership=False,
+    )
+
+    assert observed == [
+        "binding:False",
+        "candidate-set:True",
+        "retire:oldlab",
+        "retire:gb10",
+    ]
+    assert receipt["status"] == "retired"
+    assert set(receipt["domains"]) == {"oldlab", "gb10"}
+    assert (
+        json.loads(
+            (root / "receipts" / f"{request['deployment_id']}-abort.json").read_text(),
+        )
+        == receipt
+    )
+
+
+def test_capacity_rollback_rebinds_preserved_active_candidate_without_fleet_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failed, _candidate_set = _capacity_fixture()
+    active_candidate = {
+        "candidate_id": "cand-" + "9" * 40,
+        "env_id": failed["env_id"],
+        "principal_id": failed["principal_id"],
+        "candidate_sha": "9" * 40,
+        "candidate_tree": "8" * 40,
+    }
+    snapshot = {
+        "generation": 44,
+        "payload_sha256": "7" * 64,
+        "environments": [
+            {
+                "env_id": failed["env_id"],
+                "principal_id": failed["principal_id"],
+                "state": "active",
+                "resource_generation": failed["resource_generation"],
+                "current_candidate_id": active_candidate["candidate_id"],
+                "slurm_user": failed["slurm_user"],
+                "service_user": failed["slurm_user"],
+                "service_group": failed["service_group"],
+                "slurm_account": failed["slurm_account"],
+                "slurm_qos": failed["slurm_qos"],
+                "uid": failed["uid"],
+                "gid": failed["gid"],
+            },
+        ],
+        "deployments": [
+            {
+                "deployment_id": failed["deployment_id"],
+                "env_id": failed["env_id"],
+                "candidate_id": failed["candidate_id"],
+                "principal_id": failed["principal_id"],
+                "expected_resource_generation": failed["resource_generation"],
+                "phase": "failed",
+            },
+            {
+                "deployment_id": "dep-" + "2" * 32,
+                "env_id": failed["env_id"],
+                "candidate_id": active_candidate["candidate_id"],
+                "principal_id": failed["principal_id"],
+                "expected_resource_generation": int(failed["resource_generation"]) - 1,
+                "phase": "committed",
+                "applied_resource_generation": failed["resource_generation"],
+                "applied_registry_generation": 43,
+                "applied_registry_payload_sha256": "6" * 64,
+            },
+        ],
+        "candidates": [
+            {
+                "candidate_id": failed["candidate_id"],
+                "env_id": failed["env_id"],
+                "principal_id": failed["principal_id"],
+                "candidate_sha": failed["candidate_sha"],
+                "candidate_tree": failed["candidate_tree"],
+            },
+            active_candidate,
+        ],
+    }
+    binding = {
+        "env_id": failed["env_id"],
+        "resource_generation": failed["resource_generation"],
+        "sandbox": "dev-00000001",
+        "service_user": failed["slurm_user"],
+        "slurm_qos": failed["slurm_qos"],
+        "candidate_id": active_candidate["candidate_id"],
+        "candidate_sha": active_candidate["candidate_sha"],
+        "candidate_tree": active_candidate["candidate_tree"],
+    }
+    current_set = {
+        "schema_version": 2,
+        "kind": "loom.developer-sandbox.slurm-candidate-set",
+        "candidate_set_sha256": policy._candidate_set_sha256(
+            {str(failed["slurm_account"]): binding},
+        ),
+        "candidate_bindings": {str(failed["slurm_account"]): binding},
+        "generation": 44,
+        "convergence_id": "6" * 64,
+        "registry_generation": 44,
+        "registry_payload_sha256": snapshot["payload_sha256"],
+    }
+    events: list[str] = []
+    monkeypatch.setattr(
+        policy,
+        "_capacity_request",
+        lambda *_args, **_kwargs: (failed, b"request\n"),
+    )
+    monkeypatch.setattr(
+        policy,
+        "_read_registry_snapshot",
+        lambda *_args, **_kwargs: snapshot,
+    )
+    monkeypatch.setattr(
+        policy,
+        "slurm_candidate_set_from_snapshot",
+        lambda _snapshot: current_set,
+    )
+    monkeypatch.setattr(
+        policy,
+        "_capacity_node_converge",
+        lambda *_args, **_kwargs: pytest.fail("rollback reached fleet convergence"),
+    )
+    monkeypatch.setattr(
+        policy,
+        "_capacity_domain_preflight",
+        lambda domain, *_args, **_kwargs: (
+            events.append(f"preflight:{domain}") or {"controller": {"status": "exact-existing"}}
+        ),
+    )
+    monkeypatch.setattr(
+        policy,
+        "_capacity_domain_identity_converge",
+        lambda domain, *_args, **_kwargs: (
+            events.append(f"identity:{domain}") or {"controller": {"request_id": "1" * 64}}
+        ),
+    )
+    monkeypatch.setattr(
+        policy,
+        "_capacity_domain_identity_readback",
+        lambda domain, *_args, **_kwargs: (
+            events.append(f"readback:{domain}") or {"controller": {"status": "exact-existing"}}
+        ),
+    )
+    monkeypatch.setattr(
+        policy,
+        "_capacity_domain_converge",
+        lambda domain, *_args, **_kwargs: events.append(f"domain:{domain}") or {"status": "ready"},
+    )
+
+    receipt = policy.rollback_capacity(
+        str(failed["deployment_id"]),
+        root=tmp_path / "capacity",
+        registry_snapshot=tmp_path / "registry",
+        program=Path("/fixed-transport"),
+        require_root_ownership=False,
+    )
+
+    assert receipt["failed_candidate_projection_present"] is False
+    assert receipt["association_preserved"] is True
+    assert receipt["restored_candidate_id"] == active_candidate["candidate_id"]
+    assert receipt["failed_candidate_id"] == failed["candidate_id"]
+    assert events == [
+        "preflight:oldlab",
+        "identity:oldlab",
+        "readback:oldlab",
+        "domain:oldlab",
+        "preflight:gb10",
+        "identity:gb10",
+        "readback:gb10",
+        "domain:gb10",
+    ]
+
+
+def _acceptance_probe_fixture(tmp_path: Path) -> tuple[dict[str, object], bytes]:
+    environment = {
+        "env_id": "denv-" + "1" * 32,
+        "principal_id": "oidc:example:developer",
+        "runtime_id": "e-" + "2" * 12,
+        "state": "deploying",
+        "resource_generation": 2,
+        "service_user": "loom-e-" + "2" * 12,
+        "slurm_user": "loom-e-" + "2" * 12,
+        "slurm_account": "lda-" + "2" * 12,
+        "slurm_qos": "ldq-" + "2" * 12,
+        "evidence_root": str(tmp_path / "evidence"),
+        "ports": {
+            "control_plane": 23003,
+            "llm_gateway": 23005,
+            "minio": 23001,
+        },
+    }
+    candidate = {
+        "candidate_id": "cand-" + "3" * 40,
+        "env_id": environment["env_id"],
+        "principal_id": environment["principal_id"],
+        "candidate_sha": "4" * 40,
+        "candidate_tree": "5" * 40,
+    }
+    deployment = {
+        "deployment_id": "dep-" + "6" * 32,
+        "env_id": environment["env_id"],
+        "principal_id": environment["principal_id"],
+        "candidate_id": candidate["candidate_id"],
+        "expected_resource_generation": 2,
+        "applied_resource_generation": 3,
+        "applied_registry_generation": 8,
+        "applied_registry_payload_sha256": "7" * 64,
+        "finalization_payload_sha256": None,
+        "phase": "verified",
+    }
+    snapshot = {
+        "generation": 9,
+        "payload_sha256": "8" * 64,
+        "environments": [environment],
+        "deployments": [deployment],
+        "candidates": [candidate],
+    }
+    unsigned = {
+        "schema_version": 1,
+        "kind": policy._ACCEPTANCE_PROBE_KIND,
+        "action": policy._ACCEPTANCE_PROBE_ACTION,
+        "domain": "oldlab",
+        "cluster": "trt-oldlab",
+        "submit_host": "trt-EAI-OLDLAB-2",
+        "controller": "TRT-EAI-OLDLAB-1",
+        "deployment_id": deployment["deployment_id"],
+        "env_id": environment["env_id"],
+        "principal_id": environment["principal_id"],
+        "runtime_id": environment["runtime_id"],
+        "candidate_id": candidate["candidate_id"],
+        "candidate_sha": candidate["candidate_sha"],
+        "candidate_tree": candidate["candidate_tree"],
+        "applied_resource_generation": 3,
+        "registry_generation": snapshot["generation"],
+        "registry_snapshot_sha256": snapshot["payload_sha256"],
+        "service_user": environment["service_user"],
+        "slurm_account": environment["slurm_account"],
+        "slurm_qos": environment["slurm_qos"],
+        "job_name": f"loom-env-{environment['runtime_id']}-finalize-" + "9" * 12,
+        "time_limit_seconds": 300,
+        "health_services": ["control-plane", "gateway", "minio"],
+        "general_admission_authorized": False,
+        "foreign_job_action": "observe-only",
+        "idempotency_key": "a" * 64,
+    }
+    request = {
+        **unsigned,
+        "payload_sha256": hashlib.sha256(
+            policy._canonical_json_bytes(unsigned) + b"\n",
+        ).hexdigest(),
+    }
+    return snapshot, policy._canonical_json_bytes(request) + b"\n"
+
+
+def test_acceptance_probe_domain_is_durable_single_submit_and_never_cancels_foreign(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    snapshot, raw = _acceptance_probe_fixture(tmp_path)
+    request = json.loads(raw)
+    journals: dict[str, dict[str, object]] = {}
+    commands: list[tuple[str, ...]] = []
+    uid = os.getuid()
+    gid = os.getgid()
+    health = {
+        name: {
+            "service": name,
+            "status": "healthy",
+            "http_status": 200,
+            "candidate_binding_sha256": hashlib.sha256(name.encode()).hexdigest(),
+            "response_sha256": hashlib.sha256(f"{name}-response".encode()).hexdigest(),
+        }
+        for name in policy._ACCEPTANCE_PROBE_SERVICES
+    }
+    output = {
+        "schema_version": 1,
+        "kind": policy._ACCEPTANCE_PROBE_CONTAINER_RESULT_KIND,
+        "request_payload_sha256": request["payload_sha256"],
+        "slurm_job_id": "12345",
+        "health": health,
+        "completed_at": "2026-07-29T12:00:00Z",
+    }
+    output_raw = policy._canonical_json_bytes(output) + b"\n"
+
+    monkeypatch.setattr(policy.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        policy,
+        "_read_registry_snapshot",
+        lambda *_args, **_kwargs: snapshot,
+    )
+    monkeypatch.setattr(policy, "_canonical_host", lambda: "trt-eai-oldlab-2")
+    monkeypatch.setattr(
+        policy,
+        "_slurm_node_for_host",
+        lambda *_args, **_kwargs: loaded.submit_host,
+    )
+    monkeypatch.setattr(
+        policy,
+        "_prepare_private_directory",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        policy,
+        "_load_journal",
+        lambda path, **_kwargs: journals.get(str(path)),
+    )
+
+    def atomic(path: Path, content: str, **_kwargs: object) -> None:
+        journals[str(path)] = json.loads(content)
+        if path.name == "request.json":
+            path.write_text(content, encoding="ascii")
+
+    def run(argv: tuple[str, ...], **_kwargs: object) -> str:
+        commands.append(tuple(argv))
+        assert argv[0] == "sbatch"
+        return "12345;trt-oldlab\n"
+
+    monkeypatch.setattr(policy, "_atomic_write", atomic)
+    monkeypatch.setattr(policy, "_probe_named_accounting_rows", lambda *_args: [])
+    monkeypatch.setattr(policy, "_run", run)
+    monkeypatch.setattr(policy, "_poll_probe_terminal", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        policy,
+        "_acceptance_probe_accounting",
+        lambda *_args: [
+            [
+                "12345",
+                request["job_name"],
+                "COMPLETED",
+                loaded.submit_host,
+                request["slurm_account"],
+                request["service_user"],
+                loaded.cluster,
+                request["slurm_qos"],
+                "0:0",
+            ],
+        ],
+    )
+    monkeypatch.setattr(
+        policy,
+        "_acceptance_probe_output",
+        lambda *_args, **_kwargs: (output, output_raw),
+    )
+    monkeypatch.setattr(
+        policy.pwd,
+        "getpwnam",
+        lambda _name: SimpleNamespace(pw_uid=uid, pw_gid=gid),
+    )
+    monkeypatch.setattr(
+        policy,
+        "_ACCEPTANCE_PROBE_RELATIVE",
+        tmp_path / "state",
+    )
+
+    first = policy.run_acceptance_probe_domain(
+        Path("/"),
+        loaded,
+        raw,
+        transport_request_id="b" * 64,
+    )
+    replay = policy.run_acceptance_probe_domain(
+        Path("/"),
+        loaded,
+        raw,
+        transport_request_id="b" * 64,
+    )
+
+    assert first == replay
+    assert first["submission_count"] == 1
+    assert len(commands) == 1
+    command = commands[0]
+    assert command[0] == "sbatch"
+    assert f"--uid={request['service_user']}" in command
+    assert f"--account={request['slurm_account']}" in command
+    assert f"--qos={request['slurm_qos']}" in command
+    assert "--time=00:05:00" in command
+    assert not any("scancel" in item for item in command)
+    wrap = next(item.removeprefix("--wrap=") for item in command if item.startswith("--wrap="))
+    assert "acceptance-probe-job" in wrap
+    assert "127.0.0.1" not in wrap
+    assert str(policy.Path(policy.__file__).resolve().parents[2]) in wrap
+    assert str(request["candidate_sha"]) not in wrap
+
+
+def test_acceptance_probe_job_uses_fixed_private_compose_and_exact_labels(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(PROFILE)
+    _snapshot, raw = _acceptance_probe_fixture(tmp_path)
+    request = json.loads(raw)
+    request_path = (
+        Path("/srv/loom/developer-environments")
+        / str(request["env_id"])
+        / "evidence"
+        / "acceptance-probes"
+        / f"{request['cluster']}-{request['idempotency_key']}"
+        / "request.json"
+    )
+    result_path = request_path.with_name("result.json")
+    job_id = "34567"
+    project = (
+        f"loom-accept-{request['runtime_id']}-{request['idempotency_key'][:12]}-{request['domain']}"
+    )
+    labels = {
+        "loom.sandbox": request["runtime_id"],
+        "loom.candidate_sha": request["candidate_sha"],
+        "loom.slurm_job_id": job_id,
+        "loom.compose_project": project,
+        "loom.env_id": request["env_id"],
+        "loom.resource_generation": str(request["applied_resource_generation"]),
+        "loom.candidate_id": request["candidate_id"],
+        "loom.candidate_tree": request["candidate_tree"],
+        "loom.registry_generation": str(request["registry_generation"]),
+        "loom.registry_payload_sha256": request["registry_snapshot_sha256"],
+    }
+    rendered = {
+        "services": {
+            name: {
+                "image": f"loom-worker:{request['candidate_sha'][:12]}",
+                "cgroup_parent": "/system.slice/slurm/job_34567",
+                "cpus": 0.25,
+                "mem_limit": 134217728,
+                "pids_limit": 64,
+                "restart": "no",
+                "labels": labels,
+            }
+            for name in ("sandbox-link", "acceptance-probe")
+        },
+    }
+    health = {
+        name: {
+            "service": name,
+            "status": "healthy",
+            "http_status": 200,
+            "candidate_binding_sha256": "1" * 64,
+            "response_sha256": "2" * 64,
+        }
+        for name in policy._ACCEPTANCE_PROBE_SERVICES
+    }
+    output = {
+        "schema_version": 1,
+        "kind": policy._ACCEPTANCE_PROBE_CONTAINER_RESULT_KIND,
+        "request_payload_sha256": request["payload_sha256"],
+        "slurm_job_id": job_id,
+        "health": health,
+        "completed_at": "2026-07-29T12:00:00Z",
+    }
+    commands: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    def run(argv: tuple[str, ...], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append((tuple(argv), kwargs))
+        if "slurm_job_cgroup.py" in " ".join(argv):
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout="/system.slice/slurm/job_34567\n",
+                stderr="",
+            )
+        if argv[-3:] == ("config", "--format", "json"):
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=json.dumps(rendered),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    uid = os.getuid()
+    gid = os.getgid()
+    monkeypatch.setattr(policy, "_acceptance_probe_job_request", lambda _path: request)
+    monkeypatch.setattr(policy.os, "geteuid", lambda: uid)
+    monkeypatch.setattr(policy.os, "getegid", lambda: gid)
+    monkeypatch.setattr(
+        policy.pwd,
+        "getpwnam",
+        lambda _name: SimpleNamespace(pw_uid=uid, pw_gid=gid),
+    )
+    monkeypatch.setattr(policy.os, "environ", {**os.environ, "SLURM_JOB_ID": job_id})
+    monkeypatch.setattr(policy.subprocess, "run", run)
+    monkeypatch.setattr(
+        policy,
+        "_acceptance_probe_output",
+        lambda *_args, **_kwargs: (
+            output,
+            policy._canonical_json_bytes(output) + b"\n",
+        ),
+    )
+
+    assert (
+        policy.run_acceptance_probe_job(
+            loaded,
+            probe_request=request_path,
+            result_path=result_path,
+        )
+        == output
+    )
+
+    compose_calls = [
+        (argv, kwargs) for argv, kwargs in commands if argv[:2] == ("docker", "compose")
+    ]
+    assert [argv[-1] for argv, _kwargs in compose_calls] == [
+        "json",
+        "sandbox-link",
+        "acceptance-probe",
+        "--remove-orphans",
+    ]
+    assert all("127.0.0.1" not in " ".join(argv) for argv, _kwargs in compose_calls)
+    for argv, kwargs in compose_calls:
+        assert "--env-file" in argv
+        assert all(
+            str(REPO_ROOT / relative) in argv for relative in policy._ACCEPTANCE_PROBE_COMPOSE_FILES
+        )
+        assert not any(
+            f"/{request['candidate_sha']}/deploy/" in item
+            or f"/{request['candidate_sha']}/scripts/" in item
+            for item in argv
+        )
+        environment = kwargs["env"]
+        assert isinstance(environment, dict)
+        assert environment["COMPOSE_PROJECT_NAME"] == project
+        assert environment["LOOM_WORKER_ENV_ID"] == request["env_id"]
+        assert environment["LOOM_WORKER_CANDIDATE_SHA"] == request["candidate_sha"]
+
+    drifted = json.loads(json.dumps(rendered))
+    drifted["services"]["sandbox-link"]["ports"] = [{"published": 8080}]
+    with pytest.raises(policy.PolicyError, match="binding drifted"):
+        policy._validate_acceptance_probe_compose(
+            drifted,
+            request,
+            project=project,
+            job_id=job_id,
+            cgroup_parent="/system.slice/slurm/job_34567",
+        )
+    del drifted["services"]["sandbox-link"]["ports"]
+    del drifted["services"]["acceptance-probe"]["labels"]["loom.env_id"]
+    with pytest.raises(policy.PolicyError, match="binding drifted"):
+        policy._validate_acceptance_probe_compose(
+            drifted,
+            request,
+            project=project,
+            job_id=job_id,
+            cgroup_parent="/system.slice/slurm/job_34567",
+        )
+
+
+def test_acceptance_probe_container_reaches_only_private_sandbox_link(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _snapshot, raw = _acceptance_probe_fixture(tmp_path)
+    request = json.loads(raw)
+    requested_urls: list[str] = []
+    published: dict[str, object] = {}
+
+    class Response:
+        status = 200
+
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self, _limit: int) -> bytes:
+            return b'{"status":"ok"}\n'
+
+    def open_url(http_request: SimpleNamespace, **_kwargs: object) -> Response:
+        requested_urls.append(str(http_request.full_url))
+        return Response()
+
+    environment = {
+        variable: str(request[field]) for variable, field in probe_container.REQUIRED_ENV.items()
+    }
+    environment.update(
+        {
+            "SLURM_JOB_ID": "45678",
+            "LOOM_WORKER_SLURM_JOB_ID": "45678",
+        },
+    )
+    monkeypatch.setattr(
+        probe_container,
+        "_read",
+        lambda _path: (request, raw),
+    )
+    monkeypatch.setattr(
+        probe_container,
+        "_write",
+        lambda _path, payload: published.update(payload),
+    )
+    monkeypatch.setattr(probe_container, "urlopen", open_url)
+    monkeypatch.setattr(probe_container.os, "environ", environment)
+
+    result = probe_container.execute(
+        Path("/run/loom-acceptance/request.json"),
+        Path("/run/loom-acceptance-output/result.json"),
+    )
+
+    assert result == published
+    assert requested_urls == list(probe_container.SERVICES.values())
+    assert all(url.startswith("http://sandbox-link:") for url in requested_urls)
+    assert all("127.0.0.1" not in url and "localhost" not in url for url in requested_urls)

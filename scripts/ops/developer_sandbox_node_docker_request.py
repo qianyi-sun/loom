@@ -22,6 +22,16 @@ ACTIONS = (
     "transport-client-bootstrap",
     "transport-upgrade",
     "readback",
+    "environment-authority-bootstrap",
+    "environment-authority-upgrade",
+    "environment-authority-readback",
+)
+ENVIRONMENT_AUTHORITY_ACTIONS = frozenset(
+    {
+        "environment-authority-bootstrap",
+        "environment-authority-upgrade",
+        "environment-authority-readback",
+    }
 )
 EXPECTATIONS = ("not-checked", "absent", "server", "client-server")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -90,6 +100,8 @@ def _validate_semantics(
         raise RequestRenderError("non-readback request contract is invalid")
     if action in {"authority-bootstrap", "authority-upgrade"} and inputs:
         raise RequestRenderError("authority request has unexpected inputs")
+    if action in ENVIRONMENT_AUTHORITY_ACTIONS and inputs:
+        raise RequestRenderError("environment authority request has unexpected inputs")
     if action == "transport-server-bootstrap" and (
         not inputs or any(not name.endswith(".pub") for name in inputs)
     ):
@@ -112,6 +124,7 @@ def render(args: argparse.Namespace) -> bytes:
         or SHA_RE.fullmatch(args.candidate_tree) is None
         or SHA256_RE.fullmatch(operation_id) is None
         or NODE_RE.fullmatch(args.expected_node) is None
+        or (args.action in ENVIRONMENT_AUTHORITY_ACTIONS and args.expected_node != "oldlab-2")
     ):
         raise RequestRenderError("request binding is invalid")
     inputs = _input_digests(args.input_root)

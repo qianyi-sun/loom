@@ -23,17 +23,53 @@ import sys
 import tempfile
 import tomllib
 import uuid
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-PROFILE_ROOT = REPO_ROOT / "deploy/developer-sandboxes/remote-links"
+_FIXED_SOURCE_ROOT = Path(__file__).resolve().parents[2]
+_FIXED_REGISTRY_MODULE = _FIXED_SOURCE_ROOT / "scripts/ops/developer_environment_registry.py"
+if __package__ in {None, ""}:
+    roots = (
+        _FIXED_SOURCE_ROOT,
+        _FIXED_SOURCE_ROOT / "scripts",
+        _FIXED_SOURCE_ROOT / "scripts/ops",
+    )
+    try:
+        root_metadata = tuple(path.lstat() for path in roots)
+        registry_metadata = _FIXED_REGISTRY_MODULE.lstat()
+    except OSError as exc:
+        raise RuntimeError("fixed remote-link module tree is unavailable") from exc
+    expected_identity = (os.geteuid(), os.getegid())
+    if (
+        any(
+            not stat.S_ISDIR(item.st_mode)
+            or (item.st_uid, item.st_gid) != expected_identity
+            or item.st_mode & 0o022
+            for item in root_metadata
+        )
+        or not stat.S_ISREG(registry_metadata.st_mode)
+        or stat.S_ISLNK(registry_metadata.st_mode)
+        or (registry_metadata.st_uid, registry_metadata.st_gid) != expected_identity
+        or registry_metadata.st_nlink != 1
+        or registry_metadata.st_mode & 0o022
+    ):
+        raise RuntimeError("fixed remote-link module tree is unsafe")
+    sys.path.insert(0, str(_FIXED_SOURCE_ROOT))
+
+from scripts.ops.developer_environment_registry import (  # noqa: E402
+    CURRENT_SNAPSHOT_PATH,
+    DeveloperEnvironmentRegistry,
+    RegistryError,
+)
+
+REPO_ROOT = _FIXED_SOURCE_ROOT
 SOURCE_RELAY = REPO_ROOT / "scripts/ops/developer_sandbox_remote_link.py"
 SOURCE_UNIT = REPO_ROOT / "deploy/developer-sandboxes/loom-developer-sandbox-link@.service"
+REGISTRY_SNAPSHOT = CURRENT_SNAPSHOT_PATH
 INSTALL_ROOT = Path("/etc/loom/developer-sandbox-links")
 SERVER_ROOT = INSTALL_ROOT / "server"
 CLIENT_ROOT = INSTALL_ROOT / "clients"
@@ -51,21 +87,7 @@ UNIT_PATH = Path(
 )
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 FINGERPRINT_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
-SANDBOXES = ("qianyi", "hongjian", "devansh")
-PROFILE_VALUES = {
-    "qianyi": (
-        "192.168.50.14",
-        ((26080, 20080), (26100, 20100), (26900, 20900)),
-    ),
-    "hongjian": (
-        "192.168.50.14",
-        ((27080, 21080), (27100, 21100), (27900, 21900)),
-    ),
-    "devansh": (
-        "192.168.50.14",
-        ((28080, 22080), (28100, 22100), (28900, 22900)),
-    ),
-}
+SERVER_ADDRESS = "192.168.50.14"
 OLDLAB_NODES = (
     "oldlab-1",
     "oldlab-2",
@@ -101,6 +123,14 @@ class ServiceProfile:
 @dataclass(frozen=True, slots=True)
 class Profile:
     sandbox: str
+    env_id: str
+    resource_generation: int
+    registry_generation: int
+    registry_payload_sha256: str
+    candidate_id: str
+    candidate_sha: str
+    candidate_tree: str
+    lifecycle_state: str
     server_address: str
     services: tuple[ServiceProfile, ...]
 
@@ -114,85 +144,140 @@ class Profile:
         raise LinkHostError("sandbox link service is absent")
 
 
-def load_profile(sandbox: str) -> Profile:
-    if sandbox not in SANDBOXES:
-        raise LinkHostError("sandbox is not in the closed inventory")
-    expected_address, expected_ports = PROFILE_VALUES[sandbox]
+def _load_registry_snapshot(
+    path: Path = REGISTRY_SNAPSHOT,
+) -> dict[str, Any]:
+    try:
+        raw = path.read_bytes()
+        return DeveloperEnvironmentRegistry.verify_snapshot(raw)
+    except (OSError, RegistryError) as exc:
+        raise LinkHostError("developer environment registry snapshot is invalid") from exc
+
+
+def _registry_environment(
+    sandbox: str,
+    *,
+    snapshot: Mapping[str, Any],
+    allow_provisioning: bool,
+) -> tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]:
+    environments = [item for item in snapshot["environments"] if item["runtime_id"] == sandbox]
+    if len(environments) != 1:
+        raise LinkHostError("developer environment is absent from the registry")
+    environment = environments[0]
+    current = environment["current_candidate_id"]
+    candidates = [
+        item
+        for item in snapshot["candidates"]
+        if item["env_id"] == environment["env_id"]
+        and item["principal_id"] == environment["principal_id"]
+        and item["candidate_id"] == current
+    ]
+    deployments = [
+        item
+        for item in snapshot["deployments"]
+        if item["env_id"] == environment["env_id"]
+        and item["principal_id"] == environment["principal_id"]
+        and item["candidate_id"] == current
+        and item["expected_resource_generation"] + 1 == environment["resource_generation"]
+        and item["applied_resource_generation"] == environment["resource_generation"]
+    ]
+    if (
+        environment["state"] == "active"
+        and len(candidates) == 1
+        and len(deployments) == 1
+        and deployments[0]["phase"] == "committed"
+    ):
+        return environment, candidates[0], deployments[0]
+    if allow_provisioning and environment["state"] == "deploying":
+        in_flight = [
+            item
+            for item in snapshot["deployments"]
+            if item["env_id"] == environment["env_id"]
+            and item["principal_id"] == environment["principal_id"]
+            and item["expected_resource_generation"] == environment["resource_generation"]
+            and item["phase"] not in {"committed", "failed"}
+        ]
+        if len(in_flight) == 1:
+            candidate = [
+                item
+                for item in snapshot["candidates"]
+                if item["candidate_id"] == in_flight[0]["candidate_id"]
+                and item["env_id"] == environment["env_id"]
+                and item["principal_id"] == environment["principal_id"]
+            ]
+            if len(candidate) == 1:
+                return environment, candidate[0], in_flight[0]
+    raise LinkHostError("developer environment is not an admitted registry cohort member")
+
+
+def registered_sandboxes(
+    *,
+    snapshot_path: Path = REGISTRY_SNAPSHOT,
+    allow_provisioning: bool = False,
+) -> tuple[str, ...]:
+    snapshot = _load_registry_snapshot(snapshot_path)
+    sandboxes: list[str] = []
+    for environment in snapshot["environments"]:
+        try:
+            _registry_environment(
+                environment["runtime_id"],
+                snapshot=snapshot,
+                allow_provisioning=allow_provisioning,
+            )
+        except LinkHostError:
+            continue
+        sandboxes.append(environment["runtime_id"])
+    return tuple(sorted(sandboxes))
+
+
+def load_profile(
+    sandbox: str,
+    *,
+    snapshot_path: Path = REGISTRY_SNAPSHOT,
+    allow_provisioning: bool = False,
+) -> Profile:
+    snapshot = _load_registry_snapshot(snapshot_path)
+    environment, candidate, deployment = _registry_environment(
+        sandbox,
+        snapshot=snapshot,
+        allow_provisioning=allow_provisioning,
+    )
+    ports = environment["ports"]
     expected_services = tuple(
         ServiceProfile(
             name=name,
-            server_port=ports[0],
-            target_port=ports[1],
+            server_port=int(ports[f"relay_{name.replace('-', '_')}"]),
+            target_port=int(
+                ports[
+                    {
+                        "control-plane": "control_plane",
+                        "gateway": "llm_gateway",
+                        "minio": "minio",
+                    }[name]
+                ],
+            ),
             health_path=SERVICE_VALUES[name][0],
             allow_empty_health=SERVICE_VALUES[name][1],
         )
-        for name, ports in zip(SERVICE_VALUES, expected_ports, strict=True)
+        for name in SERVICE_VALUES
     )
-    path = PROFILE_ROOT / f"{sandbox}.toml"
-    if not path.exists():
-        return Profile(
-            sandbox=sandbox,
-            server_address=expected_address,
-            services=expected_services,
-        )
-    try:
-        with path.open("rb") as handle:
-            raw: dict[str, Any] = tomllib.load(handle)
-    except (OSError, tomllib.TOMLDecodeError) as exc:
-        raise LinkHostError("sandbox link profile is unavailable") from exc
-    if (
-        set(raw)
-        != {
-            "schema_version",
-            "sandbox",
-            "server_address",
-            "services",
-        }
-        or raw.get("schema_version") != 1
-    ):
-        raise LinkHostError("sandbox link profile does not match schema version 1")
-    if raw.get("sandbox") != sandbox or raw.get("server_address") != expected_address:
-        raise LinkHostError("sandbox link identity or private address drifted")
-    raw_services = raw.get("services")
-    if not isinstance(raw_services, dict) or set(raw_services) != set(SERVICE_VALUES):
-        raise LinkHostError("sandbox link services drifted")
-    services: list[ServiceProfile] = []
-    for expected in expected_services:
-        raw_service = raw_services.get(expected.name)
-        if not isinstance(raw_service, dict) or set(raw_service) != {
-            "server_port",
-            "target_port",
-            "health_path",
-            "allow_empty_health",
-        }:
-            raise LinkHostError("sandbox link service schema drifted")
-        server_port = raw_service.get("server_port")
-        target_port = raw_service.get("target_port")
-        health_path = raw_service.get("health_path")
-        allow_empty_health = raw_service.get("allow_empty_health")
-        if (
-            isinstance(server_port, bool)
-            or not isinstance(server_port, int)
-            or isinstance(target_port, bool)
-            or not isinstance(target_port, int)
-            or not isinstance(health_path, str)
-            or type(allow_empty_health) is not bool
-        ):
-            raise LinkHostError("sandbox link service values drifted")
-        actual = ServiceProfile(
-            name=expected.name,
-            server_port=server_port,
-            target_port=target_port,
-            health_path=health_path,
-            allow_empty_health=allow_empty_health,
-        )
-        if actual != expected:
-            raise LinkHostError("sandbox link service contract drifted")
-        services.append(actual)
     return Profile(
         sandbox=sandbox,
-        server_address=expected_address,
-        services=tuple(services),
+        env_id=environment["env_id"],
+        resource_generation=(
+            deployment["applied_resource_generation"]
+            if deployment["phase"] == "verified"
+            and deployment["applied_resource_generation"] is not None
+            else environment["resource_generation"]
+        ),
+        registry_generation=snapshot["generation"],
+        registry_payload_sha256=snapshot["payload_sha256"],
+        candidate_id=candidate["candidate_id"],
+        candidate_sha=candidate["candidate_sha"],
+        candidate_tree=candidate["candidate_tree"],
+        lifecycle_state=environment["state"],
+        server_address=SERVER_ADDRESS,
+        services=expected_services,
     )
 
 
@@ -402,12 +487,24 @@ def _read_journal(profile: Profile) -> dict[str, Any] | None:
         != {
             "schema_version",
             "sandbox",
+            "env_id",
+            "resource_generation",
+            "registry_generation",
+            "registry_payload_sha256",
             "candidate_sha",
             "previous_sha",
             "phase",
+            "manifest_sha256",
         }
         or payload["schema_version"] != 1
         or payload["sandbox"] != profile.sandbox
+        or not isinstance(payload["env_id"], str)
+        or not isinstance(payload["resource_generation"], int)
+        or not isinstance(payload["registry_generation"], int)
+        or FINGERPRINT_RE.fullmatch(
+            "sha256:" + str(payload["registry_payload_sha256"]),
+        )
+        is None
         or not isinstance(payload["candidate_sha"], str)
         or SHA_RE.fullmatch(payload["candidate_sha"]) is None
         or (
@@ -418,6 +515,14 @@ def _read_journal(profile: Profile) -> dict[str, Any] | None:
             )
         )
         or payload["phase"] not in {"switching", "switched", "restarting"}
+        or payload["manifest_sha256"]
+        != hashlib.sha256(
+            json.dumps(
+                {key: value for key, value in payload.items() if key != "manifest_sha256"},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("ascii"),
+        ).hexdigest()
     ):
         raise LinkHostError("remote-link activation journal binding is invalid")
     return payload
@@ -430,15 +535,29 @@ def _write_journal(
     phase: str,
 ) -> None:
     _ensure_root_dir(TRANSACTION_ROOT)
+    manifest = {
+        "schema_version": 1,
+        "sandbox": profile.sandbox,
+        "env_id": profile.env_id,
+        "resource_generation": profile.resource_generation,
+        "registry_generation": profile.registry_generation,
+        "registry_payload_sha256": profile.registry_payload_sha256,
+        "candidate_sha": candidate_sha,
+        "previous_sha": previous_sha,
+        "phase": phase,
+    }
     _atomic_write(
         _journal_path(profile),
         json.dumps(
             {
-                "schema_version": 1,
-                "sandbox": profile.sandbox,
-                "candidate_sha": candidate_sha,
-                "previous_sha": previous_sha,
-                "phase": phase,
+                **manifest,
+                "manifest_sha256": hashlib.sha256(
+                    json.dumps(
+                        manifest,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("ascii"),
+                ).hexdigest(),
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -749,8 +868,32 @@ def _validate_existing_issuance(
 
 
 def _install_programs() -> None:
+    if Path(__file__).resolve() == INSTALLED_HOST:
+        for path, mode in (
+            (INSTALLED_RELAY, 0o755),
+            (INSTALLED_HOST, 0o755),
+            (UNIT_PATH, 0o644),
+        ):
+            try:
+                metadata = path.lstat()
+            except OSError as exc:
+                raise LinkHostError("fixed remote-link asset is unavailable") from exc
+            if (
+                stat.S_ISLNK(metadata.st_mode)
+                or not stat.S_ISREG(metadata.st_mode)
+                or (metadata.st_uid, metadata.st_gid) != (0, 0)
+                or metadata.st_nlink != 1
+                or stat.S_IMODE(metadata.st_mode) != mode
+                or metadata.st_size == 0
+            ):
+                raise LinkHostError("fixed remote-link asset metadata drifted")
+        _run(("systemctl", "daemon-reload"))
+        return
     _atomic_copy(SOURCE_RELAY, INSTALLED_RELAY, mode=0o755)
-    _atomic_copy(Path(__file__), INSTALLED_HOST, mode=0o755)
+    if Path(__file__).resolve() == INSTALLED_HOST:
+        _install_programs()
+    else:
+        _atomic_copy(Path(__file__), INSTALLED_HOST, mode=0o755)
     _atomic_copy(SOURCE_UNIT, UNIT_PATH, mode=0o644)
     _run(("systemctl", "daemon-reload"))
 
@@ -1238,12 +1381,15 @@ def validate_worker_env(
         "LOOM_SANDBOX_LINK_CP_UPSTREAM": (
             f"https://{profile.server_address}:{control_plane.server_port}"
         ),
+        "LOOM_SANDBOX_LINK_CP_EXPECTED_PORT": str(control_plane.server_port),
         "LOOM_SANDBOX_LINK_GATEWAY_UPSTREAM": (
             f"https://{profile.server_address}:{gateway.server_port}"
         ),
+        "LOOM_SANDBOX_LINK_GATEWAY_EXPECTED_PORT": str(gateway.server_port),
         "LOOM_SANDBOX_LINK_MINIO_UPSTREAM": (
             f"https://{profile.server_address}:{minio.server_port}"
         ),
+        "LOOM_SANDBOX_LINK_MINIO_EXPECTED_PORT": str(minio.server_port),
         "LOOM_WORKER_TOKEN_FILE_HOST": str(root / "worker-token"),
         "LOOM_WORKER_MINIO_ACCESS_KEY_FILE_HOST": str(root / "minio-access-key"),
         "LOOM_WORKER_MINIO_SECRET_KEY_FILE_HOST": str(root / "minio-secret-key"),
@@ -1302,7 +1448,12 @@ def _persist_attestation_locked(
     expected_keys = {
         "schema_version",
         "sandbox",
+        "env_id",
+        "resource_generation",
+        "registry_generation",
+        "registry_payload_sha256",
         "candidate_sha",
+        "candidate_tree",
         "generated_at",
         "expires_at",
         "eligible_nodes",
@@ -1316,7 +1467,12 @@ def _persist_attestation_locked(
         set(payload) != expected_keys
         or payload.get("schema_version") != 1
         or payload.get("sandbox") != profile.sandbox
+        or payload.get("env_id") != profile.env_id
+        or payload.get("resource_generation") != profile.resource_generation
+        or payload.get("registry_generation") != profile.registry_generation
+        or payload.get("registry_payload_sha256") != profile.registry_payload_sha256
         or payload.get("candidate_sha") != candidate_sha
+        or payload.get("candidate_tree") != profile.candidate_tree
         or payload.get("eligible_nodes") != list(INFRASTRUCTURE_LINK_NODES)
         or not isinstance(nodes, dict)
         or set(nodes) != set(INFRASTRUCTURE_LINK_NODES)
@@ -1479,7 +1635,7 @@ def build_parser() -> argparse.ArgumentParser:
         "persist-attestation",
     ):
         child = subparsers.add_parser(command)
-        child.add_argument("--sandbox", choices=SANDBOXES, required=True)
+        child.add_argument("--sandbox", required=True)
         child.add_argument("--candidate-sha", required=True)
         if command in {
             "prepare-rotation",
@@ -1516,7 +1672,27 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     candidate_sha = _candidate(args.candidate_sha)
-    profile = load_profile(args.sandbox)
+    provisioning_commands = {
+        "prepare-rotation",
+        "install-server",
+        "install-client",
+        "activate-server",
+        "rollback-server",
+        "check-server",
+        "check-client",
+        "persist-attestation",
+    }
+    allow_provisioning = args.command in provisioning_commands and (
+        bool(getattr(args, "execute", False)) or args.command in {"check-server", "check-client"}
+    )
+    if allow_provisioning and os.geteuid() != 0:
+        raise LinkHostError("provisioning registry access requires root")
+    profile = load_profile(
+        args.sandbox,
+        allow_provisioning=allow_provisioning,
+    )
+    if candidate_sha != profile.candidate_sha:
+        raise LinkHostError("candidate differs from the registry-bound deployment")
     plan = _plan(args, profile, candidate_sha)
     if hasattr(args, "execute") and not args.execute:
         print(json.dumps(plan, sort_keys=True))

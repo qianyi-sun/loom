@@ -11,31 +11,10 @@ from scripts.ops import developer_sandbox_slurm_policy as policy
 from scripts.ops import slurm_job_cgroup_guard as guard
 
 
-def _config() -> guard.GuardConfig:
-    bindings = {
-        "loom-dev-qianyi": guard.CandidateBinding(
-            account="loom-dev-qianyi",
-            sandbox="qianyi",
-            service_user="loom-sandbox-qianyi",
-            candidate_sha="a" * 40,
-            candidate_tree="b" * 40,
-        ),
-        "loom-dev-hongjian": guard.CandidateBinding(
-            account="loom-dev-hongjian",
-            sandbox="hongjian",
-            service_user="loom-sandbox-hongjian",
-            candidate_sha="c" * 40,
-            candidate_tree="b" * 40,
-        ),
-        "loom-dev-devansh": guard.CandidateBinding(
-            account="loom-dev-devansh",
-            sandbox="devansh",
-            service_user="loom-sandbox-devansh",
-            candidate_sha="d" * 40,
-            candidate_tree="b" * 40,
-        ),
-    }
-    candidate_set_sha256 = hashlib.sha256(
+def _candidate_set_sha256(
+    bindings: dict[str, guard.CandidateBinding],
+) -> str:
+    return hashlib.sha256(
         json.dumps(
             {
                 account: {
@@ -50,13 +29,45 @@ def _config() -> guard.GuardConfig:
             separators=(",", ":"),
         ).encode("ascii"),
     ).hexdigest()
+
+
+def _config(
+    bindings: dict[str, guard.CandidateBinding] | None = None,
+) -> guard.GuardConfig:
+    configured_bindings = (
+        bindings
+        if bindings is not None
+        else {
+            "loom-dev-qianyi": guard.CandidateBinding(
+                account="loom-dev-qianyi",
+                sandbox="qianyi",
+                service_user="loom-sandbox-qianyi",
+                candidate_sha="a" * 40,
+                candidate_tree="b" * 40,
+            ),
+            "loom-dev-hongjian": guard.CandidateBinding(
+                account="loom-dev-hongjian",
+                sandbox="hongjian",
+                service_user="loom-sandbox-hongjian",
+                candidate_sha="c" * 40,
+                candidate_tree="b" * 40,
+            ),
+            "loom-dev-devansh": guard.CandidateBinding(
+                account="loom-dev-devansh",
+                sandbox="devansh",
+                service_user="loom-sandbox-devansh",
+                candidate_sha="d" * 40,
+                candidate_tree="b" * 40,
+            ),
+        }
+    )
     return guard.GuardConfig(
         cluster="trt-oldlab",
         controller="oldlab-1",
         submit_host="oldlab-2",
         allowed_nodes=frozenset({"oldlab-1"}),
-        candidate_bindings=bindings,
-        candidate_set_sha256=candidate_set_sha256,
+        candidate_bindings=configured_bindings,
+        candidate_set_sha256=_candidate_set_sha256(configured_bindings),
         config_sha256="b" * 64,
         pids_max=32768,
         poll_interval_seconds=0.2,
@@ -77,8 +88,10 @@ def _job(tmp_path: Path, job_id: str = "123") -> tuple[Path, Path]:
     return root, job
 
 
-def _config_payload() -> dict[str, object]:
-    config = _config()
+def _config_payload(
+    config: guard.GuardConfig | None = None,
+) -> dict[str, object]:
+    config = config or _config()
     bindings = {
         account: {
             "sandbox": binding.sandbox,
@@ -107,17 +120,79 @@ def _write_config(path: Path, payload: dict[str, object]) -> None:
     path.chmod(0o600)
 
 
+def _refresh_candidate_set_digest(payload: dict[str, object]) -> None:
+    bindings = payload["candidate_bindings"]
+    assert isinstance(bindings, dict)
+    payload["candidate_set_sha256"] = hashlib.sha256(
+        json.dumps(bindings, sort_keys=True, separators=(",", ":")).encode("ascii"),
+    ).hexdigest()
+
+
+def test_dynamic_registry_bindings_accept_custom_accounts_and_service_users(
+    tmp_path: Path,
+) -> None:
+    bindings = dict(_config().candidate_bindings)
+    bindings.update(
+        {
+            "lda-a1b2c3d4": guard.CandidateBinding(
+                account="lda-a1b2c3d4",
+                sandbox="research-4",
+                service_user="lds-a1b2c3d4",
+                candidate_sha="e" * 40,
+                candidate_tree="f" * 40,
+            ),
+            "lda-e5f6a7b8": guard.CandidateBinding(
+                account="lda-e5f6a7b8",
+                sandbox="team-27",
+                service_user="lds-e5f6a7b8",
+                candidate_sha="f" * 40,
+                candidate_tree="e" * 40,
+            ),
+        },
+    )
+    path = tmp_path / "guard.json"
+    _write_config(path, _config_payload(_config(bindings)))
+
+    loaded = guard.load_config(path)
+
+    assert len(loaded.candidate_bindings) == 5
+    assert loaded.candidate_bindings["lda-a1b2c3d4"] == bindings["lda-a1b2c3d4"]
+    root, job = _job(tmp_path)
+    result = guard.scan_once(
+        loaded,
+        cgroup_root=root,
+        job_lookup=lambda job_id: guard.JobRecord(
+            job_id=job_id,
+            account="lda-a1b2c3d4",
+            comment="loom-cgroup-v1:pids=32768",
+            job_name="loom-sandbox-research-4-eeeeeeeeeeee-oldlab-1",
+            batch_host="oldlab-1",
+            node_list="oldlab-1",
+            user="lds-a1b2c3d4",
+        ),
+    )
+    assert result["verified"] == 1
+    assert result["resource_probes"]["lda-a1b2c3d4"]["service_user"] == "lds-a1b2c3d4"
+    assert (job / "pids.max").read_text() == "32768\n"
+
+
 @pytest.mark.parametrize(
     "mutation",
     (
         "legacy",
-        "arbitrary-account",
         "hybrid",
-        "duplicate-sha",
-        "duplicate-label",
+        "empty",
+        "invalid-account",
+        "invalid-service-user",
+        "root-service-user",
+        "invalid-sandbox",
+        "duplicate-sandbox",
+        "duplicate-service-user",
+        "invalid-sha",
+        "invalid-tree",
     ),
 )
-def test_config_rejects_legacy_partial_or_nonclosed_candidate_maps(
+def test_config_rejects_invalid_dynamic_candidate_maps(
     tmp_path: Path,
     mutation: str,
 ) -> None:
@@ -130,24 +205,85 @@ def test_config_rejects_legacy_partial_or_nonclosed_candidate_maps(
         payload["schema_version"] = 1
         payload["candidate_sha"] = "a" * 40
         payload["allowed_accounts"] = sorted(_config().allowed_accounts)
-    elif mutation == "arbitrary-account":
-        bindings["loom-dev-other"] = bindings.pop("loom-dev-devansh")
     elif mutation == "hybrid":
         payload["candidate_sha"] = "a" * 40
-    elif mutation == "duplicate-sha":
-        bindings["loom-dev-hongjian"]["candidate_sha"] = "a" * 40
-        payload["candidate_set_sha256"] = hashlib.sha256(
-            json.dumps(bindings, sort_keys=True, separators=(",", ":")).encode("ascii"),
-        ).hexdigest()
+    elif mutation == "empty":
+        bindings.clear()
+    elif mutation == "invalid-account":
+        bindings["Bad Account"] = bindings.pop("loom-dev-devansh")
+    elif mutation == "invalid-service-user":
+        bindings["loom-dev-devansh"]["service_user"] = "Bad User"
+    elif mutation == "root-service-user":
+        bindings["loom-dev-devansh"]["service_user"] = "root"
+    elif mutation == "invalid-sandbox":
+        bindings["loom-dev-devansh"]["sandbox"] = "Devansh"
+    elif mutation == "duplicate-sandbox":
+        bindings["loom-dev-devansh"]["sandbox"] = "qianyi"
+    elif mutation == "duplicate-service-user":
+        bindings["loom-dev-devansh"]["service_user"] = "loom-sandbox-qianyi"
+    elif mutation == "invalid-sha":
+        bindings["loom-dev-devansh"]["candidate_sha"] = "abc"
     else:
-        bindings["loom-dev-hongjian"]["candidate_sha"] = "a" * 12 + "c" * 28
-        payload["candidate_set_sha256"] = hashlib.sha256(
-            json.dumps(bindings, sort_keys=True, separators=(",", ":")).encode("ascii"),
-        ).hexdigest()
+        bindings["loom-dev-devansh"]["candidate_tree"] = "abc"
+    if mutation not in {"legacy", "hybrid"}:
+        _refresh_candidate_set_digest(payload)
     path = tmp_path / "guard.json"
     _write_config(path, payload)
 
     with pytest.raises(guard.GuardError):
+        guard.load_config(path)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ("account", "sandbox", "service_user", "candidate_sha", "candidate_tree"),
+)
+def test_candidate_set_digest_binds_every_dynamic_binding_field(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    payload = _config_payload()
+    bindings = payload["candidate_bindings"]
+    assert isinstance(bindings, dict)
+    binding = bindings["loom-dev-qianyi"]
+    if field == "account":
+        bindings["lda-a1b2c3d4"] = bindings.pop("loom-dev-qianyi")
+    elif field == "sandbox":
+        binding["sandbox"] = "runtime-x"
+    elif field == "service_user":
+        binding["service_user"] = "lds-a1b2c3d4"
+    elif field == "candidate_sha":
+        binding["candidate_sha"] = "e" * 40
+    else:
+        binding["candidate_tree"] = "f" * 40
+    path = tmp_path / f"{field}.json"
+    _write_config(path, payload)
+
+    with pytest.raises(guard.GuardError, match="candidate-set digest"):
+        guard.load_config(path)
+
+
+def test_config_rejects_duplicate_json_account_keys(tmp_path: Path) -> None:
+    payload = _config_payload()
+    bindings = payload["candidate_bindings"]
+    assert isinstance(bindings, dict)
+    serialized_bindings = json.dumps(bindings, sort_keys=True)
+    duplicated_bindings = (
+        serialized_bindings[:-1]
+        + ',"loom-dev-qianyi":'
+        + json.dumps(bindings["loom-dev-qianyi"], sort_keys=True)
+        + "}"
+    )
+    serialized = json.dumps(payload, sort_keys=True).replace(
+        serialized_bindings,
+        duplicated_bindings,
+        1,
+    )
+    path = tmp_path / "duplicate-account.json"
+    path.write_text(serialized + "\n")
+    path.chmod(0o600)
+
+    with pytest.raises(guard.GuardError, match="duplicate fields"):
         guard.load_config(path)
 
 
@@ -275,27 +411,45 @@ def test_candidate_or_allocation_route_mismatch_fails_closed(tmp_path: Path) -> 
 
 def test_cross_account_candidate_or_user_binding_fails_closed(tmp_path: Path) -> None:
     root, job = _job(tmp_path)
+    config = _config(
+        {
+            "lda-a1b2c3d4": guard.CandidateBinding(
+                account="lda-a1b2c3d4",
+                sandbox="runtime-a",
+                service_user="lds-a1b2c3d4",
+                candidate_sha="a" * 40,
+                candidate_tree="b" * 40,
+            ),
+            "lda-e5f6a7b8": guard.CandidateBinding(
+                account="lda-e5f6a7b8",
+                sandbox="runtime-b",
+                service_user="lds-e5f6a7b8",
+                candidate_sha="c" * 40,
+                candidate_tree="d" * 40,
+            ),
+        },
+    )
 
     for user, job_name in (
         (
-            "loom-sandbox-hongjian",
-            "loom-sandbox-qianyi-aaaaaaaaaaaa-oldlab-1",
+            "lds-e5f6a7b8",
+            "loom-sandbox-runtime-a-aaaaaaaaaaaa-oldlab-1",
         ),
         (
-            "loom-sandbox-qianyi",
-            "loom-sandbox-hongjian-cccccccccccc-oldlab-1",
+            "lds-a1b2c3d4",
+            "loom-sandbox-runtime-b-cccccccccccc-oldlab-1",
         ),
         (
-            "loom-sandbox-qianyi",
-            "loom-sandbox-hongjian-cccccccccccc-qianyi-aaaaaaaaaaaa-oldlab-1",
+            "lds-a1b2c3d4",
+            "loom-sandbox-runtime-a-cccccccccccc-oldlab-1",
         ),
     ):
         result = guard.scan_once(
-            _config(),
+            config,
             cgroup_root=root,
             job_lookup=lambda job_id, user=user, job_name=job_name: guard.JobRecord(
                 job_id=job_id,
-                account="loom-dev-qianyi",
+                account="lda-a1b2c3d4",
                 comment="loom-cgroup-v1:pids=32768",
                 job_name=job_name,
                 batch_host="oldlab-1",
@@ -306,6 +460,32 @@ def test_cross_account_candidate_or_user_binding_fails_closed(tmp_path: Path) ->
         assert result["failed"] == 1
         assert result["verified"] == 0
         assert (job / "pids.max").read_text() == "max\n"
+
+    account_drift = replace(
+        config,
+        candidate_bindings={
+            **config.candidate_bindings,
+            "lda-a1b2c3d4": replace(
+                config.candidate_bindings["lda-a1b2c3d4"],
+                account="lda-e5f6a7b8",
+            ),
+        },
+    )
+    result = guard.scan_once(
+        account_drift,
+        cgroup_root=root,
+        job_lookup=lambda job_id: guard.JobRecord(
+            job_id=job_id,
+            account="lda-a1b2c3d4",
+            comment="loom-cgroup-v1:pids=32768",
+            job_name="loom-sandbox-runtime-a-aaaaaaaaaaaa-oldlab-1",
+            batch_host="oldlab-1",
+            node_list="oldlab-1",
+            user="lds-a1b2c3d4",
+        ),
+    )
+    assert result["failed"] == 1
+    assert "account binding" in result["failures"][0]["reason"]
 
 
 def test_host_converger_installs_exact_guard_contract(tmp_path: Path) -> None:

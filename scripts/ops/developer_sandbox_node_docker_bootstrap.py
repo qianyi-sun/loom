@@ -63,7 +63,17 @@ ACTIONS: Final = frozenset(
         "transport-client-bootstrap",
         "transport-upgrade",
         "readback",
+        "environment-authority-bootstrap",
+        "environment-authority-upgrade",
+        "environment-authority-readback",
     },
+)
+ENVIRONMENT_AUTHORITY_ACTIONS: Final = frozenset(
+    {
+        "environment-authority-bootstrap",
+        "environment-authority-upgrade",
+        "environment-authority-readback",
+    }
 )
 REQUEST_FIELDS: Final = {
     "schema_version",
@@ -285,17 +295,36 @@ def _load_request() -> dict[str, Any]:
         or raw != _canonical(payload)
     ):
         raise DockerNodeBootstrapError("Docker bootstrap request binding is invalid")
-    if payload["action"] in {"authority-bootstrap", "authority-upgrade", "readback"} and inputs:
+    if (
+        payload["action"]
+        in {
+            "authority-bootstrap",
+            "authority-upgrade",
+            "readback",
+            *ENVIRONMENT_AUTHORITY_ACTIONS,
+        }
+        and inputs
+    ):
         raise DockerNodeBootstrapError("Docker bootstrap request has unexpected trust inputs")
+    if (
+        payload["action"] in ENVIRONMENT_AUTHORITY_ACTIONS
+        and payload["expected_node"] != "oldlab-2"
+    ):
+        raise DockerNodeBootstrapError("environment authority bootstrap is pinned to oldlab-2")
     return payload
 
 
-def _clean_env() -> dict[str, str]:
+def _clean_env(*, host_chroot: bool = False) -> dict[str, str]:
+    xdg_root = (
+        Path("/run/loom-developer-sandbox-node-bootstrap/xdg-config")
+        if host_chroot
+        else HOST_STAGE_ROOT / "xdg-config"
+    )
     return {
         "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
-        "HOME": "/nonexistent",
+        "XDG_CONFIG_HOME": str(xdg_root),
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_TERMINAL_PROMPT": "0",
@@ -455,6 +484,7 @@ def _validate_launcher_identity(source: Path, candidate_sha: str) -> None:
 
 def _prepare_stage(request: Mapping[str, Any], bundle_payload: bytes) -> tuple[Path, Path]:
     _ensure_directory(HOST_STAGE_ROOT, 0o700)
+    _ensure_directory(HOST_STAGE_ROOT / "xdg-config", 0o700)
     stage = HOST_STAGE_ROOT / str(request["request_id"])
     _remove_stage(stage)
     try:
@@ -540,6 +570,7 @@ def _fixed_action_argv(
     host_input_root = stage / "input"
     authority = source / "scripts/ops/developer_sandbox_node_authority.py"
     transport = source / "scripts/ops/developer_sandbox_node_transport.py"
+    environment_installer = source / "scripts/ops/developer_environment_authority_installer.py"
     prefix = ["/usr/bin/python3", "-I"]
     action = request["action"]
     if action in {"authority-bootstrap", "authority-upgrade"}:
@@ -554,6 +585,19 @@ def _fixed_action_argv(
                 "--candidate-tree",
                 str(request["candidate_tree"]),
                 "--execute",
+            ],
+            source,
+        )
+    if action in ENVIRONMENT_AUTHORITY_ACTIONS:
+        return (
+            [
+                *prefix,
+                str(environment_installer),
+                str(action),
+                "--candidate-sha",
+                str(request["candidate_sha"]),
+                "--candidate-tree",
+                str(request["candidate_tree"]),
             ],
             source,
         )
@@ -619,7 +663,7 @@ def _run_host_python(argv: Sequence[str], cwd: Path) -> dict[str, Any]:
         completed = subprocess.run(
             list(argv),
             stdin=subprocess.DEVNULL,
-            env=_clean_env(),
+            env=_clean_env(host_chroot=True),
             check=False,
             capture_output=True,
             timeout=600,
@@ -661,7 +705,12 @@ def _validate_action_result(
     binding_field = "initiator" if request["action"] == "transport-client-bootstrap" else "node"
     if result.get("status") != "succeeded" or result.get(binding_field) != request["expected_node"]:
         raise DockerNodeBootstrapError("Docker bootstrap child evidence is invalid")
-    if request["action"] in {"authority-bootstrap", "authority-upgrade", "readback"} and (
+    if request["action"] in {
+        "authority-bootstrap",
+        "authority-upgrade",
+        "readback",
+        *ENVIRONMENT_AUTHORITY_ACTIONS,
+    } and (
         result.get("source_sha") != request["candidate_sha"]
         or result.get("source_tree") != request["candidate_tree"]
     ):
@@ -721,6 +770,22 @@ def _run_chroot_action(request: Mapping[str, Any], stage: Path) -> dict[str, Any
 def _write_receipt(request: Mapping[str, Any], result: Mapping[str, Any]) -> dict[str, Any]:
     path = HOST_RECEIPT_ROOT / f"{request['request_id']}.json"
     result_digest = _digest(_canonical(result))
+    environment_action = request["action"] in ENVIRONMENT_AUTHORITY_ACTIONS
+    environment_fields = (
+        {"installed_asset_digests", "registry_snapshot_sha256"} if environment_action else set()
+    )
+    if environment_action and (
+        not isinstance(result.get("installed_asset_digests"), dict)
+        or not result["installed_asset_digests"]
+        or any(
+            not isinstance(destination, str)
+            or not destination.startswith("/")
+            or SHA256_RE.fullmatch(str(digest)) is None
+            for destination, digest in result["installed_asset_digests"].items()
+        )
+        or SHA256_RE.fullmatch(str(result.get("registry_snapshot_sha256"))) is None
+    ):
+        raise DockerNodeBootstrapError("Docker bootstrap environment receipt evidence is invalid")
     if path.exists():
         existing_raw = _read_regular(
             path,
@@ -747,6 +812,7 @@ def _write_receipt(request: Mapping[str, Any], result: Mapping[str, Any]) -> dic
                 "completed_at",
                 "status",
             }
+            | environment_fields
             or existing_raw != _canonical(existing)
             or existing.get("schema_version") != SCHEMA_VERSION
             or existing.get("kind") != "loom.developer-sandbox.node-docker-bootstrap-receipt"
@@ -757,6 +823,14 @@ def _write_receipt(request: Mapping[str, Any], result: Mapping[str, Any]) -> dic
             or existing.get("candidate_tree") != request["candidate_tree"]
             or existing.get("expected_node") != request["expected_node"]
             or existing.get("result_sha256") != result_digest
+            or (
+                environment_action
+                and (
+                    existing.get("installed_asset_digests") != result["installed_asset_digests"]
+                    or existing.get("registry_snapshot_sha256")
+                    != result["registry_snapshot_sha256"]
+                )
+            )
             or not isinstance(existing.get("completed_at"), str)
             or existing.get("status") != "succeeded"
         ):
@@ -775,6 +849,9 @@ def _write_receipt(request: Mapping[str, Any], result: Mapping[str, Any]) -> dic
         "completed_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "status": "succeeded",
     }
+    if environment_action:
+        receipt["installed_asset_digests"] = result["installed_asset_digests"]
+        receipt["registry_snapshot_sha256"] = result["registry_snapshot_sha256"]
     payload = _canonical(receipt)
     temporary_descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{request['request_id']}.",

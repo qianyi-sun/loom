@@ -169,13 +169,77 @@ def _runtime_identity_labels(
     the documented legacy, unlabelled worker rather than failing after a trial
     has already been claimed.
     """
-    values = (
+    legacy_values = (
         ("loom.sandbox", getattr(settings, "sandbox_identity", "")),
         ("loom.candidate_sha", getattr(settings, "candidate_sha", "")),
         ("loom.slurm_job_id", getattr(settings, "slurm_job_id", "")),
         ("loom.compose_project", getattr(settings, "compose_project", "")),
     )
-    return tuple((key, value) for key, value in values if value)
+    registry_values: tuple[tuple[str, str | int], ...] = (
+        ("loom.env_id", getattr(settings, "env_id", "")),
+        (
+            "loom.resource_generation",
+            getattr(settings, "resource_generation", 0),
+        ),
+        ("loom.candidate_id", getattr(settings, "candidate_id", "")),
+        ("loom.candidate_tree", getattr(settings, "candidate_tree", "")),
+        (
+            "loom.registry_generation",
+            getattr(settings, "registry_generation", 0),
+        ),
+        (
+            "loom.registry_payload_sha256",
+            getattr(settings, "registry_payload_sha256", ""),
+        ),
+    )
+    if not any(value for _key, value in registry_values):
+        return tuple((key, value) for key, value in legacy_values if value)
+    legacy = dict(legacy_values)
+    registry = dict(registry_values)
+    if (
+        not all(isinstance(value, str) and value for value in legacy.values())
+        or re.fullmatch(
+            r"^[a-z][a-z0-9-]{1,31}$",
+            str(legacy["loom.sandbox"]),
+        )
+        is None
+        or re.fullmatch(
+            r"^[0-9a-f]{40}$",
+            str(legacy["loom.candidate_sha"]),
+        )
+        is None
+        or _SLURM_JOB_ID_RE.fullmatch(str(legacy["loom.slurm_job_id"])) is None
+        or re.fullmatch(
+            r"^[a-z0-9][a-z0-9_-]{0,127}$",
+            str(legacy["loom.compose_project"]),
+        )
+        is None
+        or re.fullmatch(r"^denv-[a-z0-9-]{8,64}$", str(registry["loom.env_id"])) is None
+        or type(registry["loom.resource_generation"]) is not int
+        or registry["loom.resource_generation"] < 1
+        or re.fullmatch(
+            r"^cand-[0-9a-f]{40}$",
+            str(registry["loom.candidate_id"]),
+        )
+        is None
+        or re.fullmatch(
+            r"^[0-9a-f]{40}$",
+            str(registry["loom.candidate_tree"]),
+        )
+        is None
+        or type(registry["loom.registry_generation"]) is not int
+        or registry["loom.registry_generation"] < 1
+        or re.fullmatch(
+            r"^[0-9a-f]{64}$",
+            str(registry["loom.registry_payload_sha256"]),
+        )
+        is None
+    ):
+        raise RuntimeError("worker registry identity labels are incomplete or invalid")
+    return (
+        *legacy_values,
+        *((key, str(value)) for key, value in registry_values),
+    )
 
 
 def _slurm_gpu_device_ids(settings: WorkerSettings) -> tuple[str, ...]:
@@ -371,10 +435,11 @@ async def run_worker(settings: WorkerSettings) -> None:
     state = ShutdownState()
     install_signal_handlers(state)
 
-    # Evaluate the controller-owned containment binding before registration,
-    # cleanup, or claims. A non-exclusive worker must never become visible if
-    # its allocation cgroup was lost or replaced.
+    # Evaluate the controller-owned containment and registry bindings before
+    # registration, cleanup, or claims. A non-exclusive worker must never
+    # become visible if either allocation boundary was lost or replaced.
     _worker_cgroup_parent(settings)
+    _runtime_identity_labels(settings)
     settings.trajectory_cache_dir.mkdir(parents=True, exist_ok=True)
     _configure_blocking_io_executor(settings)
     _log_docker_registry_auth_summary()

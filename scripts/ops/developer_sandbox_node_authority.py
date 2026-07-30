@@ -20,6 +20,7 @@ import binascii
 import fcntl
 import grp
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -45,10 +46,17 @@ LIBEXEC: Final = Path("/usr/local/libexec/loom-developer-sandbox-node-authority"
 SOURCE_ROOT: Final = Path("/opt/loom-developer-sandbox-node-authority/source")
 POLICY: Final = Path("/etc/loom/developer-sandbox-node-authority.json")
 SUDOERS: Final = Path("/etc/sudoers.d/loom-developer-sandbox-node-authority")
+NODE_AUTHORITY_SUDOERS_PAYLOAD: Final = (
+    b"qianyi ALL=(root) NOPASSWD:NOSETENV: "
+    b"/usr/local/libexec/loom-developer-sandbox-node-authority transact\n"
+    b"qianyi ALL=(root) NOPASSWD:NOSETENV: "
+    b"/usr/local/libexec/loom-developer-sandbox-node-authority check\n"
+)
 STATE_ROOT: Final = Path("/var/lib/loom-developer-sandbox-node-authority")
 LOCK: Final = STATE_ROOT / "authority.lock"
 JOURNAL: Final = STATE_ROOT / "journal.jsonl"
 RECEIPT_ROOT: Final = STATE_ROOT / "receipts"
+IDENTITY_TRANSACTION_ROOT: Final = STATE_ROOT / "identity-transactions"
 STAGING_BROKER_ROOT: Final = STATE_ROOT / "staging-broker"
 STAGING_ACCOUNTING_ROOT: Final = STATE_ROOT / "staging-accounting"
 STAGING_ACCOUNTING_JOURNAL: Final = STAGING_ACCOUNTING_ROOT / "journal.json"
@@ -171,7 +179,19 @@ SCHEMA_VERSION: Final = 1
 MAX_REQUEST_BYTES: Final = 96 * 1024 * 1024
 MAX_PAYLOAD_BYTES: Final = 64 * 1024 * 1024
 SHA_RE: Final = frozenset("0123456789abcdef")
-SANDBOXES: Final = frozenset({"qianyi", "hongjian", "devansh"})
+SAFE_RUNTIME_RE: Final = re.compile(r"[a-z][a-z0-9-]{1,31}\Z")
+REGISTRY_SNAPSHOT: Final = Path(
+    "/var/lib/loom-developer-environment-registry/current-snapshot.json",
+)
+REGISTRY_SNAPSHOT_ARCHIVE: Final = REGISTRY_SNAPSHOT.parent / "snapshots"
+REGISTRY_SNAPSHOT_SYNC_ACTION: Final = "registry-snapshot-sync"
+REGISTRY_SNAPSHOT_SYNC_KIND: Final = "developer-environment-registry-snapshot-json"
+REGISTRY_SNAPSHOT_ARCHIVE_RE: Final = re.compile(
+    r"registry-([1-9][0-9]*)-([0-9a-f]{64})\.json\Z",
+)
+REGISTRY_MODULE_RELATIVE: Final = Path(
+    "scripts/ops/developer_environment_registry.py",
+)
 STAGING_SCOPE: Final = "staging"
 STAGING_BOOT_ID_PATH: Final = Path("/proc/sys/kernel/random/boot_id")
 STAGING_BOOT_ID_RE: Final = re.compile(
@@ -188,6 +208,11 @@ TRANSACT_ACTIONS: Final = frozenset(
         "persist-fleet-attestation",
         "slurm-node-converge",
         "slurm-controller-converge",
+        "slurm-identity-converge",
+        "slurm-identity-retire",
+        "developer-environment-acceptance-probe",
+        "developer-environment-runtime-retire",
+        REGISTRY_SNAPSHOT_SYNC_ACTION,
         "slurm-rollback",
         "collect-live-overlap",
         "staging-allocation-bootstrap",
@@ -209,6 +234,8 @@ CHECK_ACTIONS: Final = frozenset(
         "export-domain-attestation",
         "export-runtime-proof-artifact",
         "slurm-check",
+        "slurm-identity-preflight",
+        "slurm-identity-inventory",
         "observe-live-overlap-job",
         "observe-platform-health-node",
         "staging-pressure-reclaim-observe",
@@ -233,6 +260,10 @@ SLURM_ACTIONS: Final = frozenset(
         "slurm-controller-converge",
         "slurm-rollback",
         "slurm-check",
+        "slurm-identity-converge",
+        "slurm-identity-retire",
+        "slurm-identity-inventory",
+        "slurm-identity-preflight",
     },
 )
 UPGRADE_PHASES: Final = frozenset(
@@ -255,6 +286,8 @@ PAYLOAD_KIND: Final = {
     "persist-fleet-attestation": "fleet-attestation-json",
     "slurm-node-converge": "slurm-candidate-set-json",
     "slurm-controller-converge": "slurm-candidate-set-json",
+    "slurm-identity-converge": "developer-environment-identity-preflight-json",
+    "slurm-identity-retire": "developer-environment-identity-preflight-json",
     "slurm-rollback": "slurm-candidate-set-json",
     "collect-live-overlap": "live-overlap-collection-json",
     "staging-allocation-bootstrap": "staging-infrastructure-operation-request",
@@ -272,10 +305,37 @@ PAYLOAD_KIND: Final = {
     "export-domain-attestation": "none",
     "export-runtime-proof-artifact": "runtime-proof-artifact-id",
     "slurm-check": "slurm-candidate-set-json",
+    "slurm-identity-preflight": "developer-environment-identity-preflight-json",
+    "slurm-identity-inventory": "developer-environment-identity-inventory-json",
+    "developer-environment-acceptance-probe": ("developer-environment-acceptance-probe-json"),
+    "developer-environment-runtime-retire": ("developer-environment-runtime-retire-json"),
+    REGISTRY_SNAPSHOT_SYNC_ACTION: REGISTRY_SNAPSHOT_SYNC_KIND,
     "observe-live-overlap-job": "live-overlap-job-json",
     "observe-platform-health-node": "platform-health-node-json",
     "staging-pressure-reclaim-observe": "staging-pressure-reclaim-observe-request",
 }
+DYNAMIC_TARGET_ACTIONS: Final = frozenset(
+    {
+        "host-converge",
+        "materialize",
+        "install-client",
+        "attest",
+        "rollback",
+        "persist-fleet-attestation",
+        "inspect-candidate",
+        "inspect-local",
+        "inspect-link-client",
+        "inspect-link-server",
+        "export-domain-attestation",
+        "export-runtime-proof-artifact",
+        "collect-live-overlap",
+        "observe-live-overlap-job",
+        "observe-platform-health-node",
+        "slurm-identity-preflight",
+        "slurm-identity-converge",
+        "slurm-identity-retire",
+    },
+)
 REQUEST_FIELDS: Final = {
     "schema_version",
     "request_id",
@@ -289,6 +349,26 @@ REQUEST_FIELDS: Final = {
     "payload_sha256",
     "payload_base64",
     "prior_request_id",
+}
+DYNAMIC_TARGET_BINDING_FIELDS: Final = {
+    "env_id",
+    "resource_generation",
+    "candidate_id",
+    "registry_generation",
+    "registry_payload_sha256",
+}
+DEPLOYMENT_TARGET_ACTIONS: Final = frozenset(
+    {
+        "slurm-identity-preflight",
+        "slurm-identity-converge",
+        "slurm-identity-retire",
+    },
+)
+DEPLOYMENT_TARGET_BINDING_FIELDS: Final = {"deployment_id"}
+DYNAMIC_REQUEST_FIELDS: Final = REQUEST_FIELDS | DYNAMIC_TARGET_BINDING_FIELDS
+REGISTRY_SNAPSHOT_SYNC_FIELDS: Final = REQUEST_FIELDS | {
+    "registry_generation",
+    "registry_payload_sha256",
 }
 RECEIPT_FIELDS: Final = {
     "schema_version",
@@ -305,6 +385,13 @@ RECEIPT_FIELDS: Final = {
     "completed_at",
     "status",
 }
+DYNAMIC_RECEIPT_FIELDS: Final = RECEIPT_FIELDS | DYNAMIC_TARGET_BINDING_FIELDS
+REGISTRY_SNAPSHOT_SYNC_RECEIPT_FIELDS: Final = RECEIPT_FIELDS | {
+    "registry_generation",
+    "registry_payload_sha256",
+    "source_sha",
+    "source_tree",
+}
 JOURNAL_FIELDS: Final = {
     "schema_version",
     "request_id",
@@ -314,6 +401,10 @@ JOURNAL_FIELDS: Final = {
     "result_sha256",
     "completed_at",
     "status",
+}
+REGISTRY_SNAPSHOT_SYNC_JOURNAL_FIELDS: Final = JOURNAL_FIELDS | {
+    "registry_generation",
+    "registry_payload_sha256",
 }
 LIVE_COLLECTION_FIELDS: Final = {
     "schema_version",
@@ -351,6 +442,209 @@ PLATFORM_HEALTH_REQUEST_FIELDS: Final = {
     "expected_host",
     "since_at",
     "candidates",
+}
+IDENTITY_PREFLIGHT_FIELDS: Final = {
+    "schema_version",
+    "kind",
+    "env_id",
+    "principal_id",
+    "resource_generation",
+    "service_user",
+    "service_group",
+    "uid",
+    "gid",
+    "slurm_account",
+    "slurm_qos",
+    "registry_generation",
+    "registry_payload_sha256",
+    "candidate_set_sha256",
+    "revive_journal_sha256",
+}
+IDENTITY_PREFLIGHT_KIND: Final = "loom.developer-environment.identity-preflight"
+IDENTITY_PREFLIGHT_RESULT_KIND: Final = "loom.developer-environment.identity-preflight-result"
+IDENTITY_CONVERGENCE_RESULT_KIND: Final = "loom.developer-environment.identity-convergence-result"
+IDENTITY_INVENTORY_KIND: Final = "loom.developer-environment.identity-inventory-request"
+IDENTITY_INVENTORY_RESULT_KIND: Final = "loom.developer-environment.identity-inventory-result"
+FLEET_BOOTSTRAP_SCOPE: Final = "fleet-bootstrap"
+IDENTITY_INVENTORY_FIELDS: Final = {
+    "schema_version",
+    "kind",
+    "uid_start",
+    "uid_end",
+    "registry_generation",
+    "registry_payload_sha256",
+}
+IDENTITY_UID_START: Final = 32_000
+IDENTITY_UID_END: Final = 60_000
+ACCEPTANCE_PROBE_ACTION: Final = "developer-environment-acceptance-probe"
+ACCEPTANCE_PROBE_REQUEST_KIND: Final = "loom.developer-environment.acceptance-probe-domain-request"
+ACCEPTANCE_PROBE_REQUEST_FIELDS: Final = {
+    "schema_version",
+    "kind",
+    "action",
+    "domain",
+    "cluster",
+    "submit_host",
+    "controller",
+    "deployment_id",
+    "env_id",
+    "principal_id",
+    "runtime_id",
+    "candidate_id",
+    "candidate_sha",
+    "candidate_tree",
+    "applied_resource_generation",
+    "registry_generation",
+    "registry_snapshot_sha256",
+    "service_user",
+    "slurm_account",
+    "slurm_qos",
+    "job_name",
+    "time_limit_seconds",
+    "health_services",
+    "general_admission_authorized",
+    "foreign_job_action",
+    "idempotency_key",
+    "payload_sha256",
+}
+RUNTIME_RETIRE_ACTION: Final = "developer-environment-runtime-retire"
+RUNTIME_RETIRE_REQUEST_KIND: Final = "loom.developer-environment.runtime-retire-node-request"
+RUNTIME_RETIRE_RECEIPT_KIND: Final = "loom.developer-environment.runtime-retire-node-receipt"
+RUNTIME_RETIRE_REQUEST_FIELDS: Final = {
+    "schema_version",
+    "kind",
+    "action",
+    "node",
+    "domain",
+    "deployment_id",
+    "env_id",
+    "principal_id",
+    "runtime_id",
+    "resource_generation",
+    "registry_generation",
+    "registry_snapshot_sha256",
+    "retire_operation_sha256",
+    "current_candidate_id",
+    "candidate_bindings",
+    "foreign_path_action",
+    "audit_action",
+    "payload_sha256",
+}
+RUNTIME_RETIRE_ABSENCE_FIELDS: Final = {
+    "link_client_credentials",
+    "tls_private_keys",
+    "token_files",
+    "domain_environment",
+    "domain_config",
+    "candidate_material",
+    "active_attestation_pointers",
+}
+RUNTIME_RETIRE_ROOT: Final = Path(
+    "/var/lib/loom-developer-environment-runtime-retire",
+)
+RUNTIME_RETIRE_WAL_ROOT: Final = Path(
+    "/var/lib/loom-developer-environment-runtime/lifecycle/retire",
+)
+RUNTIME_RETIRE_WAL_FIELDS: Final = {
+    "schema_version",
+    "kind",
+    "phase",
+    "env_id",
+    "principal_id",
+    "runtime_id",
+    "uid",
+    "gid",
+    "service_user",
+    "service_group",
+    "slurm_user",
+    "slurm_account",
+    "slurm_qos",
+    "expected_resource_generation",
+    "current_candidate_id",
+    "idempotency_key",
+    "evidence",
+    "object_checkpoints",
+    "created_at",
+    "updated_at",
+    "payload_sha256",
+}
+ACCEPTANCE_PROBE_ROUTE: Final = {
+    "oldlab": {
+        "cluster": "trt-oldlab",
+        "node": "oldlab-2",
+        "submit_host": "trt-EAI-OLDLAB-2",
+        "controller": "TRT-EAI-OLDLAB-1",
+    },
+    "gb10": {
+        "cluster": "trt-gb10",
+        "node": "trt-gb10-1",
+        "submit_host": "trt-gb10-1",
+        "controller": "trt-gb10-1",
+    },
+}
+ACCEPTANCE_PROBE_RECEIPT_FIELDS: Final = {
+    "schema_version",
+    "kind",
+    "status",
+    "action",
+    "domain",
+    "cluster",
+    "submit_host",
+    "controller",
+    "deployment_id",
+    "env_id",
+    "principal_id",
+    "runtime_id",
+    "candidate_id",
+    "candidate_sha",
+    "candidate_tree",
+    "applied_resource_generation",
+    "registry_generation",
+    "registry_snapshot_sha256",
+    "probe_request_sha256",
+    "transport_request_id",
+    "submission_count",
+    "job",
+    "health",
+    "terminal",
+    "job_output_sha256",
+    "authority_receipt_sha256",
+    "completed_at",
+    "payload_sha256",
+}
+ACCEPTANCE_PROBE_JOB_FIELDS: Final = {
+    "job_id",
+    "job_name",
+    "user",
+    "account",
+    "qos",
+    "submit_host",
+    "controller",
+    "allocation_nodes",
+    "time_limit_seconds",
+}
+ACCEPTANCE_PROBE_HEALTH_FIELDS: Final = {
+    "service",
+    "status",
+    "http_status",
+    "candidate_binding_sha256",
+    "response_sha256",
+}
+IDENTITY_TRANSACTION_FIELDS: Final = {
+    "schema_version",
+    "kind",
+    "request_id",
+    "payload_sha256",
+    "node",
+    "domain",
+    "env_id",
+    "service_user",
+    "service_group",
+    "uid",
+    "gid",
+    "phase",
+    "created_at",
+    "updated_at",
 }
 STAGING_ALLOCATION_PROBE_FIELDS: Final = {
     "schema_version",
@@ -429,6 +723,7 @@ SOURCE_ASSETS: Final = (
     Path("scripts/ops/developer_sandbox_node_authority.py"),
     Path("scripts/ops/developer_sandbox_node_docker_request.py"),
     Path("scripts/ops/developer_sandbox_node_transport.py"),
+    REGISTRY_MODULE_RELATIVE,
     LIVE_AUTHORITY_RELATIVE,
     PLATFORM_HEALTH_AUTHORITY_RELATIVE,
     CAPACITY_CONTRACT_RELATIVE,
@@ -438,8 +733,15 @@ SOURCE_ASSETS: Final = (
     REMOTE_LINK_HOST_RELATIVE,
     Path("scripts/ops/developer_sandbox_remote_link.py"),
     Path("scripts/ops/developer_sandbox_slurm_policy.py"),
+    Path("scripts/ops/developer_environment_acceptance_probe_container.py"),
+    Path("scripts/ops/developer_environment_runtime_retire.py"),
     Path("scripts/ops/slurm_job_cgroup_guard.py"),
+    Path("src/loom_control_plane/slurm_job_cgroup.py"),
     RUNTIME_CONFIG_RELATIVE,
+    Path("deploy/docker-compose.remote-worker.yml"),
+    Path("deploy/docker-compose.remote-worker.sandbox-link.yml"),
+    Path("deploy/docker-compose.remote-worker.cgroup-parent.yml"),
+    Path("deploy/docker-compose.remote-worker.acceptance-probe.yml"),
     Path("deploy/developer-sandboxes/node-authority-transport.toml"),
     PLATFORM_HEALTH_CONFIG_RELATIVE,
     OLDLAB_CAPACITY_POLICY_RELATIVE,
@@ -459,9 +761,6 @@ SOURCE_ASSETS: Final = (
     PLATFORM_HEALTH_SERVICE_RELATIVE,
     PLATFORM_HEALTH_SUDOERS_RELATIVE,
     Path("deploy/developer-sandboxes/loom-developer-sandbox-link@.service"),
-    Path("deploy/developer-sandboxes/remote-links/qianyi.toml"),
-    Path("deploy/developer-sandboxes/remote-links/hongjian.toml"),
-    Path("deploy/developer-sandboxes/remote-links/devansh.toml"),
     Path("deploy/slurm/developer-sandboxes/oldlab.toml"),
     Path("deploy/slurm/developer-sandboxes/gb10.toml"),
     Path("deploy/slurm/loom-slurm-job-cgroup-guard.service"),
@@ -505,6 +804,9 @@ PLATFORM_HEALTH_SUDOERS: Final = Path(
 )
 SLURM_RECOVERY_LIBEXEC: Final = Path(
     "/usr/local/libexec/loom-developer-sandbox-slurm-recovery",
+)
+SLURM_REGISTRY_CONTRACT_LIBEXEC: Final = Path(
+    "/usr/local/libexec/developer_environment_registry.py",
 )
 SLURM_RECOVERY_SERVICE: Final = Path(
     "/etc/systemd/system/loom-developer-sandbox-slurm-recovery.service",
@@ -557,6 +859,12 @@ SYSTEM_INSTALL_ASSETS: Final = (
         Path("scripts/ops/developer_sandbox_slurm_policy.py"),
         SLURM_RECOVERY_LIBEXEC,
         0o755,
+        0o755,
+    ),
+    (
+        REGISTRY_MODULE_RELATIVE,
+        SLURM_REGISTRY_CONTRACT_LIBEXEC,
+        0o644,
         0o755,
     ),
     (
@@ -705,6 +1013,7 @@ BOOTSTRAP_DIRECTORIES: Final = (
     (STAGING_EXTERNAL_CONFIG.parent, 0o700, 0o755),
     (STATE_ROOT, 0o700, 0o755),
     (RECEIPT_ROOT, 0o700, 0o700),
+    (IDENTITY_TRANSACTION_ROOT, 0o700, 0o700),
     (STAGING_BROKER_ROOT, 0o700, 0o700),
     (STAGING_ACCOUNTING_ROOT, 0o700, 0o700),
     (STAGING_INFRASTRUCTURE_PRODUCER_ROOT, 0o700, 0o700),
@@ -1213,6 +1522,411 @@ def _unlink_root_file(path: Path, *, mode: int, parent_mode: int = 0o755) -> byt
     return payload
 
 
+def _registry_module() -> Any:
+    sealed = SOURCE_ROOT / REGISTRY_MODULE_RELATIVE
+    source = (
+        sealed
+        if sealed.exists()
+        else REPO_ROOT / REGISTRY_MODULE_RELATIVE
+        if Path(__file__).resolve().is_relative_to(REPO_ROOT)
+        else sealed
+    )
+    spec = importlib.util.spec_from_file_location(
+        "_loom_developer_environment_registry",
+        source,
+    )
+    if spec is None or spec.loader is None:
+        raise NodeAuthorityError("developer environment registry verifier is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    except (OSError, ImportError) as exc:
+        raise NodeAuthorityError(
+            "developer environment registry verifier is unavailable",
+        ) from exc
+    return module
+
+
+def _load_registry_snapshot() -> dict[str, Any]:
+    try:
+        raw = _safe_root_file(REGISTRY_SNAPSHOT, mode=0o600, limit=8 << 20)
+        payload = _registry_module().DeveloperEnvironmentRegistry.verify_snapshot(raw)
+    except NodeAuthorityError:
+        raise
+    except Exception as exc:
+        raise NodeAuthorityError("developer environment registry snapshot is invalid") from exc
+    if not isinstance(payload, dict):
+        raise NodeAuthorityError("developer environment registry snapshot is invalid")
+    return payload
+
+
+def _verify_registry_snapshot_bytes(raw: bytes) -> dict[str, Any]:
+    try:
+        payload = _registry_module().DeveloperEnvironmentRegistry.verify_snapshot(raw)
+    except Exception as exc:
+        raise NodeAuthorityError("developer environment registry snapshot is invalid") from exc
+    if not isinstance(payload, dict):
+        raise NodeAuthorityError("developer environment registry snapshot is invalid")
+    return payload
+
+
+def _registry_snapshot_archive_path(snapshot: Mapping[str, Any]) -> Path:
+    return REGISTRY_SNAPSHOT_ARCHIVE / (
+        f"registry-{snapshot['generation']}-{snapshot['payload_sha256']}.json"
+    )
+
+
+def _validated_registry_snapshot_archive() -> list[tuple[Path, bytes, dict[str, Any]]]:
+    _safe_root_directory(REGISTRY_SNAPSHOT_ARCHIVE, mode=0o700)
+    try:
+        paths = sorted(REGISTRY_SNAPSHOT_ARCHIVE.iterdir(), key=lambda item: item.name)
+    except OSError as exc:
+        raise NodeAuthorityError("registry snapshot archive is unavailable") from exc
+    records: list[tuple[Path, bytes, dict[str, Any]]] = []
+    generations: dict[int, str] = {}
+    for path in paths:
+        matched = REGISTRY_SNAPSHOT_ARCHIVE_RE.fullmatch(path.name)
+        if matched is None:
+            raise NodeAuthorityError("registry snapshot archive contains an unknown entry")
+        raw = _safe_root_file(path, mode=0o600, limit=8 << 20)
+        snapshot = _verify_registry_snapshot_bytes(raw)
+        generation = int(matched.group(1))
+        digest = matched.group(2)
+        if (
+            snapshot["generation"] != generation
+            or snapshot["payload_sha256"] != digest
+            or (generation in generations and generations[generation] != digest)
+        ):
+            raise NodeAuthorityError("registry snapshot archive binding is invalid")
+        generations[generation] = digest
+        records.append((path, raw, snapshot))
+    return records
+
+
+def _publish_registry_snapshot(
+    raw: bytes,
+    *,
+    policy: AuthorityPolicy,
+) -> dict[str, Any]:
+    incoming = _verify_registry_snapshot_bytes(raw)
+    _ensure_root_directory(
+        REGISTRY_SNAPSHOT.parent,
+        mode=0o700,
+        parent_mode=0o755,
+    )
+    _ensure_root_directory(
+        REGISTRY_SNAPSHOT_ARCHIVE,
+        mode=0o700,
+        parent_mode=0o700,
+    )
+    archived = _validated_registry_snapshot_archive()
+    try:
+        current_raw = _safe_root_file(
+            REGISTRY_SNAPSHOT,
+            mode=0o600,
+            limit=8 << 20,
+        )
+    except NodeAuthorityError:
+        if REGISTRY_SNAPSHOT.exists() or REGISTRY_SNAPSHOT.is_symlink():
+            raise
+        current_raw = None
+        current = None
+    else:
+        current = _verify_registry_snapshot_bytes(current_raw)
+    incoming_generation = int(incoming["generation"])
+    incoming_digest = str(incoming["payload_sha256"])
+    if current is not None:
+        current_generation = int(current["generation"])
+        current_digest = str(current["payload_sha256"])
+        if incoming_generation < current_generation:
+            raise NodeAuthorityError("registry snapshot generation cannot move backward")
+        if incoming_generation == current_generation and (
+            incoming_digest != current_digest or raw != current_raw
+        ):
+            raise NodeAuthorityError("registry snapshot generation conflicts")
+    if any(
+        int(snapshot["generation"]) > incoming_generation for _path, _payload, snapshot in archived
+    ):
+        raise NodeAuthorityError("registry snapshot archive contains a newer pending version")
+    if current is not None:
+        _atomic_install(
+            _registry_snapshot_archive_path(current),
+            current_raw,
+            0o600,
+            parent_mode=0o700,
+        )
+    _atomic_install(
+        _registry_snapshot_archive_path(incoming),
+        raw,
+        0o600,
+        parent_mode=0o700,
+    )
+    if current_raw != raw:
+        _atomic_replace(
+            REGISTRY_SNAPSHOT,
+            raw,
+            0o600,
+            parent_mode=0o700,
+        )
+    published_raw = _safe_root_file(
+        REGISTRY_SNAPSHOT,
+        mode=0o600,
+        limit=8 << 20,
+    )
+    published = _verify_registry_snapshot_bytes(published_raw)
+    if published_raw != raw or published != incoming:
+        raise NodeAuthorityError("registry snapshot publication readback drifted")
+
+    # Validate the complete archive before deleting any old candidate.  The
+    # fixed current file is already durable, so pruning can never remove the
+    # last usable snapshot after a crash.
+    archived = _validated_registry_snapshot_archive()
+    current_path = _registry_snapshot_archive_path(incoming)
+    previous = max(
+        (record for record in archived if int(record[2]["generation"]) < incoming_generation),
+        key=lambda record: int(record[2]["generation"]),
+        default=None,
+    )
+    retained = {current_path}
+    if previous is not None:
+        retained.add(previous[0])
+    for path, _candidate_raw, _candidate in archived:
+        if path not in retained:
+            _unlink_root_file(path, mode=0o600, parent_mode=0o700)
+    final_archive = _validated_registry_snapshot_archive()
+    if len(final_archive) > 2 or current_path not in {record[0] for record in final_archive}:
+        raise NodeAuthorityError("registry snapshot archive retention is invalid")
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "loom.developer-environment.registry-snapshot-sync",
+        "generation": incoming_generation,
+        "registry_payload_sha256": incoming_digest,
+        "source_sha": policy.source_sha,
+        "source_tree": policy.source_tree,
+        "status": "published",
+    }
+
+
+def _registry_finalization_exact(
+    snapshot: Mapping[str, Any],
+    environment: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    deployment: Mapping[str, Any],
+) -> bool:
+    digest = deployment.get("finalization_payload_sha256")
+    records = snapshot.get("deployment_finalizations")
+    if not _is_sha(digest, length=64) or not isinstance(records, list):
+        return False
+    matched = [
+        record
+        for record in records
+        if isinstance(record, Mapping)
+        and record.get("deployment_id") == deployment["deployment_id"]
+        and record.get("payload_sha256") == digest
+    ]
+    if len(matched) != 1:
+        return False
+    record = matched[0]
+    fields = {
+        "deployment_id",
+        "env_id",
+        "principal_id",
+        "candidate_id",
+        "candidate_sha",
+        "candidate_tree",
+        "applied_resource_generation",
+        "applied_registry_generation",
+        "applied_registry_payload_sha256",
+        "capacity_finalize_receipt_sha256",
+        "capacity_finalize_check_receipt_sha256",
+        "runtime_reconcile_receipt_sha256",
+        "runtime_prepare_check_receipt_sha256",
+        "acceptance_probe_receipt_sha256",
+        "created_at",
+        "payload_sha256",
+    }
+    unsigned = {field: value for field, value in record.items() if field != "payload_sha256"}
+    return (
+        set(record) == fields
+        and record.get("payload_sha256") == hashlib.sha256(_canonical(unsigned)).hexdigest()
+        and record.get("env_id") == environment["env_id"]
+        and record.get("principal_id") == environment["principal_id"]
+        and record.get("candidate_id") == candidate["candidate_id"]
+        and record.get("candidate_sha") == candidate["candidate_sha"]
+        and record.get("candidate_tree") == candidate["candidate_tree"]
+        and record.get("applied_resource_generation")
+        == deployment.get("applied_resource_generation")
+        and record.get("applied_registry_generation")
+        == deployment.get("applied_registry_generation")
+        and record.get("applied_registry_payload_sha256")
+        == deployment.get("applied_registry_payload_sha256")
+        and all(
+            _is_sha(record.get(field), length=64)
+            for field in (
+                "capacity_finalize_receipt_sha256",
+                "capacity_finalize_check_receipt_sha256",
+                "runtime_reconcile_receipt_sha256",
+                "runtime_prepare_check_receipt_sha256",
+                "acceptance_probe_receipt_sha256",
+            )
+        )
+        and isinstance(record.get("created_at"), str)
+    )
+
+
+def _registry_cohort(
+    snapshot: Mapping[str, Any],
+    *,
+    include_provisioning: bool,
+    deployment_id: str | None = None,
+    target_resource_generation: int | None = None,
+    include_retiring: bool = False,
+) -> dict[str, tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]]:
+    cohort: dict[str, tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]] = {}
+    target_env_id: str | None = None
+    if deployment_id is not None:
+        targets = [
+            deployment
+            for deployment in snapshot["deployments"]
+            if deployment["deployment_id"] == deployment_id
+        ]
+        if len(targets) != 1:
+            raise NodeAuthorityError("registry deployment selector is invalid")
+        target_env_id = str(targets[0]["env_id"])
+    for environment in snapshot["environments"]:
+        state = environment["state"]
+        deployment_matches = environment["env_id"] == target_env_id
+        projected_environment: Mapping[str, Any] = environment
+        committed_binding = False
+        if state == "active":
+            candidate_id = environment["current_candidate_id"]
+            phases = {"committed"}
+            committed_binding = True
+        elif state == "deploying" and include_provisioning and deployment_matches:
+            candidates_in_flight = [
+                deployment
+                for deployment in snapshot["deployments"]
+                if deployment["env_id"] == environment["env_id"]
+                and deployment["principal_id"] == environment["principal_id"]
+                and (not deployment_matches or deployment["deployment_id"] == deployment_id)
+                and deployment["expected_resource_generation"] == environment["resource_generation"]
+                and deployment["phase"] not in {"committed", "failed"}
+            ]
+            if len(candidates_in_flight) != 1:
+                raise NodeAuthorityError("registry provisioning binding is invalid")
+            candidate_id = candidates_in_flight[0]["candidate_id"]
+            phases = {candidates_in_flight[0]["phase"]}
+            target_generation = (
+                environment["resource_generation"]
+                if target_resource_generation is None
+                else target_resource_generation
+            )
+            if target_generation not in {
+                environment["resource_generation"],
+                *(
+                    [environment["resource_generation"] + 1]
+                    if candidates_in_flight[0]["phase"] == "verified"
+                    else []
+                ),
+            }:
+                raise NodeAuthorityError("registry provisioning generation is invalid")
+            if target_generation != environment["resource_generation"]:
+                if (
+                    candidates_in_flight[0].get("applied_resource_generation") != target_generation
+                    or type(
+                        candidates_in_flight[0].get("applied_registry_generation"),
+                    )
+                    is not int
+                    or not 1
+                    <= candidates_in_flight[0]["applied_registry_generation"]
+                    < snapshot["generation"]
+                    or not _is_sha(
+                        candidates_in_flight[0].get(
+                            "applied_registry_payload_sha256",
+                        ),
+                        length=64,
+                    )
+                ):
+                    raise NodeAuthorityError(
+                        "registry provisioning applied binding is invalid",
+                    )
+                projected_environment = {
+                    **environment,
+                    "resource_generation": target_generation,
+                    "current_candidate_id": candidate_id,
+                }
+        elif state == "quarantined" and include_retiring and deployment_matches:
+            retiring = [
+                deployment
+                for deployment in snapshot["deployments"]
+                if deployment["deployment_id"] == deployment_id
+                and deployment["env_id"] == environment["env_id"]
+                and deployment["principal_id"] == environment["principal_id"]
+                and deployment["candidate_id"] == environment["current_candidate_id"]
+                and deployment["phase"] == "committed"
+                and deployment.get("applied_resource_generation")
+                == environment["resource_generation"]
+            ]
+            if len(retiring) != 1:
+                raise NodeAuthorityError("registry retiring binding is invalid")
+            candidate_id = retiring[0]["candidate_id"]
+            phases = {"committed"}
+            committed_binding = True
+        else:
+            continue
+        candidates = [
+            candidate
+            for candidate in snapshot["candidates"]
+            if candidate["candidate_id"] == candidate_id
+            and candidate["env_id"] == environment["env_id"]
+            and candidate["principal_id"] == environment["principal_id"]
+        ]
+        deployments = [
+            deployment
+            for deployment in snapshot["deployments"]
+            if deployment["candidate_id"] == candidate_id
+            and deployment["env_id"] == environment["env_id"]
+            and deployment["principal_id"] == environment["principal_id"]
+            and (not deployment_matches or deployment["deployment_id"] == deployment_id)
+            and deployment["phase"] in phases
+            and (
+                (
+                    deployment.get("applied_resource_generation")
+                    == environment["resource_generation"]
+                    and deployment.get("expected_resource_generation", 0) + 1
+                    == deployment["applied_resource_generation"]
+                    and isinstance(deployment.get("applied_registry_generation"), int)
+                    and not isinstance(deployment.get("applied_registry_generation"), bool)
+                    and 1 <= deployment["applied_registry_generation"] < snapshot["generation"]
+                    and _is_sha(
+                        deployment.get("applied_registry_payload_sha256"),
+                        length=64,
+                    )
+                )
+                if committed_binding
+                else deployment["expected_resource_generation"]
+                == environment["resource_generation"]
+            )
+        ]
+        if len(candidates) != 1 or len(deployments) != 1:
+            raise NodeAuthorityError("registry candidate binding is invalid")
+        if committed_binding and not _registry_finalization_exact(
+            snapshot,
+            environment,
+            candidates[0],
+            deployments[0],
+        ):
+            raise NodeAuthorityError(
+                "registry committed deployment finalization binding is invalid",
+            )
+        runtime_id = environment["runtime_id"]
+        if SAFE_RUNTIME_RE.fullmatch(runtime_id) is None or runtime_id in cohort:
+            raise NodeAuthorityError("registry runtime identity is invalid")
+        cohort[runtime_id] = (projected_environment, candidates[0], deployments[0])
+    return cohort
+
+
 def _source_asset_mode(relative: Path) -> int:
     if relative == SUDOERS_RELATIVE:
         return 0o440
@@ -1388,8 +2102,7 @@ def _validate_tmpfiles(
 ) -> None:
     if (
         not expected_directories
-        or len({relative for relative, _mode in expected_directories})
-        != len(expected_directories)
+        or len({relative for relative, _mode in expected_directories}) != len(expected_directories)
         or any(
             relative.is_absolute()
             or not relative.parts
@@ -1408,11 +2121,7 @@ def _validate_tmpfiles(
         for relative, mode in expected_directories
     )
     try:
-        payload = (
-            _safe_root_file(path, mode=0o644, limit=4096)
-            if apply
-            else path.read_bytes()
-        )
+        payload = _safe_root_file(path, mode=0o644, limit=4096) if apply else path.read_bytes()
     except OSError as exc:
         raise NodeAuthorityError("staging shared tmpfiles policy is unavailable") from exc
     if payload != expected_payload:
@@ -1665,7 +2374,7 @@ def _validate_upgrade_journal() -> None:
             raise NodeAuthorityError("node authority upgrade journal is invalid") from exc
         if (
             not isinstance(record, dict)
-            or set(record)
+            or frozenset(record)
             != {
                 "schema_version",
                 "upgrade_id",
@@ -2212,6 +2921,8 @@ def _exact_source_assets(source_sha: str, source_tree: str) -> dict[str, bytes]:
                 "bootstrap source asset does not match the exact candidate",
             )
         assets[str(relative)] = payload
+    if assets[str(SUDOERS_RELATIVE)] != NODE_AUTHORITY_SUDOERS_PAYLOAD:
+        raise NodeAuthorityError("node authority sudoers operator contract drifted")
     if (
         _git("rev-parse", "--verify", "HEAD") != source_sha
         or _git("rev-parse", "--verify", "HEAD^{tree}") != source_tree
@@ -2322,18 +3033,317 @@ def _validate_runtime_assets(
 
 def _validate_invoker(verb: str, environ: Mapping[str, str]) -> None:
     try:
-        account = pwd.getpwnam(OPERATOR)
-    except KeyError as exc:
-        raise NodeAuthorityError("node authority operator identity is unavailable") from exc
+        sudo_uid = int(environ.get("SUDO_UID", ""))
+        sudo_gid = int(environ.get("SUDO_GID", ""))
+        operator = pwd.getpwnam(OPERATOR)
+    except (KeyError, ValueError) as exc:
+        raise NodeAuthorityError("node authority caller identity is unavailable") from exc
     if (
         verb not in {"transact", "check"}
         or os.geteuid() != 0
         or environ.get("SUDO_USER") != OPERATOR
-        or environ.get("SUDO_UID") != str(account.pw_uid)
-        or environ.get("SUDO_GID") != str(account.pw_gid)
+        or sudo_uid != operator.pw_uid
+        or sudo_gid != operator.pw_gid
         or environ.get("SUDO_COMMAND") != f"{LIBEXEC} {verb}"
     ):
         raise NodeAuthorityError("node authority invocation is not approved")
+
+
+def _validate_acceptance_probe_request(
+    decoded: bytes,
+    outer: Mapping[str, Any],
+    snapshot: Mapping[str, Any],
+) -> None:
+    try:
+        request = json.loads(decoded)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise NodeAuthorityError("acceptance probe payload is invalid") from exc
+    unsigned = (
+        {key: value for key, value in request.items() if key != "payload_sha256"}
+        if isinstance(request, dict)
+        else {}
+    )
+    domain = str(outer["domain"])
+    route = ACCEPTANCE_PROBE_ROUTE[domain]
+    environments = (
+        [
+            row
+            for row in snapshot["environments"]
+            if row["env_id"] == request.get("env_id")
+            and row["principal_id"] == request.get("principal_id")
+            and row["runtime_id"] == request.get("runtime_id")
+        ]
+        if isinstance(request, dict)
+        else []
+    )
+    deployments = (
+        [
+            row
+            for row in snapshot["deployments"]
+            if row["deployment_id"] == request.get("deployment_id")
+            and row["env_id"] == request.get("env_id")
+            and row["principal_id"] == request.get("principal_id")
+            and row["candidate_id"] == request.get("candidate_id")
+        ]
+        if isinstance(request, dict)
+        else []
+    )
+    candidates = (
+        [
+            row
+            for row in snapshot["candidates"]
+            if row["candidate_id"] == request.get("candidate_id")
+            and row["env_id"] == request.get("env_id")
+            and row["principal_id"] == request.get("principal_id")
+            and row["candidate_sha"] == request.get("candidate_sha")
+            and row["candidate_tree"] == request.get("candidate_tree")
+        ]
+        if isinstance(request, dict)
+        else []
+    )
+    environment = environments[0] if len(environments) == 1 else {}
+    deployment = deployments[0] if len(deployments) == 1 else {}
+    if (
+        not isinstance(request, dict)
+        or set(request) != ACCEPTANCE_PROBE_REQUEST_FIELDS
+        or decoded != _canonical(request)
+        or request.get("schema_version") != SCHEMA_VERSION
+        or request.get("kind") != ACCEPTANCE_PROBE_REQUEST_KIND
+        or request.get("action") != ACCEPTANCE_PROBE_ACTION
+        or request.get("domain") != domain
+        or request.get("cluster") != route["cluster"]
+        or request.get("submit_host") != route["submit_host"]
+        or request.get("controller") != route["controller"]
+        or outer.get("node") != route["node"]
+        or request.get("runtime_id") != outer["sandbox"]
+        or request.get("candidate_sha") != outer["candidate_sha"]
+        or request.get("candidate_tree") != outer["candidate_tree"]
+        or re.fullmatch(r"dep-[0-9a-f]{32}", str(request.get("deployment_id"))) is None
+        or re.fullmatch(r"denv-[a-z0-9-]{8,64}", str(request.get("env_id"))) is None
+        or re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9:._@/+%-]{1,254}",
+            str(request.get("principal_id")),
+        )
+        is None
+        or re.fullmatch(r"cand-[0-9a-f]{40}", str(request.get("candidate_id"))) is None
+        or SAFE_RUNTIME_RE.fullmatch(str(request.get("runtime_id"))) is None
+        or not _is_sha(request.get("candidate_sha"))
+        or not _is_sha(request.get("candidate_tree"))
+        or type(request.get("applied_resource_generation")) is not int
+        or request["applied_resource_generation"] < 2
+        or type(request.get("registry_generation")) is not int
+        or request["registry_generation"] < 1
+        or not _is_sha(request.get("registry_snapshot_sha256"), length=64)
+        or re.fullmatch(r"[a-z][a-z0-9_-]{1,62}", str(request.get("service_user"))) is None
+        or re.fullmatch(r"[a-z][a-z0-9_-]{1,62}", str(request.get("slurm_account"))) is None
+        or re.fullmatch(r"[a-z][a-z0-9_-]{1,62}", str(request.get("slurm_qos"))) is None
+        or re.fullmatch(
+            r"loom-env-[a-z0-9][a-z0-9-]{0,62}-finalize-[0-9a-f]{12}",
+            str(request.get("job_name")),
+        )
+        is None
+        or request.get("time_limit_seconds") != 300
+        or request.get("health_services") != ["control-plane", "gateway", "minio"]
+        or request.get("general_admission_authorized") is not False
+        or request.get("foreign_job_action") != "observe-only"
+        or not _is_sha(request.get("idempotency_key"), length=64)
+        or request.get("payload_sha256") != hashlib.sha256(_canonical(unsigned)).hexdigest()
+        or snapshot.get("generation") != request.get("registry_generation")
+        or snapshot.get("payload_sha256") != request.get("registry_snapshot_sha256")
+        or len(environments) != 1
+        or len(deployments) != 1
+        or len(candidates) != 1
+        or environment.get("state") != "deploying"
+        or environment.get("resource_generation") != deployment.get("expected_resource_generation")
+        or environment.get("slurm_user") != request.get("service_user")
+        or environment.get("service_user") != request.get("service_user")
+        or environment.get("slurm_account") != request.get("slurm_account")
+        or environment.get("slurm_qos") != request.get("slurm_qos")
+        or deployment.get("phase") != "verified"
+        or deployment.get("applied_resource_generation")
+        != deployment.get("expected_resource_generation", 0) + 1
+        or deployment.get("applied_resource_generation")
+        != request.get("applied_resource_generation")
+        or type(deployment.get("applied_registry_generation")) is not int
+        or deployment["applied_registry_generation"] < 1
+        or not _is_sha(
+            deployment.get("applied_registry_payload_sha256"),
+            length=64,
+        )
+        or deployment.get("finalization_payload_sha256") is not None
+    ):
+        raise NodeAuthorityError("acceptance probe registry binding is invalid")
+
+
+def _runtime_retire_wal(env_id: str) -> dict[str, Any]:
+    try:
+        raw = _safe_root_file(
+            RUNTIME_RETIRE_WAL_ROOT / f"{env_id}.json",
+            mode=0o600,
+            limit=1 << 20,
+        )
+        wal = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise NodeAuthorityError("runtime retirement WAL is invalid") from exc
+    unsigned = (
+        {key: value for key, value in wal.items() if key != "payload_sha256"}
+        if isinstance(wal, dict)
+        else {}
+    )
+    if (
+        not isinstance(wal, dict)
+        or set(wal) != RUNTIME_RETIRE_WAL_FIELDS
+        or raw != _canonical(wal)
+        or wal.get("schema_version") != SCHEMA_VERSION
+        or wal.get("kind") != "loom.developer-environment.retire-journal"
+        or wal.get("phase") != "capacity-retired"
+        or not isinstance(wal.get("evidence"), dict)
+        or set(wal["evidence"]) != {"capacity_retire"}
+        or not _is_sha(wal["evidence"].get("capacity_retire"), length=64)
+        or wal.get("object_checkpoints") != {}
+        or wal.get("payload_sha256") != hashlib.sha256(_canonical(unsigned)).hexdigest()
+    ):
+        raise NodeAuthorityError("runtime retirement WAL binding is invalid")
+    return wal
+
+
+def _runtime_retire_candidate_bindings(
+    snapshot: Mapping[str, Any],
+    environment: Mapping[str, Any],
+) -> list[dict[str, str]]:
+    deployments = [row for row in snapshot["deployments"] if row["env_id"] == environment["env_id"]]
+    candidate_ids = {
+        str(environment["current_candidate_id"]),
+        *(str(row["candidate_id"]) for row in deployments if row["phase"] == "failed"),
+    }
+    candidates = {
+        str(row["candidate_id"]): row
+        for row in snapshot["candidates"]
+        if row["env_id"] == environment["env_id"]
+        and row["principal_id"] == environment["principal_id"]
+        and str(row["candidate_id"]) in candidate_ids
+    }
+    if set(candidates) != candidate_ids:
+        raise NodeAuthorityError("runtime retirement candidate set is incomplete")
+    bindings = [
+        {
+            "candidate_id": candidate_id,
+            "candidate_sha": str(candidates[candidate_id]["candidate_sha"]),
+            "candidate_tree": str(candidates[candidate_id]["candidate_tree"]),
+        }
+        for candidate_id in sorted(candidate_ids)
+    ]
+    if any(
+        re.fullmatch(r"cand-[0-9a-f]{40}", row["candidate_id"]) is None
+        or not _is_sha(row["candidate_sha"])
+        or not _is_sha(row["candidate_tree"])
+        for row in bindings
+    ):
+        raise NodeAuthorityError("runtime retirement candidate set is invalid")
+    return bindings
+
+
+def _validate_runtime_retire_request(
+    decoded: bytes,
+    outer: Mapping[str, Any],
+    snapshot: Mapping[str, Any],
+) -> None:
+    try:
+        request = json.loads(decoded)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise NodeAuthorityError("runtime retirement payload is invalid") from exc
+    unsigned = (
+        {key: value for key, value in request.items() if key != "payload_sha256"}
+        if isinstance(request, dict)
+        else {}
+    )
+    environments = (
+        [
+            row
+            for row in snapshot["environments"]
+            if row["env_id"] == request.get("env_id")
+            and row["principal_id"] == request.get("principal_id")
+            and row["runtime_id"] == request.get("runtime_id")
+        ]
+        if isinstance(request, dict)
+        else []
+    )
+    environment = environments[0] if len(environments) == 1 else {}
+    deployments = (
+        [
+            row
+            for row in snapshot["deployments"]
+            if row["deployment_id"] == request.get("deployment_id")
+            and row["env_id"] == request.get("env_id")
+            and row["principal_id"] == request.get("principal_id")
+        ]
+        if isinstance(request, dict)
+        else []
+    )
+    deployment = deployments[0] if len(deployments) == 1 else {}
+    expected_candidates = (
+        _runtime_retire_candidate_bindings(snapshot, environment) if environment else []
+    )
+    current = (
+        [
+            row
+            for row in expected_candidates
+            if row["candidate_id"] == request.get("current_candidate_id")
+        ]
+        if isinstance(request, dict)
+        else []
+    )
+    wal = (
+        _runtime_retire_wal(str(request["env_id"]))
+        if isinstance(request, dict)
+        and re.fullmatch(r"denv-[a-z0-9-]{8,64}", str(request.get("env_id")))
+        else {}
+    )
+    if (
+        not isinstance(request, dict)
+        or set(request) != RUNTIME_RETIRE_REQUEST_FIELDS
+        or decoded != _canonical(request)
+        or request.get("schema_version") != SCHEMA_VERSION
+        or request.get("kind") != RUNTIME_RETIRE_REQUEST_KIND
+        or request.get("action") != RUNTIME_RETIRE_ACTION
+        or request.get("node") != outer["node"]
+        or request.get("domain") != outer["domain"]
+        or request.get("domain")
+        != ("oldlab" if str(request.get("node")).startswith("oldlab-") else "gb10")
+        or request.get("runtime_id") != outer["sandbox"]
+        or request.get("foreign_path_action") != "preserve"
+        or request.get("audit_action") != "append-only-preserve"
+        or not _is_sha(request.get("retire_operation_sha256"), length=64)
+        or request.get("payload_sha256") != hashlib.sha256(_canonical(unsigned)).hexdigest()
+        or snapshot.get("generation") != request.get("registry_generation")
+        or snapshot.get("payload_sha256") != request.get("registry_snapshot_sha256")
+        or len(environments) != 1
+        or len(deployments) != 1
+        or environment.get("state") != "quarantined"
+        or environment.get("resource_generation") != request.get("resource_generation")
+        or environment.get("current_candidate_id") != request.get("current_candidate_id")
+        or deployment.get("phase") != "committed"
+        or deployment.get("candidate_id") != request.get("current_candidate_id")
+        or deployment.get("applied_resource_generation") != request.get("resource_generation")
+        or request.get("candidate_bindings") != expected_candidates
+        or len(current) != 1
+        or current[0]["candidate_sha"] != outer["candidate_sha"]
+        or current[0]["candidate_tree"] != outer["candidate_tree"]
+        or wal.get("payload_sha256") != request.get("retire_operation_sha256")
+        or wal.get("env_id") != request.get("env_id")
+        or wal.get("principal_id") != request.get("principal_id")
+        or wal.get("runtime_id") != request.get("runtime_id")
+        or wal.get("expected_resource_generation") != request.get("resource_generation")
+        or wal.get("current_candidate_id") != request.get("current_candidate_id")
+        or wal.get("uid") != environment.get("uid")
+        or wal.get("gid") != environment.get("gid")
+        or wal.get("service_user") != environment.get("service_user")
+        or wal.get("service_group") != environment.get("service_group")
+        or wal.get("slurm_user") != environment.get("slurm_user")
+        or wal.get("slurm_account") != environment.get("slurm_account")
+        or wal.get("slurm_qos") != environment.get("slurm_qos")
+    ):
+        raise NodeAuthorityError("runtime retirement registry binding is invalid")
 
 
 def _parse_request(raw: bytes, *, verb: str, policy: AuthorityPolicy) -> Request:
@@ -2343,9 +3353,23 @@ def _parse_request(raw: bytes, *, verb: str, policy: AuthorityPolicy) -> Request
         raise NodeAuthorityError("node authority request is invalid") from exc
     actions = TRANSACT_ACTIONS if verb == "transact" else CHECK_ACTIONS
     requested_action = payload.get("action") if isinstance(payload, dict) else None
+    expected_request_fields = (
+        REGISTRY_SNAPSHOT_SYNC_FIELDS
+        if requested_action == REGISTRY_SNAPSHOT_SYNC_ACTION
+        else (
+            DYNAMIC_REQUEST_FIELDS
+            | (
+                DEPLOYMENT_TARGET_BINDING_FIELDS
+                if requested_action in DEPLOYMENT_TARGET_ACTIONS
+                else set()
+            )
+            if requested_action in DYNAMIC_TARGET_ACTIONS
+            else REQUEST_FIELDS
+        )
+    )
     if (
         not isinstance(payload, dict)
-        or set(payload) != REQUEST_FIELDS
+        or set(payload) != expected_request_fields
         or payload.get("schema_version") != SCHEMA_VERSION
         or requested_action not in actions
         or payload.get("node") != policy.node
@@ -2353,18 +3377,32 @@ def _parse_request(raw: bytes, *, verb: str, policy: AuthorityPolicy) -> Request
         or (
             payload.get("sandbox") != STAGING_SCOPE
             if requested_action in STAGING_ACTIONS
-            else payload.get("sandbox") not in SANDBOXES
+            else SAFE_RUNTIME_RE.fullmatch(str(payload.get("sandbox"))) is None
         )
         or not _is_sha(payload.get("candidate_sha"))
         or not _is_sha(payload.get("candidate_tree"))
-        or (
-            requested_action not in STAGING_ACTIONS
-            and requested_action not in SLURM_ACTIONS
-            and payload.get("candidate_tree") != policy.source_tree
-        )
         or payload.get("payload_kind") != PAYLOAD_KIND.get(requested_action)
         or not _is_sha(payload.get("payload_sha256"), length=64)
         or not isinstance(payload.get("payload_base64"), str)
+        or (
+            requested_action == REGISTRY_SNAPSHOT_SYNC_ACTION
+            and (
+                type(payload.get("registry_generation")) is not int
+                or int(payload["registry_generation"]) < 1
+                or not _is_sha(
+                    payload.get("registry_payload_sha256"),
+                    length=64,
+                )
+            )
+        )
+        or (
+            requested_action in DEPLOYMENT_TARGET_ACTIONS
+            and re.fullmatch(
+                r"dep-[0-9a-f]{32}",
+                str(payload.get("deployment_id")),
+            )
+            is None
+        )
         or (
             payload.get("prior_request_id") is not None
             and not _is_sha(payload.get("prior_request_id"), length=64)
@@ -2390,6 +3428,167 @@ def _parse_request(raw: bytes, *, verb: str, policy: AuthorityPolicy) -> Request
         or (payload["payload_kind"] != "none" and not decoded)
     ):
         raise NodeAuthorityError("node authority request payload binding is invalid")
+    snapshot: dict[str, Any] | None = None
+    binding: tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]] | None = None
+    if action == REGISTRY_SNAPSHOT_SYNC_ACTION:
+        snapshot = _verify_registry_snapshot_bytes(decoded)
+        if (
+            snapshot["generation"] != payload["registry_generation"]
+            or snapshot["payload_sha256"] != payload["registry_payload_sha256"]
+        ):
+            raise NodeAuthorityError("registry snapshot sync binding is invalid")
+    elif action in DYNAMIC_TARGET_ACTIONS:
+        snapshot = _load_registry_snapshot()
+        cohort = _registry_cohort(
+            snapshot,
+            include_provisioning=True,
+            deployment_id=(
+                str(payload["deployment_id"]) if action in DEPLOYMENT_TARGET_ACTIONS else None
+            ),
+            target_resource_generation=(
+                int(payload["resource_generation"]) if action in DEPLOYMENT_TARGET_ACTIONS else None
+            ),
+            include_retiring=action == "slurm-identity-retire",
+        )
+        binding = cohort.get(str(payload["sandbox"]))
+        if (
+            binding is None
+            or binding[0]["env_id"] != payload["env_id"]
+            or binding[0]["resource_generation"] != payload["resource_generation"]
+            or binding[1]["candidate_id"] != payload["candidate_id"]
+            or binding[1]["candidate_sha"] != payload["candidate_sha"]
+            or binding[1]["candidate_tree"] != payload["candidate_tree"]
+            or snapshot["generation"] != payload["registry_generation"]
+            or snapshot["payload_sha256"] != payload["registry_payload_sha256"]
+        ):
+            raise NodeAuthorityError("node authority dynamic target binding is invalid")
+    elif action not in STAGING_ACTIONS and action not in {
+        "slurm-rollback",
+        ACCEPTANCE_PROBE_ACTION,
+        RUNTIME_RETIRE_ACTION,
+    }:
+        snapshot = _load_registry_snapshot()
+        provisioning_actions = {
+            "slurm-node-converge",
+            "slurm-controller-converge",
+            "slurm-identity-preflight",
+            "slurm-identity-converge",
+        }
+        cohort = _registry_cohort(
+            snapshot,
+            include_provisioning=action in provisioning_actions,
+        )
+        binding = cohort.get(str(payload["sandbox"]))
+        if action == "slurm-identity-inventory":
+            if cohort:
+                if (
+                    binding is None
+                    or binding[1]["candidate_sha"] != payload["candidate_sha"]
+                    or binding[1]["candidate_tree"] != payload["candidate_tree"]
+                    or payload["candidate_sha"] != policy.source_sha
+                    or payload["candidate_tree"] != policy.source_tree
+                ):
+                    raise NodeAuthorityError("node authority registry binding is invalid")
+            elif (
+                payload["sandbox"] != FLEET_BOOTSTRAP_SCOPE
+                or payload["candidate_sha"] != policy.source_sha
+                or payload["candidate_tree"] != policy.source_tree
+            ):
+                raise NodeAuthorityError("node authority bootstrap binding is invalid")
+        elif (
+            binding is None
+            or binding[1]["candidate_sha"] != payload["candidate_sha"]
+            or binding[1]["candidate_tree"] != payload["candidate_tree"]
+        ):
+            raise NodeAuthorityError("node authority registry binding is invalid")
+    if payload["payload_kind"] == "developer-environment-acceptance-probe-json":
+        if snapshot is None:
+            snapshot = _load_registry_snapshot()
+        _validate_acceptance_probe_request(decoded, payload, snapshot)
+    if payload["payload_kind"] == "developer-environment-runtime-retire-json":
+        if snapshot is None:
+            snapshot = _load_registry_snapshot()
+        _validate_runtime_retire_request(decoded, payload, snapshot)
+    if payload["payload_kind"] == "developer-environment-identity-preflight-json":
+        try:
+            identity_preflight = json.loads(decoded)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise NodeAuthorityError("developer identity preflight payload is invalid") from exc
+        if snapshot is None or binding is None:
+            raise NodeAuthorityError("developer identity preflight registry binding is invalid")
+        cohort = _registry_cohort(
+            snapshot,
+            include_provisioning=True,
+            deployment_id=(
+                str(payload["deployment_id"]) if action in DEPLOYMENT_TARGET_ACTIONS else None
+            ),
+            target_resource_generation=(
+                int(payload["resource_generation"]) if action in DEPLOYMENT_TARGET_ACTIONS else None
+            ),
+            include_retiring=action == "slurm-identity-retire",
+        )
+        candidate_bindings = {
+            row[0]["slurm_account"]: {
+                "env_id": row[0]["env_id"],
+                "resource_generation": row[0]["resource_generation"],
+                "sandbox": runtime_id,
+                "service_user": row[0]["slurm_user"],
+                "slurm_qos": row[0]["slurm_qos"],
+                "candidate_id": row[1]["candidate_id"],
+                "candidate_sha": row[1]["candidate_sha"],
+                "candidate_tree": row[1]["candidate_tree"],
+            }
+            for runtime_id, row in cohort.items()
+        }
+        candidate_set_sha256 = hashlib.sha256(
+            _canonical(candidate_bindings).rstrip(b"\n"),
+        ).hexdigest()
+        environment = binding[0]
+        if (
+            not isinstance(identity_preflight, dict)
+            or set(identity_preflight) != IDENTITY_PREFLIGHT_FIELDS
+            or decoded != _canonical(identity_preflight)
+            or identity_preflight.get("schema_version") != 2
+            or identity_preflight.get("kind") != IDENTITY_PREFLIGHT_KIND
+            or identity_preflight.get("env_id") != environment["env_id"]
+            or identity_preflight.get("principal_id") != environment["principal_id"]
+            or identity_preflight.get("resource_generation") != environment["resource_generation"]
+            or identity_preflight.get("service_user") != environment["service_user"]
+            or identity_preflight.get("service_group") != environment["service_group"]
+            or identity_preflight.get("uid") != environment["uid"]
+            or identity_preflight.get("gid") != environment["gid"]
+            or identity_preflight.get("slurm_account") != environment["slurm_account"]
+            or identity_preflight.get("slurm_qos") != environment["slurm_qos"]
+            or identity_preflight.get("registry_generation") != snapshot["generation"]
+            or identity_preflight.get("registry_payload_sha256") != snapshot["payload_sha256"]
+            or identity_preflight.get("candidate_set_sha256") != candidate_set_sha256
+            or (
+                identity_preflight.get("revive_journal_sha256") is not None
+                and not _is_sha(
+                    identity_preflight.get("revive_journal_sha256"),
+                    length=64,
+                )
+            )
+        ):
+            raise NodeAuthorityError("developer identity preflight payload is invalid")
+    if payload["payload_kind"] == "developer-environment-identity-inventory-json":
+        try:
+            identity_inventory = json.loads(decoded)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise NodeAuthorityError("developer identity inventory payload is invalid") from exc
+        if (
+            snapshot is None
+            or not isinstance(identity_inventory, dict)
+            or set(identity_inventory) != IDENTITY_INVENTORY_FIELDS
+            or decoded != _canonical(identity_inventory)
+            or identity_inventory.get("schema_version") != SCHEMA_VERSION
+            or identity_inventory.get("kind") != IDENTITY_INVENTORY_KIND
+            or identity_inventory.get("uid_start") != IDENTITY_UID_START
+            or identity_inventory.get("uid_end") != IDENTITY_UID_END
+            or identity_inventory.get("registry_generation") != snapshot["generation"]
+            or identity_inventory.get("registry_payload_sha256") != snapshot["payload_sha256"]
+        ):
+            raise NodeAuthorityError("developer identity inventory payload is invalid")
     if payload["payload_kind"] == "fleet-attestation-json":
         try:
             fleet = json.loads(decoded)
@@ -2404,18 +3603,19 @@ def _parse_request(raw: bytes, *, verb: str, policy: AuthorityPolicy) -> Request
         ):
             raise NodeAuthorityError("fleet attestation payload is invalid")
     if payload["payload_kind"] == "slurm-candidate-set-json":
+        if snapshot is None:
+            snapshot = _load_registry_snapshot()
         try:
             candidate_set = json.loads(decoded)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise NodeAuthorityError("Slurm candidate-set payload is invalid") from exc
         bindings = (
-            candidate_set.get("candidate_bindings")
-            if isinstance(candidate_set, dict)
-            else None
+            candidate_set.get("candidate_bindings") if isinstance(candidate_set, dict) else None
         )
-        expected_sandboxes = {"qianyi", "hongjian", "devansh"}
+        registry_cohort = _registry_cohort(snapshot, include_provisioning=True)
         expected_accounts = {
-            f"loom-dev-{sandbox}": sandbox for sandbox in expected_sandboxes
+            binding[0]["slurm_account"]: (sandbox, binding)
+            for sandbox, binding in registry_cohort.items()
         }
         if (
             not isinstance(candidate_set, dict)
@@ -2428,12 +3628,16 @@ def _parse_request(raw: bytes, *, verb: str, policy: AuthorityPolicy) -> Request
                 "candidate_bindings",
                 "generation",
                 "convergence_id",
+                "registry_generation",
+                "registry_payload_sha256",
             }
             or candidate_set.get("schema_version") != 2
             or candidate_set.get("kind") != "loom.developer-sandbox.slurm-candidate-set"
             or type(candidate_set.get("generation")) is not int
             or candidate_set["generation"] < 1
             or not _is_sha(candidate_set.get("convergence_id"), length=64)
+            or candidate_set.get("registry_generation") != snapshot["generation"]
+            or candidate_set.get("registry_payload_sha256") != snapshot["payload_sha256"]
             or not isinstance(bindings, dict)
             or set(bindings) != set(expected_accounts)
             or any(
@@ -2441,35 +3645,33 @@ def _parse_request(raw: bytes, *, verb: str, policy: AuthorityPolicy) -> Request
                 or set(bindings[account])
                 != {
                     "sandbox",
+                    "env_id",
+                    "resource_generation",
                     "service_user",
+                    "slurm_qos",
+                    "candidate_id",
                     "candidate_sha",
                     "candidate_tree",
                 }
                 or bindings[account].get("sandbox") != sandbox
-                or bindings[account].get("service_user") != f"loom-sandbox-{sandbox}"
-                or not _is_sha(bindings[account].get("candidate_sha"))
-                or not _is_sha(bindings[account].get("candidate_tree"))
-                for account, sandbox in expected_accounts.items()
+                or bindings[account].get("env_id") != binding[0]["env_id"]
+                or bindings[account].get("resource_generation") != binding[0]["resource_generation"]
+                or bindings[account].get("service_user") != binding[0]["slurm_user"]
+                or bindings[account].get("slurm_qos") != binding[0]["slurm_qos"]
+                or bindings[account].get("candidate_id") != binding[1]["candidate_id"]
+                or bindings[account].get("candidate_sha") != binding[1]["candidate_sha"]
+                or bindings[account].get("candidate_tree") != binding[1]["candidate_tree"]
+                for account, (sandbox, binding) in expected_accounts.items()
             )
-            or len(
-                {
-                    str(bindings[account]["candidate_sha"])
-                    for account in expected_accounts
-                },
-            )
-            != 3
-            or len(
-                {
-                    str(bindings[account]["candidate_sha"])[:12]
-                    for account in expected_accounts
-                },
-            )
-            != 3
             or candidate_set.get("candidate_set_sha256")
             != hashlib.sha256(_canonical(bindings).rstrip(b"\n")).hexdigest()
-            or bindings["loom-dev-qianyi"].get("candidate_sha")
+            or bindings[registry_cohort[str(payload["sandbox"])][0]["slurm_account"]].get(
+                "candidate_sha"
+            )
             != payload["candidate_sha"]
-            or bindings["loom-dev-qianyi"].get("candidate_tree")
+            or bindings[registry_cohort[str(payload["sandbox"])][0]["slurm_account"]].get(
+                "candidate_tree"
+            )
             != payload["candidate_tree"]
         ):
             raise NodeAuthorityError("Slurm candidate-set payload is invalid")
@@ -2496,6 +3698,8 @@ def _parse_request(raw: bytes, *, verb: str, policy: AuthorityPolicy) -> Request
                 or re.fullmatch(r"[1-9][0-9]*(?:_[0-9]+)?", str(live_payload.get("job_id"))) is None
             ):
                 raise NodeAuthorityError("live overlap collection payload is invalid")
+        elif binding is None:
+            raise NodeAuthorityError("live overlap Slurm registry binding is invalid")
         elif (
             set(live_payload) != LIVE_SLURM_REQUEST_FIELDS
             or live_payload.get("schema_version") != SCHEMA_VERSION
@@ -2506,8 +3710,8 @@ def _parse_request(raw: bytes, *, verb: str, policy: AuthorityPolicy) -> Request
             or not _is_sha(live_payload.get("candidate_tree"))
             or live_payload.get("source_host")
             != ("trt-eai-oldlab-2" if payload["domain"] == "oldlab" else "trt-gb10-1")
-            or live_payload.get("account") != f"loom-dev-{payload['sandbox']}"
-            or live_payload.get("user") != f"loom-sandbox-{payload['sandbox']}"
+            or live_payload.get("account") != binding[0]["slurm_account"]
+            or live_payload.get("user") != binding[0]["slurm_user"]
             or not isinstance(live_payload.get("job_name"), str)
             or re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", live_payload["job_name"]) is None
             or not isinstance(live_payload.get("node"), str)
@@ -2527,6 +3731,8 @@ def _parse_request(raw: bytes, *, verb: str, policy: AuthorityPolicy) -> Request
         ):
             raise NodeAuthorityError("live overlap Slurm payload is invalid")
     if payload["payload_kind"] == "platform-health-node-json":
+        if snapshot is None:
+            raise NodeAuthorityError("platform-health registry binding is invalid")
         try:
             platform_payload = json.loads(decoded)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -2541,6 +3747,7 @@ def _parse_request(raw: bytes, *, verb: str, policy: AuthorityPolicy) -> Request
             "worker_crash": "during",
             "final_drain": "after",
         }
+        registry_cohort = _registry_cohort(snapshot, include_provisioning=False)
         if (
             not isinstance(platform_payload, dict)
             or decoded != _canonical(platform_payload)
@@ -2559,16 +3766,16 @@ def _parse_request(raw: bytes, *, verb: str, policy: AuthorityPolicy) -> Request
             or platform_payload.get("expected_host") != NODE_HOSTNAMES.get(str(payload["node"]))
             or not isinstance(platform_payload.get("since_at"), str)
             or not isinstance(candidates, dict)
-            or set(candidates) != {"qianyi", "hongjian", "devansh"}
+            or set(candidates) != set(registry_cohort)
             or any(
                 not isinstance(candidates[sandbox], dict)
                 or set(candidates[sandbox]) != {"sha", "tree"}
-                or not _is_sha(candidates[sandbox].get("sha"))
-                or not _is_sha(candidates[sandbox].get("tree"))
-                for sandbox in ("qianyi", "hongjian", "devansh")
+                or candidates[sandbox].get("sha") != binding[1]["candidate_sha"]
+                or candidates[sandbox].get("tree") != binding[1]["candidate_tree"]
+                for sandbox, binding in registry_cohort.items()
             )
-            or candidates["qianyi"]["sha"] != payload["candidate_sha"]
-            or candidates["qianyi"]["tree"] != payload["candidate_tree"]
+            or candidates[str(payload["sandbox"])]["sha"] != payload["candidate_sha"]
+            or candidates[str(payload["sandbox"])]["tree"] != payload["candidate_tree"]
         ):
             raise NodeAuthorityError("platform-health node payload is invalid")
     if payload["payload_kind"] == "staging-pressure-reclaim-observe-request":
@@ -2651,9 +3858,7 @@ def _parse_request(raw: bytes, *, verb: str, policy: AuthorityPolicy) -> Request
             or (
                 payload["payload_kind"] == "staging-allocation-submit-request"
                 and staging_payload.get("requested_node")
-                not in {
-                    f"trt-gb10-{index}" for index in range(1, 16)
-                }
+                not in {f"trt-gb10-{index}" for index in range(1, 16)}
             )
         ):
             raise NodeAuthorityError("staging allocation payload is invalid")
@@ -2672,9 +3877,7 @@ def _parse_request(raw: bytes, *, verb: str, policy: AuthorityPolicy) -> Request
             or not _is_sha(staging_cancel.get("submit_request_id"), length=64)
             or re.fullmatch(r"[1-9][0-9]*", str(staging_cancel.get("job_id"))) is None
             or staging_cancel.get("requested_node")
-            not in {
-                f"trt-gb10-{index}" for index in range(1, 16)
-            }
+            not in {f"trt-gb10-{index}" for index in range(1, 16)}
             or staging_cancel.get("candidate_sha") != payload["candidate_sha"]
             or staging_cancel.get("candidate_tree") != payload["candidate_tree"]
         ):
@@ -2829,6 +4032,18 @@ def _parse_request(raw: bytes, *, verb: str, policy: AuthorityPolicy) -> Request
             raise NodeAuthorityError("Slurm compute convergence excludes the controller")
         if requested_action == "slurm-controller-converge" and not is_controller:
             raise NodeAuthorityError("Slurm controller convergence is controller-only")
+        if (
+            requested_action
+            in {
+                "slurm-identity-preflight",
+                "slurm-identity-converge",
+                "slurm-identity-retire",
+            }
+            and not is_controller
+        ):
+            raise NodeAuthorityError(
+                "incremental Slurm identity authority is controller-only",
+            )
     return Request(payload=payload, payload_bytes=decoded)
 
 
@@ -2874,9 +4089,34 @@ def _read_receipt(request_id: str) -> dict[str, Any] | None:
         raise NodeAuthorityError("node authority receipt is invalid") from exc
     inner = payload.get("inner_receipt") if isinstance(payload, dict) else None
     action = payload.get("action") if isinstance(payload, dict) else None
+    expected_dynamic_fields = DYNAMIC_RECEIPT_FIELDS | (
+        DEPLOYMENT_TARGET_BINDING_FIELDS if action in DEPLOYMENT_TARGET_ACTIONS else set()
+    )
+    dynamic_bound = (
+        isinstance(payload, dict)
+        and action in DYNAMIC_TARGET_ACTIONS
+        and set(payload) == expected_dynamic_fields
+    )
+    registry_sync_bound = (
+        isinstance(payload, dict)
+        and action == REGISTRY_SNAPSHOT_SYNC_ACTION
+        and set(payload) == REGISTRY_SNAPSHOT_SYNC_RECEIPT_FIELDS
+    )
+    receipt_fields_valid = isinstance(payload, dict) and (
+        set(payload) == RECEIPT_FIELDS or dynamic_bound or registry_sync_bound
+    )
     slurm_inner = isinstance(inner, str) and SLURM_BINDING_RE.fullmatch(inner) is not None
     domain_inner = isinstance(inner, str) and inner.startswith(
         "/var/lib/loom-developer-domain-runtime/"
+    )
+    identity_inner = (
+        isinstance(inner, str)
+        and re.fullmatch(
+            r"/var/lib/loom-developer-sandbox-slurm-policy/identity-tombstones/"
+            r"(?:trt-oldlab|trt-gb10)/denv-[a-z0-9-]{8,64}\.json",
+            inner,
+        )
+        is not None
     )
     staging_inner = (
         isinstance(inner, str)
@@ -2891,7 +4131,7 @@ def _read_receipt(request_id: str) -> dict[str, Any] | None:
     )
     if (
         not isinstance(payload, dict)
-        or set(payload) != RECEIPT_FIELDS
+        or not receipt_fields_valid
         or payload.get("schema_version") != SCHEMA_VERSION
         or payload.get("request_id") != request_id
         or payload.get("action") not in TRANSACT_ACTIONS
@@ -2900,11 +4140,46 @@ def _read_receipt(request_id: str) -> dict[str, Any] | None:
         or (
             payload.get("sandbox") != STAGING_SCOPE
             if action in STAGING_ACTIONS
-            else payload.get("sandbox") not in SANDBOXES
+            else SAFE_RUNTIME_RE.fullmatch(str(payload.get("sandbox"))) is None
         )
         or not _is_sha(payload.get("candidate_sha"))
         or not _is_sha(payload.get("candidate_tree"))
         or not _is_sha(payload.get("payload_sha256"), length=64)
+        or (
+            registry_sync_bound
+            and (
+                type(payload.get("registry_generation")) is not int
+                or int(payload["registry_generation"]) < 1
+                or not _is_sha(
+                    payload.get("registry_payload_sha256"),
+                    length=64,
+                )
+                or not _is_sha(payload.get("source_sha"))
+                or not _is_sha(payload.get("source_tree"))
+            )
+        )
+        or (
+            dynamic_bound
+            and (
+                not isinstance(payload.get("env_id"), str)
+                or not isinstance(payload.get("resource_generation"), int)
+                or isinstance(payload.get("resource_generation"), bool)
+                or int(payload["resource_generation"]) < 1
+                or re.fullmatch(r"cand-[0-9a-f]{40}", str(payload.get("candidate_id"))) is None
+                or not isinstance(payload.get("registry_generation"), int)
+                or isinstance(payload.get("registry_generation"), bool)
+                or int(payload["registry_generation"]) < 1
+                or not _is_sha(payload.get("registry_payload_sha256"), length=64)
+                or (
+                    action in DEPLOYMENT_TARGET_ACTIONS
+                    and re.fullmatch(
+                        r"dep-[0-9a-f]{32}",
+                        str(payload.get("deployment_id")),
+                    )
+                    is None
+                )
+            )
+        )
         or payload.get("status") != "succeeded"
         or not _is_sha(payload.get("result_sha256"), length=64)
         or (
@@ -2927,6 +4202,8 @@ def _read_receipt(request_id: str) -> dict[str, Any] | None:
                     "staging-infrastructure-converge",
                     "staging-infrastructure-install",
                 }
+                else identity_inner
+                if action == "slurm-identity-retire"
                 else domain_inner
             )
         )
@@ -2951,7 +4228,7 @@ def _write_receipt(payload: Mapping[str, Any]) -> None:
 
 
 def _journal_record(receipt: Mapping[str, Any]) -> dict[str, Any]:
-    return {
+    record = {
         "schema_version": SCHEMA_VERSION,
         "request_id": receipt["request_id"],
         "action": receipt["action"],
@@ -2961,6 +4238,14 @@ def _journal_record(receipt: Mapping[str, Any]) -> dict[str, Any]:
         "completed_at": receipt["completed_at"],
         "status": receipt["status"],
     }
+    if receipt["action"] == REGISTRY_SNAPSHOT_SYNC_ACTION:
+        record.update(
+            {
+                "registry_generation": receipt["registry_generation"],
+                "registry_payload_sha256": receipt["registry_payload_sha256"],
+            },
+        )
+    return record
 
 
 def _journal_contains(receipt: Mapping[str, Any]) -> bool:
@@ -2972,9 +4257,14 @@ def _journal_contains(receipt: Mapping[str, Any]) -> bool:
             record = json.loads(line)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise NodeAuthorityError("node authority journal is invalid") from exc
+        expected_fields = (
+            REGISTRY_SNAPSHOT_SYNC_JOURNAL_FIELDS
+            if isinstance(record, dict) and record.get("action") == REGISTRY_SNAPSHOT_SYNC_ACTION
+            else JOURNAL_FIELDS
+        )
         if (
             not isinstance(record, dict)
-            or set(record) != JOURNAL_FIELDS
+            or set(record) != expected_fields
             or line != _canonical(record)
         ):
             raise NodeAuthorityError("node authority journal is invalid")
@@ -3135,19 +4425,13 @@ def _extract_attestation_archive(payload: bytes, destination: Path) -> None:
 def _domain_argv(request: Request, command: str, *extra: str) -> tuple[str, ...]:
     return (
         "/usr/bin/python3",
+        "-I",
+        "-B",
         str(SOURCE_ROOT / DOMAIN_RUNTIME_RELATIVE),
         command,
         "--config",
         str(SOURCE_ROOT / RUNTIME_CONFIG_RELATIVE),
         *extra,
-    )
-
-
-def _slurm_candidate_root(request: Request) -> Path:
-    return (
-        Path("/shared_work/loom/candidates/sandboxes")
-        / str(request.payload["sandbox"])
-        / str(request.payload["candidate_sha"])
     )
 
 
@@ -3160,7 +4444,6 @@ def _slurm_policy_argv(request: Request, command: str) -> tuple[str, ...]:
     if command not in expected_action or request.action not in expected_action[command]:
         raise NodeAuthorityError("Slurm policy command binding is invalid")
     domain = str(request.payload["domain"])
-    candidate = _slurm_candidate_root(request)
     try:
         candidate_set = json.loads(request.payload_bytes)
         bindings = candidate_set["candidate_bindings"]
@@ -3170,10 +4453,10 @@ def _slurm_policy_argv(request: Request, command: str) -> tuple[str, ...]:
     argv = [
         "/usr/bin/python3",
         "-I",
-        str(candidate / SLURM_POLICY_RELATIVE),
+        str(SOURCE_ROOT / SLURM_POLICY_RELATIVE),
         command,
         "--profile",
-        str(candidate / "deploy/slurm/developer-sandboxes" / SLURM_PROFILE_NAME[domain]),
+        str(SOURCE_ROOT / "deploy/slurm/developer-sandboxes" / SLURM_PROFILE_NAME[domain]),
         "--candidate-sha",
         str(request.payload["candidate_sha"]),
         "--candidate-bindings-json",
@@ -3199,6 +4482,603 @@ def _slurm_policy_argv(request: Request, command: str) -> tuple[str, ...]:
         if command == "apply" and request.action == "slurm-controller-converge":
             argv.append("--apply-accounting")
     return tuple(argv)
+
+
+def _slurm_identity_policy_argv(request: Request, command: str) -> tuple[str, ...]:
+    expected_action = {
+        "identity-check": "slurm-identity-preflight",
+        "identity-reconcile": "slurm-identity-converge",
+        "identity-retire": "slurm-identity-retire",
+    }
+    if expected_action.get(command) != request.action:
+        raise NodeAuthorityError("incremental Slurm identity command binding is invalid")
+    domain = str(request.payload["domain"])
+    return (
+        "/usr/bin/python3",
+        "-I",
+        str(SOURCE_ROOT / SLURM_POLICY_RELATIVE),
+        command,
+        "--profile",
+        str(SOURCE_ROOT / "deploy/slurm/developer-sandboxes" / SLURM_PROFILE_NAME[domain]),
+        "--transaction-id",
+        request.request_id,
+        *(("--execute",) if command != "identity-check" else ()),
+    )
+
+
+def _acceptance_probe_policy_argv(request: Request) -> tuple[str, ...]:
+    if request.action != ACCEPTANCE_PROBE_ACTION:
+        raise NodeAuthorityError("acceptance probe policy command binding is invalid")
+    domain = str(request.payload["domain"])
+    return (
+        "/usr/bin/python3",
+        "-I",
+        str(SOURCE_ROOT / SLURM_POLICY_RELATIVE),
+        "acceptance-probe-domain",
+        "--profile",
+        str(SOURCE_ROOT / "deploy/slurm/developer-sandboxes" / SLURM_PROFILE_NAME[domain]),
+        "--transport-request-id",
+        request.request_id,
+        "--execute",
+    )
+
+
+def _validated_acceptance_probe_result(
+    request: Request,
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    inner = json.loads(request.payload_bytes)
+    domain = str(request.payload["domain"])
+    route = ACCEPTANCE_PROBE_ROUTE[domain]
+    unsigned = {key: value for key, value in result.items() if key != "payload_sha256"}
+    job = result.get("job")
+    health = result.get("health")
+    terminal = result.get("terminal")
+    if (
+        set(result) != ACCEPTANCE_PROBE_RECEIPT_FIELDS
+        or result.get("schema_version") != SCHEMA_VERSION
+        or result.get("kind") != "loom.developer-environment.acceptance-probe-domain-receipt"
+        or result.get("status") != "passed"
+        or result.get("action") != "acceptance-probe"
+        or result.get("domain") != domain
+        or result.get("cluster") != route["cluster"]
+        or result.get("submit_host") != route["submit_host"]
+        or result.get("controller") != route["controller"]
+        or any(
+            result.get(field) != inner[field]
+            for field in (
+                "deployment_id",
+                "env_id",
+                "principal_id",
+                "runtime_id",
+                "candidate_id",
+                "candidate_sha",
+                "candidate_tree",
+                "applied_resource_generation",
+                "registry_generation",
+                "registry_snapshot_sha256",
+            )
+        )
+        or result.get("probe_request_sha256") != inner["payload_sha256"]
+        or result.get("transport_request_id") != request.request_id
+        or result.get("submission_count") != 1
+        or not isinstance(job, dict)
+        or set(job) != ACCEPTANCE_PROBE_JOB_FIELDS
+        or re.fullmatch(r"[1-9][0-9]*(?:_[0-9]+)?", str(job.get("job_id"))) is None
+        or job.get("job_name") != inner["job_name"]
+        or job.get("user") != inner["service_user"]
+        or job.get("account") != inner["slurm_account"]
+        or job.get("qos") != inner["slurm_qos"]
+        or job.get("submit_host") != route["submit_host"]
+        or job.get("controller") != route["controller"]
+        or not isinstance(job.get("allocation_nodes"), list)
+        or not job["allocation_nodes"]
+        or len(job["allocation_nodes"]) != len(set(job["allocation_nodes"]))
+        or job.get("time_limit_seconds") != 300
+        or not isinstance(health, dict)
+        or set(health) != {"control-plane", "gateway", "minio"}
+        or any(
+            not isinstance(health[name], dict)
+            or set(health[name]) != ACCEPTANCE_PROBE_HEALTH_FIELDS
+            or health[name].get("service") != name
+            or health[name].get("status") != "healthy"
+            or health[name].get("http_status") != 200
+            or not _is_sha(
+                health[name].get("candidate_binding_sha256"),
+                length=64,
+            )
+            or not _is_sha(health[name].get("response_sha256"), length=64)
+            for name in ("control-plane", "gateway", "minio")
+        )
+        or terminal
+        != {
+            "state": "COMPLETED",
+            "exit_code": "0:0",
+            "natural_exit": True,
+            "cancel_requested": False,
+            "timed_out": False,
+        }
+        or not _is_sha(result.get("job_output_sha256"), length=64)
+        or not _is_sha(result.get("authority_receipt_sha256"), length=64)
+        or _canonical_utc(result.get("completed_at")) is None
+        or result.get("payload_sha256") != hashlib.sha256(_canonical(unsigned)).hexdigest()
+    ):
+        raise NodeAuthorityError("acceptance probe readback is invalid")
+    return dict(result)
+
+
+def _runtime_retire_peer_digest(
+    *,
+    candidate_root: Path,
+    runtime_root: Path,
+    runtime_id: str,
+) -> str:
+    roots = (
+        (Path("/etc/loom/developer-sandbox-links/clients"), runtime_id),
+        (Path("/etc/loom/developer-sandbox-links/server"), runtime_id),
+        (Path("/var/lib/loom-developer-domain-attestations"), runtime_id),
+        (Path("/var/lib/loom-developer-sandbox-links/attestations"), runtime_id),
+        (Path("/var/lib/loom-shared-capacity/runtime-attestations"), runtime_id),
+        (candidate_root.parent, candidate_root.name),
+        (runtime_root.parent, runtime_root.name),
+    )
+    rows: list[dict[str, object]] = []
+    for root, excluded in roots:
+        try:
+            root_metadata = root.lstat()
+        except FileNotFoundError:
+            rows.append({"root": str(root), "present": False, "entries": []})
+            continue
+        except OSError as exc:
+            raise NodeAuthorityError("runtime retirement peer inventory failed safely") from exc
+        if stat.S_ISLNK(root_metadata.st_mode) or not stat.S_ISDIR(root_metadata.st_mode):
+            raise NodeAuthorityError("runtime retirement peer root is unsafe")
+        entries: list[dict[str, object]] = []
+        try:
+            for child in sorted(root.iterdir(), key=lambda path: path.name):
+                if child.name == excluded:
+                    continue
+                metadata = child.lstat()
+                entries.append(
+                    {
+                        "name": child.name,
+                        "mode": stat.S_IFMT(metadata.st_mode),
+                        "uid": metadata.st_uid,
+                        "gid": metadata.st_gid,
+                        "size": metadata.st_size,
+                        "link": os.readlink(child) if stat.S_ISLNK(metadata.st_mode) else None,
+                    },
+                )
+        except OSError as exc:
+            raise NodeAuthorityError("runtime retirement peer inventory failed safely") from exc
+        rows.append({"root": str(root), "present": True, "entries": entries})
+    return hashlib.sha256(_canonical({"roots": rows})).hexdigest()
+
+
+def _runtime_retire_remove_tree(
+    path: Path,
+    *,
+    allowed_uids: frozenset[int],
+) -> None:
+    current = path
+    while True:
+        try:
+            ancestry = current.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise NodeAuthorityError("runtime retirement ancestry is unavailable") from exc
+        else:
+            if stat.S_ISLNK(ancestry.st_mode):
+                if current == path:
+                    break
+                raise NodeAuthorityError("runtime retirement ancestry contains a symlink")
+        if current.parent == current:
+            break
+        current = current.parent
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise NodeAuthorityError("runtime retirement target is unavailable") from exc
+    if metadata.st_uid not in allowed_uids:
+        raise NodeAuthorityError("runtime retirement target ownership drifted")
+    if stat.S_ISDIR(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode):
+        try:
+            children = list(path.iterdir())
+        except OSError as exc:
+            raise NodeAuthorityError("runtime retirement target is unreadable") from exc
+        for child in children:
+            _runtime_retire_remove_tree(child, allowed_uids=allowed_uids)
+        try:
+            path.rmdir()
+        except OSError as exc:
+            raise NodeAuthorityError("runtime retirement directory removal failed safely") from exc
+        return
+    try:
+        path.unlink()
+    except OSError as exc:
+        raise NodeAuthorityError("runtime retirement file removal failed safely") from exc
+
+
+def _runtime_retire_remove_current(
+    runtime_id: str,
+    candidate_shas: frozenset[str],
+) -> None:
+    current = Path("/etc/loom/developer-sandbox-links/server") / runtime_id / "current"
+    try:
+        metadata = current.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise NodeAuthorityError("runtime retirement active link is unavailable") from exc
+    if not stat.S_ISLNK(metadata.st_mode) or metadata.st_uid != 0:
+        raise NodeAuthorityError("runtime retirement active link is unsafe")
+    target = os.readlink(current)
+    match = re.fullmatch(r"candidates/([0-9a-f]{40})", target)
+    if match is None or match.group(1) not in candidate_shas:
+        raise NodeAuthorityError("runtime retirement active link is foreign")
+    completed = subprocess.run(
+        (
+            "/usr/bin/systemctl",
+            "stop",
+            f"loom-developer-sandbox-link@{runtime_id}.service",
+        ),
+        env=_clean_env(),
+        check=False,
+        capture_output=True,
+        timeout=60,
+    )
+    if completed.returncode != 0:
+        raise NodeAuthorityError("runtime retirement link stop failed safely")
+    try:
+        current.unlink()
+        descriptor = os.open(
+            current.parent,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        raise NodeAuthorityError("runtime retirement active link removal failed safely") from exc
+
+
+def _runtime_retire_paths(
+    *,
+    candidate_root: Path,
+    runtime_root: Path,
+    runtime_id: str,
+    candidate_shas: frozenset[str],
+) -> dict[str, tuple[Path, ...]]:
+    clients = tuple(
+        Path("/etc/loom/developer-sandbox-links/clients") / runtime_id / sha
+        for sha in candidate_shas
+    )
+    servers = tuple(
+        Path("/etc/loom/developer-sandbox-links/server") / runtime_id / "candidates" / sha
+        for sha in candidate_shas
+    )
+    runtime = tuple(runtime_root / sha for sha in candidate_shas)
+    candidates = tuple(candidate_root / sha for sha in candidate_shas)
+    attestations = tuple(
+        root / runtime_id / sha
+        for root in (
+            Path("/var/lib/loom-developer-domain-attestations"),
+            Path("/var/lib/loom-developer-sandbox-links/attestations"),
+            Path("/var/lib/loom-shared-capacity/runtime-attestations"),
+        )
+        for sha in candidate_shas
+    )
+    return {
+        "clients": clients,
+        "servers": servers,
+        "runtime": runtime,
+        "candidates": candidates,
+        "attestations": attestations,
+    }
+
+
+def _runtime_retire_absence(
+    *,
+    candidate_root: Path,
+    runtime_root: Path,
+    runtime_id: str,
+    candidate_shas: frozenset[str],
+) -> dict[str, bool]:
+    paths = _runtime_retire_paths(
+        candidate_root=candidate_root,
+        runtime_root=runtime_root,
+        runtime_id=runtime_id,
+        candidate_shas=candidate_shas,
+    )
+
+    def exact_absent(path: Path) -> bool:
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return True
+        except OSError as exc:
+            raise NodeAuthorityError("runtime retirement absence readback failed safely") from exc
+        return False
+
+    absent = {name: all(exact_absent(path) for path in values) for name, values in paths.items()}
+    current = Path("/etc/loom/developer-sandbox-links/server") / runtime_id / "current"
+    return {
+        "link_client_credentials": absent["clients"],
+        "tls_private_keys": absent["clients"] and absent["servers"],
+        "token_files": absent["clients"],
+        "domain_environment": absent["runtime"],
+        "domain_config": absent["servers"],
+        "candidate_material": absent["candidates"],
+        "active_attestation_pointers": (exact_absent(current) and absent["attestations"]),
+    }
+
+
+def _execute_runtime_retire(request: Request) -> dict[str, Any]:
+    payload = json.loads(request.payload_bytes)
+    snapshot = _load_registry_snapshot()
+    _validate_runtime_retire_request(request.payload_bytes, request.payload, snapshot)
+    environments = [row for row in snapshot["environments"] if row["env_id"] == payload["env_id"]]
+    if len(environments) != 1:
+        raise NodeAuthorityError("runtime retirement environment is unavailable")
+    environment = environments[0]
+    candidate_root = Path(str(environment["candidate_root"]))
+    runtime_root = Path(str(environment["runtime_root"]))
+    expected_dynamic_candidate = Path("/shared_work/loom/candidates/environments") / str(
+        payload["env_id"]
+    )
+    expected_dynamic_runtime = Path("/shared_work/loom/runtime/environments") / str(
+        payload["env_id"]
+    )
+    expected_legacy_candidate = Path("/shared_work/loom/candidates/sandboxes") / str(
+        payload["runtime_id"]
+    )
+    expected_legacy_runtime = Path("/shared_work/loom/runtime/sandboxes") / str(
+        payload["runtime_id"]
+    )
+    if (candidate_root, runtime_root) not in {
+        (expected_dynamic_candidate, expected_dynamic_runtime),
+        (expected_legacy_candidate, expected_legacy_runtime),
+    }:
+        raise NodeAuthorityError("runtime retirement storage binding is invalid")
+    candidate_shas = frozenset(str(row["candidate_sha"]) for row in payload["candidate_bindings"])
+    tombstone_root = (
+        RUNTIME_RETIRE_ROOT / "tombstones" / str(payload["node"]) / str(payload["runtime_id"])
+    )
+    tombstone_path = tombstone_root / f"{payload['retire_operation_sha256']}.json"
+    for path, mode, parent_mode in (
+        (RUNTIME_RETIRE_ROOT, 0o700, 0o755),
+        (RUNTIME_RETIRE_ROOT / "tombstones", 0o700, 0o700),
+        (RUNTIME_RETIRE_ROOT / "tombstones" / str(payload["node"]), 0o700, 0o700),
+        (tombstone_root, 0o700, 0o700),
+    ):
+        _ensure_root_directory(path, mode=mode, parent_mode=parent_mode)
+    existing: dict[str, Any] | None = None
+    if tombstone_path.exists() or tombstone_path.is_symlink():
+        try:
+            existing = json.loads(
+                _safe_root_file(tombstone_path, mode=0o600, limit=1 << 20),
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise NodeAuthorityError("runtime retirement tombstone is invalid") from exc
+    if existing is None:
+        peer_before = _runtime_retire_peer_digest(
+            candidate_root=candidate_root,
+            runtime_root=runtime_root,
+            runtime_id=str(payload["runtime_id"]),
+        )
+        _runtime_retire_remove_current(str(payload["runtime_id"]), candidate_shas)
+        allowed_uids = frozenset({0, int(environment["uid"])})
+        paths = _runtime_retire_paths(
+            candidate_root=candidate_root,
+            runtime_root=runtime_root,
+            runtime_id=str(payload["runtime_id"]),
+            candidate_shas=candidate_shas,
+        )
+        for target in (
+            *paths["clients"],
+            *paths["servers"],
+            *paths["runtime"],
+            *paths["candidates"],
+            *paths["attestations"],
+        ):
+            _runtime_retire_remove_tree(target, allowed_uids=allowed_uids)
+        absent = _runtime_retire_absence(
+            candidate_root=candidate_root,
+            runtime_root=runtime_root,
+            runtime_id=str(payload["runtime_id"]),
+            candidate_shas=candidate_shas,
+        )
+        peer_after = _runtime_retire_peer_digest(
+            candidate_root=candidate_root,
+            runtime_root=runtime_root,
+            runtime_id=str(payload["runtime_id"]),
+        )
+        if (
+            set(absent) != RUNTIME_RETIRE_ABSENCE_FIELDS
+            or any(value is not True for value in absent.values())
+            or peer_after != peer_before
+        ):
+            raise NodeAuthorityError("runtime retirement readback failed safely")
+        tombstone_unsigned = {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "loom.developer-environment.runtime-retire-node-tombstone",
+            "node": payload["node"],
+            "domain": payload["domain"],
+            "deployment_id": payload["deployment_id"],
+            "env_id": payload["env_id"],
+            "principal_id": payload["principal_id"],
+            "runtime_id": payload["runtime_id"],
+            "resource_generation": payload["resource_generation"],
+            "registry_generation": payload["registry_generation"],
+            "registry_snapshot_sha256": payload["registry_snapshot_sha256"],
+            "retire_operation_sha256": payload["retire_operation_sha256"],
+            "request_sha256": payload["payload_sha256"],
+            "transport_request_id": request.request_id,
+            "candidate_bindings": payload["candidate_bindings"],
+            "absent": absent,
+            "peer_digest_before": peer_before,
+            "peer_digest_after": peer_after,
+            "foreign_path_action": "preserve",
+            "audit_action": "append-only-preserve",
+            "completed_at": _timestamp(),
+        }
+        existing = {
+            **tombstone_unsigned,
+            "payload_sha256": hashlib.sha256(_canonical(tombstone_unsigned)).hexdigest(),
+        }
+        _atomic_install(
+            tombstone_path,
+            _canonical(existing),
+            0o600,
+            parent_mode=0o700,
+        )
+    tombstone_unsigned = {key: value for key, value in existing.items() if key != "payload_sha256"}
+    if (
+        existing.get("kind") != "loom.developer-environment.runtime-retire-node-tombstone"
+        or existing.get("request_sha256") != payload["payload_sha256"]
+        or existing.get("transport_request_id") != request.request_id
+        or existing.get("candidate_bindings") != payload["candidate_bindings"]
+        or existing.get("peer_digest_before") != existing.get("peer_digest_after")
+        or existing.get("payload_sha256")
+        != hashlib.sha256(_canonical(tombstone_unsigned)).hexdigest()
+        or _safe_root_file(tombstone_path, mode=0o600, limit=1 << 20) != _canonical(existing)
+    ):
+        raise NodeAuthorityError("runtime retirement tombstone binding is invalid")
+    rebound_absent = _runtime_retire_absence(
+        candidate_root=candidate_root,
+        runtime_root=runtime_root,
+        runtime_id=str(payload["runtime_id"]),
+        candidate_shas=candidate_shas,
+    )
+    if rebound_absent != existing.get("absent") or any(
+        value is not True for value in rebound_absent.values()
+    ):
+        raise NodeAuthorityError("runtime retirement tombstone target reappeared")
+    receipt_unsigned = {
+        "schema_version": SCHEMA_VERSION,
+        "kind": RUNTIME_RETIRE_RECEIPT_KIND,
+        "status": "cleaned",
+        "action": RUNTIME_RETIRE_ACTION,
+        **{
+            field: payload[field]
+            for field in (
+                "node",
+                "domain",
+                "deployment_id",
+                "env_id",
+                "principal_id",
+                "runtime_id",
+                "resource_generation",
+                "registry_generation",
+                "registry_snapshot_sha256",
+                "retire_operation_sha256",
+            )
+        },
+        "request_sha256": payload["payload_sha256"],
+        "transport_request_id": request.request_id,
+        "candidate_bindings": payload["candidate_bindings"],
+        "absent": existing["absent"],
+        "tombstone": {
+            "path": str(tombstone_path),
+            "payload_sha256": existing["payload_sha256"],
+            "persisted": True,
+        },
+        "peer_digest_before": existing["peer_digest_before"],
+        "peer_digest_after": existing["peer_digest_after"],
+        "foreign_path_action": "preserve",
+        "audit_action": "append-only-preserve",
+        "completed_at": existing["completed_at"],
+    }
+    return {
+        **receipt_unsigned,
+        "payload_sha256": hashlib.sha256(_canonical(receipt_unsigned)).hexdigest(),
+    }
+
+
+def _validated_slurm_identity_result(
+    request: Request,
+    result: Mapping[str, Any],
+    *,
+    operation: str,
+) -> dict[str, Any]:
+    identity = json.loads(request.payload_bytes)
+    expected_fields = {
+        "schema_version",
+        "kind",
+        "operation",
+        "cluster",
+        "env_id",
+        "resource_generation",
+        "service_user",
+        "slurm_account",
+        "slurm_qos",
+        "status",
+        "jobs",
+        "state_sha256",
+        "mutations",
+        "completed_at",
+    }
+    if operation == "retire":
+        expected_fields.add("tombstone")
+    expected_cluster = "trt-oldlab" if request.payload["domain"] == "oldlab" else "trt-gb10"
+    if (
+        set(result) != expected_fields
+        or result.get("schema_version") != SCHEMA_VERSION
+        or result.get("kind") != "loom.developer-environment.slurm-identity-result"
+        or result.get("operation") != operation
+        or result.get("cluster") != expected_cluster
+        or result.get("env_id") != identity["env_id"]
+        or result.get("resource_generation") != identity["resource_generation"]
+        or result.get("service_user") != identity["service_user"]
+        or result.get("slurm_account") != identity["slurm_account"]
+        or result.get("slurm_qos") != identity["slurm_qos"]
+        or result.get("status")
+        not in (
+            {"available", "exact-existing", "retired"}
+            if operation == "check"
+            else {"exact-existing"}
+            if operation == "reconcile"
+            else {"retired"}
+        )
+        or not isinstance(result.get("jobs"), list)
+        or any(
+            not isinstance(job, dict)
+            or set(job) != {"job_id", "state", "account", "user"}
+            or re.fullmatch(r"[1-9][0-9]*(?:_[0-9]+)?", str(job.get("job_id"))) is None
+            or re.fullmatch(r"[A-Z][A-Z0-9_+*~-]{1,63}", str(job.get("state"))) is None
+            or job.get("account") != identity["slurm_account"]
+            or job.get("user") != identity["service_user"]
+            for job in result["jobs"]
+        )
+        or (operation == "retire" and result["jobs"])
+        or not _is_sha(result.get("state_sha256"), length=64)
+        or not isinstance(result.get("mutations"), list)
+        or any(not isinstance(value, str) for value in result["mutations"])
+        or not isinstance(result.get("completed_at"), str)
+        or (
+            operation == "retire"
+            and (
+                not isinstance(result.get("tombstone"), str)
+                or result.get("tombstone")
+                != (
+                    "/var/lib/loom-developer-sandbox-slurm-policy/"
+                    f"identity-tombstones/{expected_cluster}/{identity['env_id']}.json"
+                )
+            )
+        )
+    ):
+        raise NodeAuthorityError("incremental Slurm identity readback is invalid")
+    try:
+        completed_at = datetime.fromisoformat(str(result["completed_at"]))
+    except ValueError as exc:
+        raise NodeAuthorityError("incremental Slurm identity time is invalid") from exc
+    if completed_at.tzinfo is None:
+        raise NodeAuthorityError("incremental Slurm identity time is invalid")
+    return dict(result)
 
 
 def _live_authority_argv(request: Request, command: str) -> tuple[str, ...]:
@@ -3318,6 +5198,7 @@ def _staging_broker_argv(request: Request) -> tuple[str, ...]:
 def _validate_slurm_candidate(request: Request, policy: AuthorityPolicy) -> None:
     candidate_set = json.loads(request.payload_bytes)
     bindings = candidate_set["candidate_bindings"]
+    cohort = _registry_cohort(_load_registry_snapshot(), include_provisioning=True)
     surface = (
         "scripts/ops/developer_sandbox_slurm_policy.py",
         "scripts/ops/slurm_job_cgroup_guard.py",
@@ -3325,8 +5206,8 @@ def _validate_slurm_candidate(request: Request, policy: AuthorityPolicy) -> None
         "deploy/slurm/loom-slurm-job-cgroup-guard.service",
     )
     surface_identities: list[tuple[str, ...]] = []
-    for sandbox in ("qianyi", "hongjian", "devansh"):
-        binding = bindings[f"loom-dev-{sandbox}"]
+    for sandbox, registry_binding in sorted(cohort.items()):
+        binding = bindings[registry_binding[0]["slurm_account"]]
         result = _run_fixed(
             _domain_argv(
                 request,
@@ -3350,10 +5231,8 @@ def _validate_slurm_candidate(request: Request, policy: AuthorityPolicy) -> None
             or result.get("candidate_clean") is not True
         ):
             raise NodeAuthorityError("Slurm candidate readback binding is invalid")
-        candidate_root = (
-            Path("/shared_work/loom/candidates/sandboxes")
-            / sandbox
-            / str(binding["candidate_sha"])
+        candidate_root = Path(registry_binding[0]["candidate_root"]) / str(
+            binding["candidate_sha"],
         )
         identities: list[str] = []
         for relative in surface:
@@ -3774,9 +5653,7 @@ def _validate_prior_slurm_binding(request: Request, prior: Mapping[str, Any]) ->
             journal={
                 "apply_accounting": require_accounting,
                 "accounting_snapshot": (
-                    str(restored_snapshot / "accounting-cas.json")
-                    if require_accounting
-                    else None
+                    str(restored_snapshot / "accounting-cas.json") if require_accounting else None
                 ),
             },
             cluster=SLURM_CLUSTER[domain],
@@ -5518,14 +7395,21 @@ def _execute_request(
     sandbox = str(payload["sandbox"])
     sha = str(payload["candidate_sha"])
     tree = str(payload["candidate_tree"])
+    if action == REGISTRY_SNAPSHOT_SYNC_ACTION:
+        return _publish_registry_snapshot(request.payload_bytes, policy=policy), None
+    if action == ACCEPTANCE_PROBE_ACTION:
+        result = _run_fixed_input(
+            _acceptance_probe_policy_argv(request),
+            request.payload_bytes,
+        )
+        return _validated_acceptance_probe_result(request, result), None
+    if action == RUNTIME_RETIRE_ACTION:
+        return _execute_runtime_retire(request), None
     if action == "staging-allocation-bootstrap":
         result = _staging_allocation_bootstrap(request)
         return (
             result,
-            (
-                "staging-allocation-bootstrap/v1/"
-                f"{result['boot_id']}/{result['mount_digest']}"
-            ),
+            (f"staging-allocation-bootstrap/v1/{result['boot_id']}/{result['mount_digest']}"),
         )
     if action == "staging-shared-source-bootstrap":
         result = _staging_shared_source_bootstrap(request)
@@ -5591,8 +7475,7 @@ def _execute_request(
             or not isinstance(result["namespace"].get("mount_inode"), int)
             or result.get("slurm_account") != "loom-staging"
             or result.get("qos") != "loom-staging"
-            or result.get("allowed_nodes")
-            != [f"trt-gb10-{index}" for index in range(1, 16)]
+            or result.get("allowed_nodes") != [f"trt-gb10-{index}" for index in range(1, 16)]
             or not isinstance(result.get("nodes"), list)
             or len(result["nodes"]) != 15
             or result.get("result") != "pass"
@@ -5644,6 +7527,37 @@ def _execute_request(
             ),
             None,
         )
+    if action == "slurm-identity-converge":
+        local = _identity_converge(request)
+        accounting = _validated_slurm_identity_result(
+            request,
+            _run_fixed_input(
+                _slurm_identity_policy_argv(request, "identity-reconcile"),
+                request.payload_bytes,
+            ),
+            operation="reconcile",
+        )
+        return (
+            {
+                **local,
+                "slurm_accounting_status": accounting["status"],
+                "slurm_accounting_receipt_sha256": hashlib.sha256(
+                    _canonical(accounting),
+                ).hexdigest(),
+                "owned_jobs": accounting["jobs"],
+            },
+            None,
+        )
+    if action == "slurm-identity-retire":
+        accounting = _validated_slurm_identity_result(
+            request,
+            _run_fixed_input(
+                _slurm_identity_policy_argv(request, "identity-retire"),
+                request.payload_bytes,
+            ),
+            operation="retire",
+        )
+        return accounting, str(accounting["tombstone"])
     if action in {"slurm-node-converge", "slurm-controller-converge"}:
         _validate_slurm_candidate(request, policy)
         result = _run_fixed(_slurm_policy_argv(request, "apply"))
@@ -5685,6 +7599,7 @@ def _execute_request(
             or prior.get("sandbox") != sandbox
             or prior.get("candidate_sha") != sha
             or prior.get("candidate_tree") != tree
+            or any(prior.get(field) != payload[field] for field in DYNAMIC_TARGET_BINDING_FIELDS)
             or prior.get("action") not in {"materialize", "attest"}
             or not isinstance(prior.get("inner_receipt"), str)
         ):
@@ -5713,6 +7628,8 @@ def _execute_request(
         result = _run_fixed_input(
             (
                 "/usr/bin/python3",
+                "-I",
+                "-B",
                 str(SOURCE_ROOT / REMOTE_LINK_HOST_RELATIVE),
                 "persist-attestation",
                 "--sandbox",
@@ -5769,11 +7686,27 @@ def _execute_request(
                     "--execute",
                 ),
             )
+            if (
+                result.get("schema_version") != SCHEMA_VERSION
+                or result.get("operation") != "materialize"
+                or result.get("mode") != "applied"
+                or result.get("domain") != domain
+                or result.get("sandbox") != sandbox
+                or result.get("candidate_sha") != sha
+                or result.get("candidate_tree") != tree
+                or not isinstance(result.get("journal"), str)
+                or not str(result["journal"]).startswith(
+                    "/var/lib/loom-developer-domain-runtime/",
+                )
+            ):
+                raise NodeAuthorityError("candidate bundle materialization readback is invalid")
         elif action == "install-client":
             _extract_client_archive(request.payload_bytes, stage)
             result = _run_fixed(
                 (
                     "/usr/bin/python3",
+                    "-I",
+                    "-B",
                     str(SOURCE_ROOT / REMOTE_LINK_HOST_RELATIVE),
                     "install-client",
                     "--sandbox",
@@ -5818,7 +7751,7 @@ def _execute_request(
             )
         else:  # pragma: no cover - request parser owns this invariant
             raise NodeAuthorityError("node authority action is invalid")
-        inner = result.get("receipt")
+        inner = result.get("journal") if action == "materialize" else result.get("receipt")
         return result, str(inner) if isinstance(inner, str) else None
     finally:
         try:
@@ -5828,9 +7761,390 @@ def _execute_request(
             raise NodeAuthorityError("node authority stage cleanup failed safely") from exc
 
 
+def _identity_inventory_sha256() -> str:
+    passwd_rows = [
+        {"name": entry.pw_name, "uid": entry.pw_uid, "gid": entry.pw_gid}
+        for entry in sorted(
+            pwd.getpwall(),
+            key=lambda entry: (entry.pw_uid, entry.pw_name, entry.pw_gid),
+        )
+    ]
+    group_rows = [
+        {"name": entry.gr_name, "gid": entry.gr_gid}
+        for entry in sorted(
+            grp.getgrall(),
+            key=lambda entry: (entry.gr_gid, entry.gr_name),
+        )
+    ]
+    return hashlib.sha256(
+        _canonical({"passwd": passwd_rows, "group": group_rows}),
+    ).hexdigest()
+
+
+def _identity_preflight(request: Request) -> dict[str, Any]:
+    try:
+        preflight = json.loads(request.payload_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:  # pragma: no cover
+        raise NodeAuthorityError("developer identity preflight payload is invalid") from exc
+    service_user = str(preflight["service_user"])
+    service_group = str(preflight["service_group"])
+    uid = int(preflight["uid"])
+    gid = int(preflight["gid"])
+    try:
+        passwd_by_name = pwd.getpwnam(service_user)
+    except KeyError:
+        passwd_by_name = None
+    try:
+        passwd_by_uid = pwd.getpwuid(uid)
+    except KeyError:
+        passwd_by_uid = None
+    try:
+        group_by_name = grp.getgrnam(service_group)
+    except KeyError:
+        group_by_name = None
+    try:
+        group_by_gid = grp.getgrgid(gid)
+    except KeyError:
+        group_by_gid = None
+    rows = (passwd_by_name, passwd_by_uid, group_by_name, group_by_gid)
+    if all(row is None for row in rows):
+        status = "available"
+        passwd_name: str | None = None
+        group_name: str | None = None
+    elif (
+        passwd_by_name is not None
+        and passwd_by_uid is not None
+        and group_by_name is not None
+        and group_by_gid is not None
+        and passwd_by_name.pw_name == service_user
+        and passwd_by_name.pw_uid == uid
+        and passwd_by_name.pw_gid == gid
+        and passwd_by_uid.pw_name == service_user
+        and passwd_by_uid.pw_uid == uid
+        and passwd_by_uid.pw_gid == gid
+        and group_by_name.gr_name == service_group
+        and group_by_name.gr_gid == gid
+        and group_by_gid.gr_name == service_group
+        and group_by_gid.gr_gid == gid
+    ):
+        status = "exact-existing"
+        passwd_name = service_user
+        group_name = service_group
+    else:
+        raise NodeAuthorityError("developer identity preflight collision detected")
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": IDENTITY_PREFLIGHT_RESULT_KIND,
+        "node": request.payload["node"],
+        "domain": request.payload["domain"],
+        "env_id": preflight["env_id"],
+        "service_user": service_user,
+        "service_group": service_group,
+        "uid": uid,
+        "gid": gid,
+        "status": status,
+        "passwd_name": passwd_name,
+        "group_name": group_name,
+        "identity_inventory_sha256": _identity_inventory_sha256(),
+        "checked_at": _timestamp(),
+    }
+
+
+def _identity_local_state(preflight: Mapping[str, Any]) -> str:
+    service_user = str(preflight["service_user"])
+    service_group = str(preflight["service_group"])
+    uid = int(preflight["uid"])
+    gid = int(preflight["gid"])
+    try:
+        passwd_by_name = pwd.getpwnam(service_user)
+    except KeyError:
+        passwd_by_name = None
+    try:
+        passwd_by_uid = pwd.getpwuid(uid)
+    except KeyError:
+        passwd_by_uid = None
+    try:
+        group_by_name = grp.getgrnam(service_group)
+    except KeyError:
+        group_by_name = None
+    try:
+        group_by_gid = grp.getgrgid(gid)
+    except KeyError:
+        group_by_gid = None
+    if all(row is None for row in (passwd_by_name, passwd_by_uid, group_by_name, group_by_gid)):
+        return "available"
+    group_exact = (
+        group_by_name is not None
+        and group_by_gid is not None
+        and group_by_name.gr_name == service_group
+        and group_by_name.gr_gid == gid
+        and group_by_gid.gr_name == service_group
+        and group_by_gid.gr_gid == gid
+        and not tuple(getattr(group_by_name, "gr_mem", ()))
+        and not tuple(getattr(group_by_gid, "gr_mem", ()))
+    )
+    if group_exact and passwd_by_name is None and passwd_by_uid is None:
+        return "group-only-exact"
+    user_exact = (
+        passwd_by_name is not None
+        and passwd_by_uid is not None
+        and passwd_by_name.pw_name == service_user
+        and passwd_by_name.pw_uid == uid
+        and passwd_by_name.pw_gid == gid
+        and passwd_by_uid.pw_name == service_user
+        and passwd_by_uid.pw_uid == uid
+        and passwd_by_uid.pw_gid == gid
+        and passwd_by_name.pw_dir == "/nonexistent"
+        and passwd_by_uid.pw_dir == "/nonexistent"
+        and passwd_by_name.pw_shell == "/usr/sbin/nologin"
+        and passwd_by_uid.pw_shell == "/usr/sbin/nologin"
+    )
+    if group_exact and user_exact:
+        return "exact-existing"
+    raise NodeAuthorityError("developer identity convergence collision detected")
+
+
+def _identity_transaction_path(request_id: str) -> Path:
+    return IDENTITY_TRANSACTION_ROOT / f"{request_id}.json"
+
+
+def _identity_transaction_read(request: Request) -> dict[str, Any] | None:
+    path = _identity_transaction_path(request.request_id)
+    try:
+        raw = _safe_root_file(path, mode=0o600, limit=64 * 1024)
+    except NodeAuthorityError:
+        if not path.exists() and not path.is_symlink():
+            return None
+        raise
+    try:
+        transaction = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise NodeAuthorityError("developer identity transaction is invalid") from exc
+    preflight = json.loads(request.payload_bytes)
+    if (
+        not isinstance(transaction, dict)
+        or set(transaction) != IDENTITY_TRANSACTION_FIELDS
+        or raw != _canonical(transaction)
+        or transaction.get("schema_version") != SCHEMA_VERSION
+        or transaction.get("kind") != "loom.developer-environment.identity-convergence-transaction"
+        or transaction.get("request_id") != request.request_id
+        or transaction.get("payload_sha256") != request.payload["payload_sha256"]
+        or transaction.get("node") != request.payload["node"]
+        or transaction.get("domain") != request.payload["domain"]
+        or transaction.get("env_id") != preflight["env_id"]
+        or transaction.get("service_user") != preflight["service_user"]
+        or transaction.get("service_group") != preflight["service_group"]
+        or transaction.get("uid") != preflight["uid"]
+        or transaction.get("gid") != preflight["gid"]
+        or transaction.get("phase")
+        not in {"prepared", "group-created", "user-created", "committed"}
+        or not isinstance(transaction.get("created_at"), str)
+        or not isinstance(transaction.get("updated_at"), str)
+    ):
+        raise NodeAuthorityError("developer identity transaction binding is invalid")
+    return transaction
+
+
+def _identity_transaction_write(
+    request: Request,
+    transaction: Mapping[str, Any],
+    phase: str,
+) -> dict[str, Any]:
+    if phase not in {"prepared", "group-created", "user-created", "committed"}:
+        raise NodeAuthorityError("developer identity transaction phase is invalid")
+    _ensure_root_directory(
+        IDENTITY_TRANSACTION_ROOT,
+        mode=0o700,
+        parent_mode=0o700,
+    )
+    now = _timestamp()
+    if transaction:
+        updated = {**transaction, "phase": phase, "updated_at": now}
+    else:
+        preflight = json.loads(request.payload_bytes)
+        updated = {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "loom.developer-environment.identity-convergence-transaction",
+            "request_id": request.request_id,
+            "payload_sha256": request.payload["payload_sha256"],
+            "node": request.payload["node"],
+            "domain": request.payload["domain"],
+            "env_id": preflight["env_id"],
+            "service_user": preflight["service_user"],
+            "service_group": preflight["service_group"],
+            "uid": preflight["uid"],
+            "gid": preflight["gid"],
+            "phase": phase,
+            "created_at": now,
+            "updated_at": now,
+        }
+    _atomic_replace(
+        _identity_transaction_path(request.request_id),
+        _canonical(updated),
+        0o600,
+        parent_mode=0o700,
+    )
+    rebound = _identity_transaction_read(request)
+    if rebound != updated:
+        raise NodeAuthorityError("developer identity transaction publication drifted")
+    return updated
+
+
+def _run_identity_command(argv: Sequence[str]) -> None:
+    try:
+        completed = subprocess.run(
+            tuple(argv),
+            check=False,
+            capture_output=True,
+            timeout=30,
+            env=_clean_env(),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise NodeAuthorityError("developer identity command failed safely") from exc
+    if completed.returncode != 0 or completed.stderr or completed.stdout:
+        raise NodeAuthorityError("developer identity command failed safely")
+
+
+def _identity_converge(request: Request) -> dict[str, Any]:
+    preflight = json.loads(request.payload_bytes)
+    transaction = _identity_transaction_read(request)
+    if transaction is None:
+        transaction = _identity_transaction_write(request, {}, "prepared")
+    state = _identity_local_state(preflight)
+    changed = transaction["phase"] != "committed" and state != "exact-existing"
+    if transaction["phase"] == "committed":
+        if state != "exact-existing":
+            raise NodeAuthorityError("committed developer identity drifted")
+    else:
+        if state == "available":
+            if transaction["phase"] != "prepared":
+                raise NodeAuthorityError("developer identity transaction state regressed")
+            _run_identity_command(
+                (
+                    "/usr/sbin/groupadd",
+                    "--gid",
+                    str(preflight["gid"]),
+                    str(preflight["service_group"]),
+                ),
+            )
+            transaction = _identity_transaction_write(
+                request,
+                transaction,
+                "group-created",
+            )
+            state = _identity_local_state(preflight)
+        if state == "group-only-exact":
+            if transaction["phase"] == "prepared":
+                transaction = _identity_transaction_write(
+                    request,
+                    transaction,
+                    "group-created",
+                )
+            if transaction["phase"] != "group-created":
+                raise NodeAuthorityError("developer identity transaction state drifted")
+            _run_identity_command(
+                (
+                    "/usr/sbin/useradd",
+                    "--uid",
+                    str(preflight["uid"]),
+                    "--gid",
+                    str(preflight["service_group"]),
+                    "--no-create-home",
+                    "--home-dir",
+                    "/nonexistent",
+                    "--shell",
+                    "/usr/sbin/nologin",
+                    str(preflight["service_user"]),
+                ),
+            )
+            transaction = _identity_transaction_write(
+                request,
+                transaction,
+                "user-created",
+            )
+            state = _identity_local_state(preflight)
+        if state != "exact-existing":
+            raise NodeAuthorityError("developer identity did not converge")
+        transaction = _identity_transaction_write(request, transaction, "committed")
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": IDENTITY_CONVERGENCE_RESULT_KIND,
+        "node": request.payload["node"],
+        "domain": request.payload["domain"],
+        "env_id": preflight["env_id"],
+        "service_user": preflight["service_user"],
+        "service_group": preflight["service_group"],
+        "uid": preflight["uid"],
+        "gid": preflight["gid"],
+        "status": "exact-existing",
+        "passwd_name": preflight["service_user"],
+        "group_name": preflight["service_group"],
+        "identity_inventory_sha256": _identity_inventory_sha256(),
+        "transaction_sha256": hashlib.sha256(_canonical(transaction)).hexdigest(),
+        "changed": changed,
+        "completed_at": _timestamp(),
+    }
+
+
+def _identity_inventory(request: Request) -> dict[str, Any]:
+    inventory = json.loads(request.payload_bytes)
+    occupied = sorted(
+        {
+            identity
+            for identity in (
+                *(int(account.pw_uid) for account in pwd.getpwall()),
+                *(int(account.pw_gid) for account in pwd.getpwall()),
+                *(int(group.gr_gid) for group in grp.getgrall()),
+            )
+            if IDENTITY_UID_START <= identity <= IDENTITY_UID_END
+        },
+    )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": IDENTITY_INVENTORY_RESULT_KIND,
+        "node": request.payload["node"],
+        "domain": request.payload["domain"],
+        "uid_start": inventory["uid_start"],
+        "uid_end": inventory["uid_end"],
+        "occupied_ids": occupied,
+        "identity_inventory_sha256": _identity_inventory_sha256(),
+        "checked_at": _timestamp(),
+    }
+
+
 def _execute_check(request: Request, policy: AuthorityPolicy) -> dict[str, Any]:
     payload = request.payload
     action = str(payload["action"])
+    if action == "slurm-identity-preflight":
+        local = _identity_preflight(request)
+        accounting = _validated_slurm_identity_result(
+            request,
+            _run_fixed_input(
+                _slurm_identity_policy_argv(request, "identity-check"),
+                request.payload_bytes,
+            ),
+            operation="check",
+        )
+        local_status = str(local["status"])
+        accounting_status = str(accounting["status"])
+        if accounting_status == "retired":
+            status = "retired"
+        elif local_status == accounting_status == "exact-existing":
+            status = "exact-existing"
+        else:
+            status = "available"
+        return {
+            **local,
+            "status": status,
+            "local_identity_status": local_status,
+            "slurm_accounting_status": accounting_status,
+            "slurm_accounting_receipt_sha256": hashlib.sha256(
+                _canonical(accounting),
+            ).hexdigest(),
+            "owned_jobs": accounting["jobs"],
+        }
+    if action == "slurm-identity-inventory":
+        return _identity_inventory(request)
     if action == "observe-platform-health-node":
         result = _run_fixed_input(
             _platform_health_authority_argv(request, "observe-node"),
@@ -5975,6 +8289,8 @@ def _execute_check(request: Request, policy: AuthorityPolicy) -> dict[str, Any]:
         return _run_fixed(
             (
                 "/usr/bin/python3",
+                "-I",
+                "-B",
                 str(SOURCE_ROOT / REMOTE_LINK_HOST_RELATIVE),
                 "check-client",
                 "--sandbox",
@@ -5989,6 +8305,8 @@ def _execute_check(request: Request, policy: AuthorityPolicy) -> dict[str, Any]:
         return _run_fixed(
             (
                 "/usr/bin/python3",
+                "-I",
+                "-B",
                 str(SOURCE_ROOT / REMOTE_LINK_HOST_RELATIVE),
                 "check-server",
                 "--sandbox",
@@ -6047,6 +8365,26 @@ def dispatch(
         policy = _read_policy()
         _validate_runtime_assets(policy)
         request = _parse_request(raw, verb=verb, policy=policy)
+        if verb == "transact" and request.action in {
+            ACCEPTANCE_PROBE_ACTION,
+            RUNTIME_RETIRE_ACTION,
+        }:
+            result, _inner_receipt = _execute_request(request, policy)
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "request_id": request.request_id,
+                "status": "succeeded",
+                "action": request.action,
+                "node": request.payload["node"],
+                "domain": request.payload["domain"],
+                "sandbox": request.payload["sandbox"],
+                "candidate_sha": request.payload["candidate_sha"],
+                "candidate_tree": request.payload["candidate_tree"],
+                "payload_sha256": request.payload["payload_sha256"],
+                "result": result,
+                "result_sha256": hashlib.sha256(_canonical(result)).hexdigest(),
+                "completed_at": str(result["completed_at"]),
+            }
         if verb == "check":
             result = _execute_check(request, policy)
             return {
@@ -6076,6 +8414,23 @@ def dispatch(
             "completed_at": _timestamp(),
             "status": "succeeded",
         }
+        if request.action in DYNAMIC_TARGET_ACTIONS:
+            receipt.update(
+                {field: request.payload[field] for field in DYNAMIC_TARGET_BINDING_FIELDS},
+            )
+        if request.action == REGISTRY_SNAPSHOT_SYNC_ACTION:
+            receipt.update(
+                {
+                    "registry_generation": request.payload["registry_generation"],
+                    "registry_payload_sha256": request.payload["registry_payload_sha256"],
+                    "source_sha": policy.source_sha,
+                    "source_tree": policy.source_tree,
+                },
+            )
+        if request.action in DEPLOYMENT_TARGET_ACTIONS:
+            receipt.update(
+                {field: request.payload[field] for field in DEPLOYMENT_TARGET_BINDING_FIELDS},
+            )
         _write_receipt(receipt)
         _append_journal(receipt)
         return receipt

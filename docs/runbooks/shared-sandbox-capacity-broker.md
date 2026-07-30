@@ -1,18 +1,66 @@
 # Shared Sandbox Capacity Broker
 
-The shared capacity broker is the single slot authority for the disposable
-`sandbox-qianyi`, `sandbox-hongjian`, and `sandbox-devansh` Control Planes. It
-does not run inside any sandbox and does not read a sandbox database. One
-submit-host service owns its SQLite state and publishes candidate-bound,
-secret-free grant handoffs for sandbox-specific adapters.
+The shared capacity broker is the single slot authority for the
+registry-owned active developer-environment cohort. It does not run inside an
+environment and does not read an environment database. One submit-host
+service owns its SQLite state and publishes candidate-bound, secret-free grant
+handoffs for environment-specific adapters.
 
 This repository slice is a broker and handoff contract. It does not authorize
 Slurm policy changes, non-exclusive worker activation, shared-host mutation, or
 production/staging reclaim. Those remain gated by their owning issues.
 
+## Current registry-owned dynamic cohort
+
+The current runtime host reads the root-owned registry snapshot and derives
+the complete active cohort. There is no checked-in developer-name allowlist
+and no fixed upper environment count. Live acceptance requires at least two
+active environments with committed, distinct candidates; ordinary deployment
+may contain any non-zero number of active environments. For cohort size `N`,
+the runtime host renders exactly two adapter instances per environment, one
+for `oldlab` and one for `gb10`, and publishes an atomic `2 * N`-lane
+generation. Admission, drain, rollback, and readback must operate on that
+same registry generation and complete cohort.
+
+Dynamic environment paths, identities, ports, buckets, Slurm accounts, and
+systemd instances come from the registry record. Operators must not clone a
+legacy TOML file, choose a free port manually, or add a developer name to a
+static list. A cohort change requires a new verified registry snapshot and a
+new complete runtime-host generation.
+
+An additive generation is admitted while existing environments have committed
+jobs only when it is a pure cohort addition: every prior environment's
+candidate, resource binding, policy, rendered adapter bytes, handoff bytes,
+lease epoch, unit state, and job IDs remain exact. The new environment is
+converged independently; no existing adapter is stopped, disabled, restarted,
+drained, or handed off.
+
+A subtractive generation retires only the exact removed environment. Its own
+requests, leases, adapters, jobs, and resources must reach terminal zero before
+removal, but peer environments do not have to drain. Their handoffs, leases,
+units, candidates, and jobs remain unchanged. Rebinding an existing
+environment, changing its budget during a cohort edit, or deleting an
+environment with nonterminal owned work fails closed.
+
+The broker invariants below continue to apply per dynamically derived
+environment and pool: exact candidate binding, fail-closed observations,
+pending-before-publication accounting, bounded grants, and terminal-zero
+drain before release.
+
+## Legacy-v1-only static acceptance workflow
+
+Everything from this heading to the end of this runbook that names
+`qianyi`, `hongjian`, or `devansh`, or assumes three environments, six lanes,
+18 denials, 33 checkpoints, or fixed per-name adapter files, is retained only
+for recovery and interpretation of an existing `legacy-v1` transaction. It
+must not be used to admit, install, or truncate the current registry-owned
+cohort. The checked-in per-name adapter TOMLs are migration fixtures, not the
+current source of membership.
+
 ## Safety contract
 
-- The sandbox allowlist is fixed to `qianyi`, `hongjian`, and `devansh`.
+- Legacy-v1 only: the historical sandbox allowlist was fixed to `qianyi`,
+  `hongjian`, and `devansh`.
 - Every request binds a full lowercase 40-character candidate SHA, one pool,
   `min_slots`, `target_slots`, bounded TTL, purpose, and preemptibility.
 - All request, cancel, observation, fair-share, grant, and audit changes occur
@@ -180,7 +228,8 @@ process from the broker:
 - restart state is durable. Unknown Control Plane counters retain the last
   committed observation instead of releasing uncertain capacity.
 
-Checked-in adapter configs cover both pools for all three sandboxes:
+Legacy-v1 checked-in adapter fixtures cover both pools for its three
+sandboxes:
 
 ```text
 deploy/developer-sandboxes/shared-capacity-adapters/

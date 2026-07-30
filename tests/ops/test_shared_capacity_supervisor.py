@@ -32,10 +32,20 @@ def _write(path: Path, payload: object, *, mode: int = 0o600) -> None:
     path.chmod(mode)
 
 
-def _fixture(tmp_path: Path) -> tuple[supervisor.SupervisorConfig, Path]:
+def _fixture(
+    tmp_path: Path,
+    *,
+    sandboxes: tuple[str, ...] = ("qianyi", "hongjian", "devansh"),
+    instances: list[str] | None = None,
+) -> tuple[supervisor.SupervisorConfig, Path]:
     authority = tmp_path / "authority"
-    authority.mkdir(mode=0o700)
+    authority.mkdir(mode=0o700, parents=True, exist_ok=True)
     config_path = tmp_path / "supervisor.toml"
+    configured_instances = (
+        instances
+        if instances is not None
+        else [f"{sandbox}-{pool}" for sandbox in sandboxes for pool in ("gb10", "oldlab")]
+    )
     _write(
         config_path,
         "\n".join(
@@ -50,9 +60,7 @@ def _fixture(tmp_path: Path) -> tuple[supervisor.SupervisorConfig, Path]:
                 "global_slot_budget = 140",
                 "global_pending_slot_budget = 34",
                 "instances = [",
-                '  "qianyi-gb10", "qianyi-oldlab",',
-                '  "hongjian-gb10", "hongjian-oldlab",',
-                '  "devansh-gb10", "devansh-oldlab",',
+                *(f'  "{instance}",' for instance in configured_instances),
                 "]",
                 "[pool_slot_budgets]",
                 "gb10 = 120",
@@ -98,7 +106,7 @@ def _handoff(config: supervisor.SupervisorConfig, instance: str) -> dict[str, An
 def _assert_complete_generation(config: supervisor.SupervisorConfig) -> dict[str, Any]:
     current = config.handoff_dir / "current"
     manifest = json.loads((current / "manifest.json").read_text())
-    assert set(manifest["instances"]) == set(supervisor._EXPECTED_INSTANCES)
+    assert set(manifest["instances"]) == set(config.instances)
     for instance, entry in manifest["instances"].items():
         path = current / f"{instance}.json"
         if entry["status"] == "absent":
@@ -154,6 +162,427 @@ def _observation(
     )
 
 
+def test_dynamic_instance_registry_is_sorted_digest_bound_and_published(
+    tmp_path: Path,
+) -> None:
+    instances = [
+        "team-27-oldlab",
+        "qianyi-gb10",
+        "research-4-oldlab",
+        "team-27-gb10",
+        "qianyi-oldlab",
+        "research-4-gb10",
+    ]
+    config, _ = _fixture(
+        tmp_path,
+        sandboxes=("qianyi", "research-4", "team-27"),
+        instances=instances,
+    )
+    assert config.instances == tuple(sorted(instances))
+    first_digest = config.digest
+
+    reordered, _ = _fixture(
+        tmp_path,
+        sandboxes=("qianyi", "research-4", "team-27"),
+        instances=list(reversed(instances)),
+    )
+    assert reordered.instances == config.instances
+    assert reordered.digest == first_digest
+
+    _request(
+        reordered,
+        SandboxId("research-4"),
+        pool="gb10",
+        candidate_sha=SHA_A,
+        target_slots=12,
+        key="research-4-gb10-dynamic",
+    )
+    result = supervisor.run_once(reordered, now=NOW)
+
+    assert result["published"]["research-4-gb10"]["status"] == "published"
+    assert _handoff(reordered, "research-4-gb10")["environment"] == "sandbox-research-4"
+    assert set(_assert_complete_generation(reordered)["instances"]) == set(instances)
+
+
+@pytest.mark.parametrize(
+    ("instances", "message"),
+    [
+        ([], "non-empty"),
+        (["qianyi-gb10"], "every reviewed pool"),
+        (
+            ["qianyi-gb10", "qianyi-gb10", "qianyi-oldlab"],
+            "duplicates",
+        ),
+        (["Qianyi-gb10", "Qianyi-oldlab"], "sandbox id"),
+    ],
+)
+def test_config_rejects_invalid_dynamic_instance_registry(
+    tmp_path: Path,
+    instances: list[str],
+    message: str,
+) -> None:
+    with pytest.raises(supervisor.SupervisorError, match=message):
+        _fixture(tmp_path, instances=instances)
+
+
+def test_request_observation_and_handoff_must_match_config_snapshot(
+    tmp_path: Path,
+) -> None:
+    config, _ = _fixture(tmp_path, sandboxes=("qianyi",))
+    _request(
+        config,
+        SandboxId("research-4"),
+        pool="gb10",
+        candidate_sha=SHA_A,
+        target_slots=4,
+        key="research-4-gb10-outside-snapshot",
+    )
+    with pytest.raises(supervisor.SupervisorError, match="outside supervisor scope"):
+        supervisor.run_once(config, now=NOW)
+
+    isolated, _ = _fixture(tmp_path / "observation", sandboxes=("qianyi",))
+    _write(isolated.observation_dir / "research-4-gb10.json", [])
+    with pytest.raises(supervisor.SupervisorError, match="outside the config snapshot"):
+        supervisor.run_once(isolated, now=NOW)
+
+    handoff_config, _ = _fixture(tmp_path / "handoff", sandboxes=("qianyi",))
+    _request(
+        handoff_config,
+        SandboxId("qianyi"),
+        pool="gb10",
+        candidate_sha=SHA_A,
+        target_slots=4,
+        key="qianyi-gb10-handoff-snapshot",
+    )
+    report = SharedCapacityBroker(
+        handoff_config.state_db,
+        clock=lambda: NOW,
+    ).reconcile(
+        BrokerBudgets(
+            global_slots=handoff_config.global_slot_budget,
+            pool_slots=handoff_config.pool_slot_budgets,
+            global_pending_slots=handoff_config.global_pending_slot_budget,
+            pool_pending_slots=handoff_config.pool_pending_slot_budgets,
+        ),
+    )
+    report["handoffs"][0]["sandbox"] = "research-4"
+    report["handoffs"][0]["environment"] = "sandbox-research-4"
+    with pytest.raises(supervisor.SupervisorError, match="exactly request/lease bound"):
+        supervisor._request_maps(report, handoff_config)
+
+
+def test_additive_cohort_migration_preserves_committed_peer_handoff_exactly(
+    tmp_path: Path,
+) -> None:
+    config, _ = _fixture(tmp_path, sandboxes=("qianyi",))
+    _request(
+        config,
+        SandboxId("qianyi"),
+        pool="gb10",
+        candidate_sha=SHA_A,
+        target_slots=4,
+        key="qianyi-gb10-instance-snapshot",
+    )
+    supervisor.run_once(config, now=NOW)
+    handoff_path = config.handoff_dir / "current" / "qianyi-gb10.json"
+    handoff_before = handoff_path.read_bytes()
+    lease_epoch_before = _handoff(config, "qianyi-gb10")["lease_epoch"]
+
+    expanded, _ = _fixture(tmp_path, sandboxes=("qianyi", "research-4"))
+    assert expanded.digest != config.digest
+    result = supervisor.run_once(expanded, now=NOW)
+
+    assert result["aggregate"]["committed_slots"] == 4
+    assert handoff_path.read_bytes() == handoff_before
+    assert _handoff(expanded, "qianyi-gb10")["lease_epoch"] == lease_epoch_before
+    assert result["published"]["research-4-gb10"] == {"status": "absent"}
+    assert result["published"]["research-4-oldlab"] == {"status": "absent"}
+    assert set(_assert_complete_generation(expanded)["instances"]) == set(expanded.instances)
+
+
+def test_cohort_rebind_is_rejected_while_peer_capacity_is_committed(
+    tmp_path: Path,
+) -> None:
+    config, _ = _fixture(tmp_path, sandboxes=("qianyi", "research-4"))
+    _request(
+        config,
+        SandboxId("qianyi"),
+        pool="gb10",
+        candidate_sha=SHA_A,
+        target_slots=4,
+        key="qianyi-gb10-cohort-rebind",
+    )
+    supervisor.run_once(config, now=NOW)
+    handoff_before = (config.handoff_dir / "current" / "qianyi-gb10.json").read_bytes()
+    state_before = config.supervisor_state_path.read_bytes()
+
+    rebound, _ = _fixture(tmp_path, sandboxes=("qianyi", "team-27"))
+    with pytest.raises(supervisor.SupervisorError, match="rebind"):
+        supervisor.run_once(rebound, now=NOW)
+
+    assert (config.handoff_dir / "current" / "qianyi-gb10.json").read_bytes() == handoff_before
+    assert config.supervisor_state_path.read_bytes() == state_before
+
+
+def test_peer_policy_binding_change_blocks_additive_cohort_migration(
+    tmp_path: Path,
+) -> None:
+    config, _ = _fixture(tmp_path, sandboxes=("qianyi",))
+    request_id = _request(
+        config,
+        SandboxId("qianyi"),
+        pool="gb10",
+        candidate_sha=SHA_A,
+        target_slots=4,
+        key="qianyi-gb10-policy-binding",
+    )
+    supervisor.run_once(config, now=NOW)
+    handoff_before = (config.handoff_dir / "current" / "qianyi-gb10.json").read_bytes()
+    SharedCapacityBroker(config.state_db, clock=lambda: NOW).cancel(request_id)
+
+    expanded, _ = _fixture(tmp_path, sandboxes=("qianyi", "research-4"))
+    with pytest.raises(supervisor.SupervisorError, match="handoff differs"):
+        supervisor.run_once(expanded, now=NOW)
+
+    assert (config.handoff_dir / "current" / "qianyi-gb10.json").read_bytes() == handoff_before
+
+
+def test_drained_cohort_removal_preserves_committed_peer_handoff_exactly(
+    tmp_path: Path,
+) -> None:
+    expanded, _ = _fixture(tmp_path, sandboxes=("qianyi", "research-4"))
+    _request(
+        expanded,
+        SandboxId("qianyi"),
+        pool="gb10",
+        candidate_sha=SHA_A,
+        target_slots=4,
+        key="qianyi-gb10-removal-peer",
+    )
+    removed_request_id = _request(
+        expanded,
+        SandboxId("research-4"),
+        pool="gb10",
+        candidate_sha=SHA_B,
+        target_slots=4,
+        key="research-4-gb10-removal",
+    )
+    supervisor.run_once(expanded, now=NOW)
+    broker = SharedCapacityBroker(expanded.state_db, clock=lambda: NOW)
+    broker.cancel(removed_request_id)
+    cancelled = next(
+        handoff
+        for handoff in broker.status()["handoffs"]
+        if handoff["request_id"] == removed_request_id
+    )
+    _observation(
+        expanded,
+        "research-4-gb10",
+        handoff=cancelled,
+        capacity_lease_state="retired",
+    )
+    drained = supervisor.run_once(expanded, now=NOW)
+    assert drained["aggregate"]["committed_slots"] == 4
+    peer_path = expanded.handoff_dir / "current" / "qianyi-gb10.json"
+    peer_before = peer_path.read_bytes()
+    peer_epoch_before = _handoff(expanded, "qianyi-gb10")["lease_epoch"]
+    (expanded.observation_dir / "research-4-gb10.json").unlink()
+
+    reduced, _ = _fixture(tmp_path, sandboxes=("qianyi",))
+    result = supervisor.run_once(reduced, now=NOW)
+
+    assert result["aggregate"]["committed_slots"] == 4
+    assert peer_path.read_bytes() == peer_before
+    assert _handoff(reduced, "qianyi-gb10")["lease_epoch"] == peer_epoch_before
+    assert set(_assert_complete_generation(reduced)["instances"]) == set(reduced.instances)
+
+
+def test_undrained_cohort_removal_is_rejected_without_touching_committed_peer(
+    tmp_path: Path,
+) -> None:
+    expanded, _ = _fixture(tmp_path, sandboxes=("qianyi", "research-4"))
+    _request(
+        expanded,
+        SandboxId("qianyi"),
+        pool="gb10",
+        candidate_sha=SHA_A,
+        target_slots=4,
+        key="qianyi-gb10-unsafe-removal-peer",
+    )
+    _request(
+        expanded,
+        SandboxId("research-4"),
+        pool="gb10",
+        candidate_sha=SHA_B,
+        target_slots=4,
+        key="research-4-gb10-unsafe-removal",
+    )
+    supervisor.run_once(expanded, now=NOW)
+    peer_path = expanded.handoff_dir / "current" / "qianyi-gb10.json"
+    peer_before = peer_path.read_bytes()
+    state_before = expanded.supervisor_state_path.read_bytes()
+
+    reduced, _ = _fixture(tmp_path, sandboxes=("qianyi",))
+    with pytest.raises(supervisor.SupervisorError, match="drained terminal"):
+        supervisor.run_once(reduced, now=NOW)
+
+    assert peer_path.read_bytes() == peer_before
+    assert expanded.supervisor_state_path.read_bytes() == state_before
+
+
+def _retired_dynamic_environment(
+    tmp_path: Path,
+) -> tuple[
+    supervisor.SupervisorConfig,
+    supervisor.SupervisorConfig,
+    dict[str, Any],
+    dict[str, Any],
+]:
+    expanded, _ = _fixture(
+        tmp_path,
+        sandboxes=("qianyi", "hongjian", "devansh", "research-4"),
+    )
+    request_id = _request(
+        expanded,
+        SandboxId("research-4"),
+        pool="gb10",
+        candidate_sha=SHA_A,
+        target_slots=4,
+        key="research-4-gb10-retirement",
+    )
+    granted = supervisor.run_once(expanded, now=NOW)
+    broker = SharedCapacityBroker(expanded.state_db, clock=lambda: NOW)
+    broker.cancel(request_id)
+    cancelled_handoff = next(
+        handoff for handoff in broker.status()["handoffs"] if handoff["request_id"] == request_id
+    )
+    _observation(
+        expanded,
+        "research-4-gb10",
+        handoff=cancelled_handoff,
+        capacity_lease_state="retired",
+    )
+    drained = supervisor.run_once(expanded, now=NOW)
+    request = next(
+        row
+        for row in SharedCapacityBroker(expanded.state_db).status()["requests"]
+        if row["request"]["id"] == request_id
+    )
+    assert request["request"]["state"] == "terminal"
+    assert all(request["lease"][field] == 0 for field in supervisor._DRAINED_LEASE_FIELDS)
+    (expanded.observation_dir / "research-4-gb10.json").unlink()
+    reduced, _ = _fixture(
+        tmp_path,
+        sandboxes=("qianyi", "hongjian", "devansh"),
+    )
+    return expanded, reduced, granted, drained
+
+
+def test_drained_fourth_environment_retires_and_cleans_exact_old_generation(
+    tmp_path: Path,
+) -> None:
+    expanded, reduced, granted, drained = _retired_dynamic_environment(tmp_path)
+    obsolete = expanded.handoff_dir / granted["generation"]
+    rollback = expanded.handoff_dir / drained["generation"]
+    rollback_before = {path.name: path.read_bytes() for path in rollback.iterdir()}
+    unrelated = expanded.handoff_dir / "operator-note"
+    unrelated.write_text("preserve\n")
+
+    retired = supervisor.run_once(reduced, now=NOW)
+
+    assert not obsolete.exists()
+    assert rollback.is_dir()
+    assert {path.name: path.read_bytes() for path in rollback.iterdir()} == rollback_before
+    assert unrelated.read_text() == "preserve\n"
+    assert "research-4-gb10" not in retired["published"]
+    assert "research-4-oldlab" not in retired["published"]
+    assert set(_assert_complete_generation(reduced)["instances"]) == set(reduced.instances)
+
+
+def test_removed_environment_nonterminal_request_is_rejected(
+    tmp_path: Path,
+) -> None:
+    expanded, _ = _fixture(
+        tmp_path,
+        sandboxes=("qianyi", "research-4"),
+    )
+    _request(
+        expanded,
+        SandboxId("research-4"),
+        pool="gb10",
+        candidate_sha=SHA_A,
+        target_slots=4,
+        key="research-4-gb10-pending-retirement",
+    )
+    reduced, _ = _fixture(tmp_path, sandboxes=("qianyi",))
+
+    with pytest.raises(supervisor.SupervisorError, match="outside supervisor scope"):
+        supervisor.run_once(reduced, now=NOW)
+
+
+@pytest.mark.parametrize(
+    "lease_field",
+    (
+        "granted_slots",
+        "committed_slots",
+        "pending_slots",
+        "active_slots",
+        "draining_slots",
+        "terminal_slots",
+    ),
+)
+def test_removed_terminal_environment_with_live_slots_is_rejected(
+    tmp_path: Path,
+    lease_field: str,
+) -> None:
+    expanded, reduced, _granted, _drained = _retired_dynamic_environment(tmp_path)
+    report = SharedCapacityBroker(expanded.state_db).status()
+    outside = next(row for row in report["requests"] if row["request"]["sandbox"] == "research-4")
+    outside["lease"][lease_field] = 1
+
+    with pytest.raises(supervisor.SupervisorError, match="outside supervisor scope"):
+        supervisor._request_maps(report, reduced)
+
+
+@pytest.mark.parametrize(
+    ("tamper", "message"),
+    (
+        ("digest", "digest drifted"),
+        ("unknown", "unexpected files"),
+        ("metadata", "owner-private"),
+    ),
+)
+def test_old_generation_tampering_blocks_retirement_cleanup(
+    tmp_path: Path,
+    tamper: str,
+    message: str,
+) -> None:
+    expanded, reduced, granted, _drained = _retired_dynamic_environment(tmp_path)
+    obsolete = expanded.handoff_dir / granted["generation"]
+    if tamper == "digest":
+        path = obsolete / "research-4-gb10.json"
+        handoff = json.loads(path.read_text())
+        handoff["max_slots"] += 1
+        _write(path, handoff)
+    elif tamper == "unknown":
+        _write(obsolete / "foreign.json", {"unexpected": True})
+    else:
+        obsolete.chmod(0o755)
+    before = {path.name: path.read_bytes() for path in obsolete.iterdir() if path.is_file()}
+    current_before = expanded.handoff_dir.joinpath("current").readlink()
+    state_before = expanded.supervisor_state_path.read_bytes()
+    audit_before = expanded.audit_path.read_bytes()
+
+    with pytest.raises(supervisor.SupervisorError, match=message):
+        supervisor.run_once(reduced, now=NOW)
+
+    assert expanded.handoff_dir.joinpath("current").readlink() == current_before
+    assert expanded.supervisor_state_path.read_bytes() == state_before
+    assert expanded.audit_path.read_bytes() == audit_before
+    assert obsolete.is_dir()
+    assert {path.name: path.read_bytes() for path in obsolete.iterdir() if path.is_file()} == before
+
+
 def test_cycle_reconciles_once_and_publishes_exact_broker_handoff(
     tmp_path: Path,
     monkeypatch,
@@ -161,7 +590,7 @@ def test_cycle_reconciles_once_and_publishes_exact_broker_handoff(
     config, _ = _fixture(tmp_path)
     request_id = _request(
         config,
-        SandboxId.QIANYI,
+        SandboxId("qianyi"),
         pool="gb10",
         candidate_sha=SHA_A,
         target_slots=12,
@@ -193,14 +622,14 @@ def test_cycle_reconciles_once_and_publishes_exact_broker_handoff(
     assert not (config.handoff_dir / "current" / "hongjian-gb10.json").exists()
 
 
-def test_six_file_collection_accepts_two_exact_observations_in_one_transaction(
+def test_configured_file_collection_accepts_two_exact_observations_in_one_transaction(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     config, _ = _fixture(tmp_path)
     _request(
         config,
-        SandboxId.QIANYI,
+        SandboxId("qianyi"),
         pool="gb10",
         candidate_sha=SHA_A,
         target_slots=12,
@@ -208,7 +637,7 @@ def test_six_file_collection_accepts_two_exact_observations_in_one_transaction(
     )
     _request(
         config,
-        SandboxId.HONGJIAN,
+        SandboxId("hongjian"),
         pool="oldlab",
         candidate_sha=SHA_B,
         target_slots=8,
@@ -253,7 +682,7 @@ def test_restart_is_idempotent_and_audit_sequence_is_durable(tmp_path: Path) -> 
     config, _ = _fixture(tmp_path)
     _request(
         config,
-        SandboxId.QIANYI,
+        SandboxId("qianyi"),
         pool="gb10",
         candidate_sha=SHA_A,
         target_slots=12,
@@ -278,14 +707,14 @@ def test_restart_is_idempotent_and_audit_sequence_is_durable(tmp_path: Path) -> 
     assert evidence["cycle"]["sequence"] == 2
 
 
-def test_interrupted_generation_flip_never_exposes_partial_six_instance_set(
+def test_interrupted_generation_flip_never_exposes_partial_instance_set(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     config, _ = _fixture(tmp_path)
     request_id = _request(
         config,
-        SandboxId.QIANYI,
+        SandboxId("qianyi"),
         pool="gb10",
         candidate_sha=SHA_A,
         target_slots=12,
@@ -322,7 +751,7 @@ def test_unchanged_cycle_retains_current_and_previous_generations(
     config, _ = _fixture(tmp_path)
     request_id = _request(
         config,
-        SandboxId.QIANYI,
+        SandboxId("qianyi"),
         pool="gb10",
         candidate_sha=SHA_A,
         target_slots=12,
@@ -361,7 +790,7 @@ def test_malformed_observation_fails_before_reconcile_or_publish(
     config, _ = _fixture(tmp_path)
     _request(
         config,
-        SandboxId.QIANYI,
+        SandboxId("qianyi"),
         pool="gb10",
         candidate_sha=SHA_A,
         target_slots=12,
@@ -389,7 +818,7 @@ def test_ahead_epoch_observation_fails_closed(tmp_path: Path) -> None:
     config, _ = _fixture(tmp_path)
     _request(
         config,
-        SandboxId.QIANYI,
+        SandboxId("qianyi"),
         pool="gb10",
         candidate_sha=SHA_A,
         target_slots=12,
@@ -418,7 +847,7 @@ def test_terminal_tombstone_is_ignored_without_blocking_new_request(
     config, _ = _fixture(tmp_path)
     first_id = _request(
         config,
-        SandboxId.QIANYI,
+        SandboxId("qianyi"),
         pool="gb10",
         candidate_sha=SHA_A,
         target_slots=4,
@@ -441,7 +870,7 @@ def test_terminal_tombstone_is_ignored_without_blocking_new_request(
     supervisor.run_once(config, now=NOW)
     second_id = _request(
         config,
-        SandboxId.QIANYI,
+        SandboxId("qianyi"),
         pool="gb10",
         candidate_sha=SHA_B,
         target_slots=4,
@@ -461,7 +890,7 @@ def test_duplicate_observation_does_not_refresh_broker_liveness(
     config, _ = _fixture(tmp_path)
     request_id = _request(
         config,
-        SandboxId.QIANYI,
+        SandboxId("qianyi"),
         pool="gb10",
         candidate_sha=SHA_A,
         target_slots=4,
@@ -501,7 +930,7 @@ def test_stale_and_regressed_observations_fail_before_reconcile(
     config, _ = _fixture(tmp_path)
     _request(
         config,
-        SandboxId.QIANYI,
+        SandboxId("qianyi"),
         pool="gb10",
         candidate_sha=SHA_A,
         target_slots=4,
@@ -561,7 +990,7 @@ def test_duplicate_nonterminal_instance_requests_fail_before_publication(
     config, _ = _fixture(tmp_path)
     _request(
         config,
-        SandboxId.QIANYI,
+        SandboxId("qianyi"),
         pool="gb10",
         candidate_sha=SHA_A,
         target_slots=4,
@@ -569,7 +998,7 @@ def test_duplicate_nonterminal_instance_requests_fail_before_publication(
     )
     _request(
         config,
-        SandboxId.QIANYI,
+        SandboxId("qianyi"),
         pool="gb10",
         candidate_sha=SHA_B,
         target_slots=4,
@@ -589,7 +1018,7 @@ def test_independent_budget_validation_blocks_publication_after_transaction(
     config, _ = _fixture(tmp_path)
     _request(
         config,
-        SandboxId.QIANYI,
+        SandboxId("qianyi"),
         pool="gb10",
         candidate_sha=SHA_A,
         target_slots=12,
@@ -658,7 +1087,7 @@ def test_budget_validation_checks_global_pool_and_pending_independently(
         config = supervisor.load_config(config_path)
     _request(
         config,
-        SandboxId.QIANYI,
+        SandboxId("qianyi"),
         pool="gb10",
         candidate_sha=SHA_A,
         target_slots=12,
@@ -685,7 +1114,7 @@ def test_restart_rejects_config_digest_change_while_capacity_is_committed(
     config, config_path = _fixture(tmp_path)
     _request(
         config,
-        SandboxId.QIANYI,
+        SandboxId("qianyi"),
         pool="gb10",
         candidate_sha=SHA_A,
         target_slots=12,
@@ -754,7 +1183,14 @@ def test_checked_in_config_and_exact_candidate_service_renderer(tmp_path: Path) 
     config = supervisor.load_config(installed)
     assert config.pool_slot_budgets == {"gb10": 120, "oldlab": 20}
     assert config.pool_pending_slot_budgets == {"gb10": 24, "oldlab": 10}
-    assert set(config.instances) == set(supervisor._EXPECTED_INSTANCES)
+    assert config.instances == (
+        "devansh-gb10",
+        "devansh-oldlab",
+        "hongjian-gb10",
+        "hongjian-oldlab",
+        "qianyi-gb10",
+        "qianyi-oldlab",
+    )
     template = (
         ROOT / "deploy/developer-sandboxes/loom-shared-capacity-supervisor.service"
     ).read_text()

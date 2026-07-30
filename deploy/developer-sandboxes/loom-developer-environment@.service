@@ -1,0 +1,22 @@
+[Unit]
+Description=Converge registry-owned Loom developer environment %i
+Requires=docker.service loom-developer-environment-authority.socket
+After=docker.service network-online.target loom-developer-environment-authority.socket
+Wants=network-online.target
+ConditionPathExists=/var/lib/loom-developer-environment-registry/current-snapshot.json
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/bin/python3 -I -B /usr/local/libexec/loom-developer-environment-deploy resume --runtime-id %i --execute
+ExecStartPost=/usr/bin/python3 -I -B /usr/local/libexec/loom-developer-environment-deploy check --runtime-id %i
+TimeoutStartSec=infinity
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

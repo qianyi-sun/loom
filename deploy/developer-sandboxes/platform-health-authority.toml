@@ -6,6 +6,7 @@ kubeconfig = "/var/lib/loom-staging-rollout/kubeconfig"
 acceptance_state_root = "/var/lib/loom-developer-sandbox-live-acceptance"
 authority_state_root = "/var/lib/loom-developer-sandbox-platform-health-authority"
 node_transport = "/usr/local/libexec/loom-developer-sandbox-node-transport"
+registry_snapshot = "/var/lib/loom-developer-environment-registry/current-snapshot.json"
 minio_statefulset = "loom-minio"
 minio_pdb = "loom-minio"
 max_checkpoint_seconds = 120

@@ -17,10 +17,51 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from scripts.ops import developer_environment_deploy as environment_deploy
 from scripts.ops import developer_sandbox_host as host
 from scripts.plan_ci_validations import HEAVY_CHECKS, plan_validations
 
 SHA = "a" * 40
+
+
+def test_dynamic_environment_commands_delegate_only_identity_bindings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        environment_deploy,
+        "main",
+        lambda argv: calls.append(list(argv or ())) or 0,
+    )
+
+    assert (
+        host.main(
+            (
+                "environment-create",
+                "--env-id",
+                "denv-0123456789abcdef",
+                "--candidate-id",
+                "cand-" + "a" * 40,
+                "--idempotency-key",
+                "developer-deploy-0001",
+                "--execute",
+            )
+        )
+        == 0
+    )
+
+    assert calls == [
+        [
+            "create",
+            "--env-id",
+            "denv-0123456789abcdef",
+            "--candidate-id",
+            "cand-" + "a" * 40,
+            "--idempotency-key",
+            "developer-deploy-0001",
+            "--execute",
+        ]
+    ]
 
 
 def _temporary_profile(tmp_path: Path, sandbox: str = "qianyi") -> host.Profile:
@@ -33,6 +74,19 @@ def _temporary_profile(tmp_path: Path, sandbox: str = "qianyi") -> host.Profile:
         cache_root=state / "cache",
         evidence_root=state / "evidence",
         runtime_root=state / "runtime",
+    )
+
+
+def _dynamic_profile(tmp_path: Path, sandbox: str = "qianyi") -> host.Profile:
+    return replace(
+        _temporary_profile(tmp_path, sandbox),
+        env_id=f"env-{sandbox}-000000000001",
+        resource_generation=7,
+        registry_generation=11,
+        registry_payload_sha256="c" * 64,
+        candidate_id=f"cand-{sandbox}-000000000001",
+        candidate_tree="b" * 40,
+        service_user=f"loom-dev-{sandbox}",
     )
 
 
@@ -76,7 +130,7 @@ def test_plan_covers_all_fixed_paths_ports_and_nfs_readbacks_without_secrets() -
 
     assert plan["mutation_authorized"] is False
     assert "remote_url" not in plan
-    assert {row["sandbox"] for row in plan["sandboxes"]} == set(host.SANDBOXES)
+    assert {row["sandbox"] for row in plan["sandboxes"]} == set(host.LEGACY_SEED_RUNTIME_IDS)
     assert sum(len(row["ports"]) for row in plan["sandboxes"]) == 30
     assert (
         len(
@@ -204,7 +258,7 @@ def test_slurm_maintenance_busy_resume_reuses_receipts_and_keeps_controller_last
             "candidate_tree": "b" * 40,
         }
         for sandbox, candidate in zip(
-            host.SANDBOXES,
+            host.LEGACY_SEED_RUNTIME_IDS,
             (SHA, "c" * 40, "d" * 40),
             strict=True,
         )
@@ -232,9 +286,7 @@ def test_slurm_maintenance_busy_resume_reuses_receipts_and_keeps_controller_last
         }
         return (
             payload,
-            (
-                json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
-            ).encode("ascii"),
+            (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii"),
         )
 
     monkeypatch.setattr(host, "_slurm_candidate_set", candidate_set)
@@ -767,7 +819,8 @@ def test_systemd_entry_is_fixed_and_replayable() -> None:
 
     assert "ConditionPathExists=/etc/loom/developer-sandboxes/desired/%i.json" in unit
     assert (
-        "ExecStart=/usr/local/libexec/loom-developer-sandbox-host service-converge --sandbox %i"
+        "ExecStart=/usr/local/libexec/loom-developer-sandbox-host service-converge "
+        "--legacy-v1-seed-migrate --sandbox %i"
     ) in unit
     assert "EnvironmentFile=" not in unit
     assert "RemainAfterExit=" not in unit
@@ -785,17 +838,13 @@ def test_attestation_renewal_timer_is_persistent_and_bounded() -> None:
     )
 
     assert (
-        "ExecStart=/usr/local/libexec/loom-developer-sandbox-host "
-        "renew-attestations --sandbox all --execute"
+        "ExecStart=/usr/bin/python3 -I -B "
+        "/usr/local/libexec/loom-developer-environment-deploy renew-active --execute"
     ) in service
+    assert "NoNewPrivileges=false" in service
     assert "User=root" in service
     assert "UMask=0077" in service
-    requires = next(line for line in service.splitlines() if line.startswith("Requires="))
-    after = next(line for line in service.splitlines() if line.startswith("After="))
-    for sandbox in host.SANDBOXES:
-        unit = f"loom-developer-sandbox-link@{sandbox}.service"
-        assert unit in requires.split()
-        assert unit in after.split()
+    assert "loom-developer-sandbox-links.target" in service
     assert "OnUnitActiveSec=5min" in timer
     assert "Persistent=true" in timer
     assert "WantedBy=timers.target" in timer
@@ -899,8 +948,9 @@ def test_installer_tmpfiles_install_failure_rolls_back_exact_prior_asset(
     monkeypatch.setattr(
         host,
         "_run",
-        lambda *_args, **_kwargs: events.append("apply")
-        or type("Completed", (), {"stdout": "", "returncode": 0})(),
+        lambda *_args, **_kwargs: (
+            events.append("apply") or type("Completed", (), {"stdout": "", "returncode": 0})()
+        ),
     )
     validation_calls = 0
 
@@ -939,9 +989,7 @@ def test_installer_tmpfiles_source_is_closed(
         Path(__file__).resolve().parents[2]
         / "deploy/developer-sandboxes/loom-developer-sandbox-installer.tmpfiles.conf"
     )
-    assert source.read_bytes() == (
-        b"d /run/loom-developer-sandbox-installer 0700 root root -\n"
-    )
+    assert source.read_bytes() == (b"d /run/loom-developer-sandbox-installer 0700 root root -\n")
     invalid = tmp_path / "invalid.conf"
     invalid.write_text("d /run/loom-developer-sandbox-installer 0755 root root -\n")
     monkeypatch.setattr(host, "INSTALLER_TMPFILES_PATH", tmp_path / "installed.conf")
@@ -1273,7 +1321,7 @@ def test_service_converge_uses_expired_archive_before_links_are_active(
 
 
 def test_cli_plan_is_non_mutating_and_secret_safe(capsys: pytest.CaptureFixture[str]) -> None:
-    rc = host.main(["plan", "--candidate-sha", SHA])
+    rc = host.main(["plan", "--legacy-v1-seed-migrate", "--candidate-sha", SHA])
     captured = capsys.readouterr()
 
     assert rc == 0
@@ -1281,6 +1329,13 @@ def test_cli_plan_is_non_mutating_and_secret_safe(capsys: pytest.CaptureFixture[
     assert payload["mutation_authorized"] is False
     assert not captured.err
     assert "LOOM_DEV_POSTGRES_PASSWORD" not in captured.out
+
+
+def test_fixed_seed_commands_require_explicit_legacy_migration_gate() -> None:
+    with pytest.raises(SystemExit):
+        host._parser().parse_args(["install", "--candidate-sha", SHA])
+    with pytest.raises(SystemExit):
+        host._parser().parse_args(["service-converge", "--sandbox", "qianyi"])
 
 
 def test_cli_executed_check_remains_read_only_and_reports_verified(
@@ -1293,6 +1348,7 @@ def test_cli_executed_check_remains_read_only_and_reports_verified(
     rc = host.main(
         [
             "check",
+            "--legacy-v1-seed-migrate",
             "--candidate-sha",
             SHA,
             "--sandbox",
@@ -2156,7 +2212,7 @@ def test_remote_link_fleet_reads_each_client_from_issuance_clients_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    profile = _temporary_profile(tmp_path)
+    profile = _dynamic_profile(tmp_path)
     issuance_root = tmp_path / "issuance"
     sources: list[Path] = []
     monkeypatch.setattr(host, "REMOTE_LINK_ISSUANCE_ROOT", issuance_root)
@@ -2169,7 +2225,7 @@ def test_remote_link_fleet_reads_each_client_from_issuance_clients_directory(
             "LOOM_DEV_MINIO_ROOT_PASSWORD": "secret",
         },
     )
-    monkeypatch.setattr(host, "_run_candidate_program", lambda *_args: {})
+    monkeypatch.setattr(host, "_run", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(host, "_verify_remote_candidate", lambda *_args: None)
 
     def archive(source: Path, **_kwargs: object) -> bytes:
@@ -2218,8 +2274,10 @@ def _link_client_report(
         "tls_version": "TLSv1.3",
         "services": {
             name: {
-                "listener_port": host.REMOTE_LINK_SERVICE_PORTS[profile.sandbox][name][0],
-                "target_port": host.REMOTE_LINK_SERVICE_PORTS[profile.sandbox][name][1],
+                "listener_port": host.LEGACY_SEED_REMOTE_LINK_SERVICE_PORTS[profile.sandbox][name][
+                    0
+                ],
+                "target_port": host.LEGACY_SEED_REMOTE_LINK_SERVICE_PORTS[profile.sandbox][name][1],
                 "health": "ok",
             }
             for name in host.REMOTE_LINK_SERVICE_NAMES
@@ -2251,9 +2309,11 @@ def _link_server_report(profile: host.Profile) -> dict[str, object]:
         "client_uri_san": host._link_client_uri(profile, SHA),
         "services": {
             name: {
-                "listener_port": host.REMOTE_LINK_SERVICE_PORTS[profile.sandbox][name][0],
+                "listener_port": host.LEGACY_SEED_REMOTE_LINK_SERVICE_PORTS[profile.sandbox][name][
+                    0
+                ],
                 "target_host": "127.0.0.1",
-                "target_port": host.REMOTE_LINK_SERVICE_PORTS[profile.sandbox][name][1],
+                "target_port": host.LEGACY_SEED_REMOTE_LINK_SERVICE_PORTS[profile.sandbox][name][1],
                 "health_path": host.REMOTE_LINK_HEALTH_PATHS[name],
                 "tls_version": "TLSv1.3",
                 "status": "active",
@@ -2267,7 +2327,7 @@ def test_fleet_collection_uses_only_node_authority_and_persists_canonical_payloa
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    profile = _temporary_profile(tmp_path)
+    profile = _dynamic_profile(tmp_path)
     tree = "b" * 40
     calls: list[tuple[str, str, dict[str, object]]] = []
 
@@ -2308,6 +2368,11 @@ def test_fleet_collection_uses_only_node_authority_and_persists_canonical_payloa
             "sandbox": profile.sandbox,
             "candidate_sha": SHA,
             "candidate_tree": tree,
+            "env_id": profile.env_id,
+            "resource_generation": profile.resource_generation,
+            "candidate_id": profile.candidate_id,
+            "registry_generation": profile.registry_generation,
+            "registry_payload_sha256": profile.registry_payload_sha256,
             "payload_sha256": hashlib.sha256(payload).hexdigest(),
             "result_sha256": "f" * 64,
             "inner_receipt": None,
@@ -2339,7 +2404,7 @@ def test_fleet_collection_rejects_one_cross_bound_client(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    profile = _temporary_profile(tmp_path)
+    profile = _dynamic_profile(tmp_path)
 
     def authority_call(node: str, _verb: str, envelope: bytes) -> dict[str, object]:
         request = json.loads(envelope)
@@ -2402,6 +2467,16 @@ def test_node_authority_uses_only_the_two_fixed_sudo_commands(
         )()
 
     monkeypatch.setattr(host.subprocess, "run", run)
+    profile = replace(
+        next(item for item in host.load_profiles() if item.sandbox == "qianyi"),
+        env_id="env-qianyi-000000000001",
+        resource_generation=7,
+        registry_generation=11,
+        registry_payload_sha256="c" * 64,
+        candidate_id="cand-qianyi-000000000001",
+        candidate_tree="b" * 40,
+        service_user="loom-dev-qianyi",
+    )
     envelope = host._node_authority_envelope(
         action="host-converge",
         node="oldlab-1",
@@ -2409,6 +2484,7 @@ def test_node_authority_uses_only_the_two_fixed_sudo_commands(
         sandbox="qianyi",
         sha=SHA,
         tree="b" * 40,
+        profile=profile,
     )
 
     for verb in ("transact", "check"):
@@ -2434,7 +2510,7 @@ def test_domain_attest_sends_fixed_worker_and_fleet_seed_archive(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    profile = _temporary_profile(tmp_path)
+    profile = _dynamic_profile(tmp_path)
     tree = "b" * 40
     fleet_root = tmp_path / "fleet"
     fleet = fleet_root / profile.sandbox / SHA / "fleet.json"
@@ -2468,8 +2544,8 @@ def test_domain_attest_sends_fixed_worker_and_fleet_seed_archive(
     monkeypatch.setattr(host, "_node_authority", authority_call)
     monkeypatch.setattr(
         host,
-        "_run_candidate_program",
-        lambda _profile, _sha, _program, *args: collect_calls.append(tuple(args)) or {},
+        "_run",
+        lambda args, **_kwargs: collect_calls.append(tuple(args)) or None,
     )
 
     host._publish_domain_attestations(profile, SHA, tree)
@@ -2489,7 +2565,7 @@ def test_domain_attest_sends_fixed_worker_and_fleet_seed_archive(
     assert tree in collect_calls[0]
 
 
-@pytest.mark.parametrize("sandbox", host.SANDBOXES)
+@pytest.mark.parametrize("sandbox", host.LEGACY_SEED_RUNTIME_IDS)
 def test_worker_env_seed_uses_checked_in_domain_capacity_contract(
     tmp_path: Path,
     sandbox: str,
@@ -2508,6 +2584,57 @@ def test_worker_env_seed_uses_checked_in_domain_capacity_contract(
     assert gb10["LOOM_WORKER_MAX_CONCURRENT"] == "8"
     assert oldlab["LOOM_WORKER_SANDBOX_IDENTITY"] == sandbox
     assert gb10["LOOM_WORKER_CANDIDATE_SHA"] == SHA
+    legacy_ports = host.LEGACY_SEED_REMOTE_LINK_SERVICE_PORTS[sandbox]
+    assert oldlab["LOOM_SANDBOX_LINK_CP_EXPECTED_PORT"] == str(
+        legacy_ports["control-plane"][0],
+    )
+    assert oldlab["LOOM_SANDBOX_LINK_GATEWAY_EXPECTED_PORT"] == str(
+        legacy_ports["gateway"][0],
+    )
+    assert oldlab["LOOM_SANDBOX_LINK_MINIO_EXPECTED_PORT"] == str(
+        legacy_ports["minio"][0],
+    )
+
+
+def test_dynamic_worker_env_seed_uses_registry_allocated_link_ports(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _temporary_profile(tmp_path, "qianyi")
+    dynamic = replace(
+        profile,
+        sandbox="dev-fourth-a1b2c3d4",
+        compose_project="loom-env-fourth-a1b2c3d4",
+        ports={
+            **profile.ports,
+            "relay_control_plane": 30080,
+            "relay_gateway": 30100,
+            "relay_minio": 30900,
+        },
+        env_id="denv-fourth-a1b2c3d4",
+        resource_generation=2,
+        registry_generation=9,
+        registry_payload_sha256="f" * 64,
+        candidate_id="cand-" + "a" * 40,
+        candidate_tree="b" * 40,
+        service_user="loom_env_fourth",
+    )
+    monkeypatch.setattr(
+        host,
+        "_worker_capacity_contract",
+        lambda domain, *, installed: (domain, 4 if domain == "oldlab" else 8),
+    )
+
+    values = dict(
+        line.split("=", 1)
+        for line in host._worker_env_seed(dynamic, SHA, "oldlab").decode().splitlines()
+    )
+
+    assert values["LOOM_WORKER_SANDBOX_IDENTITY"] == dynamic.sandbox
+    assert values["LOOM_SANDBOX_LINK_CP_UPSTREAM"].endswith(":30080")
+    assert values["LOOM_SANDBOX_LINK_CP_EXPECTED_PORT"] == "30080"
+    assert values["LOOM_SANDBOX_LINK_GATEWAY_EXPECTED_PORT"] == "30100"
+    assert values["LOOM_SANDBOX_LINK_MINIO_EXPECTED_PORT"] == "30900"
 
 
 def test_host_installer_and_profiles_require_the_full_ci_matrix() -> None:

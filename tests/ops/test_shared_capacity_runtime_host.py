@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import shutil
+import stat
 import subprocess
 import sys
 from contextlib import nullcontext
@@ -12,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from scripts.ops import shared_capacity_adapter
 from scripts.ops import shared_capacity_runtime_host as host
 from scripts.ops.developer_sandbox_capacity_contract import load_platform_health_contract
 
@@ -23,14 +25,54 @@ ADAPTER_CANDIDATES = {
     "hongjian": {"sha": "c" * 40, "tree": "d" * 40},
     "devansh": {"sha": "e" * 40, "tree": "f" * 40},
 }
-CANDIDATE_SHAS = {
-    sandbox: binding["sha"] for sandbox, binding in ADAPTER_CANDIDATES.items()
-}
+CANDIDATE_SHAS = {sandbox: binding["sha"] for sandbox, binding in ADAPTER_CANDIDATES.items()}
+TEST_SANDBOXES = tuple(ADAPTER_CANDIDATES)
+TEST_INSTANCES = tuple(f"{sandbox}-{pool}" for sandbox in TEST_SANDBOXES for pool in host.POOLS)
+
+
+@pytest.fixture(autouse=True)
+def _registry_cohort(monkeypatch: pytest.MonkeyPatch) -> None:
+    environments = tuple(
+        host.RuntimeEnvironment(
+            env_id=f"denv-{sandbox}00",
+            runtime_id=sandbox,
+            layout_version="legacy-v1",
+            state="active",
+            resource_generation=2,
+            service_user=f"loom-sandbox-{sandbox}",
+            service_group=f"loom-sandbox-{sandbox}",
+            uid=31_021 + index,
+            gid=31_021 + index,
+            systemd_instance=sandbox,
+            state_root=Path(f"/srv/loom/developer-sandboxes/{sandbox}"),
+            runtime_root=Path(f"/shared_work/loom/runtime/sandboxes/{sandbox}"),
+            candidate_root=Path(f"/shared_work/loom/candidates/sandboxes/{sandbox}"),
+            control_plane_port=20_080 + index * 100,
+            slurm_user=f"loom-sandbox-{sandbox}",
+            slurm_account=f"loom-dev-{sandbox}",
+            slurm_qos=f"loom-dev-{sandbox}",
+            candidate_id=f"cand-{binding['sha']}",
+            candidate_sha=binding["sha"],
+            candidate_tree=binding["tree"],
+            deployment_phase="committed",
+        )
+        for index, (sandbox, binding) in enumerate(ADAPTER_CANDIDATES.items())
+    )
+    monkeypatch.setattr(
+        host,
+        "_COHORT_CACHE",
+        host.RegistryCohort(
+            generation=7,
+            payload_sha256="9" * 64,
+            environments=environments,
+            provisioning_environments=environments,
+        ),
+    )
 
 
 def _gate6_observations() -> dict[str, object]:
     started = NOW - timedelta(seconds=14_400)
-    pairs = [(sandbox, pool) for sandbox in host.SANDBOXES for pool in host.POOLS]
+    pairs = [(sandbox, pool) for sandbox in TEST_SANDBOXES for pool in host.POOLS]
     return {
         "soak": {
             "started_at": started.isoformat().replace("+00:00", "Z"),
@@ -125,6 +167,253 @@ def _gate6_observations() -> dict[str, object]:
             )
         ],
     }
+
+
+def _generation_binding() -> dict[str, object]:
+    return {
+        **host._registry_binding(),
+        "runtime_manifest": host._runtime_manifest(),
+    }
+
+
+def _full_registry_snapshot(
+    runtimes: tuple[str, ...],
+    *,
+    states: dict[str, str] | None = None,
+    deploying_phase: str = "services-prepared",
+) -> dict[str, object]:
+    registry = host.registry_contract
+    environments: list[dict[str, object]] = []
+    candidates: list[dict[str, object]] = []
+    deployments: list[dict[str, object]] = []
+    finalizations: list[dict[str, object]] = []
+    for index, runtime_id in enumerate(runtimes):
+        state = (states or {}).get(runtime_id, "active")
+        env_id = f"denv-{index + 1:032x}"
+        principal_id = f"unix-uid:{40_000 + index}"
+        candidate_sha = f"{index + 1:x}" * 40
+        candidate_tree = f"{index + 9:x}" * 40
+        bundle_sha256 = f"{index + 1:x}" * 64
+        candidate_identity = {
+            "principal_id": principal_id,
+            "env_id": env_id,
+            "lifecycle_epoch": 1,
+            "repository_id": "qianyi-sun/loom",
+            "candidate_sha": candidate_sha,
+            "candidate_tree": candidate_tree,
+            "bundle_sha256": bundle_sha256,
+        }
+        candidate_id = "cand-" + registry._digest(candidate_identity)[:40]
+        resources = registry.DeveloperEnvironmentRegistry._dynamic_resources(
+            env_id,
+            runtime_id,
+        )
+        ports = {
+            name: 23_000 + index * 32 + offset for offset, name in enumerate(registry.PORT_NAMES)
+        }
+        current_candidate_id = candidate_id if state == "active" else None
+        environments.append(
+            {
+                "env_id": env_id,
+                "principal_id": principal_id,
+                "display_name": f"Developer {index + 1}",
+                "layout_version": "dynamic-v1",
+                "runtime_id": runtime_id,
+                "state": state,
+                "resource_generation": 2 if state == "active" else 1,
+                "lifecycle_epoch": 1,
+                "service_user": resources["service_user"],
+                "service_group": resources["service_group"],
+                "uid": 40_000 + index,
+                "gid": 40_000 + index,
+                "ports": ports,
+                **resources,
+                "current_candidate_id": current_candidate_id,
+                "created_at": "2026-07-29T12:00:00Z",
+            },
+        )
+        if state == "ready":
+            continue
+        candidates.append(
+            {
+                "candidate_id": candidate_id,
+                "principal_id": principal_id,
+                "env_id": env_id,
+                "lifecycle_epoch": 1,
+                "repository_id": "qianyi-sun/loom",
+                "candidate_sha": candidate_sha,
+                "candidate_tree": candidate_tree,
+                "bundle_sha256": bundle_sha256,
+                "bundle_size": 1024,
+                "bundle_path": str(
+                    registry.SYSTEM_CANDIDATE_ROOT / candidate_id / "candidate.bundle",
+                ),
+                "image_digests": {
+                    "amd64": f"sha256:{index + 2:x}" * 1 + f"{index + 2:x}" * 63,
+                    "arm64": f"sha256:{index + 3:x}" * 1 + f"{index + 3:x}" * 63,
+                },
+                "imported_at": "2026-07-29T12:01:00Z",
+            },
+        )
+        deployment = {
+            "deployment_id": f"dep-{index + 1:032x}",
+            "principal_id": principal_id,
+            "env_id": env_id,
+            "candidate_id": candidate_id,
+            "expected_resource_generation": 1,
+            "applied_resource_generation": 2 if state == "active" else None,
+            "applied_registry_generation": 41 if state == "active" else None,
+            "applied_registry_payload_sha256": (
+                f"{index + 5:x}" * 64 if state == "active" else None
+            ),
+            "finalization_payload_sha256": None,
+            "phase": "committed" if state == "active" else deploying_phase,
+            "previous_candidate_id": (None),
+            "request_digest": f"{index + 4:x}" * 64,
+            "created_at": "2026-07-29T12:02:00Z",
+            "updated_at": "2026-07-29T12:03:00Z",
+        }
+        if state == "active":
+            finalization_unsigned = {
+                "deployment_id": deployment["deployment_id"],
+                "env_id": env_id,
+                "principal_id": principal_id,
+                "candidate_id": candidate_id,
+                "candidate_sha": candidate_sha,
+                "candidate_tree": candidate_tree,
+                "applied_resource_generation": 2,
+                "applied_registry_generation": 41,
+                "applied_registry_payload_sha256": f"{index + 5:x}" * 64,
+                "capacity_finalize_receipt_sha256": "a" * 64,
+                "capacity_finalize_check_receipt_sha256": "b" * 64,
+                "runtime_reconcile_receipt_sha256": "c" * 64,
+                "runtime_prepare_check_receipt_sha256": "d" * 64,
+                "acceptance_probe_receipt_sha256": "e" * 64,
+                "created_at": "2026-07-29T12:02:30Z",
+            }
+            finalization = {
+                **finalization_unsigned,
+                "payload_sha256": registry._digest(finalization_unsigned),
+            }
+            deployment["finalization_payload_sha256"] = finalization["payload_sha256"]
+            finalizations.append(finalization)
+        deployments.append(deployment)
+    candidates.sort(key=lambda item: str(item["candidate_id"]))
+    deployments.sort(key=lambda item: str(item["deployment_id"]))
+    unsigned: dict[str, object] = {
+        "schema_version": registry.SCHEMA_VERSION,
+        "kind": registry.SNAPSHOT_KIND,
+        "generation": 42,
+        "environments": environments,
+        "candidates": candidates,
+        "deployments": deployments,
+        "deployment_finalizations": finalizations,
+    }
+    return {**unsigned, "payload_sha256": registry._digest(unsigned)}
+
+
+def _write_registry_snapshot(path: Path, payload: dict[str, object]) -> None:
+    path.write_bytes(host.registry_contract._canonical(payload))
+    path.chmod(0o600)
+
+
+def test_clean_fixed_runtime_reconciles_first_provisioning_environment_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot_path = tmp_path / "registry.json"
+    _write_registry_snapshot(
+        snapshot_path,
+        _full_registry_snapshot(
+            ("e-fourth",),
+            states={"e-fourth": "deploying"},
+        ),
+    )
+    cohort = host._load_registry_cohort(snapshot_path)
+    config_root = tmp_path / "config"
+    state_path = tmp_path / "state.json"
+    state_path.write_text(
+        '{"activation_status":"installed","admission_state":"closed",'
+        '"installation_mode":"fixed-registry-runtime","schema_version":1}\n',
+        encoding="ascii",
+    )
+    commands: list[tuple[str, ...]] = []
+
+    monkeypatch.setattr(host, "_require_live_host", lambda: None)
+    monkeypatch.setattr(host, "_lock", nullcontext)
+    monkeypatch.setattr(host, "_recover_orphan", lambda: None)
+    monkeypatch.setattr(
+        host,
+        "_ensure_directory",
+        lambda path, **_kwargs: path.mkdir(parents=True, exist_ok=True),
+    )
+
+    def atomic_write(path: Path, content: bytes, *, mode: int) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        path.chmod(mode)
+
+    monkeypatch.setattr(host, "_atomic_write", atomic_write)
+    monkeypatch.setattr(host, "_cohort", lambda: cohort)
+    monkeypatch.setattr(
+        host,
+        "fence_registry_environment",
+        lambda runtime_id: {"status": "ready", "runtime_id": runtime_id},
+    )
+    monkeypatch.setattr(
+        host,
+        "environment_admission_readback",
+        lambda _runtime_id: "1" * 32,
+    )
+    monkeypatch.setattr(host, "ADAPTER_CONFIG_ROOT", config_root / "adapters")
+    monkeypatch.setattr(host, "SUPERVISOR_CONFIG_PATH", config_root / "supervisor.toml")
+    monkeypatch.setattr(host, "STATE_PATH", state_path)
+    monkeypatch.setattr(host, "ENVIRONMENT_RECONCILE_ROOT", tmp_path / "journals")
+    monkeypatch.setattr(
+        host,
+        "_render_registry_supervisor_config_for_instances",
+        lambda instances: (
+            b"fixed\n"
+            if instances == ("e-fourth-gb10", "e-fourth-oldlab")
+            else (_ for _ in ()).throw(AssertionError("unexpected provisioning cohort"))
+        ),
+    )
+    monkeypatch.setattr(
+        host,
+        "_systemctl_state",
+        lambda _unit: {"enabled": False, "active": False},
+    )
+    monkeypatch.setattr(host, "_run", lambda argv, **_kwargs: commands.append(tuple(argv)))
+
+    def check(
+        runtime_id: str,
+        *,
+        require_admission_open: bool = True,
+    ) -> dict[str, object]:
+        assert runtime_id == "e-fourth"
+        assert require_admission_open is False
+        assert host.SUPERVISOR_CONFIG_PATH.read_bytes() == b"fixed\n"
+        assert set(path.name for path in host._environment_configs(runtime_id)) == {
+            "e-fourth-gb10.toml",
+            "e-fourth-oldlab.toml",
+        }
+        state = json.loads(state_path.read_text(encoding="ascii"))
+        assert state["activation_status"] == "installed"
+        assert state["runtime_manifest"]["environments"][0]["runtime_id"] == runtime_id
+        return {"status": "ready", "runtime_id": runtime_id}
+
+    monkeypatch.setattr(host, "check_registry_environment", check)
+
+    assert host.reconcile_registry_environment("e-fourth") == {
+        "status": "ready",
+        "runtime_id": "e-fourth",
+    }
+    assert not any(
+        host.SUPERVISOR_SERVICE in command
+        or host.SUPERVISOR_TIMER in command
+        or "qianyi" in " ".join(command)
+        for command in commands
+    )
 
 
 def _platform_capacity() -> tuple[
@@ -250,7 +539,7 @@ def _source_repo(tmp_path: Path) -> tuple[Path, str, str]:
     return repo, sha, tree
 
 
-def test_closed_profile_covers_exact_six_instances() -> None:
+def test_closed_profile_uses_fixed_root_owned_registry_snapshot() -> None:
     profile = host._load_profile()
 
     assert profile["expected_hostname"] == "trt-eai-oldlab-2"
@@ -261,8 +550,8 @@ def test_closed_profile_covers_exact_six_instances() -> None:
     assert profile["acceptance_mixed_non_loom_ttl_seconds"] == 21600
     assert profile["acceptance_ttl_cleanup_seconds"] == 120
     assert profile["acceptance_phases"] == list(host.ACCEPTANCE_PHASES)
-    assert profile["adapter_instances"] == list(host.INSTANCES)
-    assert len(profile["adapter_instances"]) == 6
+    assert profile["registry_snapshot_path"] == str(host.REGISTRY_SNAPSHOT_PATH)
+    assert "adapter_instances" not in profile
     assert profile["slurm_domains"] == {
         "oldlab": {
             "submit_host": "trt-EAI-OLDLAB-2",
@@ -273,6 +562,401 @@ def test_closed_profile_covers_exact_six_instances() -> None:
             "controller": "trt-gb10-1",
         },
     }
+
+
+def test_registry_snapshot_adds_fourth_developer_without_static_config(
+    tmp_path: Path,
+) -> None:
+    snapshot_path = tmp_path / "current-snapshot.json"
+    _write_registry_snapshot(
+        snapshot_path,
+        _full_registry_snapshot(
+            ("e-zeta", "e-alpha", "e-fourthdev", "e-bravo"),
+        ),
+    )
+
+    cohort = host._load_registry_cohort(snapshot_path)
+
+    assert cohort.sandboxes == (
+        "e-alpha",
+        "e-bravo",
+        "e-fourthdev",
+        "e-zeta",
+    )
+    assert cohort.instances == tuple(
+        f"{sandbox}-{pool}" for sandbox in cohort.sandboxes for pool in host.POOLS
+    )
+    assert len(cohort.instances) == 8
+    fourth = next(
+        environment
+        for environment in cohort.environments
+        if environment.runtime_id == "e-fourthdev"
+    )
+    assert fourth.candidate_sha == "3" * 40
+    assert fourth.slurm_account == "lda-fourthdev"
+    assert fourth.slurm_qos == "ldq-fourthdev"
+    adapter_config = host._render_adapter_config(
+        fourth,
+        "gb10",
+    )
+    assert b'sandbox = "e-fourthdev"' in adapter_config
+    assert b'slurm_account = "lda-fourthdev"' in adapter_config
+    assert b'slurm_qos = "ldq-fourthdev"' in adapter_config
+    assert f'runtime_root = "{fourth.runtime_root}"'.encode() in adapter_config
+    assert f'candidate_root = "{fourth.candidate_root}"'.encode() in adapter_config
+    config_path = tmp_path / "e-fourthdev-gb10.toml"
+    config_path.write_bytes(adapter_config)
+    config_path.chmod(0o600)
+    loaded = shared_capacity_adapter.load_config(config_path)
+    assert loaded.slurm_account == fourth.slurm_account
+    assert loaded.slurm_qos == fourth.slurm_qos
+    assert loaded.runtime_root == fourth.runtime_root
+    assert loaded.candidate_root == fourth.candidate_root
+    rebound = host._cohort_from_runtime_manifest(host._runtime_manifest(cohort))
+    assert rebound.environments == cohort.environments
+    assert rebound.provisioning_environments == cohort.provisioning_environments
+
+
+def test_registry_snapshot_tamper_and_resealed_internal_drift_fail_closed(
+    tmp_path: Path,
+) -> None:
+    snapshot_path = tmp_path / "current-snapshot.json"
+    payload = _full_registry_snapshot(("e-alpha",))
+    _write_registry_snapshot(snapshot_path, payload)
+    payload["environments"][0]["slurm_qos"] = "foreign-qos"  # type: ignore[index]
+    _write_registry_snapshot(snapshot_path, payload)
+    with pytest.raises(host.RuntimeHostError, match="snapshot is invalid"):
+        host._load_registry_cohort(snapshot_path)
+
+    unsigned = {key: value for key, value in payload.items() if key != "payload_sha256"}
+    payload["payload_sha256"] = host.registry_contract._digest(unsigned)
+    _write_registry_snapshot(snapshot_path, payload)
+    with pytest.raises(host.RuntimeHostError, match="snapshot is invalid"):
+        host._load_registry_cohort(snapshot_path)
+
+
+def test_registry_state_rules_separate_active_and_provisioning_cohorts(
+    tmp_path: Path,
+) -> None:
+    snapshot_path = tmp_path / "current-snapshot.json"
+    _write_registry_snapshot(
+        snapshot_path,
+        _full_registry_snapshot(
+            ("e-active", "e-ready", "e-deploying"),
+            states={
+                "e-active": "active",
+                "e-ready": "ready",
+                "e-deploying": "deploying",
+            },
+        ),
+    )
+
+    cohort = host._load_registry_cohort(snapshot_path)
+
+    assert cohort.sandboxes == ("e-active",)
+    assert tuple(environment.runtime_id for environment in cohort.provisioning_environments) == (
+        "e-active",
+        "e-deploying",
+    )
+    assert "e-ready-gb10" not in cohort.provisioning_instances
+    assert "e-deploying-gb10" in cohort.provisioning_instances
+    assert "e-deploying-gb10" not in cohort.instances
+
+
+def test_first_dynamic_environment_is_provisionable_before_any_active_cohort(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot_path = tmp_path / "current-snapshot.json"
+    _write_registry_snapshot(
+        snapshot_path,
+        _full_registry_snapshot(
+            ("e-first",),
+            states={"e-first": "deploying"},
+        ),
+    )
+
+    cohort = host._load_registry_cohort(snapshot_path)
+
+    assert cohort.environments == ()
+    assert tuple(item.runtime_id for item in cohort.provisioning_environments) == ("e-first",)
+    assert cohort.provisioning_instances == ("e-first-gb10", "e-first-oldlab")
+    monkeypatch.setattr(host, "_COHORT_CACHE", cohort)
+    with pytest.raises(host.RuntimeHostError, match="active cohort is empty"):
+        host._require_active_cohort()
+
+
+def test_old_generation_manifest_validates_itself_not_new_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_manifest = host._runtime_manifest()
+    old_candidates = dict(CANDIDATE_SHAS)
+    new_environment = host.RuntimeEnvironment(
+        env_id="denv-00000000000000000000000000000009",
+        runtime_id="e-newowner",
+        layout_version="dynamic-v1",
+        state="active",
+        resource_generation=9,
+        service_user="loom-e-newowner",
+        service_group="loom-e-newowner",
+        uid=40_009,
+        gid=40_009,
+        systemd_instance="e-newowner",
+        state_root=Path(
+            "/srv/loom/developer-environments/denv-00000000000000000000000000000009",
+        ),
+        runtime_root=Path(
+            "/shared_work/loom/runtime/environments/denv-00000000000000000000000000000009",
+        ),
+        candidate_root=Path(
+            "/shared_work/loom/candidates/environments/denv-00000000000000000000000000000009",
+        ),
+        control_plane_port=25_500,
+        slurm_user="loom-e-newowner",
+        slurm_account="lda-newowner",
+        slurm_qos="ldq-newowner",
+        candidate_id=f"cand-{'1' * 40}",
+        candidate_sha="1" * 40,
+        candidate_tree="2" * 40,
+        deployment_phase="committed",
+    )
+    monkeypatch.setattr(
+        host,
+        "_COHORT_CACHE",
+        host.RegistryCohort(
+            generation=8,
+            payload_sha256="8" * 64,
+            environments=(new_environment,),
+            provisioning_environments=(new_environment,),
+        ),
+    )
+
+    old_cohort = host._cohort_from_runtime_manifest(old_manifest)
+
+    assert old_cohort.generation == 7
+    assert old_cohort.sandboxes == tuple(sorted(TEST_SANDBOXES))
+    old_qianyi = next(
+        environment for environment in old_cohort.environments if environment.runtime_id == "qianyi"
+    )
+    assert old_qianyi.runtime_root == Path(
+        "/shared_work/loom/runtime/sandboxes/qianyi",
+    )
+    assert old_qianyi.candidate_root == Path(
+        "/shared_work/loom/candidates/sandboxes/qianyi",
+    )
+    rendered = host._render_adapter_config(old_qianyi, "gb10")
+    assert b'runtime_root = "/shared_work/loom/runtime/sandboxes/qianyi"' in rendered
+    assert b'candidate_root = "/shared_work/loom/candidates/sandboxes/qianyi"' in rendered
+    assert b'slurm_account = "loom-dev-qianyi"' in rendered
+    assert b'slurm_qos = "loom-dev-qianyi"' in rendered
+    report = _retirement_report(state="terminal")
+    with host._bound_cohort(old_cohort):
+        assert host._retirement_is_drained(report, old_candidates) is True
+
+    tampered = json.loads(json.dumps(old_manifest))
+    tampered["environments"][0]["foreign"] = True
+    unsigned = {key: value for key, value in tampered.items() if key != "manifest_sha256"}
+    tampered["manifest_sha256"] = host._sha256(host._canonical_json(unsigned))
+    with pytest.raises(host.RuntimeHostError, match="environment is invalid"):
+        host._cohort_from_runtime_manifest(tampered)
+
+    root_tampered = json.loads(json.dumps(old_manifest))
+    root_tampered["environments"][0]["runtime_root"] = "/tmp/foreign"
+    root_unsigned = {key: value for key, value in root_tampered.items() if key != "manifest_sha256"}
+    root_tampered["manifest_sha256"] = host._sha256(
+        host._canonical_json(root_unsigned),
+    )
+    with pytest.raises(host.RuntimeHostError, match="registry roots are invalid"):
+        host._cohort_from_runtime_manifest(root_tampered)
+
+    internal_root_tampered = json.loads(json.dumps(old_manifest))
+    internal_root_tampered["environments"][0]["runtime_root"] = (
+        "/shared_work/loom/runtime/sandboxes/foreign"
+    )
+    internal_unsigned = {
+        key: value for key, value in internal_root_tampered.items() if key != "manifest_sha256"
+    }
+    internal_root_tampered["manifest_sha256"] = host._sha256(
+        host._canonical_json(internal_unsigned),
+    )
+    with pytest.raises(host.RuntimeHostError, match="registry roots are invalid"):
+        host._cohort_from_runtime_manifest(internal_root_tampered)
+
+
+def test_dynamic_storage_readback_requires_primary_identity_without_sharedwork(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = host.RuntimeEnvironment(
+        env_id="denv-00000000000000000000000000000001",
+        runtime_id="e-alpha",
+        layout_version="dynamic-v1",
+        state="active",
+        resource_generation=2,
+        service_user="loom-e-alpha",
+        service_group="loom-e-alpha",
+        uid=40_001,
+        gid=40_001,
+        systemd_instance="e-alpha",
+        state_root=Path(
+            "/srv/loom/developer-environments/denv-00000000000000000000000000000001",
+        ),
+        runtime_root=Path(
+            "/shared_work/loom/runtime/environments/denv-00000000000000000000000000000001",
+        ),
+        candidate_root=Path(
+            "/shared_work/loom/candidates/environments/denv-00000000000000000000000000000001",
+        ),
+        control_plane_port=23_000,
+        slurm_user="loom-e-alpha",
+        slurm_account="lda-alpha",
+        slurm_qos="ldq-alpha",
+        candidate_id=f"cand-{'1' * 40}",
+        candidate_sha="1" * 40,
+        candidate_tree="2" * 40,
+        deployment_phase="committed",
+    )
+    user = SimpleNamespace(
+        pw_name=environment.service_user,
+        pw_uid=environment.uid,
+        pw_gid=environment.gid,
+    )
+    service_group = SimpleNamespace(
+        gr_name=environment.service_group,
+        gr_gid=environment.gid,
+    )
+    sharedwork_group = SimpleNamespace(gr_name="sharedwork", gr_gid=9_999)
+    monkeypatch.setattr(host.pwd, "getpwnam", lambda _name: user)
+    monkeypatch.setattr(host.pwd, "getpwuid", lambda _uid: user)
+    monkeypatch.setattr(
+        host.grp,
+        "getgrnam",
+        lambda name: sharedwork_group if name == "sharedwork" else service_group,
+    )
+    monkeypatch.setattr(host.grp, "getgrgid", lambda _gid: service_group)
+    monkeypatch.setattr(
+        host.os,
+        "getgrouplist",
+        lambda _name, gid: [gid],
+    )
+
+    def metadata(path: Path) -> SimpleNamespace:
+        if path == environment.candidate_root:
+            mode, uid, gid = 0o750, environment.uid, environment.gid
+        elif path == environment.runtime_root:
+            mode, uid, gid = 0o700, environment.uid, environment.gid
+        else:
+            mode, uid, gid = 0o755, 0, 0
+        return SimpleNamespace(
+            st_mode=stat.S_IFDIR | mode,
+            st_uid=uid,
+            st_gid=gid,
+        )
+
+    monkeypatch.setattr(Path, "lstat", metadata)
+
+    assert host._validate_dynamic_storage_access(environment) == {
+        "env_id": environment.env_id,
+        "runtime_id": environment.runtime_id,
+        "service_user": environment.service_user,
+        "service_group": environment.service_group,
+        "uid": environment.uid,
+        "gid": environment.gid,
+        "supplementary_sharedwork": False,
+        "candidate_root": f"{environment.uid}:{environment.gid}:0750",
+        "runtime_root": f"{environment.uid}:{environment.gid}:0700",
+    }
+
+    monkeypatch.setattr(
+        host.os,
+        "getgrouplist",
+        lambda _name, gid: [gid, sharedwork_group.gr_gid],
+    )
+    with pytest.raises(host.RuntimeHostError, match="identity binding drifted"):
+        host._validate_dynamic_storage_access(environment)
+
+
+def test_dynamic_storage_readback_rejects_sharedgroup_or_world_writable_parent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = host.RuntimeEnvironment(
+        env_id="denv-00000000000000000000000000000002",
+        runtime_id="e-bravo",
+        layout_version="dynamic-v1",
+        state="active",
+        resource_generation=2,
+        service_user="loom-e-bravo",
+        service_group="loom-e-bravo",
+        uid=40_002,
+        gid=40_002,
+        systemd_instance="e-bravo",
+        state_root=Path(
+            "/srv/loom/developer-environments/denv-00000000000000000000000000000002",
+        ),
+        runtime_root=Path(
+            "/shared_work/loom/runtime/environments/denv-00000000000000000000000000000002",
+        ),
+        candidate_root=Path(
+            "/shared_work/loom/candidates/environments/denv-00000000000000000000000000000002",
+        ),
+        control_plane_port=23_032,
+        slurm_user="loom-e-bravo",
+        slurm_account="lda-bravo",
+        slurm_qos="ldq-bravo",
+        candidate_id=f"cand-{'3' * 40}",
+        candidate_sha="3" * 40,
+        candidate_tree="4" * 40,
+        deployment_phase="committed",
+    )
+    user = SimpleNamespace(
+        pw_name=environment.service_user,
+        pw_uid=environment.uid,
+        pw_gid=environment.gid,
+    )
+    service_group = SimpleNamespace(
+        gr_name=environment.service_group,
+        gr_gid=environment.gid,
+    )
+    monkeypatch.setattr(host.pwd, "getpwnam", lambda _name: user)
+    monkeypatch.setattr(host.pwd, "getpwuid", lambda _uid: user)
+    monkeypatch.setattr(
+        host.grp,
+        "getgrnam",
+        lambda name: (
+            (_ for _ in ()).throw(KeyError(name)) if name == "sharedwork" else service_group
+        ),
+    )
+    monkeypatch.setattr(host.grp, "getgrgid", lambda _gid: service_group)
+
+    inaccessible_parent = environment.runtime_root.parent
+
+    def inaccessible_metadata(path: Path) -> SimpleNamespace:
+        if path == environment.candidate_root:
+            mode, uid, gid = 0o750, environment.uid, environment.gid
+        elif path == environment.runtime_root:
+            mode, uid, gid = 0o700, environment.uid, environment.gid
+        elif path == inaccessible_parent:
+            mode, uid, gid = 0o770, 0, 9_999
+        else:
+            mode, uid, gid = 0o755, 0, 0
+        return SimpleNamespace(
+            st_mode=stat.S_IFDIR | mode,
+            st_uid=uid,
+            st_gid=gid,
+        )
+
+    monkeypatch.setattr(Path, "lstat", inaccessible_metadata)
+    with pytest.raises(host.RuntimeHostError, match="independently accessible"):
+        host._validate_dynamic_storage_access(environment)
+
+    def world_writable_metadata(path: Path) -> SimpleNamespace:
+        observed = inaccessible_metadata(path)
+        if path == inaccessible_parent:
+            observed.st_mode = stat.S_IFDIR | 0o777
+        return observed
+
+    monkeypatch.setattr(Path, "lstat", world_writable_metadata)
+    with pytest.raises(host.RuntimeHostError, match="independently accessible"):
+        host._validate_dynamic_storage_access(environment)
 
 
 def test_candidate_identity_requires_exact_clean_locked_source(tmp_path: Path) -> None:
@@ -356,7 +1040,7 @@ def test_plan_is_secret_free_and_covers_exact_configs_units_and_lock(
 
     assert result["mutation_authorized"] is False
     assert result["capacity_enabled_by_installer"] is False
-    assert result["instances"] == list(host.INSTANCES)
+    assert result["instances"] == list(TEST_INSTANCES)
     assert result["slurm_domains"]["oldlab"] != result["slurm_domains"]["gb10"]
     assert len(result["files"]) == 13
     assert all(row["sha256"] for row in result["files"])
@@ -432,12 +1116,16 @@ def test_closed_world_config_readback_rejects_orphan(
 ) -> None:
     config_root = tmp_path / "configs"
     config_root.mkdir()
-    for instance in host.INSTANCES:
+    for instance in TEST_INSTANCES:
         (config_root / f"{instance}.toml").write_text("", encoding="utf-8")
     monkeypatch.setattr(host, "ADAPTER_CONFIG_ROOT", config_root)
 
     host._reject_orphan_configs()
     (config_root / "orphan-gb10.toml").write_text("", encoding="utf-8")
+    with pytest.raises(host.RuntimeHostError, match="orphan"):
+        host._reject_orphan_configs()
+    (config_root / "orphan-gb10.toml").unlink()
+    (config_root / "unknown").mkdir()
     with pytest.raises(host.RuntimeHostError, match="orphan"):
         host._reject_orphan_configs()
 
@@ -452,6 +1140,7 @@ def test_install_failure_restores_snapshot_and_candidate(
     journal = {
         "transaction_id": "1" * 32,
         "operation": "install",
+        **_generation_binding(),
         "candidate_sha": SHA,
         "candidate_tree": TREE,
         "candidate_previously_existed": False,
@@ -585,6 +1274,7 @@ def test_prepared_activation_orphan_restores_installed_and_reopens_exact_fence(
     payload = {
         "phase": "prepared",
         "operation": "activate",
+        **_generation_binding(),
         "transaction_id": journal_token,
         "candidate_sha": SHA,
         "candidate_tree": TREE,
@@ -598,8 +1288,7 @@ def test_prepared_activation_orphan_restores_installed_and_reopens_exact_fence(
         host,
         "_restore_local_transaction",
         lambda _path, _payload, **_kwargs: (
-            events.append("installed-restored")
-            or (journal_token, "activate", SHA, TREE)
+            events.append("installed-restored") or (journal_token, "activate", SHA, TREE)
         ),
     )
     monkeypatch.setattr(
@@ -628,6 +1317,7 @@ def test_prepared_admit_orphan_restores_bootstrap_and_recloses_exact_fence(
     payload = {
         "phase": "prepared",
         "operation": "admit",
+        **_generation_binding(),
         "transaction_id": journal_token,
         "candidate_sha": SHA,
         "candidate_tree": TREE,
@@ -656,8 +1346,7 @@ def test_prepared_admit_orphan_restores_bootstrap_and_recloses_exact_fence(
         host,
         "_restore_local_transaction",
         lambda _path, _payload, **_kwargs: (
-            events.append("bootstrap-restored")
-            or (journal_token, "admit", SHA, TREE)
+            events.append("bootstrap-restored") or (journal_token, "admit", SHA, TREE)
         ),
     )
     monkeypatch.setattr(host, "_update_journal", lambda *_args: None)
@@ -680,6 +1369,7 @@ def test_orphan_recovery_resumes_persisted_activated_rollback(
     path = Path("/var/lib/loom-shared-capacity/rollback.json")
     payload = {
         "operation": "install",
+        **_generation_binding(),
         "phase": "rollback-restoring",
     }
     resumed: list[tuple[Path, dict[str, object]]] = []
@@ -704,6 +1394,7 @@ def test_committed_bootstrap_recovery_preserves_closed_admission_before_cleanup(
     payload = {
         "phase": "committed",
         "operation": "activate",
+        **_generation_binding(),
         "transaction_id": transaction_id,
         "candidate_sha": SHA,
         "candidate_tree": TREE,
@@ -752,12 +1443,13 @@ def test_crash_restore_removes_journal_owned_stage_and_candidate(
     payload = {
         "transaction_id": transaction_id,
         "operation": "install",
+        **_generation_binding(),
         "candidate_sha": SHA,
         "candidate_tree": TREE,
         "candidate_previously_existed": False,
         "staging_path": str(stage),
         "files": {str(path): {"present": False} for path in host._snapshot_paths()},
-        "units": {unit: {"enabled": False, "active": False} for unit in host.ALL_UNITS},
+        "units": {unit: {"enabled": False, "active": False} for unit in host._all_units()},
     }
     monkeypatch.setattr(host, "CANDIDATE_PARENT", candidate_parent)
     monkeypatch.setattr(host, "INSTALLER_ROOT", installer_root)
@@ -827,7 +1519,7 @@ def test_bootstrap_preflight_checks_broker_and_all_six_receipts_without_health_g
     )
     adapter_calls = calls[7:]
     assert all(code == host._ADAPTER_PREFLIGHT for code, _args in adapter_calls)
-    assert {Path(args[0]).stem for _code, args in adapter_calls} == set(host.INSTANCES)
+    assert {Path(args[0]).stem for _code, args in adapter_calls} == set(TEST_INSTANCES)
     for _code, args in adapter_calls:
         sandbox, _pool = Path(args[0]).stem.rsplit("-", 1)
         assert args[1:] == (
@@ -1049,6 +1741,7 @@ def test_platform_health_rebuild_returns_exact_platform_and_gate6_digests(
     payload = {
         "gate6_sha256": "6" * 64,
         "platform_health_sha256": "7" * 64,
+        **host._registry_binding(),
     }
     monkeypatch.setattr(
         host,
@@ -1065,6 +1758,13 @@ def test_platform_health_rebuild_returns_exact_platform_and_gate6_digests(
         candidate,
         Path("/var/lib/loom-platform/session/evidence.json"),
     ) == ("7" * 64, "6" * 64)
+
+    payload["registry_generation"] = 6
+    with pytest.raises(host.RuntimeHostError, match="rebuild is invalid"):
+        host._verify_platform_health_authority_evidence(
+            candidate,
+            Path("/var/lib/loom-platform/session/evidence.json"),
+        )
 
 
 @pytest.mark.parametrize("attack", ["digest", "capacity-extra", "recommendation-extra"])
@@ -1213,7 +1913,7 @@ def test_adapter_candidate_bindings_require_exact_two_pool_agreement(
         return completed
 
     monkeypatch.setattr(host, "_run_candidate_python", drifted_readback)
-    with pytest.raises(host.RuntimeHostError, match="drifted across pools"):
+    with pytest.raises(host.RuntimeHostError, match="drifted"):
         host._adapter_candidate_bindings(candidate)
 
 
@@ -1372,9 +2072,7 @@ def test_embedded_acceptance_retire_uses_token_session_api_not_generic_cancel(
         "ttl_seconds": {"multi_candidate_overlap": 7200},
         "pool_slot_budgets": {"gb10": 6, "oldlab": 6},
         "pool_pending_slot_budgets": {"gb10": 6, "oldlab": 6},
-        "expires_at": (datetime.now(UTC) + timedelta(hours=1))
-        .isoformat()
-        .replace("+00:00", "Z"),
+        "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
     }
     broker.open_acceptance_admission(token=token, contract=contract)
     cohort = broker.request_acceptance_cohort(
@@ -1425,7 +2123,7 @@ def test_embedded_acceptance_retire_uses_token_session_api_not_generic_cancel(
 def _zero_broker_preflight() -> tuple[dict[str, object], dict[str, object]]:
     selected: dict[str, object] = {}
     requests: list[dict[str, object]] = []
-    for index, instance in enumerate(host.INSTANCES):
+    for index, instance in enumerate(TEST_INSTANCES):
         request_id = f"request-{index}"
         sandbox, pool = instance.rsplit("-", 1)
         selected[instance] = {
@@ -1467,7 +2165,7 @@ def _zero_broker_preflight() -> tuple[dict[str, object], dict[str, object]]:
 
 def test_activation_rejects_nonzero_broker_handoff() -> None:
     report, selected = _zero_broker_preflight()
-    handoff = selected[host.INSTANCES[0]]
+    handoff = selected[TEST_INSTANCES[0]]
     assert isinstance(handoff, dict)
     handoff.update({"enabled": True, "max_slots": 1})
 
@@ -1493,7 +2191,7 @@ def _retirement_report(
 ) -> dict[str, object]:
     exact_shas = CANDIDATE_SHAS if candidate_shas is None else candidate_shas
     requests: list[dict[str, object]] = []
-    for index, instance in enumerate(host.INSTANCES):
+    for index, instance in enumerate(TEST_INSTANCES):
         sandbox, pool = instance.rsplit("-", 1)
         live = state != "terminal"
         requests.append(
@@ -1514,7 +2212,7 @@ def _retirement_report(
                 },
             },
         )
-    total = len(host.INSTANCES) if state != "terminal" else 0
+    total = len(TEST_INSTANCES) if state != "terminal" else 0
     return {
         "requests": requests,
         "aggregate": {
@@ -1551,7 +2249,7 @@ def test_retirement_targets_only_exact_candidate_and_ignores_foreign_terminal() 
     )
 
     assert host._retirement_request_ids(report, CANDIDATE_SHAS) == tuple(
-        f"request-{index}" for index in range(len(host.INSTANCES))
+        f"request-{index}" for index in range(len(TEST_INSTANCES))
     )
     assert "foreign-terminal" not in host._retirement_request_ids(
         report,
@@ -1600,14 +2298,13 @@ def test_retirement_requires_six_terminal_zero_lanes() -> None:
 def test_retirement_uses_distinct_candidate_set_and_rejects_one_wrong_binding() -> None:
     report = _retirement_report(state="active")
 
-    assert len(host._retirement_request_ids(report, CANDIDATE_SHAS)) == len(host.INSTANCES)
+    assert len(host._retirement_request_ids(report, CANDIDATE_SHAS)) == len(TEST_INSTANCES)
     requests = report["requests"]
     assert isinstance(requests, list)
     hongjian = next(
         item["request"]
         for item in requests
-        if item["request"]["sandbox"] == "hongjian"
-        and item["request"]["pool"] == "gb10"
+        if item["request"]["sandbox"] == "hongjian" and item["request"]["pool"] == "gb10"
     )
     hongjian["candidate_sha"] = SHA
     with pytest.raises(host.RuntimeHostError, match="lane is missing"):
@@ -1707,7 +2404,7 @@ def test_activation_orders_supervisor_generation_before_adapters(
     supervisor_start = events.index(f"start {host.SUPERVISOR_SERVICE}")
     generation = events.index("generation-readback")
     supervisor_timer = events.index(f"enable --now {host.SUPERVISOR_TIMER}")
-    first_adapter = events.index(f"start {host.ADAPTER_SERVICES[0]}")
+    first_adapter = events.index(f"start {host._adapter_services()[0]}")
     assert supervisor_start < generation < supervisor_timer < first_adapter
     assert sum(event.startswith("start loom-shared-capacity-adapter@") for event in events) == 6
 
@@ -1780,15 +2477,15 @@ def test_fourth_adapter_failure_stops_activation_after_zero_cp_gate(
     monkeypatch.setattr(
         host,
         "_service_result",
-        lambda unit: ("failed", "1") if unit == host.ADAPTER_SERVICES[3] else ("success", "0"),
+        lambda unit: ("failed", "1") if unit == host._adapter_services()[3] else ("success", "0"),
     )
 
     with pytest.raises(host.RuntimeHostError, match="adapter activation"):
         host._activate_units(candidate)
 
     started = [command[2] for command in commands if command[1] == "start"]
-    assert started[-1] == host.ADAPTER_SERVICES[3]
-    assert host.ADAPTER_SERVICES[4] not in started
+    assert started[-1] == host._adapter_services()[3]
+    assert host._adapter_services()[4] not in started
 
 
 def test_activation_failure_restores_installed_inactive_snapshot(
@@ -1800,6 +2497,7 @@ def test_activation_failure_restores_installed_inactive_snapshot(
     journal = {
         "transaction_id": transaction_id,
         "operation": "activate",
+        **_generation_binding(),
         "candidate_sha": SHA,
         "candidate_tree": TREE,
         "candidate_previously_existed": True,
@@ -1819,6 +2517,7 @@ def test_activation_failure_restores_installed_inactive_snapshot(
             "candidate_sha": SHA,
             "candidate_tree": TREE,
             "activation_status": "installed",
+            **_generation_binding(),
             "transaction_id": "1" * 32,
         },
     )
@@ -1860,6 +2559,7 @@ def test_successful_activation_commits_bootstrap_with_admission_fenced(
     journal: dict[str, object] = {
         "transaction_id": transaction_id,
         "operation": "activate",
+        **_generation_binding(),
     }
     phases: list[str] = []
     states: list[dict[str, object]] = []
@@ -1885,6 +2585,7 @@ def test_successful_activation_commits_bootstrap_with_admission_fenced(
             "candidate_sha": SHA,
             "candidate_tree": TREE,
             "activation_status": "installed",
+            **_generation_binding(),
             "transaction_id": admission_token,
         },
     )
@@ -1945,6 +2646,7 @@ def test_admission_authorization_persists_digest_before_resume(
     journal: dict[str, object] = {
         "transaction_id": transaction_id,
         "operation": "admit",
+        **_generation_binding(),
     }
     phases: list[str] = []
     resumed: list[dict[str, object]] = []
@@ -1968,6 +2670,7 @@ def test_admission_authorization_persists_digest_before_resume(
             "candidate_sha": SHA,
             "candidate_tree": TREE,
             "activation_status": "bootstrap-active",
+            **_generation_binding(),
             "transaction_id": admission_token,
         },
     )
@@ -2027,6 +2730,7 @@ def test_authorized_admission_resume_opens_exact_fence_then_commits_state(
                 "candidate_sha": SHA,
                 "candidate_tree": TREE,
                 "activation_status": "bootstrap-active",
+                **_generation_binding(),
                 "transaction_id": admission_token,
             },
         ),
@@ -2035,6 +2739,7 @@ def test_authorized_admission_resume_opens_exact_fence_then_commits_state(
     payload: dict[str, object] = {
         "transaction_id": transaction_id,
         "operation": "admit",
+        **_generation_binding(),
         "phase": "admission-authorized",
         "candidate_sha": SHA,
         "candidate_tree": TREE,
@@ -2130,6 +2835,7 @@ def test_stale_admission_resume_recloses_and_drains_before_restoring_bootstrap(
     payload: dict[str, object] = {
         "transaction_id": transaction_id,
         "operation": "admit",
+        **_generation_binding(),
         "phase": "admission-authorized",
         "candidate_sha": SHA,
         "candidate_tree": TREE,
@@ -2177,8 +2883,7 @@ def test_stale_admission_resume_recloses_and_drains_before_restoring_bootstrap(
         host,
         "_restore_local_transaction",
         lambda _path, _payload, **_kwargs: (
-            events.append("bootstrap-restored")
-            or (transaction_id, "admit", SHA, TREE)
+            events.append("bootstrap-restored") or (transaction_id, "admit", SHA, TREE)
         ),
     )
     monkeypatch.setattr(host, "_update_journal", lambda *_args: None)
@@ -2211,6 +2916,7 @@ def test_post_open_check_failure_drains_racing_request_before_bootstrap_restore(
     journal: dict[str, object] = {
         "transaction_id": transaction_id,
         "operation": "admit",
+        **_generation_binding(),
         "phase": "prepared",
         "candidate_sha": SHA,
         "candidate_tree": TREE,
@@ -2231,6 +2937,7 @@ def test_post_open_check_failure_drains_racing_request_before_bootstrap_restore(
             "candidate_sha": SHA,
             "candidate_tree": TREE,
             "activation_status": "bootstrap-active",
+            **_generation_binding(),
             "transaction_id": admission_token,
         },
     )
@@ -2303,8 +3010,7 @@ def test_post_open_check_failure_drains_racing_request_before_bootstrap_restore(
         host,
         "_restore_local_transaction",
         lambda _path, _payload, **_kwargs: (
-            events.append("bootstrap-restored")
-            or (transaction_id, "admit", SHA, TREE)
+            events.append("bootstrap-restored") or (transaction_id, "admit", SHA, TREE)
         ),
     )
     monkeypatch.setattr(host, "_atomic_write", lambda *_args, **_kwargs: None)
@@ -2336,6 +3042,7 @@ def test_admission_rejects_authority_gate_before_transaction_mutation(
             "candidate_sha": SHA,
             "candidate_tree": TREE,
             "activation_status": "bootstrap-active",
+            **_generation_binding(),
             "transaction_id": "1" * 32,
         },
     )
@@ -2369,6 +3076,7 @@ def test_activated_rollback_reopens_fence_only_after_external_and_local_restore(
     transaction_id = "1" * 32
     payload = {
         "phase": "rollback-closing-admission",
+        **_generation_binding(),
         "candidate_sha": SHA,
         "candidate_tree": TREE,
         "candidate_previously_existed": False,
@@ -2444,6 +3152,7 @@ def test_activated_rollback_partial_drain_failure_keeps_fence_and_journal(
     transaction_id = "1" * 32
     payload = {
         "phase": "rollback-closing-admission",
+        **_generation_binding(),
         "candidate_sha": SHA,
         "candidate_tree": TREE,
         "candidate_previously_existed": False,
@@ -2502,6 +3211,7 @@ def test_activated_rollback_resumes_after_local_restore_before_opening_fence(
     transaction_id = "1" * 32
     payload = {
         "phase": "rollback-restored-fenced",
+        **_generation_binding(),
         "candidate_sha": SHA,
         "candidate_tree": TREE,
         "candidate_previously_existed": False,
@@ -2569,6 +3279,7 @@ def test_persisted_disk_recovery_survives_public_program_restore_and_resumes(
     payload: dict[str, object] = {
         "transaction_id": "1" * 32,
         "operation": "install",
+        **_generation_binding(),
         "phase": "committed",
         "candidate_sha": SHA,
         "candidate_tree": TREE,
@@ -2671,6 +3382,7 @@ def test_install_refuses_to_replace_an_activated_runtime(
                 "candidate_sha": SHA,
                 "candidate_tree": TREE,
                 "activation_status": "activated",
+                **_generation_binding(),
             },
         ),
         encoding="utf-8",
@@ -2755,8 +3467,8 @@ def _acceptance_session(
         "session_id": "2" * 32,
         "status": "running",
         "candidates": ADAPTER_CANDIDATES,
-        "next_phase_index": host.LIVE_PHASES.index(phase) * len(host.SANDBOXES) + offset,
-        "phase_checkpoints": len(host.LIVE_PHASES) * len(host.SANDBOXES),
+        "next_phase_index": host.LIVE_PHASES.index(phase) * len(TEST_SANDBOXES) + offset,
+        "phase_checkpoints": len(host.LIVE_PHASES) * len(TEST_SANDBOXES),
         "phases": list(host.LIVE_PHASES),
     }
 
@@ -2818,20 +3530,21 @@ def test_acceptance_contract_is_exact_candidate_policy_and_fixed_ttl(
     assert contract["candidate_shas"] == CANDIDATE_SHAS
     assert contract["target_slots"] == {"gb10": 2, "oldlab": 4}
     assert contract["ttl_seconds"] == {
-            phase: (
-                host.ACCEPTANCE_TTL_CLEANUP_SECONDS
-                if phase == "ttl_cleanup"
-                else (
-                    host.ACCEPTANCE_MIXED_NON_LOOM_TTL_SECONDS
-                    if phase == "mixed_non_loom"
-                    else host.ACCEPTANCE_DEFAULT_PHASE_TTL_SECONDS
-                )
+        phase: (
+            host.ACCEPTANCE_TTL_CLEANUP_SECONDS
+            if phase == "ttl_cleanup"
+            else (
+                host.ACCEPTANCE_MIXED_NON_LOOM_TTL_SECONDS
+                if phase == "mixed_non_loom"
+                else host.ACCEPTANCE_DEFAULT_PHASE_TTL_SECONDS
             )
+        )
         for phase in host.ACCEPTANCE_PHASES
     }
-    assert contract["expires_at"] == (
-        NOW + timedelta(seconds=host.ACCEPTANCE_CONTRACT_TTL_SECONDS)
-    ).isoformat()
+    assert (
+        contract["expires_at"]
+        == (NOW + timedelta(seconds=host.ACCEPTANCE_CONTRACT_TTL_SECONDS)).isoformat()
+    )
 
 
 def test_acceptance_broker_readback_accepts_canonical_list_and_null(
@@ -2884,6 +3597,7 @@ def test_acceptance_cohort_journals_before_exact_broker_replay(
         "candidate_tree": TREE,
         "transaction_id": "1" * 32,
         "activation_status": "acceptance-active",
+        **_generation_binding(),
         "acceptance_session_id": "2" * 32,
     }
     events: list[tuple[str, object]] = []
@@ -2926,6 +3640,7 @@ def test_acceptance_cohort_journals_before_exact_broker_replay(
     assert payload == {
         "schema_version": 1,
         "operation": "cohort",
+        **_generation_binding(),
         "candidate_sha": SHA,
         "candidate_tree": TREE,
         "admission_token": "1" * 32,
@@ -2983,6 +3698,7 @@ def test_acceptance_open_rejects_late_multi_prefix_without_state_change(
         "candidate_tree": TREE,
         "transaction_id": "1" * 32,
         "activation_status": "bootstrap-active",
+        **_generation_binding(),
     }
     journaled: list[dict[str, object]] = []
     monkeypatch.setattr(host, "_require_live_host", lambda: None)
@@ -3024,6 +3740,7 @@ def test_acceptance_cohort_rotation_crash_replays_drain_then_same_cohort(
     payload = {
         "schema_version": 1,
         "operation": "cohort",
+        **_generation_binding(),
         "candidate_sha": SHA,
         "candidate_tree": TREE,
         "admission_token": "1" * 32,
@@ -3040,6 +3757,7 @@ def test_acceptance_cohort_rotation_crash_replays_drain_then_same_cohort(
                 "candidate_tree": TREE,
                 "transaction_id": "1" * 32,
                 "activation_status": "acceptance-active",
+                **_generation_binding(),
                 "acceptance_session_id": "2" * 32,
             },
         ),
@@ -3103,6 +3821,7 @@ def test_acceptance_open_check_failure_compensates_and_recovery_converges(
     payload = {
         "schema_version": 1,
         "operation": "open",
+        **_generation_binding(),
         "candidate_sha": SHA,
         "candidate_tree": TREE,
         "admission_token": "1" * 32,
@@ -3117,6 +3836,7 @@ def test_acceptance_open_check_failure_compensates_and_recovery_converges(
                 "candidate_tree": TREE,
                 "transaction_id": "1" * 32,
                 "activation_status": "acceptance-active",
+                **_generation_binding(),
                 "acceptance_session_id": "2" * 32,
                 "acceptance_contract_sha256": host._sha256(
                     host._canonical_json(contract),
@@ -3193,6 +3913,7 @@ def test_acceptance_open_crash_replays_identical_contract(
     payload = {
         "schema_version": 1,
         "operation": "open",
+        **_generation_binding(),
         "candidate_sha": SHA,
         "candidate_tree": TREE,
         "admission_token": "1" * 32,
@@ -3207,6 +3928,7 @@ def test_acceptance_open_crash_replays_identical_contract(
                 "candidate_tree": TREE,
                 "transaction_id": "1" * 32,
                 "activation_status": "bootstrap-active",
+                **_generation_binding(),
             },
         ),
     )
@@ -3253,6 +3975,7 @@ def test_acceptance_close_replay_drains_before_contract_close_and_bootstrap(
     payload = {
         "schema_version": 1,
         "operation": "close",
+        **_generation_binding(),
         "candidate_sha": SHA,
         "candidate_tree": TREE,
         "admission_token": "1" * 32,
@@ -3265,6 +3988,7 @@ def test_acceptance_close_replay_drains_before_contract_close_and_bootstrap(
                 "candidate_tree": TREE,
                 "transaction_id": "1" * 32,
                 "activation_status": "acceptance-active",
+                **_generation_binding(),
                 "acceptance_session_id": "2" * 32,
                 "acceptance_contract_sha256": "d" * 64,
             },
@@ -3368,3 +4092,369 @@ def test_acceptance_cli_has_no_capacity_or_ttl_override() -> None:
                 "3600",
             ),
         )
+
+
+def _retire_host(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    peers: tuple[str, ...] = ("peer-dev",),
+) -> SimpleNamespace:
+    state_root = tmp_path / "capacity-state"
+    config_root = tmp_path / "config"
+    installer_root = state_root / "runtime-host-installer"
+    adapter_root = config_root / "adapters"
+    supervisor_config = config_root / "supervisor.toml"
+    supervisor_state = state_root / "supervisor-state.json"
+    handoff_root = state_root / "handoffs"
+    observation_root = state_root / "observations"
+    current_generation = handoff_root / "generation-old"
+    current_generation.mkdir(parents=True)
+    (handoff_root / "current").symlink_to("generation-old")
+    observation_root.mkdir(parents=True)
+    adapter_root.mkdir(parents=True)
+    supervisor_config.parent.mkdir(parents=True, exist_ok=True)
+    supervisor_config.write_bytes(b"old-supervisor-config\n")
+    supervisor_state.write_bytes(b'{"generation":"old"}\n')
+    target = "target-dev"
+    target_instances = tuple(f"{target}-{pool}" for pool in host.POOLS)
+    peer_instances = tuple(f"{peer}-{pool}" for peer in peers for pool in host.POOLS)
+    for index, instance in enumerate((*target_instances, *peer_instances)):
+        (observation_root / f"{instance}.json").write_bytes(
+            f'{{"instance":"{instance}","job_id":"job-{index}"}}\n'.encode(),
+        )
+        (current_generation / f"{instance}.json").write_bytes(
+            f'{{"instance":"{instance}","lease_epoch":{index + 1}}}\n'.encode(),
+        )
+    for pool in host.POOLS:
+        (adapter_root / f"{target}-{pool}.toml").write_bytes(
+            f"target-{pool}\n".encode(),
+        )
+    units = {
+        host.SUPERVISOR_SERVICE: {"enabled": False, "active": False},
+        host.SUPERVISOR_TIMER: {"enabled": True, "active": True},
+    }
+    for service, timer in host._environment_units(target):
+        units[service] = {"enabled": False, "active": True}
+        units[timer] = {"enabled": True, "active": True}
+    commands: list[tuple[str, ...]] = []
+    events: list[str] = []
+
+    def run(argv: tuple[str, ...], **_kwargs: object) -> SimpleNamespace:
+        command = tuple(argv)
+        commands.append(command)
+        if command[0] != "systemctl":
+            raise AssertionError(command)
+        action = command[1]
+        if action == "daemon-reload":
+            return SimpleNamespace(stdout="", returncode=0)
+        unit = command[-1]
+        state = units.setdefault(unit, {"enabled": False, "active": False})
+        if action == "stop":
+            state["active"] = False
+        elif action == "start":
+            events.append(f"start:{unit}")
+            if unit != host.SUPERVISOR_SERVICE:
+                state["active"] = True
+        elif action == "disable":
+            state["enabled"] = False
+            if "--now" in command:
+                state["active"] = False
+        elif action == "enable":
+            state["enabled"] = True
+            if "--now" in command:
+                state["active"] = True
+        else:
+            raise AssertionError(command)
+        return SimpleNamespace(stdout="", returncode=0)
+
+    def atomic_write(path: Path, content: bytes, *, mode: int) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        path.chmod(mode)
+
+    environment_rows = [
+        {
+            "env_id": "denv-target00",
+            "runtime_id": target,
+            "state": "quarantined",
+            "resource_generation": 3,
+        },
+        *(
+            {
+                "env_id": f"denv-{peer}00",
+                "runtime_id": peer,
+                "state": "active",
+                "resource_generation": 2,
+            }
+            for peer in peers
+        ),
+    ]
+    snapshot = {
+        "generation": 11,
+        "payload_sha256": "8" * 64,
+        "environments": environment_rows,
+    }
+    base = {
+        "schema_version": 1,
+        "state_db": str(state_root / "broker.sqlite3"),
+        "handoff_dir": str(handoff_root),
+        "observation_dir": str(observation_root),
+        "supervisor_state_path": str(supervisor_state),
+        "audit_path": str(state_root / "audit.jsonl"),
+        "evidence_path": str(state_root / "evidence.json"),
+        "global_slot_budget": 4,
+        "global_pending_slot_budget": 4,
+        "pool_slot_budgets": {"gb10": 2, "oldlab": 2},
+        "pool_pending_slot_budgets": {"gb10": 2, "oldlab": 2},
+    }
+    monkeypatch.setattr(host, "STATE_ROOT", state_root)
+    monkeypatch.setattr(host, "ADAPTER_CONFIG_ROOT", adapter_root)
+    monkeypatch.setattr(host, "SUPERVISOR_CONFIG_PATH", supervisor_config)
+    monkeypatch.setattr(host, "ENVIRONMENT_RETIRE_ROOT", installer_root / "retire")
+    monkeypatch.setattr(host, "EMPTY_COHORT_PATH", installer_root / "empty.json")
+    monkeypatch.setattr(host, "_require_live_host", lambda: None)
+    monkeypatch.setattr(host, "_lock", nullcontext)
+    monkeypatch.setattr(host, "_fsync_directory", lambda _path: None)
+    monkeypatch.setattr(
+        host,
+        "_ensure_directory",
+        lambda path, **_kwargs: path.mkdir(parents=True, exist_ok=True),
+    )
+    monkeypatch.setattr(host, "_atomic_write", atomic_write)
+    monkeypatch.setattr(host, "_registry_supervisor_base", lambda: base)
+    monkeypatch.setattr(
+        host,
+        "_registry_admission_intent",
+        lambda runtime_id, *, states: (
+            snapshot,
+            next(row for row in environment_rows if row["runtime_id"] == runtime_id),
+        ),
+    )
+    monkeypatch.setattr(host, "environment_admission_readback", lambda _runtime_id: "f" * 32)
+    monkeypatch.setattr(host, "_systemctl_state", lambda unit: dict(units[unit]))
+    monkeypatch.setattr(host, "_run", run)
+    monkeypatch.setattr(host, "_service_result", lambda _unit: ("success", "0"))
+    return SimpleNamespace(
+        target=target,
+        peers=peers,
+        target_instances=target_instances,
+        peer_instances=peer_instances,
+        state_root=state_root,
+        adapter_root=adapter_root,
+        observation_root=observation_root,
+        handoff_root=handoff_root,
+        supervisor_config=supervisor_config,
+        supervisor_state=supervisor_state,
+        installer_root=installer_root,
+        units=units,
+        commands=commands,
+        events=events,
+        snapshot=snapshot,
+    )
+
+
+def test_retire_environment_migrates_supervisor_before_removing_target_configs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _retire_host(tmp_path, monkeypatch)
+    peer_bytes = {
+        path: path.read_bytes()
+        for path in (
+            *(fixture.observation_root / f"{instance}.json" for instance in fixture.peer_instances),
+            *(
+                fixture.handoff_root / "current" / f"{instance}.json"
+                for instance in fixture.peer_instances
+            ),
+        )
+    }
+    original_remove = host._remove_path
+
+    def remove(path: Path) -> None:
+        fixture.events.append(f"remove:{path}")
+        original_remove(path)
+
+    monkeypatch.setattr(host, "_remove_path", remove)
+
+    report = host.retire_registry_environment(fixture.target)
+
+    assert report["peer_instances"] == list(fixture.peer_instances)
+    rendered = fixture.supervisor_config.read_text(encoding="ascii")
+    assert all(instance in rendered for instance in fixture.peer_instances)
+    assert all(instance not in rendered for instance in fixture.target_instances)
+    assert all(path.read_bytes() == content for path, content in peer_bytes.items())
+    assert all(
+        not (fixture.observation_root / f"{instance}.json").exists()
+        for instance in fixture.target_instances
+    )
+    assert all(
+        not (fixture.adapter_root / f"{fixture.target}-{pool}.toml").exists() for pool in host.POOLS
+    )
+    first_supervisor = fixture.events.index(f"start:{host.SUPERVISOR_SERVICE}")
+    target_config_removals = [
+        fixture.events.index(
+            f"remove:{fixture.adapter_root / f'{fixture.target}-{pool}.toml'}",
+        )
+        for pool in host.POOLS
+    ]
+    assert all(first_supervisor < removal for removal in target_config_removals)
+    assert fixture.units[host.SUPERVISOR_TIMER] == {
+        "enabled": True,
+        "active": True,
+    }
+    assert not any("scancel" in command for command in fixture.commands)
+
+
+def test_retire_environment_rolls_back_bytes_units_and_old_supervisor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _retire_host(tmp_path, monkeypatch)
+    before = {
+        path: path.read_bytes()
+        for path in (
+            fixture.supervisor_config,
+            *(fixture.adapter_root / f"{fixture.target}-{pool}.toml" for pool in host.POOLS),
+            *(
+                fixture.observation_root / f"{instance}.json"
+                for instance in (*fixture.target_instances, *fixture.peer_instances)
+            ),
+        )
+    }
+    unit_before = {unit: dict(state) for unit, state in fixture.units.items()}
+    results = iter((("failed", "1"), ("success", "0")))
+    monkeypatch.setattr(host, "_service_result", lambda _unit: next(results))
+
+    with pytest.raises(
+        host.RuntimeHostError,
+        match="subtractive migration failed",
+    ):
+        host.retire_registry_environment(fixture.target)
+
+    assert all(path.read_bytes() == content for path, content in before.items())
+    assert fixture.units == unit_before
+    assert fixture.events.count(f"start:{host.SUPERVISOR_SERVICE}") == 2
+    assert not (fixture.installer_root / "retire" / f"{fixture.target}.json").exists()
+    assert not any("scancel" in command for command in fixture.commands)
+
+
+def test_retire_environment_recovers_persisted_crash_before_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _retire_host(tmp_path, monkeypatch)
+    original_update = host._update_environment_retire
+    crashed = False
+
+    class RetireCrash(BaseException):
+        pass
+
+    def update(path: Path, payload: dict[str, object], phase: str) -> None:
+        nonlocal crashed
+        original_update(path, payload, phase)
+        if phase == "reduced-config-published" and not crashed:
+            crashed = True
+            raise RetireCrash
+
+    monkeypatch.setattr(host, "_update_environment_retire", update)
+    with pytest.raises(RetireCrash):
+        host.retire_registry_environment(fixture.target)
+    journal = fixture.installer_root / "retire" / f"{fixture.target}.json"
+    assert journal.exists()
+    assert fixture.supervisor_config.read_bytes() != b"old-supervisor-config\n"
+
+    report = host.retire_registry_environment(fixture.target)
+
+    assert report["status"] == "ready"
+    assert not journal.exists()
+    assert fixture.events.count(f"start:{host.SUPERVISOR_SERVICE}") >= 2
+    assert all(
+        not (fixture.adapter_root / f"{fixture.target}-{pool}.toml").exists() for pool in host.POOLS
+    )
+    assert not any("scancel" in command for command in fixture.commands)
+
+
+def test_last_environment_retire_persists_empty_fail_closed_and_new_reconcile_recovers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _retire_host(tmp_path, monkeypatch, peers=())
+
+    report = host.retire_registry_environment(fixture.target)
+
+    assert report["zero_cohort"] is True
+    assert not fixture.supervisor_config.exists()
+    assert not fixture.supervisor_state.exists()
+    assert not (fixture.handoff_root / "current").exists()
+    assert fixture.units[host.SUPERVISOR_SERVICE] == {
+        "enabled": False,
+        "active": False,
+    }
+    assert fixture.units[host.SUPERVISOR_TIMER] == {
+        "enabled": False,
+        "active": False,
+    }
+    empty_path = fixture.installer_root / "empty.json"
+    assert json.loads(empty_path.read_text())["status"] == "empty-fail-closed"
+
+    new_environment = host.RuntimeEnvironment(
+        env_id="denv-newdev00",
+        runtime_id="new-dev",
+        layout_version="dynamic-v1",
+        state="deploying",
+        resource_generation=1,
+        service_user="loom-env-newdev",
+        service_group="loom-env-newdev",
+        uid=32_100,
+        gid=32_100,
+        systemd_instance="new-dev",
+        state_root=tmp_path / "new-state",
+        runtime_root=tmp_path / "new-runtime",
+        candidate_root=tmp_path / "new-candidates",
+        control_plane_port=24_080,
+        slurm_user="loom-env-newdev",
+        slurm_account="loom-env-newdev",
+        slurm_qos="loom-env-newdev",
+        candidate_id=f"cand-{'1' * 40}",
+        candidate_sha="1" * 40,
+        candidate_tree="2" * 40,
+        deployment_phase="services-prepared",
+    )
+    new_cohort = host.RegistryCohort(
+        generation=12,
+        payload_sha256="7" * 64,
+        environments=(),
+        provisioning_environments=(new_environment,),
+    )
+    state_path = fixture.installer_root / "state.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(
+        '{"activation_status":"activated","installation_mode":'
+        '"fixed-registry-runtime","schema_version":1}\n',
+        encoding="ascii",
+    )
+    monkeypatch.setattr(host, "STATE_PATH", state_path)
+    monkeypatch.setattr(host, "ENVIRONMENT_RECONCILE_ROOT", fixture.installer_root / "reconcile")
+    monkeypatch.setattr(host, "_COHORT_CACHE", new_cohort)
+    monkeypatch.setattr(host, "_recover_orphan", lambda: None)
+    monkeypatch.setattr(host, "_registry_environment", lambda *_args, **_kwargs: new_environment)
+    monkeypatch.setattr(
+        host,
+        "check_registry_environment",
+        lambda *_args, **_kwargs: {"status": "ready"},
+    )
+    for service, timer in host._environment_units("new-dev"):
+        fixture.units[service] = {"enabled": False, "active": False}
+        fixture.units[timer] = {"enabled": False, "active": False}
+
+    assert host.reconcile_registry_environment("new-dev") == {"status": "ready"}
+    rebuilt = fixture.supervisor_config.read_text(encoding="ascii")
+    assert all(f"new-dev-{pool}" in rebuilt for pool in host.POOLS)
+    assert all(f"{fixture.target}-{pool}" not in rebuilt for pool in host.POOLS)
+    assert fixture.units[host.SUPERVISOR_TIMER] == {
+        "enabled": True,
+        "active": True,
+    }
+    assert not empty_path.exists()
+    assert not any("scancel" in command for command in fixture.commands)

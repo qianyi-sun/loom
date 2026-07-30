@@ -1,21 +1,14 @@
 #!/usr/bin/env python3
-"""Secret-safe cross-sandbox negative credential probe (A3).
+"""Secret-safe dynamic cross-environment credential probe (A3).
 
-Default mode is dry-run / CI: plan pairwise edges against injected base URLs
-and emit fingerprint-only evidence JSON without sending credentials.
+The cohort and every endpoint, secret path, bucket, candidate, and service
+identity come from the fixed root registry snapshot.  Callers can request only
+``--execute`` and an optional evidence destination; they cannot select an
+environment, path, endpoint, credential, bucket, or candidate.  Execute mode
+probes every ordered foreign pair plus same-environment positive controls and
+re-reads both registry and runtime authorities before emitting evidence.
 
-``--execute`` is the live oldlab-2 pairwise matrix. It is fail-closed:
-
-- binds CP/MinIO targets to exact reviewed profile loopback endpoints
-- requires non-symlink secret files with owner/mode checks
-- requires complete MinIO negatives and same-sandbox positive controls
-- requires a single candidate SHA matching every sandbox state readback
-
-Never accepts raw tokens on the CLI. Never prints or stores worker tokens,
-admin tokens, or MinIO passwords.
-
-CI-safe dry-run / dual-stack integration negatives are not live A3 host
-evidence and are not #896 soak evidence.
+Never prints or stores worker tokens, admin tokens, or MinIO credentials.
 """
 
 from __future__ import annotations
@@ -24,12 +17,12 @@ import argparse
 import hashlib
 import json
 import os
-import pwd
 import re
 import stat
 import subprocess
 import sys
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -44,11 +37,16 @@ from loom.worker_token import (
     worker_token_fingerprint,
 )
 
-ALLOWED_SANDBOXES = ("qianyi", "hongjian", "devansh")
-STATE_SCHEMA_VERSION = 1
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.ops import developer_environment_registry as environment_registry  # noqa: E402
+
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _HEX_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _FLEET_SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+REGISTRY_SNAPSHOT = environment_registry.SYSTEM_SNAPSHOT
 DEFAULT_RUNTIME_ATTESTATION_ROOT = Path(
     "/var/lib/loom-shared-capacity/runtime-attestations",
 )
@@ -83,30 +81,10 @@ MINIO_FOREIGN_BUCKET_ERROR_CODES = frozenset({"AccessDenied", "NoSuchBucket", "4
 
 
 @dataclass(frozen=True)
-class SandboxProfileView:
-    sandbox: str
-    bind_address: str
-    compose_project: str
-    candidate_root: Path
-    state_root: Path
-    control_plane_port: int
-    minio_port: int
-    artifacts_bucket: str
-    trajectories_bucket: str
-    task_bucket: str
-
-    @property
-    def control_plane_url(self) -> str:
-        return f"http://{self.bind_address}:{self.control_plane_port}"
-
-    @property
-    def minio_endpoint(self) -> str:
-        return f"http://{self.bind_address}:{self.minio_port}"
-
-
-@dataclass(frozen=True)
 class CandidateIdentity:
     sandbox: str
+    env_id: str
+    candidate_id: str
     candidate_sha: str
     candidate_tree: str
     compose_project: str
@@ -132,6 +110,8 @@ class RuntimeActivationIdentity:
 @dataclass(frozen=True)
 class SandboxTarget:
     sandbox: str
+    env_id: str
+    owner_uid: int
     control_plane_url: str
     worker_token_file: Path
     admin_secret_file: Path
@@ -139,7 +119,6 @@ class SandboxTarget:
     minio_access_key_file: Path | None
     minio_secret_key_file: Path | None
     own_bucket: str | None
-    foreign_bucket: str | None
     candidate: CandidateIdentity | None = None
     runtime_activation: RuntimeActivationIdentity | None = None
 
@@ -166,63 +145,176 @@ class ProbeResult:
         }
 
 
-def _require_str(raw: dict[str, Any], path: Path, key: str) -> str:
-    value = raw.get(key)
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{path}: {key} must be a non-empty string")
-    return value.strip()
+def _canonical(value: object) -> bytes:
+    return (
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"
+    ).encode()
 
 
-def load_profile(path: Path) -> SandboxProfileView:
-    raw = tomllib.loads(path.read_text(encoding="utf-8"))
-    ports = raw.get("ports")
-    if not isinstance(ports, dict):
-        raise ValueError(f"{path}: missing [ports]")
-    object_store = raw.get("object_store")
-    if not isinstance(object_store, dict):
-        raise ValueError(f"{path}: missing [object_store]")
-    for field in ("control_plane", "minio"):
-        value = ports.get(field)
-        if not isinstance(value, int) or isinstance(value, bool):
-            raise ValueError(f"{path}: ports.{field} must be an int")
-    bind_address = _require_str(raw, path, "bind_address")
-    if bind_address != "127.0.0.1":
-        raise ValueError(f"{path}: bind_address must remain 127.0.0.1")
-    return SandboxProfileView(
-        sandbox=_require_str(raw, path, "sandbox"),
-        bind_address=bind_address,
-        compose_project=_require_str(raw, path, "compose_project"),
-        candidate_root=Path(_require_str(raw, path, "candidate_root")),
-        state_root=Path(_require_str(raw, path, "state_root")),
-        control_plane_port=int(ports["control_plane"]),
-        minio_port=int(ports["minio"]),
-        artifacts_bucket=_require_str(object_store, path, "artifacts_bucket"),
-        trajectories_bucket=_require_str(object_store, path, "trajectories_bucket"),
-        task_bucket=_require_str(object_store, path, "task_bucket"),
+def _registry_projection(value: object) -> dict[str, Any]:
+    """Verify a full registry snapshot and project its active committed cohort."""
+
+    if not isinstance(value, Mapping):
+        raise ValueError("developer environment registry snapshot is invalid")
+    try:
+        verified = environment_registry.DeveloperEnvironmentRegistry.verify_snapshot(
+            _canonical(dict(value)),
+        )
+    except environment_registry.RegistryError as exc:
+        raise ValueError("developer environment registry snapshot is invalid") from exc
+    candidates = {
+        str(row["candidate_id"]): row for row in verified["candidates"] if isinstance(row, Mapping)
+    }
+    deployments = [row for row in verified["deployments"] if isinstance(row, Mapping)]
+    finalizations = [
+        row for row in verified.get("deployment_finalizations", []) if isinstance(row, Mapping)
+    ]
+    projected: list[dict[str, Any]] = []
+    for raw_environment in verified["environments"]:
+        if not isinstance(raw_environment, Mapping) or raw_environment.get("state") != "active":
+            continue
+        environment = dict(raw_environment)
+        candidate_id = environment.get("current_candidate_id")
+        candidate = candidates.get(str(candidate_id))
+        committed = [
+            row
+            for row in deployments
+            if row.get("phase") == "committed"
+            and row.get("env_id") == environment.get("env_id")
+            and row.get("principal_id") == environment.get("principal_id")
+            and row.get("candidate_id") == candidate_id
+            and row.get("applied_resource_generation") == environment.get("resource_generation")
+            and row.get("expected_resource_generation", 0) + 1
+            == row.get("applied_resource_generation")
+            and type(row.get("applied_registry_generation")) is int
+            and 1 <= row["applied_registry_generation"] < verified["generation"]
+            and environment_registry.DIGEST_RE.fullmatch(
+                str(row.get("applied_registry_payload_sha256")),
+            )
+            is not None
+        ]
+        if not isinstance(candidate_id, str) or candidate is None or len(committed) != 1:
+            raise ValueError("active developer environment is not committed")
+        latest = committed[0]
+        records = [
+            row
+            for row in finalizations
+            if row.get("deployment_id") == latest.get("deployment_id")
+            and row.get("env_id") == environment.get("env_id")
+            and row.get("principal_id") == environment.get("principal_id")
+            and row.get("candidate_id") == candidate_id
+            and row.get("candidate_sha") == candidate.get("candidate_sha")
+            and row.get("candidate_tree") == candidate.get("candidate_tree")
+            and row.get("applied_resource_generation") == latest.get("applied_resource_generation")
+            and row.get("applied_registry_generation") == latest.get("applied_registry_generation")
+            and row.get("applied_registry_payload_sha256")
+            == latest.get("applied_registry_payload_sha256")
+        ]
+        if len(records) != 1:
+            raise ValueError("active developer environment lacks exact finalization evidence")
+        finalization = dict(records[0])
+        finalization_sha = finalization.pop("payload_sha256", None)
+        if (
+            latest.get("finalization_payload_sha256") != finalization_sha
+            or _HEX_SHA256_RE.fullmatch(str(finalization_sha)) is None
+            or finalization_sha != hashlib.sha256(_canonical(finalization)).hexdigest()
+            or any(
+                _HEX_SHA256_RE.fullmatch(str(records[0].get(field))) is None
+                for field in (
+                    "capacity_finalize_receipt_sha256",
+                    "capacity_finalize_check_receipt_sha256",
+                    "runtime_reconcile_receipt_sha256",
+                    "runtime_prepare_check_receipt_sha256",
+                    "acceptance_probe_receipt_sha256",
+                )
+            )
+        ):
+            raise ValueError("active developer environment finalization evidence drifted")
+        ports = environment.get("ports")
+        if not isinstance(ports, Mapping):
+            raise ValueError("developer environment port registry is invalid")
+        projected.append(
+            {
+                "env_id": environment["env_id"],
+                "principal_id": environment["principal_id"],
+                "runtime_id": environment["runtime_id"],
+                "resource_generation": environment["resource_generation"],
+                "service_user": environment["service_user"],
+                "service_group": environment["service_group"],
+                "uid": environment["uid"],
+                "gid": environment["gid"],
+                "ports": dict(ports),
+                "compose_project": environment["compose_project"],
+                "systemd_instance": environment["systemd_instance"],
+                "candidate_root": environment["candidate_root"],
+                "runtime_root": environment["runtime_root"],
+                "state_root": environment["state_root"],
+                "evidence_root": environment["evidence_root"],
+                "database_name": environment["database_name"],
+                "task_bucket": environment["task_bucket"],
+                "trajectories_bucket": environment["trajectories_bucket"],
+                "artifacts_bucket": environment["artifacts_bucket"],
+                "provider_namespace": environment["provider_namespace"],
+                "slurm_user": environment["slurm_user"],
+                "slurm_account": environment["slurm_account"],
+                "slurm_qos": environment["slurm_qos"],
+                "cgroup_slice": environment["cgroup_slice"],
+                "candidate_id": candidate_id,
+                "candidate_sha": candidate["candidate_sha"],
+                "candidate_tree": candidate["candidate_tree"],
+                "deployment_id": latest["deployment_id"],
+                "deployment_generation": latest["applied_resource_generation"],
+            },
+        )
+    projected.sort(key=lambda row: (str(row["env_id"]), str(row["runtime_id"])))
+    if len(projected) < 2:
+        raise ValueError("registry has fewer than two active committed environments")
+    unsigned = {
+        "schema_version": 1,
+        "kind": "loom.developer-environment.crossover-registry-projection",
+        "generation": verified["generation"],
+        "source_registry_payload_sha256": verified["payload_sha256"],
+        "source_registry": verified,
+        "environments": projected,
+    }
+    return {
+        **unsigned,
+        "payload_sha256": hashlib.sha256(_canonical(unsigned)).hexdigest(),
+    }
+
+
+def _read_registry_projection(path: Path = REGISTRY_SNAPSHOT) -> dict[str, Any]:
+    try:
+        metadata = path.lstat()
+        before = (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or (metadata.st_uid, metadata.st_gid) != (0, 0)
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_size > 16 * 1024 * 1024
+        ):
+            raise ValueError("developer environment registry snapshot is unsafe")
+        raw = path.read_bytes()
+        after_metadata = path.lstat()
+    except OSError as exc:
+        raise ValueError("developer environment registry snapshot is unavailable") from exc
+    after = (
+        after_metadata.st_dev,
+        after_metadata.st_ino,
+        after_metadata.st_size,
+        after_metadata.st_mtime_ns,
     )
-
-
-def load_profiles(profiles_dir: Path) -> dict[str, SandboxProfileView]:
-    profiles: dict[str, SandboxProfileView] = {}
-    for sandbox in ALLOWED_SANDBOXES:
-        path = profiles_dir / f"{sandbox}.toml"
-        if not path.is_file():
-            raise ValueError(f"missing profile {path}")
-        profile = load_profile(path)
-        if profile.sandbox != sandbox:
-            raise ValueError(f"{path}: sandbox={profile.sandbox!r} != {sandbox!r}")
-        profiles[sandbox] = profile
-    return profiles
-
-
-def _sandbox_owner_uids(sandbox: str) -> frozenset[int]:
-    owners = {os.geteuid()}
-    if os.geteuid() == 0:
-        try:
-            owners.add(pwd.getpwnam(sandbox).pw_uid)
-        except KeyError as exc:
-            raise ValueError(f"sandbox owner account is unavailable: {sandbox}") from exc
-    return frozenset(owners)
+    if before != after or len(raw) != metadata.st_size:
+        raise ValueError("developer environment registry snapshot changed during read")
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("developer environment registry snapshot is invalid") from exc
+    if raw != _canonical(value):
+        raise ValueError("developer environment registry snapshot is not canonical")
+    return _registry_projection(value)
 
 
 def secure_secret_file(
@@ -250,10 +342,7 @@ def secure_secret_file(
         )
     resolved = path.resolve(strict=True)
     resolved_metadata = resolved.stat()
-    if (
-        resolved_metadata.st_dev != metadata.st_dev
-        or resolved_metadata.st_ino != metadata.st_ino
-    ):
+    if resolved_metadata.st_dev != metadata.st_dev or resolved_metadata.st_ino != metadata.st_ino:
         raise ValueError(f"{label} changed during validation: {path}")
     return resolved
 
@@ -271,25 +360,35 @@ def _secure_read_text(
     except (OSError, UnicodeError) as exc:
         raise ValueError(f"{label} is unreadable: {path}") from exc
     after = secure.stat()
-    if (
-        before.st_dev != after.st_dev
-        or before.st_ino != after.st_ino
-        or after.st_nlink != 1
-    ):
+    if before.st_dev != after.st_dev or before.st_ino != after.st_ino or after.st_nlink != 1:
         raise ValueError(f"{label} changed during read: {path}")
     return secure, value
 
 
-def _read_secret_file(path: Path, *, kind: str) -> str:
-    _, raw = _secure_read_text(path, label=f"{kind} secret file")
-    value = raw.strip()
-    if not value:
-        raise ValueError(f"{kind} secret file is empty: {path}")
-    return value
+def _read_environment_secret(path: Path, *, key: str, owner_uid: int) -> str:
+    _, raw = _secure_read_text(
+        path,
+        label="environment secret file",
+        allowed_uids=frozenset({0, owner_uid}),
+    )
+    values: dict[str, str] = {}
+    for line in raw.splitlines():
+        name, separator, value = line.partition("=")
+        if not separator or not name or not value or name in values:
+            raise ValueError("environment secret file is invalid")
+        values[name] = value
+    secret = values.get(key)
+    if not secret:
+        raise ValueError("environment secret file is incomplete")
+    return secret
 
 
-def _load_worker_token(path: Path) -> str:
-    _, raw = _secure_read_text(path, label="worker-token secret file")
+def _load_worker_token(path: Path, *, owner_uid: int | None = None) -> str:
+    _, raw = _secure_read_text(
+        path,
+        label="worker-token secret file",
+        allowed_uids=(None if owner_uid is None else frozenset({0, owner_uid})),
+    )
     token: str | None = None
     for raw_line in raw.splitlines():
         line = raw_line.strip()
@@ -303,11 +402,7 @@ def _load_worker_token(path: Path) -> str:
         if token is not None:
             raise ValueError(f"{path}: duplicate {DEFAULT_WORKER_TOKEN_ENV_KEY} entry")
         value = value.strip()
-        if (
-            len(value) >= 2
-            and value[0] == value[-1]
-            and value[0] in {"'", '"'}
-        ):
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
             value = value[1:-1]
         token = value
     if token is None:
@@ -324,11 +419,11 @@ def _load_worker_token(path: Path) -> str:
     return token
 
 
-def _load_admin_token(path: Path, *, sandbox: str) -> str:
+def _load_admin_token(path: Path, *, owner_uid: int) -> str:
     secure, content = _secure_read_text(
         path,
         label="admin secret file",
-        allowed_uids=_sandbox_owner_uids(sandbox),
+        allowed_uids=frozenset({0, owner_uid}),
     )
     try:
         verifier = load_admin_secret_file(
@@ -416,28 +511,23 @@ def _run_git_readback(repository: Path, *args: str) -> str:
 
 
 def _verify_candidate_repository(
-    profile: SandboxProfileView,
     *,
+    sandbox: str,
+    candidate_root: Path,
     expected_sha: str,
     expected_tree: str,
-    state_source_repo: str,
 ) -> Path:
-    expected_path = profile.candidate_root / expected_sha
+    expected_path = candidate_root / expected_sha
     try:
         expected_resolved = expected_path.resolve(strict=True)
-        source_resolved = Path(state_source_repo).resolve(strict=True)
     except OSError as exc:
         raise ValueError(
-            f"{profile.sandbox}: exact candidate repository is unavailable",
+            f"{sandbox}: exact candidate repository is unavailable",
         ) from exc
-    if source_resolved != expected_resolved:
-        raise ValueError(
-            f"{profile.sandbox}: state source_repo is not candidate_root/<sha>",
-        )
     source_metadata = expected_path.lstat()
     if stat.S_ISLNK(source_metadata.st_mode) or not stat.S_ISDIR(source_metadata.st_mode):
         raise ValueError(
-            f"{profile.sandbox}: candidate repository must be a non-symlink directory",
+            f"{sandbox}: candidate repository must be a non-symlink directory",
         )
     head = _run_git_readback(expected_resolved, "rev-parse", "--verify", "HEAD")
     resolved = _run_git_readback(
@@ -459,81 +549,44 @@ def _verify_candidate_repository(
         "--untracked-files=all",
     )
     if head != expected_sha or resolved != expected_sha:
-        raise ValueError(f"{profile.sandbox}: candidate HEAD readback drifted")
+        raise ValueError(f"{sandbox}: candidate HEAD readback drifted")
     if tree != expected_tree:
-        raise ValueError(f"{profile.sandbox}: candidate tree readback drifted")
+        raise ValueError(f"{sandbox}: candidate tree readback drifted")
     if status:
-        raise ValueError(f"{profile.sandbox}: candidate repository is not clean")
+        raise ValueError(f"{sandbox}: candidate repository is not clean")
     return expected_resolved
 
 
 def load_candidate_identity(
-    profile: SandboxProfileView,
+    environment: Mapping[str, Any],
     *,
-    expected_sha: str,
+    verify_checkout: bool,
+    registry_payload_sha256: str,
 ) -> CandidateIdentity:
-    if _SHA_RE.fullmatch(expected_sha) is None:
-        raise ValueError("candidate-sha must be a full lowercase 40-character hex digest")
-    state_path = profile.state_root / "sandbox-state.json"
-    secure, content = _secure_read_text(
-        state_path,
-        label=f"{profile.sandbox} sandbox state",
-        allowed_uids=_sandbox_owner_uids(profile.sandbox),
-    )
-    try:
-        payload = json.loads(content)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"{profile.sandbox}: sandbox state is invalid") from exc
-    if not isinstance(payload, dict):
-        raise ValueError(f"{profile.sandbox}: sandbox state is invalid")
-    if payload.get("schema_version") != STATE_SCHEMA_VERSION:
-        raise ValueError(f"{profile.sandbox}: sandbox state schema_version mismatch")
-    if payload.get("sandbox") != profile.sandbox:
-        raise ValueError(f"{profile.sandbox}: sandbox state sandbox mismatch")
-    if payload.get("compose_project") != profile.compose_project:
-        raise ValueError(f"{profile.sandbox}: sandbox state compose_project mismatch")
-    candidate_sha = str(payload.get("candidate_sha", ""))
-    candidate_tree = str(payload.get("candidate_tree", ""))
+    sandbox = str(environment["runtime_id"])
+    candidate_sha = str(environment["candidate_sha"])
+    candidate_tree = str(environment["candidate_tree"])
     if _SHA_RE.fullmatch(candidate_sha) is None or _SHA_RE.fullmatch(candidate_tree) is None:
-        raise ValueError(f"{profile.sandbox}: sandbox state candidate binding is invalid")
-    if candidate_sha != expected_sha:
-        raise ValueError(
-            f"{profile.sandbox}: candidate_sha mismatch "
-            f"(state={candidate_sha}, expected={expected_sha})",
+        raise ValueError(f"{sandbox}: registry candidate binding is invalid")
+    source_repo = Path(str(environment["candidate_root"])) / candidate_sha
+    if verify_checkout:
+        source_repo = _verify_candidate_repository(
+            sandbox=sandbox,
+            candidate_root=Path(str(environment["candidate_root"])),
+            expected_sha=candidate_sha,
+            expected_tree=candidate_tree,
         )
-    source_repo = payload.get("source_repo")
-    if not isinstance(source_repo, str) or not source_repo.strip():
-        raise ValueError(f"{profile.sandbox}: sandbox state missing source_repo")
-    updated_at = payload.get("updated_at")
-    if updated_at is None:
-        raise ValueError(f"{profile.sandbox}: sandbox state missing updated_at")
-    _parse_utc_timestamp(
-        updated_at,
-        label=f"{profile.sandbox} sandbox state updated_at",
-    )
-    verified_source = _verify_candidate_repository(
-        profile,
-        expected_sha=expected_sha,
-        expected_tree=candidate_tree,
-        state_source_repo=source_repo,
-    )
-    # Re-read after Git readback so a concurrent update cannot mix state and source.
-    _, final_content = _secure_read_text(
-        state_path,
-        label=f"{profile.sandbox} sandbox state",
-        allowed_uids=_sandbox_owner_uids(profile.sandbox),
-    )
-    if final_content != content:
-        raise ValueError(f"{profile.sandbox}: sandbox state changed during readback")
     return CandidateIdentity(
-        sandbox=profile.sandbox,
+        sandbox=sandbox,
+        env_id=str(environment["env_id"]),
+        candidate_id=str(environment["candidate_id"]),
         candidate_sha=candidate_sha,
         candidate_tree=candidate_tree,
-        compose_project=profile.compose_project,
-        source_repo=str(verified_source),
-        state_path=str(secure),
-        state_payload_sha256=hashlib.sha256(content.encode("utf-8")).hexdigest(),
-        updated_at=updated_at,
+        compose_project=str(environment["compose_project"]),
+        source_repo=str(source_repo),
+        state_path=str(REGISTRY_SNAPSHOT),
+        state_payload_sha256=registry_payload_sha256,
+        updated_at=None,
     )
 
 
@@ -617,10 +670,7 @@ def load_runtime_activation(
 
     fleet = payload.get("fleet_attestation")
     expected_fleet_path = (
-        EXPECTED_FLEET_ATTESTATION_ROOT
-        / sandbox
-        / candidate.candidate_sha
-        / "fleet.json"
+        EXPECTED_FLEET_ATTESTATION_ROOT / sandbox / candidate.candidate_sha / "fleet.json"
     )
     if not isinstance(fleet, dict) or set(fleet) != {
         "path",
@@ -793,8 +843,6 @@ def _require_minio_config(target: SandboxTarget, *, role: str) -> None:
         missing.append("minio_secret_key_file")
     if target.own_bucket is None:
         missing.append("own_bucket")
-    if target.foreign_bucket is None:
-        missing.append("foreign_bucket")
     if missing:
         raise ValueError(
             f"execute mode requires complete MinIO config for {role} "
@@ -808,7 +856,6 @@ def probe_worker_claim_crossover(
     *,
     execute: bool,
 ) -> ProbeResult:
-    fingerprint = worker_token_fingerprint(_load_worker_token(source.worker_token_file))
     surface = "worker_claim"
     if not execute:
         return ProbeResult(
@@ -818,9 +865,10 @@ def probe_worker_claim_crossover(
             status="dry-run",
             passed=True,
             detail="would POST /trials/claim with source worker token on target CP",
-            source_worker_fingerprint=fingerprint,
+            source_worker_fingerprint=None,
         )
-    token = _load_worker_token(source.worker_token_file)
+    token = _load_worker_token(source.worker_token_file, owner_uid=source.owner_uid)
+    fingerprint = worker_token_fingerprint(token)
     status, detail = _http_status(
         "POST",
         f"{target.control_plane_url.rstrip('/')}/trials/claim",
@@ -874,7 +922,7 @@ def probe_admin_mint_crossover(
         )
     token = _load_admin_token(
         source.admin_secret_file,
-        sandbox=source.sandbox,
+        owner_uid=source.owner_uid,
     )
     status, detail = _http_status(
         "POST",
@@ -944,8 +992,16 @@ def probe_minio_foreign_creds(
     assert source.minio_secret_key_file is not None
     assert target.minio_endpoint is not None
     assert target.own_bucket is not None
-    access = _read_secret_file(source.minio_access_key_file, kind="minio-access")
-    secret = _read_secret_file(source.minio_secret_key_file, kind="minio-secret")
+    access = _read_environment_secret(
+        source.minio_access_key_file,
+        key="LOOM_DEV_MINIO_ROOT_USER",
+        owner_uid=source.owner_uid,
+    )
+    secret = _read_environment_secret(
+        source.minio_secret_key_file,
+        key="LOOM_DEV_MINIO_ROOT_PASSWORD",
+        owner_uid=source.owner_uid,
+    )
     client = boto3.client(
         "s3",
         endpoint_url=target.minio_endpoint,
@@ -1021,8 +1077,16 @@ def probe_minio_own_positive(
     assert target.minio_secret_key_file is not None
     assert target.minio_endpoint is not None
     assert target.own_bucket is not None
-    access = _read_secret_file(target.minio_access_key_file, kind="minio-access")
-    secret = _read_secret_file(target.minio_secret_key_file, kind="minio-secret")
+    access = _read_environment_secret(
+        target.minio_access_key_file,
+        key="LOOM_DEV_MINIO_ROOT_USER",
+        owner_uid=target.owner_uid,
+    )
+    secret = _read_environment_secret(
+        target.minio_secret_key_file,
+        key="LOOM_DEV_MINIO_ROOT_PASSWORD",
+        owner_uid=target.owner_uid,
+    )
     client = boto3.client(
         "s3",
         endpoint_url=target.minio_endpoint,
@@ -1062,25 +1126,27 @@ def probe_minio_own_positive(
 
 
 def probe_minio_foreign_bucket(
-    target: SandboxTarget,
+    source: SandboxTarget,
+    foreign: SandboxTarget,
     *,
     execute: bool,
 ) -> ProbeResult:
     surface = "minio_foreign_bucket"
     incomplete = (
-        target.minio_endpoint is None
-        or target.minio_access_key_file is None
-        or target.minio_secret_key_file is None
-        or target.foreign_bucket is None
+        source.minio_endpoint is None
+        or source.minio_access_key_file is None
+        or source.minio_secret_key_file is None
+        or foreign.own_bucket is None
     )
     if incomplete:
         if execute:
             raise ValueError(
-                f"execute mode missing MinIO foreign-bucket inputs for {target.sandbox}",
+                "execute mode missing MinIO foreign-bucket inputs for "
+                f"{source.sandbox}->{foreign.sandbox}",
             )
         return ProbeResult(
-            source=target.sandbox,
-            target=target.sandbox,
+            source=source.sandbox,
+            target=foreign.sandbox,
             surface=surface,
             status="skipped",
             passed=True,
@@ -1088,8 +1154,8 @@ def probe_minio_foreign_bucket(
         )
     if not execute:
         return ProbeResult(
-            source=target.sandbox,
-            target=target.sandbox,
+            source=source.sandbox,
+            target=foreign.sandbox,
             surface=surface,
             status="dry-run",
             passed=True,
@@ -1101,24 +1167,32 @@ def probe_minio_foreign_bucket(
     except ImportError as exc:  # pragma: no cover
         raise ValueError("boto3 required for --execute MinIO probes") from exc
 
-    assert target.minio_access_key_file is not None
-    assert target.minio_secret_key_file is not None
-    assert target.minio_endpoint is not None
-    assert target.foreign_bucket is not None
-    access = _read_secret_file(target.minio_access_key_file, kind="minio-access")
-    secret = _read_secret_file(target.minio_secret_key_file, kind="minio-secret")
+    assert source.minio_access_key_file is not None
+    assert source.minio_secret_key_file is not None
+    assert source.minio_endpoint is not None
+    assert foreign.own_bucket is not None
+    access = _read_environment_secret(
+        source.minio_access_key_file,
+        key="LOOM_DEV_MINIO_ROOT_USER",
+        owner_uid=source.owner_uid,
+    )
+    secret = _read_environment_secret(
+        source.minio_secret_key_file,
+        key="LOOM_DEV_MINIO_ROOT_PASSWORD",
+        owner_uid=source.owner_uid,
+    )
     client = boto3.client(
         "s3",
-        endpoint_url=target.minio_endpoint,
+        endpoint_url=source.minio_endpoint,
         aws_access_key_id=access,
         aws_secret_access_key=secret,
         region_name="us-east-1",
     )
     try:
-        client.list_objects_v2(Bucket=target.foreign_bucket, MaxKeys=1)
+        client.list_objects_v2(Bucket=foreign.own_bucket, MaxKeys=1)
         return ProbeResult(
-            source=target.sandbox,
-            target=target.sandbox,
+            source=source.sandbox,
+            target=foreign.sandbox,
             surface=surface,
             status="Success",
             passed=False,
@@ -1128,8 +1202,8 @@ def probe_minio_foreign_bucket(
         code = str(exc.response.get("Error", {}).get("Code", "ClientError"))
         passed = code in MINIO_FOREIGN_BUCKET_ERROR_CODES
         return ProbeResult(
-            source=target.sandbox,
-            target=target.sandbox,
+            source=source.sandbox,
+            target=foreign.sandbox,
             surface=surface,
             status=code,
             passed=passed,
@@ -1137,8 +1211,8 @@ def probe_minio_foreign_bucket(
         )
     except BotoCoreError:
         return ProbeResult(
-            source=target.sandbox,
-            target=target.sandbox,
+            source=source.sandbox,
+            target=foreign.sandbox,
             surface=surface,
             status="ProbeError",
             passed=False,
@@ -1172,11 +1246,13 @@ def run_probe_matrix(
         results.append(probe_admin_mint_crossover(source, target, execute=execute))
         if source_name != target_name:
             results.append(probe_minio_foreign_creds(source, target, execute=execute))
+            results.append(
+                probe_minio_foreign_bucket(source, target, execute=execute),
+            )
     for name in names:
         target = targets[name]
         if include_same_sandbox or execute:
             results.append(probe_minio_own_positive(target, execute=execute))
-        results.append(probe_minio_foreign_bucket(target, execute=execute))
     return results
 
 
@@ -1184,19 +1260,21 @@ def build_evidence(
     results: list[ProbeResult],
     *,
     execute: bool,
-    candidate_sha: str | None,
+    registry_snapshot: Mapping[str, Any],
     candidates: list[CandidateIdentity],
     runtime_activations: list[RuntimeActivationIdentity],
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "schema_version": 1,
         "artifact_type": "developer-sandbox-crossover-probe",
         "generated_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "mode": "execute" if execute else "dry-run",
-        "candidate_sha": candidate_sha,
+        "registry_snapshot": dict(registry_snapshot),
         "candidates": [
             {
                 "sandbox": row.sandbox,
+                "env_id": row.env_id,
+                "candidate_id": row.candidate_id,
                 "candidate_sha": row.candidate_sha,
                 "candidate_tree": row.candidate_tree,
                 "compose_project": row.compose_project,
@@ -1235,179 +1313,73 @@ def build_evidence(
             "failed": sum(1 for row in results if not row.passed),
         },
     }
+    payload["payload_sha256"] = hashlib.sha256(_canonical(payload)).hexdigest()
+    return payload
 
 
 def build_targets(
-    args: argparse.Namespace,
+    registry_snapshot: Mapping[str, Any],
     *,
     execute: bool,
-) -> tuple[dict[str, SandboxTarget], list[CandidateIdentity], str | None]:
-    profiles: dict[str, SandboxProfileView] | None = None
-    if args.profiles_dir is not None or execute:
-        if args.profiles_dir is None:
-            raise ValueError("--profiles-dir is required for --execute")
-        profiles = load_profiles(Path(args.profiles_dir))
-
-    candidate_sha: str | None = args.candidate_sha
+) -> tuple[dict[str, SandboxTarget], list[CandidateIdentity]]:
+    projection = _registry_projection(registry_snapshot)
     candidates: list[CandidateIdentity] = []
     runtime_activations: list[RuntimeActivationIdentity] = []
-    if execute:
-        if not candidate_sha:
-            raise ValueError("--candidate-sha is required for --execute")
-        if profiles is None:
-            raise ValueError("--profiles-dir is required for --execute")
-        for sandbox in ALLOWED_SANDBOXES:
-            candidates.append(
-                load_candidate_identity(profiles[sandbox], expected_sha=candidate_sha),
-            )
-        shas = {row.candidate_sha for row in candidates}
-        if len(shas) != 1:
-            raise ValueError(f"mixed candidate SHAs across sandboxes: {sorted(shas)}")
-        trees = {row.candidate_tree for row in candidates}
-        if len(trees) != 1:
-            raise ValueError(f"mixed candidate trees across sandboxes: {sorted(trees)}")
-        for candidate in candidates:
-            runtime_activations.append(
-                load_runtime_activation(
-                    Path(args.runtime_attestation_root),
-                    candidate,
-                ),
-            )
-        receipt_shas = {row.candidate_sha for row in runtime_activations}
-        receipt_trees = {row.candidate_tree for row in runtime_activations}
-        if receipt_shas != shas or receipt_trees != trees:
-            raise ValueError("mixed or stale runtime activation receipts")
-
     targets: dict[str, SandboxTarget] = {}
-    for sandbox in ALLOWED_SANDBOXES:
-        worker_file = getattr(args, f"{sandbox}_worker_token_file", None)
-        admin_file = getattr(args, f"{sandbox}_admin_secret_file", None)
-        cp_override = getattr(args, f"{sandbox}_cp_url", None)
-        minio_override = getattr(args, f"{sandbox}_minio_endpoint", None)
-        access_file = getattr(args, f"{sandbox}_minio_access_key_file", None)
-        secret_file = getattr(args, f"{sandbox}_minio_secret_key_file", None)
-        own_bucket_override = getattr(args, f"{sandbox}_own_bucket", None)
-        foreign_bucket_override = getattr(args, f"{sandbox}_foreign_bucket", None)
-
+    for environment in projection["environments"]:
+        sandbox = str(environment["runtime_id"])
+        owner_uid = int(environment["uid"])
+        state_root = Path(str(environment["state_root"]))
+        secrets_file = state_root / "secrets" / "environment.env"
+        admin_file = state_root / "secrets" / "admin.toml"
+        candidate = load_candidate_identity(
+            environment,
+            verify_checkout=execute,
+            registry_payload_sha256=str(
+                projection["source_registry_payload_sha256"],
+            ),
+        )
+        candidates.append(candidate)
+        runtime_activation = (
+            load_runtime_activation(DEFAULT_RUNTIME_ATTESTATION_ROOT, candidate)
+            if execute
+            else None
+        )
+        if runtime_activation is not None:
+            runtime_activations.append(runtime_activation)
         if execute:
-            if profiles is None:
-                raise ValueError("--profiles-dir is required for --execute")
-            if not worker_file or not admin_file or not access_file or not secret_file:
-                raise ValueError(
-                    f"execute mode requires --{sandbox}-worker-token-file, "
-                    f"--{sandbox}-admin-secret-file, "
-                    f"--{sandbox}-minio-access-key-file, and "
-                    f"--{sandbox}-minio-secret-key-file",
-                )
-            profile = profiles[sandbox]
-            cp_url = profile.control_plane_url
-            if cp_override:
-                cp_url = assert_endpoint_matches_reviewed(
-                    cp_override,
-                    profile.control_plane_url,
-                    label=f"--{sandbox}-cp-url",
-                )
-            minio_endpoint = profile.minio_endpoint
-            if minio_override:
-                minio_endpoint = assert_endpoint_matches_reviewed(
-                    minio_override,
-                    profile.minio_endpoint,
-                    label=f"--{sandbox}-minio-endpoint",
-                )
-            own_bucket = own_bucket_override or profile.artifacts_bucket
-            if own_bucket != profile.artifacts_bucket:
-                raise ValueError(
-                    f"--{sandbox}-own-bucket must equal reviewed artifacts "
-                    f"bucket {profile.artifacts_bucket!r}",
-                )
-            # Foreign bucket is a peer sandbox artifacts bucket.
-            peer = next(name for name in ALLOWED_SANDBOXES if name != sandbox)
-            expected_foreign = profiles[peer].artifacts_bucket
-            foreign_bucket = foreign_bucket_override or expected_foreign
-            if foreign_bucket not in {
-                profiles[name].artifacts_bucket for name in ALLOWED_SANDBOXES if name != sandbox
-            }:
-                raise ValueError(
-                    f"--{sandbox}-foreign-bucket must be a peer sandbox artifacts bucket",
-                )
-            candidate = next(row for row in candidates if row.sandbox == sandbox)
-            runtime_activation = next(
-                row for row in runtime_activations if row.sandbox == sandbox
+            allowed = frozenset({0, owner_uid})
+            worker_path = secure_secret_file(
+                secrets_file,
+                label=f"{sandbox} environment secret file",
+                allowed_uids=allowed,
             )
-            targets[sandbox] = SandboxTarget(
-                sandbox=sandbox,
-                control_plane_url=cp_url,
-                worker_token_file=secure_secret_file(
-                    Path(worker_file),
-                    label=f"{sandbox} worker-token secret file",
-                ),
-                admin_secret_file=secure_secret_file(
-                    Path(admin_file),
-                    label=f"{sandbox} admin secret file",
-                    allowed_uids=_sandbox_owner_uids(sandbox),
-                ),
-                minio_endpoint=minio_endpoint,
-                minio_access_key_file=secure_secret_file(
-                    Path(access_file),
-                    label=f"{sandbox} minio-access secret file",
-                ),
-                minio_secret_key_file=secure_secret_file(
-                    Path(secret_file),
-                    label=f"{sandbox} minio-secret secret file",
-                ),
-                own_bucket=own_bucket,
-                foreign_bucket=foreign_bucket,
-                candidate=candidate,
-                runtime_activation=runtime_activation,
+            admin_path = secure_secret_file(
+                admin_file,
+                label=f"{sandbox} admin secret file",
+                allowed_uids=allowed,
             )
-            continue
-
-        if not cp_override or not worker_file or not admin_file:
-            continue
+        else:
+            worker_path = secrets_file
+            admin_path = admin_file
+        ports = environment["ports"]
         targets[sandbox] = SandboxTarget(
             sandbox=sandbox,
-            control_plane_url=_normalize_http_url(cp_override),
-            worker_token_file=secure_secret_file(
-                Path(worker_file),
-                label=f"{sandbox} worker-token secret file",
-            ),
-            admin_secret_file=secure_secret_file(
-                Path(admin_file),
-                label=f"{sandbox} admin secret file",
-                allowed_uids=_sandbox_owner_uids(sandbox),
-            ),
-            minio_endpoint=(_normalize_http_url(minio_override) if minio_override else None),
-            minio_access_key_file=(
-                secure_secret_file(
-                    Path(access_file),
-                    label=f"{sandbox} minio-access secret file",
-                )
-                if access_file
-                else None
-            ),
-            minio_secret_key_file=(
-                secure_secret_file(
-                    Path(secret_file),
-                    label=f"{sandbox} minio-secret secret file",
-                )
-                if secret_file
-                else None
-            ),
-            own_bucket=own_bucket_override,
-            foreign_bucket=foreign_bucket_override,
+            env_id=str(environment["env_id"]),
+            owner_uid=owner_uid,
+            control_plane_url=f"http://127.0.0.1:{int(ports['control_plane'])}",
+            worker_token_file=worker_path,
+            admin_secret_file=admin_path,
+            minio_endpoint=f"http://127.0.0.1:{int(ports['minio'])}",
+            minio_access_key_file=worker_path,
+            minio_secret_key_file=worker_path,
+            own_bucket=str(environment["artifacts_bucket"]),
+            candidate=candidate,
+            runtime_activation=runtime_activation,
         )
-
-    minimum = 3 if execute else 2
-    if len(targets) < minimum:
-        raise ValueError(
-            f"configure at least {minimum} sandboxes "
-            f"(got {sorted(targets)}); execute requires all three",
-        )
-    if execute and set(targets) != set(ALLOWED_SANDBOXES):
-        raise ValueError(
-            f"execute mode requires all sandboxes {list(ALLOWED_SANDBOXES)}",
-        )
-    return targets, candidates, candidate_sha
+    if len(targets) < 2 or len(targets) != len(projection["environments"]):
+        raise ValueError("dynamic crossover cohort is incomplete")
+    return targets, candidates
 
 
 def refresh_runtime_activations(
@@ -1416,7 +1388,7 @@ def refresh_runtime_activations(
     runtime_root: Path,
 ) -> list[RuntimeActivationIdentity]:
     refreshed: list[RuntimeActivationIdentity] = []
-    for sandbox in ALLOWED_SANDBOXES:
+    for sandbox in sorted(targets):
         target = targets[sandbox]
         if target.candidate is None or target.runtime_activation is None:
             raise ValueError(f"{sandbox}: live candidate binding is incomplete")
@@ -1438,46 +1410,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Perform live HTTP/MinIO probes (fail-closed; default: dry-run)",
     )
     parser.add_argument(
-        "--profiles-dir",
-        type=Path,
-        default=None,
-        help="Developer-sandbox profiles dir (required for --execute)",
-    )
-    parser.add_argument(
-        "--candidate-sha",
-        default=None,
-        help="Exact full lowercase candidate SHA bound in every sandbox-state.json",
-    )
-    parser.add_argument(
-        "--runtime-attestation-root",
-        type=Path,
-        default=DEFAULT_RUNTIME_ATTESTATION_ROOT,
-        help=(
-            "Root containing <sandbox>/<candidate>/combined.json from the "
-            "oldlab2 cross-domain activation collector"
-        ),
-    )
-    parser.add_argument(
-        "--include-same-sandbox",
-        action="store_true",
-        help="Also probe each sandbox against itself (always on for --execute)",
-    )
-    parser.add_argument(
         "--write-evidence",
         type=Path,
         default=None,
         help="Write secret-safe evidence JSON to this path",
     )
     parser.add_argument("--json", action="store_true")
-    for sandbox in ALLOWED_SANDBOXES:
-        parser.add_argument(f"--{sandbox}-cp-url", default=None)
-        parser.add_argument(f"--{sandbox}-worker-token-file", default=None)
-        parser.add_argument(f"--{sandbox}-admin-secret-file", default=None)
-        parser.add_argument(f"--{sandbox}-minio-endpoint", default=None)
-        parser.add_argument(f"--{sandbox}-minio-access-key-file", default=None)
-        parser.add_argument(f"--{sandbox}-minio-secret-key-file", default=None)
-        parser.add_argument(f"--{sandbox}-own-bucket", default=None)
-        parser.add_argument(f"--{sandbox}-foreign-bucket", default=None)
     return parser
 
 
@@ -1494,24 +1432,30 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        targets, candidates, candidate_sha = build_targets(args, execute=args.execute)
+        registry_projection = _read_registry_projection()
+        targets, candidates = build_targets(
+            registry_projection["source_registry"],
+            execute=args.execute,
+        )
         results = run_probe_matrix(
             targets,
             execute=args.execute,
-            include_same_sandbox=args.include_same_sandbox,
+            include_same_sandbox=True,
         )
         runtime_activations = (
             refresh_runtime_activations(
                 targets,
-                runtime_root=Path(args.runtime_attestation_root),
+                runtime_root=DEFAULT_RUNTIME_ATTESTATION_ROOT,
             )
             if args.execute
             else []
         )
+        if _read_registry_projection() != registry_projection:
+            raise ValueError("developer environment registry changed during crossover probes")
         evidence = build_evidence(
             results,
             execute=args.execute,
-            candidate_sha=candidate_sha,
+            registry_snapshot=registry_projection,
             candidates=candidates,
             runtime_activations=runtime_activations,
         )

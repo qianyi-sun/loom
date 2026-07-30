@@ -25,14 +25,19 @@ from typing import Any, Protocol
 
 from loom.admin_secret import AdminSecretConfigError, AdminSecretVerifier
 
-ALLOWED_SANDBOXES = ("qianyi", "hongjian", "devansh")
 EXPECTED_SSH_TARGET = "oldlab-2"
 EXPECTED_CANONICAL_HOSTNAME = "trt-eai-oldlab-2"
 PROFILE_SCHEMA_VERSION = 1
+PROFILE_KIND = "loom.developer-sandbox.profile"
 STATE_SCHEMA_VERSION = 1
+_PROFILE_MARKER_LINE_RE = re.compile(
+    rf"""^kind\s*=\s*(?:"{re.escape(PROFILE_KIND)}"|'{re.escape(PROFILE_KIND)}')"""
+    r"\s*(?:#.*)?$",
+)
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_SANDBOX_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,47}$")
 _PROJECT_RE = re.compile(r"^loom-sandbox-([a-z][a-z0-9-]*)$")
-_DATABASE_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
+_DATABASE_RE = re.compile(r"^[a-z][a-z0-9_-]{0,62}$")
 _BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
 _PORT_FIELDS = (
     "postgres",
@@ -48,6 +53,7 @@ _PORT_FIELDS = (
 )
 _TOP_LEVEL_FIELDS = {
     "schema_version",
+    "kind",
     "sandbox",
     "ssh_target",
     "canonical_hostname",
@@ -139,9 +145,9 @@ class SandboxProfile:
             raise SandboxProfileError(
                 f"schema_version must be {PROFILE_SCHEMA_VERSION}",
             )
-        if self.sandbox not in ALLOWED_SANDBOXES:
+        if _SANDBOX_ID_RE.fullmatch(self.sandbox) is None:
             raise SandboxProfileError(
-                f"sandbox must be one of {list(ALLOWED_SANDBOXES)}",
+                "sandbox must match ^[a-z][a-z0-9-]{0,47}$",
             )
         if self.ssh_target != EXPECTED_SSH_TARGET:
             raise SandboxProfileError(
@@ -305,6 +311,13 @@ def load_profile(path: Path) -> SandboxProfile:
     except tomllib.TOMLDecodeError as exc:
         raise SandboxProfileError(f"invalid sandbox profile TOML: {path}") from exc
     _reject_unknown(raw, _TOP_LEVEL_FIELDS, str(path))
+    if set(raw) != _TOP_LEVEL_FIELDS:
+        missing = sorted(_TOP_LEVEL_FIELDS - set(raw))
+        raise SandboxProfileError(
+            f"{path} missing fields: {', '.join(missing)}",
+        )
+    if _required_string(raw, "kind", str(path)) != PROFILE_KIND:
+        raise SandboxProfileError(f"{path}.kind must be {PROFILE_KIND!r}")
 
     ports_raw = _required_table(raw, "ports", str(path))
     _reject_unknown(ports_raw, set(_PORT_FIELDS), f"{path}.ports")
@@ -339,10 +352,7 @@ def load_profile(path: Path) -> SandboxProfile:
         evidence_root=Path(_required_string(raw, "evidence_root", str(path))),
         runtime_root=Path(_required_string(raw, "runtime_root", str(path))),
         ports=SandboxPorts(
-            **{
-                field: _required_int(ports_raw, field, f"{path}.ports")
-                for field in _PORT_FIELDS
-            },
+            **{field: _required_int(ports_raw, field, f"{path}.ports") for field in _PORT_FIELDS},
         ),
         database_name=_required_string(database, "name", f"{path}.database"),
         task_bucket=_required_string(
@@ -365,18 +375,92 @@ def load_profile(path: Path) -> SandboxProfile:
     return profile
 
 
-def load_profiles(profiles_dir: Path) -> tuple[SandboxProfile, ...]:
-    if not profiles_dir.is_dir():
-        raise SandboxProfileError(f"profiles directory not found: {profiles_dir}")
-    profiles = tuple(
-        load_profile(profiles_dir / f"{sandbox}.toml")
-        for sandbox in ALLOWED_SANDBOXES
-    )
-    names = tuple(profile.sandbox for profile in profiles)
-    if set(names) != set(ALLOWED_SANDBOXES) or len(names) != len(ALLOWED_SANDBOXES):
+def _marked_as_profile(raw: bytes) -> bool:
+    """Recognize the canonical marker in otherwise malformed TOML."""
+
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            return False
+        if _PROFILE_MARKER_LINE_RE.fullmatch(stripped) is not None:
+            return True
+    return False
+
+
+def _trusted_profiles_directory(profiles_dir: Path) -> Path:
+    absolute = Path(os.path.abspath(profiles_dir))
+    try:
+        resolved = absolute.resolve(strict=True)
+    except OSError as exc:
         raise SandboxProfileError(
-            f"profiles must define exactly {list(ALLOWED_SANDBOXES)}",
+            f"profiles directory not found: {profiles_dir}",
+        ) from exc
+    current = absolute
+    while True:
+        try:
+            metadata = current.lstat()
+        except OSError as exc:
+            raise SandboxProfileError(
+                f"profiles directory ancestry is unavailable: {profiles_dir}",
+            ) from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            raise SandboxProfileError(
+                f"profiles directory ancestry must not contain symlinks: {profiles_dir}",
+            )
+        if current == absolute and not stat.S_ISDIR(metadata.st_mode):
+            raise SandboxProfileError(f"profiles directory not found: {profiles_dir}")
+        if current.parent == current:
+            break
+        current = current.parent
+    if resolved != absolute:
+        raise SandboxProfileError(
+            f"profiles directory ancestry must not contain symlinks: {profiles_dir}",
         )
+    return resolved
+
+
+def load_profiles(profiles_dir: Path) -> tuple[SandboxProfile, ...]:
+    profiles_dir = _trusted_profiles_directory(profiles_dir)
+    profile_paths: list[Path] = []
+    for path in sorted(
+        profiles_dir.glob("*.toml"),
+        key=lambda candidate: candidate.name,
+    ):
+        if not path.is_file() or path.is_symlink():
+            continue
+        try:
+            source = path.read_bytes()
+        except OSError as exc:
+            raise SandboxProfileError(
+                f"could not inspect TOML while discovering sandbox profiles: {path}",
+            ) from exc
+        try:
+            raw = tomllib.loads(source.decode("utf-8"))
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+            if _marked_as_profile(source):
+                raise SandboxProfileError(
+                    f"invalid marked sandbox profile TOML: {path}",
+                ) from exc
+            continue
+        # The exact top-level kind is the explicit protocol marker. Other TOML
+        # files in this directory are platform or template configuration.
+        if raw.get("kind") == PROFILE_KIND:
+            profile_paths.append(path)
+    if not profile_paths:
+        raise SandboxProfileError(
+            f"no developer sandbox profiles found in {profiles_dir}",
+        )
+
+    profiles = tuple(load_profile(path) for path in profile_paths)
+    for path, profile in zip(profile_paths, profiles, strict=True):
+        if path.stem != profile.sandbox:
+            raise SandboxProfileError(
+                f"{path}: filename must equal sandbox identity {profile.sandbox!r}",
+            )
     _require_distinct(profiles, "compose_project")
     _require_distinct(profiles, "provider_connection_namespace")
     _require_distinct(profiles, "database_name")
@@ -391,6 +475,30 @@ def load_profiles(profiles_dir: Path) -> tuple[SandboxProfile, ...]:
         "artifacts_bucket",
     ):
         _require_distinct(profiles, field)
+    all_paths = [
+        getattr(profile, field)
+        for profile in profiles
+        for field in (
+            "candidate_root",
+            "state_root",
+            "cache_root",
+            "evidence_root",
+            "runtime_root",
+        )
+    ]
+    if len(set(all_paths)) != len(all_paths):
+        raise SandboxProfileError(
+            "sandbox paths must be globally distinct across all sandboxes",
+        )
+    all_buckets = [
+        getattr(profile, field)
+        for profile in profiles
+        for field in ("task_bucket", "trajectories_bucket", "artifacts_bucket")
+    ]
+    if len(set(all_buckets)) != len(all_buckets):
+        raise SandboxProfileError(
+            "object-store buckets must be globally distinct across all sandboxes",
+        )
     all_ports = [port for profile in profiles for port in profile.ports.values()]
     if len(set(all_ports)) != len(all_ports):
         raise SandboxProfileError("host ports must be distinct across all sandboxes")
@@ -434,9 +542,8 @@ def bind_candidate(
         raise SandboxOperationError("candidate source repository is unavailable") from exc
     if not resolved_repo.is_dir():
         raise SandboxOperationError("candidate source repository is not a directory")
-    if (
-        expected_source_repo is not None
-        and resolved_repo != expected_source_repo.resolve(strict=False)
+    if expected_source_repo is not None and resolved_repo != expected_source_repo.resolve(
+        strict=False
     ):
         raise SandboxOperationError(
             "candidate source must be materialized at candidate_root/<sha>",
@@ -531,9 +638,7 @@ def _compose_environment(
             "LOOM_DEV_TASK_BUCKET": profile.task_bucket,
             "LOOM_DEV_TRAJECTORIES_BUCKET": profile.trajectories_bucket,
             "LOOM_DEV_ARTIFACTS_BUCKET": profile.artifacts_bucket,
-            "LOOM_DEV_PROVIDER_CONNECTION_NAMESPACE": (
-                profile.provider_connection_namespace
-            ),
+            "LOOM_DEV_PROVIDER_CONNECTION_NAMESPACE": (profile.provider_connection_namespace),
             "LOOM_DEV_ADMIN_SECRET_FILE": str(admin_secret_file),
         },
     )
@@ -788,8 +893,7 @@ def _plan_document(
             "runtime": str(profile.runtime_root),
         },
         "commands": [
-            {"purpose": command.purpose, "argv": list(command.argv)}
-            for command in commands
+            {"purpose": command.purpose, "argv": list(command.argv)} for command in commands
         ],
     }
 

@@ -21,6 +21,7 @@ import base64
 import binascii
 import fcntl
 import hashlib
+import importlib.util
 import ipaddress
 import json
 import os
@@ -81,6 +82,52 @@ REQUEST_FIELDS: Final = {
     "payload_base64",
     "prior_request_id",
 }
+REGISTRY_SNAPSHOT: Final = Path(
+    "/var/lib/loom-developer-environment-registry/current-snapshot.json",
+)
+REGISTRY_MODULE_RELATIVE: Final = Path(
+    "scripts/ops/developer_environment_registry.py",
+)
+REGISTRY_VERIFIER_SOURCE: Final = (
+    Path("/opt/loom-developer-sandbox-node-authority/source") / REGISTRY_MODULE_RELATIVE
+)
+REGISTRY_SNAPSHOT_SYNC_ACTION: Final = "registry-snapshot-sync"
+REGISTRY_SNAPSHOT_SYNC_KIND: Final = "developer-environment-registry-snapshot-json"
+REGISTRY_SNAPSHOT_SYNC_FIELDS: Final = REQUEST_FIELDS | {
+    "registry_generation",
+    "registry_payload_sha256",
+}
+REGISTRY_DEPENDENT_ACTIONS: Final = frozenset(
+    {
+        "host-converge",
+        "materialize",
+        "install-client",
+        "attest",
+        "rollback",
+        "persist-fleet-attestation",
+        "inspect-candidate",
+        "inspect-local",
+        "inspect-link-client",
+        "inspect-link-server",
+        "export-domain-attestation",
+        "export-runtime-proof-artifact",
+        "collect-live-overlap",
+        "observe-live-overlap-job",
+        "observe-platform-health-node",
+        "slurm-node-converge",
+        "slurm-controller-converge",
+        "slurm-check",
+        "slurm-rollback",
+        "slurm-identity-preflight",
+        "slurm-identity-converge",
+        "slurm-identity-retire",
+        "slurm-identity-inventory",
+        "developer-environment-acceptance-probe",
+        "developer-environment-runtime-retire",
+    },
+)
+IDENTITY_PREFLIGHT_ACTION: Final = "slurm-identity-preflight"
+IDENTITY_PREFLIGHT_PAYLOAD_KIND: Final = "developer-environment-identity-preflight-json"
 INFRASTRUCTURE_CONVERGE_FIELDS: Final = {
     "schema_version",
     "kind",
@@ -2330,6 +2377,203 @@ def _invoke_timeout(node: str, verb: str, envelope: bytes) -> int:
     return INFRASTRUCTURE_CONVERGE_TIMEOUT_SECONDS
 
 
+def _validate_identity_preflight_route(verb: str, envelope: bytes) -> None:
+    try:
+        outer = json.loads(envelope)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return
+    if not isinstance(outer, dict) or outer.get("action") != IDENTITY_PREFLIGHT_ACTION:
+        return
+    if (
+        verb != "check"
+        or not REQUEST_FIELDS.issubset(outer)
+        or outer.get("payload_kind") != IDENTITY_PREFLIGHT_PAYLOAD_KIND
+    ):
+        raise TransportError("identity preflight is outside the read-only route")
+
+
+def _registry_module() -> Any:
+    source = (
+        REGISTRY_VERIFIER_SOURCE
+        if REGISTRY_VERIFIER_SOURCE.exists()
+        else REPO_ROOT / REGISTRY_MODULE_RELATIVE
+        if Path(__file__).resolve().is_relative_to(REPO_ROOT)
+        else REGISTRY_VERIFIER_SOURCE
+    )
+    spec = importlib.util.spec_from_file_location(
+        "_loom_transport_developer_environment_registry",
+        source,
+    )
+    if spec is None or spec.loader is None:
+        raise TransportError("registry snapshot verifier is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    except (OSError, ImportError) as exc:
+        raise TransportError("registry snapshot verifier is unavailable") from exc
+    return module
+
+
+def _verified_registry_snapshot(raw: bytes) -> dict[str, Any]:
+    try:
+        snapshot = _registry_module().DeveloperEnvironmentRegistry.verify_snapshot(raw)
+    except Exception as exc:
+        raise TransportError("registry snapshot is invalid") from exc
+    if not isinstance(snapshot, dict):
+        raise TransportError("registry snapshot is invalid")
+    return snapshot
+
+
+def _registry_binding_from_envelope(
+    node: str,
+    envelope: bytes,
+) -> tuple[dict[str, Any], tuple[int, str]] | None:
+    try:
+        outer = json.loads(envelope)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TransportError("registry-bound transport request is invalid") from exc
+    if not isinstance(outer, dict):
+        raise TransportError("registry-bound transport request is invalid")
+    action = outer.get("action")
+    if action == REGISTRY_SNAPSHOT_SYNC_ACTION:
+        return None
+    if action not in REGISTRY_DEPENDENT_ACTIONS:
+        return None
+    unsigned = dict(outer)
+    unsigned.pop("request_id", None)
+    if (
+        envelope != _canonical_json(outer)
+        or outer.get("schema_version") != SCHEMA_VERSION
+        or outer.get("node") != node
+        or outer.get("request_id") != hashlib.sha256(_canonical_json(unsigned)).hexdigest()
+        or not isinstance(outer.get("payload_base64"), str)
+        or not isinstance(outer.get("payload_sha256"), str)
+    ):
+        raise TransportError("registry-bound transport request is invalid")
+    try:
+        inner_raw = base64.b64decode(outer["payload_base64"], validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise TransportError("registry-bound transport request payload is invalid") from exc
+    if hashlib.sha256(inner_raw).hexdigest() != outer["payload_sha256"]:
+        raise TransportError("registry-bound transport request payload is invalid")
+    outer_binding = (
+        outer.get("registry_generation"),
+        outer.get("registry_payload_sha256"),
+    )
+    inner_binding: tuple[object, object] = (None, None)
+    if inner_raw:
+        try:
+            inner = json.loads(inner_raw)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            inner = None
+        if isinstance(inner, dict):
+            inner_binding = (
+                inner.get("registry_generation"),
+                inner.get(
+                    "registry_payload_sha256",
+                    inner.get("registry_snapshot_sha256"),
+                ),
+            )
+    bindings = [binding for binding in (outer_binding, inner_binding) if binding != (None, None)]
+    if (
+        not bindings
+        or any(
+            type(generation) is not int
+            or int(generation) < 1
+            or re.fullmatch(r"[0-9a-f]{64}", str(digest)) is None
+            for generation, digest in bindings
+        )
+        or len(set((int(generation), str(digest)) for generation, digest in bindings)) != 1
+    ):
+        raise TransportError("registry-bound transport request has no exact snapshot binding")
+    generation, digest = bindings[0]
+    return outer, (int(generation), str(digest))
+
+
+def _registry_sync_envelope(
+    original: Mapping[str, Any],
+    snapshot: Mapping[str, Any],
+    snapshot_raw: bytes,
+) -> bytes:
+    unsigned = {
+        "schema_version": SCHEMA_VERSION,
+        "action": REGISTRY_SNAPSHOT_SYNC_ACTION,
+        "node": original["node"],
+        "domain": original["domain"],
+        "sandbox": original["sandbox"],
+        "candidate_sha": original["candidate_sha"],
+        "candidate_tree": original["candidate_tree"],
+        "registry_generation": snapshot["generation"],
+        "registry_payload_sha256": snapshot["payload_sha256"],
+        "payload_kind": REGISTRY_SNAPSHOT_SYNC_KIND,
+        "payload_sha256": hashlib.sha256(snapshot_raw).hexdigest(),
+        "payload_base64": base64.b64encode(snapshot_raw).decode("ascii"),
+        "prior_request_id": None,
+    }
+    return _canonical_json(
+        {
+            **unsigned,
+            "request_id": hashlib.sha256(_canonical_json(unsigned)).hexdigest(),
+        },
+    )
+
+
+def _validate_registry_sync_receipt(
+    completed: subprocess.CompletedProcess[bytes],
+    *,
+    sync_envelope: bytes,
+    snapshot: Mapping[str, Any],
+) -> None:
+    try:
+        request = json.loads(sync_envelope)
+        receipt = json.loads(completed.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TransportError("registry snapshot sync receipt is invalid") from exc
+    expected_fields = {
+        "schema_version",
+        "request_id",
+        "action",
+        "node",
+        "domain",
+        "sandbox",
+        "candidate_sha",
+        "candidate_tree",
+        "payload_sha256",
+        "result_sha256",
+        "inner_receipt",
+        "completed_at",
+        "status",
+        "registry_generation",
+        "registry_payload_sha256",
+        "source_sha",
+        "source_tree",
+    }
+    if (
+        not isinstance(request, dict)
+        or not isinstance(receipt, dict)
+        or set(receipt) != expected_fields
+        or completed.stdout != _canonical_json(receipt)
+        or receipt.get("schema_version") != SCHEMA_VERSION
+        or receipt.get("request_id") != request.get("request_id")
+        or receipt.get("action") != REGISTRY_SNAPSHOT_SYNC_ACTION
+        or receipt.get("node") != request.get("node")
+        or receipt.get("domain") != request.get("domain")
+        or receipt.get("sandbox") != request.get("sandbox")
+        or receipt.get("candidate_sha") != request.get("candidate_sha")
+        or receipt.get("candidate_tree") != request.get("candidate_tree")
+        or receipt.get("payload_sha256") != request.get("payload_sha256")
+        or receipt.get("registry_generation") != snapshot["generation"]
+        or receipt.get("registry_payload_sha256") != snapshot["payload_sha256"]
+        or re.fullmatch(r"[0-9a-f]{40}", str(receipt.get("source_sha"))) is None
+        or re.fullmatch(r"[0-9a-f]{40}", str(receipt.get("source_tree"))) is None
+        or receipt.get("inner_receipt") is not None
+        or receipt.get("status") != "succeeded"
+        or re.fullmatch(r"[0-9a-f]{64}", str(receipt.get("result_sha256"))) is None
+    ):
+        raise TransportError("registry snapshot sync receipt is invalid")
+
+
 def invoke(
     node: str,
     verb: str,
@@ -2342,48 +2586,83 @@ def invoke(
         raise TransportError("transport client requires root")
     if len(envelope) > 96 * 1024 * 1024:
         raise TransportError("transport request exceeds its size bound")
+    _validate_identity_preflight_route(verb, envelope)
     layout = default_layout() if layout is None else layout
     validate_client_install(layout)
     config = load_config(layout.config)
     initiator = config.node_for_hostname(_hostname())
-    role = config.authority_role(initiator, node, verb)
     local = config.nodes[node].hostname == _hostname()
-    if local:
-        argv = [
-            RUNUSER,
-            "-u",
-            OPERATOR,
-            "--",
-            SUDO,
-            "-n",
-            str(config.authority_program),
-            verb,
-        ]
-    else:
-        argv = _remote_ssh_argv(
-            config,
-            layout,
-            initiator=initiator,
-            node=node,
-            verb=verb,
-            role=role,
+
+    def execute(
+        request_verb: str,
+        request_envelope: bytes,
+    ) -> subprocess.CompletedProcess[bytes]:
+        role = config.authority_role(initiator, node, request_verb)
+        if local:
+            argv = [
+                RUNUSER,
+                "-u",
+                OPERATOR,
+                "--",
+                SUDO,
+                "-n",
+                str(config.authority_program),
+                request_verb,
+            ]
+        else:
+            argv = _remote_ssh_argv(
+                config,
+                layout,
+                initiator=initiator,
+                node=node,
+                verb=request_verb,
+                role=role,
+            )
+        try:
+            completed = run(
+                argv,
+                input=request_envelope,
+                env=_clean_env(),
+                check=False,
+                capture_output=True,
+                timeout=_invoke_timeout(node, request_verb, request_envelope),
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise TransportError("node authority transport failed safely") from exc
+        if (
+            completed.returncode != 0
+            or completed.stderr
+            or len(completed.stdout) > MAX_STDOUT_BYTES
+        ):
+            raise TransportError("node authority transport failed safely")
+        if role.kind != "authority":  # pragma: no cover - config parser invariant
+            raise TransportError("transport role is invalid")
+        return completed
+
+    registry_binding = _registry_binding_from_envelope(node, envelope)
+    if registry_binding is not None:
+        original, expected = registry_binding
+        snapshot_raw = _safe_external_file(
+            REGISTRY_SNAPSHOT,
+            modes=frozenset({0o600}),
+            limit=8 << 20,
+            expected_uid=ROOT_UID,
+            validate_parents=True,
         )
-    try:
-        completed = run(
-            argv,
-            input=envelope,
-            env=_clean_env(),
-            check=False,
-            capture_output=True,
-            timeout=_invoke_timeout(node, verb, envelope),
+        snapshot = _verified_registry_snapshot(snapshot_raw)
+        current = (int(snapshot["generation"]), str(snapshot["payload_sha256"]))
+        if current != expected:
+            raise TransportError(
+                "registry-bound transport request is stale before snapshot sync",
+            )
+        sync_envelope = _registry_sync_envelope(original, snapshot, snapshot_raw)
+        sync_completed = execute("transact", sync_envelope)
+        _validate_registry_sync_receipt(
+            sync_completed,
+            sync_envelope=sync_envelope,
+            snapshot=snapshot,
         )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise TransportError("node authority transport failed safely") from exc
-    if completed.returncode != 0 or completed.stderr or len(completed.stdout) > MAX_STDOUT_BYTES:
-        raise TransportError("node authority transport failed safely")
-    if role.kind != "authority":  # pragma: no cover - config parser invariant
-        raise TransportError("transport role is invalid")
-    return completed
+    return execute(verb, envelope)
 
 
 def _forced_action(

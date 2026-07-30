@@ -6,18 +6,673 @@ import io
 import json
 import os
 import pwd
+import shutil
 import stat
+import subprocess
+import sys
 import tarfile
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from scripts.ops import developer_environment_registry as registry
+from scripts.ops import developer_environment_runtime_retire as runtime_retire
 from scripts.ops import developer_sandbox_host as host
 from scripts.ops import developer_sandbox_node_authority as authority
 
 SHA = "a" * 40
 TREE = "b" * 40
+
+
+def _finalization_record(
+    environment: dict[str, object],
+    candidate: dict[str, object],
+    deployment: dict[str, object],
+) -> dict[str, object]:
+    unsigned: dict[str, object] = {
+        "deployment_id": deployment["deployment_id"],
+        "env_id": environment["env_id"],
+        "principal_id": environment["principal_id"],
+        "candidate_id": candidate["candidate_id"],
+        "candidate_sha": candidate["candidate_sha"],
+        "candidate_tree": candidate["candidate_tree"],
+        "applied_resource_generation": deployment["applied_resource_generation"],
+        "applied_registry_generation": deployment["applied_registry_generation"],
+        "applied_registry_payload_sha256": deployment["applied_registry_payload_sha256"],
+        "capacity_finalize_receipt_sha256": "1" * 64,
+        "capacity_finalize_check_receipt_sha256": "2" * 64,
+        "runtime_reconcile_receipt_sha256": "3" * 64,
+        "runtime_prepare_check_receipt_sha256": "4" * 64,
+        "acceptance_probe_receipt_sha256": "5" * 64,
+        "created_at": "2026-07-29T12:00:00Z",
+    }
+    return {
+        **unsigned,
+        "payload_sha256": hashlib.sha256(authority._canonical(unsigned)).hexdigest(),
+    }
+
+
+def _registry_snapshot() -> dict[str, object]:
+    identities = (
+        ("qianyi", SHA, TREE),
+        ("hongjian", "c" * 40, "d" * 40),
+        ("devansh", "e" * 40, "f" * 40),
+    )
+    environments: list[dict[str, object]] = []
+    candidates: list[dict[str, object]] = []
+    deployments: list[dict[str, object]] = []
+    finalizations: list[dict[str, object]] = []
+    for index, (sandbox, sha, tree) in enumerate(identities):
+        env_id = f"denv-legacy-{index:016x}"
+        principal = f"unix-uid:{1000 + index}"
+        candidate_id = f"cand-{sha}"
+        environments.append(
+            {
+                "env_id": env_id,
+                "principal_id": principal,
+                "runtime_id": sandbox,
+                "state": "active",
+                "resource_generation": 2,
+                "current_candidate_id": candidate_id,
+                "slurm_account": f"loom-dev-{sandbox}",
+                "slurm_qos": f"loom-dev-{sandbox}",
+                "slurm_user": f"loom-sandbox-{sandbox}",
+                "service_user": f"loom-sandbox-{sandbox}",
+                "service_group": f"loom-sandbox-{sandbox}",
+                "uid": 31021 + index,
+                "gid": 31021 + index,
+                "candidate_root": f"/shared_work/loom/candidates/sandboxes/{sandbox}",
+            },
+        )
+        candidate = {
+            "candidate_id": candidate_id,
+            "env_id": env_id,
+            "principal_id": principal,
+            "candidate_sha": sha,
+            "candidate_tree": tree,
+        }
+        deployment = {
+            "deployment_id": f"dep-{index:032x}",
+            "env_id": env_id,
+            "principal_id": principal,
+            "candidate_id": candidate_id,
+            "expected_resource_generation": 1,
+            "phase": "committed",
+            "applied_resource_generation": 2,
+            "applied_registry_generation": 12,
+            "applied_registry_payload_sha256": "8" * 64,
+        }
+        finalization = _finalization_record(environments[-1], candidate, deployment)
+        deployment["finalization_payload_sha256"] = finalization["payload_sha256"]
+        candidates.append(candidate)
+        deployments.append(deployment)
+        finalizations.append(finalization)
+    return {
+        "generation": 13,
+        "payload_sha256": "9" * 64,
+        "environments": environments,
+        "candidates": candidates,
+        "deployments": deployments,
+        "deployment_finalizations": finalizations,
+    }
+
+
+def _acceptance_probe_fixture() -> tuple[dict[str, object], bytes]:
+    snapshot = _registry_snapshot()
+    environment = snapshot["environments"][0]
+    assert isinstance(environment, dict)
+    environment["state"] = "deploying"
+    candidate = {
+        "candidate_id": "cand-" + "7" * 40,
+        "env_id": environment["env_id"],
+        "principal_id": environment["principal_id"],
+        "candidate_sha": "7" * 40,
+        "candidate_tree": "8" * 40,
+    }
+    deployment = {
+        "deployment_id": "dep-" + "7" * 32,
+        "env_id": environment["env_id"],
+        "principal_id": environment["principal_id"],
+        "candidate_id": candidate["candidate_id"],
+        "expected_resource_generation": 2,
+        "phase": "verified",
+        "applied_resource_generation": 3,
+        "applied_registry_generation": 12,
+        "applied_registry_payload_sha256": "8" * 64,
+        "finalization_payload_sha256": None,
+    }
+    snapshot["candidates"].append(candidate)
+    snapshot["deployments"].append(deployment)
+    unsigned = {
+        "schema_version": 1,
+        "kind": authority.ACCEPTANCE_PROBE_REQUEST_KIND,
+        "action": authority.ACCEPTANCE_PROBE_ACTION,
+        "domain": "oldlab",
+        "cluster": "trt-oldlab",
+        "submit_host": "trt-EAI-OLDLAB-2",
+        "controller": "TRT-EAI-OLDLAB-1",
+        "deployment_id": deployment["deployment_id"],
+        "env_id": environment["env_id"],
+        "principal_id": environment["principal_id"],
+        "runtime_id": environment["runtime_id"],
+        "candidate_id": candidate["candidate_id"],
+        "candidate_sha": candidate["candidate_sha"],
+        "candidate_tree": candidate["candidate_tree"],
+        "applied_resource_generation": 3,
+        "registry_generation": snapshot["generation"],
+        "registry_snapshot_sha256": snapshot["payload_sha256"],
+        "service_user": environment["service_user"],
+        "slurm_account": environment["slurm_account"],
+        "slurm_qos": environment["slurm_qos"],
+        "job_name": "loom-env-qianyi-finalize-" + "6" * 12,
+        "time_limit_seconds": 300,
+        "health_services": ["control-plane", "gateway", "minio"],
+        "general_admission_authorized": False,
+        "foreign_job_action": "observe-only",
+        "idempotency_key": "5" * 64,
+    }
+    inner = {
+        **unsigned,
+        "payload_sha256": hashlib.sha256(authority._canonical(unsigned)).hexdigest(),
+    }
+    inner_raw = authority._canonical(inner)
+    outer_unsigned = {
+        "schema_version": 1,
+        "action": authority.ACCEPTANCE_PROBE_ACTION,
+        "node": "oldlab-2",
+        "domain": "oldlab",
+        "sandbox": environment["runtime_id"],
+        "candidate_sha": candidate["candidate_sha"],
+        "candidate_tree": candidate["candidate_tree"],
+        "payload_kind": "developer-environment-acceptance-probe-json",
+        "payload_sha256": hashlib.sha256(inner_raw).hexdigest(),
+        "payload_base64": base64.b64encode(inner_raw).decode("ascii"),
+        "prior_request_id": None,
+    }
+    outer = {
+        **outer_unsigned,
+        "request_id": authority._request_digest(outer_unsigned),
+    }
+    return snapshot, authority._canonical(outer)
+
+
+def _runtime_retire_fixture() -> tuple[
+    dict[str, object],
+    dict[str, object],
+    bytes,
+]:
+    snapshot = _registry_snapshot()
+    environment = snapshot["environments"][0]
+    assert isinstance(environment, dict)
+    environment["state"] = "quarantined"
+    environment["runtime_root"] = f"/shared_work/loom/runtime/sandboxes/{environment['runtime_id']}"
+    candidate = snapshot["candidates"][0]
+    deployment = snapshot["deployments"][0]
+    assert isinstance(candidate, dict)
+    assert isinstance(deployment, dict)
+    failed_candidate = {
+        "candidate_id": "cand-" + "7" * 40,
+        "env_id": environment["env_id"],
+        "principal_id": environment["principal_id"],
+        "candidate_sha": "7" * 40,
+        "candidate_tree": "8" * 40,
+    }
+    failed_deployment = {
+        "deployment_id": "dep-" + "7" * 32,
+        "env_id": environment["env_id"],
+        "principal_id": environment["principal_id"],
+        "candidate_id": failed_candidate["candidate_id"],
+        "expected_resource_generation": environment["resource_generation"],
+        "phase": "failed",
+        "applied_resource_generation": None,
+        "applied_registry_generation": None,
+        "applied_registry_payload_sha256": None,
+        "finalization_payload_sha256": None,
+    }
+    snapshot["candidates"].append(failed_candidate)
+    snapshot["deployments"].append(failed_deployment)
+    wal_unsigned = {
+        "schema_version": 1,
+        "kind": "loom.developer-environment.retire-journal",
+        "phase": "capacity-retired",
+        "env_id": environment["env_id"],
+        "principal_id": environment["principal_id"],
+        "runtime_id": environment["runtime_id"],
+        "uid": environment["uid"],
+        "gid": environment["gid"],
+        "service_user": environment["service_user"],
+        "service_group": environment["service_group"],
+        "slurm_user": environment["slurm_user"],
+        "slurm_account": environment["slurm_account"],
+        "slurm_qos": environment["slurm_qos"],
+        "expected_resource_generation": environment["resource_generation"],
+        "current_candidate_id": environment["current_candidate_id"],
+        "idempotency_key": "runtime-retire-test",
+        "evidence": {"capacity_retire": "1" * 64},
+        "object_checkpoints": {},
+        "created_at": "2026-07-29T20:00:00Z",
+        "updated_at": "2026-07-29T20:01:00Z",
+    }
+    wal = {
+        **wal_unsigned,
+        "payload_sha256": hashlib.sha256(authority._canonical(wal_unsigned)).hexdigest(),
+    }
+    candidates = authority._runtime_retire_candidate_bindings(snapshot, environment)
+    request = runtime_retire._node_request(
+        "oldlab-1",
+        snapshot=snapshot,
+        environment=environment,
+        deployment_id=str(deployment["deployment_id"]),
+        retire_operation_sha256=str(wal["payload_sha256"]),
+        candidates=candidates,
+    )
+    envelope = runtime_retire._envelope(request)
+    return snapshot, wal, authority._canonical(envelope)
+
+
+@pytest.fixture(autouse=True)
+def _developer_environment_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(authority, "_load_registry_snapshot", _registry_snapshot)
+
+
+def _snapshot_at_generation(
+    store: registry.DeveloperEnvironmentRegistry,
+    generation: int,
+) -> bytes:
+    payload = json.loads(store.snapshot_bytes())
+    payload["generation"] = generation
+    unsigned = {key: value for key, value in payload.items() if key != "payload_sha256"}
+    payload["payload_sha256"] = registry._digest(unsigned)
+    return registry._canonical(payload)
+
+
+def _root_snapshot_filesystem(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tmp_path.chmod(0o755)
+    root = tmp_path / "node-registry"
+    archive = root / "snapshots"
+    monkeypatch.setattr(authority, "REGISTRY_SNAPSHOT", root / "current-snapshot.json")
+    monkeypatch.setattr(authority, "REGISTRY_SNAPSHOT_ARCHIVE", archive)
+
+    def safe_directory(path: Path, *, mode: int) -> None:
+        metadata = path.lstat()
+        if not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != mode:
+            raise authority.NodeAuthorityError("test directory metadata is unsafe")
+
+    def ensure_directory(
+        path: Path,
+        *,
+        mode: int,
+        parent_mode: int = 0o755,
+    ) -> bool:
+        if path.exists():
+            safe_directory(path, mode=mode)
+            return False
+        safe_directory(path.parent, mode=parent_mode)
+        path.mkdir(mode=mode)
+        path.chmod(mode)
+        return True
+
+    def safe_file(path: Path, *, mode: int, limit: int = 96 << 20) -> bytes:
+        try:
+            metadata = path.lstat()
+            raw = path.read_bytes()
+        except OSError as exc:
+            raise authority.NodeAuthorityError("test file is unavailable") from exc
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or stat.S_IMODE(metadata.st_mode) != mode
+            or len(raw) > limit
+        ):
+            raise authority.NodeAuthorityError("test file metadata is unsafe")
+        return raw
+
+    def install(
+        path: Path,
+        payload: bytes,
+        mode: int,
+        *,
+        parent_mode: int = 0o755,
+    ) -> bool:
+        safe_directory(path.parent, mode=parent_mode)
+        if path.exists():
+            if safe_file(path, mode=mode) != payload:
+                raise authority.NodeAuthorityError("test installed asset drifted")
+            return False
+        path.write_bytes(payload)
+        path.chmod(mode)
+        return True
+
+    def replace(
+        path: Path,
+        payload: bytes,
+        mode: int,
+        *,
+        parent_mode: int = 0o755,
+    ) -> None:
+        safe_directory(path.parent, mode=parent_mode)
+        path.write_bytes(payload)
+        path.chmod(mode)
+
+    def unlink(path: Path, *, mode: int, parent_mode: int = 0o755) -> bytes:
+        raw = safe_file(path, mode=mode)
+        safe_directory(path.parent, mode=parent_mode)
+        path.unlink()
+        return raw
+
+    monkeypatch.setattr(authority, "_safe_root_directory", safe_directory)
+    monkeypatch.setattr(authority, "_ensure_root_directory", ensure_directory)
+    monkeypatch.setattr(authority, "_safe_root_file", safe_file)
+    monkeypatch.setattr(authority, "_atomic_install", install)
+    monkeypatch.setattr(authority, "_atomic_replace", replace)
+    monkeypatch.setattr(authority, "_unlink_root_file", unlink)
+
+
+def test_registry_snapshot_sync_is_monotonic_and_retains_only_current_previous(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _root_snapshot_filesystem(tmp_path, monkeypatch)
+    store = registry.DeveloperEnvironmentRegistry(tmp_path / "source" / "registry.sqlite3")
+    policy = authority.AuthorityPolicy(
+        source_sha=SHA,
+        source_tree=TREE,
+        node="oldlab-1",
+        asset_sha256={},
+    )
+    snapshots = [_snapshot_at_generation(store, generation) for generation in range(2, 6)]
+
+    for raw in snapshots:
+        authority._publish_registry_snapshot(raw, policy=policy)
+
+    current = registry.DeveloperEnvironmentRegistry.verify_snapshot(
+        authority.REGISTRY_SNAPSHOT.read_bytes(),
+    )
+    archive = authority._validated_registry_snapshot_archive()
+    assert current["generation"] == 5
+    assert [record[2]["generation"] for record in archive] == [4, 5]
+    with pytest.raises(authority.NodeAuthorityError, match="move backward"):
+        authority._publish_registry_snapshot(snapshots[1], policy=policy)
+
+    conflicting = json.loads(snapshots[-1])
+    conflicting["kind"] = "tampered"
+    with pytest.raises(authority.NodeAuthorityError, match="snapshot is invalid"):
+        authority._publish_registry_snapshot(registry._canonical(conflicting), policy=policy)
+
+
+def test_registry_snapshot_sync_validates_all_entries_before_pruning_and_keeps_current(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _root_snapshot_filesystem(tmp_path, monkeypatch)
+    store = registry.DeveloperEnvironmentRegistry(tmp_path / "source" / "registry.sqlite3")
+    policy = authority.AuthorityPolicy(
+        source_sha=SHA,
+        source_tree=TREE,
+        node="oldlab-1",
+        asset_sha256={},
+    )
+    current_raw = _snapshot_at_generation(store, 2)
+    authority._publish_registry_snapshot(current_raw, policy=policy)
+    unknown = authority.REGISTRY_SNAPSHOT_ARCHIVE / "unbounded.tmp"
+    unknown.write_bytes(b"unsafe")
+    unknown.chmod(0o600)
+
+    with pytest.raises(authority.NodeAuthorityError, match="unknown entry"):
+        authority._publish_registry_snapshot(
+            _snapshot_at_generation(store, 3),
+            policy=policy,
+        )
+
+    assert authority.REGISTRY_SNAPSHOT.read_bytes() == current_raw
+    assert unknown.exists()
+
+
+def test_registry_snapshot_sync_request_is_exactly_generation_digest_bound(
+    tmp_path: Path,
+) -> None:
+    store = registry.DeveloperEnvironmentRegistry(tmp_path / "registry.sqlite3")
+    snapshot_raw = _snapshot_at_generation(store, 2)
+    snapshot = registry.DeveloperEnvironmentRegistry.verify_snapshot(snapshot_raw)
+    unsigned = {
+        "schema_version": 1,
+        "action": authority.REGISTRY_SNAPSHOT_SYNC_ACTION,
+        "node": "oldlab-1",
+        "domain": "oldlab",
+        "sandbox": "future-developer",
+        "candidate_sha": SHA,
+        "candidate_tree": TREE,
+        "registry_generation": snapshot["generation"],
+        "registry_payload_sha256": snapshot["payload_sha256"],
+        "payload_kind": authority.REGISTRY_SNAPSHOT_SYNC_KIND,
+        "payload_sha256": hashlib.sha256(snapshot_raw).hexdigest(),
+        "payload_base64": base64.b64encode(snapshot_raw).decode("ascii"),
+        "prior_request_id": None,
+    }
+    envelope = {
+        **unsigned,
+        "request_id": authority._request_digest(unsigned),
+    }
+    policy = authority.AuthorityPolicy(
+        source_sha=SHA,
+        source_tree=TREE,
+        node="oldlab-1",
+        asset_sha256={},
+    )
+
+    request = authority._parse_request(
+        authority._canonical(envelope),
+        verb="transact",
+        policy=policy,
+    )
+    assert request.payload_bytes == snapshot_raw
+    tampered = dict(envelope)
+    tampered["registry_generation"] = 3
+    tampered["request_id"] = authority._request_digest(tampered)
+    with pytest.raises(authority.NodeAuthorityError, match="sync binding"):
+        authority._parse_request(
+            authority._canonical(tampered),
+            verb="transact",
+            policy=policy,
+        )
+
+
+def test_registry_cohort_accepts_real_applied_committed_snapshot(tmp_path: Path) -> None:
+    store = registry.DeveloperEnvironmentRegistry(tmp_path / "registry.sqlite3")
+    environment = store.register(
+        {
+            "schema_version": 1,
+            "kind": registry.REGISTER_KIND,
+            "principal_id": "oidc:example:dynamic-developer",
+            "idempotency_key": "registration-key-dynamic-developer",
+            "display_name": "Dynamic Developer",
+        },
+    )
+    candidate = store.import_candidate(
+        {
+            "schema_version": 1,
+            "kind": registry.CANDIDATE_KIND,
+            "principal_id": environment.principal_id,
+            "idempotency_key": "candidate-key-dynamic-developer",
+            "env_id": environment.env_id,
+            "candidate_sha": "a" * 40,
+            "candidate_tree": "b" * 40,
+            "bundle_sha256": "c" * 64,
+            "bundle_size": 1024,
+            "image_digests": {
+                "amd64": "sha256:" + "d" * 64,
+                "arm64": "sha256:" + "e" * 64,
+            },
+        },
+    )
+    deployment = store.begin_deployment(
+        {
+            "schema_version": 1,
+            "kind": registry.DEPLOY_KIND,
+            "principal_id": environment.principal_id,
+            "idempotency_key": "deployment-key-dynamic-developer",
+            "env_id": environment.env_id,
+            "candidate_id": candidate.candidate_id,
+            "expected_resource_generation": 1,
+        },
+    )
+    for expected, following in zip(
+        registry.DEPLOY_PHASES[:-1],
+        registry.DEPLOY_PHASES[1:],
+        strict=True,
+    ):
+        if following == "committed":
+            deployment = store.prepare_deployment_finalization(
+                deployment.deployment_id,
+                principal_id=environment.principal_id,
+                expected_resource_generation=1,
+            )
+            deployment = store.record_deployment_finalization(
+                deployment.deployment_id,
+                principal_id=environment.principal_id,
+                expected_resource_generation=1,
+                evidence={
+                    "capacity_finalize_receipt_sha256": "1" * 64,
+                    "capacity_finalize_check_receipt_sha256": "2" * 64,
+                    "runtime_reconcile_receipt_sha256": "3" * 64,
+                    "runtime_prepare_check_receipt_sha256": "4" * 64,
+                    "acceptance_probe_receipt_sha256": "5" * 64,
+                },
+            )
+        deployment = store.advance_deployment(
+            deployment.deployment_id,
+            principal_id=environment.principal_id,
+            expected_phase=expected,
+            next_phase=following,
+            expected_resource_generation=1,
+        )
+    snapshot = store.snapshot()
+    cohort = authority._registry_cohort(snapshot, include_provisioning=True)
+    committed_environment, committed_candidate, committed_deployment = cohort[
+        environment.runtime_id
+    ]
+
+    assert committed_environment["resource_generation"] == 2
+    assert committed_candidate["candidate_id"] == candidate.candidate_id
+    assert committed_deployment["applied_resource_generation"] == 2
+    assert committed_deployment["applied_registry_generation"] < snapshot["generation"]
+
+
+def test_registry_cohort_verified_target_requires_exact_deployment_selector() -> None:
+    snapshot = _registry_snapshot()
+    environment = snapshot["environments"][0]
+    environment["state"] = "deploying"
+    target_id = "dep-" + "7" * 32
+    snapshot["candidates"].append(
+        {
+            "candidate_id": "cand-" + "7" * 40,
+            "env_id": environment["env_id"],
+            "principal_id": environment["principal_id"],
+            "candidate_sha": "7" * 40,
+            "candidate_tree": "8" * 40,
+        },
+    )
+    snapshot["deployments"].append(
+        {
+            "deployment_id": target_id,
+            "env_id": environment["env_id"],
+            "principal_id": environment["principal_id"],
+            "candidate_id": "cand-" + "7" * 40,
+            "expected_resource_generation": 2,
+            "phase": "verified",
+            "applied_resource_generation": 3,
+            "applied_registry_generation": 12,
+            "applied_registry_payload_sha256": "8" * 64,
+        },
+    )
+    ordinary = authority._registry_cohort(snapshot, include_provisioning=True)
+    selected = authority._registry_cohort(
+        snapshot,
+        include_provisioning=True,
+        deployment_id=target_id,
+        target_resource_generation=3,
+    )
+
+    assert "qianyi" not in ordinary
+    assert selected["qianyi"][1]["candidate_id"] == "cand-" + "7" * 40
+    assert selected["qianyi"][0]["resource_generation"] == 3
+
+
+def test_registry_cohort_first_create_verified_is_never_ordinary_admission() -> None:
+    snapshot = _registry_snapshot()
+    environment = {
+        **snapshot["environments"][0],
+        "env_id": "denv-first-create-77777777",
+        "principal_id": "unix-uid:31777",
+        "runtime_id": "e-first-create",
+        "state": "deploying",
+        "resource_generation": 1,
+        "current_candidate_id": None,
+        "slurm_account": "lda-first-create",
+        "slurm_qos": "ldq-first-create",
+        "slurm_user": "loom-e-first-create",
+        "service_user": "loom-e-first-create",
+        "service_group": "loom-e-first-create",
+        "uid": 31_777,
+        "gid": 31_777,
+    }
+    target_id = "dep-" + "7" * 32
+    snapshot["environments"].append(environment)
+    snapshot["candidates"].append(
+        {
+            "candidate_id": "cand-" + "7" * 40,
+            "env_id": environment["env_id"],
+            "principal_id": environment["principal_id"],
+            "candidate_sha": "7" * 40,
+            "candidate_tree": "8" * 40,
+        },
+    )
+    snapshot["deployments"].append(
+        {
+            "deployment_id": target_id,
+            "env_id": environment["env_id"],
+            "principal_id": environment["principal_id"],
+            "candidate_id": "cand-" + "7" * 40,
+            "expected_resource_generation": 1,
+            "phase": "verified",
+            "applied_resource_generation": 2,
+            "applied_registry_generation": 12,
+            "applied_registry_payload_sha256": "8" * 64,
+        },
+    )
+    ordinary = authority._registry_cohort(snapshot, include_provisioning=True)
+    selected = authority._registry_cohort(
+        snapshot,
+        include_provisioning=True,
+        deployment_id=target_id,
+        target_resource_generation=2,
+    )
+
+    assert "e-first-create" not in ordinary
+    assert selected["e-first-create"][1]["candidate_id"] == "cand-" + "7" * 40
+    assert selected["e-first-create"][0]["resource_generation"] == 2
+
+
+def test_registry_cohort_quarantined_target_is_only_available_to_retire_selector() -> None:
+    snapshot = _registry_snapshot()
+    snapshot["environments"][0]["state"] = "quarantined"
+    deployment_id = snapshot["deployments"][0]["deployment_id"]
+
+    ordinary = authority._registry_cohort(snapshot, include_provisioning=True)
+    selected = authority._registry_cohort(
+        snapshot,
+        include_provisioning=True,
+        deployment_id=deployment_id,
+        include_retiring=True,
+    )
+
+    assert "qianyi" not in ordinary
+    assert selected["qianyi"][1]["candidate_id"] == "cand-" + "a" * 40
 
 
 def _staging_infrastructure_receipt(
@@ -353,6 +1008,44 @@ def _policy(node: str = "oldlab-1") -> authority.AuthorityPolicy:
     )
 
 
+def _dynamic_request(
+    snapshot: dict[str, object],
+    *,
+    sandbox: str,
+    action: str = "inspect-local",
+    payload_kind: str = "none",
+    payload_bytes: bytes = b"",
+) -> bytes:
+    environments = snapshot["environments"]
+    candidates = snapshot["candidates"]
+    assert isinstance(environments, list)
+    assert isinstance(candidates, list)
+    environment = next(item for item in environments if item["runtime_id"] == sandbox)
+    candidate = next(
+        item for item in candidates if item["candidate_id"] == environment["current_candidate_id"]
+    )
+    body: dict[str, object] = {
+        "schema_version": authority.SCHEMA_VERSION,
+        "action": action,
+        "node": "oldlab-1",
+        "domain": "oldlab",
+        "sandbox": sandbox,
+        "candidate_sha": candidate["candidate_sha"],
+        "candidate_tree": candidate["candidate_tree"],
+        "env_id": environment["env_id"],
+        "resource_generation": environment["resource_generation"],
+        "candidate_id": candidate["candidate_id"],
+        "registry_generation": snapshot["generation"],
+        "registry_payload_sha256": snapshot["payload_sha256"],
+        "payload_kind": payload_kind,
+        "payload_sha256": hashlib.sha256(payload_bytes).hexdigest(),
+        "payload_base64": base64.b64encode(payload_bytes).decode("ascii"),
+        "prior_request_id": None,
+    }
+    body["request_id"] = authority._request_digest(body)
+    return authority._canonical(body)
+
+
 def _request(
     *,
     action: str = "host-converge",
@@ -363,23 +1056,56 @@ def _request(
     payload_bytes: bytes = b"",
     prior_request_id: str | None = None,
 ) -> bytes:
-    if action in {
-        "slurm-node-converge",
-        "slurm-controller-converge",
-        "slurm-rollback",
-        "slurm-check",
-    } and payload_kind == "none":
+    snapshot = _registry_snapshot()
+    environment = (
+        next(item for item in snapshot["environments"] if item["runtime_id"] == sandbox)
+        if sandbox != authority.STAGING_SCOPE
+        else None
+    )
+    candidate = (
+        next(
+            item
+            for item in snapshot["candidates"]
+            if environment is not None
+            and item["candidate_id"] == environment["current_candidate_id"]
+        )
+        if environment is not None
+        else None
+    )
+    if (
+        action
+        in {
+            "slurm-node-converge",
+            "slurm-controller-converge",
+            "slurm-rollback",
+            "slurm-check",
+        }
+        and payload_kind == "none"
+    ):
         bindings = {
-            f"loom-dev-{sandbox_name}": {
+            environment["slurm_account"]: {
                 "sandbox": sandbox_name,
-                "service_user": f"loom-sandbox-{sandbox_name}",
+                "env_id": environment["env_id"],
+                "resource_generation": environment["resource_generation"],
+                "service_user": environment["slurm_user"],
+                "slurm_qos": environment["slurm_qos"],
+                "candidate_id": candidate["candidate_id"],
                 "candidate_sha": candidate_sha,
-                "candidate_tree": TREE,
+                "candidate_tree": candidate_tree,
             }
-            for sandbox_name, candidate_sha in (
-                ("qianyi", SHA),
-                ("hongjian", "c" * 40),
-                ("devansh", "d" * 40),
+            for sandbox_name, candidate_sha, candidate_tree, environment, candidate in (
+                (
+                    environment["runtime_id"],
+                    candidate["candidate_sha"],
+                    candidate["candidate_tree"],
+                    environment,
+                    candidate,
+                )
+                for environment, candidate in zip(
+                    snapshot["environments"],
+                    snapshot["candidates"],
+                    strict=True,
+                )
             )
         }
         payload_kind = "slurm-candidate-set-json"
@@ -397,12 +1123,11 @@ def _request(
                 "candidate_bindings": bindings,
                 "generation": 1,
                 "convergence_id": "e" * 64,
+                "registry_generation": snapshot["generation"],
+                "registry_payload_sha256": snapshot["payload_sha256"],
             },
         )
-    if action in {
-        "export-runtime-proof-artifact",
-        "staging-pressure-reclaim-observe",
-    }:
+    if action == "staging-pressure-reclaim-observe":
         body: dict[str, object] = {
             "schema_version": authority.SCHEMA_VERSION,
             "action": action,
@@ -418,6 +1143,29 @@ def _request(
         }
         body["request_id"] = authority._request_digest(body)
         return authority._canonical(body)
+    profile = (
+        host.Profile(
+            sandbox=sandbox,
+            compose_project=f"loom-{sandbox}",
+            canonical_hostname="trt-eai-oldlab-2",
+            candidate_root=Path(f"/shared_work/loom/candidates/{sandbox}"),
+            state_root=Path(f"/srv/loom/developer-sandboxes/{sandbox}"),
+            cache_root=Path(f"/srv/loom/developer-sandboxes/{sandbox}/cache"),
+            evidence_root=Path(f"/srv/loom/developer-sandboxes/{sandbox}/evidence"),
+            runtime_root=Path(f"/shared_work/loom/runtime/{sandbox}"),
+            ports={},
+            env_id=str(environment["env_id"]),
+            resource_generation=int(environment["resource_generation"]),
+            registry_generation=int(snapshot["generation"]),
+            registry_payload_sha256=str(snapshot["payload_sha256"]),
+            candidate_id=str(candidate["candidate_id"]),
+            candidate_tree=str(candidate["candidate_tree"]),
+        )
+        if action in authority.DYNAMIC_TARGET_ACTIONS
+        and environment is not None
+        and candidate is not None
+        else None
+    )
     return host._node_authority_envelope(
         action=action,
         node=node,
@@ -428,7 +1176,663 @@ def _request(
         payload_kind=payload_kind,
         payload_bytes=payload_bytes,
         prior_request_id=prior_request_id,
+        profile=profile,
     )
+
+
+def _identity_preflight_request(
+    *,
+    mutate: Callable[[dict[str, object]], None] | None = None,
+    node: str = "oldlab-1",
+    domain: str = "oldlab",
+    action: str = "slurm-identity-preflight",
+    snapshot: dict[str, object] | None = None,
+    sandbox: str = "qianyi",
+) -> bytes:
+    registry_snapshot = _registry_snapshot() if snapshot is None else snapshot
+    cohort = authority._registry_cohort(registry_snapshot, include_provisioning=True)
+    candidate_bindings = {
+        row[0]["slurm_account"]: {
+            "env_id": row[0]["env_id"],
+            "resource_generation": row[0]["resource_generation"],
+            "sandbox": runtime_id,
+            "service_user": row[0]["slurm_user"],
+            "slurm_qos": row[0]["slurm_qos"],
+            "candidate_id": row[1]["candidate_id"],
+            "candidate_sha": row[1]["candidate_sha"],
+            "candidate_tree": row[1]["candidate_tree"],
+        }
+        for runtime_id, row in cohort.items()
+    }
+    environment, candidate, deployment = cohort[sandbox]
+    inner: dict[str, object] = {
+        "schema_version": 2,
+        "kind": authority.IDENTITY_PREFLIGHT_KIND,
+        "env_id": environment["env_id"],
+        "principal_id": environment["principal_id"],
+        "resource_generation": environment["resource_generation"],
+        "service_user": environment["service_user"],
+        "service_group": environment["service_group"],
+        "uid": environment["uid"],
+        "gid": environment["gid"],
+        "slurm_account": environment["slurm_account"],
+        "slurm_qos": environment["slurm_qos"],
+        "registry_generation": registry_snapshot["generation"],
+        "registry_payload_sha256": registry_snapshot["payload_sha256"],
+        "candidate_set_sha256": hashlib.sha256(
+            authority._canonical(candidate_bindings).rstrip(b"\n"),
+        ).hexdigest(),
+        "revive_journal_sha256": None,
+    }
+    if mutate is not None:
+        mutate(inner)
+    encoded = authority._canonical(inner)
+    outer: dict[str, object] = {
+        "schema_version": 1,
+        "action": action,
+        "node": node,
+        "domain": domain,
+        "sandbox": sandbox,
+        "candidate_sha": candidate["candidate_sha"],
+        "candidate_tree": candidate["candidate_tree"],
+        "env_id": environment["env_id"],
+        "deployment_id": deployment["deployment_id"],
+        "resource_generation": environment["resource_generation"],
+        "candidate_id": candidate["candidate_id"],
+        "registry_generation": registry_snapshot["generation"],
+        "registry_payload_sha256": registry_snapshot["payload_sha256"],
+        "payload_kind": "developer-environment-identity-preflight-json",
+        "payload_sha256": hashlib.sha256(encoded).hexdigest(),
+        "payload_base64": base64.b64encode(encoded).decode("ascii"),
+        "prior_request_id": None,
+    }
+    outer["request_id"] = authority._request_digest(outer)
+    return authority._canonical(outer)
+
+
+def _slurm_identity_result(
+    request: authority.Request,
+    *,
+    operation: str,
+    status: str,
+) -> dict[str, object]:
+    identity = json.loads(request.payload_bytes)
+    result: dict[str, object] = {
+        "schema_version": 1,
+        "kind": "loom.developer-environment.slurm-identity-result",
+        "operation": operation,
+        "cluster": ("trt-oldlab" if request.payload["domain"] == "oldlab" else "trt-gb10"),
+        "env_id": identity["env_id"],
+        "resource_generation": identity["resource_generation"],
+        "service_user": identity["service_user"],
+        "slurm_account": identity["slurm_account"],
+        "slurm_qos": identity["slurm_qos"],
+        "status": status,
+        "jobs": [],
+        "state_sha256": "1" * 64,
+        "mutations": [],
+        "completed_at": "2026-07-29T12:00:00Z",
+    }
+    if operation == "retire":
+        result["tombstone"] = (
+            "/var/lib/loom-developer-sandbox-slurm-policy/identity-tombstones/"
+            f"{result['cluster']}/{identity['env_id']}.json"
+        )
+    return result
+
+
+def _identity_inventory_request(
+    *,
+    mutate: Callable[[dict[str, object]], None] | None = None,
+    node: str = "oldlab-1",
+    domain: str = "oldlab",
+    sandbox: str = "qianyi",
+    candidate_sha: str = SHA,
+    candidate_tree: str = TREE,
+) -> bytes:
+    snapshot = _registry_snapshot()
+    inner: dict[str, object] = {
+        "schema_version": 1,
+        "kind": authority.IDENTITY_INVENTORY_KIND,
+        "uid_start": authority.IDENTITY_UID_START,
+        "uid_end": authority.IDENTITY_UID_END,
+        "registry_generation": snapshot["generation"],
+        "registry_payload_sha256": snapshot["payload_sha256"],
+    }
+    if mutate is not None:
+        mutate(inner)
+    encoded = authority._canonical(inner)
+    outer: dict[str, object] = {
+        "schema_version": 1,
+        "action": "slurm-identity-inventory",
+        "node": node,
+        "domain": domain,
+        "sandbox": sandbox,
+        "candidate_sha": candidate_sha,
+        "candidate_tree": candidate_tree,
+        "payload_kind": "developer-environment-identity-inventory-json",
+        "payload_sha256": hashlib.sha256(encoded).hexdigest(),
+        "payload_base64": base64.b64encode(encoded).decode("ascii"),
+        "prior_request_id": None,
+    }
+    outer["request_id"] = authority._request_digest(outer)
+    return authority._canonical(outer)
+
+
+def _missing_identity(_value: object) -> object:
+    raise KeyError
+
+
+def _available_identity_inventory(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(authority.pwd, "getpwnam", _missing_identity)
+    monkeypatch.setattr(authority.pwd, "getpwuid", _missing_identity)
+    monkeypatch.setattr(authority.grp, "getgrnam", _missing_identity)
+    monkeypatch.setattr(authority.grp, "getgrgid", _missing_identity)
+    monkeypatch.setattr(
+        authority.pwd,
+        "getpwall",
+        lambda: [
+            SimpleNamespace(pw_name="root", pw_uid=0, pw_gid=0),
+            SimpleNamespace(pw_name="existing-service", pw_uid=40000, pw_gid=40000),
+        ],
+    )
+    monkeypatch.setattr(
+        authority.grp,
+        "getgrall",
+        lambda: [
+            SimpleNamespace(gr_name="root", gr_gid=0),
+            SimpleNamespace(gr_name="existing-service", gr_gid=40000),
+        ],
+    )
+
+
+def test_identity_preflight_reports_available_without_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _available_identity_inventory(monkeypatch)
+
+    def reject_mutation(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("read-only identity preflight attempted a subprocess mutation")
+
+    monkeypatch.setattr(authority.subprocess, "run", reject_mutation)
+    request = authority._parse_request(
+        _identity_preflight_request(),
+        verb="check",
+        policy=_policy(),
+    )
+    monkeypatch.setattr(
+        authority,
+        "_run_fixed_input",
+        lambda _argv, _payload: _slurm_identity_result(
+            request,
+            operation="check",
+            status="available",
+        ),
+    )
+    result = authority._execute_check(request, _policy())
+
+    assert set(result) == {
+        "schema_version",
+        "kind",
+        "node",
+        "domain",
+        "env_id",
+        "service_user",
+        "service_group",
+        "uid",
+        "gid",
+        "status",
+        "passwd_name",
+        "group_name",
+        "identity_inventory_sha256",
+        "local_identity_status",
+        "slurm_accounting_status",
+        "slurm_accounting_receipt_sha256",
+        "owned_jobs",
+        "checked_at",
+    }
+    assert result["kind"] == authority.IDENTITY_PREFLIGHT_RESULT_KIND
+    assert result["node"] == "oldlab-1"
+    assert result["domain"] == "oldlab"
+    assert result["env_id"] == _registry_snapshot()["environments"][0]["env_id"]
+    assert result["service_user"] == "loom-sandbox-qianyi"
+    assert result["service_group"] == "loom-sandbox-qianyi"
+    assert result["uid"] == 31021
+    assert result["gid"] == 31021
+    assert result["status"] == "available"
+    assert result["local_identity_status"] == "available"
+    assert result["slurm_accounting_status"] == "available"
+    assert result["owned_jobs"] == []
+    assert result["passwd_name"] is None
+    assert result["group_name"] is None
+    assert (
+        result["identity_inventory_sha256"]
+        == hashlib.sha256(
+            authority._canonical(
+                {
+                    "passwd": [
+                        {"name": "root", "uid": 0, "gid": 0},
+                        {"name": "existing-service", "uid": 40000, "gid": 40000},
+                    ],
+                    "group": [
+                        {"name": "root", "gid": 0},
+                        {"name": "existing-service", "gid": 40000},
+                    ],
+                },
+            ),
+        ).hexdigest()
+    )
+    datetime.fromisoformat(str(result["checked_at"]).replace("Z", "+00:00"))
+    serialized = authority._canonical(result)
+    assert b"existing-service" not in serialized
+
+
+def test_identity_preflight_reports_exact_existing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = SimpleNamespace(
+        pw_name="loom-sandbox-qianyi",
+        pw_uid=31021,
+        pw_gid=31021,
+    )
+    group = SimpleNamespace(gr_name="loom-sandbox-qianyi", gr_gid=31021)
+    monkeypatch.setattr(authority.pwd, "getpwnam", lambda _name: account)
+    monkeypatch.setattr(authority.pwd, "getpwuid", lambda _uid: account)
+    monkeypatch.setattr(authority.grp, "getgrnam", lambda _name: group)
+    monkeypatch.setattr(authority.grp, "getgrgid", lambda _gid: group)
+    monkeypatch.setattr(authority.pwd, "getpwall", lambda: [account])
+    monkeypatch.setattr(authority.grp, "getgrall", lambda: [group])
+
+    request = authority._parse_request(
+        _identity_preflight_request(),
+        verb="check",
+        policy=_policy(),
+    )
+    monkeypatch.setattr(
+        authority,
+        "_run_fixed_input",
+        lambda _argv, _payload: _slurm_identity_result(
+            request,
+            operation="check",
+            status="exact-existing",
+        ),
+    )
+    result = authority._execute_check(request, _policy())
+
+    assert result["status"] == "exact-existing"
+    assert result["passwd_name"] == "loom-sandbox-qianyi"
+    assert result["group_name"] == "loom-sandbox-qianyi"
+
+
+@pytest.mark.parametrize(
+    "collision",
+    ["passwd-name", "passwd-uid", "group-name", "group-gid"],
+)
+def test_identity_preflight_fails_closed_on_cross_collision(
+    monkeypatch: pytest.MonkeyPatch,
+    collision: str,
+) -> None:
+    _available_identity_inventory(monkeypatch)
+    if collision == "passwd-name":
+        monkeypatch.setattr(
+            authority.pwd,
+            "getpwnam",
+            lambda _name: SimpleNamespace(
+                pw_name="loom-sandbox-qianyi",
+                pw_uid=41021,
+                pw_gid=31021,
+            ),
+        )
+    elif collision == "passwd-uid":
+        monkeypatch.setattr(
+            authority.pwd,
+            "getpwuid",
+            lambda _uid: SimpleNamespace(
+                pw_name="foreign-service",
+                pw_uid=31021,
+                pw_gid=31021,
+            ),
+        )
+    elif collision == "group-name":
+        monkeypatch.setattr(
+            authority.grp,
+            "getgrnam",
+            lambda _name: SimpleNamespace(
+                gr_name="loom-sandbox-qianyi",
+                gr_gid=41021,
+            ),
+        )
+    else:
+        monkeypatch.setattr(
+            authority.grp,
+            "getgrgid",
+            lambda _gid: SimpleNamespace(
+                gr_name="foreign-service",
+                gr_gid=31021,
+            ),
+        )
+    request = authority._parse_request(
+        _identity_preflight_request(),
+        verb="check",
+        policy=_policy(),
+    )
+
+    with pytest.raises(
+        authority.NodeAuthorityError,
+        match="identity preflight collision",
+    ):
+        authority._execute_check(request, _policy())
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ["uid", "registry-payload", "candidate-set", "extra-field"],
+)
+def test_identity_preflight_rejects_tampered_registry_binding(tamper: str) -> None:
+    def mutate(payload: dict[str, object]) -> None:
+        if tamper == "uid":
+            payload["uid"] = 31022
+        elif tamper == "registry-payload":
+            payload["registry_payload_sha256"] = "8" * 64
+        elif tamper == "candidate-set":
+            payload["candidate_set_sha256"] = "7" * 64
+        else:
+            payload["unexpected"] = True
+
+    with pytest.raises(
+        authority.NodeAuthorityError,
+        match="developer identity preflight payload is invalid",
+    ):
+        authority._parse_request(
+            _identity_preflight_request(mutate=mutate),
+            verb="check",
+            policy=_policy(),
+        )
+
+
+def test_identity_preflight_is_controller_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _available_identity_inventory(monkeypatch)
+    for domain, node in authority.SLURM_CONTROLLER.items():
+        request = authority._parse_request(
+            _identity_preflight_request(node=node, domain=domain),
+            verb="check",
+            policy=_policy(node),
+        )
+        monkeypatch.setattr(
+            authority,
+            "_run_fixed_input",
+            lambda _argv, _payload, request=request: _slurm_identity_result(
+                request,
+                operation="check",
+                status="available",
+            ),
+        )
+        result = authority._execute_check(request, _policy(node))
+        assert (result["node"], result["domain"], result["status"]) == (
+            node,
+            domain,
+            "available",
+        )
+    with pytest.raises(authority.NodeAuthorityError, match="controller-only"):
+        authority._parse_request(
+            _identity_preflight_request(node="trt-gb10-7", domain="gb10"),
+            verb="check",
+            policy=_policy("trt-gb10-7"),
+        )
+
+
+def test_identity_converge_persists_group_then_user_without_usermod(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    users: dict[str, object] = {}
+    groups: dict[str, object] = {}
+    transaction: dict[str, object] | None = None
+    commands: list[tuple[str, ...]] = []
+
+    def passwd_by_name(name: str) -> object:
+        if name not in users:
+            raise KeyError(name)
+        return users[name]
+
+    def passwd_by_uid(uid: int) -> object:
+        for account in users.values():
+            if account.pw_uid == uid:
+                return account
+        raise KeyError(uid)
+
+    def group_by_name(name: str) -> object:
+        if name not in groups:
+            raise KeyError(name)
+        return groups[name]
+
+    def group_by_gid(gid: int) -> object:
+        for group in groups.values():
+            if group.gr_gid == gid:
+                return group
+        raise KeyError(gid)
+
+    def transaction_read(_request: authority.Request) -> dict[str, object] | None:
+        return transaction
+
+    def transaction_write(
+        request: authority.Request,
+        current: dict[str, object],
+        phase: str,
+    ) -> dict[str, object]:
+        nonlocal transaction
+        identity = json.loads(request.payload_bytes)
+        transaction = {
+            "schema_version": 1,
+            "kind": "loom.developer-environment.identity-convergence-transaction",
+            "request_id": request.request_id,
+            "payload_sha256": request.payload["payload_sha256"],
+            "node": request.payload["node"],
+            "domain": request.payload["domain"],
+            "env_id": identity["env_id"],
+            "service_user": identity["service_user"],
+            "service_group": identity["service_group"],
+            "uid": identity["uid"],
+            "gid": identity["gid"],
+            "phase": phase,
+            "created_at": current.get("created_at", "2026-07-29T12:00:00Z"),
+            "updated_at": "2026-07-29T12:00:00Z",
+        }
+        return transaction
+
+    def run(argv: tuple[str, ...], **_kwargs: object) -> object:
+        commands.append(tuple(argv))
+        if argv[0] == "/usr/sbin/groupadd":
+            groups[str(argv[-1])] = SimpleNamespace(
+                gr_name=str(argv[-1]),
+                gr_gid=int(argv[2]),
+                gr_mem=(),
+            )
+        elif argv[0] == "/usr/sbin/useradd":
+            users[str(argv[-1])] = SimpleNamespace(
+                pw_name=str(argv[-1]),
+                pw_uid=int(argv[2]),
+                pw_gid=31021,
+                pw_dir="/nonexistent",
+                pw_shell="/usr/sbin/nologin",
+            )
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(authority.pwd, "getpwnam", passwd_by_name)
+    monkeypatch.setattr(authority.pwd, "getpwuid", passwd_by_uid)
+    monkeypatch.setattr(authority.grp, "getgrnam", group_by_name)
+    monkeypatch.setattr(authority.grp, "getgrgid", group_by_gid)
+    monkeypatch.setattr(authority.pwd, "getpwall", lambda: list(users.values()))
+    monkeypatch.setattr(authority.grp, "getgrall", lambda: list(groups.values()))
+    monkeypatch.setattr(authority, "_identity_transaction_read", transaction_read)
+    monkeypatch.setattr(authority, "_identity_transaction_write", transaction_write)
+    monkeypatch.setattr(authority.subprocess, "run", run)
+    request = authority._parse_request(
+        _identity_preflight_request(action="slurm-identity-converge"),
+        verb="transact",
+        policy=_policy(),
+    )
+    monkeypatch.setattr(
+        authority,
+        "_run_fixed_input",
+        lambda _argv, _payload: _slurm_identity_result(
+            request,
+            operation="reconcile",
+            status="exact-existing",
+        ),
+    )
+
+    result, inner = authority._execute_request(request, _policy())
+
+    assert inner is None
+    assert result["kind"] == authority.IDENTITY_CONVERGENCE_RESULT_KIND
+    assert result["status"] == "exact-existing"
+    assert result["changed"] is True
+    assert transaction is not None
+    assert transaction["phase"] == "committed"
+    assert commands == [
+        (
+            "/usr/sbin/groupadd",
+            "--gid",
+            "31021",
+            "loom-sandbox-qianyi",
+        ),
+        (
+            "/usr/sbin/useradd",
+            "--uid",
+            "31021",
+            "--gid",
+            "loom-sandbox-qianyi",
+            "--no-create-home",
+            "--home-dir",
+            "/nonexistent",
+            "--shell",
+            "/usr/sbin/nologin",
+            "loom-sandbox-qianyi",
+        ),
+    ]
+    assert all("usermod" not in command for argv in commands for command in argv)
+
+
+def test_identity_inventory_unions_passwd_uids_primary_gids_and_group_gids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        authority.pwd,
+        "getpwall",
+        lambda: [
+            SimpleNamespace(pw_name="one", pw_uid=32_001, pw_gid=32_002),
+            SimpleNamespace(pw_name="outside", pw_uid=1_000, pw_gid=70_000),
+        ],
+    )
+    monkeypatch.setattr(
+        authority.grp,
+        "getgrall",
+        lambda: [
+            SimpleNamespace(gr_name="two", gr_gid=32_003),
+            SimpleNamespace(gr_name="duplicate", gr_gid=32_001),
+        ],
+    )
+    request = authority._parse_request(
+        _identity_inventory_request(node="trt-gb10-7", domain="gb10"),
+        verb="check",
+        policy=_policy("trt-gb10-7"),
+    )
+
+    result = authority._execute_check(request, _policy("trt-gb10-7"))
+
+    assert set(result) == {
+        "schema_version",
+        "kind",
+        "node",
+        "domain",
+        "uid_start",
+        "uid_end",
+        "occupied_ids",
+        "identity_inventory_sha256",
+        "checked_at",
+    }
+    assert result["kind"] == authority.IDENTITY_INVENTORY_RESULT_KIND
+    assert result["node"] == "trt-gb10-7"
+    assert result["occupied_ids"] == [32_001, 32_002, 32_003]
+
+
+def test_identity_inventory_rejects_stale_registry_binding() -> None:
+    with pytest.raises(
+        authority.NodeAuthorityError,
+        match="developer identity inventory payload is invalid",
+    ):
+        authority._parse_request(
+            _identity_inventory_request(
+                mutate=lambda value: value.__setitem__(
+                    "registry_payload_sha256",
+                    "8" * 64,
+                ),
+            ),
+            verb="check",
+            policy=_policy(),
+        )
+
+
+def test_identity_inventory_accepts_installed_candidate_for_seed_only_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _registry_snapshot()
+    for environment in snapshot["environments"]:
+        environment["state"] = "ready"
+        environment["current_candidate_id"] = None
+    snapshot["candidates"] = []
+    snapshot["deployments"] = []
+    monkeypatch.setattr(authority, "_load_registry_snapshot", lambda: snapshot)
+    monkeypatch.setattr(authority.pwd, "getpwall", lambda: [])
+    monkeypatch.setattr(authority.grp, "getgrall", lambda: [])
+
+    request = authority._parse_request(
+        _identity_inventory_request(
+            sandbox=authority.FLEET_BOOTSTRAP_SCOPE,
+        ),
+        verb="check",
+        policy=_policy(),
+    )
+    result = authority._execute_check(request, _policy())
+
+    assert result["kind"] == authority.IDENTITY_INVENTORY_RESULT_KIND
+    assert result["occupied_ids"] == []
+
+
+def test_identity_inventory_bootstrap_and_active_sources_bind_installed_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed_only = _registry_snapshot()
+    for environment in seed_only["environments"]:
+        environment["state"] = "ready"
+        environment["current_candidate_id"] = None
+    seed_only["candidates"] = []
+    seed_only["deployments"] = []
+    monkeypatch.setattr(authority, "_load_registry_snapshot", lambda: seed_only)
+    with pytest.raises(authority.NodeAuthorityError, match="bootstrap binding"):
+        authority._parse_request(
+            _identity_inventory_request(
+                sandbox=authority.FLEET_BOOTSTRAP_SCOPE,
+                candidate_sha="c" * 40,
+            ),
+            verb="check",
+            policy=_policy(),
+        )
+
+    monkeypatch.setattr(authority, "_load_registry_snapshot", _registry_snapshot)
+    with pytest.raises(authority.NodeAuthorityError, match="registry binding"):
+        authority._parse_request(
+            _identity_inventory_request(),
+            verb="check",
+            policy=authority.AuthorityPolicy(
+                source_sha="c" * 40,
+                source_tree="d" * 40,
+                node="oldlab-1",
+                asset_sha256={str(path): "e" * 64 for path in authority.SOURCE_ASSETS},
+            ),
+        )
 
 
 def _rebind_request(
@@ -478,9 +1882,64 @@ def test_sudoers_exposes_only_two_exact_no_environment_commands() -> None:
         "/usr/local/libexec/loom-developer-sandbox-node-authority check",
     ]
     payload = "\n".join(lines)
+    assert (payload + "\n").encode("ascii") == authority.NODE_AUTHORITY_SUDOERS_PAYLOAD
+    assert "%loom-developers" not in payload
     assert "*" not in payload
     for forbidden in ("install", "tar", "rm", "chown", "chmod", "python3"):
         assert f" {forbidden} " not in f" {payload} "
+
+
+def test_developer_socket_routes_through_root_and_one_fixed_remote_operator() -> None:
+    repository = Path(__file__).resolve().parents[2]
+    socket = (
+        repository / "deploy/developer-sandboxes/loom-developer-environment-authority.socket"
+    ).read_text(encoding="ascii")
+    service = (
+        repository / "deploy/developer-sandboxes/loom-developer-environment-authority.service"
+    ).read_text(encoding="ascii")
+    transport = (repository / "deploy/developer-sandboxes/node-authority-transport.toml").read_text(
+        encoding="ascii"
+    )
+
+    assert "SocketUser=root" in socket
+    assert "SocketGroup=loom-developers" in socket
+    assert "SocketMode=0660" in socket
+    assert "User=root" in service
+    assert "Group=root" in service
+    assert (
+        "ConditionFileIsExecutable=/usr/local/libexec/scripts/ops/developer_sandbox_slurm_policy.py"
+    ) in service
+    assert 'operator = "qianyi"' in transport
+    assert 'name = "oldlab2-controller"' in transport
+    assert 'verbs = ["transact", "check"]' in transport
+    assert "%loom-developers" not in authority.NODE_AUTHORITY_SUDOERS_PAYLOAD.decode(
+        "ascii",
+    )
+
+
+def test_bootstrap_and_upgrade_reject_group_scoped_node_sudoers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy = (
+        b"%loom-developers ALL=(root) NOPASSWD:NOSETENV: "
+        b"/usr/local/libexec/loom-developer-sandbox-node-authority transact\n"
+        b"%loom-developers ALL=(root) NOPASSWD:NOSETENV: "
+        b"/usr/local/libexec/loom-developer-sandbox-node-authority check\n"
+    )
+    monkeypatch.setattr(authority, "SOURCE_ASSETS", (authority.SUDOERS_RELATIVE,))
+    monkeypatch.setattr(authority, "_source_asset", lambda _relative: legacy)
+    monkeypatch.setattr(authority, "_git_bytes", lambda *_args: legacy)
+    monkeypatch.setattr(
+        authority,
+        "_git",
+        lambda *args: SHA if args[-1] == "HEAD" else TREE if args[-1] == "HEAD^{tree}" else "",
+    )
+
+    with pytest.raises(
+        authority.NodeAuthorityError,
+        match="sudoers operator contract drifted",
+    ):
+        authority._exact_source_assets(SHA, TREE)
 
 
 @pytest.mark.parametrize(
@@ -504,8 +1963,221 @@ def test_host_and_authority_share_one_canonical_closed_envelope() -> None:
 
     assert parsed.action == "host-converge"
     assert parsed.payload_bytes == b""
+
+
+def test_fourth_registered_environment_is_admitted_without_code_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _registry_snapshot()
+    environment = dict(snapshot["environments"][0])
+    environment.update(
+        {
+            "env_id": "denv-dynamic-44444444",
+            "principal_id": "unix-uid:31444",
+            "runtime_id": "e-fourth",
+            "resource_generation": 4,
+            "current_candidate_id": "cand-" + "4" * 40,
+            "slurm_account": "lda-fourth",
+            "slurm_qos": "ldq-fourth",
+            "slurm_user": "loom-e-fourth",
+            "candidate_root": "/shared_work/loom/candidates/environments/denv-dynamic-44444444",
+        },
+    )
+    snapshot["environments"].append(environment)
+    snapshot["candidates"].append(
+        {
+            "candidate_id": "cand-" + "4" * 40,
+            "env_id": environment["env_id"],
+            "principal_id": environment["principal_id"],
+            "candidate_sha": "4" * 40,
+            "candidate_tree": "5" * 40,
+        },
+    )
+    snapshot["deployments"].append(
+        {
+            "deployment_id": "dep-" + "4" * 32,
+            "env_id": environment["env_id"],
+            "principal_id": environment["principal_id"],
+            "candidate_id": "cand-" + "4" * 40,
+            "expected_resource_generation": 3,
+            "phase": "committed",
+            "applied_resource_generation": 4,
+            "applied_registry_generation": 12,
+            "applied_registry_payload_sha256": "8" * 64,
+        },
+    )
+    finalization = _finalization_record(
+        environment,
+        snapshot["candidates"][-1],
+        snapshot["deployments"][-1],
+    )
+    snapshot["deployments"][-1]["finalization_payload_sha256"] = finalization["payload_sha256"]
+    snapshot["deployment_finalizations"].append(finalization)
+    monkeypatch.setattr(authority, "_load_registry_snapshot", lambda: snapshot)
+    body: dict[str, object] = {
+        "schema_version": 1,
+        "action": "inspect-local",
+        "node": "oldlab-1",
+        "domain": "oldlab",
+        "sandbox": "e-fourth",
+        "candidate_sha": "4" * 40,
+        "candidate_tree": "5" * 40,
+        "env_id": environment["env_id"],
+        "resource_generation": environment["resource_generation"],
+        "candidate_id": "cand-" + "4" * 40,
+        "registry_generation": snapshot["generation"],
+        "registry_payload_sha256": snapshot["payload_sha256"],
+        "payload_kind": "none",
+        "payload_sha256": hashlib.sha256(b"").hexdigest(),
+        "payload_base64": "",
+        "prior_request_id": None,
+    }
+    body["request_id"] = authority._request_digest(body)
+    raw = authority._canonical(body)
+    parsed = authority._parse_request(
+        raw,
+        verb="check",
+        policy=authority.AuthorityPolicy(
+            source_sha=SHA,
+            source_tree="9" * 40,
+            node="oldlab-1",
+            asset_sha256={str(path): "c" * 64 for path in authority.SOURCE_ASSETS},
+        ),
+    )
+    assert parsed.payload["sandbox"] == "e-fourth"
     assert parsed.request_id == authority._request_digest(parsed.payload)
     assert raw == authority._canonical(parsed.payload)
+
+
+def test_two_registry_candidates_are_accepted_concurrently_with_distinct_policy_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _registry_snapshot()
+    monkeypatch.setattr(authority, "_load_registry_snapshot", lambda: snapshot)
+    policy = authority.AuthorityPolicy(
+        source_sha="8" * 40,
+        source_tree="9" * 40,
+        node="oldlab-1",
+        asset_sha256={str(path): "7" * 64 for path in authority.SOURCE_ASSETS},
+    )
+    requests = [_dynamic_request(snapshot, sandbox=sandbox) for sandbox in ("qianyi", "hongjian")]
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        parsed = list(
+            executor.map(
+                lambda raw: authority._parse_request(
+                    raw,
+                    verb="check",
+                    policy=policy,
+                ),
+                requests,
+            ),
+        )
+
+    assert {item.payload["sandbox"] for item in parsed} == {"qianyi", "hongjian"}
+    assert {item.payload["candidate_tree"] for item in parsed} == {TREE, "d" * 40}
+    assert all(item.payload["candidate_tree"] != policy.source_tree for item in parsed)
+
+
+def test_new_principal_identity_preflight_uses_fixed_policy_with_many_active_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _registry_snapshot()
+    environment = {
+        **snapshot["environments"][0],
+        "env_id": "denv-dynamic-55555555",
+        "principal_id": "unix-uid:31555",
+        "runtime_id": "e-fifth",
+        "resource_generation": 2,
+        "current_candidate_id": "cand-" + "5" * 40,
+        "slurm_account": "lda-fifth",
+        "slurm_qos": "ldq-fifth",
+        "slurm_user": "loom-e-fifth",
+        "service_user": "loom-e-fifth",
+        "service_group": "loom-e-fifth",
+        "uid": 31_555,
+        "gid": 31_555,
+        "candidate_root": ("/shared_work/loom/candidates/environments/denv-dynamic-55555555"),
+    }
+    snapshot["environments"].append(environment)
+    snapshot["candidates"].append(
+        {
+            "candidate_id": environment["current_candidate_id"],
+            "env_id": environment["env_id"],
+            "principal_id": environment["principal_id"],
+            "candidate_sha": "5" * 40,
+            "candidate_tree": "6" * 40,
+        },
+    )
+    snapshot["deployments"].append(
+        {
+            "deployment_id": "dep-" + "5" * 32,
+            "env_id": environment["env_id"],
+            "principal_id": environment["principal_id"],
+            "candidate_id": environment["current_candidate_id"],
+            "expected_resource_generation": 1,
+            "phase": "committed",
+            "applied_resource_generation": 2,
+            "applied_registry_generation": 12,
+            "applied_registry_payload_sha256": "8" * 64,
+        },
+    )
+    finalization = _finalization_record(
+        environment,
+        snapshot["candidates"][-1],
+        snapshot["deployments"][-1],
+    )
+    snapshot["deployments"][-1]["finalization_payload_sha256"] = finalization["payload_sha256"]
+    snapshot["deployment_finalizations"].append(finalization)
+    monkeypatch.setattr(authority, "_load_registry_snapshot", lambda: snapshot)
+    policy = authority.AuthorityPolicy(
+        source_sha="8" * 40,
+        source_tree="9" * 40,
+        node="oldlab-1",
+        asset_sha256={str(path): "7" * 64 for path in authority.SOURCE_ASSETS},
+    )
+
+    parsed = authority._parse_request(
+        _identity_preflight_request(snapshot=snapshot, sandbox="e-fifth"),
+        verb="check",
+        policy=policy,
+    )
+
+    assert parsed.payload["deployment_id"] == "dep-" + "5" * 32
+    assert parsed.payload["candidate_tree"] == "6" * 40
+    assert parsed.payload["candidate_tree"] != policy.source_tree
+    assert authority._slurm_identity_policy_argv(parsed, "identity-check")[:3] == (
+        "/usr/bin/python3",
+        "-I",
+        str(authority.SOURCE_ROOT / authority.SLURM_POLICY_RELATIVE),
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda body: body.pop("env_id"),
+        lambda body: body.pop("registry_generation"),
+        lambda body: body.update(candidate_tree="1" * 40),
+        lambda body: body.update(registry_payload_sha256="2" * 64),
+    ],
+)
+def test_dynamic_request_rejects_unbound_or_false_registry_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: Callable[[dict[str, object]], object],
+) -> None:
+    snapshot = _registry_snapshot()
+    monkeypatch.setattr(authority, "_load_registry_snapshot", lambda: snapshot)
+    body = json.loads(_dynamic_request(snapshot, sandbox="qianyi"))
+    mutation(body)
+    body["request_id"] = authority._request_digest(body)
+
+    with pytest.raises(authority.NodeAuthorityError, match="binding"):
+        authority._parse_request(
+            authority._canonical(body),
+            verb="check",
+            policy=_policy(),
+        )
 
 
 def test_envelope_binds_exact_tree_action_payload_and_closed_schema() -> None:
@@ -615,6 +2287,12 @@ def test_live_authority_system_install_mapping_is_fixed_and_complete() -> None:
             Path("scripts/ops/developer_sandbox_slurm_policy.py"),
             authority.SLURM_RECOVERY_LIBEXEC,
             0o755,
+            0o755,
+        ),
+        (
+            authority.REGISTRY_MODULE_RELATIVE,
+            authority.SLURM_REGISTRY_CONTRACT_LIBEXEC,
+            0o644,
             0o755,
         ),
         (
@@ -907,7 +2585,8 @@ def test_system_install_validates_both_tmpfiles_sources(
 
     assert checked == [
         (
-            authority.SOURCE_ROOT / Path(
+            authority.SOURCE_ROOT
+            / Path(
                 "deploy/developer-sandboxes/loom-staging-shared.tmpfiles.conf",
             ),
             False,
@@ -1040,9 +2719,7 @@ def test_tmpfiles_apply_uses_boot_resolution_and_exact_etc_readback(
     monkeypatch.setattr(
         authority,
         "_safe_root_file",
-        lambda path, *, mode, limit: (
-            readbacks.append((path, mode, limit)) or policy
-        ),
+        lambda path, *, mode, limit: readbacks.append((path, mode, limit)) or policy,
     )
     monkeypatch.setattr(authority, "_ensure_stage_root", lambda: None)
     monkeypatch.setattr(authority, "_safe_root_directory", lambda *_args, **_kwargs: None)
@@ -1901,9 +3578,9 @@ def test_staging_bootstrap_covers_infrastructure_nodes_and_returns_fixed_roots(
 
     assert result["canonical_host"] == canonical_host
     assert result["boot_id"] == "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
-    assert result["mount_digest"] == hashlib.sha256(
-        authority._canonical(result["mount"])
-    ).hexdigest()
+    assert (
+        result["mount_digest"] == hashlib.sha256(authority._canonical(result["mount"])).hexdigest()
+    )
     assert result["supplementary_groups"] == ["docker"]
     assert result["repository_root"] == "/srv/loom/staging-shared/candidates"
     assert result["env_root"] == "/srv/loom/staging-shared/generated"
@@ -1952,28 +3629,27 @@ def test_slurm_actions_bind_domain_and_controller_role() -> None:
             authority._parse_request(raw, verb=verb, policy=policy)
 
 
-def test_slurm_request_allows_new_tree_but_other_actions_remain_exact_tree_bound() -> None:
+def test_slurm_request_rejects_candidate_tree_not_committed_in_registry() -> None:
     new_tree = "f" * 40
-    parsed = authority._parse_request(
-        _rebind_request(
-            _request(action="slurm-node-converge", node="oldlab-2"),
-            qianyi_tree=new_tree,
+    for raw, policy in (
+        (
+            _rebind_request(
+                _request(action="slurm-node-converge", node="oldlab-2"),
+                qianyi_tree=new_tree,
+            ),
+            _policy("oldlab-2"),
         ),
-        verb="transact",
-        policy=_policy("oldlab-2"),
-    )
-
-    assert parsed.payload["candidate_tree"] == new_tree
-    with pytest.raises(authority.NodeAuthorityError, match="request binding"):
-        authority._parse_request(
+        (
             _rebind_request(_request(action="host-converge"), qianyi_tree=new_tree),
-            verb="transact",
-            policy=_policy(),
-        )
+            _policy(),
+        ),
+    ):
+        with pytest.raises(authority.NodeAuthorityError, match="binding"):
+            authority._parse_request(raw, verb="transact", policy=policy)
 
 
-def test_slurm_request_rejects_colliding_job_label_prefixes() -> None:
-    with pytest.raises(authority.NodeAuthorityError, match="candidate-set"):
+def test_slurm_request_rejects_unregistered_candidate_set() -> None:
+    with pytest.raises(authority.NodeAuthorityError, match="registry binding"):
         authority._parse_request(
             _rebind_request(
                 _request(action="slurm-node-converge", node="oldlab-2"),
@@ -1991,12 +3667,8 @@ def test_slurm_request_rejects_colliding_job_label_prefixes() -> None:
 def test_slurm_candidate_surface_must_equal_installed_authority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    new_tree = "f" * 40
     request = authority._parse_request(
-        _rebind_request(
-            _request(action="slurm-node-converge", node="oldlab-2"),
-            qianyi_tree=new_tree,
-        ),
+        _request(action="slurm-node-converge", node="oldlab-2"),
         verb="transact",
         policy=_policy("oldlab-2"),
     )
@@ -2009,10 +3681,7 @@ def test_slurm_candidate_surface_must_equal_installed_authority(
     blobs = {relative: f"installed:{relative}".encode("ascii") for relative in surface}
     asset_sha256 = dict(_policy("oldlab-2").asset_sha256)
     asset_sha256.update(
-        {
-            relative: hashlib.sha256(content).hexdigest()
-            for relative, content in blobs.items()
-        },
+        {relative: hashlib.sha256(content).hexdigest() for relative, content in blobs.items()},
     )
     installed = authority.AuthorityPolicy(
         source_sha=SHA,
@@ -2039,9 +3708,7 @@ def test_slurm_candidate_surface_must_equal_installed_authority(
     def run(argv: tuple[str, ...], **_kwargs: object) -> object:
         relative = argv[-1].split(":", 1)[1]
         stdout = (
-            f"{len(blobs[relative])}\n".encode("ascii")
-            if "cat-file" in argv
-            else blobs[relative]
+            f"{len(blobs[relative])}\n".encode("ascii") if "cat-file" in argv else blobs[relative]
         )
         return type(
             "Completed",
@@ -2081,7 +3748,7 @@ def test_slurm_policy_argv_is_fully_derived_and_has_no_override_surface() -> Non
         policy=_policy("trt-gb10-2"),
     )
 
-    candidate = f"/shared_work/loom/candidates/sandboxes/qianyi/{SHA}"
+    fixed_source = str(authority.SOURCE_ROOT)
     bindings_json = json.dumps(
         json.loads(compute.payload_bytes)["candidate_bindings"],
         sort_keys=True,
@@ -2091,10 +3758,10 @@ def test_slurm_policy_argv_is_fully_derived_and_has_no_override_surface() -> Non
     assert authority._slurm_policy_argv(compute, "apply") == (
         "/usr/bin/python3",
         "-I",
-        f"{candidate}/scripts/ops/developer_sandbox_slurm_policy.py",
+        f"{fixed_source}/scripts/ops/developer_sandbox_slurm_policy.py",
         "apply",
         "--profile",
-        f"{candidate}/deploy/slurm/developer-sandboxes/oldlab.toml",
+        f"{fixed_source}/deploy/slurm/developer-sandboxes/oldlab.toml",
         "--candidate-sha",
         SHA,
         "--candidate-bindings-json",
@@ -2117,7 +3784,7 @@ def test_slurm_policy_argv_is_fully_derived_and_has_no_override_surface() -> Non
     check_argv = authority._slurm_policy_argv(checked, "node-check")
     assert check_argv[4:8] == (
         "--profile",
-        f"{candidate}/deploy/slurm/developer-sandboxes/gb10.toml",
+        f"{fixed_source}/deploy/slurm/developer-sandboxes/gb10.toml",
         "--candidate-sha",
         SHA,
     )
@@ -2131,10 +3798,75 @@ def test_slurm_policy_argv_is_fully_derived_and_has_no_override_surface() -> Non
         assert "--root" not in argv
         assert "--account" not in argv
         assert "--path" not in argv
+        assert all("/shared_work/loom/candidates/" not in value for value in argv)
     with pytest.raises(authority.NodeAuthorityError, match="command binding"):
         authority._slurm_policy_argv(compute, "rollback")
     with pytest.raises(authority.NodeAuthorityError, match="command binding"):
         authority._slurm_policy_argv(compute, "shell")
+
+
+def test_incremental_slurm_identity_argv_uses_only_fixed_installed_policy() -> None:
+    requests = {
+        command: authority._parse_request(
+            _identity_preflight_request(action=action),
+            verb="check" if action == "slurm-identity-preflight" else "transact",
+            policy=_policy(),
+        )
+        for command, action in (
+            ("identity-check", "slurm-identity-preflight"),
+            ("identity-reconcile", "slurm-identity-converge"),
+            ("identity-retire", "slurm-identity-retire"),
+        )
+    }
+
+    for command, request in requests.items():
+        argv = authority._slurm_identity_policy_argv(request, command)
+        assert argv[:3] == (
+            "/usr/bin/python3",
+            "-I",
+            str(authority.SOURCE_ROOT / authority.SLURM_POLICY_RELATIVE),
+        )
+        assert argv[3:6] == (
+            command,
+            "--profile",
+            str(authority.SOURCE_ROOT / "deploy/slurm/developer-sandboxes/oldlab.toml"),
+        )
+        assert ("--execute" in argv) == (command != "identity-check")
+        assert all("/shared_work/loom/candidates/" not in value for value in argv)
+        assert all(
+            forbidden not in argv
+            for forbidden in ("--root", "--node", "--account", "--path", "--restart")
+        )
+
+
+def test_incremental_slurm_retire_requires_zero_jobs_and_exact_tombstone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = authority._parse_request(
+        _identity_preflight_request(action="slurm-identity-retire"),
+        verb="transact",
+        policy=_policy(),
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def fixed(argv: tuple[str, ...], payload: bytes) -> dict[str, object]:
+        calls.append(tuple(argv))
+        assert payload == request.payload_bytes
+        return _slurm_identity_result(
+            request,
+            operation="retire",
+            status="retired",
+        )
+
+    monkeypatch.setattr(authority, "_run_fixed_input", fixed)
+    result, inner = authority._execute_request(request, _policy())
+
+    assert result["status"] == "retired"
+    assert result["jobs"] == []
+    assert inner == result["tombstone"]
+    assert calls == [
+        authority._slurm_identity_policy_argv(request, "identity-retire"),
+    ]
 
 
 def test_slurm_rollback_requires_exact_current_journal_and_snapshot_binding(
@@ -2237,12 +3969,7 @@ def test_slurm_rollback_accepts_exact_rolled_back_journal_for_safe_retry(
         rollback_target=target,
     ).replace(b'"phase":"committed"', b'"phase":"rolled_back"')
     journal_path.write_bytes(journal)
-    binding = (
-        "slurm-policy-v1:trt-oldlab:"
-        + "f" * 64
-        + ":"
-        + _slurm_archive_identity(manifest)
-    )
+    binding = "slurm-policy-v1:trt-oldlab:" + "f" * 64 + ":" + _slurm_archive_identity(manifest)
     monkeypatch.setattr(authority, "SLURM_TRANSACTION_ROOT", transactions)
     monkeypatch.setattr(authority, "SLURM_SNAPSHOT_ROOT", target.parent)
     monkeypatch.setattr(authority, "SLURM_STATE_ROOT", tmp_path)
@@ -2662,6 +4389,8 @@ def test_link_authority_actions_are_node_domain_and_payload_bound(
         (
             (
                 "/usr/bin/python3",
+                "-I",
+                "-B",
                 str(authority.SOURCE_ROOT / authority.REMOTE_LINK_HOST_RELATIVE),
                 "persist-attestation",
                 "--sandbox",
@@ -2773,6 +4502,8 @@ def test_link_inspections_call_only_the_fixed_local_helper(
     ) == {"status": "checked"}
     expected = [
         "/usr/bin/python3",
+        "-I",
+        "-B",
         str(authority.SOURCE_ROOT / authority.REMOTE_LINK_HOST_RELATIVE),
         expected_command,
         "--sandbox",
@@ -2973,9 +4704,7 @@ def test_live_overlap_actions_call_only_the_fixed_installed_helper(
     assert authority._execute_check(
         observed,
         _policy(str(observed.payload["node"])),
-    )["kind"] == (
-        "loom.developer-sandbox.live-slurm-observation"
-    )
+    )["kind"] == ("loom.developer-sandbox.live-slurm-observation")
     assert calls[0][0] == (
         "/usr/bin/python3",
         "-I",
@@ -3007,6 +4736,12 @@ def test_runtime_invoker_requires_exact_sudo_identity_and_command(
 
     monkeypatch.setattr(authority.os, "geteuid", lambda: 0)
     monkeypatch.setattr(authority.pwd, "getpwnam", lambda _name: Account())
+    Account.pw_name = "qianyi"
+    monkeypatch.setattr(
+        authority,
+        "_load_registry_snapshot",
+        lambda: (_ for _ in ()).throw(AssertionError("fixed operator consulted registry")),
+    )
     approved = {
         "SUDO_USER": "qianyi",
         "SUDO_UID": "1000",
@@ -3430,6 +5165,8 @@ def test_upgrade_failure_restores_snapshot_and_records_rollback(
     with pytest.raises(authority.NodeAuthorityError, match="rolled back"):
         authority.upgrade("e" * 40, "d" * 40)
 
+    assert events.index("snapshot") < events.index("admission-disabled")
+    assert events.index("admission-disabled") < events.index("restored")
     assert "restored" in events
     assert "journal:rolled-back" in events
     assert events[-1] == "active-removed"
@@ -4001,8 +5738,10 @@ def test_check_dispatches_only_fixed_domain_runtime_actions(
         request,
         _policy(str(request.payload["node"])),
     ) == {"operation": action}
-    assert calls[0][0:3] == (
+    assert calls[0][0:5] == (
         "/usr/bin/python3",
+        "-I",
+        "-B",
         str(authority.SOURCE_ROOT / authority.DOMAIN_RUNTIME_RELATIVE),
         action,
     )
@@ -4033,7 +5772,20 @@ def test_fixed_helpers_never_execute_a_candidate_or_request_supplied_program(
 
     def run(argv: tuple[str, ...]) -> dict[str, object]:
         calls.append(tuple(argv))
-        return {"operation": "materialize", "receipt": "/var/lib/fixed/receipt.json"}
+        return {
+            "schema_version": 1,
+            "operation": "materialize",
+            "mode": "applied",
+            "domain": request.payload["domain"],
+            "sandbox": request.payload["sandbox"],
+            "candidate_sha": request.payload["candidate_sha"],
+            "candidate_tree": request.payload["candidate_tree"],
+            "journal": (
+                "/var/lib/loom-developer-domain-runtime/materializations/"
+                f"{request.payload['domain']}/{request.payload['sandbox']}/"
+                f"{request.payload['candidate_sha']}.json"
+            ),
+        }
 
     monkeypatch.setattr(authority, "_run_fixed", run)
     authority._execute_request(
@@ -4041,13 +5793,146 @@ def test_fixed_helpers_never_execute_a_candidate_or_request_supplied_program(
         _policy(str(request.payload["node"])),
     )
 
-    assert calls[0][0:3] == (
+    assert calls[0][0:5] == (
         "/usr/bin/python3",
+        "-I",
+        "-B",
         str(authority.SOURCE_ROOT / authority.DOMAIN_RUNTIME_RELATIVE),
         "materialize",
     )
-    assert str(Path("/shared_work")) not in calls[0][1]
+    assert str(Path("/shared_work")) not in calls[0][3]
     assert str(tmp_path / "candidate.bundle") in calls[0]
+
+
+@pytest.mark.parametrize(
+    "relative",
+    (
+        authority.DOMAIN_RUNTIME_RELATIVE,
+        authority.REMOTE_LINK_HOST_RELATIVE,
+    ),
+)
+def test_fixed_source_helpers_start_checkout_free_under_isolated_python(
+    relative: Path,
+    tmp_path: Path,
+) -> None:
+    repository = Path(__file__).resolve().parents[2]
+    source_root = tmp_path / "opt/loom-developer-sandbox-node-authority/source"
+    ops_root = source_root / "scripts/ops"
+    ops_root.mkdir(parents=True)
+    for directory in (source_root, source_root / "scripts", ops_root):
+        directory.chmod(0o755)
+    for asset in (relative, authority.REGISTRY_MODULE_RELATIVE):
+        destination = source_root / asset
+        destination.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+        shutil.copyfile(repository / asset, destination)
+        destination.chmod(0o555 if asset == relative else 0o444)
+
+    completed = subprocess.run(
+        (sys.executable, "-I", "-B", str(source_root / relative), "--help"),
+        cwd="/",
+        env={
+            "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert not completed.stderr
+    assert completed.stdout.startswith("usage:")
+
+
+def test_fixed_source_helper_rejects_writable_module_ancestry(
+    tmp_path: Path,
+) -> None:
+    repository = Path(__file__).resolve().parents[2]
+    source_root = tmp_path / "opt/loom-developer-sandbox-node-authority/source"
+    ops_root = source_root / "scripts/ops"
+    ops_root.mkdir(parents=True)
+    for directory in (source_root, source_root / "scripts", ops_root):
+        directory.chmod(0o755)
+    for asset in (
+        authority.DOMAIN_RUNTIME_RELATIVE,
+        authority.REGISTRY_MODULE_RELATIVE,
+    ):
+        destination = source_root / asset
+        shutil.copyfile(repository / asset, destination)
+        destination.chmod(0o555)
+    ops_root.chmod(0o775)
+
+    completed = subprocess.run(
+        (
+            sys.executable,
+            "-I",
+            "-B",
+            str(source_root / authority.DOMAIN_RUNTIME_RELATIVE),
+            "--help",
+        ),
+        cwd="/",
+        env={
+            "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert completed.returncode != 0
+    assert "fixed domain-runtime module tree is unsafe" in completed.stderr
+
+
+def test_materialize_rejects_fixed_helper_candidate_tree_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = authority._parse_request(
+        _request(
+            action="materialize",
+            payload_kind="git-bundle",
+            payload_bytes=b"bundle",
+        ),
+        verb="transact",
+        policy=_policy(),
+    )
+    monkeypatch.setattr(authority, "_prepare_stage", lambda _request: tmp_path)
+    monkeypatch.setattr(
+        authority,
+        "_write_stage_file",
+        lambda path, payload, mode: path.write_bytes(payload),
+    )
+    monkeypatch.setattr(authority, "_safe_root_directory", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(authority.shutil, "rmtree", lambda _path: None)
+    monkeypatch.setattr(
+        authority,
+        "_run_fixed",
+        lambda _argv: {
+            "schema_version": 1,
+            "operation": "materialize",
+            "mode": "applied",
+            "domain": request.payload["domain"],
+            "sandbox": request.payload["sandbox"],
+            "candidate_sha": request.payload["candidate_sha"],
+            "candidate_tree": "1" * 40,
+            "journal": (
+                "/var/lib/loom-developer-domain-runtime/materializations/"
+                f"{request.payload['domain']}/{request.payload['sandbox']}/"
+                f"{request.payload['candidate_sha']}.json"
+            ),
+        },
+    )
+
+    with pytest.raises(
+        authority.NodeAuthorityError,
+        match="materialization readback",
+    ):
+        authority._execute_request(request, _policy())
 
 
 def test_transact_replay_returns_the_root_owned_receipt_without_reexecution(
@@ -4157,6 +6042,7 @@ def test_rollback_is_bound_to_a_prior_root_receipt_and_fixed_state_root(
             "candidate_tree": TREE,
             "action": "materialize",
             "inner_receipt": "/tmp/operator-selected.json",
+            **{field: request.payload[field] for field in authority.DYNAMIC_TARGET_BINDING_FIELDS},
         },
     )
     with pytest.raises(authority.NodeAuthorityError, match=r"unavailable|path"):
@@ -4164,3 +6050,245 @@ def test_rollback_is_bound_to_a_prior_root_receipt_and_fixed_state_root(
             request,
             _policy(str(request.payload["node"])),
         )
+
+
+def test_acceptance_probe_uses_only_fixed_policy_and_verified_deployment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot, raw = _acceptance_probe_fixture()
+    monkeypatch.setattr(authority, "_load_registry_snapshot", lambda: snapshot)
+
+    request = authority._parse_request(
+        raw,
+        verb="transact",
+        policy=_policy("oldlab-2"),
+    )
+
+    assert request.action == authority.ACCEPTANCE_PROBE_ACTION
+    assert authority._acceptance_probe_policy_argv(request) == (
+        "/usr/bin/python3",
+        "-I",
+        str(authority.SOURCE_ROOT / authority.SLURM_POLICY_RELATIVE),
+        "acceptance-probe-domain",
+        "--profile",
+        str(authority.SOURCE_ROOT / "deploy/slurm/developer-sandboxes/oldlab.toml"),
+        "--transport-request-id",
+        request.request_id,
+        "--execute",
+    )
+    assert str(snapshot["candidates"][-1]["candidate_id"]) not in " ".join(
+        authority._acceptance_probe_policy_argv(request),
+    )
+    assert {
+        Path("scripts/ops/developer_environment_acceptance_probe_container.py"),
+        Path("scripts/ops/developer_sandbox_slurm_policy.py"),
+        Path("src/loom_control_plane/slurm_job_cgroup.py"),
+        Path("deploy/docker-compose.remote-worker.yml"),
+        Path("deploy/docker-compose.remote-worker.sandbox-link.yml"),
+        Path("deploy/docker-compose.remote-worker.cgroup-parent.yml"),
+        Path("deploy/docker-compose.remote-worker.acceptance-probe.yml"),
+    }.issubset(set(authority.SOURCE_ASSETS))
+    assert all(
+        not str(asset).startswith(str(snapshot["environments"][-1]["candidate_root"]))
+        for asset in authority.SOURCE_ASSETS
+    )
+
+
+def test_acceptance_probe_installed_assets_run_without_checkout(
+    tmp_path: Path,
+) -> None:
+    version = subprocess.run(
+        (
+            "/usr/bin/python3",
+            "-I",
+            "-B",
+            "-c",
+            "from datetime import UTC; import tomllib",
+        ),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    executable = "/usr/bin/python3" if version.returncode == 0 else sys.executable
+    installed = tmp_path / "installed"
+    ops = installed / "scripts/ops"
+    ops.mkdir(parents=True)
+    for relative in (
+        Path("scripts/ops/developer_environment_acceptance_probe_container.py"),
+        Path("scripts/ops/developer_sandbox_slurm_policy.py"),
+        Path("scripts/ops/developer_environment_registry.py"),
+    ):
+        target = installed / relative
+        target.write_bytes((Path(__file__).resolve().parents[2] / relative).read_bytes())
+        target.chmod(0o555)
+    empty = tmp_path / "empty-checkout"
+    empty.mkdir()
+    for program in (
+        ops / "developer_environment_acceptance_probe_container.py",
+        ops / "developer_sandbox_slurm_policy.py",
+    ):
+        completed = subprocess.run(
+            (executable, "-I", "-B", str(program), "--help"),
+            cwd=empty,
+            env={
+                "PATH": "/usr/bin:/bin",
+                "PYTHONPATH": "/definitely/not/a/checkout",
+            },
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert "usage:" in completed.stdout
+
+
+def test_acceptance_probe_rejects_finalized_or_stale_intent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot, raw = _acceptance_probe_fixture()
+    snapshot["deployments"][-1]["finalization_payload_sha256"] = "4" * 64
+    monkeypatch.setattr(authority, "_load_registry_snapshot", lambda: snapshot)
+
+    with pytest.raises(authority.NodeAuthorityError, match="registry binding"):
+        authority._parse_request(
+            raw,
+            verb="transact",
+            policy=_policy("oldlab-2"),
+        )
+
+
+def test_runtime_retire_accepts_dynamic_closed_registry_and_wal_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot, wal, raw = _runtime_retire_fixture()
+    snapshot["environments"][0]["uid"] = os.getuid()
+    snapshot["environments"][0]["gid"] = os.getgid()
+    wal["uid"] = os.getuid()
+    wal["gid"] = os.getgid()
+    monkeypatch.setattr(authority, "_load_registry_snapshot", lambda: snapshot)
+    monkeypatch.setattr(authority, "_runtime_retire_wal", lambda _env_id: wal)
+
+    request = authority._parse_request(
+        raw,
+        verb="transact",
+        policy=_policy("oldlab-1"),
+    )
+    inner = json.loads(request.payload_bytes)
+
+    assert request.action == authority.RUNTIME_RETIRE_ACTION
+    assert inner["candidate_bindings"] == sorted(
+        inner["candidate_bindings"],
+        key=lambda row: row["candidate_id"],
+    )
+    assert len(inner["candidate_bindings"]) == 2
+    assert "candidate_root" not in inner
+    assert "runtime_root" not in inner
+    assert inner["foreign_path_action"] == "preserve"
+    assert inner["audit_action"] == "append-only-preserve"
+    assert Path("scripts/ops/developer_environment_runtime_retire.py") in authority.SOURCE_ASSETS
+
+    inner["candidate_bindings"].pop()
+    unsigned = {key: value for key, value in inner.items() if key != "payload_sha256"}
+    inner["payload_sha256"] = hashlib.sha256(authority._canonical(unsigned)).hexdigest()
+    with pytest.raises(authority.NodeAuthorityError, match="registry binding"):
+        authority._validate_runtime_retire_request(
+            authority._canonical(inner),
+            request.payload,
+            snapshot,
+        )
+
+    original = json.loads(request.payload_bytes)
+    snapshot["environments"][0]["state"] = "active"
+    with pytest.raises(authority.NodeAuthorityError, match="registry binding"):
+        authority._validate_runtime_retire_request(
+            request.payload_bytes,
+            request.payload,
+            snapshot,
+        )
+    snapshot["environments"][0]["state"] = "quarantined"
+    snapshot["environments"][0]["resource_generation"] = int(original["resource_generation"]) + 1
+    with pytest.raises(authority.NodeAuthorityError, match="registry binding"):
+        authority._validate_runtime_retire_request(
+            request.payload_bytes,
+            request.payload,
+            snapshot,
+        )
+
+
+def test_runtime_retire_persists_exact_tombstone_and_preserves_peer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot, wal, raw = _runtime_retire_fixture()
+    snapshot["environments"][0]["uid"] = os.getuid()
+    snapshot["environments"][0]["gid"] = os.getgid()
+    wal["uid"] = os.getuid()
+    wal["gid"] = os.getgid()
+    monkeypatch.setattr(authority, "_load_registry_snapshot", lambda: snapshot)
+    monkeypatch.setattr(authority, "_runtime_retire_wal", lambda _env_id: wal)
+    request = authority._parse_request(
+        raw,
+        verb="transact",
+        policy=_policy("oldlab-1"),
+    )
+    target_root = tmp_path / "targets"
+    peer = target_root / "peer-owned"
+    peer.mkdir(parents=True)
+    (peer / "keep").write_text("keep", encoding="utf-8")
+    targets = {
+        "clients": (target_root / "client",),
+        "servers": (target_root / "server",),
+        "runtime": (target_root / "runtime",),
+        "candidates": (target_root / "candidate",),
+        "attestations": (target_root / "attestation",),
+    }
+    for paths in targets.values():
+        for path in paths:
+            path.mkdir(parents=True)
+            (path / "owned").write_text("target", encoding="utf-8")
+    node_state = tmp_path / "node-state"
+
+    def ensure(path: Path, **_kwargs: object) -> bool:
+        path.mkdir(parents=True, exist_ok=True)
+        path.chmod(0o700)
+        return True
+
+    def install(path: Path, payload: bytes, _mode: int, **_kwargs: object) -> bool:
+        path.write_bytes(payload)
+        path.chmod(0o600)
+        return True
+
+    monkeypatch.setattr(authority, "RUNTIME_RETIRE_ROOT", node_state)
+    monkeypatch.setattr(authority, "_ensure_root_directory", ensure)
+    monkeypatch.setattr(authority, "_atomic_install", install)
+    monkeypatch.setattr(
+        authority,
+        "_safe_root_file",
+        lambda path, **_kwargs: path.read_bytes(),
+    )
+    monkeypatch.setattr(
+        authority,
+        "_runtime_retire_peer_digest",
+        lambda **_kwargs: "2" * 64,
+    )
+    monkeypatch.setattr(authority, "_runtime_retire_remove_current", lambda *_args: None)
+    monkeypatch.setattr(authority, "_runtime_retire_paths", lambda **_kwargs: targets)
+
+    first = authority._execute_runtime_retire(request)
+    replay = authority._execute_runtime_retire(request)
+
+    assert first == replay
+    assert set(first) == runtime_retire.NODE_RECEIPT_FIELDS
+    assert first["absent"] == {field: True for field in runtime_retire.ABSENCE_FIELDS}
+    assert first["peer_digest_before"] == first["peer_digest_after"] == "2" * 64
+    assert peer.is_dir()
+    assert (peer / "keep").read_text(encoding="utf-8") == "keep"
+    assert all(not path.exists() for paths in targets.values() for path in paths)
+    tombstone = first["tombstone"]
+    assert tombstone["persisted"] is True
+    assert Path(str(tombstone["path"])).is_file()
+    assert str(tombstone["path"]).endswith(
+        f"/oldlab-1/{request.payload['sandbox']}/{wal['payload_sha256']}.json",
+    )

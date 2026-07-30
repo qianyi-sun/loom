@@ -2,36 +2,41 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Lock
 from types import SimpleNamespace
 
 import pytest
 from scripts.ops import staging_external_slurm_acceptance_authority as external_authority
 
 from loom_cli.external_slurm_acceptance import load_authority_config
-from loom_cli.rollout.gb10_convergence import (
-    GB10ConvergenceState,
-    GB10FleetCandidateObservation,
-    GB10HostCandidateObservation,
-    GB10MutationKind,
-)
+from loom_cli.rollout.final_attestation_admission import validate_final_attestation
 from loom_cli.rollout.gb10_readiness import GB10ProbeTarget
+from loom_cli.rollout.operator.backup_lease import BackupLease
 from loom_cli.rollout.operator.deep_preflight_authority import (
     AdmissionPreparationLifecycle,
-    DeepPreflightAuthority,
 )
+from loom_cli.rollout.operator.final_gate_action_source import FinalGateActionSource
+from loom_cli.rollout.operator.final_gate_plan import FinalGatePlanStore
 from loom_cli.rollout.operator.protected_apply_journal import (
     ComponentObservation,
     ComponentState,
     ProtectedApplyJournal,
 )
-from loom_cli.rollout.operator.protected_gb10_component import (
-    ProtectedGB10CandidateComponent,
+from loom_cli.rollout.operator.protected_gb10_component import ProtectedGB10CandidateComponent
+from loom_cli.rollout.operator.protected_gb10_transport import (
+    FixedGB10SSHTransport,
+    GB10TransportTarget,
+    _retirement_identity,
 )
-from loom_cli.rollout.operator.protected_gb10_transport import _retirement_identity
+from loom_cli.rollout.preflight_artifact_store import (
+    PreflightArtifactPublication,
+    PreflightArtifactStore,
+)
 from loom_cli.rollout.preflight_attestation_store import PreflightAttestationStore
 from loom_cli.rollout.preflight_authority import CandidatePreflightPlan
 from loom_cli.rollout.preflight_bindings import derive_attestation_bindings
@@ -48,13 +53,23 @@ from loom_cli.rollout.preflight_contract import (
     SecretRedactionPolicy,
     StageCapability,
 )
+from loom_cli.rollout.preflight_pipeline import PreflightRehearsal
 from loom_cli.rollout.preflight_registered_checks import (
     build_external_gb10_stage_boundary_checks,
     gb10_target_inventory_digest,
 )
 from loom_cli.rollout.preflight_registry import PreflightRegistry
-from tests.loom_cli.rollout.operator.test_protected_migration_component import (
-    _published_plan,
+from tests.loom_cli.rollout.operator.test_final_gate_plan import (
+    _envelope,
+    _lease,
+    _predecessor_evidence,
+    _systemd_evidence,
+)
+from tests.loom_cli.rollout.test_preflight_artifact_store import (
+    _images,
+    _manifests,
+    _migration,
+    _production_defaults,
 )
 from tests.loom_cli.rollout.test_preflight_bindings import _executions as binding_executions
 from tests.ops.test_staging_external_slurm_acceptance_authority import (
@@ -225,6 +240,8 @@ def _context() -> CheckContext:
 def _checks(
     producer: _InfrastructureProducer,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    publication: PreflightArtifactPublication | None = None,
 ) -> tuple[RegisteredCheck, ...]:
     monkeypatch.setattr(
         "loom_cli.rollout.preflight_registered_checks.inspect_systemd_unit_sources",
@@ -246,6 +263,16 @@ def _checks(
         if execution.check_id
         not in {"gb10.shared-mount", "gb10.candidate-source", "gb10.host-readiness"}
     }
+    if publication is not None:
+        images = _images()
+        canned["images.contract"] = {"image-digests": dict(images.image_digests)}
+        canned["migration.plan"] = {"plan-digest": "4" * 64}
+        canned["systemd.render"] = _systemd_evidence()
+        canned["external-supervisor.predecessor"] = _predecessor_evidence()
+        canned["browser.runtime"] = {
+            "image-id": images.image_digests["loom-staging-admin-browser-smoke"],
+            "report-schema-digest": "8" * 64,
+        }
     tier0 = (
         _passing_check("candidate.identity", canned.pop("candidate.identity")),
         _passing_check("runner.install", canned.pop("runner.install")),
@@ -260,9 +287,25 @@ def _checks(
         candidate_source,
         host,
     )
-    binding_support = tuple(
+    binding_support: tuple[RegisteredCheck, ...] = tuple(
         _passing_check(check_id, evidence) for check_id, evidence in canned.items()
     )
+    if publication is not None:
+        binding_support += (
+            _passing_check(
+                "artifacts.publish",
+                {
+                    "bundle-digest": publication.bundle_digest,
+                    "image-artifact-digest": publication.image_artifact_sha256,
+                    "manifest-artifact-digest": publication.manifest_artifact_sha256,
+                    "rendered-manifest-digest": publication.rendered_manifest_sha256,
+                    "migration-manifest-digest": publication.migration_manifest_sha256,
+                    "migration-artifact-digest": (publication.migration_manifest_artifact_sha256),
+                    "production-defaults-digest": publication.production_defaults_sha256,
+                },
+                tier=1,
+            ),
+        )
     baseline = tuple(
         _passing_check(
             check_id,
@@ -321,57 +364,113 @@ def _plan(checks: tuple[RegisteredCheck, ...]) -> CandidatePreflightPlan:
     )
 
 
-class _WorkerSources:
-    def __init__(self, plan: CandidatePreflightPlan) -> None:
-        self.candidate = plan.candidate
-        self.loaded_artifacts = None
-        self._plan = plan
+def _publish_artifacts(
+    state_root: Path,
+) -> tuple[PreflightArtifactStore, PreflightArtifactPublication]:
+    store = PreflightArtifactStore(state_root)
+    images = _images()
+    publication = store.publish(
+        candidate_sha=SHA,
+        candidate_tree=TREE,
+        mutation_epoch=7,
+        images=images,
+        manifests=_manifests(images),
+        migration=_migration(
+            images,
+            candidate_tree=TREE,
+            migration_plan_sha256="4" * 64,
+        ),
+        production_defaults=_production_defaults(candidate_tree=TREE),
+        migration_plan_sha256="4" * 64,
+        migration_target_revision="0067",
+        browser_report_schema_sha256="8" * 64,
+    )
+    return store, publication
 
-    def build(self, *, mutation_epoch: int):
-        assert mutation_epoch == 7
-        return SimpleNamespace(prebackup_plan=lambda candidate: self._checked_plan(candidate))
 
-    def _checked_plan(self, candidate):
-        assert candidate == self.candidate
-        return self._plan
+@dataclass(frozen=True)
+class _FinalGateRequestStore:
+    rehearsal: PreflightRehearsal
+    lease: BackupLease
+
+    def read_preflight_rehearsal(self, request_id: str) -> PreflightRehearsal:
+        assert request_id == "req-alpha"
+        return self.rehearsal
+
+    def read_backup_lease(self, digest: str) -> BackupLease:
+        assert digest == self.lease.evidence_digest
+        return self.lease
 
 
-class _RetirementFleet:
-    def __init__(self) -> None:
-        self.exact = False
-        self.mutations = 0
+class _FixedRetirementSSH:
+    """Replace only the outer SSH boundary while exercising the fixed transport."""
 
-    def observe(self, plan):
-        return GB10FleetCandidateObservation(
-            hosts={
-                host: GB10HostCandidateObservation(
-                    host=host,
-                    boot_id=boot_id,
-                    baseline_ready=True,
-                    candidate_source_exact=True,
-                    checkout_exact=True,
-                    environment_exact=True,
-                    units_exact=True,
-                    legacy_absent=self.exact,
-                    service_timer_exact=self.exact,
-                    evidence_digest=f"{index:064x}",
+    def __init__(self, boot_ids: dict[str, str]) -> None:
+        self.boot_ids = boot_ids
+        self.retired_hosts: set[str] = set()
+        self.observations = 0
+        self.applies = 0
+        self._lock = Lock()
+
+    def __call__(self, argv: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        host = argv[-2]
+        command = argv[-1]
+        assert host in self.boot_ids
+        assert command.startswith("python3 -c ")
+        source = shlex.split(command)[2]
+        with self._lock:
+            if "print(json.dumps" in source:
+                self.observations += 1
+                exact = host in self.retired_hosts
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    json.dumps(
+                        {
+                            "baseline_ready": True,
+                            "boot_id": self.boot_ids[host],
+                            "candidate_source_exact": True,
+                            "checkout_exact": True,
+                            "environment_exact": True,
+                            "legacy_absent": exact,
+                            "service_timer_exact": exact,
+                            "service_timer_transient": False,
+                            "units_exact": True,
+                        }
+                    ),
+                    "",
                 )
-                for index, (host, boot_id) in enumerate(
-                    sorted(plan.gb10_boot_ids.items()),
-                    1,
-                )
-            },
-            candidate_source_digest=plan.gb10_unit_digest,
-        )
+            assert "operations = ('legacy-retire', 'service-timer')" in source
+            assert f"expected_boot_id = {self.boot_ids[host]!r}" in source
+            self.applies += 1
+            self.retired_hosts.add(host)
+            return subprocess.CompletedProcess(argv, 0, "", "")
 
-    def apply(self, _plan, convergence):
-        assert convergence.state is GB10ConvergenceState.READY
-        assert all(
-            mutation.operations == (GB10MutationKind.LEGACY_RETIRE, GB10MutationKind.SERVICE_TIMER)
-            for mutation in convergence.mutations
-        )
-        self.mutations += 1
-        self.exact = True
+
+def _final_gate_source(
+    *,
+    tmp_path: Path,
+    artifact_store: PreflightArtifactStore,
+    rehearsal: PreflightRehearsal,
+    lease: BackupLease,
+) -> FinalGateActionSource:
+    def unexpected_helper_run(*_args: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("final-gate helper execution is outside this contract test")
+
+    executable = tmp_path / "final-gate-helper"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+    return FinalGateActionSource(
+        request_store=_FinalGateRequestStore(rehearsal, lease),
+        artifact_store=artifact_store,
+        state_root=tmp_path / "final-gate-state",
+        service_uid=os.geteuid(),
+        run=unexpected_helper_run,  # type: ignore[arg-type]
+        read_mutation_epoch=lambda: 8,
+        now=lambda: NOW + timedelta(seconds=5),
+        executable=executable,
+        executable_owner_uid=os.geteuid(),
+    )
 
 
 def _execute_external_dag(plan: CandidatePreflightPlan):
@@ -427,6 +526,8 @@ def test_external_profile_contract_survives_receipt_refresh_and_reuses_retiremen
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    artifact_store, publication = _publish_artifacts(tmp_path / "preflight-state")
+    lease = _lease()
     producer = _InfrastructureProducer(tmp_path / "producer", monkeypatch)
     broker_preparation = AdmissionPreparationLifecycle(
         prepare=lambda _candidate: producer.publish(1),
@@ -435,13 +536,13 @@ def test_external_profile_contract_survives_receipt_refresh_and_reuses_retiremen
     candidate = _candidate()
     broker_preparation.prepare_admission(candidate)
 
-    plan = _plan(_checks(producer, monkeypatch))
+    plan = _plan(_checks(producer, monkeypatch, publication=publication))
     executions = _execute_external_dag(plan)
     trio = _external_evidence(executions)
     assert all(execution.passed for execution in trio.values())
     assert trio["gb10.host-readiness"].evidence["boot-ids"] == producer.summary["boot_ids"]  # type: ignore[index]
 
-    bindings = derive_attestation_bindings(plan.context, executions)
+    bindings = derive_attestation_bindings(plan.context, executions, backup_lease=lease)
     assert set(bindings.gb10_boot_ids) == set(HOSTS)
     assert "trt-gb10-7" in bindings.gb10_boot_ids
     assert bindings.gb10_mount_digest == producer.summary["mount_digest"]  # type: ignore[index]
@@ -457,45 +558,111 @@ def test_external_profile_contract_survives_receipt_refresh_and_reuses_retiremen
     store = PreflightAttestationStore(tmp_path / "worker-state")
     store.publish(attestation)
 
-    worker_preparations: list[int] = []
-
-    def refresh_for_worker(_candidate) -> None:
-        worker_preparations.append(2)
-        producer.publish(2)
-
-    worker = DeepPreflightAuthority(
-        sources_factory=lambda _candidate, _epoch, _purpose: _WorkerSources(plan),  # type: ignore[arg-type]
-        attestation_store=store,
-        read_mutation_epoch=lambda: 7,
+    worker_preparation = AdmissionPreparationLifecycle(
+        prepare=lambda _candidate: producer.publish(2),
         now=lambda: NOW + timedelta(seconds=1),
-        admission_preparation=AdmissionPreparationLifecycle(
-            prepare=refresh_for_worker,
-            now=lambda: NOW + timedelta(seconds=1),
-        ),
     )
-    admission = worker.admit_final(
-        candidate,
-        attestation_digest=attestation.attestation_digest,
-        expected_registry_digest=plan.registry.registry_digest,
-        expected_coverage_digest=plan.registry.coverage_digest,
+    worker_preparation.prepare_admission(candidate)
+    worker_preparation.require_fresh(candidate)
+    admission = validate_final_attestation(
+        attestation=store.read(attestation.attestation_digest),
+        candidate=candidate,
+        plan=plan,
+        current_mutation_epoch=7,
+        now=NOW + timedelta(seconds=1),
     )
     refreshed = {execution.check_id: execution for execution in admission.tier0_executions}
-    assert worker_preparations == [2]
     assert all(refreshed[check_id].evidence["receipt-generation"] == 2 for check_id in trio)
     assert refreshed["gb10.shared-mount"].evidence["mount-digest"] == bindings.gb10_mount_digest
     assert refreshed["gb10.candidate-source"].evidence["source-digest"] == bindings.gb10_unit_digest
     assert refreshed["gb10.host-readiness"].evidence["boot-ids"] == dict(bindings.gb10_boot_ids)
+
+    rehearsal = PreflightRehearsal.from_executions(
+        registry_digest=attestation.registry_digest,
+        coverage_digest=attestation.coverage_digest,
+        executions=executions,
+    )
+    first_source = _final_gate_source(
+        tmp_path=tmp_path,
+        artifact_store=artifact_store,
+        rehearsal=rehearsal,
+        lease=lease,
+    )
+    envelope = replace(
+        _envelope(attestation),
+        source_mode=candidate.source_mode,
+        resolved_tree=candidate.resolved_tree,
+        approved_base_sha=candidate.approved_base_sha,
+        fetched_at=candidate.fetched_at,
+        runner_config_sha256=bindings.runner_config_hash,
+        preflight_registry_sha256=attestation.registry_digest,
+        preflight_coverage_sha256=attestation.coverage_digest,
+    )
+    first_plan_root = tmp_path / "final-gate-state/requests/req-alpha/attempts/1"
+    first_plan_root.mkdir(parents=True, mode=0o700)
+    first_source(envelope, attestation, 7, admission)
+    first = FinalGatePlanStore(
+        tmp_path / "final-gate-state",
+        request_id=envelope.request_id,
+        attempt_number=envelope.attempt_number,
+        service_uid=os.geteuid(),
+    ).read()
+    assert first.attestation_digest == attestation.attestation_digest
+    assert dict(first.gb10_boot_ids) == dict(bindings.gb10_boot_ids)
+    assert first.gb10_mount_digest == bindings.gb10_mount_digest
+    assert first.gb10_unit_digest == bindings.gb10_unit_digest
+
+    ssh = _FixedRetirementSSH(dict(first.gb10_boot_ids))
+    transport = FixedGB10SSHTransport(
+        targets=tuple(
+            GB10TransportTarget(
+                ssh_target=host,
+                repo_path=None,
+                env_file_path=None,
+                node_agent_service="loom-gb10-node-agent.service",
+                retirement_only=True,
+            )
+            for host in HOSTS
+        ),
+        ssh_config=tmp_path / "ssh-config",
+        identity=tmp_path / "identity",
+        run=ssh,
+        max_concurrency=4,
+    )
+    component = ProtectedGB10CandidateComponent(
+        transport=transport,
+        epoch_guard=lambda current: ComponentObservation(
+            state=ComponentState.EXACT,
+            evidence_digest="a" * 64,
+            observed_epoch=current.starting_mutation_epoch + 1,
+        ),
+    )
+    protected_state = tmp_path / "protected-state"
+    first_attempt_root = (
+        protected_state / "requests" / first.request_id / "attempts" / str(first.attempt_number)
+    )
+    first_attempt_root.mkdir(parents=True, mode=0o700)
+    first_result = ProtectedApplyJournal(
+        protected_state,
+        request_id=first.request_id,
+        attempt_number=first.attempt_number,
+        service_uid=os.geteuid(),
+    ).execute(first, (component.component(first),))
+    assert first_result["gb10-candidate"].applied is True
+    assert ssh.applies == len(HOSTS)
+    assert ssh.retired_hosts == set(HOSTS)
 
     retry_broker_preparation = AdmissionPreparationLifecycle(
         prepare=lambda _candidate: producer.publish(3),
         now=lambda: NOW + timedelta(seconds=2),
     )
     retry_broker_preparation.prepare_admission(candidate)
-    retry_plan = _plan(_checks(producer, monkeypatch))
+    retry_plan = _plan(_checks(producer, monkeypatch, publication=publication))
     retry_executions = _execute_external_dag(retry_plan)
     retry_bindings = derive_attestation_bindings(
         retry_plan.context,
         retry_executions,
+        backup_lease=lease,
     )
     retry_attestation = PreflightAttestation.issue(
         bindings=retry_bindings,
@@ -507,32 +674,20 @@ def test_external_profile_contract_survives_receipt_refresh_and_reuses_retiremen
     store.publish(retry_attestation)
     assert retry_attestation.attestation_digest != attestation.attestation_digest
 
-    retry_worker_preparations: list[int] = []
-
-    def refresh_for_retry_worker(_candidate) -> None:
-        retry_worker_preparations.append(4)
-        producer.publish(4)
-
-    retry_worker = DeepPreflightAuthority(
-        sources_factory=lambda _candidate, _epoch, _purpose: _WorkerSources(  # type: ignore[arg-type]
-            retry_plan
-        ),
-        attestation_store=store,
-        read_mutation_epoch=lambda: 7,
+    retry_worker_preparation = AdmissionPreparationLifecycle(
+        prepare=lambda _candidate: producer.publish(4),
         now=lambda: NOW + timedelta(seconds=3),
-        admission_preparation=AdmissionPreparationLifecycle(
-            prepare=refresh_for_retry_worker,
-            now=lambda: NOW + timedelta(seconds=3),
-        ),
     )
-    retry_admission = retry_worker.admit_final(
-        candidate,
-        attestation_digest=retry_attestation.attestation_digest,
-        expected_registry_digest=retry_plan.registry.registry_digest,
-        expected_coverage_digest=retry_plan.registry.coverage_digest,
+    retry_worker_preparation.prepare_admission(candidate)
+    retry_worker_preparation.require_fresh(candidate)
+    retry_admission = validate_final_attestation(
+        attestation=store.read(retry_attestation.attestation_digest),
+        candidate=candidate,
+        plan=retry_plan,
+        current_mutation_epoch=7,
+        now=NOW + timedelta(seconds=3),
     )
     retry_refreshed = retry_admission.tier0_executions
-    assert retry_worker_preparations == [4]
 
     receipt_rounds = (
         _receipt_identity(executions),
@@ -553,47 +708,39 @@ def test_external_profile_contract_survives_receipt_refresh_and_reuses_retiremen
     assert retry_bindings.gb10_unit_digest == bindings.gb10_unit_digest
     assert dict(retry_bindings.gb10_boot_ids) == dict(bindings.gb10_boot_ids)
 
-    first = replace(
-        _published_plan(tmp_path),
-        attestation_digest=attestation.attestation_digest,
-        gb10_inventory_digest=bindings.gb10_inventory_digest,
-        gb10_boot_ids=dict(bindings.gb10_boot_ids),
-        gb10_mount_digest=bindings.gb10_mount_digest,
-        gb10_unit_digest=bindings.gb10_unit_digest,
+    retry_rehearsal = PreflightRehearsal.from_executions(
+        registry_digest=retry_attestation.registry_digest,
+        coverage_digest=retry_attestation.coverage_digest,
+        executions=retry_executions,
     )
-    fleet = _RetirementFleet()
-    component = ProtectedGB10CandidateComponent(
-        transport=fleet,
-        epoch_guard=lambda current: ComponentObservation(
-            state=ComponentState.EXACT,
-            evidence_digest="a" * 64,
-            observed_epoch=current.starting_mutation_epoch + 1,
-        ),
+    retry_source = _final_gate_source(
+        tmp_path=tmp_path,
+        artifact_store=artifact_store,
+        rehearsal=retry_rehearsal,
+        lease=lease,
     )
-    first_terminal = ProtectedApplyJournal(
-        tmp_path / "state",
-        request_id=first.request_id,
-        attempt_number=first.attempt_number,
+    retry_envelope = replace(
+        envelope,
+        attempt_number=2,
+        resume=True,
+        preflight_attestation_sha256=retry_attestation.attestation_digest,
+        preflight_registry_sha256=retry_attestation.registry_digest,
+        preflight_coverage_sha256=retry_attestation.coverage_digest,
+    )
+    retry_plan_root = tmp_path / "final-gate-state/requests/req-alpha/attempts/2"
+    retry_plan_root.mkdir(parents=True, mode=0o700)
+    retry_source(retry_envelope, retry_attestation, 7, retry_admission)
+    second = FinalGatePlanStore(
+        tmp_path / "final-gate-state",
+        request_id=retry_envelope.request_id,
+        attempt_number=retry_envelope.attempt_number,
         service_uid=os.geteuid(),
-    )
-    first_attempt_root = (
-        tmp_path / "state/requests" / first.request_id / "attempts" / str(first.attempt_number)
-    )
-    first_attempt_root.mkdir(parents=True, mode=0o700)
-    first_result = first_terminal.execute(first, (component.component(first),))
-    assert first_result["gb10-candidate"].applied is True
-    assert fleet.mutations == 1
-
-    second = replace(
-        first,
-        attempt_number=first.attempt_number + 1,
-        attestation_digest=retry_attestation.attestation_digest,
-        gb10_inventory_digest=retry_bindings.gb10_inventory_digest,
-        gb10_boot_ids=dict(retry_bindings.gb10_boot_ids),
-        gb10_mount_digest=retry_bindings.gb10_mount_digest,
-        gb10_unit_digest=retry_bindings.gb10_unit_digest,
-        plan_digest="f" * 64,
-    )
+    ).read()
+    assert second.attestation_digest == retry_attestation.attestation_digest
+    assert dict(second.gb10_boot_ids) == dict(retry_bindings.gb10_boot_ids)
+    assert second.gb10_mount_digest == retry_bindings.gb10_mount_digest
+    assert second.gb10_unit_digest == retry_bindings.gb10_unit_digest
+    assert second.plan_digest != first.plan_digest
     assert _retirement_identity(
         first,
         (
@@ -610,17 +757,18 @@ def test_external_profile_contract_survives_receipt_refresh_and_reuses_retiremen
         ),
     )
     second_attempt_root = (
-        tmp_path / "state/requests" / second.request_id / "attempts" / str(second.attempt_number)
+        protected_state / "requests" / second.request_id / "attempts" / str(second.attempt_number)
     )
     second_attempt_root.mkdir(parents=True, mode=0o700)
     second_result = ProtectedApplyJournal(
-        tmp_path / "state",
+        protected_state,
         request_id=second.request_id,
         attempt_number=second.attempt_number,
         service_uid=os.geteuid(),
     ).execute(second, (component.component(second),))
     assert second_result["gb10-candidate"].applied is False
-    assert fleet.mutations == 1
+    assert ssh.applies == len(HOSTS)
+    assert ssh.observations >= 3 * len(HOSTS)
     assert producer.generation == 4
 
 

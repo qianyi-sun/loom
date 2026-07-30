@@ -36,50 +36,29 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final
 
+from scripts.ops.developer_environment_registry import (
+    CURRENT_SNAPSHOT_PATH,
+    DeveloperEnvironmentRegistry,
+    RegistryError,
+)
+
 SCHEMA_VERSION: Final = 1
 REPO_ROOT: Final = Path(__file__).resolve().parents[2]
+REGISTRY_SNAPSHOT: Final = CURRENT_SNAPSHOT_PATH
 STATE_ROOT: Final = Path("/var/lib/loom-developer-sandbox-live-authority")
 CAPACITY_ROOT: Final = Path("/var/lib/loom-shared-capacity/observations")
-SANDBOX_ROOT: Final = Path("/srv/loom/developer-sandboxes")
-ADAPTER_CONFIG_ROOT: Final = Path("/etc/loom/shared-capacity-adapters")
 NODE_TRANSPORT: Final = Path("/usr/local/libexec/loom-developer-sandbox-node-transport")
 LOCK: Final = STATE_ROOT / "authority.lock"
 HIGH_WATER_ROOT: Final = STATE_ROOT / "high-water"
 TRANSACTION_ROOT: Final = STATE_ROOT / "transactions"
 OVERLAP_ROOT: Final = STATE_ROOT / "overlap"
 COLLECT_HOST: Final = "trt-eai-oldlab-2"
-SANDBOXES: Final = ("qianyi", "hongjian", "devansh")
 POOLS: Final = ("oldlab", "gb10")
 SOURCE_HOSTS: Final = {"oldlab": COLLECT_HOST, "gb10": "trt-gb10-1"}
 SOURCE_NODES: Final = {"oldlab": "oldlab-2", "gb10": "trt-gb10-1"}
 SOURCE_ALIASES: Final = {
     "oldlab": frozenset({"trt-eai-oldlab-2"}),
     "gb10": frozenset({"trt-gb10-1", "gx10-01c7"}),
-}
-SERVICE_USERS: Final = {
-    "qianyi": "loom-sandbox-qianyi",
-    "hongjian": "loom-sandbox-hongjian",
-    "devansh": "loom-sandbox-devansh",
-}
-CONTROL_PLANE_URLS: Final = {
-    "qianyi": "http://127.0.0.1:20080",
-    "hongjian": "http://127.0.0.1:21080",
-    "devansh": "http://127.0.0.1:22080",
-}
-EXPECTED_ADAPTER_FIELDS: Final = {
-    "schema_version",
-    "sandbox",
-    "environment",
-    "pool_name",
-    "control_plane_url",
-    "admin_secret_file",
-    "handoff_path",
-    "observation_path",
-    "adapter_state_path",
-    "sandbox_state_path",
-    "runtime_attestation_root",
-    "max_slots_bound",
-    "timeout_seconds",
 }
 CAPACITY_FIELDS: Final = {
     "sandbox",
@@ -175,6 +154,13 @@ class AdapterConfig:
     sandbox_state_path: Path
     max_slots_bound: int
     timeout_seconds: float
+    service_user: str
+    slurm_account: str
+    slurm_qos: str
+    env_id: str
+    resource_generation: int
+    registry_generation: int
+    registry_payload_sha256: str
 
 
 Run = Callable[..., subprocess.CompletedProcess[str]]
@@ -302,40 +288,73 @@ def _secure_json(path: Path, *, label: str) -> tuple[Any, bytes]:
     return payload, raw
 
 
-def _load_adapter_config(sandbox: str, pool: str) -> AdapterConfig:
-    path = ADAPTER_CONFIG_ROOT / f"{sandbox}-{pool}.toml"
-    raw = _read_secure_bytes(path, label="adapter config")
+def _load_registry_snapshot(path: Path = REGISTRY_SNAPSHOT) -> dict[str, Any]:
     try:
-        payload = tomllib.loads(raw.decode())
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
-        raise LiveAuthorityError("adapter config is invalid") from exc
-    expected = {
-        "schema_version": SCHEMA_VERSION,
-        "sandbox": sandbox,
-        "environment": f"sandbox-{sandbox}",
-        "pool_name": pool,
-        "control_plane_url": CONTROL_PLANE_URLS[sandbox],
-        "admin_secret_file": str(SANDBOX_ROOT / sandbox / "secrets/admin.toml"),
-        "handoff_path": f"/var/lib/loom-shared-capacity/handoffs/current/{sandbox}-{pool}.json",
-        "observation_path": str(CAPACITY_ROOT / f"{sandbox}-{pool}.json"),
-        "adapter_state_path": f"/var/lib/loom-shared-capacity/adapters/{sandbox}-{pool}.json",
-        "sandbox_state_path": str(SANDBOX_ROOT / sandbox / "sandbox-state.json"),
-        "runtime_attestation_root": "/var/lib/loom-shared-capacity/runtime-attestations",
-        "max_slots_bound": 20 if pool == "oldlab" else 120,
-        "timeout_seconds": 10,
-    }
-    if set(payload) != EXPECTED_ADAPTER_FIELDS or payload != expected:
-        raise LiveAuthorityError("adapter config differs from the fixed live authority")
+        return DeveloperEnvironmentRegistry.verify_snapshot(path.read_bytes())
+    except (OSError, RegistryError) as exc:
+        raise LiveAuthorityError("developer environment registry snapshot is invalid") from exc
+
+
+def _active_environment(
+    sandbox: str,
+    *,
+    snapshot: Mapping[str, Any] | None = None,
+) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+    current = _load_registry_snapshot() if snapshot is None else snapshot
+    environments = [
+        item
+        for item in current["environments"]
+        if item["runtime_id"] == sandbox and item["state"] == "active"
+    ]
+    if len(environments) != 1:
+        raise LiveAuthorityError("developer environment is not active")
+    environment = environments[0]
+    candidates = [
+        item
+        for item in current["candidates"]
+        if item["candidate_id"] == environment["current_candidate_id"]
+        and item["env_id"] == environment["env_id"]
+        and item["principal_id"] == environment["principal_id"]
+    ]
+    deployments = [
+        item
+        for item in current["deployments"]
+        if item["candidate_id"] == environment["current_candidate_id"]
+        and item["env_id"] == environment["env_id"]
+        and item["principal_id"] == environment["principal_id"]
+        and item["expected_resource_generation"] + 1 == environment["resource_generation"]
+        and item["applied_resource_generation"] == environment["resource_generation"]
+        and item["phase"] == "committed"
+    ]
+    if len(candidates) != 1 or len(deployments) != 1:
+        raise LiveAuthorityError("active developer environment binding is invalid")
+    return environment, candidates[0]
+
+
+def _load_adapter_config(sandbox: str, pool: str) -> AdapterConfig:
+    if pool not in POOLS:
+        raise LiveAuthorityError("capacity pool is invalid")
+    snapshot = _load_registry_snapshot()
+    environment, _candidate = _active_environment(sandbox, snapshot=snapshot)
+    control_plane_url = f"http://127.0.0.1:{environment['ports']['control_plane']}"
+    state_root = Path(environment["state_root"])
     return AdapterConfig(
         sandbox=sandbox,
-        environment=f"sandbox-{sandbox}",
+        environment=environment["provider_namespace"],
         pool=pool,
-        control_plane_url=CONTROL_PLANE_URLS[sandbox],
-        admin_secret_file=SANDBOX_ROOT / sandbox / "secrets/admin.toml",
+        control_plane_url=control_plane_url,
+        admin_secret_file=state_root / "secrets/admin.toml",
         observation_path=CAPACITY_ROOT / f"{sandbox}-{pool}.json",
-        sandbox_state_path=SANDBOX_ROOT / sandbox / "sandbox-state.json",
+        sandbox_state_path=state_root / "sandbox-state.json",
         max_slots_bound=20 if pool == "oldlab" else 120,
         timeout_seconds=10.0,
+        service_user=environment["slurm_user"],
+        slurm_account=environment["slurm_account"],
+        slurm_qos=environment["slurm_qos"],
+        env_id=environment["env_id"],
+        resource_generation=environment["resource_generation"],
+        registry_generation=snapshot["generation"],
+        registry_payload_sha256=snapshot["payload_sha256"],
     )
 
 
@@ -693,8 +712,8 @@ def _slurm_request(
         "candidate_sha": candidate_sha,
         "candidate_tree": candidate_tree,
         "job_id": job["job_id"],
-        "account": f"loom-dev-{config.sandbox}",
-        "user": SERVICE_USERS[config.sandbox],
+        "account": config.slurm_account,
+        "user": config.service_user,
         "job_name": job["job_name"],
         "node": job["node"],
         "requested_cpus": job["requested_cpus"],
@@ -785,21 +804,26 @@ def observe_slurm_job(
         request = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise LiveAuthorityError("live Slurm request is invalid") from exc
+    sandbox_value = request.get("sandbox") if isinstance(request, dict) else None
+    try:
+        environment, _candidate = _active_environment(str(sandbox_value))
+    except LiveAuthorityError as exc:
+        raise LiveAuthorityError("live Slurm request is invalid") from exc
     if (
         not isinstance(request, dict)
         or set(request) != SLURM_REQUEST_FIELDS
         or raw != _canonical(request)
         or request.get("schema_version") != SCHEMA_VERSION
         or request.get("kind") != "loom.developer-sandbox.live-slurm-request"
-        or request.get("sandbox") not in SANDBOXES
+        or request.get("sandbox") != environment["runtime_id"]
         or request.get("pool") not in POOLS
         or request.get("source_host") != SOURCE_HOSTS.get(str(request.get("pool")))
         or hostname() not in SOURCE_ALIASES[str(request["pool"])]
         or SHA_RE.fullmatch(str(request.get("candidate_sha"))) is None
         or SHA_RE.fullmatch(str(request.get("candidate_tree"))) is None
         or JOB_ID_RE.fullmatch(str(request.get("job_id"))) is None
-        or request.get("account") != f"loom-dev-{request.get('sandbox')}"
-        or request.get("user") != SERVICE_USERS.get(str(request.get("sandbox")))
+        or request.get("account") != environment["slurm_account"]
+        or request.get("user") != environment["slurm_user"]
         or SAFE_JOB_RE.fullmatch(str(request.get("job_name"))) is None
         or not isinstance(request.get("node"), str)
         or (
@@ -1048,16 +1072,18 @@ def collect(
     """Collect and persist one immutable overlap observation."""
 
     _require_root()
+    _environment, candidate = _active_environment(sandbox)
     if (
         hostname() != COLLECT_HOST
-        or sandbox not in SANDBOXES
         or pool not in POOLS
         or SHA_RE.fullmatch(candidate_sha) is None
         or SHA_RE.fullmatch(authority_tree) is None
+        or candidate["candidate_sha"] != candidate_sha
     ):
         raise LiveAuthorityError("live authority collection host or identity is invalid")
     request = _validate_collection(raw_request, candidate_sha)
     candidate_tree = str(request["candidate_tree"])
+    config = _load_adapter_config(sandbox, pool)
     lock = _open_lock()
     try:
         transaction_path = TRANSACTION_ROOT / f"{request['collection_id']}.json"
@@ -1071,6 +1097,10 @@ def collect(
                 "kind",
                 "collection_id",
                 "sandbox",
+                "env_id",
+                "resource_generation",
+                "registry_generation",
+                "registry_payload_sha256",
                 "pool",
                 "candidate_sha",
                 "candidate_tree",
@@ -1088,6 +1118,11 @@ def collect(
                 != "loom.developer-sandbox.live-overlap-transaction"
                 or existing_transaction.get("collection_id") != request["collection_id"]
                 or existing_transaction.get("sandbox") != sandbox
+                or existing_transaction.get("env_id") != config.env_id
+                or existing_transaction.get("resource_generation") != config.resource_generation
+                or existing_transaction.get("registry_generation") != config.registry_generation
+                or existing_transaction.get("registry_payload_sha256")
+                != config.registry_payload_sha256
                 or existing_transaction.get("pool") != pool
                 or existing_transaction.get("candidate_sha") != candidate_sha
                 or existing_transaction.get("candidate_tree") != candidate_tree
@@ -1116,7 +1151,6 @@ def collect(
             return _transaction_result(existing_transaction)
 
         started_at = clock().astimezone(UTC)
-        config = _load_adapter_config(sandbox, pool)
         capacity, capacity_raw = _capacity_observation(
             config,
             candidate_sha=candidate_sha,
@@ -1186,12 +1220,16 @@ def collect(
             "phase": "multi_candidate_overlap",
             "observed_at": capacity["observed_at"],
             "sandbox": sandbox,
+            "env_id": config.env_id,
+            "resource_generation": config.resource_generation,
+            "registry_generation": config.registry_generation,
+            "registry_payload_sha256": config.registry_payload_sha256,
             "pool": pool,
             "candidate_sha": candidate_sha,
             "candidate_tree": candidate_tree,
             "job_id": job["job_id"],
-            "account": f"loom-dev-{sandbox}",
-            "user": SERVICE_USERS[sandbox],
+            "account": config.slurm_account,
+            "user": config.service_user,
             "job_name": job["job_name"],
             "node": job["node"],
             "allocation": job_readback["allocation"],
@@ -1211,6 +1249,10 @@ def collect(
             "source_host": SOURCE_HOSTS[pool],
             "observed_at": _iso(finished_at),
             "sandbox": sandbox,
+            "env_id": config.env_id,
+            "resource_generation": config.resource_generation,
+            "registry_generation": config.registry_generation,
+            "registry_payload_sha256": config.registry_payload_sha256,
             "pool": pool,
             "candidate_sha": candidate_sha,
             "candidate_tree": candidate_tree,
@@ -1285,6 +1327,10 @@ def collect(
             "kind": "loom.developer-sandbox.live-overlap-transaction",
             "collection_id": request["collection_id"],
             "sandbox": sandbox,
+            "env_id": config.env_id,
+            "resource_generation": config.resource_generation,
+            "registry_generation": config.registry_generation,
+            "registry_payload_sha256": config.registry_payload_sha256,
             "pool": pool,
             "candidate_sha": candidate_sha,
             "candidate_tree": candidate_tree,
@@ -1311,12 +1357,12 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     subparsers = parser.add_subparsers(dest="command", required=True)
     collect_parser = subparsers.add_parser("collect", allow_abbrev=False)
-    collect_parser.add_argument("--sandbox", choices=SANDBOXES, required=True)
+    collect_parser.add_argument("--sandbox", required=True)
     collect_parser.add_argument("--pool", choices=POOLS, required=True)
     collect_parser.add_argument("--candidate-sha", required=True)
     collect_parser.add_argument("--authority-tree", required=True)
     envelope_parser = subparsers.add_parser("collection-envelope", allow_abbrev=False)
-    envelope_parser.add_argument("--sandbox", choices=SANDBOXES, required=True)
+    envelope_parser.add_argument("--sandbox", required=True)
     envelope_parser.add_argument("--pool", choices=POOLS, required=True)
     envelope_parser.add_argument("--candidate-sha", required=True)
     envelope_parser.add_argument("--candidate-tree", required=True)

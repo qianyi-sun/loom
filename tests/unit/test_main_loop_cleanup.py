@@ -31,6 +31,64 @@ def test_runtime_identity_labels_allow_legacy_settings() -> None:
     assert ml._worker_cgroup_parent(_FakeSettings()) is None  # type: ignore[arg-type]
 
 
+def test_runtime_identity_labels_propagate_complete_registry_binding() -> None:
+    settings = _FakeSettings()
+    settings.sandbox_identity = "e-alpha"
+    settings.candidate_sha = "a" * 40
+    settings.slurm_job_id = "123"
+    settings.compose_project = "loom-e-alpha-123"
+    settings.env_id = "denv-00000000000000000000000000000001"
+    settings.resource_generation = 7
+    settings.candidate_id = f"cand-{'b' * 40}"
+    settings.candidate_tree = "c" * 40
+    settings.registry_generation = 42
+    settings.registry_payload_sha256 = "d" * 64
+
+    assert ml._runtime_identity_labels(settings) == (  # type: ignore[arg-type]
+        ("loom.sandbox", "e-alpha"),
+        ("loom.candidate_sha", "a" * 40),
+        ("loom.slurm_job_id", "123"),
+        ("loom.compose_project", "loom-e-alpha-123"),
+        ("loom.env_id", "denv-00000000000000000000000000000001"),
+        ("loom.resource_generation", "7"),
+        ("loom.candidate_id", f"cand-{'b' * 40}"),
+        ("loom.candidate_tree", "c" * 40),
+        ("loom.registry_generation", "42"),
+        ("loom.registry_payload_sha256", "d" * 64),
+    )
+
+
+def test_runtime_identity_labels_reject_partial_registry_binding() -> None:
+    settings = _FakeSettings()
+    settings.sandbox_identity = "e-alpha"
+    settings.candidate_sha = "a" * 40
+    settings.slurm_job_id = "123"
+    settings.compose_project = "loom-e-alpha-123"
+    settings.env_id = "denv-00000000000000000000000000000001"
+
+    with pytest.raises(RuntimeError, match="incomplete or invalid"):
+        ml._runtime_identity_labels(settings)  # type: ignore[arg-type]
+
+
+async def test_worker_rejects_partial_registry_identity_before_registration(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    settings = _FakeSettings()
+    settings.trajectory_cache_dir = tmp_path / "cache"
+    settings.sandbox_identity = "e-alpha"
+    settings.candidate_sha = "a" * 40
+    settings.slurm_job_id = "123"
+    settings.compose_project = "loom-e-alpha-123"
+    settings.env_id = "denv-00000000000000000000000000000001"
+    monkeypatch.setattr(ml, "install_signal_handlers", lambda _state: None)
+
+    with pytest.raises(RuntimeError, match="incomplete or invalid"):
+        await ml.run_worker(settings)  # type: ignore[arg-type]
+
+    assert not settings.trajectory_cache_dir.exists()
+
+
 def test_required_worker_cgroup_parent_fails_closed_when_missing() -> None:
     settings = _FakeSettings()
     settings.require_cgroup_parent = True
@@ -478,6 +536,55 @@ async def test_tempdir_cleaned_on_success() -> None:
 async def test_tempdir_cleaned_on_runner_exception() -> None:
     task_dir = await _drive_spawn(_FailingRunner())
     assert not task_dir.exists(), f"task_dir {task_dir} leaked after a failing trial"
+
+
+async def test_spawn_forwards_complete_registry_identity_to_trial_runner() -> None:
+    from loom_worker.vllm_registry import WorkerVLLMRegistry
+
+    settings = _FakeSettings()
+    settings.sandbox_identity = "e-alpha"
+    settings.candidate_sha = "a" * 40
+    settings.slurm_job_id = "123"
+    settings.compose_project = "loom-e-alpha-123"
+    settings.env_id = "denv-00000000000000000000000000000001"
+    settings.resource_generation = 7
+    settings.candidate_id = f"cand-{'b' * 40}"
+    settings.candidate_tree = "c" * 40
+    settings.registry_generation = 42
+    settings.registry_payload_sha256 = "d" * 64
+    pool = RunnerPool(max_concurrent=1)
+    payload = {
+        "trial_id": str(uuid4()),
+        "team_id": str(uuid4()),
+        "task_id": "fake",
+        "config": {"agent_name": "oracle", "agent_model": None},
+    }
+    with patch.object(ml, "LocalTrialRunner") as fake_runner_cls:
+        fake_runner_cls.return_value = _SucceedingRunner()
+        await ml._spawn_trial(
+            pool=pool,
+            settings=settings,  # type: ignore[arg-type]
+            cp_client=_FakeCPClient(),  # type: ignore[arg-type]
+            gateway_client=None,  # type: ignore[arg-type]
+            object_store=None,  # type: ignore[arg-type]
+            worker_id=uuid4(),
+            payload=payload,
+            vllm_registry=WorkerVLLMRegistry(enabled=False),
+        )
+        await pool.wait_all(timeout=2.0)
+
+    assert fake_runner_cls.call_args.kwargs["runtime_identity_labels"] == (
+        ("loom.sandbox", "e-alpha"),
+        ("loom.candidate_sha", "a" * 40),
+        ("loom.slurm_job_id", "123"),
+        ("loom.compose_project", "loom-e-alpha-123"),
+        ("loom.env_id", "denv-00000000000000000000000000000001"),
+        ("loom.resource_generation", "7"),
+        ("loom.candidate_id", f"cand-{'b' * 40}"),
+        ("loom.candidate_tree", "c" * 40),
+        ("loom.registry_generation", "42"),
+        ("loom.registry_payload_sha256", "d" * 64),
+    )
 
 
 async def test_runner_exception_marks_claimed_trial_failed() -> None:

@@ -28,16 +28,14 @@ from pathlib import Path
 from typing import Any
 
 _JOB_DIR_RE = re.compile(r"^job_([1-9][0-9]*)$")
-_ACCOUNT_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
+_SAFE_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{1,62}$")
+_SANDBOX_RE = re.compile(r"^[a-z][a-z0-9-]{0,47}$")
 _COMMENT_RE = re.compile(r"^loom-cgroup-v1:pids=([1-9][0-9]{0,8})$")
 _REQUIRED_CONTROLLERS = frozenset({"cpu", "memory", "pids"})
 _MAX_WALKED_DIRECTORIES = 100_000
 _MAX_JOB_RECORD_CACHE = 10_000
 _MAX_CONFIG_BYTES = 1 << 20
 _CANDIDATE_RE = re.compile(r"^[0-9a-f]{40}$")
-_SANDBOX_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
-_SANDBOXES = ("qianyi", "hongjian", "devansh")
-_ACCOUNTS = frozenset(f"loom-dev-{sandbox}" for sandbox in _SANDBOXES)
 DEFAULT_STATUS_PATH = Path(
     "/var/lib/loom-developer-sandbox-slurm-policy/guard-status.json",
 )
@@ -191,10 +189,19 @@ def _read_bound_config(path: Path) -> bytes:
         os.close(descriptor)
 
 
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise GuardError("guard config contains duplicate fields")
+        result[key] = value
+    return result
+
+
 def load_config(path: Path) -> GuardConfig:
     try:
         raw = _read_bound_config(path)
-        payload = json.loads(raw)
+        payload = json.loads(raw, object_pairs_hook=_unique_json_object)
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise GuardError("guard config is unavailable or invalid") from exc
     if (
@@ -241,10 +248,10 @@ def load_config(path: Path) -> GuardConfig:
         raise GuardError("guard pids_max is invalid")
     if (
         not isinstance(raw_bindings, dict)
-        or set(raw_bindings) != _ACCOUNTS
+        or not raw_bindings
         or any(
             not isinstance(account, str)
-            or _ACCOUNT_RE.fullmatch(account) is None
+            or _SAFE_NAME_RE.fullmatch(account) is None
             or not isinstance(binding, dict)
             or set(binding)
             != {
@@ -258,7 +265,8 @@ def load_config(path: Path) -> GuardConfig:
     ):
         raise GuardError("guard candidate bindings are invalid")
     candidate_bindings: dict[str, CandidateBinding] = {}
-    for account, raw_binding in raw_bindings.items():
+    for account in sorted(raw_bindings):
+        raw_binding = raw_bindings[account]
         sandbox = raw_binding.get("sandbox")
         service_user = raw_binding.get("service_user")
         candidate_sha = raw_binding.get("candidate_sha")
@@ -266,9 +274,9 @@ def load_config(path: Path) -> GuardConfig:
         if (
             not isinstance(sandbox, str)
             or _SANDBOX_RE.fullmatch(sandbox) is None
-            or account != f"loom-dev-{sandbox}"
             or not isinstance(service_user, str)
-            or service_user != f"loom-sandbox-{sandbox}"
+            or _SAFE_NAME_RE.fullmatch(service_user) is None
+            or service_user == "root"
             or not isinstance(candidate_sha, str)
             or _CANDIDATE_RE.fullmatch(candidate_sha) is None
             or not isinstance(candidate_tree, str)
@@ -282,18 +290,23 @@ def load_config(path: Path) -> GuardConfig:
             candidate_sha=candidate_sha,
             candidate_tree=candidate_tree,
         )
-    candidate_shas = {
-        binding.candidate_sha for binding in candidate_bindings.values()
-    }
-    candidate_labels = {candidate_sha[:12] for candidate_sha in candidate_shas}
-    if (
-        {binding.sandbox for binding in candidate_bindings.values()} != set(_SANDBOXES)
-        or len(candidate_shas) != 3
-        or len(candidate_labels) != 3
+    if len({binding.sandbox for binding in candidate_bindings.values()}) != len(
+        candidate_bindings
+    ) or len({binding.service_user for binding in candidate_bindings.values()}) != len(
+        candidate_bindings
     ):
-        raise GuardError("guard candidate bindings must be pairwise distinct")
+        raise GuardError("guard candidate binding identities must be globally unique")
+    normalized_bindings = {
+        account: {
+            "sandbox": binding.sandbox,
+            "service_user": binding.service_user,
+            "candidate_sha": binding.candidate_sha,
+            "candidate_tree": binding.candidate_tree,
+        }
+        for account, binding in candidate_bindings.items()
+    }
     canonical_bindings = json.dumps(
-        raw_bindings,
+        normalized_bindings,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("ascii")
@@ -442,15 +455,15 @@ def apply_job_limit(
     if record.account not in config.allowed_accounts:
         raise GuardError("Loom cgroup job account is not allowed")
     binding = config.candidate_bindings[record.account]
+    if record.account != binding.account:
+        raise GuardError("Loom cgroup job account binding is inconsistent")
     if record.user != binding.service_user:
         raise GuardError("Loom cgroup job user does not match its sandbox account")
     if int(match.group(1)) != config.pids_max:
         raise GuardError("Loom cgroup job PID ceiling differs from host policy")
     candidate_label = binding.candidate_sha[:12]
     node = record.node_list.lower()
-    regular_job_name = (
-        f"loom-sandbox-{binding.sandbox}-{candidate_label}-{node}"
-    )
+    regular_job_name = f"loom-sandbox-{binding.sandbox}-{candidate_label}-{node}"
     allocation_job_name = re.fullmatch(
         (
             rf"loom827-{re.escape(binding.sandbox)}-{candidate_label}-"

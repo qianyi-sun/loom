@@ -39,6 +39,12 @@ _LOOM_WORKER_ENVS = [
     "LOOM_WORKER_CONTAINER_PIDS",
     "LOOM_WORKER_SANDBOX_IDENTITY",
     "LOOM_WORKER_CANDIDATE_SHA",
+    "LOOM_WORKER_ENV_ID",
+    "LOOM_WORKER_RESOURCE_GENERATION",
+    "LOOM_WORKER_CANDIDATE_ID",
+    "LOOM_WORKER_CANDIDATE_TREE",
+    "LOOM_WORKER_REGISTRY_GENERATION",
+    "LOOM_WORKER_REGISTRY_PAYLOAD_SHA256",
     "LOOM_WORKER_SLURM_JOB_ID",
     "LOOM_WORKER_COMPOSE_PROJECT",
     "LOOM_WORKER_SLURM_ALLOCATED_GPUS",
@@ -186,6 +192,15 @@ def test_slurm_runtime_identity_parses_from_env(
     monkeypatch.setenv("LOOM_WORKER_MINIO_SECRET_KEY", "y")
     monkeypatch.setenv("LOOM_WORKER_SANDBOX_IDENTITY", "dev-a")
     monkeypatch.setenv("LOOM_WORKER_CANDIDATE_SHA", "a" * 40)
+    monkeypatch.setenv(
+        "LOOM_WORKER_ENV_ID",
+        "denv-00000000000000000000000000000001",
+    )
+    monkeypatch.setenv("LOOM_WORKER_RESOURCE_GENERATION", "7")
+    monkeypatch.setenv("LOOM_WORKER_CANDIDATE_ID", f"cand-{'b' * 40}")
+    monkeypatch.setenv("LOOM_WORKER_CANDIDATE_TREE", "c" * 40)
+    monkeypatch.setenv("LOOM_WORKER_REGISTRY_GENERATION", "42")
+    monkeypatch.setenv("LOOM_WORKER_REGISTRY_PAYLOAD_SHA256", "d" * 64)
     monkeypatch.setenv("LOOM_WORKER_SLURM_JOB_ID", "12345")
     monkeypatch.setenv(
         "LOOM_WORKER_COMPOSE_PROJECT",
@@ -198,6 +213,12 @@ def test_slurm_runtime_identity_parses_from_env(
 
     assert settings.sandbox_identity == "dev-a"
     assert settings.candidate_sha == "a" * 40
+    assert settings.env_id == "denv-00000000000000000000000000000001"
+    assert settings.resource_generation == 7
+    assert settings.candidate_id == f"cand-{'b' * 40}"
+    assert settings.candidate_tree == "c" * 40
+    assert settings.registry_generation == 42
+    assert settings.registry_payload_sha256 == "d" * 64
     assert settings.slurm_job_id == "12345"
     assert settings.compose_project == "loom-dev-a-aaaaaaaaaaaa-12345"
     assert settings.slurm_allocated_gpus == 2

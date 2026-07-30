@@ -1,8 +1,9 @@
-schema_version = 1
+schema_version = 2
 expected_hostname = "trt-eai-oldlab-2"
 candidate_parent = "/opt/loom-shared-capacity/candidates"
 current_link = "/opt/loom-shared-capacity/current"
 state_root = "/var/lib/loom-shared-capacity"
+registry_snapshot_path = "/var/lib/loom-developer-environment-registry/current-snapshot.json"
 bootstrap_requires_zero_capacity = true
 positive_admission_requires_platform_health = true
 acceptance_contract_ttl_seconds = 86400
@@ -19,15 +20,6 @@ acceptance_phases = [
   "submit_host_restart",
   "worker_crash",
 ]
-adapter_instances = [
-  "qianyi-gb10",
-  "qianyi-oldlab",
-  "hongjian-gb10",
-  "hongjian-oldlab",
-  "devansh-gb10",
-  "devansh-oldlab",
-]
-
 [slurm_domains.oldlab]
 submit_host = "trt-EAI-OLDLAB-2"
 controller = "TRT-EAI-OLDLAB-1"

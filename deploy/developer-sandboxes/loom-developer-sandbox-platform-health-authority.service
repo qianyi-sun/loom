@@ -12,7 +12,7 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
-ReadOnlyPaths=/var/lib/loom-developer-sandbox-live-acceptance
+ReadOnlyPaths=/var/lib/loom-developer-sandbox-live-acceptance /var/lib/loom-developer-environment-registry
 ReadWritePaths=/var/lib/loom-developer-sandbox-platform-health-authority
 
 [Install]

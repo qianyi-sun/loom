@@ -1,0 +1,131 @@
+schema_version = 1
+kind = "loom.developer-environment.legacy-seed"
+
+[[environment]]
+env_id = "denv-legacy-2f70d2a4d18b49ca"
+owner_username = "qianyi"
+display_name = "qianyi"
+runtime_id = "qianyi"
+service_user = "loom-sandbox-qianyi"
+service_group = "loom-sandbox-qianyi"
+uid = 31021
+gid = 31021
+compose_project = "loom-sandbox-qianyi"
+systemd_instance = "qianyi"
+candidate_root = "/shared_work/loom/candidates/sandboxes/qianyi"
+runtime_root = "/shared_work/loom/runtime/sandboxes/qianyi"
+state_root = "/srv/loom/developer-sandboxes/qianyi"
+evidence_root = "/srv/loom/developer-sandboxes/qianyi/evidence"
+database_name = "loom_sandbox_qianyi"
+postgres_volume = "loom-sandbox-qianyi_postgres_data"
+minio_volume = "loom-sandbox-qianyi_minio_data"
+task_bucket = "loom-sandbox-qianyi-tasks"
+trajectories_bucket = "loom-sandbox-qianyi-trajectories"
+artifacts_bucket = "loom-sandbox-qianyi-artifacts"
+provider_namespace = "sandbox-qianyi"
+slurm_user = "loom-sandbox-qianyi"
+slurm_account = "loom-dev-qianyi"
+slurm_qos = "loom-dev-qianyi"
+cgroup_slice = "loom-dev-qianyi.slice"
+created_at = "2026-07-29T00:00:00Z"
+
+[environment.ports]
+postgres = 20532
+minio = 20900
+minio_console = 20901
+control_plane = 20080
+loom_service = 20090
+llm_gateway = 20100
+egress_xds = 20800
+egress_proxy = 20443
+egress_admin = 20991
+web = 20173
+relay_control_plane = 26080
+relay_gateway = 26100
+relay_minio = 26900
+
+[[environment]]
+env_id = "denv-legacy-5504f843bf87403d"
+owner_username = "hongjian"
+display_name = "hongjian"
+runtime_id = "hongjian"
+service_user = "loom-sandbox-hongjian"
+service_group = "loom-sandbox-hongjian"
+uid = 31022
+gid = 31022
+compose_project = "loom-sandbox-hongjian"
+systemd_instance = "hongjian"
+candidate_root = "/shared_work/loom/candidates/sandboxes/hongjian"
+runtime_root = "/shared_work/loom/runtime/sandboxes/hongjian"
+state_root = "/srv/loom/developer-sandboxes/hongjian"
+evidence_root = "/srv/loom/developer-sandboxes/hongjian/evidence"
+database_name = "loom_sandbox_hongjian"
+postgres_volume = "loom-sandbox-hongjian_postgres_data"
+minio_volume = "loom-sandbox-hongjian_minio_data"
+task_bucket = "loom-sandbox-hongjian-tasks"
+trajectories_bucket = "loom-sandbox-hongjian-trajectories"
+artifacts_bucket = "loom-sandbox-hongjian-artifacts"
+provider_namespace = "sandbox-hongjian"
+slurm_user = "loom-sandbox-hongjian"
+slurm_account = "loom-dev-hongjian"
+slurm_qos = "loom-dev-hongjian"
+cgroup_slice = "loom-dev-hongjian.slice"
+created_at = "2026-07-29T00:00:00Z"
+
+[environment.ports]
+postgres = 21532
+minio = 21900
+minio_console = 21901
+control_plane = 21080
+loom_service = 21090
+llm_gateway = 21100
+egress_xds = 21800
+egress_proxy = 21443
+egress_admin = 21991
+web = 21173
+relay_control_plane = 27080
+relay_gateway = 27100
+relay_minio = 27900
+
+[[environment]]
+env_id = "denv-legacy-cab083d348804c64"
+owner_username = "devansh"
+display_name = "devansh"
+runtime_id = "devansh"
+service_user = "loom-sandbox-devansh"
+service_group = "loom-sandbox-devansh"
+uid = 31023
+gid = 31023
+compose_project = "loom-sandbox-devansh"
+systemd_instance = "devansh"
+candidate_root = "/shared_work/loom/candidates/sandboxes/devansh"
+runtime_root = "/shared_work/loom/runtime/sandboxes/devansh"
+state_root = "/srv/loom/developer-sandboxes/devansh"
+evidence_root = "/srv/loom/developer-sandboxes/devansh/evidence"
+database_name = "loom_sandbox_devansh"
+postgres_volume = "loom-sandbox-devansh_postgres_data"
+minio_volume = "loom-sandbox-devansh_minio_data"
+task_bucket = "loom-sandbox-devansh-tasks"
+trajectories_bucket = "loom-sandbox-devansh-trajectories"
+artifacts_bucket = "loom-sandbox-devansh-artifacts"
+provider_namespace = "sandbox-devansh"
+slurm_user = "loom-sandbox-devansh"
+slurm_account = "loom-dev-devansh"
+slurm_qos = "loom-dev-devansh"
+cgroup_slice = "loom-dev-devansh.slice"
+created_at = "2026-07-29T00:00:00Z"
+
+[environment.ports]
+postgres = 22532
+minio = 22900
+minio_console = 22901
+control_plane = 22080
+loom_service = 22090
+llm_gateway = 22100
+egress_xds = 22800
+egress_proxy = 22443
+egress_admin = 22991
+web = 22173
+relay_control_plane = 28080
+relay_gateway = 28100
+relay_minio = 28900

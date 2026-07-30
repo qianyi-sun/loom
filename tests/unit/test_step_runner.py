@@ -108,6 +108,30 @@ def test_isolated_verifier_inherits_slurm_cgroup_parent(
     assert options.cgroup_parent == "/system.slice/slurmstepd.scope/job_123"
 
 
+def test_isolated_verifier_inherits_complete_registry_identity(
+    context: TrialContext,
+) -> None:
+    registry_labels = (
+        ("loom.sandbox", "e-alpha"),
+        ("loom.candidate_sha", "a" * 40),
+        ("loom.slurm_job_id", "123"),
+        ("loom.compose_project", "loom-e-alpha-123"),
+        ("loom.env_id", "denv-00000000000000000000000000000001"),
+        ("loom.resource_generation", "7"),
+        ("loom.candidate_id", f"cand-{'b' * 40}"),
+        ("loom.candidate_tree", "c" * 40),
+        ("loom.registry_generation", "42"),
+        ("loom.registry_payload_sha256", "d" * 64),
+    )
+    context.runtime_identity_labels = registry_labels
+
+    labels = dict(_isolated_verifier_start_options(context).labels)
+
+    assert {key: labels[key] for key, _value in registry_labels} == dict(registry_labels)
+    assert labels["loom.driver-role"] == "verifier"
+    assert labels["loom.trial_id"] == str(context.trial_id)
+
+
 async def test_run_step_happy_path(context: TrialContext, tmp_path: Path):
     writer = TrajectoryWriter(
         local_path=context.local_trajectory_path,

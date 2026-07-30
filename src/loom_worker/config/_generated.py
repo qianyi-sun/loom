@@ -22,7 +22,9 @@ class WorkerSettings(BaseSettings):
 
     benchmark_cache: Path | None = None
     blocking_io_max_workers: int | None = None
+    candidate_id: str = ""
     candidate_sha: str = ""
+    candidate_tree: str = ""
     cgroup_parent: str = ""
     claim_poll_interval_sec: float = 1.0
     compose_project: str = ""
@@ -34,6 +36,7 @@ class WorkerSettings(BaseSettings):
     docker_socket: Path = Path("/var/run/docker.sock")
     drain_timeout_sec: int = 600
     enable_worker_vllm: bool = False
+    env_id: str = ""
     family_state_download_timeout_sec: float = 120.0
     fixtures_root: Path | None = None
     gateway_url: HttpUrl = cast(HttpUrl, "http://loom-llm-gateway:9100")
@@ -56,7 +59,10 @@ class WorkerSettings(BaseSettings):
     minio_secret_key_file: Path | None = None
     pool_name: str = "default"
     pre_start_heartbeat_interval_sec: float = 60.0
+    registry_generation: int = 0
+    registry_payload_sha256: str = ""
     require_cgroup_parent: bool = False
+    resource_generation: int = 0
     sandbox_identity: str = ""
     sandbox_isolation: bool = False
     sandbox_singleton_image: str = "loom-llm-gateway-sandbox:dev"

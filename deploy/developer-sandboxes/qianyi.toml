@@ -1,4 +1,5 @@
 schema_version = 1
+kind = "loom.developer-sandbox.profile"
 sandbox = "qianyi"
 ssh_target = "oldlab-2"
 canonical_hostname = "trt-eai-oldlab-2"

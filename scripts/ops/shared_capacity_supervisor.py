@@ -1,11 +1,11 @@
-#!/usr/bin/env python3
 """Persistently reconcile and publish shared sandbox capacity handoffs.
 
-One invocation collects the six sandbox/pool adapter observations, validates
-their request and lease-epoch bindings against the broker's durable state,
-executes exactly one broker reconcile transaction, independently rechecks all
-global/pool slot and pending-slot budgets, then atomically publishes the exact
-broker-produced handoffs.  It never reads a sandbox credential.
+One invocation collects the configured sandbox/pool adapter observations,
+validates their request and lease-epoch bindings against the broker's durable
+state, executes exactly one broker reconcile transaction, independently
+rechecks all global/pool slot and pending-slot budgets, then atomically
+publishes the exact broker-produced handoffs.  It never reads a sandbox
+credential.
 """
 
 from __future__ import annotations
@@ -22,27 +22,75 @@ import sys
 import tomllib
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from loom_control_plane.shared_capacity_broker import (
+_INSTALLED_SELF = Path("/usr/local/libexec/scripts/ops/shared_capacity_supervisor.py")
+_INSTALLED_IMPORT_ROOT = Path("/usr/local/libexec/loom-runtime-python")
+_RUNNING_INSTALLED = Path(__file__).absolute() == _INSTALLED_SELF
+if _RUNNING_INSTALLED:
+    for _path, _mode in {
+        _INSTALLED_SELF: 0o444,
+        _INSTALLED_IMPORT_ROOT / "loom_control_plane/__init__.py": 0o444,
+        _INSTALLED_IMPORT_ROOT / "loom_control_plane/shared_capacity_broker.py": 0o444,
+    }.items():
+        _current = Path("/")
+        for _part in _path.relative_to("/").parts[:-1]:
+            _current /= _part
+            try:
+                _metadata = _current.lstat()
+            except OSError as exc:
+                raise RuntimeError("installed supervisor import ancestry is unavailable") from exc
+            if (
+                not stat.S_ISDIR(_metadata.st_mode)
+                or stat.S_ISLNK(_metadata.st_mode)
+                or _metadata.st_uid != 0
+                or _metadata.st_gid != 0
+                or _metadata.st_mode & 0o022
+            ):
+                raise RuntimeError("installed supervisor import ancestry is unsafe")
+        try:
+            _metadata = _path.lstat()
+        except OSError as exc:
+            raise RuntimeError("installed supervisor import asset is unavailable") from exc
+        if (
+            not stat.S_ISREG(_metadata.st_mode)
+            or stat.S_ISLNK(_metadata.st_mode)
+            or _metadata.st_uid != 0
+            or _metadata.st_gid != 0
+            or _metadata.st_nlink != 1
+            or stat.S_IMODE(_metadata.st_mode) != _mode
+        ):
+            raise RuntimeError("installed supervisor import asset is unsafe")
+        _cache = _path.parent / "__pycache__"
+        if _cache.exists() or _cache.is_symlink():
+            raise RuntimeError("installed supervisor import inventory is not closed")
+    sys.path.insert(0, str(_INSTALLED_IMPORT_ROOT))
+elif __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).absolute().parents[2]))
+
+from loom_control_plane.shared_capacity_broker import (  # noqa: E402
     BrokerBudgets,
     BrokerError,
     LeaseObservation,
+    SandboxId,
     SharedCapacityBroker,
 )
 
+if _RUNNING_INSTALLED:
+    _broker_module = sys.modules["loom_control_plane.shared_capacity_broker"]
+    if Path(str(_broker_module.__file__)).absolute() != (
+        _INSTALLED_IMPORT_ROOT / "loom_control_plane/shared_capacity_broker.py"
+    ):
+        raise RuntimeError("installed supervisor import closure escaped fixed assets")
+
 _SCHEMA_VERSION = 1
-_SANDBOXES = ("qianyi", "hongjian", "devansh")
 _REVIEWED_POOL_SLOT_BOUNDS = {"gb10": 120, "oldlab": 20}
 _REVIEWED_POOL_PENDING_BOUNDS = {"gb10": 24, "oldlab": 10}
 _REVIEWED_GLOBAL_SLOT_BOUND = 140
 _REVIEWED_GLOBAL_PENDING_BOUND = 34
-_EXPECTED_INSTANCES = tuple(
-    f"{sandbox}-{pool}" for sandbox in _SANDBOXES for pool in _REVIEWED_POOL_SLOT_BOUNDS
-)
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-"
     r"[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
@@ -69,6 +117,28 @@ _OBSERVATION_FIELDS = {
 _OBSERVATION_MAX_AGE = timedelta(seconds=60)
 _OBSERVATION_MAX_FUTURE_SKEW = timedelta(seconds=30)
 _MAX_AUDIT_BYTES = 16 * 1024 * 1024
+_DRAINED_LEASE_FIELDS = (
+    "granted_slots",
+    "committed_slots",
+    "pending_slots",
+    "active_slots",
+    "draining_slots",
+    "terminal_slots",
+)
+_HANDOFF_FIELDS = {
+    "schema_version",
+    "request_id",
+    "lease_epoch",
+    "sandbox",
+    "environment",
+    "candidate_sha",
+    "pool_name",
+    "enabled",
+    "min_slots",
+    "max_slots",
+    "expires_at",
+    "preemptible",
+}
 
 
 class SupervisorError(RuntimeError):
@@ -215,6 +285,44 @@ def _budget_table(
     return result
 
 
+def _instance_parts(instance: str) -> tuple[SandboxId, str]:
+    sandbox, separator, pool = instance.rpartition("-")
+    if not separator or pool not in _REVIEWED_POOL_SLOT_BOUNDS:
+        raise SupervisorError(f"unknown supervisor instance {instance!r}")
+    try:
+        normalized_sandbox = SandboxId(sandbox)
+    except ValueError as exc:
+        raise SupervisorError(f"supervisor instance sandbox id is invalid: {instance!r}") from exc
+    if instance != f"{normalized_sandbox.value}-{pool}":
+        raise SupervisorError(f"unknown supervisor instance {instance!r}")
+    return normalized_sandbox, pool
+
+
+def _normalize_instances(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value or not all(isinstance(item, str) for item in value):
+        raise SupervisorError("supervisor instances must be a non-empty string list")
+    if len(value) != len(set(value)):
+        raise SupervisorError("supervisor instances contain duplicates")
+    sandbox_pools: dict[SandboxId, set[str]] = {}
+    normalized: list[tuple[SandboxId, str]] = []
+    for instance in value:
+        sandbox, pool = _instance_parts(instance)
+        sandbox_pools.setdefault(sandbox, set()).add(pool)
+        normalized.append((sandbox, pool))
+    reviewed_pools = set(_REVIEWED_POOL_SLOT_BOUNDS)
+    if any(pools != reviewed_pools for pools in sandbox_pools.values()):
+        raise SupervisorError(
+            "each supervisor sandbox must cover every reviewed pool exactly once",
+        )
+    return tuple(
+        f"{sandbox.value}-{pool}"
+        for sandbox, pool in sorted(
+            normalized,
+            key=lambda item: (item[0].value, item[1]),
+        )
+    )
+
+
 def load_config(path: Path) -> SupervisorConfig:
     resolved = _secure_regular_file(path, label="supervisor config")
     assert resolved is not None
@@ -268,14 +376,7 @@ def load_config(path: Path) -> SupervisorConfig:
         raise SupervisorError("global pending budget is inconsistent")
     if any(pool_pending[pool] > pool_slots[pool] for pool in pool_slots):
         raise SupervisorError("pool pending budget exceeds its slot budget")
-    instances = payload.get("instances")
-    if (
-        not isinstance(instances, list)
-        or not all(isinstance(item, str) for item in instances)
-        or tuple(sorted(instances)) != tuple(sorted(_EXPECTED_INSTANCES))
-        or len(instances) != len(set(instances))
-    ):
-        raise SupervisorError("supervisor instances must cover the closed six-instance set")
+    instances = _normalize_instances(payload.get("instances"))
     return SupervisorConfig(
         state_db=_absolute_path(payload, "state_db"),
         handoff_dir=_absolute_path(payload, "handoff_dir"),
@@ -287,15 +388,8 @@ def load_config(path: Path) -> SupervisorConfig:
         global_pending_slot_budget=global_pending,
         pool_slot_budgets=pool_slots,
         pool_pending_slot_budgets=pool_pending,
-        instances=tuple(instances),
+        instances=instances,
     )
-
-
-def _instance_parts(instance: str) -> tuple[str, str]:
-    sandbox, separator, pool = instance.rpartition("-")
-    if not separator or f"{sandbox}-{pool}" not in _EXPECTED_INSTANCES:
-        raise SupervisorError(f"unknown supervisor instance {instance!r}")
-    return sandbox, pool
 
 
 def _read_json(path: Path, *, label: str) -> object:
@@ -342,6 +436,119 @@ def _load_supervisor_state(path: Path) -> dict[str, Any] | None:
     return payload
 
 
+def _canonical_handoff_bytes(handoff: Mapping[str, Any]) -> bytes:
+    return (json.dumps(dict(handoff), sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def _prepare_committed_cohort_migration(
+    *,
+    state: Mapping[str, Any],
+    config: SupervisorConfig,
+    report: Mapping[str, Any],
+) -> dict[str, bytes | None]:
+    published = state.get("published")
+    if not isinstance(published, dict):
+        raise SupervisorError("supervisor state publication registry is invalid")
+    try:
+        old_instances = _normalize_instances(list(published))
+    except SupervisorError as exc:
+        raise SupervisorError("supervisor state cohort is invalid") from exc
+    old_config = replace(config, instances=old_instances)
+    if old_config.digest != state["config_digest"]:
+        raise SupervisorError(
+            "supervisor non-cohort config changed while capacity is committed",
+        )
+
+    old_set = set(old_instances)
+    new_set = set(config.instances)
+    added = new_set - old_set
+    removed = old_set - new_set
+    if (added and removed) or (not added and not removed):
+        raise SupervisorError(
+            "supervisor cohort rebind is forbidden while capacity is committed",
+        )
+
+    if removed:
+        requests = report.get("requests")
+        if not isinstance(requests, list):
+            raise SupervisorError("broker request surface is invalid")
+        for item in requests:
+            if not isinstance(item, dict):
+                raise SupervisorError("broker request record is invalid")
+            request = item.get("request")
+            lease = item.get("lease")
+            if not isinstance(request, dict) or not isinstance(lease, dict):
+                raise SupervisorError("broker request record is invalid")
+            instance = f"{request.get('sandbox')}-{request.get('pool')}"
+            if instance in removed and not _outside_scope_request_is_drained_terminal(
+                request,
+                lease,
+            ):
+                raise SupervisorError(
+                    "supervisor cohort deletion requires drained terminal capacity",
+                )
+
+    current = _current_generation(config.handoff_dir)
+    if current != state["generation"]:
+        raise SupervisorError("supervisor current generation differs from durable state")
+    current_path = config.handoff_dir / current
+    manifest = _generation_manifest(
+        generation=current,
+        report_digest=str(state["report_digest"]),
+        published=published,
+    )
+    selected = _publication_handoffs(report, old_config)
+    _validate_generation_contents(
+        current_path,
+        manifest=manifest,
+        selected=selected,
+        config=old_config,
+    )
+    _validated_published_generation_files(current_path)
+
+    retained: dict[str, bytes | None] = {}
+    for instance in sorted(old_set & new_set):
+        handoff = selected[instance]
+        if handoff is None:
+            retained[instance] = None
+            continue
+        path = _secure_generation_file(
+            current_path / f"{instance}.json",
+            label="retained generation handoff",
+        )
+        retained[instance] = path.read_bytes()
+    return retained
+
+
+def _validate_committed_cohort_migration(
+    *,
+    retained: Mapping[str, bytes | None],
+    report: Mapping[str, Any],
+    config: SupervisorConfig,
+) -> None:
+    selected = _publication_handoffs(report, config)
+    for instance, before in retained.items():
+        handoff = selected[instance]
+        after = None if handoff is None else _canonical_handoff_bytes(handoff)
+        if after != before:
+            raise SupervisorError(
+                "existing supervisor binding changed during cohort migration",
+            )
+
+
+def _outside_scope_request_is_drained_terminal(
+    request: Mapping[str, Any],
+    lease: Mapping[str, Any],
+) -> bool:
+    return (
+        request.get("state") == "terminal"
+        and lease.get("state") == "terminal"
+        and all(
+            type(lease.get(field)) is int and lease[field] == 0 for field in _DRAINED_LEASE_FIELDS
+        )
+    )
+
+
 def _request_maps(
     report: Mapping[str, Any],
     config: SupervisorConfig,
@@ -363,8 +570,23 @@ def _request_maps(
             raise SupervisorError("broker request id is invalid")
         if request_id in requests:
             raise SupervisorError("broker report contains duplicate request ids")
-        instance = f"{request.get('sandbox')}-{request.get('pool')}"
-        if instance not in config.instances:
+        sandbox_value = request.get("sandbox")
+        pool_value = request.get("pool")
+        if not isinstance(sandbox_value, str) or not isinstance(pool_value, str):
+            raise SupervisorError("broker request instance is invalid")
+        try:
+            sandbox = SandboxId(sandbox_value)
+        except ValueError as exc:
+            raise SupervisorError("broker request sandbox id is invalid") from exc
+        instance = f"{sandbox.value}-{pool_value}"
+        try:
+            _instance_parts(instance)
+        except SupervisorError as exc:
+            raise SupervisorError("broker request is outside supervisor scope") from exc
+        if instance not in config.instances and not _outside_scope_request_is_drained_terminal(
+            request,
+            lease,
+        ):
             raise SupervisorError("broker request is outside supervisor scope")
         requests[request_id] = {"request": request, "lease": lease, "instance": instance}
     handoffs: dict[str, dict[str, Any]] = {}
@@ -451,6 +673,18 @@ def _collect_observations(
     *,
     now: datetime,
 ) -> tuple[tuple[LeaseObservation, ...], dict[str, dict[str, Any]]]:
+    if config.observation_dir.exists() or config.observation_dir.is_symlink():
+        allowed = {f"{instance}.json" for instance in config.instances}
+        try:
+            unexpected = sorted(
+                path.name
+                for path in config.observation_dir.iterdir()
+                if path.name.endswith(".json") and path.name not in allowed
+            )
+        except OSError as exc:
+            raise SupervisorError("adapter observation directory is unavailable") from exc
+        if unexpected:
+            raise SupervisorError("adapter observation is outside the config snapshot")
     requests, handoffs = _request_maps(report, config)
     current = _current_bindings(requests, handoffs, config)
     accepted: list[LeaseObservation] = []
@@ -701,9 +935,20 @@ def _secure_generation_dir(path: Path, *, label: str) -> Path:
         stat.S_ISLNK(metadata.st_mode)
         or not stat.S_ISDIR(metadata.st_mode)
         or stat.S_IMODE(metadata.st_mode) != 0o700
+        or metadata.st_uid != os.geteuid()
+        or metadata.st_gid != os.getegid()
     ):
-        raise SupervisorError(f"{label} must be a private regular directory")
+        raise SupervisorError(f"{label} must be an owner-private regular directory")
     return path
+
+
+def _secure_generation_file(path: Path, *, label: str) -> Path:
+    resolved = _secure_regular_file(path, label=label)
+    assert resolved is not None
+    metadata = resolved.stat()
+    if metadata.st_uid != os.geteuid() or metadata.st_gid != os.getegid():
+        raise SupervisorError(f"{label} must be owner-bound")
+    return resolved
 
 
 def _fsync_directory(path: Path) -> None:
@@ -779,15 +1024,109 @@ def _validate_generation_contents(
             raise SupervisorError("generation handoff differs from broker output")
 
 
-def _remove_generation_dir(path: Path, config: SupervisorConfig) -> None:
+def _validated_published_generation_files(path: Path) -> tuple[Path, ...]:
     _secure_generation_dir(path, label="obsolete handoff generation")
+    manifest_path = _secure_generation_file(
+        path / "manifest.json",
+        label="obsolete handoff manifest",
+    )
+    manifest = _read_json(manifest_path, label="obsolete handoff manifest")
+    required = {
+        "schema_version",
+        "artifact_type",
+        "generation",
+        "report_digest",
+        "instances",
+    }
+    if (
+        not isinstance(manifest, dict)
+        or set(manifest) != required
+        or manifest.get("schema_version") != _SCHEMA_VERSION
+        or manifest.get("artifact_type") != "shared-capacity-handoff-generation"
+        or manifest.get("generation") != path.name
+        or _GENERATION_RE.fullmatch(path.name) is None
+        or _DIGEST_RE.fullmatch(str(manifest.get("report_digest"))) is None
+        or path.name.rpartition("-")[2] != str(manifest.get("report_digest"))[:16]
+        or not isinstance(manifest.get("instances"), dict)
+        or not manifest["instances"]
+    ):
+        raise SupervisorError("obsolete handoff manifest is invalid")
+    instances = manifest["instances"]
+    try:
+        normalized_instances = _normalize_instances(list(instances))
+    except SupervisorError as exc:
+        raise SupervisorError("obsolete handoff manifest instance registry is invalid") from exc
+    if set(normalized_instances) != set(instances):
+        raise SupervisorError("obsolete handoff manifest instance registry is invalid")
+    published_files: list[Path] = []
+    expected_names = {"manifest.json"}
+    for instance in normalized_instances:
+        entry = instances[instance]
+        if not isinstance(entry, dict):
+            raise SupervisorError("obsolete handoff manifest entry is invalid")
+        status_value = entry.get("status")
+        if status_value == "absent":
+            if set(entry) != {"status"}:
+                raise SupervisorError("obsolete absent handoff entry is invalid")
+            continue
+        if (
+            status_value != "published"
+            or set(entry) != {"status", "request_id", "lease_epoch", "digest"}
+            or _UUID_RE.fullmatch(str(entry.get("request_id"))) is None
+            or type(entry.get("lease_epoch")) is not int
+            or entry["lease_epoch"] < 0
+            or _DIGEST_RE.fullmatch(str(entry.get("digest"))) is None
+        ):
+            raise SupervisorError("obsolete published handoff entry is invalid")
+        handoff_path = _secure_generation_file(
+            path / f"{instance}.json",
+            label="obsolete generation handoff",
+        )
+        handoff = _read_json(handoff_path, label="obsolete generation handoff")
+        sandbox, pool = _instance_parts(instance)
+        if (
+            not isinstance(handoff, dict)
+            or set(handoff) != _HANDOFF_FIELDS
+            or handoff.get("request_id") != entry["request_id"]
+            or handoff.get("lease_epoch") != entry["lease_epoch"]
+            or handoff.get("sandbox") != sandbox.value
+            or handoff.get("environment") != sandbox.environment
+            or handoff.get("pool_name") != pool
+            or _SHA_RE.fullmatch(str(handoff.get("candidate_sha"))) is None
+            or type(handoff.get("enabled")) is not bool
+            or type(handoff.get("min_slots")) is not int
+            or type(handoff.get("max_slots")) is not int
+            or type(handoff.get("preemptible")) is not bool
+        ):
+            raise SupervisorError("obsolete generation handoff binding is invalid")
+        canonical = json.dumps(handoff, sort_keys=True, separators=(",", ":")) + "\n"
+        if hashlib.sha256(canonical.encode()).hexdigest() != entry["digest"]:
+            raise SupervisorError("obsolete generation handoff digest drifted")
+        expected_names.add(handoff_path.name)
+        published_files.append(handoff_path)
+    try:
+        actual_names = {item.name for item in path.iterdir()}
+    except OSError as exc:
+        raise SupervisorError("obsolete handoff generation is unreadable") from exc
+    if actual_names != expected_names:
+        raise SupervisorError("obsolete handoff generation contains unexpected files")
+    return (*published_files, manifest_path)
+
+
+def _validated_staging_generation_files(
+    path: Path,
+    config: SupervisorConfig,
+) -> tuple[Path, ...]:
+    _secure_generation_dir(path, label="staging handoff generation")
     allowed = {"manifest.json"} | {f"{item}.json" for item in config.instances}
     entries = list(path.iterdir())
     if any(item.name not in allowed for item in entries):
-        raise SupervisorError("obsolete handoff generation contains unexpected files")
-    for item in entries:
-        resolved = _secure_regular_file(item, label="obsolete generation file")
-        assert resolved is not None
+        raise SupervisorError("staging handoff generation contains unexpected files")
+    return tuple(_secure_generation_file(item, label="staging generation file") for item in entries)
+
+
+def _remove_staging_generation_dir(path: Path, config: SupervisorConfig) -> None:
+    for resolved in _validated_staging_generation_files(path, config):
         resolved.unlink()
     path.rmdir()
 
@@ -829,7 +1168,7 @@ def _materialize_generation(
         _fsync_directory(config.handoff_dir)
     finally:
         if staging.exists():
-            _remove_generation_dir(staging, config)
+            _remove_staging_generation_dir(staging, config)
 
 
 def _flip_current_generation(handoff_dir: Path, generation: str) -> None:
@@ -854,6 +1193,7 @@ def _prune_generations(
     keep = {current}
     if previous is not None:
         keep.add(previous)
+    validated: list[tuple[Path, tuple[Path, ...]]] = []
     for path in sorted(config.handoff_dir.iterdir()):
         if path.name in keep or path.name == "current":
             continue
@@ -862,8 +1202,34 @@ def _prune_generations(
             and _STAGING_GENERATION_RE.fullmatch(path.name) is None
         ):
             continue
-        _remove_generation_dir(path, config)
+        if _GENERATION_RE.fullmatch(path.name) is not None:
+            files = _validated_published_generation_files(path)
+        else:
+            files = _validated_staging_generation_files(path, config)
+        validated.append((path, files))
+    for path, files in validated:
+        for item in files:
+            item.unlink()
+        path.rmdir()
     _fsync_directory(config.handoff_dir)
+
+
+def _validate_prunable_generations(
+    config: SupervisorConfig,
+    *,
+    current: str,
+    previous: str | None,
+) -> None:
+    keep = {current}
+    if previous is not None:
+        keep.add(previous)
+    for path in sorted(config.handoff_dir.iterdir()):
+        if path.name in keep or path.name == "current":
+            continue
+        if _GENERATION_RE.fullmatch(path.name) is not None:
+            _validated_published_generation_files(path)
+        elif _STAGING_GENERATION_RE.fullmatch(path.name) is not None:
+            _validated_staging_generation_files(path, config)
 
 
 def _previous_generation(handoff_dir: Path, current: str) -> str | None:
@@ -921,12 +1287,22 @@ def _publish_handoffs(
                 config=config,
             )
             retained_previous = _previous_generation(config.handoff_dir, previous)
+            _validate_prunable_generations(
+                config,
+                current=previous,
+                previous=retained_previous,
+            )
             _prune_generations(
                 config,
                 current=previous,
                 previous=retained_previous,
             )
             return published, previous, retained_previous
+    _validate_prunable_generations(
+        config,
+        current=generation,
+        previous=previous,
+    )
     _materialize_generation(
         generation=generation,
         selected=selected,
@@ -999,12 +1375,17 @@ def _run_once_unlocked(
     if not isinstance(before_aggregate, dict):
         raise SupervisorError("broker aggregate report is invalid")
     state = _load_supervisor_state(config.supervisor_state_path)
+    retained_handoffs: dict[str, bytes | None] | None = None
     if (
         state is not None
         and state["config_digest"] != config.digest
         and int(before_aggregate["committed_slots"]) != 0
     ):
-        raise SupervisorError("supervisor config changed while capacity is committed")
+        retained_handoffs = _prepare_committed_cohort_migration(
+            state=state,
+            config=config,
+            report=before,
+        )
     observations, observation_evidence = _collect_observations(
         config,
         before,
@@ -1020,6 +1401,12 @@ def _run_once_unlocked(
         observations=observations,
     )
     _validate_report_budgets(report, config)
+    if retained_handoffs is not None:
+        _validate_committed_cohort_migration(
+            retained=retained_handoffs,
+            report=report,
+            config=config,
+        )
     report_digest = _digest(report)
     previous_sequence = int(state["cycle_sequence"]) if state is not None else 0
     sequence = max(previous_sequence, _last_audit_sequence(config.audit_path)) + 1

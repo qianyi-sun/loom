@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import stat
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -23,6 +24,8 @@ from loom_control_plane.shared_capacity_broker import (
 SHA_A = "a" * 40
 SHA_B = "b" * 40
 SHA_C = "c" * 40
+QIANYI = SandboxId("qianyi")
+SHA_D = "d" * 40
 
 
 class Clock:
@@ -42,7 +45,7 @@ def _broker(tmp_path: Path, clock: Clock) -> SharedCapacityBroker:
 
 def _request(
     broker: SharedCapacityBroker,
-    sandbox: SandboxId,
+    sandbox: SandboxId | str,
     *,
     candidate_sha: str = SHA_A,
     pool: str = "gb10",
@@ -50,8 +53,9 @@ def _request(
     target_slots: int = 10,
     ttl_seconds: int = 3600,
 ) -> str:
+    normalized_sandbox = sandbox if isinstance(sandbox, SandboxId) else SandboxId(sandbox)
     request, _ = broker.request_capacity(
-        sandbox=sandbox,
+        sandbox=normalized_sandbox,
         candidate_sha=candidate_sha,
         pool=pool,
         min_slots=min_slots,
@@ -59,7 +63,7 @@ def _request(
         ttl_seconds=ttl_seconds,
         purpose="large-batch-runtime-validation",
         preemptible=True,
-        idempotency_key=f"{sandbox.value}:{pool}:{candidate_sha}",
+        idempotency_key=f"{normalized_sandbox.value}:{pool}:{candidate_sha}",
     )
     return request.id
 
@@ -85,7 +89,7 @@ def _lease_observation(
     request_id: str,
     lease_epoch: int,
     *,
-    sandbox: SandboxId = SandboxId.QIANYI,
+    sandbox: SandboxId = QIANYI,
     candidate_sha: str = SHA_A,
     pool_name: str = "gb10",
     capacity_lease_state: str = "retiring",
@@ -119,7 +123,7 @@ def _lease_observation(
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
-        ("sandbox", "unknown", "allowlist"),
+        ("sandbox", "Unknown", "must match"),
         ("candidate_sha", "abc1234", "40-hex"),
         ("pool", "../gb10", "identifier"),
         ("target_slots", 10_001, "10000"),
@@ -137,7 +141,7 @@ def test_request_schema_fails_closed(
     clock = Clock()
     broker = _broker(tmp_path, clock)
     kwargs: dict[str, object] = {
-        "sandbox": SandboxId.QIANYI,
+        "sandbox": SandboxId("qianyi"),
         "candidate_sha": SHA_A,
         "pool": "gb10",
         "min_slots": 2,
@@ -152,6 +156,59 @@ def test_request_schema_fails_closed(
         broker.request_capacity(**kwargs)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(
+    "value",
+    (
+        "",
+        "1sandbox",
+        "Sandbox",
+        "sandbox_name",
+        "sandbox/name",
+        "a" * 49,
+    ),
+)
+def test_sandbox_id_rejects_noncanonical_runtime_ids(value: str) -> None:
+    with pytest.raises(ValueError, match="sandbox id must match"):
+        SandboxId(value)
+
+
+def test_dynamic_sandbox_ids_support_request_fairness_status_and_restart(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    broker = _broker(tmp_path, clock)
+    dynamic = {
+        SandboxId("qianyi"): SHA_A,
+        SandboxId("research-4"): SHA_B,
+        SandboxId("team-27"): SHA_C,
+        SandboxId("runtime-n"): SHA_D,
+    }
+    for sandbox, candidate_sha in dynamic.items():
+        _request(
+            broker,
+            sandbox,
+            candidate_sha=candidate_sha,
+            target_slots=4,
+        )
+
+    report = broker.reconcile(_budgets(global_slots=8, pools={"gb10": 8}))
+    grants = {
+        str(item["request"]["sandbox"]): item["lease"]["granted_slots"]
+        for item in report["requests"]  # type: ignore[union-attr]
+    }
+    assert grants == {sandbox.value: 2 for sandbox in dynamic}
+    assert {
+        (handoff["sandbox"], handoff["environment"])
+        for handoff in report["handoffs"]  # type: ignore[union-attr]
+    } == {(sandbox.value, sandbox.environment) for sandbox in dynamic}
+
+    restarted = _broker(tmp_path, clock)
+    assert {
+        row["request"]["sandbox"]  # type: ignore[index]
+        for row in restarted.status()["requests"]
+    } == {sandbox.value for sandbox in dynamic}
+
+
 def test_state_authority_is_owner_only_and_sidecars_are_not_world_readable(
     tmp_path: Path,
 ) -> None:
@@ -162,7 +219,7 @@ def test_state_authority_is_owner_only_and_sidecars_are_not_world_readable(
     assert stat.S_IMODE(authority.stat().st_mode) == 0o700
     assert stat.S_IMODE(broker.state_db.stat().st_mode) == 0o600
 
-    _request(broker, SandboxId.QIANYI)
+    _request(broker, SandboxId("qianyi"))
     broker.reconcile(_budgets(global_slots=2, pools={"gb10": 2}))
     for path in broker._sqlite_sidecar_paths():
         if path.exists():
@@ -174,33 +231,135 @@ def test_persisted_admission_fence_blocks_only_new_requests_until_exact_release(
 ) -> None:
     clock = Clock()
     broker = _broker(tmp_path, clock)
-    existing = _request(broker, SandboxId.QIANYI)
+    existing = _request(broker, SandboxId("qianyi"))
     token = "1" * 32
 
     broker.close_admission(token)
     broker.close_admission(token)
     restarted = _broker(tmp_path, clock)
-    assert _request(restarted, SandboxId.QIANYI) == existing
+    assert _request(restarted, SandboxId("qianyi")) == existing
     with pytest.raises(BrokerError, match="fenced during runtime activation"):
-        _request(restarted, SandboxId.HONGJIAN)
+        _request(restarted, SandboxId("hongjian"))
     with pytest.raises(BrokerError, match="belongs to another transaction"):
         restarted.open_admission("2" * 32)
 
     restarted.open_admission(token)
     restarted.open_admission(token)
-    assert _request(restarted, SandboxId.HONGJIAN)
+    assert _request(restarted, SandboxId("hongjian"))
 
 
-def _acceptance_contract(clock: Clock, *, expires_in: int = 3600) -> dict[str, object]:
+def test_environment_admission_fence_is_exact_persistent_and_peer_safe(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    broker = _broker(tmp_path, clock)
+    token = "1" * 32
+
+    broker.close_environment_admission("research-4", token)
+    broker.close_environment_admission(SandboxId("research-4"), token)
+    restarted = _broker(tmp_path, clock)
+
+    assert restarted.environment_admission_fence("research-4") == token
+    assert restarted.environment_admission_fence("team-27") is None
+    with pytest.raises(BrokerError, match="fenced for this environment"):
+        _request(restarted, "research-4", candidate_sha=SHA_B)
+    assert _request(restarted, "team-27", candidate_sha=SHA_C)
+    with pytest.raises(BrokerError, match="fenced by another transaction"):
+        restarted.close_environment_admission("research-4", "2" * 32)
+    with pytest.raises(BrokerError, match="belongs to another transaction"):
+        restarted.open_environment_admission("research-4", "2" * 32)
+
+    restarted.rotate_environment_admission("research-4", token, "2" * 32)
+    assert restarted.environment_admission_fence("research-4") == "2" * 32
+    with pytest.raises(BrokerError, match="belongs to another transaction"):
+        restarted.rotate_environment_admission("research-4", token, "3" * 32)
+    with pytest.raises(BrokerError, match="fenced for this environment"):
+        _request(restarted, "research-4", candidate_sha=SHA_B)
+    restarted.open_environment_admission("research-4", "2" * 32)
+    restarted.open_environment_admission("research-4", "2" * 32)
+    assert restarted.environment_admission_fence("research-4") is None
+    assert _request(restarted, "research-4", candidate_sha=SHA_B)
+
+
+def test_environment_fence_serializes_with_racing_new_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Clock()
+    broker = _broker(tmp_path, clock)
+    broker.initialize()
+    original_transaction = broker._transaction
+    monkeypatch.setattr(broker, "initialize", lambda: None)
+    fence_holds_write_lock = threading.Event()
+    allow_fence_commit = threading.Event()
+    request_entered_transaction = threading.Event()
+    errors: list[BaseException] = []
+
+    def controlled_transaction() -> sqlite3.Connection:
+        if threading.current_thread().name == "environment-fence":
+            connection = original_transaction()
+            fence_holds_write_lock.set()
+            if not allow_fence_commit.wait(timeout=5):
+                connection.rollback()
+                connection.close()
+                raise AssertionError("test did not release environment fence")
+            return connection
+        if threading.current_thread().name == "capacity-request":
+            request_entered_transaction.set()
+        return original_transaction()
+
+    monkeypatch.setattr(broker, "_transaction", controlled_transaction)
+
+    def close_fence() -> None:
+        try:
+            broker.close_environment_admission("runtime-n", "1" * 32)
+        except BaseException as exc:
+            errors.append(exc)
+
+    def create_request() -> None:
+        try:
+            _request(broker, "runtime-n", candidate_sha=SHA_D)
+        except BaseException as exc:
+            errors.append(exc)
+
+    fence_thread = threading.Thread(target=close_fence, name="environment-fence")
+    request_thread = threading.Thread(target=create_request, name="capacity-request")
+    fence_thread.start()
+    assert fence_holds_write_lock.wait(timeout=5)
+    request_thread.start()
+    assert request_entered_transaction.wait(timeout=5)
+    allow_fence_commit.set()
+    fence_thread.join(timeout=5)
+    request_thread.join(timeout=5)
+
+    assert not fence_thread.is_alive()
+    assert not request_thread.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], BrokerError)
+    assert str(errors[0]) == "new capacity requests are fenced for this environment"
+    assert broker.environment_admission_fence("runtime-n") == "1" * 32
+    assert broker.status()["requests"] == []
+
+
+def _acceptance_contract(
+    clock: Clock,
+    *,
+    expires_in: int = 3600,
+    candidate_shas: dict[str, str] | None = None,
+) -> dict[str, object]:
     return {
         "schema_version": 1,
         "admission_token": "1" * 32,
         "session_id": "2" * 32,
-        "candidate_shas": {
-            "qianyi": SHA_A,
-            "hongjian": SHA_B,
-            "devansh": SHA_C,
-        },
+        "candidate_shas": (
+            candidate_shas
+            if candidate_shas is not None
+            else {
+                "qianyi": SHA_A,
+                "hongjian": SHA_B,
+                "devansh": SHA_C,
+            }
+        ),
         "phases": [
             "multi_candidate_overlap",
             "large_batch_burst",
@@ -263,7 +422,7 @@ def test_acceptance_fairness_cohort_is_atomic_distinct_and_general_stays_fenced(
         ("devansh", "oldlab", SHA_C),
     }
     with pytest.raises(BrokerError, match="fenced during runtime activation"):
-        _request(broker, SandboxId.QIANYI, candidate_sha=SHA_A, pool="oldlab")
+        _request(broker, SandboxId("qianyi"), candidate_sha=SHA_A, pool="oldlab")
     with pytest.raises(BrokerError, match="outside the active contract"):
         broker.request_acceptance_cohort(
             token="1" * 32,
@@ -271,6 +430,95 @@ def test_acceptance_fairness_cohort_is_atomic_distinct_and_general_stays_fenced(
             phase="final_drain",
         )
     assert len(broker.status()["requests"]) == 6
+
+
+def test_acceptance_cohort_uses_dynamic_session_registry_snapshot(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    broker = _broker(tmp_path, clock)
+    candidate_shas = {
+        "qianyi": SHA_A,
+        "hongjian": SHA_B,
+        "devansh": SHA_C,
+        "research-4": SHA_D,
+    }
+    contract = _acceptance_contract(
+        clock,
+        candidate_shas=candidate_shas,
+    )
+    broker.close_admission("1" * 32)
+    broker.open_acceptance_admission(token="1" * 32, contract=contract)
+
+    candidate_shas["late-runtime"] = "e" * 40
+    cohort = broker.request_acceptance_cohort(
+        token="1" * 32,
+        session_id="2" * 32,
+        phase="fairness_contention",
+    )
+
+    assert len(cohort) == 8
+    assert {
+        row["request"]["sandbox"]  # type: ignore[index]
+        for row in cohort
+    } == {"qianyi", "hongjian", "devansh", "research-4"}
+    assert broker.acceptance_contract()["candidate_shas"] == {  # type: ignore[index]
+        "qianyi": SHA_A,
+        "hongjian": SHA_B,
+        "devansh": SHA_C,
+        "research-4": SHA_D,
+    }
+    with pytest.raises(BrokerError, match="outside the active contract"):
+        broker.cancel_acceptance_request(
+            token="1" * 32,
+            session_id="2" * 32,
+            phase="fairness_contention",
+            sandbox="late-runtime",
+            pool="gb10",
+        )
+
+
+def test_acceptance_registry_requires_two_valid_distinct_runtime_ids(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    broker = _broker(tmp_path, clock)
+    two = _acceptance_contract(
+        clock,
+        candidate_shas={"runtime-a": SHA_A, "runtime-b": SHA_B},
+    )
+    broker.close_admission("1" * 32)
+    broker.open_acceptance_admission(token="1" * 32, contract=two)
+    assert (
+        len(
+            broker.request_acceptance_cohort(
+                token="1" * 32,
+                session_id="2" * 32,
+                phase="fairness_contention",
+            ),
+        )
+        == 4
+    )
+
+    for candidate_shas in (
+        {"runtime-a": SHA_A},
+        {"Runtime-a": SHA_A, "runtime-b": SHA_B},
+        {"runtime-a": SHA_A, "runtime-b": SHA_A},
+    ):
+        isolated = _broker(
+            tmp_path
+            / hashlib.sha256(
+                json.dumps(candidate_shas, sort_keys=True).encode(),
+            ).hexdigest(),
+            clock,
+        )
+        invalid = _acceptance_contract(
+            clock,
+            candidate_shas=candidate_shas,
+        )
+        isolated.close_admission("1" * 32)
+        with pytest.raises(BrokerError, match="sandbox registry"):
+            isolated.open_acceptance_admission(token="1" * 32, contract=invalid)
 
 
 def test_acceptance_cancel_is_exact_owned_and_not_broad_generic_routing(
@@ -331,11 +579,14 @@ def test_acceptance_phase_rotation_retires_before_next_atomic_cohort(
         "large_batch_burst",
         "fairness_contention",
     ):
-        assert broker.acceptance_cohort_status(
-            token="1" * 32,
-            session_id="2" * 32,
-            phase=phase,
-        ) is None
+        assert (
+            broker.acceptance_cohort_status(
+                token="1" * 32,
+                session_id="2" * 32,
+                phase=phase,
+            )
+            is None
+        )
         broker.retire_acceptance_requests(
             token="1" * 32,
             session_id="2" * 32,
@@ -407,7 +658,8 @@ def test_acceptance_ttl_never_refreshes_and_restart_replay_is_same_request(
         phase="submit_host_restart",
     )
     assert [row["request"]["id"] for row in restart_replay] == [  # type: ignore[index]
-        row["request"]["id"] for row in restart_first  # type: ignore[index]
+        row["request"]["id"]
+        for row in restart_first  # type: ignore[index]
     ]
 
 
@@ -428,7 +680,7 @@ def test_expired_acceptance_contract_blocks_new_cohort_without_opening_general(
             phase="multi_candidate_overlap",
         )
     with pytest.raises(BrokerError, match="fenced during runtime activation"):
-        _request(broker, SandboxId.QIANYI)
+        _request(broker, SandboxId("qianyi"))
     assert broker.acceptance_contract() == contract
 
 
@@ -488,9 +740,7 @@ def test_v1_authority_upgrades_observation_replay_state_in_place(
         version = connection.execute(
             "SELECT value FROM broker_meta WHERE key = 'schema_version'",
         ).fetchone()
-        columns = {
-            row[1] for row in connection.execute("PRAGMA table_info(capacity_leases)")
-        }
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(capacity_leases)")}
     assert version == ("2",)
     assert {
         "last_observation_sequence",
@@ -566,13 +816,13 @@ def test_request_is_idempotent_but_key_cannot_be_rebound(
 ) -> None:
     clock = Clock()
     broker = _broker(tmp_path, clock)
-    first_id = _request(broker, SandboxId.QIANYI)
-    second_id = _request(broker, SandboxId.QIANYI)
+    first_id = _request(broker, SandboxId("qianyi"))
+    second_id = _request(broker, SandboxId("qianyi"))
     assert second_id == first_id
 
     with pytest.raises(BrokerError, match="already bound"):
         broker.request_capacity(
-            sandbox=SandboxId.QIANYI,
+            sandbox=SandboxId("qianyi"),
             candidate_sha=SHA_B,
             pool="gb10",
             min_slots=0,
@@ -589,9 +839,9 @@ def test_three_sandboxes_share_minimum_and_burst_without_overshoot(
 ) -> None:
     clock = Clock()
     broker = _broker(tmp_path, clock)
-    _request(broker, SandboxId.QIANYI, candidate_sha=SHA_A, min_slots=2)
-    _request(broker, SandboxId.HONGJIAN, candidate_sha=SHA_B, min_slots=2)
-    _request(broker, SandboxId.DEVANSH, candidate_sha=SHA_C, min_slots=2)
+    _request(broker, SandboxId("qianyi"), candidate_sha=SHA_A, min_slots=2)
+    _request(broker, SandboxId("hongjian"), candidate_sha=SHA_B, min_slots=2)
+    _request(broker, SandboxId("devansh"), candidate_sha=SHA_C, min_slots=2)
 
     report = broker.reconcile(_budgets(global_slots=12, pools={"gb10": 12}))
 
@@ -624,8 +874,8 @@ def test_global_pool_and_pending_slot_budgets_all_clamp_grants(
 ) -> None:
     clock = Clock()
     broker = _broker(tmp_path, clock)
-    _request(broker, SandboxId.QIANYI, pool="gb10", candidate_sha=SHA_A)
-    _request(broker, SandboxId.HONGJIAN, pool="oldlab", candidate_sha=SHA_B)
+    _request(broker, SandboxId("qianyi"), pool="gb10", candidate_sha=SHA_A)
+    _request(broker, SandboxId("hongjian"), pool="oldlab", candidate_sha=SHA_B)
 
     report = broker.reconcile(
         _budgets(
@@ -652,7 +902,7 @@ def test_one_active_sandbox_can_burst_to_the_available_target(
 ) -> None:
     clock = Clock()
     broker = _broker(tmp_path, clock)
-    _request(broker, SandboxId.QIANYI, target_slots=140)
+    _request(broker, SandboxId("qianyi"), target_slots=140)
     report = broker.reconcile(
         _budgets(
             global_slots=140,
@@ -670,9 +920,9 @@ def test_fair_turn_ages_all_three_sandboxes_through_one_slot(
     clock = Clock()
     broker = _broker(tmp_path, clock)
     ids = {
-        SandboxId.QIANYI: _request(broker, SandboxId.QIANYI, candidate_sha=SHA_A),
-        SandboxId.HONGJIAN: _request(broker, SandboxId.HONGJIAN, candidate_sha=SHA_B),
-        SandboxId.DEVANSH: _request(broker, SandboxId.DEVANSH, candidate_sha=SHA_C),
+        SandboxId("qianyi"): _request(broker, SandboxId("qianyi"), candidate_sha=SHA_A),
+        SandboxId("hongjian"): _request(broker, SandboxId("hongjian"), candidate_sha=SHA_B),
+        SandboxId("devansh"): _request(broker, SandboxId("devansh"), candidate_sha=SHA_C),
     }
     budget = _budgets(global_slots=1, pools={"gb10": 1})
     served: list[str] = []
@@ -716,9 +966,9 @@ def test_fair_turn_ages_all_three_sandboxes_through_one_slot(
         )
 
     assert served == [
-        SandboxId.DEVANSH.value,
-        SandboxId.HONGJIAN.value,
-        SandboxId.QIANYI.value,
+        SandboxId("devansh").value,
+        SandboxId("hongjian").value,
+        SandboxId("qianyi").value,
     ]
     assert set(served) == {sandbox.value for sandbox in ids}
 
@@ -728,7 +978,7 @@ def test_cancel_is_drain_first_and_terminal_only_after_observation(
 ) -> None:
     clock = Clock()
     broker = _broker(tmp_path, clock)
-    request_id = _request(broker, SandboxId.QIANYI, target_slots=4)
+    request_id = _request(broker, SandboxId("qianyi"), target_slots=4)
     budget = _budgets(global_slots=4, pools={"gb10": 4})
     broker.reconcile(budget)
 
@@ -763,7 +1013,7 @@ def test_ttl_expiry_emits_zero_grant_handoff_and_audit(
 ) -> None:
     clock = Clock()
     broker = _broker(tmp_path, clock)
-    _request(broker, SandboxId.QIANYI, ttl_seconds=60)
+    _request(broker, SandboxId("qianyi"), ttl_seconds=60)
     budget = _budgets(global_slots=2, pools={"gb10": 2})
     broker.reconcile(budget)
     clock.advance(seconds=61)
@@ -781,7 +1031,7 @@ def test_observation_is_epoch_fenced_and_cannot_expand_commitment(
 ) -> None:
     clock = Clock()
     broker = _broker(tmp_path, clock)
-    request_id = _request(broker, SandboxId.QIANYI, target_slots=2)
+    request_id = _request(broker, SandboxId("qianyi"), target_slots=2)
     report = broker.reconcile(_budgets(global_slots=2, pools={"gb10": 2}))
     epoch = report["requests"][0]["lease"]["lease_epoch"]  # type: ignore[index]
 
@@ -818,7 +1068,7 @@ def test_observation_replay_does_not_refresh_last_observed_at(
 ) -> None:
     clock = Clock()
     broker = _broker(tmp_path, clock)
-    request_id = _request(broker, SandboxId.QIANYI, target_slots=2)
+    request_id = _request(broker, SandboxId("qianyi"), target_slots=2)
     report = broker.reconcile(_budgets(global_slots=2, pools={"gb10": 2}))
     epoch = report["requests"][0]["lease"]["lease_epoch"]  # type: ignore[index]
     observation = _lease_observation(
@@ -844,9 +1094,7 @@ def test_observation_replay_does_not_refresh_last_observed_at(
     assert replay_lease["last_observed_at"] == first_lease["last_observed_at"]
     assert replay_lease["last_observation_sequence"] == 1
     assert replay_lease["last_observation_digest"] == observation.payload_sha256
-    lease_events = [
-        event for event in replay["audit"] if event["event_type"] == "lease_observed"
-    ]
+    lease_events = [event for event in replay["audit"] if event["event_type"] == "lease_observed"]
     assert len(lease_events) == 1
 
 
@@ -855,7 +1103,7 @@ def test_observation_stale_wrong_binding_and_sequence_rebind_fail_closed(
 ) -> None:
     clock = Clock()
     broker = _broker(tmp_path, clock)
-    request_id = _request(broker, SandboxId.QIANYI, target_slots=2)
+    request_id = _request(broker, SandboxId("qianyi"), target_slots=2)
     report = broker.reconcile(_budgets(global_slots=2, pools={"gb10": 2}))
     epoch = report["requests"][0]["lease"]["lease_epoch"]  # type: ignore[index]
     accepted = _lease_observation(
@@ -921,7 +1169,7 @@ def test_two_broker_instances_share_one_persistent_authority(
 ) -> None:
     clock = Clock()
     first = _broker(tmp_path, clock)
-    request_id = _request(first, SandboxId.QIANYI)
+    request_id = _request(first, SandboxId("qianyi"))
     second = _broker(tmp_path, clock)
     report = second.reconcile(_budgets(global_slots=3, pools={"gb10": 3}))
     assert report["requests"][0]["request"]["id"] == request_id  # type: ignore[index]
@@ -939,7 +1187,7 @@ def test_cli_surface_emits_secret_free_json(
             str(state_db),
             "request",
             "--sandbox",
-            "qianyi",
+            "runtime-n",
             "--candidate-sha",
             SHA_A,
             "--pool",
@@ -959,6 +1207,7 @@ def test_cli_surface_emits_secret_free_json(
     )
     assert rc == 0
     document = json.loads(capsys.readouterr().out)
+    assert document["request"]["sandbox"] == "runtime-n"
     assert document["request"]["candidate_sha"] == SHA_A
     assert "token" not in json.dumps(document).lower()
 
@@ -966,12 +1215,11 @@ def test_cli_surface_emits_secret_free_json(
 def test_status_matches_published_evidence_schema(tmp_path: Path) -> None:
     clock = Clock()
     broker = _broker(tmp_path, clock)
-    _request(broker, SandboxId.QIANYI)
+    _request(broker, SandboxId("runtime-n"))
     report = broker.reconcile(_budgets(global_slots=3, pools={"gb10": 3}))
     schema = json.loads(
         (
-            Path(__file__).parents[2]
-            / "docs/evidence/shared-sandbox-capacity-evidence.schema.json"
+            Path(__file__).parents[2] / "docs/evidence/shared-sandbox-capacity-evidence.schema.json"
         ).read_text(encoding="utf-8"),
     )
     jsonschema.Draft202012Validator(schema).validate(report)

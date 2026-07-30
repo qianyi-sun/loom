@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Install and converge the three persistent oldlab-2 developer sandboxes.
+"""Converge registry-owned developer environments on oldlab-2.
 
 All public mutation commands are plan-only unless ``--execute`` is supplied.
 The installed systemd entry point has no repository, path, host, or secret
-overrides. Secret values are generated once, written atomically, and never
-included in command output.
+overrides.  The ``environment-*`` commands delegate to the dynamic registry
+orchestrator.  The older sandbox commands remain only for migration convergence
+of environments whose registry layout is ``legacy-v1``.
 """
 
 from __future__ import annotations
@@ -36,17 +37,21 @@ import urllib.request
 from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+from scripts.ops import developer_environment_registry as environment_registry
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SOURCE_PROFILES = REPO_ROOT / "deploy/developer-sandboxes"
 SOURCE_UNIT = SOURCE_PROFILES / "loom-developer-sandbox@.service"
 
-SANDBOXES = ("qianyi", "hongjian", "devansh")
-SANDBOX_BATCH_IDENTITIES = {
+# Migration input only. Normal deployment and renewal enumerate the verified
+# registry snapshot and never use this seed cohort as an allowlist.
+LEGACY_SEED_RUNTIME_IDS = ("qianyi", "hongjian", "devansh")
+LEGACY_SEED_BATCH_IDENTITIES = {
     "qianyi": ("loom-sandbox-qianyi", 31021),
     "hongjian": ("loom-sandbox-hongjian", 31022),
     "devansh": ("loom-sandbox-devansh", 31023),
@@ -75,6 +80,14 @@ NODE_AUTHORITY_PROGRAM = Path(
 )
 NODE_TRANSPORT_PROGRAM = Path(
     "/usr/local/libexec/loom-developer-sandbox-node-transport",
+)
+INSTALLED_REMOTE_LINK_HOST = Path(
+    "/usr/local/libexec/loom-developer-sandbox-remote-link-host",
+)
+INSTALLED_DOMAIN_RUNTIME = Path("/usr/local/libexec/loom-developer-domain-runtime")
+INSTALLED_DOMAIN_RUNTIME_CONFIG = Path("/etc/loom/developer-runtime-domains.toml")
+INSTALLED_CAPACITY_POLICY_ROOT = Path(
+    "/etc/loom/developer-shared-capacity-policies",
 )
 UNIT_PATH = Path("/etc/systemd/system/loom-developer-sandbox@.service")
 RENEWAL_SERVICE_PATH = Path(
@@ -129,7 +142,7 @@ DOMAIN_CAPACITY_NODES = {
 ELIGIBLE_LINK_NODES = DOMAIN_PEERS["oldlab"] + DOMAIN_PEERS["gb10"]
 REMOTE_LINK_SERVER_ADDRESS = "192.168.50.14"
 REMOTE_LINK_SERVICE_NAMES = ("control-plane", "gateway", "minio")
-REMOTE_LINK_SERVICE_PORTS = {
+LEGACY_SEED_REMOTE_LINK_SERVICE_PORTS = {
     "qianyi": {
         "control-plane": (26080, 20080),
         "gateway": (26100, 20100),
@@ -178,6 +191,13 @@ class Profile:
     evidence_root: Path
     runtime_root: Path
     ports: dict[str, int]
+    env_id: str | None = None
+    resource_generation: int | None = None
+    registry_generation: int | None = None
+    registry_payload_sha256: str | None = None
+    candidate_id: str | None = None
+    candidate_tree: str | None = None
+    service_user: str | None = None
 
     @property
     def secrets_root(self) -> Path:
@@ -274,7 +294,7 @@ def _load_profile(path: Path) -> Profile:
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise HostConvergeError(f"could not load profile {path}") from exc
     sandbox = raw.get("sandbox")
-    if sandbox not in SANDBOXES or path.stem != sandbox:
+    if sandbox not in LEGACY_SEED_RUNTIME_IDS or path.stem != sandbox:
         raise HostConvergeError(f"invalid sandbox profile identity: {path}")
     ports = raw.get("ports")
     if not isinstance(ports, dict) or not ports:
@@ -315,7 +335,7 @@ def _load_profile(path: Path) -> Profile:
 
 
 def load_profiles(root: Path = SOURCE_PROFILES) -> tuple[Profile, ...]:
-    profiles = tuple(_load_profile(root / f"{sandbox}.toml") for sandbox in SANDBOXES)
+    profiles = tuple(_load_profile(root / f"{sandbox}.toml") for sandbox in LEGACY_SEED_RUNTIME_IDS)
     all_ports = [port for profile in profiles for port in profile.ports.values()]
     if len(all_ports) != len(set(all_ports)):
         raise HostConvergeError("sandbox host ports collide")
@@ -491,7 +511,7 @@ def _identity(user: str, group: str) -> Identity:
 
 def _sandbox_batch_identity(sandbox: str) -> Identity:
     try:
-        user, expected_id = SANDBOX_BATCH_IDENTITIES[sandbox]
+        user, expected_id = LEGACY_SEED_BATCH_IDENTITIES[sandbox]
     except KeyError as exc:
         raise HostConvergeError("sandbox batch identity is outside the fixed contract") from exc
     identity = _identity(user, user)
@@ -3475,7 +3495,7 @@ def _install_assets(source_root: Path) -> None:
         (profiles_root / "loom-developer-sandbox-attestation-renewal.timer").read_bytes(),
         mode=0o644,
     )
-    for sandbox in SANDBOXES:
+    for sandbox in LEGACY_SEED_RUNTIME_IDS:
         _atomic_write(
             PROFILE_CONFIG_ROOT / f"{sandbox}.toml",
             (profiles_root / f"{sandbox}.toml").read_bytes(),
@@ -3949,7 +3969,25 @@ def _node_authority_envelope(
     payload_kind: str = "none",
     payload_bytes: bytes = b"",
     prior_request_id: str | None = None,
+    profile: Profile | None = None,
 ) -> bytes:
+    dynamic_actions = {
+        "host-converge",
+        "materialize",
+        "install-client",
+        "attest",
+        "rollback",
+        "persist-fleet-attestation",
+        "inspect-candidate",
+        "inspect-local",
+        "inspect-link-client",
+        "inspect-link-server",
+        "export-domain-attestation",
+        "export-runtime-proof-artifact",
+        "collect-live-overlap",
+        "observe-live-overlap-job",
+        "observe-platform-health-node",
+    }
     if (
         action
         not in {
@@ -3981,7 +4019,7 @@ def _node_authority_envelope(
         }
         or node not in ELIGIBLE_LINK_NODES
         or domain not in DOMAIN_PEERS
-        or (sandbox != "staging" if action.startswith("staging-") else sandbox not in SANDBOXES)
+        or (sandbox != "staging" if action.startswith("staging-") else False)
         or SHA_RE.fullmatch(sha) is None
         or SHA_RE.fullmatch(tree) is None
         or (prior_request_id is not None and DIGEST_RE.fullmatch(prior_request_id) is None)
@@ -4000,6 +4038,29 @@ def _node_authority_envelope(
         "payload_base64": base64.b64encode(payload_bytes).decode("ascii"),
         "prior_request_id": prior_request_id,
     }
+    if action in dynamic_actions:
+        if profile is not None and profile.env_id is None:
+            profile = _registry_bound_profile(profile, sha=sha, tree=tree)
+        if (
+            profile is None
+            or profile.sandbox != sandbox
+            or profile.env_id is None
+            or profile.resource_generation is None
+            or profile.candidate_id is None
+            or profile.registry_generation is None
+            or profile.registry_payload_sha256 is None
+            or DIGEST_RE.fullmatch(profile.registry_payload_sha256) is None
+        ):
+            raise HostConvergeError("node authority registry binding is incomplete")
+        body.update(
+            {
+                "env_id": profile.env_id,
+                "resource_generation": profile.resource_generation,
+                "candidate_id": profile.candidate_id,
+                "registry_generation": profile.registry_generation,
+                "registry_payload_sha256": profile.registry_payload_sha256,
+            }
+        )
     digest = hashlib.sha256(
         (
             json.dumps(
@@ -4020,6 +4081,89 @@ def _node_authority_envelope(
             ensure_ascii=True,
         ).encode("ascii")
         + b"\n"
+    )
+
+
+def _registry_bound_profile(profile: Profile, *, sha: str, tree: str) -> Profile:
+    path = environment_registry.SYSTEM_SNAPSHOT
+    try:
+        before = path.lstat()
+        raw = path.read_bytes()
+        after = path.lstat()
+        snapshot = environment_registry.DeveloperEnvironmentRegistry.verify_snapshot(raw)
+    except (OSError, environment_registry.RegistryError) as exc:
+        raise HostConvergeError("developer environment registry snapshot is invalid") from exc
+
+    def identity(item: os.stat_result) -> tuple[int, int, int, int, int, int, int, int]:
+        return (
+            item.st_dev,
+            item.st_ino,
+            item.st_mode,
+            item.st_uid,
+            item.st_gid,
+            item.st_nlink,
+            item.st_size,
+            item.st_mtime_ns,
+        )
+
+    if (
+        identity(before) != identity(after)
+        or stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISREG(before.st_mode)
+        or (before.st_uid, before.st_gid) != (0, 0)
+        or before.st_nlink != 1
+        or stat.S_IMODE(before.st_mode) != 0o600
+    ):
+        raise HostConvergeError("developer environment registry snapshot metadata is unsafe")
+    environments = [
+        row
+        for row in snapshot["environments"]
+        if row["runtime_id"] == profile.sandbox and row["state"] in {"deploying", "active"}
+    ]
+    if len(environments) != 1:
+        raise HostConvergeError("developer environment registry profile is unavailable")
+    environment = environments[0]
+    candidate_ids = {environment["current_candidate_id"]}
+    candidate_ids.update(
+        row["candidate_id"]
+        for row in snapshot["deployments"]
+        if row["env_id"] == environment["env_id"] and row["phase"] not in {"committed", "failed"}
+    )
+    candidates = [
+        row
+        for row in snapshot["candidates"]
+        if row["candidate_id"] in candidate_ids
+        and row["candidate_sha"] == sha
+        and row["candidate_tree"] == tree
+    ]
+    if len(candidates) != 1:
+        raise HostConvergeError("developer environment candidate profile is unavailable")
+    resource_generation = environment["resource_generation"]
+    if environment["state"] == "deploying":
+        prepared = [
+            row
+            for row in snapshot["deployments"]
+            if row["env_id"] == environment["env_id"]
+            and row["candidate_id"] == candidates[0]["candidate_id"]
+            and row["phase"] == "verified"
+            and row["applied_resource_generation"] is not None
+        ]
+        if prepared and (
+            len(prepared) != 1
+            or prepared[0]["applied_resource_generation"] != environment["resource_generation"] + 1
+        ):
+            raise HostConvergeError("developer environment prepared profile is invalid")
+        if prepared:
+            resource_generation = prepared[0]["applied_resource_generation"]
+    return replace(
+        profile,
+        env_id=environment["env_id"],
+        resource_generation=resource_generation,
+        registry_generation=snapshot["generation"],
+        registry_payload_sha256=snapshot["payload_sha256"],
+        candidate_id=candidates[0]["candidate_id"],
+        candidate_tree=tree,
+        service_user=environment["service_user"],
     )
 
 
@@ -4059,7 +4203,11 @@ def _node_authority(
 
 
 def _slurm_maintenance_file(domain: str, sandbox: str, sha: str) -> Path:
-    if domain not in DOMAIN_PEERS or sandbox not in SANDBOXES or SHA_RE.fullmatch(sha) is None:
+    if (
+        domain not in DOMAIN_PEERS
+        or sandbox not in LEGACY_SEED_RUNTIME_IDS
+        or SHA_RE.fullmatch(sha) is None
+    ):
         raise HostConvergeError("Slurm maintenance identity is invalid")
     return SLURM_MAINTENANCE_ROOT / f"{domain}-candidate-set.json"
 
@@ -4224,7 +4372,7 @@ def _slurm_candidate_set(
     if generation < 1:
         raise HostConvergeError("Slurm candidate-set generation is invalid")
     bindings: dict[str, dict[str, str]] = {}
-    for sandbox in SANDBOXES:
+    for sandbox in LEGACY_SEED_RUNTIME_IDS:
         profile, desired = _desired_for_service(sandbox)
         sha = desired.get("candidate_sha")
         tree = desired.get("candidate_tree")
@@ -4253,7 +4401,7 @@ def _slurm_candidate_set(
             "candidate_sha": sha,
             "candidate_tree": tree,
         }
-    if len({row["candidate_sha"] for row in bindings.values()}) != len(SANDBOXES):
+    if len({row["candidate_sha"] for row in bindings.values()}) != len(LEGACY_SEED_RUNTIME_IDS):
         raise HostConvergeError("sandbox desired candidate SHAs must be pairwise distinct")
     bindings_bytes = json.dumps(
         bindings,
@@ -4299,7 +4447,7 @@ def _new_slurm_maintenance_state(
                 "candidate_tree": tree,
             }
             for sandbox, candidate in zip(
-                SANDBOXES,
+                LEGACY_SEED_RUNTIME_IDS,
                 (sha, "c" * 40, "d" * 40),
                 strict=True,
             )
@@ -4510,8 +4658,7 @@ def _slurm_authority_request(
             or response.get("sandbox") != profile.sandbox
             or response.get("candidate_sha") != sha
             or response.get("candidate_tree") != tree
-            or response.get("payload_sha256")
-            != hashlib.sha256(candidate_set_bytes).hexdigest()
+            or response.get("payload_sha256") != hashlib.sha256(candidate_set_bytes).hexdigest()
             or DIGEST_RE.fullmatch(str(response.get("result_sha256"))) is None
             or binding is None
             or binding.group(1) != expected_cluster
@@ -4572,10 +4719,9 @@ def _slurm_maintenance_converge_locked(
                 generation=int(raw.get("generation", 0)),
                 convergence_id=str(raw.get("convergence_id", "")),
             )
-            if (
-                candidate_set["candidate_set_sha256"] != raw.get("candidate_set_sha256")
-                or candidate_set["candidate_bindings"] != raw.get("candidate_bindings")
-            ):
+            if candidate_set["candidate_set_sha256"] != raw.get(
+                "candidate_set_sha256"
+            ) or candidate_set["candidate_bindings"] != raw.get("candidate_bindings"):
                 raise HostConvergeError(
                     "blocked Slurm candidate-set transition differs from desired state",
                 )
@@ -4836,6 +4982,8 @@ def _verify_remote_candidate(
     tree: str,
     shared_gid: int,
 ) -> None:
+    if profile.env_id is None:
+        profile = _registry_bound_profile(profile, sha=sha, tree=tree)
     domain = next(
         (name for name, nodes in DOMAIN_PEERS.items() if node in nodes),
         None,
@@ -4852,6 +5000,7 @@ def _verify_remote_candidate(
             sandbox=profile.sandbox,
             sha=sha,
             tree=tree,
+            profile=profile,
         ),
     )
     report = authority_report.get("result")
@@ -5007,6 +5156,8 @@ def _candidate_source_stage(sha: str) -> Iterator[tuple[Path, str]]:
 
 
 def _bootstrap_domain_runtime_hosts(profile: Profile, sha: str, tree: str) -> None:
+    if profile.env_id is None:
+        profile = _registry_bound_profile(profile, sha=sha, tree=tree)
     for domain, nodes in DOMAIN_PEERS.items():
         for node in nodes:
             _node_authority(
@@ -5019,6 +5170,7 @@ def _bootstrap_domain_runtime_hosts(profile: Profile, sha: str, tree: str) -> No
                     sandbox=profile.sandbox,
                     sha=sha,
                     tree=tree,
+                    profile=profile,
                 ),
             )
 
@@ -5029,6 +5181,8 @@ def _materialize_domain_candidates(
     tree: str,
     bundle: Path,
 ) -> None:
+    if profile.env_id is None:
+        profile = _registry_bound_profile(profile, sha=sha, tree=tree)
     payload = bundle.read_bytes()
     for domain, publisher in DOMAIN_PUBLISHERS.items():
         _node_authority(
@@ -5043,6 +5197,7 @@ def _materialize_domain_candidates(
                 tree=tree,
                 payload_kind="git-bundle",
                 payload_bytes=payload,
+                profile=profile,
             ),
         )
 
@@ -5086,8 +5241,18 @@ def _validate_link_client_inspection(
     }
     expected_services = {
         name: {
-            "listener_port": REMOTE_LINK_SERVICE_PORTS[profile.sandbox][name][0],
-            "target_port": REMOTE_LINK_SERVICE_PORTS[profile.sandbox][name][1],
+            "listener_port": profile.ports.get(
+                f"relay_{name.replace('-', '_')}",
+                LEGACY_SEED_REMOTE_LINK_SERVICE_PORTS.get(profile.sandbox, {}).get(name, (0, 0))[0],
+            ),
+            "target_port": profile.ports.get(
+                {
+                    "control-plane": "control_plane",
+                    "gateway": "llm_gateway",
+                    "minio": "minio",
+                }[name],
+                LEGACY_SEED_REMOTE_LINK_SERVICE_PORTS.get(profile.sandbox, {}).get(name, (0, 0))[1],
+            ),
             "health": "ok",
         }
         for name in REMOTE_LINK_SERVICE_NAMES
@@ -5151,9 +5316,19 @@ def _validate_link_server_inspection(
     }
     expected_services = {
         name: {
-            "listener_port": REMOTE_LINK_SERVICE_PORTS[profile.sandbox][name][0],
+            "listener_port": profile.ports.get(
+                f"relay_{name.replace('-', '_')}",
+                LEGACY_SEED_REMOTE_LINK_SERVICE_PORTS.get(profile.sandbox, {}).get(name, (0, 0))[0],
+            ),
             "target_host": "127.0.0.1",
-            "target_port": REMOTE_LINK_SERVICE_PORTS[profile.sandbox][name][1],
+            "target_port": profile.ports.get(
+                {
+                    "control-plane": "control_plane",
+                    "gateway": "llm_gateway",
+                    "minio": "minio",
+                }[name],
+                LEGACY_SEED_REMOTE_LINK_SERVICE_PORTS.get(profile.sandbox, {}).get(name, (0, 0))[1],
+            ),
             "health_path": REMOTE_LINK_HEALTH_PATHS[name],
             "tls_version": "TLSv1.3",
             "status": "active",
@@ -5193,6 +5368,8 @@ def _collect_and_persist_remote_link_fleet(
     sha: str,
     tree: str,
 ) -> dict[str, Any]:
+    if profile.env_id is None:
+        profile = _registry_bound_profile(profile, sha=sha, tree=tree)
     node_payloads: dict[str, dict[str, Any]] = {}
     failures: list[str] = []
 
@@ -5204,6 +5381,7 @@ def _collect_and_persist_remote_link_fleet(
             sandbox=profile.sandbox,
             sha=sha,
             tree=tree,
+            profile=profile,
         )
         request_id = str(json.loads(envelope)["request_id"])
         response = _node_authority(
@@ -5251,6 +5429,7 @@ def _collect_and_persist_remote_link_fleet(
         sandbox=profile.sandbox,
         sha=sha,
         tree=tree,
+        profile=profile,
     )
     server_request_id = str(json.loads(server_envelope)["request_id"])
     server_response = _node_authority("oldlab-2", "check", server_envelope)
@@ -5286,6 +5465,30 @@ def _collect_and_persist_remote_link_fleet(
         "server": server,
         "nodes": {node: node_payloads[node] for node in ELIGIBLE_LINK_NODES},
     }
+    dynamic_bindings = (
+        profile.env_id,
+        profile.resource_generation,
+        profile.registry_generation,
+        profile.registry_payload_sha256,
+    )
+    if any(value is not None for value in dynamic_bindings):
+        if (
+            profile.env_id is None
+            or profile.resource_generation is None
+            or profile.registry_generation is None
+            or profile.registry_payload_sha256 is None
+            or DIGEST_RE.fullmatch(profile.registry_payload_sha256) is None
+        ):
+            raise HostConvergeError("dynamic fleet registry binding is incomplete")
+        fleet.update(
+            {
+                "env_id": profile.env_id,
+                "resource_generation": profile.resource_generation,
+                "registry_generation": profile.registry_generation,
+                "registry_payload_sha256": profile.registry_payload_sha256,
+                "candidate_tree": tree,
+            }
+        )
     fleet["payload_sha256"] = _fleet_attestation_digest(fleet)
     serialized = (
         json.dumps(
@@ -5305,6 +5508,7 @@ def _collect_and_persist_remote_link_fleet(
         tree=tree,
         payload_kind="fleet-attestation-json",
         payload_bytes=serialized,
+        profile=profile,
     )
     request_id = str(json.loads(envelope)["request_id"])
     persisted = _node_authority("oldlab-2", "transact", envelope)
@@ -5319,6 +5523,11 @@ def _collect_and_persist_remote_link_fleet(
             "sandbox",
             "candidate_sha",
             "candidate_tree",
+            "env_id",
+            "resource_generation",
+            "candidate_id",
+            "registry_generation",
+            "registry_payload_sha256",
             "payload_sha256",
             "result_sha256",
             "inner_receipt",
@@ -5333,6 +5542,11 @@ def _collect_and_persist_remote_link_fleet(
         or persisted.get("sandbox") != profile.sandbox
         or persisted.get("candidate_sha") != sha
         or persisted.get("candidate_tree") != tree
+        or persisted.get("env_id") != profile.env_id
+        or persisted.get("resource_generation") != profile.resource_generation
+        or persisted.get("candidate_id") != profile.candidate_id
+        or persisted.get("registry_generation") != profile.registry_generation
+        or persisted.get("registry_payload_sha256") != profile.registry_payload_sha256
         or persisted.get("payload_sha256") != hashlib.sha256(serialized).hexdigest()
         or DIGEST_RE.fullmatch(str(persisted.get("result_sha256"))) is None
         or persisted.get("inner_receipt") is not None
@@ -5349,12 +5563,11 @@ def _install_remote_link_fleet(
     tree: str,
     authority: Identity,
 ) -> None:
+    if profile.env_id is None:
+        profile = _registry_bound_profile(profile, sha=sha, tree=tree)
     values = _parse_env_file(profile.secrets_env)
     program = "scripts/ops/developer_sandbox_remote_link_host.py"
-    _run_candidate_program(
-        profile,
-        sha,
-        program,
+    prepare_args = (
         "prepare-rotation",
         "--sandbox",
         profile.sandbox,
@@ -5362,11 +5575,12 @@ def _install_remote_link_fleet(
         sha,
         "--execute",
     )
+    if profile.env_id is None:
+        _run_candidate_program(profile, sha, program, *prepare_args)
+    else:
+        _run((str(INSTALLED_REMOTE_LINK_HOST), *prepare_args))
     issuance = REMOTE_LINK_ISSUANCE_ROOT / profile.sandbox / sha
-    _run_candidate_program(
-        profile,
-        sha,
-        program,
+    server_args = (
         "install-server",
         "--sandbox",
         profile.sandbox,
@@ -5376,12 +5590,24 @@ def _install_remote_link_fleet(
         str(issuance / "server"),
         "--execute",
     )
+    if profile.env_id is None:
+        _run_candidate_program(profile, sha, program, *server_args)
+    else:
+        _run((str(INSTALLED_REMOTE_LINK_HOST), *server_args))
     for node in ELIGIBLE_LINK_NODES:
         _verify_remote_candidate(profile, node, sha, tree, authority.gid)
         archive = _archive_credentials(
             issuance / "clients" / node,
             worker_token=values["LOOM_WORKER_TOKEN"],
-            minio_access_key=values["LOOM_DEV_MINIO_ROOT_USER"],
+            minio_access_key=(
+                values["LOOM_DEV_MINIO_ROOT_USER"]
+                if profile.env_id is None
+                else (
+                    profile.service_user
+                    if profile.service_user is not None
+                    else _raise_missing_service_user()
+                )
+            ),
             minio_secret_key=values["LOOM_DEV_MINIO_ROOT_PASSWORD"],
         )
         domain = next(name for name, nodes in DOMAIN_PEERS.items() if node in nodes)
@@ -5397,12 +5623,10 @@ def _install_remote_link_fleet(
                 tree=tree,
                 payload_kind="client-credentials",
                 payload_bytes=archive,
+                profile=profile,
             ),
         )
-    _run_candidate_program(
-        profile,
-        sha,
-        program,
+    activate_args = (
         "activate-server",
         "--sandbox",
         profile.sandbox,
@@ -5410,14 +5634,28 @@ def _install_remote_link_fleet(
         sha,
         "--execute",
     )
+    if profile.env_id is None:
+        _run_candidate_program(profile, sha, program, *activate_args)
+    else:
+        _run((str(INSTALLED_REMOTE_LINK_HOST), *activate_args))
     _collect_and_persist_remote_link_fleet(profile, sha, tree)
 
 
-def _worker_capacity_contract(domain: str) -> tuple[str, int]:
+def _raise_missing_service_user() -> str:
+    raise HostConvergeError("dynamic service identity binding is incomplete")
+
+
+def _worker_capacity_contract(
+    domain: str,
+    *,
+    installed: bool = False,
+) -> tuple[str, int]:
     """Read the domain worker binding from the exact checked-in capacity policy."""
     if domain not in DOMAIN_PEERS:
         raise HostConvergeError("worker capacity domain is invalid")
-    runtime_config = SOURCE_PROFILES / "runtime-domains.toml"
+    runtime_config = (
+        INSTALLED_DOMAIN_RUNTIME_CONFIG if installed else SOURCE_PROFILES / "runtime-domains.toml"
+    )
     try:
         runtime = tomllib.loads(runtime_config.read_text(encoding="utf-8"))
         domain_config = runtime["domains"][domain]
@@ -5425,15 +5663,16 @@ def _worker_capacity_contract(domain: str) -> tuple[str, int]:
         expected_source = f"deploy/developer-sandboxes/shared-capacity-policies/{domain}.toml"
         if source != expected_source:
             raise HostConvergeError("worker capacity policy source drifted")
-        capacity_path = REPO_ROOT / source
+        capacity_path = (
+            REPO_ROOT / source
+            if not installed
+            else INSTALLED_CAPACITY_POLICY_ROOT / f"{domain}.toml"
+        )
         capacity = tomllib.loads(capacity_path.read_text(encoding="utf-8"))
         actuator = capacity["policy"]["actuator_config"]
     except (KeyError, OSError, TypeError, UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise HostConvergeError("worker capacity contract is unavailable or invalid") from exc
-    expected_env = (
-        f"/shared_work/loom/runtime/sandboxes/${{SANDBOX}}/"
-        f"${{CANDIDATE_SHA}}/worker-{domain}.env"
-    )
+    expected_env = f"${{RUNTIME_ROOT}}/${{CANDIDATE_SHA}}/worker-{domain}.env"
     concurrency = actuator.get("requested_concurrency")
     allowed_nodes = actuator.get("allowed_nodes")
     if (
@@ -5450,21 +5689,55 @@ def _worker_capacity_contract(domain: str) -> tuple[str, int]:
         or tuple(node.lower() for node in allowed_nodes) != DOMAIN_CAPACITY_NODES[domain]
         or actuator.get("env_file") != expected_env
         or actuator.get("candidate_sha") != "${CANDIDATE_SHA}"
-        or actuator.get("slurm_account") != "loom-dev-${SANDBOX}"
+        or actuator.get("slurm_account") != "${SLURM_ACCOUNT}"
     ):
         raise HostConvergeError("worker capacity contract binding drifted")
     return domain, concurrency
 
 
 def _worker_env_seed(profile: Profile, sha: str, domain: str) -> bytes:
-    pool, concurrency = _worker_capacity_contract(domain)
+    pool, concurrency = _worker_capacity_contract(
+        domain,
+        installed=profile.env_id is not None,
+    )
     bundle = f"/etc/loom/developer-sandbox-links/clients/{profile.sandbox}/{sha}"
+    legacy_ports = LEGACY_SEED_REMOTE_LINK_SERVICE_PORTS.get(profile.sandbox, {})
+    control_plane_port = profile.ports.get(
+        "relay_control_plane",
+        legacy_ports.get("control-plane", (0, 0))[0],
+    )
+    gateway_port = profile.ports.get(
+        "relay_gateway",
+        legacy_ports.get("gateway", (0, 0))[0],
+    )
+    minio_port = profile.ports.get(
+        "relay_minio",
+        legacy_ports.get("minio", (0, 0))[0],
+    )
+    if (
+        any(
+            type(port) is not int or not 1024 <= port <= 65535
+            for port in (control_plane_port, gateway_port, minio_port)
+        )
+        or len({control_plane_port, gateway_port, minio_port}) != 3
+    ):
+        raise HostConvergeError("worker remote-link ports are unavailable or invalid")
     values = {
         "LOOM_WORKER_CONTROL_PLANE_URL": "http://sandbox-link:8080",
         "LOOM_WORKER_GATEWAY_URL": "http://sandbox-link:9100",
         "LOOM_WORKER_MINIO_ENDPOINT": "http://sandbox-link:9000",
         "LOOM_WORKER_SANDBOX_IDENTITY": profile.sandbox,
         "LOOM_WORKER_CANDIDATE_SHA": sha,
+        "LOOM_SANDBOX_LINK_CP_UPSTREAM": (
+            f"https://{REMOTE_LINK_SERVER_ADDRESS}:{control_plane_port}"
+        ),
+        "LOOM_SANDBOX_LINK_CP_EXPECTED_PORT": str(control_plane_port),
+        "LOOM_SANDBOX_LINK_GATEWAY_UPSTREAM": (
+            f"https://{REMOTE_LINK_SERVER_ADDRESS}:{gateway_port}"
+        ),
+        "LOOM_SANDBOX_LINK_GATEWAY_EXPECTED_PORT": str(gateway_port),
+        "LOOM_SANDBOX_LINK_MINIO_UPSTREAM": (f"https://{REMOTE_LINK_SERVER_ADDRESS}:{minio_port}"),
+        "LOOM_SANDBOX_LINK_MINIO_EXPECTED_PORT": str(minio_port),
         "LOOM_WORKER_POOL_NAME": pool,
         "LOOM_WORKER_MAX_CONCURRENT": str(concurrency),
         "LOOM_WORKER_TOKEN_FILE_HOST": f"{bundle}/worker-token",
@@ -5474,6 +5747,37 @@ def _worker_env_seed(profile: Profile, sha: str, domain: str) -> bytes:
         "LOOM_WORKER_CP_TLS_CERT_FILE_HOST": f"{bundle}/client.pem",
         "LOOM_WORKER_CP_TLS_KEY_FILE_HOST": f"{bundle}/client-key.pem",
     }
+    dynamic = (
+        profile.env_id,
+        profile.resource_generation,
+        profile.registry_generation,
+        profile.registry_payload_sha256,
+        profile.candidate_id,
+        profile.candidate_tree,
+    )
+    if any(value is not None for value in dynamic):
+        if (
+            profile.env_id is None
+            or profile.resource_generation is None
+            or profile.registry_generation is None
+            or profile.registry_payload_sha256 is None
+            or profile.candidate_id is None
+            or profile.candidate_tree is None
+            or DIGEST_RE.fullmatch(profile.registry_payload_sha256) is None
+            or SHA_RE.fullmatch(profile.candidate_tree) is None
+        ):
+            raise HostConvergeError("dynamic worker env registry binding is incomplete")
+        values.update(
+            {
+                "LOOM_WORKER_COMPOSE_PROJECT": profile.compose_project,
+                "LOOM_WORKER_ENV_ID": profile.env_id,
+                "LOOM_WORKER_RESOURCE_GENERATION": str(profile.resource_generation),
+                "LOOM_WORKER_CANDIDATE_ID": profile.candidate_id,
+                "LOOM_WORKER_CANDIDATE_TREE": profile.candidate_tree,
+                "LOOM_WORKER_REGISTRY_GENERATION": str(profile.registry_generation),
+                "LOOM_WORKER_REGISTRY_PAYLOAD_SHA256": profile.registry_payload_sha256,
+            }
+        )
     return _render_env(values)
 
 
@@ -5483,6 +5787,8 @@ def _converge_domain_runtime_hosts(
     tree: str,
     authority: Identity,
 ) -> None:
+    if profile.env_id is None:
+        profile = _registry_bound_profile(profile, sha=sha, tree=tree)
     for domain, nodes in DOMAIN_PEERS.items():
         for node in nodes:
             _verify_remote_candidate(profile, node, sha, tree, authority.gid)
@@ -5496,6 +5802,7 @@ def _converge_domain_runtime_hosts(
                     sandbox=profile.sandbox,
                     sha=sha,
                     tree=tree,
+                    profile=profile,
                 ),
             )
 
@@ -5505,6 +5812,8 @@ def _publish_domain_attestations(
     sha: str,
     tree: str,
 ) -> None:
+    if profile.env_id is None:
+        profile = _registry_bound_profile(profile, sha=sha, tree=tree)
     relative_program = "scripts/ops/developer_sandbox_domain_runtime.py"
     config_relative = "deploy/developer-sandboxes/runtime-domains.toml"
     fleet_path = FLEET_ATTESTATION_ROOT / profile.sandbox / sha / "fleet.json"
@@ -5549,23 +5858,41 @@ def _publish_domain_attestations(
                 tree=tree,
                 payload_kind="attestation-seed",
                 payload_bytes=attestation_seed,
+                profile=profile,
             ),
         )
-    _run_candidate_program(
-        profile,
-        sha,
-        relative_program,
-        "collect",
-        "--config",
-        str(profile.candidate_root / sha / config_relative),
-        "--sandbox",
-        profile.sandbox,
-        "--candidate-sha",
-        sha,
-        "--candidate-tree",
-        tree,
-        "--execute",
-    )
+    if profile.env_id is None:
+        _run_candidate_program(
+            profile,
+            sha,
+            relative_program,
+            "collect",
+            "--config",
+            str(profile.candidate_root / sha / config_relative),
+            "--sandbox",
+            profile.sandbox,
+            "--candidate-sha",
+            sha,
+            "--candidate-tree",
+            tree,
+            "--execute",
+        )
+    else:
+        _run(
+            (
+                str(INSTALLED_DOMAIN_RUNTIME),
+                "collect",
+                "--config",
+                str(INSTALLED_DOMAIN_RUNTIME_CONFIG),
+                "--sandbox",
+                profile.sandbox,
+                "--candidate-sha",
+                sha,
+                "--candidate-tree",
+                tree,
+                "--execute",
+            )
+        )
 
 
 def _read_policy(profile: Profile, pool: str) -> dict[str, Any] | None:
@@ -6555,27 +6882,81 @@ def _select_profiles(all_profiles: Sequence[Profile], sandbox: str) -> tuple[Pro
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    def legacy_seed_gate(child: argparse.ArgumentParser) -> None:
+        child.add_argument(
+            "--legacy-v1-seed-migrate",
+            action="store_true",
+            required=True,
+            help="authorize only migration convergence of the three legacy-v1 seed rows",
+        )
+
+    for command in (
+        "environment-create",
+        "environment-update",
+        "environment-check",
+        "environment-resume",
+        "environment-rollback",
+        "environment-destroy",
+        "environment-retire",
+    ):
+        environment = subparsers.add_parser(command, allow_abbrev=False)
+        if command == "environment-resume":
+            environment.add_argument("--runtime-id", required=True)
+        else:
+            environment.add_argument("--env-id", required=True)
+        if command in {
+            "environment-create",
+            "environment-update",
+            "environment-rollback",
+        }:
+            environment.add_argument("--idempotency-key", required=True)
+        if command in {"environment-create", "environment-update"}:
+            environment.add_argument("--candidate-id", required=True)
+        if command != "environment-check":
+            environment.add_argument("--execute", action="store_true")
     for command in ("plan", "install", "check"):
         child = subparsers.add_parser(command)
+        legacy_seed_gate(child)
         child.add_argument("--candidate-sha", required=True)
-        child.add_argument("--sandbox", choices=(*SANDBOXES, "all"), default="all")
+        child.add_argument(
+            "--sandbox",
+            choices=(*LEGACY_SEED_RUNTIME_IDS, "all"),
+            default="all",
+        )
         if command != "plan":
             child.add_argument("--execute", action="store_true")
     rollback_parser = subparsers.add_parser("rollback")
-    rollback_parser.add_argument("--sandbox", choices=SANDBOXES, required=True)
+    legacy_seed_gate(rollback_parser)
+    rollback_parser.add_argument(
+        "--sandbox",
+        choices=LEGACY_SEED_RUNTIME_IDS,
+        required=True,
+    )
     rollback_parser.add_argument("--candidate-sha", required=True)
     rollback_parser.add_argument("--execute", action="store_true")
     for command in ("slurm-converge", "slurm-check", "slurm-rollback"):
         child = subparsers.add_parser(command)
+        legacy_seed_gate(child)
         child.add_argument("--domain", choices=tuple(DOMAIN_PEERS), required=True)
         child.add_argument("--sandbox", choices=("all",), required=True)
         child.add_argument("--candidate-sha", required=True)
         child.add_argument("--execute", action="store_true")
     for command in ("service-converge", "service-check"):
         child = subparsers.add_parser(command)
-        child.add_argument("--sandbox", choices=SANDBOXES, required=True)
+        legacy_seed_gate(child)
+        child.add_argument(
+            "--sandbox",
+            choices=LEGACY_SEED_RUNTIME_IDS,
+            required=True,
+        )
     renew = subparsers.add_parser("renew-attestations")
-    renew.add_argument("--sandbox", choices=(*SANDBOXES, "all"), default="all")
+    legacy_seed_gate(renew)
+    renew.add_argument(
+        "--sandbox",
+        choices=(*LEGACY_SEED_RUNTIME_IDS, "all"),
+        default="all",
+    )
     renew.add_argument("--execute", action="store_true")
     staging_identity = subparsers.add_parser(
         "staging-allocation-identity-converge",
@@ -6607,6 +6988,23 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(list(argv) if argv is not None else None)
+    if args.command.startswith("environment-"):
+        from scripts.ops.developer_environment_deploy import main as environment_main
+
+        delegated = [
+            args.command.removeprefix("environment-"),
+        ]
+        if getattr(args, "env_id", None) is not None:
+            delegated.extend(("--env-id", args.env_id))
+        if getattr(args, "runtime_id", None) is not None:
+            delegated.extend(("--runtime-id", args.runtime_id))
+        if getattr(args, "candidate_id", None) is not None:
+            delegated.extend(("--candidate-id", args.candidate_id))
+        if getattr(args, "idempotency_key", None) is not None:
+            delegated.extend(("--idempotency-key", args.idempotency_key))
+        if bool(getattr(args, "execute", False)):
+            delegated.append("--execute")
+        return environment_main(delegated)
     try:
         if args.command == "staging-allocation-identity-converge":
             if not args.execute:

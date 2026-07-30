@@ -302,6 +302,21 @@ async def test_trial_run_passes_task_sandbox_start_options(
         local_trajectory_path=tmp_path / "events.jsonl",
         sandbox_extra_hosts=(("host.docker.internal", "host-gateway"),),
         container_cgroup_parent="/system.slice/slurmstepd.scope/job_123",
+        runtime_identity_labels=(
+            ("loom.sandbox", "e-alpha"),
+            ("loom.candidate_sha", "a" * 40),
+            ("loom.slurm_job_id", "123"),
+            ("loom.compose_project", "loom-e-alpha-123"),
+            (
+                "loom.env_id",
+                "denv-00000000000000000000000000000001",
+            ),
+            ("loom.resource_generation", "7"),
+            ("loom.candidate_id", f"cand-{'b' * 40}"),
+            ("loom.candidate_tree", "c" * 40),
+            ("loom.registry_generation", "42"),
+            ("loom.registry_payload_sha256", "d" * 64),
+        ),
     )
 
     result = await Trial(ctx=ctx).run()
@@ -319,6 +334,18 @@ async def test_trial_run_passes_task_sandbox_start_options(
     )
     assert start_options.dns == ("192.0.2.1",)
     assert start_options.tmpfs == ("/root:size=100M,mode=755",)
+    labels = dict(start_options.labels)
+    assert labels["loom.sandbox"] == "e-alpha"
+    assert labels["loom.candidate_sha"] == "a" * 40
+    assert labels["loom.slurm_job_id"] == "123"
+    assert labels["loom.compose_project"] == "loom-e-alpha-123"
+    assert labels["loom.env_id"] == "denv-00000000000000000000000000000001"
+    assert labels["loom.resource_generation"] == "7"
+    assert labels["loom.candidate_id"] == f"cand-{'b' * 40}"
+    assert labels["loom.candidate_tree"] == "c" * 40
+    assert labels["loom.registry_generation"] == "42"
+    assert labels["loom.registry_payload_sha256"] == "d" * 64
+    assert labels["loom.trial-container"] == "true"
 
 
 async def test_trial_run_driver_start_failure_classified(

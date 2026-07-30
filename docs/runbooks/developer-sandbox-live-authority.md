@@ -13,20 +13,23 @@ set as every other GB10 node. Live acceptance covers all 15 nodes with
 gate defers disruptive convergence and must never cancel or preempt an
 external job.
 
-The producer consumes the already-installed adapter config
-`/etc/loom/shared-capacity-adapters/<sandbox>-<pool>.toml`. Its complete content
-must equal the closed mapping compiled into
-`developer_sandbox_live_authority.py`. It then reads:
+The producer resolves `<sandbox>` as an active registry runtime ID. The
+root-owned registry snapshot, not a checked-in developer list, supplies the
+environment's loopback port, state root, Slurm user/account/QoS, resource
+generation, and committed candidate. It consumes the already-installed
+registry-rendered adapter config
+`/etc/loom/shared-capacity-adapters/<sandbox>-<pool>.toml` and exact-matches
+that config to the same snapshot generation. It then reads:
 
 - canonical `[object]` adapter output at
   `/var/lib/loom-shared-capacity/observations/<sandbox>-<pool>.json`;
 - canonical lifecycle state at
-  `/srv/loom/developer-sandboxes/<sandbox>/sandbox-state.json`;
-- the fixed sandbox Control Plane's autoscaler policy and active Slurm job
+  `<registry-state-root>/sandbox-state.json`;
+- the exact environment Control Plane's autoscaler policy and active Slurm job
   registry, using the existing root-only admin secret file without persisting
   or printing the token;
-- `systemctl show` for the one fixed sandbox unit, without reading its
-  environment or command line;
+- `systemctl show` for that environment's registry-derived unit, without
+  reading its environment or command line;
 - `scontrol show job` for the exact registry job ID on the fixed pool source
   host. GB10 reaches that host only through the installed forced-command node
   transport.
@@ -35,10 +38,9 @@ The CP policy must bind the adapter request UUID, lease epoch, candidate SHA,
 active lease, non-exclusive Slurm actuator, account, and allowed-node set.
 Exactly one CP job must be running for the sandbox/pool/candidate. The Slurm
 readback must independently match its job ID, derived job name, account,
-stable service user (`loom-sandbox-qianyi`, `loom-sandbox-hongjian`, or
-`loom-sandbox-devansh`), node, CPU, memory, PID comment, GPU allocation, and
-non-exclusive state. Personal login users are not accepted as Slurm batch
-users.
+registry-assigned stable service user, node, CPU, memory, PID comment, GPU
+allocation, and non-exclusive state. Personal login users are not accepted as
+Slurm batch users.
 
 ## Collect one pair
 
@@ -49,7 +51,7 @@ The UUID makes the outer node-authority transaction idempotent.
 
 ```bash
 python3 scripts/ops/developer_sandbox_live_authority.py collection-envelope \
-  --sandbox qianyi \
+  --sandbox <registry-runtime-id> \
   --pool gb10 \
   --candidate-sha "$CANDIDATE_SHA" \
   --candidate-tree "$CANDIDATE_TREE" \
@@ -59,9 +61,12 @@ python3 scripts/ops/developer_sandbox_live_authority.py collection-envelope \
   | sudo /usr/local/libexec/loom-developer-sandbox-node-authority transact
 ```
 
-Repeat for the six sandbox/pool pairs with a distinct collection UUID. Do not
-invoke `collect` or `observe-slurm-job` directly; those are fixed installed
-node-authority helpers.
+Repeat for both pools of every environment in the exact acceptance cohort,
+using a distinct collection UUID for each of the `2 * N` pairs. Do not invoke
+`collect` or `observe-slurm-job` directly; those are fixed installed
+node-authority helpers. Adding a cohort member must not restart, stop, drain,
+or rewrite any existing environment's unit, handoff, lease epoch, or active
+job identity.
 
 The immutable producer result is:
 
@@ -98,3 +103,8 @@ candidate/request/lease drift, personal-user identity, node or resource drift,
 source replacement, transport failure, high-water regression, receipt
 collision, or any unsafe ownership/mode/link metadata. Never substitute raw
 SSH, a manually written JSON file, or copied command output.
+
+Retirement removes only the exact target environment after its own jobs,
+requests, leases, adapters, units, and resources are terminal. Other cohort
+members do not have to drain, and their jobs, handoffs, units, candidates, and
+registry-derived resources must remain byte-for-byte and identity-stable.

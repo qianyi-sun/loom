@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import re
 import sys
@@ -29,6 +30,28 @@ SCHEMA_VERSION = 1
 MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SCHEMA = REPO_ROOT / "docs/evidence/nonexclusive-slurm-acceptance-v1.schema.json"
+
+
+def _live_acceptance_contract() -> Any:
+    try:
+        from scripts.ops import developer_sandbox_live_acceptance
+
+        return developer_sandbox_live_acceptance
+    except ModuleNotFoundError:
+        path = Path(__file__).with_name("developer_sandbox_live_acceptance.py")
+        spec = importlib.util.spec_from_file_location(
+            "_loom_developer_sandbox_live_acceptance_for_gate6",
+            path,
+        )
+        if spec is None or spec.loader is None:
+            raise RuntimeError("live acceptance verifier is unavailable") from None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+
+
+live_acceptance = _live_acceptance_contract()
 REQUIRED_ROLES = frozenset({"worker", "trial", "verifier", "sidecar"})
 REQUIRED_CONTROLLERS = frozenset({"cpu", "memory", "pids"})
 REQUIRED_WORKLOADS = frozenset(
@@ -40,7 +63,6 @@ REQUIRED_RESOURCES = frozenset(
 REQUIRED_CLEANUP_EVENTS = frozenset(
     {"cancellation", "ttl_expiry", "worker_crash", "submit_host_restart"},
 )
-GATE6_SANDBOXES = ("qianyi", "hongjian", "devansh")
 GATE6_POOLS = ("oldlab", "gb10")
 GATE6_POOL_CONCURRENCY = {"oldlab": 4, "gb10": 8}
 GATE6_POOL_NODES = {
@@ -333,12 +355,32 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(_canonical_bytes(value)).hexdigest()
 
 
+def _gate6_registry_environments(
+    live: Mapping[str, Any],
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    try:
+        snapshot = live_acceptance._validated_registry_snapshot(
+            live.get("registry_snapshot"),
+        )
+    except live_acceptance.AcceptanceError as exc:
+        raise AcceptanceError("gate-6 registry snapshot is invalid") from exc
+    environments = {
+        str(environment["runtime_id"]): dict(environment)
+        for environment in snapshot["environments"]
+    }
+    if len(environments) < 2 or len(environments) != len(snapshot["environments"]):
+        raise AcceptanceError("gate-6 requires at least two distinct registry environments")
+    return environments, snapshot
+
+
 def _gate6_matrix_failures(
     matrix: Any,
     *,
     sandbox: str,
     pool: str,
     candidate: Mapping[str, str],
+    environment: Mapping[str, Any],
+    registry_snapshot: Mapping[str, Any],
 ) -> list[str]:
     """Validate the immutable allocation-probe result used by gate 6.
 
@@ -376,7 +418,8 @@ def _gate6_matrix_failures(
         or matrix.get("cluster") != GATE6_CLUSTERS[pool]
         or matrix.get("expected_pool") != pool
         or matrix.get("expected_concurrency") != GATE6_POOL_CONCURRENCY[pool]
-        or matrix.get("account") != f"loom-dev-{sandbox}"
+        or matrix.get("account") != environment["slurm_account"]
+        or matrix.get("qos") != environment["slurm_qos"]
         or matrix.get("closed_world_verified") is not True
         or observed_allowed != expected_nodes
         or observed_rows != expected_nodes
@@ -389,6 +432,16 @@ def _gate6_matrix_failures(
         or runtime.get("candidate_sha") != candidate["sha"]
         or runtime.get("candidate_tree") != candidate["tree"]
         or runtime.get("domain") != pool
+        or runtime.get("env_id") != environment["env_id"]
+        or runtime.get("resource_generation")
+        != next(
+            item["resource_generation"]
+            for item in registry_snapshot["source_registry"]["environments"]
+            if item["env_id"] == environment["env_id"]
+        )
+        or runtime.get("registry_generation") != registry_snapshot["generation"]
+        or runtime.get("registry_payload_sha256")
+        != registry_snapshot["source_registry"]["payload_sha256"]
     ):
         failures.append(f"{sandbox}/{pool} allocation matrix binding is invalid")
         return failures
@@ -401,14 +454,15 @@ def _gate6_matrix_failures(
         if (
             row.get("sandbox") != sandbox
             or row.get("state") != "COMPLETED"
-            or row.get("account") != f"loom-dev-{sandbox}"
+            or row.get("account") != environment["slurm_account"]
+            or row.get("qos") != environment["slurm_qos"]
             or row.get("sbatch_verified") is not True
             or row.get("srun_verified") is not True
             or row.get("nonexclusive") is not True
-            or str(row.get("explicit_nodelist", "")).lower()
-            != str(row.get("node", "")).lower()
+            or str(row.get("explicit_nodelist", "")).lower() != str(row.get("node", "")).lower()
             or not isinstance(compute, Mapping)
             or compute.get("sandbox") != sandbox
+            or compute.get("account") != environment["slurm_account"]
             or compute.get("candidate_sha") != candidate["sha"]
             or compute.get("candidate_tree") != candidate["tree"]
             or compute.get("pool") != pool
@@ -427,6 +481,7 @@ def _gate6_pair_artifact(
     *,
     sandbox: str,
     pool: str,
+    sandboxes: Sequence[str],
 ) -> dict[str, Any]:
     """Losslessly materialize one v1-shaped pair from native authority fields."""
 
@@ -437,19 +492,14 @@ def _gate6_pair_artifact(
         for row in platform["mixed_jobs"]
         if row["sandbox"] == sandbox
         and (
-            ("oldlab" if str(row["node"]).lower().startswith("trt-eai-oldlab-") else "gb10")
-            == pool
+            ("oldlab" if str(row["node"]).lower().startswith("trt-eai-oldlab-") else "gb10") == pool
         )
     ]
     devices = [
-        row
-        for row in gate["device_isolation"]
-        if row["sandbox"] == sandbox and row["pool"] == pool
+        row for row in gate["device_isolation"] if row["sandbox"] == sandbox and row["pool"] == pool
     ]
     headroom = [
-        row
-        for row in soak["pair_headroom"]
-        if row["sandbox"] == sandbox and row["pool"] == pool
+        row for row in soak["pair_headroom"] if row["sandbox"] == sandbox and row["pool"] == pool
     ]
     if len(jobs) != 1 or len(devices) != 1 or len(headroom) != 1:
         raise AcceptanceError(f"{sandbox}/{pool} native gate-6 coverage is not exact")
@@ -472,9 +522,7 @@ def _gate6_pair_artifact(
             "labels": item["identity_labels"],
             "cgroup_parent": item["cgroup_parent"],
             "cgroup_path": item["observed_cgroup_path"],
-            "limits": {
-                key: item["limits"][key] for key in ("cpu_cores", "memory_bytes", "pids")
-            },
+            "limits": {key: item["limits"][key] for key in ("cpu_cores", "memory_bytes", "pids")},
             "device_ids": item["limits"]["gpu_ids"],
         }
         for item in job["containers"]
@@ -554,7 +602,7 @@ def _gate6_pair_artifact(
             "within_reviewed_envelope": observed_headroom["within_reviewed_envelope"],
         },
         "negative_isolation": {
-            "sandboxes": list(GATE6_SANDBOXES),
+            "sandboxes": list(sandboxes),
             "checks": [
                 {
                     "source": item["source"],
@@ -604,6 +652,8 @@ def _build_gate6_bundle(
     _scan_for_secrets(platform)
     if not isinstance(live, Mapping) or not isinstance(platform, Mapping):
         raise AcceptanceError("gate-6 sources must be objects")
+    environments, registry_snapshot = _gate6_registry_environments(live)
+    sandboxes = tuple(environments)
     if (
         live.get("schema_version") != 2
         or len(live.get("state_machine", [])) != 33
@@ -618,11 +668,12 @@ def _build_gate6_bundle(
                 "sha": live["candidates"][sandbox]["sha"],
                 "tree": live["candidates"][sandbox]["tree"],
             }
-            for sandbox in GATE6_SANDBOXES
+            for sandbox in sandboxes
         }
+        or set(live.get("candidates", {})) != set(sandboxes)
     ):
         raise AcceptanceError("finalized live/platform gate-6 binding is invalid")
-    expected_pairs = {(sandbox, pool) for sandbox in GATE6_SANDBOXES for pool in GATE6_POOLS}
+    expected_pairs = {(sandbox, pool) for sandbox in sandboxes for pool in GATE6_POOLS}
     if set(matrices) != expected_pairs:
         raise AcceptanceError("gate-6 allocation matrix set is incomplete")
     failures = [
@@ -633,6 +684,8 @@ def _build_gate6_bundle(
             sandbox=sandbox,
             pool=pool,
             candidate=live["candidates"][sandbox],
+            environment=environments[sandbox],
+            registry_snapshot=registry_snapshot,
         )
     ]
     if failures:
@@ -640,7 +693,13 @@ def _build_gate6_bundle(
 
     pair_artifacts: dict[tuple[str, str], dict[str, Any]] = {}
     for sandbox, pool in sorted(expected_pairs):
-        artifact = _gate6_pair_artifact(live, platform, sandbox=sandbox, pool=pool)
+        artifact = _gate6_pair_artifact(
+            live,
+            platform,
+            sandbox=sandbox,
+            pool=pool,
+            sandboxes=sandboxes,
+        )
         pair_artifacts[(sandbox, pool)] = artifact
         if pool == "gb10":
             pair_failures = verify_evidence(artifact, schema)
@@ -698,8 +757,11 @@ def _build_gate6_bundle(
                 "sha": live["candidates"][sandbox]["sha"],
                 "tree": live["candidates"][sandbox]["tree"],
             }
-            for sandbox in GATE6_SANDBOXES
+            for sandbox in sandboxes
         },
+        "registry_generation": registry_snapshot["generation"],
+        "registry_payload_sha256": registry_snapshot["source_registry"]["payload_sha256"],
+        "registry_projection_sha256": registry_snapshot["payload_sha256"],
         "live_evidence_sha256": _digest(live),
         "platform_health_sha256": platform["payload_sha256"],
         "state_machine_phase_count": 33,

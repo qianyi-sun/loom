@@ -1,0 +1,68 @@
+[Unit]
+Description=Loom developer environment registry transaction authority
+Requires=loom-developer-environment-authority.socket
+After=local-fs.target
+ConditionFileIsExecutable=/usr/local/libexec/loom-developer-environment-deploy
+ConditionFileIsExecutable=/usr/local/libexec/loom-developer-environment-capacity-authority
+ConditionFileIsExecutable=/usr/local/libexec/scripts/ops/developer_sandbox_slurm_policy.py
+ConditionFileIsExecutable=/usr/local/libexec/loom-developer-sandbox-node-transport
+
+[Service]
+Type=simple
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/bin/python3 -I -B /usr/local/libexec/loom-developer-environment/developer_environment_authority.py
+StateDirectory=loom-developer-environment-registry
+StateDirectoryMode=0700
+RuntimeDirectory=loom-developer-environment-authority
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+ReadWritePaths=/var/lib/loom-developer-environment-registry
+ReadWritePaths=-/var/lib/loom-developer-environment-capacity
+ReadWritePaths=-/var/lib/loom-developer-environment-runtime
+ReadWritePaths=-/var/lib/loom-developer-sandbox-installer
+ReadWritePaths=-/var/lib/loom-developer-sandbox-links
+ReadWritePaths=-/var/lib/loom-shared-capacity
+ReadWritePaths=-/var/lib/loom
+ReadWritePaths=-/srv/loom/developer-environments
+ReadWritePaths=-/srv/loom/developer-sandboxes
+ReadWritePaths=-/shared_work/loom/candidates
+ReadWritePaths=-/shared_work/loom/runtime
+ReadWritePaths=/run/loom-developer-environment-authority
+ReadWritePaths=-/run/loom-developer-sandbox-installer
+# groupadd/useradd use root-owned lock and temporary files beside the four
+# account databases; the fixed authority accepts no caller-selected path.
+ReadWritePaths=/etc
+# The fixed 20-node transport deliberately drops to qianyi for its local route
+# and then uses the installed sudo-only node authority, matching remote nodes.
+NoNewPrivileges=no
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID
+AmbientCapabilities=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateUsers=no
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RemoveIPC=yes
+KeyringMode=private
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target

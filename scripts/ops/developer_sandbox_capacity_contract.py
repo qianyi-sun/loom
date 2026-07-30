@@ -77,6 +77,7 @@ _PLATFORM_HEALTH_FIELDS: Final = {
     "acceptance_state_root",
     "authority_state_root",
     "node_transport",
+    "registry_snapshot",
     "minio_statefulset",
     "minio_pdb",
     "max_checkpoint_seconds",
@@ -183,12 +184,10 @@ def load_capacity_policy(
         or actuator.get("external_runner") is not True
         or actuator.get("shared_capacity_managed") is not True
         or actuator.get("candidate_sha") != "${CANDIDATE_SHA}"
-        or actuator.get("slurm_account") != "loom-dev-${SANDBOX}"
-        or actuator.get("qos_normal") != "loom-dev"
-        or actuator.get("env_file")
-        != f"/shared_work/loom/runtime/sandboxes/${{SANDBOX}}/${{CANDIDATE_SHA}}/worker-{pool}.env"
-        or actuator.get("repo_dir")
-        != "/shared_work/loom/candidates/sandboxes/${SANDBOX}/${CANDIDATE_SHA}"
+        or actuator.get("slurm_account") != "${SLURM_ACCOUNT}"
+        or actuator.get("qos_normal") != "${SLURM_QOS}"
+        or actuator.get("env_file") != f"${{RUNTIME_ROOT}}/${{CANDIDATE_SHA}}/worker-{pool}.env"
+        or actuator.get("repo_dir") != "${CANDIDATE_ROOT}/${CANDIDATE_SHA}"
         or actuator.get("time_limit") != "02:00:00"
         or not isinstance(actuator.get("gpu_tres"), str)
         or actuator.get("gpu_tres") != ("" if pool == "oldlab" else "gpu:1")
@@ -318,6 +317,8 @@ def load_platform_health_contract(repo_root: Path) -> PlatformHealthContract:
         or payload.get("collector_host") != "trt-eai-oldlab-2"
         or payload.get("namespace") != "loom-staging"
         or payload.get("longhorn_namespace") != "longhorn-system"
+        or payload.get("registry_snapshot")
+        != "/var/lib/loom-developer-environment-registry/current-snapshot.json"
         or policy_sources != CAPACITY_POLICY_SOURCES
         or not inventory_is_typed
         or tuple(cast(list[str], oldlab_nodes)) != expected_oldlab

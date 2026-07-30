@@ -1,12 +1,12 @@
 # Developer sandbox cross-domain runtime publication
 
-This runbook publishes one exact developer-sandbox candidate and its private
-worker environment into the independent OLDLAB and GB10 `/shared_work` NFS
-domains. Identical path strings do not imply shared storage: the publisher
-converges and verifies each domain separately.
+This runbook publishes one exact registry-owned developer-environment
+candidate and its private worker environment into the independent OLDLAB and
+GB10 `/shared_work` NFS domains. Identical path strings do not imply shared
+storage: the publisher converges and verifies each domain separately.
 
 This is a root/admin installation path for issue #1023. It does not grant
-Qianyi (or any other user) general sudo on GB10, activate a worker, submit a
+any developer general sudo on GB10, activate a worker, submit a
 Slurm job, or authorize staging/production. Every peer first requires the
 external-root exact-tree bootstrap documented in
 `docs/runbooks/developer-sandboxes.md`. After bootstrap, oldlab2 may invoke
@@ -16,6 +16,14 @@ authority. If that fixed GB10 authority is unavailable, publication remains
 fail-closed. Docker group membership is not a bootstrap fallback.
 Changing the pinned source tree uses the same runbook's journaled direct-root
 `upgrade`; manual deletion or in-place source replacement is unsupported.
+
+The root-owned registry snapshot is the only environment-membership source.
+It supplies the runtime ID, service user/group and UID/GID, candidate and
+runtime roots, ports, Slurm identity, resource generation, and current
+candidate. There is no developer-name allowlist or fixed cohort size.
+Registering a fourth, fifth, or later authorized developer therefore requires
+no profile copy, port selection, authority rebuild, or peer-environment
+handoff.
 
 ## Stable identity and path contract
 
@@ -39,12 +47,13 @@ Each domain has a separate private runtime env:
 /shared_work/loom/runtime/sandboxes/<sandbox>/<SHA>/worker-gb10.env
 ```
 
-The env is owned by a fixed non-login `loom-sandbox-<sandbox>` batch service
-identity at mode `0600`; its sandbox and SHA parents are mode `2750` with that
-identity's dedicated primary group. `sharedwork`, the human developer account,
-and other sandbox service identities never get secret-env access.
+The env is owned by the registry-assigned non-login batch service identity at
+mode `0600`; its sandbox and SHA parents are mode `2750` with that identity's
+dedicated primary group. `sharedwork`, the human developer account, and other
+environment service identities never get secret-env access.
 
-The checked-in batch identities have fixed UID/GID pairs:
+The following checked-in identities are only `legacy-v1` migration seeds and
+examples. They are not the current membership list:
 
 | Sandbox | Non-login batch identity | UID:GID |
 | --- | --- | ---: |
@@ -52,13 +61,14 @@ The checked-in batch identities have fixed UID/GID pairs:
 | hongjian | `loom-sandbox-hongjian` | `31022:31022` |
 | devansh | `loom-sandbox-devansh` | `31023:31023` |
 
-The node authority creates only these fixed service identities with
-`/nonexistent` and `/usr/sbin/nologin`, after proving both numbers are free.
-Every peer compares its local passwd/group identity, the NFS inode, and the env
-owner UID/GID before the publisher signs an attestation. Human UID drift
-therefore cannot become an NFS authorization input. Any UID/GID collision,
-login-capable metadata, explicit dedicated-group member, cross-peer identity
-drift, or `sharedwork` GID drift fails before publication.
+For every registry environment, the node authority creates or verifies only
+its exact assigned identity with `/nonexistent` and `/usr/sbin/nologin`, after
+proving the name and numbers are free or already exact on all 20 nodes. Every
+peer compares its local passwd/group identity, the NFS inode, and the env owner
+UID/GID before the publisher signs an attestation. Human UID drift therefore
+cannot become an NFS authorization input. Any UID/GID collision, login-capable
+metadata, explicit dedicated-group member, cross-peer identity drift, or
+`sharedwork` GID drift fails before publication.
 
 The existing `loom-rollout` identity is not part of this contract. Its absence
 on an OLDLAB client cannot silently become a numeric-UID authorization.
@@ -91,9 +101,9 @@ GB10. The runtime-domain closed schema binds the same source, pool, and value;
 an OLDLAB seed cannot be published into GB10 (or vice versa), and an operator
 cannot lower or raise the effective worker concurrency with a CLI override.
 
-The worker addresses only the host-local `sandbox-link` relay. The
-sandbox-specific TLS listeners on oldlab2 and their loopback service targets
-are:
+The worker addresses only the host-local `sandbox-link` relay. Listener and
+loopback target ports are read from the exact registry environment. The
+following values document only the three `legacy-v1` migration seeds:
 
 | Sandbox | Control-plane listener → target | Gateway listener → target | MinIO listener → target |
 | --- | --- | --- | --- |
@@ -153,8 +163,8 @@ cancelling or preempting external work. The applied command installs:
 ```
 
 No non-root fallback exists. A failed `sudo -n` from the publisher is evidence
-that host authority has not been installed; do not work around it with a
-Qianyi-owned copy or a shared secret file.
+that host authority has not been installed; do not work around it with an
+operator-owned copy or a shared secret file.
 
 ## Plan and publish each domain
 
@@ -167,10 +177,10 @@ OLDLAB plan:
 sudo /usr/local/libexec/loom-developer-domain-runtime publish \
   --config /etc/loom/developer-runtime-domains.toml \
   --domain oldlab \
-  --sandbox qianyi \
+  --sandbox <registry-runtime-id> \
   --candidate-sha <SHA> \
   --source-repo /root/loom-candidate-source \
-  --worker-env-seed /run/loom-private/qianyi-oldlab.env
+  --worker-env-seed /run/loom-private/<registry-runtime-id>-oldlab.env
 ```
 
 The JSON contains only candidate identity, target paths, actions, stable group,
@@ -183,10 +193,10 @@ Execute the unchanged request on the declared publisher
 sudo /usr/local/libexec/loom-developer-domain-runtime publish \
   --config /etc/loom/developer-runtime-domains.toml \
   --domain oldlab \
-  --sandbox qianyi \
+  --sandbox <registry-runtime-id> \
   --candidate-sha <SHA> \
   --source-repo /root/loom-candidate-source \
-  --worker-env-seed /run/loom-private/qianyi-oldlab.env \
+  --worker-env-seed /run/loom-private/<registry-runtime-id>-oldlab.env \
   --execute
 ```
 
@@ -298,12 +308,12 @@ On oldlab2, collect both fresh domains in plan mode, then apply:
 ```bash
 sudo /usr/local/libexec/loom-developer-domain-runtime collect \
   --config /etc/loom/developer-runtime-domains.toml \
-  --sandbox qianyi \
+  --sandbox <registry-runtime-id> \
   --candidate-sha <SHA>
 
 sudo /usr/local/libexec/loom-developer-domain-runtime collect \
   --config /etc/loom/developer-runtime-domains.toml \
-  --sandbox qianyi \
+  --sandbox <registry-runtime-id> \
   --candidate-sha <SHA> \
   --execute
 ```
@@ -356,7 +366,7 @@ The peer helper's bounded local check is:
 sudo /usr/local/libexec/loom-developer-domain-runtime inspect-local \
   --config /etc/loom/developer-runtime-domains.toml \
   --domain oldlab \
-  --sandbox qianyi \
+  --sandbox <registry-runtime-id> \
   --candidate-sha <SHA> \
   --candidate-tree <TREE>
 ```

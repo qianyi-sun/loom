@@ -9,7 +9,17 @@
     "default": "None",
     "required": false
   },
+  "candidate_id": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
   "candidate_sha": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
+  "candidate_tree": {
     "annotation": "<class 'str'>",
     "default": "''",
     "required": false
@@ -67,6 +77,11 @@
   "enable_worker_vllm": {
     "annotation": "<class 'bool'>",
     "default": "False",
+    "required": false
+  },
+  "env_id": {
+    "annotation": "<class 'str'>",
+    "default": "''",
     "required": false
   },
   "family_state_download_timeout_sec": {
@@ -179,9 +194,24 @@
     "default": "60.0",
     "required": false
   },
+  "registry_generation": {
+    "annotation": "<class 'int'>",
+    "default": "0",
+    "required": false
+  },
+  "registry_payload_sha256": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
   "require_cgroup_parent": {
     "annotation": "<class 'bool'>",
     "default": "False",
+    "required": false
+  },
+  "resource_generation": {
+    "annotation": "<class 'int'>",
+    "default": "0",
     "required": false
   },
   "sandbox_identity": {

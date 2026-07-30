@@ -42,19 +42,12 @@ IMPORT_ROOT: Final = (
 if str(IMPORT_ROOT) not in sys.path:
     sys.path.insert(0, str(IMPORT_ROOT))
 
+from scripts.ops import developer_environment_registry as environment_registry  # noqa: E402
+from scripts.ops import developer_sandbox_live_acceptance as live_acceptance  # noqa: E402
 from scripts.ops.developer_sandbox_capacity_contract import (  # noqa: E402
     CAPACITY_POLICY_SOURCES,
     CapacityContractError,
     load_capacity_policy,
-)
-from scripts.ops.developer_sandbox_host import (  # noqa: E402
-    HostConvergeError,
-    _validate_desired_binding,
-    load_profiles,
-    verify_combined_receipt,
-)
-from scripts.ops.developer_sandbox_host import (  # noqa: E402
-    _load_json as _load_host_json,
 )
 
 SCHEMA_VERSION: Final = 1
@@ -87,7 +80,6 @@ CHECKPOINT_GROUPS: Final = {
     "worker_crash": "during",
     "final_drain": "after",
 }
-SANDBOXES: Final = ("qianyi", "hongjian", "devansh")
 POOLS: Final = ("oldlab", "gb10")
 ROLES: Final = ("worker", "trial", "verifier", "sidecar")
 GATE6_WORKLOADS: Final = ("loom", "non_loom_slurm", "kubernetes", "minio", "longhorn")
@@ -146,6 +138,7 @@ NODE_REQUEST_FIELDS: Final = {
     "expected_slurm_node",
     "expected_host",
     "since_at",
+    "registry_snapshot",
     "candidates",
 }
 NODE_RESULT_FIELDS: Final = {
@@ -208,6 +201,7 @@ class Config:
     acceptance_state_root: Path
     authority_state_root: Path
     node_transport: Path
+    registry_snapshot: Path
     minio_statefulset: str
     minio_pdb: str
     max_checkpoint_seconds: int
@@ -283,6 +277,7 @@ def load_config(path: Path) -> Config:
         "acceptance_state_root",
         "authority_state_root",
         "node_transport",
+        "registry_snapshot",
         "minio_statefulset",
         "minio_pdb",
         "max_checkpoint_seconds",
@@ -342,6 +337,7 @@ def load_config(path: Path) -> Config:
         Path(payload["acceptance_state_root"]),
         Path(payload["authority_state_root"]),
         Path(payload["node_transport"]),
+        Path(payload["registry_snapshot"]),
     )
     if any(not item.is_absolute() for item in absolute_paths):
         raise PlatformHealthError("platform-health authority config path is invalid")
@@ -353,6 +349,7 @@ def load_config(path: Path) -> Config:
         acceptance_state_root=absolute_paths[1],
         authority_state_root=absolute_paths[2],
         node_transport=absolute_paths[3],
+        registry_snapshot=absolute_paths[4],
         minio_statefulset=payload["minio_statefulset"],
         minio_pdb=payload["minio_pdb"],
         max_checkpoint_seconds=payload["max_checkpoint_seconds"],
@@ -483,6 +480,59 @@ def _secure_json(path: Path, *, label: str) -> tuple[Any, bytes]:
     return payload, raw
 
 
+def _validated_registry_snapshot(value: object) -> dict[str, Any]:
+    try:
+        return live_acceptance._validated_registry_snapshot(value)
+    except live_acceptance.AcceptanceError as exc:
+        raise PlatformHealthError("acceptance registry snapshot is invalid") from exc
+
+
+def _current_registry_snapshot(config: Config) -> dict[str, Any]:
+    raw = _read_secure_bytes(
+        config.registry_snapshot,
+        label="developer environment registry snapshot",
+    )
+    try:
+        source = environment_registry.DeveloperEnvironmentRegistry.verify_snapshot(raw)
+        projected = live_acceptance._acceptance_registry_snapshot(source)
+    except (
+        environment_registry.RegistryError,
+        live_acceptance.AcceptanceError,
+    ) as exc:
+        raise PlatformHealthError("developer environment registry snapshot is invalid") from exc
+    return _validated_registry_snapshot(projected)
+
+
+def _registry_environments(snapshot: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    projection = _validated_registry_snapshot(snapshot)
+    source = projection["source_registry"]
+    candidates = {
+        str(row["candidate_id"]): row for row in source["candidates"] if isinstance(row, Mapping)
+    }
+    result: dict[str, dict[str, Any]] = {}
+    for row in source["environments"]:
+        if not isinstance(row, Mapping) or row.get("state") != "active":
+            continue
+        candidate = candidates.get(str(row.get("current_candidate_id")))
+        if not isinstance(candidate, Mapping):
+            raise PlatformHealthError("registry environment candidate is invalid")
+        environment = {
+            **dict(row),
+            "candidate_id": candidate["candidate_id"],
+            "candidate_sha": candidate["candidate_sha"],
+            "candidate_tree": candidate["candidate_tree"],
+        }
+        result[str(row["runtime_id"])] = environment
+    projected_ids = {str(row["runtime_id"]) for row in projection["environments"]}
+    if set(result) != projected_ids:
+        raise PlatformHealthError("registry environment projection is incomplete")
+    return result
+
+
+def _sandboxes(snapshot: Mapping[str, Any]) -> tuple[str, ...]:
+    return tuple(_registry_environments(snapshot))
+
+
 def _ensure_directory(path: Path) -> None:
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     metadata = path.lstat()
@@ -587,22 +637,29 @@ def _acceptance_state(config: Config, session_id: str) -> dict[str, Any]:
         label="acceptance session state",
     )
     candidates = state.get("candidates") if isinstance(state, dict) else None
+    registry_snapshot = state.get("registry_snapshot") if isinstance(state, dict) else None
+    validated_registry = _validated_registry_snapshot(registry_snapshot)
+    current_registry = _current_registry_snapshot(config)
+    sandboxes = _sandboxes(validated_registry)
+    registry_environments = _registry_environments(validated_registry)
     if (
         not isinstance(state, dict)
         or state.get("schema_version") != 2
         or state.get("session_id") != session_id
         or state.get("submit_host") != config.collector_host
         or state.get("status") not in {"running", "complete"}
+        or validated_registry != current_registry
         or not isinstance(candidates, dict)
-        or set(candidates) != set(SANDBOXES)
+        or set(candidates) != set(sandboxes)
         or any(
             not isinstance(candidates[sandbox], dict)
             or set(candidates[sandbox]) != {"sha", "tree"}
             or SHA_RE.fullmatch(str(candidates[sandbox]["sha"])) is None
             or SHA_RE.fullmatch(str(candidates[sandbox]["tree"])) is None
-            for sandbox in SANDBOXES
+            or candidates[sandbox]["sha"] != registry_environments[sandbox]["candidate_sha"]
+            or candidates[sandbox]["tree"] != registry_environments[sandbox]["candidate_tree"]
+            for sandbox in sandboxes
         )
-        or len({candidates[sandbox]["sha"] for sandbox in SANDBOXES}) != len(SANDBOXES)
         or not isinstance(state.get("completed_phases"), list)
     ):
         raise PlatformHealthError("acceptance session state binding is invalid")
@@ -614,8 +671,9 @@ def _require_acceptance_phase(
     state: Mapping[str, Any],
     checkpoint: str,
 ) -> dict[str, str]:
+    sandboxes = _sandboxes(state["registry_snapshot"])
     completed = state["completed_phases"]
-    expected = [f"{sandbox}:{checkpoint}" for sandbox in SANDBOXES]
+    expected = [f"{sandbox}:{checkpoint}" for sandbox in sandboxes]
     indexes: list[int] = []
     for item in expected:
         try:
@@ -641,8 +699,8 @@ def _require_acceptance_phase(
         "final_drain",
     )
     phase_index = phase_order.index(checkpoint)
-    for sandbox_index, sandbox in enumerate(SANDBOXES):
-        checkpoint_index = phase_index * len(SANDBOXES) + sandbox_index
+    for sandbox_index, sandbox in enumerate(sandboxes):
+        checkpoint_index = phase_index * len(sandboxes) + sandbox_index
         path = (
             config.acceptance_state_root
             / "sessions"
@@ -674,24 +732,22 @@ def _soak_trial_batch_manifest(
     config: Config,
     state: Mapping[str, Any],
 ) -> list[dict[str, str]]:
+    sandboxes = _sandboxes(state["registry_snapshot"])
     phase_index = (
-        (
-            "preflight",
-            "baseline",
-            "multi_candidate_overlap",
-            "large_batch_burst",
-            "fairness_contention",
-            "mixed_non_loom",
-            "cancel_cleanup",
-            "ttl_cleanup",
-            "submit_host_restart",
-            "worker_crash",
-            "final_drain",
-        ).index("mixed_non_loom")
-        * len(SANDBOXES)
-    )
+        "preflight",
+        "baseline",
+        "multi_candidate_overlap",
+        "large_batch_burst",
+        "fairness_contention",
+        "mixed_non_loom",
+        "cancel_cleanup",
+        "ttl_cleanup",
+        "submit_host_restart",
+        "worker_crash",
+        "final_drain",
+    ).index("mixed_non_loom") * len(sandboxes)
     manifest: list[dict[str, str]] = []
-    for sandbox_index, sandbox in enumerate(SANDBOXES):
+    for sandbox_index, sandbox in enumerate(sandboxes):
         checkpoint = (
             config.acceptance_state_root
             / "sessions"
@@ -830,62 +886,49 @@ ORDER BY t.finished_at, t.id
 def _sandbox_postgres_container(
     sandbox: str,
     candidate: Mapping[str, str],
+    environment: Mapping[str, Any],
     *,
     run: Run,
 ) -> tuple[str, dict[str, str]]:
-    profiles = {profile.sandbox: profile for profile in load_profiles()}
-    profile = profiles.get(sandbox)
-    if profile is None:
-        raise PlatformHealthError("sandbox Postgres profile is unavailable")
-    try:
-        receipt = verify_combined_receipt(
-            profile,
-            candidate["sha"],
-            candidate["tree"],
-        )
-        desired = _load_host_json(profile.desired_file, "sandbox desired state")
-        lifecycle = _load_host_json(profile.state_file, "sandbox lifecycle state")
-        if desired is None or lifecycle is None:
-            raise HostConvergeError("sandbox current state is unavailable")
-        _validate_desired_binding(
-            profile,
-            desired,
-            sha=candidate["sha"],
-            tree=candidate["tree"],
-            receipt=receipt,
-        )
-    except HostConvergeError as exc:
-        raise PlatformHealthError("sandbox Postgres candidate receipt is invalid") from exc
-    if (
-        set(lifecycle)
-        != {
-            "schema_version",
-            "sandbox",
-            "compose_project",
-            "candidate_sha",
-            "candidate_tree",
-            "source_repo",
-            "updated_at",
-        }
-        or lifecycle.get("schema_version") != 1
-        or lifecycle.get("sandbox") != sandbox
-        or lifecycle.get("compose_project") != profile.compose_project
-        or lifecycle.get("candidate_sha") != candidate["sha"]
-        or lifecycle.get("candidate_tree") != candidate["tree"]
-        or lifecycle.get("source_repo") != str(profile.candidate_root / candidate["sha"])
-    ):
-        raise PlatformHealthError("sandbox Postgres lifecycle candidate is invalid")
-    lifecycle_updated = _timestamp(
-        lifecycle["updated_at"],
-        label="sandbox lifecycle updated_at",
+    manifest, _raw = _secure_json(
+        Path(str(environment["state_root"])) / "host-manifest.json",
+        label="developer environment host manifest",
     )
+    unsigned = (
+        {key: value for key, value in manifest.items() if key != "payload_sha256"}
+        if isinstance(manifest, dict)
+        else {}
+    )
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema_version") != 1
+        or manifest.get("kind") != "loom.developer-environment.host-manifest"
+        or manifest.get("env_id") != environment["env_id"]
+        or manifest.get("candidate_id") != environment["candidate_id"]
+        or manifest.get("candidate_sha") != candidate["sha"]
+        or manifest.get("candidate_tree") != candidate["tree"]
+        or manifest.get("compose_project") != environment["compose_project"]
+        or manifest.get("slurm_user") != environment["slurm_user"]
+        or manifest.get("slurm_account") != environment["slurm_account"]
+        or manifest.get("slurm_qos") != environment["slurm_qos"]
+        or manifest.get("cgroup_slice") != environment["cgroup_slice"]
+        or manifest.get("candidate_checkout")
+        != str(Path(str(environment["candidate_root"])) / candidate["sha"])
+        or manifest.get("runtime_root") != environment["runtime_root"]
+        or manifest.get("payload_sha256") != _digest(unsigned)
+    ):
+        raise PlatformHealthError("developer environment host manifest is invalid")
     raw = _run_bounded(
         (
             "/usr/bin/docker",
             "ps",
             "--quiet",
             "--filter",
-            f"label=com.docker.compose.project={profile.compose_project}",
+            f"label=com.docker.compose.project={environment['compose_project']}",
+            "--filter",
+            f"label=loom.developer-environment.env-id={environment['env_id']}",
+            "--filter",
+            f"label=loom.developer-environment.candidate-id={environment['candidate_id']}",
             "--filter",
             "label=com.docker.compose.service=postgres",
             "--filter",
@@ -905,12 +948,10 @@ def _sandbox_postgres_container(
     labels = entry.get("Config", {}).get("Labels") if isinstance(entry, dict) else None
     state = entry.get("State") if isinstance(entry, dict) else None
     full_container_id = entry.get("Id") if isinstance(entry, dict) else None
-    expected_candidate_root = str(profile.candidate_root / candidate["sha"])
+    expected_candidate_root = str(Path(str(environment["candidate_root"])) / candidate["sha"])
     expected_compose_root = str(Path(expected_candidate_root) / "deploy")
     compose_config = (
-        labels.get("com.docker.compose.project.config_files")
-        if isinstance(labels, dict)
-        else None
+        labels.get("com.docker.compose.project.config_files") if isinstance(labels, dict) else None
     )
     compose_hash = (
         labels.get("com.docker.compose.config-hash") if isinstance(labels, dict) else None
@@ -920,11 +961,12 @@ def _sandbox_postgres_container(
         or not isinstance(full_container_id, str)
         or CONTAINER_ID_RE.fullmatch(full_container_id) is None
         or not full_container_id.startswith(container_id)
-        or labels.get("com.docker.compose.project") != profile.compose_project
+        or labels.get("com.docker.compose.project") != environment["compose_project"]
+        or labels.get("loom.developer-environment.env-id") != environment["env_id"]
+        or labels.get("loom.developer-environment.candidate-id") != environment["candidate_id"]
         or labels.get("com.docker.compose.service") != "postgres"
         or labels.get("com.docker.compose.project.working_dir") != expected_compose_root
-        or compose_config
-        != str(Path(expected_candidate_root) / "deploy/docker-compose.dev.yml")
+        or compose_config != str(Path(expected_candidate_root) / "deploy/docker-compose.dev.yml")
         or not isinstance(compose_hash, str)
         or DIGEST_RE.fullmatch(compose_hash) is None
         or not isinstance(state, dict)
@@ -936,42 +978,47 @@ def _sandbox_postgres_container(
     assert isinstance(state, dict)
     created_at = _timestamp(entry.get("Created"), label="sandbox Postgres created_at")
     started_at = _timestamp(state.get("StartedAt"), label="sandbox Postgres started_at")
-    if created_at > started_at or started_at > lifecycle_updated:
+    if created_at > started_at:
         raise PlatformHealthError("sandbox Postgres generation is not current")
     return container_id, {
         "sandbox": sandbox,
         "candidate_sha": candidate["sha"],
         "candidate_tree": candidate["tree"],
-        "compose_project": profile.compose_project,
+        "compose_project": str(environment["compose_project"]),
         "container_id": full_container_id,
         "compose_config_sha256": compose_hash,
         "created_at": _iso(created_at),
         "started_at": _iso(started_at),
-        "lifecycle_updated_at": _iso(lifecycle_updated),
-        "desired_sha256": _digest(desired),
-        "lifecycle_sha256": _digest(lifecycle),
-        "combined_receipt_sha256": receipt.payload_sha256,
+        "lifecycle_updated_at": _iso(started_at),
+        "desired_sha256": str(manifest["payload_sha256"]),
+        "lifecycle_sha256": str(manifest["payload_sha256"]),
+        "combined_receipt_sha256": str(manifest["payload_sha256"]),
     }
 
 
 def _trial_outcomes(
     candidates: Mapping[str, Mapping[str, str]],
+    registry_snapshot: Mapping[str, Any],
     trial_batches: Sequence[Mapping[str, str]],
     *,
     run: Run = subprocess.run,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     outcomes: list[dict[str, Any]] = []
     authorities: list[dict[str, str]] = []
-    for sandbox in SANDBOXES:
+    environments = _registry_environments(registry_snapshot)
+    for sandbox in candidates:
         candidate = candidates[sandbox]
         sandbox_batches = {
-            row["pool"]: row["batch_id"]
-            for row in trial_batches
-            if row["sandbox"] == sandbox
+            row["pool"]: row["batch_id"] for row in trial_batches if row["sandbox"] == sandbox
         }
         if set(sandbox_batches) != set(POOLS):
             raise PlatformHealthError("sandbox trial-batch manifest is incomplete")
-        container_id, authority = _sandbox_postgres_container(sandbox, candidate, run=run)
+        container_id, authority = _sandbox_postgres_container(
+            sandbox,
+            candidate,
+            environments[sandbox],
+            run=run,
+        )
         authorities.append(authority)
         raw = _run_bounded(
             (
@@ -995,17 +1042,15 @@ def _trial_outcomes(
             run=run,
         )
         try:
-            rows = [
-                json.loads(line)
-                for line in raw.decode("utf-8").splitlines()
-                if line.strip()
-            ]
+            rows = [json.loads(line) for line in raw.decode("utf-8").splitlines() if line.strip()]
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise PlatformHealthError("sandbox trial outcome readback is invalid") from exc
         if any(not isinstance(row, dict) for row in rows):
             raise PlatformHealthError("sandbox trial outcome readback is invalid")
         outcomes.extend(rows)
-    ordered = sorted(outcomes, key=lambda row: (str(row.get("finished_at")), str(row.get("trial_id"))))
+    ordered = sorted(
+        outcomes, key=lambda row: (str(row.get("finished_at")), str(row.get("trial_id")))
+    )
     if len({str(row.get("trial_id")) for row in ordered}) != len(ordered):
         raise PlatformHealthError("sandbox trial outcome attribution is duplicated")
     return ordered, authorities
@@ -1253,6 +1298,7 @@ def _node_request(
         "expected_slurm_node": config.host_aliases[node] if node.startswith("oldlab-") else node,
         "expected_host": config.host_aliases[node],
         "since_at": since_at,
+        "registry_snapshot": state["registry_snapshot"],
         "candidates": state["candidates"],
     }
 
@@ -1263,13 +1309,14 @@ def _request_envelope(
     node: str,
 ) -> bytes:
     payload = _canonical(request)
-    candidate = request["candidates"]["qianyi"]
+    sandbox = next(iter(request["candidates"]))
+    candidate = request["candidates"][sandbox]
     body: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "action": "observe-platform-health-node",
         "node": node,
         "domain": "oldlab" if node.startswith("oldlab-") else "gb10",
-        "sandbox": "qianyi",
+        "sandbox": sandbox,
         "candidate_sha": candidate["sha"],
         "candidate_tree": candidate["tree"],
         "payload_kind": "platform-health-node-json",
@@ -1363,7 +1410,7 @@ def _docker_container_ids(
     run: Run,
 ) -> tuple[str, ...]:
     found: set[str] = set()
-    for sandbox in SANDBOXES:
+    for sandbox in candidates:
         raw = _run_bounded(
             (
                 "/usr/bin/docker",
@@ -1546,6 +1593,7 @@ def _job_readback(
     *,
     sandbox: str,
     candidate_sha: str,
+    environment: Mapping[str, Any],
     job_id: str,
     expected_node: str,
     run: Run,
@@ -1574,8 +1622,9 @@ def _job_readback(
     if (
         values.get("JobId") != job_id
         or not job_name.startswith(f"loom-{sandbox}-{candidate_sha[:12]}-")
-        or user != f"loom-sandbox-{sandbox}"
-        or values.get("Account") != f"loom-dev-{sandbox}"
+        or user != environment["slurm_user"]
+        or values.get("Account") != environment["slurm_account"]
+        or values.get("QOS") != environment["slurm_qos"]
         or values.get("JobState") != "RUNNING"
         or values.get("NodeList", "").lower() != expected_node.lower()
         or values.get("NumNodes") != "1"
@@ -1591,6 +1640,7 @@ def _job_readback(
         "sandbox": sandbox,
         "candidate_sha": candidate_sha,
         "account": values["Account"],
+        "qos": values["QOS"],
         "user": user,
         "node": expected_node,
         "state": "RUNNING",
@@ -1607,6 +1657,7 @@ def _job_readback(
 
 def _container_observations(
     candidates: Mapping[str, Mapping[str, str]],
+    registry_snapshot: Mapping[str, Any],
     *,
     expected_node: str,
     expected_host: str,
@@ -1614,6 +1665,7 @@ def _container_observations(
     policy: Mapping[str, Any],
     run: Run,
 ) -> tuple[list[dict[str, Any]], list[str]]:
+    environments = _registry_environments(registry_snapshot)
     ids = _docker_container_ids(candidates, run=run)
     containers: list[dict[str, Any]] = []
     orphans: list[str] = []
@@ -1657,11 +1709,20 @@ def _container_observations(
         candidate_sha = labels.get("loom.candidate_sha", "")
         job_id = labels.get("loom.slurm_job_id", "")
         compose_project = labels.get("loom.compose_project", "")
+        environment = environments.get(sandbox, {})
+        registry_generation = str(registry_snapshot["generation"])
+        registry_payload_sha256 = str(registry_snapshot["payload_sha256"])
         compose_label = labels.get("com.docker.compose.project", "")
         networks = network_settings.get("Networks")
         if (
-            sandbox not in SANDBOXES
+            sandbox not in candidates
             or candidate_sha != candidates[sandbox]["sha"]
+            or labels.get("loom.env_id") != environment.get("env_id")
+            or labels.get("loom.resource_generation") != str(environment.get("resource_generation"))
+            or labels.get("loom.candidate_id") != environment.get("candidate_id")
+            or labels.get("loom.candidate_tree") != candidates[sandbox]["tree"]
+            or labels.get("loom.registry_generation") != registry_generation
+            or labels.get("loom.registry_payload_sha256") != registry_payload_sha256
             or JOB_ID_RE.fullmatch(job_id) is None
             or SAFE_NAME_RE.fullmatch(compose_project) is None
             or compose_label != compose_project
@@ -1736,6 +1797,12 @@ def _container_observations(
                     "loom.candidate_sha": candidate_sha,
                     "loom.slurm_job_id": job_id,
                     "loom.compose_project": compose_project,
+                    "loom.env_id": str(environment["env_id"]),
+                    "loom.resource_generation": str(environment["resource_generation"]),
+                    "loom.candidate_id": str(environment["candidate_id"]),
+                    "loom.candidate_tree": str(candidates[sandbox]["tree"]),
+                    "loom.registry_generation": registry_generation,
+                    "loom.registry_payload_sha256": registry_payload_sha256,
                 },
                 "compose_networks": sorted(networks),
                 "pid": pid,
@@ -1773,9 +1840,21 @@ def _container_observations(
         slurm = _job_readback(
             sandbox=sandbox,
             candidate_sha=candidate_sha,
+            environment=environments[sandbox],
             job_id=job_id,
             expected_node=expected_node,
             run=run,
+        )
+        environment = environments[sandbox]
+        slurm.update(
+            {
+                "env_id": environment["env_id"],
+                "resource_generation": environment["resource_generation"],
+                "candidate_id": environment["candidate_id"],
+                "candidate_tree": candidates[sandbox]["tree"],
+                "registry_generation": registry_snapshot["generation"],
+                "registry_payload_sha256": registry_snapshot["payload_sha256"],
+            },
         )
         slurm_pid_paths = _slurm_job_pid_cgroups(job_id, run=run)
         if not _cgroup_binds_slurm_job(job_path, job_id) or any(
@@ -1925,11 +2004,13 @@ def _container_observations(
 
 def _terminal_jobs(
     candidates: Mapping[str, Mapping[str, str]],
+    registry_snapshot: Mapping[str, Any],
     *,
     expected_node: str,
     since_at: str,
     run: Run,
 ) -> list[dict[str, Any]]:
+    environments = _registry_environments(registry_snapshot)
     since = _timestamp(since_at, label="node observation lower bound")
     raw = _run_bounded(
         (
@@ -1955,7 +2036,7 @@ def _terminal_jobs(
             ended_at += "Z"
         matches = [
             sandbox
-            for sandbox in SANDBOXES
+            for sandbox in candidates
             if name.startswith(f"loom-{sandbox}-{candidates[sandbox]['sha'][:12]}-")
         ]
         if not matches:
@@ -1964,8 +2045,8 @@ def _terminal_jobs(
         if (
             JOB_ID_RE.fullmatch(job_id) is None
             or node.lower() != expected_node.lower()
-            or account != f"loom-dev-{sandbox}"
-            or user != f"loom-sandbox-{sandbox}"
+            or account != environments[sandbox]["slurm_account"]
+            or user != environments[sandbox]["slurm_user"]
             or job_id in seen
             or not elapsed_raw.isdigit()
             or int(elapsed_raw) < 0
@@ -2038,6 +2119,13 @@ def observe_node(
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise PlatformHealthError("platform-health node request is invalid") from exc
     candidates = request.get("candidates") if isinstance(request, dict) else None
+    registry_snapshot = (
+        _validated_registry_snapshot(request.get("registry_snapshot"))
+        if isinstance(request, dict)
+        else {}
+    )
+    sandboxes = _sandboxes(registry_snapshot)
+    environments = _registry_environments(registry_snapshot)
     if (
         not isinstance(request, dict)
         or set(request) != NODE_REQUEST_FIELDS
@@ -2058,13 +2146,15 @@ def observe_node(
         or not isinstance(request.get("expected_host"), str)
         or hostname() != request.get("expected_host")
         or not isinstance(candidates, dict)
-        or set(candidates) != set(SANDBOXES)
+        or set(candidates) != set(sandboxes)
         or any(
             not isinstance(candidates[sandbox], dict)
             or set(candidates[sandbox]) != {"sha", "tree"}
             or SHA_RE.fullmatch(str(candidates[sandbox]["sha"])) is None
             or SHA_RE.fullmatch(str(candidates[sandbox]["tree"])) is None
-            for sandbox in SANDBOXES
+            or candidates[sandbox]["sha"] != environments[sandbox]["candidate_sha"]
+            or candidates[sandbox]["tree"] != environments[sandbox]["candidate_tree"]
+            for sandbox in sandboxes
         )
     ):
         raise PlatformHealthError("platform-health node request binding is invalid")
@@ -2083,6 +2173,7 @@ def observe_node(
     policy = _load_capacity_policy(pool)
     jobs, orphans = _container_observations(
         candidates,
+        registry_snapshot,
         expected_node=request["expected_slurm_node"],
         expected_host=request["expected_host"],
         checkpoint=request["checkpoint"],
@@ -2091,6 +2182,7 @@ def observe_node(
     )
     terminal = _terminal_jobs(
         candidates,
+        registry_snapshot,
         expected_node=request["expected_slurm_node"],
         since_at=request["since_at"],
         run=run,
@@ -2154,13 +2246,11 @@ def _validate_node_result(
             or job.get("state")
             not in {"CANCELLED", "FAILED", "NODE_FAIL", "OUT_OF_MEMORY", "TIMEOUT", "COMPLETED"}
             or job.get("node") != request["expected_slurm_node"]
-            or job.get("sandbox") not in SANDBOXES
+            or job.get("sandbox") not in request["candidates"]
             or job.get("candidate_sha")
             != request["candidates"].get(str(job.get("sandbox")), {}).get("sha")
             or not str(job.get("job_name", "")).startswith(
-                "loom-"
-                f"{job.get('sandbox')}-"
-                f"{str(job.get('candidate_sha', ''))[:12]}-",
+                f"loom-{job.get('sandbox')}-{str(job.get('candidate_sha', ''))[:12]}-",
             )
             or not isinstance(job.get("elapsed_seconds"), int)
             or isinstance(job.get("elapsed_seconds"), bool)
@@ -2243,8 +2333,15 @@ def _verify_mixed_job_policy(
             "job_id",
             "job_name",
             "sandbox",
+            "env_id",
+            "resource_generation",
+            "candidate_id",
             "candidate_sha",
+            "candidate_tree",
+            "registry_generation",
+            "registry_payload_sha256",
             "account",
+            "qos",
             "user",
             "node",
             "host",
@@ -2314,6 +2411,12 @@ def _verify_mixed_job_policy(
                 "loom.candidate_sha": job.get("candidate_sha"),
                 "loom.slurm_job_id": job_id,
                 "loom.compose_project": job.get("compose_project"),
+                "loom.env_id": job.get("env_id"),
+                "loom.resource_generation": str(job.get("resource_generation")),
+                "loom.candidate_id": job.get("candidate_id"),
+                "loom.candidate_tree": job.get("candidate_tree"),
+                "loom.registry_generation": str(job.get("registry_generation")),
+                "loom.registry_payload_sha256": job.get("registry_payload_sha256"),
             }
             or item.get("cgroup_parent") != cgroup["job_path"]
             or not _strict_descendant(
@@ -2359,8 +2462,9 @@ def _verify_mixed_job_policy(
 def _exact_active_jobs(
     config: Config,
     nodes: Mapping[str, Any],
+    candidates: Mapping[str, Any],
 ) -> list[Mapping[str, Any]]:
-    """Verify and return the exact six sandbox/pool jobs in one live sample."""
+    """Verify and return one exact job per dynamic environment/pool pair."""
 
     if set(nodes) != set(config.nodes):
         raise PlatformHealthError("soak node inventory is incomplete")
@@ -2393,9 +2497,9 @@ def _exact_active_jobs(
         if combination in combinations:
             raise PlatformHealthError("soak repeats a sandbox/pool job")
         combinations.add(combination)
-    expected = {(sandbox, pool) for sandbox in SANDBOXES for pool in POOLS}
+    expected = {(sandbox, pool) for sandbox in candidates for pool in POOLS}
     if combinations != expected or len(jobs) != len(expected):
-        raise PlatformHealthError("soak does not contain the exact six active jobs")
+        raise PlatformHealthError("soak does not contain the exact active environment jobs")
     return jobs
 
 
@@ -2437,8 +2541,7 @@ def _validate_trial_outcome(
                 UUID_RE.fullmatch(str(outcome.get("worker_id"))) is None
                 or JOB_ID_RE.fullmatch(str(outcome.get("slurm_job_id"))) is None
                 or (sandbox, outcome.get("pool")) != expected_pair
-                or outcome.get("candidate_sha")
-                != candidates.get(str(sandbox), {}).get("sha")
+                or outcome.get("candidate_sha") != candidates.get(str(sandbox), {}).get("sha")
             )
         )
     ):
@@ -2454,8 +2557,7 @@ def _validate_trial_outcome(
     else:
         finished_at = None
     if batch_created_at > observed_at or (
-        finished_at is not None
-        and (finished_at < batch_created_at or finished_at > observed_at)
+        finished_at is not None and (finished_at < batch_created_at or finished_at > observed_at)
     ):
         raise PlatformHealthError("platform-health trial outcome is from the future")
 
@@ -2474,6 +2576,7 @@ def _validate_soak_sample(
         "session_id",
         "sequence",
         "previous_sha256",
+        "registry_snapshot",
         "candidates",
         "collector_host",
         "collection_started_at",
@@ -2486,6 +2589,9 @@ def _validate_soak_sample(
         "trial_outcomes",
         "payload_sha256",
     }
+    registry_snapshot = _validated_registry_snapshot(sample.get("registry_snapshot"))
+    sandboxes = _sandboxes(registry_snapshot)
+    environments = _registry_environments(registry_snapshot)
     if (
         set(sample) != fields
         or sample.get("schema_version") != SCHEMA_VERSION
@@ -2493,6 +2599,12 @@ def _validate_soak_sample(
         or sample.get("sequence") != sequence
         or sample.get("previous_sha256") != previous_sha256
         or sample.get("candidates") != candidates
+        or set(candidates) != set(sandboxes)
+        or any(
+            candidates[sandbox].get("sha") != environments[sandbox]["candidate_sha"]
+            or candidates[sandbox].get("tree") != environments[sandbox]["candidate_tree"]
+            for sandbox in sandboxes
+        )
         or sample.get("collector_host") != config.collector_host
         or sample.get("excluded_nodes") != []
         or set(sample.get("nodes", {})) != set(config.nodes)
@@ -2510,7 +2622,7 @@ def _validate_soak_sample(
     if observed < started or observed - started > timedelta(seconds=config.max_checkpoint_seconds):
         raise PlatformHealthError("platform-health soak sample window is invalid")
     trial_batch_rows = sample["trial_batches"]
-    expected_pairs = {(sandbox, pool) for sandbox in SANDBOXES for pool in POOLS}
+    expected_pairs = {(sandbox, pool) for sandbox in sandboxes for pool in POOLS}
     if (
         len(trial_batch_rows) != len(expected_pairs)
         or any(
@@ -2527,24 +2639,17 @@ def _validate_soak_sample(
             }
             or (row.get("sandbox"), row.get("pool")) not in expected_pairs
             or UUID_RE.fullmatch(str(row.get("batch_id"))) is None
-            or row.get("candidate_sha")
-            != candidates.get(str(row.get("sandbox")), {}).get("sha")
-            or row.get("candidate_tree")
-            != candidates.get(str(row.get("sandbox")), {}).get("tree")
+            or row.get("candidate_sha") != candidates.get(str(row.get("sandbox")), {}).get("sha")
+            or row.get("candidate_tree") != candidates.get(str(row.get("sandbox")), {}).get("tree")
             for row in trial_batch_rows
         )
-        or {
-            (row["sandbox"], row["pool"])
-            for row in trial_batch_rows
-            if isinstance(row, dict)
-        }
+        or {(row["sandbox"], row["pool"]) for row in trial_batch_rows if isinstance(row, dict)}
         != expected_pairs
         or len({row["batch_id"] for row in trial_batch_rows}) != len(trial_batch_rows)
     ):
         raise PlatformHealthError("platform-health soak trial-batch manifest is invalid")
     trial_batch_map = {
-        (str(row["sandbox"]), str(row["pool"])): str(row["batch_id"])
-        for row in trial_batch_rows
+        (str(row["sandbox"]), str(row["pool"])): str(row["batch_id"]) for row in trial_batch_rows
     }
     trial_batch_windows = {
         str(row["batch_id"]): (
@@ -2554,15 +2659,14 @@ def _validate_soak_sample(
         for row in trial_batch_rows
     }
     if any(
-        not started_at <= completed_at
-        for started_at, completed_at in trial_batch_windows.values()
+        not started_at <= completed_at for started_at, completed_at in trial_batch_windows.values()
     ):
         raise PlatformHealthError("platform-health soak trial-batch window is invalid")
     database_authorities = sample["trial_database_authorities"]
     if (
-        len(database_authorities) != len(SANDBOXES)
+        len(database_authorities) != len(sandboxes)
         or {row.get("sandbox") for row in database_authorities if isinstance(row, dict)}
-        != set(SANDBOXES)
+        != set(sandboxes)
         or any(
             not isinstance(row, dict)
             or set(row)
@@ -2580,11 +2684,10 @@ def _validate_soak_sample(
                 "lifecycle_sha256",
                 "combined_receipt_sha256",
             }
-            or row.get("candidate_sha")
-            != candidates.get(str(row.get("sandbox")), {}).get("sha")
-            or row.get("candidate_tree")
-            != candidates.get(str(row.get("sandbox")), {}).get("tree")
-            or row.get("compose_project") != f"loom-sandbox-{row.get('sandbox')}"
+            or row.get("candidate_sha") != candidates.get(str(row.get("sandbox")), {}).get("sha")
+            or row.get("candidate_tree") != candidates.get(str(row.get("sandbox")), {}).get("tree")
+            or row.get("compose_project")
+            != environments[str(row.get("sandbox"))]["compose_project"]
             or CONTAINER_ID_RE.fullmatch(str(row.get("container_id"))) is None
             or any(
                 DIGEST_RE.fullmatch(str(row.get(field))) is None
@@ -2639,19 +2742,11 @@ def _validate_soak_sample(
         trial_ids.add(trial_id)
     for batch_id in trial_batch_windows:
         batch_outcomes = [
-            outcome
-            for outcome in sample["trial_outcomes"]
-            if str(outcome["batch_id"]) == batch_id
+            outcome for outcome in sample["trial_outcomes"] if str(outcome["batch_id"]) == batch_id
         ]
-        expected_counts = {
-            int(outcome["expected_trial_count"]) for outcome in batch_outcomes
-        }
-        if (
-            len(expected_counts) > 1
-            or (
-                expected_counts
-                and len(batch_outcomes) > next(iter(expected_counts))
-            )
+        expected_counts = {int(outcome["expected_trial_count"]) for outcome in batch_outcomes}
+        if len(expected_counts) > 1 or (
+            expected_counts and len(batch_outcomes) > next(iter(expected_counts))
         ):
             raise PlatformHealthError("soak trial batch census is invalid")
     for node in config.nodes:
@@ -2664,6 +2759,7 @@ def _validate_soak_sample(
                 config.host_aliases[node] if node.startswith("oldlab-") else node
             ),
             "expected_host": config.host_aliases[node],
+            "registry_snapshot": registry_snapshot,
             "candidates": candidates,
         }
         _validate_node_result(sample["nodes"][node], request=request, config=config)
@@ -2680,7 +2776,7 @@ def _validate_soak_sample(
             )
         ):
             raise PlatformHealthError("soak node observation is outside its sample window")
-    _exact_active_jobs(config, sample["nodes"])
+    _exact_active_jobs(config, sample["nodes"], candidates)
 
 
 def _load_samples(
@@ -2730,6 +2826,7 @@ def _verify_soak_samples(
     candidates = samples[0].get("candidates")
     if not isinstance(candidates, dict):
         raise PlatformHealthError("platform-health soak candidates are invalid")
+    registry_snapshot = _validated_registry_snapshot(samples[0].get("registry_snapshot"))
     previous: str | None = None
     prior_observed: datetime | None = None
     trial_batches = samples[0].get("trial_batches")
@@ -2747,6 +2844,8 @@ def _verify_soak_samples(
         current_observed = _timestamp(sample["observed_at"], label="soak sample")
         if sample.get("trial_batches") != trial_batches:
             raise PlatformHealthError("platform-health soak trial-batch manifest drifted")
+        if sample.get("registry_snapshot") != registry_snapshot:
+            raise PlatformHealthError("platform-health soak registry snapshot drifted")
         if prior_observed is not None and current_observed <= prior_observed:
             raise PlatformHealthError("platform-health soak sample time did not advance")
         prior_observed = current_observed
@@ -2756,7 +2855,7 @@ def _verify_soak_samples(
     if duration < SOAK_REQUIRED_DURATION_SECONDS:
         raise PlatformHealthError("platform-health soak is too short")
     pair_headroom: list[dict[str, Any]] = []
-    sample_jobs = [_exact_active_jobs(config, sample["nodes"]) for sample in samples]
+    sample_jobs = [_exact_active_jobs(config, sample["nodes"], candidates) for sample in samples]
     prior_outcomes: dict[str, Mapping[str, Any]] = {}
     for sample_index, sample in enumerate(samples):
         current_outcomes = {
@@ -2786,10 +2885,7 @@ def _verify_soak_samples(
                 "succeeded",
                 "failed",
                 "cancelled",
-            } or (
-                prior is not None
-                and prior["state"] in {"succeeded", "failed", "cancelled"}
-            ):
+            } or (prior is not None and prior["state"] in {"succeeded", "failed", "cancelled"}):
                 continue
             binding = (
                 str(outcome["sandbox"]),
@@ -2808,27 +2904,16 @@ def _verify_soak_samples(
         for outcome in final_trial_outcomes
     ):
         raise PlatformHealthError("soak trial batch is not terminal-complete")
-    final_batch_ids = {
-        str(row["batch_id"])
-        for row in trial_batches
-        if isinstance(row, dict)
-    }
+    final_batch_ids = {str(row["batch_id"]) for row in trial_batches if isinstance(row, dict)}
     for batch_id in final_batch_ids:
         batch_outcomes = [
-            outcome
-            for outcome in final_trial_outcomes
-            if str(outcome["batch_id"]) == batch_id
+            outcome for outcome in final_trial_outcomes if str(outcome["batch_id"]) == batch_id
         ]
-        expected_counts = {
-            int(outcome["expected_trial_count"]) for outcome in batch_outcomes
-        }
-        if (
-            len(expected_counts) != 1
-            or len(batch_outcomes) != next(iter(expected_counts))
-        ):
+        expected_counts = {int(outcome["expected_trial_count"]) for outcome in batch_outcomes}
+        if len(expected_counts) != 1 or len(batch_outcomes) != next(iter(expected_counts)):
             raise PlatformHealthError("soak trial batch census is incomplete")
     trial_outcome_summaries: list[dict[str, Any]] = []
-    for sandbox in SANDBOXES:
+    for sandbox in candidates:
         for pool in POOLS:
             jobs = [
                 job
@@ -2850,9 +2935,7 @@ def _verify_soak_samples(
             succeeded_trial_count = sum(
                 outcome["state"] == "succeeded" for outcome in pair_outcomes
             )
-            failed_trial_count = sum(
-                outcome["state"] == "failed" for outcome in pair_outcomes
-            )
+            failed_trial_count = sum(outcome["state"] == "failed" for outcome in pair_outcomes)
             cancelled_trial_count = sum(
                 outcome["state"] == "cancelled" for outcome in pair_outcomes
             )
@@ -2870,9 +2953,7 @@ def _verify_soak_samples(
                     "retried_trial_count": sum(
                         outcome["retry_count"] > 0 for outcome in pair_outcomes
                     ),
-                    "retry_attempt_count": sum(
-                        outcome["retry_count"] for outcome in pair_outcomes
-                    ),
+                    "retry_attempt_count": sum(outcome["retry_count"] for outcome in pair_outcomes),
                     "success_ratio": pair_success_ratio,
                 },
             )
@@ -2925,21 +3006,13 @@ def _verify_soak_samples(
                     "within_reviewed_envelope": True,
                 },
             )
-    trial_success_numerator = sum(
-        row["succeeded_trial_count"] for row in trial_outcome_summaries
-    )
-    trial_success_denominator = sum(
-        row["terminal_trial_count"] for row in trial_outcome_summaries
-    )
+    trial_success_numerator = sum(row["succeeded_trial_count"] for row in trial_outcome_summaries)
+    trial_success_denominator = sum(row["terminal_trial_count"] for row in trial_outcome_summaries)
     if trial_success_denominator == 0:
         raise PlatformHealthError("soak trial success ratio has a zero denominator")
     trial_success_ratio = trial_success_numerator / trial_success_denominator
-    if (
-        trial_success_ratio < SOAK_MINIMUM_TRIAL_SUCCESS_RATIO
-        or any(
-            row["success_ratio"] < SOAK_MINIMUM_TRIAL_SUCCESS_RATIO
-            for row in trial_outcome_summaries
-        )
+    if trial_success_ratio < SOAK_MINIMUM_TRIAL_SUCCESS_RATIO or any(
+        row["success_ratio"] < SOAK_MINIMUM_TRIAL_SUCCESS_RATIO for row in trial_outcome_summaries
     ):
         raise PlatformHealthError("platform-health soak trial success ratio is below policy")
     return {
@@ -3011,6 +3084,7 @@ def _verify_checkpoints(
         raise PlatformHealthError("platform-health checkpoint sequence is incomplete")
     prior_time: datetime | None = None
     prior_candidates: Mapping[str, Mapping[str, str]] | None = None
+    prior_registry_snapshot: Mapping[str, Any] | None = None
     by_checkpoint: dict[str, Mapping[str, Any]] = {}
     receipt_fields = {
         "schema_version",
@@ -3019,6 +3093,7 @@ def _verify_checkpoints(
         "sequence",
         "checkpoint",
         "checkpoint_group",
+        "registry_snapshot",
         "candidates",
         "collector_host",
         "acceptance_checkpoint_times",
@@ -3031,6 +3106,9 @@ def _verify_checkpoints(
     }
     for sequence, receipt in enumerate(receipts, start=1):
         candidates = receipt.get("candidates")
+        registry_snapshot = _validated_registry_snapshot(receipt.get("registry_snapshot"))
+        sandboxes = _sandboxes(registry_snapshot)
+        environments = _registry_environments(registry_snapshot)
         if (
             set(receipt) != receipt_fields
             or receipt.get("schema_version") != SCHEMA_VERSION
@@ -3044,36 +3122,41 @@ def _verify_checkpoints(
             or receipt.get("collector_host") != config.collector_host
             or not isinstance(receipt.get("platform_health"), dict)
             or not isinstance(candidates, dict)
-            or set(candidates) != set(SANDBOXES)
+            or set(candidates) != set(sandboxes)
             or any(
                 not isinstance(candidates[sandbox], dict)
                 or set(candidates[sandbox]) != {"sha", "tree"}
                 or SHA_RE.fullmatch(str(candidates[sandbox]["sha"])) is None
                 or SHA_RE.fullmatch(str(candidates[sandbox]["tree"])) is None
-                for sandbox in SANDBOXES
+                or candidates[sandbox]["sha"] != environments[sandbox]["candidate_sha"]
+                or candidates[sandbox]["tree"] != environments[sandbox]["candidate_tree"]
+                for sandbox in sandboxes
             )
-            or len({candidates[sandbox]["sha"] for sandbox in SANDBOXES}) != len(SANDBOXES)
             or (prior_candidates is not None and candidates != prior_candidates)
+            or (
+                prior_registry_snapshot is not None and registry_snapshot != prior_registry_snapshot
+            )
             or receipt.get("payload_sha256")
             != _digest({key: value for key, value in receipt.items() if key != "payload_sha256"})
         ):
             raise PlatformHealthError("platform-health checkpoint receipt is invalid")
         _validate_platform_health_observation(receipt["platform_health"])
         acceptance_times = receipt["acceptance_checkpoint_times"]
-        if not isinstance(acceptance_times, dict) or set(acceptance_times) != set(SANDBOXES):
+        if not isinstance(acceptance_times, dict) or set(acceptance_times) != set(sandboxes):
             raise PlatformHealthError("acceptance checkpoint time binding is invalid")
         started = _timestamp(
             receipt["collection_started_at"],
             label="platform-health checkpoint start",
         )
         prior_candidates = candidates
+        prior_registry_snapshot = registry_snapshot
         current = _timestamp(receipt.get("observed_at"), label="platform-health checkpoint")
         if (
             current < started
             or current - started > timedelta(seconds=config.max_checkpoint_seconds)
             or any(
                 _timestamp(acceptance_times[sandbox], label="acceptance checkpoint") > started
-                for sandbox in SANDBOXES
+                for sandbox in sandboxes
             )
         ):
             raise PlatformHealthError("platform-health checkpoint window is invalid")
@@ -3087,6 +3170,7 @@ def _verify_checkpoints(
                     config.host_aliases[node] if node.startswith("oldlab-") else node
                 ),
                 "expected_host": config.host_aliases[node],
+                "registry_snapshot": registry_snapshot,
                 "candidates": candidates,
             }
             _validate_node_result(receipt["nodes"][node], request=request, config=config)
@@ -3156,7 +3240,9 @@ def _verify_checkpoints(
         if base_node["active_jobs"] or final_node["active_jobs"]:
             raise PlatformHealthError("baseline or final drain retains acceptance jobs")
         active_mixed.extend(mixed_node["active_jobs"])
-    active_mixed = list(_exact_active_jobs(config, mixed["nodes"]))
+    active_mixed = list(
+        _exact_active_jobs(config, mixed["nodes"], baseline["candidates"]),
+    )
     compose_projects: set[str] = set()
     compose_networks: set[str] = set()
     for job in active_mixed:
@@ -3190,7 +3276,9 @@ def _verify_checkpoints(
         )
         for job in active_mixed
     }
-    expected_combinations = {(sandbox, pool) for sandbox in SANDBOXES for pool in POOLS}
+    expected_combinations = {
+        (sandbox, pool) for sandbox in baseline["candidates"] for pool in POOLS
+    }
     if combinations != expected_combinations or len(active_mixed) != len(expected_combinations):
         raise PlatformHealthError("mixed workload does not contain one exact job per sandbox/pool")
     cleanup_specs = (
@@ -3263,6 +3351,8 @@ def _verify_checkpoints(
             },
         )
     soak = _verify_soak_samples(config, samples)
+    if any(sample.get("registry_snapshot") != baseline["registry_snapshot"] for sample in samples):
+        raise PlatformHealthError("platform-health soak registry binding drifted")
     device_isolation = _device_isolation_rows(
         active_mixed,
         observed_at=mixed["observed_at"],
@@ -3332,6 +3422,7 @@ def _verify_checkpoints(
         "schema_version": SCHEMA_VERSION,
         "kind": "loom.developer-sandbox.platform-health-evidence",
         "session_id": baseline["session_id"],
+        "registry_snapshot": baseline["registry_snapshot"],
         "candidates": baseline["candidates"],
         "collector_host": config.collector_host,
         "checkpoints": [
@@ -3578,7 +3669,7 @@ def sample(
     clock: Clock = _now,
     hostname: Callable[[], str] = _host,
 ) -> dict[str, Any]:
-    """Append one real, exact-six-job Gate-6 soak sample."""
+    """Append one real Gate-6 soak sample for the exact registry cohort."""
 
     _require_root()
     if (
@@ -3628,6 +3719,7 @@ def sample(
         trial_batches = _soak_trial_batch_manifest(config, state)
         trial_outcomes, trial_database_authorities = _trial_outcomes(
             state["candidates"],
+            state["registry_snapshot"],
             trial_batches,
             run=platform_run,
         )
@@ -3638,6 +3730,7 @@ def sample(
             "session_id": session_id,
             "sequence": sequence,
             "previous_sha256": samples[-1]["payload_sha256"] if samples else None,
+            "registry_snapshot": state["registry_snapshot"],
             "candidates": state["candidates"],
             "collector_host": config.collector_host,
             "collection_started_at": _iso(started),
@@ -3772,6 +3865,7 @@ def collect(
             "sequence": expected_sequence,
             "checkpoint": checkpoint,
             "checkpoint_group": CHECKPOINT_GROUPS[checkpoint],
+            "registry_snapshot": state["registry_snapshot"],
             "candidates": state["candidates"],
             "collector_host": config.collector_host,
             "acceptance_checkpoint_times": acceptance_times,
@@ -3872,6 +3966,7 @@ def verify(config: Config, session_id: str) -> dict[str, Any]:
                 ),
             ).hexdigest()
             != existing.get("payload_sha256")
+            or existing.get("registry_snapshot") != state["registry_snapshot"]
             or existing.get("candidates") != state["candidates"]
         ):
             raise PlatformHealthError("platform-health final evidence drifted")

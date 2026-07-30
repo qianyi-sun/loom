@@ -27,8 +27,8 @@ allowed_nodes = [
   "trt-eai-oldlab-4",
   "trt-eai-oldlab-5",
 ]
-env_file = "/shared_work/loom/runtime/sandboxes/${SANDBOX}/${CANDIDATE_SHA}/worker-oldlab.env"
-repo_dir = "/shared_work/loom/candidates/sandboxes/${SANDBOX}/${CANDIDATE_SHA}"
+env_file = "${RUNTIME_ROOT}/${CANDIDATE_SHA}/worker-oldlab.env"
+repo_dir = "${CANDIDATE_ROOT}/${CANDIDATE_SHA}"
 requested_cpus = 8
 requested_memory_mib = 32000
 requested_concurrency = 4
@@ -38,8 +38,8 @@ time_limit = "02:00:00"
 exclusive = false
 external_runner = true
 shared_capacity_managed = true
-slurm_account = "loom-dev-${SANDBOX}"
-qos_normal = "loom-dev"
+slurm_account = "${SLURM_ACCOUNT}"
+qos_normal = "${SLURM_QOS}"
 container_cpus = 2
 container_memory_mib = 8000
 container_pids = 4096

@@ -13,6 +13,126 @@ from scripts.ops import developer_sandbox_live_authority as authority
 
 SHA = "a" * 40
 TREE = "b" * 40
+
+
+def _environment_snapshot() -> dict[str, Any]:
+    environments: list[dict[str, Any]] = []
+    candidates: list[dict[str, Any]] = []
+    deployments: list[dict[str, Any]] = []
+    for index, sandbox in enumerate(("qianyi", "hongjian", "devansh")):
+        env_id = f"denv-legacy-{index:016x}"
+        principal = f"unix-uid:{31021 + index}"
+        candidate_id = f"cand-{SHA}"
+        environments.append(
+            {
+                "env_id": env_id,
+                "principal_id": principal,
+                "runtime_id": sandbox,
+                "state": "active",
+                "resource_generation": 2,
+                "current_candidate_id": candidate_id,
+                "ports": {"control_plane": 20080 + index * 1000},
+                "state_root": f"/srv/loom/developer-sandboxes/{sandbox}",
+                "provider_namespace": f"sandbox-{sandbox}",
+                "slurm_user": f"loom-sandbox-{sandbox}",
+                "slurm_account": f"loom-dev-{sandbox}",
+                "slurm_qos": f"loom-dev-{sandbox}",
+            },
+        )
+        candidates.append(
+            {
+                "candidate_id": candidate_id,
+                "env_id": env_id,
+                "principal_id": principal,
+                "candidate_sha": SHA,
+                "candidate_tree": TREE,
+            },
+        )
+        deployments.append(
+            {
+                "deployment_id": f"dep-{index:032x}",
+                "env_id": env_id,
+                "principal_id": principal,
+                "candidate_id": candidate_id,
+                "expected_resource_generation": 1,
+                "applied_resource_generation": 2,
+                "applied_registry_generation": 10,
+                "applied_registry_payload_sha256": "e" * 64,
+                "phase": "committed",
+            },
+        )
+    return {
+        "generation": 11,
+        "payload_sha256": "f" * 64,
+        "environments": environments,
+        "candidates": candidates,
+        "deployments": deployments,
+    }
+
+
+@pytest.fixture(autouse=True)
+def _environment_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        authority,
+        "_load_registry_snapshot",
+        lambda _path=authority.REGISTRY_SNAPSHOT: _environment_snapshot(),
+    )
+
+
+def test_fourth_active_environment_builds_live_config_without_adapter_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _environment_snapshot()
+    environment = dict(snapshot["environments"][0])
+    environment.update(
+        {
+            "env_id": "denv-dynamic-44444444",
+            "principal_id": "unix-uid:31444",
+            "runtime_id": "e-fourth",
+            "resource_generation": 4,
+            "current_candidate_id": "cand-" + "4" * 40,
+            "ports": {"control_plane": 34080},
+            "state_root": "/srv/loom/developer-environments/denv-dynamic-44444444",
+            "provider_namespace": "environment-denv-dynamic-44444444",
+            "slurm_user": "loom-e-fourth",
+            "slurm_account": "lda-fourth",
+            "slurm_qos": "ldq-fourth",
+        },
+    )
+    snapshot["environments"].append(environment)
+    snapshot["candidates"].append(
+        {
+            "candidate_id": "cand-" + "4" * 40,
+            "env_id": environment["env_id"],
+            "principal_id": environment["principal_id"],
+            "candidate_sha": "4" * 40,
+            "candidate_tree": "5" * 40,
+        },
+    )
+    snapshot["deployments"].append(
+        {
+            "deployment_id": "dep-" + "4" * 32,
+            "env_id": environment["env_id"],
+            "principal_id": environment["principal_id"],
+            "candidate_id": "cand-" + "4" * 40,
+            "expected_resource_generation": 3,
+            "applied_resource_generation": 4,
+            "applied_registry_generation": 10,
+            "applied_registry_payload_sha256": "e" * 64,
+            "phase": "committed",
+        },
+    )
+    monkeypatch.setattr(
+        authority,
+        "_load_registry_snapshot",
+        lambda _path=authority.REGISTRY_SNAPSHOT: snapshot,
+    )
+
+    config = authority._load_adapter_config("e-fourth", "gb10")
+    assert config.control_plane_url == "http://127.0.0.1:34080"
+    assert config.slurm_account == "lda-fourth"
+
+
 AUTHORITY_TREE = "c" * 40
 REQUEST_ID = "00000000-0000-0000-0000-000000000001"
 
@@ -261,6 +381,13 @@ def _prepare_collect(
         sandbox_state_path=Path("/fixed/sandbox-state.json"),
         max_slots_bound=120,
         timeout_seconds=10,
+        service_user="loom-sandbox-qianyi",
+        slurm_account="loom-dev-qianyi",
+        slurm_qos="loom-dev-qianyi",
+        env_id="denv-legacy-0000000000000000",
+        resource_generation=1,
+        registry_generation=11,
+        registry_payload_sha256="f" * 64,
     )
     monkeypatch.setattr(authority, "_load_adapter_config", lambda *_args: config)
     monkeypatch.setattr(

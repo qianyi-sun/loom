@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Validate developer-sandbox profile isolation (static, secret-safe).
 
-Checks the three checked-in profiles under deploy/developer-sandboxes/
+Checks discovered developer profiles under deploy/developer-sandboxes/
 for pairwise-disjoint identity fields and secret-free dry-run artifacts.
 Does not contact oldlab-2 or resolve secret values.
 """
@@ -10,13 +10,40 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
+import stat
 import sys
 import tomllib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-ALLOWED_SANDBOXES = ("qianyi", "hongjian", "devansh")
+PROFILE_SCHEMA_VERSION = 1
+PROFILE_KIND = "loom.developer-sandbox.profile"
+SANDBOX_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,47}$")
+PROFILE_MARKER_LINE_RE = re.compile(
+    rf"""^kind\s*=\s*(?:"{re.escape(PROFILE_KIND)}"|'{re.escape(PROFILE_KIND)}')"""
+    r"\s*(?:#.*)?$",
+)
+PROFILE_TOP_LEVEL_FIELDS = {
+    "schema_version",
+    "kind",
+    "sandbox",
+    "ssh_target",
+    "canonical_hostname",
+    "compose_project",
+    "bind_address",
+    "provider_connection_namespace",
+    "candidate_root",
+    "state_root",
+    "cache_root",
+    "evidence_root",
+    "runtime_root",
+    "ports",
+    "database",
+    "object_store",
+}
 
 REQUIRED_DISTINCT_FIELDS = (
     "compose_project",
@@ -56,6 +83,20 @@ SECRET_NEEDLES = (
     "secret=",
 )
 
+PATH_FIELDS = (
+    "candidate_root",
+    "state_root",
+    "cache_root",
+    "evidence_root",
+    "runtime_root",
+)
+
+BUCKET_FIELDS = (
+    "task_bucket",
+    "trajectories_bucket",
+    "artifacts_bucket",
+)
+
 
 @dataclass(frozen=True)
 class DeveloperSandboxProfile:
@@ -76,14 +117,26 @@ class DeveloperSandboxProfile:
     @classmethod
     def from_toml(cls, path: Path) -> DeveloperSandboxProfile:
         raw = tomllib.loads(path.read_text(encoding="utf-8"))
+        if set(raw) != PROFILE_TOP_LEVEL_FIELDS:
+            raise ValueError(f"{path}: profile fields do not match the closed schema")
+        if raw.get("schema_version") != PROFILE_SCHEMA_VERSION:
+            raise ValueError(
+                f"{path}: schema_version must be {PROFILE_SCHEMA_VERSION}",
+            )
+        if raw.get("kind") != PROFILE_KIND:
+            raise ValueError(f"{path}: kind must be {PROFILE_KIND!r}")
         ports_raw = raw.get("ports")
-        if not isinstance(ports_raw, dict):
+        if not isinstance(ports_raw, dict) or set(ports_raw) != set(PORT_FIELDS):
             raise ValueError(f"{path}: missing [ports]")
         database = raw.get("database")
-        if not isinstance(database, dict):
+        if not isinstance(database, dict) or set(database) != {"name"}:
             raise ValueError(f"{path}: missing [database]")
         object_store = raw.get("object_store")
-        if not isinstance(object_store, dict):
+        if not isinstance(object_store, dict) or set(object_store) != {
+            "task_bucket",
+            "trajectories_bucket",
+            "artifacts_bucket",
+        }:
             raise ValueError(f"{path}: missing [object_store]")
         ports: dict[str, int] = {}
         for field in PORT_FIELDS:
@@ -92,6 +145,10 @@ class DeveloperSandboxProfile:
                 raise ValueError(f"{path}: ports.{field} must be an int")
             ports[field] = value
         sandbox = _require_str(raw, path, "sandbox")
+        if SANDBOX_ID_RE.fullmatch(sandbox) is None:
+            raise ValueError(
+                f"{path}: sandbox must match ^[a-z][a-z0-9-]{{0,47}}$",
+            )
         return cls(
             sandbox=sandbox,
             compose_project=_require_str(raw, path, "compose_project"),
@@ -124,24 +181,87 @@ def _require_str(raw: dict[str, Any], path: Path, key: str) -> str:
     return value.strip()
 
 
+def _marked_as_profile(raw: bytes) -> bool:
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            return False
+        if PROFILE_MARKER_LINE_RE.fullmatch(stripped) is not None:
+            return True
+    return False
+
+
+def _trusted_profiles_directory(profiles_dir: Path) -> Path:
+    absolute = Path(os.path.abspath(profiles_dir))
+    try:
+        resolved = absolute.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(f"profiles directory not found: {profiles_dir}") from exc
+    current = absolute
+    while True:
+        try:
+            metadata = current.lstat()
+        except OSError as exc:
+            raise ValueError(
+                f"profiles directory ancestry is unavailable: {profiles_dir}",
+            ) from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ValueError(
+                f"profiles directory ancestry must not contain symlinks: {profiles_dir}",
+            )
+        if current == absolute and not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError(f"profiles directory not found: {profiles_dir}")
+        if current.parent == current:
+            break
+        current = current.parent
+    if resolved != absolute:
+        raise ValueError(
+            f"profiles directory ancestry must not contain symlinks: {profiles_dir}",
+        )
+    return resolved
+
+
 def load_profiles(profiles_dir: Path) -> list[DeveloperSandboxProfile]:
+    profiles_dir = _trusted_profiles_directory(profiles_dir)
+
     profiles: list[DeveloperSandboxProfile] = []
-    for owner in ALLOWED_SANDBOXES:
-        path = profiles_dir / f"{owner}.toml"
-        if not path.is_file():
-            raise ValueError(f"missing profile {path}")
+    for path in sorted(
+        profiles_dir.glob("*.toml"),
+        key=lambda candidate: candidate.name,
+    ):
+        if not path.is_file() or path.is_symlink():
+            continue
+        try:
+            source = path.read_bytes()
+        except OSError as exc:
+            raise ValueError(f"{path}: unavailable during profile discovery") from exc
+        try:
+            raw = tomllib.loads(source.decode("utf-8"))
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+            if _marked_as_profile(source):
+                raise ValueError(f"{path}: invalid marked sandbox profile TOML") from exc
+            continue
+        # The exact top-level kind is the explicit protocol marker. Other TOML
+        # files in this directory are platform or template configuration.
+        if raw.get("kind") != PROFILE_KIND:
+            continue
         profile = DeveloperSandboxProfile.from_toml(path)
-        if profile.sandbox != owner:
-            raise ValueError(f"{path}: sandbox={profile.sandbox!r} != {owner!r}")
+        if path.stem != profile.sandbox:
+            raise ValueError(
+                f"{path}: filename must equal sandbox identity {profile.sandbox!r}",
+            )
         profiles.append(profile)
+    if not profiles:
+        raise ValueError(f"no developer sandbox profiles found in {profiles_dir}")
     return profiles
 
 
 def validate_profiles(profiles: list[DeveloperSandboxProfile]) -> list[str]:
     errors: list[str] = []
-    names = [p.sandbox for p in profiles]
-    if names != list(ALLOWED_SANDBOXES):
-        errors.append(f"profiles must be exactly {list(ALLOWED_SANDBOXES)}, got {names}")
 
     for field in REQUIRED_DISTINCT_FIELDS:
         values = [getattr(p, field) for p in profiles]
@@ -196,6 +316,16 @@ def validate_profiles(profiles: list[DeveloperSandboxProfile]) -> list[str]:
                         f"{profile.sandbox}: {root_field}={root!r} must be "
                         f"under developer-sandboxes/{profile.sandbox}",
                     )
+
+    all_paths = [getattr(profile, field) for profile in profiles for field in PATH_FIELDS]
+    if len(all_paths) != len(set(all_paths)):
+        errors.append("sandbox paths must be globally distinct across all sandboxes")
+
+    all_buckets = [getattr(profile, field) for profile in profiles for field in BUCKET_FIELDS]
+    if len(all_buckets) != len(set(all_buckets)):
+        errors.append(
+            "object-store buckets must be globally distinct across all sandboxes",
+        )
 
     if len(all_ports) != len(set(all_ports)):
         errors.append("host ports must be pairwise distinct across all sandboxes")

@@ -15,6 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from scripts.ops import developer_environment_registry as environment_registry
 from scripts.ops import developer_sandbox_node_authority as authority
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -25,6 +26,102 @@ assert _SPEC is not None and _SPEC.loader is not None
 runtime = importlib.util.module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = runtime
 _SPEC.loader.exec_module(runtime)
+
+
+def _registry_snapshot() -> dict[str, object]:
+    environments: list[dict[str, object]] = []
+    candidates: list[dict[str, object]] = []
+    deployments: list[dict[str, object]] = []
+    finalizations: list[dict[str, object]] = []
+    for index, sandbox in enumerate(("qianyi", "hongjian", "devansh")):
+        env_id = f"denv-legacy-{index:016x}"
+        candidate_id = f"cand-{'a' * 40}"
+        principal = f"unix-uid:{31021 + index}"
+        environments.append(
+            {
+                "env_id": env_id,
+                "principal_id": principal,
+                "runtime_id": sandbox,
+                "state": "active",
+                "resource_generation": 2,
+                "service_user": f"loom-sandbox-{sandbox}",
+                "service_group": f"loom-sandbox-{sandbox}",
+                "uid": 31021 + index,
+                "gid": 31021 + index,
+                "ports": {
+                    "control_plane": 20080 + index * 1000,
+                    "llm_gateway": 20100 + index * 1000,
+                    "minio": 20900 + index * 1000,
+                    "relay_control_plane": 26080 + index * 1000,
+                    "relay_gateway": 26100 + index * 1000,
+                    "relay_minio": 26900 + index * 1000,
+                },
+                "current_candidate_id": candidate_id,
+                "candidate_root": f"/shared_work/loom/candidates/sandboxes/{sandbox}",
+                "runtime_root": f"/shared_work/loom/runtime/sandboxes/{sandbox}",
+                "compose_project": f"loom-sandbox-{sandbox}",
+                "slurm_account": f"loom-dev-{sandbox}",
+                "slurm_qos": f"loom-dev-{sandbox}",
+                "slurm_user": f"loom-sandbox-{sandbox}",
+            },
+        )
+        candidates.append(
+            {
+                "candidate_id": candidate_id,
+                "env_id": env_id,
+                "principal_id": principal,
+                "candidate_sha": "a" * 40,
+                "candidate_tree": "b" * 40,
+            },
+        )
+        deployment_id = f"dep-{index:032x}"
+        finalization = {
+            "deployment_id": deployment_id,
+            "env_id": env_id,
+            "principal_id": principal,
+            "candidate_id": candidate_id,
+            "candidate_sha": "a" * 40,
+            "candidate_tree": "b" * 40,
+            "applied_resource_generation": 2,
+            "applied_registry_generation": 8,
+            "applied_registry_payload_sha256": "e" * 64,
+            "capacity_finalize_receipt_sha256": "1" * 64,
+            "capacity_finalize_check_receipt_sha256": "2" * 64,
+            "runtime_reconcile_receipt_sha256": "3" * 64,
+            "runtime_prepare_check_receipt_sha256": "4" * 64,
+            "acceptance_probe_receipt_sha256": "5" * 64,
+            "created_at": "2026-07-29T12:00:00Z",
+        }
+        finalization_digest = hashlib.sha256(authority._canonical(finalization)).hexdigest()
+        finalizations.append({**finalization, "payload_sha256": finalization_digest})
+        deployments.append(
+            {
+                "deployment_id": deployment_id,
+                "env_id": env_id,
+                "principal_id": principal,
+                "candidate_id": candidate_id,
+                "expected_resource_generation": 1,
+                "applied_resource_generation": 2,
+                "applied_registry_generation": 8,
+                "applied_registry_payload_sha256": "e" * 64,
+                "finalization_payload_sha256": finalization_digest,
+                "phase": "committed",
+            },
+        )
+    return {
+        "generation": 9,
+        "payload_sha256": "f" * 64,
+        "environments": environments,
+        "candidates": candidates,
+        "deployments": deployments,
+        "deployment_finalizations": finalizations,
+    }
+
+
+@pytest.fixture(autouse=True)
+def _registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runtime, "_load_registry_snapshot", lambda _path: _registry_snapshot())
+    monkeypatch.setattr(authority, "_load_registry_snapshot", _registry_snapshot)
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -49,9 +146,19 @@ def _repository(tmp_path: Path) -> tuple[Path, str]:
     return repo, _git(repo, "rev-parse", "HEAD")
 
 
-def _env_text(sandbox: str, sha: str, *, domain: str = "oldlab") -> str:
+def _env_text(
+    sandbox: str,
+    sha: str,
+    *,
+    domain: str = "oldlab",
+    candidate_tree: str = "b" * 40,
+) -> str:
     root = f"/etc/loom/developer-sandbox-links/clients/{sandbox}/{sha}"
     concurrency = {"oldlab": 4, "gb10": 8}[domain]
+    index = ("qianyi", "hongjian", "devansh").index(sandbox)
+    control_plane_port = 26080 + index * 1000
+    gateway_port = 26100 + index * 1000
+    minio_port = 26900 + index * 1000
     return "\n".join(
         (
             "LOOM_WORKER_CONTROL_PLANE_URL=http://sandbox-link:8080",
@@ -59,6 +166,19 @@ def _env_text(sandbox: str, sha: str, *, domain: str = "oldlab") -> str:
             "LOOM_WORKER_MINIO_ENDPOINT=http://sandbox-link:9000",
             f"LOOM_WORKER_SANDBOX_IDENTITY={sandbox}",
             f"LOOM_WORKER_CANDIDATE_SHA={sha}",
+            f"LOOM_SANDBOX_LINK_CP_UPSTREAM=https://192.168.50.14:{control_plane_port}",
+            f"LOOM_SANDBOX_LINK_CP_EXPECTED_PORT={control_plane_port}",
+            f"LOOM_SANDBOX_LINK_GATEWAY_UPSTREAM=https://192.168.50.14:{gateway_port}",
+            f"LOOM_SANDBOX_LINK_GATEWAY_EXPECTED_PORT={gateway_port}",
+            f"LOOM_SANDBOX_LINK_MINIO_UPSTREAM=https://192.168.50.14:{minio_port}",
+            f"LOOM_SANDBOX_LINK_MINIO_EXPECTED_PORT={minio_port}",
+            f"LOOM_WORKER_COMPOSE_PROJECT=loom-sandbox-{sandbox}",
+            f"LOOM_WORKER_ENV_ID=denv-legacy-{index:016x}",
+            "LOOM_WORKER_RESOURCE_GENERATION=2",
+            f"LOOM_WORKER_CANDIDATE_ID=cand-{'a' * 40}",
+            f"LOOM_WORKER_CANDIDATE_TREE={candidate_tree}",
+            "LOOM_WORKER_REGISTRY_GENERATION=9",
+            f"LOOM_WORKER_REGISTRY_PAYLOAD_SHA256={'f' * 64}",
             f"LOOM_WORKER_POOL_NAME={domain}",
             f"LOOM_WORKER_MAX_CONCURRENT={concurrency}",
             f"LOOM_WORKER_TOKEN_FILE_HOST={root}/worker-token",
@@ -117,9 +237,164 @@ def test_checked_in_contract_has_two_independent_domains_and_stable_groups() -> 
     assert gb10_peers["trt-gb10-7"] == "gx10-0faf"
 
 
+def test_fourth_environment_uses_registry_allocated_identity_and_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _registry_snapshot()
+    environment = dict(snapshot["environments"][0])
+    environment.update(
+        {
+            "env_id": "denv-dynamic-44444444",
+            "principal_id": "unix-uid:31444",
+            "runtime_id": "e-fourth",
+            "resource_generation": 4,
+            "service_user": "loom-e-fourth",
+            "service_group": "loom-e-fourth",
+            "uid": 31444,
+            "gid": 31444,
+            "ports": {
+                "control_plane": 34080,
+                "llm_gateway": 34100,
+                "minio": 34900,
+                "relay_control_plane": 36080,
+                "relay_gateway": 36100,
+                "relay_minio": 36900,
+            },
+            "current_candidate_id": "cand-" + "4" * 40,
+            "candidate_root": "/shared_work/loom/candidates/environments/denv-dynamic-44444444",
+            "runtime_root": "/shared_work/loom/runtime/environments/denv-dynamic-44444444",
+            "compose_project": "loom-env-fourth",
+            "slurm_account": "lda-fourth",
+            "slurm_qos": "ldq-fourth",
+            "slurm_user": "loom-e-fourth",
+        },
+    )
+    snapshot["environments"].append(environment)
+    snapshot["candidates"].append(
+        {
+            "candidate_id": "cand-" + "4" * 40,
+            "env_id": environment["env_id"],
+            "principal_id": environment["principal_id"],
+            "candidate_sha": "4" * 40,
+            "candidate_tree": "5" * 40,
+        },
+    )
+    snapshot["deployments"].append(
+        {
+            "deployment_id": "dep-" + "4" * 32,
+            "env_id": environment["env_id"],
+            "principal_id": environment["principal_id"],
+            "candidate_id": "cand-" + "4" * 40,
+            "expected_resource_generation": 3,
+            "applied_resource_generation": 4,
+            "applied_registry_generation": 8,
+            "applied_registry_payload_sha256": "e" * 64,
+            "phase": "committed",
+        },
+    )
+    monkeypatch.setattr(runtime, "_load_registry_snapshot", lambda _path: snapshot)
+
+    config = runtime.load_config(_CONFIG)
+    paths = runtime.runtime_paths(config.domains["gb10"], "e-fourth", "4" * 40)
+    assert config.sandbox_groups["e-fourth"].slurm_account == "lda-fourth"
+    assert str(paths.candidate).startswith(environment["candidate_root"])
+
+
+def test_first_committed_registry_generation_is_an_active_runtime_member(
+    tmp_path: Path,
+) -> None:
+    registry = environment_registry.DeveloperEnvironmentRegistry(tmp_path / "registry.sqlite3")
+    environment = registry.register(
+        {
+            "schema_version": 1,
+            "kind": environment_registry.REGISTER_KIND,
+            "principal_id": "oidc:example:runtime-binding",
+            "idempotency_key": "runtime-register-0001",
+            "display_name": "Runtime binding",
+        }
+    )
+    candidate = registry.import_candidate(
+        {
+            "schema_version": 1,
+            "kind": environment_registry.CANDIDATE_KIND,
+            "principal_id": environment.principal_id,
+            "idempotency_key": "runtime-candidate-0001",
+            "env_id": environment.env_id,
+            "candidate_sha": "4" * 40,
+            "candidate_tree": "5" * 40,
+            "bundle_sha256": "6" * 64,
+            "bundle_size": 1024,
+            "image_digests": {
+                "amd64": "sha256:" + "7" * 64,
+                "arm64": "sha256:" + "8" * 64,
+            },
+        }
+    )
+    deployment = registry.begin_deployment(
+        {
+            "schema_version": 1,
+            "kind": environment_registry.DEPLOY_KIND,
+            "principal_id": environment.principal_id,
+            "idempotency_key": "runtime-deployment-0001",
+            "env_id": environment.env_id,
+            "candidate_id": candidate.candidate_id,
+            "expected_resource_generation": environment.resource_generation,
+        }
+    )
+    for expected, following in zip(
+        environment_registry.DEPLOY_PHASES[:-1],
+        environment_registry.DEPLOY_PHASES[1:],
+        strict=True,
+    ):
+        if following == "committed":
+            registry.prepare_deployment_finalization(
+                deployment.deployment_id,
+                principal_id=environment.principal_id,
+                expected_resource_generation=environment.resource_generation,
+            )
+            registry.record_deployment_finalization(
+                deployment.deployment_id,
+                principal_id=environment.principal_id,
+                expected_resource_generation=environment.resource_generation,
+                evidence={
+                    "capacity_finalize_receipt_sha256": "1" * 64,
+                    "capacity_finalize_check_receipt_sha256": "2" * 64,
+                    "runtime_reconcile_receipt_sha256": "3" * 64,
+                    "runtime_prepare_check_receipt_sha256": "4" * 64,
+                    "acceptance_probe_receipt_sha256": "5" * 64,
+                },
+            )
+        registry.advance_deployment(
+            deployment.deployment_id,
+            principal_id=environment.principal_id,
+            expected_phase=expected,
+            next_phase=following,
+            expected_resource_generation=environment.resource_generation,
+        )
+    snapshot = registry.snapshot()
+    environment_row = next(
+        item for item in snapshot["environments"] if item["env_id"] == environment.env_id
+    )
+
+    selected_candidate, selected_deployment = runtime._candidate_for_environment(
+        snapshot,
+        environment_row,
+    )
+
+    assert selected_candidate == next(
+        item for item in snapshot["candidates"] if item["candidate_id"] == candidate.candidate_id
+    )
+    assert selected_deployment is not None
+    assert (
+        selected_deployment["applied_resource_generation"] == environment_row["resource_generation"]
+    )
+
+
 def test_peer_check_envelope_is_canonical_for_the_fixed_node_authority() -> None:
     identity = runtime.CandidateIdentity("a" * 40, "b" * 40)
+    config = runtime.load_config(_CONFIG)
     raw = runtime._authority_envelope(
+        config=config,
         action="inspect-local",
         node="oldlab-3",
         domain="oldlab",
@@ -179,6 +454,7 @@ def test_remote_attestation_uses_bounded_authority_export(
     assert result == (manifest, signature.strip(), str(manifest_path), str(signature_path))
     assert calls == [
         {
+            "config": config,
             "action": "export-domain-attestation",
             "node": "trt-gb10-1",
             "domain": "gb10",
@@ -277,7 +553,7 @@ def test_host_converge_creates_empty_candidate_namespace_before_materialize(
         runtime,
         "identity_plan",
         lambda *_args: {
-            "groups": {sandbox: "ok" for sandbox in runtime.ALLOWED_SANDBOXES},
+            "groups": {sandbox: "ok" for sandbox in config.sandbox_groups},
         },
     )
     monkeypatch.setattr(runtime, "_service_identity_status", lambda *_args: "ok")
@@ -300,10 +576,25 @@ def test_host_converge_creates_empty_candidate_namespace_before_materialize(
 def test_publish_plan_is_exact_sha_and_secret_safe(tmp_path: Path) -> None:
     config = runtime.load_config(_CONFIG)
     repo, sha = _repository(tmp_path)
-    seed = tmp_path / "worker.env"
-    seed.write_text(_env_text("qianyi", sha), encoding="utf-8")
-    seed.chmod(0o600)
     identity = runtime._candidate_identity(repo, sha)
+    group = config.sandbox_groups["qianyi"]
+    config = replace(
+        config,
+        sandbox_groups={
+            **config.sandbox_groups,
+            "qianyi": replace(
+                group,
+                candidate_sha=sha,
+                candidate_tree=identity.tree,
+            ),
+        },
+    )
+    seed = tmp_path / "worker.env"
+    seed.write_text(
+        _env_text("qianyi", sha, candidate_tree=identity.tree),
+        encoding="utf-8",
+    )
+    seed.chmod(0o600)
 
     report = runtime.publish_plan(
         config,
@@ -463,9 +754,11 @@ def test_env_references_reject_tls_material_or_wrong_candidate(tmp_path: Path) -
     )
 
     with pytest.raises(runtime.ConvergenceError, match="forbidden raw secret"):
+        config = runtime.load_config(_CONFIG)
         runtime._parse_env_references(
             seed,
-            domain=runtime.load_config(_CONFIG).domains["oldlab"],
+            config=config,
+            domain=config.domains["oldlab"],
             sandbox="qianyi",
             sha="a" * 40,
         )
@@ -491,9 +784,11 @@ def test_env_references_reject_every_raw_secret_class(
     seed.write_text(_env_text("qianyi", sha) + raw_line + "\n", encoding="utf-8")
 
     with pytest.raises(runtime.ConvergenceError, match="forbidden raw secret"):
+        config = runtime.load_config(_CONFIG)
         runtime._parse_env_references(
             seed,
-            domain=runtime.load_config(_CONFIG).domains["oldlab"],
+            config=config,
+            domain=config.domains["oldlab"],
             sandbox="qianyi",
             sha=sha,
         )
@@ -505,9 +800,11 @@ def test_env_references_reject_unknown_nonsecret_field(tmp_path: Path) -> None:
     seed.write_text(_env_text("qianyi", sha) + "UNDECLARED_FLAG=1\n", encoding="utf-8")
 
     with pytest.raises(runtime.ConvergenceError, match="exact closed schema"):
+        config = runtime.load_config(_CONFIG)
         runtime._parse_env_references(
             seed,
-            domain=runtime.load_config(_CONFIG).domains["oldlab"],
+            config=config,
+            domain=config.domains["oldlab"],
             sandbox="qianyi",
             sha=sha,
         )
@@ -522,6 +819,7 @@ def test_env_references_reject_cross_domain_pool_binding(tmp_path: Path) -> None
     with pytest.raises(runtime.ConvergenceError, match="LOOM_WORKER_POOL_NAME"):
         runtime._parse_env_references(
             seed,
+            config=config,
             domain=config.domains["gb10"],
             sandbox="qianyi",
             sha=sha,
@@ -604,19 +902,17 @@ def test_config_rejects_drifting_logical_path(tmp_path: Path) -> None:
         runtime.load_config(drifted)
 
 
-def test_config_rejects_drifting_remote_link_port(tmp_path: Path) -> None:
-    drifted = tmp_path / "runtime-domains.toml"
-    drifted.write_text(
-        _CONFIG.read_text(encoding="utf-8").replace(
-            "upstream_gateway_port = 26100",
-            "upstream_gateway_port = 26101",
-            1,
-        ),
-        encoding="utf-8",
-    )
+def test_config_rejects_drifting_remote_link_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _registry_snapshot()
+    snapshot["environments"][0]["ports"]["relay_gateway"] = snapshot["environments"][0]["ports"][
+        "relay_control_plane"
+    ]
+    monkeypatch.setattr(runtime, "_load_registry_snapshot", lambda _path: snapshot)
 
-    with pytest.raises(runtime.ConvergenceError, match="identity is invalid"):
-        runtime.load_config(drifted)
+    with pytest.raises(runtime.ConvergenceError, match="runtime identity is invalid"):
+        runtime.load_config(_CONFIG)
 
 
 def _fleet_payload(
@@ -657,7 +953,12 @@ def _fleet_payload(
     payload: dict[str, object] = {
         "schema_version": 1,
         "sandbox": sandbox,
+        "env_id": group.env_id,
+        "resource_generation": group.resource_generation,
+        "registry_generation": config.registry_generation,
+        "registry_payload_sha256": config.registry_payload_sha256,
         "candidate_sha": sha,
+        "candidate_tree": group.candidate_tree,
         "generated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "expires_at": (now + timedelta(minutes=15)).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "eligible_nodes": list(runtime._INFRASTRUCTURE_LINK_NODES),
@@ -679,7 +980,7 @@ def _fleet_payload(
                 name: {
                     "listener_port": listener_ports[name],
                     "target_host": "127.0.0.1",
-                    "target_port": runtime._SANDBOX_TARGET_PORTS[sandbox][name],
+                    "target_port": runtime._target_ports(config.sandbox_groups[sandbox])[name],
                     "health_path": runtime._SERVICE_HEALTH_PATHS[name],
                     "tls_version": "TLSv1.3",
                     "status": "active",

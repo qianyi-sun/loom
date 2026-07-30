@@ -21,10 +21,11 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 from uuid import uuid4
 
 _SHA_RE = re.compile(r"[0-9a-f]{40}")
+_SANDBOX_ID_RE = re.compile(r"[a-z][a-z0-9-]{0,47}")
 _POOL_RE = re.compile(r"[a-z][a-z0-9-]{0,31}")
 _IDEMPOTENCY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 _PURPOSE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._:/()#,+-]{0,199}")
@@ -58,6 +59,7 @@ _OBSERVATION_FIELDS = {
     "payload_sha256",
 }
 _ACCEPTANCE_META_KEY = "acceptance_capacity_contract"
+_ENVIRONMENT_ADMISSION_FENCE_PREFIX = "capacity_environment_admission_fence:"
 _ACCEPTANCE_SESSION_RE = re.compile(r"[0-9a-f]{32}")
 _ACCEPTANCE_PHASE_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _ACCEPTANCE_POOLS = ("gb10", "oldlab")
@@ -67,17 +69,27 @@ class BrokerError(ValueError):
     """A bounded, secret-free broker failure."""
 
 
-class SandboxId(StrEnum):
-    QIANYI = "qianyi"
-    HONGJIAN = "hongjian"
-    DEVANSH = "devansh"
+class SandboxId(str):
+    """Strict dynamic identifier for one registered sandbox runtime."""
+
+    QIANYI: ClassVar[SandboxId]
+    HONGJIAN: ClassVar[SandboxId]
+    DEVANSH: ClassVar[SandboxId]
+
+    def __new__(cls, value: str) -> SandboxId:
+        if not isinstance(value, str) or _SANDBOX_ID_RE.fullmatch(value) is None:
+            raise ValueError(
+                "sandbox id must match ^[a-z][a-z0-9-]{0,47}$",
+            )
+        return str.__new__(cls, value)
+
+    @property
+    def value(self) -> str:
+        return str(self)
 
     @property
     def environment(self) -> str:
         return f"sandbox-{self.value}"
-
-
-_ACCEPTANCE_SANDBOXES = tuple(item.value for item in SandboxId)
 
 
 class RequestState(StrEnum):
@@ -165,7 +177,7 @@ class LeaseObservation:
         try:
             sandbox = SandboxId(_exact_text(value.get("sandbox"), "sandbox"))
         except ValueError as exc:
-            raise BrokerError("observation sandbox is not in the fixed allowlist") from exc
+            raise BrokerError("observation sandbox id is invalid") from exc
         pool_name = _exact_text(value.get("pool_name"), "pool_name")
         if _POOL_RE.fullmatch(pool_name) is None:
             raise BrokerError("observation pool_name is invalid")
@@ -304,10 +316,7 @@ class _MutableRecord:
 
     @property
     def eligible(self) -> bool:
-        return (
-            not self.request.cancel_requested
-            and self.request.state != RequestState.TERMINAL
-        )
+        return not self.request.cancel_requested and self.request.state != RequestState.TERMINAL
 
 
 def _utc(value: datetime) -> datetime:
@@ -358,11 +367,11 @@ def _validate_request_input(
     idempotency_key: str,
 ) -> tuple[SandboxId, str, str, str, str]:
     try:
-        normalized_sandbox = (
-            sandbox if isinstance(sandbox, SandboxId) else SandboxId(str(sandbox))
-        )
+        normalized_sandbox = sandbox if isinstance(sandbox, SandboxId) else SandboxId(str(sandbox))
     except ValueError as exc:
-        raise BrokerError("sandbox is not in the fixed developer allowlist") from exc
+        raise BrokerError(
+            "sandbox must match ^[a-z][a-z0-9-]{0,47}$",
+        ) from exc
     if _SHA_RE.fullmatch(candidate_sha) is None:
         raise BrokerError("candidate_sha must be a full lowercase 40-hex commit")
     if _POOL_RE.fullmatch(pool) is None:
@@ -392,9 +401,8 @@ def _validate_request_input(
     if _PURPOSE_RE.fullmatch(purpose) is None or _SECRET_HINT_RE.search(purpose):
         raise BrokerError("purpose must be bounded secret-free operator text")
     idempotency_key = _exact_text(idempotency_key, "idempotency_key")
-    if (
-        _IDEMPOTENCY_RE.fullmatch(idempotency_key) is None
-        or _SECRET_HINT_RE.search(idempotency_key)
+    if _IDEMPOTENCY_RE.fullmatch(idempotency_key) is None or _SECRET_HINT_RE.search(
+        idempotency_key
     ):
         raise BrokerError("idempotency_key has invalid or secret-like content")
     return normalized_sandbox, candidate_sha, pool, purpose, idempotency_key
@@ -427,13 +435,6 @@ def _validate_acceptance_contract(value: object) -> dict[str, Any]:
         or _ADMISSION_FENCE_RE.fullmatch(str(value.get("admission_token"))) is None
         or _ACCEPTANCE_SESSION_RE.fullmatch(str(value.get("session_id"))) is None
         or not isinstance(candidate_shas, dict)
-        or set(candidate_shas) != set(_ACCEPTANCE_SANDBOXES)
-        or any(
-            not isinstance(candidate_shas.get(sandbox), str)
-            or _SHA_RE.fullmatch(str(candidate_shas[sandbox])) is None
-            for sandbox in _ACCEPTANCE_SANDBOXES
-        )
-        or len(set(candidate_shas.values())) != len(_ACCEPTANCE_SANDBOXES)
         or not isinstance(phases, list)
         or not phases
         or len(phases) != len(set(phases))
@@ -451,6 +452,29 @@ def _validate_acceptance_contract(value: object) -> dict[str, Any]:
         or set(pending_budgets) != set(_ACCEPTANCE_POOLS)
     ):
         raise BrokerError("acceptance contract is invalid")
+    try:
+        acceptance_sandboxes = tuple(
+            sorted(
+                (
+                    SandboxId(_exact_text(sandbox, "acceptance sandbox"))
+                    for sandbox in candidate_shas
+                ),
+                key=lambda sandbox: sandbox.value,
+            ),
+        )
+    except (BrokerError, ValueError) as exc:
+        raise BrokerError("acceptance contract sandbox registry is invalid") from exc
+    if (
+        len(acceptance_sandboxes) < 2
+        or {sandbox.value for sandbox in acceptance_sandboxes} != set(candidate_shas)
+        or any(
+            not isinstance(candidate_shas[sandbox.value], str)
+            or _SHA_RE.fullmatch(str(candidate_shas[sandbox.value])) is None
+            for sandbox in acceptance_sandboxes
+        )
+        or len(set(candidate_shas.values())) != len(acceptance_sandboxes)
+    ):
+        raise BrokerError("acceptance contract sandbox registry is invalid")
     for pool in _ACCEPTANCE_POOLS:
         target = target_slots[pool]
         slot_budget = slot_budgets[pool]
@@ -464,24 +488,38 @@ def _validate_acceptance_contract(value: object) -> dict[str, Any]:
             or isinstance(pending_budget, bool)
             or not isinstance(pending_budget, int)
             or pending_budget < 0
-            or target * len(_ACCEPTANCE_SANDBOXES) > slot_budget
+            or target * len(acceptance_sandboxes) > slot_budget
             or slot_budget > _MAX_BUDGET_SLOTS
             or pending_budget > _MAX_BUDGET_SLOTS
         ):
             raise BrokerError("acceptance contract budgets are invalid")
     for phase in phases:
         ttl = ttl_seconds[phase]
-        if (
-            isinstance(ttl, bool)
-            or not isinstance(ttl, int)
-            or not 60 <= ttl <= _MAX_TTL_SECONDS
-        ):
+        if isinstance(ttl, bool) or not isinstance(ttl, int) or not 60 <= ttl <= _MAX_TTL_SECONDS:
             raise BrokerError("acceptance contract TTL is invalid")
     _parse_timestamp(str(value.get("expires_at")))
     return cast(
         dict[str, Any],
         json.loads(json.dumps(value, sort_keys=True, separators=(",", ":"))),
     )
+
+
+def _acceptance_sandboxes(contract: Mapping[str, Any]) -> tuple[SandboxId, ...]:
+    candidate_shas = contract.get("candidate_shas")
+    if not isinstance(candidate_shas, dict):
+        raise BrokerError("acceptance contract sandbox registry is invalid")
+    try:
+        sandboxes = tuple(
+            sorted(
+                (SandboxId(str(sandbox)) for sandbox in candidate_shas),
+                key=lambda sandbox: sandbox.value,
+            ),
+        )
+    except ValueError as exc:
+        raise BrokerError("acceptance contract sandbox registry is invalid") from exc
+    if len(sandboxes) < 2 or {sandbox.value for sandbox in sandboxes} != set(candidate_shas):
+        raise BrokerError("acceptance contract sandbox registry is invalid")
+    return sandboxes
 
 
 class SharedCapacityBroker:
@@ -595,9 +633,7 @@ class SharedCapacityBroker:
     def _connect(self) -> sqlite3.Connection:
         self._validate_authority_file(self.state_db, mode=0o600)
         existing_sidecars = {
-            path
-            for path in self._sqlite_sidecar_paths()
-            if path.exists() or path.is_symlink()
+            path for path in self._sqlite_sidecar_paths() if path.exists() or path.is_symlink()
         }
         for path in existing_sidecars:
             self._validate_authority_file(path, mode=0o600, missing_ok=True)
@@ -763,6 +799,127 @@ class SharedCapacityBroker:
             connection.close()
 
     @staticmethod
+    def _environment_admission_fence(
+        connection: sqlite3.Connection,
+        sandbox: SandboxId,
+    ) -> str | None:
+        row = connection.execute(
+            "SELECT value FROM broker_meta WHERE key = ?",
+            (_ENVIRONMENT_ADMISSION_FENCE_PREFIX + sandbox.value,),
+        ).fetchone()
+        if row is None:
+            return None
+        token = str(row["value"])
+        if _ADMISSION_FENCE_RE.fullmatch(token) is None:
+            raise BrokerError("environment admission fence is invalid")
+        return token
+
+    def close_environment_admission(
+        self,
+        sandbox: SandboxId | str,
+        token: str,
+    ) -> None:
+        """Fence only one environment while peer admission remains open."""
+
+        selected = SandboxId(str(sandbox))
+        if _ADMISSION_FENCE_RE.fullmatch(token) is None:
+            raise BrokerError("environment admission fence token is invalid")
+        self.initialize()
+        connection = self._transaction()
+        try:
+            existing = self._environment_admission_fence(connection, selected)
+            if existing is None:
+                connection.execute(
+                    "INSERT INTO broker_meta(key, value) VALUES(?, ?)",
+                    (
+                        _ENVIRONMENT_ADMISSION_FENCE_PREFIX + selected.value,
+                        token,
+                    ),
+                )
+            elif existing != token:
+                raise BrokerError("environment admission is fenced by another transaction")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def open_environment_admission(
+        self,
+        sandbox: SandboxId | str,
+        token: str,
+    ) -> None:
+        """Release only the exact environment fence owned by this token."""
+
+        selected = SandboxId(str(sandbox))
+        if _ADMISSION_FENCE_RE.fullmatch(token) is None:
+            raise BrokerError("environment admission fence token is invalid")
+        self.initialize()
+        connection = self._transaction()
+        try:
+            existing = self._environment_admission_fence(connection, selected)
+            if existing is not None and existing != token:
+                raise BrokerError("environment admission fence belongs to another transaction")
+            if existing == token:
+                connection.execute(
+                    "DELETE FROM broker_meta WHERE key = ?",
+                    (_ENVIRONMENT_ADMISSION_FENCE_PREFIX + selected.value,),
+                )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def rotate_environment_admission(
+        self,
+        sandbox: SandboxId | str,
+        previous_token: str,
+        token: str,
+    ) -> None:
+        """Atomically replace one exact environment fence without an open gap."""
+
+        selected = SandboxId(str(sandbox))
+        if (
+            _ADMISSION_FENCE_RE.fullmatch(previous_token) is None
+            or _ADMISSION_FENCE_RE.fullmatch(token) is None
+        ):
+            raise BrokerError("environment admission fence token is invalid")
+        self.initialize()
+        connection = self._transaction()
+        try:
+            existing = self._environment_admission_fence(connection, selected)
+            if existing != previous_token:
+                raise BrokerError("environment admission fence belongs to another transaction")
+            connection.execute(
+                "UPDATE broker_meta SET value = ? WHERE key = ?",
+                (
+                    token,
+                    _ENVIRONMENT_ADMISSION_FENCE_PREFIX + selected.value,
+                ),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def environment_admission_fence(
+        self,
+        sandbox: SandboxId | str,
+    ) -> str | None:
+        selected = SandboxId(str(sandbox))
+        self.initialize()
+        connection = self._connect()
+        try:
+            return self._environment_admission_fence(connection, selected)
+        finally:
+            connection.close()
+
+    @staticmethod
     def _acceptance_contract(
         connection: sqlite3.Connection,
     ) -> dict[str, Any] | None:
@@ -829,16 +986,22 @@ class SharedCapacityBroker:
         contract: Mapping[str, Any],
         *,
         phase: str,
-        sandbox: str,
+        sandbox: SandboxId | str,
         pool: str,
     ) -> tuple[SandboxId, str, str, int, int, str]:
-        normalized_sandbox = SandboxId(sandbox)
-        candidate_sha = str(contract["candidate_shas"][sandbox])
+        try:
+            normalized_sandbox = sandbox if isinstance(sandbox, SandboxId) else SandboxId(sandbox)
+        except ValueError as exc:
+            raise BrokerError("acceptance sandbox id is invalid") from exc
+        candidate_shas = contract.get("candidate_shas")
+        if not isinstance(candidate_shas, dict) or normalized_sandbox.value not in candidate_shas:
+            raise BrokerError("acceptance sandbox is outside the session registry")
+        candidate_sha = str(candidate_shas[normalized_sandbox.value])
         target_slots = int(contract["target_slots"][pool])
         ttl_seconds = int(contract["ttl_seconds"][phase])
         purpose = f"developer-sandbox-live-acceptance/{contract['session_id']}/{phase}"
         idempotency_key = (
-            f"acceptance:{contract['session_id']}:{phase}:{sandbox}:{pool}"
+            f"acceptance:{contract['session_id']}:{phase}:{normalized_sandbox.value}:{pool}"
         )
         _validate_request_input(
             sandbox=normalized_sandbox,
@@ -867,6 +1030,8 @@ class SharedCapacityBroker:
         contract: Mapping[str, Any],
     ) -> bool:
         if request.pool not in _ACCEPTANCE_POOLS:
+            return False
+        if request.sandbox not in _acceptance_sandboxes(contract):
             return False
         for phase in contract["phases"]:
             values = cls._acceptance_request_values(
@@ -911,7 +1076,9 @@ class SharedCapacityBroker:
                 raise BrokerError("acceptance cohort is outside the active contract")
             rows: list[tuple[CapacityRequest, CapacityLease]] = []
             missing = 0
-            for sandbox in _ACCEPTANCE_SANDBOXES:
+            acceptance_sandboxes = _acceptance_sandboxes(contract)
+            for normalized_sandbox in acceptance_sandboxes:
+                sandbox = normalized_sandbox.value
                 for pool in _ACCEPTANCE_POOLS:
                     values = self._acceptance_request_values(
                         contract,
@@ -932,10 +1099,11 @@ class SharedCapacityBroker:
                     if not self._is_acceptance_owned_request(request, contract):
                         raise BrokerError("acceptance cohort idempotency binding drifted")
                     rows.append((request, lease))
-            if missing == len(_ACCEPTANCE_SANDBOXES) * len(_ACCEPTANCE_POOLS):
+            expected_lane_count = len(acceptance_sandboxes) * len(_ACCEPTANCE_POOLS)
+            if missing == expected_lane_count:
                 connection.commit()
                 return None
-            if missing or len(rows) != len(_ACCEPTANCE_SANDBOXES) * len(_ACCEPTANCE_POOLS):
+            if missing or len(rows) != expected_lane_count:
                 raise BrokerError("acceptance cohort is partially materialized")
             rows.sort(key=lambda item: (item[0].sandbox.value, item[0].pool))
             connection.commit()
@@ -1019,7 +1187,7 @@ class SharedCapacityBroker:
         session_id: str,
         phase: str,
     ) -> list[dict[str, object]]:
-        """Atomically create or read the exact six-lane cohort for one bounded phase."""
+        """Atomically create or read the session-registry cohort for one bounded phase."""
 
         if (
             _ADMISSION_FENCE_RE.fullmatch(token) is None
@@ -1043,10 +1211,10 @@ class SharedCapacityBroker:
             ):
                 raise BrokerError("acceptance cohort is outside the active contract")
             rows: list[tuple[CapacityRequest, CapacityLease]] = []
-            missing: list[
-                tuple[str, str, tuple[SandboxId, str, str, int, int, str]]
-            ] = []
-            for sandbox in _ACCEPTANCE_SANDBOXES:
+            missing: list[tuple[str, str, tuple[SandboxId, str, str, int, int, str]]] = []
+            acceptance_sandboxes = _acceptance_sandboxes(contract)
+            for normalized_sandbox in acceptance_sandboxes:
+                sandbox = normalized_sandbox.value
                 for pool in _ACCEPTANCE_POOLS:
                     values = self._acceptance_request_values(
                         contract,
@@ -1168,7 +1336,7 @@ class SharedCapacityBroker:
                 rows.append(
                     _record_from_row(self._joined_row(connection, request_id)),
                 )
-            if len(rows) != len(_ACCEPTANCE_SANDBOXES) * len(_ACCEPTANCE_POOLS):
+            if len(rows) != len(acceptance_sandboxes) * len(_ACCEPTANCE_POOLS):
                 raise BrokerError("acceptance cohort is not closed-world")
             rows.sort(key=lambda item: (item[0].sandbox.value, item[0].pool))
             connection.commit()
@@ -1197,19 +1365,25 @@ class SharedCapacityBroker:
             if self._admission_fence(connection) != token:
                 raise BrokerError("acceptance cancel requires the exact closed general fence")
             contract = self._acceptance_contract(connection)
+            try:
+                normalized_sandbox = SandboxId(sandbox)
+            except ValueError as exc:
+                raise BrokerError(
+                    "acceptance cancel is outside the active contract",
+                ) from exc
             if (
                 contract is None
                 or contract["admission_token"] != token
                 or contract["session_id"] != session_id
                 or phase not in contract["phases"]
-                or sandbox not in _ACCEPTANCE_SANDBOXES
+                or normalized_sandbox not in _acceptance_sandboxes(contract)
                 or pool not in _ACCEPTANCE_POOLS
             ):
                 raise BrokerError("acceptance cancel is outside the active contract")
             values = self._acceptance_request_values(
                 contract,
                 phase=phase,
-                sandbox=sandbox,
+                sandbox=normalized_sandbox,
                 pool=pool,
             )
             row = connection.execute(
@@ -1287,10 +1461,7 @@ class SharedCapacityBroker:
             if contract is None:
                 connection.commit()
                 return
-            if (
-                contract["admission_token"] != token
-                or contract["session_id"] != session_id
-            ):
+            if contract["admission_token"] != token or contract["session_id"] != session_id:
                 raise BrokerError("acceptance close ownership drifted")
             purpose_prefix = f"developer-sandbox-live-acceptance/{session_id}/"
             rows = connection.execute(
@@ -1407,6 +1578,14 @@ class SharedCapacityBroker:
 
             if self._admission_fence(connection) is not None:
                 raise BrokerError("new capacity requests are fenced during runtime activation")
+            if (
+                self._environment_admission_fence(
+                    connection,
+                    normalized_sandbox,
+                )
+                is not None
+            ):
+                raise BrokerError("new capacity requests are fenced for this environment")
 
             request_id = str(uuid4())
             connection.execute(
@@ -1477,10 +1656,7 @@ class SharedCapacityBroker:
         try:
             request, lease = _record_from_row(self._joined_row(connection, request_id))
             contract = self._acceptance_contract(connection)
-            if (
-                contract is not None
-                and self._is_acceptance_owned_request(request, contract)
-            ):
+            if contract is not None and self._is_acceptance_owned_request(request, contract):
                 raise BrokerError(
                     "acceptance-owned request requires the exact acceptance cancel path",
                 )
@@ -1615,8 +1791,7 @@ class SharedCapacityBroker:
         handoffs = [
             self._handoff(record).public_dict()
             for record in records
-            if record.request.state != RequestState.TERMINAL
-            or record.lease.lease_epoch > 0
+            if record.request.state != RequestState.TERMINAL or record.lease.lease_epoch > 0
         ]
         audit_rows = connection.execute(
             """
@@ -1682,7 +1857,7 @@ class SharedCapacityBroker:
     ) -> dict[str, int]:
         eligible = [record for record in records if record.eligible]
         targets = {record.request.id: 0 for record in records}
-        sandbox_allocations = {sandbox: 0 for sandbox in SandboxId}
+        sandbox_allocations = {record.request.sandbox: 0 for record in records}
         pool_allocations = {pool: 0 for pool in budgets.pool_slots}
         global_remaining = budgets.global_slots
 
@@ -1767,18 +1942,14 @@ class SharedCapacityBroker:
         committed_global = sum(record.lease.committed_slots for record in records)
         committed_by_pool = {
             pool: sum(
-                record.lease.committed_slots
-                for record in records
-                if record.request.pool == pool
+                record.lease.committed_slots for record in records if record.request.pool == pool
             )
             for pool in budgets.pool_slots
         }
         pending_global = sum(record.lease.pending_slots for record in records)
         pending_by_pool = {
             pool: sum(
-                record.lease.pending_slots
-                for record in records
-                if record.request.pool == pool
+                record.lease.pending_slots for record in records if record.request.pool == pool
             )
             for pool in budgets.pool_slots
         }
@@ -1792,7 +1963,7 @@ class SharedCapacityBroker:
                 for record in records
                 if record.request.sandbox == sandbox
             )
-            for sandbox in SandboxId
+            for sandbox in {record.request.sandbox for record in records}
         }
 
         while True:
@@ -1968,15 +2139,12 @@ class SharedCapacityBroker:
                 if observation.payload_sha256 != lease.last_observation_digest:
                     raise BrokerError("observation sequence was rebound to another payload")
                 return
-            if (
-                lease.last_observed_at is not None
-                and observed_at < _parse_timestamp(lease.last_observed_at)
+            if lease.last_observed_at is not None and observed_at < _parse_timestamp(
+                lease.last_observed_at
             ):
                 raise BrokerError("observation timestamp regressed")
         nonterminal = (
-            observation.pending_slots
-            + observation.active_slots
-            + observation.draining_slots
+            observation.pending_slots + observation.active_slots + observation.draining_slots
         )
         allowed_nonterminal = max(lease.committed_slots, lease.granted_slots)
         if nonterminal > allowed_nonterminal:
@@ -2168,9 +2336,7 @@ class SharedCapacityBroker:
 
 def _record_from_row(row: sqlite3.Row) -> tuple[CapacityRequest, CapacityLease]:
     lease_state_key = "lease_state" if "lease_state" in row.keys() else "state"
-    lease_updated_key = (
-        "lease_updated_at" if "lease_updated_at" in row.keys() else "updated_at"
-    )
+    lease_updated_key = "lease_updated_at" if "lease_updated_at" in row.keys() else "updated_at"
     request = CapacityRequest(
         id=row["id"],
         sandbox=SandboxId(row["sandbox"]),
@@ -2261,7 +2427,7 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     request = subparsers.add_parser("request", allow_abbrev=False)
-    request.add_argument("--sandbox", choices=[item.value for item in SandboxId], required=True)
+    request.add_argument("--sandbox", required=True)
     request.add_argument("--candidate-sha", required=True)
     request.add_argument("--pool", required=True)
     request.add_argument("--min-slots", type=int, required=True)

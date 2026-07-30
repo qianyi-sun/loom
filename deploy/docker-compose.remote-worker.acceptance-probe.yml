@@ -1,0 +1,61 @@
+# Fixed allocation-local finalization probe. Compose with the installed base,
+# sandbox-link, and cgroup-parent definitions. No service publishes host ports.
+services:
+  acceptance-probe:
+    image: loom-worker:${LOOM_IMAGE_TAG:?set exact candidate image tag}
+    command:
+      - /usr/bin/python3
+      - -I
+      - -B
+      - /run/loom-acceptance/probe.py
+      - --request
+      - /run/loom-acceptance/request.json
+      - --result
+      - /run/loom-acceptance-output/result.json
+      - --execute
+    user: "${LOOM_ACCEPTANCE_PROBE_UID:?set service uid}:${LOOM_ACCEPTANCE_PROBE_GID:?set service gid}"
+    environment:
+      LOOM_WORKER_SANDBOX_IDENTITY: ${LOOM_WORKER_SANDBOX_IDENTITY:?set runtime identity}
+      LOOM_WORKER_CANDIDATE_SHA: ${LOOM_WORKER_CANDIDATE_SHA:?set candidate sha}
+      LOOM_WORKER_SLURM_JOB_ID: ${LOOM_WORKER_SLURM_JOB_ID:?set Slurm job id}
+      LOOM_WORKER_ENV_ID: ${LOOM_WORKER_ENV_ID:?set environment id}
+      LOOM_WORKER_RESOURCE_GENERATION: ${LOOM_WORKER_RESOURCE_GENERATION:?set resource generation}
+      LOOM_WORKER_CANDIDATE_ID: ${LOOM_WORKER_CANDIDATE_ID:?set candidate id}
+      LOOM_WORKER_CANDIDATE_TREE: ${LOOM_WORKER_CANDIDATE_TREE:?set candidate tree}
+      LOOM_WORKER_REGISTRY_GENERATION: ${LOOM_WORKER_REGISTRY_GENERATION:?set registry generation}
+      LOOM_WORKER_REGISTRY_PAYLOAD_SHA256: ${LOOM_WORKER_REGISTRY_PAYLOAD_SHA256:?set registry digest}
+      SLURM_JOB_ID: ${LOOM_WORKER_SLURM_JOB_ID:?set Slurm job id}
+    volumes:
+      - type: bind
+        source: ${LOOM_ACCEPTANCE_PROBE_PROGRAM_HOST:?set fixed probe program}
+        target: /run/loom-acceptance/probe.py
+        read_only: true
+      - type: bind
+        source: ${LOOM_ACCEPTANCE_PROBE_REQUEST_HOST:?set bound request}
+        target: /run/loom-acceptance/request.json
+        read_only: true
+      - type: bind
+        source: ${LOOM_ACCEPTANCE_PROBE_OUTPUT_HOST:?set bound output directory}
+        target: /run/loom-acceptance-output
+    depends_on:
+      sandbox-link:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp
+    cpus: 0.25
+    mem_limit: 128m
+    pids_limit: 64
+    cgroup_parent: ${LOOM_WORKER_CGROUP_PARENT:?set allocation cgroup}
+    labels:
+      loom.sandbox: ${LOOM_WORKER_SANDBOX_IDENTITY:?set runtime identity}
+      loom.candidate_sha: ${LOOM_WORKER_CANDIDATE_SHA:?set candidate sha}
+      loom.slurm_job_id: ${LOOM_WORKER_SLURM_JOB_ID:?set Slurm job id}
+      loom.compose_project: ${LOOM_WORKER_COMPOSE_PROJECT:?set compose project}
+      loom.env_id: ${LOOM_WORKER_ENV_ID:?set environment id}
+      loom.resource_generation: ${LOOM_WORKER_RESOURCE_GENERATION:?set resource generation}
+      loom.candidate_id: ${LOOM_WORKER_CANDIDATE_ID:?set candidate id}
+      loom.candidate_tree: ${LOOM_WORKER_CANDIDATE_TREE:?set candidate tree}
+      loom.registry_generation: ${LOOM_WORKER_REGISTRY_GENERATION:?set registry generation}
+      loom.registry_payload_sha256: ${LOOM_WORKER_REGISTRY_PAYLOAD_SHA256:?set registry digest}
+    restart: "no"

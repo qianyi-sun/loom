@@ -9,6 +9,7 @@ from scripts.ops import developer_sandbox as sandbox
 
 SHA = "a" * 40
 TREE = "b" * 40
+SEED_SANDBOXES = ("qianyi", "hongjian", "devansh")
 
 
 class FakeRunner:
@@ -26,7 +27,9 @@ class FakeRunner:
         command = tuple(argv)
         self.calls.append((command, cwd, env))
         if command[:3] == ("git", "rev-parse", "--verify"):
-            return sandbox.CommandResult(0, TREE + "\n" if command[-1] == "HEAD^{tree}" else SHA + "\n")
+            return sandbox.CommandResult(
+                0, TREE + "\n" if command[-1] == "HEAD^{tree}" else SHA + "\n"
+            )
         if command[:2] == ("git", "status"):
             return sandbox.CommandResult(0, " M unsafe\n" if self.dirty else "")
         if command[:2] == ("docker", "compose") and "ps" in command:
@@ -38,16 +41,20 @@ class FakeRunner:
         return sandbox.CommandResult(0)
 
 
-def _write_profiles(tmp_path: Path) -> tuple[Path, Path]:
+def _write_profiles(
+    tmp_path: Path,
+    owners: Sequence[str] = SEED_SANDBOXES,
+) -> tuple[Path, Path]:
     profiles_dir = tmp_path / "profiles"
     profiles_dir.mkdir()
     candidates = tmp_path / "candidates" / "sandboxes"
     state_parent = tmp_path / "developer-sandboxes"
-    for index, owner in enumerate(sandbox.ALLOWED_SANDBOXES):
+    for index, owner in enumerate(owners):
         port = 20_000 + index * 1_000
         state = state_parent / owner
         (profiles_dir / f"{owner}.toml").write_text(
             f"""schema_version = 1
+kind = "loom.developer-sandbox.profile"
 sandbox = "{owner}"
 ssh_target = "oldlab-2"
 canonical_hostname = "trt-eai-oldlab-2"
@@ -88,8 +95,7 @@ artifacts_bucket = "loom-sandbox-{owner}-artifacts"
 def _write_secret_files(tmp_path: Path) -> tuple[Path, Path]:
     secrets = tmp_path / "sandbox.env"
     secrets.write_text(
-        "\n".join(f"{key}=test-value" for key in sorted(sandbox._REQUIRED_SECRET_ENV_KEYS))
-        + "\n",
+        "\n".join(f"{key}=test-value" for key in sorted(sandbox._REQUIRED_SECRET_ENV_KEYS)) + "\n",
         encoding="utf-8",
     )
     admin = tmp_path / "admin.toml"
@@ -113,9 +119,116 @@ def test_checked_in_profiles_are_typed_and_cross_profile_distinct() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     profiles = sandbox.load_profiles(repo_root / "deploy" / "developer-sandboxes")
 
-    assert {profile.sandbox for profile in profiles} == set(sandbox.ALLOWED_SANDBOXES)
+    # These are seed fixtures, not a product allowlist.
+    assert {profile.sandbox for profile in profiles} == set(SEED_SANDBOXES)
     assert len({port for profile in profiles for port in profile.ports.values()}) == 30
     assert all(profile.bind_address == "127.0.0.1" for profile in profiles)
+
+
+def test_profile_loader_discovers_n_profiles_in_stable_filename_order(
+    tmp_path: Path,
+) -> None:
+    profiles_dir, _ = _write_profiles(
+        tmp_path,
+        ("zoe", "qianyi", "alice-7", "devansh", "hongjian"),
+    )
+    (profiles_dir / "platform.toml").write_text(
+        'schema_version = 1\n[routing]\nsandbox = "staging"\n',
+        encoding="utf-8",
+    )
+
+    profiles = sandbox.load_profiles(profiles_dir)
+
+    assert [profile.sandbox for profile in profiles] == [
+        "alice-7",
+        "devansh",
+        "hongjian",
+        "qianyi",
+        "zoe",
+    ]
+
+
+@pytest.mark.parametrize(
+    "invalid_id",
+    ("Alice", "-alice", "alice_1", "a" * 49),
+)
+def test_profile_loader_rejects_invalid_sandbox_id(
+    tmp_path: Path,
+    invalid_id: str,
+) -> None:
+    profiles_dir, _ = _write_profiles(tmp_path, (invalid_id,))
+
+    with pytest.raises(sandbox.SandboxProfileError, match="sandbox must match"):
+        sandbox.load_profiles(profiles_dir)
+
+
+def test_profile_loader_rejects_filename_identity_mismatch(tmp_path: Path) -> None:
+    profiles_dir, _ = _write_profiles(tmp_path, ("qianyi",))
+    (profiles_dir / "qianyi.toml").rename(profiles_dir / "alice.toml")
+
+    with pytest.raises(sandbox.SandboxProfileError, match="filename must equal"):
+        sandbox.load_profiles(profiles_dir)
+
+
+def test_profile_loader_requires_at_least_one_marked_profile(tmp_path: Path) -> None:
+    profiles_dir = tmp_path / "profiles"
+    profiles_dir.mkdir()
+    (profiles_dir / "platform.toml").write_text(
+        'schema_version = 1\n[routing]\nsandbox = "staging"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(sandbox.SandboxProfileError, match="no developer sandbox"):
+        sandbox.load_profiles(profiles_dir)
+
+
+def test_profile_loader_ignores_unmarked_malformed_toml(tmp_path: Path) -> None:
+    profiles_dir, _ = _write_profiles(tmp_path, ("qianyi",))
+    (profiles_dir / "platform.toml").write_text(
+        'sandbox = "platform"\nthis is not valid TOML\n',
+        encoding="utf-8",
+    )
+
+    profiles = sandbox.load_profiles(profiles_dir)
+
+    assert [profile.sandbox for profile in profiles] == ["qianyi"]
+
+
+def test_profile_loader_rejects_marked_malformed_toml(tmp_path: Path) -> None:
+    profiles_dir, _ = _write_profiles(tmp_path, ("qianyi",))
+    (profiles_dir / "broken.toml").write_text(
+        'kind = "loom.developer-sandbox.profile"\nthis is not valid TOML\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(sandbox.SandboxProfileError, match="invalid marked"):
+        sandbox.load_profiles(profiles_dir)
+
+
+def test_profile_loader_rejects_symlink_in_directory_ancestry(tmp_path: Path) -> None:
+    real_root = tmp_path / "real"
+    real_root.mkdir()
+    _write_profiles(real_root, ("qianyi",))
+    linked_root = tmp_path / "linked"
+    linked_root.symlink_to(real_root, target_is_directory=True)
+
+    with pytest.raises(sandbox.SandboxProfileError, match="must not contain symlinks"):
+        sandbox.load_profiles(linked_root / "profiles")
+
+
+def test_direct_profile_loader_requires_protocol_marker(tmp_path: Path) -> None:
+    profiles_dir, _ = _write_profiles(tmp_path, ("qianyi",))
+    profile = profiles_dir / "qianyi.toml"
+    profile.write_text(
+        profile.read_text(encoding="utf-8").replace(
+            'kind = "loom.developer-sandbox.profile"\n',
+            "",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(sandbox.SandboxProfileError, match="missing fields: kind"):
+        sandbox.load_profile(profile)
 
 
 def test_profile_loader_rejects_cross_profile_port_collision(tmp_path: Path) -> None:
@@ -244,8 +357,7 @@ def test_execute_create_records_exact_state_without_exposing_secret_values(
 
 def test_destroy_preserves_volumes_unless_explicit(tmp_path: Path) -> None:
     profile = sandbox.load_profile(
-        Path(__file__).resolve().parents[2]
-        / "deploy/developer-sandboxes/qianyi.toml",
+        Path(__file__).resolve().parents[2] / "deploy/developer-sandboxes/qianyi.toml",
     )
     source = tmp_path / "candidate"
     (source / "deploy").mkdir(parents=True)
@@ -329,9 +441,9 @@ def test_dirty_candidate_is_rejected(tmp_path: Path) -> None:
 
 
 def test_dev_compose_exposes_all_sandbox_isolation_inputs() -> None:
-    compose = (
-        Path(__file__).resolve().parents[2] / "deploy/docker-compose.dev.yml"
-    ).read_text(encoding="utf-8")
+    compose = (Path(__file__).resolve().parents[2] / "deploy/docker-compose.dev.yml").read_text(
+        encoding="utf-8"
+    )
 
     for key in (
         "LOOM_DEV_IMAGE_TAG",

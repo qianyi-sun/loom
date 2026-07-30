@@ -36,18 +36,211 @@ def _load_module() -> Any:
 
 
 ACCEPTANCE = _load_module()
+FIXTURE_SANDBOXES = ("qianyi", "hongjian", "devansh")
+FIXTURE_SERVICE_USERS = {
+    "qianyi": "loom-sandbox-qianyi",
+    "hongjian": "loom-sandbox-hongjian",
+    "devansh": "loom-sandbox-devansh",
+}
+FIXTURE_PHASE_CHECKPOINTS = tuple(
+    (phase, sandbox) for phase in ACCEPTANCE.PHASES for sandbox in FIXTURE_SANDBOXES
+)
 
 
-def _candidate_map() -> dict[str, dict[str, str]]:
+def _source_registry_snapshot(
+    sandboxes: tuple[str, ...] = FIXTURE_SANDBOXES,
+) -> dict[str, Any]:
+    candidates = _candidate_map(sandboxes)
+    environments: list[dict[str, Any]] = []
+    candidate_rows: list[dict[str, Any]] = []
+    deployment_rows: list[dict[str, Any]] = []
+    finalization_rows: list[dict[str, Any]] = []
+    for index, sandbox in enumerate(sandboxes, start=1):
+        env_id = f"denv-{index:08d}"
+        principal_id = f"github:{1000 + index}"
+        candidate = candidates[sandbox]
+        bundle_sha256 = str(index) * 64
+        candidate_identity = {
+            "principal_id": principal_id,
+            "env_id": env_id,
+            "lifecycle_epoch": 1,
+            "repository_id": "qianyi-sun/loom",
+            "candidate_sha": candidate["sha"],
+            "candidate_tree": candidate["tree"],
+            "bundle_sha256": bundle_sha256,
+        }
+        candidate_id = "cand-" + ACCEPTANCE.environment_registry._digest(candidate_identity)[:40]
+        legacy = sandbox in FIXTURE_SERVICE_USERS
+        if legacy:
+            service_user = FIXTURE_SERVICE_USERS[sandbox]
+            resources = {
+                "service_user": service_user,
+                "service_group": service_user,
+                "compose_project": f"loom-sandbox-{sandbox}",
+                "systemd_instance": sandbox,
+                "candidate_root": f"/shared_work/loom/candidates/sandboxes/{sandbox}",
+                "runtime_root": f"/shared_work/loom/runtime/sandboxes/{sandbox}",
+                "state_root": f"/srv/loom/developer-sandboxes/{sandbox}",
+                "evidence_root": f"/srv/loom/developer-sandboxes/{sandbox}/evidence",
+                "database_name": f"loom_sandbox_{sandbox}",
+                "postgres_volume": f"loom-sandbox-{sandbox}_postgres_data",
+                "minio_volume": f"loom-sandbox-{sandbox}_minio_data",
+                "task_bucket": f"loom-sandbox-{sandbox}-tasks",
+                "trajectories_bucket": f"loom-sandbox-{sandbox}-trajectories",
+                "artifacts_bucket": f"loom-sandbox-{sandbox}-artifacts",
+                "provider_namespace": f"sandbox-{sandbox}",
+                "slurm_user": service_user,
+                "slurm_account": f"loom-dev-{sandbox}",
+                "slurm_qos": f"loom-dev-{sandbox}",
+                "cgroup_slice": f"loom-dev-{sandbox}.slice",
+            }
+        else:
+            resources = (
+                ACCEPTANCE.environment_registry.DeveloperEnvironmentRegistry._dynamic_resources(
+                    env_id,
+                    sandbox,
+                )
+            )
+        environments.append(
+            {
+                "env_id": env_id,
+                "principal_id": principal_id,
+                "display_name": sandbox,
+                "layout_version": "legacy-v1" if legacy else "dynamic-v1",
+                "runtime_id": sandbox,
+                "state": "active",
+                "resource_generation": 2,
+                "lifecycle_epoch": 1,
+                **resources,
+                "uid": 20_000 + index,
+                "gid": 20_000 + index,
+                "ports": {
+                    name: 30_000 + index * 100 + offset
+                    for offset, name in enumerate(
+                        ACCEPTANCE.environment_registry.PORT_NAMES,
+                    )
+                },
+                "current_candidate_id": candidate_id,
+                "created_at": _iso(0),
+            },
+        )
+        candidate_rows.append(
+            {
+                "candidate_id": candidate_id,
+                "principal_id": principal_id,
+                "env_id": env_id,
+                "lifecycle_epoch": 1,
+                "repository_id": "qianyi-sun/loom",
+                "candidate_sha": candidate["sha"],
+                "candidate_tree": candidate["tree"],
+                "bundle_sha256": bundle_sha256,
+                "bundle_size": 1024,
+                "bundle_path": f"/var/lib/loom-developer-environments/candidates/{candidate_id}/candidate.bundle",
+                "image_digests": {
+                    "amd64": f"sha256:{candidate['sha']}{candidate['sha'][:24]}",
+                    "arm64": f"sha256:{candidate['tree']}{candidate['tree'][:24]}",
+                },
+                "imported_at": _iso(0),
+            },
+        )
+        deployment_id = f"dep-{index:032x}"
+        applied_registry_payload_sha256 = f"{index + 5:x}" * 64
+        finalization_unsigned = {
+            "deployment_id": deployment_id,
+            "env_id": env_id,
+            "principal_id": principal_id,
+            "candidate_id": candidate_id,
+            "candidate_sha": candidate["sha"],
+            "candidate_tree": candidate["tree"],
+            "applied_resource_generation": 2,
+            "applied_registry_generation": 41,
+            "applied_registry_payload_sha256": applied_registry_payload_sha256,
+            "capacity_finalize_receipt_sha256": "a" * 64,
+            "capacity_finalize_check_receipt_sha256": "b" * 64,
+            "runtime_reconcile_receipt_sha256": "c" * 64,
+            "runtime_prepare_check_receipt_sha256": "d" * 64,
+            "acceptance_probe_receipt_sha256": "e" * 64,
+            "created_at": _iso(1),
+        }
+        finalization = {
+            **finalization_unsigned,
+            "payload_sha256": ACCEPTANCE.environment_registry._digest(
+                finalization_unsigned,
+            ),
+        }
+        finalization_rows.append(finalization)
+        deployment_rows.append(
+            {
+                "deployment_id": deployment_id,
+                "principal_id": principal_id,
+                "env_id": env_id,
+                "candidate_id": candidate_id,
+                "expected_resource_generation": 1,
+                "applied_resource_generation": 2,
+                "applied_registry_generation": 41,
+                "applied_registry_payload_sha256": applied_registry_payload_sha256,
+                "finalization_payload_sha256": finalization["payload_sha256"],
+                "phase": "committed",
+                "previous_candidate_id": None,
+                "request_digest": str(index + 4) * 64,
+                "created_at": _iso(0),
+                "updated_at": _iso(1),
+            },
+        )
+    candidate_rows.sort(key=lambda candidate: candidate["candidate_id"])
+    deployment_rows.sort(key=lambda deployment: deployment["deployment_id"])
+    unsigned = {
+        "schema_version": 1,
+        "kind": "loom.developer-environment.registry-snapshot",
+        "generation": 42,
+        "environments": environments,
+        "candidates": candidate_rows,
+        "deployments": deployment_rows,
+        "deployment_finalizations": finalization_rows,
+    }
     return {
-        "qianyi": {"sha": "a" * 40, "tree": "b" * 40},
-        "hongjian": {"sha": "c" * 40, "tree": "d" * 40},
-        "devansh": {"sha": "e" * 40, "tree": "f" * 40},
+        **unsigned,
+        "payload_sha256": hashlib.sha256(
+            ACCEPTANCE._canonical_bytes(unsigned),
+        ).hexdigest(),
+    }
+
+
+def _registry_snapshot(
+    sandboxes: tuple[str, ...] = FIXTURE_SANDBOXES,
+) -> dict[str, Any]:
+    return ACCEPTANCE._acceptance_registry_snapshot(
+        _source_registry_snapshot(sandboxes),
+    )
+
+
+def _reseal_source_registry(source: dict[str, Any]) -> None:
+    unsigned = {key: value for key, value in source.items() if key != "payload_sha256"}
+    source["payload_sha256"] = hashlib.sha256(
+        ACCEPTANCE._canonical_bytes(unsigned),
+    ).hexdigest()
+
+
+def _candidate_map(
+    sandboxes: tuple[str, ...] = FIXTURE_SANDBOXES,
+) -> dict[str, dict[str, str]]:
+    identity_chars = (("a", "b"), ("c", "d"), ("e", "f"), ("1", "2"))
+    assert len(sandboxes) <= len(identity_chars)
+    return {
+        sandbox: {
+            "sha": identity_chars[index][0] * 40,
+            "tree": identity_chars[index][1] * 40,
+        }
+        for index, sandbox in enumerate(sandboxes)
     }
 
 
 def _start_session() -> dict[str, Any]:
-    return ACCEPTANCE.start_session(_candidate_map(), execute=True)
+    return ACCEPTANCE.start_session(
+        _candidate_map(),
+        registry_snapshot=_source_registry_snapshot(),
+        execute=True,
+    )
 
 
 def _run(*args: str | Path) -> subprocess.CompletedProcess[str]:
@@ -91,13 +284,17 @@ def _request_id(index: int) -> str:
     return str(uuid.UUID(int=index))
 
 
+def _job_name(sandbox: str, candidate_sha: str, node: str) -> str:
+    return f"accept-{sandbox}-{candidate_sha[:12]}-{node}"[:128]
+
+
 def _runtime_receipts(
     sandbox: str,
     candidate: str,
     tree: str,
 ) -> list[dict[str, Any]]:
     receipts: list[dict[str, Any]] = []
-    sandbox_index = ACCEPTANCE.SANDBOXES.index(sandbox) + 1
+    sandbox_index = int(candidate[0], 16) + 1
     previous: str | None = None
     for generation, minute in enumerate((0, 10, 20, 30, 40), start=1):
         collected_at = _iso(minute)
@@ -701,6 +898,9 @@ def _record_trusted_receipts(
 
 
 def _platform_health_authority(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    registry_environments = ACCEPTANCE._registry_environments(
+        evidence["registry_snapshot"],
+    )
     policy_contracts = {
         pool: ACCEPTANCE._platform_policy_contract(pool) for pool in ACCEPTANCE.POOLS
     }
@@ -710,6 +910,7 @@ def _platform_health_authority(evidence: Mapping[str, Any]) -> dict[str, Any]:
         policy = policy_contracts[pool][0]
         job_id = row["job_id"]
         job_path = row["cgroup"]["job_path"]
+        environment = registry_environments[row["sandbox"]]
         compose_project = f"loom-{row['sandbox']}-{job_id}"
         compose_networks = [f"{compose_project}_default"]
         containers = [
@@ -720,6 +921,22 @@ def _platform_health_authority(evidence: Mapping[str, Any]) -> dict[str, Any]:
                 "candidate_sha": row["candidate_sha"],
                 "job_id": job_id,
                 "compose_project": compose_project,
+                "identity_labels": {
+                    "loom.sandbox": row["sandbox"],
+                    "loom.candidate_sha": row["candidate_sha"],
+                    "loom.slurm_job_id": job_id,
+                    "loom.compose_project": compose_project,
+                    "loom.env_id": environment["env_id"],
+                    "loom.resource_generation": str(
+                        environment["resource_generation"],
+                    ),
+                    "loom.candidate_id": environment["candidate_id"],
+                    "loom.candidate_tree": row["candidate_tree"],
+                    "loom.registry_generation": str(
+                        evidence["registry_snapshot"]["generation"],
+                    ),
+                    "loom.registry_payload_sha256": evidence["registry_snapshot"]["payload_sha256"],
+                },
                 "compose_networks": compose_networks,
                 "pid": 2000 + index,
                 "cgroup_parent": job_path,
@@ -747,9 +964,16 @@ def _platform_health_authority(evidence: Mapping[str, Any]) -> dict[str, Any]:
                 "job_id": job_id,
                 "job_name": (f"loom-{row['sandbox']}-{row['candidate_sha'][:12]}-{row['node']}"),
                 "sandbox": row["sandbox"],
+                "env_id": environment["env_id"],
+                "resource_generation": environment["resource_generation"],
+                "candidate_id": environment["candidate_id"],
                 "candidate_sha": row["candidate_sha"],
+                "candidate_tree": row["candidate_tree"],
+                "registry_generation": evidence["registry_snapshot"]["generation"],
+                "registry_payload_sha256": evidence["registry_snapshot"]["payload_sha256"],
                 "account": row["account"],
-                "user": f"loom-sandbox-{row['sandbox']}",
+                "qos": registry_environments[row["sandbox"]]["slurm_qos"],
+                "user": registry_environments[row["sandbox"]]["slurm_user"],
                 "node": row["node"],
                 "state": "RUNNING",
                 "allocation": allocation,
@@ -791,12 +1015,13 @@ def _platform_health_authority(evidence: Mapping[str, Any]) -> dict[str, Any]:
         "schema_version": 1,
         "kind": "loom.developer-sandbox.platform-health-evidence",
         "session_id": evidence["session"]["id"],
+        "registry_snapshot": evidence["registry_snapshot"],
         "candidates": {
             sandbox: {
                 "sha": evidence["candidates"][sandbox]["sha"],
                 "tree": evidence["candidates"][sandbox]["tree"],
             }
-            for sandbox in ACCEPTANCE.SANDBOXES
+            for sandbox in evidence["candidates"]
         },
         "collector_host": ACCEPTANCE.SUBMIT_HOST,
         "checkpoints": [
@@ -907,6 +1132,7 @@ def test_platform_health_authority_requires_exact_bounded_expiry(attack: str) ->
         ACCEPTANCE._validate_platform_health_authority(
             authority,
             session_id=evidence["session"]["id"],
+            registry_snapshot=evidence["registry_snapshot"],
             candidates=evidence["candidates"],
         )
 
@@ -953,6 +1179,7 @@ def test_platform_health_authority_rejects_policy_and_isolation_drift(
         ACCEPTANCE._validate_platform_health_authority(
             platform,
             session_id=evidence["session"]["id"],
+            registry_snapshot=evidence["registry_snapshot"],
             candidates=evidence["candidates"],
         )
 
@@ -985,6 +1212,8 @@ def _runtime_envelope(
     index: int,
     candidate: str,
     tree: str,
+    account: str,
+    qos: str,
 ) -> dict[str, Any]:
     job_id = str(1000 + index)
     job_path = f"/system.slice/slurmstepd.scope/job_{job_id}"
@@ -1035,7 +1264,8 @@ def _runtime_envelope(
         "observed_at": _phase_observed_at("mixed_non_loom"),
         "job_id": job_id,
         "node": node,
-        "account": f"loom-dev-{sandbox}",
+        "account": account,
+        "qos": qos,
         "allocation": allocation,
         "cgroup": {
             "job_path": job_path,
@@ -1049,15 +1279,16 @@ def _runtime_envelope(
     }
 
 
-def _evidence() -> dict[str, Any]:
-    candidate_ids = {
-        "qianyi": {"sha": "a" * 40, "tree": "b" * 40},
-        "hongjian": {"sha": "c" * 40, "tree": "d" * 40},
-        "devansh": {"sha": "e" * 40, "tree": "f" * 40},
-    }
+def _evidence(
+    sandboxes: tuple[str, ...] = FIXTURE_SANDBOXES,
+) -> dict[str, Any]:
+    candidate_ids = _candidate_map(sandboxes)
+    registry_snapshot = _registry_snapshot(sandboxes)
+    registry_environments = ACCEPTANCE._registry_environments(registry_snapshot)
+    phase_checkpoints = ACCEPTANCE._phase_checkpoints(sandboxes)
     session_id = "1" * 32
     candidates: dict[str, Any] = {}
-    for sandbox in ACCEPTANCE.SANDBOXES:
+    for sandbox in sandboxes:
         identity = candidate_ids[sandbox]
         receipts = _runtime_receipts(sandbox, identity["sha"], identity["tree"])
         for receipt in receipts:
@@ -1065,22 +1296,22 @@ def _evidence() -> dict[str, Any]:
         candidates[sandbox] = {**identity, "runtime_receipts": receipts}
 
     phases = []
-    for index, (phase, sandbox) in enumerate(ACCEPTANCE.PHASE_CHECKPOINTS):
+    for index, (phase, sandbox) in enumerate(phase_checkpoints):
         phase_start, phase_finish = PHASE_BOUNDS[phase]
         identity = candidate_ids[sandbox]
         phase_row = {
-                "phase": phase,
-                "sandbox": sandbox,
-                "candidate_sha": identity["sha"],
-                "candidate_tree": identity["tree"],
-                "started_at": _iso(phase_start),
-                "finished_at": _iso(phase_finish),
-                "deadline_seconds": (phase_finish - phase_start) * 60,
-                "status": "pass",
-                "checkpoint_sha256": f"{index + 1:064x}",
-            }
+            "phase": phase,
+            "sandbox": sandbox,
+            "candidate_sha": identity["sha"],
+            "candidate_tree": identity["tree"],
+            "started_at": _iso(phase_start),
+            "finished_at": _iso(phase_finish),
+            "deadline_seconds": (phase_finish - phase_start) * 60,
+            "status": "pass",
+            "checkpoint_sha256": f"{index + 1:064x}",
+        }
         if phase == "mixed_non_loom":
-            sandbox_index = ACCEPTANCE.SANDBOXES.index(sandbox)
+            sandbox_index = sandboxes.index(sandbox)
             phase_row["trial_batches"] = {
                 "oldlab": _request_id(500 + sandbox_index * 2),
                 "gb10": _request_id(501 + sandbox_index * 2),
@@ -1088,7 +1319,7 @@ def _evidence() -> dict[str, Any]:
         phases.append(phase_row)
     capacity_samples = []
     pair_index = 1
-    for sandbox in ACCEPTANCE.SANDBOXES:
+    for sandbox in sandboxes:
         identity = candidate_ids[sandbox]
         for pool in ACCEPTANCE.POOLS:
             for phase_index, phase in enumerate(ACCEPTANCE.CAPACITY_PHASES, start=1):
@@ -1126,9 +1357,10 @@ def _evidence() -> dict[str, Any]:
                         "candidate_sha": identity["sha"],
                         "candidate_tree": identity["tree"],
                         "job_id": job_id,
-                        "account": f"loom-dev-{sandbox}",
-                        "user": ACCEPTANCE.SANDBOX_SERVICE_USERS[sandbox],
-                        "job_name": ACCEPTANCE._expected_job_name(
+                        "account": registry_environments[sandbox]["slurm_account"],
+                        "qos": registry_environments[sandbox]["slurm_qos"],
+                        "user": registry_environments[sandbox]["slurm_user"],
+                        "job_name": _job_name(
                             sandbox,
                             identity["sha"],
                             node,
@@ -1149,7 +1381,7 @@ def _evidence() -> dict[str, Any]:
             pair_index += 1
     runtime_envelopes = []
     index = 1
-    for sandbox in ACCEPTANCE.SANDBOXES:
+    for sandbox in sandboxes:
         identity = candidate_ids[sandbox]
         for pool in ACCEPTANCE.POOLS:
             runtime_envelopes.append(
@@ -1159,6 +1391,8 @@ def _evidence() -> dict[str, Any]:
                     index,
                     identity["sha"],
                     identity["tree"],
+                    registry_environments[sandbox]["slurm_account"],
+                    registry_environments[sandbox]["slurm_qos"],
                 ),
             )
             index += 1
@@ -1185,7 +1419,7 @@ def _evidence() -> dict[str, Any]:
                         "longest_starvation_seconds": 120,
                         "indefinite_starvation": False,
                     }
-                    for sandbox in ACCEPTANCE.SANDBOXES
+                    for sandbox in sandboxes
                 ],
             },
         )
@@ -1248,7 +1482,7 @@ def _evidence() -> dict[str, Any]:
     fault_recovery = []
     for index, event in enumerate(ACCEPTANCE.FAULTS, start=1):
         phase = ACCEPTANCE.FAULT_PHASES[event]
-        sandbox = ACCEPTANCE.SANDBOXES[(index - 1) % 3]
+        sandbox = sandboxes[(index - 1) % len(sandboxes)]
         fault_recovery.append(
             {
                 "event": event,
@@ -1278,7 +1512,7 @@ def _evidence() -> dict[str, Any]:
     overlap_windows = []
     for pool_index, pool in enumerate(ACCEPTANCE.POOLS, start=1):
         observations = []
-        for sandbox_index, sandbox in enumerate(ACCEPTANCE.SANDBOXES, start=1):
+        for sandbox_index, sandbox in enumerate(sandboxes, start=1):
             identity = candidate_ids[sandbox]
             capacity_sample = next(
                 sample
@@ -1290,16 +1524,17 @@ def _evidence() -> dict[str, Any]:
             job_id = capacity_sample["job_id"]
             node = capacity_sample["node"]
             observed_at = _iso(2, 30)
-            service_unit = f"loom-developer-sandbox-{sandbox}.service"
-            job_name = ACCEPTANCE._expected_job_name(sandbox, identity["sha"], node)
+            service_unit = registry_environments[sandbox]["service_unit"]
+            job_name = _job_name(sandbox, identity["sha"], node)
             job_readback = {
                 "sandbox": sandbox,
                 "pool": pool,
                 "candidate_sha": identity["sha"],
                 "candidate_tree": identity["tree"],
                 "job_id": job_id,
-                "account": f"loom-dev-{sandbox}",
-                "user": ACCEPTANCE.SANDBOX_SERVICE_USERS[sandbox],
+                "account": registry_environments[sandbox]["slurm_account"],
+                "qos": registry_environments[sandbox]["slurm_qos"],
+                "user": registry_environments[sandbox]["slurm_user"],
                 "job_name": job_name,
                 "node": node,
                 "state": "RUNNING",
@@ -1330,8 +1565,9 @@ def _evidence() -> dict[str, Any]:
                     ).hexdigest(),
                     "job_id": job_id,
                     "job_active": True,
-                    "slurm_account": f"loom-dev-{sandbox}",
-                    "slurm_user": ACCEPTANCE.SANDBOX_SERVICE_USERS[sandbox],
+                    "slurm_account": registry_environments[sandbox]["slurm_account"],
+                    "slurm_qos": registry_environments[sandbox]["slurm_qos"],
+                    "slurm_user": registry_environments[sandbox]["slurm_user"],
                     "job_name": job_name,
                     "job_readback": job_readback,
                     "job_readback_sha256": hashlib.sha256(
@@ -1346,7 +1582,7 @@ def _evidence() -> dict[str, Any]:
                         ).hexdigest(),
                     },
                     "trusted_receipt": {
-                        "sequence": (pool_index - 1) * len(ACCEPTANCE.SANDBOXES) + sandbox_index,
+                        "sequence": (pool_index - 1) * len(sandboxes) + sandbox_index,
                         "receipt_sha256": "0" * 64,
                     },
                     "node": node,
@@ -1366,7 +1602,7 @@ def _evidence() -> dict[str, Any]:
         )
 
     bursts = []
-    for sandbox_index, sandbox in enumerate(ACCEPTANCE.SANDBOXES, start=1):
+    for sandbox_index, sandbox in enumerate(sandboxes, start=1):
         identity = candidate_ids[sandbox]
         for pool_index, pool in enumerate(ACCEPTANCE.POOLS, start=1):
             oldlab = pool == "oldlab"
@@ -1411,6 +1647,7 @@ def _evidence() -> dict[str, Any]:
 
     evidence = {
         "schema_version": ACCEPTANCE.SCHEMA_VERSION,
+        "registry_snapshot": registry_snapshot,
         "candidates": candidates,
         "promotion_candidate": {
             "sha": "7" * 40,
@@ -1437,7 +1674,7 @@ def _evidence() -> dict[str, Any]:
             "max_collection_lag_seconds": 300,
         },
         "topology": {
-            "sandboxes": list(ACCEPTANCE.SANDBOXES),
+            "sandboxes": list(sandboxes),
             "pools": list(ACCEPTANCE.POOLS),
             "infrastructure_nodes": list(ACCEPTANCE.INFRASTRUCTURE_NODES),
             "eligible_nodes": list(ACCEPTANCE.EXPECTED_NODES),
@@ -1460,8 +1697,8 @@ def _evidence() -> dict[str, Any]:
                 "observed_at": _phase_observed_at("baseline"),
                 "denied": True,
             }
-            for source in ACCEPTANCE.SANDBOXES
-            for target in ACCEPTANCE.SANDBOXES
+            for source in sandboxes
+            for target in sandboxes
             if source != target
             for resource in ACCEPTANCE.CROSS_SANDBOX_RESOURCES
         ],
@@ -1518,7 +1755,7 @@ def _journaled_evidence(
     evidence = _evidence()
     evidence["session"]["id"] = session_id
     evidence["staging_pressure_reclaim"] = _staging_pressure_evidence(evidence)
-    for sandbox in ACCEPTANCE.SANDBOXES:
+    for sandbox in FIXTURE_SANDBOXES:
         candidate = evidence["candidates"][sandbox]
         for receipt in _runtime_receipts(
             sandbox,
@@ -1534,7 +1771,7 @@ def _journaled_evidence(
     _record_trusted_receipts(session_id, evidence)
     phase_dir = tmp_path / "phase-inputs"
     phase_dir.mkdir()
-    for index, (phase, sandbox) in enumerate(ACCEPTANCE.PHASE_CHECKPOINTS):
+    for index, (phase, sandbox) in enumerate(FIXTURE_PHASE_CHECKPOINTS):
         phase_payload = evidence["state_machine"][index].copy()
         del phase_payload["checkpoint_sha256"]
         digest = hashlib.sha256(ACCEPTANCE._canonical_bytes(phase_payload)).hexdigest()
@@ -1559,6 +1796,115 @@ def test_schema_is_valid_and_complete_fixture_passes() -> None:
     Draft202012Validator.check_schema(schema)
 
     assert _failures(_evidence()) == []
+
+
+def test_future_fourth_developer_requires_no_acceptance_code_or_schema_edit() -> None:
+    evidence = _evidence((*FIXTURE_SANDBOXES, "future-dev"))
+    future = next(
+        environment
+        for environment in evidence["registry_snapshot"]["environments"]
+        if environment["runtime_id"] == "future-dev"
+    )
+
+    assert _failures(evidence) == []
+    assert set(evidence["candidates"]) == {
+        "qianyi",
+        "hongjian",
+        "devansh",
+        "future-dev",
+    }
+    assert future["slurm_account"] == "lda-future-dev"
+    assert future["slurm_qos"] == "ldq-future-dev"
+    assert future["slurm_user"] == "loom-e-future-dev"
+    assert future["systemd_instance"] == "future-dev"
+    assert all(
+        sample["account"] == future["slurm_account"]
+        and sample["qos"] == future["slurm_qos"]
+        and sample["user"] == future["slurm_user"]
+        for sample in evidence["capacity_samples"]
+        if sample["sandbox"] == "future-dev"
+    )
+
+
+def test_registry_snapshot_digest_tampering_fails_closed() -> None:
+    evidence = _evidence()
+    evidence["registry_snapshot"]["generation"] += 1
+
+    assert _failures(evidence) == ["acceptance registry snapshot is invalid"]
+    with pytest.raises(
+        ACCEPTANCE.AcceptanceError,
+        match="registry snapshot digest is invalid",
+    ):
+        ACCEPTANCE._validated_registry_snapshot(evidence["registry_snapshot"])
+
+
+def test_source_registry_digest_tampering_fails_closed() -> None:
+    source = _source_registry_snapshot()
+    source["generation"] += 1
+
+    with pytest.raises(
+        ACCEPTANCE.AcceptanceError,
+        match="source registry snapshot is invalid",
+    ):
+        ACCEPTANCE._acceptance_registry_snapshot(source)
+
+
+def test_registry_projection_rejects_noncanonical_order() -> None:
+    snapshot = _registry_snapshot()
+    snapshot["environments"].reverse()
+    unsigned = {key: value for key, value in snapshot.items() if key != "payload_sha256"}
+    snapshot["payload_sha256"] = hashlib.sha256(
+        ACCEPTANCE._canonical_digest_bytes(unsigned),
+    ).hexdigest()
+
+    with pytest.raises(
+        ACCEPTANCE.AcceptanceError,
+        match="cohort is not canonical",
+    ):
+        ACCEPTANCE._validated_registry_snapshot(snapshot)
+
+
+def test_source_registry_rejects_duplicate_principal_and_resource() -> None:
+    source = _source_registry_snapshot()
+    source["environments"][1]["principal_id"] = source["environments"][0]["principal_id"]
+    source["environments"][1]["slurm_account"] = source["environments"][0]["slurm_account"]
+    _reseal_source_registry(source)
+
+    with pytest.raises(
+        ACCEPTANCE.AcceptanceError,
+        match="source registry snapshot is invalid",
+    ):
+        ACCEPTANCE._acceptance_registry_snapshot(source)
+
+
+@pytest.mark.parametrize("attack", ["extra_candidate_field", "bundle_path"])
+def test_source_registry_candidate_rows_are_closed_and_path_bound(attack: str) -> None:
+    source = _source_registry_snapshot()
+    if attack == "extra_candidate_field":
+        source["candidates"][0]["unexpected"] = True
+    else:
+        source["candidates"][0]["bundle_path"] = "/tmp/candidate.bundle"
+    _reseal_source_registry(source)
+
+    with pytest.raises(
+        ACCEPTANCE.AcceptanceError,
+        match="source registry snapshot is invalid",
+    ):
+        ACCEPTANCE._acceptance_registry_snapshot(source)
+
+
+@pytest.mark.parametrize("state", ["retired", "quarantined"])
+def test_nonactive_registry_environment_is_excluded_from_cohort(state: str) -> None:
+    source = _source_registry_snapshot()
+    source["environments"][-1]["state"] = state
+    _reseal_source_registry(source)
+
+    snapshot = ACCEPTANCE._acceptance_registry_snapshot(source)
+
+    assert [row["runtime_id"] for row in snapshot["environments"]] == [
+        "qianyi",
+        "hongjian",
+    ]
 
 
 def test_schema_node_contract_includes_gb10_node7() -> None:
@@ -1653,9 +1999,12 @@ def test_overlap_rejects_wrong_slurm_identity(field: str, replacement: str) -> N
     evidence = _evidence()
     evidence["overlap_windows"][0]["observations"][0][field] = replacement
 
-    assert any(
-        "overlap Slurm identity does not match" in failure for failure in _failures(evidence)
+    expected = (
+        "overlap Slurm readback does not match"
+        if field == "job_name"
+        else "overlap Slurm identity does not match"
     )
+    assert any(expected in failure for failure in _failures(evidence))
 
 
 def test_overlap_rejects_service_candidate_drift() -> None:
@@ -1746,7 +2095,7 @@ def test_promotion_candidate_is_separate_and_exactly_bound() -> None:
     assert "promotion staging regression checkpoint digest does not match" in failures
 
 
-def test_default_plan_is_read_only_fixed_and_complete() -> None:
+def test_default_plan_is_read_only_registry_driven_and_complete() -> None:
     completed = _run()
 
     assert completed.returncode == 0, completed.stderr
@@ -1754,7 +2103,7 @@ def test_default_plan_is_read_only_fixed_and_complete() -> None:
     assert plan["mode"] == "plan_read_only"
     assert plan["live_mutations_supported"] is False
     assert plan["submit_host"] == "trt-eai-oldlab-2"
-    assert plan["sandboxes"] == ["qianyi", "hongjian", "devansh"]
+    assert plan["cohort_source"] == "generation-and-digest-bound registry snapshot"
     assert plan["pools"] == ["oldlab", "gb10"]
     assert plan["infrastructure_nodes"] == list(ACCEPTANCE.INFRASTRUCTURE_NODES)
     assert plan["excluded_nodes"] == []
@@ -1762,25 +2111,42 @@ def test_default_plan_is_read_only_fixed_and_complete() -> None:
     assert len(plan["stop_rules"]) >= 8
 
 
-def test_session_mutation_requires_execute_before_host_checks() -> None:
+def test_session_mutation_requires_execute_before_host_checks(tmp_path: Path) -> None:
+    candidates_path = tmp_path / "candidates.json"
+    candidates_path.write_text(json.dumps(_candidate_map()), encoding="utf-8")
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps(_source_registry_snapshot()), encoding="utf-8")
     completed = _run(
         "session-start",
-        "--qianyi-sha",
-        "a" * 40,
-        "--qianyi-tree",
-        "b" * 40,
-        "--hongjian-sha",
-        "c" * 40,
-        "--hongjian-tree",
-        "d" * 40,
-        "--devansh-sha",
-        "e" * 40,
-        "--devansh-tree",
-        "f" * 40,
+        "--registry-snapshot",
+        registry_path,
+        "--candidates",
+        candidates_path,
     )
 
     assert completed.returncode == 1
     assert "explicit --execute" in completed.stdout
+
+
+def test_session_start_derives_fourth_environment_from_full_source_registry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sandboxes = (*FIXTURE_SANDBOXES, "future-dev")
+    _patch_live_host(tmp_path, monkeypatch)
+
+    state = ACCEPTANCE.start_session(
+        _candidate_map(sandboxes),
+        registry_snapshot=_source_registry_snapshot(sandboxes),
+        execute=True,
+    )
+
+    assert tuple(state["candidates"]) == sandboxes
+    assert (
+        state["registry_snapshot"]["source_registry"]["payload_sha256"]
+        == _source_registry_snapshot(sandboxes)["payload_sha256"]
+    )
+    assert state["registry_snapshot"]["environments"][-1]["slurm_account"] == ("lda-future-dev")
 
 
 def test_persistent_state_machine_is_ordered_and_candidate_bound(
@@ -1866,7 +2232,7 @@ def test_gate6_seal_is_root_owned_candidate_bound_and_idempotent(
     slurm_root = tmp_path / "authority/slurm-policy"
     monkeypatch.setattr(ACCEPTANCE, "SLURM_POLICY_STATE_ROOT", slurm_root)
     matrices: dict[tuple[str, str], dict[str, Any]] = {}
-    for sandbox in ACCEPTANCE.SANDBOXES:
+    for sandbox in FIXTURE_SANDBOXES:
         sha = evidence["candidates"][sandbox]["sha"]
         wrapper = json.loads(
             Path(evidence["candidates"][sandbox]["runtime_receipts"][-1]["path"]).read_text(),
@@ -1899,8 +2265,7 @@ def test_gate6_seal_is_root_owned_candidate_bound_and_idempotent(
         "status": "pass",
     }
     artifacts = {
-        pair: {"schema_version": 1, "sandbox": pair[0], "pool": pair[1]}
-        for pair in matrices
+        pair: {"schema_version": 1, "sandbox": pair[0], "pool": pair[1]} for pair in matrices
     }
 
     def build(
@@ -1956,7 +2321,7 @@ def test_gate6_seal_is_root_owned_candidate_bound_and_idempotent(
     assert stat.S_IMODE((gate_root / "acceptance.json").stat().st_mode) == 0o600
     assert sorted(path.name for path in gate_root.glob("*.nonexclusive.json")) == [
         f"{sandbox}-{pool}.nonexclusive.json"
-        for sandbox in sorted(ACCEPTANCE.SANDBOXES)
+        for sandbox in sorted(FIXTURE_SANDBOXES)
         for pool in sorted(ACCEPTANCE.POOLS)
     ]
 
@@ -2039,7 +2404,7 @@ def test_runtime_receipt_series_covers_longer_than_single_ttl() -> None:
     evidence = _evidence()
 
     assert _failures(evidence) == []
-    for sandbox in ACCEPTANCE.SANDBOXES:
+    for sandbox in FIXTURE_SANDBOXES:
         chain = [receipt for receipt in evidence["candidates"][sandbox]["runtime_receipts"]]
         assert len(chain) == 5
         assert ACCEPTANCE._timestamp(chain[0]["collected_at"]) <= ACCEPTANCE._timestamp(
@@ -2270,7 +2635,7 @@ def test_finalize_rejects_self_consistent_forged_overlap_readback(
         and row["pool"] == "oldlab"
     )
     observation["node"] = "trt-eai-oldlab-3"
-    observation["job_name"] = ACCEPTANCE._expected_job_name(
+    observation["job_name"] = _job_name(
         observation["sandbox"],
         observation["candidate_sha"],
         observation["node"],
@@ -2326,10 +2691,7 @@ def test_mixed_phase_checkpoint_persists_exact_soak_batch_manifest(
     )
     checkpoint = json.loads(
         (
-            tmp_path
-            / "state/sessions"
-            / session_id
-            / "checkpoints/15-qianyi-mixed_non_loom.json"
+            tmp_path / "state/sessions" / session_id / "checkpoints/15-qianyi-mixed_non_loom.json"
         ).read_text(encoding="utf-8"),
     )
     phase = next(
@@ -2707,7 +3069,7 @@ def test_finalize_rejects_checkpoint_metadata_tampering(
 def test_cross_sandbox_negative_matrix_is_exact_and_candidate_bound() -> None:
     evidence = _evidence()
     evidence["cross_sandbox_negative"].pop()
-    assert any("schema violation" in failure for failure in _failures(evidence))
+    assert any("negative matrix is incomplete" in failure for failure in _failures(evidence))
 
     evidence = _evidence()
     evidence["cross_sandbox_negative"][-1] = copy.deepcopy(
@@ -2934,7 +3296,7 @@ def test_capacity_overshoot_and_duplicate_observation_fail() -> None:
 def test_capacity_requires_every_phase_pair_and_zero_final_drain() -> None:
     evidence = _evidence()
     evidence["capacity_samples"].pop()
-    assert any("schema violation" in failure for failure in _failures(evidence))
+    assert any("every required phase/pair" in failure for failure in _failures(evidence))
 
     evidence = _evidence()
     final = next(
@@ -2967,7 +3329,7 @@ def test_runtime_account_node_and_gpu_envelopes_are_bound() -> None:
 
     failures = _failures(evidence)
 
-    assert any("account does not match" in failure for failure in failures)
+    assert any("Slurm identity does not match" in failure for failure in failures)
     assert any("node does not match" in failure for failure in failures)
     assert any("OLDLAB runtime envelope" in failure for failure in failures)
 

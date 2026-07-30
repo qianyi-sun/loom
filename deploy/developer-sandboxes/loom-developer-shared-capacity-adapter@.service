@@ -1,0 +1,22 @@
+[Unit]
+Description=Loom registry shared-capacity handoff adapter (%i)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/loom/shared-capacity-adapters/%i.toml
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/var/lib/loom-shared-capacity
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=/etc/loom/shared-capacity-adapters /etc/loom/developer-shared-capacity-policies /srv/loom/developer-sandboxes
+ReadWritePaths=/var/lib/loom-shared-capacity
+ReadOnlyPaths=-/var/lib/loom-shared-capacity/runtime-attestations
+ExecStart=/usr/bin/python3 -I -B /usr/local/libexec/scripts/ops/shared_capacity_adapter.py --config /etc/loom/shared-capacity-adapters/%i.toml run
+TimeoutStartSec=60

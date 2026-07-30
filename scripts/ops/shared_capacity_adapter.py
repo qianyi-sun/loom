@@ -54,7 +54,9 @@ _POLICY_COPY_FIELDS = (
     "actuator_config",
 )
 _POLICY_TEMPLATE_DIR = (
-    Path(__file__).resolve().parents[2] / "deploy/developer-sandboxes/shared-capacity-policies"
+    Path("/etc/loom/developer-shared-capacity-policies")
+    if str(Path(__file__).resolve()).startswith("/usr/local/libexec/")
+    else Path(__file__).resolve().parents[2] / "deploy/developer-sandboxes/shared-capacity-policies"
 )
 _CAPACITY_BINDING_FIELDS = {
     "schema_version",
@@ -128,6 +130,10 @@ class AdapterConfig:
     sandbox: str
     environment: str
     pool_name: str
+    slurm_account: str
+    slurm_qos: str
+    runtime_root: Path
+    candidate_root: Path
     control_plane_url: str
     admin_secret_file: Path
     handoff_path: Path
@@ -326,6 +332,10 @@ def load_config(path: Path) -> AdapterConfig:
         "sandbox",
         "environment",
         "pool_name",
+        "slurm_account",
+        "slurm_qos",
+        "runtime_root",
+        "candidate_root",
         "control_plane_url",
         "admin_secret_file",
         "handoff_path",
@@ -347,6 +357,19 @@ def load_config(path: Path) -> AdapterConfig:
         raise AdapterError("adapter environment is not bound to sandbox")
     if _IDENTIFIER_RE.fullmatch(pool_name) is None:
         raise AdapterError("adapter pool_name is invalid")
+    slurm_account = _required_string(payload, "slurm_account", "adapter config")
+    slurm_qos = _required_string(payload, "slurm_qos", "adapter config")
+    runtime_root = _required_absolute_path(payload, "runtime_root", "adapter config")
+    candidate_root = _required_absolute_path(payload, "candidate_root", "adapter config")
+    if (
+        _IDENTIFIER_RE.fullmatch(slurm_account) is None
+        or _IDENTIFIER_RE.fullmatch(slurm_qos) is None
+        or not runtime_root.is_relative_to(Path("/shared_work/loom/runtime"))
+        or runtime_root == Path("/shared_work/loom/runtime")
+        or not candidate_root.is_relative_to(Path("/shared_work/loom/candidates"))
+        or candidate_root == Path("/shared_work/loom/candidates")
+    ):
+        raise AdapterError("adapter registry resource binding is invalid")
     max_slots_bound = payload.get("max_slots_bound")
     if (
         isinstance(max_slots_bound, bool)
@@ -379,6 +402,10 @@ def load_config(path: Path) -> AdapterConfig:
         sandbox=sandbox,
         environment=environment,
         pool_name=pool_name,
+        slurm_account=slurm_account,
+        slurm_qos=slurm_qos,
+        runtime_root=runtime_root,
+        candidate_root=candidate_root,
         control_plane_url=control_plane_url,
         admin_secret_file=_required_absolute_path(
             payload,
@@ -733,16 +760,20 @@ def _bootstrap_policy_body(
         json.loads(
             json.dumps(policy)
             .replace("${SANDBOX}", config.sandbox)
+            .replace("${SLURM_ACCOUNT}", config.slurm_account)
+            .replace("${SLURM_QOS}", config.slurm_qos)
+            .replace("${RUNTIME_ROOT}", str(config.runtime_root))
+            .replace("${CANDIDATE_ROOT}", str(config.candidate_root))
             .replace("${CANDIDATE_SHA}", candidate_sha),
         ),
     )
     actuator_config = body.get("actuator_config")
     job_pids_max = payload.get("job_pids_max")
     pending_budget = payload.get("pending_slot_budget")
-    expected_env_file = (
-        f"/shared_work/loom/runtime/sandboxes/{config.sandbox}/"
-        f"{candidate_sha}/worker-{config.pool_name}.env"
+    expected_env_file = str(
+        config.runtime_root / candidate_sha / f"worker-{config.pool_name}.env",
     )
+    expected_repo_dir = str(config.candidate_root / candidate_sha)
     if (
         not isinstance(actuator_config, dict)
         or isinstance(job_pids_max, bool)
@@ -750,6 +781,10 @@ def _bootstrap_policy_body(
         or job_pids_max <= 0
         or actuator_config.get("job_pids_max") != job_pids_max
         or actuator_config.get("env_file") != expected_env_file
+        or actuator_config.get("repo_dir") != expected_repo_dir
+        or actuator_config.get("slurm_account") != config.slurm_account
+        or actuator_config.get("qos_normal") != config.slurm_qos
+        or any("${" in value for value in actuator_config.values() if isinstance(value, str))
         or isinstance(pending_budget, bool)
         or not isinstance(pending_budget, int)
         or pending_budget <= 0

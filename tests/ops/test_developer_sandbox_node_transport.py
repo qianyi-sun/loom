@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from scripts.ops import developer_environment_registry as registry
 from scripts.ops import developer_sandbox_node_transport as transport
 
 RUNBOOK = Path(__file__).resolve().parents[2] / "docs/runbooks/developer-sandbox-node-transport.md"
@@ -33,6 +34,33 @@ def _layout(tmp_path: Path) -> transport.Layout:
         authorized_keys=home / ".ssh/authorized_keys",
         operator_uid=os.getuid(),
         operator_gid=os.getgid(),
+    )
+
+
+def _registry_bound_envelope(snapshot: dict[str, object]) -> bytes:
+    unsigned = {
+        "schema_version": 1,
+        "action": "host-converge",
+        "node": "oldlab-2",
+        "domain": "oldlab",
+        "sandbox": "future-developer",
+        "candidate_sha": "a" * 40,
+        "candidate_tree": "b" * 40,
+        "env_id": "denv-" + "1" * 32,
+        "resource_generation": 1,
+        "candidate_id": "cand-" + "a" * 40,
+        "registry_generation": snapshot["generation"],
+        "registry_payload_sha256": snapshot["payload_sha256"],
+        "payload_kind": "none",
+        "payload_sha256": hashlib.sha256(b"").hexdigest(),
+        "payload_base64": "",
+        "prior_request_id": None,
+    }
+    return transport._canonical_json(
+        {
+            **unsigned,
+            "request_id": hashlib.sha256(transport._canonical_json(unsigned)).hexdigest(),
+        },
     )
 
 
@@ -544,6 +572,120 @@ def test_local_authority_uses_qianyi_then_the_fixed_sudo_command(
         "/usr/local/libexec/loom-developer-sandbox-node-authority",
         "check",
     ]
+
+
+def test_registry_bound_invoke_syncs_exact_snapshot_before_original_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = _layout(tmp_path)
+    layout.root.mkdir(mode=0o700)
+    layout.config.write_bytes(transport.CHECKED_IN_CONFIG.read_bytes())
+    store = registry.DeveloperEnvironmentRegistry(tmp_path / "registry" / "registry.sqlite3")
+    snapshot = json.loads(store.snapshot_bytes())
+    snapshot["generation"] = 1
+    unsigned_snapshot = {key: value for key, value in snapshot.items() if key != "payload_sha256"}
+    snapshot["payload_sha256"] = registry._digest(unsigned_snapshot)
+    snapshot_raw = registry._canonical(snapshot)
+    original = _registry_bound_envelope(snapshot)
+    calls: list[bytes] = []
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        request_raw = kwargs["input"]
+        assert isinstance(request_raw, bytes)
+        calls.append(request_raw)
+        request = json.loads(request_raw)
+        if request["action"] == transport.REGISTRY_SNAPSHOT_SYNC_ACTION:
+            receipt = {
+                "schema_version": 1,
+                "request_id": request["request_id"],
+                "action": request["action"],
+                "node": request["node"],
+                "domain": request["domain"],
+                "sandbox": request["sandbox"],
+                "candidate_sha": request["candidate_sha"],
+                "candidate_tree": request["candidate_tree"],
+                "payload_sha256": request["payload_sha256"],
+                "result_sha256": "c" * 64,
+                "inner_receipt": None,
+                "completed_at": "2026-07-30T12:00:00Z",
+                "status": "succeeded",
+                "registry_generation": snapshot["generation"],
+                "registry_payload_sha256": snapshot["payload_sha256"],
+                "source_sha": "d" * 40,
+                "source_tree": "e" * 40,
+            }
+            return subprocess.CompletedProcess(argv, 0, transport._canonical_json(receipt), b"")
+        return subprocess.CompletedProcess(argv, 0, b'{"status":"succeeded"}\n', b"")
+
+    monkeypatch.setattr(transport.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(transport, "_hostname", lambda: "trt-eai-oldlab-2")
+    monkeypatch.setattr(transport, "validate_client_install", lambda _layout: {})
+    monkeypatch.setattr(
+        transport,
+        "_safe_external_file",
+        lambda *_args, **_kwargs: snapshot_raw,
+    )
+
+    completed = transport.invoke(
+        "oldlab-2",
+        "transact",
+        original,
+        layout=layout,
+        run=run,
+    )
+
+    assert completed.returncode == 0
+    assert len(calls) == 2
+    sync = json.loads(calls[0])
+    assert sync["action"] == transport.REGISTRY_SNAPSHOT_SYNC_ACTION
+    assert base64.b64decode(sync["payload_base64"]) == snapshot_raw
+    assert sync["registry_generation"] == snapshot["generation"]
+    assert sync["registry_payload_sha256"] == snapshot["payload_sha256"]
+    assert calls[1] == original
+
+
+def test_registry_bound_invoke_rejects_stale_central_snapshot_before_remote_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = _layout(tmp_path)
+    layout.root.mkdir(mode=0o700)
+    layout.config.write_bytes(transport.CHECKED_IN_CONFIG.read_bytes())
+    store = registry.DeveloperEnvironmentRegistry(tmp_path / "registry" / "registry.sqlite3")
+    snapshot = json.loads(store.snapshot_bytes())
+    snapshot["generation"] = 1
+    unsigned_snapshot = {key: value for key, value in snapshot.items() if key != "payload_sha256"}
+    snapshot["payload_sha256"] = registry._digest(unsigned_snapshot)
+    snapshot_raw = registry._canonical(snapshot)
+    original_snapshot = dict(snapshot)
+    original_snapshot["generation"] = int(snapshot["generation"]) + 1
+    original = _registry_bound_envelope(original_snapshot)
+    calls = 0
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        nonlocal calls
+        calls += 1
+        return subprocess.CompletedProcess(argv, 0, b"{}\n", b"")
+
+    monkeypatch.setattr(transport.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(transport, "_hostname", lambda: "trt-eai-oldlab-2")
+    monkeypatch.setattr(transport, "validate_client_install", lambda _layout: {})
+    monkeypatch.setattr(
+        transport,
+        "_safe_external_file",
+        lambda *_args, **_kwargs: snapshot_raw,
+    )
+
+    with pytest.raises(transport.TransportError, match="stale before snapshot sync"):
+        transport.invoke(
+            "oldlab-2",
+            "transact",
+            original,
+            layout=layout,
+            run=run,
+        )
+    assert calls == 0
 
 
 def test_client_bootstrap_plan_pins_external_assets_without_mutation(
@@ -1169,6 +1311,41 @@ def test_only_closed_infrastructure_converge_envelope_gets_long_timeout() -> Non
         transport._invoke_timeout("oldlab-2", "transact", tampered)
         == transport.DEFAULT_INVOKE_TIMEOUT_SECONDS
     )
+
+
+def test_identity_preflight_transport_is_check_only_and_payload_kind_closed() -> None:
+    envelope = {
+        "schema_version": 1,
+        "request_id": "a" * 64,
+        "action": transport.IDENTITY_PREFLIGHT_ACTION,
+        "node": "trt-gb10-7",
+        "domain": "gb10",
+        "sandbox": "future-developer",
+        "candidate_sha": "b" * 40,
+        "candidate_tree": "c" * 40,
+        "payload_kind": transport.IDENTITY_PREFLIGHT_PAYLOAD_KIND,
+        "payload_sha256": "d" * 64,
+        "payload_base64": "e30K",
+        "prior_request_id": None,
+    }
+    raw = transport._canonical_json(envelope)
+
+    transport._validate_identity_preflight_route("check", raw)
+    with pytest.raises(transport.TransportError, match="read-only route"):
+        transport._validate_identity_preflight_route("transact", raw)
+    envelope["payload_kind"] = "slurm-candidate-set-json"
+    with pytest.raises(transport.TransportError, match="read-only route"):
+        transport._validate_identity_preflight_route(
+            "check",
+            transport._canonical_json(envelope),
+        )
+    envelope["payload_kind"] = transport.IDENTITY_PREFLIGHT_PAYLOAD_KIND
+    del envelope["prior_request_id"]
+    with pytest.raises(transport.TransportError, match="read-only route"):
+        transport._validate_identity_preflight_route(
+            "check",
+            transport._canonical_json(envelope),
+        )
 
 
 def test_program_source_contains_no_key_generation_or_accept_new() -> None:

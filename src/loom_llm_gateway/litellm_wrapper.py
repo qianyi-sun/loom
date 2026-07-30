@@ -8,10 +8,22 @@ not opaque).
 
 from __future__ import annotations
 
+import importlib
+import os
 from dataclasses import dataclass
 from typing import Any
 
-import litellm
+
+def _import_litellm() -> Any:
+    # LiteLLM treats an unset mode as DEV and implicitly searches for and loads
+    # an ancestor .env during import. Loom owns dotenv loading at its
+    # entrypoints, so keep this library boundary in LiteLLM's formal PRODUCTION
+    # mode before its package initializer can mutate os.environ.
+    os.environ["LITELLM_MODE"] = "PRODUCTION"
+    return importlib.import_module("litellm")
+
+
+litellm = _import_litellm()
 
 
 @dataclass(frozen=True)
@@ -27,15 +39,23 @@ class ParsedResponse:
     raw_response: dict[str, Any]
 
 
-_KNOWN_USAGE_KEYS = frozenset({
-    "prompt_tokens", "completion_tokens", "total_tokens", "thinking_tokens",
-    # Anthropic
-    "cache_creation_input_tokens", "cache_read_input_tokens",
-})
+_KNOWN_USAGE_KEYS = frozenset(
+    {
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "thinking_tokens",
+        # Anthropic
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+    }
+)
 
 
 def parse_litellm_response(
-    response: dict[str, Any], *, provider: str,
+    response: dict[str, Any],
+    *,
+    provider: str,
 ) -> ParsedResponse:
     choice = response["choices"][0]
     msg = choice["message"]
@@ -43,8 +63,7 @@ def parse_litellm_response(
     if not isinstance(content, str):
         # Multimodal content list — collapse to text fragments
         parts = [
-            p.get("text", "") for p in content
-            if isinstance(p, dict) and p.get("type") == "text"
+            p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"
         ]
         content = "".join(parts)
 

@@ -1,0 +1,16 @@
+[Unit]
+Description=Loom developer environment transaction authority socket
+
+[Socket]
+ListenSequentialPacket=/run/loom-developer-environment-authority/authority.sock
+SocketUser=root
+SocketGroup=loom-developers
+SocketMode=0660
+# The socket exists before its service starts. Keep the root-owned parent
+# traversable; authorization remains on this 0660 group-owned socket.
+DirectoryMode=0755
+RemoveOnStop=yes
+Service=loom-developer-environment-authority.service
+
+[Install]
+WantedBy=sockets.target

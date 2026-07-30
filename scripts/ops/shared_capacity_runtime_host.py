@@ -2,7 +2,7 @@
 """Install the exact-candidate shared-capacity supervisor and adapters.
 
 Public mutation commands are plan-only unless ``--execute`` is supplied.  The
-live path is fixed to oldlab2 and installs only the six sandbox adapter
+live path is fixed to oldlab2 and installs the registry-bound sandbox adapter
 instances plus the broker supervisor.  Capacity remains fail-closed until a
 valid broker handoff and runtime receipt reach an adapter.
 """
@@ -12,9 +12,11 @@ from __future__ import annotations
 import argparse
 import base64
 import fcntl
+import grp
 import hashlib
 import json
 import os
+import pwd
 import re
 import shutil
 import socket
@@ -47,19 +49,28 @@ from scripts.ops.developer_sandbox_capacity_contract import (  # noqa: E402, I00
     load_capacity_policy,
     load_platform_health_contract,
 )
+from scripts.ops import developer_environment_registry as registry_contract  # noqa: E402
 
 SOURCE_PROFILE = REPO_ROOT / "deploy/developer-sandboxes/shared-capacity-runtime-host.toml"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 EXPECTED_HOSTNAME = "trt-eai-oldlab-2"
 PROGRAM_PATH = Path("/usr/local/libexec/loom-shared-capacity-runtime-host")
 CAPACITY_CONTRACT_PATH = Path(
     "/usr/local/libexec/scripts/ops/developer_sandbox_capacity_contract.py",
 )
+REGISTRY_CONTRACT_PATH = Path(
+    "/usr/local/libexec/scripts/ops/developer_environment_registry.py",
+)
 PROFILE_PATH = Path("/etc/loom/shared-capacity-runtime-host.toml")
 CONFIG_ROOT = Path("/etc/loom")
 ADAPTER_CONFIG_ROOT = CONFIG_ROOT / "shared-capacity-adapters"
 SUPERVISOR_CONFIG_PATH = CONFIG_ROOT / "shared-capacity-supervisor.toml"
+SUPERVISOR_BASE_CONFIG_PATH = CONFIG_ROOT / "shared-capacity-supervisor.base.toml"
+LOOM_RUNTIME_PYTHON_ROOT = Path("/usr/local/libexec/loom-runtime-python")
 STATE_ROOT = Path("/var/lib/loom-shared-capacity")
+BROKER_STATE_DB_PATH = STATE_ROOT / "broker.sqlite3"
+REGISTRY_SNAPSHOT_PATH = registry_contract.SYSTEM_SNAPSHOT
 INSTALLER_ROOT = STATE_ROOT / "runtime-host-installer"
 JOURNAL_ROOT = INSTALLER_ROOT / "transactions"
 STATE_PATH = INSTALLER_ROOT / "state.json"
@@ -69,6 +80,14 @@ PLATFORM_HEALTH_ROOT = Path(
 ACTIVE_JOURNAL_PATH = INSTALLER_ROOT / "active-transaction.json"
 ACCEPTANCE_OPERATION_PATH = INSTALLER_ROOT / "acceptance-operation.json"
 RECOVERY_PROGRAM_PATH = INSTALLER_ROOT / "runtime-host-recovery"
+ENVIRONMENT_RECONCILE_ROOT = INSTALLER_ROOT / "environment-reconcile"
+ENVIRONMENT_RETIRE_ROOT = INSTALLER_ROOT / "environment-retire"
+EMPTY_COHORT_PATH = INSTALLER_ROOT / "empty-cohort.json"
+DEVELOPER_ENVIRONMENT_RUNTIME_ROOT = Path(
+    "/var/lib/loom-developer-environment-runtime",
+)
+ENVIRONMENT_ADMISSION_INTENT_ROOT = DEVELOPER_ENVIRONMENT_RUNTIME_ROOT / "lifecycle" / "admission"
+ENVIRONMENT_ADMISSION_INTENT_KIND = "loom.developer-environment.admission-intent"
 LOCK_PATH = Path("/run/loom-shared-capacity-runtime-host.lock")
 CANDIDATE_PARENT = Path("/opt/loom-shared-capacity/candidates")
 CURRENT_LINK = Path("/opt/loom-shared-capacity/current")
@@ -97,16 +116,6 @@ SUPERVISOR_TIMER_SOURCE = (
 SUPERVISOR_CONFIG_SOURCE = (
     REPO_ROOT / "deploy/developer-sandboxes/shared-capacity-supervisor/config.toml"
 )
-ADAPTER_CONFIG_SOURCE_ROOT = REPO_ROOT / "deploy/developer-sandboxes/shared-capacity-adapters"
-INSTANCES = (
-    "qianyi-gb10",
-    "qianyi-oldlab",
-    "hongjian-gb10",
-    "hongjian-oldlab",
-    "devansh-gb10",
-    "devansh-oldlab",
-)
-SANDBOXES = ("qianyi", "hongjian", "devansh")
 POOLS = ("gb10", "oldlab")
 ACCEPTANCE_PHASES = (
     "multi_candidate_overlap",
@@ -140,13 +149,6 @@ PLATFORM_HEALTH_ACTIVATION_MINIMUM_REMAINING = timedelta(minutes=5)
 PLATFORM_HEALTH_MAX_CLOCK_SKEW = timedelta(seconds=5)
 SUPERVISOR_SERVICE = "loom-shared-capacity-supervisor.service"
 SUPERVISOR_TIMER = "loom-shared-capacity-supervisor.timer"
-ADAPTER_TIMERS = tuple(f"loom-shared-capacity-adapter@{instance}.timer" for instance in INSTANCES)
-ADAPTER_SERVICES = tuple(
-    f"loom-shared-capacity-adapter@{instance}.service" for instance in INSTANCES
-)
-ALL_TIMERS = (SUPERVISOR_TIMER, *ADAPTER_TIMERS)
-ALL_SERVICES = (SUPERVISOR_SERVICE, *ADAPTER_SERVICES)
-ALL_UNITS = (*ALL_TIMERS, *ALL_SERVICES)
 RETIREMENT_MAX_CYCLES = 60
 RETIREMENT_POLL_SECONDS = 5.0
 UNIT_PATHS = (
@@ -155,12 +157,6 @@ UNIT_PATHS = (
     SUPERVISOR_SERVICE_PATH,
     SUPERVISOR_TIMER_PATH,
 )
-UNIT_FRAGMENT_PATHS = {
-    SUPERVISOR_SERVICE: SUPERVISOR_SERVICE_PATH,
-    SUPERVISOR_TIMER: SUPERVISOR_TIMER_PATH,
-    **{service: ADAPTER_SERVICE_PATH for service in ADAPTER_SERVICES},
-    **{timer: ADAPTER_TIMER_PATH for timer in ADAPTER_TIMERS},
-}
 REQUIRED_UNIT_FILES = {
     ADAPTER_SERVICE_PATH.name,
     ADAPTER_TIMER_PATH.name,
@@ -190,6 +186,58 @@ class Candidate:
     @property
     def venv(self) -> Path:
         return self.root / "venv"
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeEnvironment:
+    env_id: str
+    runtime_id: str
+    layout_version: str
+    state: str
+    resource_generation: int
+    service_user: str
+    service_group: str
+    uid: int
+    gid: int
+    systemd_instance: str
+    state_root: Path
+    runtime_root: Path
+    candidate_root: Path
+    control_plane_port: int
+    slurm_user: str
+    slurm_account: str
+    slurm_qos: str
+    candidate_id: str
+    candidate_sha: str
+    candidate_tree: str
+    deployment_phase: str
+
+
+@dataclass(frozen=True, slots=True)
+class RegistryCohort:
+    generation: int
+    payload_sha256: str
+    environments: tuple[RuntimeEnvironment, ...]
+    provisioning_environments: tuple[RuntimeEnvironment, ...] = ()
+
+    @property
+    def sandboxes(self) -> tuple[str, ...]:
+        return tuple(item.runtime_id for item in self.environments)
+
+    @property
+    def instances(self) -> tuple[str, ...]:
+        return tuple(f"{sandbox}-{pool}" for sandbox in self.sandboxes for pool in POOLS)
+
+    @property
+    def provisioning_instances(self) -> tuple[str, ...]:
+        return tuple(
+            f"{environment.runtime_id}-{pool}"
+            for environment in self.provisioning_environments
+            for pool in POOLS
+        )
+
+
+_COHORT_CACHE: RegistryCohort | None = None
 
 
 def _run(
@@ -385,6 +433,797 @@ def _canonical_json_value(payload: Any) -> bytes:
     return (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
 
+def _registry_record_fields(record_type: type[Any]) -> set[str]:
+    return set(record_type.__dataclass_fields__)
+
+
+def _registry_path(value: object, *, label: str) -> Path:
+    if not isinstance(value, str):
+        raise RuntimeHostError(f"runtime registry {label} is invalid")
+    path = Path(value)
+    if not path.is_absolute() or ".." in path.parts:
+        raise RuntimeHostError(f"runtime registry {label} is invalid")
+    return path
+
+
+def _validate_registry_environment_resources(row: Mapping[str, Any]) -> None:
+    runtime_id = str(row["runtime_id"])
+    layout_version = row.get("layout_version")
+    if layout_version == "dynamic-v1":
+        expected = registry_contract.DeveloperEnvironmentRegistry._dynamic_resources(
+            str(row["env_id"]),
+            runtime_id,
+        )
+    elif layout_version == "legacy-v1":
+        expected = {
+            "service_user": f"loom-sandbox-{runtime_id}",
+            "service_group": f"loom-sandbox-{runtime_id}",
+            "compose_project": f"loom-sandbox-{runtime_id}",
+            "systemd_instance": runtime_id,
+            "candidate_root": f"/shared_work/loom/candidates/sandboxes/{runtime_id}",
+            "runtime_root": f"/shared_work/loom/runtime/sandboxes/{runtime_id}",
+            "state_root": f"/srv/loom/developer-sandboxes/{runtime_id}",
+            "evidence_root": f"/srv/loom/developer-sandboxes/{runtime_id}/evidence",
+            "database_name": f"loom_sandbox_{runtime_id}",
+            "postgres_volume": f"loom-sandbox-{runtime_id}_postgres_data",
+            "minio_volume": f"loom-sandbox-{runtime_id}_minio_data",
+            "task_bucket": f"loom-sandbox-{runtime_id}-tasks",
+            "trajectories_bucket": f"loom-sandbox-{runtime_id}-trajectories",
+            "artifacts_bucket": f"loom-sandbox-{runtime_id}-artifacts",
+            "provider_namespace": f"sandbox-{runtime_id}",
+            "slurm_user": f"loom-sandbox-{runtime_id}",
+            "slurm_account": f"loom-dev-{runtime_id}",
+            "slurm_qos": f"loom-dev-{runtime_id}",
+            "cgroup_slice": f"loom-dev-{runtime_id}.slice",
+        }
+    else:
+        raise RuntimeHostError("runtime registry environment layout is invalid")
+    if any(row.get(field) != value for field, value in expected.items()):
+        raise RuntimeHostError("runtime registry environment resource binding is invalid")
+
+
+def _validate_registry_environment_row(row: object) -> dict[str, Any]:
+    fields = _registry_record_fields(registry_contract.EnvironmentRecord)
+    if not isinstance(row, dict) or set(row) != fields:
+        raise RuntimeHostError("runtime registry environment shape is invalid")
+    ports = row.get("ports")
+    display_name = row.get("display_name")
+    if (
+        registry_contract.ENV_ID_RE.fullmatch(str(row.get("env_id"))) is None
+        or registry_contract.PRINCIPAL_RE.fullmatch(str(row.get("principal_id"))) is None
+        or registry_contract.RUNTIME_ID_RE.fullmatch(str(row.get("runtime_id"))) is None
+        or row.get("state") not in {"ready", "deploying", "active", "retired", "quarantined"}
+        or type(row.get("resource_generation")) is not int
+        or row["resource_generation"] < 1
+        or type(row.get("uid")) is not int
+        or type(row.get("gid")) is not int
+        or row["uid"] < 1
+        or row["uid"] != row["gid"]
+        or not isinstance(display_name, str)
+        or not display_name
+        or len(display_name) > 128
+        or any(ord(character) < 32 or ord(character) == 127 for character in display_name)
+        or not isinstance(ports, dict)
+        or set(ports) != set(registry_contract.PORT_NAMES)
+        or any(type(port) is not int or not 1024 <= port <= 65_535 for port in ports.values())
+        or len(set(ports.values())) != len(registry_contract.PORT_NAMES)
+        or (
+            row.get("current_candidate_id") is not None
+            and registry_contract.CANDIDATE_ID_RE.fullmatch(
+                str(row["current_candidate_id"]),
+            )
+            is None
+        )
+        or not isinstance(row.get("created_at"), str)
+    ):
+        raise RuntimeHostError("runtime registry environment binding is invalid")
+    for field in (
+        "service_user",
+        "service_group",
+        "compose_project",
+        "systemd_instance",
+        "database_name",
+        "postgres_volume",
+        "minio_volume",
+        "provider_namespace",
+        "slurm_user",
+        "slurm_account",
+        "slurm_qos",
+    ):
+        if registry_contract.SAFE_NAME_RE.fullmatch(str(row.get(field))) is None:
+            raise RuntimeHostError("runtime registry environment name binding is invalid")
+    for field in ("task_bucket", "trajectories_bucket", "artifacts_bucket"):
+        if registry_contract.SAFE_BUCKET_RE.fullmatch(str(row.get(field))) is None:
+            raise RuntimeHostError("runtime registry environment bucket binding is invalid")
+    for field in ("candidate_root", "runtime_root", "state_root", "evidence_root"):
+        _registry_path(row.get(field), label=f"environment {field}")
+    _validate_registry_environment_resources(row)
+    return row
+
+
+def _validate_registry_candidate_row(row: object) -> dict[str, Any]:
+    fields = _registry_record_fields(registry_contract.CandidateRecord)
+    image_digests = row.get("image_digests") if isinstance(row, dict) else None
+    if (
+        not isinstance(row, dict)
+        or set(row) != fields
+        or registry_contract.CANDIDATE_ID_RE.fullmatch(str(row.get("candidate_id"))) is None
+        or registry_contract.PRINCIPAL_RE.fullmatch(str(row.get("principal_id"))) is None
+        or registry_contract.ENV_ID_RE.fullmatch(str(row.get("env_id"))) is None
+        or row.get("repository_id") != "qianyi-sun/loom"
+        or registry_contract.SHA_RE.fullmatch(str(row.get("candidate_sha"))) is None
+        or registry_contract.SHA_RE.fullmatch(str(row.get("candidate_tree"))) is None
+        or registry_contract.DIGEST_RE.fullmatch(str(row.get("bundle_sha256"))) is None
+        or type(row.get("bundle_size")) is not int
+        or row["bundle_size"] < 1
+        or row.get("bundle_path")
+        != str(
+            registry_contract.SYSTEM_CANDIDATE_ROOT
+            / str(row.get("candidate_id"))
+            / "candidate.bundle",
+        )
+        or not isinstance(image_digests, dict)
+        or set(image_digests) != {"amd64", "arm64"}
+        or any(
+            registry_contract.IMAGE_DIGEST_RE.fullmatch(str(digest)) is None
+            for digest in image_digests.values()
+        )
+        or not isinstance(row.get("imported_at"), str)
+    ):
+        raise RuntimeHostError("runtime registry candidate binding is invalid")
+    return row
+
+
+def _validate_registry_deployment_row(row: object) -> dict[str, Any]:
+    fields = _registry_record_fields(registry_contract.DeploymentRecord)
+    if (
+        not isinstance(row, dict)
+        or set(row) != fields
+        or registry_contract.DEPLOYMENT_ID_RE.fullmatch(
+            str(row.get("deployment_id")),
+        )
+        is None
+        or registry_contract.PRINCIPAL_RE.fullmatch(str(row.get("principal_id"))) is None
+        or registry_contract.ENV_ID_RE.fullmatch(str(row.get("env_id"))) is None
+        or registry_contract.CANDIDATE_ID_RE.fullmatch(str(row.get("candidate_id"))) is None
+        or type(row.get("expected_resource_generation")) is not int
+        or row["expected_resource_generation"] < 1
+        or row.get("phase") not in {*registry_contract.DEPLOY_PHASES, "failed"}
+        or (
+            row.get("previous_candidate_id") is not None
+            and registry_contract.CANDIDATE_ID_RE.fullmatch(
+                str(row["previous_candidate_id"]),
+            )
+            is None
+        )
+        or registry_contract.DIGEST_RE.fullmatch(str(row.get("request_digest"))) is None
+        or not isinstance(row.get("created_at"), str)
+        or not isinstance(row.get("updated_at"), str)
+    ):
+        raise RuntimeHostError("runtime registry deployment binding is invalid")
+    return row
+
+
+def _load_registry_cohort(path: Path = REGISTRY_SNAPSHOT_PATH) -> RegistryCohort:
+    try:
+        raw = registry_contract._read_regular(path, limit=16 * 1024 * 1024)
+        metadata = path.lstat()
+    except (OSError, registry_contract.RegistryError) as exc:
+        raise RuntimeHostError("runtime registry snapshot is unavailable") from exc
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or metadata.st_uid != os.geteuid()
+        or metadata.st_gid != os.getegid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        raise RuntimeHostError("runtime registry snapshot metadata is unsafe")
+    try:
+        payload = registry_contract.DeveloperEnvironmentRegistry.verify_snapshot(raw)
+    except registry_contract.RegistryError as exc:
+        raise RuntimeHostError("runtime registry snapshot is invalid") from exc
+
+    environment_rows: dict[str, dict[str, Any]] = {}
+    runtime_ids: set[str] = set()
+    all_ports: set[int] = set()
+    for raw_environment in payload["environments"]:
+        row = _validate_registry_environment_row(raw_environment)
+        env_id = str(row["env_id"])
+        runtime_id = str(row["runtime_id"])
+        ports = cast(dict[str, int], row["ports"])
+        if (
+            env_id in environment_rows
+            or runtime_id in runtime_ids
+            or all_ports.intersection(ports.values())
+        ):
+            raise RuntimeHostError("runtime registry environment identity is duplicated")
+        environment_rows[env_id] = row
+        runtime_ids.add(runtime_id)
+        all_ports.update(ports.values())
+
+    candidates: dict[str, dict[str, Any]] = {}
+    for raw_candidate in payload["candidates"]:
+        row = _validate_registry_candidate_row(raw_candidate)
+        candidate_id = str(row["candidate_id"])
+        environment = environment_rows.get(str(row["env_id"]))
+        if (
+            candidate_id in candidates
+            or environment is None
+            or row["principal_id"] != environment["principal_id"]
+        ):
+            raise RuntimeHostError("runtime registry candidate ownership is invalid")
+        candidates[candidate_id] = row
+
+    deployments: dict[str, dict[str, Any]] = {}
+    deployments_by_environment: dict[str, list[dict[str, Any]]] = {
+        env_id: [] for env_id in environment_rows
+    }
+    for raw_deployment in payload["deployments"]:
+        row = _validate_registry_deployment_row(raw_deployment)
+        deployment_id = str(row["deployment_id"])
+        environment = environment_rows.get(str(row["env_id"]))
+        candidate = candidates.get(str(row["candidate_id"]))
+        previous = row.get("previous_candidate_id")
+        previous_candidate = None if previous is None else candidates.get(str(previous))
+        if (
+            deployment_id in deployments
+            or environment is None
+            or candidate is None
+            or candidate["env_id"] != environment["env_id"]
+            or candidate["principal_id"] != environment["principal_id"]
+            or row["principal_id"] != environment["principal_id"]
+            or (
+                previous is not None
+                and (
+                    previous_candidate is None
+                    or previous_candidate["env_id"] != environment["env_id"]
+                )
+            )
+        ):
+            raise RuntimeHostError("runtime registry deployment ownership is invalid")
+        deployments[deployment_id] = row
+        deployments_by_environment[str(environment["env_id"])].append(row)
+
+    active_environments: list[RuntimeEnvironment] = []
+    provisioning_environments: list[RuntimeEnvironment] = []
+    for env_id, row in environment_rows.items():
+        state_value = str(row["state"])
+        current_candidate_id = row.get("current_candidate_id")
+        current_candidate = (
+            None if current_candidate_id is None else candidates.get(str(current_candidate_id))
+        )
+        environment_deployments = deployments_by_environment[env_id]
+        live_deployments = [
+            item for item in environment_deployments if item["phase"] not in {"committed", "failed"}
+        ]
+        committed_current = [
+            item
+            for item in environment_deployments
+            if item["phase"] == "committed"
+            and item["candidate_id"] == current_candidate_id
+            and item["expected_resource_generation"] + 1 == row["resource_generation"]
+            and item["applied_resource_generation"] == row["resource_generation"]
+        ]
+        if state_value == "ready":
+            consistent = current_candidate_id is None and not live_deployments
+        elif state_value == "active":
+            consistent = (
+                current_candidate is not None
+                and current_candidate["env_id"] == env_id
+                and not live_deployments
+                and bool(committed_current)
+            )
+        elif state_value == "deploying":
+            consistent = (
+                len(live_deployments) == 1
+                and live_deployments[0]["expected_resource_generation"]
+                == row["resource_generation"]
+                and live_deployments[0]["previous_candidate_id"] == current_candidate_id
+            )
+        else:
+            consistent = not live_deployments
+        if not consistent:
+            raise RuntimeHostError("runtime registry environment state is inconsistent")
+
+        selected_candidate: Mapping[str, Any] | None = None
+        deployment_phase = "committed"
+        capacity_eligible = state_value == "active"
+        provisioning_eligible = capacity_eligible
+        if state_value == "deploying":
+            deployment = live_deployments[0]
+            deployment_phase = str(deployment["phase"])
+            if registry_contract.DEPLOY_PHASES.index(deployment_phase) >= (
+                registry_contract.DEPLOY_PHASES.index("services-prepared")
+            ):
+                selected_candidate = candidates[str(deployment["candidate_id"])]
+                provisioning_eligible = True
+        elif capacity_eligible:
+            selected_candidate = current_candidate
+        if not provisioning_eligible or selected_candidate is None:
+            continue
+        runtime_environment = RuntimeEnvironment(
+            env_id=env_id,
+            runtime_id=str(row["runtime_id"]),
+            layout_version=str(row["layout_version"]),
+            state=state_value,
+            resource_generation=int(
+                deployment["applied_resource_generation"]
+                if deployment_phase == "verified"
+                and deployment["applied_resource_generation"] is not None
+                else row["resource_generation"]
+            ),
+            service_user=str(row["service_user"]),
+            service_group=str(row["service_group"]),
+            uid=int(row["uid"]),
+            gid=int(row["gid"]),
+            systemd_instance=str(row["systemd_instance"]),
+            state_root=_registry_path(row["state_root"], label="environment state_root"),
+            runtime_root=_registry_path(
+                row["runtime_root"],
+                label="environment runtime_root",
+            ),
+            candidate_root=_registry_path(
+                row["candidate_root"],
+                label="environment candidate_root",
+            ),
+            control_plane_port=cast(dict[str, int], row["ports"])["control_plane"],
+            slurm_user=str(row["slurm_user"]),
+            slurm_account=str(row["slurm_account"]),
+            slurm_qos=str(row["slurm_qos"]),
+            candidate_id=str(selected_candidate["candidate_id"]),
+            candidate_sha=str(selected_candidate["candidate_sha"]),
+            candidate_tree=str(selected_candidate["candidate_tree"]),
+            deployment_phase=deployment_phase,
+        )
+        provisioning_environments.append(runtime_environment)
+        if capacity_eligible:
+            active_environments.append(runtime_environment)
+    if not active_environments and not provisioning_environments:
+        raise RuntimeHostError("runtime registry provisionable cohort is empty")
+    active_environments.sort(key=lambda item: item.runtime_id)
+    provisioning_environments.sort(key=lambda item: item.runtime_id)
+    return RegistryCohort(
+        generation=int(payload["generation"]),
+        payload_sha256=str(payload["payload_sha256"]),
+        environments=tuple(active_environments),
+        provisioning_environments=tuple(provisioning_environments),
+    )
+
+
+def _cohort() -> RegistryCohort:
+    global _COHORT_CACHE
+    if _COHORT_CACHE is None:
+        _COHORT_CACHE = _load_registry_cohort()
+    return _COHORT_CACHE
+
+
+def _require_active_cohort() -> RegistryCohort:
+    cohort = _cohort()
+    if not cohort.environments:
+        raise RuntimeHostError("runtime registry active cohort is empty")
+    return cohort
+
+
+def _registry_environment(runtime_id: str, *, provisioning: bool) -> RuntimeEnvironment:
+    if registry_contract.RUNTIME_ID_RE.fullmatch(runtime_id) is None:
+        raise RuntimeHostError("runtime environment identity is invalid")
+    source = _cohort().provisioning_environments if provisioning else _cohort().environments
+    matches = [item for item in source if item.runtime_id == runtime_id]
+    if len(matches) != 1:
+        raise RuntimeHostError("runtime environment is not in the required registry cohort")
+    return matches[0]
+
+
+def _sandboxes() -> tuple[str, ...]:
+    return _cohort().sandboxes
+
+
+def _instances() -> tuple[str, ...]:
+    return _cohort().instances
+
+
+def _provisioning_instances() -> tuple[str, ...]:
+    return _cohort().provisioning_instances or _cohort().instances
+
+
+def _adapter_timers() -> tuple[str, ...]:
+    return tuple(f"loom-shared-capacity-adapter@{item}.timer" for item in _instances())
+
+
+def _adapter_services() -> tuple[str, ...]:
+    return tuple(f"loom-shared-capacity-adapter@{item}.service" for item in _instances())
+
+
+def _all_timers() -> tuple[str, ...]:
+    return (SUPERVISOR_TIMER, *_adapter_timers())
+
+
+def _all_services() -> tuple[str, ...]:
+    return (SUPERVISOR_SERVICE, *_adapter_services())
+
+
+def _all_units() -> tuple[str, ...]:
+    return (*_all_timers(), *_all_services())
+
+
+def _unit_fragment_paths() -> dict[str, Path]:
+    return {
+        SUPERVISOR_SERVICE: SUPERVISOR_SERVICE_PATH,
+        SUPERVISOR_TIMER: SUPERVISOR_TIMER_PATH,
+        **{service: ADAPTER_SERVICE_PATH for service in _adapter_services()},
+        **{timer: ADAPTER_TIMER_PATH for timer in _adapter_timers()},
+    }
+
+
+def _registry_binding() -> dict[str, object]:
+    cohort = _cohort()
+    return {
+        "registry_generation": cohort.generation,
+        "registry_payload_sha256": cohort.payload_sha256,
+    }
+
+
+def _runtime_manifest(cohort: RegistryCohort | None = None) -> dict[str, Any]:
+    selected = _cohort() if cohort is None else cohort
+    provisioned = selected.provisioning_environments or selected.environments
+    environments = [
+        {
+            "env_id": environment.env_id,
+            "runtime_id": environment.runtime_id,
+            "layout_version": environment.layout_version,
+            "state": environment.state,
+            "deployment_phase": environment.deployment_phase,
+            "capacity_eligible": environment in selected.environments,
+            "resource_generation": environment.resource_generation,
+            "service_user": environment.service_user,
+            "service_group": environment.service_group,
+            "uid": environment.uid,
+            "gid": environment.gid,
+            "systemd_instance": environment.systemd_instance,
+            "state_root": str(environment.state_root),
+            "runtime_root": str(environment.runtime_root),
+            "candidate_root": str(environment.candidate_root),
+            "control_plane_port": environment.control_plane_port,
+            "slurm_user": environment.slurm_user,
+            "slurm_account": environment.slurm_account,
+            "slurm_qos": environment.slurm_qos,
+            "candidate_id": environment.candidate_id,
+            "candidate_sha": environment.candidate_sha,
+            "candidate_tree": environment.candidate_tree,
+            "instances": [f"{environment.runtime_id}-{pool}" for pool in POOLS],
+        }
+        for environment in sorted(
+            provisioned,
+            key=lambda item: item.runtime_id,
+        )
+    ]
+    unsigned = {
+        "schema_version": 1,
+        "registry_generation": selected.generation,
+        "registry_payload_sha256": selected.payload_sha256,
+        "environments": environments,
+    }
+    return {
+        **unsigned,
+        "manifest_sha256": _sha256(_canonical_json(unsigned)),
+    }
+
+
+def _cohort_from_runtime_manifest(value: object) -> RegistryCohort:
+    fields = {
+        "schema_version",
+        "registry_generation",
+        "registry_payload_sha256",
+        "environments",
+        "manifest_sha256",
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) != fields
+        or value.get("schema_version") != 1
+        or type(value.get("registry_generation")) is not int
+        or value["registry_generation"] < 0
+        or DIGEST_RE.fullmatch(str(value.get("registry_payload_sha256"))) is None
+        or DIGEST_RE.fullmatch(str(value.get("manifest_sha256"))) is None
+        or not isinstance(value.get("environments"), list)
+        or not value["environments"]
+    ):
+        raise RuntimeHostError("runtime generation manifest is invalid")
+    unsigned = {key: item for key, item in value.items() if key != "manifest_sha256"}
+    if value["manifest_sha256"] != _sha256(_canonical_json(unsigned)):
+        raise RuntimeHostError("runtime generation manifest digest is invalid")
+    environment_fields = {
+        "env_id",
+        "runtime_id",
+        "layout_version",
+        "state",
+        "deployment_phase",
+        "capacity_eligible",
+        "resource_generation",
+        "service_user",
+        "service_group",
+        "uid",
+        "gid",
+        "systemd_instance",
+        "state_root",
+        "runtime_root",
+        "candidate_root",
+        "control_plane_port",
+        "slurm_user",
+        "slurm_account",
+        "slurm_qos",
+        "candidate_id",
+        "candidate_sha",
+        "candidate_tree",
+        "instances",
+    }
+    environments: list[RuntimeEnvironment] = []
+    provisioning_environments: list[RuntimeEnvironment] = []
+    seen_env_ids: set[str] = set()
+    seen_runtime_ids: set[str] = set()
+    seen_instances: set[str] = set()
+    for raw in value["environments"]:
+        if not isinstance(raw, dict) or set(raw) != environment_fields:
+            raise RuntimeHostError("runtime generation manifest environment is invalid")
+        runtime_id = raw.get("runtime_id")
+        env_id = raw.get("env_id")
+        expected_instances = (
+            [f"{runtime_id}-{pool}" for pool in POOLS] if isinstance(runtime_id, str) else []
+        )
+        if (
+            not isinstance(env_id, str)
+            or registry_contract.ENV_ID_RE.fullmatch(env_id) is None
+            or env_id in seen_env_ids
+            or not isinstance(runtime_id, str)
+            or registry_contract.RUNTIME_ID_RE.fullmatch(runtime_id) is None
+            or runtime_id in seen_runtime_ids
+            or raw.get("systemd_instance") != runtime_id
+            or raw.get("layout_version") not in {"legacy-v1", "dynamic-v1"}
+            or raw.get("state") not in {"active", "deploying"}
+            or raw.get("deployment_phase") not in registry_contract.DEPLOY_PHASES
+            or type(raw.get("capacity_eligible")) is not bool
+            or (raw["capacity_eligible"] is True and raw.get("state") != "active")
+            or (raw["capacity_eligible"] is False and raw.get("state") != "deploying")
+            or (raw.get("state") == "active" and raw.get("deployment_phase") != "committed")
+            or (
+                raw.get("state") == "deploying"
+                and registry_contract.DEPLOY_PHASES.index(
+                    str(raw.get("deployment_phase")),
+                )
+                < registry_contract.DEPLOY_PHASES.index("services-prepared")
+            )
+            or type(raw.get("resource_generation")) is not int
+            or raw["resource_generation"] < 1
+            or registry_contract.SAFE_NAME_RE.fullmatch(
+                str(raw.get("service_user")),
+            )
+            is None
+            or registry_contract.SAFE_NAME_RE.fullmatch(
+                str(raw.get("service_group")),
+            )
+            is None
+            or type(raw.get("uid")) is not int
+            or type(raw.get("gid")) is not int
+            or raw["uid"] < 1
+            or raw["uid"] != raw["gid"]
+            or type(raw.get("control_plane_port")) is not int
+            or not 1024 <= raw["control_plane_port"] <= 65_535
+            or any(
+                registry_contract.SAFE_NAME_RE.fullmatch(str(raw.get(field))) is None
+                for field in ("slurm_user", "slurm_account", "slurm_qos")
+            )
+            or registry_contract.CANDIDATE_ID_RE.fullmatch(
+                str(raw.get("candidate_id")),
+            )
+            is None
+            or SHA_RE.fullmatch(str(raw.get("candidate_sha"))) is None
+            or SHA_RE.fullmatch(str(raw.get("candidate_tree"))) is None
+            or raw.get("instances") != expected_instances
+            or seen_instances.intersection(expected_instances)
+        ):
+            raise RuntimeHostError("runtime generation manifest binding is invalid")
+        state_root = _registry_path(
+            raw.get("state_root"),
+            label="generation manifest state_root",
+        )
+        runtime_root = _registry_path(
+            raw.get("runtime_root"),
+            label="generation manifest runtime_root",
+        )
+        candidate_root = _registry_path(
+            raw.get("candidate_root"),
+            label="generation manifest candidate_root",
+        )
+        root_pairs = {
+            "legacy-v1": (
+                Path("/shared_work/loom/runtime/sandboxes") / runtime_id,
+                Path("/shared_work/loom/candidates/sandboxes") / runtime_id,
+            ),
+            "dynamic-v1": (
+                Path("/shared_work/loom/runtime/environments") / env_id,
+                Path("/shared_work/loom/candidates/environments") / env_id,
+            ),
+        }
+        if (runtime_root, candidate_root) != root_pairs[str(raw["layout_version"])]:
+            raise RuntimeHostError(
+                "runtime generation manifest registry roots are invalid",
+            )
+        seen_env_ids.add(env_id)
+        seen_runtime_ids.add(runtime_id)
+        seen_instances.update(expected_instances)
+        environment = RuntimeEnvironment(
+            env_id=env_id,
+            runtime_id=runtime_id,
+            layout_version=str(raw["layout_version"]),
+            state=str(raw["state"]),
+            resource_generation=int(raw["resource_generation"]),
+            service_user=str(raw["service_user"]),
+            service_group=str(raw["service_group"]),
+            uid=int(raw["uid"]),
+            gid=int(raw["gid"]),
+            systemd_instance=runtime_id,
+            state_root=state_root,
+            runtime_root=runtime_root,
+            candidate_root=candidate_root,
+            control_plane_port=int(raw["control_plane_port"]),
+            slurm_user=str(raw["slurm_user"]),
+            slurm_account=str(raw["slurm_account"]),
+            slurm_qos=str(raw["slurm_qos"]),
+            candidate_id=str(raw["candidate_id"]),
+            candidate_sha=str(raw["candidate_sha"]),
+            candidate_tree=str(raw["candidate_tree"]),
+            deployment_phase=str(raw["deployment_phase"]),
+        )
+        provisioning_environments.append(environment)
+        if raw["capacity_eligible"] is True:
+            environments.append(environment)
+    if [item.runtime_id for item in provisioning_environments] != sorted(seen_runtime_ids):
+        raise RuntimeHostError("runtime generation manifest order is invalid")
+    if not environments:
+        raise RuntimeHostError("runtime generation manifest active cohort is empty")
+    return RegistryCohort(
+        generation=int(value["registry_generation"]),
+        payload_sha256=str(value["registry_payload_sha256"]),
+        environments=tuple(environments),
+        provisioning_environments=tuple(provisioning_environments),
+    )
+
+
+def _require_current_registry_binding(payload: Mapping[str, Any]) -> None:
+    if (
+        payload.get("registry_generation") != _cohort().generation
+        or payload.get("registry_payload_sha256") != _cohort().payload_sha256
+    ):
+        raise RuntimeHostError("runtime registry generation binding drifted")
+
+
+def _identity_has_sharedwork_group(environment: RuntimeEnvironment) -> bool:
+    try:
+        sharedwork_gid = grp.getgrnam("sharedwork").gr_gid
+        group_ids = os.getgrouplist(environment.service_user, environment.gid)
+    except KeyError:
+        return False
+    except OSError as exc:
+        raise RuntimeHostError("dynamic service group readback failed") from exc
+    return sharedwork_gid in group_ids
+
+
+def _identity_mode_bits(metadata: os.stat_result, *, uid: int, gid: int) -> int:
+    mode = stat.S_IMODE(metadata.st_mode)
+    if metadata.st_uid == uid:
+        return (mode >> 6) & 0o7
+    if metadata.st_gid == gid:
+        return (mode >> 3) & 0o7
+    return mode & 0o7
+
+
+def _validate_dynamic_storage_access(
+    environment: RuntimeEnvironment,
+    *,
+    traversal_floor: Path = Path("/shared_work"),
+) -> dict[str, object]:
+    if environment.layout_version != "dynamic-v1":
+        raise RuntimeHostError("dynamic storage readback received a legacy environment")
+    try:
+        user_by_name = pwd.getpwnam(environment.service_user)
+        user_by_id = pwd.getpwuid(environment.uid)
+        group_by_name = grp.getgrnam(environment.service_group)
+        group_by_id = grp.getgrgid(environment.gid)
+    except (KeyError, OSError) as exc:
+        raise RuntimeHostError("dynamic service identity is unavailable") from exc
+    if (
+        user_by_name.pw_uid != environment.uid
+        or user_by_name.pw_gid != environment.gid
+        or user_by_id.pw_name != environment.service_user
+        or group_by_name.gr_gid != environment.gid
+        or group_by_id.gr_name != environment.service_group
+        or _identity_has_sharedwork_group(environment)
+    ):
+        raise RuntimeHostError("dynamic service identity binding drifted")
+
+    roots = (
+        ("candidate_root", environment.candidate_root, 0o750),
+        ("runtime_root", environment.runtime_root, 0o700),
+    )
+    readback: dict[str, str] = {}
+    for label, path, expected_mode in roots:
+        if not path.is_relative_to(traversal_floor) or path == traversal_floor:
+            raise RuntimeHostError("dynamic storage root escaped its traversal boundary")
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            raise RuntimeHostError(f"dynamic {label} is unavailable") from exc
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != environment.uid
+            or metadata.st_gid != environment.gid
+            or stat.S_IMODE(metadata.st_mode) != expected_mode
+            or _identity_mode_bits(
+                metadata,
+                uid=environment.uid,
+                gid=environment.gid,
+            )
+            != 0o7
+        ):
+            raise RuntimeHostError(f"dynamic {label} ownership or access drifted")
+        for parent in path.parents:
+            if parent == traversal_floor.parent:
+                break
+            try:
+                parent_metadata = parent.lstat()
+            except OSError as exc:
+                raise RuntimeHostError(
+                    f"dynamic {label} traversal parent is unavailable",
+                ) from exc
+            if (
+                stat.S_ISLNK(parent_metadata.st_mode)
+                or not stat.S_ISDIR(parent_metadata.st_mode)
+                or not (
+                    _identity_mode_bits(
+                        parent_metadata,
+                        uid=environment.uid,
+                        gid=environment.gid,
+                    )
+                    & 0o1
+                )
+                or (
+                    parent.is_relative_to(traversal_floor)
+                    and stat.S_IMODE(parent_metadata.st_mode) & 0o002
+                )
+            ):
+                raise RuntimeHostError(
+                    f"dynamic {label} traversal is not independently accessible",
+                )
+            if parent == traversal_floor:
+                break
+        else:
+            raise RuntimeHostError(f"dynamic {label} traversal boundary is missing")
+        readback[label] = f"{metadata.st_uid}:{metadata.st_gid}:{expected_mode:04o}"
+    return {
+        "env_id": environment.env_id,
+        "runtime_id": environment.runtime_id,
+        "service_user": environment.service_user,
+        "service_group": environment.service_group,
+        "uid": environment.uid,
+        "gid": environment.gid,
+        "supplementary_sharedwork": False,
+        **readback,
+    }
+
+
+@contextmanager
+def _bound_cohort(cohort: RegistryCohort) -> Iterator[None]:
+    global _COHORT_CACHE
+    previous = _COHORT_CACHE
+    _COHORT_CACHE = cohort
+    try:
+        yield
+    finally:
+        _COHORT_CACHE = previous
+
+
 def _fsync_directory(path: Path) -> None:
     descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
     try:
@@ -457,6 +1296,7 @@ def _validate_profile_bytes(content: bytes) -> dict[str, Any]:
         "candidate_parent",
         "current_link",
         "state_root",
+        "registry_snapshot_path",
         "bootstrap_requires_zero_capacity",
         "positive_admission_requires_platform_health",
         "acceptance_contract_ttl_seconds",
@@ -464,7 +1304,6 @@ def _validate_profile_bytes(content: bytes) -> dict[str, Any]:
         "acceptance_mixed_non_loom_ttl_seconds",
         "acceptance_ttl_cleanup_seconds",
         "acceptance_phases",
-        "adapter_instances",
         "slurm_domains",
     }
     expected_domains = {
@@ -479,22 +1318,19 @@ def _validate_profile_bytes(content: bytes) -> dict[str, Any]:
     }
     if (
         set(raw) != expected
-        or raw.get("schema_version") != 1
+        or raw.get("schema_version") != 2
         or raw.get("expected_hostname") != EXPECTED_HOSTNAME
         or raw.get("candidate_parent") != str(CANDIDATE_PARENT)
         or raw.get("current_link") != str(CURRENT_LINK)
         or raw.get("state_root") != str(STATE_ROOT)
+        or raw.get("registry_snapshot_path") != str(REGISTRY_SNAPSHOT_PATH)
         or raw.get("bootstrap_requires_zero_capacity") is not True
         or raw.get("positive_admission_requires_platform_health") is not True
-        or raw.get("acceptance_contract_ttl_seconds")
-        != ACCEPTANCE_CONTRACT_TTL_SECONDS
-        or raw.get("acceptance_default_phase_ttl_seconds")
-        != ACCEPTANCE_DEFAULT_PHASE_TTL_SECONDS
-        or raw.get("acceptance_mixed_non_loom_ttl_seconds")
-        != ACCEPTANCE_MIXED_NON_LOOM_TTL_SECONDS
+        or raw.get("acceptance_contract_ttl_seconds") != ACCEPTANCE_CONTRACT_TTL_SECONDS
+        or raw.get("acceptance_default_phase_ttl_seconds") != ACCEPTANCE_DEFAULT_PHASE_TTL_SECONDS
+        or raw.get("acceptance_mixed_non_loom_ttl_seconds") != ACCEPTANCE_MIXED_NON_LOOM_TTL_SECONDS
         or raw.get("acceptance_ttl_cleanup_seconds") != ACCEPTANCE_TTL_CLEANUP_SECONDS
         or raw.get("acceptance_phases") != list(ACCEPTANCE_PHASES)
-        or raw.get("adapter_instances") != list(INSTANCES)
         or raw.get("slurm_domains") != expected_domains
     ):
         raise RuntimeHostError("runtime-host profile drifted from the closed contract")
@@ -567,6 +1403,148 @@ def _render_service(template: bytes, candidate: Candidate) -> bytes:
     return rendered
 
 
+def _render_supervisor_config(candidate: Candidate) -> bytes:
+    raw = _read_candidate_file(
+        candidate,
+        SUPERVISOR_CONFIG_SOURCE.relative_to(REPO_ROOT),
+    )
+    try:
+        payload = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise RuntimeHostError("candidate supervisor config is invalid") from exc
+    instances = "\n".join(f'  "{instance}",' for instance in _instances())
+    return (
+        "\n".join(
+            (
+                f"schema_version = {payload['schema_version']}",
+                f'state_db = "{payload["state_db"]}"',
+                f'handoff_dir = "{payload["handoff_dir"]}"',
+                f'observation_dir = "{payload["observation_dir"]}"',
+                f'supervisor_state_path = "{payload["supervisor_state_path"]}"',
+                f'audit_path = "{payload["audit_path"]}"',
+                f'evidence_path = "{payload["evidence_path"]}"',
+                f"global_slot_budget = {payload['global_slot_budget']}",
+                f"global_pending_slot_budget = {payload['global_pending_slot_budget']}",
+                "instances = [",
+                instances,
+                "]",
+                "",
+                "[pool_slot_budgets]",
+                f"gb10 = {payload['pool_slot_budgets']['gb10']}",
+                f"oldlab = {payload['pool_slot_budgets']['oldlab']}",
+                "",
+                "[pool_pending_slot_budgets]",
+                f"gb10 = {payload['pool_pending_slot_budgets']['gb10']}",
+                f"oldlab = {payload['pool_pending_slot_budgets']['oldlab']}",
+                "",
+            ),
+        )
+    ).encode()
+
+
+def _registry_supervisor_base() -> dict[str, Any]:
+    try:
+        metadata = SUPERVISOR_BASE_CONFIG_PATH.lstat()
+        raw = SUPERVISOR_BASE_CONFIG_PATH.read_bytes()
+        payload = tomllib.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise RuntimeHostError("fixed supervisor base config is unavailable") from exc
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or (metadata.st_uid, metadata.st_gid) != (0, 0)
+        or metadata.st_nlink != 1
+        or stat.S_IMODE(metadata.st_mode) != 0o644
+    ):
+        raise RuntimeHostError("fixed supervisor base config metadata drifted")
+    return payload
+
+
+def _render_registry_supervisor_config_for_instances(
+    instances: Sequence[str],
+) -> bytes:
+    payload = _registry_supervisor_base()
+    normalized = tuple(instances)
+    if (
+        not normalized
+        or len(normalized) != len(set(normalized))
+        or tuple(sorted(normalized)) != normalized
+        or any(
+            registry_contract.RUNTIME_ID_RE.fullmatch(instance.rpartition("-")[0]) is None
+            or instance.rpartition("-")[2] not in POOLS
+            for instance in normalized
+        )
+    ):
+        raise RuntimeHostError("fixed supervisor instance cohort is invalid")
+    instance_rows = "\n".join(f'  "{instance}",' for instance in normalized)
+    try:
+        return (
+            "\n".join(
+                (
+                    f"schema_version = {payload['schema_version']}",
+                    f'state_db = "{payload["state_db"]}"',
+                    f'handoff_dir = "{payload["handoff_dir"]}"',
+                    f'observation_dir = "{payload["observation_dir"]}"',
+                    f'supervisor_state_path = "{payload["supervisor_state_path"]}"',
+                    f'audit_path = "{payload["audit_path"]}"',
+                    f'evidence_path = "{payload["evidence_path"]}"',
+                    f"global_slot_budget = {payload['global_slot_budget']}",
+                    f"global_pending_slot_budget = {payload['global_pending_slot_budget']}",
+                    "instances = [",
+                    instance_rows,
+                    "]",
+                    "",
+                    "[pool_slot_budgets]",
+                    f"gb10 = {payload['pool_slot_budgets']['gb10']}",
+                    f"oldlab = {payload['pool_slot_budgets']['oldlab']}",
+                    "",
+                    "[pool_pending_slot_budgets]",
+                    f"gb10 = {payload['pool_pending_slot_budgets']['gb10']}",
+                    f"oldlab = {payload['pool_pending_slot_budgets']['oldlab']}",
+                    "",
+                ),
+            )
+            + "\n"
+        ).encode("ascii")
+    except (KeyError, TypeError, UnicodeEncodeError) as exc:
+        raise RuntimeHostError("fixed supervisor base config is invalid") from exc
+
+
+def _render_registry_supervisor_config() -> bytes:
+    return _render_registry_supervisor_config_for_instances(_instances())
+
+
+def _render_adapter_config(environment: RuntimeEnvironment, pool: str) -> bytes:
+    if pool not in POOLS:
+        raise RuntimeHostError("adapter pool is invalid")
+    instance = f"{environment.runtime_id}-{pool}"
+    max_slots = 120 if pool == "gb10" else 20
+    return (
+        "\n".join(
+            (
+                "schema_version = 1",
+                f'sandbox = "{environment.runtime_id}"',
+                f'environment = "sandbox-{environment.runtime_id}"',
+                f'pool_name = "{pool}"',
+                f'slurm_account = "{environment.slurm_account}"',
+                f'slurm_qos = "{environment.slurm_qos}"',
+                f'runtime_root = "{environment.runtime_root}"',
+                f'candidate_root = "{environment.candidate_root}"',
+                f'control_plane_url = "http://127.0.0.1:{environment.control_plane_port}"',
+                f'admin_secret_file = "{environment.state_root}/secrets/admin.toml"',
+                f'handoff_path = "{STATE_ROOT}/handoffs/current/{instance}.json"',
+                f'observation_path = "{STATE_ROOT}/observations/{instance}.json"',
+                f'adapter_state_path = "{STATE_ROOT}/adapters/{instance}.json"',
+                f'sandbox_state_path = "{environment.state_root}/sandbox-state.json"',
+                f'runtime_attestation_root = "{STATE_ROOT}/runtime-attestations"',
+                f"max_slots_bound = {max_slots}",
+                "timeout_seconds = 10",
+                "",
+            ),
+        )
+    ).encode()
+
+
 def _desired_files(candidate: Candidate) -> dict[Path, tuple[bytes, int]]:
     files: dict[Path, tuple[bytes, int]] = {
         PROGRAM_PATH: (
@@ -583,6 +1561,13 @@ def _desired_files(candidate: Candidate) -> dict[Path, tuple[bytes, int]]:
             ),
             0o644,
         ),
+        REGISTRY_CONTRACT_PATH: (
+            _read_candidate_file(
+                candidate,
+                Path("scripts/ops/developer_environment_registry.py"),
+            ),
+            0o644,
+        ),
         PROFILE_PATH: (
             _read_candidate_file(
                 candidate,
@@ -591,10 +1576,7 @@ def _desired_files(candidate: Candidate) -> dict[Path, tuple[bytes, int]]:
             0o600,
         ),
         SUPERVISOR_CONFIG_PATH: (
-            _read_candidate_file(
-                candidate,
-                SUPERVISOR_CONFIG_SOURCE.relative_to(REPO_ROOT),
-            ),
+            _render_supervisor_config(candidate),
             0o600,
         ),
         ADAPTER_SERVICE_PATH: (
@@ -632,10 +1614,14 @@ def _desired_files(candidate: Candidate) -> dict[Path, tuple[bytes, int]]:
             0o644,
         ),
     }
-    for instance in INSTANCES:
-        relative = ADAPTER_CONFIG_SOURCE_ROOT.relative_to(REPO_ROOT) / f"{instance}.toml"
+    by_runtime = {
+        item.runtime_id: item
+        for item in (_cohort().provisioning_environments or _cohort().environments)
+    }
+    for instance in _provisioning_instances():
+        sandbox, pool = instance.rsplit("-", 1)
         files[ADAPTER_CONFIG_ROOT / f"{instance}.toml"] = (
-            _read_candidate_file(candidate, relative),
+            _render_adapter_config(by_runtime[sandbox], pool),
             0o600,
         )
     try:
@@ -643,6 +1629,11 @@ def _desired_files(candidate: Candidate) -> dict[Path, tuple[bytes, int]]:
         compile(
             files[CAPACITY_CONTRACT_PATH][0],
             str(CAPACITY_CONTRACT_PATH),
+            "exec",
+        )
+        compile(
+            files[REGISTRY_CONTRACT_PATH][0],
+            str(REGISTRY_CONTRACT_PATH),
             "exec",
         )
     except (SyntaxError, ValueError) as exc:
@@ -664,7 +1655,9 @@ def plan(candidate: Candidate, operation: str) -> dict[str, Any]:
         "lockfile_sha256": _sha256(
             _read_candidate_file(candidate, Path("uv.lock")),
         ),
-        "instances": list(INSTANCES),
+        "instances": list(_instances()),
+        "provisioning_instances": list(_provisioning_instances()),
+        **_registry_binding(),
         "slurm_domains": _load_candidate_profile(candidate)["slurm_domains"],
         "files": [
             {
@@ -682,7 +1675,7 @@ def plan(candidate: Candidate, operation: str) -> dict[str, Any]:
             "stop-and-disable-existing-services-and-timers",
             "materialize-exact-repo-and-frozen-venv",
             "publish-configs-and-exact-units",
-            "leave-supervisor-and-six-adapters-disabled-and-inactive",
+            "leave-supervisor-and-registry-adapters-disabled-and-inactive",
             "closed-world-readback",
         ],
         "capacity_enabled_by_installer": False,
@@ -747,7 +1740,7 @@ def _validate_managed_unit_rows(rows: Sequence[str]) -> set[str]:
         if match is None:
             raise RuntimeHostError("orphan shared-capacity systemd unit exists")
         instance = match.group(1)
-        if instance not in {None, "", *INSTANCES}:
+        if instance not in {None, "", *_instances()}:
             raise RuntimeHostError("orphan shared-capacity adapter unit is loaded")
         managed.add(name)
     return managed
@@ -801,7 +1794,7 @@ def _reject_orphan_unit_files() -> None:
     installed = _installed_managed_unit_files()
     if not REQUIRED_UNIT_FILES <= installed:
         raise RuntimeHostError("required shared-capacity unit file is missing")
-    allowed = {*REQUIRED_UNIT_FILES, *ALL_UNITS}
+    allowed = {*REQUIRED_UNIT_FILES, *_all_units()}
     if installed - allowed:
         raise RuntimeHostError("orphan shared-capacity unit file is installed")
 
@@ -809,11 +1802,12 @@ def _reject_orphan_unit_files() -> None:
 def _reject_orphan_configs() -> None:
     if not ADAPTER_CONFIG_ROOT.exists():
         return
-    expected = {f"{instance}.toml" for instance in INSTANCES}
-    actual = {
-        path.name for path in ADAPTER_CONFIG_ROOT.iterdir() if path.is_file() or path.is_symlink()
-    }
-    if actual - expected:
+    expected = {f"{instance}.toml" for instance in _provisioning_instances()}
+    entries = list(ADAPTER_CONFIG_ROOT.iterdir())
+    actual = {path.name for path in entries}
+    if actual - expected or any(
+        path.name not in expected or path.is_symlink() or not path.is_file() for path in entries
+    ):
         raise RuntimeHostError("orphan shared-capacity adapter config is installed")
 
 
@@ -847,9 +1841,10 @@ def _snapshot_paths() -> tuple[Path, ...]:
     return (
         PROGRAM_PATH,
         CAPACITY_CONTRACT_PATH,
+        REGISTRY_CONTRACT_PATH,
         PROFILE_PATH,
         SUPERVISOR_CONFIG_PATH,
-        *(ADAPTER_CONFIG_ROOT / f"{instance}.toml" for instance in INSTANCES),
+        *(ADAPTER_CONFIG_ROOT / f"{instance}.toml" for instance in _provisioning_instances()),
         *UNIT_PATHS,
         CURRENT_LINK,
         STATE_PATH,
@@ -888,8 +1883,10 @@ def _write_journal(
         "candidate_previously_existed": (candidate.root.exists() or candidate.root.is_symlink()),
         "staging_path": str(staging_path),
         "started_at": datetime.now(UTC).isoformat(),
+        **_registry_binding(),
+        "runtime_manifest": _runtime_manifest(),
         "files": _capture_files(_snapshot_paths()),
-        "units": {unit: _systemctl_state(unit) for unit in ALL_UNITS},
+        "units": {unit: _systemctl_state(unit) for unit in _all_units()},
     }
     if admission_token is not None:
         payload["admission_token"] = admission_token
@@ -1117,14 +2114,13 @@ def _validate_gate6_observations(
         or soak["sample_count"] < 120
         or soak.get("required_duration_seconds") != 14_400
         or soak.get("required_sample_count") != 120
-        or soak.get("workloads")
-        != ["loom", "non_loom_slurm", "kubernetes", "minio", "longhorn"]
+        or soak.get("workloads") != ["loom", "non_loom_slurm", "kubernetes", "minio", "longhorn"]
         or not isinstance(soak.get("trial_success_numerator"), int)
         or isinstance(soak.get("trial_success_numerator"), bool)
-        or soak["trial_success_numerator"] < len(INSTANCES)
+        or soak["trial_success_numerator"] < len(_instances())
         or not isinstance(soak.get("trial_success_denominator"), int)
         or isinstance(soak.get("trial_success_denominator"), bool)
-        or soak["trial_success_denominator"] < len(INSTANCES)
+        or soak["trial_success_denominator"] < len(_instances())
         or not isinstance(soak.get("trial_success_ratio"), (int, float))
         or isinstance(soak.get("trial_success_ratio"), bool)
         or not 0.95 <= soak["trial_success_ratio"] <= 1
@@ -1166,7 +2162,7 @@ def _validate_gate6_observations(
         "within_reviewed_envelope",
     }
     pairs = soak["pair_headroom"]
-    expected_pairs = {(sandbox, pool) for sandbox in SANDBOXES for pool in POOLS}
+    expected_pairs = {(sandbox, pool) for sandbox in _sandboxes() for pool in POOLS}
     outcome_fields = {
         "sandbox",
         "pool",
@@ -1190,12 +2186,8 @@ def _validate_gate6_observations(
     }
     outcomes = soak["trial_outcomes"]
     if (
-        len(outcomes) != len(INSTANCES)
-        or {
-            (row.get("sandbox"), row.get("pool"))
-            for row in outcomes
-            if isinstance(row, dict)
-        }
+        len(outcomes) != len(_instances())
+        or {(row.get("sandbox"), row.get("pool")) for row in outcomes if isinstance(row, dict)}
         != expected_pairs
         or any(
             not isinstance(row, dict)
@@ -1220,25 +2212,18 @@ def _validate_gate6_observations(
             or not isinstance(row.get("success_ratio"), (int, float))
             or isinstance(row.get("success_ratio"), bool)
             or not 0.95 <= row["success_ratio"] <= 1
-            or row["success_ratio"]
-            != row["succeeded_trial_count"] / row["terminal_trial_count"]
+            or row["success_ratio"] != row["succeeded_trial_count"] / row["terminal_trial_count"]
             for row in outcomes
         )
-        or soak["trial_success_numerator"]
-        != sum(row["succeeded_trial_count"] for row in outcomes)
-        or soak["trial_success_denominator"]
-        != sum(row["terminal_trial_count"] for row in outcomes)
+        or soak["trial_success_numerator"] != sum(row["succeeded_trial_count"] for row in outcomes)
+        or soak["trial_success_denominator"] != sum(row["terminal_trial_count"] for row in outcomes)
         or soak["trial_success_ratio"]
         != soak["trial_success_numerator"] / soak["trial_success_denominator"]
     ):
         return False
     if (
-        len(pairs) != len(INSTANCES)
-        or {
-            (row.get("sandbox"), row.get("pool"))
-            for row in pairs
-            if isinstance(row, dict)
-        }
+        len(pairs) != len(_instances())
+        or {(row.get("sandbox"), row.get("pool")) for row in pairs if isinstance(row, dict)}
         != expected_pairs
         or any(
             not isinstance(row, dict)
@@ -1279,12 +2264,8 @@ def _validate_gate6_observations(
     }
     if (
         not isinstance(devices, list)
-        or len(devices) != len(INSTANCES)
-        or {
-            (row.get("sandbox"), row.get("pool"))
-            for row in devices
-            if isinstance(row, dict)
-        }
+        or len(devices) != len(_instances())
+        or {(row.get("sandbox"), row.get("pool")) for row in devices if isinstance(row, dict)}
         != expected_pairs
         or any(
             not isinstance(row, dict)
@@ -1340,13 +2321,11 @@ def _validate_gate6_observations(
     if (
         not isinstance(cleanup, list)
         or len(cleanup) != len(event_checkpoints)
-        or {row.get("event") for row in cleanup if isinstance(row, dict)}
-        != set(event_checkpoints)
+        or {row.get("event") for row in cleanup if isinstance(row, dict)} != set(event_checkpoints)
         or any(
             not isinstance(row, dict)
             or set(row) != cleanup_fields
-            or row.get("checkpoint")
-            != event_checkpoints.get(cast(str, row.get("event")))
+            or row.get("checkpoint") != event_checkpoints.get(cast(str, row.get("event")))
             or not isinstance(row.get("job_ids"), list)
             or not row["job_ids"]
             or not isinstance(row.get("terminal_states"), list)
@@ -1477,15 +2456,15 @@ def _validate_platform_health_activation_gate(
         or evidence.get("payload_sha256") != current["payload_sha256"]
         or evidence.get("payload_sha256") != _sha256(_canonical_json(unsigned))
         or not isinstance(candidates, dict)
-        or set(candidates) != set(SANDBOXES)
+        or set(candidates) != set(_sandboxes())
         or any(
             not isinstance(candidates[sandbox], dict)
             or set(candidates[sandbox]) != {"sha", "tree"}
             or SHA_RE.fullmatch(str(candidates[sandbox].get("sha"))) is None
             or SHA_RE.fullmatch(str(candidates[sandbox].get("tree"))) is None
-            for sandbox in SANDBOXES
+            for sandbox in _sandboxes()
         )
-        or len({candidates[sandbox]["sha"] for sandbox in SANDBOXES}) != len(SANDBOXES)
+        or len({candidates[sandbox]["sha"] for sandbox in _sandboxes()}) != len(_sandboxes())
         or candidates != adapter_candidates
         or {"sha": candidate.sha, "tree": candidate.tree} not in candidates.values()
         or expires_at - completed_at != PLATFORM_HEALTH_EVIDENCE_TTL
@@ -1580,9 +2559,9 @@ def _active_journal() -> tuple[Path, dict[str, Any]] | None:
 
 
 def _stop_units() -> None:
-    for unit in ALL_TIMERS:
+    for unit in _all_timers():
         _run(("systemctl", "stop", unit), expected={0, 5})
-    for unit in ALL_SERVICES:
+    for unit in _all_services():
         _run(("systemctl", "stop", unit), expected={0, 5})
 
 
@@ -1611,7 +2590,7 @@ def _restore_files(snapshot: Mapping[str, Any]) -> None:
 
 def _restore_units(states: Mapping[str, Any]) -> None:
     _run(("systemctl", "daemon-reload"))
-    for unit in ALL_UNITS:
+    for unit in _all_units():
         state = states.get(unit)
         if not isinstance(state, dict):
             raise RuntimeHostError("transaction unit snapshot is invalid")
@@ -1629,6 +2608,7 @@ def _validate_transaction(
     path: Path,
     payload: dict[str, Any],
 ) -> tuple[str, str, str, str, Mapping[str, Any], Mapping[str, Any]]:
+    manifest_cohort = _cohort_from_runtime_manifest(payload.get("runtime_manifest"))
     transaction_id = payload.get("transaction_id")
     operation = payload.get("operation")
     sha = payload.get("candidate_sha")
@@ -1645,17 +2625,20 @@ def _validate_transaction(
         or SHA_RE.fullmatch(tree) is None
         or type(payload.get("candidate_previously_existed")) is not bool
         or staging_path != str(CANDIDATE_PARENT / f".install-{sha}-{transaction_id}")
+        or payload.get("registry_generation") != manifest_cohort.generation
+        or payload.get("registry_payload_sha256") != manifest_cohort.payload_sha256
     ):
         raise RuntimeHostError("runtime-host transaction ownership is invalid")
     files = payload.get("files")
     units = payload.get("units")
-    if (
-        not isinstance(files, dict)
-        or set(files) != {str(item) for item in _snapshot_paths()}
-        or not isinstance(units, dict)
-        or set(units) != set(ALL_UNITS)
-    ):
-        raise RuntimeHostError("runtime-host transaction snapshot is invalid")
+    with _bound_cohort(manifest_cohort):
+        if (
+            not isinstance(files, dict)
+            or set(files) != {str(item) for item in _snapshot_paths()}
+            or not isinstance(units, dict)
+            or set(units) != set(_all_units())
+        ):
+            raise RuntimeHostError("runtime-host transaction snapshot is invalid")
     for state in units.values():
         if (
             not isinstance(state, dict)
@@ -1673,20 +2656,31 @@ def _restore_local_transaction(
     *,
     remove_candidate: bool,
 ) -> tuple[str, str, str, str]:
-    transaction_id, operation, sha, tree, files, units = _validate_transaction(
-        path,
-        payload,
-    )
-    _stop_units()
-    _remove_path(Path(str(payload["staging_path"])))
-    _restore_files(files)
-    _restore_units(units)
-    if remove_candidate and payload.get("candidate_previously_existed") is False:
-        _remove_path(CANDIDATE_PARENT / sha)
+    manifest_cohort = _cohort_from_runtime_manifest(payload.get("runtime_manifest"))
+    with _bound_cohort(manifest_cohort):
+        transaction_id, operation, sha, tree, files, units = _validate_transaction(
+            path,
+            payload,
+        )
+        _stop_units()
+        _remove_path(Path(str(payload["staging_path"])))
+        _restore_files(files)
+        _restore_units(units)
+        if remove_candidate and payload.get("candidate_previously_existed") is False:
+            _remove_path(CANDIDATE_PARENT / sha)
     return transaction_id, operation, sha, tree
 
 
 def _restore_transaction(
+    path: Path,
+    payload: dict[str, Any],
+) -> None:
+    manifest_cohort = _cohort_from_runtime_manifest(payload.get("runtime_manifest"))
+    with _bound_cohort(manifest_cohort):
+        _restore_transaction_bound(path, payload)
+
+
+def _restore_transaction_bound(
     path: Path,
     payload: dict[str, Any],
 ) -> None:
@@ -1896,7 +2890,7 @@ def _publish_files(candidate: Candidate) -> None:
 
 def _publish_unit_state() -> None:
     _run(("systemctl", "daemon-reload"))
-    for unit in ALL_UNITS:
+    for unit in _all_units():
         _run(("systemctl", "disable", "--now", unit), expected={0, 1, 5})
     _stop_units()
 
@@ -1966,16 +2960,16 @@ def _validate_candidate_sha_set(
     candidate_shas: Mapping[str, Any],
 ) -> dict[str, str]:
     if (
-        set(candidate_shas) != set(SANDBOXES)
+        set(candidate_shas) != set(_sandboxes())
         or any(
             not isinstance(candidate_shas.get(sandbox), str)
             or SHA_RE.fullmatch(str(candidate_shas[sandbox])) is None
-            for sandbox in SANDBOXES
+            for sandbox in _sandboxes()
         )
-        or len({str(candidate_shas[sandbox]) for sandbox in SANDBOXES}) != len(SANDBOXES)
+        or len({str(candidate_shas[sandbox]) for sandbox in _sandboxes()}) != len(_sandboxes())
     ):
         raise RuntimeHostError("sandbox candidate SHA set is invalid")
-    return {sandbox: str(candidate_shas[sandbox]) for sandbox in SANDBOXES}
+    return {sandbox: str(candidate_shas[sandbox]) for sandbox in _sandboxes()}
 
 
 def _retirement_request_ids(
@@ -1987,7 +2981,7 @@ def _retirement_request_ids(
     if not isinstance(records, list):
         raise RuntimeHostError("broker retirement report is invalid")
     by_instance: dict[str, list[tuple[Mapping[str, Any], Mapping[str, Any]]]] = {
-        instance: [] for instance in INSTANCES
+        instance: [] for instance in _instances()
     }
     request_ids: set[str] = set()
     for record in records:
@@ -2056,7 +3050,7 @@ def _retirement_is_drained(
             raise RuntimeHostError("broker retirement request is invalid")
         sandbox = request.get("sandbox")
         pool = request.get("pool")
-        if sandbox not in exact_shas or f"{sandbox}-{pool}" not in INSTANCES:
+        if sandbox not in exact_shas or f"{sandbox}-{pool}" not in _instances():
             continue
         if request.get("candidate_sha") != exact_shas[str(sandbox)]:
             continue
@@ -2091,7 +3085,7 @@ def _validate_zero_broker_handoffs(
     candidate_shas: Mapping[str, Any],
 ) -> None:
     exact_shas = _validate_candidate_sha_set(candidate_shas)
-    if set(selected) != set(INSTANCES):
+    if set(selected) != set(_instances()):
         raise RuntimeHostError("broker activation preflight is not closed-world")
     records = report.get("requests")
     aggregate = report.get("aggregate")
@@ -2111,7 +3105,7 @@ def _validate_zero_broker_handoffs(
             raise RuntimeHostError("broker activation request binding is invalid")
         requests[request_id] = request
         leases[request_id] = lease
-    for instance in INSTANCES:
+    for instance in _instances():
         sandbox, _pool = instance.rsplit("-", 1)
         expected_sha = exact_shas[sandbox]
         handoff = selected.get(instance)
@@ -2122,7 +3116,9 @@ def _validate_zero_broker_handoffs(
             or handoff.get("max_slots") != 0
             or handoff.get("candidate_sha") != expected_sha
         ):
-            raise RuntimeHostError("activation requires six zero-capacity handoffs")
+            raise RuntimeHostError(
+                "activation requires registry-closed zero-capacity handoffs",
+            )
         request_id = str(handoff.get("request_id"))
         request = requests.get(request_id)
         lease = leases.get(request_id)
@@ -2227,10 +3223,7 @@ def _validate_zero_adapter_state(
         or getattr(handoff, "max_slots", None) != 0
     ):
         raise RuntimeHostError("bootstrap adapter handoff is not disabled at zero")
-    if any(
-        state.get(field) != 0
-        for field in ("pending_slots", "active_slots", "draining_slots")
-    ):
+    if any(state.get(field) != 0 for field in ("pending_slots", "active_slots", "draining_slots")):
         raise RuntimeHostError("bootstrap adapter state still has live capacity")
 
 
@@ -2287,6 +3280,47 @@ finally:
 print("open" if fence is None else fence)
 """
 
+_BROKER_ENVIRONMENT_CLOSE = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from loom_control_plane.shared_capacity_broker import SharedCapacityBroker
+broker = SharedCapacityBroker(Path(sys.argv[2]))
+broker.close_environment_admission(sys.argv[3], sys.argv[4])
+print(broker.environment_admission_fence(sys.argv[3]) or "open")
+"""
+
+_BROKER_ENVIRONMENT_OPEN = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from loom_control_plane.shared_capacity_broker import SharedCapacityBroker
+broker = SharedCapacityBroker(Path(sys.argv[2]))
+broker.open_environment_admission(sys.argv[3], sys.argv[4])
+print(broker.environment_admission_fence(sys.argv[3]) or "open")
+"""
+
+_BROKER_ENVIRONMENT_ROTATE = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from loom_control_plane.shared_capacity_broker import SharedCapacityBroker
+broker = SharedCapacityBroker(Path(sys.argv[2]))
+broker.rotate_environment_admission(sys.argv[3], sys.argv[4], sys.argv[5])
+print(broker.environment_admission_fence(sys.argv[3]) or "open")
+"""
+
+_BROKER_ENVIRONMENT_READBACK = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from loom_control_plane.shared_capacity_broker import SharedCapacityBroker
+print(
+    SharedCapacityBroker(Path(sys.argv[2])).environment_admission_fence(sys.argv[3])
+    or "open"
+)
+"""
+
 _PLATFORM_HEALTH_AUTHORITY_REBUILD = """
 import hashlib
 import json
@@ -2302,15 +3336,15 @@ from scripts.ops.developer_sandbox_platform_health_authority import (
 )
 from scripts.ops.developer_sandbox_live_acceptance import (
     NONEXCLUSIVE_SCHEMA,
-    PHASE_CHECKPOINTS,
     POOLS,
-    SANDBOXES,
     SLURM_POLICY_STATE_ROOT,
     _canonical_bytes,
     _checkpoint_payload,
     _gate6_matrix_path,
     _gate6_runtime_domain_bindings,
     _load_schema,
+    _phase_checkpoints,
+    _registry_sandboxes,
     _secure_json_load,
     _session_dir,
     _session_state_unlocked,
@@ -2346,11 +3380,13 @@ if rebuilt is None or existing != rebuilt:
     raise RuntimeError("platform-health final evidence does not rebuild exactly")
 session_id = existing["session_id"]
 state = _session_state_unlocked(session_id)
+sandboxes = _registry_sandboxes(state["registry_snapshot"])
+phase_checkpoints = _phase_checkpoints(sandboxes)
 if (
     state["status"] != "complete"
-    or state["next_phase_index"] != len(PHASE_CHECKPOINTS)
+    or state["next_phase_index"] != len(phase_checkpoints)
     or state["completed_phases"]
-    != [f"{sandbox}:{phase}" for phase, sandbox in PHASE_CHECKPOINTS]
+    != [f"{sandbox}:{phase}" for phase, sandbox in phase_checkpoints]
     or state["candidates"] != existing["candidates"]
 ):
     raise RuntimeError("live acceptance session is not complete")
@@ -2365,7 +3401,7 @@ if (
             "sha": live_evidence["candidates"][sandbox]["sha"],
             "tree": live_evidence["candidates"][sandbox]["tree"],
         }
-        for sandbox in SANDBOXES
+        for sandbox in sandboxes
     }
     != state["candidates"]
 ):
@@ -2373,11 +3409,11 @@ if (
 checkpoint_root = _session_dir(session_id) / "checkpoints"
 expected_names = {
     f"{index:02d}-{sandbox}-{phase}.json"
-    for index, (phase, sandbox) in enumerate(PHASE_CHECKPOINTS)
+    for index, (phase, sandbox) in enumerate(phase_checkpoints)
 }
 if {path.name for path in checkpoint_root.iterdir()} != expected_names:
     raise RuntimeError("live acceptance checkpoint journal is incomplete")
-for index, (phase, sandbox) in enumerate(PHASE_CHECKPOINTS):
+for index, (phase, sandbox) in enumerate(phase_checkpoints):
     checkpoint = _secure_json_load(
         checkpoint_root / f"{index:02d}-{sandbox}-{phase}.json",
     )
@@ -2397,7 +3433,7 @@ if state["evidence_sha256"] != live_digest:
 if "gate6_sha256" not in state:
     raise RuntimeError("live acceptance gate 6 is not sealed")
 matrices = {}
-for sandbox in SANDBOXES:
+for sandbox in sandboxes:
     candidate_sha = state["candidates"][sandbox]["sha"]
     for pool in POOLS:
         matrix_path = _gate6_matrix_path(sandbox, pool, candidate_sha)
@@ -2439,6 +3475,10 @@ print(json.dumps(
     {
         "gate6_sha256": rebuilt_bundle["payload_sha256"],
         "platform_health_sha256": existing["payload_sha256"],
+        "registry_generation": state["registry_snapshot"]["source_registry"]["generation"],
+        "registry_payload_sha256": (
+            state["registry_snapshot"]["source_registry"]["payload_sha256"]
+        ),
     },
     sort_keys=True,
     separators=(",", ":"),
@@ -2451,17 +3491,19 @@ import sys
 sys.path.insert(0, sys.argv[1])
 from scripts.ops.developer_sandbox_live_acceptance import (
     PHASES,
-    PHASE_CHECKPOINTS,
+    _phase_checkpoints,
+    _registry_sandboxes,
     _session_state_unlocked,
 )
 state = _session_state_unlocked(sys.argv[2])
+sandboxes = _registry_sandboxes(state["registry_snapshot"])
 print(json.dumps(
     {
         "session_id": state["session_id"],
         "status": state["status"],
         "candidates": state["candidates"],
         "next_phase_index": state["next_phase_index"],
-        "phase_checkpoints": len(PHASE_CHECKPOINTS),
+        "phase_checkpoints": len(_phase_checkpoints(sandboxes)),
         "phases": list(PHASES),
     },
     sort_keys=True,
@@ -2851,7 +3893,13 @@ def _verify_platform_health_authority_evidence(
         raise RuntimeHostError("platform-health authority rebuild is invalid") from exc
     if (
         not isinstance(payload, dict)
-        or set(payload) != {"gate6_sha256", "platform_health_sha256"}
+        or set(payload)
+        != {
+            "gate6_sha256",
+            "platform_health_sha256",
+            "registry_generation",
+            "registry_payload_sha256",
+        }
         or completed.stdout.encode() != _canonical_json(payload)
         or re.fullmatch(r"[0-9a-f]{64}", str(payload.get("gate6_sha256"))) is None
         or re.fullmatch(
@@ -2859,6 +3907,8 @@ def _verify_platform_health_authority_evidence(
             str(payload.get("platform_health_sha256")),
         )
         is None
+        or payload.get("registry_generation") != _cohort().generation
+        or payload.get("registry_payload_sha256") != _cohort().payload_sha256
     ):
         raise RuntimeHostError("platform-health authority rebuild is invalid")
     return str(payload["platform_health_sha256"]), str(payload["gate6_sha256"])
@@ -2894,7 +3944,7 @@ def _acceptance_session_readback(
         or payload.get("session_id") != session_id
         or payload.get("status") not in {"running", "complete"}
         or payload.get("phases") != list(LIVE_PHASES)
-        or payload.get("phase_checkpoints") != len(LIVE_PHASES) * len(SANDBOXES)
+        or payload.get("phase_checkpoints") != len(LIVE_PHASES) * len(_sandboxes())
         or not isinstance(payload.get("next_phase_index"), int)
         or isinstance(payload.get("next_phase_index"), bool)
         or not isinstance(payload.get("candidates"), dict)
@@ -2910,9 +3960,7 @@ def _acceptance_candidate_shas(
     adapter_candidates = _adapter_candidate_bindings(candidate)
     if session.get("candidates") != adapter_candidates:
         raise RuntimeHostError("acceptance session candidate set drifted")
-    return {
-        sandbox: adapter_candidates[sandbox]["sha"] for sandbox in SANDBOXES
-    }
+    return {sandbox: adapter_candidates[sandbox]["sha"] for sandbox in _sandboxes()}
 
 
 def _acceptance_contract(
@@ -2923,9 +3971,7 @@ def _acceptance_contract(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     candidate_shas = _acceptance_candidate_shas(candidate, session)
-    policies = {
-        pool: _candidate_platform_policy(candidate, pool)[0] for pool in POOLS
-    }
+    policies = {pool: _candidate_platform_policy(candidate, pool)[0] for pool in POOLS}
     current = _platform_health_now(now)
     return {
         "schema_version": 1,
@@ -2933,9 +3979,7 @@ def _acceptance_contract(
         "session_id": session["session_id"],
         "candidate_shas": candidate_shas,
         "phases": list(ACCEPTANCE_PHASES),
-        "target_slots": {
-            pool: policies[pool]["requested_concurrency"] for pool in POOLS
-        },
+        "target_slots": {pool: policies[pool]["requested_concurrency"] for pool in POOLS},
         "ttl_seconds": {
             phase: (
                 ACCEPTANCE_TTL_CLEANUP_SECONDS
@@ -2948,15 +3992,11 @@ def _acceptance_contract(
             )
             for phase in ACCEPTANCE_PHASES
         },
-        "pool_slot_budgets": {
-            pool: policies[pool]["slot_budget"] for pool in POOLS
-        },
+        "pool_slot_budgets": {pool: policies[pool]["slot_budget"] for pool in POOLS},
         "pool_pending_slot_budgets": {
             pool: policies[pool]["pending_slot_budget"] for pool in POOLS
         },
-        "expires_at": (
-            current + timedelta(seconds=ACCEPTANCE_CONTRACT_TTL_SECONDS)
-        ).isoformat(),
+        "expires_at": (current + timedelta(seconds=ACCEPTANCE_CONTRACT_TTL_SECONDS)).isoformat(),
     }
 
 
@@ -2983,13 +4023,13 @@ def _require_acceptance_phase_prefix(
 ) -> int:
     if phase not in LIVE_PHASES:
         raise RuntimeHostError("acceptance phase is invalid")
-    start = LIVE_PHASES.index(phase) * len(SANDBOXES)
+    start = LIVE_PHASES.index(phase) * len(_sandboxes())
     next_index = session.get("next_phase_index")
     if (
         session.get("status") != "running"
         or not isinstance(next_index, int)
         or isinstance(next_index, bool)
-        or next_index not in range(start, start + len(SANDBOXES))
+        or next_index not in range(start, start + len(_sandboxes()))
     ):
         raise RuntimeHostError("acceptance phase prefix is not current")
     return next_index - start
@@ -3020,7 +4060,10 @@ def _run_acceptance_program(
 def _adapter_candidate_bindings(candidate: Candidate) -> dict[str, dict[str, str]]:
     by_sandbox: dict[str, dict[str, str]] = {}
     observed_instances: set[str] = set()
-    for instance in INSTANCES:
+    registry_environments = {
+        environment.runtime_id: environment for environment in _cohort().environments
+    }
+    for instance in _instances():
         completed = _run_candidate_python(
             candidate,
             _ADAPTER_BINDING_READBACK,
@@ -3034,7 +4077,7 @@ def _adapter_candidate_bindings(candidate: Candidate) -> dict[str, dict[str, str
             not isinstance(payload, dict)
             or set(payload) != {"pool", "sandbox", "sha", "tree"}
             or completed.stdout.encode() != _canonical_json(payload)
-            or payload.get("sandbox") not in SANDBOXES
+            or payload.get("sandbox") not in _sandboxes()
             or payload.get("pool") not in POOLS
             or instance != f"{payload.get('sandbox')}-{payload.get('pool')}"
             or SHA_RE.fullmatch(str(payload.get("sha"))) is None
@@ -3045,13 +4088,21 @@ def _adapter_candidate_bindings(candidate: Candidate) -> dict[str, dict[str, str
         observed_instances.add(instance)
         binding = {"sha": str(payload["sha"]), "tree": str(payload["tree"])}
         sandbox = str(payload["sandbox"])
+        registry_environment = registry_environments.get(sandbox)
+        if registry_environment is None or binding != {
+            "sha": registry_environment.candidate_sha,
+            "tree": registry_environment.candidate_tree,
+        }:
+            raise RuntimeHostError(
+                "adapter candidate binding drifted from the registry snapshot",
+            )
         existing = by_sandbox.get(sandbox)
         if existing is not None and existing != binding:
             raise RuntimeHostError("sandbox adapter candidate bindings drifted across pools")
         by_sandbox[sandbox] = binding
-    if observed_instances != set(INSTANCES) or set(by_sandbox) != set(SANDBOXES):
+    if observed_instances != set(_instances()) or set(by_sandbox) != set(_sandboxes()):
         raise RuntimeHostError("adapter candidate binding set is not closed")
-    if len({binding["sha"] for binding in by_sandbox.values()}) != len(SANDBOXES):
+    if len({binding["sha"] for binding in by_sandbox.values()}) != len(_sandboxes()):
         raise RuntimeHostError("sandbox adapter candidate bindings are not unique")
     return by_sandbox
 
@@ -3062,9 +4113,7 @@ def _activation_preflight(
     transaction_id: str,
 ) -> None:
     adapter_candidates = _adapter_candidate_bindings(candidate)
-    candidate_shas = {
-        sandbox: adapter_candidates[sandbox]["sha"] for sandbox in SANDBOXES
-    }
+    candidate_shas = {sandbox: adapter_candidates[sandbox]["sha"] for sandbox in _sandboxes()}
     _run_candidate_python(
         candidate,
         _BROKER_PREFLIGHT,
@@ -3072,7 +4121,7 @@ def _activation_preflight(
         json.dumps(candidate_shas, sort_keys=True, separators=(",", ":")),
         transaction_id,
     )
-    for instance in INSTANCES:
+    for instance in _instances():
         sandbox, _pool = instance.rsplit("-", 1)
         binding = adapter_candidates[sandbox]
         _run_candidate_python(
@@ -3138,9 +4187,7 @@ def _request_capacity_retirement(
     transaction_id: str,
 ) -> str:
     adapter_candidates = _adapter_candidate_bindings(candidate)
-    candidate_shas = {
-        sandbox: adapter_candidates[sandbox]["sha"] for sandbox in SANDBOXES
-    }
+    candidate_shas = {sandbox: adapter_candidates[sandbox]["sha"] for sandbox in _sandboxes()}
     completed = _run_candidate_python(
         candidate,
         _BROKER_RETIRE,
@@ -3161,9 +4208,7 @@ def _request_acceptance_retirement(
     session_id: str,
 ) -> str:
     adapter_candidates = _adapter_candidate_bindings(candidate)
-    candidate_shas = {
-        sandbox: adapter_candidates[sandbox]["sha"] for sandbox in SANDBOXES
-    }
+    candidate_shas = {sandbox: adapter_candidates[sandbox]["sha"] for sandbox in _sandboxes()}
     completed = _run_candidate_python(
         candidate,
         _ACCEPTANCE_RETIRE,
@@ -3180,7 +4225,7 @@ def _request_acceptance_retirement(
 
 
 def _run_retirement_cycle() -> None:
-    for unit in (SUPERVISOR_SERVICE, *ADAPTER_SERVICES, SUPERVISOR_SERVICE):
+    for unit in (SUPERVISOR_SERVICE, *_adapter_services(), SUPERVISOR_SERVICE):
         _run(("systemctl", "start", unit))
         if _service_result(unit) != ("success", "0"):
             raise RuntimeHostError("shared-capacity retirement cycle failed")
@@ -3271,6 +4316,15 @@ def _complete_activated_rollback(
     path: Path,
     payload: dict[str, Any],
 ) -> None:
+    manifest_cohort = _cohort_from_runtime_manifest(payload.get("runtime_manifest"))
+    with _bound_cohort(manifest_cohort):
+        _complete_activated_rollback_bound(path, payload)
+
+
+def _complete_activated_rollback_bound(
+    path: Path,
+    payload: dict[str, Any],
+) -> None:
     transaction_id, operation, _sha, _tree, _files, _units = _validate_transaction(
         path,
         payload,
@@ -3344,7 +4398,7 @@ def _activate_units(candidate: Candidate) -> None:
         str(SUPERVISOR_CONFIG_PATH),
     )
     _run(("systemctl", "enable", "--now", SUPERVISOR_TIMER))
-    for service, timer in zip(ADAPTER_SERVICES, ADAPTER_TIMERS, strict=True):
+    for service, timer in zip(_adapter_services(), _adapter_timers(), strict=True):
         _run(("systemctl", "start", service))
         if _service_result(service) != ("success", "0"):
             raise RuntimeHostError("adapter activation cycle failed")
@@ -3362,7 +4416,7 @@ def _activated_adapter_readback(
         _GENERATION_READBACK,
         str(SUPERVISOR_CONFIG_PATH),
     )
-    for instance in INSTANCES:
+    for instance in _instances():
         sandbox, _pool = instance.rsplit("-", 1)
         binding = adapter_candidates[sandbox]
         _run_candidate_python(
@@ -3392,6 +4446,9 @@ def _acceptance_operation_candidate(
         or payload.get("candidate_sha") != sha
         or payload.get("candidate_tree") != tree
         or payload.get("admission_token") != token
+        or state.get("registry_generation") != payload.get("registry_generation")
+        or state.get("registry_payload_sha256") != payload.get("registry_payload_sha256")
+        or state.get("runtime_manifest") != payload.get("runtime_manifest")
     ):
         raise RuntimeHostError("acceptance operation candidate binding is invalid")
     return (
@@ -3456,10 +4513,7 @@ def _load_acceptance_operation() -> dict[str, Any]:
             payload = json.loads(content)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise RuntimeHostError("acceptance operation is invalid") from exc
-        if (
-            not isinstance(payload, dict)
-            or content != _canonical_json(payload)
-        ):
+        if not isinstance(payload, dict) or content != _canonical_json(payload):
             raise RuntimeHostError("acceptance operation is not canonical")
         return payload
     finally:
@@ -3475,6 +4529,9 @@ def _validate_acceptance_operation(payload: Mapping[str, Any]) -> None:
         "candidate_tree",
         "admission_token",
         "session_id",
+        "registry_generation",
+        "registry_payload_sha256",
+        "runtime_manifest",
     }
     expected = {
         "open": common | {"contract", "step"},
@@ -3492,6 +4549,12 @@ def _validate_acceptance_operation(payload: Mapping[str, Any]) -> None:
         or re.fullmatch(r"[0-9a-f]{32}", str(payload.get("session_id"))) is None
     ):
         raise RuntimeHostError("acceptance operation is invalid")
+    manifest_cohort = _cohort_from_runtime_manifest(payload.get("runtime_manifest"))
+    if (
+        payload.get("registry_generation") != manifest_cohort.generation
+        or payload.get("registry_payload_sha256") != manifest_cohort.payload_sha256
+    ):
+        raise RuntimeHostError("acceptance registry generation binding is invalid")
     if operation == "open" and not isinstance(payload.get("contract"), dict):
         raise RuntimeHostError("acceptance open contract is invalid")
     if operation == "open" and payload.get("step") not in {
@@ -3504,26 +4567,21 @@ def _validate_acceptance_operation(payload: Mapping[str, Any]) -> None:
     if operation == "cohort" and (
         payload.get("phase") not in ACCEPTANCE_PHASES
         or payload.get("mode") not in {"replay", "rotate"}
-        or payload.get("step") not in {
+        or payload.get("step")
+        not in {
             "prepared",
             "rotation-drained",
             "cohort-created",
             "cohort-ready",
         }
         or payload.get("checkpoint_offset") not in {0, 1, 2}
-        or (
-            payload.get("mode") == "rotate"
-            and payload.get("checkpoint_offset") != 0
-        )
-        or (
-            payload.get("mode") == "replay"
-            and payload.get("step") != "cohort-ready"
-        )
+        or (payload.get("mode") == "rotate" and payload.get("checkpoint_offset") != 0)
+        or (payload.get("mode") == "replay" and payload.get("step") != "cohort-ready")
     ):
         raise RuntimeHostError("acceptance cohort operation is invalid")
     if operation == "cancel" and (
         payload.get("phase") != "cancel_cleanup"
-        or payload.get("sandbox") not in SANDBOXES
+        or payload.get("sandbox") not in _sandboxes()
         or payload.get("pool") not in POOLS
     ):
         raise RuntimeHostError("acceptance cancel operation is invalid")
@@ -3534,6 +4592,14 @@ def _resume_acceptance_operation() -> dict[str, Any] | None:
         return None
     payload = _load_acceptance_operation()
     _validate_acceptance_operation(payload)
+    manifest_cohort = _cohort_from_runtime_manifest(payload.get("runtime_manifest"))
+    with _bound_cohort(manifest_cohort):
+        return _resume_acceptance_operation_bound(payload)
+
+
+def _resume_acceptance_operation_bound(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
     operation = payload.get("operation")
     session_id = payload.get("session_id")
     candidate, state, token = _acceptance_operation_candidate(payload)
@@ -3626,12 +4692,13 @@ def _resume_acceptance_operation() -> dict[str, Any] | None:
             str(session_id),
             str(phase),
         )
-        if not isinstance(rows, list) or len(rows) != len(INSTANCES):
+        if not isinstance(rows, list) or len(rows) != len(_instances()):
             raise RuntimeHostError("acceptance cohort is not closed-world")
         report = {
             "schema_version": 1,
             "status": "pass",
             "operation": "acceptance-cohort",
+            **_registry_binding(),
             "session_id": session_id,
             "phase": phase,
             "requests": rows,
@@ -3640,11 +4707,7 @@ def _resume_acceptance_operation() -> dict[str, Any] | None:
         phase = payload.get("phase")
         sandbox = payload.get("sandbox")
         pool = payload.get("pool")
-        if (
-            phase != "cancel_cleanup"
-            or sandbox not in SANDBOXES
-            or pool not in POOLS
-        ):
+        if phase != "cancel_cleanup" or sandbox not in _sandboxes() or pool not in POOLS:
             raise RuntimeHostError("acceptance cancel operation is invalid")
         row = _run_acceptance_program(
             candidate,
@@ -3661,6 +4724,7 @@ def _resume_acceptance_operation() -> dict[str, Any] | None:
             "schema_version": 1,
             "status": "pass",
             "operation": "acceptance-cancel",
+            **_registry_binding(),
             "session_id": session_id,
             "phase": phase,
             "sandbox": sandbox,
@@ -3744,11 +4808,11 @@ def check(
             raise RuntimeHostError(f"installed directory drifted: {directory}")
     _reject_orphan_configs()
     loaded_units = _loaded_managed_units()
-    unexpected = loaded_units - set(ALL_UNITS)
+    unexpected = loaded_units - set(_all_units())
     if unexpected:
         raise RuntimeHostError("orphan shared-capacity unit is loaded")
     _reject_orphan_unit_files()
-    for unit, fragment_path in UNIT_FRAGMENT_PATHS.items():
+    for unit, fragment_path in _unit_fragment_paths().items():
         _validate_unit_fragment(unit, fragment_path)
     runtime_active = activation_mode in {
         "bootstrap-active",
@@ -3756,14 +4820,14 @@ def check(
         "activated",
     }
     if not runtime_active:
-        for unit in ALL_UNITS:
+        for unit in _all_units():
             if _systemctl_state(unit) != {"enabled": False, "active": False}:
                 raise RuntimeHostError(f"managed unit is not fail-closed: {unit}")
     else:
-        for timer in ALL_TIMERS:
+        for timer in _all_timers():
             if _systemctl_state(timer) != {"enabled": True, "active": True}:
                 raise RuntimeHostError(f"managed timer is not active: {timer}")
-        for service in ALL_SERVICES:
+        for service in _all_services():
             if _service_result(service) != ("success", "0"):
                 raise RuntimeHostError(f"managed service result failed: {service}")
         _activated_adapter_readback(
@@ -3771,12 +4835,23 @@ def check(
             require_zero=activation_mode == "bootstrap-active",
         )
     installed_state = _load_json(STATE_PATH, "runtime-host state")
+    _require_current_registry_binding(installed_state)
+    installed_manifest = _cohort_from_runtime_manifest(
+        installed_state.get("runtime_manifest"),
+    )
     if (
         installed_state.get("candidate_sha") != candidate.sha
         or installed_state.get("candidate_tree") != candidate.tree
         or installed_state.get("activation_status") != activation_mode
+        or installed_manifest.environments != _cohort().environments
+        or installed_manifest.provisioning_environments != _cohort().provisioning_environments
     ):
         raise RuntimeHostError("runtime-host state candidate drifted")
+    dynamic_storage_access = [
+        _validate_dynamic_storage_access(environment)
+        for environment in _cohort().provisioning_environments
+        if environment.layout_version == "dynamic-v1"
+    ]
     admission_token = installed_state.get("transaction_id")
     if runtime_active:
         if (
@@ -3811,17 +4886,926 @@ def check(
         "candidate_sha": candidate.sha,
         "candidate_tree": candidate.tree,
         "candidate_root": str(candidate.root),
-        "instances": list(INSTANCES),
+        "instances": list(_instances()),
+        "provisioning_instances": list(_provisioning_instances()),
+        **_registry_binding(),
+        "dynamic_storage_access": dynamic_storage_access,
         "activation_status": activation_mode,
-        "timers_active": len(ALL_TIMERS) if runtime_active else 0,
+        "timers_active": len(_all_timers()) if runtime_active else 0,
         "managed_units_disabled_and_inactive": (
-            len(ALL_UNITS) if activation_mode == "installed" else 0
+            len(_all_units()) if activation_mode == "installed" else 0
         ),
         "capacity_enabled_by_install_command": False,
         "adapter_activation_authorized": runtime_active,
         "positive_capacity_admission_authorized": activation_mode == "activated",
         "acceptance_only_admission_authorized": activation_mode == "acceptance-active",
         "capacity_enabled_by_installer": False,
+    }
+
+
+def _environment_units(runtime_id: str) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (
+            f"loom-shared-capacity-adapter@{runtime_id}-{pool}.service",
+            f"loom-shared-capacity-adapter@{runtime_id}-{pool}.timer",
+        )
+        for pool in POOLS
+    )
+
+
+def _environment_configs(runtime_id: str) -> tuple[Path, ...]:
+    return tuple(ADAPTER_CONFIG_ROOT / f"{runtime_id}-{pool}.toml" for pool in POOLS)
+
+
+def _registry_admission_intent(
+    runtime_id: str,
+    *,
+    states: frozenset[str],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    try:
+        raw = registry_contract._read_regular(
+            REGISTRY_SNAPSHOT_PATH,
+            limit=16 * 1024 * 1024,
+        )
+        snapshot = registry_contract.DeveloperEnvironmentRegistry.verify_snapshot(raw)
+    except (OSError, registry_contract.RegistryError) as exc:
+        raise RuntimeHostError("runtime registry admission intent is unavailable") from exc
+    matches = [
+        row
+        for row in cast(list[dict[str, Any]], snapshot["environments"])
+        if row["runtime_id"] == runtime_id
+    ]
+    if len(matches) != 1 or matches[0]["state"] not in states:
+        raise RuntimeHostError("runtime registry admission intent is invalid")
+    return snapshot, matches[0]
+
+
+def _registry_broker_state_db() -> Path:
+    try:
+        raw = registry_contract._read_regular(
+            SUPERVISOR_BASE_CONFIG_PATH,
+            limit=64 * 1024,
+        )
+        metadata = SUPERVISOR_BASE_CONFIG_PATH.lstat()
+        payload = tomllib.loads(raw.decode("ascii"))
+        state_db = Path(str(payload["state_db"]))
+    except (
+        OSError,
+        registry_contract.RegistryError,
+        UnicodeDecodeError,
+        tomllib.TOMLDecodeError,
+        KeyError,
+        TypeError,
+    ) as exc:
+        raise RuntimeHostError("fixed registry broker state is invalid") from exc
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or (metadata.st_uid, metadata.st_gid) != (0, 0)
+        or metadata.st_nlink != 1
+        or stat.S_IMODE(metadata.st_mode) != 0o644
+        or state_db != BROKER_STATE_DB_PATH
+    ):
+        raise RuntimeHostError("fixed registry broker state is invalid")
+    return state_db
+
+
+def _environment_admission_intent(
+    runtime_id: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if registry_contract.RUNTIME_ID_RE.fullmatch(runtime_id) is None:
+        raise RuntimeHostError("runtime environment identity is invalid")
+    payload = _load_json(
+        ENVIRONMENT_ADMISSION_INTENT_ROOT / f"{runtime_id}.json",
+        "environment admission intent",
+    )
+    unsigned = dict(payload)
+    payload_sha256 = unsigned.pop("payload_sha256", None)
+    immutable_fields = (
+        "env_id",
+        "principal_id",
+        "runtime_id",
+        "operation",
+        "target_candidate_id",
+        "current_candidate_id",
+        "resource_generation",
+        "expected_resource_generation",
+        "applied_resource_generation",
+        "idempotency_key",
+        "registry_generation",
+        "registry_payload_sha256",
+        "prior_admission_token",
+    )
+    immutable = {field: payload.get(field) for field in immutable_fields}
+    if (
+        payload.get("schema_version") != 1
+        or payload.get("kind") != ENVIRONMENT_ADMISSION_INTENT_KIND
+        or payload.get("runtime_id") != runtime_id
+        or payload.get("operation") not in {"create", "update", "retire"}
+        or payload.get("phase")
+        not in {"recorded", "fenced", "registry-transitioned", "activated", "retired"}
+        or registry_contract.ENV_ID_RE.fullmatch(str(payload.get("env_id"))) is None
+        or registry_contract.RUNTIME_ID_RE.fullmatch(str(payload.get("runtime_id"))) is None
+        or type(payload.get("resource_generation")) is not int
+        or cast(int, payload["resource_generation"]) < 1
+        or payload.get("expected_resource_generation") != payload["resource_generation"]
+        or payload.get("applied_resource_generation")
+        != cast(int, payload["expected_resource_generation"]) + 1
+        or type(payload.get("registry_generation")) is not int
+        or cast(int, payload["registry_generation"]) < 1
+        or DIGEST_RE.fullmatch(str(payload.get("registry_payload_sha256"))) is None
+        or DIGEST_RE.fullmatch(str(payload.get("intent_sha256"))) is None
+        or DIGEST_RE.fullmatch(str(payload_sha256)) is None
+        or _sha256(_canonical_json(unsigned)) != payload_sha256
+        or _sha256(_canonical_json(immutable)) != payload["intent_sha256"]
+        or (
+            payload.get("prior_admission_token") is not None
+            and re.fullmatch(
+                r"[0-9a-f]{32}",
+                str(payload.get("prior_admission_token")),
+            )
+            is None
+        )
+    ):
+        raise RuntimeHostError("environment admission intent is invalid")
+    snapshot, environment = _registry_admission_intent(
+        runtime_id,
+        states=frozenset({"ready", "active", "deploying", "quarantined"}),
+    )
+    exact_environment = {
+        "env_id": environment["env_id"],
+        "principal_id": environment["principal_id"],
+        "runtime_id": environment["runtime_id"],
+    }
+    applied_active = (
+        payload["operation"] in {"create", "update"}
+        and environment["state"] == "active"
+        and environment["current_candidate_id"] == payload["target_candidate_id"]
+    )
+    expected_generation = (
+        payload["applied_resource_generation"]
+        if applied_active
+        else payload["expected_resource_generation"]
+    )
+    if (
+        any(payload.get(field) != value for field, value in exact_environment.items())
+        or environment["resource_generation"] != expected_generation
+    ):
+        raise RuntimeHostError("environment admission intent registry binding drifted")
+    return snapshot, payload
+
+
+def _environment_admission_token(intent: Mapping[str, Any]) -> str:
+    return hashlib.sha256(
+        _canonical_json(
+            {
+                "env_id": intent["env_id"],
+                "runtime_id": intent["runtime_id"],
+                "expected_resource_generation": intent["expected_resource_generation"],
+                "applied_resource_generation": intent["applied_resource_generation"],
+                "current_candidate_id": intent["current_candidate_id"],
+                "target_candidate_id": intent["target_candidate_id"],
+                "operation": intent["operation"],
+                "intent_sha256": intent["intent_sha256"],
+            }
+        )
+    ).hexdigest()[:32]
+
+
+def _environment_broker_action(
+    source: str,
+    runtime_id: str,
+    *values: str,
+) -> str:
+    completed = _run(
+        (
+            sys.executable,
+            "-I",
+            "-B",
+            "-c",
+            source,
+            str(LOOM_RUNTIME_PYTHON_ROOT),
+            str(_registry_broker_state_db()),
+            runtime_id,
+            *values,
+        )
+    )
+    observed = completed.stdout.strip()
+    if observed != "open" and re.fullmatch(r"[0-9a-f]{32}", observed) is None:
+        raise RuntimeHostError("environment admission fence readback is invalid")
+    return observed
+
+
+def fence_registry_environment(runtime_id: str) -> dict[str, Any]:
+    """Persist and read back one exact-env fence after registry intent exists."""
+
+    _require_live_host()
+    snapshot, environment = _registry_admission_intent(
+        runtime_id,
+        states=frozenset({"deploying", "quarantined"}),
+    )
+    unsigned = {
+        "env_id": environment["env_id"],
+        "runtime_id": runtime_id,
+        "resource_generation": environment["resource_generation"],
+        "registry_generation": snapshot["generation"],
+        "registry_payload_sha256": snapshot["payload_sha256"],
+        "state": environment["state"],
+    }
+    token = hashlib.sha256(_canonical_json(unsigned)).hexdigest()[:32]
+    observed = _environment_broker_action(
+        _BROKER_ENVIRONMENT_CLOSE,
+        runtime_id,
+        token,
+    )
+    if observed != token:
+        raise RuntimeHostError("environment admission fence did not close exactly")
+    return {
+        "schema_version": 1,
+        "status": "ready",
+        "runtime_id": runtime_id,
+        "instances": [f"{runtime_id}-{pool}" for pool in POOLS],
+    }
+
+
+def fence_registry_environment_intent(
+    runtime_id: str,
+    intent_sha256: str,
+) -> dict[str, Any]:
+    """Close one exact environment while its registry state is still active/ready."""
+
+    _require_live_host()
+    snapshot, intent = _environment_admission_intent(runtime_id)
+    if intent["intent_sha256"] != intent_sha256 or intent["phase"] not in {"recorded", "fenced"}:
+        raise RuntimeHostError("environment admission intent digest is invalid")
+    environment = next(
+        row
+        for row in cast(list[dict[str, Any]], snapshot["environments"])
+        if row["runtime_id"] == runtime_id
+    )
+    if environment["state"] not in {"ready", "active"}:
+        raise RuntimeHostError("environment must be active or ready before fencing")
+    if (
+        environment["current_candidate_id"] != intent["current_candidate_id"]
+        or (intent["operation"] == "create" and environment["current_candidate_id"] is not None)
+        or (intent["operation"] == "update" and environment["current_candidate_id"] is None)
+        or (
+            intent["operation"] != "retire"
+            and not any(
+                candidate["candidate_id"] == intent["target_candidate_id"]
+                and candidate["env_id"] == intent["env_id"]
+                for candidate in cast(
+                    list[dict[str, Any]],
+                    snapshot["candidates"],
+                )
+            )
+        )
+    ):
+        raise RuntimeHostError("environment admission candidate binding drifted")
+    token = _environment_admission_token(intent)
+    current = environment_admission_readback(runtime_id)
+    if current is None:
+        if (
+            snapshot["generation"] != intent["registry_generation"]
+            or snapshot["payload_sha256"] != intent["registry_payload_sha256"]
+        ):
+            raise RuntimeHostError("environment admission registry snapshot drifted")
+        current = _environment_broker_action(
+            _BROKER_ENVIRONMENT_CLOSE,
+            runtime_id,
+            token,
+        )
+    elif current == intent.get("prior_admission_token") and current != token:
+        current = _environment_broker_action(
+            _BROKER_ENVIRONMENT_ROTATE,
+            runtime_id,
+            current,
+            token,
+        )
+    if current != token or environment_admission_readback(runtime_id) != token:
+        raise RuntimeHostError("environment admission fence did not close exactly")
+    unsigned = {
+        "schema_version": 1,
+        "status": "ready",
+        "runtime_id": runtime_id,
+        "intent_sha256": intent_sha256,
+        "admission_token": token,
+        "registry_generation": intent["registry_generation"],
+        "registry_payload_sha256": intent["registry_payload_sha256"],
+        "instances": [f"{runtime_id}-{pool}" for pool in POOLS],
+    }
+    return {**unsigned, "payload_sha256": _sha256(_canonical_json(unsigned))}
+
+
+def environment_admission_readback(runtime_id: str) -> str | None:
+    observed = _environment_broker_action(
+        _BROKER_ENVIRONMENT_READBACK,
+        runtime_id,
+    )
+    return None if observed == "open" else observed
+
+
+def reopen_registry_environment_admission(runtime_id: str) -> dict[str, Any]:
+    """Open only the exact persisted fence after the registry reports active."""
+
+    _require_live_host()
+    snapshot, intent = _environment_admission_intent(runtime_id)
+    environment = next(
+        row
+        for row in cast(list[dict[str, Any]], snapshot["environments"])
+        if row["runtime_id"] == runtime_id
+    )
+    if environment["state"] not in {"ready", "active"}:
+        raise RuntimeHostError("environment cannot reopen admission")
+    if intent["operation"] not in {"create", "update"}:
+        raise RuntimeHostError("retirement admission cannot be reopened")
+    expected_candidate = (
+        intent["target_candidate_id"]
+        if environment["state"] == "active"
+        and environment["current_candidate_id"] == intent["target_candidate_id"]
+        else intent["current_candidate_id"]
+    )
+    if environment["current_candidate_id"] != expected_candidate:
+        raise RuntimeHostError("environment admission reopen binding drifted")
+    deployment_id = intent.get("deployment_id")
+    if not isinstance(deployment_id, str) or not deployment_id.startswith("dep-"):
+        raise RuntimeHostError("environment admission deployment binding is invalid")
+    deployments = [
+        row
+        for row in cast(list[dict[str, Any]], snapshot["deployments"])
+        if row["deployment_id"] == deployment_id
+        and row["env_id"] == intent["env_id"]
+        and row["candidate_id"] == intent["target_candidate_id"]
+        and row["expected_resource_generation"] == intent["expected_resource_generation"]
+    ]
+    if len(deployments) != 1:
+        raise RuntimeHostError("environment admission deployment binding is invalid")
+    deployment = deployments[0]
+    committed = (
+        environment["state"] == "active"
+        and environment["current_candidate_id"] == intent["target_candidate_id"]
+    )
+    if committed:
+        if (
+            deployment["phase"] != "committed"
+            or deployment["applied_resource_generation"] != intent["applied_resource_generation"]
+            or deployment["finalization_payload_sha256"]
+            != intent.get("finalization_payload_sha256")
+            or DIGEST_RE.fullmatch(
+                str(intent.get("finalization_payload_sha256")),
+            )
+            is None
+            or not any(
+                row["deployment_id"] == deployment_id
+                and row["payload_sha256"] == intent["finalization_payload_sha256"]
+                and row["applied_resource_generation"] == intent["applied_resource_generation"]
+                and row["candidate_id"] == intent["target_candidate_id"]
+                for row in cast(
+                    list[dict[str, Any]],
+                    snapshot["deployment_finalizations"],
+                )
+            )
+        ):
+            raise RuntimeHostError(
+                "environment admission finalization binding is invalid",
+            )
+    elif deployment["phase"] != "failed":
+        raise RuntimeHostError("environment admission rollback binding is invalid")
+    token = environment_admission_readback(runtime_id)
+    if token is None:
+        return {
+            "schema_version": 1,
+            "status": "ready",
+            "runtime_id": runtime_id,
+            "instances": [f"{runtime_id}-{pool}" for pool in POOLS],
+        }
+    if token != _environment_admission_token(intent):
+        raise RuntimeHostError("environment admission token drifted")
+    observed = _environment_broker_action(
+        _BROKER_ENVIRONMENT_OPEN,
+        runtime_id,
+        token,
+    )
+    if observed != "open":
+        raise RuntimeHostError("environment admission fence remained closed")
+    return {
+        "schema_version": 1,
+        "status": "ready",
+        "runtime_id": runtime_id,
+        "instances": [f"{runtime_id}-{pool}" for pool in POOLS],
+    }
+
+
+def _restore_exact_units(states: Mapping[str, Mapping[str, bool]]) -> None:
+    _run(("systemctl", "daemon-reload"))
+    for unit, state in states.items():
+        if state["enabled"]:
+            _run(("systemctl", "enable", unit), expected={0, 1})
+        else:
+            _run(("systemctl", "disable", unit), expected={0, 1, 5})
+        if state["active"]:
+            _run(("systemctl", "start", unit))
+        else:
+            _run(("systemctl", "stop", unit), expected={0, 5})
+
+
+def _recover_environment_reconcile(runtime_id: str) -> None:
+    path = ENVIRONMENT_RECONCILE_ROOT / f"{runtime_id}.json"
+    if not path.exists():
+        return
+    payload = _load_json(path, "environment reconcile journal")
+    if (
+        payload.get("schema_version") != 1
+        or payload.get("runtime_id") != runtime_id
+        or not isinstance(payload.get("files"), dict)
+        or not isinstance(payload.get("units"), dict)
+        or (payload.get("state_b64") is not None and not isinstance(payload.get("state_b64"), str))
+    ):
+        raise RuntimeHostError("environment reconcile journal is invalid")
+    _restore_files(cast(dict[str, dict[str, Any]], payload["files"]))
+    encoded_state = payload.get("state_b64")
+    if encoded_state is None:
+        _remove_path(STATE_PATH)
+    else:
+        try:
+            previous_state = base64.b64decode(encoded_state, validate=True)
+        except (ValueError, TypeError) as exc:
+            raise RuntimeHostError("environment reconcile journal state is invalid") from exc
+        _atomic_write(STATE_PATH, previous_state, mode=0o600)
+    _restore_exact_units(cast(dict[str, dict[str, bool]], payload["units"]))
+    path.unlink()
+    _fsync_directory(ENVIRONMENT_RECONCILE_ROOT)
+
+
+def reconcile_registry_environment(runtime_id: str) -> dict[str, Any]:
+    """Incrementally publish one registry environment without touching peers."""
+
+    _require_live_host()
+    environment = _registry_environment(runtime_id, provisioning=True)
+    with _lock():
+        if environment_admission_readback(runtime_id) is None:
+            raise RuntimeHostError("environment admission is not fail-closed")
+        _recover_orphan()
+        _recover_environment_reconcile(runtime_id)
+        state = (
+            _load_json(STATE_PATH, "runtime-host state")
+            if STATE_PATH.exists()
+            else {
+                "schema_version": 1,
+                "activation_status": "installed",
+                "installation_mode": "fixed-registry-runtime",
+                "admission_state": "closed",
+            }
+        )
+        sha = state.get("candidate_sha")
+        tree = state.get("candidate_tree")
+        activation_status = state.get("activation_status")
+        legacy_candidate = isinstance(sha, str) and SHA_RE.fullmatch(sha) is not None
+        if activation_status not in {
+            "installed",
+            "bootstrap-active",
+            "acceptance-active",
+            "activated",
+        }:
+            raise RuntimeHostError("runtime-host state is unavailable for environment reconcile")
+        if legacy_candidate:
+            if not isinstance(tree, str) or SHA_RE.fullmatch(tree) is None:
+                raise RuntimeHostError("runtime-host state candidate binding is invalid")
+            _verify_installed_candidate(
+                Candidate(
+                    sha=cast(str, sha),
+                    tree=tree,
+                    source=CANDIDATE_PARENT / cast(str, sha) / "repo",
+                )
+            )
+        configs = (
+            *_environment_configs(runtime_id),
+            SUPERVISOR_CONFIG_PATH,
+            EMPTY_COHORT_PATH,
+        )
+        units = (
+            SUPERVISOR_SERVICE,
+            SUPERVISOR_TIMER,
+            *(unit for pair in _environment_units(runtime_id) for unit in pair),
+        )
+        previous_files = _capture_files(configs)
+        previous_units = {unit: _systemctl_state(unit) for unit in units}
+        previous_state = STATE_PATH.read_bytes() if STATE_PATH.exists() else None
+        transaction = {
+            "schema_version": 1,
+            "runtime_id": runtime_id,
+            "registry_generation": _cohort().generation,
+            "registry_payload_sha256": _cohort().payload_sha256,
+            "candidate_sha": environment.candidate_sha,
+            "candidate_tree": environment.candidate_tree,
+            "files": previous_files,
+            "units": previous_units,
+            "state_b64": (
+                None if previous_state is None else base64.b64encode(previous_state).decode("ascii")
+            ),
+        }
+        _ensure_directory(ENVIRONMENT_RECONCILE_ROOT, mode=0o700)
+        journal_path = ENVIRONMENT_RECONCILE_ROOT / f"{runtime_id}.json"
+        _atomic_write(journal_path, _canonical_json(transaction), mode=0o600)
+        try:
+            for service, timer in _environment_units(runtime_id):
+                _run(("systemctl", "stop", timer), expected={0, 5})
+                _run(("systemctl", "stop", service), expected={0, 5})
+            for pool, path in zip(POOLS, _environment_configs(runtime_id), strict=True):
+                _atomic_write(
+                    path,
+                    _render_adapter_config(environment, pool),
+                    mode=0o600,
+                )
+            _atomic_write(
+                SUPERVISOR_CONFIG_PATH,
+                _render_registry_supervisor_config_for_instances(
+                    _provisioning_instances(),
+                ),
+                mode=0o600,
+            )
+            _run(("systemctl", "daemon-reload"))
+            if activation_status != "installed":
+                _run(("systemctl", "start", SUPERVISOR_SERVICE))
+                if _service_result(SUPERVISOR_SERVICE) != ("success", "0"):
+                    raise RuntimeHostError("registry supervisor activation cycle failed")
+                _run(("systemctl", "enable", "--now", SUPERVISOR_TIMER))
+                for service, timer in _environment_units(runtime_id):
+                    _run(("systemctl", "start", service))
+                    if _service_result(service) != ("success", "0"):
+                        raise RuntimeHostError("environment adapter activation cycle failed")
+                    _run(("systemctl", "enable", "--now", timer))
+            updated = dict(state)
+            updated.update(_registry_binding())
+            updated["runtime_manifest"] = _runtime_manifest()
+            _atomic_write(STATE_PATH, _canonical_json(updated), mode=0o600)
+            report = check_registry_environment(
+                runtime_id,
+                require_admission_open=False,
+            )
+            _remove_path(EMPTY_COHORT_PATH)
+        except Exception:
+            _restore_files(previous_files)
+            if previous_state is None:
+                _remove_path(STATE_PATH)
+            else:
+                _atomic_write(STATE_PATH, previous_state, mode=0o600)
+            _restore_exact_units(previous_units)
+            raise
+        journal_path.unlink(missing_ok=True)
+        _fsync_directory(ENVIRONMENT_RECONCILE_ROOT)
+        return report
+
+
+def check_registry_environment(
+    runtime_id: str,
+    *,
+    require_admission_open: bool = True,
+) -> dict[str, Any]:
+    environment = _registry_environment(runtime_id, provisioning=True)
+    state = _load_json(STATE_PATH, "runtime-host state")
+    activation_status = state.get("activation_status")
+    admission_fence = environment_admission_readback(runtime_id)
+    if environment.state == "deploying" and admission_fence is None:
+        raise RuntimeHostError("deploying environment admission is open")
+    if environment.state == "active" and require_admission_open and admission_fence is not None:
+        raise RuntimeHostError("active environment admission remains fenced")
+    if environment.state == "active" and not require_admission_open and admission_fence is None:
+        raise RuntimeHostError("active reconcile lost its admission fence")
+    expected_supervisor_config = (
+        _render_registry_supervisor_config_for_instances(
+            _provisioning_instances(),
+        )
+        if environment.state == "deploying"
+        else _render_registry_supervisor_config()
+    )
+    if SUPERVISOR_CONFIG_PATH.read_bytes() != expected_supervisor_config:
+        raise RuntimeHostError("registry supervisor config drifted")
+    for pool, path in zip(POOLS, _environment_configs(runtime_id), strict=True):
+        metadata = path.lstat()
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISREG(metadata.st_mode)
+            or (metadata.st_uid, metadata.st_gid) != (0, 0)
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or path.read_bytes() != _render_adapter_config(environment, pool)
+        ):
+            raise RuntimeHostError("environment adapter config drifted")
+    for service, timer in _environment_units(runtime_id):
+        if activation_status == "installed":
+            expected = {"enabled": False, "active": False}
+            if _systemctl_state(service) != expected or _systemctl_state(timer) != expected:
+                raise RuntimeHostError("environment adapter is not fail-closed")
+        else:
+            if _service_result(service) != ("success", "0") or _systemctl_state(timer) != {
+                "enabled": True,
+                "active": True,
+            }:
+                raise RuntimeHostError("environment adapter activation readback failed")
+    return {
+        "schema_version": 1,
+        "status": "prepared" if activation_status == "installed" else "ready",
+        "runtime_id": runtime_id,
+        "candidate_id": environment.candidate_id,
+        "candidate_sha": environment.candidate_sha,
+        "candidate_tree": environment.candidate_tree,
+        "resource_generation": environment.resource_generation,
+        **_registry_binding(),
+        "instances": [f"{runtime_id}-{pool}" for pool in POOLS],
+        "activation_status": activation_status,
+    }
+
+
+def _update_environment_retire(
+    path: Path,
+    payload: dict[str, Any],
+    phase: str,
+) -> None:
+    payload["phase"] = phase
+    _atomic_write(path, _canonical_json(payload), mode=0o600)
+
+
+def _require_file_snapshot(snapshot: Mapping[str, Any]) -> None:
+    paths = tuple(Path(raw_path) for raw_path in snapshot)
+    if _capture_files(paths) != snapshot:
+        raise RuntimeHostError("peer runtime evidence changed during retirement")
+
+
+def _rollback_environment_retire(
+    journal_path: Path,
+    payload: Mapping[str, Any],
+) -> None:
+    files = payload.get("files")
+    units = payload.get("units")
+    peer_files = payload.get("peer_files")
+    if (
+        not isinstance(files, dict)
+        or not isinstance(units, dict)
+        or not isinstance(peer_files, dict)
+    ):
+        raise RuntimeHostError("environment retire journal is invalid")
+    _run(("systemctl", "stop", SUPERVISOR_TIMER), expected={0, 5})
+    _run(("systemctl", "stop", SUPERVISOR_SERVICE), expected={0, 5})
+    _restore_files(files)
+    _run(("systemctl", "daemon-reload"))
+    supervisor_was_operational = any(
+        cast(dict[str, Any], units).get(unit, {}).get(field) is True
+        for unit in (SUPERVISOR_SERVICE, SUPERVISOR_TIMER)
+        for field in ("enabled", "active")
+    )
+    supervisor_config = cast(dict[str, Any], files).get(
+        str(SUPERVISOR_CONFIG_PATH),
+        {},
+    )
+    if supervisor_was_operational and supervisor_config.get("present") is True:
+        _run(("systemctl", "start", SUPERVISOR_SERVICE))
+        if _service_result(SUPERVISOR_SERVICE) != ("success", "0"):
+            raise RuntimeHostError("environment retire rollback supervisor failed")
+    _restore_exact_units(cast(dict[str, dict[str, bool]], units))
+    _require_file_snapshot(cast(dict[str, dict[str, Any]], peer_files))
+    journal_path.unlink(missing_ok=True)
+    _fsync_directory(ENVIRONMENT_RETIRE_ROOT)
+
+
+def _recover_environment_retire(runtime_id: str) -> None:
+    journal_path = ENVIRONMENT_RETIRE_ROOT / f"{runtime_id}.json"
+    if not journal_path.exists():
+        return
+    payload = _load_json(journal_path, "environment retire journal")
+    if (
+        payload.get("schema_version") != 1
+        or payload.get("operation") != "retire-environment"
+        or payload.get("runtime_id") != runtime_id
+        or payload.get("phase")
+        not in {
+            "prepared",
+            "supervisor-stopped",
+            "target-stopped",
+            "observations-removed",
+            "reduced-config-published",
+            "supervisor-migrated",
+            "empty-cohort-published",
+            "read-back",
+            "committed",
+        }
+        or not isinstance(payload.get("files"), dict)
+        or not isinstance(payload.get("peer_files"), dict)
+        or not isinstance(payload.get("units"), dict)
+    ):
+        raise RuntimeHostError("environment retire journal is invalid")
+    _rollback_environment_retire(journal_path, payload)
+
+
+def retire_registry_environment(runtime_id: str) -> dict[str, Any]:
+    """Transactionally subtract one drained environment from the fixed runtime."""
+
+    _require_live_host()
+    if registry_contract.RUNTIME_ID_RE.fullmatch(runtime_id) is None:
+        raise RuntimeHostError("runtime environment identity is invalid")
+    with _lock():
+        if environment_admission_readback(runtime_id) is None:
+            raise RuntimeHostError("retirement requires a closed environment fence")
+        _recover_environment_retire(runtime_id)
+        snapshot, target = _registry_admission_intent(
+            runtime_id,
+            states=frozenset({"quarantined"}),
+        )
+        peer_runtime_ids = tuple(
+            sorted(
+                str(environment["runtime_id"])
+                for environment in cast(
+                    list[dict[str, Any]],
+                    snapshot["environments"],
+                )
+                if environment["state"] == "active" and environment["runtime_id"] != runtime_id
+            )
+        )
+        peer_instances = tuple(
+            f"{peer_runtime_id}-{pool}" for peer_runtime_id in peer_runtime_ids for pool in POOLS
+        )
+        target_instances = tuple(f"{runtime_id}-{pool}" for pool in POOLS)
+        target_observations = tuple(
+            STATE_ROOT / "observations" / f"{instance}.json" for instance in target_instances
+        )
+        peer_observations = tuple(
+            STATE_ROOT / "observations" / f"{instance}.json" for instance in peer_instances
+        )
+        peer_handoffs = tuple(
+            STATE_ROOT / "handoffs" / "current" / f"{instance}.json" for instance in peer_instances
+        )
+        base = _registry_supervisor_base()
+        try:
+            supervisor_state_path = Path(str(base["supervisor_state_path"]))
+            handoff_root = Path(str(base["handoff_dir"]))
+        except (KeyError, TypeError) as exc:
+            raise RuntimeHostError("fixed supervisor runtime paths are invalid") from exc
+        if (
+            not supervisor_state_path.is_absolute()
+            or not handoff_root.is_absolute()
+            or STATE_ROOT not in supervisor_state_path.parents
+            or STATE_ROOT not in handoff_root.parents
+            or ".." in supervisor_state_path.parts
+            or ".." in handoff_root.parts
+        ):
+            raise RuntimeHostError("fixed supervisor runtime paths are invalid")
+        zero_cohort = not peer_instances
+        rollback_paths = [
+            *_environment_configs(runtime_id),
+            *target_observations,
+            SUPERVISOR_CONFIG_PATH,
+            EMPTY_COHORT_PATH,
+        ]
+        if zero_cohort:
+            rollback_paths.extend(
+                (
+                    supervisor_state_path,
+                    handoff_root / "current",
+                )
+            )
+        units = (
+            SUPERVISOR_SERVICE,
+            SUPERVISOR_TIMER,
+            *(unit for pair in _environment_units(runtime_id) for unit in pair),
+        )
+        transaction = {
+            "schema_version": 1,
+            "operation": "retire-environment",
+            "phase": "prepared",
+            "runtime_id": runtime_id,
+            "env_id": target["env_id"],
+            "resource_generation": target["resource_generation"],
+            "registry_generation": snapshot["generation"],
+            "registry_payload_sha256": snapshot["payload_sha256"],
+            "zero_cohort": zero_cohort,
+            "peer_instances": list(peer_instances),
+            "files": _capture_files(tuple(rollback_paths)),
+            "peer_files": _capture_files((*peer_observations, *peer_handoffs)),
+            "units": {unit: _systemctl_state(unit) for unit in units},
+        }
+        _ensure_directory(ENVIRONMENT_RETIRE_ROOT, mode=0o700)
+        journal_path = ENVIRONMENT_RETIRE_ROOT / f"{runtime_id}.json"
+        _atomic_write(journal_path, _canonical_json(transaction), mode=0o600)
+        try:
+            _run(("systemctl", "stop", SUPERVISOR_TIMER), expected={0, 5})
+            _run(("systemctl", "stop", SUPERVISOR_SERVICE), expected={0, 5})
+            _update_environment_retire(journal_path, transaction, "supervisor-stopped")
+            for service, timer in _environment_units(runtime_id):
+                _run(("systemctl", "disable", "--now", timer), expected={0, 1, 5})
+                _run(("systemctl", "stop", service), expected={0, 5})
+            _update_environment_retire(journal_path, transaction, "target-stopped")
+            for path in target_observations:
+                _remove_path(path)
+            _update_environment_retire(
+                journal_path,
+                transaction,
+                "observations-removed",
+            )
+            if zero_cohort:
+                _run(
+                    ("systemctl", "disable", SUPERVISOR_TIMER),
+                    expected={0, 1, 5},
+                )
+                _run(
+                    ("systemctl", "disable", SUPERVISOR_SERVICE),
+                    expected={0, 1, 5},
+                )
+                _remove_path(SUPERVISOR_CONFIG_PATH)
+                _remove_path(supervisor_state_path)
+                _remove_path(handoff_root / "current")
+                empty = {
+                    "schema_version": 1,
+                    "status": "empty-fail-closed",
+                    "retired_runtime_id": runtime_id,
+                    "registry_generation": snapshot["generation"],
+                    "registry_payload_sha256": snapshot["payload_sha256"],
+                }
+                _atomic_write(
+                    EMPTY_COHORT_PATH,
+                    _canonical_json(empty),
+                    mode=0o600,
+                )
+                _update_environment_retire(
+                    journal_path,
+                    transaction,
+                    "empty-cohort-published",
+                )
+            else:
+                reduced_config = _render_registry_supervisor_config_for_instances(
+                    peer_instances,
+                )
+                _atomic_write(
+                    SUPERVISOR_CONFIG_PATH,
+                    reduced_config,
+                    mode=0o600,
+                )
+                _update_environment_retire(
+                    journal_path,
+                    transaction,
+                    "reduced-config-published",
+                )
+                _run(("systemctl", "start", SUPERVISOR_SERVICE))
+                if _service_result(SUPERVISOR_SERVICE) != ("success", "0"):
+                    raise RuntimeHostError(
+                        "registry supervisor subtractive migration failed",
+                    )
+                _update_environment_retire(
+                    journal_path,
+                    transaction,
+                    "supervisor-migrated",
+                )
+                supervisor_units = {
+                    unit: cast(dict[str, dict[str, bool]], transaction["units"])[unit]
+                    for unit in (SUPERVISOR_SERVICE, SUPERVISOR_TIMER)
+                }
+                _restore_exact_units(supervisor_units)
+                if SUPERVISOR_CONFIG_PATH.read_bytes() != reduced_config:
+                    raise RuntimeHostError(
+                        "registry supervisor reduced config drifted",
+                    )
+                _require_file_snapshot(
+                    cast(dict[str, dict[str, Any]], transaction["peer_files"]),
+                )
+            for path in target_observations:
+                if path.exists() or path.is_symlink():
+                    raise RuntimeHostError("retired adapter observation remains installed")
+            for service, timer in _environment_units(runtime_id):
+                if _systemctl_state(service) != {
+                    "enabled": False,
+                    "active": False,
+                } or _systemctl_state(timer) != {
+                    "enabled": False,
+                    "active": False,
+                }:
+                    raise RuntimeHostError("retired adapter unit remains enabled")
+            if zero_cohort:
+                if (
+                    SUPERVISOR_CONFIG_PATH.exists()
+                    or SUPERVISOR_CONFIG_PATH.is_symlink()
+                    or _systemctl_state(SUPERVISOR_SERVICE) != {"enabled": False, "active": False}
+                    or _systemctl_state(SUPERVISOR_TIMER) != {"enabled": False, "active": False}
+                ):
+                    raise RuntimeHostError("empty supervisor cohort is not fail-closed")
+            _update_environment_retire(journal_path, transaction, "read-back")
+            for path in _environment_configs(runtime_id):
+                _remove_path(path)
+            _run(("systemctl", "daemon-reload"))
+            if any(path.exists() or path.is_symlink() for path in _environment_configs(runtime_id)):
+                raise RuntimeHostError("retired adapter config remains installed")
+            _update_environment_retire(journal_path, transaction, "committed")
+        except Exception:
+            _rollback_environment_retire(journal_path, transaction)
+            raise
+        journal_path.unlink()
+        _fsync_directory(ENVIRONMENT_RETIRE_ROOT)
+    return {
+        "schema_version": 1,
+        "status": "ready",
+        "runtime_id": runtime_id,
+        "instances": list(target_instances),
+        "peer_instances": list(peer_instances),
+        "zero_cohort": zero_cohort,
+        "registry_generation": snapshot["generation"],
+        "registry_payload_sha256": snapshot["payload_sha256"],
     }
 
 
@@ -3865,6 +5849,8 @@ def install(candidate: Candidate) -> dict[str, Any]:
                 "activation_status": "installed",
                 "installed_at": datetime.now(UTC).isoformat(),
                 "transaction_id": journal["transaction_id"],
+                **_registry_binding(),
+                "runtime_manifest": _runtime_manifest(),
             }
             _atomic_write(STATE_PATH, _canonical_json(state), mode=0o600)
             _publish_unit_state()
@@ -3887,14 +5873,16 @@ def activation_plan(sha: str) -> dict[str, Any]:
         "artifact_type": "shared-capacity-runtime-host-activation-plan",
         "mutation_authorized": False,
         "candidate_sha": sha,
+        **_registry_binding(),
+        "instances": list(_instances()),
         "steps": [
             "verify-installed-inactive-exact-candidate",
             "journal-and-fence-new-broker-requests-by-installed-transaction",
-            "require-six-terminal-disabled-zero-handoffs-and-zero-broker-counters",
-            "validate-six-config-secret-combined-receipt-and-zero-cp-policies",
+            "require-registry-terminal-disabled-zero-handoffs-and-zero-broker-counters",
+            "validate-registry-config-secret-combined-receipt-and-zero-cp-policies",
             "run-supervisor-once-and-read-back-complete-generation",
             "enable-supervisor-timer",
-            "run-and-enable-six-adapter-timers",
+            "run-and-enable-registry-adapter-timers",
             "commit-bootstrap-active-state-with-exact-admission-fence-closed",
             "rollback-to-all-disabled-on-any-failure",
         ],
@@ -3904,6 +5892,7 @@ def activation_plan(sha: str) -> dict[str, Any]:
 
 def activate(sha: str) -> dict[str, Any]:
     _require_live_host()
+    _require_active_cohort()
     if SHA_RE.fullmatch(sha) is None:
         raise RuntimeHostError("activation requires the installed full candidate SHA")
     with _lock():
@@ -3978,10 +5967,12 @@ def admission_plan(sha: str) -> dict[str, Any]:
         "artifact_type": "shared-capacity-runtime-host-admission-plan",
         "mutation_authorized": False,
         "candidate_sha": sha,
+        **_registry_binding(),
+        "instances": list(_instances()),
         "steps": [
             "verify-bootstrap-active-runtime-and-exact-closed-admission-fence",
             "require-fresh-complete-candidate-bound-platform-health-live-evidence",
-            "re-read-six-zero-handoffs-policies-workers-and-adapter-state",
+            "re-read-registry-zero-handoffs-policies-workers-and-adapter-state",
             "persist-evidence-digest-before-opening-admission",
             "release-only-the-installed-transaction-admission-fence",
             "commit-positive-capacity-admitted-state",
@@ -4028,10 +6019,7 @@ def _resume_admission(
             current_evidence_sha256,
             current_gate6_sha256,
         ) = _positive_capacity_admission_gate(candidate)
-        if (
-            current_evidence_sha256 != evidence_sha256
-            or current_gate6_sha256 != gate6_sha256
-        ):
+        if current_evidence_sha256 != evidence_sha256 or current_gate6_sha256 != gate6_sha256:
             raise RuntimeHostError("positive-capacity admission evidence digest drifted")
         _activated_adapter_readback(candidate, require_zero=True)
         if _admission_fence(candidate) != admission_token:
@@ -4069,6 +6057,7 @@ def _resume_admission(
 
 def admit(sha: str) -> dict[str, Any]:
     _require_live_host()
+    _require_active_cohort()
     if SHA_RE.fullmatch(sha) is None:
         raise RuntimeHostError("admission requires the installed full candidate SHA")
     with _lock():
@@ -4120,7 +6109,12 @@ def admit(sha: str) -> dict[str, Any]:
 
 
 def acceptance_plan(command: str, *, session_id: str) -> dict[str, Any]:
-    if command not in {"acceptance-open", "acceptance-cohort", "acceptance-cancel", "acceptance-close"}:
+    if command not in {
+        "acceptance-open",
+        "acceptance-cohort",
+        "acceptance-cancel",
+        "acceptance-close",
+    }:
         raise RuntimeHostError("acceptance operation is invalid")
     if re.fullmatch(r"[0-9a-f]{32}", session_id) is None:
         raise RuntimeHostError("acceptance session identity is invalid")
@@ -4130,7 +6124,8 @@ def acceptance_plan(command: str, *, session_id: str) -> dict[str, Any]:
         "mutation_authorized": False,
         "session_id": session_id,
         "general_positive_capacity_admission_authorized": False,
-        "fixed_sandboxes": list(SANDBOXES),
+        "sandboxes": list(_sandboxes()),
+        **_registry_binding(),
         "fixed_pools": list(POOLS),
         "fixed_phases": list(ACCEPTANCE_PHASES),
         "fixed_phase_ttl_seconds": {
@@ -4156,6 +6151,12 @@ def _acceptance_state_candidate(
     if re.fullmatch(r"[0-9a-f]{32}", session_id) is None:
         raise RuntimeHostError("acceptance session identity is invalid")
     state = _load_json(STATE_PATH, "runtime-host state")
+    _require_current_registry_binding(state)
+    if (
+        _cohort_from_runtime_manifest(state.get("runtime_manifest")).environments
+        != _cohort().environments
+    ):
+        raise RuntimeHostError("acceptance runtime manifest drifted")
     sha = state.get("candidate_sha")
     tree = state.get("candidate_tree")
     token = state.get("transaction_id")
@@ -4196,6 +6197,8 @@ def _acceptance_operation_payload(
         "candidate_tree": candidate.tree,
         "admission_token": admission_token,
         "session_id": session_id,
+        **_registry_binding(),
+        "runtime_manifest": _runtime_manifest(),
     }
     if extra is not None:
         payload.update(extra)
@@ -4205,6 +6208,7 @@ def _acceptance_operation_payload(
 
 def acceptance_open(session_id: str) -> dict[str, Any]:
     _require_live_host()
+    _require_active_cohort()
     with _lock():
         _recover_orphan()
         candidate, _state, token = _acceptance_state_candidate(
@@ -4213,9 +6217,7 @@ def acceptance_open(session_id: str) -> dict[str, Any]:
         )
         check(candidate, activation_mode="bootstrap-active")
         session = _acceptance_session_readback(candidate, session_id)
-        required_open_index = (
-            LIVE_PHASES.index("multi_candidate_overlap") * len(SANDBOXES)
-        )
+        required_open_index = LIVE_PHASES.index("multi_candidate_overlap") * len(_sandboxes())
         if (
             session.get("status") != "running"
             or not isinstance(session.get("next_phase_index"), int)
@@ -4246,6 +6248,7 @@ def acceptance_open(session_id: str) -> dict[str, Any]:
 
 def acceptance_cohort(session_id: str, phase: str) -> dict[str, Any]:
     _require_live_host()
+    _require_active_cohort()
     with _lock():
         _recover_orphan()
         candidate, _state, token = _acceptance_state_candidate(
@@ -4263,7 +6266,7 @@ def acceptance_cohort(session_id: str, phase: str) -> dict[str, Any]:
             phase,
         )
         if existing is not None and (
-            not isinstance(existing, list) or len(existing) != len(INSTANCES)
+            not isinstance(existing, list) or len(existing) != len(_instances())
         ):
             raise RuntimeHostError("acceptance cohort readback is invalid")
         if checkpoint_offset > 0 and existing is None:
@@ -4298,6 +6301,7 @@ def acceptance_cancel(
     pool: str,
 ) -> dict[str, Any]:
     _require_live_host()
+    _require_active_cohort()
     with _lock():
         _recover_orphan()
         candidate, _state, token = _acceptance_state_candidate(
@@ -4323,6 +6327,7 @@ def acceptance_cancel(
 
 def acceptance_close(session_id: str) -> dict[str, Any]:
     _require_live_host()
+    _require_active_cohort()
     with _lock():
         _recover_orphan()
         candidate, _state, token = _acceptance_state_candidate(
@@ -4353,12 +6358,14 @@ def rollback_plan(sha: str) -> dict[str, Any]:
         "artifact_type": "shared-capacity-runtime-host-rollback-plan",
         "mutation_authorized": False,
         "candidate_sha": sha,
+        **_registry_binding(),
+        "instances": list(_instances()),
         "steps": [
             "persist-and-journal-root-owned-recovery-entrypoint",
             "journal-and-persistently-fence-new-broker-requests",
-            "cancel-only-the-six-exact-candidate-sandbox-pool-requests",
-            "reconcile-and-read-back-six-terminal-zero-handoffs",
-            "read-back-six-disabled-zero-control-plane-policies-and-worker-jobs",
+            "cancel-only-the-registry-exact-candidate-sandbox-pool-requests",
+            "reconcile-and-read-back-registry-terminal-zero-handoffs",
+            "read-back-registry-disabled-zero-control-plane-policies-and-worker-jobs",
             "stop-current-services-and-timers-after-external-capacity-is-zero",
             "restore-previous-configs-and-exact-units",
             "restore-previous-enabled-and-active-state",
@@ -4419,8 +6426,7 @@ def recover() -> dict[str, Any]:
     with _lock():
         active = _active_journal()
         acceptance_active = (
-            ACCEPTANCE_OPERATION_PATH.exists()
-            or ACCEPTANCE_OPERATION_PATH.is_symlink()
+            ACCEPTANCE_OPERATION_PATH.exists() or ACCEPTANCE_OPERATION_PATH.is_symlink()
         )
         if active is None and not acceptance_active:
             return {
@@ -4428,9 +6434,7 @@ def recover() -> dict[str, Any]:
                 "status": "no-active-transaction",
             }
         transaction_id = (
-            active[1].get("transaction_id")
-            if active is not None
-            else "acceptance-operation"
+            active[1].get("transaction_id") if active is not None else "acceptance-operation"
         )
         _recover_orphan()
         return {
@@ -4466,7 +6470,7 @@ def _parser() -> argparse.ArgumentParser:
     cancel_parser = subparsers.add_parser("acceptance-cancel")
     cancel_parser.add_argument("--session-id", required=True)
     cancel_parser.add_argument("--phase", choices=("cancel_cleanup",), required=True)
-    cancel_parser.add_argument("--sandbox", choices=SANDBOXES, required=True)
+    cancel_parser.add_argument("--sandbox", required=True)
     cancel_parser.add_argument("--pool", choices=POOLS, required=True)
     cancel_parser.add_argument("--execute", action="store_true")
     check_parser = subparsers.add_parser("check")
@@ -4501,7 +6505,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else activation_plan(args.candidate_sha)
             )
         elif args.command == "admit":
-            result = admit(args.candidate_sha) if args.execute else admission_plan(args.candidate_sha)
+            result = (
+                admit(args.candidate_sha) if args.execute else admission_plan(args.candidate_sha)
+            )
         elif args.command == "acceptance-open":
             result = (
                 acceptance_open(args.session_id)

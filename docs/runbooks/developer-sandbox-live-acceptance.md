@@ -1,9 +1,12 @@
 # Developer sandbox live acceptance
 
-This runbook closes the live, candidate-bound acceptance scope for the three
-shared developer sandboxes. Pre-merge acceptance deliberately runs three
-different candidates at the same time: one full SHA/tree for each of `qianyi`,
-`hongjian`, and `devansh`. It covers a directly observed overlap window, a
+This runbook closes the live, candidate-bound acceptance scope for the
+registry-owned active developer-environment cohort. Pre-merge acceptance
+deliberately runs a different candidate in every selected environment at the
+same time. The cohort is projected from the root-owned registry snapshot,
+contains at least two active environments with committed deployments, and has
+no fixed upper cardinality or developer-name allowlist. It covers a directly
+observed overlap window, a
 large multi-node batch, simultaneous fair-share pressure, non-Loom Slurm
 peers, container cgroup containment, storage/I/O bounds, and recovery from
 cancel, TTL expiry, submit-host restart, and worker crash.
@@ -20,12 +23,13 @@ journal mutation requires explicit `--execute`.
 Do not use repository tests, a Draft PR, a green CI result, or an earlier
 candidate's live artifact as a substitute for this acceptance.
 
-## Fixed scope
+## Registry-owned scope
 
 The verifier rejects changes to this topology:
 
 - submit host: `trt-eai-oldlab-2`;
-- sandboxes: `qianyi`, `hongjian`, and `devansh`;
+- environments: the complete ordered active-and-committed cohort projected
+  from the supplied root-owned registry snapshot, with at least two entries;
 - pools: `oldlab` (20 slots, 10 pending) and `gb10` (120 slots, 24 pending);
 - OLDLAB nodes 1 through 5;
 - GB10 infrastructure nodes 1 through 15;
@@ -39,9 +43,10 @@ drain/quiescence gate defers disruptive convergence until acceptance-owned
 work is quiescent; the acceptance procedure must never cancel or preempt an
 external job. The complete acceptance boundary remains all 15 GB10 nodes.
 
-The pre-merge `candidates` map is closed-world: it contains exactly `qianyi`,
-`hongjian`, and `devansh`, each with a full SHA, full tree, and that sandbox's
-runtime-receipt chain. All three SHAs must be pairwise distinct; every tree
+The pre-merge `candidates` map is closed-world relative to that registry
+projection: it contains exactly one entry for every projected runtime ID, each
+with a full SHA, full tree, and that environment's runtime-receipt chain. All
+SHAs must be pairwise distinct; every tree
 must still be a full hash and bind the corresponding SHA's installed content.
 Every sandbox phase, capacity sample, burst, runtime envelope, fairness
 participant, fault row, and overlap observation binds the corresponding map
@@ -63,16 +68,17 @@ acceptance window. Evidence is closed-schema, canonical, secret-free,
 timezone-qualified, and collected no later than five minutes after the final
 readback.
 
-The artifact also contains exactly 18 cross-sandbox denials: all six directed
-source-to-foreign-target sandbox pairs multiplied by `worker_identity`,
-`object_store`, and `result_path`. Every row binds both the source sandbox's
+For a cohort of `N` environments, the artifact contains exactly
+`3 * N * (N - 1)` cross-environment denials: every directed
+source-to-foreign-target pair multiplied by `worker_identity`, `object_store`,
+and `result_path`. Every row binds both the source environment's
 SHA/tree and the target sandbox's different SHA/tree, lands in the source
 sandbox's declared preflight or baseline phase, and reports `denied=true`.
 
-The eventual exact squash-merged staging candidate is not a fourth entry in
-the pre-merge map. It is recorded only in the independent top-level
+The eventual exact squash-merged staging candidate is not another entry in the
+pre-merge map. It is recorded only in the independent top-level
 `promotion_candidate` object and its `promotion_staging_regression` phase.
-That SHA must differ from all three pre-merge SHAs, and the phase's canonical
+That SHA must differ from every pre-merge SHA, and the phase's canonical
 digest must match its content.
 
 An overlap observation is not accepted from `job_active=true` or
@@ -92,11 +98,12 @@ observation sequence, and canonical sample digest.
 Before creating a session, record all of the following outside the artifact:
 
 1. the separately authorized live test window;
-2. the three exact, distinct pre-merge sandbox SHA/tree pairs;
+2. the exact, distinct SHA/tree pair for every environment in the registry
+   cohort;
 3. the persistent renewal timer is active and a fresh combined runtime receipt
-   generation exists for all three sandboxes and both NFS domains;
-4. installed capacity broker, six adapters, supervisor, Slurm policy, cgroup
-   guard, and remote-link readbacks for each sandbox's exact candidate;
+   generation exists for the complete cohort and both NFS domains;
+4. installed capacity broker, two adapters per environment, supervisor, Slurm
+   policy, cgroup guard, and remote-link readbacks for every exact candidate;
 5. a healthy non-Loom peer workload in each Slurm domain;
 6. reviewed disk, cache, read-I/O, and write-I/O bounds;
 7. an operator who can drain only the acceptance-owned requests, jobs, and
@@ -108,7 +115,7 @@ write, manual `/etc/slurm` edit, unscoped `scancel`, Docker prune, or
 host-wide process kill. The acceptance harness's `--execute` acknowledges only
 its own journal write; it does not expand live authority.
 
-Render the fixed plan from any checkout:
+Render the plan from any checkout:
 
 ```bash
 python scripts/ops/developer_sandbox_live_acceptance.py
@@ -124,14 +131,15 @@ Run this only as root on `trt-eai-oldlab-2` after the admission checks pass:
 
 ```bash
 sudo python scripts/ops/developer_sandbox_live_acceptance.py session-start \
-  --qianyi-sha <FULL_QIANYI_SHA> \
-  --qianyi-tree <FULL_QIANYI_TREE> \
-  --hongjian-sha <FULL_HONGJIAN_SHA> \
-  --hongjian-tree <FULL_HONGJIAN_TREE> \
-  --devansh-sha <FULL_DEVANSH_SHA> \
-  --devansh-tree <FULL_DEVANSH_TREE> \
+  --registry-snapshot <ROOT_OWNED_REGISTRY_SNAPSHOT_JSON> \
+  --candidates <EXACT_REGISTRY_COHORT_CANDIDATE_MAP_JSON> \
   --execute
 ```
+
+The candidate-map JSON is keyed by the projected runtime IDs and contains only
+`sha` and `tree` for each entry. The command rejects fewer than two active
+committed registry environments, a missing or extra map entry, registry
+candidate drift, or duplicate candidate SHAs.
 
 The command requires every directory from the state root through `sessions`,
 the session, `checkpoints`, and `trusted-receipts` to be non-symlink
@@ -158,7 +166,7 @@ record one immutable trusted receipt for each sandbox/pool pair. The command
 reads only these fixed root-owned producer paths:
 
 - `/var/lib/loom-shared-capacity/observations/<sandbox>-<pool>.json`;
-- `/srv/loom/developer-sandboxes/<sandbox>/sandbox-state.json`;
+- the registry environment's exact `state_root/sandbox-state.json`;
 - `/var/lib/loom-developer-sandbox-live-authority/overlap/<pool>/<sandbox>/<candidate_sha>/<job_id>.json`.
 
 The first path is the existing shared-capacity-adapter output. It remains a
@@ -190,7 +198,7 @@ are:
   "kind": "loom.developer-sandbox.live-overlap-observation",
   "source_host": "trt-eai-oldlab-2",
   "observed_at": "<RFC3339>",
-  "sandbox": "qianyi",
+  "sandbox": "<registry-runtime-id>",
   "pool": "oldlab",
   "candidate_sha": "<40 lowercase hex>",
   "candidate_tree": "<40 lowercase hex>",
@@ -225,7 +233,7 @@ After that producer has atomically published a pair's file, import it:
 sudo python scripts/ops/developer_sandbox_live_acceptance.py \
   session-record-overlap \
   --session-id <SESSION_ID> \
-  --sandbox <qianyi|hongjian|devansh> \
+  --sandbox <registry-runtime-id> \
   --pool <oldlab|gb10> \
   --job-id <SLURM_JOB_ID> \
   --execute
@@ -271,10 +279,11 @@ non-exclusive JSON shape. Collect the seven ordered checkpoints `baseline`,
 `cancel_cleanup`, invoke the fixed `sample` command at least 120 times across
 at least four hours:
 
-The phase evidence supplied to each of the three `mixed_non_loom`
-checkpoints must include a closed `trial_batches` object with the exact
+The phase evidence supplied to every environment's `mixed_non_loom`
+checkpoint must include a closed `trial_batches` object with the exact
 `oldlab` and `gb10` soak batch UUIDs returned by that sandbox's workload
-submission. These are six distinct soak batches; they are not the earlier
+submission. These are `2 * N` distinct soak batches for cohort size `N`; they
+are not the earlier
 `large_batch_burst` batches. The root checkpoint journal persists this
 manifest with the sandbox candidate SHA/tree, and later samples accept no
 replacement batch or caller-selected database.
@@ -284,7 +293,8 @@ sudo /usr/local/libexec/loom-developer-sandbox-platform-health-authority \
   sample --session-id <SESSION_ID> --execute
 ```
 
-Each invocation rereads the exact six sandbox/pool jobs through the fixed
+Each invocation rereads the exact `2 * N` environment/pool jobs through the
+fixed
 root-owned node transport, plus Slurm/Docker/cgroup, Kubernetes, MinIO,
 Longhorn, non-Loom peer, CPU/memory/PID, and GPU-device authorities. It appends
 one canonical mode-`0600` sample to a digest-chained journal. A crash or
@@ -292,14 +302,15 @@ disconnect does not erase prior samples: rerun the same command, and the
 collector verifies and resumes the exact chain. The four-hour interval may
 span bounded Slurm job rotation because the checked-in QoS has a two-hour wall
 limit, but every sample must still contain exactly one candidate-bound job for
-each of the six pairs. Any duplicate, foreign candidate, excluded node,
+each environment/pool pair. Any duplicate, foreign candidate, excluded node,
 missing node 7, device-isolation failure, peer failure, or envelope breach is
 a hard stop.
 
 Trial success is read from durable Loom trial rows, not inferred from Slurm
 job exit status. On `oldlab-2`, the collector verifies each candidate's
 root-owned combined activation receipt, exact desired state, and current
-`sandbox-state.json`. It requires all three to name the same candidate
+`sandbox-state.json`. It requires the desired state, lifecycle state, and
+activation receipt for each environment to name the same candidate
 SHA/tree and Compose project, then resolves exactly one healthy `postgres`
 container whose Compose config path/hash and creation/start generation precede
 that lifecycle record. The resulting container, desired-state, lifecycle, and
@@ -370,7 +381,7 @@ python scripts/ops/developer_sandbox_capacity_promotion.py check
 first is the committed fail-closed profile: empty evidence bindings,
 provisional disabled OLDLAB values, and a disabled/inactive supervisor. The
 second is an enabled profile whose historical provenance has a closed
-session-to-fixed-evidence-path binding, payload digest, three-candidate-set
+session-to-fixed-evidence-path binding, payload digest, registry-candidate-set
 digest, recorded expiry, policy-source digest, and recommendation digest, and
 whose capacity values, external allocation prerequisite, and supervisor state
 exact-match the checked-in policy. Any hybrid, malformed, or config-drifted
@@ -421,7 +432,7 @@ signature and closed receipt, and exact-binds the evidence to the acceptance
 session, promotion SHA/tree, source host, sequence, and staging regression
 window. This is staging pressure evidence only; it is not production evidence.
 
-Finalization requires all six ordered overlap receipts, promotion receipt,
+Finalization requires all `2 * N` ordered overlap receipts, promotion receipt,
 complete platform-health receipt, and signed staging-pressure receipt. It
 reloads them from the protected journal and exact-matches their capacity
 sample, job/service readbacks, candidates, source bindings, signatures, and
@@ -431,17 +442,17 @@ self-hash.
 ## Bounded state machine
 
 Phases must be completed in this exact order. Each phase is checkpointed once
-for each sandbox, in `qianyi`, `hongjian`, `devansh` order, for 33 total
-checkpoints. A final artifact with a missing, duplicated, or reordered
-sandbox/phase pair fails.
+for each environment in the registry projection's stable order, for
+`11 * N` total checkpoints. A final artifact with a missing, duplicated, or
+reordered environment/phase pair fails.
 
 | Phase | Required action and readback | Hard stop |
 | --- | --- | --- |
-| `preflight` | Read back each sandbox's exact candidate/tree, both domain receipts, six adapter identities, broker/supervisor state, Slurm policy, cgroup guard, topology, and empty acceptance-owned capacity. Begin the directed cross-sandbox denial matrix. | Any stale/cross-candidate receipt, reused SHA, missing node, active prior test lease, or nonzero invariant. |
-| `baseline` | Complete all 18 cross-sandbox denials. Record healthy non-Loom peer jobs, disk free space, cache footprint, and domain I/O counters before Loom pressure. | Missing/duplicate denial, a same-sandbox row, any allowed foreign access, peer already failing, disk below the reviewed floor, or an unknown owner on a planned test resource. |
+| `preflight` | Read back each environment's exact candidate/tree, both domain receipts, all `2 * N` adapter identities, broker/supervisor state, Slurm policy, cgroup guard, topology, and empty acceptance-owned capacity. Begin the directed cross-environment denial matrix. | Any stale/cross-candidate receipt, reused SHA, missing node, active prior test lease, or nonzero invariant. |
+| `baseline` | Complete all `3 * N * (N - 1)` cross-environment denials. Record healthy non-Loom peer jobs, disk free space, cache footprint, and domain I/O counters before Loom pressure. | Missing/duplicate denial, a same-environment row, any allowed foreign access, peer already failing, disk below the reviewed floor, or an unknown owner on a planned test resource. |
 | `multi_candidate_overlap` | In each pool, hold one active service and active Slurm job for every sandbox. Record a non-empty common interval, exact candidate, unique job ID/name, Slurm account/user, eligible node, canonical job and service readbacks/digests, and the exact active capacity-sample binding. | No common interval, reused job identity, inactive service/job, candidate/account/user/name/readback mismatch, wrong-pool node, digest drift, missing active capacity binding, or a synthesized session-wide timestamp. |
 | `large_batch_burst` | Submit at least 100 trials for each sandbox/pool pair through acceptance-owned batches and let every burst use at least two eligible nodes. Record requested/granted/peak slots and per-node trial counts. | `--exclusive`, one-node placement, duplicate trial ID, pool/pending overshoot, or excluded-node use. |
-| `fairness_contention` | Keep equal requests from all three sandboxes eligible in each pool for at least 30 minutes. Retain the raw series and record the phase-closing requested/granted/pending/active/draining/terminal sample for each pair. | A sandbox receives no grant cycle, waits more than 600 seconds for its first grant, total grant skew exceeds 20%, indefinite starvation, replayed observation, or temporary overshoot. |
+| `fairness_contention` | Keep equal requests from every cohort environment eligible in each pool for at least 30 minutes. Retain the raw series and record the phase-closing requested/granted/pending/active/draining/terminal sample for each pair. | An environment receives no grant cycle, waits more than 600 seconds for its first grant, total grant skew exceeds 20%, indefinite starvation, replayed observation, or temporary overshoot. |
 | `mixed_non_loom` | Run the acceptance workload with the pre-existing non-Loom Slurm peer. Capture baseline/during/after throughput, latency, running/completed/failed counts, and storage/I/O. | New peer failure, disruption, throughput regression over 20%, ENOSPC/I/O error, or a reviewed cache/I/O limit breach. |
 | `cancel_cleanup` | Explicitly cancel one acceptance-owned request and its batch through the supported candidate-bound surface. Observe drain and retry attribution. | Recovery over 600 seconds, orphan, lost trial, duplicate retry, or unknown attribution. |
 | `ttl_cleanup` | Let one bounded acceptance request expire without extending or rewriting its lease. Observe automatic retire/drain. | Capacity remains committed after the deadline, an observation refreshes an expired lease, or any orphan remains. |
@@ -473,7 +484,7 @@ these keys:
 
 ```json
 {
-  "sandbox": "qianyi",
+  "sandbox": "<registry-runtime-id>",
   "candidate_sha": "<40 lowercase hex>",
   "candidate_tree": "<40 lowercase hex>",
   "phase": "preflight",
@@ -518,16 +529,19 @@ Build one JSON document following
 
 Schema version 2 is intentionally incompatible with the legacy single
 `candidate` object. Do not translate a v1 artifact by copying one SHA across
-the three sandbox entries; collect new candidate-distinct evidence.
+the registry cohort; collect new candidate-distinct evidence.
 
 Important closed sets are:
 
-- exactly 18 unique directed cross-sandbox/resource denials;
+- exactly `3 * N * (N - 1)` unique directed
+  cross-environment/resource denials;
 - exactly two multi-candidate overlap windows, one per pool, each covering all
-  three sandbox candidates for the complete common interval;
-- all six sandbox/pool capacity streams and runtime envelopes, including the
-  six overlap-phase capacity samples (54 phase-closing samples total);
-- exactly one large-batch per sandbox/pool pair and one fairness row per pool;
+  cohort candidates for the complete common interval;
+- all `2 * N` environment/pool capacity streams and runtime envelopes,
+  including the `2 * N` overlap-phase capacity samples (`18 * N`
+  phase-closing samples total across the nine capacity phases);
+- exactly one large-batch per environment/pool pair and one fairness row per
+  pool;
 - exactly one non-Loom peer and one storage/I/O row per pool;
 - exactly one recovery row for `cancel`, `ttl_expiry`,
   `submit_host_restart`, and `worker_crash`;
@@ -538,13 +552,13 @@ Every sandbox-scoped row binds the SHA/tree from its exact pre-merge map entry.
 Capacity samples must land inside that sandbox's named phase. Runtime
 envelopes bind a timestamp inside `mixed_non_loom`. Bursts bind intervals
 inside their sandbox's `large_batch_burst`; fairness participants bind their
-own candidates while the common window fits all three sandbox phase windows.
+own candidates while the common window fits every environment's phase window.
 Peer baseline/during/after and storage baseline/minimum/after observations land
 in `baseline`, `mixed_non_loom`, and `final_drain`. Each fault interval lands
 inside its corresponding cancel, TTL, submit-host restart, or worker-crash
 phase. A session-wide timestamp is not enough.
 
-The phase verifier first constructs the exact 33-key
+The phase verifier first constructs the exact `11 * N`-key
 `(phase, sandbox)` map. A duplicate or missing key is a controlled failure and
 stops all validation that depends on phase windows; it must never surface a
 `KeyError` or continue using a different sandbox's window.
@@ -578,7 +592,8 @@ from the canonical phase object without `checkpoint_sha256` (sorted keys,
 compact separators, UTF-8, and one trailing LF). Do not rewrite the pre-merge
 map to the promotion SHA.
 
-After all 33 pre-merge checkpoints, the independent promotion regression, and
+After all `11 * N` pre-merge checkpoints, the independent promotion
+regression, and
 an offline pass, seal the artifact into the session:
 
 ```bash
@@ -611,20 +626,21 @@ sudo python scripts/ops/developer_sandbox_live_acceptance.py \
 ```
 
 This command accepts no caller-selected evidence paths. It rereads the sealed
-33/33 live artifact, its trusted receipts, the root-owned platform-health
-authority, and the six exact allocation matrices under
+complete `11 * N` live artifact, its trusted receipts, the root-owned
+platform-health authority, and the `2 * N` exact allocation matrices under
 `/var/lib/loom-developer-sandbox-slurm-policy/allocation-probes`. Every matrix
-must bind its own F/H/D candidate, reviewed pool concurrency (`oldlab=4`,
-`gb10=8`), and the complete 5/15-node set with `excluded_nodes=[]`. The three
+must bind its own registry candidate, reviewed pool concurrency (`oldlab=4`,
+`gb10=8`), and the complete 5/15-node set with `excluded_nodes=[]`. The
 GB10 pair artifacts pass the unchanged non-exclusive v1 schema and semantic
 verifier. OLDLAB cannot pass that schema's mandatory non-empty GPU list, so the
 same Gate-6 verifier instead requires a native empty allocation plus positive
 zero-device exposure and denial proof; it never invents a GPU ID.
 
-The command writes six canonical pair artifacts and
+The command writes `2 * N` canonical pair artifacts and
 `gate6/acceptance.json` under the protected session directory, records
 `gate6_sha256` in the closed session state, and is idempotent only for exact
-bytes. Missing phase 33/33, candidate drift, node 7 omission, a non-empty
+bytes. An incomplete `11 * N` phase set, candidate drift, node 7 omission, a
+non-empty
 exclusion list, partial matrix, missing worker/trial/verifier/sidecar, short
 soak, failed negative isolation, incomplete cleanup, or receipt mismatch fails
 closed.
@@ -645,3 +661,12 @@ On any stop condition:
 Never turn a failed checkpoint into `status=pass`, reuse a candidate-mismatched
 session, raise a budget to make an overshoot disappear, suppress a peer
 failure, or delete broker/adapter state to manufacture a clean final drain.
+
+## Legacy-v1-only historical cardinalities
+
+The names `qianyi`, `hongjian`, and `devansh`, the six lanes, 18 isolation
+denials, 33 phase checkpoints, 54 capacity samples, and six allocation
+matrices describe only the retired `legacy-v1` three-environment acceptance
+cohort. They may be used to recover or interpret an existing legacy journal,
+but they must never be used as the current admission allowlist or as a reason
+to truncate a registry-owned cohort.

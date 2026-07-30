@@ -63,6 +63,7 @@ def _authority_payload(
     evidence_path = promotion.AUTHORITY_ROOT / "sessions" / session_id / "evidence.json"
     evidence = {
         "session_id": session_id,
+        "registry_snapshot": {"payload_sha256": "5" * 64},
         "candidates": candidates,
         "completed_at": (now - timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
         "expires_at": (now + timedelta(minutes=14)).isoformat().replace("+00:00", "Z"),
@@ -126,9 +127,7 @@ def test_render_is_deterministic_and_exact_evidence_bound() -> None:
     assert prerequisites["pools"] == ["gb10", "oldlab"]
     assert prerequisites["env_template_glob"] == promotion.PROMOTED_ENV_TEMPLATE_GLOB
     oldlab = next(
-        row
-        for row in parsed["worker_pool_autoscaler_policies"]
-        if row["pool_name"] == "oldlab"
+        row for row in parsed["worker_pool_autoscaler_policies"] if row["pool_name"] == "oldlab"
     )
     assert oldlab["enabled"] is True
     assert "disabled_reason" not in oldlab
@@ -199,6 +198,21 @@ def test_load_evidence_closes_pointer_candidate_policy_and_freshness(
     assert result.recommendation_sha256 == promotion._digest(
         evidence["oldlab_capacity_recommendation"],
     )
+
+
+def test_candidate_validation_is_dynamic_and_requires_an_isolation_cohort() -> None:
+    candidates = {
+        "denv-z": {"sha": "d" * 40, "tree": "4" * 40},
+        "denv-a": {"sha": "a" * 40, "tree": "1" * 40},
+        "denv-b": {"sha": "b" * 40, "tree": "2" * 40},
+        "denv-c": {"sha": "c" * 40, "tree": "3" * 40},
+    }
+
+    assert promotion._validate_candidates(candidates) == promotion._digest(candidates)
+    with pytest.raises(promotion.PromotionError, match="candidate set is invalid"):
+        promotion._validate_candidates(
+            {"denv-only": {"sha": "a" * 40, "tree": "1" * 40}},
+        )
 
 
 def test_load_evidence_rejects_stale_receipt(

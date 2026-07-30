@@ -1,5 +1,6 @@
 [Unit]
 Description=Loom developer sandbox mTLS link (%i)
+PartOf=loom-developer-sandbox-links.target
 After=network-online.target loom-developer-sandbox@%i.service
 Wants=network-online.target
 Requires=loom-developer-sandbox@%i.service

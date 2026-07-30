@@ -1,19 +1,21 @@
 [Unit]
-Description=Renew exact-candidate developer sandbox runtime attestations
-Requires=network-online.target loom-developer-sandbox-link@qianyi.service loom-developer-sandbox-link@hongjian.service loom-developer-sandbox-link@devansh.service
-After=network-online.target loom-developer-sandbox-link@qianyi.service loom-developer-sandbox-link@hongjian.service loom-developer-sandbox-link@devansh.service
+Description=Renew the complete registry-owned developer environment cohort
+Requires=network-online.target loom-developer-sandbox-links.target
+After=network-online.target loom-developer-sandbox-links.target
 
 [Service]
 Type=oneshot
 User=root
 Group=root
 UMask=0077
-ExecStart=/usr/local/libexec/loom-developer-sandbox-host renew-attestations --sandbox all --execute
+ExecStart=/usr/bin/python3 -I -B /usr/local/libexec/loom-developer-environment-deploy renew-active --execute
 TimeoutStartSec=10min
 Nice=5
 IOSchedulingClass=best-effort
 IOSchedulingPriority=6
-NoNewPrivileges=true
+# Renewal uses the same fixed local runuser -> sudo node-authority route as
+# remote collection; it never accepts an operator-selected command.
+NoNewPrivileges=false
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
@@ -22,4 +24,5 @@ ReadWritePaths=/run/loom-developer-sandbox-installer
 ReadWritePaths=/var/lib/loom-developer-sandbox-installer
 ReadWritePaths=/var/lib/loom-developer-sandbox-links/attestations
 ReadWritePaths=/var/lib/loom-shared-capacity/runtime-attestations
-ReadWritePaths=/shared_work/loom/runtime/sandboxes
+ReadWritePaths=/shared_work/loom/runtime
+ReadWritePaths=/srv/loom/developer-environments

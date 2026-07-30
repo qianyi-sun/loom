@@ -1,0 +1,6 @@
+[Unit]
+Description=Registry-managed Loom developer environment link instances
+After=network-online.target
+
+[Install]
+WantedBy=multi-user.target

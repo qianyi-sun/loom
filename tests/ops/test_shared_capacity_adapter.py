@@ -160,6 +160,10 @@ def _fixture(
                 'sandbox = "qianyi"',
                 'environment = "sandbox-qianyi"',
                 'pool_name = "gb10"',
+                'slurm_account = "loom-dev-qianyi"',
+                'slurm_qos = "loom-dev-qianyi"',
+                'runtime_root = "/shared_work/loom/runtime/sandboxes/qianyi"',
+                'candidate_root = "/shared_work/loom/candidates/sandboxes/qianyi"',
                 'control_plane_url = "http://127.0.0.1:20080"',
                 f'admin_secret_file = "{secret_path}"',
                 f'handoff_path = "{handoff_path}"',
@@ -190,6 +194,10 @@ def _policy(
         (ROOT / "deploy/developer-sandboxes/shared-capacity-policies/gb10.toml")
         .read_text()
         .replace("${SANDBOX}", "qianyi")
+        .replace("${SLURM_ACCOUNT}", "loom-dev-qianyi")
+        .replace("${SLURM_QOS}", "loom-dev-qianyi")
+        .replace("${RUNTIME_ROOT}", "/shared_work/loom/runtime/sandboxes/qianyi")
+        .replace("${CANDIDATE_ROOT}", "/shared_work/loom/candidates/sandboxes/qianyi")
         .replace("${CANDIDATE_SHA}", candidate_sha),
     )["policy"]
     return {
@@ -539,7 +547,7 @@ def test_bootstrap_creates_disabled_unbound_nonexclusive_policy_once(
         actuator["job_pids_max"] >= actuator["container_pids"] * actuator["requested_concurrency"]
     )
     assert actuator["slurm_account"] == "loom-dev-qianyi"
-    assert actuator["qos_normal"] == "loom-dev"
+    assert actuator["qos_normal"] == "loom-dev-qianyi"
     assert "loom_admin_test_secret" not in json.dumps(policy)
 
 
@@ -1428,11 +1436,10 @@ def test_checked_in_configs_cover_three_sandboxes_and_two_pools() -> None:
         assert actuator["exclusive"] is False
         assert actuator["external_runner"] is True
         assert actuator["shared_capacity_managed"] is True
-        assert actuator["slurm_account"] == f"loom-dev-{config.sandbox}"
-        assert actuator["qos_normal"] == "loom-dev"
+        assert actuator["slurm_account"] == config.slurm_account
+        assert actuator["qos_normal"] == config.slurm_qos
         assert actuator["env_file"] == (
-            f"/shared_work/loom/runtime/sandboxes/{config.sandbox}/"
-            f"{SHA}/worker-{config.pool_name}.env"
+            f"{config.runtime_root}/{SHA}/worker-{config.pool_name}.env"
         )
         assert "/candidates/" not in actuator["env_file"]
         assert actuator["container_cpus"] > 0

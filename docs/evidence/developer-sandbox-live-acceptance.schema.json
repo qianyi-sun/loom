@@ -6,6 +6,7 @@
   "additionalProperties": false,
   "required": [
     "schema_version",
+    "registry_snapshot",
     "candidates",
     "promotion_candidate",
     "session",
@@ -28,24 +29,17 @@
     "schema_version": {
       "const": 2
     },
+    "registry_snapshot": {
+      "$ref": "#/$defs/registrySnapshot"
+    },
     "candidates": {
       "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "qianyi",
-        "hongjian",
-        "devansh"
-      ],
-      "properties": {
-        "qianyi": {
-          "$ref": "#/$defs/sandboxCandidate"
-        },
-        "hongjian": {
-          "$ref": "#/$defs/sandboxCandidate"
-        },
-        "devansh": {
-          "$ref": "#/$defs/sandboxCandidate"
-        }
+      "minProperties": 2,
+      "propertyNames": {
+        "$ref": "#/$defs/sandbox"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/sandboxCandidate"
       }
     },
     "promotion_candidate": {
@@ -102,11 +96,12 @@
       ],
       "properties": {
         "sandboxes": {
-          "const": [
-            "qianyi",
-            "hongjian",
-            "devansh"
-          ]
+          "type": "array",
+          "minItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/sandbox"
+          }
         },
         "pools": {
           "const": [
@@ -181,8 +176,7 @@
     },
     "state_machine": {
       "type": "array",
-      "minItems": 33,
-      "maxItems": 33,
+      "minItems": 22,
       "items": {
         "$ref": "#/$defs/phase"
       }
@@ -197,24 +191,21 @@
     },
     "cross_sandbox_negative": {
       "type": "array",
-      "minItems": 18,
-      "maxItems": 18,
+      "minItems": 4,
       "items": {
         "$ref": "#/$defs/crossSandboxNegative"
       }
     },
     "capacity_samples": {
       "type": "array",
-      "minItems": 54,
-      "maxItems": 54,
+      "minItems": 1,
       "items": {
         "$ref": "#/$defs/capacitySample"
       }
     },
     "large_batch_bursts": {
       "type": "array",
-      "minItems": 6,
-      "maxItems": 6,
+      "minItems": 4,
       "items": {
         "$ref": "#/$defs/burst"
       }
@@ -229,8 +220,7 @@
     },
     "runtime_envelopes": {
       "type": "array",
-      "minItems": 6,
-      "maxItems": 6,
+      "minItems": 4,
       "items": {
         "$ref": "#/$defs/runtimeEnvelope"
       }
@@ -395,11 +385,180 @@
       "maximum": 1
     },
     "sandbox": {
-      "enum": [
-        "qianyi",
-        "hongjian",
-        "devansh"
-      ]
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,47}$"
+    },
+    "serviceUser": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,63}$"
+    },
+    "registrySnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "kind",
+        "generation",
+        "source_registry",
+        "environments",
+        "payload_sha256"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "kind": {
+          "const": "loom.developer-sandbox.acceptance-registry"
+        },
+        "generation": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "source_registry": {
+          "$ref": "#/$defs/sourceRegistrySnapshot"
+        },
+        "environments": {
+          "type": "array",
+          "minItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/registryEnvironment"
+          }
+        },
+        "payload_sha256": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "registryEnvironment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "env_id",
+        "principal_id",
+        "runtime_id",
+        "systemd_instance",
+        "service_unit",
+        "compose_project",
+        "slurm_account",
+        "slurm_qos",
+        "slurm_user",
+        "service_user",
+        "resource_generation",
+        "candidate_id",
+        "candidate_sha",
+        "candidate_tree",
+        "domains"
+      ],
+      "properties": {
+        "env_id": {
+          "type": "string",
+          "pattern": "^denv-[a-z0-9-]{8,64}$"
+        },
+        "principal_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9:._@/+%-]{1,254}$"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/sandbox"
+        },
+        "systemd_instance": {
+          "$ref": "#/$defs/safeResource"
+        },
+        "service_unit": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.@-]{1,128}$"
+        },
+        "compose_project": {
+          "$ref": "#/$defs/safeResource"
+        },
+        "slurm_account": {
+          "$ref": "#/$defs/safeResource"
+        },
+        "slurm_qos": {
+          "$ref": "#/$defs/safeResource"
+        },
+        "slurm_user": {
+          "$ref": "#/$defs/serviceUser"
+        },
+        "service_user": {
+          "$ref": "#/$defs/serviceUser"
+        },
+        "resource_generation": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "candidate_id": {
+          "type": "string",
+          "pattern": "^cand-[0-9a-f]{40}$"
+        },
+        "candidate_sha": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "candidate_tree": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "domains": {
+          "const": [
+            "oldlab",
+            "gb10"
+          ]
+        }
+      }
+    },
+    "safeResource": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{1,62}$"
+    },
+    "sourceRegistrySnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "kind",
+        "generation",
+        "environments",
+        "candidates",
+        "deployments",
+        "deployment_finalizations",
+        "payload_sha256"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "kind": {
+          "const": "loom.developer-environment.registry-snapshot"
+        },
+        "generation": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "environments": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "deployments": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "deployment_finalizations": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "payload_sha256": {
+          "$ref": "#/$defs/digest"
+        }
+      }
     },
     "sandboxCandidate": {
       "type": "object",
@@ -881,6 +1040,7 @@
         "candidate_tree",
         "job_id",
         "account",
+        "qos",
         "user",
         "job_name",
         "node",
@@ -906,16 +1066,18 @@
           "pattern": "^[1-9][0-9]*(?:_[0-9]+)?$"
         },
         "account": {
-          "type": "string",
-          "pattern": "^loom-dev-(?:qianyi|hongjian|devansh)$"
+          "$ref": "#/$defs/safeResource"
+        },
+        "qos": {
+          "$ref": "#/$defs/safeResource"
         },
         "user": {
           "type": "string",
-          "pattern": "^loom-sandbox-(?:qianyi|hongjian|devansh)$"
+          "pattern": "^[a-z][a-z0-9-]{0,63}$"
         },
         "job_name": {
           "type": "string",
-          "pattern": "^loom-sandbox-(?:qianyi|hongjian|devansh)-[0-9a-f]{12}-[A-Za-z0-9_.-]+$",
+          "pattern": "^[A-Za-z0-9_.@+-]{1,128}$",
           "maxLength": 128
         },
         "node": {
@@ -956,7 +1118,7 @@
         },
         "unit": {
           "type": "string",
-          "pattern": "^loom-developer-sandbox-(?:qianyi|hongjian|devansh)\\.service$"
+          "pattern": "^[A-Za-z0-9_.@-]{1,128}$"
         },
         "active_state": {
           "const": "active"
@@ -1019,8 +1181,7 @@
         },
         "observations": {
           "type": "array",
-          "minItems": 3,
-          "maxItems": 3,
+          "minItems": 2,
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -1037,6 +1198,7 @@
               "job_id",
               "job_active",
               "slurm_account",
+              "slurm_qos",
               "slurm_user",
               "job_name",
               "job_readback",
@@ -1066,7 +1228,7 @@
               },
               "service_unit": {
                 "type": "string",
-                "pattern": "^loom-developer-sandbox-(?:qianyi|hongjian|devansh)\\.service$"
+                "pattern": "^[A-Za-z0-9_.@-]{1,128}$"
               },
               "service_active": {
                 "const": true
@@ -1085,16 +1247,18 @@
                 "const": true
               },
               "slurm_account": {
-                "type": "string",
-                "pattern": "^loom-dev-(?:qianyi|hongjian|devansh)$"
+                "$ref": "#/$defs/safeResource"
+              },
+              "slurm_qos": {
+                "$ref": "#/$defs/safeResource"
               },
               "slurm_user": {
                 "type": "string",
-                "pattern": "^loom-sandbox-(?:qianyi|hongjian|devansh)$"
+                "pattern": "^[a-z][a-z0-9-]{0,63}$"
               },
               "job_name": {
                 "type": "string",
-                "pattern": "^loom-sandbox-(?:qianyi|hongjian|devansh)-[0-9a-f]{12}-[A-Za-z0-9_.-]+$",
+                "pattern": "^[A-Za-z0-9_.@+-]{1,128}$",
                 "maxLength": 128
               },
               "job_readback": {
@@ -1402,7 +1566,13 @@
             "loom.sandbox",
             "loom.candidate_sha",
             "loom.slurm_job_id",
-            "loom.compose_project"
+            "loom.compose_project",
+            "loom.env_id",
+            "loom.resource_generation",
+            "loom.candidate_id",
+            "loom.candidate_tree",
+            "loom.registry_generation",
+            "loom.registry_payload_sha256"
           ],
           "properties": {
             "loom.sandbox": {
@@ -1418,6 +1588,28 @@
             "loom.compose_project": {
               "type": "string",
               "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+            },
+            "loom.env_id": {
+              "type": "string",
+              "pattern": "^denv-[a-z0-9-]{8,64}$"
+            },
+            "loom.resource_generation": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "loom.candidate_id": {
+              "type": "string",
+              "pattern": "^cand-[0-9a-f]{40}$"
+            },
+            "loom.candidate_tree": {
+              "$ref": "#/$defs/fullSha"
+            },
+            "loom.registry_generation": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "loom.registry_payload_sha256": {
+              "$ref": "#/$defs/digest"
             }
           }
         },
@@ -1502,8 +1694,15 @@
         "job_id",
         "job_name",
         "sandbox",
+        "env_id",
+        "resource_generation",
+        "candidate_id",
         "candidate_sha",
+        "candidate_tree",
+        "registry_generation",
+        "registry_payload_sha256",
         "account",
+        "qos",
         "user",
         "node",
         "state",
@@ -1521,22 +1720,44 @@
         },
         "job_name": {
           "type": "string",
-          "pattern": "^loom-(?:qianyi|hongjian|devansh)-[0-9a-f]{12}-[A-Za-z0-9_.-]+$",
+          "pattern": "^[A-Za-z0-9_.@+-]{1,256}$",
           "maxLength": 256
         },
         "sandbox": {
           "$ref": "#/$defs/sandbox"
         },
+        "env_id": {
+          "type": "string",
+          "pattern": "^denv-[a-z0-9-]{8,64}$"
+        },
+        "resource_generation": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "candidate_id": {
+          "type": "string",
+          "pattern": "^cand-[0-9a-f]{40}$"
+        },
         "candidate_sha": {
           "$ref": "#/$defs/fullSha"
         },
+        "candidate_tree": {
+          "$ref": "#/$defs/fullSha"
+        },
+        "registry_generation": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "registry_payload_sha256": {
+          "$ref": "#/$defs/digest"
+        },
         "account": {
-          "type": "string",
-          "pattern": "^loom-dev-(?:qianyi|hongjian|devansh)$"
+          "$ref": "#/$defs/safeResource"
+        },
+        "qos": {
+          "$ref": "#/$defs/safeResource"
         },
         "user": {
           "type": "string",
-          "pattern": "^loom-sandbox-(?:qianyi|hongjian|devansh)$"
+          "pattern": "^[a-z][a-z0-9-]{0,63}$"
         },
         "node": {
           "$ref": "#/$defs/node"
@@ -1825,6 +2046,7 @@
         "schema_version",
         "kind",
         "session_id",
+        "registry_snapshot",
         "candidates",
         "collector_host",
         "checkpoints",
@@ -1850,24 +2072,17 @@
           "type": "string",
           "pattern": "^[0-9a-f]{32}$"
         },
+        "registry_snapshot": {
+          "$ref": "#/$defs/registrySnapshot"
+        },
         "candidates": {
           "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "qianyi",
-            "hongjian",
-            "devansh"
-          ],
-          "properties": {
-            "qianyi": {
-              "$ref": "#/$defs/platformHealthCandidateIdentity"
-            },
-            "hongjian": {
-              "$ref": "#/$defs/platformHealthCandidateIdentity"
-            },
-            "devansh": {
-              "$ref": "#/$defs/platformHealthCandidateIdentity"
-            }
+          "minProperties": 2,
+          "propertyNames": {
+            "$ref": "#/$defs/sandbox"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/platformHealthCandidateIdentity"
           }
         },
         "collector_host": {
@@ -1883,8 +2098,7 @@
         },
         "mixed_jobs": {
           "type": "array",
-          "minItems": 6,
-          "maxItems": 6,
+          "minItems": 4,
           "items": {
             "$ref": "#/$defs/platformHealthMixedJob"
           }
@@ -2030,8 +2244,7 @@
             },
             "trial_outcomes": {
               "type": "array",
-              "minItems": 6,
-              "maxItems": 6,
+              "minItems": 4,
               "items": {
                 "type": "object",
                 "additionalProperties": false,
@@ -2105,8 +2318,7 @@
             },
             "pair_headroom": {
               "type": "array",
-              "minItems": 6,
-              "maxItems": 6,
+              "minItems": 4,
               "items": {
                 "type": "object",
                 "additionalProperties": false,
@@ -2149,8 +2361,7 @@
         },
         "device_isolation": {
           "type": "array",
-          "minItems": 6,
-          "maxItems": 6,
+          "minItems": 4,
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -2463,6 +2674,7 @@
         "candidate_tree",
         "job_id",
         "account",
+        "qos",
         "user",
         "job_name",
         "node",
@@ -2501,16 +2713,18 @@
           "pattern": "^[1-9][0-9]*(?:_[0-9]+)?$"
         },
         "account": {
-          "type": "string",
-          "pattern": "^loom-dev-(?:qianyi|hongjian|devansh)$"
+          "$ref": "#/$defs/safeResource"
+        },
+        "qos": {
+          "$ref": "#/$defs/safeResource"
         },
         "user": {
           "type": "string",
-          "pattern": "^loom-sandbox-(?:qianyi|hongjian|devansh)$"
+          "pattern": "^[a-z][a-z0-9-]{0,63}$"
         },
         "job_name": {
           "type": "string",
-          "pattern": "^loom-sandbox-(?:qianyi|hongjian|devansh)-[0-9a-f]{12}-[A-Za-z0-9_.-]+$",
+          "pattern": "^[A-Za-z0-9_.@+-]{1,128}$",
           "maxLength": 128
         },
         "node": {
@@ -2685,8 +2899,7 @@
         },
         "participants": {
           "type": "array",
-          "minItems": 3,
-          "maxItems": 3,
+          "minItems": 2,
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -2771,6 +2984,7 @@
         "job_id",
         "node",
         "account",
+        "qos",
         "allocation",
         "cgroup",
         "containers"
@@ -2802,8 +3016,10 @@
           "$ref": "#/$defs/node"
         },
         "account": {
-          "type": "string",
-          "pattern": "^loom-dev-(?:qianyi|hongjian|devansh)$"
+          "$ref": "#/$defs/safeResource"
+        },
+        "qos": {
+          "$ref": "#/$defs/safeResource"
         },
         "allocation": {
           "type": "object",
@@ -2990,11 +3206,9 @@
         },
         "account": {
           "type": "string",
+          "pattern": "^[A-Za-z0-9_.@+-]{1,64}$",
           "minLength": 1,
-          "maxLength": 64,
-          "not": {
-            "pattern": "^loom-dev(?:-|$)"
-          }
+          "maxLength": 64
         },
         "baseline": {
           "$ref": "#/$defs/peerCheckpoint"

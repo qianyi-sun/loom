@@ -1,6 +1,7 @@
 FROM debian@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 
 ARG TARGETARCH
+ENV XDG_CONFIG_HOME=/run/loom-developer-sandbox-node-bootstrap/xdg-config
 
 RUN case "$TARGETARCH" in amd64|arm64) ;; *) exit 1 ;; esac \
     && apt-get update \

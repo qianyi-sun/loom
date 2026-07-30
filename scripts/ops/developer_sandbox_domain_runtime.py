@@ -35,9 +35,45 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
+_FIXED_SOURCE_ROOT = Path(__file__).resolve().parents[2]
+_FIXED_REGISTRY_MODULE = _FIXED_SOURCE_ROOT / "scripts/ops/developer_environment_registry.py"
+if __package__ in {None, ""}:
+    roots = (
+        _FIXED_SOURCE_ROOT,
+        _FIXED_SOURCE_ROOT / "scripts",
+        _FIXED_SOURCE_ROOT / "scripts/ops",
+    )
+    try:
+        root_metadata = tuple(path.lstat() for path in roots)
+        registry_metadata = _FIXED_REGISTRY_MODULE.lstat()
+    except OSError as exc:
+        raise RuntimeError("fixed domain-runtime module tree is unavailable") from exc
+    expected_identity = (os.geteuid(), os.getegid())
+    if (
+        any(
+            not stat.S_ISDIR(item.st_mode)
+            or (item.st_uid, item.st_gid) != expected_identity
+            or item.st_mode & 0o022
+            for item in root_metadata
+        )
+        or not stat.S_ISREG(registry_metadata.st_mode)
+        or stat.S_ISLNK(registry_metadata.st_mode)
+        or (registry_metadata.st_uid, registry_metadata.st_gid) != expected_identity
+        or registry_metadata.st_nlink != 1
+        or registry_metadata.st_mode & 0o022
+    ):
+        raise RuntimeError("fixed domain-runtime module tree is unsafe")
+    sys.path.insert(0, str(_FIXED_SOURCE_ROOT))
+
+from scripts.ops.developer_environment_registry import (  # noqa: E402
+    CURRENT_SNAPSHOT_PATH,
+    DeveloperEnvironmentRegistry,
+    RegistryError,
+)
+
 SCHEMA_VERSION = 1
-ALLOWED_SANDBOXES = ("qianyi", "hongjian", "devansh")
 ALLOWED_DOMAINS = ("oldlab", "gb10")
+REGISTRY_SNAPSHOT = CURRENT_SNAPSHOT_PATH
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SAFE_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 _RENAME_NOREPLACE = 1
@@ -52,6 +88,7 @@ _TRUSTED_KEY_ROOT = Path(
 _PUBLIC_ATTESTATION_ROOT = Path("/var/lib/loom-developer-domain-attestations")
 _COMBINED_ROOT = Path("/var/lib/loom-shared-capacity/runtime-attestations")
 _COLLECTOR_HOSTNAME = "trt-eai-oldlab-2"
+_LINK_SERVER_ADDRESS = "192.168.50.14"
 _FLEET_ATTESTATION_ROOT = Path(
     "/var/lib/loom-developer-sandbox-links/attestations",
 )
@@ -91,40 +128,6 @@ _INFRASTRUCTURE_LINK_NODES = (
     "trt-gb10-14",
     "trt-gb10-15",
 )
-_SANDBOX_TARGET_PORTS = {
-    "qianyi": {
-        "control-plane": 20080,
-        "gateway": 20100,
-        "minio": 20900,
-    },
-    "hongjian": {
-        "control-plane": 21080,
-        "gateway": 21100,
-        "minio": 21900,
-    },
-    "devansh": {
-        "control-plane": 22080,
-        "gateway": 22100,
-        "minio": 22900,
-    },
-}
-_SANDBOX_LISTENER_PORTS = {
-    "qianyi": {
-        "control-plane": 26080,
-        "gateway": 26100,
-        "minio": 26900,
-    },
-    "hongjian": {
-        "control-plane": 27080,
-        "gateway": 27100,
-        "minio": 27900,
-    },
-    "devansh": {
-        "control-plane": 28080,
-        "gateway": 28100,
-        "minio": 28900,
-    },
-}
 _SERVICE_HEALTH_PATHS = {
     "control-plane": "/healthz",
     "gateway": "/healthz",
@@ -145,6 +148,22 @@ class SandboxGroup:
     upstream_control_plane_port: int
     upstream_gateway_port: int
     upstream_minio_port: int
+    target_control_plane_port: int
+    target_gateway_port: int
+    target_minio_port: int
+    env_id: str
+    principal_id: str
+    resource_generation: int
+    lifecycle_state: str
+    candidate_id: str | None
+    candidate_sha: str | None
+    candidate_tree: str | None
+    candidate_root: Path
+    runtime_root: Path
+    compose_project: str
+    slurm_account: str
+    slurm_qos: str
+    slurm_user: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +183,8 @@ class Domain:
     runtime_root: Path
     publisher_hostname: str
     peers: tuple[Peer, ...]
+    candidate_roots: Mapping[str, Path]
+    runtime_roots: Mapping[str, Path]
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +194,9 @@ class RuntimeConfig:
     state_root: Path
     installed_program: Path
     installed_config: Path
+    registry_snapshot_path: Path
+    registry_generation: int
+    registry_payload_sha256: str
     sandbox_groups: Mapping[str, SandboxGroup]
     domains: Mapping[str, Domain]
 
@@ -196,17 +220,8 @@ _TOP_LEVEL_KEYS = {
     "state_root",
     "installed_program",
     "installed_config",
-    "sandbox_groups",
+    "registry_snapshot_path",
     "domains",
-}
-_GROUP_KEYS = {
-    "name",
-    "uid",
-    "gid",
-    "member",
-    "upstream_control_plane_port",
-    "upstream_gateway_port",
-    "upstream_minio_port",
 }
 _DOMAIN_KEYS = {
     "worker_env_name",
@@ -245,6 +260,60 @@ def _safe_name(value: object, label: str) -> str:
     return value
 
 
+def _load_registry_snapshot(path: Path) -> dict[str, Any]:
+    try:
+        return DeveloperEnvironmentRegistry.verify_snapshot(path.read_bytes())
+    except (OSError, RegistryError) as exc:
+        raise ConvergenceError("developer environment registry snapshot is invalid") from exc
+
+
+def _candidate_for_environment(
+    snapshot: Mapping[str, Any],
+    environment: Mapping[str, Any],
+) -> tuple[Mapping[str, Any] | None, Mapping[str, Any] | None]:
+    candidate_id = environment["current_candidate_id"]
+    deployments = snapshot["deployments"]
+    if environment["state"] == "deploying":
+        in_flight = [
+            item
+            for item in deployments
+            if item["env_id"] == environment["env_id"]
+            and item["principal_id"] == environment["principal_id"]
+            and item["expected_resource_generation"] == environment["resource_generation"]
+            and item["phase"] not in {"committed", "failed"}
+        ]
+        if len(in_flight) != 1:
+            raise ConvergenceError("provisioning deployment registry binding is invalid")
+        candidate_id = in_flight[0]["candidate_id"]
+        deployment: Mapping[str, Any] | None = in_flight[0]
+    elif environment["state"] == "active":
+        committed = [
+            item
+            for item in deployments
+            if item["env_id"] == environment["env_id"]
+            and item["principal_id"] == environment["principal_id"]
+            and item["candidate_id"] == candidate_id
+            and item["expected_resource_generation"] + 1 == environment["resource_generation"]
+            and item["applied_resource_generation"] == environment["resource_generation"]
+            and item["phase"] == "committed"
+        ]
+        if len(committed) != 1:
+            raise ConvergenceError("active deployment registry binding is invalid")
+        deployment = committed[0]
+    else:
+        return None, None
+    candidates = [
+        item
+        for item in snapshot["candidates"]
+        if item["candidate_id"] == candidate_id
+        and item["env_id"] == environment["env_id"]
+        and item["principal_id"] == environment["principal_id"]
+    ]
+    if len(candidates) != 1:
+        raise ConvergenceError("candidate registry binding is invalid")
+    return candidates[0], deployment
+
+
 def load_config(path: Path) -> RuntimeConfig:
     try:
         raw = tomllib.loads(path.read_text(encoding="utf-8"))
@@ -258,27 +327,28 @@ def load_config(path: Path) -> RuntimeConfig:
     if type(shared_gid) is not int or not 1 <= shared_gid <= 60000:
         raise ConvergenceError("shared_gid is invalid")
 
-    groups_raw = raw["sandbox_groups"]
-    if not isinstance(groups_raw, dict) or set(groups_raw) != set(ALLOWED_SANDBOXES):
-        raise ConvergenceError("sandbox_groups must define the three fixed sandboxes")
+    registry_snapshot_path = _absolute_path(
+        raw["registry_snapshot_path"],
+        "registry_snapshot_path",
+    )
+    snapshot = _load_registry_snapshot(registry_snapshot_path)
     groups: dict[str, SandboxGroup] = {}
     gids: set[int] = {shared_gid}
-    for sandbox in ALLOWED_SANDBOXES:
-        item = groups_raw[sandbox]
-        if not isinstance(item, dict):
-            raise ConvergenceError(f"sandbox_groups.{sandbox} must be a table")
-        _exact_keys(item, _GROUP_KEYS, f"sandbox_groups.{sandbox}")
-        name = _safe_name(item["name"], f"sandbox_groups.{sandbox}.name")
-        member = _safe_name(item["member"], f"sandbox_groups.{sandbox}.member")
+    for item in snapshot["environments"]:
+        if item["state"] in {"retired", "quarantined"}:
+            continue
+        sandbox = _safe_name(item["runtime_id"], "registry runtime_id")
+        name = _safe_name(item["service_group"], "registry service_group")
+        member = _safe_name(item["service_user"], "registry service_user")
         uid = item["uid"]
         gid = item["gid"]
-        upstream_control_plane_port = item["upstream_control_plane_port"]
-        upstream_gateway_port = item["upstream_gateway_port"]
-        upstream_minio_port = item["upstream_minio_port"]
+        ports = item["ports"]
+        upstream_control_plane_port = ports["relay_control_plane"]
+        upstream_gateway_port = ports["relay_gateway"]
+        upstream_minio_port = ports["relay_minio"]
+        candidate, deployment = _candidate_for_environment(snapshot, item)
         if (
-            name != f"loom-sandbox-{sandbox}"
-            or member != f"loom-sandbox-{sandbox}"
-            or type(uid) is not int
+            type(uid) is not int
             or not 1000 <= uid <= 60000
             or uid != gid
             or type(gid) is not int
@@ -300,14 +370,9 @@ def load_config(path: Path) -> RuntimeConfig:
                 },
             )
             != 3
-            or {
-                "control-plane": upstream_control_plane_port,
-                "gateway": upstream_gateway_port,
-                "minio": upstream_minio_port,
-            }
-            != _SANDBOX_LISTENER_PORTS[sandbox]
+            or sandbox in groups
         ):
-            raise ConvergenceError(f"sandbox_groups.{sandbox} identity is invalid")
+            raise ConvergenceError("registry environment runtime identity is invalid")
         gids.add(gid)
         groups[sandbox] = SandboxGroup(
             name=name,
@@ -317,7 +382,31 @@ def load_config(path: Path) -> RuntimeConfig:
             upstream_control_plane_port=upstream_control_plane_port,
             upstream_gateway_port=upstream_gateway_port,
             upstream_minio_port=upstream_minio_port,
+            target_control_plane_port=ports["control_plane"],
+            target_gateway_port=ports["llm_gateway"],
+            target_minio_port=ports["minio"],
+            env_id=item["env_id"],
+            principal_id=item["principal_id"],
+            resource_generation=(
+                deployment["applied_resource_generation"]
+                if deployment is not None
+                and deployment["phase"] == "verified"
+                and deployment["applied_resource_generation"] is not None
+                else item["resource_generation"]
+            ),
+            lifecycle_state=item["state"],
+            candidate_id=None if candidate is None else candidate["candidate_id"],
+            candidate_sha=None if candidate is None else candidate["candidate_sha"],
+            candidate_tree=None if candidate is None else candidate["candidate_tree"],
+            candidate_root=Path(item["candidate_root"]),
+            runtime_root=Path(item["runtime_root"]),
+            compose_project=item["compose_project"],
+            slurm_account=item["slurm_account"],
+            slurm_qos=item["slurm_qos"],
+            slurm_user=item["slurm_user"],
         )
+    if not groups:
+        raise ConvergenceError("registry has no provisionable developer environments")
 
     domains_raw = raw["domains"]
     if not isinstance(domains_raw, dict) or set(domains_raw) != set(ALLOWED_DOMAINS):
@@ -387,6 +476,8 @@ def load_config(path: Path) -> RuntimeConfig:
             runtime_root=runtime_root,
             publisher_hostname=publisher,
             peers=tuple(peers),
+            candidate_roots={sandbox: group.candidate_root for sandbox, group in groups.items()},
+            runtime_roots={sandbox: group.runtime_root for sandbox, group in groups.items()},
         )
 
     return RuntimeConfig(
@@ -395,6 +486,9 @@ def load_config(path: Path) -> RuntimeConfig:
         state_root=_absolute_path(raw["state_root"], "state_root"),
         installed_program=_absolute_path(raw["installed_program"], "installed_program"),
         installed_config=_absolute_path(raw["installed_config"], "installed_config"),
+        registry_snapshot_path=registry_snapshot_path,
+        registry_generation=snapshot["generation"],
+        registry_payload_sha256=snapshot["payload_sha256"],
         sandbox_groups=groups,
         domains=domains,
     )
@@ -432,17 +526,23 @@ def _run(
 
 def _authority_envelope(
     *,
+    config: RuntimeConfig,
     action: str,
     node: str,
     domain: str,
     sandbox: str,
     identity: CandidateIdentity,
 ) -> str:
+    group = config.sandbox_groups.get(sandbox)
     if (
         action not in {"inspect-candidate", "inspect-local", "export-domain-attestation"}
         or node not in _INFRASTRUCTURE_LINK_NODES
         or domain not in ALLOWED_DOMAINS
-        or sandbox not in ALLOWED_SANDBOXES
+        or _SAFE_NAME_RE.fullmatch(sandbox) is None
+        or group is None
+        or group.candidate_id is None
+        or group.candidate_sha != identity.sha
+        or group.candidate_tree != identity.tree
     ):
         raise ConvergenceError("node authority check identity is invalid")
     body: dict[str, object] = {
@@ -457,6 +557,11 @@ def _authority_envelope(
         "payload_sha256": hashlib.sha256(b"").hexdigest(),
         "payload_base64": "",
         "prior_request_id": None,
+        "env_id": group.env_id,
+        "resource_generation": group.resource_generation,
+        "candidate_id": group.candidate_id,
+        "registry_generation": config.registry_generation,
+        "registry_payload_sha256": config.registry_payload_sha256,
     }
     request_id = hashlib.sha256(_canonical_json(body) + b"\n").hexdigest()
     body["request_id"] = request_id
@@ -465,6 +570,7 @@ def _authority_envelope(
 
 def _authority_check(
     *,
+    config: RuntimeConfig,
     action: str,
     node: str,
     domain: str,
@@ -481,6 +587,7 @@ def _authority_check(
             "check",
         ),
         input_text=_authority_envelope(
+            config=config,
             action=action,
             node=node,
             domain=domain,
@@ -629,6 +736,7 @@ def _secure_seed(path: Path, *, require_root_owner: bool = False) -> Path:
 def _parse_env_references(
     path: Path,
     *,
+    config: RuntimeConfig,
     domain: Domain,
     sandbox: str,
     sha: str,
@@ -648,12 +756,43 @@ def _parse_env_references(
             raise ConvergenceError("worker env seed has an invalid or duplicate entry")
         values[key] = value
     bundle_root = f"/etc/loom/developer-sandbox-links/clients/{sandbox}/{sha}"
+    try:
+        group = config.sandbox_groups[sandbox]
+    except KeyError as exc:
+        raise ConvergenceError("worker env registry binding is unavailable") from exc
+    if group.candidate_id is None or group.candidate_sha != sha or group.candidate_tree is None:
+        raise ConvergenceError("worker env candidate binding is unavailable")
     expected = {
         "LOOM_WORKER_CONTROL_PLANE_URL": "http://sandbox-link:8080",
         "LOOM_WORKER_GATEWAY_URL": "http://sandbox-link:9100",
         "LOOM_WORKER_MINIO_ENDPOINT": "http://sandbox-link:9000",
         "LOOM_WORKER_SANDBOX_IDENTITY": sandbox,
         "LOOM_WORKER_CANDIDATE_SHA": sha,
+        "LOOM_SANDBOX_LINK_CP_UPSTREAM": (
+            f"https://{_LINK_SERVER_ADDRESS}:{group.upstream_control_plane_port}"
+        ),
+        "LOOM_SANDBOX_LINK_CP_EXPECTED_PORT": str(
+            group.upstream_control_plane_port,
+        ),
+        "LOOM_SANDBOX_LINK_GATEWAY_UPSTREAM": (
+            f"https://{_LINK_SERVER_ADDRESS}:{group.upstream_gateway_port}"
+        ),
+        "LOOM_SANDBOX_LINK_GATEWAY_EXPECTED_PORT": str(
+            group.upstream_gateway_port,
+        ),
+        "LOOM_SANDBOX_LINK_MINIO_UPSTREAM": (
+            f"https://{_LINK_SERVER_ADDRESS}:{group.upstream_minio_port}"
+        ),
+        "LOOM_SANDBOX_LINK_MINIO_EXPECTED_PORT": str(
+            group.upstream_minio_port,
+        ),
+        "LOOM_WORKER_COMPOSE_PROJECT": group.compose_project,
+        "LOOM_WORKER_ENV_ID": group.env_id,
+        "LOOM_WORKER_RESOURCE_GENERATION": str(group.resource_generation),
+        "LOOM_WORKER_CANDIDATE_ID": group.candidate_id,
+        "LOOM_WORKER_CANDIDATE_TREE": group.candidate_tree,
+        "LOOM_WORKER_REGISTRY_GENERATION": str(config.registry_generation),
+        "LOOM_WORKER_REGISTRY_PAYLOAD_SHA256": config.registry_payload_sha256,
         "LOOM_WORKER_POOL_NAME": domain.worker_pool_name,
         "LOOM_WORKER_MAX_CONCURRENT": str(domain.worker_max_concurrent),
         "LOOM_WORKER_TOKEN_FILE_HOST": f"{bundle_root}/worker-token",
@@ -701,11 +840,11 @@ def _parse_env_references(
 
 
 def runtime_paths(domain: Domain, sandbox: str, sha: str) -> RuntimePaths:
-    if sandbox not in ALLOWED_SANDBOXES or _SHA_RE.fullmatch(sha) is None:
+    if sandbox not in domain.candidate_roots or _SHA_RE.fullmatch(sha) is None:
         raise ConvergenceError("runtime identity is invalid")
     return RuntimePaths(
-        candidate=domain.candidate_root / sandbox / sha,
-        env=domain.runtime_root / sandbox / sha / domain.worker_env_name,
+        candidate=domain.candidate_roots[sandbox] / sha,
+        env=domain.runtime_roots[sandbox] / sha / domain.worker_env_name,
     )
 
 
@@ -995,6 +1134,7 @@ def publish_plan(
     seed = _secure_seed(env_seed)
     _parse_env_references(
         seed,
+        config=config,
         domain=domain,
         sandbox=sandbox,
         sha=identity.sha,
@@ -1315,6 +1455,7 @@ def _peer_candidate_readback(
             report = inspect_candidate_local(config, domain, sandbox, identity)
         else:
             report = _authority_check(
+                config=config,
                 action="inspect-candidate",
                 node=peer.ssh_target,
                 domain=domain.name,
@@ -1639,6 +1780,7 @@ def _peer_readback(
             report = inspect_local(config, domain, sandbox, identity)
         else:
             report = _authority_check(
+                config=config,
                 action="inspect-local",
                 node=peer.ssh_target,
                 domain=domain.name,
@@ -1687,6 +1829,14 @@ def _listener_ports(group: SandboxGroup) -> dict[str, int]:
     }
 
 
+def _target_ports(group: SandboxGroup) -> dict[str, int]:
+    return {
+        "control-plane": group.target_control_plane_port,
+        "gateway": group.target_gateway_port,
+        "minio": group.target_minio_port,
+    }
+
+
 def _fleet_attestation_path(sandbox: str, sha: str) -> Path:
     return _FLEET_ATTESTATION_ROOT / sandbox / sha / "fleet.json"
 
@@ -1732,12 +1882,21 @@ def _verify_fleet_attestation(
         raise ConvergenceError("remote-link fleet attestation is invalid") from exc
     if not isinstance(fleet, dict):
         raise ConvergenceError("remote-link fleet attestation is invalid")
+    try:
+        group = config.sandbox_groups[sandbox]
+    except KeyError as exc:
+        raise ConvergenceError("remote-link fleet environment is not registered") from exc
     _exact_keys(
         fleet,
         {
             "schema_version",
             "sandbox",
+            "env_id",
+            "resource_generation",
+            "registry_generation",
+            "registry_payload_sha256",
             "candidate_sha",
+            "candidate_tree",
             "generated_at",
             "expires_at",
             "eligible_nodes",
@@ -1751,7 +1910,12 @@ def _verify_fleet_attestation(
     if (
         fleet["schema_version"] != SCHEMA_VERSION
         or fleet["sandbox"] != sandbox
+        or fleet["env_id"] != group.env_id
+        or fleet["resource_generation"] != group.resource_generation
+        or fleet["registry_generation"] != config.registry_generation
+        or fleet["registry_payload_sha256"] != config.registry_payload_sha256
         or fleet["candidate_sha"] != sha
+        or fleet["candidate_tree"] != group.candidate_tree
         or fleet["eligible_nodes"] != list(_INFRASTRUCTURE_LINK_NODES)
     ):
         raise ConvergenceError("remote-link fleet identity is invalid")
@@ -1770,7 +1934,6 @@ def _verify_fleet_attestation(
     ):
         raise ConvergenceError("remote-link fleet attestation is stale or expired")
 
-    group = config.sandbox_groups[sandbox]
     listener_ports = _listener_ports(group)
     client_uri = f"spiffe://loom/developer-sandbox/{sandbox}/candidate/{sha}/worker"
     bundle = fleet["bundle_generation"]
@@ -1837,7 +2000,7 @@ def _verify_fleet_attestation(
         if row != {
             "listener_port": listener_ports[service],
             "target_host": "127.0.0.1",
-            "target_port": _SANDBOX_TARGET_PORTS[sandbox][service],
+            "target_port": _target_ports(group)[service],
             "health_path": health_path,
             "tls_version": "TLSv1.3",
             "status": "active",
@@ -2030,7 +2193,7 @@ def _runtime_proof_artifact_identity(
     if (
         len(fields) != 7
         or fields[:2] != ["runtime-proof", "v1"]
-        or fields[2] not in ALLOWED_SANDBOXES
+        or _SAFE_NAME_RE.fullmatch(fields[2]) is None
         or _SHA_RE.fullmatch(fields[3]) is None
         or _SHA_RE.fullmatch(fields[4]) is None
         or fields[5] != "artifact"
@@ -2651,6 +2814,7 @@ def _remote_attestation(
         peer.ssh_target for peer in domain.peers if peer.hostname == domain.publisher_hostname
     )
     report = _authority_check(
+        config=config,
         action="export-domain-attestation",
         node=target,
         domain=domain.name,
@@ -2962,7 +3126,7 @@ def _rollback(
         not isinstance(domain_name, str)
         or domain_name not in config.domains
         or not isinstance(sandbox, str)
-        or sandbox not in ALLOWED_SANDBOXES
+        or sandbox not in config.sandbox_groups
         or not isinstance(sha, str)
         or _SHA_RE.fullmatch(sha) is None
     ):
@@ -3055,7 +3219,7 @@ def _rollback_locked(
         not isinstance(domain_name, str)
         or domain_name not in config.domains
         or not isinstance(sandbox, str)
-        or sandbox not in ALLOWED_SANDBOXES
+        or sandbox not in config.sandbox_groups
         or not isinstance(sha, str)
         or _SHA_RE.fullmatch(sha) is None
         or not isinstance(tree, str)
@@ -3276,6 +3440,7 @@ def _converge_publish_locked(
         seed = _secure_seed(env_seed, require_root_owner=True)
         _parse_env_references(
             seed,
+            config=config,
             domain=domain,
             sandbox=sandbox,
             sha=identity.sha,
@@ -3378,7 +3543,13 @@ def attest_plan(
     paths = runtime_paths(domain, sandbox, identity.sha)
     _verify_candidate(paths.candidate, identity, config.shared_gid)
     seed = _secure_seed(env_seed)
-    _parse_env_references(seed, domain=domain, sandbox=sandbox, sha=identity.sha)
+    _parse_env_references(
+        seed,
+        config=config,
+        domain=domain,
+        sandbox=sandbox,
+        sha=identity.sha,
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "operation": "attest",
@@ -3438,6 +3609,7 @@ def _converge_attest_locked(
         seed = _secure_seed(env_seed, require_root_owner=True)
         _parse_env_references(
             seed,
+            config=config,
             domain=domain,
             sandbox=sandbox,
             sha=identity.sha,
@@ -3552,7 +3724,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--domain", choices=ALLOWED_DOMAINS)
-    parser.add_argument("--sandbox", choices=ALLOWED_SANDBOXES)
+    parser.add_argument("--sandbox")
     parser.add_argument("--candidate-sha")
     parser.add_argument("--candidate-tree")
     parser.add_argument("--source-repo", type=Path)

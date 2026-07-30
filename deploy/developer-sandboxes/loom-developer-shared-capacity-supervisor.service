@@ -1,0 +1,21 @@
+[Unit]
+Description=Loom registry shared-capacity broker supervisor
+After=local-fs.target
+ConditionPathExists=/etc/loom/shared-capacity-supervisor.toml
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/var/lib/loom-shared-capacity
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+UMask=0077
+NoNewPrivileges=true
+PrivateNetwork=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=/etc/loom/shared-capacity-supervisor.toml
+ReadWritePaths=/var/lib/loom-shared-capacity
+ExecStart=/usr/bin/python3 -I -B /usr/local/libexec/scripts/ops/shared_capacity_supervisor.py --config /etc/loom/shared-capacity-supervisor.toml run
+TimeoutStartSec=60

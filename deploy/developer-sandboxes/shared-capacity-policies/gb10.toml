@@ -37,8 +37,8 @@ allowed_nodes = [
   "trt-gb10-14",
   "trt-gb10-15",
 ]
-env_file = "/shared_work/loom/runtime/sandboxes/${SANDBOX}/${CANDIDATE_SHA}/worker-gb10.env"
-repo_dir = "/shared_work/loom/candidates/sandboxes/${SANDBOX}/${CANDIDATE_SHA}"
+env_file = "${RUNTIME_ROOT}/${CANDIDATE_SHA}/worker-gb10.env"
+repo_dir = "${CANDIDATE_ROOT}/${CANDIDATE_SHA}"
 requested_cpus = 16
 requested_memory_mib = 92000
 requested_concurrency = 8
@@ -48,8 +48,8 @@ time_limit = "02:00:00"
 exclusive = false
 external_runner = true
 shared_capacity_managed = true
-slurm_account = "loom-dev-${SANDBOX}"
-qos_normal = "loom-dev"
+slurm_account = "${SLURM_ACCOUNT}"
+qos_normal = "${SLURM_QOS}"
 container_cpus = 2
 container_memory_mib = 11500
 container_pids = 4096

@@ -93,10 +93,12 @@ req-* --execute` and `check`; the parser rejects extra or abbreviated flags.
 
 ## Pre-merge and post-merge boundary
 
-The three sandbox candidates and their live overlap session are pre-merge
-evidence. Keep that session in `running` state after its ordered checkpoints and
-six trusted overlap receipts are complete. Do not create a promotion receipt
-from a PR head: before squash merge there is no merged-dev promotion candidate.
+The registry-selected developer-environment candidates and their live overlap
+session are pre-merge evidence. Keep that session in `running` state after its
+`11 * N` ordered checkpoints and `2 * N` trusted overlap receipts are
+complete, where `N` is the exact accepted cohort size. Do not create a
+promotion receipt from a PR head: before squash merge there is no merged-dev
+promotion candidate.
 
 After the aggregate PR is squash-merged to `dev`:
 

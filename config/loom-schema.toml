@@ -894,6 +894,42 @@ python_type = "str"
 default     = ""
 description = "Exact lowercase 40-character candidate SHA bound to this Slurm worker job and propagated to every worker-created container label."
 
+[service_config.env_id]
+used_by     = ["worker"]
+python_type = "str"
+default     = ""
+description = "Immutable developer-environment registry ID bound to a Slurm worker and every worker-created container. Sandbox Slurm workers require the complete registry identity set."
+
+[service_config.resource_generation]
+used_by     = ["worker"]
+python_type = "int"
+default     = 0
+description = "Positive developer-environment resource generation bound by the verified registry snapshot. Zero is reserved for non-registry workers."
+
+[service_config.candidate_id]
+used_by     = ["worker"]
+python_type = "str"
+default     = ""
+description = "Immutable registry candidate ID for the exact Slurm worker candidate. Sandbox Slurm workers propagate it unchanged to every container label."
+
+[service_config.candidate_tree]
+used_by     = ["worker"]
+python_type = "str"
+default     = ""
+description = "Exact lowercase 40-character candidate tree bound by the developer-environment registry."
+
+[service_config.registry_generation]
+used_by     = ["worker"]
+python_type = "int"
+default     = 0
+description = "Positive generation of the verified developer-environment registry snapshot used for Slurm admission."
+
+[service_config.registry_payload_sha256]
+used_by     = ["worker"]
+python_type = "str"
+default     = ""
+description = "Exact lowercase SHA-256 digest of the verified developer-environment registry snapshot used for Slurm admission."
+
 [service_config.slurm_job_id]
 used_by     = ["worker"]
 python_type = "str"

@@ -84,6 +84,30 @@ def test_renderer_hashes_client_secrets_without_emitting_them(tmp_path: Path) ->
     assert request["inputs"]["role"] == hashlib.sha256(secret).hexdigest()
 
 
+@pytest.mark.parametrize("action", sorted(renderer.ENVIRONMENT_AUTHORITY_ACTIONS))
+def test_environment_authority_requests_are_pinned_to_oldlab_2_without_inputs(
+    tmp_path: Path,
+    action: str,
+) -> None:
+    args = _args(tmp_path, action=action, expectation="not-checked")
+    args.expected_node = "oldlab-2"
+
+    request = json.loads(renderer.render(args))
+
+    assert request["action"] == action
+    assert request["expected_node"] == "oldlab-2"
+    assert request["inputs"] == {}
+
+    args.expected_node = "oldlab-1"
+    with pytest.raises(renderer.RequestRenderError, match="binding is invalid"):
+        renderer.render(args)
+
+    args.expected_node = "oldlab-2"
+    (args.input_root / "caller-path").write_text("forbidden\n", encoding="ascii")
+    with pytest.raises(renderer.RequestRenderError, match="unexpected inputs"):
+        renderer.render(args)
+
+
 @pytest.mark.parametrize(
     ("action", "expectation"),
     [

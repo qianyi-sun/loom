@@ -17,7 +17,11 @@ spec:
         - name: worker
           image: loom-worker:0.7
           env:
+            - name: LOOM_WORKER_CANDIDATE_ID
+              value: ""
             - name: LOOM_WORKER_CANDIDATE_SHA
+              value: ""
+            - name: LOOM_WORKER_CANDIDATE_TREE
               value: ""
             - name: LOOM_WORKER_CGROUP_PARENT
               value: ""
@@ -41,6 +45,8 @@ spec:
               value: "600"
             - name: LOOM_WORKER_ENABLE_WORKER_VLLM
               value: "False"
+            - name: LOOM_WORKER_ENV_ID
+              value: ""
             - name: LOOM_WORKER_FAMILY_STATE_DOWNLOAD_TIMEOUT_SEC
               value: "120.0"
             - name: LOOM_WORKER_GATEWAY_URL
@@ -77,8 +83,14 @@ spec:
                   key: minio-secret-key
             - name: LOOM_WORKER_PRE_START_HEARTBEAT_INTERVAL_SEC
               value: "60.0"
+            - name: LOOM_WORKER_REGISTRY_GENERATION
+              value: "0"
+            - name: LOOM_WORKER_REGISTRY_PAYLOAD_SHA256
+              value: ""
             - name: LOOM_WORKER_REQUIRE_CGROUP_PARENT
               value: "False"
+            - name: LOOM_WORKER_RESOURCE_GENERATION
+              value: "0"
             - name: LOOM_WORKER_SANDBOX_IDENTITY
               value: ""
             - name: LOOM_WORKER_SANDBOX_ISOLATION

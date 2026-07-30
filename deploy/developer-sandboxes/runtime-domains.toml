@@ -4,33 +4,7 @@ shared_gid = 2007
 state_root = "/var/lib/loom-developer-domain-runtime"
 installed_program = "/usr/local/libexec/loom-developer-domain-runtime"
 installed_config = "/etc/loom/developer-runtime-domains.toml"
-
-[sandbox_groups.qianyi]
-name = "loom-sandbox-qianyi"
-uid = 31021
-gid = 31021
-member = "loom-sandbox-qianyi"
-upstream_control_plane_port = 26080
-upstream_gateway_port = 26100
-upstream_minio_port = 26900
-
-[sandbox_groups.hongjian]
-name = "loom-sandbox-hongjian"
-uid = 31022
-gid = 31022
-member = "loom-sandbox-hongjian"
-upstream_control_plane_port = 27080
-upstream_gateway_port = 27100
-upstream_minio_port = 27900
-
-[sandbox_groups.devansh]
-name = "loom-sandbox-devansh"
-uid = 31023
-gid = 31023
-member = "loom-sandbox-devansh"
-upstream_control_plane_port = 28080
-upstream_gateway_port = 28100
-upstream_minio_port = 28900
+registry_snapshot_path = "/var/lib/loom-developer-environment-registry/current-snapshot.json"
 
 [domains.oldlab]
 worker_env_name = "worker-oldlab.env"

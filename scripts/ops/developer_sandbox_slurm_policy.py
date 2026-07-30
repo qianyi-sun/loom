@@ -14,6 +14,7 @@ import ctypes
 import errno
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import pwd
@@ -27,13 +28,14 @@ import sys
 import tempfile
 import time
 import tomllib
+import types
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 
 class PolicyError(ValueError):
@@ -167,8 +169,10 @@ _DRAIN_REASON_RE = re.compile(
     r"^loom-sandbox-policy:[0-9a-f]{12}:[0-9a-f]{16}$",
 )
 _RECOVERY_CANDIDATE_ROOT_RE = re.compile(
-    r"^/shared_work/loom/candidates/sandboxes/"
-    r"(?:qianyi|hongjian|devansh)/([0-9a-f]{40})$",
+    r"^/shared_work/loom/candidates/(?:"
+    r"sandboxes/[a-z][a-z0-9-]{1,31}|"
+    r"environments/denv-[a-z0-9-]{8,64}"
+    r")/([0-9a-f]{40})$",
 )
 _RECOVERY_PROFILE_RELATIVE = {
     "trt-oldlab": "deploy/slurm/developer-sandboxes/oldlab.toml",
@@ -280,12 +284,160 @@ _TERMINAL_JOB_STATES = frozenset(
     },
 )
 _ENV_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
-_SANDBOXES = ("qianyi", "hongjian", "devansh")
-_SANDBOX_SERVICE_USERS = {
-    "qianyi": "loom-sandbox-qianyi",
-    "hongjian": "loom-sandbox-hongjian",
-    "devansh": "loom-sandbox-devansh",
+_BINDING_FIELDS = {
+    "env_id",
+    "resource_generation",
+    "sandbox",
+    "service_user",
+    "slurm_qos",
+    "candidate_id",
+    "candidate_sha",
+    "candidate_tree",
 }
+_REGISTRY_SET_FIELDS = {
+    "schema_version",
+    "kind",
+    "candidate_set_sha256",
+    "candidate_bindings",
+    "generation",
+    "convergence_id",
+    "registry_generation",
+    "registry_payload_sha256",
+}
+_REGISTRY_SET_KIND = "loom.developer-environment.slurm-candidate-set"
+
+
+def _registry_contract() -> types.ModuleType:
+    """Load the registry verifier from the candidate that owns this policy."""
+
+    try:
+        from scripts.ops import developer_environment_registry
+
+        return developer_environment_registry
+    except ModuleNotFoundError:
+        path = Path(__file__).with_name("developer_environment_registry.py")
+        spec = importlib.util.spec_from_file_location(
+            "_loom_developer_environment_registry_for_slurm",
+            path,
+        )
+        if spec is None or spec.loader is None:
+            raise PolicyError(
+                "developer environment registry verifier is unavailable",
+            ) from None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+        except (ImportError, OSError) as exc:
+            raise PolicyError("developer environment registry verifier is unavailable") from exc
+        return module
+
+
+_REGISTRY = _registry_contract()
+REGISTRY_SNAPSHOT_PATH = Path(_REGISTRY.SYSTEM_SNAPSHOT)
+_CAPACITY_ROOT = Path("/var/lib/loom-developer-environment-capacity")
+_CAPACITY_TRANSPORT_PROGRAM = Path(
+    "/usr/local/libexec/loom-developer-sandbox-node-transport",
+)
+_CAPACITY_DOMAINS = {
+    "oldlab": {
+        "cluster": "trt-oldlab",
+        "controller": "TRT-EAI-OLDLAB-1",
+        "submit_host": "trt-EAI-OLDLAB-2",
+        "authority_node": "oldlab-1",
+        "infrastructure_nodes": tuple(f"oldlab-{index}" for index in range(1, 6)),
+    },
+    "gb10": {
+        "cluster": "trt-gb10",
+        "controller": "trt-gb10-1",
+        "submit_host": "trt-gb10-1",
+        "authority_node": "trt-gb10-1",
+        "infrastructure_nodes": tuple(f"trt-gb10-{index}" for index in range(1, 16)),
+    },
+}
+_INCREMENTAL_IDENTITY_FIELDS = {
+    "schema_version",
+    "kind",
+    "env_id",
+    "principal_id",
+    "resource_generation",
+    "service_user",
+    "service_group",
+    "uid",
+    "gid",
+    "slurm_account",
+    "slurm_qos",
+    "registry_generation",
+    "registry_payload_sha256",
+    "candidate_set_sha256",
+    "revive_journal_sha256",
+}
+_INCREMENTAL_IDENTITY_V1_FIELDS = _INCREMENTAL_IDENTITY_FIELDS - {
+    "principal_id",
+    "revive_journal_sha256",
+}
+_REVIVE_ROOT = Path("/var/lib/loom-developer-environment-runtime/revive")
+_ACCEPTANCE_PROBE_RELATIVE = _STATE_RELATIVE / "acceptance-probes"
+_ACCEPTANCE_PROBE_ACTION = "developer-environment-acceptance-probe"
+_ACCEPTANCE_PROBE_KIND = "loom.developer-environment.acceptance-probe-domain-request"
+_ACCEPTANCE_PROBE_RECEIPT_KIND = "loom.developer-environment.acceptance-probe-domain-receipt"
+_ACCEPTANCE_PROBE_CONTAINER_RESULT_KIND = (
+    "loom.developer-environment.acceptance-probe-container-result"
+)
+_ACCEPTANCE_PROBE_REQUEST_FIELDS = {
+    "schema_version",
+    "kind",
+    "action",
+    "domain",
+    "cluster",
+    "submit_host",
+    "controller",
+    "deployment_id",
+    "env_id",
+    "principal_id",
+    "runtime_id",
+    "candidate_id",
+    "candidate_sha",
+    "candidate_tree",
+    "applied_resource_generation",
+    "registry_generation",
+    "registry_snapshot_sha256",
+    "service_user",
+    "slurm_account",
+    "slurm_qos",
+    "job_name",
+    "time_limit_seconds",
+    "health_services",
+    "general_admission_authorized",
+    "foreign_job_action",
+    "idempotency_key",
+    "payload_sha256",
+}
+_ACCEPTANCE_PROBE_SERVICES = ("control-plane", "gateway", "minio")
+_ACCEPTANCE_PROBE_LABELS = frozenset(
+    {
+        "loom.sandbox",
+        "loom.candidate_sha",
+        "loom.slurm_job_id",
+        "loom.compose_project",
+        "loom.env_id",
+        "loom.resource_generation",
+        "loom.candidate_id",
+        "loom.candidate_tree",
+        "loom.registry_generation",
+        "loom.registry_payload_sha256",
+    },
+)
+_ACCEPTANCE_PROBE_COMPOSE_FILES = (
+    Path("deploy/docker-compose.remote-worker.yml"),
+    Path("deploy/docker-compose.remote-worker.sandbox-link.yml"),
+    Path("deploy/docker-compose.remote-worker.cgroup-parent.yml"),
+    Path("deploy/docker-compose.remote-worker.acceptance-probe.yml"),
+)
+_ACCEPTANCE_PROBE_PROGRAM = Path(
+    "scripts/ops/developer_environment_acceptance_probe_container.py",
+)
+_ACCEPTANCE_CGROUP_PROGRAM = Path("src/loom_control_plane/slurm_job_cgroup.py")
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,70 +467,518 @@ class Profile:
     qos_max_jobs_per_user: int
     qos_max_submit_jobs_per_user: int
     parent_group_tres: tuple[str, ...]
+    environment_bindings: Mapping[str, Mapping[str, Any]]
 
 
 def _sandbox_account(profile: Profile, sandbox: str) -> str:
-    user = _sandbox_service_user(profile, sandbox)
-    return profile.child_accounts[profile.users.index(user)]
+    matches = [
+        account
+        for account, binding in profile.environment_bindings.items()
+        if binding.get("sandbox") == sandbox
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if profile.environment_bindings:
+        raise PolicyError("sandbox is absent or ambiguous in the registry cohort")
+    suffix = f"-{sandbox}"
+    fallback = [
+        account
+        for user, account in zip(profile.users, profile.child_accounts, strict=True)
+        if user.endswith(suffix)
+    ]
+    if len(fallback) != 1:
+        raise PolicyError("sandbox is absent or ambiguous in the offline profile")
+    return fallback[0]
 
 
 def _sandbox_service_user(profile: Profile, sandbox: str) -> str:
-    try:
-        user = _SANDBOX_SERVICE_USERS[sandbox]
-    except KeyError as exc:
-        raise PolicyError("sandbox must be one of the fixed sandbox labels") from exc
-    if user not in profile.users:
-        raise PolicyError("sandbox service user is absent from profile accounting")
-    return user
+    account = _sandbox_account(profile, sandbox)
+    if profile.environment_bindings:
+        return str(profile.environment_bindings[account]["service_user"])
+    return profile.users[profile.child_accounts.index(account)]
+
+
+def _sandbox_qos(profile: Profile, sandbox: str) -> str:
+    account = _sandbox_account(profile, sandbox)
+    if profile.environment_bindings:
+        return str(profile.environment_bindings[account]["slurm_qos"])
+    return profile.qos
+
+
+def _account_qos(profile: Profile, account: str) -> str:
+    if profile.environment_bindings:
+        try:
+            return str(profile.environment_bindings[account]["slurm_qos"])
+        except KeyError as exc:
+            raise PolicyError("Slurm account is absent from the registry cohort") from exc
+    return profile.qos
+
+
+def _profile_qoses(profile: Profile) -> tuple[str, ...]:
+    if profile.environment_bindings:
+        return tuple(
+            sorted(
+                {str(binding["slurm_qos"]) for binding in profile.environment_bindings.values()},
+            ),
+        )
+    return (profile.qos,)
+
+
+def _profile_with_bindings(
+    profile: Profile,
+    bindings: Mapping[str, Mapping[str, Any]],
+) -> Profile:
+    normalized = {account: dict(binding) for account, binding in bindings.items()}
+    ordered_accounts = tuple(sorted(normalized))
+    return replace(
+        profile,
+        child_accounts=ordered_accounts,
+        users=tuple(str(normalized[account]["service_user"]) for account in ordered_accounts),
+        environment_bindings=normalized,
+    )
 
 
 def _candidate_bindings(
-    profile: Profile,
+    _profile: Profile | None,
     raw: Mapping[str, Any],
-) -> dict[str, dict[str, str]]:
-    expected_accounts = {
-        _sandbox_account(profile, sandbox): sandbox for sandbox in _SANDBOXES
-    }
-    if set(raw) != set(expected_accounts):
-        raise PolicyError("candidate bindings must cover the exact sandbox accounts")
-    normalized: dict[str, dict[str, str]] = {}
-    for account, sandbox in expected_accounts.items():
+) -> dict[str, dict[str, Any]]:
+    if not raw:
+        raise PolicyError("candidate bindings must contain at least one active environment")
+    normalized: dict[str, dict[str, Any]] = {}
+    for account in sorted(raw):
         binding = raw.get(account)
-        service_user = _sandbox_service_user(profile, sandbox)
         if (
-            not isinstance(binding, Mapping)
-            or set(binding)
-            != {
-                "sandbox",
-                "service_user",
-                "candidate_sha",
-                "candidate_tree",
-            }
-            or binding.get("sandbox") != sandbox
-            or binding.get("service_user") != service_user
+            not isinstance(account, str)
+            or _SAFE_NAME.fullmatch(account) is None
+            or not isinstance(binding, Mapping)
+            or set(binding) != _BINDING_FIELDS
+            or _REGISTRY.ENV_ID_RE.fullmatch(str(binding.get("env_id"))) is None
+            or type(binding.get("resource_generation")) is not int
+            or int(binding["resource_generation"]) < 1
+            or _REGISTRY.RUNTIME_ID_RE.fullmatch(str(binding.get("sandbox"))) is None
+            or _REGISTRY.SAFE_NAME_RE.fullmatch(str(binding.get("service_user"))) is None
+            or _REGISTRY.SAFE_NAME_RE.fullmatch(str(binding.get("slurm_qos"))) is None
+            or _REGISTRY.CANDIDATE_ID_RE.fullmatch(str(binding.get("candidate_id"))) is None
             or _CANDIDATE_RE.fullmatch(str(binding.get("candidate_sha"))) is None
             or _CANDIDATE_RE.fullmatch(str(binding.get("candidate_tree"))) is None
         ):
             raise PolicyError("candidate account binding is invalid")
         normalized[account] = {
-            "sandbox": sandbox,
-            "service_user": service_user,
+            "env_id": str(binding["env_id"]),
+            "resource_generation": int(binding["resource_generation"]),
+            "sandbox": str(binding["sandbox"]),
+            "service_user": str(binding["service_user"]),
+            "slurm_qos": str(binding["slurm_qos"]),
+            "candidate_id": str(binding["candidate_id"]),
             "candidate_sha": str(binding["candidate_sha"]),
             "candidate_tree": str(binding["candidate_tree"]),
         }
-    candidate_shas = {row["candidate_sha"] for row in normalized.values()}
-    if (
-        len(candidate_shas) != len(_SANDBOXES)
-        or len({candidate_sha[:12] for candidate_sha in candidate_shas}) != len(_SANDBOXES)
+    unique_fields = (
+        "env_id",
+        "sandbox",
+        "service_user",
+        "candidate_id",
+    )
+    if any(
+        len({str(row[field]) for row in normalized.values()}) != len(normalized)
+        for field in unique_fields
     ):
-        raise PolicyError("sandbox candidate SHAs must be pairwise distinct")
+        raise PolicyError("candidate account bindings must be pairwise unique")
     return normalized
 
 
-def _candidate_set_sha256(bindings: Mapping[str, Mapping[str, str]]) -> str:
+def _candidate_set_sha256(bindings: Mapping[str, Mapping[str, Any]]) -> str:
     return hashlib.sha256(
         json.dumps(bindings, sort_keys=True, separators=(",", ":")).encode("ascii"),
     ).hexdigest()
+
+
+def _read_registry_snapshot(
+    path: Path = REGISTRY_SNAPSHOT_PATH,
+    *,
+    require_root_ownership: bool,
+) -> dict[str, Any]:
+    descriptor = -1
+    try:
+        lexical = path.lstat()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+        )
+        opened = os.fstat(descriptor)
+        raw = os.pread(descriptor, 8 * 1024 * 1024 + 1, 0)
+        rebound = os.fstat(descriptor)
+        current = path.lstat()
+    except OSError as exc:
+        raise PolicyError("developer environment registry snapshot is unavailable") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    identities = {
+        (
+            item.st_dev,
+            item.st_ino,
+            item.st_mode,
+            item.st_uid,
+            item.st_gid,
+            item.st_size,
+            item.st_mtime_ns,
+        )
+        for item in (lexical, opened, rebound, current)
+    }
+    expected_uid = 0 if require_root_ownership else os.geteuid()
+    if (
+        len(raw) > 8 * 1024 * 1024
+        or len(identities) != 1
+        or not stat.S_ISREG(opened.st_mode)
+        or opened.st_nlink != 1
+        or opened.st_uid != expected_uid
+        or opened.st_gid != (0 if require_root_ownership else os.getegid())
+        or stat.S_IMODE(opened.st_mode) != 0o600
+    ):
+        raise PolicyError("developer environment registry snapshot is unsafe")
+    try:
+        payload = _REGISTRY.DeveloperEnvironmentRegistry.verify_snapshot(raw)
+    except Exception as exc:
+        raise PolicyError("developer environment registry snapshot is invalid") from exc
+    if not isinstance(payload, dict):
+        raise PolicyError("developer environment registry snapshot is invalid")
+    return payload
+
+
+def _registry_candidate_bindings(
+    snapshot: Mapping[str, Any],
+    *,
+    include_provisioning: bool,
+    deployment_id: str | None = None,
+    target_resource_generation: int | None = None,
+    include_retiring: bool = False,
+) -> tuple[dict[str, dict[str, Any]], tuple[dict[str, Any], ...]]:
+    candidates = {str(candidate["candidate_id"]): candidate for candidate in snapshot["candidates"]}
+    deployments = tuple(snapshot["deployments"])
+    bindings: dict[str, dict[str, Any]] = {}
+    provisioning: list[dict[str, Any]] = []
+    target_env_id: str | None = None
+    if deployment_id is not None:
+        targets = [
+            deployment for deployment in deployments if deployment["deployment_id"] == deployment_id
+        ]
+        if len(targets) != 1:
+            raise PolicyError("registry deployment selector is invalid")
+        target_env_id = str(targets[0]["env_id"])
+    for environment in snapshot["environments"]:
+        candidate_id: str | None = None
+        phase: str | None = None
+        resource_generation = int(environment["resource_generation"])
+        state = environment["state"]
+        deployment_matches = environment["env_id"] == target_env_id
+        if state == "active":
+            candidate_id = str(environment["current_candidate_id"])
+            committed = [
+                deployment
+                for deployment in deployments
+                if deployment["env_id"] == environment["env_id"]
+                and deployment["principal_id"] == environment["principal_id"]
+                and deployment["candidate_id"] == candidate_id
+                and (not deployment_matches or deployment["deployment_id"] == deployment_id)
+                and deployment["phase"] == "committed"
+                and deployment.get("applied_resource_generation")
+                == environment["resource_generation"]
+                and deployment.get("expected_resource_generation", 0) + 1
+                == deployment["applied_resource_generation"]
+                and type(deployment.get("applied_registry_generation")) is int
+                and 1 <= deployment["applied_registry_generation"] < snapshot["generation"]
+                and _REGISTRY.DIGEST_RE.fullmatch(
+                    str(deployment.get("applied_registry_payload_sha256")),
+                )
+                is not None
+            ]
+            if len(committed) != 1:
+                raise PolicyError(
+                    "registry active environment lacks one applied committed deployment",
+                )
+            latest = committed[0]
+            if not _registry_finalization_exact(
+                snapshot,
+                environment,
+                candidates.get(candidate_id),
+                latest,
+            ):
+                raise PolicyError(
+                    "registry committed deployment finalization binding is invalid",
+                )
+            phase = str(latest["phase"])
+        elif state == "deploying" and include_provisioning and deployment_matches:
+            in_flight = [
+                deployment
+                for deployment in deployments
+                if deployment["env_id"] == environment["env_id"]
+                and deployment["principal_id"] == environment["principal_id"]
+                and (not deployment_matches or deployment["deployment_id"] == deployment_id)
+                and deployment["expected_resource_generation"] == environment["resource_generation"]
+                and deployment["phase"] not in {"committed", "failed"}
+            ]
+            if len(in_flight) != 1:
+                raise PolicyError("registry provisioning environment is ambiguous")
+            candidate_id = str(in_flight[0]["candidate_id"])
+            phase = str(in_flight[0]["phase"])
+            selected_generation = (
+                int(environment["resource_generation"])
+                if target_resource_generation is None
+                else target_resource_generation
+            )
+            allowed_generations = {int(environment["resource_generation"])}
+            if phase == "verified":
+                allowed_generations.add(int(environment["resource_generation"]) + 1)
+            if selected_generation not in allowed_generations:
+                raise PolicyError("registry provisioning generation is invalid")
+            if selected_generation != environment["resource_generation"] and (
+                in_flight[0].get("applied_resource_generation") != selected_generation
+                or type(in_flight[0].get("applied_registry_generation")) is not int
+                or not 1 <= in_flight[0]["applied_registry_generation"] < snapshot["generation"]
+                or _REGISTRY.DIGEST_RE.fullmatch(
+                    str(in_flight[0].get("applied_registry_payload_sha256")),
+                )
+                is None
+            ):
+                raise PolicyError("registry provisioning applied binding is invalid")
+            resource_generation = selected_generation
+            provisioning.append(
+                {
+                    "env_id": environment["env_id"],
+                    "deployment_id": in_flight[0]["deployment_id"],
+                    "phase": phase,
+                },
+            )
+        elif state == "quarantined" and include_retiring and deployment_matches:
+            committed = [
+                deployment
+                for deployment in deployments
+                if deployment["deployment_id"] == deployment_id
+                and deployment["env_id"] == environment["env_id"]
+                and deployment["principal_id"] == environment["principal_id"]
+                and deployment["candidate_id"] == environment["current_candidate_id"]
+                and deployment["phase"] == "committed"
+                and deployment.get("applied_resource_generation")
+                == environment["resource_generation"]
+                and deployment.get("expected_resource_generation", 0) + 1
+                == deployment["applied_resource_generation"]
+            ]
+            if len(committed) != 1:
+                raise PolicyError("registry retiring environment binding is invalid")
+            candidate_id = str(committed[0]["candidate_id"])
+            phase = "committed"
+        else:
+            continue
+        candidate = candidates.get(candidate_id)
+        if (
+            candidate is None
+            or candidate["env_id"] != environment["env_id"]
+            or candidate["principal_id"] != environment["principal_id"]
+            or phase is None
+        ):
+            raise PolicyError("registry candidate ownership is invalid")
+        selected_deployments = [
+            deployment
+            for deployment in deployments
+            if deployment["env_id"] == environment["env_id"]
+            and deployment["principal_id"] == environment["principal_id"]
+            and deployment["candidate_id"] == candidate_id
+            and deployment["phase"] == phase
+            and (
+                phase != "committed"
+                or deployment.get("applied_resource_generation") == resource_generation
+            )
+            and (not deployment_matches or deployment["deployment_id"] == deployment_id)
+        ]
+        if phase == "committed" and (
+            len(selected_deployments) != 1
+            or not _registry_finalization_exact(
+                snapshot,
+                environment,
+                candidate,
+                selected_deployments[0],
+            )
+        ):
+            raise PolicyError(
+                "registry committed deployment finalization binding is invalid",
+            )
+        account = str(environment["slurm_account"])
+        if account in bindings:
+            raise PolicyError("registry Slurm account is duplicated")
+        bindings[account] = {
+            "env_id": str(environment["env_id"]),
+            "resource_generation": resource_generation,
+            "sandbox": str(environment["runtime_id"]),
+            # The Slurm batch identity, not the host service identity, owns jobs.
+            "service_user": str(environment["slurm_user"]),
+            "slurm_qos": str(environment["slurm_qos"]),
+            "candidate_id": str(candidate["candidate_id"]),
+            "candidate_sha": str(candidate["candidate_sha"]),
+            "candidate_tree": str(candidate["candidate_tree"]),
+        }
+    return _candidate_bindings(None, bindings), tuple(
+        sorted(provisioning, key=lambda row: str(row["env_id"])),
+    )
+
+
+def _registry_finalization_exact(
+    snapshot: Mapping[str, Any],
+    environment: Mapping[str, Any],
+    candidate: object,
+    deployment: Mapping[str, Any],
+) -> bool:
+    if not isinstance(candidate, Mapping):
+        return False
+    digest = deployment.get("finalization_payload_sha256")
+    records = snapshot.get("deployment_finalizations")
+    if _REGISTRY.DIGEST_RE.fullmatch(str(digest)) is None or not isinstance(records, list):
+        return False
+    matched = [
+        record
+        for record in records
+        if isinstance(record, Mapping)
+        and record.get("deployment_id") == deployment["deployment_id"]
+        and record.get("payload_sha256") == digest
+    ]
+    if len(matched) != 1:
+        return False
+    record = matched[0]
+    fields = {
+        "deployment_id",
+        "env_id",
+        "principal_id",
+        "candidate_id",
+        "candidate_sha",
+        "candidate_tree",
+        "applied_resource_generation",
+        "applied_registry_generation",
+        "applied_registry_payload_sha256",
+        "capacity_finalize_receipt_sha256",
+        "capacity_finalize_check_receipt_sha256",
+        "runtime_reconcile_receipt_sha256",
+        "runtime_prepare_check_receipt_sha256",
+        "acceptance_probe_receipt_sha256",
+        "created_at",
+        "payload_sha256",
+    }
+    unsigned = {field: value for field, value in record.items() if field != "payload_sha256"}
+    return (
+        set(record) == fields
+        and record.get("payload_sha256")
+        == hashlib.sha256(_canonical_json_bytes(unsigned) + b"\n").hexdigest()
+        and record.get("env_id") == environment["env_id"]
+        and record.get("principal_id") == environment["principal_id"]
+        and record.get("candidate_id") == candidate["candidate_id"]
+        and record.get("candidate_sha") == candidate["candidate_sha"]
+        and record.get("candidate_tree") == candidate["candidate_tree"]
+        and record.get("applied_resource_generation")
+        == deployment.get("applied_resource_generation")
+        and record.get("applied_registry_generation")
+        == deployment.get("applied_registry_generation")
+        and record.get("applied_registry_payload_sha256")
+        == deployment.get("applied_registry_payload_sha256")
+        and all(
+            _REGISTRY.DIGEST_RE.fullmatch(str(record.get(field))) is not None
+            for field in (
+                "capacity_finalize_receipt_sha256",
+                "capacity_finalize_check_receipt_sha256",
+                "runtime_reconcile_receipt_sha256",
+                "runtime_prepare_check_receipt_sha256",
+                "acceptance_probe_receipt_sha256",
+            )
+        )
+        and isinstance(record.get("created_at"), str)
+    )
+
+
+def slurm_candidate_set_from_snapshot(
+    snapshot: Mapping[str, Any],
+    *,
+    generation: int | None = None,
+    convergence_id: str | None = None,
+    include_provisioning: bool = True,
+    deployment_id: str | None = None,
+    target_resource_generation: int | None = None,
+    include_retiring: bool = False,
+) -> dict[str, Any]:
+    """Produce the exact registry-bound payload consumed by node authorities."""
+
+    bindings, _provisioning = _registry_candidate_bindings(
+        snapshot,
+        include_provisioning=include_provisioning,
+        deployment_id=deployment_id,
+        target_resource_generation=target_resource_generation,
+        include_retiring=include_retiring,
+    )
+    registry_generation = snapshot.get("generation")
+    registry_digest = snapshot.get("payload_sha256")
+    if (
+        type(registry_generation) is not int
+        or registry_generation < 1
+        or _REGISTRY.DIGEST_RE.fullmatch(str(registry_digest)) is None
+    ):
+        raise PolicyError("registry snapshot identity is invalid")
+    policy_generation = registry_generation if generation is None else generation
+    if type(policy_generation) is not int or policy_generation < 1:
+        raise PolicyError("Slurm candidate-set generation is invalid")
+    binding_digest = _candidate_set_sha256(bindings)
+    convergence = (
+        convergence_id
+        or hashlib.sha256(
+            (
+                f"{registry_generation}:{registry_digest}:{policy_generation}:{binding_digest}"
+            ).encode("ascii"),
+        ).hexdigest()
+    )
+    if _REGISTRY.DIGEST_RE.fullmatch(convergence) is None:
+        raise PolicyError("Slurm candidate-set convergence identity is invalid")
+    return {
+        "schema_version": 2,
+        "kind": "loom.developer-sandbox.slurm-candidate-set",
+        "candidate_set_sha256": binding_digest,
+        "candidate_bindings": bindings,
+        "generation": policy_generation,
+        "convergence_id": convergence,
+        "registry_generation": registry_generation,
+        "registry_payload_sha256": str(registry_digest),
+    }
+
+
+def load_slurm_candidate_set(
+    path: Path = REGISTRY_SNAPSHOT_PATH,
+    *,
+    require_root_ownership: bool = True,
+    generation: int | None = None,
+    convergence_id: str | None = None,
+) -> dict[str, Any]:
+    snapshot = _read_registry_snapshot(
+        path,
+        require_root_ownership=require_root_ownership,
+    )
+    return slurm_candidate_set_from_snapshot(
+        snapshot,
+        generation=generation,
+        convergence_id=convergence_id,
+    )
+
+
+def _require_current_registry_bindings(
+    bindings: Mapping[str, Mapping[str, Any]],
+    *,
+    path: Path = REGISTRY_SNAPSHOT_PATH,
+) -> dict[str, Any]:
+    snapshot = _read_registry_snapshot(path, require_root_ownership=True)
+    expected, _provisioning = _registry_candidate_bindings(
+        snapshot,
+        include_provisioning=True,
+    )
+    if dict(bindings) != expected:
+        raise PolicyError("Slurm candidate bindings are stale against the current registry")
+    return {
+        "registry_generation": snapshot["generation"],
+        "registry_payload_sha256": snapshot["payload_sha256"],
+    }
 
 
 def _transaction_identity(
@@ -416,20 +1016,26 @@ def _transaction_identity(
 def _offline_candidate_bindings(
     profile: Profile,
     candidate_sha: str,
-) -> dict[str, dict[str, str]]:
+) -> dict[str, dict[str, Any]]:
     """Provide closed schema-v2 fixtures only for non-live planning roots."""
 
-    rows: dict[str, dict[str, str]] = {}
-    for index, sandbox in enumerate(_SANDBOXES):
-        account = _sandbox_account(profile, sandbox)
+    rows: dict[str, dict[str, Any]] = {}
+    for index, (service_user, account) in enumerate(
+        zip(profile.users, profile.child_accounts, strict=True),
+    ):
+        sandbox = service_user.removeprefix("loom-sandbox-")
         sha = (
             candidate_sha
             if index == 0
             else hashlib.sha256(f"{candidate_sha}:{sandbox}".encode("ascii")).hexdigest()[:40]
         )
         rows[account] = {
+            "env_id": f"denv-offline-{index:08d}",
+            "resource_generation": 1,
             "sandbox": sandbox,
-            "service_user": _sandbox_service_user(profile, sandbox),
+            "service_user": service_user,
+            "slurm_qos": profile.qos,
+            "candidate_id": f"cand-{sha}",
             "candidate_sha": sha,
             "candidate_tree": candidate_sha,
         }
@@ -536,10 +1142,10 @@ def load_profile(path: Path) -> Profile:
         accounting.get("child_accounts"),
         "accounting.child_accounts",
     )
-    if len(users) != 3 or len(child_accounts) != 3:
-        raise PolicyError("exactly three sandbox users and child accounts are required")
-    if users != tuple(_SANDBOX_SERVICE_USERS[sandbox] for sandbox in _SANDBOXES):
-        raise PolicyError("accounting.users must be the fixed sandbox service users")
+    if len(users) != len(child_accounts):
+        raise PolicyError("accounting users and child accounts must have equal length")
+    if any(not user.startswith("loom-") for user in users):
+        raise PolicyError("accounting users must be non-login Loom service users")
     cluster = raw.get("cluster")
     controller = raw.get("controller")
     submit_host = raw.get("submit_host")
@@ -623,6 +1229,7 @@ def load_profile(path: Path) -> Profile:
             accounting["qos_max_submit_jobs_per_user"],
         ),
         parent_group_tres=parent_group_tres,
+        environment_bindings={},
     )
 
 
@@ -664,10 +1271,7 @@ def _worker_capacity_contract(
         raise PolicyError("worker capacity contract tables are invalid")
     concurrency = actuator.get("requested_concurrency")
     allowed_nodes = actuator.get("allowed_nodes")
-    expected_env = (
-        f"/shared_work/loom/runtime/sandboxes/${{SANDBOX}}/"
-        f"${{CANDIDATE_SHA}}/worker-{domain}.env"
-    )
+    expected_env = f"${{RUNTIME_ROOT}}/${{CANDIDATE_SHA}}/worker-{domain}.env"
     if (
         runtime.get("schema_version") != 1
         or domain_config.get("worker_env_name") != f"worker-{domain}.env"
@@ -683,8 +1287,10 @@ def _worker_capacity_contract(
         or tuple(node.lower() for node in allowed_nodes)
         != tuple(node.lower() for node in profile.allowed_nodes)
         or actuator.get("env_file") != expected_env
+        or actuator.get("repo_dir") != "${CANDIDATE_ROOT}/${CANDIDATE_SHA}"
         or actuator.get("candidate_sha") != "${CANDIDATE_SHA}"
-        or actuator.get("slurm_account") != "loom-dev-${SANDBOX}"
+        or actuator.get("slurm_account") != "${SLURM_ACCOUNT}"
+        or actuator.get("qos_normal") != "${SLURM_QOS}"
         or capacity.get("slot_budget") != profile.slot_budget
         or capacity.get("job_pids_max") != profile.job_pids_max
     ):
@@ -1351,7 +1957,7 @@ def allocation_node_check(
     ):
         raise PolicyError("allocation-side Docker Compose cgroup binding drifted")
     result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "sandbox": sandbox,
         "account": account,
         "candidate_sha": candidate_sha,
@@ -1397,6 +2003,7 @@ def desired_files(
         bindings = _offline_candidate_bindings(profile, candidate)
     else:
         bindings = _candidate_bindings(profile, candidate_bindings)
+    profile = _profile_with_bindings(profile, bindings)
     candidate_set_sha256 = _candidate_set_sha256(bindings)
     slurm_path = root / "etc/slurm/slurm.conf"
     daemon_path = root / "etc/docker/daemon.json"
@@ -1481,6 +2088,7 @@ def plan(
         if candidate_bindings is None
         else _candidate_bindings(profile, candidate_bindings)
     )
+    profile = _profile_with_bindings(profile, bindings)
     rows = []
     for path, desired in files.items():
         live = path.read_bytes() if path.exists() else b""
@@ -1503,7 +2111,7 @@ def plan(
             },
         )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "artifact_type": "developer-sandbox-slurm-policy-plan",
         "cluster": profile.cluster,
         "candidate_sha": candidate,
@@ -1527,49 +2135,52 @@ def plan(
 
 
 def accounting_commands(profile: Profile) -> list[list[str]]:
-    commands = [
+    commands: list[list[str]] = []
+    for qos in _profile_qoses(profile):
+        commands.extend(
+            [
+                ["sacctmgr", "-i", "add", "qos", qos],
+                [
+                    "sacctmgr",
+                    "-i",
+                    "modify",
+                    "qos",
+                    "where",
+                    f"name={qos}",
+                    "set",
+                    f"Priority={profile.qos_priority}",
+                    f"MaxWall={profile.qos_max_wall}",
+                    f"MaxJobsPerUser={profile.qos_max_jobs_per_user}",
+                    f"MaxSubmitJobsPerUser={profile.qos_max_submit_jobs_per_user}",
+                ],
+            ],
+        )
+    commands.extend(
         [
-            "sacctmgr",
-            "-i",
-            "add",
-            "qos",
-            profile.qos,
+            [
+                "sacctmgr",
+                "-i",
+                "add",
+                "account",
+                profile.parent_account,
+                "Description=Loom developer sandboxes",
+                "Organization=loom",
+            ],
+            [
+                "sacctmgr",
+                "-i",
+                "modify",
+                "account",
+                "where",
+                f"account={profile.parent_account}",
+                "set",
+                f"Fairshare={profile.fairshare}",
+                f"GrpTRES={','.join(profile.parent_group_tres)}",
+            ],
         ],
-        [
-            "sacctmgr",
-            "-i",
-            "modify",
-            "qos",
-            "where",
-            f"name={profile.qos}",
-            "set",
-            f"Priority={profile.qos_priority}",
-            f"MaxWall={profile.qos_max_wall}",
-            f"MaxJobsPerUser={profile.qos_max_jobs_per_user}",
-            f"MaxSubmitJobsPerUser={profile.qos_max_submit_jobs_per_user}",
-        ],
-        [
-            "sacctmgr",
-            "-i",
-            "add",
-            "account",
-            profile.parent_account,
-            "Description=Loom developer sandboxes",
-            "Organization=loom",
-        ],
-        [
-            "sacctmgr",
-            "-i",
-            "modify",
-            "account",
-            "where",
-            f"account={profile.parent_account}",
-            "set",
-            f"Fairshare={profile.fairshare}",
-            f"GrpTRES={','.join(profile.parent_group_tres)}",
-        ],
-    ]
+    )
     for user, account in zip(profile.users, profile.child_accounts, strict=True):
+        qos = _account_qos(profile, account)
         commands.extend(
             [
                 [
@@ -1600,8 +2211,8 @@ def accounting_commands(profile: Profile) -> list[list[str]]:
                     f"account={account}",
                     "set",
                     f"Fairshare={profile.fairshare}",
-                    f"QOS={profile.qos}",
-                    f"DefaultQOS={profile.qos}",
+                    f"QOS={qos}",
+                    f"DefaultQOS={qos}",
                 ],
             ],
         )
@@ -1964,7 +2575,11 @@ def _write_journal(path: Path, payload: Mapping[str, Any]) -> None:
         raise PolicyError("durable Slurm policy journal write is unsafe")
 
 
-def _load_journal(path: Path) -> dict[str, Any] | None:
+def _load_journal(
+    path: Path,
+    *,
+    allowed_schema_versions: frozenset[int] = frozenset({1, 2}),
+) -> dict[str, Any] | None:
     enforce_root_ownership = _state_path_enforces_root(path)
     _prepare_private_directory(
         path.parent,
@@ -2016,7 +2631,7 @@ def _load_journal(path: Path) -> dict[str, Any] | None:
         os.close(descriptor)
     if (
         not isinstance(payload, dict)
-        or payload.get("schema_version") != 1
+        or payload.get("schema_version") not in allowed_schema_versions
         or raw
         != (
             json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"
@@ -2033,7 +2648,7 @@ def _load_policy_journal(
     profile: Profile,
     slurm_node: str | None,
 ) -> dict[str, Any] | None:
-    payload = _load_journal(path)
+    payload = _load_journal(path, allowed_schema_versions=frozenset({1, 2}))
     if payload is None:
         return None
     operation = payload.get("operation")
@@ -2471,12 +3086,13 @@ def _restore_snapshot(root: Path, snapshot: Path) -> None:
 def _accounting_desired_state(profile: Profile) -> dict[str, Any]:
     return {
         "qos": {
-            profile.qos: {
+            qos: {
                 "Priority": str(profile.qos_priority),
                 "MaxWall": profile.qos_max_wall,
                 "MaxJobsPU": str(profile.qos_max_jobs_per_user),
                 "MaxSubmitJobsPU": str(profile.qos_max_submit_jobs_per_user),
-            },
+            }
+            for qos in _profile_qoses(profile)
         },
         "accounts": {
             profile.parent_account: {
@@ -2496,8 +3112,8 @@ def _accounting_desired_state(profile: Profile) -> dict[str, Any]:
                 "User": user,
                 "Account": account,
                 "Fairshare": str(profile.fairshare),
-                "QOS": profile.qos,
-                "DefaultQOS": profile.qos,
+                "QOS": _account_qos(profile, account),
+                "DefaultQOS": _account_qos(profile, account),
             }
             for user, account in zip(profile.users, profile.child_accounts, strict=True)
         },
@@ -2505,35 +3121,32 @@ def _accounting_desired_state(profile: Profile) -> dict[str, Any]:
 
 
 def _accounting_state(profile: Profile) -> dict[str, Any]:
-    qos_rows = [
-        line.split("|")
-        for line in _run(
-            (
-                "sacctmgr",
-                "-nP",
-                "show",
-                "qos",
-                "where",
-                f"name={profile.qos}",
-                "format=Name,Priority,MaxWall,MaxJobsPU,MaxSubmitJobsPU",
-            ),
-        ).splitlines()
-        if line.strip()
-    ]
-    if len(qos_rows) > 1 or any(len(row) < 5 for row in qos_rows):
-        raise PolicyError("Loom QoS accounting snapshot is ambiguous")
-    qos = (
-        {}
-        if not qos_rows
-        else {
-            profile.qos: {
+    qos: dict[str, dict[str, str]] = {}
+    for qos_name in _profile_qoses(profile):
+        qos_rows = [
+            line.split("|")
+            for line in _run(
+                (
+                    "sacctmgr",
+                    "-nP",
+                    "show",
+                    "qos",
+                    "where",
+                    f"name={qos_name}",
+                    "format=Name,Priority,MaxWall,MaxJobsPU,MaxSubmitJobsPU",
+                ),
+            ).splitlines()
+            if line.strip()
+        ]
+        if len(qos_rows) > 1 or any(len(row) < 5 for row in qos_rows):
+            raise PolicyError("Loom QoS accounting snapshot is ambiguous")
+        if qos_rows:
+            qos[qos_name] = {
                 "Priority": qos_rows[0][1],
                 "MaxWall": qos_rows[0][2],
                 "MaxJobsPU": qos_rows[0][3],
                 "MaxSubmitJobsPU": qos_rows[0][4],
-            },
-        }
-    )
+            }
 
     account_rows = [
         line.split("|")
@@ -2743,8 +3356,9 @@ def _accounting_external_references(profile: Profile) -> set[str]:
             continue
         if row[1] in exact_accounts:
             references.add(row[1])
-        if profile.qos in _split_csv(row[2]) or row[3] == profile.qos:
-            references.add(profile.qos)
+        for qos in _profile_qoses(profile):
+            if qos in _split_csv(row[2]) or row[3] == qos:
+                references.add(qos)
     return references
 
 
@@ -2809,22 +3423,23 @@ def _apply_accounting(
     expected = deepcopy(before)
     commands = iter(accounting_commands(profile))
 
-    expected = _checked_accounting_add(
-        profile,
-        next(commands),
-        expected,
-        category="qos",
-        identity=profile.qos,
-        required_fields={},
-    )
-    next_expected = deepcopy(expected)
-    next_expected["qos"][profile.qos] = deepcopy(desired["qos"][profile.qos])
-    expected = _checked_accounting_transition(
-        profile,
-        next(commands),
-        expected,
-        next_expected,
-    )
+    for qos in _profile_qoses(profile):
+        expected = _checked_accounting_add(
+            profile,
+            next(commands),
+            expected,
+            category="qos",
+            identity=qos,
+            required_fields={},
+        )
+        next_expected = deepcopy(expected)
+        next_expected["qos"][qos] = deepcopy(desired["qos"][qos])
+        expected = _checked_accounting_transition(
+            profile,
+            next(commands),
+            expected,
+            next_expected,
+        )
 
     expected = _checked_accounting_add(
         profile,
@@ -2896,8 +3511,9 @@ def _restore_accounting(profile: Profile, path: Path) -> None:
         for account in (*profile.child_accounts, profile.parent_account)
         if account not in before_accounts and account in current["accounts"]
     }
-    if profile.qos not in before["qos"] and profile.qos in current["qos"]:
-        created_identities.add(profile.qos)
+    for qos in _profile_qoses(profile):
+        if qos not in before["qos"] and qos in current["qos"]:
+            created_identities.add(qos)
     if created_identities and (_accounting_external_references(profile) & created_identities):
         raise PolicyError("new Loom accounting identities have external references")
 
@@ -3000,51 +3616,52 @@ def _restore_accounting(profile: Profile, path: Path) -> None:
                 next_expected,
             )
     before_qos = before["qos"]
-    if profile.qos in before_qos:
-        row = before_qos[profile.qos]
-        next_expected = deepcopy(expected)
-        next_expected["qos"][profile.qos] = deepcopy(row)
-        expected = _checked_accounting_transition(
-            profile,
-            (
-                "sacctmgr",
-                "-i",
-                "modify",
-                "qos",
-                "where",
-                f"name={profile.qos}",
-                "set",
-                f"Priority={row['Priority']}",
-                f"MaxWall={row['MaxWall']}",
-                f"MaxJobsPerUser={row['MaxJobsPU']}",
-                f"MaxSubmitJobsPerUser={row['MaxSubmitJobsPU']}",
-            ),
-            expected,
-            next_expected,
-        )
-    elif profile.qos in expected["qos"]:
-        _require_accounting_state(
-            profile,
-            expected,
-            phase="before external-reference readback",
-        )
-        if profile.qos in _accounting_external_references(profile):
-            raise PolicyError("new Loom QoS gained an external reference")
-        next_expected = deepcopy(expected)
-        next_expected["qos"].pop(profile.qos)
-        expected = _checked_accounting_transition(
-            profile,
-            (
-                "sacctmgr",
-                "-i",
-                "delete",
-                "qos",
-                "where",
-                f"name={profile.qos}",
-            ),
-            expected,
-            next_expected,
-        )
+    for qos in reversed(_profile_qoses(profile)):
+        if qos in before_qos:
+            row = before_qos[qos]
+            next_expected = deepcopy(expected)
+            next_expected["qos"][qos] = deepcopy(row)
+            expected = _checked_accounting_transition(
+                profile,
+                (
+                    "sacctmgr",
+                    "-i",
+                    "modify",
+                    "qos",
+                    "where",
+                    f"name={qos}",
+                    "set",
+                    f"Priority={row['Priority']}",
+                    f"MaxWall={row['MaxWall']}",
+                    f"MaxJobsPerUser={row['MaxJobsPU']}",
+                    f"MaxSubmitJobsPerUser={row['MaxSubmitJobsPU']}",
+                ),
+                expected,
+                next_expected,
+            )
+        elif qos in expected["qos"]:
+            _require_accounting_state(
+                profile,
+                expected,
+                phase="before external-reference readback",
+            )
+            if qos in _accounting_external_references(profile):
+                raise PolicyError("new Loom QoS gained an external reference")
+            next_expected = deepcopy(expected)
+            next_expected["qos"].pop(qos)
+            expected = _checked_accounting_transition(
+                profile,
+                (
+                    "sacctmgr",
+                    "-i",
+                    "delete",
+                    "qos",
+                    "where",
+                    f"name={qos}",
+                ),
+                expected,
+                next_expected,
+            )
     if expected != before:
         raise PolicyError("Loom accounting CAS restore readback drifted")
 
@@ -3245,8 +3862,7 @@ def _load_drain_journal(
         or not isinstance(payload.get("candidate_root"), str)
         or not Path(payload["candidate_root"]).is_absolute()
         or len(payload["candidate_root"]) > 4096
-        or payload.get("profile_relative")
-        != _RECOVERY_PROFILE_RELATIVE.get(profile.cluster)
+        or payload.get("profile_relative") != _RECOVERY_PROFILE_RELATIVE.get(profile.cluster)
         or payload.get("operation") not in {"apply", "rollback"}
         or type(payload.get("apply_accounting")) is not bool
         or (payload.get("operation") == "rollback" and payload.get("apply_accounting") is True)
@@ -3725,33 +4341,31 @@ def _split_csv(value: str) -> set[str]:
 
 
 def _accounting_readback(profile: Profile) -> dict[str, Any]:
-    qos_rows = [
-        line.split("|")
-        for line in _run(
-            (
-                "sacctmgr",
-                "-nP",
-                "show",
-                "qos",
-                "where",
-                f"name={profile.qos}",
-                "format=Name,Priority,MaxWall,MaxJobsPU,MaxSubmitJobsPU",
-            ),
-        ).splitlines()
-        if line.strip()
-    ]
-    if len(qos_rows) != 1 or len(qos_rows[0]) < 5:
-        raise PolicyError("live Slurm QoS readback is missing or ambiguous")
-    qos = qos_rows[0][:5]
-    expected_qos = [
-        profile.qos,
-        str(profile.qos_priority),
-        profile.qos_max_wall,
-        str(profile.qos_max_jobs_per_user),
-        str(profile.qos_max_submit_jobs_per_user),
-    ]
-    if qos != expected_qos:
-        raise PolicyError("live Slurm QoS readback drifted")
+    for qos_name in _profile_qoses(profile):
+        qos_rows = [
+            line.split("|")
+            for line in _run(
+                (
+                    "sacctmgr",
+                    "-nP",
+                    "show",
+                    "qos",
+                    "where",
+                    f"name={qos_name}",
+                    "format=Name,Priority,MaxWall,MaxJobsPU,MaxSubmitJobsPU",
+                ),
+            ).splitlines()
+            if line.strip()
+        ]
+        expected_qos = [
+            qos_name,
+            str(profile.qos_priority),
+            profile.qos_max_wall,
+            str(profile.qos_max_jobs_per_user),
+            str(profile.qos_max_submit_jobs_per_user),
+        ]
+        if len(qos_rows) != 1 or qos_rows[0][:5] != expected_qos:
+            raise PolicyError("live Slurm QoS readback is missing or drifted")
 
     account_rows = [
         line.split("|")
@@ -3800,15 +4414,16 @@ def _accounting_readback(profile: Profile) -> dict[str, Any]:
     associations = {(row[0], row[1]): row for row in association_rows if len(row) >= 5 and row[0]}
     for user, account in zip(profile.users, profile.child_accounts, strict=True):
         association = associations.get((user, account))
+        qos = _account_qos(profile, account)
         if (
             association is None
             or association[2] != str(profile.fairshare)
-            or profile.qos not in _split_csv(association[3])
-            or association[4] != profile.qos
+            or qos not in _split_csv(association[3])
+            or association[4] != qos
         ):
             raise PolicyError("live Slurm user association or fair-share drifted")
     return {
-        "qos": profile.qos,
+        "qos": list(_profile_qoses(profile)),
         "accounts": sorted(expected_accounts),
         "associations": [
             {"user": user, "account": account}
@@ -3830,9 +4445,7 @@ def _guard_status_readback(
     candidate_set_sha256 = _candidate_set_sha256(bindings)
     path = root / _GUARD_STATUS_RELATIVE
     try:
-        expected_uid, expected_gid = (
-            (0, 0) if root == Path("/") else (os.geteuid(), os.getegid())
-        )
+        expected_uid, expected_gid = (0, 0) if root == Path("/") else (os.geteuid(), os.getegid())
         raw, _metadata = _read_bound_regular_file(
             path,
             expected_uid=expected_uid,
@@ -3844,10 +4457,7 @@ def _guard_status_readback(
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise PolicyError("cgroup guard status is unavailable") from exc
-    if (
-        not isinstance(payload, dict)
-        or payload.get("schema_version") != 2
-    ):
+    if not isinstance(payload, dict) or payload.get("schema_version") != 2:
         raise PolicyError("cgroup guard status is unsafe")
     try:
         observed = datetime.fromisoformat(str(payload["timestamp"]))
@@ -3863,10 +4473,7 @@ def _guard_status_readback(
     if (
         normalized_observed is None
         or (not_before is not None and normalized_not_before is None)
-        or (
-            normalized_not_before is not None
-            and normalized_observed < normalized_not_before
-        )
+        or (normalized_not_before is not None and normalized_observed < normalized_not_before)
         or normalized_observed > now + _GUARD_MAX_CLOCK_SKEW
         or now - normalized_observed > _GUARD_STATUS_MAX_AGE
     ):
@@ -3881,8 +4488,14 @@ def _guard_status_readback(
     if require_probe:
         if sandbox is None:
             raise PolicyError("cgroup guard probe readback requires a sandbox")
-        account = f"loom-dev-{sandbox}"
-        binding = bindings.get(account)
+        matching = [
+            (account, binding)
+            for account, binding in bindings.items()
+            if isinstance(binding, Mapping) and binding.get("sandbox") == sandbox
+        ]
+        if len(matching) != 1:
+            raise PolicyError("cgroup guard sandbox binding is absent or ambiguous")
+        account, binding = matching[0]
         probes = payload.get("resource_probes")
         probe = probes.get(account) if isinstance(probes, dict) else None
         if (
@@ -3989,9 +4602,7 @@ def _legacy_guard_status_readback(
         raise PolicyError("restored legacy guard config is invalid")
     path = root / _GUARD_STATUS_RELATIVE
     try:
-        expected_uid, expected_gid = (
-            (0, 0) if root == Path("/") else (os.geteuid(), os.getegid())
-        )
+        expected_uid, expected_gid = (0, 0) if root == Path("/") else (os.geteuid(), os.getegid())
         raw, _metadata = _read_bound_regular_file(
             path,
             expected_uid=expected_uid,
@@ -4014,10 +4625,7 @@ def _legacy_guard_status_readback(
         or observed.tzinfo is None
         or (
             not_before is not None
-            and (
-                not_before.tzinfo is None
-                or observed.astimezone(UTC) < not_before.astimezone(UTC)
-            )
+            and (not_before.tzinfo is None or observed.astimezone(UTC) < not_before.astimezone(UTC))
         )
         or datetime.now(UTC) - observed.astimezone(UTC) > _GUARD_STATUS_MAX_AGE
     ):
@@ -4032,9 +4640,7 @@ def _wait_for_restored_guard_status(
     guard_config: Path,
     not_before: datetime | None = None,
 ) -> dict[str, Any]:
-    expected_uid, expected_gid = (
-        (0, 0) if root == Path("/") else (os.geteuid(), os.getegid())
-    )
+    expected_uid, expected_gid = (0, 0) if root == Path("/") else (os.geteuid(), os.getegid())
     raw, _metadata = _read_bound_regular_file(
         guard_config,
         expected_uid=expected_uid,
@@ -4071,7 +4677,9 @@ def _wait_for_restored_guard_status(
             raise PolicyError("restored guard config version is unsupported")
         except (KeyError, TypeError, PolicyError) as exc:
             last_error = (
-                exc if isinstance(exc, PolicyError) else PolicyError("restored guard config invalid")
+                exc
+                if isinstance(exc, PolicyError)
+                else PolicyError("restored guard config invalid")
             )
             time.sleep(0.25)
     raise PolicyError("restored guard did not publish matching fresh status") from last_error
@@ -4369,10 +4977,7 @@ def _allocation_job_name(
     if attempt < 1:
         raise PolicyError("allocation matrix attempt is invalid")
     if _ALLOCATION_GENERATION_RE.fullmatch(generation_id) is not None:
-        job_name = (
-            f"loom827-{sandbox}-{candidate_sha[:12]}-{safe_node}-"
-            f"g{generation_id}-a{attempt}"
-        )
+        job_name = f"loom827-{sandbox}-{candidate_sha[:12]}-{safe_node}-g{generation_id}-a{attempt}"
     elif allow_legacy and _LEGACY_ALLOCATION_GENERATION_RE.fullmatch(generation_id):
         job_name = f"loom827-{sandbox}-{candidate_sha}-{safe_node}-g{generation_id}-a{attempt}"
     else:
@@ -4641,7 +5246,7 @@ def _fetch_runtime_proof_source(
     if (
         len(fields) != 7
         or fields[:2] != ["runtime-proof", "v1"]
-        or fields[2] not in {"qianyi", "hongjian", "devansh"}
+        or _REGISTRY.RUNTIME_ID_RE.fullmatch(fields[2]) is None
         or _CANDIDATE_RE.fullmatch(fields[3]) is None
         or _CANDIDATE_RE.fullmatch(fields[4]) is None
         or fields[5] != "artifact"
@@ -5990,8 +6595,32 @@ def _runtime_attestation_binding(
     except (KeyError, ValueError) as exc:
         raise PolicyError("runtime fleet attestation timestamps are invalid") from exc
     expected_fleet_nodes = list(_RUNTIME_FLEET_NODES)
+    account = _sandbox_account(profile, sandbox)
+    environment_binding = profile.environment_bindings.get(account)
+    dynamic_fleet_fields = {
+        "env_id",
+        "resource_generation",
+        "registry_generation",
+        "registry_payload_sha256",
+        "candidate_tree",
+    }
+    expected_fleet_fields = {
+        "schema_version",
+        "sandbox",
+        "candidate_sha",
+        "generated_at",
+        "expires_at",
+        "eligible_nodes",
+        "bundle_generation",
+        "server",
+        "nodes",
+        "payload_sha256",
+    }
+    if environment_binding is not None:
+        expected_fleet_fields |= dynamic_fleet_fields
     if (
-        fleet_digest != fleet_reference.get("payload_sha256")
+        (environment_binding is not None and set(fleet) != expected_fleet_fields)
+        or fleet_digest != fleet_reference.get("payload_sha256")
         or fleet_digest != expected_fleet_digest
         or fleet.get("generated_at") != fleet_reference.get("generated_at")
         or fleet.get("expires_at") != fleet_reference.get("expires_at")
@@ -5999,6 +6628,20 @@ def _runtime_attestation_binding(
         or fleet_expires_at.tzinfo is None
         or fleet_expires_at.astimezone(UTC) <= now
         or fleet.get("candidate_sha") != candidate_sha
+        or (
+            environment_binding is not None
+            and (
+                fleet.get("env_id") != environment_binding["env_id"]
+                or fleet.get("resource_generation") != environment_binding["resource_generation"]
+                or type(fleet.get("registry_generation")) is not int
+                or int(fleet["registry_generation"]) < 1
+                or _REGISTRY.DIGEST_RE.fullmatch(
+                    str(fleet.get("registry_payload_sha256")),
+                )
+                is None
+                or fleet.get("candidate_tree") != candidate_tree
+            )
+        )
         or fleet.get("eligible_nodes") != expected_fleet_nodes
         or not isinstance(fleet.get("nodes"), dict)
         or set(fleet["nodes"]) != set(expected_fleet_nodes)
@@ -6016,6 +6659,28 @@ def _runtime_attestation_binding(
         fleet_expires_at.astimezone(UTC),
         *domain_expiries,
     )
+    worker_registry_binding: dict[str, str] | None = None
+    if environment_binding is not None and worker_env != Path("/unbound-at-materialization"):
+        worker_env_binding = _read_private_env(worker_env)
+        worker_values = _read_exact_env_values(
+            worker_env,
+            expected_inode=int(worker_env_binding["inode"]),
+            expected_sha256=str(worker_env_binding["sha256"]),
+        )
+        worker_registry_binding = {
+            "LOOM_WORKER_ENV_ID": str(environment_binding["env_id"]),
+            "LOOM_WORKER_RESOURCE_GENERATION": str(
+                environment_binding["resource_generation"],
+            ),
+            "LOOM_WORKER_CANDIDATE_ID": str(environment_binding["candidate_id"]),
+            "LOOM_WORKER_CANDIDATE_TREE": candidate_tree,
+            "LOOM_WORKER_REGISTRY_GENERATION": str(fleet["registry_generation"]),
+            "LOOM_WORKER_REGISTRY_PAYLOAD_SHA256": str(
+                fleet["registry_payload_sha256"],
+            ),
+        }
+        if any(worker_values.get(key) != value for key, value in worker_registry_binding.items()):
+            raise PolicyError("runtime worker env registry binding drifted")
     return {
         "proof_path": str(proof_path),
         "bundle_id": bundle_id,
@@ -6039,6 +6704,21 @@ def _runtime_attestation_binding(
         "allocation_worker_env_path": str(worker_env),
         "fleet_payload_sha256": fleet_digest,
         "fleet_nodes": expected_fleet_nodes,
+        **(
+            {
+                "env_id": fleet["env_id"],
+                "resource_generation": fleet["resource_generation"],
+                "registry_generation": fleet["registry_generation"],
+                "registry_payload_sha256": fleet["registry_payload_sha256"],
+            }
+            if environment_binding is not None
+            else {}
+        ),
+        **(
+            {"worker_registry_binding": worker_registry_binding}
+            if worker_registry_binding is not None
+            else {}
+        ),
     }
 
 
@@ -6132,7 +6812,7 @@ def _validate_probe_base_row(
         or row[5] != account
         or row[6] != _sandbox_service_user(profile, sandbox)
         or row[7] != profile.cluster
-        or row[8] != profile.qos
+        or row[8] != _sandbox_qos(profile, sandbox)
     ):
         raise PolicyError("allocation probe job identity drifted")
 
@@ -6644,7 +7324,7 @@ def _new_allocation_matrix(
         "batch_uid": batch_uid,
         "batch_gid": batch_gid,
         "account": _sandbox_account(profile, sandbox),
-        "qos": profile.qos,
+        "qos": _sandbox_qos(profile, sandbox),
         "expected_pool": expected_pool,
         "expected_concurrency": expected_concurrency,
         "candidate_binding": dict(binding),
@@ -6694,7 +7374,7 @@ def _validate_allocation_matrix(
         or matrix.get("batch_uid") != batch_uid
         or matrix.get("batch_gid") != batch_gid
         or matrix.get("account") != _sandbox_account(profile, sandbox)
-        or matrix.get("qos") != profile.qos
+        or matrix.get("qos") != _sandbox_qos(profile, sandbox)
         or matrix.get("expected_pool") != expected_pool
         or matrix.get("expected_concurrency") != expected_concurrency
         or matrix.get("candidate_binding") != binding
@@ -6861,7 +7541,7 @@ def _allocation_probe_arguments(
         f"--job-name={_allocation_job_name(sandbox, candidate_sha, node, attempt, generation_id=generation_id)}",
         f"--uid={_sandbox_service_user(profile, sandbox)}",
         f"--account={_sandbox_account(profile, sandbox)}",
-        f"--qos={profile.qos}",
+        f"--qos={_sandbox_qos(profile, sandbox)}",
         f"--clusters={profile.cluster}",
         f"--nodelist={node}",
         "--oversubscribe",
@@ -6910,7 +7590,7 @@ def _allocation_node_evidence(
         or base_rows[0][5] != _sandbox_account(profile, sandbox)
         or base_rows[0][6] != _sandbox_service_user(profile, sandbox)
         or base_rows[0][7] != profile.cluster
-        or base_rows[0][8] != profile.qos
+        or base_rows[0][8] != _sandbox_qos(profile, sandbox)
         or _normalize_probe_job_state(srun_rows[0][2]) != "COMPLETED"
         or srun_rows[0][3].lower() != node.lower()
         or srun_rows[0][5] != _sandbox_account(profile, sandbox)
@@ -7655,7 +8335,7 @@ def _run_allocation_probe_transaction(
         "batch_uid": batch_uid,
         "batch_gid": batch_gid,
         "account": account,
-        "qos": profile.qos,
+        "qos": _sandbox_qos(profile, sandbox),
         "expected_pool": expected_pool,
         "expected_concurrency": expected_concurrency,
         "candidate_binding": binding,
@@ -7830,7 +8510,7 @@ def _allocation_probe_readback_unlocked(
         or payload.get("allowed_nodes") != list(profile.allowed_nodes)
         or payload.get("host_aliases") != _allowed_host_aliases(profile)
         or payload.get("account") != account
-        or payload.get("qos") != profile.qos
+        or payload.get("qos") != _sandbox_qos(profile, sandbox)
         or payload.get("expected_pool") != expected_pool
         or payload.get("expected_concurrency") != expected_concurrency
         or payload.get("runtime_attestation") != runtime_attestation
@@ -7872,7 +8552,7 @@ def _allocation_probe_readback_unlocked(
             or evidence.get("state") != "COMPLETED"
             or evidence.get("sandbox") != sandbox
             or evidence.get("account") != account
-            or evidence.get("qos") != profile.qos
+            or evidence.get("qos") != _sandbox_qos(profile, sandbox)
             or evidence.get("batch_uid") != worker_env_binding["uid"]
             or evidence.get("batch_gid") != worker_env_binding["gid"]
             or evidence.get("sbatch_verified") is not True
@@ -7994,6 +8674,7 @@ def _live_readback_unlocked(
     guard_not_before: datetime | None = None,
 ) -> dict[str, Any]:
     bindings = _candidate_bindings(profile, candidate_bindings)
+    profile = _profile_with_bindings(profile, bindings)
     desired = desired_files(
         root,
         profile,
@@ -8167,9 +8848,7 @@ def _recover_orphan(
             payload_sha256=str(journal["candidate_set_payload_sha256"]),
             operation=str(journal["operation"]),
             apply_accounting=(
-                bool(journal["apply_accounting"])
-                if journal["operation"] == "apply"
-                else False
+                bool(journal["apply_accounting"]) if journal["operation"] == "apply" else False
             ),
         )
         _wait_for_restart_quiescence(root, profile, drain)
@@ -8295,9 +8974,10 @@ def _release_committed_transaction_drain(
     expected_drain_apply_accounting = (
         journal.get("apply_accounting") if journal.get("operation") == "apply" else False
     )
-    if any(
-        drain.get(field) != journal.get(field) for field in exact_fields
-    ) or drain.get("apply_accounting") is not expected_drain_apply_accounting:
+    if (
+        any(drain.get(field) != journal.get(field) for field in exact_fields)
+        or drain.get("apply_accounting") is not expected_drain_apply_accounting
+    ):
         raise PolicyError("committed Slurm transaction drain identity drifted")
     _release_restart_drain(root, profile, drain)
     final = _load_drain_journal(
@@ -8330,6 +9010,7 @@ def apply(
         if candidate_bindings is None
         else _candidate_bindings(profile, candidate_bindings)
     )
+    profile = _profile_with_bindings(profile, bindings)
     transaction = _transaction_identity(
         transaction_id=transaction_id,
         generation=generation,
@@ -8579,6 +9260,7 @@ def rollback(
         if candidate_bindings is None
         else _candidate_bindings(profile, candidate_bindings)
     )
+    profile = _profile_with_bindings(profile, bindings)
     transaction_identity = _transaction_identity(
         transaction_id=transaction_id,
         generation=generation,
@@ -8833,11 +9515,3619 @@ def rollback(
     }
 
 
+def _incremental_identity_payload(raw: bytes, profile: Profile) -> dict[str, Any]:
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PolicyError("incremental Slurm identity payload is invalid") from exc
+    if (
+        not isinstance(payload, dict)
+        or (
+            not (
+                payload.get("schema_version") == 1
+                and set(payload) == _INCREMENTAL_IDENTITY_V1_FIELDS
+            )
+            and not (
+                payload.get("schema_version") == 2 and set(payload) == _INCREMENTAL_IDENTITY_FIELDS
+            )
+        )
+        or raw != _canonical_json_bytes(payload) + b"\n"
+        or payload.get("kind") != "loom.developer-environment.identity-preflight"
+        or _REGISTRY.ENV_ID_RE.fullmatch(str(payload.get("env_id"))) is None
+        or (
+            payload.get("schema_version") == 2
+            and _REGISTRY.PRINCIPAL_RE.fullmatch(
+                str(payload.get("principal_id")),
+            )
+            is None
+        )
+        or type(payload.get("resource_generation")) is not int
+        or int(payload["resource_generation"]) < 1
+        or _REGISTRY.SAFE_NAME_RE.fullmatch(str(payload.get("service_user"))) is None
+        or _REGISTRY.SAFE_NAME_RE.fullmatch(str(payload.get("service_group"))) is None
+        or type(payload.get("uid")) is not int
+        or int(payload["uid"]) < 1
+        or payload.get("gid") != payload["uid"]
+        or _SAFE_NAME.fullmatch(str(payload.get("slurm_account"))) is None
+        or _SAFE_NAME.fullmatch(str(payload.get("slurm_qos"))) is None
+        or payload.get("slurm_account") == profile.parent_account
+        or type(payload.get("registry_generation")) is not int
+        or int(payload["registry_generation"]) < 1
+        or _REGISTRY.DIGEST_RE.fullmatch(
+            str(payload.get("registry_payload_sha256")),
+        )
+        is None
+        or _REGISTRY.DIGEST_RE.fullmatch(str(payload.get("candidate_set_sha256"))) is None
+        or (
+            payload.get("schema_version") == 2
+            and payload.get("revive_journal_sha256") is not None
+            and _REGISTRY.DIGEST_RE.fullmatch(
+                str(payload.get("revive_journal_sha256")),
+            )
+            is None
+        )
+    ):
+        raise PolicyError("incremental Slurm identity payload is invalid")
+    return payload
+
+
+def _single_accounting_row(
+    argv: Sequence[str],
+    *,
+    width: int,
+    label: str,
+) -> list[str] | None:
+    rows = [line.split("|") for line in _run(argv).splitlines() if line.strip()]
+    if len(rows) > 1 or any(len(row) < width for row in rows):
+        raise PolicyError(f"incremental Slurm {label} readback is ambiguous")
+    return rows[0] if rows else None
+
+
+def _incremental_accounting_state(
+    profile: Profile,
+    identity: Mapping[str, Any],
+) -> dict[str, Any]:
+    qos = str(identity["slurm_qos"])
+    account = str(identity["slurm_account"])
+    user = str(identity["service_user"])
+    qos_row = _single_accounting_row(
+        (
+            "sacctmgr",
+            "-nP",
+            "show",
+            "qos",
+            "where",
+            f"name={qos}",
+            "format=Name,Priority,MaxWall,MaxJobsPU,MaxSubmitJobsPU,Flags",
+        ),
+        width=6,
+        label="QoS",
+    )
+    account_row = _single_accounting_row(
+        (
+            "sacctmgr",
+            "-nP",
+            "show",
+            "account",
+            "where",
+            f"cluster={profile.cluster}",
+            f"account={account}",
+            "format=Account,ParentName,Fairshare",
+        ),
+        width=3,
+        label="account",
+    )
+    association_row = _single_accounting_row(
+        (
+            "sacctmgr",
+            "-nP",
+            "show",
+            "association",
+            "where",
+            f"cluster={profile.cluster}",
+            f"account={account}",
+            f"user={user}",
+            "format=User,Account,Fairshare,QOS,DefaultQOS",
+        ),
+        width=5,
+        label="association",
+    )
+    return {
+        "qos": None
+        if qos_row is None
+        else {
+            "Name": qos_row[0],
+            "Priority": qos_row[1],
+            "MaxWall": qos_row[2],
+            "MaxJobsPU": qos_row[3],
+            "MaxSubmitJobsPU": qos_row[4],
+            "Flags": qos_row[5],
+        },
+        "account": None
+        if account_row is None
+        else {
+            "Account": account_row[0],
+            "ParentName": account_row[1],
+            "Fairshare": account_row[2],
+        },
+        "association": None
+        if association_row is None
+        else {
+            "User": association_row[0],
+            "Account": association_row[1],
+            "Fairshare": association_row[2],
+            "QOS": association_row[3],
+            "DefaultQOS": association_row[4],
+        },
+    }
+
+
+def _incremental_desired_state(
+    profile: Profile,
+    identity: Mapping[str, Any],
+    *,
+    retired: bool,
+) -> dict[str, Any]:
+    qos = str(identity["slurm_qos"])
+    account = str(identity["slurm_account"])
+    user = str(identity["service_user"])
+    return {
+        "qos": {
+            "Name": qos,
+            "Priority": "0" if retired else str(profile.qos_priority),
+            "MaxWall": profile.qos_max_wall,
+            "MaxJobsPU": "0" if retired else str(profile.qos_max_jobs_per_user),
+            "MaxSubmitJobsPU": ("0" if retired else str(profile.qos_max_submit_jobs_per_user)),
+            "Flags": "DenyOnLimit",
+        },
+        "account": {
+            "Account": account,
+            "ParentName": profile.parent_account,
+            "Fairshare": "0" if retired else str(profile.fairshare),
+        },
+        "association": {
+            "User": user,
+            "Account": account,
+            "Fairshare": "0" if retired else str(profile.fairshare),
+            "QOS": qos,
+            "DefaultQOS": qos,
+        },
+    }
+
+
+def _incremental_accounting_status(
+    profile: Profile,
+    identity: Mapping[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    state = _incremental_accounting_state(profile, identity)
+    if all(value is None for value in state.values()):
+        return "available", state
+    if state == _incremental_desired_state(profile, identity, retired=False):
+        return "exact-existing", state
+    if state == _incremental_desired_state(profile, identity, retired=True):
+        return "retired", state
+    raise PolicyError("incremental Slurm identity collides with existing accounting state")
+
+
+def _incremental_transaction_path(
+    root: Path,
+    profile: Profile,
+    transaction_id: str,
+) -> Path:
+    return (
+        root
+        / "var/lib/loom-developer-sandbox-slurm-policy/incremental-transactions"
+        / profile.cluster
+        / f"{transaction_id}.json"
+    )
+
+
+def _incremental_transaction(
+    root: Path,
+    profile: Profile,
+    identity: Mapping[str, Any],
+    *,
+    transaction_id: str,
+    operation: str,
+    phase: str | None = None,
+) -> dict[str, Any] | None:
+    if (
+        _REGISTRY.DIGEST_RE.fullmatch(transaction_id) is None
+        or operation not in {"reconcile", "retire"}
+        or phase not in {None, "prepared", "committed"}
+    ):
+        raise PolicyError("incremental Slurm transaction binding is invalid")
+    path = _incremental_transaction_path(root, profile, transaction_id)
+    existing = _load_journal(path)
+    payload_sha256 = hashlib.sha256(_canonical_json_bytes(identity)).hexdigest()
+    if existing is not None and (
+        set(existing)
+        != {
+            "schema_version",
+            "kind",
+            "transaction_id",
+            "operation",
+            "cluster",
+            "env_id",
+            "resource_generation",
+            "payload_sha256",
+            "phase",
+            "created_at",
+            "updated_at",
+        }
+        or existing.get("schema_version") != 1
+        or existing.get("kind") != "loom.developer-environment.slurm-identity-transaction"
+        or existing.get("transaction_id") != transaction_id
+        or existing.get("operation") != operation
+        or existing.get("cluster") != profile.cluster
+        or existing.get("env_id") != identity["env_id"]
+        or existing.get("resource_generation") != identity["resource_generation"]
+        or existing.get("payload_sha256") != payload_sha256
+        or existing.get("phase") not in {"prepared", "committed"}
+    ):
+        raise PolicyError("incremental Slurm transaction binding drifted")
+    if phase is None:
+        return existing
+    now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    updated = {
+        "schema_version": 1,
+        "kind": "loom.developer-environment.slurm-identity-transaction",
+        "transaction_id": transaction_id,
+        "operation": operation,
+        "cluster": profile.cluster,
+        "env_id": identity["env_id"],
+        "resource_generation": identity["resource_generation"],
+        "payload_sha256": payload_sha256,
+        "phase": phase,
+        "created_at": existing["created_at"] if existing is not None else now,
+        "updated_at": now,
+    }
+    _prepare_private_directory(
+        path.parent,
+        enforce_root_ownership=root == Path("/"),
+        create=True,
+    )
+    _atomic_write(
+        path,
+        (_canonical_json_bytes(updated) + b"\n").decode("ascii"),
+        mode=0o600,
+    )
+    rebound = _load_journal(path)
+    if rebound != updated:
+        raise PolicyError("incremental Slurm transaction publication drifted")
+    return updated
+
+
+def _incremental_jobs(profile: Profile, identity: Mapping[str, Any]) -> list[dict[str, str]]:
+    account = str(identity["slurm_account"])
+    user = str(identity["service_user"])
+    rows = [
+        line.split("|")
+        for line in _run(
+            (
+                "squeue",
+                "--noheader",
+                f"--clusters={profile.cluster}",
+                f"--accounts={account}",
+                f"--user={user}",
+                "--format=%i|%T|%a|%u",
+            ),
+        ).splitlines()
+        if line.strip()
+    ]
+    if any(
+        len(row) != 4
+        or re.fullmatch(r"[1-9][0-9]*(?:_[0-9]+)?", row[0]) is None
+        or re.fullmatch(r"[A-Z][A-Z0-9_+*~-]{1,63}", row[1]) is None
+        or row[2] != account
+        or row[3] != user
+        for row in rows
+    ):
+        raise PolicyError("incremental Slurm job ownership readback is invalid")
+    return [{"job_id": row[0], "state": row[1], "account": row[2], "user": row[3]} for row in rows]
+
+
+def incremental_identity_check(
+    profile: Profile,
+    identity: Mapping[str, Any],
+) -> dict[str, Any]:
+    status, state = _incremental_accounting_status(profile, identity)
+    jobs = _incremental_jobs(profile, identity)
+    return {
+        "schema_version": 1,
+        "kind": "loom.developer-environment.slurm-identity-result",
+        "operation": "check",
+        "cluster": profile.cluster,
+        "env_id": identity["env_id"],
+        "resource_generation": identity["resource_generation"],
+        "service_user": identity["service_user"],
+        "slurm_account": identity["slurm_account"],
+        "slurm_qos": identity["slurm_qos"],
+        "status": status,
+        "jobs": jobs,
+        "state_sha256": hashlib.sha256(_canonical_json_bytes(state)).hexdigest(),
+        "mutations": [],
+        "completed_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+    }
+
+
+def _incremental_revive_binding(
+    root: Path,
+    profile: Profile,
+    identity: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    expected_journal_sha = identity.get("revive_journal_sha256")
+    if _REGISTRY.DIGEST_RE.fullmatch(str(expected_journal_sha)) is None:
+        raise PolicyError("retired incremental Slurm identity lacks a revive journal")
+    journal_path = (
+        root / "var/lib/loom-developer-environment-runtime/revive" / f"{identity['env_id']}.json"
+    )
+    journal = _load_journal(journal_path)
+    tombstone_fields = {
+        "schema_version",
+        "kind",
+        "cluster",
+        "env_id",
+        "principal_id",
+        "resource_generation",
+        "service_user",
+        "service_group",
+        "uid",
+        "gid",
+        "slurm_account",
+        "slurm_qos",
+        "registry_generation",
+        "registry_payload_sha256",
+        "state_sha256",
+        "retired_at",
+        "payload_sha256",
+    }
+    journal_fields = {
+        "schema_version",
+        "kind",
+        "phase",
+        "env_id",
+        "principal_id",
+        "runtime_id",
+        "uid",
+        "gid",
+        "service_user",
+        "service_group",
+        "slurm_user",
+        "slurm_account",
+        "slurm_qos",
+        "previous_resource_generation",
+        "new_resource_generation",
+        "registry_generation",
+        "registry_payload_sha256",
+        "retire_tombstone_sha256",
+        "idempotency_key",
+        "created_at",
+        "updated_at",
+        "payload_sha256",
+    }
+    if not isinstance(journal, dict):
+        raise PolicyError("incremental Slurm revive journal is unavailable")
+    previous_generation = journal.get("previous_resource_generation")
+    if type(previous_generation) is not int or previous_generation < 2:
+        raise PolicyError("incremental Slurm revive generation is invalid")
+    tombstone_path = (
+        root
+        / "var/lib/loom-developer-sandbox-slurm-policy/identity-tombstones"
+        / profile.cluster
+        / str(identity["env_id"])
+        / f"{previous_generation - 1}.json"
+    )
+    tombstone = _load_journal(tombstone_path)
+    tombstone_unsigned = (
+        {field: value for field, value in tombstone.items() if field != "payload_sha256"}
+        if isinstance(tombstone, dict)
+        else {}
+    )
+    journal_unsigned = (
+        {field: value for field, value in journal.items() if field != "payload_sha256"}
+        if isinstance(journal, dict)
+        else {}
+    )
+    if (
+        not isinstance(tombstone, dict)
+        or set(tombstone) != tombstone_fields
+        or tombstone.get("schema_version") != 1
+        or tombstone.get("kind") != "loom.developer-environment.slurm-identity-tombstone"
+        or tombstone.get("cluster") != profile.cluster
+        or tombstone.get("payload_sha256")
+        != hashlib.sha256(_canonical_json_bytes(tombstone_unsigned)).hexdigest()
+        or not isinstance(journal, dict)
+        or set(journal) != journal_fields
+        or journal.get("schema_version") != 1
+        or journal.get("kind") != "loom.developer-environment.revive-journal"
+        or journal.get("phase") not in {"registered", "capacity-restored"}
+        or _REGISTRY.RUNTIME_ID_RE.fullmatch(str(journal.get("runtime_id"))) is None
+        or _REGISTRY.IDEMPOTENCY_RE.fullmatch(
+            str(journal.get("idempotency_key")),
+        )
+        is None
+        or not isinstance(journal.get("created_at"), str)
+        or not isinstance(journal.get("updated_at"), str)
+        or journal.get("payload_sha256") != expected_journal_sha
+        or journal.get("payload_sha256")
+        != hashlib.sha256(_canonical_json_bytes(journal_unsigned)).hexdigest()
+        or journal.get("previous_resource_generation") != tombstone["resource_generation"] + 1
+        or journal.get("new_resource_generation") != tombstone["resource_generation"] + 2
+        or identity["resource_generation"] != journal["new_resource_generation"]
+        or journal.get("registry_generation") != identity["registry_generation"]
+        or journal.get("registry_payload_sha256") != identity["registry_payload_sha256"]
+        or any(
+            tombstone.get(field) != identity[field]
+            for field in (
+                "env_id",
+                "principal_id",
+                "service_user",
+                "service_group",
+                "uid",
+                "gid",
+                "slurm_account",
+                "slurm_qos",
+            )
+        )
+        or any(
+            journal.get(field) != identity[field]
+            for field in (
+                "env_id",
+                "principal_id",
+                "service_user",
+                "service_group",
+                "uid",
+                "gid",
+                "slurm_account",
+                "slurm_qos",
+            )
+        )
+        or journal.get("slurm_user") != identity["service_user"]
+    ):
+        raise PolicyError("incremental Slurm revive binding is invalid")
+    _parse_allocation_timestamp(
+        str(tombstone["retired_at"]),
+        "incremental Slurm retirement",
+    )
+    _parse_allocation_timestamp(
+        str(journal["created_at"]),
+        "incremental Slurm revive journal",
+    )
+    _parse_allocation_timestamp(
+        str(journal["updated_at"]),
+        "incremental Slurm revive journal",
+    )
+    return tombstone, journal
+
+
+def incremental_identity_reconcile(
+    root: Path,
+    profile: Profile,
+    identity: Mapping[str, Any],
+    *,
+    transaction_id: str,
+) -> dict[str, Any]:
+    transaction = _incremental_transaction(
+        root,
+        profile,
+        identity,
+        transaction_id=transaction_id,
+        operation="reconcile",
+    )
+    if transaction is None:
+        status, _state = _incremental_accounting_status(profile, identity)
+        transaction = _incremental_transaction(
+            root,
+            profile,
+            identity,
+            transaction_id=transaction_id,
+            operation="reconcile",
+            phase="prepared",
+        )
+    elif transaction["phase"] == "committed":
+        status, _state = _incremental_accounting_status(profile, identity)
+        if status != "exact-existing":
+            raise PolicyError("committed incremental Slurm identity drifted")
+    else:
+        status = "recovering"
+    mutations: list[str] = []
+    revive: tuple[dict[str, Any], dict[str, Any]] | None = None
+    if status == "retired" or (
+        status == "recovering" and identity.get("revive_journal_sha256") is not None
+    ):
+        revive = _incremental_revive_binding(root, profile, identity)
+    if status in {"available", "recovering", "retired"}:
+        qos = str(identity["slurm_qos"])
+        account = str(identity["slurm_account"])
+        user = str(identity["service_user"])
+        commands = (
+            ("sacctmgr", "-i", "add", "qos", qos),
+            (
+                "sacctmgr",
+                "-i",
+                "modify",
+                "qos",
+                "where",
+                f"name={qos}",
+                "set",
+                f"Priority={profile.qos_priority}",
+                f"MaxWall={profile.qos_max_wall}",
+                f"MaxJobsPerUser={profile.qos_max_jobs_per_user}",
+                f"MaxSubmitJobsPerUser={profile.qos_max_submit_jobs_per_user}",
+                "Flags=DenyOnLimit",
+            ),
+            (
+                "sacctmgr",
+                "-i",
+                "add",
+                "account",
+                account,
+                f"Parent={profile.parent_account}",
+                f"Description=Loom environment {identity['env_id']}",
+                "Organization=loom",
+            ),
+            (
+                "sacctmgr",
+                "-i",
+                "modify",
+                "account",
+                "where",
+                f"cluster={profile.cluster}",
+                f"account={account}",
+                "set",
+                f"Fairshare={profile.fairshare}",
+            ),
+            ("sacctmgr", "-i", "add", "user", user, f"Account={account}"),
+            (
+                "sacctmgr",
+                "-i",
+                "modify",
+                "user",
+                "where",
+                f"name={user}",
+                f"account={account}",
+                f"cluster={profile.cluster}",
+                "set",
+                f"Fairshare={profile.fairshare}",
+                f"QOS={qos}",
+                f"DefaultQOS={qos}",
+            ),
+        )
+        for command in commands:
+            _run(command)
+            mutations.append(" ".join(command[:4]))
+    rebound_status, rebound = _incremental_accounting_status(profile, identity)
+    if rebound_status != "exact-existing":
+        raise PolicyError("incremental Slurm identity did not converge exactly")
+    result = incremental_identity_check(profile, identity)
+    if result["status"] != "exact-existing":
+        raise PolicyError("incremental Slurm identity readback drifted")
+    if revive is not None:
+        tombstone, journal = revive
+        revival_unsigned = {
+            "schema_version": 1,
+            "kind": "loom.developer-environment.slurm-identity-revival",
+            "cluster": profile.cluster,
+            "env_id": identity["env_id"],
+            "principal_id": identity["principal_id"],
+            "previous_resource_generation": tombstone["resource_generation"],
+            "resource_generation": identity["resource_generation"],
+            "registry_generation": identity["registry_generation"],
+            "registry_payload_sha256": identity["registry_payload_sha256"],
+            "retire_tombstone_sha256": tombstone["payload_sha256"],
+            "revive_journal_sha256": journal["payload_sha256"],
+            "state_sha256": hashlib.sha256(
+                _canonical_json_bytes(rebound),
+            ).hexdigest(),
+            "restored_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        }
+        revival = {
+            **revival_unsigned,
+            "payload_sha256": hashlib.sha256(
+                _canonical_json_bytes(revival_unsigned),
+            ).hexdigest(),
+        }
+        revival_path = (
+            root
+            / "var/lib/loom-developer-sandbox-slurm-policy/identity-revivals"
+            / profile.cluster
+            / str(identity["env_id"])
+            / f"{identity['resource_generation']}.json"
+        )
+        _prepare_private_directory(
+            revival_path.parent,
+            enforce_root_ownership=root == Path("/"),
+            create=True,
+        )
+        existing_revival = _load_journal(revival_path)
+        if existing_revival is None:
+            _atomic_write(
+                revival_path,
+                (_canonical_json_bytes(revival) + b"\n").decode("ascii"),
+                mode=0o600,
+            )
+        elif existing_revival != revival:
+            raise PolicyError("incremental Slurm revival receipt replay drifted")
+    _incremental_transaction(
+        root,
+        profile,
+        identity,
+        transaction_id=transaction_id,
+        operation="reconcile",
+        phase="committed",
+    )
+    result.update(
+        {
+            "operation": "reconcile",
+            "mutations": mutations,
+            "state_sha256": hashlib.sha256(
+                _canonical_json_bytes(rebound),
+            ).hexdigest(),
+        },
+    )
+    return result
+
+
+def incremental_identity_retire(
+    root: Path,
+    profile: Profile,
+    identity: Mapping[str, Any],
+    *,
+    transaction_id: str,
+) -> dict[str, Any]:
+    jobs = _incremental_jobs(profile, identity)
+    if jobs:
+        raise PolicyError("incremental Slurm identity still owns jobs")
+    transaction = _incremental_transaction(
+        root,
+        profile,
+        identity,
+        transaction_id=transaction_id,
+        operation="retire",
+    )
+    if transaction is None:
+        status, _state = _incremental_accounting_status(profile, identity)
+        transaction = _incremental_transaction(
+            root,
+            profile,
+            identity,
+            transaction_id=transaction_id,
+            operation="retire",
+            phase="prepared",
+        )
+    elif transaction["phase"] == "committed":
+        status, _state = _incremental_accounting_status(profile, identity)
+        if status != "retired":
+            raise PolicyError("committed incremental Slurm retirement drifted")
+    else:
+        status = "recovering"
+    if status == "available":
+        raise PolicyError("incremental Slurm identity is unavailable for retirement")
+    mutations: list[str] = []
+    if status != "retired":
+        qos = str(identity["slurm_qos"])
+        account = str(identity["slurm_account"])
+        user = str(identity["service_user"])
+        commands = (
+            (
+                "sacctmgr",
+                "-i",
+                "modify",
+                "qos",
+                "where",
+                f"name={qos}",
+                "set",
+                "Priority=0",
+                "MaxJobsPerUser=0",
+                "MaxSubmitJobsPerUser=0",
+                "Flags=DenyOnLimit",
+            ),
+            (
+                "sacctmgr",
+                "-i",
+                "modify",
+                "account",
+                "where",
+                f"cluster={profile.cluster}",
+                f"account={account}",
+                "set",
+                "Fairshare=0",
+            ),
+            (
+                "sacctmgr",
+                "-i",
+                "modify",
+                "user",
+                "where",
+                f"name={user}",
+                f"account={account}",
+                f"cluster={profile.cluster}",
+                "set",
+                "Fairshare=0",
+                f"QOS={qos}",
+                f"DefaultQOS={qos}",
+            ),
+        )
+        for command in commands:
+            _run(command)
+            mutations.append(" ".join(command[:4]))
+    rebound_status, rebound = _incremental_accounting_status(profile, identity)
+    if rebound_status != "retired" or _incremental_jobs(profile, identity):
+        raise PolicyError("incremental Slurm identity retirement did not read back exactly")
+    tombstone_unsigned = {
+        "schema_version": 1,
+        "kind": "loom.developer-environment.slurm-identity-tombstone",
+        "cluster": profile.cluster,
+        "env_id": identity["env_id"],
+        "principal_id": identity["principal_id"],
+        "resource_generation": identity["resource_generation"],
+        "service_user": identity["service_user"],
+        "service_group": identity["service_group"],
+        "uid": identity["uid"],
+        "gid": identity["gid"],
+        "slurm_account": identity["slurm_account"],
+        "slurm_qos": identity["slurm_qos"],
+        "registry_generation": identity["registry_generation"],
+        "registry_payload_sha256": identity["registry_payload_sha256"],
+        "state_sha256": hashlib.sha256(_canonical_json_bytes(rebound)).hexdigest(),
+        "retired_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+    }
+    tombstone = {
+        **tombstone_unsigned,
+        "payload_sha256": hashlib.sha256(
+            _canonical_json_bytes(tombstone_unsigned),
+        ).hexdigest(),
+    }
+    tombstone_root = (
+        root
+        / "var/lib/loom-developer-sandbox-slurm-policy/identity-tombstones"
+        / profile.cluster
+        / str(identity["env_id"])
+    )
+    _prepare_private_directory(
+        tombstone_root,
+        enforce_root_ownership=root == Path("/"),
+        create=True,
+    )
+    tombstone_path = tombstone_root / f"{identity['resource_generation']}.json"
+    existing = _load_journal(tombstone_path)
+    if existing is None:
+        _atomic_write(
+            tombstone_path,
+            (_canonical_json_bytes(tombstone) + b"\n").decode("ascii"),
+            mode=0o600,
+        )
+    else:
+        existing_unsigned = {
+            field: value for field, value in existing.items() if field != "payload_sha256"
+        }
+        if (
+            set(existing) != set(tombstone)
+            or any(
+                existing.get(field) != tombstone[field]
+                for field in tombstone
+                if field not in {"retired_at", "payload_sha256"}
+            )
+            or existing.get("payload_sha256")
+            != hashlib.sha256(_canonical_json_bytes(existing_unsigned)).hexdigest()
+        ):
+            raise PolicyError("incremental Slurm identity tombstone binding drifted")
+        tombstone = existing
+    _incremental_transaction(
+        root,
+        profile,
+        identity,
+        transaction_id=transaction_id,
+        operation="retire",
+        phase="committed",
+    )
+    return {
+        "schema_version": 1,
+        "kind": "loom.developer-environment.slurm-identity-result",
+        "operation": "retire",
+        "cluster": profile.cluster,
+        "env_id": identity["env_id"],
+        "resource_generation": identity["resource_generation"],
+        "service_user": identity["service_user"],
+        "slurm_account": identity["slurm_account"],
+        "slurm_qos": identity["slurm_qos"],
+        "status": "retired",
+        "jobs": [],
+        "state_sha256": tombstone["state_sha256"],
+        "mutations": mutations,
+        "tombstone": str(tombstone_path),
+        "completed_at": tombstone["retired_at"],
+    }
+
+
+def _capacity_request(
+    deployment_id: str,
+    *,
+    root: Path,
+    require_root_ownership: bool,
+    suffix: str = "",
+    kind: str = "loom.developer-environment.capacity-request",
+) -> tuple[dict[str, Any], bytes]:
+    if _REGISTRY.DEPLOYMENT_ID_RE.fullmatch(deployment_id) is None:
+        raise PolicyError("capacity deployment identity is invalid")
+    path = root / "requests" / f"{deployment_id}{suffix}.json"
+    raw, _metadata = _read_bound_regular_file(
+        path,
+        expected_uid=0 if require_root_ownership else os.geteuid(),
+        expected_gid=0 if require_root_ownership else os.getegid(),
+        expected_mode=0o600,
+        description="capacity reconciliation request",
+        max_bytes=1 << 20,
+    )
+    try:
+        request = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PolicyError("capacity reconciliation request is invalid") from exc
+    fields = {
+        "schema_version",
+        "kind",
+        "env_id",
+        "principal_id",
+        "deployment_id",
+        "candidate_id",
+        "candidate_sha",
+        "candidate_tree",
+        "resource_generation",
+        "registry_generation",
+        "registry_snapshot_sha256",
+        "slurm_user",
+        "service_group",
+        "slurm_account",
+        "slurm_qos",
+        "uid",
+        "gid",
+        "identity_preflight_nodes",
+        "payload_sha256",
+    }
+    unsigned = (
+        {key: value for key, value in request.items() if key != "payload_sha256"}
+        if isinstance(request, dict)
+        else {}
+    )
+    if (
+        not isinstance(request, dict)
+        or set(request) != fields
+        or request.get("schema_version") != 1
+        or request.get("kind") != kind
+        or request.get("deployment_id") != deployment_id
+        or _REGISTRY.ENV_ID_RE.fullmatch(str(request.get("env_id"))) is None
+        or _REGISTRY.PRINCIPAL_RE.fullmatch(str(request.get("principal_id"))) is None
+        or _REGISTRY.CANDIDATE_ID_RE.fullmatch(str(request.get("candidate_id"))) is None
+        or _CANDIDATE_RE.fullmatch(str(request.get("candidate_sha"))) is None
+        or _CANDIDATE_RE.fullmatch(str(request.get("candidate_tree"))) is None
+        or type(request.get("resource_generation")) is not int
+        or int(request["resource_generation"]) < 1
+        or type(request.get("registry_generation")) is not int
+        or int(request["registry_generation"]) < 1
+        or _REGISTRY.DIGEST_RE.fullmatch(
+            str(request.get("registry_snapshot_sha256")),
+        )
+        is None
+        or _REGISTRY.SAFE_NAME_RE.fullmatch(str(request.get("slurm_user"))) is None
+        or _REGISTRY.SAFE_NAME_RE.fullmatch(str(request.get("service_group"))) is None
+        or _SAFE_NAME.fullmatch(str(request.get("slurm_account"))) is None
+        or _REGISTRY.SAFE_NAME_RE.fullmatch(str(request.get("slurm_qos"))) is None
+        or type(request.get("uid")) is not int
+        or int(request["uid"]) < 1
+        or request.get("gid") != request["uid"]
+        or request.get("identity_preflight_nodes")
+        != {
+            domain: [str(_CAPACITY_DOMAINS[domain]["authority_node"])]
+            for domain in ("oldlab", "gb10")
+        }
+        or request.get("payload_sha256")
+        != hashlib.sha256(_canonical_json_bytes(unsigned)).hexdigest()
+        or raw != _canonical_json_bytes(request) + b"\n"
+    ):
+        raise PolicyError("capacity reconciliation request binding is invalid")
+    return request, raw
+
+
+def _capacity_registry_binding(
+    request: Mapping[str, Any],
+    snapshot: Mapping[str, Any],
+    *,
+    committed: bool,
+) -> dict[str, Any]:
+    environments = [
+        environment
+        for environment in snapshot["environments"]
+        if environment["env_id"] == request["env_id"]
+        and environment["principal_id"] == request["principal_id"]
+    ]
+    deployments = [
+        deployment
+        for deployment in snapshot["deployments"]
+        if deployment["deployment_id"] == request["deployment_id"]
+        and deployment["env_id"] == request["env_id"]
+        and deployment["candidate_id"] == request["candidate_id"]
+        and deployment["principal_id"] == request["principal_id"]
+        and (
+            (
+                deployment["expected_resource_generation"] + 1 == request["resource_generation"]
+                and deployment["phase"] == "verified"
+                and deployment.get("applied_resource_generation") == request["resource_generation"]
+                and type(deployment.get("applied_registry_generation")) is int
+                and 1 <= deployment["applied_registry_generation"] < request["registry_generation"]
+                and _REGISTRY.DIGEST_RE.fullmatch(
+                    str(deployment.get("applied_registry_payload_sha256")),
+                )
+                is not None
+            )
+            if committed
+            else (
+                deployment["phase"] not in {"committed", "failed"}
+                and (
+                    deployment["expected_resource_generation"] == request["resource_generation"]
+                    or (
+                        deployment["phase"] == "verified"
+                        and deployment.get("applied_resource_generation")
+                        == request["resource_generation"]
+                    )
+                )
+            )
+        )
+    ]
+    candidates = [
+        candidate
+        for candidate in snapshot["candidates"]
+        if candidate["candidate_id"] == request["candidate_id"]
+        and candidate["env_id"] == request["env_id"]
+        and candidate["principal_id"] == request["principal_id"]
+        and candidate["candidate_sha"] == request["candidate_sha"]
+        and candidate["candidate_tree"] == request["candidate_tree"]
+    ]
+    if (
+        snapshot.get("generation") != request["registry_generation"]
+        or snapshot.get("payload_sha256") != request["registry_snapshot_sha256"]
+        or len(environments) != 1
+        or len(deployments) != 1
+        or len(candidates) != 1
+    ):
+        raise PolicyError("capacity request is stale against the registry snapshot")
+    environment = cast(dict[str, Any], environments[0])
+    expected_environment_generation = (
+        request["resource_generation"] - 1
+        if committed
+        else deployments[0]["expected_resource_generation"]
+    )
+    if (
+        environment["state"] != "deploying"
+        or environment["resource_generation"] != expected_environment_generation
+        or environment["slurm_user"] != request["slurm_user"]
+        or environment["service_user"] != request["slurm_user"]
+        or environment["service_group"] != request["service_group"]
+        or environment["slurm_account"] != request["slurm_account"]
+        or environment["slurm_qos"] != request["slurm_qos"]
+        or environment["uid"] != request["uid"]
+        or environment["gid"] != request["gid"]
+    ):
+        raise PolicyError("capacity request resource binding drifted")
+    return environment
+
+
+def _capacity_node_converge(
+    domain: str,
+    node: str,
+    request: Mapping[str, Any],
+    candidate_set: Mapping[str, Any],
+    *,
+    program: Path,
+) -> dict[str, Any]:
+    route = _CAPACITY_DOMAINS[domain]
+    infrastructure_nodes = route["infrastructure_nodes"]
+    if node not in infrastructure_nodes:
+        raise PolicyError("capacity node is outside the closed domain inventory")
+    bindings = candidate_set["candidate_bindings"]
+    account = str(request["slurm_account"])
+    binding = bindings.get(account)
+    if not isinstance(binding, Mapping):
+        raise PolicyError("capacity domain candidate binding is unavailable")
+    action = (
+        "slurm-controller-converge" if node == route["authority_node"] else "slurm-node-converge"
+    )
+    candidate_set_bytes = _canonical_json_bytes(candidate_set) + b"\n"
+    body: dict[str, Any] = {
+        "schema_version": 1,
+        "action": action,
+        "node": node,
+        "domain": domain,
+        "sandbox": binding["sandbox"],
+        "candidate_sha": binding["candidate_sha"],
+        "candidate_tree": binding["candidate_tree"],
+        "payload_kind": "slurm-candidate-set-json",
+        "payload_sha256": hashlib.sha256(candidate_set_bytes).hexdigest(),
+        "payload_base64": base64.b64encode(candidate_set_bytes).decode("ascii"),
+        "prior_request_id": None,
+    }
+    envelope = {
+        **body,
+        "request_id": hashlib.sha256(
+            _canonical_json_bytes(body) + b"\n",
+        ).hexdigest(),
+    }
+    envelope_bytes = _canonical_json_bytes(envelope) + b"\n"
+    try:
+        completed = subprocess.run(
+            (
+                str(program),
+                "invoke",
+                "--node",
+                node,
+                "--verb",
+                "transact",
+            ),
+            input=envelope_bytes,
+            check=False,
+            capture_output=True,
+            timeout=1800,
+            env={
+                "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "LANG": "C.UTF-8",
+            },
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PolicyError("capacity domain authority is unavailable") from exc
+    if completed.returncode != 0 or completed.stderr or len(completed.stdout) > 2 * 1024 * 1024:
+        raise PolicyError("capacity domain reconciliation failed safely")
+    try:
+        state = json.loads(completed.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PolicyError("capacity domain authority response is invalid") from exc
+    inner_receipt = state.get("inner_receipt") if isinstance(state, dict) else None
+    expected_inner = re.fullmatch(
+        rf"slurm-policy-v1:{re.escape(str(route['cluster']))}:"
+        r"([0-9a-f]{64}):([0-9a-f]{64})",
+        str(inner_receipt),
+    )
+    if (
+        not isinstance(state, dict)
+        or completed.stdout != _canonical_json_bytes(state) + b"\n"
+        or set(state)
+        != {
+            "schema_version",
+            "request_id",
+            "action",
+            "node",
+            "domain",
+            "sandbox",
+            "candidate_sha",
+            "candidate_tree",
+            "payload_sha256",
+            "result_sha256",
+            "inner_receipt",
+            "completed_at",
+            "status",
+        }
+        or state.get("schema_version") != 1
+        or state.get("request_id") != envelope["request_id"]
+        or state.get("action") != action
+        or state.get("node") != node
+        or state.get("domain") != domain
+        or state.get("sandbox") != binding["sandbox"]
+        or state.get("candidate_sha") != binding["candidate_sha"]
+        or state.get("candidate_tree") != binding["candidate_tree"]
+        or state.get("payload_sha256") != body["payload_sha256"]
+        or _REGISTRY.DIGEST_RE.fullmatch(str(state.get("result_sha256"))) is None
+        or expected_inner is None
+        or not isinstance(state.get("completed_at"), str)
+        or state.get("status") != "succeeded"
+        or bindings.get(account, {}).get("candidate_id") != request["candidate_id"]
+    ):
+        raise PolicyError("capacity domain authority readback drifted")
+    try:
+        completed_at = datetime.fromisoformat(str(state["completed_at"]))
+    except ValueError as exc:
+        raise PolicyError("capacity domain authority timestamp is invalid") from exc
+    if completed_at.tzinfo is None:
+        raise PolicyError("capacity domain authority timestamp is invalid")
+    return {
+        "action": action,
+        "request_id": state["request_id"],
+        "result_sha256": state["result_sha256"],
+        "authority_receipt_sha256": hashlib.sha256(
+            _canonical_json_bytes(state),
+        ).hexdigest(),
+        "completed_at": completed_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+    }
+
+
+def _capacity_identity_preflight(
+    domain: str,
+    node: str,
+    request: Mapping[str, Any],
+    candidate_set: Mapping[str, Any],
+    *,
+    program: Path,
+) -> dict[str, Any]:
+    route = _CAPACITY_DOMAINS[domain]
+    if node not in route["infrastructure_nodes"]:
+        raise PolicyError("capacity identity node is outside the closed inventory")
+    binding = candidate_set["candidate_bindings"].get(str(request["slurm_account"]))
+    if not isinstance(binding, Mapping):
+        raise PolicyError("capacity identity candidate binding is unavailable")
+    preflight = {
+        "schema_version": 2,
+        "kind": "loom.developer-environment.identity-preflight",
+        "env_id": request["env_id"],
+        "principal_id": request["principal_id"],
+        "resource_generation": request["resource_generation"],
+        "service_user": request["slurm_user"],
+        "service_group": request["service_group"],
+        "uid": request["uid"],
+        "gid": request["gid"],
+        "slurm_account": request["slurm_account"],
+        "slurm_qos": request["slurm_qos"],
+        "registry_generation": request["registry_generation"],
+        "registry_payload_sha256": request["registry_snapshot_sha256"],
+        "candidate_set_sha256": candidate_set["candidate_set_sha256"],
+        "revive_journal_sha256": request.get("revive_journal_sha256"),
+    }
+    payload_bytes = _canonical_json_bytes(preflight) + b"\n"
+    body: dict[str, Any] = {
+        "schema_version": 1,
+        "action": "slurm-identity-preflight",
+        "node": node,
+        "domain": domain,
+        "sandbox": binding["sandbox"],
+        "candidate_sha": binding["candidate_sha"],
+        "candidate_tree": binding["candidate_tree"],
+        "env_id": request["env_id"],
+        "deployment_id": request["deployment_id"],
+        "resource_generation": request["resource_generation"],
+        "candidate_id": request["candidate_id"],
+        "registry_generation": request["registry_generation"],
+        "registry_payload_sha256": request["registry_snapshot_sha256"],
+        "payload_kind": "developer-environment-identity-preflight-json",
+        "payload_sha256": hashlib.sha256(payload_bytes).hexdigest(),
+        "payload_base64": base64.b64encode(payload_bytes).decode("ascii"),
+        "prior_request_id": None,
+    }
+    envelope = {
+        **body,
+        "request_id": hashlib.sha256(
+            _canonical_json_bytes(body) + b"\n",
+        ).hexdigest(),
+    }
+    try:
+        completed = subprocess.run(
+            (
+                str(program),
+                "invoke",
+                "--node",
+                node,
+                "--verb",
+                "check",
+            ),
+            input=_canonical_json_bytes(envelope) + b"\n",
+            check=False,
+            capture_output=True,
+            timeout=120,
+            env={
+                "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "LANG": "C.UTF-8",
+            },
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PolicyError("capacity identity preflight is unavailable") from exc
+    if completed.returncode != 0 or completed.stderr or len(completed.stdout) > 2 * 1024 * 1024:
+        raise PolicyError("capacity identity preflight failed safely")
+    try:
+        response = json.loads(completed.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PolicyError("capacity identity preflight response is invalid") from exc
+    result = response.get("result") if isinstance(response, Mapping) else None
+    status = result.get("status") if isinstance(result, Mapping) else None
+    local_status = result.get("local_identity_status") if isinstance(result, Mapping) else None
+    expected_name = request["slurm_user"] if local_status == "exact-existing" else None
+    expected_group = request["service_group"] if local_status == "exact-existing" else None
+    if (
+        not isinstance(response, dict)
+        or completed.stdout != _canonical_json_bytes(response) + b"\n"
+        or set(response) != {"schema_version", "request_id", "status", "result"}
+        or response.get("schema_version") != 1
+        or response.get("request_id") != envelope["request_id"]
+        or response.get("status") != "succeeded"
+        or not isinstance(result, Mapping)
+        or set(result)
+        != {
+            "schema_version",
+            "kind",
+            "node",
+            "domain",
+            "env_id",
+            "service_user",
+            "service_group",
+            "uid",
+            "gid",
+            "status",
+            "passwd_name",
+            "group_name",
+            "identity_inventory_sha256",
+            "local_identity_status",
+            "slurm_accounting_status",
+            "slurm_accounting_receipt_sha256",
+            "owned_jobs",
+            "checked_at",
+        }
+        or result.get("schema_version") != 1
+        or result.get("kind") != "loom.developer-environment.identity-preflight-result"
+        or result.get("node") != node
+        or result.get("domain") != domain
+        or result.get("env_id") != request["env_id"]
+        or result.get("service_user") != request["slurm_user"]
+        or result.get("service_group") != request["service_group"]
+        or result.get("uid") != request["uid"]
+        or result.get("gid") != request["gid"]
+        or local_status not in {"available", "exact-existing"}
+        or result.get("slurm_accounting_status") not in {"available", "exact-existing"}
+        or status
+        != (
+            "exact-existing"
+            if local_status == result.get("slurm_accounting_status") == "exact-existing"
+            else "available"
+        )
+        or _REGISTRY.DIGEST_RE.fullmatch(
+            str(result.get("slurm_accounting_receipt_sha256")),
+        )
+        is None
+        or not isinstance(result.get("owned_jobs"), list)
+        or status not in {"available", "exact-existing"}
+        or result.get("passwd_name") != expected_name
+        or result.get("group_name") != expected_group
+        or _REGISTRY.DIGEST_RE.fullmatch(
+            str(result.get("identity_inventory_sha256")),
+        )
+        is None
+        or not isinstance(result.get("checked_at"), str)
+    ):
+        raise PolicyError("capacity identity preflight readback drifted")
+    try:
+        checked_at = datetime.fromisoformat(str(result["checked_at"]))
+    except ValueError as exc:
+        raise PolicyError("capacity identity preflight timestamp is invalid") from exc
+    if checked_at.tzinfo is None:
+        raise PolicyError("capacity identity preflight timestamp is invalid")
+    return {
+        "status": status,
+        "receipt_sha256": hashlib.sha256(
+            _canonical_json_bytes(response),
+        ).hexdigest(),
+    }
+
+
+def _capacity_identity_converge(
+    domain: str,
+    node: str,
+    request: Mapping[str, Any],
+    candidate_set: Mapping[str, Any],
+    *,
+    program: Path,
+    action: str = "slurm-identity-converge",
+) -> dict[str, Any]:
+    if action not in {"slurm-identity-converge", "slurm-identity-retire"}:
+        raise PolicyError("capacity identity action is invalid")
+    route = _CAPACITY_DOMAINS[domain]
+    if node not in route["infrastructure_nodes"]:
+        raise PolicyError("capacity identity node is outside the closed inventory")
+    binding = candidate_set["candidate_bindings"].get(str(request["slurm_account"]))
+    if not isinstance(binding, Mapping):
+        raise PolicyError("capacity identity candidate binding is unavailable")
+    identity = {
+        "schema_version": 2,
+        "kind": "loom.developer-environment.identity-preflight",
+        "env_id": request["env_id"],
+        "principal_id": request["principal_id"],
+        "resource_generation": request["resource_generation"],
+        "service_user": request["slurm_user"],
+        "service_group": request["service_group"],
+        "uid": request["uid"],
+        "gid": request["gid"],
+        "slurm_account": request["slurm_account"],
+        "slurm_qos": request["slurm_qos"],
+        "registry_generation": request["registry_generation"],
+        "registry_payload_sha256": request["registry_snapshot_sha256"],
+        "candidate_set_sha256": candidate_set["candidate_set_sha256"],
+        "revive_journal_sha256": request.get("revive_journal_sha256"),
+    }
+    payload_bytes = _canonical_json_bytes(identity) + b"\n"
+    body: dict[str, Any] = {
+        "schema_version": 1,
+        "action": action,
+        "node": node,
+        "domain": domain,
+        "sandbox": binding["sandbox"],
+        "candidate_sha": binding["candidate_sha"],
+        "candidate_tree": binding["candidate_tree"],
+        "env_id": request["env_id"],
+        "deployment_id": request["deployment_id"],
+        "resource_generation": request["resource_generation"],
+        "candidate_id": request["candidate_id"],
+        "registry_generation": request["registry_generation"],
+        "registry_payload_sha256": request["registry_snapshot_sha256"],
+        "payload_kind": "developer-environment-identity-preflight-json",
+        "payload_sha256": hashlib.sha256(payload_bytes).hexdigest(),
+        "payload_base64": base64.b64encode(payload_bytes).decode("ascii"),
+        "prior_request_id": None,
+    }
+    envelope = {
+        **body,
+        "request_id": hashlib.sha256(
+            _canonical_json_bytes(body) + b"\n",
+        ).hexdigest(),
+    }
+    try:
+        completed = subprocess.run(
+            (
+                str(program),
+                "invoke",
+                "--node",
+                node,
+                "--verb",
+                "transact",
+            ),
+            input=_canonical_json_bytes(envelope) + b"\n",
+            check=False,
+            capture_output=True,
+            timeout=120,
+            env={
+                "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "LANG": "C.UTF-8",
+            },
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PolicyError("capacity identity convergence is unavailable") from exc
+    if completed.returncode != 0 or completed.stderr or len(completed.stdout) > 2 * 1024 * 1024:
+        raise PolicyError("capacity identity convergence failed safely")
+    try:
+        receipt = json.loads(completed.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PolicyError("capacity identity convergence response is invalid") from exc
+    if (
+        not isinstance(receipt, dict)
+        or completed.stdout != _canonical_json_bytes(receipt) + b"\n"
+        or set(receipt)
+        != {
+            "schema_version",
+            "request_id",
+            "action",
+            "node",
+            "domain",
+            "sandbox",
+            "candidate_sha",
+            "candidate_tree",
+            "env_id",
+            "deployment_id",
+            "resource_generation",
+            "candidate_id",
+            "registry_generation",
+            "registry_payload_sha256",
+            "payload_sha256",
+            "result_sha256",
+            "inner_receipt",
+            "completed_at",
+            "status",
+        }
+        or receipt.get("schema_version") != 1
+        or receipt.get("request_id") != envelope["request_id"]
+        or receipt.get("action") != action
+        or receipt.get("node") != node
+        or receipt.get("domain") != domain
+        or receipt.get("sandbox") != binding["sandbox"]
+        or receipt.get("candidate_sha") != binding["candidate_sha"]
+        or receipt.get("candidate_tree") != binding["candidate_tree"]
+        or receipt.get("env_id") != request["env_id"]
+        or receipt.get("deployment_id") != request["deployment_id"]
+        or receipt.get("resource_generation") != request["resource_generation"]
+        or receipt.get("candidate_id") != request["candidate_id"]
+        or receipt.get("registry_generation") != request["registry_generation"]
+        or receipt.get("registry_payload_sha256") != request["registry_snapshot_sha256"]
+        or receipt.get("payload_sha256") != body["payload_sha256"]
+        or _REGISTRY.DIGEST_RE.fullmatch(str(receipt.get("result_sha256"))) is None
+        or (
+            receipt.get("inner_receipt")
+            != (
+                f"/var/lib/loom-developer-sandbox-slurm-policy/identity-tombstones/"
+                f"{route['cluster']}/{request['env_id']}/"
+                f"{request['resource_generation']}.json"
+            )
+            if action == "slurm-identity-retire"
+            else receipt.get("inner_receipt") is not None
+        )
+        or not isinstance(receipt.get("completed_at"), str)
+        or receipt.get("status") != "succeeded"
+    ):
+        raise PolicyError("capacity identity convergence readback drifted")
+    try:
+        completed_at = datetime.fromisoformat(str(receipt["completed_at"]))
+    except ValueError as exc:
+        raise PolicyError("capacity identity convergence timestamp is invalid") from exc
+    if completed_at.tzinfo is None:
+        raise PolicyError("capacity identity convergence timestamp is invalid")
+    result = {
+        "request_id": receipt["request_id"],
+        "result_sha256": receipt["result_sha256"],
+        "authority_receipt_sha256": hashlib.sha256(
+            _canonical_json_bytes(receipt),
+        ).hexdigest(),
+        "completed_at": completed_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+    }
+    if action == "slurm-identity-retire":
+        result["action"] = action
+        result["tombstone"] = receipt["inner_receipt"]
+    return result
+
+
+def _capacity_domain_converge(
+    domain: str,
+    request: Mapping[str, Any],
+    candidate_set: Mapping[str, Any],
+    identity_preflight: Mapping[str, Mapping[str, Any]],
+    identity_convergence: Mapping[str, Mapping[str, Any]],
+    *,
+    program: Path,
+) -> dict[str, Any]:
+    route = _CAPACITY_DOMAINS[domain]
+    account = str(request["slurm_account"])
+    controller = str(route["authority_node"])
+    if not route["infrastructure_nodes"] or route["infrastructure_nodes"][0] != controller:
+        raise PolicyError("capacity domain inventory is invalid")
+    if (
+        set(identity_preflight) != {controller}
+        or set(identity_convergence) != {controller}
+        or any(proof.get("status") != "exact-existing" for proof in identity_convergence.values())
+    ):
+        raise PolicyError("capacity domain identity convergence is incomplete")
+    convergence = identity_convergence[controller]
+    node_receipts = {
+        controller: {
+            "action": "slurm-identity-converge",
+            "request_id": convergence["request_id"],
+            "result_sha256": convergence["result_sha256"],
+            "authority_receipt_sha256": convergence["authority_receipt_sha256"],
+            "completed_at": convergence["completed_at"],
+        },
+    }
+    completed_at = max(str(receipt["completed_at"]) for receipt in node_receipts.values())
+    receipts_sha256 = hashlib.sha256(
+        _canonical_json_bytes(
+            {
+                "identity_convergence": identity_convergence,
+                "slurm_convergence": node_receipts,
+            },
+        ),
+    ).hexdigest()
+    return {
+        "status": "ready",
+        "cluster": route["cluster"],
+        "controller": route["controller"],
+        "submit_host": route["submit_host"],
+        "env_id": request["env_id"],
+        "slurm_user": request["slurm_user"],
+        "service_group": request["service_group"],
+        "uid": request["uid"],
+        "gid": request["gid"],
+        "slurm_account": account,
+        "slurm_qos": request["slurm_qos"],
+        "candidate_sha": request["candidate_sha"],
+        "candidate_tree": request["candidate_tree"],
+        "registry_snapshot_sha256": request["registry_snapshot_sha256"],
+        "policy_generation": candidate_set["generation"],
+        "policy_sha256": hashlib.sha256(
+            _canonical_json_bytes(
+                {controller: node_receipts[controller]["result_sha256"]},
+            ),
+        ).hexdigest(),
+        "authority_receipt_sha256": receipts_sha256,
+        "slurm_convergence": node_receipts,
+        "slurm_convergence_sha256": hashlib.sha256(
+            _canonical_json_bytes(node_receipts),
+        ).hexdigest(),
+        "completed_at": completed_at,
+        "identity_preflight": identity_preflight,
+        "identity_preflight_sha256": hashlib.sha256(
+            _canonical_json_bytes(identity_preflight),
+        ).hexdigest(),
+        "identity_convergence": identity_convergence,
+        "identity_convergence_sha256": hashlib.sha256(
+            _canonical_json_bytes(identity_convergence),
+        ).hexdigest(),
+    }
+
+
+def _capacity_domain_preflight(
+    domain: str,
+    request: Mapping[str, Any],
+    candidate_set: Mapping[str, Any],
+    *,
+    program: Path,
+) -> dict[str, dict[str, Any]]:
+    return {
+        str(_CAPACITY_DOMAINS[domain]["authority_node"]): _capacity_identity_preflight(
+            domain,
+            str(_CAPACITY_DOMAINS[domain]["authority_node"]),
+            request,
+            candidate_set,
+            program=program,
+        )
+    }
+
+
+def _capacity_domain_identity_converge(
+    domain: str,
+    request: Mapping[str, Any],
+    candidate_set: Mapping[str, Any],
+    *,
+    program: Path,
+) -> dict[str, dict[str, Any]]:
+    return {
+        str(_CAPACITY_DOMAINS[domain]["authority_node"]): _capacity_identity_converge(
+            domain,
+            str(_CAPACITY_DOMAINS[domain]["authority_node"]),
+            request,
+            candidate_set,
+            program=program,
+        )
+    }
+
+
+def _capacity_domain_identity_retire(
+    domain: str,
+    request: Mapping[str, Any],
+    candidate_set: Mapping[str, Any],
+    *,
+    program: Path,
+) -> dict[str, dict[str, Any]]:
+    controller = str(_CAPACITY_DOMAINS[domain]["authority_node"])
+    return {
+        controller: _capacity_identity_converge(
+            domain,
+            controller,
+            request,
+            candidate_set,
+            program=program,
+            action="slurm-identity-retire",
+        ),
+    }
+
+
+def _capacity_domain_identity_readback(
+    domain: str,
+    request: Mapping[str, Any],
+    candidate_set: Mapping[str, Any],
+    transactions: Mapping[str, Mapping[str, Any]],
+    *,
+    program: Path,
+) -> dict[str, dict[str, Any]]:
+    controller = str(_CAPACITY_DOMAINS[domain]["authority_node"])
+    if set(transactions) != {controller}:
+        raise PolicyError("capacity identity transaction set is incomplete")
+    readback: dict[str, dict[str, Any]] = {}
+    proof = _capacity_identity_preflight(
+        domain,
+        controller,
+        request,
+        candidate_set,
+        program=program,
+    )
+    if proof["status"] != "exact-existing":
+        raise PolicyError("capacity identity convergence did not read back exactly")
+    readback[controller] = {
+        **transactions[controller],
+        "status": "exact-existing",
+        "readback_receipt_sha256": proof["receipt_sha256"],
+    }
+    return readback
+
+
+def _capacity_revive_journal_sha256(
+    request: Mapping[str, Any],
+    *,
+    revive_root: Path = _REVIVE_ROOT,
+) -> str:
+    path = revive_root / f"{request['env_id']}.json"
+    journal = _load_journal(path)
+    fields = {
+        "schema_version",
+        "kind",
+        "phase",
+        "env_id",
+        "principal_id",
+        "runtime_id",
+        "uid",
+        "gid",
+        "service_user",
+        "service_group",
+        "slurm_user",
+        "slurm_account",
+        "slurm_qos",
+        "previous_resource_generation",
+        "new_resource_generation",
+        "registry_generation",
+        "registry_payload_sha256",
+        "retire_tombstone_sha256",
+        "idempotency_key",
+        "created_at",
+        "updated_at",
+        "payload_sha256",
+    }
+    unsigned = (
+        {field: value for field, value in journal.items() if field != "payload_sha256"}
+        if isinstance(journal, dict)
+        else {}
+    )
+    if (
+        not isinstance(journal, dict)
+        or set(journal) != fields
+        or journal.get("schema_version") != 1
+        or journal.get("kind") != "loom.developer-environment.revive-journal"
+        or journal.get("phase") not in {"registered", "capacity-restored"}
+        or journal.get("env_id") != request["env_id"]
+        or journal.get("principal_id") != request["principal_id"]
+        or journal.get("uid") != request["uid"]
+        or journal.get("gid") != request["gid"]
+        or journal.get("service_user") != request["slurm_user"]
+        or journal.get("service_group") != request["service_group"]
+        or journal.get("slurm_user") != request["slurm_user"]
+        or journal.get("slurm_account") != request["slurm_account"]
+        or journal.get("slurm_qos") != request["slurm_qos"]
+        or type(journal.get("previous_resource_generation")) is not int
+        or type(journal.get("new_resource_generation")) is not int
+        or journal.get("new_resource_generation") != request["resource_generation"]
+        or journal.get("previous_resource_generation") + 1 != journal.get("new_resource_generation")
+        or journal.get("registry_generation") != request["registry_generation"]
+        or journal.get("registry_payload_sha256") != request["registry_snapshot_sha256"]
+        or _REGISTRY.RUNTIME_ID_RE.fullmatch(str(journal.get("runtime_id"))) is None
+        or _REGISTRY.IDEMPOTENCY_RE.fullmatch(
+            str(journal.get("idempotency_key")),
+        )
+        is None
+        or _REGISTRY.DIGEST_RE.fullmatch(
+            str(journal.get("retire_tombstone_sha256")),
+        )
+        is None
+        or journal.get("payload_sha256")
+        != hashlib.sha256(_canonical_json_bytes(unsigned)).hexdigest()
+    ):
+        raise PolicyError("capacity revive journal binding is invalid")
+    _parse_allocation_timestamp(
+        str(journal["created_at"]),
+        "capacity revive journal",
+    )
+    _parse_allocation_timestamp(
+        str(journal["updated_at"]),
+        "capacity revive journal",
+    )
+    return str(journal["payload_sha256"])
+
+
+def reconcile_capacity(
+    deployment_id: str,
+    *,
+    root: Path = _CAPACITY_ROOT,
+    registry_snapshot: Path = REGISTRY_SNAPSHOT_PATH,
+    program: Path = _CAPACITY_TRANSPORT_PROGRAM,
+    require_root_ownership: bool = True,
+    committed: bool = False,
+    revive_journal_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Converge both independent Slurm domains and publish one durable receipt."""
+
+    if require_root_ownership and os.geteuid() != 0:
+        raise PolicyError("capacity reconciliation requires root")
+    request, _raw = _capacity_request(
+        deployment_id,
+        root=root,
+        require_root_ownership=require_root_ownership,
+    )
+    if revive_journal_sha256 is not None:
+        if _REGISTRY.DIGEST_RE.fullmatch(revive_journal_sha256) is None:
+            raise PolicyError("capacity revive journal identity is invalid")
+        request = {**request, "revive_journal_sha256": revive_journal_sha256}
+    snapshot = _read_registry_snapshot(
+        registry_snapshot,
+        require_root_ownership=require_root_ownership,
+    )
+    _capacity_registry_binding(request, snapshot, committed=committed)
+    candidate_set = slurm_candidate_set_from_snapshot(
+        snapshot,
+        deployment_id=deployment_id,
+        target_resource_generation=int(request["resource_generation"]),
+    )
+    account = str(request["slurm_account"])
+    binding = candidate_set["candidate_bindings"].get(account)
+    if (
+        not isinstance(binding, Mapping)
+        or binding.get("env_id") != request["env_id"]
+        or binding.get("resource_generation") != request["resource_generation"]
+        or binding.get("service_user") != request["slurm_user"]
+        or binding.get("slurm_qos") != request["slurm_qos"]
+        or binding.get("candidate_id") != request["candidate_id"]
+        or binding.get("candidate_sha") != request["candidate_sha"]
+        or binding.get("candidate_tree") != request["candidate_tree"]
+    ):
+        raise PolicyError("capacity candidate set does not contain the deployment")
+    preflight = {
+        domain: _capacity_domain_preflight(
+            domain,
+            request,
+            candidate_set,
+            program=program,
+        )
+        for domain in ("oldlab", "gb10")
+    }
+    identity_transactions = {
+        domain: _capacity_domain_identity_converge(
+            domain,
+            request,
+            candidate_set,
+            program=program,
+        )
+        for domain in ("oldlab", "gb10")
+    }
+    identity_convergence = {
+        domain: _capacity_domain_identity_readback(
+            domain,
+            request,
+            candidate_set,
+            identity_transactions[domain],
+            program=program,
+        )
+        for domain in ("oldlab", "gb10")
+    }
+    domains = {
+        domain: _capacity_domain_converge(
+            domain,
+            request,
+            candidate_set,
+            preflight[domain],
+            identity_convergence[domain],
+            program=program,
+        )
+        for domain in ("oldlab", "gb10")
+    }
+    unsigned = {
+        "schema_version": 1,
+        "kind": "loom.developer-environment.capacity-receipt",
+        "status": (
+            "revive-prepared"
+            if revive_journal_sha256 is not None
+            else "acceptance-prepared"
+            if committed
+            else "prepared"
+        ),
+        "request_sha256": request["payload_sha256"],
+        **{
+            field: request[field]
+            for field in (
+                "env_id",
+                "principal_id",
+                "deployment_id",
+                "candidate_id",
+                "candidate_sha",
+                "candidate_tree",
+                "resource_generation",
+                "registry_generation",
+                "registry_snapshot_sha256",
+                "slurm_user",
+                "service_group",
+                "slurm_account",
+                "slurm_qos",
+                "uid",
+                "gid",
+            )
+        },
+        "domains": domains,
+    }
+    receipt = {
+        **unsigned,
+        "payload_sha256": hashlib.sha256(_canonical_json_bytes(unsigned)).hexdigest(),
+    }
+    receipt_root = root / "receipts"
+    _prepare_private_directory(
+        receipt_root,
+        enforce_root_ownership=require_root_ownership,
+        create=True,
+    )
+    receipt_path = receipt_root / f"{deployment_id}.json"
+    existing = _load_journal(receipt_path)
+    if existing is not None:
+        if existing == receipt:
+            return existing
+        if not committed:
+            raise PolicyError("capacity receipt replay drifted")
+        precommit = receipt_root / f"{deployment_id}-precommit.json"
+        archived = _load_journal(precommit)
+        if archived is None:
+            _atomic_write(
+                precommit,
+                (_canonical_json_bytes(existing) + b"\n").decode("ascii"),
+                mode=0o600,
+            )
+        elif archived != existing:
+            raise PolicyError("capacity precommit receipt archive drifted")
+    _atomic_write(
+        receipt_path,
+        (_canonical_json_bytes(receipt) + b"\n").decode("ascii"),
+        mode=0o600,
+    )
+    rebound = _load_journal(receipt_path)
+    if rebound != receipt:
+        raise PolicyError("capacity receipt publication drifted")
+    return receipt
+
+
+def abort_capacity(
+    deployment_id: str,
+    *,
+    root: Path = _CAPACITY_ROOT,
+    registry_snapshot: Path = REGISTRY_SNAPSHOT_PATH,
+    program: Path = _CAPACITY_TRANSPORT_PROGRAM,
+    require_root_ownership: bool = True,
+) -> dict[str, Any]:
+    """Retire a first-create identity while its deployment is still in flight."""
+
+    if require_root_ownership and os.geteuid() != 0:
+        raise PolicyError("capacity abort requires root")
+    request, _raw = _capacity_request(
+        deployment_id,
+        root=root,
+        require_root_ownership=require_root_ownership,
+    )
+    snapshot = _read_registry_snapshot(
+        registry_snapshot,
+        require_root_ownership=require_root_ownership,
+    )
+    _capacity_registry_binding(request, snapshot, committed=False)
+    candidate_set = slurm_candidate_set_from_snapshot(
+        snapshot,
+        include_provisioning=True,
+        deployment_id=deployment_id,
+        target_resource_generation=int(request["resource_generation"]),
+        include_retiring=True,
+    )
+    binding = candidate_set["candidate_bindings"].get(str(request["slurm_account"]))
+    if (
+        not isinstance(binding, Mapping)
+        or binding.get("env_id") != request["env_id"]
+        or binding.get("resource_generation") != request["resource_generation"]
+        or binding.get("service_user") != request["slurm_user"]
+        or binding.get("slurm_qos") != request["slurm_qos"]
+        or binding.get("candidate_id") != request["candidate_id"]
+        or binding.get("candidate_sha") != request["candidate_sha"]
+        or binding.get("candidate_tree") != request["candidate_tree"]
+    ):
+        raise PolicyError("capacity abort candidate set does not contain the deployment")
+    domains = {
+        domain: _capacity_domain_identity_retire(
+            domain,
+            request,
+            candidate_set,
+            program=program,
+        )
+        for domain in ("oldlab", "gb10")
+    }
+    unsigned = {
+        "schema_version": 1,
+        "kind": "loom.developer-environment.capacity-abort-receipt",
+        "status": "retired",
+        "request_sha256": request["payload_sha256"],
+        **{
+            field: request[field]
+            for field in (
+                "env_id",
+                "principal_id",
+                "deployment_id",
+                "candidate_id",
+                "candidate_sha",
+                "candidate_tree",
+                "resource_generation",
+                "registry_generation",
+                "registry_snapshot_sha256",
+                "slurm_user",
+                "service_group",
+                "slurm_account",
+                "slurm_qos",
+                "uid",
+                "gid",
+            )
+        },
+        "domains": domains,
+    }
+    receipt = {
+        **unsigned,
+        "payload_sha256": hashlib.sha256(_canonical_json_bytes(unsigned)).hexdigest(),
+    }
+    receipt_root = root / "receipts"
+    _prepare_private_directory(
+        receipt_root,
+        enforce_root_ownership=require_root_ownership,
+        create=True,
+    )
+    receipt_path = receipt_root / f"{deployment_id}-abort.json"
+    existing = _load_journal(receipt_path)
+    if existing is None:
+        _atomic_write(
+            receipt_path,
+            (_canonical_json_bytes(receipt) + b"\n").decode("ascii"),
+            mode=0o600,
+        )
+    elif existing != receipt:
+        raise PolicyError("capacity abort receipt replay drifted")
+    return receipt
+
+
+def retire_capacity(
+    deployment_id: str,
+    *,
+    root: Path = _CAPACITY_ROOT,
+    registry_snapshot: Path = REGISTRY_SNAPSHOT_PATH,
+    program: Path = _CAPACITY_TRANSPORT_PROGRAM,
+    require_root_ownership: bool = True,
+) -> dict[str, Any]:
+    """Retire one quarantined committed identity without touching peer accounts."""
+
+    if require_root_ownership and os.geteuid() != 0:
+        raise PolicyError("capacity retirement requires root")
+    request, _raw = _capacity_request(
+        deployment_id,
+        root=root,
+        require_root_ownership=require_root_ownership,
+        suffix="-retire-request",
+        kind="loom.developer-environment.capacity-retire-request",
+    )
+    snapshot = _read_registry_snapshot(
+        registry_snapshot,
+        require_root_ownership=require_root_ownership,
+    )
+    environments = [
+        environment
+        for environment in snapshot["environments"]
+        if environment["env_id"] == request["env_id"]
+        and environment["principal_id"] == request["principal_id"]
+        and environment["state"] == "quarantined"
+        and environment["current_candidate_id"] == request["candidate_id"]
+        and environment["resource_generation"] == request["resource_generation"]
+        and environment["slurm_user"] == request["slurm_user"]
+        and environment["service_user"] == request["slurm_user"]
+        and environment["service_group"] == request["service_group"]
+        and environment["slurm_account"] == request["slurm_account"]
+        and environment["slurm_qos"] == request["slurm_qos"]
+        and environment["uid"] == request["uid"]
+        and environment["gid"] == request["gid"]
+    ]
+    deployments = [
+        deployment
+        for deployment in snapshot["deployments"]
+        if deployment["deployment_id"] == deployment_id
+        and deployment["env_id"] == request["env_id"]
+        and deployment["principal_id"] == request["principal_id"]
+        and deployment["candidate_id"] == request["candidate_id"]
+        and deployment["phase"] == "committed"
+        and deployment.get("applied_resource_generation") == request["resource_generation"]
+        and deployment.get("expected_resource_generation", 0) + 1
+        == deployment["applied_resource_generation"]
+    ]
+    candidates = [
+        candidate
+        for candidate in snapshot["candidates"]
+        if candidate["candidate_id"] == request["candidate_id"]
+        and candidate["env_id"] == request["env_id"]
+        and candidate["principal_id"] == request["principal_id"]
+        and candidate["candidate_sha"] == request["candidate_sha"]
+        and candidate["candidate_tree"] == request["candidate_tree"]
+    ]
+    if (
+        snapshot.get("generation") != request["registry_generation"]
+        or snapshot.get("payload_sha256") != request["registry_snapshot_sha256"]
+        or len(environments) != 1
+        or len(deployments) != 1
+        or len(candidates) != 1
+    ):
+        raise PolicyError("capacity retirement registry binding is invalid")
+    candidate_set = slurm_candidate_set_from_snapshot(
+        snapshot,
+        deployment_id=deployment_id,
+        target_resource_generation=int(request["resource_generation"]),
+        include_retiring=True,
+    )
+    binding = candidate_set["candidate_bindings"].get(str(request["slurm_account"]))
+    if (
+        not isinstance(binding, Mapping)
+        or binding.get("env_id") != request["env_id"]
+        or binding.get("resource_generation") != request["resource_generation"]
+        or binding.get("candidate_id") != request["candidate_id"]
+        or binding.get("candidate_sha") != request["candidate_sha"]
+        or binding.get("candidate_tree") != request["candidate_tree"]
+    ):
+        raise PolicyError("capacity retirement candidate set binding is invalid")
+    domains = {
+        domain: _capacity_domain_identity_retire(
+            domain,
+            request,
+            candidate_set,
+            program=program,
+        )
+        for domain in ("oldlab", "gb10")
+    }
+    unsigned = {
+        "schema_version": 1,
+        "kind": "loom.developer-environment.capacity-retire-receipt",
+        "status": "retired",
+        "request_sha256": request["payload_sha256"],
+        **{
+            field: request[field]
+            for field in (
+                "env_id",
+                "principal_id",
+                "deployment_id",
+                "candidate_id",
+                "candidate_sha",
+                "candidate_tree",
+                "resource_generation",
+                "registry_generation",
+                "registry_snapshot_sha256",
+                "slurm_user",
+                "service_group",
+                "slurm_account",
+                "slurm_qos",
+                "uid",
+                "gid",
+            )
+        },
+        "domains": domains,
+    }
+    receipt = {
+        **unsigned,
+        "payload_sha256": hashlib.sha256(_canonical_json_bytes(unsigned)).hexdigest(),
+    }
+    receipt_root = root / "receipts"
+    _prepare_private_directory(
+        receipt_root,
+        enforce_root_ownership=require_root_ownership,
+        create=True,
+    )
+    receipt_path = receipt_root / f"{deployment_id}-retire.json"
+    existing = _load_journal(receipt_path)
+    if existing is None:
+        _atomic_write(
+            receipt_path,
+            (_canonical_json_bytes(receipt) + b"\n").decode("ascii"),
+            mode=0o600,
+        )
+    elif existing != receipt:
+        raise PolicyError("capacity retirement receipt replay drifted")
+    return receipt
+
+
+def finalize_capacity(
+    deployment_id: str,
+    *,
+    root: Path = _CAPACITY_ROOT,
+    registry_snapshot: Path = REGISTRY_SNAPSHOT_PATH,
+    program: Path = _CAPACITY_TRANSPORT_PROGRAM,
+    require_root_ownership: bool = True,
+) -> dict[str, Any]:
+    """Publish an active+committed final-generation receipt without fleet restart."""
+
+    return reconcile_capacity(
+        deployment_id,
+        root=root,
+        registry_snapshot=registry_snapshot,
+        program=program,
+        require_root_ownership=require_root_ownership,
+        committed=True,
+    )
+
+
+def reactivate_capacity(
+    deployment_id: str,
+    *,
+    root: Path = _CAPACITY_ROOT,
+    registry_snapshot: Path = REGISTRY_SNAPSHOT_PATH,
+    program: Path = _CAPACITY_TRANSPORT_PROGRAM,
+    require_root_ownership: bool = True,
+    revive_root: Path = _REVIVE_ROOT,
+) -> dict[str, Any]:
+    """Restore only the exact same retired identity under an independent root journal."""
+
+    if require_root_ownership and os.geteuid() != 0:
+        raise PolicyError("capacity reactivation requires root")
+    snapshot = _read_registry_snapshot(
+        registry_snapshot,
+        require_root_ownership=require_root_ownership,
+    )
+    deployments = [
+        deployment
+        for deployment in snapshot["deployments"]
+        if deployment["deployment_id"] == deployment_id
+        and deployment["phase"] not in {"committed", "failed"}
+    ]
+    if len(deployments) != 1:
+        raise PolicyError("capacity reactivation deployment binding is invalid")
+    deployment = deployments[0]
+    environments = [
+        environment
+        for environment in snapshot["environments"]
+        if environment["env_id"] == deployment["env_id"]
+        and environment["principal_id"] == deployment["principal_id"]
+        and environment["state"] == "deploying"
+        and environment["resource_generation"] == deployment["expected_resource_generation"]
+    ]
+    candidates = [
+        candidate
+        for candidate in snapshot["candidates"]
+        if candidate["candidate_id"] == deployment["candidate_id"]
+        and candidate["env_id"] == deployment["env_id"]
+        and candidate["principal_id"] == deployment["principal_id"]
+    ]
+    if len(environments) != 1 or len(candidates) != 1:
+        raise PolicyError("capacity reactivation registry binding is invalid")
+    environment = environments[0]
+    candidate = candidates[0]
+    unsigned_request = {
+        "schema_version": 1,
+        "kind": "loom.developer-environment.capacity-request",
+        "env_id": environment["env_id"],
+        "principal_id": environment["principal_id"],
+        "deployment_id": deployment_id,
+        "candidate_id": candidate["candidate_id"],
+        "candidate_sha": candidate["candidate_sha"],
+        "candidate_tree": candidate["candidate_tree"],
+        "resource_generation": environment["resource_generation"],
+        "registry_generation": snapshot["generation"],
+        "registry_snapshot_sha256": snapshot["payload_sha256"],
+        "slurm_user": environment["slurm_user"],
+        "service_group": environment["service_group"],
+        "slurm_account": environment["slurm_account"],
+        "slurm_qos": environment["slurm_qos"],
+        "uid": environment["uid"],
+        "gid": environment["gid"],
+        "identity_preflight_nodes": {
+            domain: [str(_CAPACITY_DOMAINS[domain]["authority_node"])]
+            for domain in ("oldlab", "gb10")
+        },
+    }
+    request = {
+        **unsigned_request,
+        "payload_sha256": hashlib.sha256(
+            _canonical_json_bytes(unsigned_request),
+        ).hexdigest(),
+    }
+    revive_journal_sha256 = _capacity_revive_journal_sha256(
+        request,
+        revive_root=revive_root,
+    )
+    request_root = root / "requests"
+    _prepare_private_directory(
+        request_root,
+        enforce_root_ownership=require_root_ownership,
+        create=True,
+    )
+    request_path = request_root / f"{deployment_id}.json"
+    existing = _load_journal(request_path)
+    if existing is None:
+        _atomic_write(
+            request_path,
+            (_canonical_json_bytes(request) + b"\n").decode("ascii"),
+            mode=0o600,
+        )
+    elif existing != request:
+        raise PolicyError("capacity reactivation request replay drifted")
+    rebound, _raw = _capacity_request(
+        deployment_id,
+        root=root,
+        require_root_ownership=require_root_ownership,
+    )
+    if rebound != request:
+        raise PolicyError("capacity reactivation request publication drifted")
+    return reconcile_capacity(
+        deployment_id,
+        root=root,
+        registry_snapshot=registry_snapshot,
+        program=program,
+        require_root_ownership=require_root_ownership,
+        revive_journal_sha256=revive_journal_sha256,
+    )
+
+
+def rollback_capacity(
+    deployment_id: str,
+    *,
+    root: Path = _CAPACITY_ROOT,
+    registry_snapshot: Path = REGISTRY_SNAPSHOT_PATH,
+    program: Path = _CAPACITY_TRANSPORT_PROGRAM,
+    require_root_ownership: bool = True,
+) -> dict[str, Any]:
+    """Rebind accounting to the current active candidate after a failed deployment."""
+
+    if require_root_ownership and os.geteuid() != 0:
+        raise PolicyError("capacity rollback requires root")
+    failed, _raw = _capacity_request(
+        deployment_id,
+        root=root,
+        require_root_ownership=require_root_ownership,
+    )
+    snapshot = _read_registry_snapshot(
+        registry_snapshot,
+        require_root_ownership=require_root_ownership,
+    )
+    environments = [
+        environment
+        for environment in snapshot["environments"]
+        if environment["env_id"] == failed["env_id"]
+        and environment["principal_id"] == failed["principal_id"]
+    ]
+    failed_deployments = [
+        deployment
+        for deployment in snapshot["deployments"]
+        if deployment["deployment_id"] == deployment_id
+        and deployment["env_id"] == failed["env_id"]
+        and deployment["candidate_id"] == failed["candidate_id"]
+        and deployment["principal_id"] == failed["principal_id"]
+        and deployment["phase"] == "failed"
+    ]
+    if len(environments) != 1 or len(failed_deployments) != 1:
+        raise PolicyError("capacity rollback failed deployment binding is invalid")
+    environment = environments[0]
+    current_candidate_id = environment.get("current_candidate_id")
+    if environment.get("state") != "active" or not isinstance(current_candidate_id, str):
+        raise PolicyError("capacity rollback requires a preserved active environment")
+    candidates = [
+        candidate
+        for candidate in snapshot["candidates"]
+        if candidate["candidate_id"] == current_candidate_id
+        and candidate["env_id"] == failed["env_id"]
+        and candidate["principal_id"] == failed["principal_id"]
+    ]
+    committed = [
+        deployment
+        for deployment in snapshot["deployments"]
+        if deployment["env_id"] == failed["env_id"]
+        and deployment["candidate_id"] == current_candidate_id
+        and deployment["principal_id"] == failed["principal_id"]
+        and deployment["phase"] == "committed"
+        and deployment.get("applied_resource_generation") == environment["resource_generation"]
+        and deployment.get("expected_resource_generation", 0) + 1
+        == deployment["applied_resource_generation"]
+        and type(deployment.get("applied_registry_generation")) is int
+        and 1 <= deployment["applied_registry_generation"] < snapshot["generation"]
+        and _REGISTRY.DIGEST_RE.fullmatch(
+            str(deployment.get("applied_registry_payload_sha256")),
+        )
+        is not None
+    ]
+    if len(candidates) != 1 or not committed:
+        raise PolicyError("capacity rollback active candidate binding is invalid")
+    current_candidate = candidates[0]
+    restored_request = {
+        **failed,
+        "candidate_id": current_candidate["candidate_id"],
+        "candidate_sha": current_candidate["candidate_sha"],
+        "candidate_tree": current_candidate["candidate_tree"],
+        "resource_generation": environment["resource_generation"],
+        "registry_generation": snapshot["generation"],
+        "registry_snapshot_sha256": snapshot["payload_sha256"],
+        "slurm_user": environment["slurm_user"],
+        "service_group": environment["service_group"],
+        "slurm_account": environment["slurm_account"],
+        "slurm_qos": environment["slurm_qos"],
+        "uid": environment["uid"],
+        "gid": environment["gid"],
+        "identity_preflight_nodes": {
+            domain: [str(_CAPACITY_DOMAINS[domain]["authority_node"])]
+            for domain in ("oldlab", "gb10")
+        },
+    }
+    restored_unsigned = {
+        key: value for key, value in restored_request.items() if key != "payload_sha256"
+    }
+    restored_request["payload_sha256"] = hashlib.sha256(
+        _canonical_json_bytes(restored_unsigned),
+    ).hexdigest()
+    candidate_set = slurm_candidate_set_from_snapshot(snapshot)
+    binding = candidate_set["candidate_bindings"].get(str(restored_request["slurm_account"]))
+    if (
+        not isinstance(binding, Mapping)
+        or binding.get("candidate_id") != restored_request["candidate_id"]
+        or binding.get("candidate_sha") != restored_request["candidate_sha"]
+        or binding.get("candidate_tree") != restored_request["candidate_tree"]
+        or failed["candidate_id"] == restored_request["candidate_id"]
+    ):
+        raise PolicyError("capacity rollback current candidate set binding is invalid")
+    domains: dict[str, Any] = {}
+    for domain in ("oldlab", "gb10"):
+        preflight = _capacity_domain_preflight(
+            domain,
+            restored_request,
+            candidate_set,
+            program=program,
+        )
+        transactions = _capacity_domain_identity_converge(
+            domain,
+            restored_request,
+            candidate_set,
+            program=program,
+        )
+        convergence = _capacity_domain_identity_readback(
+            domain,
+            restored_request,
+            candidate_set,
+            transactions,
+            program=program,
+        )
+        domains[domain] = _capacity_domain_converge(
+            domain,
+            restored_request,
+            candidate_set,
+            preflight,
+            convergence,
+            program=program,
+        )
+    unsigned = {
+        "schema_version": 1,
+        "kind": "loom.developer-environment.capacity-rollback-receipt",
+        "status": "ready",
+        "deployment_id": deployment_id,
+        "env_id": failed["env_id"],
+        "failed_candidate_id": failed["candidate_id"],
+        "failed_candidate_sha": failed["candidate_sha"],
+        "failed_candidate_tree": failed["candidate_tree"],
+        "restored_candidate_id": restored_request["candidate_id"],
+        "restored_candidate_sha": restored_request["candidate_sha"],
+        "restored_candidate_tree": restored_request["candidate_tree"],
+        "resource_generation": restored_request["resource_generation"],
+        "registry_generation": snapshot["generation"],
+        "registry_payload_sha256": snapshot["payload_sha256"],
+        "failed_candidate_projection_present": False,
+        "association_preserved": True,
+        "domains": domains,
+    }
+    receipt = {
+        **unsigned,
+        "payload_sha256": hashlib.sha256(_canonical_json_bytes(unsigned)).hexdigest(),
+    }
+    receipt_root = root / "receipts"
+    _prepare_private_directory(
+        receipt_root,
+        enforce_root_ownership=require_root_ownership,
+        create=True,
+    )
+    receipt_path = receipt_root / f"{deployment_id}-rollback.json"
+    existing = _load_journal(receipt_path)
+    if existing is None:
+        _atomic_write(
+            receipt_path,
+            (_canonical_json_bytes(receipt) + b"\n").decode("ascii"),
+            mode=0o600,
+        )
+    elif existing != receipt:
+        raise PolicyError("capacity rollback receipt replay drifted")
+    return receipt
+
+
+def check_capacity(
+    deployment_id: str,
+    *,
+    root: Path = _CAPACITY_ROOT,
+    registry_snapshot: Path = REGISTRY_SNAPSHOT_PATH,
+    require_root_ownership: bool = True,
+    finalized: bool = False,
+) -> dict[str, Any]:
+    """Validate one committed capacity receipt against the current registry."""
+
+    if require_root_ownership and os.geteuid() != 0:
+        raise PolicyError("capacity check requires root")
+    request, _raw = _capacity_request(
+        deployment_id,
+        root=root,
+        require_root_ownership=require_root_ownership,
+    )
+    snapshot = _read_registry_snapshot(
+        registry_snapshot,
+        require_root_ownership=require_root_ownership,
+    )
+    if finalized:
+        _capacity_registry_binding(request, snapshot, committed=True)
+        environments: list[Mapping[str, Any]] = []
+        deployments: list[Mapping[str, Any]] = []
+        candidates: list[Mapping[str, Any]] = []
+    else:
+        environments = [
+            environment
+            for environment in snapshot["environments"]
+            if environment["env_id"] == request["env_id"]
+            and environment["principal_id"] == request["principal_id"]
+        ]
+        deployments = [
+            deployment
+            for deployment in snapshot["deployments"]
+            if deployment["deployment_id"] == deployment_id
+            and deployment["env_id"] == request["env_id"]
+            and deployment["principal_id"] == request["principal_id"]
+            and deployment["candidate_id"] == request["candidate_id"]
+            and deployment["expected_resource_generation"] + 1 == request["resource_generation"]
+            and deployment.get("applied_resource_generation") == request["resource_generation"]
+            and type(deployment.get("applied_registry_generation")) is int
+            and 1 <= deployment["applied_registry_generation"] < snapshot["generation"]
+            and _REGISTRY.DIGEST_RE.fullmatch(
+                str(deployment.get("applied_registry_payload_sha256")),
+            )
+            is not None
+        ]
+        candidates = [
+            candidate
+            for candidate in snapshot["candidates"]
+            if candidate["candidate_id"] == request["candidate_id"]
+            and candidate["env_id"] == request["env_id"]
+            and candidate["principal_id"] == request["principal_id"]
+            and candidate["candidate_sha"] == request["candidate_sha"]
+            and candidate["candidate_tree"] == request["candidate_tree"]
+        ]
+    if not finalized and (
+        len(environments) != 1
+        or len(deployments) != 1
+        or len(candidates) != 1
+        or environments[0]["state"] != "active"
+        or environments[0]["resource_generation"] != request["resource_generation"]
+        or environments[0]["current_candidate_id"] != request["candidate_id"]
+        or environments[0]["service_user"] != request["slurm_user"]
+        or environments[0]["service_group"] != request["service_group"]
+        or environments[0]["uid"] != request["uid"]
+        or environments[0]["gid"] != request["gid"]
+        or environments[0]["slurm_account"] != request["slurm_account"]
+        or environments[0]["slurm_qos"] != request["slurm_qos"]
+        or deployments[0]["phase"] != "committed"
+        or snapshot["generation"] < request["registry_generation"]
+    ):
+        raise PolicyError("capacity receipt is stale against the current registry")
+    candidate_set = slurm_candidate_set_from_snapshot(
+        snapshot,
+        deployment_id=deployment_id if finalized else None,
+        target_resource_generation=(int(request["resource_generation"]) if finalized else None),
+    )
+    binding = candidate_set["candidate_bindings"].get(str(request["slurm_account"]))
+    if (
+        not isinstance(binding, Mapping)
+        or binding.get("env_id") != request["env_id"]
+        or binding.get("resource_generation") != request["resource_generation"]
+        or binding.get("service_user") != request["slurm_user"]
+        or binding.get("slurm_qos") != request["slurm_qos"]
+        or binding.get("candidate_id") != request["candidate_id"]
+        or binding.get("candidate_sha") != request["candidate_sha"]
+        or binding.get("candidate_tree") != request["candidate_tree"]
+    ):
+        raise PolicyError("capacity receipt candidate is not current")
+    receipt_path = root / "receipts" / f"{deployment_id}.json"
+    receipt_raw, _metadata = _read_bound_regular_file(
+        receipt_path,
+        expected_uid=0 if require_root_ownership else os.geteuid(),
+        expected_gid=0 if require_root_ownership else os.getegid(),
+        expected_mode=0o600,
+        description="capacity receipt",
+        max_bytes=2 << 20,
+    )
+    try:
+        receipt = json.loads(receipt_raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PolicyError("capacity receipt is invalid") from exc
+    receipt_fields = {
+        "schema_version",
+        "kind",
+        "status",
+        "request_sha256",
+        "env_id",
+        "principal_id",
+        "deployment_id",
+        "candidate_id",
+        "candidate_sha",
+        "candidate_tree",
+        "resource_generation",
+        "registry_generation",
+        "registry_snapshot_sha256",
+        "slurm_user",
+        "service_group",
+        "slurm_account",
+        "slurm_qos",
+        "uid",
+        "gid",
+        "domains",
+        "payload_sha256",
+    }
+    unsigned = (
+        {key: value for key, value in receipt.items() if key != "payload_sha256"}
+        if isinstance(receipt, dict)
+        else {}
+    )
+    exact_request = {
+        field: request[field]
+        for field in (
+            "env_id",
+            "principal_id",
+            "deployment_id",
+            "candidate_id",
+            "candidate_sha",
+            "candidate_tree",
+            "resource_generation",
+            "registry_generation",
+            "registry_snapshot_sha256",
+            "slurm_user",
+            "service_group",
+            "slurm_account",
+            "slurm_qos",
+            "uid",
+            "gid",
+        )
+    }
+    domains = receipt.get("domains") if isinstance(receipt, Mapping) else None
+    if (
+        not isinstance(receipt, dict)
+        or set(receipt) != receipt_fields
+        or receipt_raw != _canonical_json_bytes(receipt) + b"\n"
+        or receipt.get("schema_version") != 1
+        or receipt.get("kind") != "loom.developer-environment.capacity-receipt"
+        or receipt.get("status") != "acceptance-prepared"
+        or receipt.get("request_sha256") != request["payload_sha256"]
+        or receipt.get("payload_sha256")
+        != hashlib.sha256(_canonical_json_bytes(unsigned)).hexdigest()
+        or any(receipt.get(field) != value for field, value in exact_request.items())
+        or not isinstance(domains, dict)
+        or set(domains) != {"oldlab", "gb10"}
+    ):
+        raise PolicyError("capacity receipt binding is invalid")
+    domain_fields = {
+        "status",
+        "cluster",
+        "controller",
+        "submit_host",
+        "env_id",
+        "slurm_user",
+        "service_group",
+        "uid",
+        "gid",
+        "slurm_account",
+        "slurm_qos",
+        "candidate_sha",
+        "candidate_tree",
+        "registry_snapshot_sha256",
+        "policy_generation",
+        "policy_sha256",
+        "authority_receipt_sha256",
+        "completed_at",
+        "identity_preflight",
+        "identity_preflight_sha256",
+        "identity_convergence",
+        "identity_convergence_sha256",
+        "slurm_convergence",
+        "slurm_convergence_sha256",
+    }
+    for domain, route in _CAPACITY_DOMAINS.items():
+        value = domains[domain]
+        nodes = {str(route["authority_node"])}
+        preflight = value.get("identity_preflight") if isinstance(value, Mapping) else None
+        convergence = value.get("identity_convergence") if isinstance(value, Mapping) else None
+        slurm = value.get("slurm_convergence") if isinstance(value, Mapping) else None
+        if (
+            not isinstance(value, dict)
+            or set(value) != domain_fields
+            or value.get("status") != "ready"
+            or value.get("cluster") != route["cluster"]
+            or value.get("controller") != route["controller"]
+            or value.get("submit_host") != route["submit_host"]
+            or any(
+                value.get(field) != request[field]
+                for field in (
+                    "env_id",
+                    "slurm_user",
+                    "service_group",
+                    "uid",
+                    "gid",
+                    "slurm_account",
+                    "slurm_qos",
+                    "candidate_sha",
+                    "candidate_tree",
+                    "registry_snapshot_sha256",
+                )
+            )
+            or value.get("policy_generation") != request["registry_generation"]
+            or not isinstance(value.get("completed_at"), str)
+            or not isinstance(preflight, dict)
+            or set(preflight) != nodes
+            or any(
+                not isinstance(proof, dict)
+                or set(proof) != {"status", "receipt_sha256"}
+                or proof.get("status") not in {"available", "exact-existing"}
+                or _REGISTRY.DIGEST_RE.fullmatch(str(proof.get("receipt_sha256"))) is None
+                for proof in preflight.values()
+            )
+            or value.get("identity_preflight_sha256")
+            != hashlib.sha256(_canonical_json_bytes(preflight)).hexdigest()
+            or not isinstance(convergence, dict)
+            or set(convergence) != nodes
+            or any(
+                not isinstance(proof, dict)
+                or set(proof)
+                != {
+                    "request_id",
+                    "result_sha256",
+                    "authority_receipt_sha256",
+                    "completed_at",
+                    "status",
+                    "readback_receipt_sha256",
+                }
+                or proof.get("status") != "exact-existing"
+                or any(
+                    _REGISTRY.DIGEST_RE.fullmatch(str(proof.get(field))) is None
+                    for field in (
+                        "request_id",
+                        "result_sha256",
+                        "authority_receipt_sha256",
+                        "readback_receipt_sha256",
+                    )
+                )
+                or not isinstance(proof.get("completed_at"), str)
+                for proof in convergence.values()
+            )
+            or value.get("identity_convergence_sha256")
+            != hashlib.sha256(_canonical_json_bytes(convergence)).hexdigest()
+            or not isinstance(slurm, dict)
+            or set(slurm) != nodes
+            or any(
+                not isinstance(proof, dict)
+                or set(proof)
+                != {
+                    "action",
+                    "request_id",
+                    "result_sha256",
+                    "authority_receipt_sha256",
+                    "completed_at",
+                }
+                or proof.get("action") != "slurm-identity-converge"
+                or any(
+                    _REGISTRY.DIGEST_RE.fullmatch(str(proof.get(field))) is None
+                    for field in (
+                        "request_id",
+                        "result_sha256",
+                        "authority_receipt_sha256",
+                    )
+                )
+                or not isinstance(proof.get("completed_at"), str)
+                for node, proof in slurm.items()
+            )
+            or value.get("slurm_convergence_sha256")
+            != hashlib.sha256(_canonical_json_bytes(slurm)).hexdigest()
+            or value.get("policy_sha256")
+            != hashlib.sha256(
+                _canonical_json_bytes(
+                    {node: proof["result_sha256"] for node, proof in slurm.items()},
+                ),
+            ).hexdigest()
+            or value.get("authority_receipt_sha256")
+            != hashlib.sha256(
+                _canonical_json_bytes(
+                    {
+                        "identity_convergence": convergence,
+                        "slurm_convergence": slurm,
+                    },
+                ),
+            ).hexdigest()
+        ):
+            raise PolicyError("capacity domain receipt binding is invalid")
+        _parse_allocation_timestamp(
+            value["completed_at"],
+            "capacity domain receipt",
+        )
+        for proof in convergence.values():
+            _parse_allocation_timestamp(
+                proof["completed_at"],
+                "capacity identity receipt",
+            )
+        for proof in slurm.values():
+            _parse_allocation_timestamp(
+                proof["completed_at"],
+                "capacity Slurm receipt",
+            )
+    unsigned_check = {
+        "schema_version": 1,
+        "kind": (
+            "loom.developer-environment.capacity-finalize-check"
+            if finalized
+            else "loom.developer-environment.capacity-check"
+        ),
+        "status": "acceptance-prepared" if finalized else "activated",
+        "deployment_id": deployment_id,
+        "env_id": request["env_id"],
+        "candidate_id": request["candidate_id"],
+        "candidate_sha": request["candidate_sha"],
+        "candidate_tree": request["candidate_tree"],
+        "resource_generation": request["resource_generation"],
+        "registry_generation": snapshot["generation"],
+        "registry_payload_sha256": snapshot["payload_sha256"],
+        "capacity_receipt_sha256": receipt["payload_sha256"],
+        "identity_node_count": sum(
+            len(domains[domain]["identity_convergence"]) for domain in ("oldlab", "gb10")
+        ),
+        "domains": ["oldlab", "gb10"],
+        "checked_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+    }
+    return {
+        **unsigned_check,
+        "payload_sha256": hashlib.sha256(
+            _canonical_json_bytes(unsigned_check),
+        ).hexdigest(),
+    }
+
+
+def _acceptance_probe_request(
+    raw: bytes,
+    profile: Profile,
+    *,
+    registry_snapshot: Path,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    try:
+        request = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PolicyError("acceptance probe domain request is invalid") from exc
+    unsigned = (
+        {key: value for key, value in request.items() if key != "payload_sha256"}
+        if isinstance(request, dict)
+        else {}
+    )
+    domain = "oldlab" if profile.cluster == "trt-oldlab" else "gb10"
+    snapshot = _read_registry_snapshot(
+        registry_snapshot,
+        require_root_ownership=registry_snapshot == REGISTRY_SNAPSHOT_PATH,
+    )
+    environments = (
+        [
+            row
+            for row in snapshot["environments"]
+            if row["env_id"] == request.get("env_id")
+            and row["principal_id"] == request.get("principal_id")
+            and row["runtime_id"] == request.get("runtime_id")
+        ]
+        if isinstance(request, dict)
+        else []
+    )
+    deployments = (
+        [
+            row
+            for row in snapshot["deployments"]
+            if row["deployment_id"] == request.get("deployment_id")
+            and row["env_id"] == request.get("env_id")
+            and row["principal_id"] == request.get("principal_id")
+            and row["candidate_id"] == request.get("candidate_id")
+        ]
+        if isinstance(request, dict)
+        else []
+    )
+    candidates = (
+        [
+            row
+            for row in snapshot["candidates"]
+            if row["candidate_id"] == request.get("candidate_id")
+            and row["env_id"] == request.get("env_id")
+            and row["principal_id"] == request.get("principal_id")
+            and row["candidate_sha"] == request.get("candidate_sha")
+            and row["candidate_tree"] == request.get("candidate_tree")
+        ]
+        if isinstance(request, dict)
+        else []
+    )
+    environment = environments[0] if len(environments) == 1 else {}
+    deployment = deployments[0] if len(deployments) == 1 else {}
+    if (
+        not isinstance(request, dict)
+        or set(request) != _ACCEPTANCE_PROBE_REQUEST_FIELDS
+        or raw != _canonical_json_bytes(request) + b"\n"
+        or request.get("schema_version") != 1
+        or request.get("kind") != _ACCEPTANCE_PROBE_KIND
+        or request.get("action") != _ACCEPTANCE_PROBE_ACTION
+        or request.get("domain") != domain
+        or request.get("cluster") != profile.cluster
+        or request.get("submit_host") != profile.submit_host
+        or request.get("controller") != profile.controller
+        or _REGISTRY.DEPLOYMENT_ID_RE.fullmatch(
+            str(request.get("deployment_id")),
+        )
+        is None
+        or _REGISTRY.ENV_ID_RE.fullmatch(str(request.get("env_id"))) is None
+        or _REGISTRY.PRINCIPAL_RE.fullmatch(str(request.get("principal_id"))) is None
+        or _REGISTRY.RUNTIME_ID_RE.fullmatch(str(request.get("runtime_id"))) is None
+        or _REGISTRY.CANDIDATE_ID_RE.fullmatch(
+            str(request.get("candidate_id")),
+        )
+        is None
+        or _CANDIDATE_RE.fullmatch(str(request.get("candidate_sha"))) is None
+        or _CANDIDATE_RE.fullmatch(str(request.get("candidate_tree"))) is None
+        or type(request.get("applied_resource_generation")) is not int
+        or request["applied_resource_generation"] < 2
+        or type(request.get("registry_generation")) is not int
+        or request["registry_generation"] < 1
+        or _REGISTRY.DIGEST_RE.fullmatch(
+            str(request.get("registry_snapshot_sha256")),
+        )
+        is None
+        or _REGISTRY.SAFE_NAME_RE.fullmatch(
+            str(request.get("service_user")),
+        )
+        is None
+        or _SAFE_NAME.fullmatch(str(request.get("slurm_account"))) is None
+        or _REGISTRY.SAFE_NAME_RE.fullmatch(str(request.get("slurm_qos"))) is None
+        or re.fullmatch(
+            r"loom-env-[a-z0-9][a-z0-9-]{0,62}-finalize-[0-9a-f]{12}",
+            str(request.get("job_name")),
+        )
+        is None
+        or request.get("time_limit_seconds") != 300
+        or request.get("health_services") != list(_ACCEPTANCE_PROBE_SERVICES)
+        or request.get("general_admission_authorized") is not False
+        or request.get("foreign_job_action") != "observe-only"
+        or _REGISTRY.DIGEST_RE.fullmatch(
+            str(request.get("idempotency_key")),
+        )
+        is None
+        or request.get("payload_sha256")
+        != hashlib.sha256(_canonical_json_bytes(unsigned) + b"\n").hexdigest()
+        or snapshot.get("generation") != request.get("registry_generation")
+        or snapshot.get("payload_sha256") != request.get("registry_snapshot_sha256")
+        or len(environments) != 1
+        or len(deployments) != 1
+        or len(candidates) != 1
+        or environment.get("state") != "deploying"
+        or environment.get("resource_generation") != deployment.get("expected_resource_generation")
+        or environment.get("slurm_user") != request.get("service_user")
+        or environment.get("service_user") != request.get("service_user")
+        or environment.get("slurm_account") != request.get("slurm_account")
+        or environment.get("slurm_qos") != request.get("slurm_qos")
+        or deployment.get("phase") != "verified"
+        or deployment.get("applied_resource_generation")
+        != deployment.get("expected_resource_generation", 0) + 1
+        or deployment.get("applied_resource_generation")
+        != request.get("applied_resource_generation")
+        or type(deployment.get("applied_registry_generation")) is not int
+        or deployment["applied_registry_generation"] < 1
+        or _REGISTRY.DIGEST_RE.fullmatch(
+            str(deployment.get("applied_registry_payload_sha256")),
+        )
+        is None
+        or deployment.get("finalization_payload_sha256") is not None
+    ):
+        raise PolicyError("acceptance probe domain request binding is invalid")
+    return request, environment
+
+
+def _acceptance_probe_output(
+    path: Path,
+    *,
+    uid: int,
+    gid: int,
+) -> tuple[dict[str, Any], bytes]:
+    try:
+        lexical = path.lstat()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+        )
+        opened = os.fstat(descriptor)
+        raw = os.read(descriptor, (1 << 20) + 1)
+        rebound = os.fstat(descriptor)
+        current = path.lstat()
+    except OSError as exc:
+        raise PolicyError("acceptance probe job output is unavailable") from exc
+    finally:
+        if "descriptor" in locals():
+            os.close(descriptor)
+    if (
+        len(raw) > (1 << 20)
+        or not stat.S_ISREG(opened.st_mode)
+        or stat.S_ISLNK(lexical.st_mode)
+        or opened.st_nlink != 1
+        or current.st_nlink != 1
+        or (opened.st_uid, opened.st_gid) != (uid, gid)
+        or stat.S_IMODE(opened.st_mode) & 0o022
+        or (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+        != (rebound.st_dev, rebound.st_ino, rebound.st_size, rebound.st_mtime_ns)
+        or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+    ):
+        raise PolicyError("acceptance probe job output is unsafe")
+    try:
+        output = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PolicyError("acceptance probe job output is invalid") from exc
+    if not isinstance(output, dict) or raw != _canonical_json_bytes(output) + b"\n":
+        raise PolicyError("acceptance probe job output is invalid")
+    return output, raw
+
+
+def _acceptance_probe_accounting(
+    job_id: str,
+    profile: Profile,
+) -> list[list[str]]:
+    output = _run(
+        (
+            "sacct",
+            "-nP",
+            f"--clusters={profile.cluster}",
+            "-j",
+            job_id,
+            "--format=JobIDRaw,JobName,State,NodeList,Account,User,Cluster,QOS,ExitCode",
+        ),
+        timeout=15,
+    )
+    rows = [line.split("|") for line in output.splitlines() if line.strip()]
+    if any(len(row) != 9 for row in rows):
+        raise PolicyError("acceptance probe accounting output is malformed")
+    return rows
+
+
+def _acceptance_probe_wrapped_script(
+    *,
+    profile: Profile,
+    request_path: Path,
+    result_path: Path,
+) -> str:
+    source_root = Path(__file__).resolve().parents[2]
+    return " ".join(
+        shlex.quote(item)
+        for item in (
+            "/usr/bin/python3",
+            "-I",
+            "-B",
+            str(source_root / "scripts/ops/developer_sandbox_slurm_policy.py"),
+            "acceptance-probe-job",
+            "--profile",
+            str(
+                source_root
+                / "deploy/slurm/developer-sandboxes"
+                / ("oldlab.toml" if profile.cluster == "trt-oldlab" else "gb10.toml")
+            ),
+            "--probe-request",
+            str(request_path),
+            "--result-path",
+            str(result_path),
+            "--execute",
+        )
+    )
+
+
+def _acceptance_probe_job_request(path: Path) -> dict[str, Any]:
+    try:
+        metadata = path.lstat()
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise PolicyError("allocation acceptance probe request is unavailable") from exc
+    try:
+        request = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PolicyError("allocation acceptance probe request is invalid") from exc
+    unsigned = (
+        {key: value for key, value in request.items() if key != "payload_sha256"}
+        if isinstance(request, dict)
+        else {}
+    )
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or stat.S_IMODE(metadata.st_mode) & 0o077
+        or len(raw) > (1 << 20)
+        or not isinstance(request, dict)
+        or set(request) != _ACCEPTANCE_PROBE_REQUEST_FIELDS
+        or raw != _canonical_json_bytes(request) + b"\n"
+        or request.get("schema_version") != 1
+        or request.get("kind") != _ACCEPTANCE_PROBE_KIND
+        or request.get("action") != _ACCEPTANCE_PROBE_ACTION
+        or request.get("health_services") != list(_ACCEPTANCE_PROBE_SERVICES)
+        or request.get("general_admission_authorized") is not False
+        or request.get("foreign_job_action") != "observe-only"
+        or request.get("payload_sha256")
+        != hashlib.sha256(_canonical_json_bytes(unsigned) + b"\n").hexdigest()
+    ):
+        raise PolicyError("allocation acceptance probe request is invalid")
+    return request
+
+
+def _acceptance_probe_compose_environment(
+    request: Mapping[str, Any],
+    *,
+    job_id: str,
+    cgroup_parent: str,
+    worker_env: Path,
+    result_path: Path,
+) -> tuple[dict[str, str], str]:
+    source_root = Path(__file__).resolve().parents[2]
+    project = (
+        f"loom-accept-{request['runtime_id']}-{request['idempotency_key'][:12]}-{request['domain']}"
+    )
+    try:
+        identity = pwd.getpwnam(str(request["service_user"]))
+    except KeyError as exc:
+        raise PolicyError("allocation acceptance probe identity is unavailable") from exc
+    environment = {
+        **os.environ,
+        "COMPOSE_PROJECT_NAME": project,
+        "LOOM_IMAGE_TAG": str(request["candidate_sha"])[:12],
+        "LOOM_WORKER_SANDBOX_IDENTITY": str(request["runtime_id"]),
+        "LOOM_WORKER_CANDIDATE_SHA": str(request["candidate_sha"]),
+        "LOOM_WORKER_SLURM_JOB_ID": job_id,
+        "LOOM_WORKER_COMPOSE_PROJECT": project,
+        "LOOM_WORKER_ENV_ID": str(request["env_id"]),
+        "LOOM_WORKER_RESOURCE_GENERATION": str(
+            request["applied_resource_generation"],
+        ),
+        "LOOM_WORKER_CANDIDATE_ID": str(request["candidate_id"]),
+        "LOOM_WORKER_CANDIDATE_TREE": str(request["candidate_tree"]),
+        "LOOM_WORKER_REGISTRY_GENERATION": str(request["registry_generation"]),
+        "LOOM_WORKER_REGISTRY_PAYLOAD_SHA256": str(
+            request["registry_snapshot_sha256"],
+        ),
+        "LOOM_WORKER_CGROUP_PARENT": cgroup_parent,
+        "LOOM_WORKER_RESTART_POLICY": "no",
+        "LOOM_ACCEPTANCE_PROBE_UID": str(identity.pw_uid),
+        "LOOM_ACCEPTANCE_PROBE_GID": str(identity.pw_gid),
+        "LOOM_ACCEPTANCE_PROBE_PROGRAM_HOST": str(
+            source_root / _ACCEPTANCE_PROBE_PROGRAM,
+        ),
+        "LOOM_ACCEPTANCE_PROBE_REQUEST_HOST": str(worker_env.parent / "request.json"),
+        "LOOM_ACCEPTANCE_PROBE_OUTPUT_HOST": str(result_path.parent),
+    }
+    return environment, project
+
+
+def _validate_acceptance_probe_compose(
+    rendered: Mapping[str, Any],
+    request: Mapping[str, Any],
+    *,
+    project: str,
+    job_id: str,
+    cgroup_parent: str,
+) -> None:
+    services = rendered.get("services")
+    if not isinstance(services, Mapping):
+        raise PolicyError("allocation acceptance probe Compose services are invalid")
+    expected_labels = {
+        "loom.sandbox": str(request["runtime_id"]),
+        "loom.candidate_sha": str(request["candidate_sha"]),
+        "loom.slurm_job_id": job_id,
+        "loom.compose_project": project,
+        "loom.env_id": str(request["env_id"]),
+        "loom.resource_generation": str(request["applied_resource_generation"]),
+        "loom.candidate_id": str(request["candidate_id"]),
+        "loom.candidate_tree": str(request["candidate_tree"]),
+        "loom.registry_generation": str(request["registry_generation"]),
+        "loom.registry_payload_sha256": str(request["registry_snapshot_sha256"]),
+    }
+    expected_image = f"loom-worker:{str(request['candidate_sha'])[:12]}"
+    for service_name in ("sandbox-link", "acceptance-probe"):
+        service = services.get(service_name)
+        labels = service.get("labels") if isinstance(service, Mapping) else None
+        if (
+            not isinstance(service, Mapping)
+            or service.get("image") != expected_image
+            or service.get("cgroup_parent") != cgroup_parent
+            or service.get("ports") not in (None, [])
+            or service.get("network_mode") == "host"
+            or service.get("restart") not in (None, "no")
+            or not isinstance(labels, Mapping)
+            or set(labels) != _ACCEPTANCE_PROBE_LABELS
+            or dict(labels) != expected_labels
+            or float(service.get("cpus", 0)) <= 0
+            or int(service.get("pids_limit", 0)) <= 0
+            or int(service.get("mem_limit", 0)) <= 0
+        ):
+            raise PolicyError("allocation acceptance probe Compose binding drifted")
+
+
+def run_acceptance_probe_job(
+    profile: Profile,
+    *,
+    probe_request: Path,
+    result_path: Path,
+) -> dict[str, Any]:
+    """Run the fixed candidate-bound link probe inside one Slurm allocation."""
+    request = _acceptance_probe_job_request(probe_request)
+    job_id = os.environ.get("SLURM_JOB_ID", "")
+    try:
+        identity = pwd.getpwnam(str(request["service_user"]))
+    except KeyError as exc:
+        raise PolicyError("allocation acceptance probe identity is unavailable") from exc
+    expected_result_parent = (
+        Path("/srv/loom/developer-environments")
+        / str(request["env_id"])
+        / "evidence"
+        / "acceptance-probes"
+        / f"{request['cluster']}-{request['idempotency_key']}"
+    )
+    worker_env = (
+        Path("/shared_work/loom/runtime/environments")
+        / str(request["env_id"])
+        / str(request["candidate_sha"])
+        / f"worker-{request['domain']}.env"
+    )
+    if (
+        re.fullmatch(r"[1-9][0-9]*", job_id) is None
+        or os.geteuid() != identity.pw_uid
+        or os.getegid() != identity.pw_gid
+        or request["cluster"] != profile.cluster
+        or request["submit_host"] != profile.submit_host
+        or (request["domain"] != ("oldlab" if profile.cluster == "trt-oldlab" else "gb10"))
+        or probe_request != expected_result_parent / "request.json"
+        or result_path != expected_result_parent / "result.json"
+    ):
+        raise PolicyError("allocation acceptance probe execution binding drifted")
+    source_root = Path(__file__).resolve().parents[2]
+    try:
+        cgroup_completed = subprocess.run(
+            (
+                "/usr/bin/python3",
+                "-I",
+                "-B",
+                str(source_root / _ACCEPTANCE_CGROUP_PROGRAM),
+                "--job-id",
+                job_id,
+                "--pids-max",
+                str(profile.job_pids_max),
+                "--wait-seconds",
+                "30",
+            ),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=45,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PolicyError("allocation acceptance probe cgroup is unavailable") from exc
+    cgroup_parent = cgroup_completed.stdout.strip()
+    if cgroup_completed.returncode or not cgroup_parent.startswith("/"):
+        raise PolicyError("allocation acceptance probe cgroup is unavailable")
+    compose_environment, project = _acceptance_probe_compose_environment(
+        request,
+        job_id=job_id,
+        cgroup_parent=cgroup_parent,
+        worker_env=worker_env,
+        result_path=result_path,
+    )
+    compose_environment["LOOM_ACCEPTANCE_PROBE_REQUEST_HOST"] = str(probe_request)
+    compose = [
+        "docker",
+        "compose",
+        "--env-file",
+        str(worker_env),
+    ]
+    for relative in _ACCEPTANCE_PROBE_COMPOSE_FILES:
+        compose.extend(("-f", str(source_root / relative)))
+    try:
+        config = subprocess.run(
+            (*compose, "config", "--format", "json"),
+            cwd=source_root,
+            env=compose_environment,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PolicyError(
+            "allocation acceptance probe Compose validation failed safely",
+        ) from exc
+    try:
+        rendered = json.loads(config.stdout)
+    except json.JSONDecodeError as exc:
+        raise PolicyError("allocation acceptance probe Compose output is invalid") from exc
+    if config.returncode or not isinstance(rendered, dict):
+        raise PolicyError("allocation acceptance probe Compose validation failed")
+    _validate_acceptance_probe_compose(
+        rendered,
+        request,
+        project=project,
+        job_id=job_id,
+        cgroup_parent=cgroup_parent,
+    )
+    failure: PolicyError | None = None
+    try:
+        for suffix in (
+            ("up", "--detach", "--no-build", "--wait", "sandbox-link"),
+            ("run", "--rm", "--no-deps", "acceptance-probe"),
+        ):
+            completed = subprocess.run(
+                (*compose, *suffix),
+                cwd=source_root,
+                env=compose_environment,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+            if completed.returncode:
+                raise PolicyError("allocation acceptance probe container failed")
+    except (OSError, subprocess.SubprocessError, PolicyError) as exc:
+        failure = (
+            exc
+            if isinstance(exc, PolicyError)
+            else PolicyError("allocation acceptance probe container failed safely")
+        )
+    finally:
+        try:
+            down = subprocess.run(
+                (*compose, "down", "--remove-orphans"),
+                cwd=source_root,
+                env=compose_environment,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise PolicyError("allocation acceptance probe cleanup failed safely") from exc
+        if down.returncode:
+            raise PolicyError("allocation acceptance probe cleanup failed")
+    if failure is not None:
+        raise failure
+    output, _raw = _acceptance_probe_output(
+        result_path,
+        uid=identity.pw_uid,
+        gid=identity.pw_gid,
+    )
+    if (
+        output.get("kind") != _ACCEPTANCE_PROBE_CONTAINER_RESULT_KIND
+        or output.get("request_payload_sha256") != request["payload_sha256"]
+        or output.get("slurm_job_id") != job_id
+    ):
+        raise PolicyError("allocation acceptance probe result binding drifted")
+    return output
+
+
+def run_acceptance_probe_domain(
+    root: Path,
+    profile: Profile,
+    raw: bytes,
+    *,
+    transport_request_id: str,
+    registry_snapshot: Path = REGISTRY_SNAPSHOT_PATH,
+) -> dict[str, Any]:
+    if (
+        root != Path("/")
+        or os.geteuid() != 0
+        or _REGISTRY.DIGEST_RE.fullmatch(transport_request_id) is None
+    ):
+        raise PolicyError("acceptance probe requires fixed live root authority")
+    request, environment = _acceptance_probe_request(
+        raw,
+        profile,
+        registry_snapshot=registry_snapshot,
+    )
+    if _slurm_node_for_host(profile, _canonical_host()) != profile.submit_host:
+        raise PolicyError("acceptance probe reached the wrong submit host")
+    state_root = root / _ACCEPTANCE_PROBE_RELATIVE / profile.cluster
+    _prepare_private_directory(
+        state_root,
+        enforce_root_ownership=True,
+        create=True,
+    )
+    state_path = state_root / f"{transport_request_id}.json"
+    receipt_path = state_root / f"{transport_request_id}.receipt.json"
+    existing_receipt = _load_journal(receipt_path)
+    if existing_receipt is not None:
+        if (
+            existing_receipt.get("transport_request_id") != transport_request_id
+            or existing_receipt.get("probe_request_sha256") != request["payload_sha256"]
+        ):
+            raise PolicyError("acceptance probe receipt replay drifted")
+        return existing_receipt
+    output_root = (
+        Path(str(environment["evidence_root"]))
+        / "acceptance-probes"
+        / f"{profile.cluster}-{request['idempotency_key']}"
+    )
+    request_path = output_root / "request.json"
+    output_path = output_root / "result.json"
+    stdout_path = output_root / "slurm.stdout.log"
+    state = _load_journal(state_path)
+    created_transaction = state is None
+    if state is not None and (
+        set(state)
+        != {
+            "schema_version",
+            "kind",
+            "transport_request_id",
+            "idempotency_key",
+            "probe_request_sha256",
+            "job_name",
+            "job_id",
+            "output_path",
+            "phase",
+            "created_at",
+            "updated_at",
+        }
+        or state.get("schema_version") != 1
+        or state.get("kind") != "loom.developer-environment.acceptance-probe-domain-transaction"
+        or state.get("transport_request_id") != transport_request_id
+        or state.get("idempotency_key") != request["idempotency_key"]
+        or state.get("probe_request_sha256") != request["payload_sha256"]
+        or state.get("job_name") != request["job_name"]
+        or state.get("output_path") != str(output_path)
+        or state.get("phase") not in {"prepared", "submitted"}
+    ):
+        raise PolicyError("acceptance probe durable transaction drifted")
+    if state is None:
+        now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        state = {
+            "schema_version": 1,
+            "kind": "loom.developer-environment.acceptance-probe-domain-transaction",
+            "transport_request_id": transport_request_id,
+            "idempotency_key": request["idempotency_key"],
+            "probe_request_sha256": request["payload_sha256"],
+            "job_name": request["job_name"],
+            "job_id": None,
+            "output_path": str(output_path),
+            "phase": "prepared",
+            "created_at": now,
+            "updated_at": now,
+        }
+        _atomic_write(
+            state_path,
+            (_canonical_json_bytes(state) + b"\n").decode("ascii"),
+            mode=0o600,
+        )
+    job_id = state.get("job_id")
+    if job_id is None:
+        historical = [
+            row
+            for row in _probe_named_accounting_rows(str(request["job_name"]), profile)
+            if "." not in row[0]
+        ]
+        if len(historical) > 1:
+            raise PolicyError("acceptance probe idempotency history is ambiguous")
+        if historical:
+            job_id = historical[0][0]
+        else:
+            if not created_transaction:
+                raise PolicyError(
+                    "acceptance probe prepared transaction has no recoverable job; "
+                    "duplicate submission refused",
+                )
+            try:
+                service = pwd.getpwnam(str(request["service_user"]))
+                output_root.mkdir(parents=True, mode=0o700, exist_ok=True)
+                output_metadata = output_root.lstat()
+                if (
+                    not stat.S_ISDIR(output_metadata.st_mode)
+                    or stat.S_ISLNK(output_metadata.st_mode)
+                    or output_metadata.st_nlink < 2
+                    or output_metadata.st_uid not in {0, service.pw_uid}
+                    or output_metadata.st_gid not in {0, service.pw_gid}
+                ):
+                    raise PolicyError("acceptance probe output root is unsafe")
+                os.chown(output_root, service.pw_uid, service.pw_gid)
+                os.chmod(output_root, 0o700)
+                _atomic_write(
+                    request_path,
+                    (_canonical_json_bytes(request) + b"\n").decode("ascii"),
+                    mode=0o600,
+                )
+                os.chown(request_path, service.pw_uid, service.pw_gid)
+            except KeyError as exc:
+                raise PolicyError("acceptance probe service identity is unavailable") from exc
+            except OSError as exc:
+                raise PolicyError("acceptance probe output root is unavailable") from exc
+            arguments = [
+                "sbatch",
+                "--parsable",
+                f"--job-name={request['job_name']}",
+                f"--uid={request['service_user']}",
+                f"--account={request['slurm_account']}",
+                f"--qos={request['slurm_qos']}",
+                f"--clusters={profile.cluster}",
+                f"--nodelist={profile.submit_host}",
+                "--oversubscribe",
+                "--nodes=1",
+                "--ntasks=1",
+                "--cpus-per-task=1",
+                "--mem=256M",
+                "--time=00:05:00",
+                f"--output={stdout_path}",
+                f"--error={stdout_path}.error",
+                "--open-mode=truncate",
+                "--export=NONE",
+                f"--comment=loom-cgroup-v1:pids={profile.job_pids_max}",
+            ]
+            if profile.gpu_tres_per_slot > 0:
+                arguments.append("--gres=gpu:1")
+            arguments.append(
+                f"--wrap={_acceptance_probe_wrapped_script(profile=profile, request_path=request_path, result_path=output_path)}",
+            )
+            submitted = _run(tuple(arguments), timeout=30).strip()
+            job_id = submitted.split(";", 1)[0]
+            if re.fullmatch(r"[1-9][0-9]*", job_id) is None:
+                raise PolicyError("acceptance probe Slurm submission is invalid")
+        state["job_id"] = job_id
+        state["phase"] = "submitted"
+        state["updated_at"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        _atomic_write(
+            state_path,
+            (_canonical_json_bytes(state) + b"\n").decode("ascii"),
+            mode=0o600,
+        )
+    if re.fullmatch(r"[1-9][0-9]*", str(job_id)) is None:
+        raise PolicyError("acceptance probe durable job identity is invalid")
+    _poll_probe_terminal(str(job_id), profile, timeout_seconds=420)
+    rows = _acceptance_probe_accounting(str(job_id), profile)
+    base = [row for row in rows if row[0] == str(job_id)]
+    if (
+        len(base) != 1
+        or base[0][1] != request["job_name"]
+        or _normalize_probe_job_state(base[0][2]) != "COMPLETED"
+        or base[0][3].lower() != profile.submit_host.lower()
+        or base[0][4] != request["slurm_account"]
+        or base[0][5] != request["service_user"]
+        or base[0][6] != profile.cluster
+        or base[0][7] != request["slurm_qos"]
+        or base[0][8] != "0:0"
+    ):
+        raise PolicyError("acceptance probe terminal accounting drifted")
+    try:
+        service = pwd.getpwnam(str(request["service_user"]))
+    except KeyError as exc:
+        raise PolicyError("acceptance probe service identity is unavailable") from exc
+    output, output_raw = _acceptance_probe_output(
+        output_path,
+        uid=service.pw_uid,
+        gid=service.pw_gid,
+    )
+    health = output.get("health")
+    if (
+        set(output)
+        != {
+            "schema_version",
+            "kind",
+            "request_payload_sha256",
+            "slurm_job_id",
+            "health",
+            "completed_at",
+        }
+        or output.get("schema_version") != 1
+        or output.get("kind") != _ACCEPTANCE_PROBE_CONTAINER_RESULT_KIND
+        or output.get("request_payload_sha256") != request["payload_sha256"]
+        or output.get("slurm_job_id") != str(job_id)
+        or not isinstance(health, dict)
+        or set(health) != set(_ACCEPTANCE_PROBE_SERVICES)
+        or any(
+            not isinstance(health[name], dict)
+            or set(health[name])
+            != {
+                "service",
+                "status",
+                "http_status",
+                "candidate_binding_sha256",
+                "response_sha256",
+            }
+            or health[name].get("service") != name
+            or health[name].get("status") != "healthy"
+            or health[name].get("http_status") != 200
+            or _REGISTRY.DIGEST_RE.fullmatch(
+                str(health[name].get("candidate_binding_sha256")),
+            )
+            is None
+            or _REGISTRY.DIGEST_RE.fullmatch(
+                str(health[name].get("response_sha256")),
+            )
+            is None
+            for name in _ACCEPTANCE_PROBE_SERVICES
+        )
+        or not isinstance(output.get("completed_at"), str)
+    ):
+        raise PolicyError("acceptance probe health output drifted")
+    completed_at = _parse_allocation_timestamp(
+        output["completed_at"],
+        "acceptance probe completion",
+    )
+    if completed_at > datetime.now(UTC) + timedelta(minutes=5):
+        raise PolicyError("acceptance probe completion timestamp is in the future")
+    output_sha = hashlib.sha256(output_raw).hexdigest()
+    authority_receipt_sha = hashlib.sha256(
+        _canonical_json_bytes(
+            {
+                "transport_request_id": transport_request_id,
+                "idempotency_key": request["idempotency_key"],
+                "probe_request_sha256": request["payload_sha256"],
+                "job_id": job_id,
+                "job_output_sha256": output_sha,
+            },
+        )
+        + b"\n",
+    ).hexdigest()
+    unsigned_receipt = {
+        "schema_version": 1,
+        "kind": _ACCEPTANCE_PROBE_RECEIPT_KIND,
+        "status": "passed",
+        "action": "acceptance-probe",
+        "domain": request["domain"],
+        "cluster": request["cluster"],
+        "submit_host": request["submit_host"],
+        "controller": request["controller"],
+        **{
+            field: request[field]
+            for field in (
+                "deployment_id",
+                "env_id",
+                "principal_id",
+                "runtime_id",
+                "candidate_id",
+                "candidate_sha",
+                "candidate_tree",
+                "applied_resource_generation",
+                "registry_generation",
+                "registry_snapshot_sha256",
+            )
+        },
+        "probe_request_sha256": request["payload_sha256"],
+        "transport_request_id": transport_request_id,
+        "submission_count": 1,
+        "job": {
+            "job_id": str(job_id),
+            "job_name": request["job_name"],
+            "user": request["service_user"],
+            "account": request["slurm_account"],
+            "qos": request["slurm_qos"],
+            "submit_host": request["submit_host"],
+            "controller": request["controller"],
+            "allocation_nodes": [
+                "oldlab-2" if request["domain"] == "oldlab" else profile.submit_host
+            ],
+            "time_limit_seconds": 300,
+        },
+        "health": health,
+        "terminal": {
+            "state": "COMPLETED",
+            "exit_code": "0:0",
+            "natural_exit": True,
+            "cancel_requested": False,
+            "timed_out": False,
+        },
+        "job_output_sha256": output_sha,
+        "authority_receipt_sha256": authority_receipt_sha,
+        "completed_at": completed_at.isoformat().replace("+00:00", "Z"),
+    }
+    receipt = {
+        **unsigned_receipt,
+        "payload_sha256": hashlib.sha256(
+            _canonical_json_bytes(unsigned_receipt) + b"\n",
+        ).hexdigest(),
+    }
+    _atomic_write(
+        receipt_path,
+        (_canonical_json_bytes(receipt) + b"\n").decode("ascii"),
+        mode=0o600,
+    )
+    return receipt
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument(
         "command",
         choices=(
+            "candidate-set",
+            "capacity-abort",
+            "capacity-check",
+            "capacity-finalize",
+            "capacity-finalize-check",
+            "capacity-reconcile",
+            "capacity-reactivate",
+            "capacity-retire",
+            "capacity-rollback",
+            "identity-check",
+            "identity-reconcile",
+            "identity-retire",
+            "acceptance-probe-domain",
+            "acceptance-probe-job",
             "plan",
             "check",
             "node-check",
@@ -8850,6 +13140,7 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--profile", type=Path)
+    parser.add_argument("--registry-snapshot", type=Path, default=REGISTRY_SNAPSHOT_PATH)
     parser.add_argument("--sandbox")
     parser.add_argument("--root", type=Path, default=Path("/"))
     parser.add_argument("--candidate-sha")
@@ -8869,6 +13160,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-pool")
     parser.add_argument("--expected-concurrency", type=int)
     parser.add_argument("--result-path", type=Path)
+    parser.add_argument("--deployment-id")
+    parser.add_argument("--transport-request-id")
+    parser.add_argument("--probe-request", type=Path)
     parser.add_argument(
         "--allocation-timeout-seconds",
         type=float,
@@ -8883,6 +13177,213 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(list(argv) if argv is not None else None)
     try:
+        if args.command == "capacity-abort":
+            if (
+                args.deployment_id is None
+                or args.profile is not None
+                or args.sandbox is not None
+                or args.candidate_sha is not None
+                or args.candidate_bindings_json is not None
+                or args.registry_snapshot != REGISTRY_SNAPSHOT_PATH
+                or args.restart
+                or args.apply_accounting
+                or args.root != Path("/")
+            ):
+                raise PolicyError(
+                    "capacity-abort requires only --deployment-id and --execute",
+                )
+            if not args.execute:
+                raise PolicyError("capacity-abort requires --execute")
+            result = abort_capacity(
+                args.deployment_id,
+                registry_snapshot=args.registry_snapshot,
+            )
+            sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")
+            return 0
+        if args.command == "candidate-set":
+            if (
+                args.profile is not None
+                or args.sandbox is not None
+                or args.candidate_sha is not None
+                or args.candidate_bindings_json is not None
+                or args.execute
+                or args.restart
+                or args.apply_accounting
+                or args.root != Path("/")
+            ):
+                raise PolicyError("candidate-set accepts only registry and generation bindings")
+            result = load_slurm_candidate_set(
+                args.registry_snapshot,
+                require_root_ownership=args.registry_snapshot == REGISTRY_SNAPSHOT_PATH,
+                generation=args.candidate_set_generation,
+                convergence_id=args.candidate_set_convergence_id,
+            )
+            sys.stdout.write(
+                json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n",
+            )
+            return 0
+        if args.command == "capacity-reconcile":
+            if (
+                args.deployment_id is None
+                or args.profile is not None
+                or args.sandbox is not None
+                or args.candidate_sha is not None
+                or args.candidate_bindings_json is not None
+                or args.registry_snapshot != REGISTRY_SNAPSHOT_PATH
+                or args.restart
+                or args.apply_accounting
+                or args.root != Path("/")
+            ):
+                raise PolicyError(
+                    "capacity-reconcile requires only --deployment-id and --execute",
+                )
+            if not args.execute:
+                raise PolicyError("capacity-reconcile requires --execute")
+            result = reconcile_capacity(
+                args.deployment_id,
+                registry_snapshot=args.registry_snapshot,
+            )
+            sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")
+            return 0
+        if args.command == "capacity-reactivate":
+            if (
+                args.deployment_id is None
+                or args.profile is not None
+                or args.sandbox is not None
+                or args.candidate_sha is not None
+                or args.candidate_bindings_json is not None
+                or args.registry_snapshot != REGISTRY_SNAPSHOT_PATH
+                or args.restart
+                or args.apply_accounting
+                or args.root != Path("/")
+            ):
+                raise PolicyError(
+                    "capacity-reactivate requires only --deployment-id and --execute",
+                )
+            if not args.execute:
+                raise PolicyError("capacity-reactivate requires --execute")
+            result = reactivate_capacity(
+                args.deployment_id,
+                registry_snapshot=args.registry_snapshot,
+            )
+            sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")
+            return 0
+        if args.command == "capacity-retire":
+            if (
+                args.deployment_id is None
+                or args.profile is not None
+                or args.sandbox is not None
+                or args.candidate_sha is not None
+                or args.candidate_bindings_json is not None
+                or args.registry_snapshot != REGISTRY_SNAPSHOT_PATH
+                or args.restart
+                or args.apply_accounting
+                or args.root != Path("/")
+            ):
+                raise PolicyError(
+                    "capacity-retire requires only --deployment-id and --execute",
+                )
+            if not args.execute:
+                raise PolicyError("capacity-retire requires --execute")
+            result = retire_capacity(
+                args.deployment_id,
+                registry_snapshot=args.registry_snapshot,
+            )
+            sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")
+            return 0
+        if args.command == "capacity-finalize":
+            if (
+                args.deployment_id is None
+                or args.profile is not None
+                or args.sandbox is not None
+                or args.candidate_sha is not None
+                or args.candidate_bindings_json is not None
+                or args.registry_snapshot != REGISTRY_SNAPSHOT_PATH
+                or args.restart
+                or args.apply_accounting
+                or args.root != Path("/")
+            ):
+                raise PolicyError(
+                    "capacity-finalize requires only --deployment-id and --execute",
+                )
+            if not args.execute:
+                raise PolicyError("capacity-finalize requires --execute")
+            result = finalize_capacity(
+                args.deployment_id,
+                registry_snapshot=args.registry_snapshot,
+            )
+            sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")
+            return 0
+        if args.command == "capacity-finalize-check":
+            if (
+                args.deployment_id is None
+                or args.profile is not None
+                or args.sandbox is not None
+                or args.candidate_sha is not None
+                or args.candidate_bindings_json is not None
+                or args.registry_snapshot != REGISTRY_SNAPSHOT_PATH
+                or args.execute
+                or args.restart
+                or args.apply_accounting
+                or args.root != Path("/")
+            ):
+                raise PolicyError(
+                    "capacity-finalize-check requires only --deployment-id",
+                )
+            result = check_capacity(
+                args.deployment_id,
+                registry_snapshot=args.registry_snapshot,
+                finalized=True,
+            )
+            sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")
+            return 0
+        if args.command == "capacity-rollback":
+            if (
+                args.deployment_id is None
+                or args.profile is not None
+                or args.sandbox is not None
+                or args.candidate_sha is not None
+                or args.candidate_bindings_json is not None
+                or args.registry_snapshot != REGISTRY_SNAPSHOT_PATH
+                or args.restart
+                or args.apply_accounting
+                or args.root != Path("/")
+            ):
+                raise PolicyError(
+                    "capacity-rollback requires only --deployment-id and --execute",
+                )
+            if not args.execute:
+                raise PolicyError("capacity-rollback requires --execute")
+            result = rollback_capacity(
+                args.deployment_id,
+                registry_snapshot=args.registry_snapshot,
+            )
+            sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")
+            return 0
+        if args.command == "capacity-check":
+            if (
+                args.deployment_id is None
+                or args.profile is not None
+                or args.sandbox is not None
+                or args.candidate_sha is not None
+                or args.candidate_bindings_json is not None
+                or args.registry_snapshot != REGISTRY_SNAPSHOT_PATH
+                or args.execute
+                or args.restart
+                or args.apply_accounting
+                or args.root != Path("/")
+            ):
+                raise PolicyError(
+                    "capacity-check requires only --deployment-id",
+                )
+            result = check_capacity(
+                args.deployment_id,
+                registry_snapshot=args.registry_snapshot,
+            )
+            sys.stdout.write(
+                json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n",
+            )
+            return 0
         if args.command == "recover-drain":
             if not args.execute:
                 raise PolicyError("recover-drain requires --execute")
@@ -8907,24 +13408,143 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.profile is None:
             raise PolicyError(f"{args.command} requires --profile")
         profile = load_profile(args.profile)
+        if args.command == "acceptance-probe-job":
+            if (
+                args.probe_request is None
+                or args.result_path is None
+                or args.transport_request_id is not None
+                or args.sandbox is not None
+                or args.candidate_sha is not None
+                or args.candidate_bindings_json is not None
+                or args.deployment_id is not None
+                or args.restart
+                or args.apply_accounting
+                or args.registry_snapshot != REGISTRY_SNAPSHOT_PATH
+                or args.root != Path("/")
+                or not args.execute
+            ):
+                raise PolicyError("acceptance probe job arguments are invalid")
+            result = run_acceptance_probe_job(
+                profile,
+                probe_request=args.probe_request,
+                result_path=args.result_path,
+            )
+            sys.stdout.write(
+                json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n",
+            )
+            return 0
+        if args.command == "acceptance-probe-domain":
+            if (
+                args.transport_request_id is None
+                or args.probe_request is not None
+                or args.sandbox is not None
+                or args.candidate_sha is not None
+                or args.candidate_bindings_json is not None
+                or args.deployment_id is not None
+                or args.restart
+                or args.apply_accounting
+                or args.registry_snapshot != REGISTRY_SNAPSHOT_PATH
+                or args.root != Path("/")
+                or not args.execute
+            ):
+                raise PolicyError("acceptance probe domain arguments are invalid")
+            raw = sys.stdin.buffer.read((1 << 20) + 1)
+            if len(raw) > (1 << 20):
+                raise PolicyError("acceptance probe domain request is too large")
+            result = run_acceptance_probe_domain(
+                args.root,
+                profile,
+                raw,
+                transport_request_id=args.transport_request_id,
+                registry_snapshot=args.registry_snapshot,
+            )
+            sys.stdout.write(
+                json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n",
+            )
+            return 0
+        if args.command in {"identity-check", "identity-reconcile", "identity-retire"}:
+            if (
+                args.sandbox is not None
+                or args.candidate_sha is not None
+                or args.candidate_bindings_json is not None
+                or args.deployment_id is not None
+                or args.restart
+                or args.apply_accounting
+                or args.registry_snapshot != REGISTRY_SNAPSHOT_PATH
+                or _REGISTRY.DIGEST_RE.fullmatch(str(args.transaction_id)) is None
+                or (args.command == "identity-check" and args.execute)
+                or (args.command != "identity-check" and not args.execute)
+            ):
+                raise PolicyError("incremental Slurm identity arguments are invalid")
+            raw = sys.stdin.buffer.read(64 * 1024 + 1)
+            if len(raw) > 64 * 1024:
+                raise PolicyError("incremental Slurm identity payload is too large")
+            identity = _incremental_identity_payload(raw, profile)
+            if args.command == "identity-check":
+                result = incremental_identity_check(profile, identity)
+            elif args.command == "identity-reconcile":
+                result = incremental_identity_reconcile(
+                    args.root,
+                    profile,
+                    identity,
+                    transaction_id=str(args.transaction_id),
+                )
+            else:
+                if identity["schema_version"] != 2:
+                    raise PolicyError(
+                        "incremental Slurm retirement requires identity schema v2",
+                    )
+                result = incremental_identity_retire(
+                    args.root,
+                    profile,
+                    identity,
+                    transaction_id=str(args.transaction_id),
+                )
+            sys.stdout.write(
+                json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n",
+            )
+            return 0
         candidate = args.candidate_sha or source_candidate_sha()
-        candidate_bindings: dict[str, dict[str, str]] | None = None
+        if (
+            args.command
+            in {
+                "check",
+                "node-check",
+                "materialize-runtime-proof",
+                "allocation-probe",
+                "allocation-node-check",
+            }
+            and args.sandbox is None
+        ):
+            raise PolicyError(f"{args.command} requires --sandbox")
+        candidate_bindings: dict[str, dict[str, Any]] | None = None
         if args.candidate_bindings_json is not None:
             try:
                 raw_candidate_bindings = json.loads(args.candidate_bindings_json)
             except json.JSONDecodeError as exc:
                 raise PolicyError("candidate bindings JSON is invalid") from exc
-            if (
-                not isinstance(raw_candidate_bindings, dict)
-                or args.candidate_bindings_json
-                != json.dumps(
-                    raw_candidate_bindings,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )
+            if not isinstance(
+                raw_candidate_bindings, dict
+            ) or args.candidate_bindings_json != json.dumps(
+                raw_candidate_bindings,
+                sort_keys=True,
+                separators=(",", ":"),
             ):
                 raise PolicyError("candidate bindings JSON is not canonical")
             candidate_bindings = _candidate_bindings(profile, raw_candidate_bindings)
+            if args.root == Path("/"):
+                _require_current_registry_bindings(
+                    candidate_bindings,
+                    path=args.registry_snapshot,
+                )
+            profile = _profile_with_bindings(profile, candidate_bindings)
+        elif args.root == Path("/") and args.command not in {"recover-drain"}:
+            candidate_set = load_slurm_candidate_set(args.registry_snapshot)
+            candidate_bindings = _candidate_bindings(
+                profile,
+                candidate_set["candidate_bindings"],
+            )
+            profile = _profile_with_bindings(profile, candidate_bindings)
         if args.command in {
             "check",
             "node-check",

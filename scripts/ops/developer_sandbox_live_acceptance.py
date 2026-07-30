@@ -45,6 +45,7 @@ from scripts.ops.developer_sandbox_capacity_contract import (  # noqa: E402, I00
     load_capacity_policy,
     load_platform_health_contract,
 )
+from scripts.ops import developer_environment_registry as environment_registry  # noqa: E402
 from scripts.ops import nonexclusive_slurm_acceptance as gate6_verifier  # noqa: E402
 
 SCHEMA_VERSION = 2
@@ -77,13 +78,8 @@ REQUIRED_OWNER_UID = 0
 REQUIRED_OWNER_GID = 0
 SUBMIT_HOST = "trt-eai-oldlab-2"
 POOL_AUTHORITY_HOSTS = {"oldlab": SUBMIT_HOST, "gb10": "trt-gb10-1"}
-SANDBOXES = ("qianyi", "hongjian", "devansh")
 POOLS = ("oldlab", "gb10")
-SANDBOX_SERVICE_USERS = {
-    "qianyi": "loom-sandbox-qianyi",
-    "hongjian": "loom-sandbox-hongjian",
-    "devansh": "loom-sandbox-devansh",
-}
+REGISTRY_SNAPSHOT_KIND = "loom.developer-sandbox.acceptance-registry"
 MAX_OVERLAP_CAPACITY_AGE_SECONDS = 120
 MAX_OVERLAP_COLLECTION_SPAN_SECONDS = 30
 PLATFORM_HEALTH_EVIDENCE_TTL = timedelta(minutes=15)
@@ -140,7 +136,6 @@ PHASES = (
     "worker_crash",
     "final_drain",
 )
-PHASE_CHECKPOINTS = tuple((phase, sandbox) for phase in PHASES for sandbox in SANDBOXES)
 CAPACITY_PHASES = (
     "multi_candidate_overlap",
     "large_batch_burst",
@@ -164,6 +159,12 @@ CONTAINER_ROLES = ("worker", "trial", "verifier", "sidecar")
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SESSION_RE = re.compile(r"^[0-9a-f]{32}$")
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+_SANDBOX_RE = re.compile(r"^[a-z][a-z0-9-]{0,47}$")
+_SERVICE_USER_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+_ENV_ID_RE = re.compile(r"^denv-[a-z0-9-]{8,64}$")
+_PRINCIPAL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._@/+%-]{1,254}$")
+_SAFE_RESOURCE_RE = re.compile(r"^[a-z][a-z0-9_-]{1,62}$")
+_SERVICE_UNIT_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,128}$")
 _SECRET_KEY_RE = re.compile(
     r"(?:authorization|credential|password|private[_-]?key|access[_-]?key|"
     r"api[_-]?key|secret|token)",
@@ -194,6 +195,369 @@ def _platform_policy_contract(pool: str) -> tuple[dict[str, Any], str]:
 
 class AcceptanceError(ValueError):
     """Raised for a controlled, secret-safe acceptance failure."""
+
+
+def _validated_registry_snapshot(value: object) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise AcceptanceError("acceptance registry snapshot is invalid")
+    snapshot = dict(value)
+    environments = snapshot.get("environments")
+    generation = snapshot.get("generation")
+    if (
+        set(snapshot)
+        != {
+            "schema_version",
+            "kind",
+            "generation",
+            "source_registry",
+            "environments",
+            "payload_sha256",
+        }
+        or snapshot.get("schema_version") != 1
+        or snapshot.get("kind") != REGISTRY_SNAPSHOT_KIND
+        or isinstance(generation, bool)
+        or not isinstance(generation, int)
+        or generation < 1
+        or not isinstance(snapshot.get("source_registry"), Mapping)
+        or not isinstance(environments, list)
+        or len(environments) < 2
+        or _DIGEST_RE.fullmatch(str(snapshot.get("payload_sha256"))) is None
+    ):
+        raise AcceptanceError("acceptance registry snapshot is invalid")
+    normalized: list[dict[str, Any]] = []
+    for environment in environments:
+        if (
+            not isinstance(environment, Mapping)
+            or set(environment)
+            != {
+                "env_id",
+                "principal_id",
+                "runtime_id",
+                "systemd_instance",
+                "service_unit",
+                "compose_project",
+                "slurm_account",
+                "slurm_qos",
+                "slurm_user",
+                "service_user",
+                "resource_generation",
+                "candidate_id",
+                "candidate_sha",
+                "candidate_tree",
+                "domains",
+            }
+            or _ENV_ID_RE.fullmatch(str(environment.get("env_id"))) is None
+            or _PRINCIPAL_RE.fullmatch(str(environment.get("principal_id"))) is None
+            or _SANDBOX_RE.fullmatch(str(environment.get("runtime_id"))) is None
+            or _SAFE_RESOURCE_RE.fullmatch(str(environment.get("systemd_instance"))) is None
+            or _SERVICE_UNIT_RE.fullmatch(str(environment.get("service_unit"))) is None
+            or _SAFE_RESOURCE_RE.fullmatch(str(environment.get("compose_project"))) is None
+            or _SAFE_RESOURCE_RE.fullmatch(str(environment.get("slurm_account"))) is None
+            or _SAFE_RESOURCE_RE.fullmatch(str(environment.get("slurm_qos"))) is None
+            or _SERVICE_USER_RE.fullmatch(str(environment.get("slurm_user"))) is None
+            or _SERVICE_USER_RE.fullmatch(str(environment.get("service_user"))) is None
+            or isinstance(environment.get("resource_generation"), bool)
+            or not isinstance(environment.get("resource_generation"), int)
+            or environment["resource_generation"] < 1
+            or environment_registry.CANDIDATE_ID_RE.fullmatch(
+                str(environment.get("candidate_id")),
+            )
+            is None
+            or _SHA_RE.fullmatch(str(environment.get("candidate_sha"))) is None
+            or _SHA_RE.fullmatch(str(environment.get("candidate_tree"))) is None
+            or environment.get("domains") != list(POOLS)
+        ):
+            raise AcceptanceError("acceptance registry environment is invalid")
+        normalized.append(dict(environment))
+    if normalized != sorted(
+        normalized,
+        key=lambda environment: (environment["env_id"], environment["runtime_id"]),
+    ):
+        raise AcceptanceError("acceptance registry cohort is not canonical")
+    unique_fields = (
+        "env_id",
+        "principal_id",
+        "runtime_id",
+        "systemd_instance",
+        "service_unit",
+        "compose_project",
+        "slurm_account",
+        "slurm_qos",
+        "slurm_user",
+        "service_user",
+    )
+    if any(
+        len({str(environment[field]) for environment in normalized}) != len(normalized)
+        for field in unique_fields
+    ):
+        raise AcceptanceError("acceptance registry cohort is not canonical")
+    unsigned = {key: item for key, item in snapshot.items() if key != "payload_sha256"}
+    if (
+        snapshot["payload_sha256"]
+        != hashlib.sha256(
+            _canonical_digest_bytes(unsigned),
+        ).hexdigest()
+    ):
+        raise AcceptanceError("acceptance registry snapshot digest is invalid")
+    expected = _acceptance_registry_snapshot(snapshot["source_registry"])
+    if expected != snapshot:
+        raise AcceptanceError("acceptance registry projection does not match source registry")
+    return {
+        **unsigned,
+        "environments": normalized,
+        "payload_sha256": snapshot["payload_sha256"],
+    }
+
+
+def _acceptance_registry_snapshot(source_value: object) -> dict[str, Any]:
+    if not isinstance(source_value, Mapping):
+        raise AcceptanceError("source registry snapshot is invalid")
+    source = dict(source_value)
+    try:
+        verified = environment_registry.DeveloperEnvironmentRegistry.verify_snapshot(
+            _canonical_bytes(source),
+        )
+    except environment_registry.RegistryError as exc:
+        raise AcceptanceError("source registry snapshot is invalid") from exc
+    environment_fields = set(environment_registry.EnvironmentRecord.__dataclass_fields__)
+    candidate_fields = set(environment_registry.CandidateRecord.__dataclass_fields__)
+    deployment_fields = set(environment_registry.DeploymentRecord.__dataclass_fields__)
+    if (
+        any(
+            not isinstance(environment, Mapping) or set(environment) != environment_fields
+            for environment in verified["environments"]
+        )
+        or any(
+            not isinstance(candidate, Mapping) or set(candidate) != candidate_fields
+            for candidate in verified["candidates"]
+        )
+        or any(
+            not isinstance(deployment, Mapping) or set(deployment) != deployment_fields
+            for deployment in verified["deployments"]
+        )
+    ):
+        raise AcceptanceError("source registry record shape is invalid")
+    for environment in verified["environments"]:
+        ports = environment["ports"]
+        if (
+            environment_registry.ENV_ID_RE.fullmatch(str(environment["env_id"])) is None
+            or environment_registry.PRINCIPAL_RE.fullmatch(str(environment["principal_id"])) is None
+            or environment_registry.RUNTIME_ID_RE.fullmatch(str(environment["runtime_id"])) is None
+            or environment["layout_version"] not in {"dynamic-v1", "legacy-v1"}
+            or environment["state"]
+            not in {"ready", "deploying", "active", "retired", "quarantined"}
+            or isinstance(environment["resource_generation"], bool)
+            or not isinstance(environment["resource_generation"], int)
+            or environment["resource_generation"] < 1
+            or isinstance(environment["uid"], bool)
+            or not isinstance(environment["uid"], int)
+            or environment["uid"] < 1
+            or environment["uid"] != environment["gid"]
+            or not isinstance(ports, Mapping)
+            or set(ports) != set(environment_registry.PORT_NAMES)
+            or len(set(ports.values())) != len(ports)
+            or any(
+                isinstance(port, bool) or not isinstance(port, int) or not 1024 <= port <= 65_535
+                for port in ports.values()
+            )
+            or (
+                environment["current_candidate_id"] is not None
+                and environment_registry.CANDIDATE_ID_RE.fullmatch(
+                    str(environment["current_candidate_id"]),
+                )
+                is None
+            )
+        ):
+            raise AcceptanceError("source registry environment binding is invalid")
+        if environment["layout_version"] == "dynamic-v1":
+            expected_resources = (
+                environment_registry.DeveloperEnvironmentRegistry._dynamic_resources(
+                    str(environment["env_id"]),
+                    str(environment["runtime_id"]),
+                )
+            )
+            if any(
+                environment.get(field) != expected for field, expected in expected_resources.items()
+            ):
+                raise AcceptanceError("source registry dynamic resources are invalid")
+    source_environments = verified["environments"]
+    source_unique_fields = (
+        "env_id",
+        "principal_id",
+        "runtime_id",
+        "service_user",
+        "service_group",
+        "compose_project",
+        "systemd_instance",
+        "candidate_root",
+        "runtime_root",
+        "state_root",
+        "evidence_root",
+        "database_name",
+        "postgres_volume",
+        "minio_volume",
+        "task_bucket",
+        "trajectories_bucket",
+        "artifacts_bucket",
+        "provider_namespace",
+        "slurm_user",
+        "slurm_account",
+        "slurm_qos",
+        "cgroup_slice",
+    )
+    if source_environments != sorted(
+        source_environments,
+        key=lambda environment: (environment["env_id"], environment["runtime_id"]),
+    ) or any(
+        len({str(environment[field]) for environment in source_environments})
+        != len(source_environments)
+        for field in source_unique_fields
+    ):
+        raise AcceptanceError("source registry environment order or uniqueness is invalid")
+    for candidate in verified["candidates"]:
+        if (
+            environment_registry.CANDIDATE_ID_RE.fullmatch(str(candidate["candidate_id"])) is None
+            or environment_registry.PRINCIPAL_RE.fullmatch(str(candidate["principal_id"])) is None
+            or environment_registry.ENV_ID_RE.fullmatch(str(candidate["env_id"])) is None
+            or candidate["repository_id"] != "qianyi-sun/loom"
+            or _SHA_RE.fullmatch(str(candidate["candidate_sha"])) is None
+            or _SHA_RE.fullmatch(str(candidate["candidate_tree"])) is None
+            or _DIGEST_RE.fullmatch(str(candidate["bundle_sha256"])) is None
+            or isinstance(candidate["bundle_size"], bool)
+            or not isinstance(candidate["bundle_size"], int)
+            or candidate["bundle_size"] < 1
+            or not isinstance(candidate["bundle_path"], str)
+            or not Path(candidate["bundle_path"]).is_absolute()
+            or not isinstance(candidate["image_digests"], Mapping)
+            or set(candidate["image_digests"]) != {"amd64", "arm64"}
+            or any(
+                environment_registry.IMAGE_DIGEST_RE.fullmatch(str(digest)) is None
+                for digest in candidate["image_digests"].values()
+            )
+        ):
+            raise AcceptanceError("source registry candidate binding is invalid")
+    for deployment in verified["deployments"]:
+        if (
+            environment_registry.DEPLOYMENT_ID_RE.fullmatch(str(deployment["deployment_id"]))
+            is None
+            or environment_registry.PRINCIPAL_RE.fullmatch(str(deployment["principal_id"])) is None
+            or environment_registry.ENV_ID_RE.fullmatch(str(deployment["env_id"])) is None
+            or environment_registry.CANDIDATE_ID_RE.fullmatch(str(deployment["candidate_id"]))
+            is None
+            or isinstance(deployment["expected_resource_generation"], bool)
+            or not isinstance(deployment["expected_resource_generation"], int)
+            or deployment["expected_resource_generation"] < 1
+            or deployment["phase"] not in {*environment_registry.DEPLOY_PHASES, "failed"}
+            or (
+                deployment["previous_candidate_id"] is not None
+                and environment_registry.CANDIDATE_ID_RE.fullmatch(
+                    str(deployment["previous_candidate_id"]),
+                )
+                is None
+            )
+            or _DIGEST_RE.fullmatch(str(deployment["request_digest"])) is None
+        ):
+            raise AcceptanceError("source registry deployment binding is invalid")
+    if verified["candidates"] != sorted(
+        verified["candidates"],
+        key=lambda candidate: candidate["candidate_id"],
+    ) or verified["deployments"] != sorted(
+        verified["deployments"],
+        key=lambda deployment: deployment["deployment_id"],
+    ):
+        raise AcceptanceError("source registry record order is invalid")
+    candidates = {
+        candidate.get("candidate_id"): candidate
+        for candidate in verified["candidates"]
+        if isinstance(candidate, Mapping)
+    }
+    deployments = [
+        deployment for deployment in verified["deployments"] if isinstance(deployment, Mapping)
+    ]
+    if len(candidates) != len(verified["candidates"]):
+        raise AcceptanceError("source registry candidate identity is duplicated")
+    projected: list[dict[str, Any]] = []
+    for environment in verified["environments"]:
+        if not isinstance(environment, Mapping):
+            raise AcceptanceError("source registry environment is invalid")
+        if environment.get("state") != "active":
+            continue
+        candidate_id = environment.get("current_candidate_id")
+        candidate = candidates.get(candidate_id)
+        if (
+            not isinstance(candidate_id, str)
+            or not isinstance(candidate, Mapping)
+            or candidate.get("env_id") != environment.get("env_id")
+            or candidate.get("principal_id") != environment.get("principal_id")
+            or not any(
+                deployment.get("phase") == "committed"
+                and deployment.get("env_id") == environment.get("env_id")
+                and deployment.get("principal_id") == environment.get("principal_id")
+                and deployment.get("candidate_id") == candidate_id
+                and deployment.get("applied_resource_generation")
+                == environment.get("resource_generation")
+                and deployment.get("expected_resource_generation", 0) + 1
+                == deployment.get("applied_resource_generation")
+                for deployment in deployments
+            )
+        ):
+            raise AcceptanceError("active registry environment is not committed")
+        projected.append(
+            {
+                "env_id": environment.get("env_id"),
+                "principal_id": environment.get("principal_id"),
+                "runtime_id": environment.get("runtime_id"),
+                "systemd_instance": environment.get("systemd_instance"),
+                "service_unit": (
+                    f"loom-developer-sandbox@{environment.get('systemd_instance')}.service"
+                ),
+                "compose_project": environment.get("compose_project"),
+                "slurm_account": environment.get("slurm_account"),
+                "slurm_qos": environment.get("slurm_qos"),
+                "slurm_user": environment.get("slurm_user"),
+                "service_user": environment.get("service_user"),
+                "resource_generation": environment.get("resource_generation"),
+                "candidate_id": candidate_id,
+                "candidate_sha": candidate.get("candidate_sha"),
+                "candidate_tree": candidate.get("candidate_tree"),
+                "domains": list(POOLS),
+            },
+        )
+    projected.sort(key=lambda environment: (environment["env_id"], environment["runtime_id"]))
+    if len(projected) < 2:
+        raise AcceptanceError("source registry has fewer than two active committed environments")
+    unsigned = {
+        "schema_version": 1,
+        "kind": REGISTRY_SNAPSHOT_KIND,
+        "generation": verified["generation"],
+        "source_registry": verified,
+        "environments": projected,
+    }
+    return {
+        **unsigned,
+        "payload_sha256": hashlib.sha256(
+            _canonical_digest_bytes(unsigned),
+        ).hexdigest(),
+    }
+
+
+def _registry_sandboxes(snapshot: Mapping[str, Any]) -> tuple[str, ...]:
+    validated = _validated_registry_snapshot(snapshot)
+    return tuple(str(item["runtime_id"]) for item in validated["environments"])
+
+
+def _registry_environments(snapshot: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    validated = _validated_registry_snapshot(snapshot)
+    return {str(item["runtime_id"]): dict(item) for item in validated["environments"]}
+
+
+def _registry_service_users(snapshot: Mapping[str, Any]) -> dict[str, str]:
+    validated = _validated_registry_snapshot(snapshot)
+    return {str(item["runtime_id"]): str(item["slurm_user"]) for item in validated["environments"]}
+
+
+def _phase_checkpoints(sandboxes: Sequence[str]) -> tuple[tuple[str, str], ...]:
+    return tuple((phase, sandbox) for phase in PHASES for sandbox in sandboxes)
 
 
 def _json_load(path: Path) -> Any:
@@ -276,11 +640,6 @@ def _node_in_pool(node: str, pool: str) -> bool:
     return node.startswith(prefix)
 
 
-def _expected_job_name(sandbox: str, candidate_sha: str, node: str) -> str:
-    job_node = re.sub(r"[^A-Za-z0-9_.-]+", "-", node).strip("-") or "worker"
-    return f"loom-sandbox-{sandbox}-{candidate_sha[:12]}-{job_node}"[:128]
-
-
 def _inside_window(value: str, window: tuple[datetime, datetime]) -> bool:
     observed = _timestamp(value)
     return window[0] <= observed <= window[1]
@@ -319,11 +678,24 @@ def _candidate_matches(
 
 def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
     failures: list[str] = []
+    try:
+        registry_snapshot = _validated_registry_snapshot(evidence["registry_snapshot"])
+    except (AcceptanceError, KeyError):
+        return ["acceptance registry snapshot is invalid"]
+    sandboxes = _registry_sandboxes(registry_snapshot)
+    registry_environments = _registry_environments(registry_snapshot)
     candidates = evidence["candidates"]
-    if set(candidates) != set(SANDBOXES):
+    if set(candidates) != set(sandboxes):
         failures.append("pre-merge candidate map is not the exact sandbox set")
-    candidate_shas = [candidates[sandbox]["sha"] for sandbox in SANDBOXES]
-    if len(set(candidate_shas)) != len(SANDBOXES):
+        return failures
+    if any(
+        candidates[sandbox]["sha"] != registry_environments[sandbox]["candidate_sha"]
+        or candidates[sandbox]["tree"] != registry_environments[sandbox]["candidate_tree"]
+        for sandbox in sandboxes
+    ):
+        failures.append("pre-merge candidate map does not match the source registry")
+    candidate_shas = [candidates[sandbox]["sha"] for sandbox in sandboxes]
+    if len(set(candidate_shas)) != len(sandboxes):
         failures.append("pre-merge sandbox candidate SHAs must be distinct")
     session = evidence["session"]
     try:
@@ -341,7 +713,7 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
     if not session["execute_acknowledged"]:
         failures.append("live acceptance was not explicitly execute-acknowledged")
 
-    for sandbox in SANDBOXES:
+    for sandbox in sandboxes:
         receipts = candidates[sandbox]["runtime_receipts"]
         if any(receipt["sandbox"] != sandbox for receipt in receipts):
             failures.append(f"{sandbox} runtime receipt is stored under a foreign candidate")
@@ -390,8 +762,8 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
             failures.append(f"{sandbox} runtime receipt chain does not cover the session")
 
     topology = evidence["topology"]
-    if tuple(topology["sandboxes"]) != SANDBOXES:
-        failures.append("sandbox topology is not the fixed three-sandbox set")
+    if tuple(topology["sandboxes"]) != sandboxes:
+        failures.append("sandbox topology does not match the registry snapshot")
     if tuple(topology["pools"]) != POOLS:
         failures.append("pool topology is not the fixed oldlab/gb10 set")
     if tuple(topology["infrastructure_nodes"]) != INFRASTRUCTURE_NODES:
@@ -406,7 +778,7 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
         failures.append("pool pending budgets do not match the reviewed contract")
 
     phases = evidence["state_machine"]
-    expected_phase_order = [(phase, sandbox) for phase in PHASES for sandbox in SANDBOXES]
+    expected_phase_order = list(_phase_checkpoints(sandboxes))
     if [(phase["phase"], phase["sandbox"]) for phase in phases] != expected_phase_order:
         failures.append("state-machine phases are incomplete or out of order")
     phase_by_identity: dict[tuple[str, str], Mapping[str, Any]] = {}
@@ -424,28 +796,25 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
     if duplicate_phase_identity or missing_phase_identities:
         return failures
 
-    previous_by_sandbox = {sandbox: started_at for sandbox in SANDBOXES}
+    previous_by_sandbox = {sandbox: started_at for sandbox in sandboxes}
     checkpoint_digests: set[str] = set()
     phase_windows: dict[tuple[str, str], tuple[datetime, datetime]] = {}
     for phase_identity in expected_phase_order:
         phase = phase_by_identity[phase_identity]
         sandbox = phase["sandbox"]
         trial_batches = phase.get("trial_batches")
-        if (
-            (phase["phase"] == "mixed_non_loom")
-            != (
-                isinstance(trial_batches, dict)
-                and set(trial_batches) == set(POOLS)
-                and all(
-                    isinstance(batch_id, str)
-                    and re.fullmatch(
-                        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
-                        r"[0-9a-f]{4}-[0-9a-f]{12}",
-                        batch_id,
-                    )
-                    is not None
-                    for batch_id in trial_batches.values()
+        if (phase["phase"] == "mixed_non_loom") != (
+            isinstance(trial_batches, dict)
+            and set(trial_batches) == set(POOLS)
+            and all(
+                isinstance(batch_id, str)
+                and re.fullmatch(
+                    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+                    r"[0-9a-f]{4}-[0-9a-f]{12}",
+                    batch_id,
                 )
+                is not None
+                for batch_id in trial_batches.values()
             )
         ):
             failures.append(f"{phase['phase']} soak trial-batch manifest is invalid")
@@ -503,22 +872,23 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
         if overlap_start >= overlap_finish:
             failures.append(f"{window['pool']} overlap window is empty")
         observations = window["observations"]
-        if {observation["sandbox"] for observation in observations} != set(SANDBOXES) or len(
+        if {observation["sandbox"] for observation in observations} != set(sandboxes) or len(
             observations
-        ) != len(SANDBOXES):
+        ) != len(sandboxes):
             failures.append(f"{window['pool']} overlap does not cover the exact sandbox set")
         job_ids = [observation["job_id"] for observation in observations]
         job_identities = [
             (
                 observation["slurm_account"],
+                observation["slurm_qos"],
                 observation["slurm_user"],
                 observation["job_name"],
             )
             for observation in observations
         ]
-        if len(set(job_ids)) != len(SANDBOXES) or len(job_ids) != len(SANDBOXES):
+        if len(set(job_ids)) != len(sandboxes) or len(job_ids) != len(sandboxes):
             failures.append(f"{window['pool']} overlap job IDs are not unique")
-        if len(set(job_identities)) != len(SANDBOXES):
+        if len(set(job_identities)) != len(sandboxes):
             failures.append(f"{window['pool']} overlap job identities are not unique")
         if any(job_id in all_overlap_job_ids for job_id in job_ids):
             failures.append("overlap job ID is reused across pools")
@@ -554,21 +924,17 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
                 failures.append(
                     f"{window['pool']}/{sandbox} service and job were not simultaneously active",
                 )
-            if observation["service_unit"] != f"loom-developer-sandbox-{sandbox}.service":
+            registry_environment = registry_environments[sandbox]
+            if observation["service_unit"] != registry_environment["service_unit"]:
                 failures.append(
                     f"{window['pool']}/{sandbox} overlap service identity does not match",
                 )
             if not _node_in_pool(observation["node"], pool):
                 failures.append(f"{window['pool']}/{sandbox} overlap node is in the wrong pool")
-            expected_job_name = _expected_job_name(
-                sandbox,
-                observation["candidate_sha"],
-                observation["node"],
-            )
             if (
-                observation["slurm_account"] != f"loom-dev-{sandbox}"
-                or observation["slurm_user"] != SANDBOX_SERVICE_USERS[sandbox]
-                or observation["job_name"] != expected_job_name
+                observation["slurm_account"] != registry_environment["slurm_account"]
+                or observation["slurm_qos"] != registry_environment["slurm_qos"]
+                or observation["slurm_user"] != registry_environment["slurm_user"]
             ):
                 failures.append(f"{pool}/{sandbox} overlap Slurm identity does not match")
 
@@ -579,6 +945,7 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
                 "candidate_tree": observation["candidate_tree"],
                 "job_id": observation["job_id"],
                 "account": observation["slurm_account"],
+                "qos": observation["slurm_qos"],
                 "user": observation["slurm_user"],
                 "job_name": observation["job_name"],
                 "node": observation["node"],
@@ -654,6 +1021,7 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
                     != hashlib.sha256(_canonical_bytes(bound_sample)).hexdigest()
                     or bound_sample["job_id"] != observation["job_id"]
                     or bound_sample["account"] != observation["slurm_account"]
+                    or bound_sample["qos"] != observation["slurm_qos"]
                     or bound_sample["user"] != observation["slurm_user"]
                     or bound_sample["job_name"] != observation["job_name"]
                     or bound_sample["node"] != observation["node"]
@@ -674,15 +1042,15 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
         for observation in window["observations"]
     ]
     if sorted(trusted_sequences) != list(
-        range(1, len(SANDBOXES) * len(POOLS) + 1),
+        range(1, len(sandboxes) * len(POOLS) + 1),
     ):
         failures.append("overlap trusted receipt sequence is incomplete or replayed")
 
     negative = evidence["cross_sandbox_negative"]
     expected_negative = {
         (source, target, resource)
-        for source in SANDBOXES
-        for target in SANDBOXES
+        for source in sandboxes
+        for target in sandboxes
         if source != target
         for resource in CROSS_SANDBOX_RESOURCES
     }
@@ -710,13 +1078,13 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
             failures.append("cross-sandbox negative probe unexpectedly succeeded")
 
     samples = evidence["capacity_samples"]
-    expected_pairs = {(sandbox, pool) for sandbox in SANDBOXES for pool in POOLS}
+    expected_pairs = {(sandbox, pool) for sandbox in sandboxes for pool in POOLS}
     if _matrix(samples, "sandbox", "pool") != expected_pairs:
         failures.append("capacity samples do not cover all sandbox/pool pairs")
     expected_phase_pairs = {
         (phase, sandbox, pool)
         for phase in CAPACITY_PHASES
-        for sandbox in SANDBOXES
+        for sandbox in sandboxes
         for pool in POOLS
     }
     if _matrix(samples, "phase", "sandbox", "pool") != expected_phase_pairs:
@@ -731,15 +1099,11 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
         pool = sample["pool"]
         if not _candidate_matches(evidence, sample, sandbox):
             failures.append("capacity sample candidate does not match")
-        expected_job_name = _expected_job_name(
-            sandbox,
-            sample["candidate_sha"],
-            sample["node"],
-        )
+        registry_environment = registry_environments[sandbox]
         if (
-            sample["account"] != f"loom-dev-{sandbox}"
-            or sample["user"] != SANDBOX_SERVICE_USERS[sandbox]
-            or sample["job_name"] != expected_job_name
+            sample["account"] != registry_environment["slurm_account"]
+            or sample["qos"] != registry_environment["slurm_qos"]
+            or sample["user"] != registry_environment["slurm_user"]
             or not _node_in_pool(sample["node"], pool)
         ):
             failures.append("capacity sample job identity does not match")
@@ -833,8 +1197,8 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
             window["started_at"],
             window["finished_at"],
             (
-                max(phase_windows[(window["phase"], sandbox)][0] for sandbox in SANDBOXES),
-                min(phase_windows[(window["phase"], sandbox)][1] for sandbox in SANDBOXES),
+                max(phase_windows[(window["phase"], sandbox)][0] for sandbox in sandboxes),
+                min(phase_windows[(window["phase"], sandbox)][1] for sandbox in sandboxes),
             ),
         ):
             failures.append(f"{window['pool']} fairness is outside its phase window")
@@ -843,9 +1207,9 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
         ).total_seconds() < window["window_seconds"]:
             failures.append(f"{window['pool']} fairness interval is shorter than policy")
         participants = window["participants"]
-        if {item["sandbox"] for item in participants} != set(SANDBOXES):
+        if {item["sandbox"] for item in participants} != set(sandboxes):
             failures.append(f"{window['pool']} fairness omits a sandbox")
-        if len(participants) != len(SANDBOXES):
+        if len(participants) != len(sandboxes):
             failures.append(f"{window['pool']} fairness duplicates a sandbox")
         if len({item["requested_slots"] for item in participants}) != 1:
             failures.append(f"{window['pool']} fairness requests are not equal")
@@ -886,8 +1250,11 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
         ):
             failures.append("runtime envelope is outside the mixed-load phase")
         allocation = envelope["allocation"]
-        if envelope["account"] != f"loom-dev-{envelope['sandbox']}":
-            failures.append("runtime envelope Slurm account does not match sandbox")
+        if (
+            envelope["account"] != registry_environments[envelope["sandbox"]]["slurm_account"]
+            or envelope["qos"] != registry_environments[envelope["sandbox"]]["slurm_qos"]
+        ):
+            failures.append("runtime envelope Slurm identity does not match registry")
         if not _node_in_pool(envelope["node"], envelope["pool"]):
             failures.append("runtime envelope node does not match its pool")
         tres = allocation["tres"]
@@ -941,6 +1308,10 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
     if {peer["pool"] for peer in peers} != set(POOLS) or len(peers) != len(POOLS):
         failures.append("non-Loom peer evidence must contain exactly one row per pool")
     for peer in peers:
+        if peer["account"] in {
+            environment["slurm_account"] for environment in registry_environments.values()
+        }:
+            failures.append(f"{peer['pool']} peer reused a developer Slurm account")
         baseline = peer["baseline"]
         during = peer["during"]
         after = peer["after"]
@@ -1209,12 +1580,13 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
         _validate_platform_health_authority(
             platform_authority,
             session_id=evidence["session"]["id"],
+            registry_snapshot=registry_snapshot,
             candidates={
                 sandbox: {
                     "sha": evidence["candidates"][sandbox]["sha"],
                     "tree": evidence["candidates"][sandbox]["tree"],
                 }
-                for sandbox in SANDBOXES
+                for sandbox in sandboxes
             },
         )
     except AcceptanceError:
@@ -1242,14 +1614,14 @@ def verify_evidence(evidence: Any, schema: Mapping[str, Any]) -> list[str]:
 
 
 def acceptance_plan() -> dict[str, Any]:
-    """Return the fixed, non-mutating #1023 live acceptance plan."""
+    """Return the registry-driven, non-mutating #1023 live acceptance plan."""
 
     return {
         "schema_version": SCHEMA_VERSION,
         "mode": "plan_read_only",
         "live_mutations_supported": False,
         "submit_host": SUBMIT_HOST,
-        "sandboxes": list(SANDBOXES),
+        "cohort_source": "generation-and-digest-bound registry snapshot",
         "pools": list(POOLS),
         "infrastructure_nodes": list(INFRASTRUCTURE_NODES),
         "eligible_nodes": list(EXPECTED_NODES),
@@ -1257,14 +1629,14 @@ def acceptance_plan() -> dict[str, Any]:
         "state_machine": list(PHASES),
         "faults": list(FAULTS),
         "requirements": [
-            "closed-world qianyi/hongjian/devansh map with three distinct full SHAs, each with a full tree",
+            "closed-world registry cohort with at least two distinct full SHAs and trees",
             "every sandbox phase and runtime record binds its own candidate-map entry",
-            "both pools prove a common interval with all three candidate-distinct services and jobs active",
+            "both pools prove a common interval with every candidate-distinct service and job active",
             "overlap jobs have unique IDs and exact account/user/name plus canonical Slurm readbacks",
             "overlap services have exact active candidate/unit/status readbacks and capacity-sample bindings",
-            "all 18 directed cross-sandbox resource probes are denied",
+            "every directed cross-sandbox resource probe is denied",
             "large batches span multiple nodes in both pools",
-            "all three sandboxes receive fair capacity without overshoot or starvation",
+            "every registered sandbox receives fair capacity without overshoot or starvation",
             "non-Loom Slurm peers retain bounded throughput and zero new failures",
             "Slurm allocations are non-exclusive and bind CPU/memory/PID/GPU TRES",
             "all runtime containers remain inside the finite Slurm cgroup envelope",
@@ -1275,9 +1647,9 @@ def acceptance_plan() -> dict[str, Any]:
             "the exact squash-merged staging regression uses the independent promotion candidate",
         ],
         "stop_rules": [
-            "Stop unless all three exact pre-merge candidates are installed and read back on both domains.",
+            "Stop unless every snapshotted pre-merge candidate is installed and read back on both domains.",
             "Stop if candidate SHAs are reused across sandboxes or a receipt crosses map entries.",
-            "Stop unless a real three-candidate overlap window is observed in each pool.",
+            "Stop unless a real whole-cohort overlap window is observed in each pool.",
             "Stop on reused overlap job identity or any readback/capacity digest mismatch.",
             "Stop unless separate live-mutation authority has been recorded.",
             "Stop if submit host, sandbox, pool, or eligible-node identity differs.",
@@ -1586,7 +1958,7 @@ def _trusted_authority_json(path: Path, root: Path, *, label: str) -> dict[str, 
 
 
 def _verify_trusted_runtime_receipts(evidence: Mapping[str, Any]) -> None:
-    for sandbox in SANDBOXES:
+    for sandbox in _registry_sandboxes(evidence["registry_snapshot"]):
         candidate = evidence["candidates"][sandbox]
         sha = candidate["sha"]
         tree = candidate["tree"]
@@ -1950,6 +2322,7 @@ def _session_state_unlocked(session_id: str) -> dict[str, Any]:
     base_keys = {
         "schema_version",
         "session_id",
+        "registry_snapshot",
         "candidates",
         "submit_host",
         "status",
@@ -1967,6 +2340,12 @@ def _session_state_unlocked(session_id: str) -> dict[str, Any]:
         frozenset((*base_keys, "evidence_sha256", "gate6_sha256")),
     }:
         raise AcceptanceError("session state has an invalid closed shape")
+    try:
+        registry_snapshot = _validated_registry_snapshot(state["registry_snapshot"])
+    except (KeyError, AcceptanceError) as exc:
+        raise AcceptanceError("session state registry snapshot is invalid") from exc
+    sandboxes = _registry_sandboxes(registry_snapshot)
+    phase_checkpoints = _phase_checkpoints(sandboxes)
     completed = state["completed_phases"]
     next_index = state["next_phase_index"]
     trusted_receipts = state["trusted_overlap_receipts"]
@@ -1974,29 +2353,29 @@ def _session_state_unlocked(session_id: str) -> dict[str, Any]:
         state["schema_version"] != SCHEMA_VERSION
         or state["session_id"] != session_id
         or not isinstance(state["candidates"], dict)
-        or set(state["candidates"]) != set(SANDBOXES)
+        or set(state["candidates"]) != set(sandboxes)
         or any(
             not isinstance(state["candidates"][sandbox], dict)
             or set(state["candidates"][sandbox]) != {"sha", "tree"}
             or _SHA_RE.fullmatch(str(state["candidates"][sandbox]["sha"])) is None
             or _SHA_RE.fullmatch(str(state["candidates"][sandbox]["tree"])) is None
-            for sandbox in SANDBOXES
+            for sandbox in sandboxes
         )
         or len(
-            {state["candidates"][sandbox]["sha"] for sandbox in SANDBOXES},
+            {state["candidates"][sandbox]["sha"] for sandbox in sandboxes},
         )
-        != len(SANDBOXES)
+        != len(sandboxes)
         or state["submit_host"] != SUBMIT_HOST
         or state["status"] not in {"running", "complete"}
         or not isinstance(state["next_trusted_sequence"], int)
         or isinstance(state["next_trusted_sequence"], bool)
         or not isinstance(trusted_receipts, list)
-        or len(trusted_receipts) > len(SANDBOXES) * len(POOLS)
+        or len(trusted_receipts) > len(sandboxes) * len(POOLS)
         or any(
             not isinstance(receipt, dict)
             or set(receipt) != {"sequence", "sandbox", "pool", "receipt_sha256"}
             or receipt["sequence"] != index
-            or receipt["sandbox"] not in SANDBOXES
+            or receipt["sandbox"] not in sandboxes
             or receipt["pool"] not in POOLS
             or _DIGEST_RE.fullmatch(str(receipt["receipt_sha256"])) is None
             for index, receipt in enumerate(trusted_receipts, start=1)
@@ -2025,22 +2404,21 @@ def _session_state_unlocked(session_id: str) -> dict[str, Any]:
         or not isinstance(next_index, int)
         or isinstance(next_index, bool)
         or next_index < 0
-        or next_index > len(PHASE_CHECKPOINTS)
+        or next_index > len(phase_checkpoints)
         or not isinstance(completed, list)
-        or completed != [f"{sandbox}:{phase}" for phase, sandbox in PHASE_CHECKPOINTS[:next_index]]
+        or completed != [f"{sandbox}:{phase}" for phase, sandbox in phase_checkpoints[:next_index]]
     ):
         raise AcceptanceError("session state identity or progress is invalid")
     if state["status"] == "complete":
         if (
-            next_index != len(PHASE_CHECKPOINTS)
+            next_index != len(phase_checkpoints)
             or _DIGEST_RE.fullmatch(str(state.get("evidence_sha256"))) is None
-            or len(trusted_receipts) != len(SANDBOXES) * len(POOLS)
+            or len(trusted_receipts) != len(sandboxes) * len(POOLS)
             or state["promotion_receipt_sha256"] is None
             or state["platform_health_receipt_sha256"] is None
             or state["staging_pressure_receipt_sha256"] is None
             or (
-                "gate6_sha256" in state
-                and _DIGEST_RE.fullmatch(str(state["gate6_sha256"])) is None
+                "gate6_sha256" in state and _DIGEST_RE.fullmatch(str(state["gate6_sha256"])) is None
             )
         ):
             raise AcceptanceError("complete session state is invalid")
@@ -2057,20 +2435,30 @@ def _session_state(session_id: str) -> dict[str, Any]:
 def start_session(
     candidates: Mapping[str, Mapping[str, str]],
     *,
+    registry_snapshot: Mapping[str, Any],
     execute: bool,
 ) -> dict[str, Any]:
     """Create a crash-safe, candidate-bound acceptance session."""
 
     _require_execute(execute)
-    if set(candidates) != set(SANDBOXES) or any(
+    registry_snapshot = _acceptance_registry_snapshot(registry_snapshot)
+    sandboxes = _registry_sandboxes(registry_snapshot)
+    registry_environments = _registry_environments(registry_snapshot)
+    if set(candidates) != set(sandboxes) or any(
         set(candidates[sandbox]) != {"sha", "tree"}
         or _SHA_RE.fullmatch(candidates[sandbox]["sha"]) is None
         or _SHA_RE.fullmatch(candidates[sandbox]["tree"]) is None
-        for sandbox in SANDBOXES
+        for sandbox in sandboxes
     ):
         raise AcceptanceError("candidate map must contain exact full lowercase Git hashes")
-    if len({candidates[sandbox]["sha"] for sandbox in SANDBOXES}) != len(SANDBOXES):
+    if len({candidates[sandbox]["sha"] for sandbox in sandboxes}) != len(sandboxes):
         raise AcceptanceError("sandbox candidate SHA values must be distinct")
+    if any(
+        candidates[sandbox]["sha"] != registry_environments[sandbox]["candidate_sha"]
+        or candidates[sandbox]["tree"] != registry_environments[sandbox]["candidate_tree"]
+        for sandbox in sandboxes
+    ):
+        raise AcceptanceError("candidate map does not match the source registry")
     _ensure_state_tree(create=True)
     session_id = uuid.uuid4().hex
     session_dir = _session_dir(session_id)
@@ -2085,12 +2473,13 @@ def start_session(
     state = {
         "schema_version": SCHEMA_VERSION,
         "session_id": session_id,
+        "registry_snapshot": registry_snapshot,
         "candidates": {
             sandbox: {
                 "sha": candidates[sandbox]["sha"],
                 "tree": candidates[sandbox]["tree"],
             }
-            for sandbox in SANDBOXES
+            for sandbox in sandboxes
         },
         "submit_host": SUBMIT_HOST,
         "status": "running",
@@ -2208,7 +2597,9 @@ def checkpoint_session(
         if state["status"] != "running":
             raise AcceptanceError("session is not running")
         try:
-            phase_index = PHASE_CHECKPOINTS.index((phase, sandbox))
+            phase_index = _phase_checkpoints(
+                _registry_sandboxes(state["registry_snapshot"]),
+            ).index((phase, sandbox))
         except ValueError as exc:
             raise AcceptanceError("checkpoint phase is invalid") from exc
         if phase_index > state["next_phase_index"]:
@@ -2273,7 +2664,7 @@ def _overlap_source_paths(
     job_id: str,
 ) -> tuple[Path, Path, Path]:
     if (
-        sandbox not in SANDBOXES
+        _SANDBOX_RE.fullmatch(sandbox) is None
         or pool not in POOLS
         or _SHA_RE.fullmatch(candidate_sha) is None
         or re.fullmatch(r"[1-9][0-9]*(?:_[0-9]+)?", job_id) is None
@@ -2293,6 +2684,8 @@ def _load_overlap_authority_sources(
     pool: str,
     job_id: str,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any], tuple[Path, Path, Path]]:
+    if sandbox not in _registry_sandboxes(state["registry_snapshot"]):
+        raise AcceptanceError("trusted overlap source identity is invalid")
     candidate = state["candidates"][sandbox]
     paths = _overlap_source_paths(
         sandbox=sandbox,
@@ -2410,6 +2803,7 @@ def _load_overlap_authority_sources(
         "candidate_tree",
         "job_id",
         "account",
+        "qos",
         "user",
         "job_name",
         "node",
@@ -2431,6 +2825,7 @@ def _load_overlap_authority_sources(
         "candidate_tree",
         "job_id",
         "account",
+        "qos",
         "user",
         "job_name",
         "node",
@@ -2455,16 +2850,17 @@ def _load_overlap_authority_sources(
         raise AcceptanceError("live service readback has an invalid closed shape")
     _validate_job_allocation(sample["allocation"])
     _validate_job_allocation(job_readback["allocation"])
-    expected_job_name = _expected_job_name(sandbox, candidate["sha"], sample["node"])
+    registry_environment = _registry_environments(state["registry_snapshot"])[sandbox]
     sample_job_fields = {
         "sandbox": sandbox,
         "pool": pool,
         "candidate_sha": candidate["sha"],
         "candidate_tree": candidate["tree"],
         "job_id": job_id,
-        "account": f"loom-dev-{sandbox}",
-        "user": SANDBOX_SERVICE_USERS[sandbox],
-        "job_name": expected_job_name,
+        "account": registry_environment["slurm_account"],
+        "qos": registry_environment["slurm_qos"],
+        "user": registry_environment["slurm_user"],
+        "job_name": sample["job_name"],
     }
     adapter_fields = {
         "sandbox": "sandbox",
@@ -2484,7 +2880,7 @@ def _load_overlap_authority_sources(
         or capacity["active_slots"] < 1
         or sandbox_state["schema_version"] != 1
         or sandbox_state["sandbox"] != sandbox
-        or sandbox_state["compose_project"] != f"loom-sandbox-{sandbox}"
+        or sandbox_state["compose_project"] != registry_environment["compose_project"]
         or sandbox_state["candidate_sha"] != candidate["sha"]
         or sandbox_state["candidate_tree"] != candidate["tree"]
         or not isinstance(sandbox_state["source_repo"], str)
@@ -2508,7 +2904,7 @@ def _load_overlap_authority_sources(
         or service_readback["sandbox"] != sandbox
         or service_readback["candidate_sha"] != candidate["sha"]
         or service_readback["candidate_tree"] != candidate["tree"]
-        or service_readback["unit"] != f"loom-developer-sandbox-{sandbox}.service"
+        or service_readback["unit"] != registry_environment["service_unit"]
         or service_readback["active_state"] != "active"
         or service_readback["sub_state"] != "running"
     ):
@@ -2649,7 +3045,10 @@ def record_promotion_receipt(session_id: str, *, execute: bool) -> dict[str, Any
             or _SHA_RE.fullmatch(str(authority["candidate_sha"])) is None
             or _SHA_RE.fullmatch(str(authority["candidate_tree"])) is None
             or authority["candidate_sha"]
-            in {state["candidates"][sandbox]["sha"] for sandbox in SANDBOXES}
+            in {
+                state["candidates"][sandbox]["sha"]
+                for sandbox in _registry_sandboxes(state["registry_snapshot"])
+            }
             or authority["result"] != "pass"
         ):
             raise AcceptanceError("promotion rollout authority receipt is invalid")
@@ -3017,12 +3416,16 @@ def _validate_platform_health_authority(
     authority: Mapping[str, Any],
     *,
     session_id: str,
+    registry_snapshot: Mapping[str, Any],
     candidates: Mapping[str, Any],
 ) -> None:
+    sandboxes = tuple(candidates)
+    registry_environments = _registry_environments(registry_snapshot)
     required = {
         "schema_version",
         "kind",
         "session_id",
+        "registry_snapshot",
         "candidates",
         "collector_host",
         "checkpoints",
@@ -3119,6 +3522,7 @@ def _validate_platform_health_authority(
         or authority.get("schema_version") != 1
         or authority.get("kind") != "loom.developer-sandbox.platform-health-evidence"
         or authority.get("session_id") != session_id
+        or authority.get("registry_snapshot") != registry_snapshot
         or authority.get("candidates") != candidates
         or authority.get("collector_host") != SUBMIT_HOST
         or authority.get("payload_sha256") != hashlib.sha256(_canonical_bytes(unsigned)).hexdigest()
@@ -3128,7 +3532,7 @@ def _validate_platform_health_authority(
         or [row.get("sequence") for row in checkpoints if isinstance(row, dict)]
         != list(range(1, len(expected_checkpoints) + 1))
         or not isinstance(mixed_jobs, list)
-        or len(mixed_jobs) != len(SANDBOXES) * len(POOLS)
+        or len(mixed_jobs) != len(sandboxes) * len(POOLS)
         or not isinstance(intervals, dict)
         or set(intervals) != set(PLATFORM_HEALTH_NODE_KEYS)
         or not isinstance(policy_capacity, dict)
@@ -3202,10 +3606,20 @@ def _validate_platform_health_authority(
         networks = job.get("compose_networks")
         project = job.get("compose_project")
         if (
-            sandbox not in SANDBOXES
+            sandbox not in sandboxes
             or node not in EXPECTED_NODES
             or not isinstance(candidate, Mapping)
             or job.get("candidate_sha") != candidate.get("sha")
+            or job.get("env_id") != registry_environments[str(sandbox)]["env_id"]
+            or job.get("resource_generation")
+            != registry_environments[str(sandbox)]["resource_generation"]
+            or job.get("candidate_id") != registry_environments[str(sandbox)]["candidate_id"]
+            or job.get("candidate_tree") != candidate.get("tree")
+            or job.get("registry_generation") != registry_snapshot["generation"]
+            or job.get("registry_payload_sha256") != registry_snapshot["payload_sha256"]
+            or job.get("account") != registry_environments[str(sandbox)]["slurm_account"]
+            or job.get("qos") != registry_environments[str(sandbox)]["slurm_qos"]
+            or job.get("user") != registry_environments[str(sandbox)]["slurm_user"]
             or not isinstance(allocation, dict)
             or allocation.get("exclusive") is not False
             or allocation.get("cpu_cores") != policy["requested_cpus"]
@@ -3260,8 +3674,7 @@ def _validate_platform_health_authority(
                     not isinstance(job.get("host"), str)
                     or not job["host"]
                     or cgroup.get("delegated") is not True
-                    or set(cgroup.get("delegated_controllers", ()))
-                    != {"cpu", "memory", "pids"}
+                    or set(cgroup.get("delegated_controllers", ())) != {"cpu", "memory", "pids"}
                     or not isinstance(cgroup.get("pids_current"), int)
                     or isinstance(cgroup.get("pids_current"), bool)
                     or cgroup["pids_current"] < 0
@@ -3269,12 +3682,22 @@ def _validate_platform_health_authority(
                     or not isinstance(job.get("device_probe"), dict)
                     or any(
                         not isinstance(container, dict)
-                        or set(container.get("identity_labels", {}))
+                        or container.get("identity_labels")
                         != {
-                            "loom.sandbox",
-                            "loom.candidate_sha",
-                            "loom.slurm_job_id",
-                            "loom.compose_project",
+                            "loom.sandbox": sandbox,
+                            "loom.candidate_sha": candidate.get("sha"),
+                            "loom.slurm_job_id": job_id,
+                            "loom.compose_project": project,
+                            "loom.env_id": registry_environments[str(sandbox)]["env_id"],
+                            "loom.resource_generation": str(
+                                registry_environments[str(sandbox)]["resource_generation"],
+                            ),
+                            "loom.candidate_id": registry_environments[str(sandbox)][
+                                "candidate_id"
+                            ],
+                            "loom.candidate_tree": candidate.get("tree"),
+                            "loom.registry_generation": str(registry_snapshot["generation"]),
+                            "loom.registry_payload_sha256": registry_snapshot["payload_sha256"],
                         }
                         or not isinstance(container.get("name"), str)
                         or not container["name"]
@@ -3298,7 +3721,8 @@ def _validate_platform_health_authority(
         combinations.add((sandbox, pool))
         compose_projects.add(project)
         compose_networks.update(networks)
-    if combinations != {(sandbox, pool) for sandbox in SANDBOXES for pool in POOLS}:
+    expected_combinations = {(sandbox, pool) for sandbox in sandboxes for pool in POOLS}
+    if combinations != expected_combinations:
         raise AcceptanceError("platform-health mixed job coverage is incomplete")
     if gate6_enabled:
         if (
@@ -3317,8 +3741,8 @@ def _validate_platform_health_authority(
                 for row in gate6_observations["device_isolation"]
                 if isinstance(row, dict)
             }
-            != {(sandbox, pool) for sandbox in SANDBOXES for pool in POOLS}
-            or len(gate6_observations["device_isolation"]) != len(SANDBOXES) * len(POOLS)
+            != expected_combinations
+            or len(gate6_observations["device_isolation"]) != len(sandboxes) * len(POOLS)
             or not isinstance(gate6_observations.get("cleanup"), list)
             or {row.get("event") for row in gate6_observations["cleanup"] if isinstance(row, dict)}
             != {"cancellation", "ttl_expiry", "worker_crash", "submit_host_restart"}
@@ -3331,13 +3755,9 @@ def _validate_platform_health_authority(
         denominator = soak.get("trial_success_denominator")
         if (
             not isinstance(outcomes, list)
-            or len(outcomes) != len(SANDBOXES) * len(POOLS)
-            or {
-                (row.get("sandbox"), row.get("pool"))
-                for row in outcomes
-                if isinstance(row, dict)
-            }
-            != {(sandbox, pool) for sandbox in SANDBOXES for pool in POOLS}
+            or len(outcomes) != len(sandboxes) * len(POOLS)
+            or {(row.get("sandbox"), row.get("pool")) for row in outcomes if isinstance(row, dict)}
+            != expected_combinations
             or not isinstance(numerator, int)
             or isinstance(numerator, bool)
             or not isinstance(denominator, int)
@@ -3370,8 +3790,7 @@ def _validate_platform_health_authority(
                 != row.get("succeeded_trial_count", 0) / row.get("terminal_trial_count", 1)
                 for row in outcomes
             )
-            or numerator
-            != sum(row.get("succeeded_trial_count", 0) for row in outcomes)
+            or numerator != sum(row.get("succeeded_trial_count", 0) for row in outcomes)
             or denominator != sum(row.get("terminal_trial_count", 0) for row in outcomes)
             or soak.get("trial_success_ratio") != numerator / denominator
             or soak["trial_success_ratio"] < soak["minimum_trial_success_ratio"]
@@ -3407,6 +3826,7 @@ def record_platform_health_receipt(session_id: str, *, execute: bool) -> dict[st
         _validate_platform_health_authority(
             authority,
             session_id=session_id,
+            registry_snapshot=state["registry_snapshot"],
             candidates=state["candidates"],
         )
         receipt_unsigned = {
@@ -3445,6 +3865,7 @@ def _verify_overlap_session_receipts(
     evidence: Mapping[str, Any],
     state: Mapping[str, Any],
 ) -> None:
+    sandboxes = _registry_sandboxes(state["registry_snapshot"])
     observations = {
         (observation["sandbox"], window["pool"]): (window, observation)
         for window in evidence["overlap_windows"]
@@ -3457,8 +3878,8 @@ def _verify_overlap_session_receipts(
     }
     descriptors = state["trusted_overlap_receipts"]
     if (
-        len(descriptors) != len(SANDBOXES) * len(POOLS)
-        or set(observations) != {(sandbox, pool) for sandbox in SANDBOXES for pool in POOLS}
+        len(descriptors) != len(sandboxes) * len(POOLS)
+        or set(observations) != {(sandbox, pool) for sandbox in sandboxes for pool in POOLS}
         or set(samples) != set(observations)
     ):
         raise AcceptanceError("trusted overlap receipt coverage is incomplete")
@@ -3646,6 +4067,7 @@ def _verify_platform_health_session_receipt(
     _validate_platform_health_authority(
         authority,
         session_id=session_id,
+        registry_snapshot=state["registry_snapshot"],
         candidates=state["candidates"],
     )
     if (
@@ -3762,8 +4184,10 @@ def finalize_session(
         raise AcceptanceError("final evidence failed verification")
     with _session_lock(session_id, exclusive=True):
         state = _session_state_unlocked(session_id)
+        sandboxes = _registry_sandboxes(state["registry_snapshot"])
+        phase_checkpoints = _phase_checkpoints(sandboxes)
         if state["completed_phases"] != [
-            f"{sandbox}:{phase}" for phase, sandbox in PHASE_CHECKPOINTS
+            f"{sandbox}:{phase}" for phase, sandbox in phase_checkpoints
         ]:
             raise AcceptanceError("all bounded phases must pass before finalization")
         if {
@@ -3771,15 +4195,17 @@ def finalize_session(
                 "sha": evidence["candidates"][sandbox]["sha"],
                 "tree": evidence["candidates"][sandbox]["tree"],
             }
-            for sandbox in SANDBOXES
+            for sandbox in sandboxes
         } != state["candidates"] or evidence["session"]["id"] != session_id:
             raise AcceptanceError("final evidence does not match the session identity")
+        if evidence.get("registry_snapshot") != state["registry_snapshot"]:
+            raise AcceptanceError("final evidence registry snapshot does not match the session")
         _verify_trusted_runtime_receipts(evidence)
         _verify_overlap_session_receipts(session_id, evidence, state)
         _verify_promotion_session_receipt(session_id, evidence, state)
         _verify_platform_health_session_receipt(session_id, evidence, state)
         _verify_staging_pressure_session_receipt(session_id, evidence, state)
-        for index, (phase, sandbox) in enumerate(PHASE_CHECKPOINTS):
+        for index, (phase, sandbox) in enumerate(phase_checkpoints):
             checkpoint = _secure_json_load(
                 _session_dir(session_id) / "checkpoints" / f"{index:02d}-{sandbox}-{phase}.json",
             )
@@ -3813,21 +4239,18 @@ def finalize_session(
 def _gate6_matrix_path(sandbox: str, pool: str, candidate_sha: str) -> Path:
     cluster = {"oldlab": "trt-oldlab", "gb10": "trt-gb10"}[pool]
     return (
-        SLURM_POLICY_STATE_ROOT
-        / "allocation-probes"
-        / cluster
-        / sandbox
-        / f"{candidate_sha}.json"
+        SLURM_POLICY_STATE_ROOT / "allocation-probes" / cluster / sandbox / f"{candidate_sha}.json"
     )
 
 
 def _gate6_runtime_domain_bindings(
     evidence: Mapping[str, Any],
 ) -> dict[tuple[str, str], set[tuple[str, str, str, int]]]:
+    sandboxes = _registry_sandboxes(evidence["registry_snapshot"])
     bindings: dict[tuple[str, str], set[tuple[str, str, str, int]]] = {
-        (sandbox, pool): set() for sandbox in SANDBOXES for pool in POOLS
+        (sandbox, pool): set() for sandbox in sandboxes for pool in POOLS
     }
-    for sandbox in SANDBOXES:
+    for sandbox in sandboxes:
         for reference in evidence["candidates"][sandbox]["runtime_receipts"]:
             raw = _runtime_attestation_bytes(Path(reference["path"]))
             try:
@@ -3877,9 +4300,7 @@ def seal_gate6(
         _verify_platform_health_session_receipt(session_id, evidence, state)
         _verify_staging_pressure_session_receipt(session_id, evidence, state)
 
-        platform_path = (
-            PLATFORM_HEALTH_AUTHORITY_ROOT / "sessions" / session_id / "evidence.json"
-        )
+        platform_path = PLATFORM_HEALTH_AUTHORITY_ROOT / "sessions" / session_id / "evidence.json"
         platform = _trusted_authority_json(
             platform_path,
             PLATFORM_HEALTH_AUTHORITY_ROOT,
@@ -3889,7 +4310,7 @@ def seal_gate6(
             raise AcceptanceError("platform-health gate-6 authority drifted")
 
         matrices: dict[tuple[str, str], dict[str, Any]] = {}
-        for sandbox in SANDBOXES:
+        for sandbox in _registry_sandboxes(state["registry_snapshot"]):
             candidate_sha = state["candidates"][sandbox]["sha"]
             for pool in POOLS:
                 path = _gate6_matrix_path(sandbox, pool, candidate_sha)
@@ -3901,12 +4322,16 @@ def seal_gate6(
         runtime_bindings = _gate6_runtime_domain_bindings(evidence)
         for pair, matrix in matrices.items():
             runtime = matrix.get("runtime_attestation")
-            if not isinstance(runtime, dict) or (
-                runtime.get("receipt_sha256"),
-                runtime.get("domain_payload_sha256"),
-                runtime.get("domain_signature_sha256"),
-                runtime.get("domain_generation"),
-            ) not in runtime_bindings[pair]:
+            if (
+                not isinstance(runtime, dict)
+                or (
+                    runtime.get("receipt_sha256"),
+                    runtime.get("domain_payload_sha256"),
+                    runtime.get("domain_signature_sha256"),
+                    runtime.get("domain_generation"),
+                )
+                not in runtime_bindings[pair]
+            ):
                 raise AcceptanceError("allocation matrix is not bound to a trusted runtime receipt")
         try:
             bundle, pair_artifacts = gate6_verifier.build_gate6_bundle(
@@ -3949,7 +4374,7 @@ def _report(evidence: Any, schema: Mapping[str, Any]) -> dict[str, Any]:
                 "sha": evidence["candidates"][sandbox]["sha"],
                 "tree": evidence["candidates"][sandbox]["tree"],
             }
-            for sandbox in SANDBOXES
+            for sandbox in _registry_sandboxes(evidence["registry_snapshot"])
         },
         "promotion_candidate": {
             "sha": evidence["promotion_candidate"]["sha"],
@@ -3975,9 +4400,8 @@ def _parser() -> argparse.ArgumentParser:
     collect.add_argument("--output", type=Path, required=True)
 
     start = subparsers.add_parser("session-start", allow_abbrev=False)
-    for sandbox in SANDBOXES:
-        start.add_argument(f"--{sandbox}-sha", required=True)
-        start.add_argument(f"--{sandbox}-tree", required=True)
+    start.add_argument("--registry-snapshot", type=Path, required=True)
+    start.add_argument("--candidates", type=Path, required=True)
     start.add_argument("--execute", action="store_true")
 
     status = subparsers.add_parser("session-status", allow_abbrev=False)
@@ -3986,7 +4410,7 @@ def _parser() -> argparse.ArgumentParser:
     checkpoint = subparsers.add_parser("session-checkpoint", allow_abbrev=False)
     checkpoint.add_argument("--session-id", required=True)
     checkpoint.add_argument("--phase", choices=PHASES, required=True)
-    checkpoint.add_argument("--sandbox", choices=SANDBOXES, required=True)
+    checkpoint.add_argument("--sandbox", required=True)
     checkpoint.add_argument("--phase-evidence", type=Path, required=True)
     checkpoint.add_argument("--execute", action="store_true")
 
@@ -3995,7 +4419,7 @@ def _parser() -> argparse.ArgumentParser:
         allow_abbrev=False,
     )
     record_overlap.add_argument("--session-id", required=True)
-    record_overlap.add_argument("--sandbox", choices=SANDBOXES, required=True)
+    record_overlap.add_argument("--sandbox", required=True)
     record_overlap.add_argument("--pool", choices=POOLS, required=True)
     record_overlap.add_argument("--job-id", required=True)
     record_overlap.add_argument("--execute", action="store_true")
@@ -4043,15 +4467,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             _emit(_session_state(args.session_id))
             return 0
         if command == "session-start":
+            candidates = _json_load(args.candidates)
+            registry_snapshot = _json_load(args.registry_snapshot)
+            if not isinstance(candidates, Mapping):
+                raise AcceptanceError("candidate map must be a JSON object")
             _emit(
                 start_session(
-                    {
-                        sandbox: {
-                            "sha": getattr(args, f"{sandbox}_sha"),
-                            "tree": getattr(args, f"{sandbox}_tree"),
-                        }
-                        for sandbox in SANDBOXES
-                    },
+                    candidates,
+                    registry_snapshot=registry_snapshot,
                     execute=args.execute,
                 ),
             )

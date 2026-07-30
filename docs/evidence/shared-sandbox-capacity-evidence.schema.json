@@ -55,11 +55,8 @@
       "pattern": "^[0-9a-f]{40}$"
     },
     "sandbox": {
-      "enum": [
-        "qianyi",
-        "hongjian",
-        "devansh"
-      ]
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,47}$"
     },
     "state": {
       "enum": [
@@ -352,11 +349,8 @@
           "$ref": "#/$defs/sandbox"
         },
         "environment": {
-          "enum": [
-            "sandbox-qianyi",
-            "sandbox-hongjian",
-            "sandbox-devansh"
-          ]
+          "type": "string",
+          "pattern": "^sandbox-[a-z][a-z0-9-]{0,47}$"
         },
         "candidate_sha": {
           "$ref": "#/$defs/fullSha"

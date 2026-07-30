@@ -1,13 +1,57 @@
 # Developer-sandbox Slurm policy
 
-The canonical scheduler and host-containment inputs for the shared developer
-sandboxes live in:
+The current scheduler membership is registry-owned and dynamic. Every active
+developer environment receives its own `loom-dev-<runtime-id>` account and
+non-login Slurm user from its registry record; there is no fixed developer
+allowlist or upper environment count. Live cohort acceptance requires at least
+two active committed environments, while normal create/update/check/destroy
+continues to operate on the exact environment and deployment IDs.
+
+The installed isolated-Python capacity authority is the supported persistent
+surface for per-deployment reconciliation and readback:
+
+```bash
+sudo /usr/local/libexec/loom-developer-environment-capacity-authority \
+  reconcile --deployment-id <DEPLOYMENT_ID>
+sudo /usr/local/libexec/loom-developer-environment-capacity-authority \
+  check --deployment-id <DEPLOYMENT_ID>
+```
+
+It reads the root-owned registry snapshot, derives the environment's exact
+account/user/QoS/resource generation, and rejects caller-selected profiles,
+paths, accounts, and capacity overrides.
+
+Reconciliation is incremental. Adding a fourth, fifth, or later environment
+may create only that environment's derived account, association, guard
+binding, adapters, and units; it must preserve every existing environment's
+candidate, account, association, handoff bytes, lease epoch, unit state, and
+running job IDs. Removing an environment waits only for that exact
+environment's jobs and owned resources to become terminal. Peer environments
+do not have to drain, and the authority never cancels, preempts, stops, or
+kills foreign or peer jobs.
+
+The canonical scheduler and host-containment inputs for the two shared
+capacity domains live in:
 
 - `deploy/slurm/developer-sandboxes/oldlab.toml`
 - `deploy/slurm/developer-sandboxes/gb10.toml`
 
 They describe two independent Slurm clusters. Never submit a GB10 request
 through the OLDLAB controller or add GB10 nodes to the OLDLAB inventory.
+
+Both domains cover the complete 20-node infrastructure fleet: five OLDLAB
+nodes and 15 GB10 nodes, including `trt-gb10-7`, with
+`excluded_nodes=[]`.
+
+## Legacy-v1-only static profile and historical acceptance workflow
+
+Everything from this heading to the end of this runbook that names
+`qianyi`, `hongjian`, or `devansh`, assumes exactly three child accounts, or
+uses `--sandbox all --candidate-sha <QIANYI_SHA>` is retained only to recover
+or interpret an existing `legacy-v1` fleet transaction. It is not the current
+membership contract and must not be used to exclude a newly registered
+developer environment. Six lanes and 33-checkpoint references in the linked
+historical evidence have the same legacy-only scope.
 
 ## Admission boundary
 
@@ -170,7 +214,7 @@ artifact ID. It never records a credential or remote filesystem path.
 The materializer copies the combined receipt, fleet, both domain
 manifests/signatures, and both publisher public keys into a root-only local
 bundle. It verifies both Ed25519 signatures, candidate/tree identity,
-monotonic publisher generations, and the closed nineteen-node fleet before an
+monotonic publisher generations, and the complete 20-node fleet before an
 atomic no-replace publish. Run the command once on `oldlab2` with the OLDLAB
 profile and once on `gb10-1` with the GB10 profile:
 

@@ -135,6 +135,27 @@ def test_request_rejects_noncanonical_or_unexpected_authority_inputs(
         bootstrap._load_request()
 
 
+@pytest.mark.parametrize("action", sorted(bootstrap.ENVIRONMENT_AUTHORITY_ACTIONS))
+def test_environment_authority_request_is_pinned_to_oldlab_2_without_inputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    request = _request(action=action, node="oldlab-2")
+    _write_request(tmp_path, monkeypatch, request)
+    assert bootstrap._load_request() == request
+
+    wrong_node = _request(action=action, node="oldlab-1")
+    _write_request(tmp_path, monkeypatch, wrong_node)
+    with pytest.raises(bootstrap.DockerNodeBootstrapError, match="pinned to oldlab-2"):
+        bootstrap._load_request()
+
+    with_input = _request(action=action, node="oldlab-2", inputs={"caller": "d" * 64})
+    _write_request(tmp_path, monkeypatch, with_input)
+    with pytest.raises(bootstrap.DockerNodeBootstrapError, match="unexpected trust inputs"):
+        bootstrap._load_request()
+
+
 def test_request_rejects_invalid_operation_id(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -418,6 +439,43 @@ def test_client_bootstrap_requires_known_hosts_before_host_python(
 
     with pytest.raises(bootstrap.DockerNodeBootstrapError, match="known_hosts is missing"):
         bootstrap._fixed_action_argv(request, stage)
+
+
+@pytest.mark.parametrize("action", sorted(bootstrap.ENVIRONMENT_AUTHORITY_ACTIONS))
+def test_environment_authority_argv_is_fixed_to_candidate_installer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    request = _request(action=action, node="oldlab-2")
+    host_root = tmp_path / "host"
+    stage = host_root / "run/loom-developer-sandbox-node-bootstrap" / request["request_id"]
+    (stage / "source/scripts/ops").mkdir(parents=True)
+    (stage / "input").mkdir()
+    monkeypatch.setattr(bootstrap, "HOST_ROOT", host_root)
+
+    argv, cwd = bootstrap._fixed_action_argv(request, stage)
+
+    assert argv == [
+        "/usr/bin/python3",
+        "-I",
+        str(cwd / "scripts/ops/developer_environment_authority_installer.py"),
+        action,
+        "--candidate-sha",
+        SHA,
+        "--candidate-tree",
+        TREE,
+    ]
+    assert not {"--execute", "--uid", "--port", "--path"} & set(argv)
+
+
+def test_clean_environment_uses_fixed_xdg_stage_without_home() -> None:
+    container = bootstrap._clean_env()
+    host = bootstrap._clean_env(host_chroot=True)
+
+    assert "HOME" not in container
+    assert container["XDG_CONFIG_HOME"] == str(bootstrap.HOST_STAGE_ROOT / "xdg-config")
+    assert host["XDG_CONFIG_HOME"] == ("/run/loom-developer-sandbox-node-bootstrap/xdg-config")
 
 
 def test_host_python_requires_fixed_candidate_script_and_canonical_evidence(
@@ -709,6 +767,35 @@ def test_distinct_operation_ids_preserve_successive_readback_receipts(
     }
 
 
+def test_environment_authority_receipt_binds_installed_assets_and_registry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(action="environment-authority-bootstrap", node="oldlab-2")
+    result = {
+        "schema_version": 1,
+        "action": request["action"],
+        "node": "oldlab-2",
+        "source_sha": SHA,
+        "source_tree": TREE,
+        "installed_asset_digests": {"/usr/local/bin/tool": "e" * 64},
+        "registry_snapshot_sha256": "f" * 64,
+        "status": "succeeded",
+    }
+    receipt_root = tmp_path / "receipts"
+    receipt_root.mkdir()
+    monkeypatch.setattr(bootstrap, "HOST_RECEIPT_ROOT", receipt_root)
+
+    receipt = bootstrap._write_receipt(request, result)
+
+    assert receipt["installed_asset_digests"] == result["installed_asset_digests"]
+    assert receipt["registry_snapshot_sha256"] == "f" * 64
+    assert bootstrap._write_receipt(request, result) == receipt
+
+    with pytest.raises(bootstrap.DockerNodeBootstrapError, match="receipt evidence"):
+        bootstrap._write_receipt(request, {**result, "registry_snapshot_sha256": "bad"})
+
+
 def test_containerfile_is_fixed_multiarch_one_shot_without_runtime_daemon() -> None:
     root = Path(__file__).resolve().parents[2]
     payload = (root / "deploy/developer-sandboxes/Containerfile.node-bootstrap").read_text(
@@ -718,6 +805,7 @@ def test_containerfile_is_fixed_multiarch_one_shot_without_runtime_daemon() -> N
     assert "amd64|arm64" in payload
     assert "ENTRYPOINT" in payload
     assert "developer_sandbox_node_docker_bootstrap.py" in payload
+    assert "XDG_CONFIG_HOME=/run/loom-developer-sandbox-node-bootstrap/xdg-config" in payload
     assert "CMD " not in payload
     assert "systemd" not in payload
     assert "sshd" not in payload

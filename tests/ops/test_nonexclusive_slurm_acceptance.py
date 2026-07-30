@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
 import json
 import subprocess
@@ -378,6 +379,137 @@ def test_negative_isolation_requires_every_ordered_pair_and_denial() -> None:
     assert any("negative isolation matrix" in item for item in failures)
 
 
+def _gate6_registry_snapshot(
+    candidates: dict[str, dict[str, str]],
+) -> dict[str, Any]:
+    registry = ACCEPTANCE.live_acceptance.environment_registry
+    environments: list[dict[str, Any]] = []
+    candidate_rows: list[dict[str, Any]] = []
+    deployments: list[dict[str, Any]] = []
+    finalizations: list[dict[str, Any]] = []
+    for index, (sandbox, candidate) in enumerate(sorted(candidates.items()), start=1):
+        env_id = f"denv-{index:08d}"
+        principal_id = f"github:{1000 + index}"
+        resources = registry.DeveloperEnvironmentRegistry._dynamic_resources(
+            env_id,
+            sandbox,
+        )
+        identity = {
+            "principal_id": principal_id,
+            "env_id": env_id,
+            "lifecycle_epoch": 1,
+            "repository_id": "qianyi-sun/loom",
+            "candidate_sha": candidate["sha"],
+            "candidate_tree": candidate["tree"],
+            "bundle_sha256": str(index) * 64,
+        }
+        candidate_id = f"cand-{registry._digest(identity)[:40]}"
+        environments.append(
+            {
+                "env_id": env_id,
+                "principal_id": principal_id,
+                "display_name": sandbox,
+                "layout_version": "dynamic-v1",
+                "runtime_id": sandbox,
+                "state": "active",
+                "resource_generation": 2,
+                "lifecycle_epoch": 1,
+                **resources,
+                "uid": 32_000 + index,
+                "gid": 32_000 + index,
+                "ports": {
+                    name: 30_000 + index * 100 + offset
+                    for offset, name in enumerate(registry.PORT_NAMES)
+                },
+                "current_candidate_id": candidate_id,
+                "created_at": "2026-07-28T00:00:00Z",
+            },
+        )
+        candidate_rows.append(
+            {
+                "candidate_id": candidate_id,
+                **identity,
+                "bundle_size": 1024,
+                "bundle_path": (
+                    f"/var/lib/loom-developer-environments/candidates/"
+                    f"{candidate_id}/candidate.bundle"
+                ),
+                "image_digests": {
+                    "amd64": f"sha256:{candidate['sha']}{candidate['sha'][:24]}",
+                    "arm64": f"sha256:{candidate['tree']}{candidate['tree'][:24]}",
+                },
+                "imported_at": "2026-07-28T00:00:00Z",
+            },
+        )
+        deployment_id = f"dep-{index:032x}"
+        applied_registry_payload_sha256 = f"{index + 5:x}" * 64
+        finalization_unsigned = {
+            "deployment_id": deployment_id,
+            "env_id": env_id,
+            "principal_id": principal_id,
+            "candidate_id": candidate_id,
+            "candidate_sha": candidate["sha"],
+            "candidate_tree": candidate["tree"],
+            "applied_resource_generation": 2,
+            "applied_registry_generation": 41,
+            "applied_registry_payload_sha256": applied_registry_payload_sha256,
+            "capacity_finalize_receipt_sha256": "a" * 64,
+            "capacity_finalize_check_receipt_sha256": "b" * 64,
+            "runtime_reconcile_receipt_sha256": "c" * 64,
+            "runtime_prepare_check_receipt_sha256": "d" * 64,
+            "acceptance_probe_receipt_sha256": "e" * 64,
+            "created_at": "2026-07-28T00:00:01Z",
+        }
+        finalization = {
+            **finalization_unsigned,
+            "payload_sha256": registry._digest(finalization_unsigned),
+        }
+        finalizations.append(finalization)
+        deployments.append(
+            {
+                "deployment_id": deployment_id,
+                "principal_id": principal_id,
+                "env_id": env_id,
+                "candidate_id": candidate_id,
+                "expected_resource_generation": 1,
+                "applied_resource_generation": 2,
+                "applied_registry_generation": 41,
+                "applied_registry_payload_sha256": applied_registry_payload_sha256,
+                "finalization_payload_sha256": finalization["payload_sha256"],
+                "phase": "committed",
+                "previous_candidate_id": None,
+                "request_digest": str(index + 4) * 64,
+                "created_at": "2026-07-28T00:00:00Z",
+                "updated_at": "2026-07-28T00:00:01Z",
+            },
+        )
+    unsigned = {
+        "schema_version": 1,
+        "kind": "loom.developer-environment.registry-snapshot",
+        "generation": 42,
+        "environments": sorted(
+            environments,
+            key=lambda environment: (environment["env_id"], environment["runtime_id"]),
+        ),
+        "candidates": sorted(
+            candidate_rows,
+            key=lambda candidate: candidate["candidate_id"],
+        ),
+        "deployments": sorted(
+            deployments,
+            key=lambda deployment: deployment["deployment_id"],
+        ),
+        "deployment_finalizations": finalizations,
+    }
+    source = {
+        **unsigned,
+        "payload_sha256": hashlib.sha256(
+            ACCEPTANCE._canonical_bytes(unsigned),
+        ).hexdigest(),
+    }
+    return ACCEPTANCE.live_acceptance._acceptance_registry_snapshot(source)
+
+
 def _gate6_sources() -> tuple[
     dict[str, Any],
     dict[str, Any],
@@ -387,8 +519,13 @@ def _gate6_sources() -> tuple[
         "qianyi": {"sha": "a" * 40, "tree": "b" * 40},
         "hongjian": {"sha": "c" * 40, "tree": "d" * 40},
         "devansh": {"sha": "e" * 40, "tree": "f" * 40},
+        "quinn": {"sha": "1" * 40, "tree": "2" * 40},
     }
-    sandboxes = list(ACCEPTANCE.GATE6_SANDBOXES)
+    registry_snapshot = _gate6_registry_snapshot(candidates)
+    sandboxes = [environment["runtime_id"] for environment in registry_snapshot["environments"]]
+    environments = {
+        environment["runtime_id"]: environment for environment in registry_snapshot["environments"]
+    }
     checks = [
         {"source": source, "target": target, "resource": resource, "denied": True}
         for source in sandboxes
@@ -400,6 +537,7 @@ def _gate6_sources() -> tuple[
         "schema_version": 2,
         "session": {"id": "1" * 32},
         "candidates": candidates,
+        "registry_snapshot": registry_snapshot,
         "state_machine": [{"phase": index} for index in range(33)],
         "topology": {
             "eligible_nodes": [
@@ -469,9 +607,7 @@ def _gate6_sources() -> tuple[
                 "pids": 32_768 if pool == "oldlab" else 65_536,
                 "gpu_count": len(gpu_ids),
                 "tres": (
-                    "cpu=8,mem=32000M"
-                    if pool == "oldlab"
-                    else "cpu=16,mem=92000M,gres/gpu=1"
+                    "cpu=8,mem=32000M" if pool == "oldlab" else "cpu=16,mem=92000M,gres/gpu=1"
                 ),
                 "exclusive": False,
             }
@@ -481,8 +617,8 @@ def _gate6_sources() -> tuple[
                     "job_name": f"loom-{sandbox}-{candidate['sha'][:12]}-{node}",
                     "sandbox": sandbox,
                     "candidate_sha": candidate["sha"],
-                    "account": f"loom-dev-{sandbox}",
-                    "user": f"loom-sandbox-{sandbox}",
+                    "account": environments[sandbox]["slurm_account"],
+                    "user": environments[sandbox]["slurm_user"],
                     "node": node,
                     "state": "RUNNING",
                     "allocation": allocation,
@@ -548,7 +684,8 @@ def _gate6_sources() -> tuple[
                     "node": matrix_node,
                     "sandbox": sandbox,
                     "state": "COMPLETED",
-                    "account": f"loom-dev-{sandbox}",
+                    "account": environments[sandbox]["slurm_account"],
+                    "qos": environments[sandbox]["slurm_qos"],
                     "sbatch_verified": True,
                     "srun_verified": True,
                     "nonexclusive": True,
@@ -556,6 +693,7 @@ def _gate6_sources() -> tuple[
                     "gpu_verified": True,
                     "compute_check": {
                         "sandbox": sandbox,
+                        "account": environments[sandbox]["slurm_account"],
                         "candidate_sha": candidate["sha"],
                         "candidate_tree": candidate["tree"],
                         "pool": pool,
@@ -575,7 +713,8 @@ def _gate6_sources() -> tuple[
                 "cluster": ACCEPTANCE.GATE6_CLUSTERS[pool],
                 "expected_pool": pool,
                 "expected_concurrency": ACCEPTANCE.GATE6_POOL_CONCURRENCY[pool],
-                "account": f"loom-dev-{sandbox}",
+                "account": environments[sandbox]["slurm_account"],
+                "qos": environments[sandbox]["slurm_qos"],
                 "allowed_nodes": list(nodes),
                 "candidate_binding": {
                     "repository": {
@@ -588,6 +727,12 @@ def _gate6_sources() -> tuple[
                     "candidate_sha": candidate["sha"],
                     "candidate_tree": candidate["tree"],
                     "domain": pool,
+                    "env_id": environments[sandbox]["env_id"],
+                    "resource_generation": 2,
+                    "registry_generation": registry_snapshot["generation"],
+                    "registry_payload_sha256": registry_snapshot["source_registry"][
+                        "payload_sha256"
+                    ],
                 },
                 "nodes": matrix_rows,
                 "closed_world_verified": True,
@@ -658,19 +803,20 @@ def _build_gate6(
     return ACCEPTANCE.build_gate6_bundle(live, platform, matrices, schema)
 
 
-def test_gate6_bridge_verifies_six_pairs_and_unchanged_gb10_v1() -> None:
+def test_gate6_bridge_verifies_dynamic_pairs_and_unchanged_gb10_v1() -> None:
     live, platform, matrices = _gate6_sources()
 
     bundle, artifacts = _build_gate6(live, platform, matrices)
 
     assert bundle["status"] == "pass"
     assert bundle["state_machine_phase_count"] == 33
-    assert len(bundle["allocation_matrices"]) == 6
-    assert len(artifacts) == 6
+    assert len(bundle["allocation_matrices"]) == 8
+    assert len(artifacts) == 8
+    assert bundle["registry_generation"] == 42
     schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
     assert all(
         ACCEPTANCE.verify_evidence(artifacts[(sandbox, "gb10")], schema) == []
-        for sandbox in ACCEPTANCE.GATE6_SANDBOXES
+        for sandbox in live["candidates"]
     )
 
 
@@ -693,6 +839,25 @@ def test_gate6_bridge_rejects_candidate_or_matrix_mismatch() -> None:
     matrices[("qianyi", "gb10")]["candidate_sha"] = "f" * 40
 
     with pytest.raises(ACCEPTANCE.AcceptanceError, match="matrix binding"):
+        _build_gate6(live, platform, matrices)
+
+
+@pytest.mark.parametrize("attack", ("source_digest", "stale_projection"))
+def test_gate6_bridge_rejects_tampered_or_stale_registry_snapshot(
+    attack: str,
+) -> None:
+    live, platform, matrices = _gate6_sources()
+    snapshot = live["registry_snapshot"]
+    if attack == "source_digest":
+        snapshot["source_registry"]["payload_sha256"] = "0" * 64
+    else:
+        snapshot["generation"] -= 1
+        unsigned = {key: value for key, value in snapshot.items() if key != "payload_sha256"}
+        snapshot["payload_sha256"] = hashlib.sha256(
+            ACCEPTANCE._canonical_bytes(unsigned),
+        ).hexdigest()
+
+    with pytest.raises(ACCEPTANCE.AcceptanceError, match="registry snapshot"):
         _build_gate6(live, platform, matrices)
 
 

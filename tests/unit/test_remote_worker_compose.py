@@ -74,6 +74,7 @@ def test_sandbox_link_overlay_mounts_only_host_local_secret_files() -> None:
     worker = data["services"]["worker"]
     sidecar = data["services"]["sandbox-link"]
     env = _env_map(worker["environment"])
+    sidecar_env = _env_map(sidecar["environment"])
     volumes = worker["volumes"]
 
     assert env["LOOM_WORKER_CONTROL_PLANE_URL"] == "http://sandbox-link:8080"
@@ -85,6 +86,15 @@ def test_sandbox_link_overlay_mounts_only_host_local_secret_files() -> None:
     assert env["LOOM_WORKER_MINIO_ACCESS_KEY_FILE"].endswith("/minio-access-key")
     assert env["LOOM_WORKER_MINIO_SECRET_KEY"] == ""
     assert env["LOOM_WORKER_MINIO_SECRET_KEY_FILE"].endswith("/minio-secret-key")
+    assert sidecar_env["LOOM_SANDBOX_LINK_CP_EXPECTED_PORT"] == (
+        "${LOOM_SANDBOX_LINK_CP_EXPECTED_PORT:?set LOOM_SANDBOX_LINK_CP_EXPECTED_PORT}"
+    )
+    assert sidecar_env["LOOM_SANDBOX_LINK_GATEWAY_EXPECTED_PORT"] == (
+        "${LOOM_SANDBOX_LINK_GATEWAY_EXPECTED_PORT:?set LOOM_SANDBOX_LINK_GATEWAY_EXPECTED_PORT}"
+    )
+    assert sidecar_env["LOOM_SANDBOX_LINK_MINIO_EXPECTED_PORT"] == (
+        "${LOOM_SANDBOX_LINK_MINIO_EXPECTED_PORT:?set LOOM_SANDBOX_LINK_MINIO_EXPECTED_PORT}"
+    )
     assert {volume["source"] for volume in volumes} == {
         "${LOOM_WORKER_TOKEN_FILE_HOST:?set LOOM_WORKER_TOKEN_FILE_HOST}",
         "${LOOM_WORKER_MINIO_ACCESS_KEY_FILE_HOST:?set LOOM_WORKER_MINIO_ACCESS_KEY_FILE_HOST}",
@@ -107,6 +117,57 @@ def test_sandbox_link_overlay_mounts_only_host_local_secret_files() -> None:
     assert worker["depends_on"] == {
         "sandbox-link": {"condition": "service_healthy"},
     }
+
+
+def test_sandbox_link_overlay_requires_closed_registry_identity_labels() -> None:
+    data = yaml.safe_load(_SANDBOX_LINK_COMPOSE.read_text(encoding="utf-8"))
+    worker = data["services"]["worker"]
+    sidecar = data["services"]["sandbox-link"]
+    worker_env = _env_map(worker["environment"])
+    interpolation = {
+        "loom.sandbox": ("${LOOM_WORKER_SANDBOX_IDENTITY:?set LOOM_WORKER_SANDBOX_IDENTITY}"),
+        "loom.candidate_sha": ("${LOOM_WORKER_CANDIDATE_SHA:?set LOOM_WORKER_CANDIDATE_SHA}"),
+        "loom.slurm_job_id": ("${LOOM_WORKER_SLURM_JOB_ID:?set LOOM_WORKER_SLURM_JOB_ID}"),
+        "loom.compose_project": ("${LOOM_WORKER_COMPOSE_PROJECT:?set LOOM_WORKER_COMPOSE_PROJECT}"),
+        "loom.env_id": "${LOOM_WORKER_ENV_ID:?set LOOM_WORKER_ENV_ID}",
+        "loom.resource_generation": (
+            "${LOOM_WORKER_RESOURCE_GENERATION:?set LOOM_WORKER_RESOURCE_GENERATION}"
+        ),
+        "loom.candidate_id": ("${LOOM_WORKER_CANDIDATE_ID:?set LOOM_WORKER_CANDIDATE_ID}"),
+        "loom.candidate_tree": ("${LOOM_WORKER_CANDIDATE_TREE:?set LOOM_WORKER_CANDIDATE_TREE}"),
+        "loom.registry_generation": (
+            "${LOOM_WORKER_REGISTRY_GENERATION:?set LOOM_WORKER_REGISTRY_GENERATION}"
+        ),
+        "loom.registry_payload_sha256": (
+            "${LOOM_WORKER_REGISTRY_PAYLOAD_SHA256:?set LOOM_WORKER_REGISTRY_PAYLOAD_SHA256}"
+        ),
+    }
+    expected_environment = {
+        label.removeprefix("loom.").upper(): value
+        for label, value in interpolation.items()
+        if label
+        not in {
+            "loom.sandbox",
+            "loom.candidate_sha",
+            "loom.slurm_job_id",
+            "loom.compose_project",
+        }
+    }
+    expected_environment = {
+        f"LOOM_WORKER_{key}": value for key, value in expected_environment.items()
+    }
+    expected_environment.update(
+        {
+            "LOOM_WORKER_SANDBOX_IDENTITY": interpolation["loom.sandbox"],
+            "LOOM_WORKER_CANDIDATE_SHA": interpolation["loom.candidate_sha"],
+            "LOOM_WORKER_SLURM_JOB_ID": interpolation["loom.slurm_job_id"],
+            "LOOM_WORKER_COMPOSE_PROJECT": interpolation["loom.compose_project"],
+        },
+    )
+
+    assert sidecar["labels"] == interpolation
+    assert worker["labels"] == interpolation
+    assert {key: worker_env[key] for key in expected_environment} == expected_environment
 
 
 def test_remote_worker_compose_container_caps_passthrough() -> None:
