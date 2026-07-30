@@ -573,7 +573,7 @@ def _fixed_action_argv(
     authority = source / "scripts/ops/developer_sandbox_node_authority.py"
     transport = source / "scripts/ops/developer_sandbox_node_transport.py"
     environment_installer = source / "scripts/ops/developer_environment_authority_installer.py"
-    prefix = ["/usr/bin/python3", "-I"]
+    prefix = ["/usr/bin/python3", "-I", "-B"]
     action = request["action"]
     if action in {"authority-bootstrap", "authority-upgrade"}:
         command = action.removeprefix("authority-")
@@ -651,9 +651,9 @@ def _fixed_action_argv(
 
 def _run_host_python(argv: Sequence[str], cwd: Path) -> dict[str, Any]:
     if (
-        list(argv[:2]) != ["/usr/bin/python3", "-I"]
-        or len(argv) < 4
-        or not str(argv[2]).startswith(str(cwd) + "/scripts/ops/")
+        list(argv[:3]) != ["/usr/bin/python3", "-I", "-B"]
+        or len(argv) < 5
+        or not str(argv[3]).startswith(str(cwd) + "/scripts/ops/")
     ):
         raise DockerNodeBootstrapError("Docker bootstrap host command is outside authority")
 
@@ -787,12 +787,12 @@ def _run_chroot_action(request: Mapping[str, Any], stage: Path) -> dict[str, Any
     transport = cwd / "scripts/ops/developer_sandbox_node_transport.py"
     if HOST_TRANSPORT_CLIENT_POLICY.exists():
         client_result = _run_host_python(
-            ["/usr/bin/python3", "-I", str(transport), "check-client"],
+            ["/usr/bin/python3", "-I", "-B", str(transport), "check-client"],
             cwd,
         )
     if HOST_TRANSPORT_SERVER_POLICY.exists():
         server_result = _run_host_python(
-            ["/usr/bin/python3", "-I", str(transport), "check-server"],
+            ["/usr/bin/python3", "-I", "-B", str(transport), "check-server"],
             cwd,
         )
     result = {

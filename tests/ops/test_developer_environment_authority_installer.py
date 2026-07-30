@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import socket
@@ -618,6 +619,368 @@ def test_readback_rejects_untracked_import_bytecode_inventory(
             candidate_sha=SHA_ONE,
             candidate_tree=TREE_ONE,
         )
+
+
+def test_upgrade_retires_closed_legacy_bytecode_caches(
+    tmp_path: Path,
+    filesystem_root: Path,
+) -> None:
+    first_source = _candidate_source(tmp_path, "candidate-one")
+    commands = FakeHostCommands(filesystem_root, os.getgid())
+    first = _authority_installer(
+        filesystem_root=filesystem_root,
+        source_root=first_source,
+        runner=commands,
+    )
+    first.install(
+        action="environment-authority-bootstrap",
+        candidate_sha=SHA_ONE,
+        candidate_tree=TREE_ONE,
+    )
+    for relative, name in (
+        (
+            "usr/local/libexec/loom-developer-environment/__pycache__",
+            "developer_environment_authority.cpython-312.pyc",
+        ),
+        (
+            "usr/local/libexec/scripts/ops/__pycache__",
+            "developer_environment_registry.cpython-312.pyc",
+        ),
+    ):
+        cache = filesystem_root / relative
+        cache.mkdir(mode=0o755)
+        bytecode = cache / name
+        bytecode.write_bytes(b"derived bytecode")
+        bytecode.chmod(0o644)
+
+    second_source = _candidate_source(tmp_path, "candidate-two")
+    upgraded = _authority_installer(
+        filesystem_root=filesystem_root,
+        source_root=second_source,
+        runner=commands,
+    )
+    report = upgraded.install(
+        action="environment-authority-upgrade",
+        candidate_sha=SHA_TWO,
+        candidate_tree=TREE_TWO,
+    )
+
+    assert report["status"] == "succeeded"
+    assert all(
+        not (filesystem_root / path.relative_to("/")).exists()
+        for path in installer.LEGACY_BYTECODE_CACHE_DIRECTORIES
+    )
+    journal = (filesystem_root / installer.JOURNAL_PATH.relative_to("/")).read_text(
+        encoding="ascii"
+    )
+    assert '"phase":"legacy-bytecode-cache-retired"' in journal
+    assert "developer_environment_authority.cpython-312.pyc" in journal
+    assert "developer_environment_registry.cpython-312.pyc" in journal
+
+
+def test_upgrade_rejects_unknown_legacy_cache_entry_without_removing_it(
+    tmp_path: Path,
+    filesystem_root: Path,
+) -> None:
+    first_source = _candidate_source(tmp_path, "candidate-one")
+    commands = FakeHostCommands(filesystem_root, os.getgid())
+    first = _authority_installer(
+        filesystem_root=filesystem_root,
+        source_root=first_source,
+        runner=commands,
+    )
+    first.install(
+        action="environment-authority-bootstrap",
+        candidate_sha=SHA_ONE,
+        candidate_tree=TREE_ONE,
+    )
+    safe_cache = filesystem_root / "usr/local/libexec/loom-developer-environment/__pycache__"
+    safe_cache.mkdir(mode=0o755)
+    safe_bytecode = safe_cache / "developer_environment_authority.cpython-312.pyc"
+    safe_bytecode.write_bytes(b"derived bytecode")
+    safe_bytecode.chmod(0o644)
+    unsafe_cache = filesystem_root / "usr/local/libexec/scripts/ops/__pycache__"
+    unsafe_cache.mkdir(mode=0o755)
+    unknown = unsafe_cache / "operator-note"
+    unknown.write_bytes(b"preserve me")
+    unknown.chmod(0o644)
+
+    second_source = _candidate_source(tmp_path, "candidate-two")
+    upgraded = _authority_installer(
+        filesystem_root=filesystem_root,
+        source_root=second_source,
+        runner=commands,
+    )
+    with pytest.raises(
+        installer.AuthorityInstallerError,
+        match="legacy bytecode cache is not closed",
+    ):
+        upgraded.install(
+            action="environment-authority-upgrade",
+            candidate_sha=SHA_TWO,
+            candidate_tree=TREE_TWO,
+        )
+
+    assert unknown.read_bytes() == b"preserve me"
+    assert safe_bytecode.read_bytes() == b"derived bytecode"
+    journal = (filesystem_root / installer.JOURNAL_PATH.relative_to("/")).read_text(
+        encoding="ascii"
+    )
+    assert '"phase":"legacy-bytecode-cache-retirement-prepared"' not in journal
+
+
+def test_upgrade_rejects_cache_behind_symlink_ancestor_without_external_deletion(
+    tmp_path: Path,
+    filesystem_root: Path,
+) -> None:
+    first_source = _candidate_source(tmp_path, "candidate-one")
+    commands = FakeHostCommands(filesystem_root, os.getgid())
+    first = _authority_installer(
+        filesystem_root=filesystem_root,
+        source_root=first_source,
+        runner=commands,
+    )
+    first.install(
+        action="environment-authority-bootstrap",
+        candidate_sha=SHA_ONE,
+        candidate_tree=TREE_ONE,
+    )
+    runtime_root = filesystem_root / "usr/local/libexec/loom-runtime-python"
+    preserved = tmp_path / "preserved-runtime"
+    runtime_root.rename(preserved)
+    external = tmp_path / "external-runtime"
+    cache = external / "loom_control_plane/__pycache__"
+    cache.mkdir(parents=True, mode=0o755)
+    sentinel = cache / "__init__.cpython-312.pyc"
+    sentinel.write_bytes(b"outside authority")
+    sentinel.chmod(0o644)
+    runtime_root.symlink_to(external, target_is_directory=True)
+
+    second_source = _candidate_source(tmp_path, "candidate-two")
+    upgraded = _authority_installer(
+        filesystem_root=filesystem_root,
+        source_root=second_source,
+        runner=commands,
+    )
+    with pytest.raises(
+        installer.AuthorityInstallerError,
+        match="import ancestry is unsafe",
+    ):
+        upgraded.install(
+            action="environment-authority-upgrade",
+            candidate_sha=SHA_TWO,
+            candidate_tree=TREE_TWO,
+        )
+
+    assert sentinel.read_bytes() == b"outside authority"
+
+
+def test_interrupted_bytecode_retirement_is_journaled_and_retry_converges(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    filesystem_root: Path,
+) -> None:
+    first_source = _candidate_source(tmp_path, "candidate-one")
+    commands = FakeHostCommands(filesystem_root, os.getgid())
+    first = _authority_installer(
+        filesystem_root=filesystem_root,
+        source_root=first_source,
+        runner=commands,
+    )
+    first.install(
+        action="environment-authority-bootstrap",
+        candidate_sha=SHA_ONE,
+        candidate_tree=TREE_ONE,
+    )
+    cache = filesystem_root / "usr/local/libexec/loom-developer-environment/__pycache__"
+    cache.mkdir(mode=0o755)
+    bytecode = cache / "developer_environment_authority.cpython-312.pyc"
+    bytecode.write_bytes(b"derived bytecode")
+    bytecode.chmod(0o644)
+    second_source = _candidate_source(tmp_path, "candidate-two")
+    upgraded = _authority_installer(
+        filesystem_root=filesystem_root,
+        source_root=second_source,
+        runner=commands,
+    )
+    real_unlink = Path.unlink
+
+    class SimulatedCrash(BaseException):
+        pass
+
+    def crash_after_unlink(path: Path, *args: object, **kwargs: object) -> None:
+        real_unlink(path, *args, **kwargs)
+        if path == bytecode:
+            raise SimulatedCrash
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(Path, "unlink", crash_after_unlink)
+        with pytest.raises(SimulatedCrash):
+            upgraded.install(
+                action="environment-authority-upgrade",
+                candidate_sha=SHA_TWO,
+                candidate_tree=TREE_TWO,
+            )
+
+    interrupted_journal = (filesystem_root / installer.JOURNAL_PATH.relative_to("/")).read_text(
+        encoding="ascii"
+    )
+    assert '"phase":"legacy-bytecode-cache-retirement-prepared"' in interrupted_journal
+    assert '"phase":"legacy-bytecode-cache-retired"' not in interrupted_journal
+
+    report = upgraded.install(
+        action="environment-authority-upgrade",
+        candidate_sha=SHA_TWO,
+        candidate_tree=TREE_TWO,
+    )
+
+    assert report["status"] == "succeeded"
+    assert not cache.exists()
+    converged_journal = (filesystem_root / installer.JOURNAL_PATH.relative_to("/")).read_text(
+        encoding="ascii"
+    )
+    assert '"phase":"legacy-bytecode-cache-retired"' in converged_journal
+
+
+def test_bytecode_retirement_requires_complete_prepared_journal_before_unlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    filesystem_root: Path,
+) -> None:
+    first_source = _candidate_source(tmp_path, "candidate-one")
+    commands = FakeHostCommands(filesystem_root, os.getgid())
+    first = _authority_installer(
+        filesystem_root=filesystem_root,
+        source_root=first_source,
+        runner=commands,
+    )
+    first.install(
+        action="environment-authority-bootstrap",
+        candidate_sha=SHA_ONE,
+        candidate_tree=TREE_ONE,
+    )
+    cache = filesystem_root / "usr/local/libexec/loom-developer-environment/__pycache__"
+    cache.mkdir(mode=0o755)
+    bytecode = cache / "developer_environment_authority.cpython-312.pyc"
+    bytecode.write_bytes(b"derived bytecode")
+    bytecode.chmod(0o644)
+    second_source = _candidate_source(tmp_path, "candidate-two")
+    upgraded = _authority_installer(
+        filesystem_root=filesystem_root,
+        source_root=second_source,
+        runner=commands,
+    )
+    monkeypatch.setattr(installer.os, "write", lambda _descriptor, _payload: 0)
+
+    with pytest.raises(
+        installer.AuthorityInstallerError,
+        match="journal write failed",
+    ):
+        upgraded.install(
+            action="environment-authority-upgrade",
+            candidate_sha=SHA_TWO,
+            candidate_tree=TREE_TWO,
+        )
+
+    assert bytecode.read_bytes() == b"derived bytecode"
+
+
+def test_append_journal_retries_short_regular_file_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    filesystem_root: Path,
+) -> None:
+    source = _candidate_source(tmp_path, "candidate-short-journal-write")
+    commands = FakeHostCommands(filesystem_root, os.getgid())
+    authority = _authority_installer(
+        filesystem_root=filesystem_root,
+        source_root=source,
+        runner=commands,
+    )
+    authority._ensure_directory(installer.STATE_ROOT, 0o700)
+    real_write = os.write
+    writes: list[int] = []
+
+    def short_write(descriptor: int, payload: object) -> int:
+        view = memoryview(payload)
+        limit = max(1, len(view) // 3)
+        writes.append(limit)
+        return real_write(descriptor, view[:limit])
+
+    monkeypatch.setattr(installer.os, "write", short_write)
+    authority._append_journal(
+        {
+            "action": "test-short-write",
+            "phase": "complete",
+            "payload": "x" * 8192,
+        }
+    )
+
+    raw = (filesystem_root / installer.JOURNAL_PATH.relative_to("/")).read_bytes()
+    event = json.loads(raw)
+    assert raw == installer._canonical(event)
+    assert len(writes) > 1
+
+
+def test_append_journal_recovers_partial_event_after_process_crash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    filesystem_root: Path,
+) -> None:
+    source = _candidate_source(tmp_path, "candidate-crashed-journal-write")
+    commands = FakeHostCommands(filesystem_root, os.getgid())
+    authority = _authority_installer(
+        filesystem_root=filesystem_root,
+        source_root=source,
+        runner=commands,
+    )
+    authority._ensure_directory(installer.STATE_ROOT, 0o700)
+    authority._append_journal(
+        {
+            "action": "baseline",
+            "phase": "complete",
+        }
+    )
+    real_write = os.write
+    crashed = False
+
+    class SimulatedCrash(BaseException):
+        pass
+
+    def partial_then_crash(descriptor: int, payload: object) -> int:
+        nonlocal crashed
+        if not crashed:
+            crashed = True
+            view = memoryview(payload)
+            real_write(descriptor, view[: max(1, len(view) // 2)])
+            raise SimulatedCrash
+        return real_write(descriptor, payload)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(installer.os, "write", partial_then_crash)
+        with pytest.raises(SimulatedCrash):
+            authority._append_journal(
+                {
+                    "action": "interrupted",
+                    "phase": "prepared",
+                    "payload": "x" * 8192,
+                }
+            )
+
+    authority._append_journal(
+        {
+            "action": "retry",
+            "phase": "complete",
+        }
+    )
+
+    raw = (filesystem_root / installer.JOURNAL_PATH.relative_to("/")).read_bytes()
+    lines = raw.splitlines(keepends=True)
+    assert len(lines) == 2
+    for line in lines:
+        event = json.loads(line)
+        assert line == installer._canonical(event)
+    assert [json.loads(line)["action"] for line in lines] == ["baseline", "retry"]
 
 
 @pytest.mark.parametrize(

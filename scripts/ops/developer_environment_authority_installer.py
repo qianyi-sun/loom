@@ -70,6 +70,16 @@ TRANSACTION_RE: Final = re.compile(r"^[0-9a-f]{64}$")
 MAX_ASSET_BYTES: Final = 4 * 1024 * 1024
 MAX_STATE_BYTES: Final = 4 * 1024 * 1024
 MAX_COMMAND_OUTPUT: Final = 4 * 1024 * 1024
+MAX_BYTECODE_CACHE_ENTRIES: Final = 128
+BYTECODE_CACHE_NAME_RE: Final = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_]*[.](?:cpython|pypy)-?[0-9]+(?:[.]opt-[12])?[.]pyc$"
+)
+LEGACY_BYTECODE_CACHE_DIRECTORIES: Final = (
+    Path("/usr/local/libexec/loom-developer-environment/__pycache__"),
+    Path("/usr/local/libexec/scripts/__pycache__"),
+    Path("/usr/local/libexec/scripts/ops/__pycache__"),
+    Path("/usr/local/libexec/loom-runtime-python/loom_control_plane/__pycache__"),
+)
 
 EXPECTED_ASSETS: Final = {
     (
@@ -784,11 +794,7 @@ class AuthorityInstaller:
         try:
             descriptor = os.open(
                 path,
-                os.O_WRONLY
-                | os.O_APPEND
-                | os.O_CREAT
-                | os.O_NOFOLLOW
-                | getattr(os, "O_CLOEXEC", 0),
+                os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
                 0o600,
             )
             metadata = os.fstat(descriptor)
@@ -799,7 +805,23 @@ class AuthorityInstaller:
                 or stat.S_IMODE(metadata.st_mode) != 0o600
             ):
                 raise AuthorityInstallerError("installer journal is unsafe")
-            os.write(descriptor, raw)
+            initial_size = self._recover_journal_tail(descriptor)
+            try:
+                view = memoryview(raw)
+                while view:
+                    written = os.write(descriptor, view)
+                    if written < 1:
+                        raise AuthorityInstallerError("installer journal write failed")
+                    view = view[written:]
+            except (AuthorityInstallerError, OSError):
+                try:
+                    os.ftruncate(descriptor, initial_size)
+                    os.fsync(descriptor)
+                except OSError as exc:
+                    raise AuthorityInstallerError(
+                        "installer journal recovery failed safely"
+                    ) from exc
+                raise
             os.fsync(descriptor)
         except AuthorityInstallerError:
             raise
@@ -808,6 +830,49 @@ class AuthorityInstaller:
         finally:
             if descriptor >= 0:
                 os.close(descriptor)
+
+    def _recover_journal_tail(self, descriptor: int) -> int:
+        try:
+            size = os.fstat(descriptor).st_size
+            if size == 0:
+                return 0
+            start = max(0, size - MAX_STATE_BYTES)
+            tail = os.pread(descriptor, size - start, start)
+        except OSError as exc:
+            raise AuthorityInstallerError("installer journal is unavailable") from exc
+        if len(tail) != size - start:
+            raise AuthorityInstallerError("installer journal is unavailable")
+        if tail.endswith(b"\n"):
+            boundary = size
+            complete = tail
+        else:
+            separator = tail.rfind(b"\n")
+            if separator < 0:
+                if start != 0:
+                    raise AuthorityInstallerError("installer journal tail is invalid")
+                boundary = 0
+                complete = b""
+            else:
+                boundary = start + separator + 1
+                complete = tail[: separator + 1]
+        if complete:
+            previous = complete[:-1].rfind(b"\n")
+            if previous < 0 and start != 0:
+                raise AuthorityInstallerError("installer journal tail is invalid")
+            line = complete[previous + 1 :]
+            try:
+                event = json.loads(line)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise AuthorityInstallerError("installer journal tail is invalid") from exc
+            if not isinstance(event, dict) or line != _canonical(event):
+                raise AuthorityInstallerError("installer journal tail is invalid")
+        if boundary != size:
+            try:
+                os.ftruncate(descriptor, boundary)
+                os.fsync(descriptor)
+            except OSError as exc:
+                raise AuthorityInstallerError("installer journal recovery failed safely") from exc
+        return boundary
 
     def _active_payload(
         self,
@@ -1065,6 +1130,124 @@ class AuthorityInstaller:
             or {entry.name for entry in entries} - LIBEXEC_DESTINATIONS
         ):
             raise AuthorityInstallerError("installer dedicated inventory is not closed")
+
+    def _retire_legacy_bytecode_caches(
+        self,
+        *,
+        action: str,
+        candidate_sha: str,
+        candidate_tree: str,
+    ) -> tuple[dict[str, Any], ...]:
+        plans: list[dict[str, Any]] = []
+        for path in LEGACY_BYTECODE_CACHE_DIRECTORIES:
+            self._validate_installed_ancestry(path)
+            host = self._host(path)
+            try:
+                metadata = host.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise AuthorityInstallerError("legacy bytecode cache is unavailable") from exc
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or stat.S_ISLNK(metadata.st_mode)
+                or metadata.st_uid != self.expected_uid
+                or metadata.st_gid != self.expected_gid
+                or metadata.st_mode & 0o022
+            ):
+                raise AuthorityInstallerError("legacy bytecode cache metadata is unsafe")
+            try:
+                entries = tuple(sorted(host.iterdir(), key=lambda value: value.name))
+            except OSError as exc:
+                raise AuthorityInstallerError("legacy bytecode cache is unavailable") from exc
+            if len(entries) > MAX_BYTECODE_CACHE_ENTRIES:
+                raise AuthorityInstallerError("legacy bytecode cache is not closed")
+            evidence: list[dict[str, str]] = []
+            identities: dict[str, tuple[int, ...]] = {}
+            for entry in entries:
+                try:
+                    entry_metadata = entry.lstat()
+                except OSError as exc:
+                    raise AuthorityInstallerError("legacy bytecode cache is unavailable") from exc
+                if (
+                    BYTECODE_CACHE_NAME_RE.fullmatch(entry.name) is None
+                    or not stat.S_ISREG(entry_metadata.st_mode)
+                    or stat.S_ISLNK(entry_metadata.st_mode)
+                    or entry_metadata.st_nlink != 1
+                    or entry_metadata.st_uid != self.expected_uid
+                    or entry_metadata.st_gid != self.expected_gid
+                    or entry_metadata.st_mode & 0o022
+                ):
+                    raise AuthorityInstallerError("legacy bytecode cache is not closed")
+                payload = _read_regular(
+                    entry,
+                    limit=MAX_ASSET_BYTES,
+                    expected_uid=self.expected_uid,
+                    expected_gid=self.expected_gid,
+                )
+                identities[entry.name] = _metadata_identity(entry_metadata)
+                evidence.append(
+                    {
+                        "name": entry.name,
+                        "sha256": _digest(payload),
+                    }
+                )
+            plans.append(
+                {
+                    "path": path,
+                    "host": host,
+                    "directory_identity": _metadata_identity(metadata),
+                    "entry_identities": identities,
+                    "evidence": {
+                        "directory": str(path),
+                        "entries": evidence,
+                    },
+                }
+            )
+        if not plans:
+            return ()
+        rendered_evidence = tuple(plan["evidence"] for plan in plans)
+        journal_binding = {
+            "action": action,
+            "candidate_sha": candidate_sha,
+            "candidate_tree": candidate_tree,
+            "retired_bytecode_caches": list(rendered_evidence),
+        }
+        self._append_journal(
+            {
+                **journal_binding,
+                "phase": "legacy-bytecode-cache-retirement-prepared",
+            }
+        )
+        for plan in plans:
+            path = plan["path"]
+            host = plan["host"]
+            try:
+                if _metadata_identity(host.lstat()) != plan["directory_identity"]:
+                    raise AuthorityInstallerError("legacy bytecode cache changed")
+                rebound = tuple(sorted(host.iterdir(), key=lambda value: value.name))
+                if [entry.name for entry in rebound] != sorted(plan["entry_identities"]):
+                    raise AuthorityInstallerError("legacy bytecode cache changed")
+                for entry in rebound:
+                    if _metadata_identity(entry.lstat()) != plan["entry_identities"][entry.name]:
+                        raise AuthorityInstallerError("legacy bytecode cache changed")
+                    entry.unlink()
+                self._fsync_directory(path)
+                host.rmdir()
+                self._fsync_directory(path.parent)
+            except AuthorityInstallerError:
+                raise
+            except OSError as exc:
+                raise AuthorityInstallerError(
+                    "legacy bytecode cache retirement failed safely"
+                ) from exc
+        self._append_journal(
+            {
+                **journal_binding,
+                "phase": "legacy-bytecode-cache-retired",
+            }
+        )
+        return rendered_evidence
 
     def _read_installed(self) -> dict[str, Any] | None:
         path = self._host(INSTALLED_PATH)
@@ -1707,8 +1890,14 @@ class AuthorityInstaller:
                 assets=assets,
                 manifest_sha256=manifest_sha256,
             )
-        self._validate_dedicated_inventory()
         installed = self._read_installed()
+        if action == "environment-authority-upgrade" and installed is not None:
+            self._retire_legacy_bytecode_caches(
+                action=action,
+                candidate_sha=candidate_sha,
+                candidate_tree=candidate_tree,
+            )
+        self._validate_dedicated_inventory()
         if installed is not None:
             self._verify_installed_assets(installed)
             if (

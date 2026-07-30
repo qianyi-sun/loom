@@ -417,9 +417,9 @@ def test_fixed_action_argv_is_closed_to_host_python_and_candidate_scripts(
 
     argv, cwd = bootstrap._fixed_action_argv(request, stage)
 
-    assert argv[:2] == ["/usr/bin/python3", "-I"]
+    assert argv[:3] == ["/usr/bin/python3", "-I", "-B"]
     assert expected_command in argv
-    assert str(argv[2]).startswith(str(cwd) + "/scripts/ops/")
+    assert str(argv[3]).startswith(str(cwd) + "/scripts/ops/")
     assert cwd == Path("/") / stage.relative_to(host_root) / "source"
     assert "--execute" in argv if action != "readback" else "--execute" not in argv
 
@@ -459,6 +459,7 @@ def test_environment_authority_argv_is_fixed_to_candidate_installer(
     assert argv == [
         "/usr/bin/python3",
         "-I",
+        "-B",
         str(cwd / "scripts/ops/developer_environment_authority_installer.py"),
         action,
         "--candidate-sha",
@@ -467,6 +468,44 @@ def test_environment_authority_argv_is_fixed_to_candidate_installer(
         TREE,
     ]
     assert not {"--execute", "--uid", "--port", "--path"} & set(argv)
+
+
+def test_fixed_environment_action_passes_host_python_guard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(action="environment-authority-upgrade", node="oldlab-2")
+    host_root = tmp_path / "host"
+    stage = host_root / "run/loom-developer-sandbox-node-bootstrap" / request["request_id"]
+    (stage / "source/scripts/ops").mkdir(parents=True)
+    (stage / "input").mkdir()
+    monkeypatch.setattr(bootstrap, "HOST_ROOT", host_root)
+    argv, cwd = bootstrap._fixed_action_argv(request, stage)
+    report = {
+        "schema_version": 1,
+        "action": "environment-authority-upgrade",
+        "node": "oldlab-2",
+        "source_sha": SHA,
+        "source_tree": TREE,
+        "status": "succeeded",
+    }
+
+    def run(received: list[str], **kwargs: Any) -> Any:
+        assert received == argv
+        assert callable(kwargs["preexec_fn"])
+        return type(
+            "Completed",
+            (),
+            {
+                "returncode": 0,
+                "stdout": bootstrap._canonical(report),
+                "stderr": b"",
+            },
+        )()
+
+    monkeypatch.setattr(bootstrap.subprocess, "run", run)
+
+    assert bootstrap._run_host_python(argv, cwd) == report
 
 
 def test_clean_environment_uses_fixed_xdg_stage_without_home() -> None:
@@ -510,6 +549,7 @@ def test_host_python_requires_fixed_candidate_script_and_canonical_evidence(
     argv = [
         "/usr/bin/python3",
         "-I",
+        "-B",
         str(cwd / "scripts/ops/developer_sandbox_node_authority.py"),
         "bootstrap",
     ]
@@ -518,7 +558,7 @@ def test_host_python_requires_fixed_candidate_script_and_canonical_evidence(
     assert calls == [argv]
 
     with pytest.raises(bootstrap.DockerNodeBootstrapError, match="outside authority"):
-        bootstrap._run_host_python(["/bin/sh", "-c", "id", "extra"], cwd)
+        bootstrap._run_host_python(["/bin/sh", "-c", "id", "extra", "extra"], cwd)
 
     def rejected(_argv: list[str], **_kwargs: Any) -> Any:
         return type(

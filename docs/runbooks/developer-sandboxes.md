@@ -229,6 +229,17 @@ Therefore install or upgrade node authority before either consumer, and treat
 prerequisite drift as a node-authority repair rather than a consumer rollback
 target.
 
+The one-shot bootstrap invokes every host Python transaction with isolated
+imports and bytecode writes disabled. During an environment-authority upgrade,
+the installer may retire only closed `__pycache__` directories beneath its
+fixed import roots: every directory and `.pyc` must remain root-owned,
+non-writable by group/other, single-link, bounded, and match the closed
+bytecode-name grammar. The retirement and file digests are appended to the
+persistent installer journal before normal installed-inventory verification.
+An unknown file, symlink, unsafe owner/mode, or changing inventory fails closed
+and is never deleted. Readback does not clean drift; it continues to report
+any cache as an invalid installed inventory.
+
 Use
 `deploy/developer-sandboxes/Containerfile.node-bootstrap` and the fixed
 `developer_sandbox_node_docker_bootstrap.py` entrypoint. Build the image from
