@@ -27,6 +27,56 @@ SHA = "a" * 40
 TREE = "b" * 40
 
 
+@pytest.fixture
+def live_legacy_v1_asset_keys() -> frozenset[str]:
+    return frozenset(
+        {
+            "deploy/developer-sandboxes/loom-developer-sandbox-link@.service",
+            "deploy/developer-sandboxes/loom-developer-sandbox-node-authority.sudoers",
+            "deploy/developer-sandboxes/loom-developer-sandbox-node-authority.tmpfiles.conf",
+            ("deploy/developer-sandboxes/loom-developer-sandbox-platform-health-authority.service"),
+            ("deploy/developer-sandboxes/loom-developer-sandbox-platform-health-authority.sudoers"),
+            "deploy/developer-sandboxes/loom-staging-external-slurm-authority.service",
+            "deploy/developer-sandboxes/loom-staging-external-slurm-authority.sudoers",
+            "deploy/developer-sandboxes/loom-staging-external-slurm-authority.wrapper",
+            "deploy/developer-sandboxes/loom-staging-pressure-reclaim-authority.service",
+            "deploy/developer-sandboxes/loom-staging-pressure-reclaim-authority.sudoers",
+            "deploy/developer-sandboxes/loom-staging-shared.tmpfiles.conf",
+            "deploy/developer-sandboxes/node-authority-transport.toml",
+            "deploy/developer-sandboxes/platform-health-authority.toml",
+            "deploy/developer-sandboxes/remote-links/devansh.toml",
+            "deploy/developer-sandboxes/remote-links/hongjian.toml",
+            "deploy/developer-sandboxes/remote-links/qianyi.toml",
+            "deploy/developer-sandboxes/runtime-domains.toml",
+            "deploy/developer-sandboxes/shared-capacity-policies/gb10.toml",
+            "deploy/developer-sandboxes/shared-capacity-policies/oldlab.toml",
+            r"deploy/developer-sandboxes/srv-loom-staging\x2dshared.mount",
+            "deploy/developer-sandboxes/staging-external-slurm-authority.toml",
+            "deploy/developer-sandboxes/staging-pressure-reclaim-authority.toml",
+            "deploy/slurm/developer-sandboxes/gb10.toml",
+            "deploy/slurm/developer-sandboxes/oldlab.toml",
+            "deploy/slurm/loom-developer-sandbox-slurm-recovery.service",
+            "deploy/slurm/loom-developer-sandbox-slurm-recovery.timer",
+            "deploy/slurm/loom-slurm-job-cgroup-guard.service",
+            "scripts/ops/developer_sandbox_capacity_contract.py",
+            "scripts/ops/developer_sandbox_domain_runtime.py",
+            "scripts/ops/developer_sandbox_host.py",
+            "scripts/ops/developer_sandbox_live_authority.py",
+            "scripts/ops/developer_sandbox_node_authority.py",
+            "scripts/ops/developer_sandbox_node_docker_request.py",
+            "scripts/ops/developer_sandbox_node_transport.py",
+            "scripts/ops/developer_sandbox_platform_health_authority.py",
+            "scripts/ops/developer_sandbox_remote_link.py",
+            "scripts/ops/developer_sandbox_remote_link_host.py",
+            "scripts/ops/developer_sandbox_slurm_policy.py",
+            "scripts/ops/slurm_job_cgroup_guard.py",
+            "scripts/ops/staging_external_slurm_acceptance_authority.py",
+            "scripts/ops/staging_pressure_reclaim_authority.py",
+            "src/loom_cli/external_slurm_acceptance.py",
+        },
+    )
+
+
 def _finalization_record(
     environment: dict[str, object],
     candidate: dict[str, object],
@@ -1005,6 +1055,22 @@ def _policy(node: str = "oldlab-1") -> authority.AuthorityPolicy:
         source_tree=TREE,
         node=node,
         asset_sha256={str(path): "c" * 64 for path in authority.SOURCE_ASSETS},
+    )
+
+
+def _legacy_policy(
+    node: str = "oldlab-1",
+    *,
+    retired_payload: bytes = b"legacy-retired",
+) -> authority.AuthorityPolicy:
+    digests = {key: "c" * 64 for key in authority.LEGACY_V1_POLICY_ASSET_KEYS}
+    for relative in authority.RETIRED_LEGACY_SOURCE_ASSETS:
+        digests[str(relative)] = hashlib.sha256(retired_payload).hexdigest()
+    return authority.AuthorityPolicy(
+        source_sha=SHA,
+        source_tree=TREE,
+        node=node,
+        asset_sha256=digests,
     )
 
 
@@ -2423,36 +2489,188 @@ def test_live_authority_system_install_mapping_is_fixed_and_complete() -> None:
         assert managed[target] == (mode, parent_mode)
 
 
-def test_policy_allows_only_the_closed_external_asset_upgrade_migration(
+def test_policy_accepts_only_exact_current_or_legacy_v1_asset_inventories(
+    monkeypatch: pytest.MonkeyPatch,
+    live_legacy_v1_asset_keys: frozenset[str],
+) -> None:
+    def encoded(digests: dict[str, str]) -> bytes:
+        return authority._canonical(
+            {
+                "schema_version": 1,
+                "source_sha": SHA,
+                "source_tree": TREE,
+                "node": "oldlab-1",
+                "asset_sha256": digests,
+            },
+        )
+
+    current = {key: "c" * 64 for key in authority.CURRENT_POLICY_ASSET_KEYS}
+    legacy = {key: "d" * 64 for key in live_legacy_v1_asset_keys}
+    assert len(live_legacy_v1_asset_keys) == 42
+    assert authority.LEGACY_V1_POLICY_ASSET_KEYS == live_legacy_v1_asset_keys
+    assert {
+        str(relative) for relative in authority.LEGACY_V1_MIGRATABLE_SOURCE_ASSETS
+    } == authority.CURRENT_POLICY_ASSET_KEYS - live_legacy_v1_asset_keys
+    payloads = iter((encoded(current), encoded(legacy)))
+    monkeypatch.setattr(
+        authority,
+        "_safe_root_file",
+        lambda *_args, **_kwargs: next(payloads),
+    )
+
+    assert authority._read_policy().asset_sha256 == current
+    assert authority._read_policy().asset_sha256 == legacy
+
+    invalid_inventories = [
+        {key: value for key, value in legacy.items() if key != removed}
+        for removed in sorted(live_legacy_v1_asset_keys)
+    ]
+    legacy_extra = dict(legacy)
+    legacy_extra["deploy/developer-sandboxes/foreign.toml"] = "e" * 64
+    invalid_inventories.append(legacy_extra)
+    current_missing = dict(current)
+    current_missing.pop(next(iter(current)))
+    invalid_inventories.append(current_missing)
+    current_extra = dict(current)
+    current_extra["deploy/developer-sandboxes/foreign.toml"] = "e" * 64
+    invalid_inventories.append(current_extra)
+    partial_migration = dict(current)
+    partial_migration.pop(str(next(iter(authority.MIGRATABLE_EXTERNAL_SOURCE_ASSETS))))
+    invalid_inventories.append(partial_migration)
+
+    payloads = iter(encoded(digests) for digests in invalid_inventories)
+    monkeypatch.setattr(
+        authority,
+        "_safe_root_file",
+        lambda *_args, **_kwargs: next(payloads),
+    )
+    for _invalid in invalid_inventories:
+        with pytest.raises(authority.NodeAuthorityError, match="asset identity"):
+            authority._read_policy()
+
+
+def test_legacy_v1_runtime_validates_every_listed_asset_and_rejects_tampering(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    digests = {
-        str(relative): "c" * 64
-        for relative in authority.SOURCE_ASSETS
-        if relative not in authority.MIGRATABLE_EXTERNAL_SOURCE_ASSETS
+    source_root = tmp_path / "source"
+    policy = _legacy_policy()
+    payloads = {
+        key: (
+            b"legacy-retired"
+            if Path(key) in authority.RETIRED_LEGACY_SOURCE_ASSETS
+            else b"legacy-current"
+        )
+        for key in policy.asset_sha256
     }
-    payload = authority._canonical(
-        {
-            "schema_version": 1,
-            "source_sha": SHA,
-            "source_tree": TREE,
-            "node": "oldlab-1",
-            "asset_sha256": digests,
+    payloads[str(authority.SOURCE_ASSETS[0])] = b"authority"
+    payloads[str(authority.SUDOERS_RELATIVE)] = b"sudoers"
+    policy = authority.AuthorityPolicy(
+        source_sha=policy.source_sha,
+        source_tree=policy.source_tree,
+        node=policy.node,
+        asset_sha256={
+            key: hashlib.sha256(payload).hexdigest() for key, payload in payloads.items()
         },
     )
-    monkeypatch.setattr(authority, "_safe_root_file", lambda *_args, **_kwargs: payload)
+    calls: list[tuple[Path, int]] = []
 
-    assert authority._read_policy().asset_sha256 == digests
+    def read(path: Path, *, mode: int, **_kwargs: object) -> bytes:
+        calls.append((path, mode))
+        if path in {authority.LIBEXEC, source_root / authority.SOURCE_ASSETS[0]}:
+            return b"authority"
+        if path in {authority.SUDOERS, source_root / authority.SUDOERS_RELATIVE}:
+            return b"sudoers"
+        return payloads[str(path.relative_to(source_root))]
 
-    missing_legacy = dict(digests)
-    missing_legacy.pop("scripts/ops/developer_sandbox_node_authority.py")
+    monkeypatch.setattr(authority, "SOURCE_ROOT", source_root)
+    monkeypatch.setattr(authority, "_hostname", lambda: authority.NODE_HOSTNAMES[policy.node])
+    monkeypatch.setattr(authority, "_safe_root_file", read)
+    monkeypatch.setattr(authority, "_validate_system_install_assets", lambda **_kwargs: ())
+
+    assert (
+        authority._validate_runtime_assets(
+            policy,
+            allow_absent_system_install=True,
+        )
+        == ()
+    )
+    validated_sources = {
+        path.relative_to(source_root): mode
+        for path, mode in calls
+        if path.is_relative_to(source_root)
+    }
+    assert set(validated_sources) == {Path(key) for key in policy.asset_sha256}
+    assert all(
+        validated_sources[Path(key)] == authority._source_asset_mode(Path(key))
+        for key in policy.asset_sha256
+    )
+
+    tampered = source_root / authority.RETIRED_LEGACY_SOURCE_ASSETS[0]
+
+    def tampered_read(path: Path, *, mode: int, **kwargs: object) -> bytes:
+        if path == tampered:
+            return b"tampered"
+        return read(path, mode=mode, **kwargs)
+
+    monkeypatch.setattr(authority, "_safe_root_file", tampered_read)
+    with pytest.raises(authority.NodeAuthorityError, match="source drifted"):
+        authority._validate_runtime_assets(
+            policy,
+            allow_absent_system_install=True,
+        )
+
+
+def test_current_policy_rejects_retired_legacy_source_assets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_root = tmp_path / "source"
+    retired = source_root / authority.RETIRED_LEGACY_SOURCE_ASSETS[0]
+    retired.parent.mkdir(parents=True)
+    retired.write_bytes(b"legacy")
+    monkeypatch.setattr(authority, "SOURCE_ROOT", source_root)
+    monkeypatch.setattr(authority, "_hostname", lambda: authority.NODE_HOSTNAMES["oldlab-1"])
+    monkeypatch.setattr(authority, "_safe_root_file", lambda *_args, **_kwargs: b"")
+    policy = authority.AuthorityPolicy(
+        source_sha=SHA,
+        source_tree=TREE,
+        node="oldlab-1",
+        asset_sha256={
+            str(relative): hashlib.sha256(b"").hexdigest() for relative in authority.SOURCE_ASSETS
+        },
+    )
+
+    with pytest.raises(authority.NodeAuthorityError, match="retired source asset"):
+        authority._validate_runtime_assets(policy)
+
+
+def test_upgrade_snapshot_inventory_includes_only_exact_legacy_retired_assets() -> None:
+    current_paths = {path for path, _mode, _parent in authority._upgrade_managed_assets(_policy())}
+    legacy_paths = {
+        path for path, _mode, _parent in authority._upgrade_managed_assets(_legacy_policy())
+    }
+    retired_paths = {
+        authority.SOURCE_ROOT / relative for relative in authority.RETIRED_LEGACY_SOURCE_ASSETS
+    }
+
+    assert legacy_paths - current_paths == retired_paths
+    assert authority.SOURCE_ROOT / authority.STAGING_EXTERNAL_CONSUMER_RELATIVE in current_paths
+    assert len(retired_paths) == 3
+
+
+def test_policy_rejects_malformed_legacy_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    digests = dict(_legacy_policy().asset_sha256)
+    digests[str(authority.RETIRED_LEGACY_SOURCE_ASSETS[0])] = "not-a-digest"
     invalid = authority._canonical(
         {
             "schema_version": 1,
             "source_sha": SHA,
             "source_tree": TREE,
             "node": "oldlab-1",
-            "asset_sha256": missing_legacy,
+            "asset_sha256": digests,
         },
     )
     monkeypatch.setattr(authority, "_safe_root_file", lambda *_args, **_kwargs: invalid)
@@ -5109,6 +5327,73 @@ def test_upgrade_disables_admission_replaces_atomically_and_preserves_state(
     assert "restored" not in events
 
 
+def test_legacy_v1_upgrade_retires_only_obsolete_assets_after_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _old, new, snapshot, events = _prepare_upgrade_mocks(tmp_path, monkeypatch)
+    retired_payload = b"legacy-retired"
+    old = _legacy_policy(retired_payload=retired_payload)
+    policies = iter((old, new))
+    monkeypatch.setattr(authority, "_read_policy", lambda: next(policies))
+    retired: list[Path] = []
+
+    def unlink(path: Path, **_kwargs: object) -> bytes:
+        if path == authority.SUDOERS:
+            events.append("admission-disabled")
+            return b"old-sudoers"
+        retired.append(path)
+        events.append(f"retire:{path}")
+        return retired_payload
+
+    monkeypatch.setattr(authority, "_unlink_root_file", unlink)
+
+    report = authority.upgrade("e" * 40, "d" * 40)
+
+    expected = [
+        authority.SOURCE_ROOT / relative for relative in authority.RETIRED_LEGACY_SOURCE_ASSETS
+    ]
+    assert report["changed"] is True
+    assert report["snapshot"] == str(snapshot.root)
+    assert retired == expected
+    assert authority.SOURCE_ROOT / authority.STAGING_EXTERNAL_CONSUMER_RELATIVE not in retired
+    last_source_replace = max(
+        index
+        for index, event in enumerate(events)
+        if event.startswith(f"replace:{authority.SOURCE_ROOT}")
+    )
+    first_retire = min(index for index, event in enumerate(events) if event.startswith("retire:"))
+    assert last_source_replace < first_retire
+    assert "restored" not in events
+
+
+def test_legacy_v1_upgrade_retirement_failure_restores_complete_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _old, new, _snapshot, events = _prepare_upgrade_mocks(tmp_path, monkeypatch)
+    old = _legacy_policy(retired_payload=b"expected")
+    policies = iter((old, new))
+    monkeypatch.setattr(authority, "_read_policy", lambda: next(policies))
+
+    def unlink(path: Path, **_kwargs: object) -> bytes:
+        if path == authority.SUDOERS:
+            events.append("admission-disabled")
+            return b"old-sudoers"
+        events.append(f"retire:{path}")
+        return b"tampered"
+
+    monkeypatch.setattr(authority, "_unlink_root_file", unlink)
+
+    with pytest.raises(authority.NodeAuthorityError, match="rolled back"):
+        authority.upgrade("e" * 40, "d" * 40)
+
+    assert any(event.startswith("retire:") for event in events)
+    assert "restored" in events
+    assert "journal:rolled-back" in events
+    assert events[-1] == "active-removed"
+
+
 def test_upgrade_after_reboot_recreates_private_stage_root_after_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5321,6 +5606,32 @@ def test_upgrade_same_sha_and_tree_is_idempotent_and_never_disables_admission(
     assert "admission-disabled" not in events
 
 
+def test_legacy_policy_same_candidate_still_migrates_to_current_inventory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _old, _new, _snapshot, events = _prepare_upgrade_mocks(tmp_path, monkeypatch)
+    retired_payload = b"legacy-retired"
+    old = _legacy_policy(retired_payload=retired_payload)
+    current = _policy()
+    policies = iter((old, current))
+    monkeypatch.setattr(authority, "_read_policy", lambda: next(policies))
+
+    def unlink(path: Path, **_kwargs: object) -> bytes:
+        if path == authority.SUDOERS:
+            events.append("admission-disabled")
+            return b"old-sudoers"
+        return retired_payload
+
+    monkeypatch.setattr(authority, "_unlink_root_file", unlink)
+
+    report = authority.upgrade(SHA, TREE)
+
+    assert report["changed"] is True
+    assert "snapshot" in events
+    assert "admission-disabled" in events
+
+
 def test_upgrade_same_tree_new_sha_rebinds_candidate_transactionally(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5400,6 +5711,64 @@ def test_interrupted_upgrade_recovery_is_snapshot_and_state_bound(
         assert events == ["recovered-committed", "active-removed"]
     else:
         assert events == ["restored", "recovered-rolled-back", "active-removed"]
+
+
+def test_interrupted_legacy_upgrade_recovery_restores_retired_asset_inventory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = _upgrade_snapshot(tmp_path)
+    retired_entries = tuple(
+        {
+            "path": str(authority.SOURCE_ROOT / relative),
+            "present": True,
+            "mode": "0644",
+            "parent_mode": "0755",
+            "snapshot": f"{index:04d}.bin",
+            "sha256": "a" * 64,
+        }
+        for index, relative in enumerate(authority.RETIRED_LEGACY_SOURCE_ASSETS)
+    )
+    snapshot = authority.UpgradeSnapshot(
+        upgrade_id=base.upgrade_id,
+        root=base.root,
+        manifest=base.manifest,
+        entries=retired_entries,
+        old_source_sha=base.old_source_sha,
+        old_source_tree=base.old_source_tree,
+        new_source_sha=base.new_source_sha,
+        new_source_tree=base.new_source_tree,
+        high_value_state=base.high_value_state,
+    )
+    restored_paths: set[Path] = set()
+    events: list[str] = []
+    monkeypatch.setattr(
+        authority,
+        "_read_upgrade_active",
+        lambda: (snapshot, "assets-replaced"),
+    )
+
+    def restore(current: authority.UpgradeSnapshot) -> None:
+        restored_paths.update(Path(str(entry["path"])) for entry in current.entries)
+
+    monkeypatch.setattr(authority, "_restore_upgrade_snapshot", restore)
+    monkeypatch.setattr(
+        authority,
+        "_high_value_state_identity",
+        lambda: dict(snapshot.high_value_state),
+    )
+    monkeypatch.setattr(
+        authority,
+        "_upgrade_journal_append",
+        lambda record: events.append(str(record["phase"])),
+    )
+    monkeypatch.setattr(authority, "_remove_upgrade_active", lambda: events.append("removed"))
+
+    assert authority._recover_upgrade_if_needed() == "rolled-back"
+    assert restored_paths == {
+        authority.SOURCE_ROOT / relative for relative in authority.RETIRED_LEGACY_SOURCE_ASSETS
+    }
+    assert events == ["recovered-rolled-back", "removed"]
 
 
 @pytest.mark.parametrize(

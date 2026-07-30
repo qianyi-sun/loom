@@ -790,6 +790,75 @@ MIGRATABLE_EXTERNAL_SOURCE_ASSETS: Final = frozenset(
         Path("deploy/developer-sandboxes/loom-staging-shared.tmpfiles.conf"),
     },
 )
+LEGACY_V1_POLICY_SOURCE_ASSETS: Final = (
+    Path("deploy/developer-sandboxes/loom-developer-sandbox-link@.service"),
+    Path("deploy/developer-sandboxes/loom-developer-sandbox-node-authority.sudoers"),
+    Path("deploy/developer-sandboxes/loom-developer-sandbox-node-authority.tmpfiles.conf"),
+    Path(
+        "deploy/developer-sandboxes/loom-developer-sandbox-platform-health-authority.service",
+    ),
+    Path(
+        "deploy/developer-sandboxes/loom-developer-sandbox-platform-health-authority.sudoers",
+    ),
+    Path("deploy/developer-sandboxes/loom-staging-external-slurm-authority.service"),
+    Path("deploy/developer-sandboxes/loom-staging-external-slurm-authority.sudoers"),
+    Path("deploy/developer-sandboxes/loom-staging-external-slurm-authority.wrapper"),
+    Path("deploy/developer-sandboxes/loom-staging-pressure-reclaim-authority.service"),
+    Path("deploy/developer-sandboxes/loom-staging-pressure-reclaim-authority.sudoers"),
+    Path("deploy/developer-sandboxes/loom-staging-shared.tmpfiles.conf"),
+    Path("deploy/developer-sandboxes/node-authority-transport.toml"),
+    Path("deploy/developer-sandboxes/platform-health-authority.toml"),
+    Path("deploy/developer-sandboxes/remote-links/devansh.toml"),
+    Path("deploy/developer-sandboxes/remote-links/hongjian.toml"),
+    Path("deploy/developer-sandboxes/remote-links/qianyi.toml"),
+    Path("deploy/developer-sandboxes/runtime-domains.toml"),
+    Path("deploy/developer-sandboxes/shared-capacity-policies/gb10.toml"),
+    Path("deploy/developer-sandboxes/shared-capacity-policies/oldlab.toml"),
+    Path(r"deploy/developer-sandboxes/srv-loom-staging\x2dshared.mount"),
+    Path("deploy/developer-sandboxes/staging-external-slurm-authority.toml"),
+    Path("deploy/developer-sandboxes/staging-pressure-reclaim-authority.toml"),
+    Path("deploy/slurm/developer-sandboxes/gb10.toml"),
+    Path("deploy/slurm/developer-sandboxes/oldlab.toml"),
+    Path("deploy/slurm/loom-developer-sandbox-slurm-recovery.service"),
+    Path("deploy/slurm/loom-developer-sandbox-slurm-recovery.timer"),
+    Path("deploy/slurm/loom-slurm-job-cgroup-guard.service"),
+    Path("scripts/ops/developer_sandbox_capacity_contract.py"),
+    Path("scripts/ops/developer_sandbox_domain_runtime.py"),
+    Path("scripts/ops/developer_sandbox_host.py"),
+    Path("scripts/ops/developer_sandbox_live_authority.py"),
+    Path("scripts/ops/developer_sandbox_node_authority.py"),
+    Path("scripts/ops/developer_sandbox_node_docker_request.py"),
+    Path("scripts/ops/developer_sandbox_node_transport.py"),
+    Path("scripts/ops/developer_sandbox_platform_health_authority.py"),
+    Path("scripts/ops/developer_sandbox_remote_link.py"),
+    Path("scripts/ops/developer_sandbox_remote_link_host.py"),
+    Path("scripts/ops/developer_sandbox_slurm_policy.py"),
+    Path("scripts/ops/slurm_job_cgroup_guard.py"),
+    Path("scripts/ops/staging_external_slurm_acceptance_authority.py"),
+    Path("scripts/ops/staging_pressure_reclaim_authority.py"),
+    Path("src/loom_cli/external_slurm_acceptance.py"),
+)
+LEGACY_V1_POLICY_ASSET_KEYS: Final = frozenset(
+    str(relative) for relative in LEGACY_V1_POLICY_SOURCE_ASSETS
+)
+CURRENT_POLICY_ASSET_KEYS: Final = frozenset(str(relative) for relative in SOURCE_ASSETS)
+LEGACY_V1_MIGRATABLE_SOURCE_ASSETS: Final = frozenset(
+    {
+        Path("deploy/docker-compose.remote-worker.acceptance-probe.yml"),
+        Path("deploy/docker-compose.remote-worker.cgroup-parent.yml"),
+        Path("deploy/docker-compose.remote-worker.sandbox-link.yml"),
+        Path("deploy/docker-compose.remote-worker.yml"),
+        Path("scripts/ops/developer_environment_acceptance_probe_container.py"),
+        Path("scripts/ops/developer_environment_registry.py"),
+        Path("scripts/ops/developer_environment_runtime_retire.py"),
+        Path("src/loom_control_plane/slurm_job_cgroup.py"),
+    },
+)
+RETIRED_LEGACY_SOURCE_ASSETS: Final = tuple(
+    relative
+    for relative in LEGACY_V1_POLICY_SOURCE_ASSETS
+    if str(relative) not in CURRENT_POLICY_ASSET_KEYS
+)
 PLATFORM_HEALTH_LIBEXEC: Final = Path(
     "/usr/local/libexec/loom-developer-sandbox-platform-health-authority",
 )
@@ -1949,6 +2018,30 @@ def _managed_assets() -> tuple[tuple[Path, int, int], ...]:
     )
 
 
+def _policy_asset_generation(asset_sha256: Mapping[str, str]) -> str:
+    keys = frozenset(asset_sha256)
+    if keys == CURRENT_POLICY_ASSET_KEYS:
+        return "current"
+    if keys == LEGACY_V1_POLICY_ASSET_KEYS:
+        return "legacy-v1"
+    raise NodeAuthorityError("node authority policy asset identity is invalid")
+
+
+def _upgrade_managed_assets(
+    old_policy: AuthorityPolicy,
+) -> tuple[tuple[Path, int, int], ...]:
+    managed = _managed_assets()
+    if _policy_asset_generation(old_policy.asset_sha256) == "current":
+        return managed
+    return (
+        *managed,
+        *tuple(
+            (SOURCE_ROOT / relative, _source_asset_mode(relative), 0o755)
+            for relative in RETIRED_LEGACY_SOURCE_ASSETS
+        ),
+    )
+
+
 def _system_sudoers_paths() -> frozenset[Path]:
     return frozenset(
         target
@@ -2445,9 +2538,15 @@ def _prepare_upgrade_snapshot(
     try:
         optional_paths = {
             *(target for _relative, target, _mode, _parent in SYSTEM_INSTALL_ASSETS),
-            *(SOURCE_ROOT / relative for relative in MIGRATABLE_EXTERNAL_SOURCE_ASSETS),
+            *(
+                SOURCE_ROOT / relative
+                for relative in LEGACY_V1_MIGRATABLE_SOURCE_ASSETS
+                if str(relative) not in old_policy.asset_sha256
+            ),
         }
-        for index, (path, mode, parent_mode) in enumerate(_managed_assets()):
+        for index, (path, mode, parent_mode) in enumerate(
+            _upgrade_managed_assets(old_policy),
+        ):
             try:
                 payload = _safe_root_file(path, mode=mode)
             except NodeAuthorityError:
@@ -2549,13 +2648,25 @@ def _load_upgrade_snapshot(root: Path) -> UpgradeSnapshot:
         or raw != _canonical(payload)
     ):
         raise NodeAuthorityError("node authority upgrade snapshot is invalid")
+    entries = payload["entries"]
+    current_assets = _managed_assets()
+    legacy_assets = (
+        *current_assets,
+        *tuple(
+            (SOURCE_ROOT / relative, _source_asset_mode(relative), 0o755)
+            for relative in RETIRED_LEGACY_SOURCE_ASSETS
+        ),
+    )
+    candidate_inventories = (current_assets, legacy_assets)
+    matching_inventories = tuple(
+        inventory for inventory in candidate_inventories if len(entries) == len(inventory)
+    )
+    if len(matching_inventories) != 1:
+        raise NodeAuthorityError("node authority upgrade snapshot inventory is invalid")
     expected_assets = [
         (str(path), f"{mode:04o}", f"{parent_mode:04o}")
-        for path, mode, parent_mode in _managed_assets()
+        for path, mode, parent_mode in matching_inventories[0]
     ]
-    entries = payload["entries"]
-    if len(entries) != len(expected_assets):
-        raise NodeAuthorityError("node authority upgrade snapshot inventory is invalid")
     for index, (entry, expected_asset) in enumerate(
         zip(entries, expected_assets, strict=True),
     ):
@@ -2970,13 +3081,8 @@ def _read_policy() -> AuthorityPolicy:
     ):
         raise NodeAuthorityError("node authority policy is invalid")
     digests = payload["asset_sha256"]
-    expected = {str(relative) for relative in SOURCE_ASSETS}
-    missing = expected - set(digests)
-    if (
-        set(digests) - expected
-        or missing - {str(relative) for relative in MIGRATABLE_EXTERNAL_SOURCE_ASSETS}
-        or any(not _is_sha(value, length=64) for value in digests.values())
-    ):
+    _policy_asset_generation(digests)
+    if any(not _is_sha(value, length=64) for value in digests.values()):
         raise NodeAuthorityError("node authority policy asset identity is invalid")
     return AuthorityPolicy(
         source_sha=payload["source_sha"],
@@ -2993,23 +3099,29 @@ def _validate_runtime_assets(
 ) -> tuple[dict[str, Any], ...]:
     if _hostname() != NODE_HOSTNAMES[policy.node]:
         raise NodeAuthorityError("node authority policy host binding is invalid")
+    generation = _policy_asset_generation(policy.asset_sha256)
     for relative in SOURCE_ASSETS:
         installed = SOURCE_ROOT / relative
-        mode = (
-            0o440
-            if relative == SUDOERS_RELATIVE
-            else (0o755 if relative.parts[:2] == ("scripts", "ops") else 0o644)
-        )
         if str(relative) not in policy.asset_sha256:
             if (
-                allow_absent_system_install
-                and relative in MIGRATABLE_EXTERNAL_SOURCE_ASSETS
+                generation == "legacy-v1"
+                and allow_absent_system_install
+                and relative in LEGACY_V1_MIGRATABLE_SOURCE_ASSETS
                 and not installed.exists()
                 and not installed.is_symlink()
             ):
                 continue
             raise NodeAuthorityError("node authority installed source identity is incomplete")
-        payload = _safe_root_file(installed, mode=mode)
+        payload = _safe_root_file(installed, mode=_source_asset_mode(relative))
+        if hashlib.sha256(payload).hexdigest() != policy.asset_sha256[str(relative)]:
+            raise NodeAuthorityError("node authority installed source drifted")
+    for relative in RETIRED_LEGACY_SOURCE_ASSETS:
+        installed = SOURCE_ROOT / relative
+        if generation == "current":
+            if installed.exists() or installed.is_symlink():
+                raise NodeAuthorityError("node authority retired source asset is still installed")
+            continue
+        payload = _safe_root_file(installed, mode=_source_asset_mode(relative))
         if hashlib.sha256(payload).hexdigest() != policy.asset_sha256[str(relative)]:
             raise NodeAuthorityError("node authority installed source drifted")
     helper = _safe_root_file(LIBEXEC, mode=0o755)
@@ -3029,6 +3141,18 @@ def _validate_runtime_assets(
     return _validate_system_install_assets(
         allow_absent=allow_absent_system_install,
     )
+
+
+def _retire_legacy_source_assets(old_policy: AuthorityPolicy) -> None:
+    if _policy_asset_generation(old_policy.asset_sha256) == "current":
+        return
+    for relative in RETIRED_LEGACY_SOURCE_ASSETS:
+        payload = _unlink_root_file(
+            SOURCE_ROOT / relative,
+            mode=_source_asset_mode(relative),
+        )
+        if hashlib.sha256(payload).hexdigest() != old_policy.asset_sha256[str(relative)]:
+            raise NodeAuthorityError("node authority retired source asset drifted")
 
 
 def _validate_invoker(verb: str, environ: Mapping[str, str]) -> None:
@@ -8572,11 +8696,13 @@ def upgrade(source_sha: str, source_tree: str) -> dict[str, Any]:
         )
         if old_policy.node != node:
             raise NodeAuthorityError("node authority upgrade host binding drifted")
+        old_policy_generation = _policy_asset_generation(old_policy.asset_sha256)
         system_install_complete = old_system_installs is None or len(old_system_installs) == len(
             SYSTEM_INSTALL_ASSETS
         )
         if (
-            old_policy.source_sha == source_sha
+            old_policy_generation == "current"
+            and old_policy.source_sha == source_sha
             and old_policy.source_tree == source_tree
             and system_install_complete
         ):
@@ -8626,6 +8752,7 @@ def upgrade(source_sha: str, source_tree: str) -> dict[str, Any]:
                     assets[str(relative)],
                     _source_asset_mode(relative),
                 )
+            _retire_legacy_source_assets(old_policy)
             authority_payload = assets["scripts/ops/developer_sandbox_node_authority.py"]
             _atomic_replace(LIBEXEC, authority_payload, 0o755)
             _atomic_replace(
