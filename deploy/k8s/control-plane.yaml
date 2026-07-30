@@ -6,169 +6,180 @@ metadata:
 spec:
   replicas: 2
   selector:
-    matchLabels: { app: loom-control-plane }
+    matchLabels:
+      app: loom-control-plane
   template:
     metadata:
-      labels: { app: loom-control-plane }
+      labels:
+        app: loom-control-plane
     spec:
       containers:
-        - name: control-plane
-          image: loom-control-plane:0.7
-          env:
-            - name: LOOM_CP_BIND_HOST
-              value: "0.0.0.0"
-            - name: LOOM_CP_BIND_PORT
-              value: "8080"
-            - name: LOOM_CP_CLAIMED_WITHOUT_START_EXPIRY_SEC
-              value: "3600"
-            - name: LOOM_CP_CONTROL_PLANE_URL
-              value: "http://loom-control-plane:8080"
-            - name: LOOM_CP_DB_MAX_OVERFLOW
-              value: "40"
-            - name: LOOM_CP_DB_POOL_SIZE
-              value: "20"
-            - name: LOOM_CP_DB_POOL_TIMEOUT_SEC
-              value: "30.0"
-            - name: LOOM_CP_DB_URL
-              valueFrom:
-                secretKeyRef:
-                  name: loom-secrets
-                  key: cp-db-url
-            - name: LOOM_CP_DB_URL_POOL
-              valueFrom:
-                secretKeyRef:
-                  name: loom-secrets
-                  key: cp-db-url-pool
-                  optional: true
-            - name: LOOM_CP_DEV_RELOAD
-              value: "False"
-            - name: LOOM_CP_FAMILY_ADAPTER_CALL_TIMEOUT_SEC
-              value: "300.0"
-            - name: LOOM_CP_FAMILY_ORCHESTRATOR_POLL_SEC
-              value: "5.0"
-            - name: LOOM_CP_FAMILY_STATE_DOWNLOAD_TIMEOUT_SEC
-              value: "120.0"
-            - name: LOOM_CP_LLM_GATEWAY_URL
-              value: "http://loom-llm-gateway:9100"
-            - name: LOOM_CP_LOG_LEVEL
-              value: "info"
-            - name: LOOM_CP_METRICS_PORT
-              value: "9090"
-            - name: LOOM_CP_MINIO_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: loom-secrets
-                  key: minio-access-key
-            - name: LOOM_CP_MINIO_ENDPOINT
-              value: "http://loom-minio:9000"
-            - name: LOOM_CP_MINIO_REGION
-              value: "us-east-1"
-            - name: LOOM_CP_MINIO_SECRET_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: loom-secrets
-                  key: minio-secret-key
-            - name: LOOM_CP_SIGNED_URL_EXPIRY_SEC
-              value: "3600"
-            - name: LOOM_CP_SKILL_EVOLVER_DEFAULT_MODEL
-              value: "anthropic/claude-sonnet-4-6"
-            - name: LOOM_CP_SLURM_WORKER_CONTROLLER_ALLOWED_NODES
-              value: ""
-            - name: LOOM_CP_SLURM_WORKER_CONTROLLER_COMMAND_TIMEOUT_SECONDS
-              value: "20.0"
-            - name: LOOM_CP_SLURM_WORKER_CONTROLLER_ENABLED
-              value: "False"
-            - name: LOOM_CP_SLURM_WORKER_CONTROLLER_ENV_FILE
-              value: ""
-            - name: LOOM_CP_SLURM_WORKER_CONTROLLER_ENVIRONMENT
-              value: "production"
-            - name: LOOM_CP_SLURM_WORKER_CONTROLLER_MAX_JOBS
-              value: "0"
-            - name: LOOM_CP_SLURM_WORKER_CONTROLLER_MIN_QUEUED_TRIALS
-              value: "1"
-            - name: LOOM_CP_SLURM_WORKER_CONTROLLER_PARTITION
-              value: ""
-            - name: LOOM_CP_SLURM_WORKER_CONTROLLER_PENDING_JOB_CAP
-              value: "1"
-            - name: LOOM_CP_SLURM_WORKER_CONTROLLER_POOL_NAME
-              value: "oldlab"
-            - name: LOOM_CP_SLURM_WORKER_CONTROLLER_REPO_DIR
-              value: ""
-            - name: LOOM_CP_SLURM_WORKER_CONTROLLER_REQUESTED_CONCURRENCY
-              value: "6"
-            - name: LOOM_CP_SLURM_WORKER_CONTROLLER_REQUESTED_CPUS
-              value: "12"
-            - name: LOOM_CP_SLURM_WORKER_CONTROLLER_REQUESTED_MEMORY_MIB
-              value: "58000"
-            - name: LOOM_CP_SLURM_WORKER_CONTROLLER_SACCT_PATH
-              value: "sacct"
-            - name: LOOM_CP_SLURM_WORKER_CONTROLLER_SBATCH_PATH
-              value: "sbatch"
-            - name: LOOM_CP_SLURM_WORKER_CONTROLLER_SCANCEL_PATH
-              value: "scancel"
-            - name: LOOM_CP_SLURM_WORKER_CONTROLLER_SQUEUE_PATH
-              value: "squeue"
-            - name: LOOM_CP_SLURM_WORKER_CONTROLLER_STALE_AFTER_SECONDS
-              value: "300"
-            - name: LOOM_CP_SLURM_WORKER_CONTROLLER_TIME_LIMIT
-              value: "7-00:00:00"
-            - name: LOOM_CP_STALE_RUNNING_TRIAL_GRACE_SEC
-              value: "900.0"
-            - name: LOOM_CP_STALE_RUNNING_TRIAL_RECLAIM_ENABLED
-              value: "True"
-            - name: LOOM_CP_STALE_RUNNING_TRIAL_SILENCE_SEC
-              value: "900.0"
-            - name: LOOM_CP_STALE_RUNNING_TRIAL_TIMEOUT_MULTIPLIER
-              value: "3.0"
-            - name: LOOM_CP_STEP_JWT_SIGNING_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: loom-secrets
-                  key: step-jwt-signing-key
-            - name: LOOM_CP_STORAGE_AUTH_KIND
-              value: "static_keys"
-            - name: LOOM_CP_STORAGE_BACKEND
-              value: "minio"
-            - name: LOOM_CP_TRIAL_RETRY_DEFAULT_BACKOFF_BASE_SEC
-              value: "30.0"
-            - name: LOOM_CP_TRIAL_RETRY_DEFAULT_BACKOFF_JITTER
-              value: "0.2"
-            - name: LOOM_CP_TRIAL_RETRY_DEFAULT_BACKOFF_MAX_SEC
-              value: "600.0"
-            - name: LOOM_CP_TRIAL_RETRY_DEFAULT_BACKOFF_MULTIPLIER
-              value: "2.0"
-            - name: LOOM_CP_TRIAL_RETRY_DEFAULT_MAX_ATTEMPTS
-              value: "3"
-            - name: LOOM_CP_TRIAL_RETRY_DEFAULT_RETRY_ON
-              value: "[\"gateway_error\", \"provider_transport_disconnect\", \"node_setup_health\"]"
-            - name: LOOM_CP_WORKER_HEARTBEAT_EXPIRY_SEC
-              value: "120"
-            - name: LOOM_CP_WORKER_RECLAIM_SWEEP_INTERVAL_SEC
-              value: "30"
-
-            - name: LOOM_CP_ADMIN_SECRET_FILE
-              value: "/var/run/loom/secrets/admin/secrets.toml"
-            - name: LOOM_ENV
-              value: "production"
-            - name: LOOM_NAMESPACE
-              value: "loom"
-          volumeMounts:
-            - name: loom-admin-secret
-              mountPath: /var/run/loom/secrets/admin
-              readOnly: true
-          ports:
-            - containerPort: 8080
-          readinessProbe:
-            httpGet: { path: /healthz, port: 8080 }
-            periodSeconds: 5
-          resources:
-            requests: { cpu: 200m, memory: 256Mi }
-            limits: { cpu: 1, memory: 1Gi }
-      volumes:
+      - name: control-plane
+        image: loom-control-plane:0.7
+        env:
+        - name: LOOM_CP_ARTIFACTS_BUCKET
+          value: artifacts
+        - name: LOOM_CP_BIND_HOST
+          value: 0.0.0.0
+        - name: LOOM_CP_BIND_PORT
+          value: '8080'
+        - name: LOOM_CP_CLAIMED_WITHOUT_START_EXPIRY_SEC
+          value: '3600'
+        - name: LOOM_CP_CONTROL_PLANE_URL
+          value: http://loom-control-plane:8080
+        - name: LOOM_CP_DB_MAX_OVERFLOW
+          value: '40'
+        - name: LOOM_CP_DB_POOL_SIZE
+          value: '20'
+        - name: LOOM_CP_DB_POOL_TIMEOUT_SEC
+          value: '30.0'
+        - name: LOOM_CP_DB_URL
+          valueFrom:
+            secretKeyRef:
+              name: loom-secrets
+              key: cp-db-url
+        - name: LOOM_CP_DB_URL_POOL
+          valueFrom:
+            secretKeyRef:
+              name: loom-secrets
+              key: cp-db-url-pool
+              optional: true
+        - name: LOOM_CP_DEV_RELOAD
+          value: 'False'
+        - name: LOOM_CP_FAMILY_ADAPTER_CALL_TIMEOUT_SEC
+          value: '300.0'
+        - name: LOOM_CP_FAMILY_ORCHESTRATOR_POLL_SEC
+          value: '5.0'
+        - name: LOOM_CP_FAMILY_STATE_DOWNLOAD_TIMEOUT_SEC
+          value: '120.0'
+        - name: LOOM_CP_LLM_GATEWAY_URL
+          value: http://loom-llm-gateway:9100
+        - name: LOOM_CP_LOG_LEVEL
+          value: info
+        - name: LOOM_CP_METRICS_PORT
+          value: '9090'
+        - name: LOOM_CP_MINIO_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: loom-secrets
+              key: minio-access-key
+        - name: LOOM_CP_MINIO_ENDPOINT
+          value: http://loom-minio:9000
+        - name: LOOM_CP_MINIO_REGION
+          value: us-east-1
+        - name: LOOM_CP_MINIO_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: loom-secrets
+              key: minio-secret-key
+        - name: LOOM_CP_SIGNED_URL_EXPIRY_SEC
+          value: '3600'
+        - name: LOOM_CP_SKILL_EVOLVER_DEFAULT_MODEL
+          value: anthropic/claude-sonnet-4-6
+        - name: LOOM_CP_SLURM_WORKER_CONTROLLER_ALLOWED_NODES
+          value: ''
+        - name: LOOM_CP_SLURM_WORKER_CONTROLLER_COMMAND_TIMEOUT_SECONDS
+          value: '20.0'
+        - name: LOOM_CP_SLURM_WORKER_CONTROLLER_ENABLED
+          value: 'False'
+        - name: LOOM_CP_SLURM_WORKER_CONTROLLER_ENV_FILE
+          value: ''
+        - name: LOOM_CP_SLURM_WORKER_CONTROLLER_ENVIRONMENT
+          value: production
+        - name: LOOM_CP_SLURM_WORKER_CONTROLLER_MAX_JOBS
+          value: '0'
+        - name: LOOM_CP_SLURM_WORKER_CONTROLLER_MIN_QUEUED_TRIALS
+          value: '1'
+        - name: LOOM_CP_SLURM_WORKER_CONTROLLER_PARTITION
+          value: ''
+        - name: LOOM_CP_SLURM_WORKER_CONTROLLER_PENDING_JOB_CAP
+          value: '1'
+        - name: LOOM_CP_SLURM_WORKER_CONTROLLER_POOL_NAME
+          value: oldlab
+        - name: LOOM_CP_SLURM_WORKER_CONTROLLER_REPO_DIR
+          value: ''
+        - name: LOOM_CP_SLURM_WORKER_CONTROLLER_REQUESTED_CONCURRENCY
+          value: '6'
+        - name: LOOM_CP_SLURM_WORKER_CONTROLLER_REQUESTED_CPUS
+          value: '12'
+        - name: LOOM_CP_SLURM_WORKER_CONTROLLER_REQUESTED_MEMORY_MIB
+          value: '58000'
+        - name: LOOM_CP_SLURM_WORKER_CONTROLLER_SACCT_PATH
+          value: sacct
+        - name: LOOM_CP_SLURM_WORKER_CONTROLLER_SBATCH_PATH
+          value: sbatch
+        - name: LOOM_CP_SLURM_WORKER_CONTROLLER_SCANCEL_PATH
+          value: scancel
+        - name: LOOM_CP_SLURM_WORKER_CONTROLLER_SQUEUE_PATH
+          value: squeue
+        - name: LOOM_CP_SLURM_WORKER_CONTROLLER_STALE_AFTER_SECONDS
+          value: '300'
+        - name: LOOM_CP_SLURM_WORKER_CONTROLLER_TIME_LIMIT
+          value: 7-00:00:00
+        - name: LOOM_CP_STALE_RUNNING_TRIAL_GRACE_SEC
+          value: '900.0'
+        - name: LOOM_CP_STALE_RUNNING_TRIAL_RECLAIM_ENABLED
+          value: 'True'
+        - name: LOOM_CP_STALE_RUNNING_TRIAL_SILENCE_SEC
+          value: '900.0'
+        - name: LOOM_CP_STALE_RUNNING_TRIAL_TIMEOUT_MULTIPLIER
+          value: '3.0'
+        - name: LOOM_CP_STEP_JWT_SIGNING_KEY
+          valueFrom:
+            secretKeyRef:
+              name: loom-secrets
+              key: step-jwt-signing-key
+        - name: LOOM_CP_STORAGE_AUTH_KIND
+          value: static_keys
+        - name: LOOM_CP_STORAGE_BACKEND
+          value: minio
+        - name: LOOM_CP_TRAJECTORIES_BUCKET
+          value: trajectories
+        - name: LOOM_CP_TRIAL_RETRY_DEFAULT_BACKOFF_BASE_SEC
+          value: '30.0'
+        - name: LOOM_CP_TRIAL_RETRY_DEFAULT_BACKOFF_JITTER
+          value: '0.2'
+        - name: LOOM_CP_TRIAL_RETRY_DEFAULT_BACKOFF_MAX_SEC
+          value: '600.0'
+        - name: LOOM_CP_TRIAL_RETRY_DEFAULT_BACKOFF_MULTIPLIER
+          value: '2.0'
+        - name: LOOM_CP_TRIAL_RETRY_DEFAULT_MAX_ATTEMPTS
+          value: '3'
+        - name: LOOM_CP_TRIAL_RETRY_DEFAULT_RETRY_ON
+          value: '["gateway_error", "provider_transport_disconnect", "node_setup_health"]'
+        - name: LOOM_CP_WORKER_HEARTBEAT_EXPIRY_SEC
+          value: '120'
+        - name: LOOM_CP_WORKER_RECLAIM_SWEEP_INTERVAL_SEC
+          value: '30'
+        - name: LOOM_CP_ADMIN_SECRET_FILE
+          value: /var/run/loom/secrets/admin/secrets.toml
+        - name: LOOM_ENV
+          value: production
+        - name: LOOM_NAMESPACE
+          value: loom
+        volumeMounts:
         - name: loom-admin-secret
-          secret:
-            secretName: loom-admin-secret
-            defaultMode: 0400
+          mountPath: /var/run/loom/secrets/admin
+          readOnly: true
+        ports:
+        - containerPort: 8080
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          periodSeconds: 5
+        resources:
+          requests:
+            cpu: 200m
+            memory: 256Mi
+          limits:
+            cpu: 1
+            memory: 1Gi
+      volumes:
+      - name: loom-admin-secret
+        secret:
+          secretName: loom-admin-secret
+          defaultMode: 256
 ---
 apiVersion: v1
 kind: Service
@@ -176,7 +187,8 @@ metadata:
   namespace: loom
   name: loom-control-plane
 spec:
-  selector: { app: loom-control-plane }
+  selector:
+    app: loom-control-plane
   ports:
-    - port: 8080
-      targetPort: 8080
+  - port: 8080
+    targetPort: 8080

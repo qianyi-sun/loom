@@ -21,6 +21,7 @@ class ControlPlaneSettings(BaseSettings):
     )
 
     admin_secret_file: Path | None = None
+    artifacts_bucket: str = "artifacts"
     bind_host: str = "0.0.0.0"
     bind_port: int = 8080
     claimed_without_start_expiry_sec: int = 3600
@@ -70,6 +71,7 @@ class ControlPlaneSettings(BaseSettings):
     step_jwt_signing_key: SecretStr
     storage_auth_kind: str = "static_keys"
     storage_backend: str = "minio"
+    trajectories_bucket: str = "trajectories"
     trial_retry_default_backoff_base_sec: float = 30.0
     trial_retry_default_backoff_jitter: float = 0.2
     trial_retry_default_backoff_max_sec: float = 600.0

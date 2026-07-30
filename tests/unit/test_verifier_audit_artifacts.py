@@ -247,6 +247,21 @@ def test_resolve_verifier_artifacts_happy_path() -> None:
     assert log_entry.step_name == "main"
 
 
+def test_resolve_verifier_artifacts_reads_indexed_bucket_not_settings() -> None:
+    body = b"--- stdout ---\n3 passed\n"
+    trial, client, _key = _trial_with_verifier_artifacts(
+        log_body=body,
+        meta={"truncated": False, "original_bytes": len(body)},
+    )
+    # Objects live under the indexed bucket; settings name differs.
+    resolved = resolve_verifier_artifacts(
+        trial,
+        client=client,
+        artifacts_bucket="loom-staging-artifacts",
+    )
+    assert any(item.archive_path == "verifier/script.log" for item in resolved)
+
+
 def test_resolve_pytest_pair_and_canonical_junit() -> None:
     junit = b'<testsuite tests="1"><testcase name="ok"/></testsuite>'
     trial, client, _key = _trial_with_verifier_artifacts(

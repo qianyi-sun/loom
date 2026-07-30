@@ -55,15 +55,15 @@ async def _amain() -> None:
     )
 
     # Which bucket the state backend seeds new empty prefixes into.
-    # Not hardcoded to "artifacts": staging seeds
-    # ``s3://loom-staging-artifacts/`` via LOOM_FAMILY_ARTIFACTS_BUCKET
-    # so the orchestrator's initialize() lands in the same place the
-    # service did at accept-time. Download/upload always parse the
-    # bucket from the incoming state_uri (see PR #728), so this only
-    # affects fresh initialize() calls; still, giving operators a knob
-    # keeps the two paths coherent.
-    artifacts_bucket = os.environ.get(
-        "LOOM_FAMILY_ARTIFACTS_BUCKET", "artifacts",
+    # Prefer the explicit family override, then the shared control-plane
+    # artifacts bucket (same cluster.toml value as loom-service / workers),
+    # then the legacy default. Download/upload always parse the bucket from
+    # the incoming state_uri (see PR #728), so this only affects fresh
+    # initialize() calls.
+    artifacts_bucket = (
+        os.environ.get("LOOM_FAMILY_ARTIFACTS_BUCKET")
+        or getattr(settings, "artifacts_bucket", None)
+        or "artifacts"
     )
 
     stop_event = asyncio.Event()

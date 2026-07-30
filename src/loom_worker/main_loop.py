@@ -373,7 +373,11 @@ async def run_worker(settings: WorkerSettings) -> None:
         try:
             pool = RunnerPool(max_concurrent=settings.max_concurrent)
             object_store = _build_worker_object_store(settings)
-            await _ensure_runtime_buckets(object_store)
+            await _ensure_runtime_buckets(
+                object_store,
+                trajectories_bucket=settings.trajectories_bucket,
+                artifacts_bucket=settings.artifacts_bucket,
+            )
             idle_exit = _IdleExitTracker(
                 after_seconds=settings.idle_exit_after_seconds,
             )
@@ -591,8 +595,13 @@ def _run_trial_cache_eviction(settings: WorkerSettings) -> None:
         logger.exception("trial_cache eviction failed at startup")
 
 
-async def _ensure_runtime_buckets(object_store: ObjectStore) -> None:
-    for bucket in ("trajectories", "artifacts"):
+async def _ensure_runtime_buckets(
+    object_store: ObjectStore,
+    *,
+    trajectories_bucket: str = "trajectories",
+    artifacts_bucket: str = "artifacts",
+) -> None:
+    for bucket in (trajectories_bucket, artifacts_bucket):
         try:
             await object_store.ensure_bucket(bucket)
         except Exception:
@@ -699,11 +708,12 @@ async def _prepare_family_state_mount_if_any(
             f"unsupported family_run state_backend {backend_name!r}; "
             "only 's3_artifacts' is wired in the worker path",
         )
-    # `artifacts` is the canonical bucket ensured at worker startup
-    # (see _ensure_runtime_buckets) — matches loom_service's default.
+    # Use the same configured artifacts bucket ensured at worker startup
+    # (see _ensure_runtime_buckets) so family-state objects land with
+    # loom-service / control-plane.
     backend = S3ArtifactsStateBackend(
         store=object_store,
-        bucket="artifacts",
+        bucket=settings.artifacts_bucket,
     )
     mount_path = family_run_spec.get("mount_path") or "/root/.skills"
     timeout_sec = getattr(
@@ -963,6 +973,8 @@ async def _spawn_trial(
             object_store=object_store,
             gateway_client=gateway_client,
             local_trajectory_root=settings.trajectory_cache_dir,
+            trajectory_bucket=settings.trajectories_bucket,
+            artifacts_bucket=settings.artifacts_bucket,
             state_patch_callback=_state_patch,
             output_projection_callback=_output_projection,
             # A11.1: query CP for the trial's llm_calls rows at finalize,

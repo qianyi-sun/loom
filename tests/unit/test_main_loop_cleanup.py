@@ -315,6 +315,9 @@ class _FakeSettings:
     trial_hard_deadline_multiplier = 3.0
     trial_hard_deadline_grace_sec = 600.0
     pre_start_heartbeat_interval_sec = 0.01
+    # Shared with control-plane / loom-service bucket settings (#1100).
+    trajectories_bucket = "trajectories"
+    artifacts_bucket = "artifacts"
 
 
 async def _drive_spawn(runner_target: object) -> Path:

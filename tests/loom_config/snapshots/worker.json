@@ -1,4 +1,9 @@
 {
+  "artifacts_bucket": {
+    "annotation": "<class 'str'>",
+    "default": "'artifacts'",
+    "required": false
+  },
   "benchmark_cache": {
     "annotation": "pathlib.Path | None",
     "default": "None",
@@ -278,6 +283,11 @@
     "annotation": "<class 'pydantic.types.SecretStr'>",
     "default": "PydanticUndefined",
     "required": true
+  },
+  "trajectories_bucket": {
+    "annotation": "<class 'str'>",
+    "default": "'trajectories'",
+    "required": false
   },
   "trajectory_cache_dir": {
     "annotation": "<class 'pathlib.Path'>",
