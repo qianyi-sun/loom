@@ -10,7 +10,7 @@ Loom's platform tier — Postgres, MinIO, LLM gateway, control-plane, service, p
 1. **Every stateful pod is a SPOF.** Postgres pod restart = ~150 in-flight trials fail. MinIO pod restart = trial finalize stalls until it recovers. Under continuous autoscaling to 100+ concurrent trials, restart events (kernel patches, image upgrades, node reboots) become user-visible incidents.
 2. **hostPath storage doesn't survive node loss.** All Postgres and MinIO data lives on `bb8-1`'s local disk. If `bb8-1` fails, the platform is offline until manual restore.
 
-The multi-node topology solves both by moving to a real 3-node k8s cluster (k3s) with replicated storage (Longhorn) and operator-managed HA services (CloudNativePG for Postgres, distributed MinIO). Pgbouncer already runs 2 replicas so no change there.
+The multi-node topology solves both by moving to a real five-node k8s cluster (k3s) with replicated storage (Longhorn) and operator-managed HA services (CloudNativePG for Postgres, distributed MinIO). Pgbouncer already runs 2 replicas so no change there.
 
 ## The seam: `topology.multi_node`
 
