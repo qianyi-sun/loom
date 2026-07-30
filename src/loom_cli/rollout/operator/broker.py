@@ -278,9 +278,8 @@ def _request(
     if not preflight.passed or preflight.attestation is None:
         raise ValueError("rollout request requires a complete preflight attestation")
     authority = environment_authority(dependencies.config.short_name)
-    if (
-        candidate.target_ref != authority.pinned_target_ref
-        or not candidate.image_tag.startswith(f"{authority.short_name}-")
+    if candidate.target_ref != authority.pinned_target_ref or not candidate.image_tag.startswith(
+        f"{authority.short_name}-"
     ):
         raise ValueError("candidate does not match the selected environment authority")
     request_id = validate_safe_identifier(dependencies.new_request_id(), "request_id")
@@ -438,10 +437,15 @@ def _manifest_ownership(
             dependencies,
             "manifest ownership maintenance requires coordinator authority",
         )
-    if (
-        dependencies.config.source_mode != "sealed-cumulative"
-        or dependencies.manifest_ownership is None
-    ):
+    if dependencies.config.source_mode != "sealed-cumulative":
+        # Distinguish mode-gated from unwired (#1085 phase 3): the service IS
+        # wired here, it's just policy-gated to a sealed-cumulative runner, so
+        # "not configured" is misleading — say what actually blocks it.
+        return _safe_error(
+            dependencies,
+            "manifest ownership maintenance requires a sealed-cumulative runner",
+        )
+    if dependencies.manifest_ownership is None:
         return _safe_error(
             dependencies,
             "manifest ownership maintenance is not configured",
@@ -1169,9 +1173,7 @@ def _protected_apply_progress(
     if not component_entries:
         return None
     component_entries.sort()
-    if len({ordinal for ordinal, _component, _path in component_entries}) != len(
-        component_entries
-    ):
+    if len({ordinal for ordinal, _component, _path in component_entries}) != len(component_entries):
         raise RequestStoreError("protected apply progress is unsafe")
     last_complete: str | None = None
     for _ordinal, component_id, component_root in component_entries:
