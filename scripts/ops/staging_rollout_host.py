@@ -4084,6 +4084,7 @@ class HostInstaller:
     source_mode: str = "merged-dev"
     source_tree_sha: str | None = None
     source_base_sha: str | None = None
+    ownership_maintenance_allowed: bool = False
 
     def _source_file(self, relative_path: str) -> bytes:
         if self.source_root is None or self.source_sha is None:
@@ -4125,6 +4126,10 @@ class HostInstaller:
                 f'source_tree_sha = "{self.source_tree_sha}"\n'
                 f'source_base_sha = "{self.source_base_sha}"\n'
             )
+        if self.ownership_maintenance_allowed:
+            # (version, policy) opt-in (#1085 phase 3): let this exact installed
+            # candidate run manifest-ownership maintenance without a sealed source.
+            rendered += "\nownership_maintenance_allowed = true\n"
         payload = rendered.encode("utf-8")
         self._validate_rendered_config(
             payload,
@@ -4132,6 +4137,7 @@ class HostInstaller:
             source_sha=self.source_sha,
             source_tree_sha=self.source_tree_sha,
             source_base_sha=self.source_base_sha,
+            ownership_maintenance_allowed=self.ownership_maintenance_allowed,
         )
         return payload
 
@@ -4143,6 +4149,7 @@ class HostInstaller:
         source_sha: str | None = None,
         source_tree_sha: str | None = None,
         source_base_sha: str | None = None,
+        ownership_maintenance_allowed: bool = False,
     ) -> None:
         try:
             raw = tomllib.loads(payload.decode("utf-8"))
@@ -4180,8 +4187,12 @@ class HostInstaller:
             required.update(
                 {"source_mode", "source_commit_sha", "source_tree_sha", "source_base_sha"}
             )
+        if ownership_maintenance_allowed:
+            required.add("ownership_maintenance_allowed")
         if set(raw) != required:
             raise InstallError("rendered staging config keys are invalid")
+        if ownership_maintenance_allowed and raw.get("ownership_maintenance_allowed") is not True:
+            raise InstallError("rendered ownership maintenance policy is invalid")
         literals: dict[str, object] = {
             "schema_version": 2 if sealed else 1,
             "service_user": SERVICE_USER,
@@ -4452,6 +4463,7 @@ class HostInstaller:
         team_id: str,
         *,
         sealed_source: SealedSource | None = None,
+        allow_ownership_maintenance: bool = False,
         _lock_held: bool = False,
     ) -> dict[str, object]:
         if not _lock_held:
@@ -4459,7 +4471,12 @@ class HostInstaller:
                 raise InstallError("install requires root")
             self.system.ensure_root_directory(TRUST_LIFECYCLE_LOCK.parent, mode=0o755)
             with self.system.trust_lifecycle_lock():
-                return self.install(team_id, sealed_source=sealed_source, _lock_held=True)
+                return self.install(
+                    team_id,
+                    sealed_source=sealed_source,
+                    allow_ownership_maintenance=allow_ownership_maintenance,
+                    _lock_held=True,
+                )
         if self.euid != 0:
             raise InstallError("install requires root")
         team_id = _validate_team_id(team_id)
@@ -4479,6 +4496,7 @@ class HostInstaller:
             self.source_root, self.source_sha = self.system.prepare_sealed_install_source(
                 sealed_source
             )
+        self.ownership_maintenance_allowed = allow_ownership_maintenance
         source_sha = self.source_sha
         if source_sha is None:  # pragma: no cover - prepare_install_source owns this
             raise InstallError("root installation source SHA is unavailable")
@@ -5767,6 +5785,7 @@ def _parser() -> argparse.ArgumentParser:
     install.add_argument("--sealed-source-sha")
     install.add_argument("--sealed-source-tree")
     install.add_argument("--sealed-approved-base-sha")
+    install.add_argument("--allow-ownership-maintenance", action="store_true")
     check = commands.add_parser("check", allow_abbrev=False)
     check.add_argument("--format", choices=("json", "text"), default="text")
     commands.add_parser("maintenance-enable", allow_abbrev=False)
@@ -5812,6 +5831,7 @@ def main(
             result = active.install(
                 args.smoke_on_behalf_team_id,
                 sealed_source=sealed_source,
+                allow_ownership_maintenance=args.allow_ownership_maintenance,
             )
         elif args.command == "check":
             result = active.check()
