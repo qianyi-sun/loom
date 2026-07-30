@@ -66,6 +66,8 @@ _BASE_CONFIG_KEYS = frozenset(
 _SEALED_CONFIG_KEYS = frozenset(
     {"source_mode", "source_commit_sha", "source_tree_sha", "source_base_sha"}
 )
+# Keys allowed on any schema but never required — absence is a valid default.
+_OPTIONAL_CONFIG_KEYS = frozenset({"ownership_maintenance_allowed"})
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _MAX_CONFIG_BYTES = 1 << 20
 
@@ -176,9 +178,7 @@ def candidate_sha_from_runner_repo(
 ) -> str:
     """Return the full SHA encoded by one installer-published candidate path."""
     candidate_runtime_root = (
-        CANDIDATE_RUNTIME_ROOT
-        if authority is None
-        else authority.candidate_runtime_root
+        CANDIDATE_RUNTIME_ROOT if authority is None else authority.candidate_runtime_root
     )
     if (
         not path.is_absolute()
@@ -369,6 +369,21 @@ class OperatorConfig:
     source_tree_sha: str | None = None
     source_base_sha: str | None = None
     short_name: EnvironmentShortName = "staging"
+    ownership_maintenance_allowed: bool = False
+
+    def ownership_maintenance_permitted(self) -> bool:
+        """Whether this runner may run manifest-ownership maintenance.
+
+        The integrity guarantee is *exactness* — the maintenance operator only
+        ever runs against the exact installer-pinned candidate (enforced in
+        ``installed_manifest_ownership``). The *authority* to run it is what this
+        gate decides, as an explicit (version, policy) pair rather than the
+        source-mode label (#1085 phase 3): a sealed-cumulative runner is always
+        permitted (its whole identity is a reviewed frozen release), and any
+        other runner is permitted only when its config explicitly opts in via
+        ``ownership_maintenance_allowed``.
+        """
+        return self.source_mode == "sealed-cumulative" or self.ownership_maintenance_allowed
 
     @classmethod
     def load(
@@ -423,16 +438,21 @@ class OperatorConfig:
         schema_version = raw.get("schema_version")
         if type(schema_version) is not int or schema_version not in {1, 2}:
             raise ConfigError("schema_version must be 1 or 2")
-        expected_keys = (
+        required_keys = (
             _BASE_CONFIG_KEYS if schema_version == 1 else _BASE_CONFIG_KEYS | _SEALED_CONFIG_KEYS
         )
+        expected_keys = required_keys | _OPTIONAL_CONFIG_KEYS
         actual_keys = set(raw)
         unknown = sorted(actual_keys - expected_keys)
-        missing = sorted(expected_keys - actual_keys)
+        missing = sorted(required_keys - actual_keys)
         if unknown:
             raise ConfigError(f"unknown config keys: {unknown}")
         if missing:
             raise ConfigError(f"missing config keys: {missing}")
+
+        ownership_maintenance_allowed = raw.get("ownership_maintenance_allowed", False)
+        if type(ownership_maintenance_allowed) is not bool:
+            raise ConfigError("ownership_maintenance_allowed must be a boolean")
 
         source_mode: CandidateSourceMode = "merged-dev"
         source_commit_sha: str | None = None
@@ -545,6 +565,7 @@ class OperatorConfig:
             source_tree_sha=source_tree_sha,
             source_base_sha=source_base_sha,
             short_name=authority.short_name,
+            ownership_maintenance_allowed=ownership_maintenance_allowed,
         )
 
 

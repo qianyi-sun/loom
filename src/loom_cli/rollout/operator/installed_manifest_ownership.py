@@ -20,7 +20,7 @@ from loom_cli.rollout.manifest_ownership_operator import ManifestOwnershipOperat
 from loom_cli.rollout.operator.manifest_apply_contract import server_side_apply_argv
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
 
-from .config import OperatorConfig
+from .config import OperatorConfig, candidate_sha_from_runner_repo, environment_authority
 from .installed_preflight_commands import InstalledPreflightCommands
 from .manifest_ownership_epoch import ManifestOwnershipEpochClaimer
 from .model import CandidateBinding
@@ -62,13 +62,32 @@ class InstalledManifestOwnershipService:
         )
 
     def _operator(self, candidate: CandidateBinding) -> ManifestOwnershipOperator:
-        if (
-            candidate.source_mode != "sealed-cumulative"
-            or candidate.resolved_tree is None
-            or candidate.resolved_sha != self.config.source_commit_sha
-            or candidate.resolved_tree != self.config.source_tree_sha
-        ):
-            raise ValueError("ownership maintenance candidate is not the exact sealed source")
+        # Authority: an explicit (version, policy) gate, not the source-mode label
+        # (#1085 phase 3). Integrity always comes from *exactness* below — the
+        # operator only ever runs against the exact installer-pinned candidate.
+        if not self.config.ownership_maintenance_permitted():
+            raise ValueError("ownership maintenance is not permitted for this runner")
+        if candidate.source_mode != self.config.source_mode or candidate.resolved_tree is None:
+            raise ValueError("ownership maintenance candidate does not match the runner source")
+        if self.config.source_mode == "sealed-cumulative":
+            # Sealed identity: the candidate must equal the independently reviewed
+            # frozen source pinned in the config (unchanged from the prior gate).
+            if (
+                candidate.resolved_sha != self.config.source_commit_sha
+                or candidate.resolved_tree != self.config.source_tree_sha
+            ):
+                raise ValueError("ownership maintenance candidate is not the exact sealed source")
+        else:
+            # Non-sealed: the pinned version is the installer-published candidate
+            # encoded in runner_repo (<candidate-runtime-root>/<sha>/repo), and the
+            # candidate binding derives its sha from that same path — so exactness
+            # here means the candidate is precisely the runner's installed source.
+            expected_sha = candidate_sha_from_runner_repo(
+                self.config.runner_repo,
+                authority=environment_authority(self.config.short_name),
+            )
+            if candidate.resolved_sha != expected_sha:
+                raise ValueError("ownership maintenance candidate is not the exact pinned source")
         epoch = self.read_mutation_epoch()
         if epoch < 0:
             raise ValueError("ownership maintenance mutation epoch is invalid")

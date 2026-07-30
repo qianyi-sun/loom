@@ -90,9 +90,7 @@ def _environment_config(short_name: str) -> str:
     replacements = {
         "operator_group": authority.operator_group,
         "target_ref": authority.target_ref,
-        "runner_repo": (
-            f"{authority.candidate_runtime_root}/{MERGED_COMMIT}/repo"
-        ),
+        "runner_repo": (f"{authority.candidate_runtime_root}/{MERGED_COMMIT}/repo"),
         "state_root": str(authority.state_root),
         "runtime_root": str(authority.runtime_root),
         "rollout_root": str(authority.rollout_root),
@@ -291,6 +289,49 @@ def test_config_loads_exact_sealed_cumulative_binding(tmp_path: Path) -> None:
     assert config.source_commit_sha == SEALED_COMMIT
     assert config.source_tree_sha == SEALED_TREE
     assert config.source_base_sha == SEALED_BASE
+
+
+def test_config_defaults_ownership_maintenance_disallowed(tmp_path: Path) -> None:
+    # Absent flag: a merged-dev runner may not run ownership maintenance (#1085 p3).
+    path = _write_config(tmp_path / "staging-rollout.toml")
+
+    config = OperatorConfig.load(path, expected_owner_uid=os.getuid())
+
+    assert config.ownership_maintenance_allowed is False
+    assert config.ownership_maintenance_permitted() is False
+
+
+def test_config_accepts_ownership_maintenance_optin(tmp_path: Path) -> None:
+    path = _write_config(
+        tmp_path / "staging-rollout.toml",
+        VALID_CONFIG.rstrip() + "\nownership_maintenance_allowed = true\n",
+    )
+
+    config = OperatorConfig.load(path, expected_owner_uid=os.getuid())
+
+    assert config.ownership_maintenance_allowed is True
+    assert config.ownership_maintenance_permitted() is True
+
+
+def test_config_rejects_nonbool_ownership_maintenance_allowed(tmp_path: Path) -> None:
+    path = _write_config(
+        tmp_path / "staging-rollout.toml",
+        VALID_CONFIG.rstrip() + '\nownership_maintenance_allowed = "yes"\n',
+    )
+
+    with pytest.raises(ConfigError, match="ownership_maintenance_allowed must be a boolean"):
+        OperatorConfig.load(path, expected_owner_uid=os.getuid())
+
+
+def test_sealed_runner_permits_ownership_maintenance_without_flag(tmp_path: Path) -> None:
+    # A sealed runner's identity is already a reviewed frozen release, so it is
+    # permitted regardless of the opt-in flag (which defaults off).
+    path = _write_config(tmp_path / "staging-rollout.toml", SEALED_CONFIG)
+
+    config = OperatorConfig.load(path, expected_owner_uid=os.getuid())
+
+    assert config.ownership_maintenance_allowed is False
+    assert config.ownership_maintenance_permitted() is True
 
 
 @pytest.mark.parametrize(
