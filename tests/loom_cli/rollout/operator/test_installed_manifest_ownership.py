@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -302,10 +303,112 @@ def test_installed_service_binds_exact_publication_and_fixed_commands(
 
 
 def test_installed_service_rejects_nonsealed_candidate(tmp_path: Path) -> None:
+    # A sealed runner rejects a candidate whose source does not match its own.
     service = InstalledManifestOwnershipService(
         config=_config(tmp_path),
         service_uid=max(1, os.geteuid()),
         read_mutation_epoch=lambda: 2,
     )
-    with pytest.raises(ValueError, match="exact sealed source"):
+    with pytest.raises(ValueError, match="does not match the runner source"):
         service.inventory(_candidate(sealed=False))
+
+
+def _merged_config(tmp_path: Path, *, allowed: bool) -> OperatorConfig:
+    # A non-sealed runner installed for the exact candidate encoded in runner_repo.
+    return replace(
+        _config(tmp_path),
+        runner_repo=Path("/opt/loom-staging-runner/candidates") / ("d" * 40) / "repo",
+        source_mode="merged-dev",
+        source_commit_sha=None,
+        source_tree_sha=None,
+        source_base_sha=None,
+        ownership_maintenance_allowed=allowed,
+    )
+
+
+def _merged_candidate(*, resolved_sha: str = "d" * 40) -> CandidateBinding:
+    return CandidateBinding(
+        remote_url="https://github.com/qianyi-sun/loom.git",
+        target_ref="origin/dev",
+        resolved_sha=resolved_sha,
+        image_tag=f"staging-{resolved_sha[:7]}",
+        fetched_at="2026-07-19T12:00:00Z",
+        source_mode="merged-dev",
+        resolved_tree="e" * 40,
+        approved_base_sha=None,
+    )
+
+
+def test_merged_dev_ownership_denied_without_policy_optin(tmp_path: Path) -> None:
+    # (version, policy) — the policy half: a non-sealed runner may not run
+    # ownership maintenance unless its config explicitly opts in (#1085 phase 3).
+    service = InstalledManifestOwnershipService(
+        config=_merged_config(tmp_path, allowed=False),
+        service_uid=max(1, os.geteuid()),
+        read_mutation_epoch=lambda: 2,
+    )
+    with pytest.raises(ValueError, match="not permitted for this runner"):
+        service.inventory(_merged_candidate())
+
+
+def test_merged_dev_ownership_rejects_candidate_sha_drift(tmp_path: Path) -> None:
+    # (version, policy) — the version half: opted in, but the candidate is not the
+    # exact installer-pinned version encoded in runner_repo.
+    service = InstalledManifestOwnershipService(
+        config=_merged_config(tmp_path, allowed=True),
+        service_uid=max(1, os.geteuid()),
+        read_mutation_epoch=lambda: 2,
+    )
+    with pytest.raises(ValueError, match="not the exact pinned source"):
+        service.inventory(_merged_candidate(resolved_sha="f" * 40))
+
+
+def test_merged_dev_ownership_runs_for_exact_opted_in_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The decouple works end to end: an opted-in non-sealed runner whose candidate
+    # is the exact installer-pinned version runs ownership maintenance — no sealed
+    # source mode required.
+    from loom_cli.rollout.operator import installed_manifest_ownership as module
+
+    runner = _Runner()
+    journal = _Journal()
+
+    class _Store:
+        def __init__(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            pass
+
+        def load_exact(self, **kwargs):  # type: ignore[no-untyped-def]
+            assert kwargs["candidate_sha"] == "d" * 40
+            assert kwargs["candidate_tree"] == "e" * 40
+            assert kwargs["mutation_epoch"] == 2
+            return SimpleNamespace(manifests=_artifact())
+
+    monkeypatch.setattr(module, "PreflightArtifactStore", _Store)
+    monkeypatch.setattr(
+        module,
+        "InstalledPreflightCommands",
+        lambda *args, **kwargs: SimpleNamespace(image=lambda *args: None),
+    )
+    monkeypatch.setattr(module, "SubprocessProtectedApplyCommandRunner", lambda **kwargs: runner)
+    monkeypatch.setattr(module, "ManifestOwnershipJournal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(
+        module,
+        "ManifestOwnershipEpochClaimer",
+        lambda **kwargs: lambda epoch, request, evidence: epoch + 1,
+    )
+
+    service = InstalledManifestOwnershipService(
+        config=_merged_config(tmp_path, allowed=True),
+        service_uid=max(1, os.geteuid()),
+        read_mutation_epoch=lambda: 2,
+    )
+    inventory = service.inventory(_merged_candidate())
+    result = service.apply(
+        _merged_candidate(),
+        request_id="req-manifest-ownership-12345678",
+        approved_inventory_sha256=inventory["inventory_sha256"],  # type: ignore[arg-type]
+    )
+    assert result["mutation_epoch_after"] == 3
+    assert journal.events[-1]["event"] == "completed"

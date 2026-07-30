@@ -437,13 +437,14 @@ def _manifest_ownership(
             dependencies,
             "manifest ownership maintenance requires coordinator authority",
         )
-    if dependencies.config.source_mode != "sealed-cumulative":
-        # Distinguish mode-gated from unwired (#1085 phase 3): the service IS
-        # wired here, it's just policy-gated to a sealed-cumulative runner, so
-        # "not configured" is misleading — say what actually blocks it.
+    if not dependencies.config.ownership_maintenance_permitted():
+        # Explicit (version, policy) gate (#1085 phase 3): the service IS wired
+        # here; a non-sealed runner may run ownership maintenance only when its
+        # config opts in via ownership_maintenance_allowed. Distinguish this from
+        # the unwired case below so "not configured" is never misleading.
         return _safe_error(
             dependencies,
-            "manifest ownership maintenance requires a sealed-cumulative runner",
+            "manifest ownership maintenance is not permitted for this runner",
         )
     if dependencies.manifest_ownership is None:
         return _safe_error(
