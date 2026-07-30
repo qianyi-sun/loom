@@ -280,7 +280,14 @@ def _browser_job(plan: RehearsalPlan, *, ingress_ip: str) -> dict[str, object]:
         },
         "spec": {
             "activeDeadlineSeconds": 900,
-            "backoffLimit": 0,
+            # Bounded retry (#1085 phase 2): a headless-browser smoke fails
+            # transiently (a flaky page load / cold-start), and with no retry a
+            # single blip marked the whole restore rehearsal `job-not-complete`
+            # — a transient treated as durable that repeatedly blocked deploys.
+            # Each attempt self-caps at --timeout-ms=60s, so 3 attempts (~180s)
+            # stay well within the 900s job deadline. A genuinely broken browser
+            # still fails after the bound, so restore verification is unweakened.
+            "backoffLimit": 2,
             "completions": 1,
             "parallelism": 1,
             "template": {
