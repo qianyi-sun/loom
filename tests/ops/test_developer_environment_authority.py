@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import array
 import base64
+import gzip
 import hashlib
+import io
 import json
 import os
 import socket
 import subprocess
+import tarfile
 from collections.abc import Callable, Set
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -45,17 +48,43 @@ def _call(
     peer: authority.PeerIdentity | None = None,
     descriptors: list[int] | None = None,
     deployer: Any | None = None,
+    expand_candidate_descriptors: bool = True,
 ) -> dict[str, Any]:
+    stream_fallback = False
     try:
         server, client = socket.socketpair(
             socket.AF_UNIX,
             socket.SOCK_SEQPACKET,
         )
     except OSError:
-        # Darwin cannot create AF_UNIX SOCK_SEQPACKET pairs. SOCK_DGRAM keeps
-        # the one-message and SCM_RIGHTS semantics exercised by this unit test;
+        # Darwin cannot create AF_UNIX SOCK_SEQPACKET pairs. SOCK_STREAM keeps
+        # SCM_RIGHTS support without Darwin's small datagram response ceiling;
         # the production activation path separately pins SOCK_SEQPACKET.
-        server, client = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+        server, client = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        stream_fallback = True
+    supplemental_descriptors: list[int] = []
+    if (
+        expand_candidate_descriptors
+        and descriptors is not None
+        and len(descriptors) == 1
+        and payload.get("kind")
+        in {
+            authority.IMPORT_KIND,
+            authority.CREATE_KIND,
+            authority.UPDATE_KIND,
+        }
+    ):
+        for architecture in ("amd64", "arm64"):
+            expected = payload["image_archives"][architecture]["sha256"]
+            matches = [
+                path
+                for path in tmp_path.rglob(f"loom-worker-linux-{architecture}.tar")
+                if "candidates" not in path.parts
+                if hashlib.sha256(path.read_bytes()).hexdigest() == expected
+            ]
+            assert len(matches) == 1
+            supplemental_descriptors.append(os.open(matches[0], os.O_RDONLY))
+        descriptors = [*descriptors, *supplemental_descriptors]
     ancillary: list[tuple[int, int, bytes]] = []
     if descriptors is not None:
         packed = array.array("i", descriptors)
@@ -72,11 +101,22 @@ def _call(
                 deployer=deployer,
             )
             client.sendmsg([_canonical(payload)], ancillary)
-            raw = client.recv(4 * 1024 * 1024)
+            if stream_fallback:
+                response = bytearray()
+                while not response.endswith(b"\n"):
+                    chunk = client.recv(64 * 1024)
+                    assert chunk
+                    response.extend(chunk)
+                    assert len(response) <= 4 * 1024 * 1024
+                raw = bytes(response)
+            else:
+                raw = client.recv(4 * 1024 * 1024)
             handled.result(timeout=10)
     finally:
         server.close()
         client.close()
+        for descriptor in supplemental_descriptors:
+            os.close(descriptor)
     response = json.loads(raw)
     assert raw == _canonical(response)
     return response
@@ -141,6 +181,31 @@ def _import_request(
     key: str = "candidate-import-key-0001",
 ) -> dict[str, Any]:
     _path, candidate_sha, candidate_tree, digest, size = bundle
+    image_digests: dict[str, str] = {}
+    image_archives: dict[str, dict[str, Any]] = {}
+    for architecture in ("amd64", "arm64"):
+        archive = bundle[0].parent / f"loom-worker-linux-{architecture}.tar"
+        image_binding = _worker_image_archive(
+            archive,
+            architecture=architecture,
+            candidate_sha=candidate_sha,
+        )
+        image_digests[architecture] = image_binding["config_digest"]
+        image_archives[architecture] = {
+            "sha256": image_binding["archive_sha256"],
+            "size": image_binding["archive_size"],
+            **{
+                field: image_binding[field]
+                for field in (
+                    "config_digest",
+                    "index_digest",
+                    "manifest_digest",
+                    "manifest_media_type",
+                    "load_descriptor_digest",
+                    "load_descriptor_media_type",
+                )
+            },
+        }
     return {
         "schema_version": 1,
         "kind": authority.IMPORT_KIND,
@@ -150,11 +215,108 @@ def _import_request(
         "candidate_tree": candidate_tree,
         "bundle_sha256": digest,
         "bundle_size": size,
-        "image_digests": {
-            "amd64": "sha256:" + "a" * 64,
-            "arm64": "sha256:" + "b" * 64,
+        "image_digests": image_digests,
+        "image_archives": image_archives,
+    }
+
+
+def _worker_image_archive(
+    path: Path,
+    *,
+    architecture: str,
+    candidate_sha: str,
+) -> dict[str, Any]:
+    layer_raw = f"{architecture} layer\n".encode()
+    layer_blob = gzip.compress(layer_raw, mtime=0)
+    layer_digest = hashlib.sha256(layer_blob).hexdigest()
+    config = {
+        "architecture": architecture,
+        "os": "linux",
+        "config": {
+            "Labels": {"org.opencontainers.image.revision": candidate_sha},
+            "Cmd": ["python", "-m", "loom_worker"],
+            "Entrypoint": None,
+        },
+        "rootfs": {
+            "type": "layers",
+            "diff_ids": [f"sha256:{hashlib.sha256(layer_raw).hexdigest()}"],
         },
     }
+    config_raw = json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
+    config_digest = hashlib.sha256(config_raw).hexdigest()
+    oci_manifest = {
+        "schemaVersion": 2,
+        "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "digest": f"sha256:{config_digest}",
+            "size": len(config_raw),
+        },
+        "layers": [
+            {
+                "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                "digest": f"sha256:{layer_digest}",
+                "size": len(layer_blob),
+            }
+        ],
+    }
+    oci_manifest_raw = json.dumps(oci_manifest, sort_keys=True, separators=(",", ":")).encode()
+    oci_manifest_digest = hashlib.sha256(oci_manifest_raw).hexdigest()
+    files = {
+        "manifest.json": json.dumps(
+            [
+                {
+                    "Config": f"blobs/sha256/{config_digest}",
+                    "RepoTags": [f"loom-worker:{candidate_sha[:12]}-{architecture}"],
+                    "Layers": [f"blobs/sha256/{layer_digest}"],
+                }
+            ],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode(),
+        "index.json": json.dumps(
+            {
+                "schemaVersion": 2,
+                "manifests": [
+                    {
+                        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                        "digest": f"sha256:{oci_manifest_digest}",
+                        "size": len(oci_manifest_raw),
+                    }
+                ],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode(),
+        f"blobs/sha256/{oci_manifest_digest}": oci_manifest_raw,
+        f"blobs/sha256/{config_digest}": config_raw,
+        f"blobs/sha256/{layer_digest}": layer_blob,
+    }
+    with tarfile.open(path, "w:") as archive:
+        for name, content in files.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(content)
+            archive.addfile(info, io.BytesIO(content))
+    return registry.verify_worker_image_archive(
+        path,
+        architecture=architecture,
+        candidate_sha=candidate_sha,
+        image_id=f"sha256:{config_digest}",
+        expected_archive_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+        expected_archive_size=path.stat().st_size,
+    )
+
+
+def _candidate_descriptors(
+    bundle: tuple[Path, str, str, str, int],
+) -> list[int]:
+    return [
+        os.open(path, os.O_RDONLY)
+        for path in (
+            bundle[0],
+            bundle[0].parent / "loom-worker-linux-amd64.tar",
+            bundle[0].parent / "loom-worker-linux-arm64.tar",
+        )
+    ]
 
 
 def _new_registry(
@@ -754,8 +916,8 @@ def test_environment_status_is_owner_scoped(tmp_path: Path) -> None:
     assert response["error"] == "request failed safely"
 
 
-@pytest.mark.parametrize("descriptor_count", [0, 2])
-def test_candidate_import_requires_exactly_one_descriptor(
+@pytest.mark.parametrize("descriptor_count", [0, 1, 2, 4])
+def test_candidate_import_requires_exactly_three_descriptors(
     tmp_path: Path,
     descriptor_count: int,
 ) -> None:
@@ -773,6 +935,7 @@ def test_candidate_import_requires_exactly_one_descriptor(
             _import_request(environment, candidate_bundle),
             tmp_path,
             descriptors=[descriptor] * descriptor_count,
+            expand_candidate_descriptors=False,
         )
     finally:
         os.close(descriptor)

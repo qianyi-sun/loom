@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import stat
 import sys
 import tempfile
@@ -365,6 +366,17 @@ def _profile(
     deployment: Mapping[str, Any],
 ) -> legacy_host.Profile:
     state_root = Path(cast(str, environment["state_root"]))
+    worker_image_ids = _worker_image_ids(
+        snapshot,
+        environment=environment,
+        candidate=candidate,
+        deployment=deployment,
+    )
+    if any(
+        legacy_host.FINGERPRINT_RE.fullmatch(worker_image_ids[domain]) is None
+        for domain in ("oldlab", "gb10")
+    ):
+        raise RuntimeAuthorityError("runtime worker image binding is invalid")
     return legacy_host.Profile(
         sandbox=cast(str, environment["runtime_id"]),
         compose_project=cast(str, environment["compose_project"]),
@@ -397,7 +409,54 @@ def _profile(
         candidate_id=cast(str, candidate["candidate_id"]),
         candidate_tree=cast(str, candidate["candidate_tree"]),
         service_user=cast(str, environment["service_user"]),
+        worker_image_ids=worker_image_ids,
     )
+
+
+def _worker_image_ids(
+    snapshot: Mapping[str, Any],
+    *,
+    environment: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    deployment: Mapping[str, Any],
+) -> dict[str, str]:
+    selected = deployment
+    if deployment.get("candidate_id") != candidate.get("candidate_id"):
+        matches = [
+            row
+            for row in snapshot.get("deployments", [])
+            if isinstance(row, dict)
+            and row.get("env_id") == environment.get("env_id")
+            and row.get("candidate_id") == candidate.get("candidate_id")
+            and row.get("phase") == "committed"
+            and isinstance(row.get("worker_runtime_bindings"), dict)
+        ]
+        if not matches:
+            raise RuntimeAuthorityError("runtime worker deployment binding is unavailable")
+        selected = max(
+            matches,
+            key=lambda row: (
+                int(row["applied_resource_generation"]),
+                str(row["deployment_id"]),
+            ),
+        )
+    bindings = selected.get("worker_runtime_bindings")
+    domains = bindings.get("domains") if isinstance(bindings, dict) else None
+    values = (
+        {domain: domains[domain].get("runtime_image_id") for domain in ("oldlab", "gb10")}
+        if isinstance(domains, dict)
+        and all(isinstance(domains.get(domain), dict) for domain in ("oldlab", "gb10"))
+        else {}
+    )
+    if (
+        set(values) != {"oldlab", "gb10"}
+        or any(
+            re.fullmatch(r"sha256:[0-9a-f]{64}", str(value)) is None for value in values.values()
+        )
+        or values["oldlab"] == values["gb10"]
+    ):
+        raise RuntimeAuthorityError("runtime worker image binding is invalid")
+    return {domain: str(values[domain]) for domain in ("oldlab", "gb10")}
 
 
 def _reconcile(
@@ -493,6 +552,32 @@ def execute(action: str, deployment_id: str) -> dict[str, Any]:
                 "runtime_request_sha256": request["payload_sha256"],
             }
             domains = combined.get("domains")
+            replay_snapshot = _snapshot()
+            replay_candidates = [
+                row
+                for row in replay_snapshot["candidates"]
+                if row["candidate_id"] == request["candidate_id"]
+            ]
+            replay_deployments = [
+                row
+                for row in replay_snapshot["deployments"]
+                if row["deployment_id"] == request["deployment_id"]
+            ]
+            replay_environments = [
+                row for row in replay_snapshot["environments"] if row["env_id"] == request["env_id"]
+            ]
+            replay_images = (
+                _worker_image_ids(
+                    replay_snapshot,
+                    environment=replay_environments[0],
+                    candidate=replay_candidates[0],
+                    deployment=replay_deployments[0],
+                )
+                if len(replay_candidates) == 1
+                and len(replay_deployments) == 1
+                and len(replay_environments) == 1
+                else None
+            )
             unsigned = {key: value for key, value in combined.items() if key != "payload_sha256"}
             if (
                 set(combined) != acceptance_probe.COMBINED_FIELDS
@@ -501,6 +586,8 @@ def execute(action: str, deployment_id: str) -> dict[str, Any]:
                 or combined.get("status") != "passed"
                 or combined.get("action") != "acceptance-probe"
                 or any(combined.get(field) != value for field, value in exact.items())
+                or not isinstance(replay_images, dict)
+                or combined.get("worker_image_ids") != replay_images
                 or not isinstance(domains, dict)
                 or set(domains) != {"oldlab", "gb10"}
                 or any(
@@ -509,6 +596,8 @@ def execute(action: str, deployment_id: str) -> dict[str, Any]:
                     or domains[domain].get("deployment_id") != deployment_id
                     or domains[domain].get("env_id") != request["env_id"]
                     or domains[domain].get("candidate_id") != request["candidate_id"]
+                    or domains[domain].get("worker_image_id")
+                    != combined["worker_image_ids"][domain]
                     or domains[domain].get("payload_sha256")
                     != acceptance_probe._digest(
                         {
@@ -602,6 +691,16 @@ def execute(action: str, deployment_id: str) -> dict[str, Any]:
         "registry_snapshot_sha256": request["registry_snapshot_sha256"],
         "request_sha256": request["payload_sha256"],
         "domains": ["oldlab", "gb10"],
+        "worker_image_ids": (
+            _worker_image_ids(
+                snapshot,
+                environment=environment,
+                candidate=effective_candidate,
+                deployment=deployment,
+            )
+            if effective_candidate is not None
+            else {}
+        ),
         "nodes": list(NODES),
         "remote_link": {"status": "ready"},
         "domain_runtime": {"status": "ready"},

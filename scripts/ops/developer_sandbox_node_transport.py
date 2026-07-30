@@ -6,10 +6,11 @@ bootstrap channel supplies pre-existing root-owned identities, matching public
 keys, and a pinned known_hosts file.  That channel may be a direct root session
 or the repository's one-shot Docker/chroot bootstrap.  Bootstrap copies those
 assets to fixed root-owned paths and records their digests.  Runtime callers
-may select only a closed node and one of the node authority's two fixed verbs.
+may select only a closed node and an explicitly authorized node-authority verb.
 
 The same installed program is the forced command for the dedicated public
-keys.  Authority roles map exactly to ``transact`` or ``check``.  The GB10
+keys.  Authority roles map exactly to ``transact``, ``check``, or the
+oldlab2-controller-only ``load-image`` stream.  The GB10
 jump role maps only a closed target name to a fixed address on TCP port 22; it
 does not enable SSH forwarding, a shell, an agent, a password, or a PTY.
 """
@@ -19,6 +20,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import contextlib
 import fcntl
 import hashlib
 import importlib.util
@@ -57,11 +59,14 @@ MAX_IDENTITY_BYTES: Final = 64 * 1024
 # JSON/base64 framing.  Keep the transport output closed and large enough for
 # that exact protocol bound.
 MAX_STDOUT_BYTES: Final = 1536 * 1024
+MAX_STDERR_BYTES: Final = 1024 * 1024
 DEFAULT_INVOKE_TIMEOUT_SECONDS: Final = 120
 INFRASTRUCTURE_CONVERGE_TIMEOUT_SECONDS: Final = 3600
+WORKER_IMAGE_LOAD_TIMEOUT_SECONDS: Final = 3600
+MAX_WORKER_IMAGE_HEADER_BYTES: Final = 64 * 1024
 NAME_RE: Final = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 ROLE_RE: Final = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
-ALLOWED_VERBS: Final = frozenset({"transact", "check"})
+ALLOWED_VERBS: Final = frozenset({"transact", "check", "load-image"})
 SSH: Final = "/usr/bin/ssh"
 SUDO: Final = "/usr/bin/sudo"
 RUNUSER: Final = "/usr/sbin/runuser"
@@ -129,6 +134,29 @@ REGISTRY_DEPENDENT_ACTIONS: Final = frozenset(
         "developer-environment-runtime-retire",
     },
 )
+WORKER_IMAGE_BOUND_ACTIONS: Final = frozenset(
+    {
+        "host-converge",
+        "materialize",
+        "install-client",
+        "attest",
+        "rollback",
+        "persist-fleet-attestation",
+        "inspect-candidate",
+        "inspect-local",
+        "inspect-link-client",
+        "inspect-link-server",
+        "export-domain-attestation",
+        "export-runtime-proof-artifact",
+        "collect-live-overlap",
+        "observe-live-overlap-job",
+        "observe-platform-health-node",
+        "slurm-identity-preflight",
+        "slurm-identity-converge",
+        "slurm-identity-retire",
+        "developer-environment-acceptance-probe",
+    },
+)
 IDENTITY_PREFLIGHT_ACTION: Final = "slurm-identity-preflight"
 IDENTITY_PREFLIGHT_PAYLOAD_KIND: Final = "developer-environment-identity-preflight-json"
 INFRASTRUCTURE_CONVERGE_FIELDS: Final = {
@@ -138,6 +166,53 @@ INFRASTRUCTURE_CONVERGE_FIELDS: Final = {
     "candidate_tree",
     "convergence_id",
     "requested_at",
+}
+WORKER_IMAGE_LOAD_REQUEST_KIND: Final = "loom.developer-sandbox.worker-image-load-request"
+WORKER_IMAGE_LOAD_RECEIPT_KIND: Final = "loom.developer-sandbox.worker-image-load-receipt"
+WORKER_IMAGE_LOAD_REQUEST_FIELDS: Final = {
+    "schema_version",
+    "kind",
+    "node",
+    "domain",
+    "architecture",
+    "env_id",
+    "resource_generation",
+    "candidate_id",
+    "candidate_sha",
+    "candidate_tree",
+    "config_digest",
+    "index_digest",
+    "load_descriptor_digest",
+    "load_descriptor_media_type",
+    "archive_sha256",
+    "archive_size",
+    "registry_generation",
+    "registry_payload_sha256",
+    "payload_sha256",
+}
+WORKER_IMAGE_LOAD_RECEIPT_FIELDS: Final = {
+    "schema_version",
+    "kind",
+    "status",
+    "node",
+    "domain",
+    "architecture",
+    "candidate_id",
+    "candidate_sha",
+    "config_digest",
+    "index_digest",
+    "load_descriptor_digest",
+    "load_descriptor_media_type",
+    "runtime_image_id",
+    "archive_sha256",
+    "archive_size",
+    "registry_generation",
+    "registry_payload_sha256",
+    "docker_storage_driver",
+    "docker_backend",
+    "docker_descriptor_digest",
+    "docker_descriptor_media_type",
+    "payload_sha256",
 }
 
 
@@ -686,6 +761,59 @@ def _safe_external_file(
         return content
     finally:
         os.close(descriptor)
+        for opened in reversed(descriptors):
+            os.close(opened)
+
+
+@contextlib.contextmanager
+def _safe_external_stream(
+    path: Path,
+    *,
+    expected_size: int,
+    expected_uid: int = ROOT_UID,
+) -> Any:
+    """Keep a root-owned, non-link regular file and its parent chain pinned."""
+
+    descriptors: list[int] = []
+    records: list[tuple[int, str, int, tuple[int, ...]]] = []
+    descriptor = -1
+    try:
+        descriptors, records, name = _open_external_parent_chain(
+            path,
+            expected_uid=expected_uid,
+        )
+        parent = descriptors[-1]
+        lexical = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
+            dir_fd=parent,
+        )
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or stat.S_ISLNK(lexical.st_mode)
+            or before.st_uid != expected_uid
+            or before.st_gid != ROOT_GID
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_nlink != 1
+            or before.st_size != expected_size
+            or _metadata_identity(lexical) != _metadata_identity(before)
+        ):
+            raise TransportError("worker image archive metadata is unsafe")
+        yield descriptor
+        after = os.fstat(descriptor)
+        current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        if _metadata_identity(before) != _metadata_identity(after) or _metadata_identity(
+            after
+        ) != _metadata_identity(current):
+            raise TransportError("worker image archive changed during transport")
+        _revalidate_external_parent_chain(records, expected_uid=expected_uid)
+    except OSError as exc:
+        raise TransportError("worker image archive is unavailable") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
         for opened in reversed(descriptors):
             os.close(opened)
 
@@ -2689,6 +2817,95 @@ def _registry_sync_envelope(
     )
 
 
+def _validate_worker_image_binding(
+    outer: Mapping[str, Any],
+    snapshot: Mapping[str, Any],
+) -> None:
+    """Fail before transport when a domain image ID is absent or mismatched."""
+    try:
+        decoded = base64.b64decode(str(outer["payload_base64"]), validate=True)
+        inner = json.loads(decoded) if decoded else {}
+    except (binascii.Error, UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+        raise TransportError("registry worker image binding is invalid") from exc
+    if not isinstance(inner, dict):
+        raise TransportError("registry worker image binding is invalid")
+    worker_image_id = outer.get("worker_image_id", inner.get("worker_image_id"))
+    if worker_image_id is None:
+        if outer.get("action") in WORKER_IMAGE_BOUND_ACTIONS:
+            raise TransportError("registry worker image binding is invalid")
+        return
+    domain = outer.get("domain")
+    architecture = {"oldlab": "amd64", "gb10": "arm64"}.get(str(domain))
+    candidate_id = outer.get("candidate_id", inner.get("candidate_id"))
+    deployment_id = outer.get("deployment_id", inner.get("deployment_id"))
+    env_id = outer.get("env_id", inner.get("env_id"))
+    sandbox = outer.get("sandbox", inner.get("sandbox"))
+    resource_generation = outer.get(
+        "resource_generation",
+        inner.get("resource_generation"),
+    )
+    candidates = [
+        row
+        for row in snapshot.get("candidates", [])
+        if isinstance(row, dict)
+        and row.get("candidate_id") == candidate_id
+        and (env_id is None or row.get("env_id") == env_id)
+        and row.get("candidate_sha") == outer.get("candidate_sha")
+        and row.get("candidate_tree") == outer.get("candidate_tree")
+    ]
+    environments = [
+        row
+        for row in snapshot.get("environments", [])
+        if isinstance(row, dict)
+        and (env_id is None or row.get("env_id") == env_id)
+        and (sandbox is None or row.get("runtime_id") == sandbox)
+        and row.get("state") in {"deploying", "active"}
+    ]
+    if len(environments) != 1:
+        raise TransportError("registry worker image binding is invalid")
+    environment = environments[0]
+    if resource_generation is not None and resource_generation != environment.get(
+        "resource_generation"
+    ):
+        raise TransportError("registry worker image binding is invalid")
+    matching_deployments = [
+        row
+        for row in snapshot.get("deployments", [])
+        if isinstance(row, dict)
+        and row.get("env_id") == environment.get("env_id")
+        and row.get("candidate_id") == candidate_id
+        and isinstance(row.get("worker_runtime_bindings"), dict)
+        and (deployment_id is None or row.get("deployment_id") == deployment_id)
+        and (
+            (
+                environment.get("state") == "deploying"
+                and row.get("phase") not in {"committed", "failed"}
+                and row.get("expected_resource_generation")
+                == environment.get("resource_generation")
+            )
+            or (
+                environment.get("state") == "active"
+                and row.get("phase") == "committed"
+                and row.get("applied_resource_generation") == environment.get("resource_generation")
+            )
+        )
+    ]
+    deployment = matching_deployments[0] if len(matching_deployments) == 1 else {}
+    bindings = deployment.get("worker_runtime_bindings")
+    domains = bindings.get("domains") if isinstance(bindings, dict) else None
+    domain_binding = domains.get(domain) if isinstance(domains, dict) else None
+    expected_image_id = (
+        domain_binding.get("runtime_image_id") if isinstance(domain_binding, dict) else None
+    )
+    if (
+        architecture is None
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", str(worker_image_id)) is None
+        or len(candidates) != 1
+        or expected_image_id != worker_image_id
+    ):
+        raise TransportError("registry worker image binding is invalid")
+
+
 def _validate_registry_sync_receipt(
     completed: subprocess.CompletedProcess[bytes],
     *,
@@ -2742,6 +2959,433 @@ def _validate_registry_sync_receipt(
         or re.fullmatch(r"[0-9a-f]{64}", str(receipt.get("result_sha256"))) is None
     ):
         raise TransportError("registry snapshot sync receipt is invalid")
+
+
+def _worker_image_request(
+    metadata_json: str,
+    *,
+    node: str,
+    archive: Path,
+    snapshot: Mapping[str, Any],
+) -> dict[str, Any]:
+    try:
+        payload = json.loads(metadata_json)
+        canonical_matches = metadata_json.encode("ascii") + b"\n" == _canonical_json(payload)
+    except (UnicodeEncodeError, UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
+        raise TransportError("worker image load metadata is invalid") from exc
+    unsigned = (
+        {key: value for key, value in payload.items() if key != "payload_sha256"}
+        if isinstance(payload, dict)
+        else {}
+    )
+    domain = "oldlab" if node.startswith("oldlab-") else "gb10"
+    architecture = "amd64" if domain == "oldlab" else "arm64"
+    candidates = (
+        [
+            row
+            for row in snapshot.get("candidates", [])
+            if isinstance(row, dict)
+            and row.get("candidate_id") == payload.get("candidate_id")
+            and row.get("env_id") == payload.get("env_id")
+            and row.get("candidate_sha") == payload.get("candidate_sha")
+            and row.get("candidate_tree") == payload.get("candidate_tree")
+        ]
+        if isinstance(payload, dict)
+        else []
+    )
+    environments = (
+        [
+            row
+            for row in snapshot.get("environments", [])
+            if isinstance(row, dict)
+            and row.get("env_id") == payload.get("env_id")
+            and row.get("resource_generation") == payload.get("resource_generation")
+        ]
+        if isinstance(payload, dict)
+        else []
+    )
+    candidate = candidates[0] if len(candidates) == 1 else {}
+    image_digests = candidate.get("image_digests")
+    image_archives = candidate.get("image_archives")
+    archive_binding = image_archives.get(architecture) if isinstance(image_archives, dict) else None
+    registry_module = _registry_module()
+    maximum_archive_size = getattr(registry_module, "MAX_WORKER_IMAGE_ARCHIVE_BYTES", 0)
+    try:
+        archive_matches = (
+            isinstance(archive_binding, dict)
+            and isinstance(archive_binding.get("path"), str)
+            and archive.absolute() == Path(str(archive_binding["path"])).absolute()
+        )
+    except OSError:
+        archive_matches = False
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != WORKER_IMAGE_LOAD_REQUEST_FIELDS
+        or not canonical_matches
+        or payload.get("schema_version") != SCHEMA_VERSION
+        or payload.get("kind") != WORKER_IMAGE_LOAD_REQUEST_KIND
+        or payload.get("node") != node
+        or payload.get("domain") != domain
+        or payload.get("architecture") != architecture
+        or re.fullmatch(r"denv-[a-z0-9-]{8,64}", str(payload.get("env_id"))) is None
+        or type(payload.get("resource_generation")) is not int
+        or int(payload["resource_generation"]) < 1
+        or re.fullmatch(r"cand-[0-9a-f]{40}", str(payload.get("candidate_id"))) is None
+        or re.fullmatch(r"[0-9a-f]{40}", str(payload.get("candidate_sha"))) is None
+        or re.fullmatch(r"[0-9a-f]{40}", str(payload.get("candidate_tree"))) is None
+        or any(
+            re.fullmatch(r"sha256:[0-9a-f]{64}", str(payload.get(field))) is None
+            for field in (
+                "config_digest",
+                "index_digest",
+                "load_descriptor_digest",
+            )
+        )
+        or payload.get("load_descriptor_media_type")
+        not in {
+            "application/vnd.oci.image.manifest.v1+json",
+            "application/vnd.docker.distribution.manifest.v2+json",
+            "application/vnd.oci.image.index.v1+json",
+            "application/vnd.docker.distribution.manifest.list.v2+json",
+        }
+        or re.fullmatch(r"[0-9a-f]{64}", str(payload.get("archive_sha256"))) is None
+        or type(payload.get("archive_size")) is not int
+        or type(maximum_archive_size) is not int
+        or not 0 < int(payload["archive_size"]) <= maximum_archive_size
+        or type(payload.get("registry_generation")) is not int
+        or int(payload["registry_generation"]) < 1
+        or re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(payload.get("registry_payload_sha256")),
+        )
+        is None
+        or re.fullmatch(r"[0-9a-f]{64}", str(payload.get("payload_sha256"))) is None
+        or payload.get("payload_sha256") != hashlib.sha256(_canonical_json(unsigned)).hexdigest()
+        or snapshot.get("generation") != payload.get("registry_generation")
+        or snapshot.get("payload_sha256") != payload.get("registry_payload_sha256")
+        or len(candidates) != 1
+        or len(environments) != 1
+        or not isinstance(image_digests, dict)
+        or image_digests.get(architecture) != payload.get("config_digest")
+        or not isinstance(archive_binding, dict)
+        or set(archive_binding)
+        != {
+            "path",
+            "sha256",
+            "size",
+            "config_digest",
+            "index_digest",
+            "manifest_digest",
+            "manifest_media_type",
+            "load_descriptor_digest",
+            "load_descriptor_media_type",
+        }
+        or archive_binding.get("sha256") != payload.get("archive_sha256")
+        or archive_binding.get("size") != payload.get("archive_size")
+        or any(
+            archive_binding.get(field) != payload.get(field)
+            for field in (
+                "config_digest",
+                "index_digest",
+                "load_descriptor_digest",
+                "load_descriptor_media_type",
+            )
+        )
+        or not archive_matches
+    ):
+        raise TransportError("worker image load metadata binding is invalid")
+    try:
+        verified = registry_module.verify_worker_image_archive(
+            archive,
+            architecture=architecture,
+            candidate_sha=str(payload["candidate_sha"]),
+            image_id=str(payload["config_digest"]),
+            expected_archive_sha256=str(payload["archive_sha256"]),
+            expected_archive_size=int(payload["archive_size"]),
+        )
+    except Exception as exc:
+        raise TransportError("worker image archive verification failed") from exc
+    if any(
+        verified.get(field) != payload.get(field)
+        for field in (
+            "config_digest",
+            "index_digest",
+            "load_descriptor_digest",
+            "load_descriptor_media_type",
+        )
+    ):
+        raise TransportError("worker image archive descriptor binding is invalid")
+    return payload
+
+
+def _validate_worker_image_load_receipt(
+    raw: bytes,
+    *,
+    request: Mapping[str, Any],
+) -> dict[str, Any]:
+    try:
+        receipt = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TransportError("worker image load receipt is invalid") from exc
+    unsigned = (
+        {key: value for key, value in receipt.items() if key != "payload_sha256"}
+        if isinstance(receipt, dict)
+        else {}
+    )
+    if (
+        not isinstance(receipt, dict)
+        or set(receipt) != WORKER_IMAGE_LOAD_RECEIPT_FIELDS
+        or raw != _canonical_json(receipt)
+        or receipt.get("schema_version") != SCHEMA_VERSION
+        or receipt.get("kind") != WORKER_IMAGE_LOAD_RECEIPT_KIND
+        or receipt.get("status") not in {"loaded", "reused"}
+        or any(
+            receipt.get(field) != request.get(field)
+            for field in (
+                "node",
+                "domain",
+                "architecture",
+                "candidate_id",
+                "candidate_sha",
+                "config_digest",
+                "index_digest",
+                "load_descriptor_digest",
+                "load_descriptor_media_type",
+                "archive_sha256",
+                "archive_size",
+                "registry_generation",
+                "registry_payload_sha256",
+            )
+        )
+        or re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            str(receipt.get("runtime_image_id")),
+        )
+        is None
+        or (
+            receipt.get("docker_backend") == "classic-overlay2"
+            and (
+                receipt.get("docker_storage_driver") != "overlay2"
+                or receipt.get("runtime_image_id") != request.get("config_digest")
+                or receipt.get("docker_descriptor_digest") is not None
+                or receipt.get("docker_descriptor_media_type") is not None
+            )
+        )
+        or (
+            receipt.get("docker_backend") == "containerd-snapshotter-v1"
+            and (
+                receipt.get("docker_storage_driver") != "overlayfs"
+                or receipt.get("runtime_image_id") != request.get("load_descriptor_digest")
+                or receipt.get("docker_descriptor_digest") != request.get("load_descriptor_digest")
+                or receipt.get("docker_descriptor_media_type")
+                != request.get("load_descriptor_media_type")
+            )
+        )
+        or receipt.get("docker_backend") not in {"classic-overlay2", "containerd-snapshotter-v1"}
+        or receipt.get("payload_sha256") != hashlib.sha256(_canonical_json(unsigned)).hexdigest()
+    ):
+        raise TransportError("worker image load receipt binding is invalid")
+    return receipt
+
+
+def _stream_worker_image(
+    argv: Sequence[str],
+    *,
+    header: bytes,
+    archive_descriptor: int,
+    archive_size: int,
+) -> subprocess.CompletedProcess[bytes]:
+    read_descriptor, write_descriptor = os.pipe()
+    try:
+        process = subprocess.Popen(
+            tuple(argv),
+            stdin=read_descriptor,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=_clean_env(),
+        )
+    except OSError as exc:
+        os.close(read_descriptor)
+        os.close(write_descriptor)
+        raise TransportError("node authority image transport failed safely") from exc
+    os.close(read_descriptor)
+    writer_error: list[BaseException] = []
+
+    def upload() -> None:
+        total = 0
+        try:
+            with os.fdopen(write_descriptor, "wb", closefd=True) as output:
+                output.write(header)
+                os.lseek(archive_descriptor, 0, os.SEEK_SET)
+                while total < archive_size:
+                    chunk = os.read(
+                        archive_descriptor,
+                        min(1024 * 1024, archive_size - total),
+                    )
+                    if not chunk:
+                        raise TransportError("worker image archive ended during transport")
+                    total += len(chunk)
+                    output.write(chunk)
+                if os.read(archive_descriptor, 1):
+                    raise TransportError("worker image archive exceeds its declared size")
+        except BaseException as exc:  # delivered to the controlling thread
+            writer_error.append(exc)
+            try:
+                os.close(write_descriptor)
+            except OSError:
+                pass
+
+    writer = threading.Thread(target=upload, daemon=True)
+    writer.start()
+    stdout_buffer = bytearray()
+    stderr_buffer = bytearray()
+    reader_errors: list[BaseException] = []
+    output_exceeded = threading.Event()
+
+    def drain(pipe: Any, output: bytearray, limit: int) -> None:
+        try:
+            while True:
+                chunk = pipe.read(65_536)
+                if not chunk:
+                    break
+                if len(output) + len(chunk) <= limit:
+                    output.extend(chunk)
+                else:
+                    output_exceeded.set()
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+        except BaseException as exc:
+            reader_errors.append(exc)
+            try:
+                process.kill()
+            except OSError:
+                pass
+
+    assert process.stdout is not None
+    assert process.stderr is not None
+    stdout_reader = threading.Thread(
+        target=drain,
+        args=(process.stdout, stdout_buffer, MAX_STDOUT_BYTES),
+        daemon=True,
+    )
+    stderr_reader = threading.Thread(
+        target=drain,
+        args=(process.stderr, stderr_buffer, MAX_STDERR_BYTES),
+        daemon=True,
+    )
+    stdout_reader.start()
+    stderr_reader.start()
+    try:
+        process.wait(timeout=WORKER_IMAGE_LOAD_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        process.kill()
+        process.wait()
+        writer.join(timeout=1)
+        stdout_reader.join(timeout=1)
+        stderr_reader.join(timeout=1)
+        raise TransportError("node authority image transport timed out safely") from exc
+    writer.join(timeout=5)
+    stdout_reader.join(timeout=5)
+    stderr_reader.join(timeout=5)
+    if writer.is_alive() or stdout_reader.is_alive() or stderr_reader.is_alive():
+        process.kill()
+        process.wait()
+        raise TransportError("node authority image transport did not close safely")
+    stdout = bytes(stdout_buffer)
+    stderr = bytes(stderr_buffer)
+    if (
+        writer_error
+        or reader_errors
+        or output_exceeded.is_set()
+        or process.returncode != 0
+        or stderr
+    ):
+        raise TransportError("node authority image transport failed safely")
+    return subprocess.CompletedProcess(tuple(argv), process.returncode, stdout, stderr)
+
+
+def load_image(
+    node: str,
+    archive: Path,
+    metadata_json: str,
+    *,
+    layout: Layout | None = None,
+) -> dict[str, Any]:
+    """Sync the exact registry snapshot, then stream one verified archive."""
+
+    if os.geteuid() != ROOT_UID:
+        raise TransportError("transport client requires root")
+    if len(metadata_json.encode("utf-8")) > MAX_WORKER_IMAGE_HEADER_BYTES:
+        raise TransportError("worker image load metadata exceeds its size bound")
+    layout = default_layout() if layout is None else layout
+    validate_client_install(layout)
+    config = load_config(layout.config)
+    initiator = config.node_for_hostname(_hostname())
+    if initiator != "oldlab-2":
+        raise TransportError("worker image loading is restricted to oldlab-2")
+    role = config.authority_role(initiator, node, "load-image")
+    snapshot_raw = _safe_external_file(
+        REGISTRY_SNAPSHOT,
+        modes=frozenset({0o600}),
+        limit=8 << 20,
+        expected_uid=ROOT_UID,
+        validate_parents=True,
+    )
+    snapshot = _verified_registry_snapshot(snapshot_raw)
+    request = _worker_image_request(
+        metadata_json,
+        node=node,
+        archive=archive,
+        snapshot=snapshot,
+    )
+    sync_original = {**request, "sandbox": "image-load"}
+    sync_envelope = _registry_sync_envelope(sync_original, snapshot, snapshot_raw)
+    sync_completed = invoke(
+        node,
+        "transact",
+        sync_envelope,
+        layout=layout,
+    )
+    _validate_registry_sync_receipt(
+        sync_completed,
+        sync_envelope=sync_envelope,
+        snapshot=snapshot,
+    )
+    local = config.nodes[node].hostname == _hostname()
+    argv = (
+        [
+            RUNUSER,
+            "-u",
+            OPERATOR,
+            "--",
+            SUDO,
+            "-n",
+            str(config.authority_program),
+            "load-image",
+        ]
+        if local
+        else _remote_ssh_argv(
+            config,
+            layout,
+            initiator=initiator,
+            node=node,
+            verb="load-image",
+            role=role,
+        )
+    )
+    with _safe_external_stream(
+        archive,
+        expected_size=int(request["archive_size"]),
+    ) as descriptor:
+        completed = _stream_worker_image(
+            argv,
+            header=_canonical_json(request),
+            archive_descriptor=descriptor,
+            archive_size=int(request["archive_size"]),
+        )
+    return _validate_worker_image_load_receipt(completed.stdout, request=request)
 
 
 def invoke(
@@ -2825,6 +3469,7 @@ def invoke(
             raise TransportError(
                 "registry-bound transport request is stale before snapshot sync",
             )
+        _validate_worker_image_binding(original, snapshot)
         sync_envelope = _registry_sync_envelope(original, snapshot, snapshot_raw)
         sync_completed = execute("transact", sync_envelope)
         _validate_registry_sync_receipt(
@@ -2973,6 +3618,11 @@ def _parser() -> argparse.ArgumentParser:
     invoke_parser.add_argument("--node", required=True)
     invoke_parser.add_argument("--verb", choices=sorted(ALLOWED_VERBS), required=True)
 
+    load_image_parser = subparsers.add_parser("load-image", allow_abbrev=False)
+    load_image_parser.add_argument("--node", required=True)
+    load_image_parser.add_argument("--archive", type=Path, required=True)
+    load_image_parser.add_argument("--metadata-json", required=True)
+
     forced_parser = subparsers.add_parser("forced", allow_abbrev=False)
     forced_parser.add_argument("role")
 
@@ -3035,6 +3685,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "invoke":
             completed = invoke(args.node, args.verb, sys.stdin.buffer.read())
             sys.stdout.buffer.write(completed.stdout)
+        elif args.command == "load-image":
+            sys.stdout.buffer.write(
+                _canonical_json(
+                    load_image(
+                        args.node,
+                        args.archive,
+                        args.metadata_json,
+                    ),
+                ),
+            )
         elif args.command == "forced":
             forced(args.role)
         else:

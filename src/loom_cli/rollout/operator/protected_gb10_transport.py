@@ -31,12 +31,15 @@ from .final_gate_plan import FinalGatePlan
 _HOST_RE = re.compile(r"trt-gb10-(?:[1-9]|1[0-5])\Z")
 _SERVICE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@-]*[.]service\Z")
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_STAGING_IMAGE_TAG_RE = re.compile(r"^staging-[0-9a-f]{7}$")
 _KNOWN_HOSTS = Path("/etc/loom/staging-rollout-gb10-known-hosts")
 _LEGACY_SHARED_ROOT = PurePosixPath("/shared_work2/qianyi/.loom-staging-rollout/worker-repos")
 _LEGACY_UNIT_ROOT = PurePosixPath("deploy/worker-pools/gb10")
 _LEGACY_SERVICE = "loom-gb10-worker.service"
 _FIXED_REPO = PurePosixPath("/home/qianyi/loom-worker-build-staging")
 _FIXED_ENV_FILE = _FIXED_REPO / ".env"
+_STAGING_SHARED_ENV_ROOT = PurePosixPath("/srv/loom/staging-shared/generated")
 _FIXED_NODE_AGENT_SERVICE = "loom-gb10-node-agent.service"
 _RETIREMENT_UNITS = (
     _LEGACY_SERVICE,
@@ -447,6 +450,367 @@ def _retirement_identity(
     )
 
 
+def retirement_worker_image_observation_source(plan: FinalGatePlan) -> str:
+    """Render the fixed read-only staging GB10 worker image verifier."""
+
+    image_tag = f"staging-{plan.candidate_sha[:7]}"
+    env_file = _STAGING_SHARED_ENV_ROOT / f"staging-gb10-worker-{image_tag}.env"
+    return f"""import json
+import pathlib
+import re
+import subprocess
+
+candidate_sha = {plan.candidate_sha!r}
+env_file = pathlib.Path({str(env_file)!r})
+
+def emit(exact, image_id=""):
+    print(json.dumps({{"candidate_sha": candidate_sha, "exact": exact,
+                      "image_id": image_id}}, sort_keys=True,
+                     separators=(",", ":")))
+
+try:
+    values = {{}}
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        if "=" not in line or line.lstrip().startswith("#"):
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key in values:
+            raise ValueError("duplicate env key")
+        values[key] = value
+    image_id = values.get("LOOM_WORKER_IMAGE_ID", "")
+    if (values.get("LOOM_WORKER_CANDIDATE_SHA") != candidate_sha
+            or re.fullmatch(r"sha256:[0-9a-f]{{64}}", image_id) is None):
+        emit(False, image_id)
+        raise SystemExit(0)
+    driver = subprocess.run(
+        ["docker", "info", "--format", "{{{{.Driver}}}}"],
+        check=False, capture_output=True, text=True, timeout=30,
+        env={{"HOME": str(pathlib.Path.home()), "LANG": "C.UTF-8",
+             "LC_ALL": "C.UTF-8", "PATH": "/usr/local/bin:/usr/bin:/bin"}},
+    )
+    if driver.returncode != 0 or driver.stderr or driver.stdout.strip() != "overlay2":
+        emit(False, image_id)
+        raise SystemExit(0)
+    inspected = subprocess.run(
+        ["docker", "image", "inspect", image_id],
+        check=False, capture_output=True, text=True, timeout=30,
+        env={{"HOME": str(pathlib.Path.home()), "LANG": "C.UTF-8",
+             "LC_ALL": "C.UTF-8", "PATH": "/usr/local/bin:/usr/bin:/bin"}},
+    )
+    if inspected.returncode != 0 or inspected.stderr or len(inspected.stdout) > 1024 * 1024:
+        emit(False, image_id)
+        raise SystemExit(0)
+    payload = json.loads(inspected.stdout)
+    row = payload[0] if isinstance(payload, list) and len(payload) == 1 else {{}}
+    config = row.get("Config") if isinstance(row, dict) else None
+    labels = config.get("Labels") if isinstance(config, dict) else None
+    exact = bool(
+        row.get("Id") == image_id
+        and row.get("Os") == "linux"
+        and row.get("Architecture") == "arm64"
+        and isinstance(config, dict)
+        and isinstance(labels, dict)
+        and labels.get("org.opencontainers.image.revision") == candidate_sha
+        and config.get("Cmd") == ["python", "-m", "loom_worker"]
+        and config.get("Entrypoint") in (None, [])
+    )
+    emit(exact, image_id)
+except (OSError, UnicodeError, ValueError, json.JSONDecodeError,
+        subprocess.SubprocessError):
+    emit(False)
+"""
+
+
+def _native_worker_build_source(
+    *,
+    candidate_sha: str,
+    image_tag: str,
+    source_sha256: str,
+) -> str:
+    """Render the fixed native-arm64 build receiver for trt-gb10-1."""
+
+    if (
+        _SHA_RE.fullmatch(candidate_sha) is None
+        or _STAGING_IMAGE_TAG_RE.fullmatch(image_tag) is None
+        or _SHA256_RE.fullmatch(source_sha256) is None
+    ):
+        raise ValueError("GB10 native worker build identity is invalid")
+    return f"""import fcntl
+import hashlib
+import os
+import pathlib
+import selectors
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+
+expected_source_sha256 = {source_sha256!r}
+candidate_sha = {candidate_sha!r}
+image_tag = {image_tag!r}
+max_source_bytes = 1024 * 1024 * 1024
+max_expanded_bytes = 4 * 1024 * 1024 * 1024
+max_image_bytes = 16 * 1024 * 1024 * 1024
+state_root = pathlib.Path("/tmp/loom-staging-native-worker-build")
+state_root.mkdir(mode=0o700, exist_ok=True)
+state_metadata = state_root.lstat()
+if (not stat.S_ISDIR(state_metadata.st_mode)
+        or stat.S_ISLNK(state_metadata.st_mode)
+        or state_metadata.st_uid != os.geteuid()):
+    raise SystemExit(1)
+state_root.chmod(0o700)
+lock_fd = os.open(
+    state_root / "build.lock",
+    os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+    0o600,
+)
+lock_metadata = os.fstat(lock_fd)
+if (not stat.S_ISREG(lock_metadata.st_mode)
+        or lock_metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(lock_metadata.st_mode) != 0o600):
+    os.close(lock_fd)
+    raise SystemExit(1)
+try:
+    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    os.close(lock_fd)
+    raise SystemExit(1)
+for stale in state_root.glob("work-*"):
+    metadata = stale.lstat()
+    if (not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()):
+        raise SystemExit(1)
+    shutil.rmtree(stale)
+work = pathlib.Path(tempfile.mkdtemp(prefix="work-", dir=state_root))
+build_process = None
+
+def interrupted(_signum, _frame):
+    global build_process
+    if build_process is not None and build_process.poll() is None:
+        build_process.terminate()
+    raise SystemExit(1)
+
+signal.signal(signal.SIGHUP, interrupted)
+signal.signal(signal.SIGTERM, interrupted)
+
+def safe_symlink(name, linkname):
+    target = pathlib.PurePosixPath(linkname)
+    if target.is_absolute() or not linkname:
+        return False
+    resolved = []
+    for part in (*name.parent.parts, *target.parts):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not resolved:
+                return False
+            resolved.pop()
+        else:
+            resolved.append(part)
+    return bool(resolved)
+
+try:
+    source = work / "source.tar"
+    digest = hashlib.sha256()
+    size = 0
+    with source.open("xb") as output:
+        while True:
+            chunk = sys.stdin.buffer.read(1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > max_source_bytes:
+                raise ValueError("source archive oversized")
+            digest.update(chunk)
+            output.write(chunk)
+    source.chmod(0o600)
+    if size == 0 or digest.hexdigest() != expected_source_sha256:
+        raise ValueError("source archive identity mismatch")
+
+    context = work / "context"
+    context.mkdir(mode=0o700)
+    with tarfile.open(source, "r:") as archive:
+        members = archive.getmembers()
+        names = [pathlib.PurePosixPath(member.name) for member in members]
+        if (len(members) > 100000 or len(set(names)) != len(names)
+                or sum(member.size for member in members if member.isfile())
+                   > max_expanded_bytes):
+            raise ValueError("source archive boundary invalid")
+        for member, name in zip(members, names):
+            if (not member.name or name.is_absolute() or ".." in name.parts
+                    or member.islnk()
+                    or not (member.isfile() or member.isdir() or member.issym())):
+                raise ValueError("source archive member invalid")
+            destination = context.joinpath(*name.parts)
+            if member.issym():
+                if not safe_symlink(name, member.linkname):
+                    raise ValueError("source archive symlink invalid")
+                continue
+            if member.isdir():
+                destination.mkdir(mode=member.mode & 0o755, parents=True, exist_ok=True)
+                continue
+            destination.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+            stream = archive.extractfile(member)
+            if stream is None:
+                raise ValueError("source archive file unavailable")
+            with destination.open("xb") as output:
+                shutil.copyfileobj(stream, output, length=1024 * 1024)
+            destination.chmod(member.mode & 0o755)
+        for member, name in zip(members, names):
+            if member.issym():
+                destination = context.joinpath(*name.parts)
+                destination.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+                destination.symlink_to(member.linkname)
+
+    image = work / "worker-image.tar"
+    preflight = subprocess.run(
+        ["/usr/bin/docker", "info", "--format", "{{{{.Driver}}}} {{{{.Architecture}}}}"],
+        check=False, capture_output=True, text=True, timeout=30,
+    )
+    if (preflight.returncode != 0 or preflight.stderr
+            or preflight.stdout.strip() not in ("overlay2 arm64", "overlay2 aarch64")):
+        raise ValueError("native Docker preflight failed")
+    command = [
+        "/usr/bin/docker", "buildx", "build",
+        "--platform", "linux/arm64",
+        "--file", "deploy/Dockerfile.worker",
+        "--label", "org.opencontainers.image.revision=" + candidate_sha,
+        "--label", "loom.source-archive.sha256=" + expected_source_sha256,
+        "--build-arg", "LOOM_BUILD_SHA=" + candidate_sha,
+        "--tag", "loom-worker:" + image_tag + "-arm64",
+        "--provenance=false", "--progress=quiet",
+        "--output", "type=docker,dest=" + str(image), ".",
+    ]
+    build_process = subprocess.Popen(
+        command, cwd=context, stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    diagnostic_size = 0
+    deadline = time.monotonic() + 3300
+    if build_process.stderr is None:
+        raise ValueError("native image build diagnostic is unavailable")
+    with selectors.DefaultSelector() as selector:
+        selector.register(build_process.stderr, selectors.EVENT_READ)
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, 3300)
+            events = selector.select(timeout=min(1.0, remaining))
+            if not events and build_process.poll() is None:
+                continue
+            for key, _mask in events:
+                chunk = os.read(key.fileobj.fileno(), 65536)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                diagnostic_size += len(chunk)
+                if diagnostic_size > 65536:
+                    raise ValueError("native image build diagnostic is too large")
+    build_process.wait(timeout=max(0.1, deadline - time.monotonic()))
+    if (build_process.returncode != 0
+            or not image.is_file()
+            or not 0 < image.stat().st_size <= max_image_bytes):
+        raise ValueError("native image build failed")
+    with image.open("rb") as stream:
+        shutil.copyfileobj(stream, sys.stdout.buffer, length=1024 * 1024)
+    sys.stdout.buffer.flush()
+except Exception:
+    sys.stderr.write("GB10 native worker build failed safely\\n")
+    raise SystemExit(1)
+finally:
+    if build_process is not None and build_process.poll() is None:
+        build_process.kill()
+        build_process.wait()
+    shutil.rmtree(work, ignore_errors=True)
+    os.close(lock_fd)
+"""
+
+
+def native_worker_build_ssh_argv(
+    cluster_config_path: Path,
+    *,
+    candidate_sha: str,
+    image_tag: str,
+    source_sha256: str,
+) -> tuple[str, ...]:
+    """Bind one native build to qianyi@trt-gb10-1 and installed SSH authority."""
+
+    from loom_cli.cluster_config import load_cluster_config
+
+    if not cluster_config_path.is_absolute() or ".." in cluster_config_path.parts:
+        raise ValueError("GB10 native build cluster config is invalid")
+    try:
+        cluster = load_cluster_config(cluster_config_path)
+    except Exception as exc:
+        raise ValueError("GB10 native build cluster config is unavailable") from exc
+    pool = getattr(cluster, "gb10_pool", None)
+    raw_hosts = getattr(pool, "hosts", None) if pool is not None else None
+    ssh_config_value = getattr(pool, "ssh_config", None) if pool is not None else None
+    identity_value = getattr(pool, "ssh_identity_file", None) if pool is not None else None
+    certificate_value = getattr(pool, "ssh_certificate_file", None) if pool is not None else None
+    expected_hosts = tuple(f"trt-gb10-{number}" for number in range(1, 16))
+    if (
+        not isinstance(raw_hosts, Sequence)
+        or isinstance(raw_hosts, (str, bytes))
+        or tuple(raw.get("ssh_target") if isinstance(raw, dict) else None for raw in raw_hosts)
+        != expected_hosts
+        or not isinstance(ssh_config_value, str)
+        or not ssh_config_value
+        or identity_value != str(_FIXED_IDENTITY)
+    ):
+        raise ValueError("GB10 native build authority is incomplete")
+    ssh_config = Path(ssh_config_value).expanduser()
+    if not ssh_config.is_absolute():
+        ssh_config = cluster_config_path.parent / ssh_config
+    ssh_config = ssh_config.resolve(strict=False)
+    command = "python3 -c " + shlex.quote(
+        _native_worker_build_source(
+            candidate_sha=candidate_sha,
+            image_tag=image_tag,
+            source_sha256=source_sha256,
+        )
+    )
+    argv = [
+        "ssh",
+        "-F",
+        str(ssh_config),
+        "-i",
+        str(_FIXED_IDENTITY),
+        "-o",
+        "IdentitiesOnly=yes",
+    ]
+    if certificate_value:
+        certificate = Path(str(certificate_value)).expanduser()
+        if not certificate.is_absolute():
+            certificate = cluster_config_path.parent / certificate
+        argv.extend(("-o", f"CertificateFile={certificate.resolve(strict=False)}"))
+    argv.extend(
+        (
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=10",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            f"UserKnownHostsFile={_KNOWN_HOSTS}",
+            "-o",
+            "GlobalKnownHostsFile=/dev/null",
+            "-o",
+            "UpdateHostKeys=no",
+            "trt-gb10-1",
+            command,
+        )
+    )
+    return tuple(argv)
+
+
 def _retirement_observation_source(
     target: GB10TransportTarget,
     plan: FinalGatePlan,
@@ -663,14 +1027,16 @@ service_prepared = bool(service_props is not None
     and service_props.get("Type") == "oneshot"
     and service_props.get("Result") == "success"
     and service_props.get("ExecMainStatus") == "0"
+    and service_props.get("ActiveState") == "inactive"
+    and service_props.get("SubState") == "dead"
     and service_props.get("NeedDaemonReload") == "no")
 service_inflight_safe = bool(service_props is not None
     and service_props.get("LoadState") == "loaded"
     and service_props.get("Type") == "oneshot"
     and service_props.get("Result") in {{"", "success"}}
     and service_props.get("ExecMainStatus") in {{"", "0"}}
-    and service_props.get("ActiveState") != "failed"
-    and service_props.get("SubState") != "failed"
+    and (service_props.get("ActiveState"), service_props.get("SubState"))
+        in {{("activating", "start"), ("active", "running")}}
     and service_props.get("NeedDaemonReload") == "no")
 timer_common = bool(timer_props is not None
     and timer_props.get("LoadState") == "loaded"
@@ -1186,4 +1552,6 @@ __all__ = [
     "GB10FleetApplyError",
     "GB10TransportTarget",
     "build_fixed_gb10_ssh_transport",
+    "native_worker_build_ssh_argv",
+    "retirement_worker_image_observation_source",
 ]

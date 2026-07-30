@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import subprocess
 from dataclasses import dataclass
@@ -60,6 +61,28 @@ def _prepared_probe(tmp_path: Path) -> PreparedProbe:
                 "amd64": "sha256:" + "d" * 64,
                 "arm64": "sha256:" + "e" * 64,
             },
+            "image_archives": {
+                "amd64": {
+                    "sha256": "f" * 64,
+                    "size": 2048,
+                    "config_digest": "sha256:" + "d" * 64,
+                    "index_digest": "sha256:" + "1" * 64,
+                    "manifest_digest": "sha256:" + "2" * 64,
+                    "manifest_media_type": "application/vnd.oci.image.manifest.v1+json",
+                    "load_descriptor_digest": "sha256:" + "2" * 64,
+                    "load_descriptor_media_type": ("application/vnd.oci.image.manifest.v1+json"),
+                },
+                "arm64": {
+                    "sha256": "0" * 64,
+                    "size": 4096,
+                    "config_digest": "sha256:" + "e" * 64,
+                    "index_digest": "sha256:" + "3" * 64,
+                    "manifest_digest": "sha256:" + "4" * 64,
+                    "manifest_media_type": "application/vnd.oci.image.manifest.v1+json",
+                    "load_descriptor_digest": "sha256:" + "4" * 64,
+                    "load_descriptor_media_type": ("application/vnd.oci.image.manifest.v1+json"),
+                },
+            },
         }
     )
     deployment = authority.begin_deployment(
@@ -72,6 +95,47 @@ def _prepared_probe(tmp_path: Path) -> PreparedProbe:
             "candidate_id": candidate.candidate_id,
             "expected_resource_generation": environment.resource_generation,
         }
+    )
+    nodes: dict[str, dict[str, Any]] = {}
+    domains: dict[str, dict[str, Any]] = {}
+    for domain, architecture in registry.WORKER_RUNTIME_BINDING_DOMAINS.items():
+        archive_binding = candidate.image_archives[architecture]
+        backend = "containerd-snapshotter-v1" if domain == "oldlab" else "classic-overlay2"
+        driver = registry.WORKER_RUNTIME_BACKENDS[backend]
+        runtime_image_id = (
+            archive_binding["load_descriptor_digest"]
+            if domain == "oldlab"
+            else archive_binding["config_digest"]
+        )
+        domain_binding = {
+            "architecture": architecture,
+            "docker_driver": driver,
+            "docker_backend": backend,
+            "config_digest": archive_binding["config_digest"],
+            "load_descriptor_digest": archive_binding["load_descriptor_digest"],
+            "load_descriptor_media_type": archive_binding["load_descriptor_media_type"],
+            "runtime_image_id": runtime_image_id,
+        }
+        domains[domain] = domain_binding
+        for node in registry.FLEET_NODES:
+            if ("oldlab" if node.startswith("oldlab-") else "gb10") != domain:
+                continue
+            nodes[node] = {
+                "domain": domain,
+                **domain_binding,
+                "docker_descriptor_digest": (
+                    archive_binding["load_descriptor_digest"] if domain == "oldlab" else None
+                ),
+                "docker_descriptor_media_type": (
+                    archive_binding["load_descriptor_media_type"] if domain == "oldlab" else None
+                ),
+                "receipt_sha256": hashlib.sha256(node.encode("ascii")).hexdigest(),
+            }
+    deployment = authority.record_worker_runtime_bindings(
+        deployment.deployment_id,
+        principal_id=principal_id,
+        expected_resource_generation=environment.resource_generation,
+        bindings={"nodes": nodes, "domains": domains},
     )
     for expected, following in zip(
         registry.DEPLOY_PHASES[:-2],
@@ -184,6 +248,7 @@ def _transport(
             "candidate_id": domain_request["candidate_id"],
             "candidate_sha": domain_request["candidate_sha"],
             "candidate_tree": domain_request["candidate_tree"],
+            "worker_image_id": domain_request["worker_image_id"],
             "applied_resource_generation": domain_request["applied_resource_generation"],
             "registry_generation": domain_request["registry_generation"],
             "registry_snapshot_sha256": domain_request["registry_snapshot_sha256"],
@@ -270,6 +335,10 @@ def test_probe_persists_both_domains_and_replays_without_resubmission(
     second = _execute(prepared)
     assert first == second
     assert set(first["domains"]) == {"oldlab", "gb10"}
+    assert first["worker_image_ids"] == {
+        "oldlab": "sha256:" + "2" * 64,
+        "gb10": "sha256:" + "e" * 64,
+    }
     assert [call["request"]["domain"] for call in calls] == ["oldlab", "gb10"]
     assert "trt-gb10-7" in probe.ROUTES["gb10"].allowed_nodes
 

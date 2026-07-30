@@ -2,18 +2,24 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import os
 import shutil
 import stat
 import subprocess
+import sys
+import tarfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import yaml
 
 import loom_cli.environment_state as environment_state_module
+from loom_cli import gb10_agent
 from loom_cli.rollout.base_context_fixture import make_ctx
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import EvidenceDirectory, StepDir
@@ -27,8 +33,11 @@ from loom_cli.rollout.steps.s10_env_state import (
     ExternalSlurmAcceptanceAuthorityError,
     ExternalSlurmPrereqMaterializationError,
     _control_plane_health_url,
+    _inspect_gb10_arm64_worker_archive,
+    _materialize_env_file,
     _materialize_external_slurm_runner_prerequisites,
     _materialize_repo_dir,
+    _prepare_gb10_arm64_worker_image,
     _prepare_probe_activate_external_slurm_authority,
     _verify_external_slurm_runner_consumers,
     _wait_for_control_plane,
@@ -85,6 +94,353 @@ env_template_glob = "{template_glob}"
         encoding="utf-8",
     )
     return profile
+
+
+def _write_worker_image_archive(
+    path: Path,
+    *,
+    candidate_sha: str,
+    image_tag: str,
+    source_sha256: str = "c" * 64,
+) -> str:
+    config = json.dumps(
+        {
+            "architecture": "arm64",
+            "os": "linux",
+            "config": {
+                "Labels": {
+                    "org.opencontainers.image.revision": candidate_sha,
+                    "loom.source-archive.sha256": source_sha256,
+                },
+                "Cmd": ["python", "-m", "loom_worker"],
+                "Entrypoint": None,
+            },
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    digest = hashlib.sha256(config).hexdigest()
+    layer = b"exact candidate worker layer"
+    layer_digest = hashlib.sha256(layer).hexdigest()
+    manifest = json.dumps(
+        [
+            {
+                "Config": f"{digest}.json",
+                "RepoTags": [f"loom-worker:{image_tag}-arm64"],
+                "Layers": [f"{layer_digest}.tar"],
+            }
+        ],
+        separators=(",", ":"),
+    ).encode()
+    with tarfile.open(path, "w") as archive:
+        for name, payload in (
+            ("manifest.json", manifest),
+            (f"{digest}.json", config),
+            (f"{layer_digest}.tar", layer),
+        ):
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            info.mode = 0o600
+            archive.addfile(info, io.BytesIO(payload))
+    path.chmod(0o600)
+    return f"sha256:{digest}"
+
+
+def test_arm64_worker_archive_id_is_offline_config_digest(tmp_path: Path) -> None:
+    candidate_sha = "b" * 40
+    archive = tmp_path / "staging-gb10-worker-arm64.tar"
+    image_id = _write_worker_image_archive(
+        archive,
+        candidate_sha=candidate_sha,
+        image_tag="staging-bbbbbbb",
+    )
+
+    observed = _inspect_gb10_arm64_worker_archive(
+        archive,
+        candidate_sha=candidate_sha,
+        image_tag="staging-bbbbbbb",
+    )
+
+    assert observed["image_id"] == image_id
+    assert observed["architecture"] == "arm64"
+    assert observed["cmd"] == ["python", "-m", "loom_worker"]
+
+
+def test_arm64_worker_archive_rejects_layer_digest_drift(tmp_path: Path) -> None:
+    candidate_sha = "b" * 40
+    archive = tmp_path / "staging-gb10-worker-arm64.tar"
+    _write_worker_image_archive(
+        archive,
+        candidate_sha=candidate_sha,
+        image_tag="staging-bbbbbbb",
+    )
+    tampered = tmp_path / "tampered.tar"
+    with tarfile.open(archive, "r") as source, tarfile.open(tampered, "w") as target:
+        for member in source.getmembers():
+            stream = source.extractfile(member)
+            payload = stream.read() if stream is not None else b""
+            if member.name.endswith(".tar"):
+                payload += b"-tampered"
+                member.size = len(payload)
+            target.addfile(member, io.BytesIO(payload))
+    tampered.chmod(0o600)
+
+    with pytest.raises(
+        ExternalSlurmPrereqMaterializationError,
+        match="layer digest drifted",
+    ):
+        _inspect_gb10_arm64_worker_archive(
+            tampered,
+            candidate_sha=candidate_sha,
+            image_tag="staging-bbbbbbb",
+        )
+
+
+def test_arm64_worker_archive_rejects_nonregular_member(tmp_path: Path) -> None:
+    candidate_sha = "b" * 40
+    source_path = tmp_path / "source.tar"
+    _write_worker_image_archive(
+        source_path,
+        candidate_sha=candidate_sha,
+        image_tag="staging-bbbbbbb",
+    )
+    unsafe = tmp_path / "unsafe.tar"
+    with tarfile.open(source_path, "r") as source, tarfile.open(unsafe, "w") as target:
+        for member in source.getmembers():
+            target.addfile(member, source.extractfile(member))
+        symlink = tarfile.TarInfo("unexpected-link")
+        symlink.type = tarfile.SYMTYPE
+        symlink.linkname = "manifest.json"
+        target.addfile(symlink)
+    unsafe.chmod(0o600)
+
+    with pytest.raises(
+        ExternalSlurmPrereqMaterializationError,
+        match="archive members are invalid",
+    ):
+        _inspect_gb10_arm64_worker_archive(
+            unsafe,
+            candidate_sha=candidate_sha,
+            image_tag="staging-bbbbbbb",
+        )
+
+
+def test_same_candidate_worker_archive_retry_revalidates_without_build(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    step_dir = StepDir(number=11, name="env-state", path=tmp_path)
+    archive = tmp_path / "staging-gb10-worker-arm64.tar"
+    candidate_sha = "b" * 40
+    image_tag = "staging-bbbbbbb"
+    _write_worker_image_archive(
+        archive,
+        candidate_sha=candidate_sha,
+        image_tag=image_tag,
+    )
+    inspected = _inspect_gb10_arm64_worker_archive(
+        archive,
+        candidate_sha=candidate_sha,
+        image_tag=image_tag,
+    )
+    (tmp_path / "staging-gb10-worker-arm64.json").write_text(
+        json.dumps(inspected, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        env_state_module,
+        "run_captured",
+        lambda *_args, **_kwargs: pytest.fail("stable retry must not rebuild"),
+    )
+
+    assert (
+        _prepare_gb10_arm64_worker_image(
+            SimpleNamespace(resolved_sha=candidate_sha, image_tag=image_tag),
+            step_dir,
+        )
+        == inspected
+    )
+
+
+def test_worker_image_retry_recovers_manifest_and_stale_crash_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    step_dir = StepDir(number=11, name="env-state", path=tmp_path)
+    archive = tmp_path / "staging-gb10-worker-arm64.tar"
+    candidate_sha = "b" * 40
+    image_tag = "staging-bbbbbbb"
+    _write_worker_image_archive(
+        archive,
+        candidate_sha=candidate_sha,
+        image_tag=image_tag,
+    )
+    stale_source = tmp_path / f".{archive.name}.source-123.tar"
+    stale_temporary = tmp_path / f".{archive.name}.tmp-123"
+    stale_stderr = tmp_path / f".{archive.name}.transport-stderr-123"
+    for stale in (stale_source, stale_temporary, stale_stderr):
+        stale.write_bytes(b"stale")
+        stale.chmod(0o600)
+    monkeypatch.setattr(
+        env_state_module,
+        "run_captured",
+        lambda *_args, **_kwargs: pytest.fail("recovery must not rebuild"),
+    )
+
+    recovered = _prepare_gb10_arm64_worker_image(
+        SimpleNamespace(resolved_sha=candidate_sha, image_tag=image_tag),
+        step_dir,
+    )
+
+    assert recovered["image_id"].startswith("sha256:")
+    assert (tmp_path / "staging-gb10-worker-arm64.json").is_file()
+    assert not any(path.exists() for path in (stale_source, stale_temporary, stale_stderr))
+
+
+def test_first_candidate_build_streams_native_archive_and_cleans_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from loom_cli.rollout.operator import protected_gb10_transport
+
+    candidate_sha = "b" * 40
+    image_tag = "staging-bbbbbbb"
+    source_payload = b"exact git archive"
+    source_sha256 = hashlib.sha256(source_payload).hexdigest()
+    native_archive = tmp_path / "native-image.tar"
+    _write_worker_image_archive(
+        native_archive,
+        candidate_sha=candidate_sha,
+        image_tag=image_tag,
+        source_sha256=source_sha256,
+    )
+    step_path = tmp_path / "11-env-state"
+    step_path.mkdir()
+    step_dir = StepDir(number=11, name="env-state", path=step_path)
+    candidate_root = tmp_path / "candidate"
+    candidate_root.mkdir()
+    cluster_config = candidate_root / "staging.cluster.toml"
+    cluster_config.write_text("[gb10_pool]\n", encoding="utf-8")
+
+    def fake_run_captured(argv, **_kwargs):  # type: ignore[no-untyped-def]
+        output = next(
+            Path(str(arg).removeprefix("--output="))
+            for arg in argv
+            if str(arg).startswith("--output=")
+        )
+        output.write_bytes(source_payload)
+        return SubprocessResult(argv=list(argv), returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(env_state_module, "candidate_worktree", lambda _step: candidate_root)
+    monkeypatch.setattr(
+        env_state_module,
+        "candidate_relative_path",
+        lambda _path, _step: cluster_config,
+    )
+    monkeypatch.setattr(env_state_module, "run_captured", fake_run_captured)
+    monkeypatch.setattr(
+        protected_gb10_transport,
+        "native_worker_build_ssh_argv",
+        lambda *_args, **_kwargs: (
+            sys.executable,
+            "-c",
+            f"import pathlib,sys;sys.stdout.buffer.write("
+            f"pathlib.Path({str(native_archive)!r}).read_bytes())",
+        ),
+    )
+
+    observed = _prepare_gb10_arm64_worker_image(
+        SimpleNamespace(
+            resolved_sha=candidate_sha,
+            image_tag=image_tag,
+            cluster_config_path=cluster_config,
+        ),
+        step_dir,
+    )
+
+    assert observed["source_archive_sha256"] == source_sha256
+    assert (step_path / "staging-gb10-worker-arm64.tar").is_file()
+    assert not list(step_path.glob(".*source-*.tar"))
+    assert (step_path / "staging-gb10-worker-arm64-build.stderr").read_text(
+        encoding="utf-8"
+    ) == "native GB10 arm64 build completed\n"
+
+
+def test_materialized_env_compose_and_inspect_share_exact_config_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_root = tmp_path / "generated"
+    env_root.mkdir(mode=0o700)
+    env_file = env_root / "staging-gb10-worker-staging-bbbbbbb.env"
+    env_file.write_text(
+        "\n".join(
+            (
+                "LOOM_WORKER_CONTROL_PLANE_URL=http://control:8080",
+                "LOOM_WORKER_GATEWAY_URL=http://control:9100",
+                "LOOM_WORKER_TOKEN=token",
+                "LOOM_WORKER_MINIO_ENDPOINT=http://control:9000",
+                "LOOM_WORKER_MINIO_ACCESS_KEY=access",
+                "LOOM_WORKER_MINIO_SECRET_KEY=secret",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o600)
+    image_id = "sha256:" + ("a" * 64)
+
+    record = _materialize_env_file(
+        env_file=env_file,
+        settings={},
+        image_tag="staging-bbbbbbb",
+        candidate_sha="b" * 40,
+        pool_name="gb10",
+        requested_concurrency=10,
+        worker_token=None,
+        worker_token_env_key="LOOM_WORKER_TOKEN",
+        worker_image_id=image_id,
+    )
+
+    rendered = env_file.read_text(encoding="utf-8")
+    assert f"LOOM_WORKER_IMAGE_ID={image_id}\n" in rendered
+    assert "LOOM_WORKER_CANDIDATE_SHA=" + ("b" * 40) in rendered
+    assert record["worker_image_id"] == image_id
+    compose = yaml.safe_load(
+        (
+            Path(__file__).resolve().parents[4] / "deploy" / "docker-compose.remote-worker.yml"
+        ).read_text(encoding="utf-8")
+    )
+    assert compose["services"]["worker"]["image"] == (
+        "${LOOM_WORKER_IMAGE_ID:?set exact loom-worker image config ID}"
+    )
+
+    def fake_run(argv, **_kwargs):  # type: ignore[no-untyped-def]
+        if argv[:2] == ["docker", "info"]:
+            return SimpleNamespace(returncode=0, stdout="overlay2\n", stderr="")
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "Id": image_id,
+                        "Os": "linux",
+                        "Architecture": "arm64",
+                        "Config": {
+                            "Labels": {
+                                "org.opencontainers.image.revision": "b" * 40,
+                            },
+                            "Cmd": ["python", "-m", "loom_worker"],
+                            "Entrypoint": None,
+                        },
+                    }
+                ]
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(gb10_agent.subprocess, "run", fake_run)
+    gb10_agent._inspect_exact_worker_image(image_id, "b" * 40)
 
 
 def _complete_worker_env_text() -> str:

@@ -87,6 +87,10 @@ def _dynamic_profile(tmp_path: Path, sandbox: str = "qianyi") -> host.Profile:
         candidate_id=f"cand-{sandbox}-000000000001",
         candidate_tree="b" * 40,
         service_user=f"loom-dev-{sandbox}",
+        worker_image_ids={
+            "oldlab": "sha256:" + "d" * 64,
+            "gb10": "sha256:" + "e" * 64,
+        },
     )
 
 
@@ -2502,6 +2506,10 @@ def test_node_authority_uses_only_the_two_fixed_sudo_commands(
         candidate_id="cand-qianyi-000000000001",
         candidate_tree="b" * 40,
         service_user="loom-dev-qianyi",
+        worker_image_ids={
+            "oldlab": "sha256:" + "d" * 64,
+            "gb10": "sha256:" + "e" * 64,
+        },
     )
     envelope = host._node_authority_envelope(
         action="host-converge",
@@ -2595,8 +2603,19 @@ def test_domain_attest_sends_fixed_worker_and_fleet_seed_archive(
 def test_worker_env_seed_uses_checked_in_domain_capacity_contract(
     tmp_path: Path,
     sandbox: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    profile = _temporary_profile(tmp_path, sandbox)
+    profile = _dynamic_profile(tmp_path, sandbox)
+    monkeypatch.setattr(
+        host,
+        "INSTALLED_DOMAIN_RUNTIME_CONFIG",
+        host.SOURCE_PROFILES / "runtime-domains.toml",
+    )
+    monkeypatch.setattr(
+        host,
+        "INSTALLED_CAPACITY_POLICY_ROOT",
+        host.REPO_ROOT / "deploy/developer-sandboxes/shared-capacity-policies",
+    )
 
     def parse(payload: bytes) -> dict[str, str]:
         return dict(line.split("=", 1) for line in payload.decode().splitlines())
@@ -2608,6 +2627,8 @@ def test_worker_env_seed_uses_checked_in_domain_capacity_contract(
     assert oldlab["LOOM_WORKER_MAX_CONCURRENT"] == "4"
     assert gb10["LOOM_WORKER_POOL_NAME"] == "gb10"
     assert gb10["LOOM_WORKER_MAX_CONCURRENT"] == "8"
+    assert oldlab["LOOM_WORKER_IMAGE_ID"] == "sha256:" + "d" * 64
+    assert gb10["LOOM_WORKER_IMAGE_ID"] == "sha256:" + "e" * 64
     assert oldlab["LOOM_WORKER_SANDBOX_IDENTITY"] == sandbox
     assert gb10["LOOM_WORKER_CANDIDATE_SHA"] == SHA
     legacy_ports = host.LEGACY_SEED_REMOTE_LINK_SERVICE_PORTS[sandbox]
@@ -2644,6 +2665,10 @@ def test_dynamic_worker_env_seed_uses_registry_allocated_link_ports(
         candidate_id="cand-" + "a" * 40,
         candidate_tree="b" * 40,
         service_user="loom_env_fourth",
+        worker_image_ids={
+            "oldlab": "sha256:" + "d" * 64,
+            "gb10": "sha256:" + "e" * 64,
+        },
     )
     monkeypatch.setattr(
         host,
@@ -2722,6 +2747,7 @@ def test_staging_allocation_config_separates_producer_batch_and_system_mount() -
     assert config.result_root == config.shared_mount_target / "results"
     assert config.infrastructure_nodes == tuple(f"trt-gb10-{index}" for index in range(1, 16))
     assert config.allowed_nodes == config.infrastructure_nodes
+    assert config.excluded_nodes == ()
     assert set(config.host_aliases) == set(config.infrastructure_nodes)
     assert config.host_aliases["trt-gb10-7"] == "gx10-0faf"
     assert "trt-gb10-7" in config.allowed_nodes

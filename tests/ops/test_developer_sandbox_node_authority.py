@@ -143,6 +143,10 @@ def _registry_snapshot() -> dict[str, object]:
             "principal_id": principal,
             "candidate_sha": sha,
             "candidate_tree": tree,
+            "image_digests": {
+                "amd64": "sha256:" + "a" * 64,
+                "arm64": "sha256:" + "b" * 64,
+            },
         }
         deployment = {
             "deployment_id": f"dep-{index:032x}",
@@ -154,6 +158,12 @@ def _registry_snapshot() -> dict[str, object]:
             "applied_resource_generation": 2,
             "applied_registry_generation": 12,
             "applied_registry_payload_sha256": "8" * 64,
+            "worker_runtime_bindings": {
+                "domains": {
+                    "oldlab": {"runtime_image_id": "sha256:" + "a" * 64},
+                    "gb10": {"runtime_image_id": "sha256:" + "b" * 64},
+                },
+            },
         }
         finalization = _finalization_record(environments[-1], candidate, deployment)
         deployment["finalization_payload_sha256"] = finalization["payload_sha256"]
@@ -181,6 +191,10 @@ def _acceptance_probe_fixture() -> tuple[dict[str, object], bytes]:
         "principal_id": environment["principal_id"],
         "candidate_sha": "7" * 40,
         "candidate_tree": "8" * 40,
+        "image_digests": {
+            "amd64": "sha256:" + "7" * 64,
+            "arm64": "sha256:" + "8" * 64,
+        },
     }
     deployment = {
         "deployment_id": "dep-" + "7" * 32,
@@ -193,6 +207,12 @@ def _acceptance_probe_fixture() -> tuple[dict[str, object], bytes]:
         "applied_registry_generation": 12,
         "applied_registry_payload_sha256": "8" * 64,
         "finalization_payload_sha256": None,
+        "worker_runtime_bindings": {
+            "domains": {
+                "oldlab": {"runtime_image_id": "sha256:" + "7" * 64},
+                "gb10": {"runtime_image_id": "sha256:" + "8" * 64},
+            },
+        },
     }
     snapshot["candidates"].append(candidate)
     snapshot["deployments"].append(deployment)
@@ -211,6 +231,7 @@ def _acceptance_probe_fixture() -> tuple[dict[str, object], bytes]:
         "candidate_id": candidate["candidate_id"],
         "candidate_sha": candidate["candidate_sha"],
         "candidate_tree": candidate["candidate_tree"],
+        "worker_image_id": candidate["image_digests"]["amd64"],
         "applied_resource_generation": 3,
         "registry_generation": snapshot["generation"],
         "registry_snapshot_sha256": snapshot["payload_sha256"],
@@ -558,6 +579,28 @@ def test_registry_cohort_accepts_real_applied_committed_snapshot(tmp_path: Path)
                 "amd64": "sha256:" + "d" * 64,
                 "arm64": "sha256:" + "e" * 64,
             },
+            "image_archives": {
+                "amd64": {
+                    "sha256": "1" * 64,
+                    "size": 2048,
+                    "config_digest": "sha256:" + "d" * 64,
+                    "index_digest": "sha256:" + "3" * 64,
+                    "manifest_digest": "sha256:" + "4" * 64,
+                    "manifest_media_type": "application/vnd.oci.image.manifest.v1+json",
+                    "load_descriptor_digest": "sha256:" + "4" * 64,
+                    "load_descriptor_media_type": "application/vnd.oci.image.manifest.v1+json",
+                },
+                "arm64": {
+                    "sha256": "2" * 64,
+                    "size": 4096,
+                    "config_digest": "sha256:" + "e" * 64,
+                    "index_digest": "sha256:" + "5" * 64,
+                    "manifest_digest": "sha256:" + "6" * 64,
+                    "manifest_media_type": "application/vnd.oci.image.manifest.v1+json",
+                    "load_descriptor_digest": "sha256:" + "6" * 64,
+                    "load_descriptor_media_type": "application/vnd.oci.image.manifest.v1+json",
+                },
+            },
         },
     )
     deployment = store.begin_deployment(
@@ -570,6 +613,38 @@ def test_registry_cohort_accepts_real_applied_committed_snapshot(tmp_path: Path)
             "candidate_id": candidate.candidate_id,
             "expected_resource_generation": 1,
         },
+    )
+    domains = {
+        domain: {
+            "architecture": architecture,
+            "docker_driver": "overlay2",
+            "docker_backend": "classic-overlay2",
+            "config_digest": candidate.image_archives[architecture]["config_digest"],
+            "load_descriptor_digest": candidate.image_archives[architecture][
+                "load_descriptor_digest"
+            ],
+            "load_descriptor_media_type": candidate.image_archives[architecture][
+                "load_descriptor_media_type"
+            ],
+            "runtime_image_id": candidate.image_archives[architecture]["config_digest"],
+        }
+        for domain, architecture in (("oldlab", "amd64"), ("gb10", "arm64"))
+    }
+    nodes = {
+        node: {
+            "domain": ("oldlab" if node.startswith("oldlab-") else "gb10"),
+            **domains["oldlab" if node.startswith("oldlab-") else "gb10"],
+            "docker_descriptor_digest": None,
+            "docker_descriptor_media_type": None,
+            "receipt_sha256": hashlib.sha256(node.encode("ascii")).hexdigest(),
+        }
+        for node in registry.FLEET_NODES
+    }
+    deployment = store.record_worker_runtime_bindings(
+        deployment.deployment_id,
+        principal_id=environment.principal_id,
+        expected_resource_generation=1,
+        bindings={"nodes": nodes, "domains": domains},
     )
     for expected, following in zip(
         registry.DEPLOY_PHASES[:-1],
@@ -1091,6 +1166,13 @@ def _dynamic_request(
     candidate = next(
         item for item in candidates if item["candidate_id"] == environment["current_candidate_id"]
     )
+    candidate.setdefault(
+        "image_digests",
+        {
+            "amd64": "sha256:" + "a" * 64,
+            "arm64": "sha256:" + "b" * 64,
+        },
+    )
     body: dict[str, object] = {
         "schema_version": authority.SCHEMA_VERSION,
         "action": action,
@@ -1104,6 +1186,7 @@ def _dynamic_request(
         "candidate_id": candidate["candidate_id"],
         "registry_generation": snapshot["generation"],
         "registry_payload_sha256": snapshot["payload_sha256"],
+        "worker_image_id": candidate["image_digests"]["amd64"],
         "payload_kind": payload_kind,
         "payload_sha256": hashlib.sha256(payload_bytes).hexdigest(),
         "payload_base64": base64.b64encode(payload_bytes).decode("ascii"),
@@ -1227,6 +1310,10 @@ def _request(
             registry_payload_sha256=str(snapshot["payload_sha256"]),
             candidate_id=str(candidate["candidate_id"]),
             candidate_tree=str(candidate["candidate_tree"]),
+            worker_image_ids={
+                "oldlab": str(candidate["image_digests"]["amd64"]),
+                "gb10": str(candidate["image_digests"]["arm64"]),
+            },
         )
         if action in authority.DYNAMIC_TARGET_ACTIONS
         and environment is not None
@@ -1272,6 +1359,13 @@ def _identity_preflight_request(
         for runtime_id, row in cohort.items()
     }
     environment, candidate, deployment = cohort[sandbox]
+    candidate.setdefault(
+        "image_digests",
+        {
+            "amd64": "sha256:" + "a" * 64,
+            "arm64": "sha256:" + "b" * 64,
+        },
+    )
     inner: dict[str, object] = {
         "schema_version": 2,
         "kind": authority.IDENTITY_PREFLIGHT_KIND,
@@ -1308,6 +1402,7 @@ def _identity_preflight_request(
         "candidate_id": candidate["candidate_id"],
         "registry_generation": registry_snapshot["generation"],
         "registry_payload_sha256": registry_snapshot["payload_sha256"],
+        "worker_image_id": candidate["image_digests"]["amd64" if domain == "oldlab" else "arm64"],
         "payload_kind": "developer-environment-identity-preflight-json",
         "payload_sha256": hashlib.sha256(encoded).hexdigest(),
         "payload_base64": base64.b64encode(encoded).decode("ascii"),
@@ -1932,7 +2027,7 @@ def _rebind_request(
     return authority._canonical(body)
 
 
-def test_sudoers_exposes_only_two_exact_no_environment_commands() -> None:
+def test_sudoers_exposes_only_three_exact_no_environment_commands() -> None:
     assert Path(authority.__file__).read_bytes().startswith(b"#!/usr/bin/python3 -I\n")
     lines = (
         Path(
@@ -1947,6 +2042,8 @@ def test_sudoers_exposes_only_two_exact_no_environment_commands() -> None:
         "/usr/local/libexec/loom-developer-sandbox-node-authority transact",
         "qianyi ALL=(root) NOPASSWD:NOSETENV: "
         "/usr/local/libexec/loom-developer-sandbox-node-authority check",
+        "qianyi ALL=(root) NOPASSWD:NOSETENV: "
+        "/usr/local/libexec/loom-developer-sandbox-node-authority load-image",
     ]
     payload = "\n".join(lines)
     assert (payload + "\n").encode("ascii") == authority.NODE_AUTHORITY_SUDOERS_PAYLOAD
@@ -2058,6 +2155,10 @@ def test_fourth_registered_environment_is_admitted_without_code_inventory(
             "principal_id": environment["principal_id"],
             "candidate_sha": "4" * 40,
             "candidate_tree": "5" * 40,
+            "image_digests": {
+                "amd64": "sha256:" + "4" * 64,
+                "arm64": "sha256:" + "5" * 64,
+            },
         },
     )
     snapshot["deployments"].append(
@@ -2071,6 +2172,12 @@ def test_fourth_registered_environment_is_admitted_without_code_inventory(
             "applied_resource_generation": 4,
             "applied_registry_generation": 12,
             "applied_registry_payload_sha256": "8" * 64,
+            "worker_runtime_bindings": {
+                "domains": {
+                    "oldlab": {"runtime_image_id": "sha256:" + "4" * 64},
+                    "gb10": {"runtime_image_id": "sha256:" + "5" * 64},
+                },
+            },
         },
     )
     finalization = _finalization_record(
@@ -2094,6 +2201,7 @@ def test_fourth_registered_environment_is_admitted_without_code_inventory(
         "candidate_id": "cand-" + "4" * 40,
         "registry_generation": snapshot["generation"],
         "registry_payload_sha256": snapshot["payload_sha256"],
+        "worker_image_id": "sha256:" + "4" * 64,
         "payload_kind": "none",
         "payload_sha256": hashlib.sha256(b"").hexdigest(),
         "payload_base64": "",
@@ -2174,6 +2282,10 @@ def test_new_principal_identity_preflight_uses_fixed_policy_with_many_active_can
             "principal_id": environment["principal_id"],
             "candidate_sha": "5" * 40,
             "candidate_tree": "6" * 40,
+            "image_digests": {
+                "amd64": "sha256:" + "a" * 64,
+                "arm64": "sha256:" + "b" * 64,
+            },
         },
     )
     snapshot["deployments"].append(
@@ -2187,6 +2299,12 @@ def test_new_principal_identity_preflight_uses_fixed_policy_with_many_active_can
             "applied_resource_generation": 2,
             "applied_registry_generation": 12,
             "applied_registry_payload_sha256": "8" * 64,
+            "worker_runtime_bindings": {
+                "domains": {
+                    "oldlab": {"runtime_image_id": "sha256:" + "a" * 64},
+                    "gb10": {"runtime_image_id": "sha256:" + "b" * 64},
+                },
+            },
         },
     )
     finalization = _finalization_record(
@@ -5291,6 +5409,8 @@ def _upgrade_snapshot(tmp_path: Path, new_tree: str = "d" * 40) -> authority.Upg
 def _prepare_upgrade_mocks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    patch_receipt_inventory: bool = True,
 ) -> tuple[
     authority.AuthorityPolicy,
     authority.AuthorityPolicy,
@@ -5331,6 +5451,7 @@ def _prepare_upgrade_mocks(
         "_ensure_upgrade_state",
         lambda: events.append("upgrade-state"),
     )
+    monkeypatch.setattr(authority, "_read_upgrade_active", lambda: None)
     monkeypatch.setattr(authority, "_recover_upgrade_if_needed", lambda: None)
     monkeypatch.setattr(authority, "_read_policy", lambda: next(policies))
     monkeypatch.setattr(
@@ -5341,6 +5462,12 @@ def _prepare_upgrade_mocks(
             or tuple({} for _item in authority.SYSTEM_INSTALL_ASSETS)
         ),
     )
+    if patch_receipt_inventory:
+        monkeypatch.setattr(
+            authority,
+            "_validate_upgrade_receipt_inventory",
+            lambda: events.append("receipt-inventory"),
+        )
     monkeypatch.setattr(
         authority,
         "_high_value_state_identity",
@@ -5423,6 +5550,162 @@ def _prepare_upgrade_mocks(
         lambda _snapshot: events.append("restored"),
     )
     return old, new, snapshot, events
+
+
+def _upgrade_history_receipt(
+    *,
+    action: str,
+    request_id: str,
+    dynamic_shape: str | None = None,
+) -> dict[str, object]:
+    receipt: dict[str, object] = {
+        "schema_version": authority.SCHEMA_VERSION,
+        "request_id": request_id,
+        "action": action,
+        "node": "oldlab-1",
+        "domain": "oldlab",
+        "sandbox": "qianyi",
+        "candidate_sha": SHA,
+        "candidate_tree": TREE,
+        "payload_sha256": "2" * 64,
+        "result_sha256": "3" * 64,
+        "inner_receipt": None,
+        "completed_at": "2026-07-29T12:00:00Z",
+        "status": "succeeded",
+    }
+    if dynamic_shape is not None:
+        receipt.update(
+            {
+                "env_id": "denv-upgrade-history",
+                "resource_generation": 2,
+                "candidate_id": f"cand-{'4' * 40}",
+                "registry_generation": 7,
+                "registry_payload_sha256": "5" * 64,
+            },
+        )
+        if dynamic_shape == "worker-bound":
+            receipt["worker_image_id"] = f"sha256:{'6' * 64}"
+    return receipt
+
+
+def _install_upgrade_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    receipts: Sequence[dict[str, object]],
+) -> dict[Path, bytes]:
+    state_root = tmp_path / "authority-state"
+    receipt_root = state_root / "receipts"
+    state_root.mkdir(mode=0o700)
+    receipt_root.mkdir(mode=0o700)
+    journal = state_root / "journal.jsonl"
+    journal.write_bytes(
+        b"".join(authority._canonical(authority._journal_record(receipt)) for receipt in receipts),
+    )
+    journal.chmod(0o600)
+    for receipt in receipts:
+        path = receipt_root / f"{receipt['request_id']}.json"
+        path.write_bytes(authority._canonical(receipt))
+        path.chmod(0o600)
+    monkeypatch.setattr(authority, "STATE_ROOT", state_root)
+    monkeypatch.setattr(authority, "RECEIPT_ROOT", receipt_root)
+    monkeypatch.setattr(authority, "JOURNAL", journal)
+
+    def safe_directory(path: Path, *, mode: int) -> None:
+        metadata = path.lstat()
+        if not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != mode:
+            raise authority.NodeAuthorityError("test directory metadata is unsafe")
+
+    def safe_file(path: Path, *, mode: int, limit: int = 96 << 20) -> bytes:
+        metadata = path.lstat()
+        raw = path.read_bytes()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or stat.S_IMODE(metadata.st_mode) != mode
+            or len(raw) > limit
+        ):
+            raise authority.NodeAuthorityError("test file metadata is unsafe")
+        return raw
+
+    monkeypatch.setattr(authority, "_safe_root_directory", safe_directory)
+    monkeypatch.setattr(authority, "_safe_root_file", safe_file)
+    return {
+        journal: journal.read_bytes(),
+        **{
+            receipt_root / f"{receipt['request_id']}.json": authority._canonical(receipt)
+            for receipt in receipts
+        },
+    }
+
+
+def test_upgrade_rejects_legacy_dynamic_receipt_before_snapshot_or_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _old, _new, _snapshot, events = _prepare_upgrade_mocks(
+        tmp_path,
+        monkeypatch,
+        patch_receipt_inventory=False,
+    )
+    receipt = _upgrade_history_receipt(
+        action="host-converge",
+        request_id="1" * 64,
+        dynamic_shape="legacy",
+    )
+    before = _install_upgrade_history(tmp_path, monkeypatch, [receipt])
+
+    with pytest.raises(authority.NodeAuthorityError, match="legacy dynamic receipt"):
+        authority.upgrade("e" * 40, "d" * 40)
+
+    assert "snapshot" not in events
+    assert "admission-disabled" not in events
+    assert {path: path.read_bytes() for path in before} == before
+
+
+def test_upgrade_allows_exact_non_dynamic_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _old, _new, snapshot, events = _prepare_upgrade_mocks(
+        tmp_path,
+        monkeypatch,
+        patch_receipt_inventory=False,
+    )
+    receipt = _upgrade_history_receipt(
+        action="slurm-node-converge",
+        request_id="2" * 64,
+    )
+    _install_upgrade_history(tmp_path, monkeypatch, [receipt])
+
+    report = authority.upgrade("e" * 40, "d" * 40)
+
+    assert report["changed"] is True
+    assert report["snapshot"] == str(snapshot.root)
+    assert "snapshot" in events
+    assert "admission-disabled" in events
+
+
+def test_upgrade_allows_worker_bound_dynamic_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _old, _new, snapshot, events = _prepare_upgrade_mocks(
+        tmp_path,
+        monkeypatch,
+        patch_receipt_inventory=False,
+    )
+    receipt = _upgrade_history_receipt(
+        action="host-converge",
+        request_id="3" * 64,
+        dynamic_shape="worker-bound",
+    )
+    _install_upgrade_history(tmp_path, monkeypatch, [receipt])
+
+    report = authority.upgrade("e" * 40, "d" * 40)
+
+    assert report["changed"] is True
+    assert report["snapshot"] == str(snapshot.root)
+    assert "snapshot" in events
+    assert "admission-disabled" in events
 
 
 def test_upgrade_disables_admission_replaces_atomically_and_preserves_state(
@@ -5545,7 +5828,8 @@ def test_upgrade_after_reboot_recreates_private_stage_root_after_lock(
     report = authority.upgrade("e" * 40, "d" * 40)
 
     assert report["changed"] is True
-    assert events[:3] == ["lock", "stage-root", "upgrade-state"]
+    assert events.index("receipt-inventory") < events.index("stage-root")
+    assert events.index("stage-root") < events.index("upgrade-state")
     assert stage_root.is_dir()
     assert stat.S_IMODE(stage_root.stat().st_mode) == 0o700
 
@@ -6777,3 +7061,307 @@ def test_runtime_retire_persists_exact_tombstone_and_preserves_peer(
     assert str(tombstone["path"]).endswith(
         f"/oldlab-1/{request.payload['sandbox']}/{wal['payload_sha256']}.json",
     )
+
+
+def _worker_image_request_for_tag_test() -> dict[str, object]:
+    return {
+        "architecture": "amd64",
+        "candidate_id": "cand-" + "a" * 40,
+        "candidate_sha": "b" * 40,
+        "config_digest": "sha256:" + "c" * 64,
+        "load_descriptor_digest": "sha256:" + "d" * 64,
+        "load_descriptor_media_type": "application/vnd.oci.image.manifest.v1+json",
+        "runtime_image_id": "sha256:" + "c" * 64,
+        "docker_storage_driver": "overlay2",
+        "docker_backend": "classic-overlay2",
+        "archive_sha256": "d" * 64,
+        "payload_sha256": "e" * 64,
+    }
+
+
+@pytest.mark.parametrize(
+    ("docker_info", "expected"),
+    [
+        (
+            {"Driver": "overlay2", "DriverStatus": [["Backing Filesystem", "extfs"]]},
+            {
+                "docker_storage_driver": "overlay2",
+                "docker_backend": "classic-overlay2",
+            },
+        ),
+        (
+            {
+                "Driver": "overlayfs",
+                "DriverStatus": [
+                    ["driver-type", "io.containerd.snapshotter.v1"],
+                ],
+            },
+            {
+                "docker_storage_driver": "overlayfs",
+                "docker_backend": "containerd-snapshotter-v1",
+            },
+        ),
+    ],
+)
+def test_docker_backend_distinguishes_classic_and_containerd_snapshotter(
+    monkeypatch: pytest.MonkeyPatch,
+    docker_info: dict[str, object],
+    expected: dict[str, str],
+) -> None:
+    monkeypatch.setattr(
+        authority,
+        "_docker",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            (),
+            0,
+            json.dumps(docker_info).encode(),
+            b"",
+        ),
+    )
+
+    assert authority._docker_backend() == expected
+
+
+def test_containerd_worker_image_id_and_descriptor_bind_load_index_not_config() -> None:
+    request = {
+        **_worker_image_request_for_tag_test(),
+        "runtime_image_id": "sha256:" + "d" * 64,
+        "docker_storage_driver": "overlayfs",
+        "docker_backend": "containerd-snapshotter-v1",
+    }
+    _placeholder, unique = authority._worker_image_tags(request)
+    image = {
+        "Id": request["load_descriptor_digest"],
+        "Os": "linux",
+        "Architecture": "amd64",
+        "Config": {
+            "Cmd": ["python", "-m", "loom_worker"],
+            "Entrypoint": None,
+            "Labels": {
+                "org.opencontainers.image.revision": request["candidate_sha"],
+            },
+        },
+        "RepoTags": [unique],
+        "Descriptor": {
+            "digest": request["load_descriptor_digest"],
+            "mediaType": request["load_descriptor_media_type"],
+        },
+    }
+
+    authority._validate_docker_worker_image(
+        image,
+        request,
+        backend={
+            "docker_storage_driver": "overlayfs",
+            "docker_backend": "containerd-snapshotter-v1",
+        },
+        require_unique_tag=True,
+    )
+    image["Id"] = request["config_digest"]
+    with pytest.raises(authority.NodeAuthorityError, match="descriptor binding"):
+        authority._validate_docker_worker_image(
+            image,
+            request,
+            backend={
+                "docker_storage_driver": "overlayfs",
+                "docker_backend": "containerd-snapshotter-v1",
+            },
+            require_unique_tag=True,
+        )
+
+
+def test_placeholder_recovery_adds_unique_tag_then_restores_prior_without_image_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _worker_image_request_for_tag_test()
+    expected_id = str(request["runtime_image_id"])
+    prior_id = "sha256:" + "f" * 64
+    placeholder, unique = authority._worker_image_tags(request)
+    tags = {placeholder: expected_id}
+    operations: list[tuple[str, str]] = []
+
+    def inspect(reference: str) -> dict[str, object] | None:
+        image_id = reference if reference in {expected_id, prior_id} else tags.get(reference)
+        if image_id is None:
+            return None
+        if image_id == prior_id:
+            return {"Id": prior_id}
+        return {
+            "Id": expected_id,
+            "Os": "linux",
+            "Architecture": "amd64",
+            "Config": {
+                "Cmd": ["python", "-m", "loom_worker"],
+                "Entrypoint": None,
+                "Labels": {
+                    "org.opencontainers.image.revision": request["candidate_sha"],
+                },
+            },
+            "RepoTags": sorted(tag for tag, bound in tags.items() if bound == expected_id),
+        }
+
+    def tag(source: str, target: str) -> None:
+        source_image = inspect(source)
+        assert source_image is not None
+        tags[target] = str(source_image["Id"])
+        operations.append(("tag", target))
+
+    def untag(reference: str) -> None:
+        assert reference in tags
+        del tags[reference]
+        operations.append(("untag", reference))
+
+    monkeypatch.setattr(authority, "_docker_image", inspect)
+    monkeypatch.setattr(authority, "_docker_tag", tag)
+    monkeypatch.setattr(authority, "_docker_untag", untag)
+    journal = authority._tag_journal_payload(
+        request,
+        phase="prepared",
+        prior_placeholder_image_id=prior_id,
+    )
+
+    authority._restore_placeholder(journal)
+
+    assert tags[unique] == expected_id
+    assert tags[placeholder] == prior_id
+    assert operations == [
+        ("tag", unique),
+        ("untag", placeholder),
+        ("tag", placeholder),
+    ]
+
+
+def test_prepared_tag_journal_before_load_recovers_without_docker_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _worker_image_request_for_tag_test()
+    prior_id = "sha256:" + "f" * 64
+    placeholder, _unique = authority._worker_image_tags(request)
+    monkeypatch.setattr(
+        authority,
+        "_docker_image",
+        lambda reference: {"Id": prior_id} if reference == placeholder else None,
+    )
+    monkeypatch.setattr(
+        authority,
+        "_docker_tag",
+        lambda *_args: pytest.fail("prepared recovery mutated a tag"),
+    )
+    monkeypatch.setattr(
+        authority,
+        "_docker_untag",
+        lambda *_args: pytest.fail("prepared recovery removed a tag"),
+    )
+
+    authority._restore_placeholder(
+        authority._tag_journal_payload(
+            request,
+            phase="prepared",
+            prior_placeholder_image_id=prior_id,
+        ),
+    )
+
+
+def test_upgrade_recovers_pending_image_tag_journal_before_snapshot_or_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _old, _new, _snapshot, events = _prepare_upgrade_mocks(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        authority,
+        "_recover_worker_image_tag_journals",
+        lambda: events.append("image-tag-recovery"),
+    )
+
+    authority.upgrade("e" * 40, "d" * 40)
+
+    assert events.index("image-tag-recovery") < events.index("snapshot")
+    assert events.index("image-tag-recovery") < events.index("admission-disabled")
+
+
+def test_worker_image_receipts_are_outside_legacy_dynamic_receipt_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_upgrade_history(tmp_path, monkeypatch, [])
+    worker_receipts = tmp_path / "authority-state" / "worker-image-loads"
+    worker_receipts.mkdir(mode=0o700)
+    (worker_receipts / ("a" * 64 + ".json")).write_text(
+        '{"separate":"worker-image-receipt"}\n',
+        encoding="ascii",
+    )
+    monkeypatch.setattr(authority, "WORKER_IMAGE_RECEIPT_ROOT", worker_receipts)
+    tag_journals = tmp_path / "authority-state" / "worker-image-tag-journals"
+    tag_journals.mkdir(mode=0o700)
+    (tag_journals / "pending.json").write_text(
+        '{"separate":"worker-image-tag-journal"}\n',
+        encoding="ascii",
+    )
+    monkeypatch.setattr(authority, "WORKER_IMAGE_TAG_JOURNAL_ROOT", tag_journals)
+
+    authority._validate_upgrade_receipt_inventory()
+
+
+def test_docker_output_is_streamed_and_killed_at_hard_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(authority, "DOCKER", sys.executable)
+    monkeypatch.setattr(authority, "MAX_DOCKER_STDOUT_BYTES", 32)
+    monkeypatch.setattr(authority, "MAX_DOCKER_STDERR_BYTES", 32)
+
+    with pytest.raises(authority.NodeAuthorityError, match="size bound"):
+        authority._docker(
+            "-c",
+            "import sys;sys.stdout.buffer.write(b'x'*4096);sys.stdout.buffer.flush()",
+        )
+
+
+def test_worker_image_stage_cleanup_removes_only_exact_safe_leftover(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    safe = stage / f".worker-image-{'a' * 64}-{'b' * 32}.tar"
+    safe.write_bytes(b"partial")
+    peer = stage / "unrelated"
+    peer.write_bytes(b"preserve")
+    original_lstat = Path.lstat
+
+    def root_lstat(path: Path) -> object:
+        metadata = original_lstat(path)
+        if path == safe:
+            return SimpleNamespace(
+                st_mode=stat.S_IFREG | 0o600,
+                st_uid=0,
+                st_gid=0,
+                st_nlink=1,
+            )
+        return metadata
+
+    monkeypatch.setattr(authority, "STAGE_ROOT", stage)
+    monkeypatch.setattr(authority, "_ensure_stage_root", lambda: None)
+    monkeypatch.setattr(authority, "_fsync_directory", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(Path, "lstat", root_lstat)
+
+    authority._cleanup_worker_image_stage()
+
+    assert not safe.exists()
+    assert peer.read_bytes() == b"preserve"
+
+
+def test_worker_image_stage_cleanup_rejects_unsafe_matching_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    unsafe = stage / ".worker-image-not-a-fixed-name.tar"
+    unsafe.write_bytes(b"partial")
+    monkeypatch.setattr(authority, "STAGE_ROOT", stage)
+    monkeypatch.setattr(authority, "_ensure_stage_root", lambda: None)
+
+    with pytest.raises(authority.NodeAuthorityError, match="unsafe leftover"):
+        authority._cleanup_worker_image_stage()
+
+    assert unsafe.exists()

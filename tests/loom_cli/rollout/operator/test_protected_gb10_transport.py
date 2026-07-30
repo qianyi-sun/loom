@@ -19,9 +19,12 @@ from loom_cli.rollout.operator.protected_gb10_transport import (
     FixedGB10SSHTransport,
     GB10FleetApplyError,
     GB10TransportTarget,
+    _native_worker_build_source,
     _remote_apply_source,
     _remote_observation_source,
     build_fixed_gb10_ssh_transport,
+    native_worker_build_ssh_argv,
+    retirement_worker_image_observation_source,
 )
 from tests.loom_cli.rollout.operator.test_protected_migration_component import _published_plan
 
@@ -696,6 +699,13 @@ def test_legacy_transport_explicitly_retains_existing_user_path_contract(tmp_pat
             True,
         ),
         (
+            {"ActiveState": "active", "SubState": "running"},
+            {},
+            True,
+            False,
+            False,
+        ),
+        (
             {
                 "Result": "",
                 "ExecMainStatus": "",
@@ -706,6 +716,13 @@ def test_legacy_transport_explicitly_retains_existing_user_path_contract(tmp_pat
             True,
             False,
             True,
+        ),
+        (
+            {},
+            {"SubState": "running"},
+            True,
+            False,
+            False,
         ),
         (
             {
@@ -820,3 +837,53 @@ def test_external_transport_target_rejects_any_legacy_human_path() -> None:
             node_agent_service="loom-gb10-node-agent.service",
             retirement_only=True,
         )
+
+
+def test_worker_image_observer_binds_fixed_env_and_classic_store(
+    tmp_path: Path,
+) -> None:
+    plan = _plan(tmp_path, "trt-gb10-1")
+
+    source = retirement_worker_image_observation_source(plan)
+
+    assert (
+        "/srv/loom/staging-shared/generated/"
+        f"staging-gb10-worker-staging-{plan.candidate_sha[:7]}.env"
+    ) in source
+    assert '["docker", "info", "--format", "{{.Driver}}"]' in source
+    assert 'driver.stdout.strip() != "overlay2"' in source
+    assert 'row.get("Id") == image_id' in source
+    assert 'config.get("Cmd") == ["python", "-m", "loom_worker"]' in source
+
+
+def test_native_worker_build_is_fixed_qianyi_direct_docker_transport() -> None:
+    repo_root = Path(__file__).resolve().parents[4]
+    candidate_sha = "b" * 40
+    source_sha256 = "c" * 64
+
+    argv = native_worker_build_ssh_argv(
+        (repo_root / "deploy/environments/staging.cluster.toml").resolve(),
+        candidate_sha=candidate_sha,
+        image_tag="staging-bbbbbbb",
+        source_sha256=source_sha256,
+    )
+    source = _native_worker_build_source(
+        candidate_sha=candidate_sha,
+        image_tag="staging-bbbbbbb",
+        source_sha256=source_sha256,
+    )
+    compile(source, "<native-worker-build>", "exec")
+
+    assert argv[-2] == "trt-gb10-1"
+    assert "UserKnownHostsFile=/etc/loom/staging-rollout-gb10-known-hosts" in argv
+    assert "/var/lib/loom-staging-rollout/gb10-deploy-ed25519" in argv
+    assert '"/usr/bin/docker", "info"' in source
+    assert '"/usr/bin/docker", "buildx", "build"' in source
+    assert "sudo" not in source
+    assert "overlay2 arm64" in source
+    assert "expected_source_sha256" in source
+    assert "max_source_bytes = 1024 * 1024 * 1024" in source
+    assert "diagnostic_size > 65536" in source
+    assert "fcntl.LOCK_EX | fcntl.LOCK_NB" in source
+    assert 'state_root.glob("work-*")' in source
+    assert "shutil.rmtree(work, ignore_errors=True)" in source

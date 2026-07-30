@@ -6,8 +6,12 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _COMPOSE = _REPO_ROOT / "deploy" / "docker-compose.remote-worker.yml"
 _SANDBOX_LINK_COMPOSE = _REPO_ROOT / "deploy" / "docker-compose.remote-worker.sandbox-link.yml"
 _CGROUP_COMPOSE = _REPO_ROOT / "deploy" / "docker-compose.remote-worker.cgroup-parent.yml"
+_ACCEPTANCE_PROBE_COMPOSE = (
+    _REPO_ROOT / "deploy" / "docker-compose.remote-worker.acceptance-probe.yml"
+)
 _DEV_COMPOSE = _REPO_ROOT / "deploy" / "docker-compose.dev.yml"
 _WORKER_NOFILE_LIMIT = 65_536
+_EXACT_WORKER_IMAGE = "${LOOM_WORKER_IMAGE_ID:?set exact loom-worker image config ID}"
 
 
 def _env_map(raw: object) -> dict[str, str | None]:
@@ -34,6 +38,24 @@ def test_remote_worker_compose_runs_only_worker() -> None:
         "remote_worker_trajectories",
         "remote_worker_benchmarks",
     }
+
+
+def test_remote_worker_services_require_exact_config_id_without_fallback() -> None:
+    image_services = (
+        (_COMPOSE, "worker"),
+        (_SANDBOX_LINK_COMPOSE, "sandbox-link"),
+        (_ACCEPTANCE_PROBE_COMPOSE, "acceptance-probe"),
+    )
+
+    for compose_file, service_name in image_services:
+        data = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+        service = data["services"][service_name]
+        assert service["image"] == _EXACT_WORKER_IMAGE
+        assert "build" not in service
+
+    base_text = _COMPOSE.read_text(encoding="utf-8")
+    assert "LOOM_WORKER_IMAGE:-" not in base_text
+    assert "LOOM_WORKER_IMAGE:" not in base_text
 
 
 def test_remote_worker_compose_uses_operator_supplied_endpoints() -> None:
@@ -141,6 +163,7 @@ def test_sandbox_link_overlay_requires_closed_registry_identity_labels() -> None
         "loom.registry_payload_sha256": (
             "${LOOM_WORKER_REGISTRY_PAYLOAD_SHA256:?set LOOM_WORKER_REGISTRY_PAYLOAD_SHA256}"
         ),
+        "loom.worker_image_id": _EXACT_WORKER_IMAGE,
     }
     expected_environment = {
         label.removeprefix("loom.").upper(): value
@@ -151,6 +174,7 @@ def test_sandbox_link_overlay_requires_closed_registry_identity_labels() -> None
             "loom.candidate_sha",
             "loom.slurm_job_id",
             "loom.compose_project",
+            "loom.worker_image_id",
         }
     }
     expected_environment = {
@@ -162,6 +186,7 @@ def test_sandbox_link_overlay_requires_closed_registry_identity_labels() -> None
             "LOOM_WORKER_CANDIDATE_SHA": interpolation["loom.candidate_sha"],
             "LOOM_WORKER_SLURM_JOB_ID": interpolation["loom.slurm_job_id"],
             "LOOM_WORKER_COMPOSE_PROJECT": interpolation["loom.compose_project"],
+            "LOOM_WORKER_IMAGE_ID": interpolation["loom.worker_image_id"],
         },
     )
 
@@ -211,14 +236,19 @@ def test_nonexclusive_compose_overlay_requires_exact_cgroup_parent() -> None:
         "LOOM_WORKER_REGISTRY_PAYLOAD_SHA256": (
             "${LOOM_WORKER_REGISTRY_PAYLOAD_SHA256:?set by the candidate env file}"
         ),
+        "LOOM_WORKER_IMAGE_ID": _EXACT_WORKER_IMAGE,
     }
     assert worker["cgroup_parent"] == (
         "${LOOM_WORKER_CGROUP_PARENT:?set by the Slurm batch controller}"
     )
     assert worker["environment"] == identity
-    assert worker["labels"] == {
-        f"loom.{key.removeprefix('LOOM_WORKER_').lower()}": value for key, value in identity.items()
+    expected_labels = {
+        f"loom.{key.removeprefix('LOOM_WORKER_').lower()}": value
+        for key, value in identity.items()
+        if key != "LOOM_WORKER_IMAGE_ID"
     }
+    expected_labels["loom.worker_image_id"] = identity["LOOM_WORKER_IMAGE_ID"]
+    assert worker["labels"] == expected_labels
     merged_labels = {
         **_worker_service(_COMPOSE)["labels"],
         **worker["labels"],
@@ -234,6 +264,7 @@ def test_nonexclusive_compose_overlay_requires_exact_cgroup_parent() -> None:
         "loom.candidate_tree",
         "loom.registry_generation",
         "loom.registry_payload_sha256",
+        "loom.worker_image_id",
     }
 
 
@@ -251,6 +282,7 @@ def test_remote_worker_compose_stamps_slurm_identity_and_disables_restart() -> N
         "loom.candidate_sha": "${LOOM_WORKER_CANDIDATE_SHA:-legacy}",
         "loom.slurm_job_id": "${LOOM_WORKER_SLURM_JOB_ID:-none}",
         "loom.compose_project": "${LOOM_WORKER_COMPOSE_PROJECT:-manual}",
+        "loom.worker_image_id": _EXACT_WORKER_IMAGE,
     }
     assert worker["restart"] == "${LOOM_WORKER_RESTART_POLICY:-on-failure}"
 

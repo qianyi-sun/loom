@@ -158,6 +158,7 @@ class SandboxGroup:
     candidate_id: str | None
     candidate_sha: str | None
     candidate_tree: str | None
+    image_digests: Mapping[str, str] | None
     layout_version: str
     candidate_root: Path
     runtime_root: Path
@@ -348,6 +349,22 @@ def load_config(path: Path) -> RuntimeConfig:
         upstream_gateway_port = ports["relay_gateway"]
         upstream_minio_port = ports["relay_minio"]
         candidate, deployment = _candidate_for_environment(snapshot, item)
+        runtime_bindings = (
+            deployment.get("worker_runtime_bindings") if deployment is not None else None
+        )
+        domain_bindings = (
+            runtime_bindings.get("domains") if isinstance(runtime_bindings, dict) else None
+        )
+        image_digests = (
+            {
+                "amd64": domain_bindings["oldlab"].get("runtime_image_id"),
+                "arm64": domain_bindings["gb10"].get("runtime_image_id"),
+            }
+            if isinstance(domain_bindings, dict)
+            and isinstance(domain_bindings.get("oldlab"), dict)
+            and isinstance(domain_bindings.get("gb10"), dict)
+            else None
+        )
         if (
             type(uid) is not int
             or not 1000 <= uid <= 60000
@@ -372,6 +389,18 @@ def load_config(path: Path) -> RuntimeConfig:
             )
             != 3
             or sandbox in groups
+            or (
+                image_digests is not None
+                and (
+                    not isinstance(image_digests, dict)
+                    or set(image_digests) != {"amd64", "arm64"}
+                    or image_digests["amd64"] == image_digests["arm64"]
+                    or any(
+                        re.fullmatch(r"sha256:[0-9a-f]{64}", str(value)) is None
+                        for value in image_digests.values()
+                    )
+                )
+            )
         ):
             raise ConvergenceError("registry environment runtime identity is invalid")
         layout_version = item["layout_version"]
@@ -417,6 +446,14 @@ def load_config(path: Path) -> RuntimeConfig:
             candidate_id=None if candidate is None else candidate["candidate_id"],
             candidate_sha=None if candidate is None else candidate["candidate_sha"],
             candidate_tree=None if candidate is None else candidate["candidate_tree"],
+            image_digests=(
+                None
+                if image_digests is None
+                else {
+                    "amd64": str(image_digests["amd64"]),
+                    "arm64": str(image_digests["arm64"]),
+                }
+            ),
             layout_version=layout_version,
             candidate_root=candidate_root,
             runtime_root=runtime_root,
@@ -563,6 +600,7 @@ def _authority_envelope(
         or group.candidate_id is None
         or group.candidate_sha != identity.sha
         or group.candidate_tree != identity.tree
+        or group.image_digests is None
     ):
         raise ConvergenceError("node authority check identity is invalid")
     body: dict[str, object] = {
@@ -582,6 +620,7 @@ def _authority_envelope(
         "candidate_id": group.candidate_id,
         "registry_generation": config.registry_generation,
         "registry_payload_sha256": config.registry_payload_sha256,
+        "worker_image_id": group.image_digests["amd64" if domain == "oldlab" else "arm64"],
     }
     request_id = hashlib.sha256(_canonical_json(body) + b"\n").hexdigest()
     body["request_id"] = request_id
@@ -782,12 +821,16 @@ def _parse_env_references(
         raise ConvergenceError("worker env registry binding is unavailable") from exc
     if group.candidate_id is None or group.candidate_sha != sha or group.candidate_tree is None:
         raise ConvergenceError("worker env candidate binding is unavailable")
+    architecture = "amd64" if domain.name == "oldlab" else "arm64"
+    if group.image_digests is None:
+        raise ConvergenceError("worker image registry binding is unavailable")
     expected = {
         "LOOM_WORKER_CONTROL_PLANE_URL": "http://sandbox-link:8080",
         "LOOM_WORKER_GATEWAY_URL": "http://sandbox-link:9100",
         "LOOM_WORKER_MINIO_ENDPOINT": "http://sandbox-link:9000",
         "LOOM_WORKER_SANDBOX_IDENTITY": sandbox,
         "LOOM_WORKER_CANDIDATE_SHA": sha,
+        "LOOM_WORKER_IMAGE_ID": group.image_digests[architecture],
         "LOOM_SANDBOX_LINK_CP_UPSTREAM": (
             f"https://{_LINK_SERVER_ADDRESS}:{group.upstream_control_plane_port}"
         ),

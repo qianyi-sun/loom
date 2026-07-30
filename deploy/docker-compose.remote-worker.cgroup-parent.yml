@@ -14,6 +14,7 @@ services:
       LOOM_WORKER_CANDIDATE_TREE: ${LOOM_WORKER_CANDIDATE_TREE:?set by the registry-bound Slurm controller}
       LOOM_WORKER_REGISTRY_GENERATION: ${LOOM_WORKER_REGISTRY_GENERATION:?set by the candidate env file}
       LOOM_WORKER_REGISTRY_PAYLOAD_SHA256: ${LOOM_WORKER_REGISTRY_PAYLOAD_SHA256:?set by the candidate env file}
+      LOOM_WORKER_IMAGE_ID: ${LOOM_WORKER_IMAGE_ID:?set exact loom-worker image config ID}
     labels:
       loom.env_id: ${LOOM_WORKER_ENV_ID:?set by the registry-bound Slurm controller}
       loom.resource_generation: ${LOOM_WORKER_RESOURCE_GENERATION:?set by the registry-bound Slurm controller}
@@ -21,3 +22,4 @@ services:
       loom.candidate_tree: ${LOOM_WORKER_CANDIDATE_TREE:?set by the registry-bound Slurm controller}
       loom.registry_generation: ${LOOM_WORKER_REGISTRY_GENERATION:?set by the candidate env file}
       loom.registry_payload_sha256: ${LOOM_WORKER_REGISTRY_PAYLOAD_SHA256:?set by the candidate env file}
+      loom.worker_image_id: ${LOOM_WORKER_IMAGE_ID:?set exact loom-worker image config ID}

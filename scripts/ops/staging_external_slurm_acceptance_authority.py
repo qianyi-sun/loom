@@ -115,6 +115,8 @@ validate_infrastructure_verification_summary = (
     _consumer.validate_infrastructure_verification_summary
 )
 infrastructure_mount_digest = _consumer.infrastructure_mount_digest
+parse_staging_worker_env = _consumer.parse_staging_worker_env
+verify_candidate_repository = _consumer.verify_candidate_repository
 verify_authority = _consumer.verify_authority
 
 _MAX_PROBE_BYTES = 2 * 1024 * 1024
@@ -215,6 +217,8 @@ _PREPARED_FIELDS = frozenset(
         "worker_env",
         "service_identity",
         "supervisor",
+        "allowed_nodes",
+        "excluded_nodes",
         "infrastructure_sha256",
         "prepared_at",
     }
@@ -400,6 +404,74 @@ def _verify_private_leaf(
         )
 
 
+def _read_stable_private_leaf(
+    path: Path,
+    *,
+    uid: int,
+    gid: int,
+    label: str,
+    maximum: int,
+    mode: int = 0o600,
+) -> bytes:
+    try:
+        path_before = path.lstat()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError as exc:
+        raise ExternalSlurmAcceptanceError(f"{label} is unavailable") from exc
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_IMODE(opened.st_mode) != mode
+            or opened.st_uid != uid
+            or opened.st_gid != gid
+            or opened.st_nlink != 1
+            or not 0 < opened.st_size <= maximum
+            or (path_before.st_dev, path_before.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise ExternalSlurmAcceptanceError(
+                f"{label} must be a stable {mode:04o} service-owned regular file"
+            )
+        chunks: list[bytes] = []
+        remaining = opened.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(64 * 1024, remaining))
+            if not chunk:
+                raise ExternalSlurmAcceptanceError(f"{label} changed while it was read")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise ExternalSlurmAcceptanceError(f"{label} changed while it was read")
+        after = os.fstat(descriptor)
+        try:
+            path_after = path.lstat()
+        except OSError as exc:
+            raise ExternalSlurmAcceptanceError(f"{label} changed while it was read") from exc
+        stable_fields = (
+            "st_dev",
+            "st_ino",
+            "st_mode",
+            "st_uid",
+            "st_gid",
+            "st_nlink",
+            "st_size",
+            "st_mtime_ns",
+            "st_ctime_ns",
+        )
+        if (
+            any(getattr(opened, field) != getattr(after, field) for field in stable_fields)
+            or any(getattr(opened, field) != getattr(path_after, field) for field in stable_fields)
+            or sum(len(chunk) for chunk in chunks) != opened.st_size
+        ):
+            raise ExternalSlurmAcceptanceError(f"{label} changed while it was read")
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
 def _verify_root_parent_chain(path: Path, *, label: str) -> None:
     for parent in path.parents:
         if parent == Path("/"):
@@ -426,37 +498,11 @@ def _verify_candidate_repo(
     candidate_sha: str,
     candidate_tree: str,
 ) -> None:
-    for arguments, expected, label in (
-        (["rev-parse", "HEAD"], candidate_sha, "repository HEAD"),
-        (["rev-parse", "HEAD^{tree}"], candidate_tree, "repository tree"),
-    ):
-        completed = _run(
-            [
-                "git",
-                "-c",
-                f"safe.directory={repository}",
-                "-C",
-                str(repository),
-                *arguments,
-            ]
-        )
-        if completed.returncode != 0 or completed.stdout.strip() != expected:
-            raise ExternalSlurmAcceptanceError(f"{label} mismatch")
-    clean = _run(
-        [
-            "git",
-            "-c",
-            f"safe.directory={repository}",
-            "-C",
-            str(repository),
-            "status",
-            "--porcelain=v1",
-            "--untracked-files=all",
-            "--ignored=matching",
-        ]
+    verify_candidate_repository(
+        repository,
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
     )
-    if clean.returncode != 0 or clean.stdout:
-        raise ExternalSlurmAcceptanceError("candidate repository is not exactly clean")
 
 
 def _supervisor_state(config: ExternalSlurmAuthorityConfig) -> dict[str, Any]:
@@ -1105,7 +1151,11 @@ def _publish_candidate_locked(
         )
     if recovering and (stage_env.exists() or stage_env.is_symlink()):
         metadata = stage_env.lstat()
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0 or metadata.st_nlink != 1:
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid not in {0, config.batch_uid}
+            or metadata.st_nlink != 1
+        ):
             raise ExternalSlurmAcceptanceError("candidate env publication stage is foreign")
         stage_env.unlink()
 
@@ -1160,26 +1210,19 @@ def _publish_candidate_locked(
     finally:
         os.close(published_descriptor)
 
-    source_descriptor = os.open(source_env, os.O_RDONLY | os.O_NOFOLLOW)
-    try:
-        source_metadata = os.fstat(source_descriptor)
-        if (
-            not stat.S_ISREG(source_metadata.st_mode)
-            or source_metadata.st_nlink != 1
-            or source_metadata.st_size > 1024 * 1024
-            or (source_metadata.st_uid, source_metadata.st_gid)
-            != (config.producer_uid, config.producer_gid)
-            or stat.S_IMODE(source_metadata.st_mode) != 0o600
-        ):
-            raise ExternalSlurmAcceptanceError("private producer worker env is unsafe")
-        env_payload = b""
-        while len(env_payload) <= 1024 * 1024:
-            chunk = os.read(source_descriptor, 1024 * 1024)
-            if not chunk:
-                break
-            env_payload += chunk
-    finally:
-        os.close(source_descriptor)
+    env_payload = _read_stable_private_leaf(
+        source_env,
+        uid=config.producer_uid,
+        gid=config.producer_gid,
+        label="private producer worker env",
+        maximum=1024 * 1024,
+    )
+    parse_staging_worker_env(
+        env_payload,
+        candidate_sha=candidate_sha,
+        pool=config.pool,
+        concurrency=10,
+    )
     if not target_env.exists():
         descriptor = os.open(
             stage_env,
@@ -1188,17 +1231,30 @@ def _publish_candidate_locked(
         )
         try:
             os.write(descriptor, env_payload)
-            os.fchown(descriptor, 0, config.batch_gid)
-            os.fchmod(descriptor, 0o440)
+            os.fchown(descriptor, config.batch_uid, config.batch_gid)
+            os.fchmod(descriptor, 0o600)
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
         journal_payload["phase"] = "environment-staged"
         _write_root_file(journal, canonical_json_bytes(journal_payload))
         _rename_noreplace(stage_env, target_env)
+    _verify_private_leaf(
+        target_env,
+        uid=config.batch_uid,
+        gid=config.batch_gid,
+        label="published candidate worker env",
+        mode=0o600,
+    )
     target_payload = target_env.read_bytes()
     if target_payload != env_payload:
         raise ExternalSlurmAcceptanceError("published worker env digest mismatch")
+    parse_staging_worker_env(
+        target_payload,
+        candidate_sha=candidate_sha,
+        pool=config.pool,
+        concurrency=10,
+    )
     journal_payload["phase"] = "verified"
     _write_root_file(journal, canonical_json_bytes(journal_payload))
     journal.unlink()
@@ -1460,10 +1516,10 @@ def prepare(
     )
     _verify_private_leaf(
         worker_env,
-        uid=0,
+        uid=config.batch_uid,
         gid=config.batch_gid,
         label="candidate worker env",
-        mode=0o440,
+        mode=0o600,
     )
     _verify_private_leaf(
         config.environment_state_profile,
@@ -1483,6 +1539,8 @@ def prepare(
         "worker_env": str(worker_env),
         "service_identity": identity,
         "supervisor": supervisor,
+        "allowed_nodes": list(config.allowed_nodes),
+        "excluded_nodes": list(config.excluded_nodes),
         "infrastructure_sha256": infrastructure_sha256,
         "prepared_at": _timestamp(),
     }
@@ -1516,6 +1574,10 @@ def _load_prepared(
     }
     if any(payload.get(field) != value for field, value in expected.items()):
         raise ExternalSlurmAcceptanceError("prepared authority candidate mismatch")
+    if payload.get("allowed_nodes") != list(config.allowed_nodes) or payload.get(
+        "excluded_nodes"
+    ) != list(config.excluded_nodes):
+        raise ExternalSlurmAcceptanceError("prepared authority node scope mismatch")
     if canonical_json_bytes(payload) != path.read_bytes():
         raise ExternalSlurmAcceptanceError("prepared authority state is not canonical")
     return payload
@@ -2459,6 +2521,8 @@ def _next_generation(config: ExternalSlurmAuthorityConfig) -> int:
                 "generation_id",
                 "created_at",
                 "expires_at",
+                "allowed_nodes",
+                "excluded_nodes",
             )
         )
     ):
@@ -2514,6 +2578,8 @@ def _load_generation_record(
         "key_id",
         "created_at",
         "expires_at",
+        "allowed_nodes",
+        "excluded_nodes",
     }
     if include_kind:
         expected_fields.add("kind")
@@ -2531,6 +2597,8 @@ def _load_generation_record(
         or pointer["generation"] < 1
         or _OBJECT_ID_RE.fullmatch(str(pointer.get("candidate_sha"))) is None
         or _OBJECT_ID_RE.fullmatch(str(pointer.get("candidate_tree"))) is None
+        or pointer.get("allowed_nodes") != [f"trt-gb10-{index}" for index in range(1, 16)]
+        or pointer.get("excluded_nodes") != []
         or any(
             _DIGEST_RE.fullmatch(str(pointer.get(field))) is None
             for field in (
@@ -2725,6 +2793,7 @@ def probe(
         "slurm_account": config.slurm_account,
         "qos": config.qos,
         "allowed_nodes": list(config.allowed_nodes),
+        "excluded_nodes": list(config.excluded_nodes),
         "repository": prepared["repository"],
         "worker_env": prepared["worker_env"],
         "nodes": probe_payload.get("nodes"),
@@ -2797,6 +2866,7 @@ def probe(
             "slurm_account": config.slurm_account,
             "qos": config.qos,
             "allowed_nodes": list(config.allowed_nodes),
+            "excluded_nodes": list(config.excluded_nodes),
             "repository": prepared["repository"],
             "worker_env": prepared["worker_env"],
             "supervisor": prepared["supervisor"],
@@ -2826,6 +2896,8 @@ def probe(
             "key_id": key_id,
             "created_at": payload["created_at"],
             "expires_at": payload["expires_at"],
+            "allowed_nodes": list(config.allowed_nodes),
+            "excluded_nodes": list(config.excluded_nodes),
         }
         _publish_generation(
             config,
@@ -2870,6 +2942,8 @@ def activate(
         "signature_sha256": verified.signature_sha256,
         "key_id": verified.key_id,
         "node_count": len(verified.payload["nodes"]),
+        "allowed_nodes": list(verified.payload["allowed_nodes"]),
+        "excluded_nodes": list(verified.payload["excluded_nodes"]),
         "expires_at": verified.payload["expires_at"],
     }
 

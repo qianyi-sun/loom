@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import grp
+import gzip
 import hashlib
 import json
 import os
@@ -24,6 +25,7 @@ import sqlite3
 import stat
 import struct
 import sys
+import tarfile
 import tempfile
 import threading
 import tomllib
@@ -31,10 +33,13 @@ from collections.abc import Callable, Iterator, Mapping, Sequence, Set
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Final, cast
 
 SCHEMA_VERSION: Final = 1
+DATABASE_SCHEMA_VERSION: Final = 3
+WORKER_IMAGE_BINDING_KIND: Final = "docker-archive-identities"
+WORKER_IMAGE_BINDING_VERSION: Final = 2
 SYSTEM_ROOT: Final = Path("/var/lib/loom-developer-environment-registry")
 SYSTEM_DATABASE: Final = SYSTEM_ROOT / "registry.sqlite3"
 SYSTEM_CANDIDATE_ROOT: Final = SYSTEM_ROOT / "candidates"
@@ -105,6 +110,7 @@ CANDIDATE_FIELDS: Final = {
     "bundle_sha256",
     "bundle_size",
     "image_digests",
+    "image_archives",
 }
 DEPLOY_FIELDS: Final = {
     "schema_version",
@@ -125,6 +131,56 @@ DEPLOYMENT_ID_RE: Final = re.compile(r"^dep-[0-9a-f]{32}$")
 SHA_RE: Final = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_RE: Final = re.compile(r"^[0-9a-f]{64}$")
 IMAGE_DIGEST_RE: Final = re.compile(r"^sha256:[0-9a-f]{64}$")
+WORKER_IMAGE_ARCHITECTURES: Final = {"amd64": "amd64", "arm64": "arm64"}
+WORKER_IMAGE_ARCHIVE_BINDING_FIELDS: Final = {
+    "sha256",
+    "size",
+    "config_digest",
+    "index_digest",
+    "manifest_digest",
+    "manifest_media_type",
+    "load_descriptor_digest",
+    "load_descriptor_media_type",
+}
+WORKER_RUNTIME_BINDING_DOMAINS: Final = {
+    "oldlab": "amd64",
+    "gb10": "arm64",
+}
+WORKER_RUNTIME_BACKENDS: Final = {
+    "classic-overlay2": "overlay2",
+    "containerd-snapshotter-v1": "overlayfs",
+}
+WORKER_IMAGE_COMMAND: Final = ["python", "-m", "loom_worker"]
+WORKER_IMAGE_REVISION_LABEL: Final = "org.opencontainers.image.revision"
+MAX_WORKER_IMAGE_ARCHIVE_BYTES: Final = 16 * 1024 * 1024 * 1024
+MAX_WORKER_IMAGE_CONFIG_BYTES: Final = 16 * 1024 * 1024
+MAX_WORKER_IMAGE_LAYER_UNCOMPRESSED_BYTES: Final = 32 * 1024 * 1024 * 1024
+MAX_WORKER_IMAGE_TOTAL_UNCOMPRESSED_BYTES: Final = 64 * 1024 * 1024 * 1024
+MAX_WORKER_IMAGE_ARCHIVE_MEMBERS: Final = 100_000
+OCI_MANIFEST_MEDIA_TYPES: Final = frozenset(
+    {
+        "application/vnd.oci.image.manifest.v1+json",
+        "application/vnd.docker.distribution.manifest.v2+json",
+    }
+)
+OCI_INDEX_MEDIA_TYPES: Final = frozenset(
+    {
+        "application/vnd.oci.image.index.v1+json",
+        "application/vnd.docker.distribution.manifest.list.v2+json",
+    }
+)
+OCI_CONFIG_MEDIA_TYPES: Final = frozenset(
+    {
+        "application/vnd.oci.image.config.v1+json",
+        "application/vnd.docker.container.image.v1+json",
+    }
+)
+OCI_LAYER_MEDIA_TYPES: Final = frozenset(
+    {
+        "application/vnd.oci.image.layer.v1.tar+gzip",
+        "application/vnd.docker.image.rootfs.diff.tar.gzip",
+    }
+)
 SAFE_NAME_RE: Final = re.compile(r"^[a-z][a-z0-9_-]{1,62}$")
 SAFE_BUCKET_RE: Final = re.compile(r"^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$")
 SNAPSHOT_PROCESS_LOCK: Final = threading.Lock()
@@ -169,12 +225,15 @@ CANDIDATE_SNAPSHOT_FIELDS: Final = {
     "env_id",
     "lifecycle_epoch",
     "repository_id",
+    "image_binding_kind",
+    "image_binding_version",
     "candidate_sha",
     "candidate_tree",
     "bundle_sha256",
     "bundle_size",
     "bundle_path",
     "image_digests",
+    "image_archives",
     "imported_at",
 }
 DEPLOYMENT_SNAPSHOT_FIELDS: Final = {
@@ -187,6 +246,7 @@ DEPLOYMENT_SNAPSHOT_FIELDS: Final = {
     "applied_registry_generation",
     "applied_registry_payload_sha256",
     "finalization_payload_sha256",
+    "worker_runtime_bindings",
     "phase",
     "previous_candidate_id",
     "request_digest",
@@ -261,6 +321,182 @@ NODE_IDENTITY_INVENTORY_FIELDS: Final = {
 
 class RegistryError(RuntimeError):
     """A bounded, secret-safe registry failure."""
+
+
+def _valid_worker_image_ids(value: object) -> bool:
+    """Validate the closed per-architecture loom-worker config-ID contract."""
+
+    return bool(
+        isinstance(value, dict)
+        and set(value) == {"amd64", "arm64"}
+        and all(
+            isinstance(image_id, str) and IMAGE_DIGEST_RE.fullmatch(image_id) is not None
+            for image_id in value.values()
+        )
+        # A Docker image config records its target architecture, so one config
+        # object cannot truthfully represent both supported platforms.
+        and value["amd64"] != value["arm64"]
+    )
+
+
+def _valid_worker_image_archives(
+    value: object,
+    *,
+    candidate_root: Path | None = None,
+    candidate_id: str | None = None,
+) -> bool:
+    if not isinstance(value, dict) or set(value) != {"amd64", "arm64"}:
+        return False
+    for architecture, item in value.items():
+        if (
+            architecture not in WORKER_IMAGE_ARCHITECTURES
+            or not isinstance(item, dict)
+            or set(item)
+            != (
+                WORKER_IMAGE_ARCHIVE_BINDING_FIELDS
+                if candidate_root is None
+                else WORKER_IMAGE_ARCHIVE_BINDING_FIELDS | {"path"}
+            )
+            or DIGEST_RE.fullmatch(str(item.get("sha256"))) is None
+            or not isinstance(item.get("size"), int)
+            or isinstance(item.get("size"), bool)
+            or not 0 < int(item["size"]) <= MAX_WORKER_IMAGE_ARCHIVE_BYTES
+            or IMAGE_DIGEST_RE.fullmatch(str(item.get("config_digest"))) is None
+            or IMAGE_DIGEST_RE.fullmatch(str(item.get("index_digest"))) is None
+            or IMAGE_DIGEST_RE.fullmatch(str(item.get("manifest_digest"))) is None
+            or item.get("manifest_media_type") not in OCI_MANIFEST_MEDIA_TYPES
+            or IMAGE_DIGEST_RE.fullmatch(str(item.get("load_descriptor_digest"))) is None
+            or item.get("load_descriptor_media_type")
+            not in OCI_MANIFEST_MEDIA_TYPES | OCI_INDEX_MEDIA_TYPES
+        ):
+            return False
+        if candidate_root is not None and (
+            candidate_id is None
+            or item.get("path")
+            != str(worker_image_archive_path(candidate_root, candidate_id, architecture))
+        ):
+            return False
+    return True
+
+
+def _archive_identity(value: Mapping[str, Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {
+        architecture: {
+            field: value[architecture][field]
+            for field in sorted(WORKER_IMAGE_ARCHIVE_BINDING_FIELDS)
+        }
+        for architecture in ("amd64", "arm64")
+    }
+
+
+def _worker_archive_configs_match(
+    image_digests: Mapping[str, str],
+    image_archives: Mapping[str, Mapping[str, Any]],
+) -> bool:
+    return all(
+        image_archives[architecture]["config_digest"] == image_digests[architecture]
+        for architecture in ("amd64", "arm64")
+    )
+
+
+def _valid_worker_runtime_bindings(
+    value: object,
+    *,
+    candidate: CandidateRecord | None = None,
+) -> bool:
+    if not isinstance(value, dict) or set(value) != {"nodes", "domains"}:
+        return False
+    nodes = value.get("nodes")
+    domains = value.get("domains")
+    if (
+        not isinstance(nodes, dict)
+        or set(nodes) != set(FLEET_NODES)
+        or not isinstance(domains, dict)
+        or set(domains) != set(WORKER_RUNTIME_BINDING_DOMAINS)
+    ):
+        return False
+    node_fields = {
+        "domain",
+        "architecture",
+        "docker_driver",
+        "docker_backend",
+        "config_digest",
+        "load_descriptor_digest",
+        "load_descriptor_media_type",
+        "runtime_image_id",
+        "docker_descriptor_digest",
+        "docker_descriptor_media_type",
+        "receipt_sha256",
+    }
+    domain_fields = node_fields - {
+        "domain",
+        "docker_descriptor_digest",
+        "docker_descriptor_media_type",
+        "receipt_sha256",
+    }
+    for node, item in nodes.items():
+        expected_domain = "oldlab" if node.startswith("oldlab-") else "gb10"
+        if not isinstance(item, dict) or set(item) != node_fields:
+            return False
+        domain = item.get("domain")
+        architecture = item.get("architecture")
+        backend = item.get("docker_backend")
+        driver = item.get("docker_driver")
+        config_digest = item.get("config_digest")
+        load_digest = item.get("load_descriptor_digest")
+        load_media_type = item.get("load_descriptor_media_type")
+        runtime_image_id = item.get("runtime_image_id")
+        descriptor_digest = item.get("docker_descriptor_digest")
+        descriptor_media_type = item.get("docker_descriptor_media_type")
+        if (
+            domain != expected_domain
+            or architecture != WORKER_RUNTIME_BINDING_DOMAINS[expected_domain]
+            or backend not in WORKER_RUNTIME_BACKENDS
+            or driver != WORKER_RUNTIME_BACKENDS[backend]
+            or IMAGE_DIGEST_RE.fullmatch(str(config_digest)) is None
+            or IMAGE_DIGEST_RE.fullmatch(str(load_digest)) is None
+            or load_media_type not in OCI_MANIFEST_MEDIA_TYPES | OCI_INDEX_MEDIA_TYPES
+            or IMAGE_DIGEST_RE.fullmatch(str(runtime_image_id)) is None
+            or DIGEST_RE.fullmatch(str(item.get("receipt_sha256"))) is None
+        ):
+            return False
+        if backend == "classic-overlay2":
+            if (
+                runtime_image_id != config_digest
+                or descriptor_digest is not None
+                or descriptor_media_type is not None
+            ):
+                return False
+        elif (
+            runtime_image_id != load_digest
+            or descriptor_digest != load_digest
+            or descriptor_media_type != load_media_type
+        ):
+            return False
+        if candidate is not None:
+            archive = candidate.image_archives[architecture]
+            if (
+                config_digest != archive["config_digest"]
+                or load_digest != archive["load_descriptor_digest"]
+                or load_media_type != archive["load_descriptor_media_type"]
+            ):
+                return False
+    for domain, item in domains.items():
+        architecture = WORKER_RUNTIME_BINDING_DOMAINS[domain]
+        if not isinstance(item, dict) or set(item) != domain_fields:
+            return False
+        domain_nodes = [
+            node_item
+            for node, node_item in nodes.items()
+            if ("oldlab" if node.startswith("oldlab-") else "gb10") == domain
+        ]
+        if not domain_nodes or any(
+            item[field] != node_item[field] for node_item in domain_nodes for field in domain_fields
+        ):
+            return False
+        if item["architecture"] != architecture:
+            return False
+    return True
 
 
 def _proc_listener_ports(path: Path) -> set[int]:
@@ -601,12 +837,15 @@ class CandidateRecord:
     env_id: str
     lifecycle_epoch: int
     repository_id: str
+    image_binding_kind: str
+    image_binding_version: int
     candidate_sha: str
     candidate_tree: str
     bundle_sha256: str
     bundle_size: int
     bundle_path: str
     image_digests: dict[str, str]
+    image_archives: dict[str, dict[str, Any]]
     imported_at: str
 
 
@@ -621,6 +860,7 @@ class DeploymentRecord:
     applied_registry_generation: int | None
     applied_registry_payload_sha256: str | None
     finalization_payload_sha256: str | None
+    worker_runtime_bindings: dict[str, Any] | None
     phase: str
     previous_candidate_id: str | None
     request_digest: str
@@ -645,6 +885,398 @@ def _canonical(payload: Mapping[str, Any]) -> bytes:
 
 def _digest(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(_canonical(payload)).hexdigest()
+
+
+def worker_image_archive_path(
+    candidate_root: Path,
+    candidate_id: str,
+    architecture: str,
+) -> Path:
+    if (
+        CANDIDATE_ID_RE.fullmatch(candidate_id) is None
+        or architecture not in WORKER_IMAGE_ARCHITECTURES
+    ):
+        raise RegistryError("worker image archive identity is invalid")
+    return candidate_root / candidate_id / f"loom-worker-linux-{architecture}.tar"
+
+
+def _safe_tar_name(value: object) -> str:
+    if not isinstance(value, str):
+        raise RegistryError("worker image archive member is invalid")
+    path = PurePosixPath(value)
+    if not value or path.is_absolute() or ".." in path.parts:
+        raise RegistryError("worker image archive member is unsafe")
+    return value
+
+
+def verify_worker_image_archive(
+    path: Path,
+    *,
+    architecture: str,
+    candidate_sha: str,
+    image_id: str,
+    expected_archive_sha256: str | None = None,
+    expected_archive_size: int | None = None,
+) -> dict[str, Any]:
+    """Verify one uncompressed buildx ``type=docker`` archive without loading it."""
+
+    if (
+        architecture not in WORKER_IMAGE_ARCHITECTURES
+        or SHA_RE.fullmatch(candidate_sha) is None
+        or IMAGE_DIGEST_RE.fullmatch(image_id) is None
+    ):
+        raise RegistryError("worker image archive binding is invalid")
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise RegistryError("worker image archive is unavailable") from exc
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or metadata.st_size < 1
+        or metadata.st_size > MAX_WORKER_IMAGE_ARCHIVE_BYTES
+    ):
+        raise RegistryError("worker image archive metadata is unsafe")
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                size += len(chunk)
+                if size > MAX_WORKER_IMAGE_ARCHIVE_BYTES:
+                    raise RegistryError("worker image archive is too large")
+                digest.update(chunk)
+    except OSError as exc:
+        raise RegistryError("worker image archive is unavailable") from exc
+    archive_sha256 = digest.hexdigest()
+    if (expected_archive_sha256 is not None and archive_sha256 != expected_archive_sha256) or (
+        expected_archive_size is not None and size != expected_archive_size
+    ):
+        raise RegistryError("worker image archive content binding is invalid")
+
+    def _member_bytes(
+        archive: tarfile.TarFile,
+        member: tarfile.TarInfo,
+        *,
+        maximum: int,
+    ) -> bytes:
+        if not member.isfile() or member.size < 1 or member.size > maximum:
+            raise RegistryError("worker image archive member size is invalid")
+        stream = archive.extractfile(member)
+        if stream is None:
+            raise RegistryError("worker image archive member is unavailable")
+        raw = stream.read(maximum + 1)
+        if len(raw) != member.size or len(raw) > maximum:
+            raise RegistryError("worker image archive member size is invalid")
+        return raw
+
+    def _descriptor(
+        value: object,
+        *,
+        media_types: frozenset[str],
+    ) -> tuple[str, int, str]:
+        if not isinstance(value, dict) or not {
+            "digest",
+            "size",
+            "mediaType",
+        }.issubset(value):
+            raise RegistryError("worker image OCI descriptor is invalid")
+        digest_value = value.get("digest")
+        size_value = value.get("size")
+        media_type = value.get("mediaType")
+        if (
+            IMAGE_DIGEST_RE.fullmatch(str(digest_value)) is None
+            or not _plain_integer(size_value, minimum=1)
+            or media_type not in media_types
+        ):
+            raise RegistryError("worker image OCI descriptor is invalid")
+        return str(digest_value), int(size_value), str(media_type)
+
+    def _blob_name(digest_value: str) -> str:
+        return f"blobs/sha256/{digest_value.removeprefix('sha256:')}"
+
+    try:
+        with tarfile.open(path, mode="r:") as archive:
+            members: dict[str, tarfile.TarInfo] = {}
+            for member in archive:
+                if len(members) >= MAX_WORKER_IMAGE_ARCHIVE_MEMBERS:
+                    raise RegistryError("worker image archive has too many members")
+                name = _safe_tar_name(member.name)
+                if name in members:
+                    raise RegistryError("worker image archive has duplicate members")
+                if not (member.isdir() or member.isfile()):
+                    raise RegistryError("worker image archive has unsafe member types")
+                members[name] = member
+            manifest_member = members.get("manifest.json")
+            if (
+                manifest_member is None
+                or not manifest_member.isfile()
+                or not 0 < manifest_member.size <= 1024 * 1024
+            ):
+                raise RegistryError("worker image archive manifest is invalid")
+            manifest = json.loads(
+                _member_bytes(
+                    archive,
+                    manifest_member,
+                    maximum=1024 * 1024,
+                )
+            )
+            if (
+                not isinstance(manifest, list)
+                or len(manifest) != 1
+                or not isinstance(manifest[0], dict)
+            ):
+                raise RegistryError("worker image archive manifest is invalid")
+            descriptor = manifest[0]
+            config_name = _safe_tar_name(descriptor.get("Config"))
+            layer_names = descriptor.get("Layers")
+            if (
+                not isinstance(layer_names, list)
+                or not layer_names
+                or any(not isinstance(item, str) for item in layer_names)
+                or len(set(layer_names)) != len(layer_names)
+            ):
+                raise RegistryError("worker image archive layer inventory is invalid")
+            index_member = members.get("index.json")
+            if index_member is None:
+                raise RegistryError("worker image OCI index is unavailable")
+            index_raw = _member_bytes(archive, index_member, maximum=1024 * 1024)
+            index_digest = f"sha256:{hashlib.sha256(index_raw).hexdigest()}"
+            index = json.loads(index_raw)
+            if (
+                not isinstance(index, dict)
+                or index.get("schemaVersion") != 2
+                or not isinstance(index.get("manifests"), list)
+                or len(index["manifests"]) != 1
+            ):
+                raise RegistryError("worker image OCI index is invalid")
+            load_descriptor_digest, load_descriptor_size, load_descriptor_media_type = _descriptor(
+                index["manifests"][0],
+                media_types=OCI_MANIFEST_MEDIA_TYPES | OCI_INDEX_MEDIA_TYPES,
+            )
+            load_descriptor_member = members.get(_blob_name(load_descriptor_digest))
+            if load_descriptor_member is None:
+                raise RegistryError("worker image OCI load descriptor is unavailable")
+            load_descriptor_raw = _member_bytes(
+                archive,
+                load_descriptor_member,
+                maximum=16 * 1024 * 1024,
+            )
+            if len(load_descriptor_raw) != load_descriptor_size or hashlib.sha256(
+                load_descriptor_raw
+            ).hexdigest() != load_descriptor_digest.removeprefix("sha256:"):
+                raise RegistryError("worker image OCI load descriptor digest is invalid")
+            if load_descriptor_media_type in OCI_MANIFEST_MEDIA_TYPES:
+                manifest_digest = load_descriptor_digest
+                manifest_size = load_descriptor_size
+                manifest_media_type = load_descriptor_media_type
+            else:
+                load_index = json.loads(load_descriptor_raw)
+                if (
+                    not isinstance(load_index, dict)
+                    or load_index.get("schemaVersion") != 2
+                    or not isinstance(load_index.get("manifests"), list)
+                    or not load_index["manifests"]
+                ):
+                    raise RegistryError("worker image OCI load index is invalid")
+                runtime_descriptors: list[tuple[str, int, str]] = []
+                attestation_references: list[str] = []
+                for child in load_index["manifests"]:
+                    child_digest, child_size, child_media_type = _descriptor(
+                        child,
+                        media_types=OCI_MANIFEST_MEDIA_TYPES,
+                    )
+                    child_member = members.get(_blob_name(child_digest))
+                    if child_member is None:
+                        raise RegistryError("worker image OCI child descriptor is unavailable")
+                    child_raw = _member_bytes(
+                        archive,
+                        child_member,
+                        maximum=16 * 1024 * 1024,
+                    )
+                    if len(child_raw) != child_size or hashlib.sha256(
+                        child_raw
+                    ).hexdigest() != child_digest.removeprefix("sha256:"):
+                        raise RegistryError("worker image OCI child descriptor digest is invalid")
+                    platform_binding = child.get("platform") if isinstance(child, dict) else None
+                    annotations = child.get("annotations") if isinstance(child, dict) else None
+                    if (
+                        isinstance(platform_binding, dict)
+                        and platform_binding.get("os") == "linux"
+                        and platform_binding.get("architecture")
+                        == WORKER_IMAGE_ARCHITECTURES[architecture]
+                    ):
+                        runtime_descriptors.append((child_digest, child_size, child_media_type))
+                    elif not (
+                        isinstance(platform_binding, dict)
+                        and platform_binding.get("os") == "unknown"
+                        and platform_binding.get("architecture") == "unknown"
+                        and isinstance(annotations, dict)
+                        and annotations.get("vnd.docker.reference.type") == "attestation-manifest"
+                        and IMAGE_DIGEST_RE.fullmatch(
+                            str(annotations.get("vnd.docker.reference.digest"))
+                        )
+                        is not None
+                    ):
+                        raise RegistryError("worker image OCI child platform is invalid")
+                    else:
+                        attestation_references.append(
+                            str(annotations["vnd.docker.reference.digest"])
+                        )
+                if len(runtime_descriptors) != 1:
+                    raise RegistryError("worker image OCI runtime manifest is ambiguous")
+                manifest_digest, manifest_size, manifest_media_type = runtime_descriptors[0]
+                if any(reference != manifest_digest for reference in attestation_references):
+                    raise RegistryError("worker image OCI attestation reference is invalid")
+            oci_manifest_member = members.get(_blob_name(manifest_digest))
+            if oci_manifest_member is None:
+                raise RegistryError("worker image OCI manifest is unavailable")
+            oci_manifest_raw = _member_bytes(
+                archive,
+                oci_manifest_member,
+                maximum=16 * 1024 * 1024,
+            )
+            if len(oci_manifest_raw) != manifest_size or hashlib.sha256(
+                oci_manifest_raw
+            ).hexdigest() != manifest_digest.removeprefix("sha256:"):
+                raise RegistryError("worker image OCI manifest digest is invalid")
+            oci_manifest = json.loads(oci_manifest_raw)
+            if (
+                not isinstance(oci_manifest, dict)
+                or oci_manifest.get("schemaVersion") != 2
+                or not isinstance(oci_manifest.get("layers"), list)
+                or not oci_manifest["layers"]
+            ):
+                raise RegistryError("worker image OCI manifest is invalid")
+            config_digest, config_size, _config_media_type = _descriptor(
+                oci_manifest.get("config"),
+                media_types=OCI_CONFIG_MEDIA_TYPES,
+            )
+            layer_descriptors = [
+                _descriptor(item, media_types=OCI_LAYER_MEDIA_TYPES)
+                for item in oci_manifest["layers"]
+            ]
+            if (
+                config_name != _blob_name(config_digest)
+                or layer_names != [_blob_name(item[0]) for item in layer_descriptors]
+                or len({item[0] for item in layer_descriptors}) != len(layer_descriptors)
+            ):
+                raise RegistryError("worker image archive OCI inventory is invalid")
+            config_member = members.get(config_name)
+            if (
+                config_member is None
+                or not config_member.isfile()
+                or not 0 < config_member.size <= MAX_WORKER_IMAGE_CONFIG_BYTES
+            ):
+                raise RegistryError("worker image archive config is invalid")
+            config_raw = _member_bytes(
+                archive,
+                config_member,
+                maximum=MAX_WORKER_IMAGE_CONFIG_BYTES,
+            )
+            config_digest = hashlib.sha256(config_raw).hexdigest()
+            if (
+                config_size != len(config_raw)
+                or config_name != f"blobs/sha256/{config_digest}"
+                or image_id != f"sha256:{config_digest}"
+            ):
+                raise RegistryError("worker image archive config ID is invalid")
+            expected_tag = f"loom-worker:{candidate_sha[:12]}-{architecture}"
+            if descriptor.get("RepoTags") != [expected_tag]:
+                raise RegistryError("worker image archive tag contract is invalid")
+            config = json.loads(config_raw)
+            rootfs = config.get("rootfs") if isinstance(config, dict) else None
+            diff_ids = rootfs.get("diff_ids") if isinstance(rootfs, dict) else None
+            if (
+                not isinstance(diff_ids, list)
+                or len(diff_ids) != len(layer_names)
+                or any(IMAGE_DIGEST_RE.fullmatch(str(item)) is None for item in diff_ids)
+            ):
+                raise RegistryError("worker image archive rootfs binding is invalid")
+            aggregate_diff_size = 0
+            for layer_name, diff_id, layer_descriptor in zip(
+                layer_names,
+                diff_ids,
+                layer_descriptors,
+                strict=True,
+            ):
+                safe_name = _safe_tar_name(layer_name)
+                layer = members.get(safe_name)
+                if layer is None or not layer.isfile() or layer.size <= 0:
+                    raise RegistryError("worker image archive layer is invalid")
+                layer_stream = archive.extractfile(layer)
+                if layer_stream is None:
+                    raise RegistryError("worker image archive layer is unavailable")
+                raw_digest = hashlib.sha256()
+                raw_size = 0
+                compressed = tempfile.SpooledTemporaryFile(max_size=64 * 1024 * 1024)
+                while chunk := layer_stream.read(1024 * 1024):
+                    raw_size += len(chunk)
+                    if raw_size > MAX_WORKER_IMAGE_ARCHIVE_BYTES:
+                        raise RegistryError("worker image archive layer is too large")
+                    raw_digest.update(chunk)
+                    compressed.write(chunk)
+                descriptor_digest, descriptor_size, _media_type = layer_descriptor
+                if (
+                    raw_size != descriptor_size
+                    or raw_size != layer.size
+                    or raw_digest.hexdigest() != descriptor_digest.removeprefix("sha256:")
+                ):
+                    raise RegistryError("worker image archive layer blob is invalid")
+                compressed.seek(0)
+                diff_digest = hashlib.sha256()
+                diff_size = 0
+                try:
+                    with gzip.GzipFile(fileobj=compressed, mode="rb") as expanded:
+                        for chunk in iter(lambda: expanded.read(1024 * 1024), b""):
+                            diff_size += len(chunk)
+                            if diff_size > MAX_WORKER_IMAGE_LAYER_UNCOMPRESSED_BYTES:
+                                raise RegistryError(
+                                    "worker image archive expanded layer is too large"
+                                )
+                            aggregate_diff_size += len(chunk)
+                            if aggregate_diff_size > MAX_WORKER_IMAGE_TOTAL_UNCOMPRESSED_BYTES:
+                                raise RegistryError(
+                                    "worker image archive expanded layers are too large"
+                                )
+                            diff_digest.update(chunk)
+                except (OSError, EOFError) as exc:
+                    raise RegistryError(
+                        "worker image archive layer compression is invalid"
+                    ) from exc
+                finally:
+                    compressed.close()
+                if diff_id != f"sha256:{diff_digest.hexdigest()}":
+                    raise RegistryError("worker image archive layer digest is invalid")
+    except RegistryError:
+        raise
+    except (OSError, tarfile.TarError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RegistryError("worker image archive is invalid") from exc
+
+    runtime = config.get("config") if isinstance(config, dict) else None
+    labels = runtime.get("Labels") if isinstance(runtime, dict) else None
+    if (
+        config.get("os") != "linux"
+        or config.get("architecture") != WORKER_IMAGE_ARCHITECTURES[architecture]
+        or not isinstance(labels, dict)
+        or labels.get(WORKER_IMAGE_REVISION_LABEL) != candidate_sha
+        or runtime.get("Cmd") != WORKER_IMAGE_COMMAND
+        or runtime.get("Entrypoint") not in (None, [])
+    ):
+        raise RegistryError("worker image archive runtime contract is invalid")
+    return {
+        "architecture": architecture,
+        "archive_sha256": archive_sha256,
+        "archive_size": size,
+        "config_digest": image_id,
+        "index_digest": index_digest,
+        "manifest_digest": manifest_digest,
+        "manifest_media_type": manifest_media_type,
+        "load_descriptor_digest": load_descriptor_digest,
+        "load_descriptor_media_type": load_descriptor_media_type,
+        "tag": expected_tag,
+    }
 
 
 def _timestamp() -> str:
@@ -1177,16 +1809,19 @@ class DeveloperEnvironmentRegistry:
                     raise RegistryError(
                         "legacy lifecycle candidate binding requires explicit migration"
                     )
+            self._prepare_worker_image_binding_schema(connection)
             connection.executescript(
                 """
                 BEGIN IMMEDIATE;
                 CREATE TABLE IF NOT EXISTS registry_meta (
                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                     schema_version INTEGER NOT NULL,
+                    database_schema_version INTEGER NOT NULL,
                     generation INTEGER NOT NULL CHECK (generation >= 0)
                 );
-                INSERT OR IGNORE INTO registry_meta(singleton, schema_version, generation)
-                    VALUES (1, 1, 0);
+                INSERT OR IGNORE INTO registry_meta(
+                    singleton, schema_version, database_schema_version, generation
+                ) VALUES (1, 1, 3, 0);
 
                 CREATE TABLE IF NOT EXISTS environments (
                     env_id TEXT PRIMARY KEY,
@@ -1245,13 +1880,20 @@ class DeveloperEnvironmentRegistry:
                     env_id TEXT NOT NULL REFERENCES environments(env_id),
                     lifecycle_epoch INTEGER NOT NULL CHECK (lifecycle_epoch >= 1),
                     repository_id TEXT NOT NULL,
+                    image_binding_kind TEXT NOT NULL,
+                    image_binding_version INTEGER NOT NULL,
                     candidate_sha TEXT NOT NULL,
                     candidate_tree TEXT NOT NULL,
                     bundle_sha256 TEXT NOT NULL,
                     bundle_size INTEGER NOT NULL,
                     image_digests_json TEXT NOT NULL,
+                    image_archives_json TEXT NOT NULL,
                     imported_at TEXT NOT NULL,
-                    UNIQUE (env_id, candidate_sha, candidate_tree, bundle_sha256)
+                    UNIQUE (
+                        env_id, candidate_sha, candidate_tree, bundle_sha256,
+                        image_binding_kind, image_binding_version,
+                        image_digests_json, image_archives_json
+                    )
                 );
 
                 CREATE TABLE IF NOT EXISTS candidate_requests (
@@ -1272,6 +1914,7 @@ class DeveloperEnvironmentRegistry:
                     applied_registry_generation INTEGER,
                     applied_registry_payload_sha256 TEXT,
                     finalization_payload_sha256 TEXT,
+                    worker_runtime_bindings_json TEXT,
                     failed_from_phase TEXT,
                     phase TEXT NOT NULL
                         CHECK (
@@ -1335,6 +1978,10 @@ class DeveloperEnvironmentRegistry:
                 str(row["name"])
                 for row in connection.execute("PRAGMA table_info(deployments)").fetchall()
             }
+            if "worker_runtime_bindings_json" not in deployment_columns:
+                connection.execute(
+                    "ALTER TABLE deployments ADD COLUMN worker_runtime_bindings_json TEXT",
+                )
             applied_columns = {
                 "applied_resource_generation",
                 "applied_registry_generation",
@@ -1378,11 +2025,246 @@ class DeveloperEnvironmentRegistry:
         self._validate_database_metadata(require_root=False)
         with self._transaction(immediate=False) as verified:
             metadata = verified.execute(
-                "SELECT schema_version FROM registry_meta WHERE singleton = 1"
+                """
+                SELECT schema_version, database_schema_version
+                FROM registry_meta WHERE singleton = 1
+                """
             ).fetchone()
-            if metadata is None or metadata["schema_version"] != SCHEMA_VERSION:
+            if (
+                metadata is None
+                or metadata["schema_version"] != SCHEMA_VERSION
+                or metadata["database_schema_version"] != DATABASE_SCHEMA_VERSION
+            ):
                 raise RegistryError("registry schema version is unsupported")
         self._reconcile_current_snapshot()
+
+    @staticmethod
+    def _prepare_worker_image_binding_schema(connection: sqlite3.Connection) -> None:
+        """Atomically mark an unbound legacy registry or reject it unchanged."""
+
+        table_names = {
+            str(row["name"])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        registry_meta_exists = "registry_meta" in table_names
+        candidates_exist = "candidates" in table_names
+        if not registry_meta_exists and not candidates_exist:
+            return
+        if registry_meta_exists != candidates_exist:
+            raise RegistryError("worker image binding schema is incomplete")
+        connection.execute("BEGIN IMMEDIATE")
+
+        meta_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(registry_meta)").fetchall()
+        }
+        candidate_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(candidates)").fetchall()
+        }
+        marker_columns = {
+            "database_schema_version" in meta_columns,
+            "image_binding_kind" in candidate_columns,
+            "image_binding_version" in candidate_columns,
+            "image_archives_json" in candidate_columns,
+        }
+        if marker_columns == {True}:
+            metadata = connection.execute(
+                """
+                SELECT schema_version, database_schema_version
+                FROM registry_meta WHERE singleton = 1
+                """
+            ).fetchone()
+            if metadata is None or metadata["schema_version"] != SCHEMA_VERSION:
+                raise RegistryError("worker image binding schema is unsupported")
+            database_schema_version = metadata["database_schema_version"]
+            if database_schema_version == DATABASE_SCHEMA_VERSION:
+                connection.execute("COMMIT")
+                return
+            if database_schema_version != 2:
+                raise RegistryError("worker image binding schema is unsupported")
+            for table in (
+                "candidates",
+                "candidate_requests",
+                "deployments",
+                "deployment_requests",
+                "deployment_finalizations",
+            ):
+                if (
+                    table in table_names
+                    and connection.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone() is not None
+                ):
+                    raise RegistryError("worker image binding v2-to-v3 requires explicit migration")
+            unsafe_environment = connection.execute(
+                """
+                SELECT 1 FROM environments
+                WHERE state NOT IN ('ready', 'retired') OR current_candidate_id IS NOT NULL
+                LIMIT 1
+                """
+            ).fetchone()
+            if unsafe_environment is not None:
+                raise RegistryError(
+                    "worker image binding v3 requires ready or retired environments"
+                )
+            try:
+                deployment_columns = (
+                    {
+                        str(row["name"])
+                        for row in connection.execute("PRAGMA table_info(deployments)").fetchall()
+                    }
+                    if "deployments" in table_names
+                    else set()
+                )
+                if deployment_columns and "worker_runtime_bindings_json" not in deployment_columns:
+                    connection.execute(
+                        "ALTER TABLE deployments ADD COLUMN worker_runtime_bindings_json TEXT"
+                    )
+                changed = connection.execute(
+                    """
+                    UPDATE registry_meta SET database_schema_version = ?
+                    WHERE singleton = 1 AND schema_version = ?
+                        AND database_schema_version = 2
+                    """,
+                    (DATABASE_SCHEMA_VERSION, SCHEMA_VERSION),
+                )
+                if changed.rowcount != 1:
+                    raise RegistryError("worker image binding v3 migration is incomplete")
+                connection.execute("COMMIT")
+            except Exception:
+                try:
+                    connection.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                raise
+            return
+        if marker_columns != {False}:
+            raise RegistryError("worker image binding schema is incomplete")
+
+        metadata = connection.execute(
+            "SELECT schema_version FROM registry_meta WHERE singleton = 1"
+        ).fetchone()
+        metadata_count = connection.execute("SELECT COUNT(*) FROM registry_meta").fetchone()
+        if (
+            metadata is None
+            or metadata_count is None
+            or int(metadata_count[0]) != 1
+            or metadata["schema_version"] != SCHEMA_VERSION
+            or "environments" not in table_names
+        ):
+            raise RegistryError("legacy worker image binding schema is invalid")
+        environment_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(environments)").fetchall()
+        }
+        if not {"state", "current_candidate_id"}.issubset(environment_columns):
+            raise RegistryError("legacy worker image binding schema is invalid")
+        unsafe_environment = connection.execute(
+            """
+            SELECT 1 FROM environments
+            WHERE state NOT IN ('ready', 'retired') OR current_candidate_id IS NOT NULL
+            LIMIT 1
+            """
+        ).fetchone()
+        if unsafe_environment is not None:
+            raise RegistryError(
+                "legacy worker image binding requires ready or retired environments"
+            )
+        for table in (
+            "candidates",
+            "registration_requests",
+            "candidate_requests",
+            "deployments",
+            "deployment_requests",
+            "deployment_finalizations",
+        ):
+            if (
+                table in table_names
+                and connection.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone() is not None
+            ):
+                raise RegistryError("legacy worker image binding requires explicit migration")
+
+        try:
+            connection.execute("DROP TABLE candidates")
+            connection.execute(
+                """
+                CREATE TABLE candidates (
+                    candidate_id TEXT PRIMARY KEY,
+                    principal_id TEXT NOT NULL,
+                    env_id TEXT NOT NULL REFERENCES environments(env_id),
+                    lifecycle_epoch INTEGER NOT NULL CHECK (lifecycle_epoch >= 1),
+                    repository_id TEXT NOT NULL,
+                    image_binding_kind TEXT NOT NULL,
+                    image_binding_version INTEGER NOT NULL,
+                    candidate_sha TEXT NOT NULL,
+                    candidate_tree TEXT NOT NULL,
+                    bundle_sha256 TEXT NOT NULL,
+                    bundle_size INTEGER NOT NULL,
+                    image_digests_json TEXT NOT NULL,
+                    image_archives_json TEXT NOT NULL,
+                    imported_at TEXT NOT NULL,
+                    UNIQUE (
+                        env_id, candidate_sha, candidate_tree, bundle_sha256,
+                        image_binding_kind, image_binding_version,
+                        image_digests_json, image_archives_json
+                    )
+                )
+                """
+            )
+            connection.execute(
+                """
+                ALTER TABLE registry_meta
+                ADD COLUMN database_schema_version INTEGER NOT NULL DEFAULT 3
+                """
+            )
+            if "deployments" in table_names:
+                deployment_columns = {
+                    str(row["name"])
+                    for row in connection.execute("PRAGMA table_info(deployments)").fetchall()
+                }
+                if "worker_runtime_bindings_json" not in deployment_columns:
+                    connection.execute(
+                        "ALTER TABLE deployments ADD COLUMN worker_runtime_bindings_json TEXT"
+                    )
+            changed = connection.execute(
+                """
+                UPDATE registry_meta SET database_schema_version = ?
+                WHERE singleton = 1 AND schema_version = ?
+                """,
+                (DATABASE_SCHEMA_VERSION, SCHEMA_VERSION),
+            )
+            if changed.rowcount != 1:
+                raise RegistryError("legacy worker image binding migration is incomplete")
+            migrated_metadata = connection.execute(
+                """
+                SELECT schema_version, database_schema_version
+                FROM registry_meta WHERE singleton = 1
+                """
+            ).fetchone()
+            migrated_candidate_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(candidates)").fetchall()
+            }
+            if (
+                migrated_metadata is None
+                or migrated_metadata["schema_version"] != SCHEMA_VERSION
+                or migrated_metadata["database_schema_version"] != DATABASE_SCHEMA_VERSION
+                or not {
+                    "image_binding_kind",
+                    "image_binding_version",
+                    "image_archives_json",
+                }.issubset(migrated_candidate_columns)
+                or connection.execute("PRAGMA foreign_key_check").fetchone() is not None
+            ):
+                raise RegistryError("legacy worker image binding migration is incomplete")
+            connection.execute("COMMIT")
+        except Exception:
+            try:
+                connection.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
 
     def _validate_database_metadata(self, *, require_root: bool) -> None:
         metadata = self.database.lstat()
@@ -2289,6 +3171,7 @@ class DeveloperEnvironmentRegistry:
         key = str(request["idempotency_key"])
         env_id = str(request["env_id"])
         image_digests = request.get("image_digests")
+        image_archives = request.get("image_archives")
         if (
             ENV_ID_RE.fullmatch(env_id) is None
             or SHA_RE.fullmatch(str(request.get("candidate_sha"))) is None
@@ -2297,11 +3180,9 @@ class DeveloperEnvironmentRegistry:
             or not isinstance(request.get("bundle_size"), int)
             or isinstance(request.get("bundle_size"), bool)
             or not 0 < int(request["bundle_size"]) <= self.policy.max_bundle_bytes
-            or not isinstance(image_digests, dict)
-            or set(image_digests) != {"amd64", "arm64"}
-            or any(
-                IMAGE_DIGEST_RE.fullmatch(str(digest)) is None for digest in image_digests.values()
-            )
+            or not _valid_worker_image_ids(image_digests)
+            or not _valid_worker_image_archives(image_archives)
+            or not _worker_archive_configs_match(image_digests, image_archives)
         ):
             raise RegistryError("candidate import binding is invalid")
         request_digest = _digest(request)
@@ -2352,9 +3233,13 @@ class DeveloperEnvironmentRegistry:
                 "env_id": env_id,
                 "lifecycle_epoch": environment.lifecycle_epoch,
                 "repository_id": "qianyi-sun/loom",
+                "image_binding_kind": WORKER_IMAGE_BINDING_KIND,
+                "image_binding_version": WORKER_IMAGE_BINDING_VERSION,
                 "candidate_sha": request["candidate_sha"],
                 "candidate_tree": request["candidate_tree"],
                 "bundle_sha256": request["bundle_sha256"],
+                "image_digests": image_digests,
+                "image_archives": image_archives,
             }
             candidate_id = "cand-" + _digest(identity)[:40]
             existing = connection.execute(
@@ -2366,9 +3251,10 @@ class DeveloperEnvironmentRegistry:
                     """
                     INSERT INTO candidates (
                         candidate_id, principal_id, env_id, lifecycle_epoch,
-                        repository_id, candidate_sha, candidate_tree, bundle_sha256,
-                        bundle_size, image_digests_json, imported_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        repository_id, image_binding_kind, image_binding_version,
+                        candidate_sha, candidate_tree, bundle_sha256, bundle_size,
+                        image_digests_json, image_archives_json, imported_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         candidate_id,
@@ -2376,11 +3262,14 @@ class DeveloperEnvironmentRegistry:
                         env_id,
                         environment.lifecycle_epoch,
                         "qianyi-sun/loom",
+                        WORKER_IMAGE_BINDING_KIND,
+                        WORKER_IMAGE_BINDING_VERSION,
                         request["candidate_sha"],
                         request["candidate_tree"],
                         request["bundle_sha256"],
                         request["bundle_size"],
                         json.dumps(image_digests, sort_keys=True, separators=(",", ":")),
+                        json.dumps(image_archives, sort_keys=True, separators=(",", ":")),
                         _timestamp(),
                     ),
                 )
@@ -2389,6 +3278,7 @@ class DeveloperEnvironmentRegistry:
                 if (
                     bound.bundle_size != request["bundle_size"]
                     or bound.image_digests != image_digests
+                    or _archive_identity(bound.image_archives) != image_archives
                 ):
                     raise RegistryError("candidate metadata conflicts with existing identity")
             connection.execute(
@@ -2449,22 +3339,42 @@ class DeveloperEnvironmentRegistry:
             raise RegistryError("developer candidate is unavailable")
         try:
             image_digests = json.loads(str(row["image_digests_json"]))
+            stored_archives = json.loads(str(row["image_archives_json"]))
         except json.JSONDecodeError as exc:
             raise RegistryError("developer candidate image binding is invalid") from exc
-        if not isinstance(image_digests, dict):
+        if not isinstance(image_digests, dict) or not _valid_worker_image_archives(stored_archives):
             raise RegistryError("developer candidate image binding is invalid")
+        image_archives = {
+            architecture: {
+                **{
+                    field: stored_archives[architecture][field]
+                    for field in WORKER_IMAGE_ARCHIVE_BINDING_FIELDS
+                },
+                "path": str(
+                    worker_image_archive_path(
+                        self.candidate_root,
+                        candidate_id,
+                        architecture,
+                    )
+                ),
+            }
+            for architecture in ("amd64", "arm64")
+        }
         candidate = CandidateRecord(
             candidate_id=str(row["candidate_id"]),
             principal_id=str(row["principal_id"]),
             env_id=str(row["env_id"]),
             lifecycle_epoch=int(row["lifecycle_epoch"]),
             repository_id=str(row["repository_id"]),
+            image_binding_kind=str(row["image_binding_kind"]),
+            image_binding_version=int(row["image_binding_version"]),
             candidate_sha=str(row["candidate_sha"]),
             candidate_tree=str(row["candidate_tree"]),
             bundle_sha256=str(row["bundle_sha256"]),
             bundle_size=int(row["bundle_size"]),
             bundle_path=str(self.candidate_root / candidate_id / "candidate.bundle"),
             image_digests={str(key): str(value) for key, value in image_digests.items()},
+            image_archives=image_archives,
             imported_at=str(row["imported_at"]),
         )
         if (
@@ -2473,16 +3383,23 @@ class DeveloperEnvironmentRegistry:
             or ENV_ID_RE.fullmatch(candidate.env_id) is None
             or candidate.lifecycle_epoch < 1
             or candidate.repository_id != "qianyi-sun/loom"
+            or candidate.image_binding_kind != WORKER_IMAGE_BINDING_KIND
+            or candidate.image_binding_version != WORKER_IMAGE_BINDING_VERSION
             or SHA_RE.fullmatch(candidate.candidate_sha) is None
             or SHA_RE.fullmatch(candidate.candidate_tree) is None
             or DIGEST_RE.fullmatch(candidate.bundle_sha256) is None
             or candidate.bundle_size < 1
             or candidate.bundle_path
             != str(self.candidate_root / candidate.candidate_id / "candidate.bundle")
-            or set(candidate.image_digests) != {"amd64", "arm64"}
-            or any(
-                IMAGE_DIGEST_RE.fullmatch(digest) is None
-                for digest in candidate.image_digests.values()
+            or not _valid_worker_image_ids(candidate.image_digests)
+            or not _valid_worker_image_archives(
+                candidate.image_archives,
+                candidate_root=self.candidate_root,
+                candidate_id=candidate.candidate_id,
+            )
+            or not _worker_archive_configs_match(
+                candidate.image_digests,
+                candidate.image_archives,
             )
         ):
             raise RegistryError("developer candidate binding is invalid")
@@ -2570,9 +3487,11 @@ class DeveloperEnvironmentRegistry:
                     deployment_id, principal_id, env_id, candidate_id,
                     expected_resource_generation, applied_resource_generation,
                     applied_registry_generation, applied_registry_payload_sha256,
-                    finalization_payload_sha256, phase, previous_candidate_id,
+                    finalization_payload_sha256, worker_runtime_bindings_json,
+                    phase, previous_candidate_id,
                     request_digest, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 'requested', ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL,
+                    'requested', ?, ?, ?, ?)
                 """,
                 (
                     deployment_id,
@@ -2605,6 +3524,14 @@ class DeveloperEnvironmentRegistry:
         ).fetchone()
         if row is None:
             raise RegistryError("developer deployment is unavailable")
+        try:
+            worker_runtime_bindings = (
+                None
+                if row["worker_runtime_bindings_json"] is None
+                else json.loads(str(row["worker_runtime_bindings_json"]))
+            )
+        except json.JSONDecodeError as exc:
+            raise RegistryError("developer deployment runtime binding is invalid") from exc
         deployment = DeploymentRecord(
             deployment_id=str(row["deployment_id"]),
             principal_id=str(row["principal_id"]),
@@ -2631,6 +3558,7 @@ class DeveloperEnvironmentRegistry:
                 if row["finalization_payload_sha256"] is None
                 else str(row["finalization_payload_sha256"])
             ),
+            worker_runtime_bindings=worker_runtime_bindings,
             phase=str(row["phase"]),
             previous_candidate_id=(
                 None if row["previous_candidate_id"] is None else str(row["previous_candidate_id"])
@@ -2645,6 +3573,14 @@ class DeveloperEnvironmentRegistry:
             or ENV_ID_RE.fullmatch(deployment.env_id) is None
             or CANDIDATE_ID_RE.fullmatch(deployment.candidate_id) is None
             or deployment.expected_resource_generation < 1
+            or (
+                deployment.worker_runtime_bindings is not None
+                and not _valid_worker_runtime_bindings(deployment.worker_runtime_bindings)
+            )
+            or (
+                deployment.phase not in {"requested", "failed"}
+                and deployment.worker_runtime_bindings is None
+            )
             or deployment.phase not in {*DEPLOY_PHASES, "failed"}
             or (
                 deployment.phase == "committed"
@@ -2701,6 +3637,56 @@ class DeveloperEnvironmentRegistry:
             raise RegistryError("developer deployment binding is invalid")
         return deployment
 
+    def record_worker_runtime_bindings(
+        self,
+        deployment_id: str,
+        *,
+        principal_id: str,
+        expected_resource_generation: int,
+        bindings: Mapping[str, Any],
+    ) -> DeploymentRecord:
+        """Bind all fleet image-load receipts before any host resource mutation."""
+
+        normalized = json.loads(_canonical(bindings))
+        if (
+            DEPLOYMENT_ID_RE.fullmatch(deployment_id) is None
+            or PRINCIPAL_RE.fullmatch(principal_id) is None
+            or not _plain_integer(expected_resource_generation, minimum=1)
+            or not isinstance(normalized, dict)
+        ):
+            raise RegistryError("worker runtime bindings are invalid")
+        with self._transaction() as connection:
+            deployment = self._deployment(connection, deployment_id)
+            candidate = self._candidate(connection, deployment.candidate_id)
+            environment = self._environment(connection, deployment.env_id)
+            if (
+                deployment.principal_id != principal_id
+                or deployment.phase != "requested"
+                or deployment.expected_resource_generation != expected_resource_generation
+                or environment.state != "deploying"
+                or environment.resource_generation != expected_resource_generation
+                or not _valid_worker_runtime_bindings(normalized, candidate=candidate)
+            ):
+                raise RegistryError("worker runtime bindings are stale or invalid")
+            if deployment.worker_runtime_bindings is not None:
+                if deployment.worker_runtime_bindings != normalized:
+                    raise RegistryError("worker runtime bindings conflict")
+                return deployment
+            connection.execute(
+                """
+                UPDATE deployments
+                SET worker_runtime_bindings_json = ?, updated_at = ?
+                WHERE deployment_id = ?
+                """,
+                (
+                    json.dumps(normalized, sort_keys=True, separators=(",", ":")),
+                    _timestamp(),
+                    deployment_id,
+                ),
+            )
+            self._bump_generation(connection)
+            return self._deployment(connection, deployment_id)
+
     def advance_deployment(
         self,
         deployment_id: str,
@@ -2732,6 +3718,8 @@ class DeveloperEnvironmentRegistry:
                 return deployment
             if deployment.phase != expected_phase:
                 raise RegistryError("deployment phase transition is stale")
+            if expected_phase == "requested" and deployment.worker_runtime_bindings is None:
+                raise RegistryError("deployment worker runtime binding is unavailable")
             if environment.resource_generation != expected_resource_generation:
                 raise RegistryError("deployment resource generation is stale")
             now = _timestamp()
@@ -3318,9 +4306,16 @@ class DeveloperEnvironmentRegistry:
 
     def _snapshot_from_connection(self, connection: sqlite3.Connection) -> dict[str, Any]:
         meta = connection.execute(
-            "SELECT schema_version, generation FROM registry_meta WHERE singleton = 1"
+            """
+            SELECT schema_version, database_schema_version, generation
+            FROM registry_meta WHERE singleton = 1
+            """
         ).fetchone()
-        if meta is None or meta["schema_version"] != SCHEMA_VERSION:
+        if (
+            meta is None
+            or meta["schema_version"] != SCHEMA_VERSION
+            or meta["database_schema_version"] != DATABASE_SCHEMA_VERSION
+        ):
             raise RegistryError("registry metadata is invalid")
         environments = [
             asdict(self._environment(connection, str(row["env_id"])))
@@ -3541,6 +4536,7 @@ class DeveloperEnvironmentRegistry:
         candidate_storage_roots: set[Path] = set()
         for item in candidates:
             image_digests = item["image_digests"]
+            image_archives = item["image_archives"]
             bundle_path = item["bundle_path"]
             if (
                 not isinstance(item["candidate_id"], str)
@@ -3551,6 +4547,9 @@ class DeveloperEnvironmentRegistry:
                 or ENV_ID_RE.fullmatch(item["env_id"]) is None
                 or not _plain_integer(item["lifecycle_epoch"], minimum=1)
                 or item["repository_id"] != "qianyi-sun/loom"
+                or item["image_binding_kind"] != WORKER_IMAGE_BINDING_KIND
+                or not _plain_integer(item["image_binding_version"], minimum=1)
+                or item["image_binding_version"] != WORKER_IMAGE_BINDING_VERSION
                 or not isinstance(item["candidate_sha"], str)
                 or SHA_RE.fullmatch(item["candidate_sha"]) is None
                 or not isinstance(item["candidate_tree"], str)
@@ -3563,12 +4562,13 @@ class DeveloperEnvironmentRegistry:
                 or not _valid_fixed_path(bundle_path)
                 or Path(bundle_path).parts[-3:]
                 != ("candidates", item["candidate_id"], "candidate.bundle")
-                or not isinstance(image_digests, dict)
-                or set(image_digests) != {"amd64", "arm64"}
-                or any(
-                    not isinstance(digest, str) or IMAGE_DIGEST_RE.fullmatch(digest) is None
-                    for digest in image_digests.values()
+                or not _valid_worker_image_ids(image_digests)
+                or not _valid_worker_image_archives(
+                    image_archives,
+                    candidate_root=Path(bundle_path).parent.parent,
+                    candidate_id=item["candidate_id"],
                 )
+                or not _worker_archive_configs_match(image_digests, image_archives)
                 or not _valid_timestamp(item["imported_at"])
             ):
                 raise RegistryError("registry snapshot candidate binding is invalid")
@@ -3580,9 +4580,13 @@ class DeveloperEnvironmentRegistry:
                 "env_id": item["env_id"],
                 "lifecycle_epoch": item["lifecycle_epoch"],
                 "repository_id": item["repository_id"],
+                "image_binding_kind": item["image_binding_kind"],
+                "image_binding_version": item["image_binding_version"],
                 "candidate_sha": item["candidate_sha"],
                 "candidate_tree": item["candidate_tree"],
                 "bundle_sha256": item["bundle_sha256"],
+                "image_digests": image_digests,
+                "image_archives": _archive_identity(image_archives),
             }
             if item["candidate_id"] != "cand-" + _digest(identity)[:40]:
                 raise RegistryError("registry snapshot candidate identity is invalid")
@@ -3591,6 +4595,22 @@ class DeveloperEnvironmentRegistry:
                 item["candidate_sha"],
                 item["candidate_tree"],
                 item["bundle_sha256"],
+                item["image_binding_kind"],
+                item["image_binding_version"],
+                tuple(sorted(image_digests.items())),
+                tuple(
+                    (
+                        architecture,
+                        tuple(
+                            (
+                                field,
+                                image_archives[architecture][field],
+                            )
+                            for field in sorted(WORKER_IMAGE_ARCHIVE_BINDING_FIELDS)
+                        ),
+                    )
+                    for architecture in ("amd64", "arm64")
+                ),
             )
             if candidate_identity in candidate_identities or bundle_path in candidate_paths:
                 raise RegistryError("registry snapshot candidate uniqueness is invalid")
@@ -3649,6 +4669,14 @@ class DeveloperEnvironmentRegistry:
                 or not _plain_integer(
                     item["expected_resource_generation"],
                     minimum=1,
+                )
+                or (
+                    item["worker_runtime_bindings"] is not None
+                    and not _valid_worker_runtime_bindings(item["worker_runtime_bindings"])
+                )
+                or (
+                    item["phase"] not in {"requested", "failed"}
+                    and item["worker_runtime_bindings"] is None
                 )
                 or (
                     item["phase"] == "committed"
@@ -3734,6 +4762,29 @@ class DeveloperEnvironmentRegistry:
                 or candidate["principal_id"] != item["principal_id"]
                 or candidate["env_id"] != item["env_id"]
                 or candidate["lifecycle_epoch"] > environment["lifecycle_epoch"]
+                or (
+                    item["worker_runtime_bindings"] is not None
+                    and not _valid_worker_runtime_bindings(
+                        item["worker_runtime_bindings"],
+                        candidate=CandidateRecord(
+                            candidate_id=candidate["candidate_id"],
+                            principal_id=candidate["principal_id"],
+                            env_id=candidate["env_id"],
+                            lifecycle_epoch=candidate["lifecycle_epoch"],
+                            repository_id=candidate["repository_id"],
+                            image_binding_kind=candidate["image_binding_kind"],
+                            image_binding_version=candidate["image_binding_version"],
+                            candidate_sha=candidate["candidate_sha"],
+                            candidate_tree=candidate["candidate_tree"],
+                            bundle_sha256=candidate["bundle_sha256"],
+                            bundle_size=candidate["bundle_size"],
+                            bundle_path=candidate["bundle_path"],
+                            image_digests=candidate["image_digests"],
+                            image_archives=candidate["image_archives"],
+                            imported_at=candidate["imported_at"],
+                        ),
+                    )
+                )
                 or (
                     item["previous_candidate_id"] is not None
                     and (
@@ -3887,12 +4938,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 __all__ = [
     "CURRENT_SNAPSHOT_PATH",
     "DEPLOY_PHASES",
+    "MAX_WORKER_IMAGE_ARCHIVE_BYTES",
     "AllocationPolicy",
     "CandidateRecord",
     "DeploymentRecord",
     "DeveloperEnvironmentRegistry",
     "EnvironmentRecord",
     "RegistryError",
+    "verify_worker_image_archive",
+    "worker_image_archive_path",
 ]
 
 

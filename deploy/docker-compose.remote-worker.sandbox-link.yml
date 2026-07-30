@@ -3,14 +3,12 @@
 # host ports: only the worker can reach its three plaintext listeners.
 services:
   sandbox-link:
-    image: loom-worker:${LOOM_IMAGE_TAG:-dev}
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile.worker
+    image: ${LOOM_WORKER_IMAGE_ID:?set exact loom-worker image config ID}
     command: ["python", "-m", "loom_worker.sandbox_link_proxy"]
     environment:
       LOOM_WORKER_SANDBOX_IDENTITY: ${LOOM_WORKER_SANDBOX_IDENTITY:?set LOOM_WORKER_SANDBOX_IDENTITY}
       LOOM_WORKER_CANDIDATE_SHA: ${LOOM_WORKER_CANDIDATE_SHA:?set LOOM_WORKER_CANDIDATE_SHA}
+      LOOM_WORKER_IMAGE_ID: ${LOOM_WORKER_IMAGE_ID:?set exact loom-worker image config ID}
       LOOM_SANDBOX_LINK_CP_UPSTREAM: ${LOOM_SANDBOX_LINK_CP_UPSTREAM:?set LOOM_SANDBOX_LINK_CP_UPSTREAM}
       LOOM_SANDBOX_LINK_CP_EXPECTED_PORT: ${LOOM_SANDBOX_LINK_CP_EXPECTED_PORT:?set LOOM_SANDBOX_LINK_CP_EXPECTED_PORT}
       LOOM_SANDBOX_LINK_GATEWAY_UPSTREAM: ${LOOM_SANDBOX_LINK_GATEWAY_UPSTREAM:?set LOOM_SANDBOX_LINK_GATEWAY_UPSTREAM}
@@ -54,6 +52,7 @@ services:
       loom.candidate_tree: ${LOOM_WORKER_CANDIDATE_TREE:?set LOOM_WORKER_CANDIDATE_TREE}
       loom.registry_generation: ${LOOM_WORKER_REGISTRY_GENERATION:?set LOOM_WORKER_REGISTRY_GENERATION}
       loom.registry_payload_sha256: ${LOOM_WORKER_REGISTRY_PAYLOAD_SHA256:?set LOOM_WORKER_REGISTRY_PAYLOAD_SHA256}
+      loom.worker_image_id: ${LOOM_WORKER_IMAGE_ID:?set exact loom-worker image config ID}
     restart: "no"
 
   worker:
@@ -68,6 +67,7 @@ services:
       LOOM_WORKER_CANDIDATE_TREE: ${LOOM_WORKER_CANDIDATE_TREE:?set LOOM_WORKER_CANDIDATE_TREE}
       LOOM_WORKER_REGISTRY_GENERATION: ${LOOM_WORKER_REGISTRY_GENERATION:?set LOOM_WORKER_REGISTRY_GENERATION}
       LOOM_WORKER_REGISTRY_PAYLOAD_SHA256: ${LOOM_WORKER_REGISTRY_PAYLOAD_SHA256:?set LOOM_WORKER_REGISTRY_PAYLOAD_SHA256}
+      LOOM_WORKER_IMAGE_ID: ${LOOM_WORKER_IMAGE_ID:?set exact loom-worker image config ID}
       LOOM_WORKER_CONTROL_PLANE_URL: http://sandbox-link:8080
       LOOM_WORKER_GATEWAY_URL: http://sandbox-link:9100
       LOOM_WORKER_MINIO_ENDPOINT: http://sandbox-link:9000
@@ -104,3 +104,4 @@ services:
       loom.candidate_tree: ${LOOM_WORKER_CANDIDATE_TREE:?set LOOM_WORKER_CANDIDATE_TREE}
       loom.registry_generation: ${LOOM_WORKER_REGISTRY_GENERATION:?set LOOM_WORKER_REGISTRY_GENERATION}
       loom.registry_payload_sha256: ${LOOM_WORKER_REGISTRY_PAYLOAD_SHA256:?set LOOM_WORKER_REGISTRY_PAYLOAD_SHA256}
+      loom.worker_image_id: ${LOOM_WORKER_IMAGE_ID:?set exact loom-worker image config ID}

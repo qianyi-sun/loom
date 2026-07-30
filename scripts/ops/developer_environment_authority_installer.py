@@ -1385,7 +1385,7 @@ class AuthorityInstaller:
         )
         return raw
 
-    def _ensure_group(self) -> int:
+    def _ensure_group(self, *, migrate_legacy_owners: bool = False) -> int:
         self._checked(
             "/usr/bin/systemd-sysusers",
             "/etc/sysusers.d/loom-developer-environment-authority.conf",
@@ -1396,11 +1396,13 @@ class AuthorityInstaller:
             raise AuthorityInstallerError("authority group is unavailable") from exc
         if group.gr_name != GROUP_NAME or not isinstance(group.gr_gid, int):
             raise AuthorityInstallerError("authority group binding is invalid")
+        if not migrate_legacy_owners:
+            return int(group.gr_gid)
         for username in LEGACY_OWNERS:
             try:
                 account = self.account_resolver(username)
-            except KeyError as exc:
-                raise AuthorityInstallerError("legacy authority owner is unavailable") from exc
+            except KeyError:
+                continue
             if account.pw_name != username:
                 raise AuthorityInstallerError("legacy authority owner binding is invalid")
             self._checked(
@@ -1458,9 +1460,11 @@ class AuthorityInstaller:
         ):
             raise AuthorityInstallerError("authority socket permission model is invalid")
 
-    def _converge_services(self) -> tuple[int, str]:
+    def _converge_services(self, *, migrate_legacy_owners: bool) -> tuple[int, str]:
         self._preflight_registry_finalization_schema()
-        group_gid = self._ensure_group()
+        group_gid = self._ensure_group(
+            migrate_legacy_owners=migrate_legacy_owners,
+        )
         self._checked(
             "/usr/bin/systemd-tmpfiles",
             "--create",
@@ -1781,7 +1785,11 @@ class AuthorityInstaller:
                     "phase": "assets-installed",
                 }
             )
-            _group_gid, registry_digest = self._converge_services()
+            _group_gid, registry_digest = self._converge_services(
+                migrate_legacy_owners=(
+                    action == "environment-authority-bootstrap" and installed is None
+                ),
+            )
             asset_digests = {asset.destination: asset.digest for asset in assets}
             installed_record = {
                 "schema_version": SCHEMA_VERSION,

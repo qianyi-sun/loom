@@ -133,6 +133,7 @@ DOMAIN_REQUEST_FIELDS: Final = {
     "candidate_id",
     "candidate_sha",
     "candidate_tree",
+    "worker_image_id",
     "applied_resource_generation",
     "registry_generation",
     "registry_snapshot_sha256",
@@ -164,6 +165,7 @@ DOMAIN_RECEIPT_FIELDS: Final = {
     "candidate_id",
     "candidate_sha",
     "candidate_tree",
+    "worker_image_id",
     "applied_resource_generation",
     "registry_generation",
     "registry_snapshot_sha256",
@@ -235,6 +237,7 @@ COMBINED_FIELDS: Final = {
     "candidate_id",
     "candidate_sha",
     "candidate_tree",
+    "worker_image_ids",
     "applied_resource_generation",
     "registry_generation",
     "registry_snapshot_sha256",
@@ -548,7 +551,17 @@ def _domain_request(
     route: DomainRoute,
     request: Mapping[str, Any],
     environment: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    deployment: Mapping[str, Any],
 ) -> dict[str, Any]:
+    runtime_bindings = deployment.get("worker_runtime_bindings")
+    domains = runtime_bindings.get("domains") if isinstance(runtime_bindings, dict) else None
+    domain_binding = domains.get(route.domain) if isinstance(domains, dict) else None
+    worker_image_id = (
+        domain_binding.get("runtime_image_id") if isinstance(domain_binding, dict) else None
+    )
+    if DIGEST_RE.fullmatch(str(worker_image_id).removeprefix("sha256:")) is None:
+        raise AcceptanceProbeError(f"{route.domain} worker image binding is invalid")
     unsigned = {
         "schema_version": 1,
         "kind": DOMAIN_REQUEST_KIND,
@@ -564,6 +577,7 @@ def _domain_request(
         "candidate_id": request["candidate_id"],
         "candidate_sha": request["candidate_sha"],
         "candidate_tree": request["candidate_tree"],
+        "worker_image_id": worker_image_id,
         "applied_resource_generation": request["resource_generation"],
         "registry_generation": request["registry_generation"],
         "registry_snapshot_sha256": request["registry_snapshot_sha256"],
@@ -672,6 +686,7 @@ def _validate_domain_receipt(
     route: DomainRoute,
     request: Mapping[str, Any],
     environment: Mapping[str, Any],
+    candidate: Mapping[str, Any],
     domain_request: Mapping[str, Any],
     transport_request_id: str,
 ) -> dict[str, Any]:
@@ -689,6 +704,7 @@ def _validate_domain_receipt(
         "candidate_id": request["candidate_id"],
         "candidate_sha": request["candidate_sha"],
         "candidate_tree": request["candidate_tree"],
+        "worker_image_id": domain_request["worker_image_id"],
         "applied_resource_generation": request["resource_generation"],
         "registry_generation": request["registry_generation"],
         "registry_snapshot_sha256": request["registry_snapshot_sha256"],
@@ -755,12 +771,14 @@ def _domain_receipt(
     route: DomainRoute,
     request: Mapping[str, Any],
     environment: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    deployment: Mapping[str, Any],
     *,
     receipt_root: Path,
     transport_program: Path,
     require_root_ownership: bool,
 ) -> dict[str, Any]:
-    domain_request = _domain_request(route, request, environment)
+    domain_request = _domain_request(route, request, environment, candidate, deployment)
     envelope = _transport_envelope(route, domain_request)
     path = receipt_root / request["deployment_id"] / f"{route.domain}.json"
     if path.exists() or path.is_symlink():
@@ -774,6 +792,7 @@ def _domain_receipt(
             route=route,
             request=request,
             environment=environment,
+            candidate=candidate,
             domain_request=domain_request,
             transport_request_id=cast(str, envelope["request_id"]),
         )
@@ -787,6 +806,7 @@ def _domain_receipt(
         route=route,
         request=request,
         environment=environment,
+        candidate=candidate,
         domain_request=domain_request,
         transport_request_id=cast(str, envelope["request_id"]),
     )
@@ -805,6 +825,7 @@ def _domain_receipt(
         route=route,
         request=request,
         environment=environment,
+        candidate=candidate,
         domain_request=domain_request,
         transport_request_id=cast(str, envelope["request_id"]),
     )
@@ -827,6 +848,9 @@ def _combined_receipt(
         "candidate_id": request["candidate_id"],
         "candidate_sha": request["candidate_sha"],
         "candidate_tree": request["candidate_tree"],
+        "worker_image_ids": {
+            domain: receipt["worker_image_id"] for domain, receipt in sorted(domains.items())
+        },
         "applied_resource_generation": request["resource_generation"],
         "registry_generation": request["registry_generation"],
         "registry_snapshot_sha256": request["registry_snapshot_sha256"],
@@ -842,6 +866,8 @@ def _validate_combined_receipt(
     *,
     request: Mapping[str, Any],
     environment: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    deployment: Mapping[str, Any],
 ) -> dict[str, Any]:
     domains = receipt.get("domains")
     unsigned = {key: value for key, value in receipt.items() if key != "payload_sha256"}
@@ -857,6 +883,16 @@ def _validate_combined_receipt(
         "registry_generation": request["registry_generation"],
         "registry_snapshot_sha256": request["registry_snapshot_sha256"],
         "runtime_request_sha256": request["payload_sha256"],
+        "worker_image_ids": {
+            domain: _domain_request(
+                ROUTES[domain],
+                request,
+                environment,
+                candidate,
+                deployment,
+            )["worker_image_id"]
+            for domain in ROUTES
+        },
     }
     if (
         set(receipt) != COMBINED_FIELDS
@@ -887,12 +923,25 @@ def _validate_combined_receipt(
             route=ROUTES[domain],
             request=request,
             environment=environment,
-            domain_request=_domain_request(ROUTES[domain], request, environment),
+            candidate=candidate,
+            domain_request=_domain_request(
+                ROUTES[domain],
+                request,
+                environment,
+                candidate,
+                deployment,
+            ),
             transport_request_id=cast(
                 str,
                 _transport_envelope(
                     ROUTES[domain],
-                    _domain_request(ROUTES[domain], request, environment),
+                    _domain_request(
+                        ROUTES[domain],
+                        request,
+                        environment,
+                        candidate,
+                        deployment,
+                    ),
                 )["request_id"],
             ),
         )
@@ -926,7 +975,7 @@ def execute(
         registry_snapshot,
         require_root_ownership=require_root_ownership,
     )
-    environment, _deployment, _candidate = _binding(snapshot, request)
+    environment, deployment, candidate = _binding(snapshot, request)
     receipt_root = runtime_root / "acceptance-probes"
     combined_path = receipt_root / deployment_id / "combined.json"
     if combined_path.exists() or combined_path.is_symlink():
@@ -939,12 +988,16 @@ def execute(
             combined,
             request=request,
             environment=environment,
+            candidate=candidate,
+            deployment=deployment,
         )
     domains = {
         domain: _domain_receipt(
             route,
             request,
             environment,
+            candidate,
+            deployment,
             receipt_root=receipt_root,
             transport_program=transport_program,
             require_root_ownership=require_root_ownership,
@@ -966,6 +1019,8 @@ def execute(
         rebound,
         request=request,
         environment=environment,
+        candidate=candidate,
+        deployment=deployment,
     )
 
 

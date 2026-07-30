@@ -10,6 +10,10 @@ from typing import Any
 import pytest
 from scripts.ops import developer_environment_registry as registry
 from scripts.ops import developer_environment_runtime_retire as retire
+from tests.ops.worker_runtime_binding_fixtures import (
+    rich_image_archives,
+    worker_runtime_bindings,
+)
 
 
 @dataclass(frozen=True)
@@ -57,6 +61,13 @@ def _prepare(tmp_path: Path) -> Prepared:
                 "amd64": "sha256:" + "4" * 64,
                 "arm64": "sha256:" + "5" * 64,
             },
+            "image_archives": {
+                **rich_image_archives(
+                    amd64_config="sha256:" + "4" * 64,
+                    arm64_config="sha256:" + "5" * 64,
+                    seed="runtime-retire-current",
+                ),
+            },
         }
     )
     deployment = authority.begin_deployment(
@@ -69,6 +80,12 @@ def _prepare(tmp_path: Path) -> Prepared:
             "candidate_id": current.candidate_id,
             "expected_resource_generation": environment.resource_generation,
         }
+    )
+    deployment = authority.record_worker_runtime_bindings(
+        deployment.deployment_id,
+        principal_id=principal,
+        expected_resource_generation=environment.resource_generation,
+        bindings=worker_runtime_bindings(current),
     )
     for expected, following in zip(
         registry.DEPLOY_PHASES[:-2],
@@ -121,6 +138,13 @@ def _prepare(tmp_path: Path) -> Prepared:
             "image_digests": {
                 "amd64": "sha256:" + "e" * 64,
                 "arm64": "sha256:" + "f" * 64,
+            },
+            "image_archives": {
+                **rich_image_archives(
+                    amd64_config="sha256:" + "e" * 64,
+                    arm64_config="sha256:" + "f" * 64,
+                    seed="runtime-retire-failed",
+                ),
             },
         }
     )

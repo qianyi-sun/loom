@@ -421,6 +421,7 @@ _ACCEPTANCE_PROBE_REQUEST_FIELDS = {
     "candidate_id",
     "candidate_sha",
     "candidate_tree",
+    "worker_image_id",
     "applied_resource_generation",
     "registry_generation",
     "registry_snapshot_sha256",
@@ -448,6 +449,7 @@ _ACCEPTANCE_PROBE_LABELS = frozenset(
         "loom.candidate_tree",
         "loom.registry_generation",
         "loom.registry_payload_sha256",
+        "loom.worker_image_id",
     },
 )
 _ACCEPTANCE_PROBE_COMPOSE_FILES = (
@@ -2122,8 +2124,19 @@ def allocation_node_check(
         values.get("LOOM_WORKER_CANDIDATE_SHA") != candidate_sha
         or values.get("LOOM_WORKER_POOL_NAME") != pool
         or values.get("LOOM_WORKER_MAX_CONCURRENT") != str(concurrency)
+        or re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            values.get("LOOM_WORKER_IMAGE_ID", ""),
+        )
+        is None
     ):
         raise PolicyError("allocation-side worker env effective values drifted")
+    domain = "oldlab" if profile.cluster == "trt-oldlab" else "gb10"
+    worker_image = _inspect_worker_image(
+        values["LOOM_WORKER_IMAGE_ID"],
+        candidate_sha=candidate_sha,
+        domain=domain,
+    )
     docker_driver = _run(("docker", "info", "--format", "{{.CgroupDriver}}"), timeout=30).strip()
     if docker_driver != profile.docker_cgroup_driver:
         raise PolicyError("allocation-side Docker cgroup driver drifted")
@@ -2212,6 +2225,8 @@ def allocation_node_check(
         or not isinstance(services.get("sandbox-link"), dict)
         or services["worker"].get("cgroup_parent") != cgroup_parent
         or services["sandbox-link"].get("cgroup_parent") != cgroup_parent
+        or services["worker"].get("image") != values["LOOM_WORKER_IMAGE_ID"]
+        or services["sandbox-link"].get("image") != values["LOOM_WORKER_IMAGE_ID"]
     ):
         raise PolicyError("allocation-side Docker Compose cgroup binding drifted")
     if profile.docker_cgroup_driver == "systemd":
@@ -2271,6 +2286,7 @@ def allocation_node_check(
         "slice_receipt_sha256": slice_receipt_sha256,
         "cgroup_guard_verified": True,
         "compose_verified": True,
+        "worker_image": worker_image,
     }
     _prepare_private_directory(
         result_path.parent,
@@ -6996,8 +7012,14 @@ def _runtime_attestation_binding(
             "LOOM_WORKER_REGISTRY_PAYLOAD_SHA256": str(
                 fleet["registry_payload_sha256"],
             ),
+            "LOOM_WORKER_IMAGE_ID": worker_values.get("LOOM_WORKER_IMAGE_ID", ""),
         }
-        if any(worker_values.get(key) != value for key, value in worker_registry_binding.items()):
+        if re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            worker_registry_binding["LOOM_WORKER_IMAGE_ID"],
+        ) is None or any(
+            worker_values.get(key) != value for key, value in worker_registry_binding.items()
+        ):
             raise PolicyError("runtime worker env registry binding drifted")
     return {
         "proof_path": str(proof_path),
@@ -7941,6 +7963,7 @@ def _allocation_node_evidence(
         "env_sha256": binding["worker_env"]["sha256"],
         "pool": expected_pool,
         "concurrency": expected_concurrency,
+        "worker_image": node_result.get("worker_image"),
         "docker_cgroup_driver": profile.docker_cgroup_driver,
         "job_id": job_id,
         "job_start_time": node_result.get("job_start_time"),
@@ -12874,6 +12897,11 @@ def _acceptance_probe_request(
         is None
         or _CANDIDATE_RE.fullmatch(str(request.get("candidate_sha"))) is None
         or _CANDIDATE_RE.fullmatch(str(request.get("candidate_tree"))) is None
+        or re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            str(request.get("worker_image_id")),
+        )
+        is None
         or type(request.get("applied_resource_generation")) is not int
         or request["applied_resource_generation"] < 2
         or type(request.get("registry_generation")) is not int
@@ -12908,6 +12936,19 @@ def _acceptance_probe_request(
         or len(environments) != 1
         or len(deployments) != 1
         or len(candidates) != 1
+        or not isinstance(deployment.get("worker_runtime_bindings"), dict)
+        or not isinstance(
+            deployment["worker_runtime_bindings"].get("domains"),
+            dict,
+        )
+        or not isinstance(
+            deployment["worker_runtime_bindings"]["domains"].get(domain),
+            dict,
+        )
+        or deployment["worker_runtime_bindings"]["domains"][domain].get(
+            "runtime_image_id",
+        )
+        != request.get("worker_image_id")
         or environment.get("state") != "deploying"
         or environment.get("resource_generation") != deployment.get("expected_resource_generation")
         or environment.get("slurm_user") != request.get("service_user")
@@ -13062,6 +13103,97 @@ def _acceptance_probe_job_request(path: Path) -> dict[str, Any]:
     return request
 
 
+def _inspect_worker_image(
+    worker_image_id: str,
+    *,
+    candidate_sha: str,
+    domain: str,
+) -> dict[str, str]:
+    expected_architecture = {"oldlab": "amd64", "gb10": "arm64"}.get(domain)
+    if (
+        expected_architecture is None
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", worker_image_id) is None
+        or _CANDIDATE_RE.fullmatch(candidate_sha) is None
+    ):
+        raise PolicyError("worker image inspection request is invalid")
+    try:
+        completed = subprocess.run(
+            ("docker", "image", "inspect", worker_image_id),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        payload = json.loads(completed.stdout)
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        raise PolicyError("worker image inspection failed safely") from exc
+    image = payload[0] if isinstance(payload, list) and len(payload) == 1 else None
+    config = image.get("Config") if isinstance(image, dict) else None
+    labels = config.get("Labels") if isinstance(config, dict) else None
+    if (
+        completed.returncode != 0
+        or not isinstance(image, dict)
+        or image.get("Id") != worker_image_id
+        or image.get("Os") != "linux"
+        or image.get("Architecture") != expected_architecture
+        or not isinstance(labels, dict)
+        or labels.get("org.opencontainers.image.revision") != candidate_sha
+        or config.get("Cmd") != ["python", "-m", "loom_worker"]
+        or config.get("Entrypoint") not in (None, [])
+    ):
+        raise PolicyError("worker image config ID binding drifted")
+    return {
+        "id": worker_image_id,
+        "os": "linux",
+        "architecture": expected_architecture,
+        "revision": candidate_sha,
+    }
+
+
+def _verify_container_image(
+    container: str,
+    worker_image_id: str,
+) -> None:
+    try:
+        completed = subprocess.run(
+            ("docker", "inspect", "--format", "{{.Image}}", container),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PolicyError("allocation container image readback failed safely") from exc
+    if completed.returncode != 0 or completed.stdout.strip() != worker_image_id:
+        raise PolicyError("allocation container image config ID drifted")
+
+
+def _verify_compose_service_image(
+    compose: Sequence[str],
+    *,
+    environment: Mapping[str, str],
+    source_root: Path,
+    service: str,
+    worker_image_id: str,
+) -> None:
+    try:
+        identity = subprocess.run(
+            (*compose, "ps", "--quiet", service),
+            cwd=source_root,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PolicyError("allocation container identity readback failed safely") from exc
+    container_id = identity.stdout.strip()
+    if identity.returncode != 0 or re.fullmatch(r"[0-9a-f]{12,64}", container_id) is None:
+        raise PolicyError("allocation container identity readback failed")
+    _verify_container_image(container_id, worker_image_id)
+
+
 def _acceptance_probe_compose_environment(
     request: Mapping[str, Any],
     *,
@@ -13081,7 +13213,7 @@ def _acceptance_probe_compose_environment(
     environment = {
         **os.environ,
         "COMPOSE_PROJECT_NAME": project,
-        "LOOM_IMAGE_TAG": str(request["candidate_sha"])[:12],
+        "LOOM_WORKER_IMAGE_ID": str(request["worker_image_id"]),
         "LOOM_WORKER_SANDBOX_IDENTITY": str(request["runtime_id"]),
         "LOOM_WORKER_CANDIDATE_SHA": str(request["candidate_sha"]),
         "LOOM_WORKER_SLURM_JOB_ID": job_id,
@@ -13131,8 +13263,9 @@ def _validate_acceptance_probe_compose(
         "loom.candidate_tree": str(request["candidate_tree"]),
         "loom.registry_generation": str(request["registry_generation"]),
         "loom.registry_payload_sha256": str(request["registry_snapshot_sha256"]),
+        "loom.worker_image_id": str(request["worker_image_id"]),
     }
-    expected_image = f"loom-worker:{str(request['candidate_sha'])[:12]}"
+    expected_image = str(request["worker_image_id"])
     for service_name in ("sandbox-link", "acceptance-probe"):
         service = services.get(service_name)
         labels = service.get("labels") if isinstance(service, Mapping) else None
@@ -13299,6 +13432,11 @@ def run_acceptance_probe_job(
     allocation_node = _slurm_node_for_host(profile, _canonical_host())
     if allocation_node is None:
         raise PolicyError("allocation acceptance probe node is outside the profile")
+    _inspect_worker_image(
+        str(request["worker_image_id"]),
+        candidate_sha=str(request["candidate_sha"]),
+        domain=str(request["domain"]),
+    )
     job_start_time = _allocation_job_start_time(
         job_id,
         account=str(request["slurm_account"]),
@@ -13383,10 +13521,17 @@ def run_acceptance_probe_job(
         cgroup_parent=cgroup_parent,
     )
     failure: PolicyError | None = None
+    one_off_container = f"{project}-acceptance-probe"
     try:
         for suffix in (
             ("up", "--detach", "--no-build", "--wait", "sandbox-link"),
-            ("run", "--rm", "--no-deps", "acceptance-probe"),
+            (
+                "run",
+                "--name",
+                one_off_container,
+                "--no-deps",
+                "acceptance-probe",
+            ),
         ):
             completed = subprocess.run(
                 (*compose, *suffix),
@@ -13399,13 +13544,26 @@ def run_acceptance_probe_job(
             )
             if completed.returncode:
                 raise PolicyError("allocation acceptance probe container failed")
-            if suffix[0] == "up" and profile.docker_cgroup_driver == "systemd":
-                _verify_systemd_container_containment(
+            if suffix[0] == "up":
+                _verify_compose_service_image(
                     compose,
                     environment=compose_environment,
                     source_root=source_root,
                     service="sandbox-link",
-                    systemd_slice=cgroup_parent,
+                    worker_image_id=str(request["worker_image_id"]),
+                )
+                if profile.docker_cgroup_driver == "systemd":
+                    _verify_systemd_container_containment(
+                        compose,
+                        environment=compose_environment,
+                        source_root=source_root,
+                        service="sandbox-link",
+                        systemd_slice=cgroup_parent,
+                    )
+            else:
+                _verify_container_image(
+                    one_off_container,
+                    str(request["worker_image_id"]),
                 )
     except (OSError, subprocess.SubprocessError, PolicyError) as exc:
         failure = (
@@ -13415,6 +13573,13 @@ def run_acceptance_probe_job(
         )
     finally:
         try:
+            removed = subprocess.run(
+                ("docker", "rm", "--force", one_off_container),
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
             down = subprocess.run(
                 (*compose, "down", "--remove-orphans"),
                 cwd=source_root,
@@ -13426,7 +13591,7 @@ def run_acceptance_probe_job(
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise PolicyError("allocation acceptance probe cleanup failed safely") from exc
-        if down.returncode:
+        if removed.returncode not in {0, 1} or down.returncode:
             raise PolicyError("allocation acceptance probe cleanup failed")
     if failure is not None:
         raise failure
@@ -13478,6 +13643,7 @@ def run_acceptance_probe_domain(
         if (
             existing_receipt.get("transport_request_id") != transport_request_id
             or existing_receipt.get("probe_request_sha256") != request["payload_sha256"]
+            or existing_receipt.get("worker_image_id") != request["worker_image_id"]
         ):
             raise PolicyError("acceptance probe receipt replay drifted")
         return existing_receipt
@@ -13722,6 +13888,7 @@ def run_acceptance_probe_domain(
                 "candidate_id",
                 "candidate_sha",
                 "candidate_tree",
+                "worker_image_id",
                 "applied_resource_generation",
                 "registry_generation",
                 "registry_snapshot_sha256",

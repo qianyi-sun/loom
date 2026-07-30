@@ -932,44 +932,65 @@ cleanup() {
 trap cleanup EXIT
 trap 'cleanup 130' INT
 trap 'cleanup 143' TERM
-docker compose "${compose_args[@]}" up --build &
+expected_worker_image_id="$(
+  docker compose "${compose_args[@]}" config --format json |
+    /usr/bin/python3 -I -B -c 'import json,re,sys
+payload=json.load(sys.stdin)
+services=payload.get("services") if isinstance(payload,dict) else None
+worker=services.get("worker") if isinstance(services,dict) else None
+image=worker.get("image") if isinstance(worker,dict) else None
+if re.fullmatch(r"sha256:[0-9a-f]{64}",str(image)) is None:
+    raise SystemExit("worker image config ID is unavailable")
+print(image)'
+)"
+docker compose "${compose_args[@]}" up --no-build &
 compose_pid=$!
-if [[ "${LOOM_WORKER_DOCKER_CGROUP_DRIVER:-cgroupfs}" == "systemd" ]]; then
-  containment_deadline=$((SECONDS + 30))
-  containment_verified=0
-  while (( SECONDS <= containment_deadline )); do
-    if ! kill -0 "$compose_pid" 2>/dev/null; then
-      if wait "$compose_pid"; then
-        echo "error: compose exited before worker containment was verified" >&2
-        exit 2
-      else
-        exit $?
-      fi
+worker_deadline=$((SECONDS + 30))
+worker_verified=0
+while (( SECONDS <= worker_deadline )); do
+  if ! kill -0 "$compose_pid" 2>/dev/null; then
+    if wait "$compose_pid"; then
+      echo "error: compose exited before worker image was verified" >&2
+      exit 2
+    else
+      exit $?
     fi
-    mapfile -t worker_container_ids < <(
-      docker compose "${compose_args[@]}" ps -q worker | sed '/^$/d'
-    )
-    if [[ "${#worker_container_ids[@]}" -eq 1 ]]; then
-      post_start_parent="$(
-        PYTHONPATH="$LOOM_REMOTE_WORKER_REPO_DIR/src" \
-          /usr/bin/python3 -m loom_control_plane.slurm_job_cgroup \
-          --job-id "$SLURM_JOB_ID" \
-          --pids-max "$LOOM_WORKER_JOB_PIDS_MAX" \
-          --docker-driver "$LOOM_WORKER_DOCKER_CGROUP_DRIVER" \
-          "${cgroup_identity_args[@]}" \
-          --wait-seconds 0
-      )"
-      if [[ "$post_start_parent" != "$LOOM_WORKER_CGROUP_PARENT" ]]; then
-        echo "error: allocation cgroup parent changed after worker start" >&2
-        exit 2
-      fi
-      worker_pid="$(
-        docker inspect --format '{{.State.Pid}}' "${worker_container_ids[0]}"
-      )"
-      slice_cgroup="$(
-        /usr/bin/systemctl show --property=ControlGroup --value "$LOOM_WORKER_CGROUP_PARENT"
-      )"
-      if /usr/bin/python3 -I -B -c 'import json,re,sys
+  fi
+  mapfile -t worker_container_ids < <(
+    docker compose "${compose_args[@]}" ps -q worker | sed '/^$/d'
+  )
+  if [[ "${#worker_container_ids[@]}" -eq 1 ]]; then
+    running_worker_image_id="$(
+      docker inspect --format '{{.Image}}' "${worker_container_ids[0]}"
+    )"
+    if [[ "$running_worker_image_id" != "$expected_worker_image_id" ]]; then
+      echo "error: worker container image config ID drifted" >&2
+      exit 2
+    fi
+    if [[ "${LOOM_WORKER_DOCKER_CGROUP_DRIVER:-cgroupfs}" != "systemd" ]]; then
+      worker_verified=1
+      break
+    fi
+    post_start_parent="$(
+      PYTHONPATH="$LOOM_REMOTE_WORKER_REPO_DIR/src" \
+        /usr/bin/python3 -m loom_control_plane.slurm_job_cgroup \
+        --job-id "$SLURM_JOB_ID" \
+        --pids-max "$LOOM_WORKER_JOB_PIDS_MAX" \
+        --docker-driver "$LOOM_WORKER_DOCKER_CGROUP_DRIVER" \
+        "${cgroup_identity_args[@]}" \
+        --wait-seconds 0
+    )"
+    if [[ "$post_start_parent" != "$LOOM_WORKER_CGROUP_PARENT" ]]; then
+      echo "error: allocation cgroup parent changed after worker start" >&2
+      exit 2
+    fi
+    worker_pid="$(
+      docker inspect --format '{{.State.Pid}}' "${worker_container_ids[0]}"
+    )"
+    slice_cgroup="$(
+      /usr/bin/systemctl show --property=ControlGroup --value "$LOOM_WORKER_CGROUP_PARENT"
+    )"
+    if /usr/bin/python3 -I -B -c 'import json,re,sys
 from fractions import Fraction
 from pathlib import Path,PurePosixPath
 unit,pid,parent_raw=sys.argv[1:]
@@ -1026,20 +1047,23 @@ checks=(
     cpuset(value("cpuset.mems.effective")) <= cpuset(str(receipt["cpuset_mems"])),
 )
 raise SystemExit(0 if all(checks) else 1)' \
-        "$LOOM_WORKER_CGROUP_PARENT" "$worker_pid" "$slice_cgroup"; then
-        containment_verified=1
-        break
-      fi
-    elif [[ "${#worker_container_ids[@]}" -gt 1 ]]; then
-      echo "error: compose project returned multiple worker containers" >&2
-      exit 2
+      "$LOOM_WORKER_CGROUP_PARENT" "$worker_pid" "$slice_cgroup"; then
+      worker_verified=1
+      break
     fi
-    sleep 1
-  done
-  if [[ "$containment_verified" -ne 1 ]]; then
-    echo "error: worker container did not enter the exact bounded systemd slice" >&2
+  elif [[ "${#worker_container_ids[@]}" -gt 1 ]]; then
+    echo "error: compose project returned multiple worker containers" >&2
     exit 2
   fi
+  sleep 1
+done
+if [[ "$worker_verified" -ne 1 ]]; then
+  if [[ "${LOOM_WORKER_DOCKER_CGROUP_DRIVER:-cgroupfs}" == "systemd" ]]; then
+    echo "error: worker container did not enter the exact bounded systemd slice" >&2
+  else
+    echo "error: worker container did not start with the exact image config ID" >&2
+  fi
+  exit 2
 fi
 wait "$compose_pid"
 """

@@ -12,6 +12,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -30,6 +31,72 @@ TRANSACTION = {
     "convergence_id": "2" * 64,
     "payload_sha256": "3" * 64,
 }
+
+
+def _archive_binding(
+    *,
+    config_digest: str,
+    archive_digest: str,
+    index_digest: str,
+    manifest_digest: str,
+    size: int,
+) -> dict[str, object]:
+    media_type = "application/vnd.oci.image.manifest.v1+json"
+    return {
+        "sha256": archive_digest,
+        "size": size,
+        "config_digest": config_digest,
+        "index_digest": index_digest,
+        "manifest_digest": manifest_digest,
+        "manifest_media_type": media_type,
+        "load_descriptor_digest": manifest_digest,
+        "load_descriptor_media_type": media_type,
+    }
+
+
+def _runtime_bindings(candidate: Any) -> dict[str, object]:
+    registry = policy._REGISTRY
+    image_archives = (
+        candidate["image_archives"] if isinstance(candidate, dict) else candidate.image_archives
+    )
+    nodes: dict[str, dict[str, object]] = {}
+    domains: dict[str, dict[str, object]] = {}
+    for domain, architecture in registry.WORKER_RUNTIME_BINDING_DOMAINS.items():
+        archive = image_archives[architecture]
+        backend = "containerd-snapshotter-v1" if domain == "oldlab" else "classic-overlay2"
+        binding = {
+            "architecture": architecture,
+            "docker_driver": registry.WORKER_RUNTIME_BACKENDS[backend],
+            "docker_backend": backend,
+            "config_digest": archive["config_digest"],
+            "load_descriptor_digest": archive["load_descriptor_digest"],
+            "load_descriptor_media_type": archive["load_descriptor_media_type"],
+            "runtime_image_id": (
+                archive["load_descriptor_digest"]
+                if backend == "containerd-snapshotter-v1"
+                else archive["config_digest"]
+            ),
+        }
+        domains[domain] = binding
+        for node in registry.FLEET_NODES:
+            node_domain = "oldlab" if node.startswith("oldlab-") else "gb10"
+            if node_domain == domain:
+                nodes[node] = {
+                    "domain": domain,
+                    **binding,
+                    "docker_descriptor_digest": (
+                        archive["load_descriptor_digest"]
+                        if backend == "containerd-snapshotter-v1"
+                        else None
+                    ),
+                    "docker_descriptor_media_type": (
+                        archive["load_descriptor_media_type"]
+                        if backend == "containerd-snapshotter-v1"
+                        else None
+                    ),
+                    "receipt_sha256": hashlib.sha256(node.encode("ascii")).hexdigest(),
+                }
+    return {"nodes": nodes, "domains": domains}
 
 
 def _generation_window() -> tuple[str, str]:
@@ -3962,6 +4029,17 @@ def test_allocation_node_check_binds_raw_inputs_docker_and_compose(
             "LOOM_WORKER_CANDIDATE_SHA": candidate,
             "LOOM_WORKER_POOL_NAME": "oldlab",
             "LOOM_WORKER_MAX_CONCURRENT": "4",
+            "LOOM_WORKER_IMAGE_ID": "sha256:" + "d" * 64,
+        },
+    )
+    monkeypatch.setattr(
+        policy,
+        "_inspect_worker_image",
+        lambda *_args, **_kwargs: {
+            "id": "sha256:" + "d" * 64,
+            "os": "linux",
+            "architecture": "amd64",
+            "revision": candidate,
         },
     )
     monkeypatch.setattr(
@@ -3995,9 +4073,11 @@ def test_allocation_node_check_binds_raw_inputs_docker_and_compose(
                     "services": {
                         "worker": {
                             "cgroup_parent": "/sys/fs/cgroup/slurm/job_123",
+                            "image": "sha256:" + "d" * 64,
                         },
                         "sandbox-link": {
                             "cgroup_parent": "/sys/fs/cgroup/slurm/job_123",
+                            "image": "sha256:" + "d" * 64,
                         },
                     },
                 },
@@ -4210,6 +4290,7 @@ def test_completed_crash_replays_original_attempt_before_deleting_result(
         "env_sha256": "e" * 64,
         "pool": "oldlab",
         "concurrency": 1,
+        "worker_image": None,
         "docker_cgroup_driver": loaded.docker_cgroup_driver,
         "job_id": job_id,
         "job_start_time": "2026-07-30T00:00:00",
@@ -5773,6 +5854,8 @@ def test_candidate_set_selects_only_latest_applied_committed_registry_binding(
     )
     candidates = []
     for index, digit in enumerate(("a", "b"), start=1):
+        amd64_config = "sha256:" + str(index + 3) * 64
+        arm64_config = "sha256:" + str(index + 4) * 64
         candidate = registry.import_candidate(
             {
                 "schema_version": 1,
@@ -5785,8 +5868,24 @@ def test_candidate_set_selects_only_latest_applied_committed_registry_binding(
                 "bundle_sha256": str(index + 2) * 64,
                 "bundle_size": 1024 + index,
                 "image_digests": {
-                    "amd64": "sha256:" + str(index + 3) * 64,
-                    "arm64": "sha256:" + str(index + 4) * 64,
+                    "amd64": amd64_config,
+                    "arm64": arm64_config,
+                },
+                "image_archives": {
+                    "amd64": _archive_binding(
+                        config_digest=amd64_config,
+                        archive_digest=format(index + 5, "x")[-1] * 64,
+                        index_digest="sha256:" + format(index + 6, "x")[-1] * 64,
+                        manifest_digest="sha256:" + format(index + 7, "x")[-1] * 64,
+                        size=2048,
+                    ),
+                    "arm64": _archive_binding(
+                        config_digest=arm64_config,
+                        archive_digest=format(index + 8, "x")[-1] * 64,
+                        index_digest="sha256:" + format(index + 9, "x")[-1] * 64,
+                        manifest_digest="sha256:" + format(index + 10, "x")[-1] * 64,
+                        size=4096,
+                    ),
                 },
             },
         )
@@ -5800,6 +5899,12 @@ def test_candidate_set_selects_only_latest_applied_committed_registry_binding(
                 "candidate_id": candidate.candidate_id,
                 "expected_resource_generation": index,
             },
+        )
+        deployment = registry.record_worker_runtime_bindings(
+            deployment.deployment_id,
+            principal_id=environment.principal_id,
+            expected_resource_generation=index,
+            bindings=_runtime_bindings(candidate),
         )
         for expected, following in zip(
             policy._REGISTRY.DEPLOY_PHASES[:-1],
@@ -7173,6 +7278,26 @@ def _acceptance_probe_fixture(tmp_path: Path) -> tuple[dict[str, object], bytes]
         "principal_id": environment["principal_id"],
         "candidate_sha": "4" * 40,
         "candidate_tree": "5" * 40,
+        "image_digests": {
+            "amd64": "sha256:" + "d" * 64,
+            "arm64": "sha256:" + "e" * 64,
+        },
+        "image_archives": {
+            "amd64": _archive_binding(
+                config_digest="sha256:" + "d" * 64,
+                archive_digest="a" * 64,
+                index_digest="sha256:" + "b" * 64,
+                manifest_digest="sha256:" + "c" * 64,
+                size=2048,
+            ),
+            "arm64": _archive_binding(
+                config_digest="sha256:" + "e" * 64,
+                archive_digest="f" * 64,
+                index_digest="sha256:" + "1" * 64,
+                manifest_digest="sha256:" + "2" * 64,
+                size=4096,
+            ),
+        },
     }
     deployment = {
         "deployment_id": "dep-" + "6" * 32,
@@ -7185,6 +7310,7 @@ def _acceptance_probe_fixture(tmp_path: Path) -> tuple[dict[str, object], bytes]
         "applied_registry_payload_sha256": "7" * 64,
         "finalization_payload_sha256": None,
         "phase": "verified",
+        "worker_runtime_bindings": _runtime_bindings(candidate),
     }
     snapshot = {
         "generation": 9,
@@ -7208,6 +7334,9 @@ def _acceptance_probe_fixture(tmp_path: Path) -> tuple[dict[str, object], bytes]
         "candidate_id": candidate["candidate_id"],
         "candidate_sha": candidate["candidate_sha"],
         "candidate_tree": candidate["candidate_tree"],
+        "worker_image_id": deployment["worker_runtime_bindings"]["domains"]["oldlab"][
+            "runtime_image_id"
+        ],
         "applied_resource_generation": 3,
         "registry_generation": snapshot["generation"],
         "registry_snapshot_sha256": snapshot["payload_sha256"],
@@ -7395,11 +7524,12 @@ def test_acceptance_probe_job_uses_fixed_private_compose_and_exact_labels(
         "loom.candidate_tree": request["candidate_tree"],
         "loom.registry_generation": str(request["registry_generation"]),
         "loom.registry_payload_sha256": request["registry_snapshot_sha256"],
+        "loom.worker_image_id": request["worker_image_id"],
     }
     rendered = {
         "services": {
             name: {
-                "image": f"loom-worker:{request['candidate_sha'][:12]}",
+                "image": request["worker_image_id"],
                 "cgroup_parent": "/system.slice/slurm/job_34567",
                 "cpus": 0.25,
                 "mem_limit": 134217728,
@@ -7460,6 +7590,18 @@ def test_acceptance_probe_job_uses_fixed_private_compose_and_exact_labels(
     )
     monkeypatch.setattr(policy.os, "environ", {**os.environ, "SLURM_JOB_ID": job_id})
     monkeypatch.setattr(policy.subprocess, "run", run)
+    monkeypatch.setattr(
+        policy,
+        "_inspect_worker_image",
+        lambda *_args, **_kwargs: {
+            "id": request["worker_image_id"],
+            "os": "linux",
+            "architecture": "amd64",
+            "revision": request["candidate_sha"],
+        },
+    )
+    monkeypatch.setattr(policy, "_verify_compose_service_image", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(policy, "_verify_container_image", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(policy, "_canonical_host", lambda: "trt-eai-oldlab-2")
     monkeypatch.setattr(
         policy,
@@ -7591,3 +7733,117 @@ def test_acceptance_probe_container_reaches_only_private_sandbox_link(
     assert requested_urls == list(probe_container.SERVICES.values())
     assert all(url.startswith("http://sandbox-link:") for url in requested_urls)
     assert all("127.0.0.1" not in url and "localhost" not in url for url in requested_urls)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("Id", "sha256:" + "e" * 64),
+        ("Os", "windows"),
+        ("Architecture", "arm64"),
+        ("revision", "f" * 40),
+        ("Cmd", ["/usr/local/bin/node-bootstrap"]),
+        ("Entrypoint", ["/usr/local/bin/node-bootstrap"]),
+    ),
+)
+def test_worker_image_inspection_rejects_identity_platform_revision_or_command_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: str | list[str],
+) -> None:
+    worker_image_id = "sha256:" + "d" * 64
+    candidate_sha = "a" * 40
+    image: dict[str, object] = {
+        "Id": worker_image_id,
+        "Os": "linux",
+        "Architecture": "amd64",
+        "Config": {
+            "Cmd": ["python", "-m", "loom_worker"],
+            "Entrypoint": [],
+            "Labels": {
+                "org.opencontainers.image.revision": candidate_sha,
+            },
+        },
+    }
+    if field == "revision":
+        config = image["Config"]
+        assert isinstance(config, dict)
+        labels = config["Labels"]
+        assert isinstance(labels, dict)
+        labels["org.opencontainers.image.revision"] = value
+    elif field in {"Cmd", "Entrypoint"}:
+        config = image["Config"]
+        assert isinstance(config, dict)
+        config[field] = value
+    else:
+        image[field] = value
+    monkeypatch.setattr(
+        policy.subprocess,
+        "run",
+        lambda argv, **_kwargs: subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=json.dumps([image]),
+            stderr="",
+        ),
+    )
+
+    with pytest.raises(policy.PolicyError, match="config ID binding drifted"):
+        policy._inspect_worker_image(
+            worker_image_id,
+            candidate_sha=candidate_sha,
+            domain="oldlab",
+        )
+
+
+def test_worker_image_inspection_and_container_readback_require_exact_config_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker_image_id = "sha256:" + "d" * 64
+    candidate_sha = "a" * 40
+    responses = iter(
+        (
+            json.dumps(
+                [
+                    {
+                        "Id": worker_image_id,
+                        "Os": "linux",
+                        "Architecture": "amd64",
+                        "Config": {
+                            "Cmd": ["python", "-m", "loom_worker"],
+                            "Entrypoint": [],
+                            "Labels": {
+                                "org.opencontainers.image.revision": candidate_sha,
+                            },
+                        },
+                    },
+                ],
+            ),
+            worker_image_id + "\n",
+            "sha256:" + "e" * 64 + "\n",
+        ),
+    )
+    monkeypatch.setattr(
+        policy.subprocess,
+        "run",
+        lambda argv, **_kwargs: subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=next(responses),
+            stderr="",
+        ),
+    )
+
+    assert policy._inspect_worker_image(
+        worker_image_id,
+        candidate_sha=candidate_sha,
+        domain="oldlab",
+    ) == {
+        "id": worker_image_id,
+        "os": "linux",
+        "architecture": "amd64",
+        "revision": candidate_sha,
+    }
+    policy._verify_container_image("container-id", worker_image_id)
+    with pytest.raises(policy.PolicyError, match="container image config ID drifted"):
+        policy._verify_container_image("container-id", worker_image_id)

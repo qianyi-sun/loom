@@ -434,11 +434,8 @@ def _acceptance_registry_snapshot(source_value: object) -> dict[str, Any]:
             or candidate["bundle_size"] < 1
             or not isinstance(candidate["bundle_path"], str)
             or not Path(candidate["bundle_path"]).is_absolute()
-            or not isinstance(candidate["image_digests"], Mapping)
-            or set(candidate["image_digests"]) != {"amd64", "arm64"}
-            or any(
-                environment_registry.IMAGE_DIGEST_RE.fullmatch(str(digest)) is None
-                for digest in candidate["image_digests"].values()
+            or not environment_registry._valid_worker_image_ids(
+                candidate["image_digests"],
             )
         ):
             raise AcceptanceError("source registry candidate binding is invalid")

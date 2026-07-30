@@ -118,10 +118,14 @@ environment-state mutation:
 2. The unprivileged rollout writes only fixed private inputs under
    `/var/lib/loom-staging-rollout/prepared/{candidates,generated}`. `prepare`
    claims those exact candidate-derived paths, freezes descriptor-pinned source
-   inodes, copies into hidden stages, normalizes ownership to 31024:31024, and
-   publishes with `renameat2(RENAME_NOREPLACE)`. Its root-owned journal supports
-   recovery without overwriting or deleting foreign content. Raw repository
-   tree and worker-env digest are read back from the final system namespace.
+   inodes, copies the repository as root-owned/batch-readable immutable content,
+   and publishes the worker env as `31024:31024` mode `0600` with
+   `renameat2(RENAME_NOREPLACE)`. Its root-owned journal supports recovery
+   without overwriting or deleting foreign content. Both the producer and final
+   repository reject hidden index flags, extra files, clean/encoding filters,
+   and any tracked raw byte that differs from the commit tree. The worker env
+   uses a closed Compose-compatible key schema and rejects duplicate, invalid,
+   unknown, interpolated, or stale candidate/pool/concurrency/image bindings.
 3. `probe` invokes the fixed allocation action for all fifteen nodes. Every
    node row must prove `sbatch`, `srun`, exact candidate/tree and paths, worker
    registration and at least two bounded heartbeats, ordered cancel,
@@ -130,7 +134,9 @@ environment-state mutation:
    preinstalled Ed25519 key.
 4. `activate` independently reloads the fixed profile and public key, verifies
    the detached signature, freshness, exact candidate, exact node matrix, and
-   closed cleanup receipt. Only its secret-safe pass summary is returned.
+   closed cleanup receipt. The signed artifact, monotonic/current pointer, and
+   secret-safe pass summary all record the full ordered node set and
+   `excluded_nodes=[]`.
 
 `loom admin environment-state apply` repeats `activate` before resolving the
 admin credential or performing any control-plane/systemd mutation.

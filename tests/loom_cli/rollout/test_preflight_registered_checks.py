@@ -910,17 +910,13 @@ def _external_infrastructure_summary(
         "source_controller_host": "trt-eai-oldlab-2",
         "created_at": created_at.isoformat().replace("+00:00", "Z"),
         "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
-        "source_bootstrap": operation(
-            "staging-shared-source-bootstrap", "trt-gb10-2"
-        ),
+        "source_bootstrap": operation("staging-shared-source-bootstrap", "trt-gb10-2"),
         "accounting": operation(
             "staging-slurm-accounting-converge",
             "trt-gb10-1",
             accounting=True,
         ),
-        "node_bootstraps": [
-            operation("staging-allocation-bootstrap", host) for host in hosts
-        ],
+        "node_bootstraps": [operation("staging-allocation-bootstrap", host) for host in hosts],
         "mount_contract": {
             "source": "192.168.20.12:/shared_work2/loom/staging",
             "target": "/srv/loom/staging-shared",
@@ -1017,9 +1013,7 @@ def test_external_gb10_infrastructure_receipt_fails_closed(
     )
     result = next(
         item
-        for item in PreflightDag(
-            (_passing_dependency("gb10.ssh-topology"), mount)
-        ).run(context)
+        for item in PreflightDag((_passing_dependency("gb10.ssh-topology"), mount)).run(context)
         if item.check_id == mount.spec.check_id
     )
 

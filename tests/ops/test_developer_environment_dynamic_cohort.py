@@ -21,6 +21,7 @@ from tests.ops.test_developer_environment_deploy import (
     _deployer,
     _register,
 )
+from tests.ops.worker_runtime_binding_fixtures import worker_runtime_bindings
 
 from loom_control_plane.shared_capacity_broker import SandboxId, SharedCapacityBroker
 
@@ -177,6 +178,12 @@ def _commit_registry_baseline(
             "candidate_id": candidate.candidate_id,
             "expected_resource_generation": environment.resource_generation,
         }
+    )
+    authority.record_worker_runtime_bindings(
+        deployment.deployment_id,
+        principal_id=environment.principal_id,
+        expected_resource_generation=environment.resource_generation,
+        bindings=worker_runtime_bindings(candidate),
     )
     for current, following in zip(
         registry.DEPLOY_PHASES[:-1],

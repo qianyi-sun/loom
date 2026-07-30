@@ -21,6 +21,10 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from jsonschema import Draft202012Validator
+from tests.ops.worker_runtime_binding_fixtures import (
+    rich_image_archives,
+    worker_runtime_bindings_from_archives,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts/ops/developer_sandbox_live_acceptance.py"
@@ -60,14 +64,27 @@ def _source_registry_snapshot(
         principal_id = f"github:{1000 + index}"
         candidate = candidates[sandbox]
         bundle_sha256 = str(index) * 64
+        image_digests = {
+            "amd64": f"sha256:{candidate['sha']}{candidate['sha'][:24]}",
+            "arm64": f"sha256:{candidate['tree']}{candidate['tree'][:24]}",
+        }
+        image_archive_bindings = rich_image_archives(
+            amd64_config=image_digests["amd64"],
+            arm64_config=image_digests["arm64"],
+            seed=f"live-acceptance-{sandbox}",
+        )
         candidate_identity = {
             "principal_id": principal_id,
             "env_id": env_id,
             "lifecycle_epoch": 1,
             "repository_id": "qianyi-sun/loom",
+            "image_binding_kind": (ACCEPTANCE.environment_registry.WORKER_IMAGE_BINDING_KIND),
+            "image_binding_version": (ACCEPTANCE.environment_registry.WORKER_IMAGE_BINDING_VERSION),
             "candidate_sha": candidate["sha"],
             "candidate_tree": candidate["tree"],
             "bundle_sha256": bundle_sha256,
+            "image_digests": image_digests,
+            "image_archives": image_archive_bindings,
         }
         candidate_id = "cand-" + ACCEPTANCE.environment_registry._digest(candidate_identity)[:40]
         legacy = sandbox in FIXTURE_SERVICE_USERS
@@ -131,14 +148,32 @@ def _source_registry_snapshot(
                 "env_id": env_id,
                 "lifecycle_epoch": 1,
                 "repository_id": "qianyi-sun/loom",
+                "image_binding_kind": (ACCEPTANCE.environment_registry.WORKER_IMAGE_BINDING_KIND),
+                "image_binding_version": (
+                    ACCEPTANCE.environment_registry.WORKER_IMAGE_BINDING_VERSION
+                ),
                 "candidate_sha": candidate["sha"],
                 "candidate_tree": candidate["tree"],
                 "bundle_sha256": bundle_sha256,
                 "bundle_size": 1024,
-                "bundle_path": f"/var/lib/loom-developer-environments/candidates/{candidate_id}/candidate.bundle",
-                "image_digests": {
-                    "amd64": f"sha256:{candidate['sha']}{candidate['sha'][:24]}",
-                    "arm64": f"sha256:{candidate['tree']}{candidate['tree'][:24]}",
+                "bundle_path": str(
+                    ACCEPTANCE.environment_registry.SYSTEM_CANDIDATE_ROOT
+                    / candidate_id
+                    / "candidate.bundle"
+                ),
+                "image_digests": image_digests,
+                "image_archives": {
+                    architecture: {
+                        **binding,
+                        "path": str(
+                            ACCEPTANCE.environment_registry.worker_image_archive_path(
+                                ACCEPTANCE.environment_registry.SYSTEM_CANDIDATE_ROOT,
+                                candidate_id,
+                                architecture,
+                            ),
+                        ),
+                    }
+                    for architecture, binding in image_archive_bindings.items()
                 },
                 "imported_at": _iso(0),
             },
@@ -180,6 +215,10 @@ def _source_registry_snapshot(
                 "applied_registry_generation": 41,
                 "applied_registry_payload_sha256": applied_registry_payload_sha256,
                 "finalization_payload_sha256": finalization["payload_sha256"],
+                "worker_runtime_bindings": worker_runtime_bindings_from_archives(
+                    candidate_id=candidate_id,
+                    image_archives=image_archive_bindings,
+                ),
                 "phase": "committed",
                 "previous_candidate_id": None,
                 "request_digest": str(index + 4) * 64,
@@ -1983,13 +2022,20 @@ def test_source_registry_rejects_duplicate_principal_and_resource() -> None:
         ACCEPTANCE._acceptance_registry_snapshot(source)
 
 
-@pytest.mark.parametrize("attack", ["extra_candidate_field", "bundle_path"])
+@pytest.mark.parametrize(
+    "attack",
+    ["extra_candidate_field", "bundle_path", "same_worker_image_id"],
+)
 def test_source_registry_candidate_rows_are_closed_and_path_bound(attack: str) -> None:
     source = _source_registry_snapshot()
     if attack == "extra_candidate_field":
         source["candidates"][0]["unexpected"] = True
-    else:
+    elif attack == "bundle_path":
         source["candidates"][0]["bundle_path"] = "/tmp/candidate.bundle"
+    else:
+        source["candidates"][0]["image_digests"]["arm64"] = source["candidates"][0][
+            "image_digests"
+        ]["amd64"]
     _reseal_source_registry(source)
 
     with pytest.raises(

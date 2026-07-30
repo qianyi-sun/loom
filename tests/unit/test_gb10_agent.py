@@ -14,6 +14,31 @@ from loom_cli.gb10_agent import (
     render_env_updates,
 )
 
+_IMAGE_ID = "sha256:" + ("a" * 64)
+_CANDIDATE_SHA = "b" * 40
+_real_worker_image_binding = gb10_agent._worker_image_binding
+
+
+@pytest.fixture(autouse=True)
+def _exact_worker_image_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep lifecycle tests focused; exact-image helpers have direct coverage."""
+
+    monkeypatch.setattr(
+        gb10_agent,
+        "_worker_image_binding",
+        lambda _env_file, _desired: (_IMAGE_ID, _CANDIDATE_SHA),
+    )
+    monkeypatch.setattr(
+        gb10_agent,
+        "_inspect_exact_worker_image",
+        lambda _image_id, _candidate_sha: None,
+    )
+    monkeypatch.setattr(
+        gb10_agent,
+        "_verify_compose_worker_image",
+        lambda _compose_base, _service, _image_id: None,
+    )
+
 
 def test_build_plan_blocks_non_canary_host_until_policy_expands() -> None:
     desired = DesiredState(
@@ -328,7 +353,7 @@ def test_apply_dry_run_uses_every_compose_file(
     )
 
     assert rc == 0
-    assert len(commands) == 3
+    assert len(commands) == 2
     for command in commands:
         assert command.count("-f") == 2
         assert str(base) in command
@@ -396,7 +421,7 @@ def test_apply_dry_run_detects_worker_token_drift(
     )
 
     assert rc == 0
-    assert len(commands) == 3
+    assert len(commands) == 2
     out = capsys.readouterr().out
     assert "LOOM_WORKER_TOKEN=<redacted>" in out
     assert "loom_w_old_secret" not in out
@@ -472,10 +497,7 @@ def test_apply_restarts_missing_active_worker_when_release_metadata_is_current(
     )
 
     assert rc == 0
-    assert [command[-2:] for command in commands] == [
-        ["pull", "worker"],
-        ["-d", "worker"],
-    ]
+    assert [command[-2:] for command in commands] == [["--no-build", "worker"]]
     assert reports[-1]["apply_state"] == "applied"
     assert reports[-1]["last_apply_result"] == "docker compose worker started"
 
@@ -550,10 +572,7 @@ def test_apply_fails_when_active_worker_never_reaches_running_after_up(
     )
 
     assert rc == 1
-    assert [command[-2:] for command in commands] == [
-        ["pull", "worker"],
-        ["-d", "worker"],
-    ]
+    assert [command[-2:] for command in commands] == [["--no-build", "worker"]]
     assert reports[-1]["apply_state"] == "failed"
     assert "did not reach running state" in str(reports[-1]["error_message"])
 
@@ -648,12 +667,12 @@ def test_apply_reuses_current_image_for_running_or_idle_exit_active_worker(
     )
 
     assert rc == 0
-    assert [command[-2:] for command in commands] == [["-d", "worker"]]
+    assert [command[-2:] for command in commands] == [["--no-build", "worker"]]
     assert reports[-1]["apply_state"] == "applied"
     assert reports[-1]["last_apply_result"] == expected_result
 
 
-def test_apply_running_wrong_image_pulls_builds_and_recreates_worker(
+def test_apply_running_wrong_image_recreates_without_pull_or_build(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -695,12 +714,11 @@ def test_apply_running_wrong_image_pulls_builds_and_recreates_worker(
         ),
     )
 
-    def _run(argv, *, dry_run):  # type: ignore[no-untyped-def]
-        commands.append(list(argv))
-        if argv[-2:] == ["pull", "worker"]:
-            raise subprocess.CalledProcessError(1, argv)
-
-    monkeypatch.setattr(gb10_agent, "_run", _run)
+    monkeypatch.setattr(
+        gb10_agent,
+        "_run",
+        lambda argv, *, dry_run: commands.append(list(argv)),
+    )
     monkeypatch.setattr(
         gb10_agent,
         "_wait_for_compose_service_running",
@@ -727,11 +745,8 @@ def test_apply_running_wrong_image_pulls_builds_and_recreates_worker(
     )
 
     assert rc == 0
-    assert [command[-2:] for command in commands] == [
-        ["pull", "worker"],
-        ["build", "worker"],
-        ["-d", "worker"],
-    ]
+    assert [command[-2:] for command in commands] == [["--no-build", "worker"]]
+    assert all("pull" not in command and "build" not in command for command in commands)
     assert reports[-1]["apply_state"] == "applied"
     assert reports[-1]["last_apply_result"] == "docker compose worker reconciled"
 
@@ -1392,7 +1407,7 @@ def test_apply_failure_leaves_env_file_retryable(
     )
 
 
-def test_apply_builds_local_worker_image_when_registry_pull_fails(
+def test_apply_never_pulls_or_builds_local_worker_image(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1428,12 +1443,11 @@ def test_apply_builds_local_worker_image_when_registry_pull_fails(
     monkeypatch.setattr(gb10_agent, "_fetch_desired_state", lambda _args: desired)
     monkeypatch.setattr(gb10_agent, "_report_node", lambda *args, **kwargs: None)
 
-    def _run(argv, *, dry_run):  # type: ignore[no-untyped-def]
-        commands.append(list(argv))
-        if argv[-2:] == ["pull", "worker"]:
-            raise subprocess.CalledProcessError(1, argv)
-
-    monkeypatch.setattr(gb10_agent, "_run", _run)
+    monkeypatch.setattr(
+        gb10_agent,
+        "_run",
+        lambda argv, *, dry_run: commands.append(list(argv)),
+    )
     monkeypatch.setattr(
         gb10_agent,
         "_wait_for_compose_service_running",
@@ -1460,14 +1474,39 @@ def test_apply_builds_local_worker_image_when_registry_pull_fails(
 
     assert rc == 0
     assert [command[-2:] for command in commands] == [
-        ["pull", "worker"],
-        ["build", "worker"],
         ["600", "worker"],
-        ["-d", "worker"],
+        ["--no-build", "worker"],
     ]
+    assert all("pull" not in command and "build" not in command for command in commands)
     rendered = env_file.read_text(encoding="utf-8")
     assert "LOOM_IMAGE_TAG=new-image" in rendered
     assert "LOOM_WORKER_ENV_CONFIG_VERSION=new-env" in rendered
+
+
+def test_worker_image_binding_requires_exact_persistent_values(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        f"LOOM_WORKER_IMAGE_ID={_IMAGE_ID}\nLOOM_WORKER_CANDIDATE_SHA={_CANDIDATE_SHA}\n",
+        encoding="utf-8",
+    )
+    desired = DesiredState(
+        environment="staging",
+        pool_name="gb10",
+        image_tag="staging-bbbbbbb",
+        max_concurrent=10,
+        env_config_version="staging-bbbbbbb",
+        rollout_policy={"mode": "all"},
+        env={},
+    )
+
+    assert _real_worker_image_binding(env_file, desired) == (
+        _IMAGE_ID,
+        _CANDIDATE_SHA,
+    )
+
+    env_file.write_text("LOOM_IMAGE_TAG=staging-bbbbbbb\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="exact worker image"):
+        _real_worker_image_binding(env_file, desired)
 
 
 def test_rollback_apply_publishes_previous_state_to_control_plane(

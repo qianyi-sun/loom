@@ -73,6 +73,10 @@ def _registry_snapshot() -> dict[str, object]:
                 "principal_id": principal,
                 "candidate_sha": "a" * 40,
                 "candidate_tree": "b" * 40,
+                "image_digests": {
+                    "amd64": "sha256:" + "d" * 64,
+                    "arm64": "sha256:" + "e" * 64,
+                },
             },
         )
         deployment_id = f"dep-{index:032x}"
@@ -107,6 +111,12 @@ def _registry_snapshot() -> dict[str, object]:
                 "applied_registry_payload_sha256": "e" * 64,
                 "finalization_payload_sha256": finalization_digest,
                 "phase": "committed",
+                "worker_runtime_bindings": {
+                    "domains": {
+                        "oldlab": {"runtime_image_id": "sha256:" + "d" * 64},
+                        "gb10": {"runtime_image_id": "sha256:" + "e" * 64},
+                    },
+                },
             },
         )
     return {
@@ -167,6 +177,7 @@ def _env_text(
             "LOOM_WORKER_MINIO_ENDPOINT=http://sandbox-link:9000",
             f"LOOM_WORKER_SANDBOX_IDENTITY={sandbox}",
             f"LOOM_WORKER_CANDIDATE_SHA={sha}",
+            "LOOM_WORKER_IMAGE_ID=sha256:" + ("d" if domain == "oldlab" else "e") * 64,
             f"LOOM_SANDBOX_LINK_CP_UPSTREAM=https://192.168.50.14:{control_plane_port}",
             f"LOOM_SANDBOX_LINK_CP_EXPECTED_PORT={control_plane_port}",
             f"LOOM_SANDBOX_LINK_GATEWAY_UPSTREAM=https://192.168.50.14:{gateway_port}",
@@ -276,6 +287,10 @@ def _append_dynamic_environment(snapshot: dict[str, object]) -> dict[str, object
             "principal_id": environment["principal_id"],
             "candidate_sha": "4" * 40,
             "candidate_tree": "5" * 40,
+            "image_digests": {
+                "amd64": "sha256:" + "4" * 64,
+                "arm64": "sha256:" + "5" * 64,
+            },
         },
     )
     snapshot["deployments"].append(
@@ -289,6 +304,12 @@ def _append_dynamic_environment(snapshot: dict[str, object]) -> dict[str, object
             "applied_registry_generation": 8,
             "applied_registry_payload_sha256": "e" * 64,
             "phase": "committed",
+            "worker_runtime_bindings": {
+                "domains": {
+                    "oldlab": {"runtime_image_id": "sha256:" + "4" * 64},
+                    "gb10": {"runtime_image_id": "sha256:" + "5" * 64},
+                },
+            },
         },
     )
     return environment
@@ -348,6 +369,28 @@ def test_first_committed_registry_generation_is_an_active_runtime_member(
                 "amd64": "sha256:" + "7" * 64,
                 "arm64": "sha256:" + "8" * 64,
             },
+            "image_archives": {
+                "amd64": {
+                    "sha256": "9" * 64,
+                    "size": 2048,
+                    "config_digest": "sha256:" + "7" * 64,
+                    "index_digest": "sha256:" + "b" * 64,
+                    "manifest_digest": "sha256:" + "c" * 64,
+                    "manifest_media_type": "application/vnd.oci.image.manifest.v1+json",
+                    "load_descriptor_digest": "sha256:" + "b" * 64,
+                    "load_descriptor_media_type": "application/vnd.oci.image.index.v1+json",
+                },
+                "arm64": {
+                    "sha256": "a" * 64,
+                    "size": 4096,
+                    "config_digest": "sha256:" + "8" * 64,
+                    "index_digest": "sha256:" + "d" * 64,
+                    "manifest_digest": "sha256:" + "e" * 64,
+                    "manifest_media_type": "application/vnd.oci.image.manifest.v1+json",
+                    "load_descriptor_digest": "sha256:" + "e" * 64,
+                    "load_descriptor_media_type": ("application/vnd.oci.image.manifest.v1+json"),
+                },
+            },
         }
     )
     deployment = registry.begin_deployment(
@@ -360,6 +403,47 @@ def test_first_committed_registry_generation_is_an_active_runtime_member(
             "candidate_id": candidate.candidate_id,
             "expected_resource_generation": environment.resource_generation,
         }
+    )
+    nodes: dict[str, dict[str, object]] = {}
+    domains: dict[str, dict[str, object]] = {}
+    for domain, architecture in environment_registry.WORKER_RUNTIME_BINDING_DOMAINS.items():
+        archive_binding = candidate.image_archives[architecture]
+        backend = "containerd-snapshotter-v1" if domain == "oldlab" else "classic-overlay2"
+        driver = environment_registry.WORKER_RUNTIME_BACKENDS[backend]
+        runtime_image_id = (
+            archive_binding["load_descriptor_digest"]
+            if domain == "oldlab"
+            else archive_binding["config_digest"]
+        )
+        domain_binding = {
+            "architecture": architecture,
+            "docker_driver": driver,
+            "docker_backend": backend,
+            "config_digest": archive_binding["config_digest"],
+            "load_descriptor_digest": archive_binding["load_descriptor_digest"],
+            "load_descriptor_media_type": archive_binding["load_descriptor_media_type"],
+            "runtime_image_id": runtime_image_id,
+        }
+        domains[domain] = domain_binding
+        for node in environment_registry.FLEET_NODES:
+            if ("oldlab" if node.startswith("oldlab-") else "gb10") != domain:
+                continue
+            nodes[node] = {
+                "domain": domain,
+                **domain_binding,
+                "docker_descriptor_digest": (
+                    archive_binding["load_descriptor_digest"] if domain == "oldlab" else None
+                ),
+                "docker_descriptor_media_type": (
+                    archive_binding["load_descriptor_media_type"] if domain == "oldlab" else None
+                ),
+                "receipt_sha256": hashlib.sha256(node.encode("ascii")).hexdigest(),
+            }
+    registry.record_worker_runtime_bindings(
+        deployment.deployment_id,
+        principal_id=environment.principal_id,
+        expected_resource_generation=environment.resource_generation,
+        bindings={"nodes": nodes, "domains": domains},
     )
     for expected, following in zip(
         environment_registry.DEPLOY_PHASES[:-1],
@@ -983,7 +1067,7 @@ def test_env_references_reject_cross_domain_pool_binding(tmp_path: Path) -> None
     seed.write_text(_env_text("qianyi", sha, domain="oldlab"), encoding="utf-8")
     config = runtime.load_config(_CONFIG)
 
-    with pytest.raises(runtime.ConvergenceError, match="LOOM_WORKER_POOL_NAME"):
+    with pytest.raises(runtime.ConvergenceError, match="LOOM_WORKER_IMAGE_ID"):
         runtime._parse_env_references(
             seed,
             config=config,

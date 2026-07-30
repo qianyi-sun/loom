@@ -6,6 +6,7 @@ import json
 import os
 import stat
 import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -51,6 +52,7 @@ def _registry_bound_envelope(snapshot: dict[str, object]) -> bytes:
         "env_id": "denv-" + "1" * 32,
         "resource_generation": 1,
         "candidate_id": "cand-" + "a" * 40,
+        "worker_image_id": "sha256:" + "d" * 64,
         "registry_generation": snapshot["generation"],
         "registry_payload_sha256": snapshot["payload_sha256"],
         "payload_kind": "none",
@@ -232,7 +234,16 @@ def test_checked_in_route_is_closed_and_includes_infrastructure_only_node() -> N
 
     assert len(config.nodes) == 20
     assert config.nodes["trt-gb10-7"].hostname == "gx10-0faf"
-    assert config.roles["oldlab2-controller"].verbs == {"transact", "check"}
+    assert config.roles["oldlab2-controller"].verbs == {
+        "transact",
+        "check",
+        "load-image",
+    }
+    assert all(
+        "load-image" not in role.verbs
+        for name, role in config.roles.items()
+        if name != "oldlab2-controller"
+    )
     assert "trt-gb10-7" in config.roles["oldlab2-controller"].targets
     assert config.roles["oldlab1-publisher"].verbs == {"transact", "check"}
     assert set(config.roles["oldlab1-publisher"].targets) == {
@@ -683,6 +694,43 @@ def test_registry_bound_invoke_syncs_exact_snapshot_before_original_request(
     store = registry.DeveloperEnvironmentRegistry(tmp_path / "registry" / "registry.sqlite3")
     snapshot = json.loads(store.snapshot_bytes())
     snapshot["generation"] = 1
+    env_id = "denv-" + "1" * 32
+    candidate_id = "cand-" + "a" * 40
+    snapshot["environments"] = [
+        {
+            "env_id": env_id,
+            "runtime_id": "future-developer",
+            "resource_generation": 1,
+            "state": "active",
+        },
+    ]
+    snapshot["candidates"] = [
+        {
+            "candidate_id": candidate_id,
+            "env_id": env_id,
+            "candidate_sha": "a" * 40,
+            "candidate_tree": "b" * 40,
+            "image_digests": {
+                "amd64": "sha256:" + "d" * 64,
+                "arm64": "sha256:" + "e" * 64,
+            },
+        },
+    ]
+    snapshot["deployments"] = [
+        {
+            "deployment_id": "deploy-" + "2" * 40,
+            "env_id": env_id,
+            "candidate_id": candidate_id,
+            "phase": "committed",
+            "applied_resource_generation": 1,
+            "worker_runtime_bindings": {
+                "domains": {
+                    "oldlab": {"runtime_image_id": "sha256:" + "d" * 64},
+                    "gb10": {"runtime_image_id": "sha256:" + "e" * 64},
+                },
+            },
+        },
+    ]
     unsigned_snapshot = {key: value for key, value in snapshot.items() if key != "payload_sha256"}
     snapshot["payload_sha256"] = registry._digest(unsigned_snapshot)
     snapshot_raw = registry._canonical(snapshot)
@@ -725,6 +773,7 @@ def test_registry_bound_invoke_syncs_exact_snapshot_before_original_request(
         "_safe_external_file",
         lambda *_args, **_kwargs: snapshot_raw,
     )
+    monkeypatch.setattr(transport, "_verified_registry_snapshot", lambda _raw: snapshot)
 
     completed = transport.invoke(
         "oldlab-2",
@@ -754,6 +803,17 @@ def test_registry_bound_invoke_rejects_stale_central_snapshot_before_remote_call
     store = registry.DeveloperEnvironmentRegistry(tmp_path / "registry" / "registry.sqlite3")
     snapshot = json.loads(store.snapshot_bytes())
     snapshot["generation"] = 1
+    snapshot["candidates"] = [
+        {
+            "candidate_id": "cand-" + "a" * 40,
+            "candidate_sha": "a" * 40,
+            "candidate_tree": "b" * 40,
+            "image_digests": {
+                "amd64": "sha256:" + "d" * 64,
+                "arm64": "sha256:" + "e" * 64,
+            },
+        },
+    ]
     unsigned_snapshot = {key: value for key, value in snapshot.items() if key != "payload_sha256"}
     snapshot["payload_sha256"] = registry._digest(unsigned_snapshot)
     snapshot_raw = registry._canonical(snapshot)
@@ -775,6 +835,7 @@ def test_registry_bound_invoke_rejects_stale_central_snapshot_before_remote_call
         "_safe_external_file",
         lambda *_args, **_kwargs: snapshot_raw,
     )
+    monkeypatch.setattr(transport, "_verified_registry_snapshot", lambda _raw: snapshot)
 
     with pytest.raises(transport.TransportError, match="stale before snapshot sync"):
         transport.invoke(
@@ -1607,3 +1668,221 @@ def test_program_source_contains_no_key_generation_or_accept_new() -> None:
     assert "trt-gb10-7" in transport.CHECKED_IN_CONFIG.read_text(encoding="utf-8")
     assert stat.S_IMODE(Path(transport.__file__).stat().st_mode) == 0o755
     assert Path(transport.__file__).read_bytes().startswith(b"#!/usr/bin/python3 -I\n")
+
+
+def test_transport_binds_domain_selected_worker_config_id_to_registry() -> None:
+    env_id = "denv-" + "f" * 32
+    outer = {
+        "action": "host-converge",
+        "domain": "gb10",
+        "candidate_id": "cand-" + "a" * 40,
+        "candidate_sha": "b" * 40,
+        "candidate_tree": "c" * 40,
+        "worker_image_id": "sha256:" + "e" * 64,
+        "payload_base64": "",
+    }
+    snapshot = {
+        "environments": [
+            {
+                "env_id": env_id,
+                "runtime_id": "dev-arbitrary",
+                "resource_generation": 3,
+                "state": "active",
+            },
+        ],
+        "candidates": [
+            {
+                "candidate_id": outer["candidate_id"],
+                "env_id": env_id,
+                "candidate_sha": outer["candidate_sha"],
+                "candidate_tree": outer["candidate_tree"],
+                "image_digests": {
+                    "amd64": "sha256:" + "d" * 64,
+                    "arm64": "sha256:" + "e" * 64,
+                },
+            },
+        ],
+        "deployments": [
+            {
+                "deployment_id": "deploy-" + "1" * 40,
+                "env_id": env_id,
+                "candidate_id": outer["candidate_id"],
+                "phase": "committed",
+                "applied_resource_generation": 3,
+                "worker_runtime_bindings": {
+                    "domains": {
+                        "oldlab": {"runtime_image_id": "sha256:" + "d" * 64},
+                        "gb10": {"runtime_image_id": "sha256:" + "e" * 64},
+                    },
+                },
+            },
+        ],
+    }
+
+    transport._validate_worker_image_binding(outer, snapshot)
+    outer["worker_image_id"] = snapshot["candidates"][0]["image_digests"]["amd64"]
+    with pytest.raises(transport.TransportError, match="worker image binding"):
+        transport._validate_worker_image_binding(outer, snapshot)
+    del outer["worker_image_id"]
+    with pytest.raises(transport.TransportError, match="worker image binding"):
+        transport._validate_worker_image_binding(outer, snapshot)
+
+
+def test_worker_image_load_metadata_is_exact_archive_and_registry_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "loom-worker-linux-amd64.tar"
+    archive.write_bytes(b"verified-archive")
+    candidate_sha = "a" * 40
+    candidate_tree = "b" * 40
+    image_id = "sha256:" + "c" * 64
+    index_digest = "sha256:" + "4" * 64
+    manifest_digest = "sha256:" + "5" * 64
+    load_descriptor_media_type = "application/vnd.oci.image.index.v1+json"
+    env_id = "denv-" + "d" * 32
+    candidate_id = "cand-" + "e" * 40
+    snapshot = {
+        "generation": 7,
+        "payload_sha256": "f" * 64,
+        "environments": [{"env_id": env_id, "resource_generation": 3}],
+        "candidates": [
+            {
+                "candidate_id": candidate_id,
+                "env_id": env_id,
+                "candidate_sha": candidate_sha,
+                "candidate_tree": candidate_tree,
+                "image_digests": {
+                    "amd64": image_id,
+                    "arm64": "sha256:" + "1" * 64,
+                },
+                "image_archives": {
+                    "amd64": {
+                        "path": str(archive),
+                        "sha256": "2" * 64,
+                        "size": archive.stat().st_size,
+                        "config_digest": image_id,
+                        "index_digest": index_digest,
+                        "manifest_digest": manifest_digest,
+                        "manifest_media_type": "application/vnd.oci.image.manifest.v1+json",
+                        "load_descriptor_digest": index_digest,
+                        "load_descriptor_media_type": load_descriptor_media_type,
+                    },
+                    "arm64": {
+                        "path": str(tmp_path / "arm64.tar"),
+                        "sha256": "3" * 64,
+                        "size": 1,
+                        "config_digest": "sha256:" + "1" * 64,
+                        "index_digest": "sha256:" + "6" * 64,
+                        "manifest_digest": "sha256:" + "7" * 64,
+                        "manifest_media_type": "application/vnd.oci.image.manifest.v1+json",
+                        "load_descriptor_digest": "sha256:" + "7" * 64,
+                        "load_descriptor_media_type": (
+                            "application/vnd.oci.image.manifest.v1+json"
+                        ),
+                    },
+                },
+            },
+        ],
+    }
+    verifier_calls: list[tuple[Path, dict[str, object]]] = []
+    monkeypatch.setattr(
+        transport,
+        "_registry_module",
+        lambda: SimpleNamespace(
+            MAX_WORKER_IMAGE_ARCHIVE_BYTES=1024,
+            verify_worker_image_archive=lambda path, **kwargs: (
+                verifier_calls.append((path, kwargs))
+                or {
+                    "config_digest": image_id,
+                    "index_digest": index_digest,
+                    "load_descriptor_digest": index_digest,
+                    "load_descriptor_media_type": load_descriptor_media_type,
+                }
+            ),
+        ),
+    )
+    unsigned = {
+        "schema_version": 1,
+        "kind": transport.WORKER_IMAGE_LOAD_REQUEST_KIND,
+        "node": "oldlab-3",
+        "domain": "oldlab",
+        "architecture": "amd64",
+        "env_id": env_id,
+        "resource_generation": 3,
+        "candidate_id": candidate_id,
+        "candidate_sha": candidate_sha,
+        "candidate_tree": candidate_tree,
+        "config_digest": image_id,
+        "index_digest": index_digest,
+        "load_descriptor_digest": index_digest,
+        "load_descriptor_media_type": load_descriptor_media_type,
+        "archive_sha256": "2" * 64,
+        "archive_size": archive.stat().st_size,
+        "registry_generation": 7,
+        "registry_payload_sha256": "f" * 64,
+    }
+    request = {
+        **unsigned,
+        "payload_sha256": hashlib.sha256(transport._canonical_json(unsigned)).hexdigest(),
+    }
+    metadata_json = transport._canonical_json(request).decode("ascii").strip()
+
+    assert (
+        transport._worker_image_request(
+            metadata_json,
+            node="oldlab-3",
+            archive=archive,
+            snapshot=snapshot,
+        )
+        == request
+    )
+    assert verifier_calls[0][0] == archive
+
+    request["archive_sha256"] = "4" * 64
+    with pytest.raises(transport.TransportError, match="metadata binding"):
+        transport._worker_image_request(
+            transport._canonical_json(request).decode("ascii").strip(),
+            node="oldlab-3",
+            archive=archive,
+            snapshot=snapshot,
+        )
+
+
+def test_load_image_verb_is_not_available_to_publishers() -> None:
+    config = transport.load_config()
+
+    with pytest.raises(transport.TransportError, match="closed authority"):
+        config.authority_role("oldlab-1", "oldlab-2", "load-image")
+    with pytest.raises(transport.TransportError, match="closed authority"):
+        config.authority_role("trt-gb10-1", "trt-gb10-2", "load-image")
+
+
+def test_worker_image_stream_kills_child_when_stdout_exceeds_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "archive.tar"
+    archive.write_bytes(b"archive")
+    descriptor = os.open(archive, os.O_RDONLY)
+    monkeypatch.setattr(transport, "MAX_STDOUT_BYTES", 32)
+    monkeypatch.setattr(transport, "MAX_STDERR_BYTES", 32)
+    try:
+        with pytest.raises(transport.TransportError, match="failed safely"):
+            transport._stream_worker_image(
+                (
+                    sys.executable,
+                    "-c",
+                    (
+                        "import sys;"
+                        "sys.stdin.buffer.read();"
+                        "sys.stdout.buffer.write(b'x'*4096);"
+                        "sys.stdout.buffer.flush()"
+                    ),
+                ),
+                header=b"{}\n",
+                archive_descriptor=descriptor,
+                archive_size=archive.stat().st_size,
+            )
+    finally:
+        os.close(descriptor)

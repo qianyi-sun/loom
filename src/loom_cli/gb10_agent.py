@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -35,6 +36,9 @@ from loom_cli.secret_source import (
 )
 
 AGENT_VERSION = "gb10-agent-v1"
+_WORKER_IMAGE_ID_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_CANDIDATE_SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
+_WORKER_CMD = ["python", "-m", "loom_worker"]
 _SECRET_KEY_PARTS = (
     "TOKEN",
     "SECRET",
@@ -544,14 +548,105 @@ def _run(argv: list[str], *, dry_run: bool) -> None:
     subprocess.run(argv, check=True)
 
 
-def _pull_or_build(compose_base: list[str], service: str, *, dry_run: bool) -> None:
-    try:
-        _run([*compose_base, "pull", service], dry_run=dry_run)
-    except subprocess.CalledProcessError:
-        sys.stderr.write(
-            "warning: docker compose pull failed; building worker image locally\n",
+def _worker_image_binding(
+    env_file: Path,
+    desired: DesiredState,
+) -> tuple[str, str]:
+    values = dotenv_values(env_file)
+    image_id = str(
+        desired.env.get("LOOM_WORKER_IMAGE_ID") or values.get("LOOM_WORKER_IMAGE_ID") or ""
+    )
+    candidate_sha = str(
+        desired.source_git_commit
+        or desired.env.get("LOOM_WORKER_CANDIDATE_SHA")
+        or values.get("LOOM_WORKER_CANDIDATE_SHA")
+        or ""
+    )
+    if (
+        _WORKER_IMAGE_ID_RE.fullmatch(image_id) is None
+        or _CANDIDATE_SHA_RE.fullmatch(candidate_sha) is None
+    ):
+        raise RuntimeError(
+            "exact worker image config ID and candidate SHA are required",
         )
-        _run([*compose_base, "build", service], dry_run=dry_run)
+    return image_id, candidate_sha
+
+
+def _inspect_exact_worker_image(image_id: str, candidate_sha: str) -> None:
+    try:
+        driver = subprocess.run(
+            ["docker", "info", "--format", "{{.Driver}}"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if driver.returncode != 0 or driver.stderr or driver.stdout.strip() != "overlay2":
+            raise RuntimeError(
+                "exact worker image requires the classic overlay2 Docker store",
+            )
+        result = subprocess.run(
+            ["docker", "image", "inspect", image_id],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("exact worker image inspection failed") from exc
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("exact worker image inspection failed") from exc
+    row = payload[0] if isinstance(payload, list) and len(payload) == 1 else None
+    config = row.get("Config") if isinstance(row, dict) else None
+    labels = config.get("Labels") if isinstance(config, dict) else None
+    if (
+        result.returncode != 0
+        or result.stderr
+        or not isinstance(row, dict)
+        or row.get("Id") != image_id
+        or row.get("Os") != "linux"
+        or row.get("Architecture") != "arm64"
+        or not isinstance(config, dict)
+        or config.get("Cmd") != _WORKER_CMD
+        or config.get("Entrypoint") not in (None, [])
+        or not isinstance(labels, dict)
+        or labels.get("org.opencontainers.image.revision") != candidate_sha
+    ):
+        raise RuntimeError("exact worker image contract drifted")
+
+
+def _verify_compose_worker_image(
+    compose_base: list[str],
+    service: str,
+    image_id: str,
+) -> None:
+    try:
+        ids = subprocess.run(
+            [*compose_base, "ps", "-q", service],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("worker container identity is unavailable") from exc
+    container_ids = [line for line in ids.stdout.splitlines() if line]
+    if ids.returncode != 0 or ids.stderr or len(container_ids) != 1:
+        raise RuntimeError("worker container identity is unavailable")
+    try:
+        inspected = subprocess.run(
+            ["docker", "inspect", "--format", "{{.Image}}", container_ids[0]],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("worker container image config ID drifted") from exc
+    if inspected.returncode != 0 or inspected.stderr or inspected.stdout.strip() != image_id:
+        raise RuntimeError("worker container image config ID drifted")
 
 
 def _compose_base(args: argparse.Namespace, env_file: Path) -> list[str]:
@@ -811,16 +906,24 @@ def _apply(args: argparse.Namespace) -> int:
             elif desired_intent == "draining":
                 last_apply_result = "new claims fenced; waiting for in-flight trials to drain"
             else:
+                image_id, candidate_sha = _worker_image_binding(args.env_file, desired)
+                if not args.dry_run:
+                    _inspect_exact_worker_image(image_id, candidate_sha)
                 observation = _compose_service_observation(
                     compose_base,
                     args.service,
-                    target_image_tag=desired.image_tag,
                 )
-                if not observation.target_image_reusable:
-                    _pull_or_build(compose_base, args.service, dry_run=args.dry_run)
-                _run([*compose_base, "up", "-d", args.service], dry_run=args.dry_run)
+                _run(
+                    [*compose_base, "up", "-d", "--no-build", args.service],
+                    dry_run=args.dry_run,
+                )
                 if not args.dry_run:
                     _wait_for_compose_service_running(compose_base, args.service)
+                    _verify_compose_worker_image(
+                        compose_base,
+                        args.service,
+                        image_id,
+                    )
                 if observation.running:
                     last_apply_result = "docker compose worker reconciled"
                 else:
@@ -840,9 +943,7 @@ def _apply(args: argparse.Namespace) -> int:
             desired=desired,
             local=local,
             apply_state=(
-                desired_intent
-                if desired_intent in {"draining", "stopped"}
-                else "applied"
+                desired_intent if desired_intent in {"draining", "stopped"} else "applied"
             ),
             last_apply_result=last_apply_result,
         )
@@ -869,13 +970,9 @@ def _apply(args: argparse.Namespace) -> int:
         compose_base = _compose_base(args, compose_env_file)
         desired_intent = str(plan.desired.get("capacity_intent") or "active")
         if desired_intent == "active":
-            observation = _compose_service_observation(
-                compose_base,
-                args.service,
-                target_image_tag=desired.image_tag,
-            )
-            if not observation.target_image_reusable:
-                _pull_or_build(compose_base, args.service, dry_run=args.dry_run)
+            image_id, candidate_sha = _worker_image_binding(compose_env_file, desired)
+            if not args.dry_run:
+                _inspect_exact_worker_image(image_id, candidate_sha)
         if desired_intent != "draining":
             _run(
                 [
@@ -890,9 +987,17 @@ def _apply(args: argparse.Namespace) -> int:
         if desired_intent == "stopped" and not args.dry_run:
             _wait_for_compose_service_stopped(compose_base, args.service)
         if desired_intent == "active":
-            _run([*compose_base, "up", "-d", args.service], dry_run=args.dry_run)
+            _run(
+                [*compose_base, "up", "-d", "--no-build", args.service],
+                dry_run=args.dry_run,
+            )
             if not args.dry_run:
                 _wait_for_compose_service_running(compose_base, args.service)
+                _verify_compose_worker_image(
+                    compose_base,
+                    args.service,
+                    image_id,
+                )
         if not args.dry_run:
             args.env_file.write_text(rendered, encoding="utf-8")
     except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:

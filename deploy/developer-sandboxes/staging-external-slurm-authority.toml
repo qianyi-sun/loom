@@ -63,6 +63,7 @@ allowed_nodes = [
   "trt-gb10-14",
   "trt-gb10-15",
 ]
+excluded_nodes = []
 
 [installation]
 source_root = "/opt/loom-developer-sandbox-node-authority/source"

@@ -19,6 +19,68 @@ CONFIG = REPO_ROOT / "deploy/developer-sandboxes/platform-health-authority.toml"
 SESSION = "1" * 32
 
 
+def _archive_binding(
+    *,
+    config_digest: str,
+    archive_digest: str,
+    index_digest: str,
+    manifest_digest: str,
+    size: int,
+) -> dict[str, Any]:
+    media_type = "application/vnd.oci.image.manifest.v1+json"
+    return {
+        "sha256": archive_digest,
+        "size": size,
+        "config_digest": config_digest,
+        "index_digest": index_digest,
+        "manifest_digest": manifest_digest,
+        "manifest_media_type": media_type,
+        "load_descriptor_digest": manifest_digest,
+        "load_descriptor_media_type": media_type,
+    }
+
+
+def _runtime_bindings(candidate: registry.CandidateRecord) -> dict[str, Any]:
+    nodes: dict[str, dict[str, Any]] = {}
+    domains: dict[str, dict[str, Any]] = {}
+    for domain, architecture in registry.WORKER_RUNTIME_BINDING_DOMAINS.items():
+        archive = candidate.image_archives[architecture]
+        backend = "containerd-snapshotter-v1" if domain == "oldlab" else "classic-overlay2"
+        binding = {
+            "architecture": architecture,
+            "docker_driver": registry.WORKER_RUNTIME_BACKENDS[backend],
+            "docker_backend": backend,
+            "config_digest": archive["config_digest"],
+            "load_descriptor_digest": archive["load_descriptor_digest"],
+            "load_descriptor_media_type": archive["load_descriptor_media_type"],
+            "runtime_image_id": (
+                archive["load_descriptor_digest"]
+                if backend == "containerd-snapshotter-v1"
+                else archive["config_digest"]
+            ),
+        }
+        domains[domain] = binding
+        for node in registry.FLEET_NODES:
+            node_domain = "oldlab" if node.startswith("oldlab-") else "gb10"
+            if node_domain == domain:
+                nodes[node] = {
+                    "domain": domain,
+                    **binding,
+                    "docker_descriptor_digest": (
+                        archive["load_descriptor_digest"]
+                        if backend == "containerd-snapshotter-v1"
+                        else None
+                    ),
+                    "docker_descriptor_media_type": (
+                        archive["load_descriptor_media_type"]
+                        if backend == "containerd-snapshotter-v1"
+                        else None
+                    ),
+                    "receipt_sha256": hashlib.sha256(node.encode("ascii")).hexdigest(),
+                }
+    return {"nodes": nodes, "domains": domains}
+
+
 def _register(principal: str, index: int) -> dict[str, Any]:
     return {
         "schema_version": 1,
@@ -36,6 +98,8 @@ def _candidate(
     sha: str | None = None,
 ) -> dict[str, Any]:
     digit = format(index + 1, "x")
+    amd64_config = "sha256:" + format(index + 1, "x") * 64
+    arm64_config = "sha256:" + format(index + 5, "x") * 64
     return {
         "schema_version": 1,
         "kind": registry.CANDIDATE_KIND,
@@ -47,8 +111,24 @@ def _candidate(
         "bundle_sha256": format(index + 9, "x") * 64,
         "bundle_size": 1024 + index,
         "image_digests": {
-            "amd64": "sha256:" + format(index + 1, "x") * 64,
-            "arm64": "sha256:" + format(index + 5, "x") * 64,
+            "amd64": amd64_config,
+            "arm64": arm64_config,
+        },
+        "image_archives": {
+            "amd64": _archive_binding(
+                config_digest=amd64_config,
+                archive_digest=format(index + 10, "x")[-1] * 64,
+                index_digest="sha256:" + format(index + 11, "x")[-1] * 64,
+                manifest_digest="sha256:" + format(index + 12, "x")[-1] * 64,
+                size=2048,
+            ),
+            "arm64": _archive_binding(
+                config_digest=arm64_config,
+                archive_digest=format(index + 13, "x")[-1] * 64,
+                index_digest="sha256:" + format(index + 14, "x")[-1] * 64,
+                manifest_digest="sha256:" + format(index + 15, "x")[-1] * 64,
+                size=4096,
+            ),
         },
     }
 
@@ -72,6 +152,12 @@ def _active_source(tmp_path: Path, count: int = 4) -> dict[str, Any]:
                 "candidate_id": candidate.candidate_id,
                 "expected_resource_generation": 1,
             },
+        )
+        deployment = store.record_worker_runtime_bindings(
+            deployment.deployment_id,
+            principal_id=environment.principal_id,
+            expected_resource_generation=1,
+            bindings=_runtime_bindings(candidate),
         )
         for expected, following in zip(
             registry.DEPLOY_PHASES[:-1],

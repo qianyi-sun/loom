@@ -75,6 +75,7 @@ REQUEST_FIELDS: Final = {
         "bundle_sha256",
         "bundle_size",
         "image_digests",
+        "image_archives",
     },
     STATUS_KIND: {"schema_version", "kind", "env_id"},
     SNAPSHOT_KIND: {"schema_version", "kind"},
@@ -96,6 +97,7 @@ REQUEST_FIELDS: Final = {
         "bundle_sha256",
         "bundle_size",
         "image_digests",
+        "image_archives",
     },
     UPDATE_KIND: {
         "schema_version",
@@ -106,6 +108,7 @@ REQUEST_FIELDS: Final = {
         "bundle_sha256",
         "bundle_size",
         "image_digests",
+        "image_archives",
     },
     CHECK_KIND: {"schema_version", "kind"},
     ROLLBACK_KIND: {"schema_version", "kind", "idempotency_key"},
@@ -263,7 +266,7 @@ def _receive_request(
             received.frombytes(data)
             descriptors.extend(received.tolist())
         request = _decode_request(raw)
-        expected_count = 1 if request["kind"] in {IMPORT_KIND, CREATE_KIND, UPDATE_KIND} else 0
+        expected_count = 3 if request["kind"] in {IMPORT_KIND, CREATE_KIND, UPDATE_KIND} else 0
         if len(descriptors) != expected_count:
             raise AuthorityError("request descriptor count is invalid")
         return request, descriptors
@@ -624,6 +627,131 @@ def _persist_verified_bundle(
     return _validate_persisted_bundle(candidate, candidate_root)
 
 
+def _validate_persisted_image_archive(
+    candidate: Any,
+    candidate_root: Path,
+    architecture: str,
+) -> Path:
+    try:
+        binding = candidate.image_archives[architecture]
+        path = registry.worker_image_archive_path(
+            candidate_root,
+            candidate.candidate_id,
+            architecture,
+        )
+        if Path(binding["path"]) != path:
+            raise AuthorityError("candidate image archive path is invalid")
+        verified = registry.verify_worker_image_archive(
+            path,
+            architecture=architecture,
+            candidate_sha=candidate.candidate_sha,
+            image_id=candidate.image_digests[architecture],
+            expected_archive_sha256=binding["sha256"],
+            expected_archive_size=binding["size"],
+        )
+        if any(
+            verified[field] != binding[field]
+            for field in (
+                "config_digest",
+                "index_digest",
+                "manifest_digest",
+                "manifest_media_type",
+                "load_descriptor_digest",
+                "load_descriptor_media_type",
+            )
+        ):
+            raise AuthorityError("candidate image archive descriptor binding is invalid")
+        metadata = path.lstat()
+    except AuthorityError:
+        raise
+    except (KeyError, OSError, registry.RegistryError) as exc:
+        raise AuthorityError("candidate image archive is invalid") from exc
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or metadata.st_nlink != 1
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        raise AuthorityError("candidate image archive metadata is unsafe")
+    return path
+
+
+def _persist_verified_image_archive(
+    staged_archive: Path,
+    candidate: Any,
+    candidate_root: Path,
+    architecture: str,
+) -> Path:
+    binding = candidate.image_archives[architecture]
+    target = registry.worker_image_archive_path(
+        candidate_root,
+        candidate.candidate_id,
+        architecture,
+    )
+    if target.exists():
+        return _validate_persisted_image_archive(candidate, candidate_root, architecture)
+    temporary: Path | None = None
+    source = -1
+    output = -1
+    try:
+        directory = target.parent.lstat()
+        if (
+            not stat.S_ISDIR(directory.st_mode)
+            or stat.S_ISLNK(directory.st_mode)
+            or directory.st_uid != os.geteuid()
+            or stat.S_IMODE(directory.st_mode) != 0o700
+        ):
+            raise AuthorityError("candidate storage directory is unsafe")
+        output, temporary_name = tempfile.mkstemp(
+            prefix=f".image-{architecture}-",
+            suffix=".tmp",
+            dir=target.parent,
+        )
+        temporary = Path(temporary_name)
+        os.fchmod(output, 0o600)
+        source = os.open(
+            staged_archive,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        remaining = int(binding["size"])
+        while remaining:
+            chunk = os.read(source, min(1024 * 1024, remaining))
+            if not chunk:
+                raise AuthorityError("candidate image archive persistence failed")
+            view = memoryview(chunk)
+            while view:
+                written = os.write(output, view)
+                if written < 1:
+                    raise AuthorityError("candidate image archive persistence failed")
+                view = view[written:]
+            remaining -= len(chunk)
+        if os.read(source, 1):
+            raise AuthorityError("candidate image archive persistence failed")
+        os.fsync(output)
+        os.close(output)
+        output = -1
+        os.close(source)
+        source = -1
+        try:
+            os.link(temporary, target)
+        except FileExistsError:
+            pass
+        _fsync_directory(target.parent)
+    except AuthorityError:
+        raise
+    except OSError as exc:
+        raise AuthorityError("candidate image archive persistence failed") from exc
+    finally:
+        if output >= 0:
+            os.close(output)
+        if source >= 0:
+            os.close(source)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return _validate_persisted_image_archive(candidate, candidate_root, architecture)
+
+
 def _owned_environment(
     authority: Any,
     *,
@@ -893,7 +1021,7 @@ def _refresh_fleet_identity_inventory(
 
 def _import_for_environment(
     request: Mapping[str, Any],
-    descriptor: int,
+    descriptors: list[int],
     *,
     principal_id: str,
     peer_uid: int,
@@ -907,7 +1035,7 @@ def _import_for_environment(
     try:
         bundle = working_root / "candidate.bundle"
         _copy_bundle(
-            descriptor,
+            descriptors[0],
             bundle,
             peer_uid=peer_uid,
             declared_size=request["bundle_size"],
@@ -920,6 +1048,46 @@ def _import_for_environment(
             candidate_tree=request["candidate_tree"],
             working_root=working_root,
         )
+        archives: dict[str, Path] = {}
+        verified_bindings: dict[str, dict[str, Any]] = {}
+        for index, architecture in enumerate(("amd64", "arm64"), start=1):
+            binding = request["image_archives"][architecture]
+            archive = working_root / f"loom-worker-linux-{architecture}.tar"
+            _copy_bundle(
+                descriptors[index],
+                archive,
+                peer_uid=peer_uid,
+                declared_size=binding["size"],
+                declared_digest=binding["sha256"],
+                max_size=registry.MAX_WORKER_IMAGE_ARCHIVE_BYTES,
+            )
+            try:
+                verified = registry.verify_worker_image_archive(
+                    archive,
+                    architecture=architecture,
+                    candidate_sha=request["candidate_sha"],
+                    image_id=request["image_digests"][architecture],
+                    expected_archive_sha256=binding["sha256"],
+                    expected_archive_size=binding["size"],
+                )
+            except registry.RegistryError as exc:
+                raise AuthorityError("worker image archive verification failed") from exc
+            archives[architecture] = archive
+            verified_bindings[architecture] = {
+                "sha256": binding["sha256"],
+                "size": binding["size"],
+                **{
+                    field: verified[field]
+                    for field in (
+                        "config_digest",
+                        "index_digest",
+                        "manifest_digest",
+                        "manifest_media_type",
+                        "load_descriptor_digest",
+                        "load_descriptor_media_type",
+                    )
+                },
+            }
         record = authority.import_candidate(
             {
                 "schema_version": request["schema_version"],
@@ -934,6 +1102,7 @@ def _import_for_environment(
                 "bundle_sha256": request["bundle_sha256"],
                 "bundle_size": request["bundle_size"],
                 "image_digests": request["image_digests"],
+                "image_archives": verified_bindings,
             }
         )
         _persist_verified_bundle(
@@ -941,6 +1110,13 @@ def _import_for_environment(
             record,
             Path(authority.candidate_root),
         )
+        for architecture, archive in archives.items():
+            _persist_verified_image_archive(
+                archive,
+                record,
+                Path(authority.candidate_root),
+                architecture,
+            )
         return record
     finally:
         shutil.rmtree(working_root, ignore_errors=True)
@@ -948,7 +1124,7 @@ def _import_for_environment(
 
 def _preflight_revival_candidate(
     request: Mapping[str, Any],
-    descriptor: int,
+    descriptors: list[int],
     *,
     principal_id: str,
     peer_uid: int,
@@ -963,7 +1139,7 @@ def _preflight_revival_candidate(
     try:
         bundle = working_root / "candidate.bundle"
         _copy_bundle(
-            descriptor,
+            descriptors[0],
             bundle,
             peer_uid=peer_uid,
             declared_size=request["bundle_size"],
@@ -976,6 +1152,28 @@ def _preflight_revival_candidate(
             candidate_tree=request["candidate_tree"],
             working_root=working_root,
         )
+        for index, architecture in enumerate(("amd64", "arm64"), start=1):
+            binding = request["image_archives"][architecture]
+            archive = working_root / f"loom-worker-linux-{architecture}.tar"
+            _copy_bundle(
+                descriptors[index],
+                archive,
+                peer_uid=peer_uid,
+                declared_size=binding["size"],
+                declared_digest=binding["sha256"],
+                max_size=registry.MAX_WORKER_IMAGE_ARCHIVE_BYTES,
+            )
+            try:
+                registry.verify_worker_image_archive(
+                    archive,
+                    architecture=architecture,
+                    candidate_sha=request["candidate_sha"],
+                    image_id=request["image_digests"][architecture],
+                    expected_archive_sha256=binding["sha256"],
+                    expected_archive_size=binding["size"],
+                )
+            except registry.RegistryError as exc:
+                raise AuthorityError("worker image archive verification failed") from exc
         authority.validate_revival_candidate_content(
             environment.env_id,
             principal_id=principal_id,
@@ -1041,7 +1239,7 @@ def _dispatch(
         return asdict(
             _import_for_environment(
                 request,
-                descriptors[0],
+                descriptors,
                 principal_id=principal_id,
                 peer_uid=peer.uid,
                 environment=environment,
@@ -1065,6 +1263,12 @@ def _dispatch(
                 candidate,
                 Path(authority.candidate_root),
             )
+            for architecture in ("amd64", "arm64"):
+                _validate_persisted_image_archive(
+                    candidate,
+                    Path(authority.candidate_root),
+                    architecture,
+                )
             rebound = _reconcile_predeployment_ports(
                 authority,
                 environment,
@@ -1118,7 +1322,7 @@ def _dispatch(
             if retired:
                 _preflight_revival_candidate(
                     request,
-                    descriptors[0],
+                    descriptors,
                     principal_id=principal_id,
                     peer_uid=peer.uid,
                     environment=existing[0],
@@ -1156,7 +1360,7 @@ def _dispatch(
             environment = _principal_environment(authority, principal_id)
         candidate = _import_for_environment(
             request,
-            descriptors[0],
+            descriptors,
             principal_id=principal_id,
             peer_uid=peer.uid,
             environment=environment,

@@ -10,6 +10,7 @@ import tomllib
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -377,6 +378,7 @@ def test_checked_in_authority_config_is_fixed_to_staging_and_all_gb10_nodes() ->
     assert config.infrastructure_nodes == tuple(f"trt-gb10-{index}" for index in range(1, 16))
     assert len(config.allowed_nodes) == 15
     assert config.allowed_nodes == config.infrastructure_nodes
+    assert config.excluded_nodes == ()
     assert config.probe_action == "staging-allocation-probe"
 
 
@@ -439,6 +441,41 @@ def test_probe_transport_and_envelope_are_closed_to_exact_candidate() -> None:
     )
     assert parsed.action == "staging-allocation-probe"
     assert json.loads(parsed.payload_bytes) == inner
+
+
+def test_activate_summary_records_full_node_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_authority_config(CONFIG)
+    monkeypatch.setattr(authority, "_require_source_host", lambda _config: None)
+    monkeypatch.setattr(authority, "_sha256_file", lambda _path: "d" * 64)
+    monkeypatch.setattr(
+        authority,
+        "verify_authority",
+        lambda **_kwargs: SimpleNamespace(
+            payload={
+                "candidate_sha": SHA,
+                "candidate_tree": TREE,
+                "profile_sha256": "d" * 64,
+                "allowed_nodes": list(config.allowed_nodes),
+                "excluded_nodes": [],
+                "nodes": [{} for _node in config.allowed_nodes],
+                "expires_at": "2026-07-29T00:15:00Z",
+            },
+            artifact_sha256="e" * 64,
+            signature_sha256="f" * 64,
+            key_id="1" * 64,
+        ),
+    )
+
+    summary = authority.activate(
+        config,
+        candidate_sha=SHA,
+        candidate_tree=TREE,
+    )
+
+    assert summary["allowed_nodes"] == list(config.allowed_nodes)
+    assert summary["excluded_nodes"] == []
 
 
 def _infrastructure_transport_receipt(
@@ -954,6 +991,8 @@ def test_deploy_assets_install_only_fixed_authority_program() -> None:
     }
     raw_config = tomllib.loads(CONFIG.read_text(encoding="utf-8"))
     assert raw_config["infrastructure_nodes"] == [f"trt-gb10-{index}" for index in range(1, 16)]
+    assert raw_config["allowed_nodes"] == raw_config["infrastructure_nodes"]
+    assert raw_config["excluded_nodes"] == []
     assert raw_config["installation"] == {
         "source_root": "/opt/loom-developer-sandbox-node-authority/source",
         "candidate_runtime_template": (
@@ -1015,7 +1054,25 @@ def _publication_fixture(
     )
     source_env = env_root / f"staging-gb10-worker-{image_tag}.env"
     source_env.write_text(
-        f"LOOM_WORKER_CANDIDATE_SHA={sha}\n",
+        "\n".join(
+            (
+                f"IMAGE_TAG={image_tag}",
+                f"ENV_CONFIG_VERSION={image_tag}",
+                f"LOOM_IMAGE_TAG={image_tag}",
+                f"LOOM_WORKER_ENV_CONFIG_VERSION={image_tag}",
+                "LOOM_WORKER_IMAGE_ID=sha256:" + "d" * 64,
+                f"LOOM_WORKER_CANDIDATE_SHA={sha}",
+                "LOOM_WORKER_CONTROL_PLANE_URL=http://control.example:8080",
+                "LOOM_WORKER_GATEWAY_URL=http://control.example:9100",
+                "LOOM_WORKER_TOKEN=test-token",
+                "LOOM_WORKER_MINIO_ENDPOINT=http://control.example:9000",
+                "LOOM_WORKER_MINIO_ACCESS_KEY=test-access",
+                "LOOM_WORKER_MINIO_SECRET_KEY=test-secret",
+                "LOOM_WORKER_POOL_NAME=gb10",
+                "LOOM_WORKER_MAX_CONCURRENT=10",
+                "",
+            )
+        ),
         encoding="utf-8",
     )
     source_env.chmod(0o600)
@@ -1068,6 +1125,114 @@ def test_producer_tree_validation_is_read_only(tmp_path: Path) -> None:
     assert source_env.stat().st_mode & 0o777 == 0o600
 
 
+def test_staging_authority_repository_verifier_rejects_hidden_and_raw_drift(
+    tmp_path: Path,
+) -> None:
+    _config, sha, tree, _image_tag, repository, _source_env = _publication_fixture(tmp_path)
+    authority._verify_candidate_repo(
+        repository,
+        candidate_sha=sha,
+        candidate_tree=tree,
+    )
+    subprocess.run(
+        ["git", "-C", str(repository), "update-index", "--assume-unchanged", "worker.txt"],
+        check=True,
+    )
+    with pytest.raises(
+        authority.ExternalSlurmAcceptanceError,
+        match="assume-unchanged",
+    ):
+        authority._verify_candidate_repo(
+            repository,
+            candidate_sha=sha,
+            candidate_tree=tree,
+        )
+    subprocess.run(
+        ["git", "-C", str(repository), "update-index", "--no-assume-unchanged", "worker.txt"],
+        check=True,
+    )
+    (repository / "worker.txt").write_text("drifted\n", encoding="utf-8")
+    with pytest.raises(
+        authority.ExternalSlurmAcceptanceError,
+        match="raw tracked bytes",
+    ):
+        authority._verify_candidate_repo(
+            repository,
+            candidate_sha=sha,
+            candidate_tree=tree,
+        )
+
+
+def test_candidate_worker_env_requires_batch_owner_and_mode_0600(
+    tmp_path: Path,
+) -> None:
+    worker_env = tmp_path / "worker.env"
+    worker_env.write_text("secret-safe-fixture\n", encoding="utf-8")
+    worker_env.chmod(0o600)
+    authority._verify_private_leaf(
+        worker_env,
+        uid=os.getuid(),
+        gid=os.getgid(),
+        label="candidate worker env",
+        mode=0o600,
+    )
+
+    worker_env.chmod(0o440)
+    with pytest.raises(
+        authority.ExternalSlurmAcceptanceError,
+        match="0600",
+    ):
+        authority._verify_private_leaf(
+            worker_env,
+            uid=os.getuid(),
+            gid=os.getgid(),
+            label="candidate worker env",
+            mode=0o600,
+        )
+
+
+@pytest.mark.parametrize("mutation", ("rewrite", "append", "truncate"))
+def test_private_worker_env_read_rejects_in_place_mutation_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    worker_env = tmp_path / "worker.env"
+    original = b"A" * (128 * 1024)
+    worker_env.write_bytes(original)
+    worker_env.chmod(0o600)
+    real_read = os.read
+    read_count = 0
+
+    def racing_read(descriptor: int, size: int) -> bytes:
+        nonlocal read_count
+        chunk = real_read(descriptor, size)
+        read_count += 1
+        if read_count == 1:
+            if mutation == "rewrite":
+                worker_env.write_bytes(b"B" * len(original))
+            elif mutation == "append":
+                with worker_env.open("ab") as handle:
+                    handle.write(b"tail")
+            else:
+                worker_env.write_bytes(b"short")
+        return chunk
+
+    monkeypatch.setattr(authority.os, "read", racing_read)
+
+    with pytest.raises(
+        authority.ExternalSlurmAcceptanceError,
+        match="changed while it was read",
+    ):
+        authority._read_stable_private_leaf(
+            worker_env,
+            uid=os.getuid(),
+            gid=os.getgid(),
+            label="private producer worker env",
+            maximum=1024 * 1024,
+        )
+
+
 def test_generation_publication_orders_immutable_files_high_water_then_current(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1100,6 +1265,8 @@ def test_generation_publication_orders_immutable_files_high_water_then_current(
         "key_id": "4" * 64,
         "created_at": "2026-07-29T00:00:00Z",
         "expires_at": "2026-07-29T00:15:00Z",
+        "allowed_nodes": list(config.allowed_nodes),
+        "excluded_nodes": [],
     }
     authority._publish_generation(
         config,

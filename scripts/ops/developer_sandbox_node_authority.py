@@ -3,9 +3,10 @@
 
 A persistent root channel bootstraps this program from a clean, root-owned
 exact checkout.  The channel may be host root or the repository's one-shot
-Docker/chroot bootstrap.  The installed runtime exposes only ``transact`` and
-``check`` through two fixed sudoers commands.  Requests arrive on stdin as a
-closed canonical envelope; no path, program, user, or secret is accepted in
+Docker/chroot bootstrap.  The installed runtime exposes only ``transact``,
+``check``, and ``load-image`` through fixed sudoers commands.  Requests arrive
+on stdin as a closed canonical envelope or a bounded canonical image header
+followed by one exact archive; no path, program, user, or secret is accepted in
 argv or the inherited environment.  A different SHA or tree is admitted only
 through the persistent-root ``upgrade`` transaction, which snapshots and
 restores the installed authority without reinitializing runtime receipts or
@@ -32,6 +33,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import threading
 import time
 import uuid
 from collections.abc import Mapping, Sequence
@@ -51,11 +53,15 @@ NODE_AUTHORITY_SUDOERS_PAYLOAD: Final = (
     b"/usr/local/libexec/loom-developer-sandbox-node-authority transact\n"
     b"qianyi ALL=(root) NOPASSWD:NOSETENV: "
     b"/usr/local/libexec/loom-developer-sandbox-node-authority check\n"
+    b"qianyi ALL=(root) NOPASSWD:NOSETENV: "
+    b"/usr/local/libexec/loom-developer-sandbox-node-authority load-image\n"
 )
 STATE_ROOT: Final = Path("/var/lib/loom-developer-sandbox-node-authority")
 LOCK: Final = STATE_ROOT / "authority.lock"
 JOURNAL: Final = STATE_ROOT / "journal.jsonl"
 RECEIPT_ROOT: Final = STATE_ROOT / "receipts"
+WORKER_IMAGE_RECEIPT_ROOT: Final = STATE_ROOT / "worker-image-loads"
+WORKER_IMAGE_TAG_JOURNAL_ROOT: Final = STATE_ROOT / "worker-image-tag-journals"
 IDENTITY_TRANSACTION_ROOT: Final = STATE_ROOT / "identity-transactions"
 STAGING_BROKER_ROOT: Final = STATE_ROOT / "staging-broker"
 STAGING_ACCOUNTING_ROOT: Final = STATE_ROOT / "staging-accounting"
@@ -181,6 +187,11 @@ SUDOERS_RELATIVE: Final = Path(
 SCHEMA_VERSION: Final = 1
 MAX_REQUEST_BYTES: Final = 96 * 1024 * 1024
 MAX_PAYLOAD_BYTES: Final = 64 * 1024 * 1024
+MAX_WORKER_IMAGE_HEADER_BYTES: Final = 64 * 1024
+WORKER_IMAGE_LOAD_TIMEOUT_SECONDS: Final = 3600
+MAX_DOCKER_STDOUT_BYTES: Final = 4 * 1024 * 1024
+MAX_DOCKER_STDERR_BYTES: Final = 1024 * 1024
+DOCKER: Final = "/usr/bin/docker"
 SHA_RE: Final = frozenset("0123456789abcdef")
 SAFE_RUNTIME_RE: Final = re.compile(r"[a-z][a-z0-9-]{1,31}\Z")
 REGISTRY_SNAPSHOT: Final = Path(
@@ -195,6 +206,73 @@ REGISTRY_SNAPSHOT_ARCHIVE_RE: Final = re.compile(
 REGISTRY_MODULE_RELATIVE: Final = Path(
     "scripts/ops/developer_environment_registry.py",
 )
+WORKER_IMAGE_LOAD_REQUEST_KIND: Final = "loom.developer-sandbox.worker-image-load-request"
+WORKER_IMAGE_LOAD_RECEIPT_KIND: Final = "loom.developer-sandbox.worker-image-load-receipt"
+WORKER_IMAGE_LOAD_REQUEST_FIELDS: Final = {
+    "schema_version",
+    "kind",
+    "node",
+    "domain",
+    "architecture",
+    "env_id",
+    "resource_generation",
+    "candidate_id",
+    "candidate_sha",
+    "candidate_tree",
+    "config_digest",
+    "index_digest",
+    "load_descriptor_digest",
+    "load_descriptor_media_type",
+    "archive_sha256",
+    "archive_size",
+    "registry_generation",
+    "registry_payload_sha256",
+    "payload_sha256",
+}
+WORKER_IMAGE_LOAD_RECEIPT_FIELDS: Final = {
+    "schema_version",
+    "kind",
+    "status",
+    "node",
+    "domain",
+    "architecture",
+    "candidate_id",
+    "candidate_sha",
+    "config_digest",
+    "index_digest",
+    "load_descriptor_digest",
+    "load_descriptor_media_type",
+    "runtime_image_id",
+    "archive_sha256",
+    "archive_size",
+    "registry_generation",
+    "registry_payload_sha256",
+    "docker_storage_driver",
+    "docker_backend",
+    "docker_descriptor_digest",
+    "docker_descriptor_media_type",
+    "payload_sha256",
+}
+WORKER_IMAGE_TAG_JOURNAL_FIELDS: Final = {
+    "schema_version",
+    "kind",
+    "phase",
+    "candidate_id",
+    "candidate_sha",
+    "architecture",
+    "config_digest",
+    "load_descriptor_digest",
+    "load_descriptor_media_type",
+    "runtime_image_id",
+    "docker_storage_driver",
+    "docker_backend",
+    "placeholder_tag",
+    "prior_placeholder_image_id",
+    "unique_tag",
+    "archive_sha256",
+    "request_payload_sha256",
+    "payload_sha256",
+}
 STAGING_SCOPE: Final = "staging"
 STAGING_BOOT_ID_PATH: Final = Path("/proc/sys/kernel/random/boot_id")
 STAGING_BOOT_ID_RE: Final = re.compile(
@@ -359,6 +437,7 @@ DYNAMIC_TARGET_BINDING_FIELDS: Final = {
     "candidate_id",
     "registry_generation",
     "registry_payload_sha256",
+    "worker_image_id",
 }
 DEPLOYMENT_TARGET_ACTIONS: Final = frozenset(
     {
@@ -496,6 +575,7 @@ ACCEPTANCE_PROBE_REQUEST_FIELDS: Final = {
     "candidate_id",
     "candidate_sha",
     "candidate_tree",
+    "worker_image_id",
     "applied_resource_generation",
     "registry_generation",
     "registry_snapshot_sha256",
@@ -601,6 +681,7 @@ ACCEPTANCE_PROBE_RECEIPT_FIELDS: Final = {
     "candidate_id",
     "candidate_sha",
     "candidate_tree",
+    "worker_image_id",
     "applied_resource_generation",
     "registry_generation",
     "registry_snapshot_sha256",
@@ -1086,6 +1167,8 @@ BOOTSTRAP_DIRECTORIES: Final = (
     (STAGING_EXTERNAL_CONFIG.parent, 0o700, 0o755),
     (STATE_ROOT, 0o700, 0o755),
     (RECEIPT_ROOT, 0o700, 0o700),
+    (WORKER_IMAGE_RECEIPT_ROOT, 0o700, 0o700),
+    (WORKER_IMAGE_TAG_JOURNAL_ROOT, 0o700, 0o700),
     (IDENTITY_TRANSACTION_ROOT, 0o700, 0o700),
     (STAGING_BROKER_ROOT, 0o700, 0o700),
     (STAGING_ACCOUNTING_ROOT, 0o700, 0o700),
@@ -1642,6 +1725,934 @@ def _verify_registry_snapshot_bytes(raw: bytes) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise NodeAuthorityError("developer environment registry snapshot is invalid")
     return payload
+
+
+def _worker_image_request(
+    raw: bytes,
+    *,
+    policy: AuthorityPolicy,
+    snapshot: Mapping[str, Any],
+) -> dict[str, Any]:
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise NodeAuthorityError("worker image load header is invalid") from exc
+    unsigned = (
+        {key: value for key, value in payload.items() if key != "payload_sha256"}
+        if isinstance(payload, dict)
+        else {}
+    )
+    domain = "oldlab" if policy.node.startswith("oldlab-") else "gb10"
+    architecture = "amd64" if domain == "oldlab" else "arm64"
+    candidates = (
+        [
+            row
+            for row in snapshot.get("candidates", [])
+            if isinstance(row, dict)
+            and row.get("candidate_id") == payload.get("candidate_id")
+            and row.get("env_id") == payload.get("env_id")
+            and row.get("candidate_sha") == payload.get("candidate_sha")
+            and row.get("candidate_tree") == payload.get("candidate_tree")
+        ]
+        if isinstance(payload, dict)
+        else []
+    )
+    environments = (
+        [
+            row
+            for row in snapshot.get("environments", [])
+            if isinstance(row, dict)
+            and row.get("env_id") == payload.get("env_id")
+            and row.get("resource_generation") == payload.get("resource_generation")
+        ]
+        if isinstance(payload, dict)
+        else []
+    )
+    candidate = candidates[0] if len(candidates) == 1 else {}
+    image_digests = candidate.get("image_digests")
+    image_archives = candidate.get("image_archives")
+    archive_binding = image_archives.get(architecture) if isinstance(image_archives, dict) else None
+    registry_module = _registry_module()
+    maximum_archive_size = getattr(registry_module, "MAX_WORKER_IMAGE_ARCHIVE_BYTES", 0)
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != WORKER_IMAGE_LOAD_REQUEST_FIELDS
+        or raw != _canonical(payload)
+        or payload.get("schema_version") != SCHEMA_VERSION
+        or payload.get("kind") != WORKER_IMAGE_LOAD_REQUEST_KIND
+        or payload.get("node") != policy.node
+        or payload.get("domain") != domain
+        or payload.get("architecture") != architecture
+        or re.fullmatch(r"denv-[a-z0-9-]{8,64}", str(payload.get("env_id"))) is None
+        or type(payload.get("resource_generation")) is not int
+        or int(payload["resource_generation"]) < 1
+        or re.fullmatch(r"cand-[0-9a-f]{40}", str(payload.get("candidate_id"))) is None
+        or not _is_sha(payload.get("candidate_sha"))
+        or not _is_sha(payload.get("candidate_tree"))
+        or any(
+            re.fullmatch(r"sha256:[0-9a-f]{64}", str(payload.get(field))) is None
+            for field in (
+                "config_digest",
+                "index_digest",
+                "load_descriptor_digest",
+            )
+        )
+        or payload.get("load_descriptor_media_type")
+        not in {
+            "application/vnd.oci.image.manifest.v1+json",
+            "application/vnd.docker.distribution.manifest.v2+json",
+            "application/vnd.oci.image.index.v1+json",
+            "application/vnd.docker.distribution.manifest.list.v2+json",
+        }
+        or not _is_sha(payload.get("archive_sha256"), length=64)
+        or type(payload.get("archive_size")) is not int
+        or type(maximum_archive_size) is not int
+        or not 0 < int(payload["archive_size"]) <= maximum_archive_size
+        or type(payload.get("registry_generation")) is not int
+        or int(payload["registry_generation"]) < 1
+        or not _is_sha(payload.get("registry_payload_sha256"), length=64)
+        or not _is_sha(payload.get("payload_sha256"), length=64)
+        or payload.get("payload_sha256") != hashlib.sha256(_canonical(unsigned)).hexdigest()
+        or snapshot.get("generation") != payload.get("registry_generation")
+        or snapshot.get("payload_sha256") != payload.get("registry_payload_sha256")
+        or len(candidates) != 1
+        or len(environments) != 1
+        or not isinstance(image_digests, dict)
+        or image_digests.get(architecture) != payload.get("config_digest")
+        or not isinstance(archive_binding, dict)
+        or set(archive_binding)
+        != {
+            "path",
+            "sha256",
+            "size",
+            "config_digest",
+            "index_digest",
+            "manifest_digest",
+            "manifest_media_type",
+            "load_descriptor_digest",
+            "load_descriptor_media_type",
+        }
+        or archive_binding.get("sha256") != payload.get("archive_sha256")
+        or archive_binding.get("size") != payload.get("archive_size")
+        or any(
+            archive_binding.get(field) != payload.get(field)
+            for field in (
+                "config_digest",
+                "index_digest",
+                "load_descriptor_digest",
+                "load_descriptor_media_type",
+            )
+        )
+    ):
+        raise NodeAuthorityError("worker image load registry binding is invalid")
+    return payload
+
+
+def _deployment_runtime_image_id(
+    deployment: Mapping[str, Any],
+    domain: str,
+) -> str | None:
+    bindings = deployment.get("worker_runtime_bindings")
+    domains = bindings.get("domains") if isinstance(bindings, dict) else None
+    binding = domains.get(domain) if isinstance(domains, dict) else None
+    value = binding.get("runtime_image_id") if isinstance(binding, dict) else None
+    return str(value) if re.fullmatch(r"sha256:[0-9a-f]{64}", str(value)) is not None else None
+
+
+def _stage_worker_image_archive(
+    stream: Any,
+    request: Mapping[str, Any],
+) -> Path:
+    _ensure_stage_root()
+    name = f".worker-image-{request['payload_sha256']}-{uuid.uuid4().hex}.tar"
+    parent_descriptor = os.open(
+        STAGE_ROOT,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+    try:
+        descriptor = os.open(
+            name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=parent_descriptor,
+        )
+    finally:
+        os.close(parent_descriptor)
+    # Re-open the parent only long enough to create the file; all subsequent
+    # writes and metadata checks use the pinned descriptor.
+    path = STAGE_ROOT / name
+    digest = hashlib.sha256()
+    remaining = int(request["archive_size"])
+    try:
+        while remaining:
+            chunk = stream.read(min(1024 * 1024, remaining))
+            if not chunk:
+                raise NodeAuthorityError("worker image archive ended before its declared size")
+            view = memoryview(chunk)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise NodeAuthorityError("worker image archive staging failed safely")
+                view = view[written:]
+            digest.update(chunk)
+            remaining -= len(chunk)
+        if stream.read(1):
+            raise NodeAuthorityError("worker image archive exceeds its declared size")
+        os.fchown(descriptor, 0, 0)
+        os.fchmod(descriptor, 0o600)
+        os.fsync(descriptor)
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != 0
+            or metadata.st_gid != 0
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_nlink != 1
+            or metadata.st_size != request["archive_size"]
+            or digest.hexdigest() != request["archive_sha256"]
+        ):
+            raise NodeAuthorityError("worker image archive content binding is invalid")
+    except Exception:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise
+    finally:
+        os.close(descriptor)
+    _fsync_directory(STAGE_ROOT, mode=0o700)
+    return path
+
+
+def _cleanup_worker_image_stage() -> None:
+    """Remove only exact root-owned SIGKILL leftovers under the private stage."""
+
+    _ensure_stage_root()
+    pattern = re.compile(r"\.worker-image-[0-9a-f]{64}-[0-9a-f]{32}\.tar\Z")
+    try:
+        paths = sorted(STAGE_ROOT.iterdir(), key=lambda item: item.name)
+    except OSError as exc:
+        raise NodeAuthorityError("worker image stage inventory is unavailable") from exc
+    changed = False
+    for path in paths:
+        if not path.name.startswith(".worker-image-"):
+            continue
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            raise NodeAuthorityError("worker image stage inventory is unavailable") from exc
+        if (
+            pattern.fullmatch(path.name) is None
+            or not stat.S_ISREG(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_uid != 0
+            or metadata.st_gid != 0
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_nlink != 1
+        ):
+            raise NodeAuthorityError("worker image stage contains an unsafe leftover")
+        try:
+            path.unlink()
+        except OSError as exc:
+            raise NodeAuthorityError("worker image stage cleanup failed safely") from exc
+        changed = True
+    if changed:
+        _fsync_directory(STAGE_ROOT, mode=0o700)
+
+
+def _docker(
+    *arguments: str,
+    timeout: int = 120,
+    allow_failure: bool = False,
+) -> subprocess.CompletedProcess[bytes]:
+    try:
+        process = subprocess.Popen(
+            (DOCKER, *arguments),
+            env=_clean_env(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as exc:
+        raise NodeAuthorityError("Docker worker image operation failed safely") from exc
+    stdout_buffer = bytearray()
+    stderr_buffer = bytearray()
+    reader_errors: list[BaseException] = []
+    output_exceeded = threading.Event()
+
+    def drain(pipe: Any, output: bytearray, limit: int) -> None:
+        try:
+            while True:
+                chunk = pipe.read(65_536)
+                if not chunk:
+                    break
+                if len(output) + len(chunk) <= limit:
+                    output.extend(chunk)
+                else:
+                    output_exceeded.set()
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+        except BaseException as exc:
+            reader_errors.append(exc)
+            try:
+                process.kill()
+            except OSError:
+                pass
+
+    assert process.stdout is not None
+    assert process.stderr is not None
+    stdout_reader = threading.Thread(
+        target=drain,
+        args=(process.stdout, stdout_buffer, MAX_DOCKER_STDOUT_BYTES),
+        daemon=True,
+    )
+    stderr_reader = threading.Thread(
+        target=drain,
+        args=(process.stderr, stderr_buffer, MAX_DOCKER_STDERR_BYTES),
+        daemon=True,
+    )
+    stdout_reader.start()
+    stderr_reader.start()
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        process.kill()
+        process.wait()
+        stdout_reader.join(timeout=5)
+        stderr_reader.join(timeout=5)
+        raise NodeAuthorityError("Docker worker image operation timed out safely") from exc
+    stdout_reader.join(timeout=5)
+    stderr_reader.join(timeout=5)
+    if stdout_reader.is_alive() or stderr_reader.is_alive() or reader_errors:
+        process.kill()
+        process.wait()
+        raise NodeAuthorityError("Docker worker image output drain failed safely")
+    if output_exceeded.is_set():
+        raise NodeAuthorityError("Docker worker image output exceeds its size bound")
+    completed = subprocess.CompletedProcess(
+        (DOCKER, *arguments),
+        process.returncode,
+        bytes(stdout_buffer),
+        bytes(stderr_buffer),
+    )
+    if not allow_failure and (completed.returncode != 0 or completed.stderr):
+        raise NodeAuthorityError("Docker worker image operation failed safely")
+    return completed
+
+
+def _docker_backend() -> dict[str, str]:
+    completed = _docker("info", "--format", "{{json .}}")
+    try:
+        payload = json.loads(completed.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise NodeAuthorityError("Docker storage backend readback is invalid") from exc
+    if not isinstance(payload, dict):
+        raise NodeAuthorityError("Docker storage backend readback is invalid")
+    driver = payload.get("Driver")
+    driver_status = payload.get("DriverStatus")
+    if not isinstance(driver_status, list) or any(
+        not isinstance(row, list)
+        or len(row) != 2
+        or not all(isinstance(value, str) for value in row)
+        for row in driver_status
+    ):
+        raise NodeAuthorityError("Docker storage backend readback is invalid")
+    snapshotter_values = [row[1] for row in driver_status if row[0].casefold() == "driver-type"]
+    if driver == "overlay2" and not snapshotter_values:
+        backend = "classic-overlay2"
+    elif driver == "overlayfs" and snapshotter_values == ["io.containerd.snapshotter.v1"]:
+        backend = "containerd-snapshotter-v1"
+    else:
+        raise NodeAuthorityError("Docker storage backend is unsupported")
+    return {"docker_storage_driver": driver, "docker_backend": backend}
+
+
+def _docker_storage_driver() -> str:
+    return _docker_backend()["docker_storage_driver"]
+
+
+def _runtime_image_id(
+    request: Mapping[str, Any],
+    backend: Mapping[str, str],
+) -> str:
+    return str(
+        request[
+            "config_digest"
+            if backend["docker_backend"] == "classic-overlay2"
+            else "load_descriptor_digest"
+        ]
+    )
+
+
+def _docker_image(reference: str) -> dict[str, Any] | None:
+    completed = _docker("image", "inspect", reference, allow_failure=True)
+    if completed.returncode != 0:
+        return None
+    if completed.stderr:
+        raise NodeAuthorityError("Docker worker image inspection failed safely")
+    try:
+        payload = json.loads(completed.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise NodeAuthorityError("Docker worker image inspection is invalid") from exc
+    if not isinstance(payload, list) or len(payload) != 1 or not isinstance(payload[0], dict):
+        raise NodeAuthorityError("Docker worker image inspection is invalid")
+    return payload[0]
+
+
+def _worker_image_tags(request: Mapping[str, Any]) -> tuple[str, str]:
+    architecture = str(request["architecture"])
+    placeholder = f"loom-worker:{str(request['candidate_sha'])[:12]}-{architecture}"
+    image_hex = str(request["runtime_image_id"]).removeprefix("sha256:")
+    unique = f"loom-worker:runtime-{image_hex}-{architecture}"
+    return placeholder, unique
+
+
+def _validate_docker_worker_image(
+    image: Mapping[str, Any],
+    request: Mapping[str, Any],
+    *,
+    backend: Mapping[str, str],
+    require_unique_tag: bool,
+) -> None:
+    runtime = image.get("Config")
+    labels = runtime.get("Labels") if isinstance(runtime, dict) else None
+    tags = image.get("RepoTags")
+    descriptor = image.get("Descriptor")
+    _placeholder, unique_tag = _worker_image_tags(request)
+    if (
+        image.get("Os") != "linux"
+        or image.get("Architecture") != request["architecture"]
+        or not isinstance(runtime, dict)
+        or runtime.get("Cmd") != ["python", "-m", "loom_worker"]
+        or runtime.get("Entrypoint") not in (None, [])
+        or not isinstance(labels, dict)
+        or labels.get("org.opencontainers.image.revision") != request["candidate_sha"]
+        or (require_unique_tag and (not isinstance(tags, list) or unique_tag not in tags))
+    ):
+        raise NodeAuthorityError("Docker worker image runtime binding is invalid")
+    if backend["docker_backend"] == "classic-overlay2":
+        if (
+            image.get("Id") != request["config_digest"]
+            or request["runtime_image_id"] != request["config_digest"]
+            or descriptor not in (None, {})
+        ):
+            raise NodeAuthorityError("Docker worker image descriptor binding is invalid")
+    elif (
+        image.get("Id") != request["load_descriptor_digest"]
+        or request["runtime_image_id"] != request["load_descriptor_digest"]
+        or not isinstance(descriptor, dict)
+        or descriptor.get("digest") != request["load_descriptor_digest"]
+        or descriptor.get("mediaType") != request["load_descriptor_media_type"]
+    ):
+        raise NodeAuthorityError("Docker worker image descriptor binding is invalid")
+
+
+def _tag_journal_path(request_payload_sha256: str) -> Path:
+    return WORKER_IMAGE_TAG_JOURNAL_ROOT / f"{request_payload_sha256}.json"
+
+
+def _tag_journal_payload(
+    request: Mapping[str, Any],
+    *,
+    phase: str,
+    prior_placeholder_image_id: str | None,
+) -> dict[str, Any]:
+    placeholder, unique = _worker_image_tags(request)
+    unsigned = {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "loom.developer-sandbox.worker-image-tag-journal",
+        "phase": phase,
+        "candidate_id": request["candidate_id"],
+        "candidate_sha": request["candidate_sha"],
+        "architecture": request["architecture"],
+        "config_digest": request["config_digest"],
+        "load_descriptor_digest": request["load_descriptor_digest"],
+        "load_descriptor_media_type": request["load_descriptor_media_type"],
+        "runtime_image_id": request["runtime_image_id"],
+        "docker_storage_driver": request["docker_storage_driver"],
+        "docker_backend": request["docker_backend"],
+        "placeholder_tag": placeholder,
+        "prior_placeholder_image_id": prior_placeholder_image_id,
+        "unique_tag": unique,
+        "archive_sha256": request["archive_sha256"],
+        "request_payload_sha256": request["payload_sha256"],
+    }
+    return {
+        **unsigned,
+        "payload_sha256": hashlib.sha256(_canonical(unsigned)).hexdigest(),
+    }
+
+
+def _validate_tag_journal(payload: Mapping[str, Any]) -> None:
+    expected_placeholder = (
+        f"loom-worker:{str(payload.get('candidate_sha'))[:12]}-{payload.get('architecture')}"
+    )
+    expected_unique = (
+        "loom-worker:runtime-"
+        f"{str(payload.get('runtime_image_id')).removeprefix('sha256:')}-"
+        f"{payload.get('architecture')}"
+    )
+    if (
+        set(payload) != WORKER_IMAGE_TAG_JOURNAL_FIELDS
+        or payload.get("schema_version") != SCHEMA_VERSION
+        or payload.get("kind") != "loom.developer-sandbox.worker-image-tag-journal"
+        or payload.get("phase") not in {"prepared", "unique-tagged", "restored"}
+        or re.fullmatch(r"cand-[0-9a-f]{40}", str(payload.get("candidate_id"))) is None
+        or not _is_sha(payload.get("candidate_sha"))
+        or payload.get("architecture") not in {"amd64", "arm64"}
+        or any(
+            re.fullmatch(r"sha256:[0-9a-f]{64}", str(payload.get(field))) is None
+            for field in (
+                "config_digest",
+                "load_descriptor_digest",
+                "runtime_image_id",
+            )
+        )
+        or payload.get("load_descriptor_media_type")
+        not in {
+            "application/vnd.oci.image.manifest.v1+json",
+            "application/vnd.docker.distribution.manifest.v2+json",
+            "application/vnd.oci.image.index.v1+json",
+            "application/vnd.docker.distribution.manifest.list.v2+json",
+        }
+        or (
+            payload.get("docker_backend") == "classic-overlay2"
+            and (
+                payload.get("docker_storage_driver") != "overlay2"
+                or payload.get("runtime_image_id") != payload.get("config_digest")
+            )
+        )
+        or (
+            payload.get("docker_backend") == "containerd-snapshotter-v1"
+            and (
+                payload.get("docker_storage_driver") != "overlayfs"
+                or payload.get("runtime_image_id") != payload.get("load_descriptor_digest")
+            )
+        )
+        or payload.get("docker_backend") not in {"classic-overlay2", "containerd-snapshotter-v1"}
+        or (
+            payload.get("prior_placeholder_image_id") is not None
+            and re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(payload.get("prior_placeholder_image_id")),
+            )
+            is None
+        )
+        or payload.get("placeholder_tag") != expected_placeholder
+        or payload.get("unique_tag") != expected_unique
+        or not _is_sha(payload.get("archive_sha256"), length=64)
+        or not _is_sha(payload.get("request_payload_sha256"), length=64)
+        or payload.get("payload_sha256")
+        != hashlib.sha256(
+            _canonical({key: value for key, value in payload.items() if key != "payload_sha256"}),
+        ).hexdigest()
+    ):
+        raise NodeAuthorityError("worker image tag journal is invalid")
+
+
+def _write_tag_journal(payload: Mapping[str, Any]) -> None:
+    _validate_tag_journal(payload)
+    _ensure_root_directory(
+        WORKER_IMAGE_TAG_JOURNAL_ROOT,
+        mode=0o700,
+        parent_mode=0o700,
+    )
+    _atomic_replace(
+        _tag_journal_path(str(payload["request_payload_sha256"])),
+        _canonical(payload),
+        0o600,
+        parent_mode=0o700,
+    )
+
+
+def _read_tag_journals() -> list[dict[str, Any]]:
+    if not WORKER_IMAGE_TAG_JOURNAL_ROOT.exists():
+        if WORKER_IMAGE_TAG_JOURNAL_ROOT.is_symlink():
+            raise NodeAuthorityError("worker image tag journal inventory is invalid")
+        return []
+    _ensure_root_directory(
+        WORKER_IMAGE_TAG_JOURNAL_ROOT,
+        mode=0o700,
+        parent_mode=0o700,
+    )
+    try:
+        paths = sorted(WORKER_IMAGE_TAG_JOURNAL_ROOT.iterdir(), key=lambda item: item.name)
+    except OSError as exc:
+        raise NodeAuthorityError("worker image tag journal inventory is unavailable") from exc
+    journals: list[dict[str, Any]] = []
+    for path in paths:
+        if len(path.name) != 69 or not path.name.endswith(".json"):
+            raise NodeAuthorityError("worker image tag journal inventory is invalid")
+        raw = _safe_root_file(path, mode=0o600, limit=1 << 20)
+        try:
+            payload = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise NodeAuthorityError("worker image tag journal is invalid") from exc
+        unsigned = (
+            {key: value for key, value in payload.items() if key != "payload_sha256"}
+            if isinstance(payload, dict)
+            else {}
+        )
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != WORKER_IMAGE_TAG_JOURNAL_FIELDS
+            or raw != _canonical(payload)
+            or path.name != f"{payload['request_payload_sha256']}.json"
+        ):
+            raise NodeAuthorityError("worker image tag journal is invalid")
+        try:
+            _validate_tag_journal(payload)
+        except NodeAuthorityError as exc:
+            raise NodeAuthorityError("worker image tag journal is invalid") from exc
+        if payload.get("payload_sha256") != hashlib.sha256(_canonical(unsigned)).hexdigest():
+            raise NodeAuthorityError("worker image tag journal is invalid")
+        journals.append(payload)
+    return journals
+
+
+def _docker_tag(source: str, target: str) -> None:
+    _docker("image", "tag", source, target)
+
+
+def _docker_untag(reference: str) -> None:
+    _docker("image", "rm", "--no-prune", reference)
+
+
+def _restore_placeholder(journal: Mapping[str, Any]) -> None:
+    expected_id = str(journal["runtime_image_id"])
+    unique_tag = str(journal["unique_tag"])
+    placeholder = str(journal["placeholder_tag"])
+    prior = journal.get("prior_placeholder_image_id")
+    current = _docker_image(placeholder)
+    current_id = current.get("Id") if current is not None else None
+    expected = _docker_image(expected_id)
+    if expected is None:
+        if current_id == prior:
+            return
+        raise NodeAuthorityError("worker image tag recovery image is unavailable")
+    recovery_request = {
+        "config_digest": journal["config_digest"],
+        "load_descriptor_digest": journal["load_descriptor_digest"],
+        "load_descriptor_media_type": journal["load_descriptor_media_type"],
+        "runtime_image_id": expected_id,
+        "architecture": journal["architecture"],
+        "candidate_sha": journal["candidate_sha"],
+    }
+    backend = {
+        "docker_storage_driver": str(journal["docker_storage_driver"]),
+        "docker_backend": str(journal["docker_backend"]),
+    }
+    _validate_docker_worker_image(
+        expected,
+        recovery_request,
+        backend=backend,
+        require_unique_tag=False,
+    )
+    unique = _docker_image(unique_tag)
+    if unique is not None and unique.get("Id") != expected_id:
+        raise NodeAuthorityError("worker image unique tag is bound to a foreign image")
+    if unique is None:
+        _docker_tag(expected_id, unique_tag)
+    unique = _docker_image(unique_tag)
+    if unique is None:
+        raise NodeAuthorityError("worker image unique tag readback is unavailable")
+    _validate_docker_worker_image(
+        unique,
+        recovery_request,
+        backend=backend,
+        require_unique_tag=True,
+    )
+    if prior is None:
+        if current_id is not None:
+            if current_id != expected_id:
+                raise NodeAuthorityError("worker image placeholder tag changed during recovery")
+            _docker_untag(placeholder)
+            if _docker_image(placeholder) is not None:
+                raise NodeAuthorityError("worker image placeholder tag restoration failed")
+    elif current_id != prior:
+        if current_id is not None:
+            if current_id != expected_id:
+                raise NodeAuthorityError("worker image placeholder tag changed during recovery")
+            _docker_untag(placeholder)
+        _docker_tag(str(prior), placeholder)
+        restored = _docker_image(placeholder)
+        if restored is None or restored.get("Id") != prior:
+            raise NodeAuthorityError("worker image placeholder tag restoration failed")
+
+
+def _recover_worker_image_tag_journals(
+    *,
+    storage_preflight: bool = True,
+    backend: Mapping[str, str] | None = None,
+) -> None:
+    journals = _read_tag_journals()
+    pending = [journal for journal in journals if journal["phase"] != "restored"]
+    current_backend = backend
+    if pending and current_backend is None:
+        current_backend = _docker_backend()
+    if pending and (
+        current_backend is None
+        or any(
+            journal["docker_storage_driver"] != current_backend["docker_storage_driver"]
+            or journal["docker_backend"] != current_backend["docker_backend"]
+            for journal in pending
+        )
+    ):
+        raise NodeAuthorityError("Docker storage backend changed during image recovery")
+    for journal in pending:
+        _restore_placeholder(journal)
+        recovered = dict(journal)
+        recovered["phase"] = "restored"
+        unsigned = {key: value for key, value in recovered.items() if key != "payload_sha256"}
+        recovered["payload_sha256"] = hashlib.sha256(_canonical(unsigned)).hexdigest()
+        _write_tag_journal(recovered)
+
+
+def _worker_image_receipt(
+    request: Mapping[str, Any],
+    *,
+    status: str,
+    image: Mapping[str, Any],
+) -> dict[str, Any]:
+    descriptor = image.get("Descriptor")
+    unsigned = {
+        "schema_version": SCHEMA_VERSION,
+        "kind": WORKER_IMAGE_LOAD_RECEIPT_KIND,
+        "status": status,
+        "node": request["node"],
+        "domain": request["domain"],
+        "architecture": request["architecture"],
+        "candidate_id": request["candidate_id"],
+        "candidate_sha": request["candidate_sha"],
+        "config_digest": request["config_digest"],
+        "index_digest": request["index_digest"],
+        "load_descriptor_digest": request["load_descriptor_digest"],
+        "load_descriptor_media_type": request["load_descriptor_media_type"],
+        "runtime_image_id": request["runtime_image_id"],
+        "archive_sha256": request["archive_sha256"],
+        "archive_size": request["archive_size"],
+        "registry_generation": request["registry_generation"],
+        "registry_payload_sha256": request["registry_payload_sha256"],
+        "docker_storage_driver": request["docker_storage_driver"],
+        "docker_backend": request["docker_backend"],
+        "docker_descriptor_digest": (
+            descriptor.get("digest") if isinstance(descriptor, dict) else None
+        ),
+        "docker_descriptor_media_type": (
+            descriptor.get("mediaType") if isinstance(descriptor, dict) else None
+        ),
+    }
+    return {
+        **unsigned,
+        "payload_sha256": hashlib.sha256(_canonical(unsigned)).hexdigest(),
+    }
+
+
+def _persist_worker_image_receipt(
+    request: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    _ensure_root_directory(
+        WORKER_IMAGE_RECEIPT_ROOT,
+        mode=0o700,
+        parent_mode=0o700,
+    )
+    path = WORKER_IMAGE_RECEIPT_ROOT / f"{request['payload_sha256']}.json"
+    try:
+        existing_raw = _safe_root_file(path, mode=0o600, limit=1 << 20)
+    except NodeAuthorityError:
+        if path.exists() or path.is_symlink():
+            raise
+    else:
+        try:
+            existing = json.loads(existing_raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise NodeAuthorityError("worker image load receipt is invalid") from exc
+        existing_unsigned = (
+            {key: value for key, value in existing.items() if key != "payload_sha256"}
+            if isinstance(existing, dict)
+            else {}
+        )
+        if (
+            not isinstance(existing, dict)
+            or set(existing) != WORKER_IMAGE_LOAD_RECEIPT_FIELDS
+            or existing_raw != _canonical(existing)
+            or existing.get("schema_version") != SCHEMA_VERSION
+            or existing.get("kind") != WORKER_IMAGE_LOAD_RECEIPT_KIND
+            or existing.get("status") not in {"loaded", "reused"}
+            or existing.get("payload_sha256")
+            != hashlib.sha256(_canonical(existing_unsigned)).hexdigest()
+            or any(
+                existing.get(field) != receipt.get(field)
+                for field in WORKER_IMAGE_LOAD_RECEIPT_FIELDS - {"status", "payload_sha256"}
+            )
+        ):
+            raise NodeAuthorityError("worker image load receipt conflicts")
+        return existing
+    _atomic_install(path, _canonical(receipt), 0o600, parent_mode=0o700)
+    readback = _safe_root_file(path, mode=0o600, limit=1 << 20)
+    if readback != _canonical(receipt):
+        raise NodeAuthorityError("worker image load receipt readback drifted")
+    return dict(receipt)
+
+
+def load_worker_image(
+    stream: Any,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    environment = os.environ if environ is None else environ
+    _validate_invoker("load-image", environment)
+    descriptor = _open_lock(exclusive=True)
+    staged: Path | None = None
+    try:
+        _reject_active_upgrade()
+        policy = _read_policy()
+        _validate_runtime_assets(policy)
+        _cleanup_worker_image_stage()
+        header = stream.readline(MAX_WORKER_IMAGE_HEADER_BYTES + 1)
+        if not header or len(header) > MAX_WORKER_IMAGE_HEADER_BYTES or not header.endswith(b"\n"):
+            raise NodeAuthorityError("worker image load header exceeds its size bound")
+        snapshot = _load_registry_snapshot()
+        request = _worker_image_request(header, policy=policy, snapshot=snapshot)
+        staged = _stage_worker_image_archive(stream, request)
+        try:
+            verified_archive = _registry_module().verify_worker_image_archive(
+                staged,
+                architecture=str(request["architecture"]),
+                candidate_sha=str(request["candidate_sha"]),
+                image_id=str(request["config_digest"]),
+                expected_archive_sha256=str(request["archive_sha256"]),
+                expected_archive_size=int(request["archive_size"]),
+            )
+        except Exception as exc:
+            raise NodeAuthorityError("worker image archive verification failed") from exc
+        if any(
+            verified_archive.get(field) != request.get(field)
+            for field in (
+                "config_digest",
+                "index_digest",
+                "load_descriptor_digest",
+                "load_descriptor_media_type",
+            )
+        ):
+            raise NodeAuthorityError("worker image archive descriptor binding is invalid")
+        backend = _docker_backend()
+        request = {
+            **request,
+            **backend,
+            "runtime_image_id": _runtime_image_id(request, backend),
+        }
+        _recover_worker_image_tag_journals(
+            storage_preflight=False,
+            backend=backend,
+        )
+        placeholder, unique_tag = _worker_image_tags(request)
+        unique = _docker_image(unique_tag)
+        if unique is not None and unique.get("Id") != request["runtime_image_id"]:
+            raise NodeAuthorityError("worker image unique tag is bound to a foreign image")
+        existing = _docker_image(str(request["runtime_image_id"]))
+        if existing is not None:
+            _validate_docker_worker_image(
+                existing,
+                request,
+                backend=backend,
+                require_unique_tag=False,
+            )
+        prior_placeholder = _docker_image(placeholder)
+        prior_placeholder_id = (
+            str(prior_placeholder["Id"]) if prior_placeholder is not None else None
+        )
+        journal = _tag_journal_payload(
+            request,
+            phase="prepared",
+            prior_placeholder_image_id=prior_placeholder_id,
+        )
+        _write_tag_journal(journal)
+        status = "reused"
+        try:
+            if existing is None:
+                _docker(
+                    "image",
+                    "load",
+                    "--input",
+                    str(staged),
+                    timeout=WORKER_IMAGE_LOAD_TIMEOUT_SECONDS,
+                )
+                status = "loaded"
+            loaded = _docker_image(str(request["runtime_image_id"]))
+            if loaded is None:
+                raise NodeAuthorityError("loaded worker image is unavailable")
+            _validate_docker_worker_image(
+                loaded,
+                request,
+                backend=backend,
+                require_unique_tag=False,
+            )
+            placeholder_after_load = _docker_image(placeholder)
+            if status == "loaded" and (
+                placeholder_after_load is None
+                or placeholder_after_load.get("Id") != request["runtime_image_id"]
+            ):
+                raise NodeAuthorityError("loaded worker image placeholder tag is invalid")
+            if unique is None:
+                _docker_tag(str(request["runtime_image_id"]), unique_tag)
+            unique_readback = _docker_image(unique_tag)
+            if unique_readback is None:
+                raise NodeAuthorityError("worker image unique tag readback is unavailable")
+            _validate_docker_worker_image(
+                unique_readback,
+                request,
+                backend=backend,
+                require_unique_tag=True,
+            )
+            journal = _tag_journal_payload(
+                request,
+                phase="unique-tagged",
+                prior_placeholder_image_id=prior_placeholder_id,
+            )
+            _write_tag_journal(journal)
+            _restore_placeholder(journal)
+            journal = _tag_journal_payload(
+                request,
+                phase="restored",
+                prior_placeholder_image_id=prior_placeholder_id,
+            )
+            _write_tag_journal(journal)
+        except Exception as operation_exc:
+            try:
+                _recover_worker_image_tag_journals(
+                    storage_preflight=False,
+                    backend=backend,
+                )
+            except Exception as recovery_exc:
+                raise NodeAuthorityError(
+                    "worker image load failed and placeholder recovery failed safely",
+                ) from recovery_exc
+            raise NodeAuthorityError(
+                "worker image load failed and placeholder was restored",
+            ) from operation_exc
+        final_image = _docker_image(unique_tag)
+        if final_image is None:
+            raise NodeAuthorityError("worker image unique tag final readback is unavailable")
+        _validate_docker_worker_image(
+            final_image,
+            request,
+            backend=backend,
+            require_unique_tag=True,
+        )
+        receipt = _worker_image_receipt(request, status=status, image=final_image)
+        return _persist_worker_image_receipt(request, receipt)
+    finally:
+        if staged is not None:
+            try:
+                staged.unlink()
+                _fsync_directory(STAGE_ROOT, mode=0o700)
+            except OSError:
+                pass
+        os.close(descriptor)
 
 
 def _registry_snapshot_archive_path(snapshot: Mapping[str, Any]) -> Path:
@@ -3167,7 +4178,7 @@ def _validate_invoker(verb: str, environ: Mapping[str, str]) -> None:
     except (KeyError, ValueError) as exc:
         raise NodeAuthorityError("node authority caller identity is unavailable") from exc
     if (
-        verb not in {"transact", "check"}
+        verb not in {"transact", "check", "load-image"}
         or os.geteuid() != 0
         or environ.get("SUDO_USER") != OPERATOR
         or sudo_uid != operator.pw_uid
@@ -3246,6 +4257,11 @@ def _validate_acceptance_probe_request(
         or request.get("runtime_id") != outer["sandbox"]
         or request.get("candidate_sha") != outer["candidate_sha"]
         or request.get("candidate_tree") != outer["candidate_tree"]
+        or re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            str(request.get("worker_image_id")),
+        )
+        is None
         or re.fullmatch(r"dep-[0-9a-f]{32}", str(request.get("deployment_id"))) is None
         or re.fullmatch(r"denv-[a-z0-9-]{8,64}", str(request.get("env_id"))) is None
         or re.fullmatch(
@@ -3281,6 +4297,7 @@ def _validate_acceptance_probe_request(
         or len(environments) != 1
         or len(deployments) != 1
         or len(candidates) != 1
+        or _deployment_runtime_image_id(deployment, domain) != request.get("worker_image_id")
         or environment.get("state") != "deploying"
         or environment.get("resource_generation") != deployment.get("expected_resource_generation")
         or environment.get("slurm_user") != request.get("service_user")
@@ -3532,6 +4549,14 @@ def _parse_request(raw: bytes, *, verb: str, policy: AuthorityPolicy) -> Request
             is None
         )
         or (
+            requested_action in DYNAMIC_TARGET_ACTIONS
+            and re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(payload.get("worker_image_id")),
+            )
+            is None
+        )
+        or (
             payload.get("prior_request_id") is not None
             and not _is_sha(payload.get("prior_request_id"), length=64)
         )
@@ -3588,6 +4613,8 @@ def _parse_request(raw: bytes, *, verb: str, policy: AuthorityPolicy) -> Request
             or binding[1]["candidate_tree"] != payload["candidate_tree"]
             or snapshot["generation"] != payload["registry_generation"]
             or snapshot["payload_sha256"] != payload["registry_payload_sha256"]
+            or _deployment_runtime_image_id(binding[2], str(payload["domain"]))
+            != payload["worker_image_id"]
         ):
             raise NodeAuthorityError("node authority dynamic target binding is invalid")
     elif action not in STAGING_ACTIONS and action not in {
@@ -4300,6 +5327,11 @@ def _read_receipt(request_id: str) -> dict[str, Any] | None:
                 or isinstance(payload.get("registry_generation"), bool)
                 or int(payload["registry_generation"]) < 1
                 or not _is_sha(payload.get("registry_payload_sha256"), length=64)
+                or re.fullmatch(
+                    r"sha256:[0-9a-f]{64}",
+                    str(payload.get("worker_image_id")),
+                )
+                is None
                 or (
                     action in DEPLOYMENT_TARGET_ACTIONS
                     and re.fullmatch(
@@ -4430,6 +5462,107 @@ def _append_journal(receipt: Mapping[str, Any]) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _validate_upgrade_receipt_inventory() -> None:
+    """Reject an in-place upgrade that would reinterpret legacy dynamic state."""
+    _safe_root_directory(STATE_ROOT, mode=0o700)
+    _safe_root_directory(RECEIPT_ROOT, mode=0o700)
+    journal_raw = _safe_root_file(JOURNAL, mode=0o600, limit=MAX_REQUEST_BYTES)
+    journal_records: dict[str, dict[str, Any]] = {}
+    for line in journal_raw.splitlines(keepends=True):
+        try:
+            record = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise NodeAuthorityError("node authority upgrade journal inventory is invalid") from exc
+        expected_fields = (
+            REGISTRY_SNAPSHOT_SYNC_JOURNAL_FIELDS
+            if isinstance(record, dict) and record.get("action") == REGISTRY_SNAPSHOT_SYNC_ACTION
+            else JOURNAL_FIELDS
+        )
+        if (
+            not isinstance(record, dict)
+            or set(record) != expected_fields
+            or line != _canonical(record)
+            or record.get("schema_version") != SCHEMA_VERSION
+            or not _is_sha(record.get("request_id"), length=64)
+            or not isinstance(record.get("action"), str)
+            or record.get("action") not in TRANSACT_ACTIONS
+            or not _is_sha(record.get("candidate_sha"))
+            or not _is_sha(record.get("candidate_tree"))
+            or not _is_sha(record.get("result_sha256"), length=64)
+            or _canonical_utc(record.get("completed_at")) is None
+            or record.get("status") != "succeeded"
+            or (
+                record.get("action") == REGISTRY_SNAPSHOT_SYNC_ACTION
+                and (
+                    type(record.get("registry_generation")) is not int
+                    or record["registry_generation"] < 1
+                    or not _is_sha(
+                        record.get("registry_payload_sha256"),
+                        length=64,
+                    )
+                )
+            )
+            or record["request_id"] in journal_records
+        ):
+            raise NodeAuthorityError("node authority upgrade journal inventory is invalid")
+        journal_records[str(record["request_id"])] = record
+
+    try:
+        receipt_names = sorted(path.name for path in RECEIPT_ROOT.iterdir())
+    except OSError as exc:
+        raise NodeAuthorityError(
+            "node authority upgrade receipt inventory is unavailable",
+        ) from exc
+    receipts: dict[str, dict[str, Any]] = {}
+    for name in receipt_names:
+        if len(name) != 69 or not name.endswith(".json") or not _is_sha(name[:-5], length=64):
+            raise NodeAuthorityError("node authority upgrade receipt inventory drifted")
+        request_id = name[:-5]
+        raw = _safe_root_file(RECEIPT_ROOT / name, mode=0o600, limit=1 << 20)
+        try:
+            candidate = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise NodeAuthorityError(
+                "node authority upgrade receipt inventory is invalid",
+            ) from exc
+        action = (
+            candidate.get("action")
+            if isinstance(candidate, dict) and isinstance(candidate.get("action"), str)
+            else None
+        )
+        if action in DYNAMIC_TARGET_ACTIONS:
+            expected_fields = DYNAMIC_RECEIPT_FIELDS | (
+                DEPLOYMENT_TARGET_BINDING_FIELDS if action in DEPLOYMENT_TARGET_ACTIONS else set()
+            )
+            if (
+                set(candidate) != expected_fields
+                or re.fullmatch(
+                    r"sha256:[0-9a-f]{64}",
+                    str(candidate.get("worker_image_id")),
+                )
+                is None
+            ):
+                raise NodeAuthorityError(
+                    "legacy dynamic receipt blocks node authority upgrade",
+                )
+        receipt = _read_receipt(request_id)
+        if receipt is None or raw != _canonical(receipt):
+            raise NodeAuthorityError("node authority upgrade receipt inventory drifted")
+        record = journal_records.get(request_id)
+        if record is not None and record != _journal_record(receipt):
+            raise NodeAuthorityError("node authority upgrade receipt journal binding drifted")
+        receipts[request_id] = receipt
+
+    for request_id, record in journal_records.items():
+        if record["action"] not in DYNAMIC_TARGET_ACTIONS:
+            continue
+        receipt = receipts.get(request_id)
+        if receipt is None or record != _journal_record(receipt):
+            raise NodeAuthorityError(
+                "legacy dynamic receipt blocks node authority upgrade",
+            )
 
 
 def _run_fixed(argv: Sequence[str]) -> dict[str, Any]:
@@ -4684,6 +5817,7 @@ def _validated_acceptance_probe_result(
                 "candidate_id",
                 "candidate_sha",
                 "candidate_tree",
+                "worker_image_id",
                 "applied_resource_generation",
                 "registry_generation",
                 "registry_snapshot_sha256",
@@ -8823,9 +9957,13 @@ def upgrade(source_sha: str, source_tree: str) -> dict[str, Any]:
     assets = _exact_source_assets(source_sha, source_tree)
     descriptor = _open_lock(exclusive=True)
     try:
-        _ensure_stage_root()
-        _ensure_upgrade_state()
-        recovered = _recover_upgrade_if_needed()
+        active_upgrade = _read_upgrade_active()
+        if active_upgrade is None:
+            recovered = None
+        else:
+            _ensure_stage_root()
+            _ensure_upgrade_state()
+            recovered = _recover_upgrade_if_needed()
         old_policy = _read_policy()
         old_system_installs = _validate_runtime_assets(
             old_policy,
@@ -8833,6 +9971,10 @@ def upgrade(source_sha: str, source_tree: str) -> dict[str, Any]:
         )
         if old_policy.node != node:
             raise NodeAuthorityError("node authority upgrade host binding drifted")
+        _validate_upgrade_receipt_inventory()
+        _recover_worker_image_tag_journals()
+        _ensure_stage_root()
+        _ensure_upgrade_state()
         old_policy_generation = _policy_asset_generation(old_policy.asset_sha256)
         system_install_complete = old_system_installs is None or len(old_system_installs) == len(
             SYSTEM_INSTALL_ASSETS
@@ -9078,6 +10220,7 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("transact", allow_abbrev=False)
     subparsers.add_parser("check", allow_abbrev=False)
+    subparsers.add_parser("load-image", allow_abbrev=False)
     subparsers.add_parser("validate-install", allow_abbrev=False)
     for command in ("bootstrap", "upgrade"):
         install = subparsers.add_parser(command, allow_abbrev=False)
@@ -9109,6 +10252,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
         elif args.command == "validate-install":
             result = validate_install()
+        elif args.command == "load-image":
+            result = load_worker_image(sys.stdin.buffer)
         else:
             result = dispatch(args.command, _read_all_stdin())
         sys.stdout.write(json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n")

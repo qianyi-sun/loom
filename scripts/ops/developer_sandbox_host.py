@@ -45,6 +45,8 @@ from typing import Any
 from scripts.ops import developer_environment_registry as environment_registry
 from scripts.ops import developer_sandbox_slurm_policy as slurm_policy
 
+from loom_cli import external_slurm_acceptance as external_slurm
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SOURCE_PROFILES = REPO_ROOT / "deploy/developer-sandboxes"
 SOURCE_UNIT = SOURCE_PROFILES / "loom-developer-sandbox@.service"
@@ -204,6 +206,7 @@ class Profile:
     candidate_id: str | None = None
     candidate_tree: str | None = None
     service_user: str | None = None
+    worker_image_ids: dict[str, str] | None = None
 
     @property
     def secrets_root(self) -> Path:
@@ -233,6 +236,18 @@ class Profile:
         if SHA_RE.fullmatch(sha) is None or domain not in {"oldlab", "gb10"}:
             raise HostConvergeError("worker runtime identity is invalid")
         return self.runtime_root / sha / f"worker-{domain}.env"
+
+    def worker_image_id(self, domain: str) -> str:
+        image_ids = self.worker_image_ids
+        image_id = image_ids.get(domain) if isinstance(image_ids, dict) else None
+        if (
+            domain not in DOMAIN_PEERS
+            or set(image_ids or {}) != set(DOMAIN_PEERS)
+            or FINGERPRINT_RE.fullmatch(str(image_id)) is None
+            or image_ids["oldlab"] == image_ids["gb10"]
+        ):
+            raise HostConvergeError("worker image config ID binding is incomplete")
+        return str(image_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -284,6 +299,7 @@ class StagingAllocationConfig:
     qos: str
     infrastructure_nodes: tuple[str, ...]
     allowed_nodes: tuple[str, ...]
+    excluded_nodes: tuple[str, ...]
     host_aliases: dict[str, str]
     repository_template: str
     worker_env_template: str
@@ -408,6 +424,9 @@ def load_staging_allocation_config(
 
     infrastructure_nodes = text_list(raw, "infrastructure_nodes")
     allowed_nodes = text_list(raw, "allowed_nodes")
+    excluded_nodes_raw = raw.get("excluded_nodes")
+    if not isinstance(excluded_nodes_raw, list) or excluded_nodes_raw:
+        raise HostConvergeError("fixed staging allocation excluded_nodes must be empty")
     aliases = {
         str(node): str(host)
         for node, host in host_aliases.items()
@@ -445,6 +464,7 @@ def load_staging_allocation_config(
         qos=text(raw, "qos"),
         infrastructure_nodes=infrastructure_nodes,
         allowed_nodes=allowed_nodes,
+        excluded_nodes=(),
         host_aliases=aliases,
         repository_template=text(candidate_paths, "repository"),
         worker_env_template=text(candidate_paths, "worker_env"),
@@ -502,6 +522,7 @@ def load_staging_allocation_config(
         or config.qos != "loom-staging"
         or config.infrastructure_nodes != expected_infrastructure_nodes
         or config.allowed_nodes != expected_allowed_nodes
+        or config.excluded_nodes
         or not set(config.allowed_nodes).issubset(config.infrastructure_nodes)
         or set(config.host_aliases) != set(expected_infrastructure_nodes)
         or len(set(config.host_aliases.values())) != len(expected_infrastructure_nodes)
@@ -806,12 +827,6 @@ def _staging_candidate_binding(
         raise HostConvergeError("staging allocation candidate paths drifted")
     _converge_staging_shared_namespace(config) if os.geteuid() == 0 else None
     identity = _staging_identity_snapshot(config)
-    service = Identity(
-        user=config.batch_user,
-        group=config.batch_group,
-        uid=config.batch_uid,
-        gid=config.batch_gid,
-    )
     try:
         repository_metadata = repository.lstat()
         env_metadata = worker_env.lstat()
@@ -828,77 +843,20 @@ def _staging_candidate_binding(
         not stat.S_ISREG(env_metadata.st_mode)
         or stat.S_ISLNK(env_metadata.st_mode)
         or env_metadata.st_nlink != 1
-        or (env_metadata.st_uid, env_metadata.st_gid) != (0, config.batch_gid)
-        or stat.S_IMODE(env_metadata.st_mode) != 0o440
+        or (env_metadata.st_uid, env_metadata.st_gid) != (config.batch_uid, config.batch_gid)
+        or stat.S_IMODE(env_metadata.st_mode) != 0o600
         or not 0 < env_metadata.st_size <= 1024 * 1024
     ):
         raise HostConvergeError("staging allocation worker env metadata drifted")
-    head = _run(
-        (
-            "git",
-            "-c",
-            f"safe.directory={repository}",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "core.attributesFile=/dev/null",
-            "-c",
-            "core.excludesFile=/dev/null",
-            "-C",
-            str(repository),
-            "rev-parse",
-            "--verify",
-            "HEAD",
-        ),
-        env=_clean_git_environment(),
-        identity=service,
-        init_groups=True,
-    ).stdout.strip()
-    tree = _run(
-        (
-            "git",
-            "-c",
-            f"safe.directory={repository}",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "core.attributesFile=/dev/null",
-            "-c",
-            "core.excludesFile=/dev/null",
-            "-C",
-            str(repository),
-            "rev-parse",
-            "--verify",
-            "HEAD^{tree}",
-        ),
-        env=_clean_git_environment(),
-        identity=service,
-        init_groups=True,
-    ).stdout.strip()
-    dirty = _run(
-        (
-            "git",
-            "-c",
-            f"safe.directory={repository}",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "core.attributesFile=/dev/null",
-            "-c",
-            "core.excludesFile=/dev/null",
-            "-C",
-            str(repository),
-            "status",
-            "--porcelain=v1",
-            "--untracked-files=all",
-            "--ignored=matching",
-        ),
-        env=_clean_git_environment(),
-        identity=service,
-        init_groups=True,
-    ).stdout
-    if head != candidate_sha or tree != candidate_tree or dirty:
-        raise HostConvergeError("staging allocation candidate Git binding drifted")
+    try:
+        verified_repository = slurm_policy.verify_candidate_repository(
+            repository,
+            candidate_sha=candidate_sha,
+        )
+    except slurm_policy.PolicyError as exc:
+        raise HostConvergeError("staging allocation candidate Git binding drifted") from exc
+    if verified_repository["candidate_tree"] != candidate_tree:
+        raise HostConvergeError("staging allocation candidate Git tree drifted")
     entry_count = 0
     for root, directories, files in os.walk(repository, followlinks=False):
         for entry in (
@@ -915,17 +873,45 @@ def _staging_candidate_binding(
                 raise HostConvergeError(
                     "staging allocation repository ownership or mode drifted",
                 )
-    raw_env = worker_env.read_bytes()
-    if len(raw_env) != env_metadata.st_size:
-        raise HostConvergeError("staging allocation worker env changed while read")
-    values = _parse_env_file(worker_env)
-    if (
-        values.get("LOOM_WORKER_CANDIDATE_SHA") != candidate_sha
-        or values.get("LOOM_WORKER_POOL_NAME") != config.pool
-        or values.get("LOOM_WORKER_MAX_CONCURRENT") != "10"
-        or values.get("LOOM_IMAGE_TAG") != f"staging-{candidate_sha[:7]}"
-    ):
-        raise HostConvergeError("staging allocation worker env binding drifted")
+    descriptor = os.open(
+        worker_env,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (
+            env_metadata.st_dev,
+            env_metadata.st_ino,
+        ):
+            raise HostConvergeError("staging allocation worker env inode changed")
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 64 * 1024):
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        if (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+            opened.st_mtime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
+            raise HostConvergeError("staging allocation worker env changed while read")
+        raw_env = b"".join(chunks)
+    finally:
+        os.close(descriptor)
+    try:
+        values = external_slurm.parse_staging_worker_env(
+            raw_env,
+            candidate_sha=candidate_sha,
+            pool=config.pool,
+            concurrency=10,
+        )
+    except external_slurm.ExternalSlurmAcceptanceError as exc:
+        raise HostConvergeError("staging allocation worker env binding drifted") from exc
     return {
         "service_identity": identity,
         "repository": {
@@ -1497,6 +1483,11 @@ def staging_allocation_node_check(
     )
     job_id = os.environ["SLURM_JOB_ID"]
     worker_env = Path(binding["worker_env"]["path"])
+    worker_image = slurm_policy._inspect_worker_image(
+        str(binding["env_values"]["LOOM_WORKER_IMAGE_ID"]),
+        candidate_sha=candidate_sha,
+        domain="gb10",
+    )
     job_start_time = _staging_allocation_job_start_time(
         config,
         job_id=job_id,
@@ -1601,6 +1592,7 @@ def staging_allocation_node_check(
         not isinstance(services, dict)
         or not isinstance(services.get("worker"), dict)
         or services["worker"].get("cgroup_parent") != cgroup_parent
+        or services["worker"].get("image") != binding["env_values"]["LOOM_WORKER_IMAGE_ID"]
     ):
         raise HostConvergeError("staging worker Compose cgroup binding drifted")
     compose_config_sha256 = hashlib.sha256(config_result.stdout).hexdigest()
@@ -1623,6 +1615,16 @@ def staging_allocation_node_check(
         )
         if up.returncode != 0:
             raise HostConvergeError("staging worker failed to start")
+        try:
+            slurm_policy._verify_compose_service_image(
+                compose,
+                environment=compose_environment,
+                source_root=repository,
+                service="worker",
+                worker_image_id=str(binding["env_values"]["LOOM_WORKER_IMAGE_ID"]),
+            )
+        except slurm_policy.PolicyError as exc:
+            raise HostConvergeError("staging worker image readback drifted") from exc
         if profile.docker_cgroup_driver == "systemd":
             assert slice_receipt is not None
             container_cgroup = _staging_systemd_container_containment(
@@ -1768,6 +1770,7 @@ def staging_allocation_node_check(
         "cancel_requested_at": cancel_requested_at,
         "stopped_at": stopped_at,
         "docker_server_version": docker_version,
+        "worker_image": worker_image,
         "docker_cgroup_driver": docker_driver,
         "job_start_time": job_start_time,
         "cgroup_parent": cgroup_parent,
@@ -2486,6 +2489,7 @@ def staging_allocation_probe(
         "slurm_account": slurm["account"],
         "qos": slurm["qos"],
         "allowed_nodes": list(config.allowed_nodes),
+        "excluded_nodes": list(config.excluded_nodes),
         "repository": repository,
         "worker_env": worker_env,
         "nodes": final_nodes,
@@ -4672,6 +4676,7 @@ def _node_authority_envelope(
                 "candidate_id": profile.candidate_id,
                 "registry_generation": profile.registry_generation,
                 "registry_payload_sha256": profile.registry_payload_sha256,
+                "worker_image_id": profile.worker_image_id(domain),
             }
         )
     digest = hashlib.sha256(
@@ -4751,6 +4756,45 @@ def _registry_bound_profile(profile: Profile, *, sha: str, tree: str) -> Profile
     ]
     if len(candidates) != 1:
         raise HostConvergeError("developer environment candidate profile is unavailable")
+    bound_deployments = [
+        row
+        for row in snapshot["deployments"]
+        if row["env_id"] == environment["env_id"]
+        and row["candidate_id"] == candidates[0]["candidate_id"]
+        and (
+            (
+                environment["state"] == "deploying"
+                and row["phase"] not in {"committed", "failed"}
+                and row["expected_resource_generation"] == environment["resource_generation"]
+            )
+            or (
+                environment["state"] == "active"
+                and row["phase"] == "committed"
+                and row["applied_resource_generation"] == environment["resource_generation"]
+            )
+        )
+        and isinstance(row.get("worker_runtime_bindings"), dict)
+    ]
+    deployment = bound_deployments[0] if len(bound_deployments) == 1 else None
+    runtime_bindings = (
+        deployment.get("worker_runtime_bindings") if isinstance(deployment, dict) else None
+    )
+    domains = runtime_bindings.get("domains") if isinstance(runtime_bindings, dict) else None
+    worker_image_ids = (
+        {domain: domains[domain].get("runtime_image_id") for domain in ("oldlab", "gb10")}
+        if isinstance(domains, dict)
+        and all(isinstance(domains.get(domain), dict) for domain in ("oldlab", "gb10"))
+        else {}
+    )
+    if (
+        set(worker_image_ids) != {"oldlab", "gb10"}
+        or any(
+            FINGERPRINT_RE.fullmatch(str(worker_image_ids[domain])) is None
+            for domain in ("oldlab", "gb10")
+        )
+        or worker_image_ids["oldlab"] == worker_image_ids["gb10"]
+    ):
+        raise HostConvergeError("developer environment worker image binding is invalid")
     resource_generation = environment["resource_generation"]
     if environment["state"] == "deploying":
         prepared = [
@@ -4777,6 +4821,10 @@ def _registry_bound_profile(profile: Profile, *, sha: str, tree: str) -> Profile
         candidate_id=candidates[0]["candidate_id"],
         candidate_tree=tree,
         service_user=environment["service_user"],
+        worker_image_ids={
+            "oldlab": str(worker_image_ids["oldlab"]),
+            "gb10": str(worker_image_ids["gb10"]),
+        },
     )
 
 
@@ -6341,6 +6389,7 @@ def _worker_env_seed(profile: Profile, sha: str, domain: str) -> bytes:
         "LOOM_WORKER_MINIO_ENDPOINT": "http://sandbox-link:9000",
         "LOOM_WORKER_SANDBOX_IDENTITY": profile.sandbox,
         "LOOM_WORKER_CANDIDATE_SHA": sha,
+        "LOOM_WORKER_IMAGE_ID": profile.worker_image_id(domain),
         "LOOM_SANDBOX_LINK_CP_UPSTREAM": (
             f"https://{REMOTE_LINK_SERVER_ADDRESS}:{control_plane_port}"
         ),
@@ -6367,6 +6416,7 @@ def _worker_env_seed(profile: Profile, sha: str, domain: str) -> bytes:
         profile.registry_payload_sha256,
         profile.candidate_id,
         profile.candidate_tree,
+        profile.worker_image_ids,
     )
     if any(value is not None for value in dynamic):
         if (

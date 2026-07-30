@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import stat
 import subprocess
 import tomllib
@@ -34,6 +35,62 @@ _GENERATION_ID_RE = re.compile(r"[0-9a-f]{64}\Z")
 _MAX_CONFIG_BYTES = 128 * 1024
 _MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
 _MAX_SIGNATURE_BYTES = 512
+_STAGING_WORKER_ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+_STAGING_WORKER_IMAGE_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_STAGING_WORKER_ENV_KEYS = frozenset(
+    {
+        "IMAGE_TAG",
+        "ENV_CONFIG_VERSION",
+        "LOOM_IMAGE_TAG",
+        "LOOM_WORKER_ENV_CONFIG_VERSION",
+        "LOOM_WORKER_IMAGE_ID",
+        "LOOM_WORKER_CANDIDATE_SHA",
+        "LOOM_WORKER_CONTROL_PLANE_URL",
+        "LOOM_WORKER_GATEWAY_URL",
+        "LOOM_WORKER_SUBPROCESS_GATEWAY_URL",
+        "LOOM_WORKER_TOKEN",
+        "LOOM_WORKER_TOKEN_FILE",
+        "LOOM_WORKER_MINIO_ENDPOINT",
+        "LOOM_WORKER_MINIO_ACCESS_KEY",
+        "LOOM_WORKER_MINIO_ACCESS_KEY_FILE",
+        "LOOM_WORKER_MINIO_SECRET_KEY",
+        "LOOM_WORKER_MINIO_SECRET_KEY_FILE",
+        "LOOM_WORKER_DOCKER_API_TIMEOUT_SEC",
+        "LOOM_WORKER_MINIO_MAX_POOL_CONNECTIONS",
+        "LOOM_WORKER_MINIO_CONNECT_TIMEOUT_SEC",
+        "LOOM_WORKER_MINIO_READ_TIMEOUT_SEC",
+        "LOOM_WORKER_MINIO_OPERATION_TIMEOUT_SEC",
+        "LOOM_WORKER_MINIO_OPERATION_ATTEMPTS",
+        "LOOM_WORKER_TASK_MATERIALIZE_TIMEOUT_SEC",
+        "LOOM_WORKER_TRIAL_CACHE_BUILD_MAX_CONCURRENT",
+        "LOOM_WORKER_HOSTNAME",
+        "LOOM_WORKER_POOL_NAME",
+        "LOOM_WORKER_MAX_CONCURRENT",
+        "LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS",
+        "LOOM_TASK_IMAGE_BUILD_MAX_FILES",
+        "LOOM_TASK_IMAGE_BUILD_MAX_BYTES",
+        "LOOM_WORKER_BLOCKING_IO_MAX_WORKERS",
+        "LOOM_WORKER_LOG_LEVEL",
+    }
+)
+_STAGING_WORKER_REQUIRED_ENV_KEYS = frozenset(
+    {
+        "IMAGE_TAG",
+        "ENV_CONFIG_VERSION",
+        "LOOM_IMAGE_TAG",
+        "LOOM_WORKER_ENV_CONFIG_VERSION",
+        "LOOM_WORKER_IMAGE_ID",
+        "LOOM_WORKER_CANDIDATE_SHA",
+        "LOOM_WORKER_CONTROL_PLANE_URL",
+        "LOOM_WORKER_GATEWAY_URL",
+        "LOOM_WORKER_TOKEN",
+        "LOOM_WORKER_MINIO_ENDPOINT",
+        "LOOM_WORKER_MINIO_ACCESS_KEY",
+        "LOOM_WORKER_MINIO_SECRET_KEY",
+        "LOOM_WORKER_POOL_NAME",
+        "LOOM_WORKER_MAX_CONCURRENT",
+    }
+)
 _AUTHORITY_CONFIG_FIELDS = frozenset(
     {
         "schema_version",
@@ -67,6 +124,7 @@ _AUTHORITY_CONFIG_FIELDS = frozenset(
         "max_age_seconds",
         "infrastructure_nodes",
         "allowed_nodes",
+        "excluded_nodes",
         "installation",
         "infrastructure",
         "host_aliases",
@@ -143,6 +201,7 @@ class ExternalSlurmAuthorityConfig:
     broker_cancel_action: str
     infrastructure_nodes: tuple[str, ...]
     allowed_nodes: tuple[str, ...]
+    excluded_nodes: tuple[str, ...]
     host_aliases: dict[str, str]
     repository_template: str
     worker_env_template: str
@@ -289,6 +348,11 @@ def load_authority_config(
         )
     allowed_nodes = _clean_string_array(raw, "allowed_nodes")
     infrastructure_nodes = _clean_string_array(raw, "infrastructure_nodes")
+    excluded_nodes_raw = raw.get("excluded_nodes")
+    if not isinstance(excluded_nodes_raw, list) or excluded_nodes_raw:
+        raise ExternalSlurmAcceptanceError(
+            "authority config excluded_nodes must be the fixed empty list"
+        )
     config = ExternalSlurmAuthorityConfig(
         environment=_clean_string(raw, "environment"),
         pool=_clean_string(raw, "pool"),
@@ -339,6 +403,7 @@ def load_authority_config(
         broker_cancel_action=_clean_string(submission_broker, "cancel_action"),
         infrastructure_nodes=infrastructure_nodes,
         allowed_nodes=allowed_nodes,
+        excluded_nodes=(),
         host_aliases={
             str(key): str(value)
             for key, value in host_aliases.items()
@@ -447,6 +512,10 @@ def load_authority_config(
         raise ExternalSlurmAcceptanceError(
             "authority config must contain the exact 15-node GB10 acceptance set"
         )
+    if config.excluded_nodes:
+        raise ExternalSlurmAcceptanceError(
+            "authority config must not exclude any GB10 infrastructure node"
+        )
     if config.infrastructure_nodes != expected_infrastructure_nodes:
         raise ExternalSlurmAcceptanceError(
             "authority config must contain the exact 15-node GB10 infrastructure set"
@@ -461,6 +530,427 @@ def load_authority_config(
             "authority config host_aliases must match the infrastructure node set"
         )
     return config
+
+
+def _candidate_git_read(repository: Path, *arguments: str) -> bytes:
+    environment = {
+        **{key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    completed = subprocess.run(
+        (
+            "git",
+            "-c",
+            f"safe.directory={repository}",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.untrackedCache=false",
+            "-c",
+            "core.attributesFile=/dev/null",
+            "-c",
+            "core.autocrlf=false",
+            "-C",
+            str(repository),
+            *arguments,
+        ),
+        check=False,
+        capture_output=True,
+        env=environment,
+        timeout=30,
+    )
+    if completed.returncode:
+        raise ExternalSlurmAcceptanceError("candidate repository verification command failed")
+    return completed.stdout
+
+
+def _verify_candidate_git_storage(repository: Path) -> None:
+    """Reject Git metadata that can resolve worktree or objects outside the candidate."""
+
+    git_directory = repository / ".git"
+    config = git_directory / "config"
+    try:
+        config_metadata = config.lstat()
+    except OSError as exc:
+        raise ExternalSlurmAcceptanceError("candidate Git config is unavailable") from exc
+    if (
+        not stat.S_ISREG(config_metadata.st_mode)
+        or stat.S_ISLNK(config_metadata.st_mode)
+        or config_metadata.st_nlink != 1
+        or config_metadata.st_mode & 0o022
+    ):
+        raise ExternalSlurmAcceptanceError("candidate Git config is unsafe")
+
+    for relative in (
+        Path("config.worktree"),
+        Path("objects/info/alternates"),
+        Path("objects/info/http-alternates"),
+    ):
+        path = git_directory / relative
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ExternalSlurmAcceptanceError(
+                "candidate Git storage metadata is unavailable"
+            ) from exc
+        raise ExternalSlurmAcceptanceError("candidate Git repository is not self-contained")
+
+    environment = {
+        **{key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    completed = subprocess.run(
+        (
+            "git",
+            "config",
+            "--file",
+            str(config),
+            "--null",
+            "--list",
+            "--no-includes",
+        ),
+        check=False,
+        capture_output=True,
+        env=environment,
+        timeout=30,
+    )
+    if completed.returncode or completed.stderr:
+        raise ExternalSlurmAcceptanceError("candidate Git config cannot be read safely")
+    try:
+        entries = [item.decode("utf-8") for item in completed.stdout.split(b"\0") if item]
+    except UnicodeDecodeError as exc:
+        raise ExternalSlurmAcceptanceError("candidate Git config is not UTF-8") from exc
+    values: dict[str, list[str]] = {}
+    for entry in entries:
+        key, separator, value = entry.partition("\n")
+        normalized = key.casefold()
+        if (
+            not separator
+            or not normalized
+            or normalized.startswith(("include.", "includeif."))
+            or normalized
+            in {
+                "core.worktree",
+                "extensions.worktreeconfig",
+                "extensions.partialclone",
+            }
+            or normalized.endswith(".promisor")
+            or normalized.endswith(".partialclonefilter")
+        ):
+            raise ExternalSlurmAcceptanceError("candidate Git repository is not self-contained")
+        values.setdefault(normalized, []).append(value)
+    bare = values.get("core.bare", [])
+    if len(bare) > 1 or (bare and bare[0].strip().casefold() not in {"false", "no", "off", "0"}):
+        raise ExternalSlurmAcceptanceError("candidate Git repository is not self-contained")
+
+
+def _candidate_repository_paths(repository: Path) -> set[str]:
+    found: set[str] = set()
+    stack = [repository]
+    while stack:
+        directory = stack.pop()
+        try:
+            children = tuple(directory.iterdir())
+        except OSError as exc:
+            raise ExternalSlurmAcceptanceError("candidate repository traversal failed") from exc
+        for child in children:
+            if child.parent == repository and child.name == ".git":
+                continue
+            metadata = child.lstat()
+            relative = child.relative_to(repository).as_posix()
+            if stat.S_ISDIR(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode):
+                stack.append(child)
+            else:
+                found.add(relative)
+    return found
+
+
+def _candidate_blob_sha(payload: bytes) -> str:
+    return hashlib.sha1(f"blob {len(payload)}\0".encode() + payload).hexdigest()
+
+
+def verify_candidate_repository(
+    repository: Path,
+    *,
+    candidate_sha: str,
+    candidate_tree: str,
+) -> dict[str, Any]:
+    """Verify the checked-out bytes, index, and tree of a staging candidate."""
+
+    if (
+        _OBJECT_ID_RE.fullmatch(candidate_sha) is None
+        or _OBJECT_ID_RE.fullmatch(candidate_tree) is None
+    ):
+        raise ExternalSlurmAcceptanceError("candidate repository identity is invalid")
+    try:
+        metadata = repository.lstat()
+    except OSError as exc:
+        raise ExternalSlurmAcceptanceError("candidate repository is unavailable") from exc
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_mode & 0o022
+    ):
+        raise ExternalSlurmAcceptanceError("candidate repository root is unsafe")
+    git_marker = repository / ".git"
+    try:
+        git_metadata = git_marker.lstat()
+    except OSError as exc:
+        raise ExternalSlurmAcceptanceError("candidate Git metadata is unavailable") from exc
+    if (
+        stat.S_ISLNK(git_metadata.st_mode)
+        or git_metadata.st_mode & 0o022
+        or not stat.S_ISDIR(git_metadata.st_mode)
+    ):
+        raise ExternalSlurmAcceptanceError("candidate Git metadata is unsafe")
+    _verify_candidate_git_storage(repository)
+    head = _candidate_git_read(repository, "rev-parse", "--verify", "HEAD").decode("ascii").strip()
+    tree = (
+        _candidate_git_read(
+            repository,
+            "rev-parse",
+            "--verify",
+            f"{candidate_sha}^{{tree}}",
+        )
+        .decode("ascii")
+        .strip()
+    )
+    if head != candidate_sha or tree != candidate_tree:
+        raise ExternalSlurmAcceptanceError("candidate repository Git identity mismatch")
+
+    tracked: dict[str, tuple[str, str]] = {}
+    for raw in _candidate_git_read(
+        repository,
+        "ls-tree",
+        "-rz",
+        "--full-tree",
+        candidate_sha,
+    ).split(b"\0"):
+        if not raw:
+            continue
+        metadata_raw, separator, raw_path = raw.partition(b"\t")
+        fields = metadata_raw.decode("ascii").split()
+        if not separator or len(fields) != 3 or fields[1] != "blob":
+            raise ExternalSlurmAcceptanceError("candidate tree contains an unsupported entry")
+        try:
+            path = raw_path.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ExternalSlurmAcceptanceError("candidate tree path is not UTF-8") from exc
+        tracked[path] = (fields[0], fields[2])
+    if not tracked:
+        raise ExternalSlurmAcceptanceError("candidate tree contains no tracked files")
+
+    indexed: set[str] = set()
+    for raw in _candidate_git_read(
+        repository,
+        "ls-files",
+        "--stage",
+        "-z",
+    ).split(b"\0"):
+        if not raw:
+            continue
+        metadata_raw, separator, raw_path = raw.partition(b"\t")
+        fields = metadata_raw.decode("ascii").split()
+        if not separator or len(fields) != 3 or fields[2] != "0":
+            raise ExternalSlurmAcceptanceError(
+                "candidate index contains a non-zero or invalid stage"
+            )
+        try:
+            indexed.add(raw_path.decode("utf-8"))
+        except UnicodeDecodeError as exc:
+            raise ExternalSlurmAcceptanceError("candidate index path is not UTF-8") from exc
+    if indexed != set(tracked):
+        raise ExternalSlurmAcceptanceError("candidate index differs from the commit tree")
+    for raw in _candidate_git_read(
+        repository,
+        "ls-files",
+        "-v",
+        "-z",
+    ).split(b"\0"):
+        if raw and (len(raw) < 3 or raw[:2] != b"H "):
+            raise ExternalSlurmAcceptanceError(
+                "candidate index has skip-worktree or assume-unchanged flags"
+            )
+    if _candidate_repository_paths(repository) != set(tracked):
+        raise ExternalSlurmAcceptanceError("candidate repository contains extra or missing files")
+    paths = tuple(sorted(tracked))
+    for offset in range(0, len(paths), 200):
+        values = [
+            item.decode("utf-8")
+            for item in _candidate_git_read(
+                repository,
+                "check-attr",
+                "-z",
+                "filter",
+                "working-tree-encoding",
+                "--",
+                *paths[offset : offset + 200],
+            ).split(b"\0")
+            if item
+        ]
+        if len(values) % 3:
+            raise ExternalSlurmAcceptanceError("candidate Git attribute readback is malformed")
+        for index in range(0, len(values), 3):
+            _path, attribute, value = values[index : index + 3]
+            if value not in {"unspecified", "unset"}:
+                raise ExternalSlurmAcceptanceError(
+                    f"candidate tracked file has interfering Git {attribute} attributes"
+                )
+
+    for relative, (mode, expected_blob) in tracked.items():
+        source = repository / relative
+        file_metadata = source.lstat()
+        if file_metadata.st_mode & 0o022:
+            raise ExternalSlurmAcceptanceError("candidate tracked file is group/world writable")
+        if mode not in {"100644", "100755", "120000"}:
+            raise ExternalSlurmAcceptanceError("candidate tracked file mode is unsupported")
+        if mode == "120000":
+            if not stat.S_ISLNK(file_metadata.st_mode):
+                raise ExternalSlurmAcceptanceError(
+                    "candidate symlink type differs from the commit tree"
+                )
+            payload = os.fsencode(os.readlink(source))
+        else:
+            if stat.S_ISLNK(file_metadata.st_mode) or not stat.S_ISREG(file_metadata.st_mode):
+                raise ExternalSlurmAcceptanceError(
+                    "candidate tracked file type differs from the commit tree"
+                )
+            executable = bool(stat.S_IMODE(file_metadata.st_mode) & 0o111)
+            if executable is not (mode == "100755"):
+                raise ExternalSlurmAcceptanceError(
+                    "candidate tracked executable mode differs from the tree"
+                )
+            descriptor = os.open(
+                source,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            )
+            try:
+                opened = os.fstat(descriptor)
+                if (opened.st_dev, opened.st_ino) != (
+                    file_metadata.st_dev,
+                    file_metadata.st_ino,
+                ):
+                    raise ExternalSlurmAcceptanceError("candidate tracked file inode changed")
+                chunks: list[bytes] = []
+                while chunk := os.read(descriptor, 64 * 1024):
+                    chunks.append(chunk)
+                after = os.fstat(descriptor)
+                if (
+                    opened.st_size,
+                    opened.st_mtime_ns,
+                    opened.st_dev,
+                    opened.st_ino,
+                ) != (
+                    after.st_size,
+                    after.st_mtime_ns,
+                    after.st_dev,
+                    after.st_ino,
+                ):
+                    raise ExternalSlurmAcceptanceError(
+                        "candidate tracked file changed while it was read"
+                    )
+                payload = b"".join(chunks)
+            finally:
+                os.close(descriptor)
+        if _candidate_blob_sha(payload) != expected_blob:
+            raise ExternalSlurmAcceptanceError(
+                "candidate raw tracked bytes differ from the commit tree"
+            )
+    status = _candidate_git_read(
+        repository,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        "--ignored=matching",
+    )
+    if status:
+        raise ExternalSlurmAcceptanceError("candidate repository is not exactly clean")
+    return {
+        "path": str(repository),
+        "candidate_sha": candidate_sha,
+        "candidate_tree": candidate_tree,
+        "tracked_files": len(tracked),
+    }
+
+
+def parse_staging_worker_env(
+    payload: bytes,
+    *,
+    candidate_sha: str,
+    pool: str,
+    concurrency: int,
+) -> dict[str, str]:
+    """Parse the closed staging Compose env contract without exposing values."""
+
+    if len(payload) == 0 or len(payload) > 1024 * 1024:
+        raise ExternalSlurmAcceptanceError("staging worker env size is invalid")
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ExternalSlurmAcceptanceError("staging worker env must be UTF-8") from exc
+    if "\x00" in text or "\r" in text:
+        raise ExternalSlurmAcceptanceError(
+            "staging worker env contains an unsafe control character"
+        )
+    values: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, separator, raw_value = line.partition("=")
+        if (
+            not separator
+            or _STAGING_WORKER_ENV_KEY_RE.fullmatch(key) is None
+            or key in values
+            or "$" in raw_value
+        ):
+            raise ExternalSlurmAcceptanceError(
+                "staging worker env contains an invalid or duplicate key"
+            )
+        try:
+            semantic_parts = shlex.split(
+                raw_value,
+                comments=False,
+                posix=True,
+            )
+        except ValueError as exc:
+            raise ExternalSlurmAcceptanceError(
+                "staging worker env contains a malformed value"
+            ) from exc
+        if len(semantic_parts) > 1:
+            raise ExternalSlurmAcceptanceError("staging worker env contains an ambiguous value")
+        values[key] = semantic_parts[0] if semantic_parts else ""
+    if (
+        not _STAGING_WORKER_REQUIRED_ENV_KEYS.issubset(values)
+        or not set(values).issubset(_STAGING_WORKER_ENV_KEYS)
+        or any(not values[key] for key in _STAGING_WORKER_REQUIRED_ENV_KEYS)
+    ):
+        raise ExternalSlurmAcceptanceError("staging worker env field set is incomplete or unknown")
+    image_tag = f"staging-{candidate_sha[:7]}"
+    exact = {
+        "IMAGE_TAG": image_tag,
+        "ENV_CONFIG_VERSION": image_tag,
+        "LOOM_IMAGE_TAG": image_tag,
+        "LOOM_WORKER_ENV_CONFIG_VERSION": image_tag,
+        "LOOM_WORKER_CANDIDATE_SHA": candidate_sha,
+        "LOOM_WORKER_POOL_NAME": pool,
+        "LOOM_WORKER_MAX_CONCURRENT": str(concurrency),
+    }
+    if any(values.get(key) != expected for key, expected in exact.items()):
+        raise ExternalSlurmAcceptanceError("staging worker env candidate source binding is stale")
+    if _STAGING_WORKER_IMAGE_RE.fullmatch(values["LOOM_WORKER_IMAGE_ID"]) is None:
+        raise ExternalSlurmAcceptanceError("staging worker env image binding is invalid")
+    return values
 
 
 def canonical_json_bytes(payload: Mapping[str, Any]) -> bytes:
@@ -517,9 +1007,7 @@ INFRASTRUCTURE_OPERATION_FIELDS = frozenset(
         "status",
     }
 )
-_BOOT_ID_RE = re.compile(
-    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z"
-)
+_BOOT_ID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
 
 
 def infrastructure_mount_digest(
@@ -594,8 +1082,7 @@ def validate_infrastructure_verification_summary(
             not isinstance(value, str) or _GENERATION_ID_RE.fullmatch(value) is None
             for value in mount_digests.values()
         )
-        or payload.get("mount_digest")
-        != infrastructure_mount_digest(expected_mount_contract)
+        or payload.get("mount_digest") != infrastructure_mount_digest(expected_mount_contract)
         or _GENERATION_ID_RE.fullmatch(str(payload.get("source_digest"))) is None
         or not isinstance(boot_ids, dict)
         or set(boot_ids) != set(hosts)
@@ -616,9 +1103,7 @@ def validate_infrastructure_verification_summary(
             for item in node_bootstraps
         )
     ):
-        raise ExternalSlurmAcceptanceError(
-            "infrastructure verification summary binding is invalid"
-        )
+        raise ExternalSlurmAcceptanceError("infrastructure verification summary binding is invalid")
     expected_request = {
         "schema_version": 1,
         "kind": "loom.staging-external-slurm.infrastructure-converge-request",
@@ -627,12 +1112,11 @@ def validate_infrastructure_verification_summary(
         "convergence_id": payload["convergence_id"],
         "requested_at": payload.get("requested_at"),
     }
-    if payload["request_sha256"] != hashlib.sha256(
-        canonical_json_bytes(expected_request)
-    ).hexdigest():
-        raise ExternalSlurmAcceptanceError(
-            "infrastructure verification request binding is invalid"
-        )
+    if (
+        payload["request_sha256"]
+        != hashlib.sha256(canonical_json_bytes(expected_request)).hexdigest()
+    ):
+        raise ExternalSlurmAcceptanceError("infrastructure verification request binding is invalid")
     operations = (
         (source, "staging-shared-source-bootstrap", "trt-gb10-2"),
         (accounting, "staging-slurm-accounting-converge", "trt-gb10-1"),
@@ -645,12 +1129,10 @@ def validate_infrastructure_verification_summary(
     for item, action, host in operations:
         inner = item.get("inner_receipt")
         valid_inner = (
-            re.fullmatch(r"staging-shared-source-bootstrap/v1/[0-9a-f]{64}", str(inner))
-            is not None
+            re.fullmatch(r"staging-shared-source-bootstrap/v1/[0-9a-f]{64}", str(inner)) is not None
             if action == "staging-shared-source-bootstrap"
             else (
-                re.fullmatch(r"staging-accounting/v1/[0-9a-f]{64}", str(inner))
-                is not None
+                re.fullmatch(r"staging-accounting/v1/[0-9a-f]{64}", str(inner)) is not None
                 if action == "staging-slurm-accounting-converge"
                 else re.fullmatch(
                     (
@@ -683,9 +1165,7 @@ def validate_infrastructure_verification_summary(
             ) from exc
     source_inner = str(source["inner_receipt"]).rsplit("/", 1)[-1]
     if payload["source_digest"] != source_inner:
-        raise ExternalSlurmAcceptanceError(
-            "infrastructure verification source digest is invalid"
-        )
+        raise ExternalSlurmAcceptanceError("infrastructure verification source digest is invalid")
     for item, host in zip(node_bootstraps, hosts, strict=True):
         _prefix, boot_id, mount_digest = str(item["inner_receipt"]).rsplit("/", 2)
         if boot_ids[host] != boot_id or mount_digests[host] != mount_digest:
@@ -693,9 +1173,7 @@ def validate_infrastructure_verification_summary(
                 "infrastructure verification node evidence is invalid"
             )
     if now is not None and (now.tzinfo is None or now.utcoffset() is None):
-        raise ExternalSlurmAcceptanceError(
-            "infrastructure verification trusted clock is invalid"
-        )
+        raise ExternalSlurmAcceptanceError("infrastructure verification trusted clock is invalid")
     requested = _parse_timestamp(payload.get("requested_at"), "requested_at")
     created = _parse_timestamp(payload.get("created_at"), "created_at")
     expires = _parse_timestamp(payload.get("expires_at"), "expires_at")
@@ -766,6 +1244,7 @@ _PAYLOAD_FIELDS = frozenset(
         "slurm_account",
         "qos",
         "allowed_nodes",
+        "excluded_nodes",
         "repository",
         "worker_env",
         "supervisor",
@@ -899,6 +1378,8 @@ def validate_authority_payload(
         )
     if payload.get("allowed_nodes") != list(config.allowed_nodes):
         raise ExternalSlurmAcceptanceError("authority allowed_nodes mismatch")
+    if payload.get("excluded_nodes") != list(config.excluded_nodes):
+        raise ExternalSlurmAcceptanceError("authority excluded_nodes mismatch")
     created_at = _parse_timestamp(payload.get("created_at"), "created_at")
     expires_at = _parse_timestamp(payload.get("expires_at"), "expires_at")
     current = (now or datetime.now(UTC)).astimezone(UTC)
@@ -1034,6 +1515,8 @@ def _current_pointer(
         "key_id",
         "created_at",
         "expires_at",
+        "allowed_nodes",
+        "excluded_nodes",
     }
     if (
         not isinstance(pointer, dict)
@@ -1041,6 +1524,8 @@ def _current_pointer(
         or canonical_json_bytes(pointer) != raw
         or pointer.get("schema_version") != 1
         or pointer.get("candidate_sha") != candidate_sha
+        or pointer.get("allowed_nodes") != list(config.allowed_nodes)
+        or pointer.get("excluded_nodes") != list(config.excluded_nodes)
         or _OBJECT_ID_RE.fullmatch(str(pointer.get("candidate_tree") or "")) is None
         or isinstance(pointer.get("generation"), bool)
         or not isinstance(pointer.get("generation"), int)

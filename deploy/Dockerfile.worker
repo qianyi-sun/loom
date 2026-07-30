@@ -1,4 +1,6 @@
 FROM python:3.12-slim
+ARG LOOM_BUILD_SHA=unknown
+LABEL org.opencontainers.image.revision="${LOOM_BUILD_SHA}"
 # #199: transient PyPI ReadTimeouts during rollout builds — see
 # docs/runbooks/operator-runbook.md#rollout-build-resilience.
 ENV PIP_RETRIES=10 PIP_DEFAULT_TIMEOUT=60

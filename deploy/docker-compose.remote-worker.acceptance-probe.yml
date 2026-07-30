@@ -2,7 +2,7 @@
 # sandbox-link, and cgroup-parent definitions. No service publishes host ports.
 services:
   acceptance-probe:
-    image: loom-worker:${LOOM_IMAGE_TAG:?set exact candidate image tag}
+    image: ${LOOM_WORKER_IMAGE_ID:?set exact loom-worker image config ID}
     command:
       - /usr/bin/python3
       - -I
@@ -24,6 +24,7 @@ services:
       LOOM_WORKER_CANDIDATE_TREE: ${LOOM_WORKER_CANDIDATE_TREE:?set candidate tree}
       LOOM_WORKER_REGISTRY_GENERATION: ${LOOM_WORKER_REGISTRY_GENERATION:?set registry generation}
       LOOM_WORKER_REGISTRY_PAYLOAD_SHA256: ${LOOM_WORKER_REGISTRY_PAYLOAD_SHA256:?set registry digest}
+      LOOM_WORKER_IMAGE_ID: ${LOOM_WORKER_IMAGE_ID:?set exact loom-worker image config ID}
       SLURM_JOB_ID: ${LOOM_WORKER_SLURM_JOB_ID:?set Slurm job id}
     volumes:
       - type: bind
@@ -58,4 +59,5 @@ services:
       loom.candidate_tree: ${LOOM_WORKER_CANDIDATE_TREE:?set candidate tree}
       loom.registry_generation: ${LOOM_WORKER_REGISTRY_GENERATION:?set registry generation}
       loom.registry_payload_sha256: ${LOOM_WORKER_REGISTRY_PAYLOAD_SHA256:?set registry digest}
+      loom.worker_image_id: ${LOOM_WORKER_IMAGE_ID:?set exact loom-worker image config ID}
     restart: "no"

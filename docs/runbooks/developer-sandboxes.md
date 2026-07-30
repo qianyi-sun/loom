@@ -17,22 +17,80 @@ admission list or the runtime cohort.
 
 ## Developer workflow
 
-Create a single-head Git bundle for the commit being deployed. Record its
-commit/tree and the already-published immutable multi-architecture image
-digests, then make one authority call:
+Create a single-head Git bundle and one buildx `type=docker` archive for each
+worker architecture. The archive tag is a transport placeholder, not identity;
+the authority binds the config ID and every referenced OCI blob/diff ID.
 
 ```bash
+candidate_sha="$(git rev-parse HEAD)"
+candidate_tree="$(git rev-parse HEAD^{tree})"
+short_sha="$(printf '%s' "${candidate_sha}" | cut -c1-12)"
 git bundle create ./loom-candidate.bundle HEAD
+
+docker buildx build \
+  --platform linux/amd64 \
+  --provenance=false \
+  --build-arg "LOOM_BUILD_SHA=${candidate_sha}" \
+  --tag "loom-worker:${short_sha}-amd64" \
+  --output "type=docker,dest=./loom-worker-linux-amd64.tar" \
+  --file deploy/Dockerfile.worker .
+docker buildx build \
+  --platform linux/arm64 \
+  --provenance=false \
+  --build-arg "LOOM_BUILD_SHA=${candidate_sha}" \
+  --tag "loom-worker:${short_sha}-arm64" \
+  --output "type=docker,dest=./loom-worker-linux-arm64.tar" \
+  --file deploy/Dockerfile.worker .
+
+amd64_image_id="sha256:$(tar -xOf ./loom-worker-linux-amd64.tar manifest.json |
+  jq -r '.[0].Config | split(\"/\")[-1]')"
+arm64_image_id="sha256:$(tar -xOf ./loom-worker-linux-arm64.tar manifest.json |
+  jq -r '.[0].Config | split(\"/\")[-1]')"
 
 loom-developer-environment create \
   --idempotency-key <stable-create-request-id> \
   --display-name <human-readable-name> \
   --bundle ./loom-candidate.bundle \
-  --candidate-sha <40-hex-commit> \
-  --candidate-tree <40-hex-tree> \
-  --amd64-image-digest sha256:<64-hex> \
-  --arm64-image-digest sha256:<64-hex>
+  --candidate-sha "${candidate_sha}" \
+  --candidate-tree "${candidate_tree}" \
+  --amd64-image-digest "${amd64_image_id}" \
+  --arm64-image-digest "${arm64_image_id}" \
+  --amd64-image-archive ./loom-worker-linux-amd64.tar \
+  --arm64-image-archive ./loom-worker-linux-arm64.tar
 ```
+
+`image_digests` is retained as the external request key for compatibility, but
+its two values have one narrow meaning: the archive's Docker config digest for
+`linux/amd64` and `linux/arm64`. They are not universal runtime `.Id` values,
+registry index/platform-manifest digests, archive checksums, aggregate Compose
+digests, or node-bootstrap identities. The two config IDs must be different
+because a Docker image config records its architecture.
+
+Do not preload images manually. The root authority verifies both archives
+offline, persists them under the immutable candidate namespace, and streams
+the architecture-matched archive through the fixed `qianyi` transport to all
+20 runtime nodes. Each node must prove one supported backend: classic
+`overlay2`, where runtime `.Id` equals the config digest, or Docker's
+containerd snapshotter (`overlayfs` with
+`driver-type=io.containerd.snapshotter.v1`), where runtime `.Id` and
+`.Descriptor` equal the archive's top-level load descriptor (an OCI manifest
+or OCI index). The verifier independently binds that load descriptor to one
+target-platform manifest, config, and layer DAG; a provenance index may contain
+only explicitly annotated attestations that reference that platform manifest.
+Each node preserves any peer placeholder-tag binding, adds an
+authority-derived runtime-ID tag, and requires `Os` to be
+`linux`, `Architecture` to match the selected key, and
+`org.opencontainers.image.revision` equals `candidate_sha`. The image's default
+command must be exactly `python -m loom_worker` and its entrypoint must be
+empty, so an otherwise correct-looking config cannot redirect execution. The
+deployer persists all 20 node receipts before its first host mutation, rejects
+unknown backends and any runtime-ID/backend difference within a domain, then
+starts each domain's worker by that domain's immutable runtime ID with
+`--no-build`; it may still build
+the other local services from the exact candidate checkout. Post-start
+readback requires the worker container's actual Docker `.Image` to equal the
+same persisted domain runtime ID. A correct-looking tag or operator-written label never
+substitutes for those two image-engine checks.
 
 The authority authenticates the socket peer, verifies and persists the bundle,
 allocates only from the current trusted fleet inventory, and journals
@@ -66,7 +124,9 @@ loom-developer-environment update \
   --candidate-sha <40-hex-commit> \
   --candidate-tree <40-hex-tree> \
   --amd64-image-digest sha256:<64-hex> \
-  --arm64-image-digest sha256:<64-hex>
+  --arm64-image-digest sha256:<64-hex> \
+  --amd64-image-archive ./loom-worker-linux-amd64.tar \
+  --arm64-image-archive ./loom-worker-linux-arm64.tar
 
 loom-developer-environment rollback \
   --idempotency-key <stable-rollback-request-id>
@@ -221,11 +281,12 @@ applicable `check-client`; success is not inferred from container exit alone.
 
 The oldlab-2 Unix socket admits authenticated members of `loom-developers`.
 The root authority then invokes the fixed transport as its single operator,
-`qianyi`. Remote nodes grant only that transport operator these two commands:
+`qianyi`. Remote nodes grant only that transport operator these three commands:
 
 ```text
 qianyi ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-developer-sandbox-node-authority transact
 qianyi ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-developer-sandbox-node-authority check
+qianyi ALL=(root) NOPASSWD:NOSETENV: /usr/local/libexec/loom-developer-sandbox-node-authority load-image
 ```
 
 Future developers receive no direct remote sudo or SSH authority. Their only
@@ -233,8 +294,8 @@ entry is the group-owned oldlab-2 socket; its root service uses
 `runuser -u qianyi` and the fixed transport inventory. Remote nodes therefore
 need neither the developer group nor per-developer membership changes. There
 is no wildcard and no permission to run `install`, `tar`, `rm`, `chown`,
-`chmod`, `python3`, a candidate path, or an operator-selected path. Both
-runtime verbs authenticate the exact fixed sudo caller/command and revalidate
+`chmod`, `python3`, a candidate path, or an operator-selected path. All three
+verbs authenticate the exact fixed sudo caller/command and revalidate
 the root-owned policy and every installed asset. `transact` accepts only a
 bounded canonical stdin envelope whose closed schema binds the fixed node,
 domain, sandbox, exact candidate SHA/tree, action, payload digest, and optional
@@ -242,7 +303,9 @@ prior receipt. The authority uses its own root-private stage and fixed
 installed programs, persists an idempotent root-owned receipt plus fsynced
 journal record, and retains the inner domain-runtime receipt needed by the
 existing targeted rollback. `check` accepts only the read-only exact-candidate
-inspection action.
+inspection action. `load-image` accepts only the closed, bounded metadata line
+followed by the exact-size verified worker archive stream; it does not accept a
+path, argv, shell command, or generic Docker operation.
 
 The policy pins both installed source SHA and tree. A squash-merged commit with
 the same tree but a different SHA is transactionally rebound and must not be
@@ -254,7 +317,12 @@ overwrite the installed authority by hand.
 Upgrade has no runtime sudoers entry. It first verifies the old policy,
 wrapper, sudoers, fixed source,
 host binding, lock, journal, receipt inventory, and the clean root-owned new
-checkout. Under the existing exclusive runtime lock it recovers any prior
+checkout. Before creating an upgrade snapshot or disabling admission, it also
+requires every historical dynamic receipt to contain the exact
+`worker_image_id` binding introduced with the config-ID contract; an older
+dynamic receipt stops the upgrade for an explicit evidence migration, while
+unrelated historical receipts remain valid. Under the existing exclusive
+runtime lock it recovers any prior
 interrupted upgrade, snapshots every replaceable authority asset, records the
 old/new SHA and tree plus the primary journal and receipt digests, and writes a
 root-owned active transaction and append-only upgrade journal. It then removes
@@ -276,7 +344,7 @@ primary runtime journal, and all domain-runtime rollback evidence are never
 reinitialized.
 
 Stop before host installation if any node lacks this exact-tree authority or
-either fixed command fails its readback.
+any of the three fixed commands fails its readback.
 
 ## Legacy-v1 seed migration reference
 
@@ -295,6 +363,18 @@ schema. Confirm the real root-owned finalization journals first and implement a
 separate evidence-driven migration for that observed database. The normal
 first install is allowed only for a new/empty registry or one with no committed
 pre-finalization rows; this preflight performs no DDL.
+
+The worker image contract also has an explicit database schema generation.
+Upgrading the prior binding generation is automatic only when every
+environment is `ready` or `retired` with no current candidate and all
+candidate/deployment/finalization history is empty. One immediate transaction
+then installs the `docker-archive-identities/v2` candidate binding, all-node
+runtime-binding column, and database schema v3 marker together. Any populated
+v2 history stops with `worker image binding v2-to-v3 requires explicit
+migration`; never reinterpret, delete, or hand-edit those rows to make the
+upgrade pass. Legacy usernames are consulted only during the first seed
+migration; later authority upgrades do not depend on those Unix accounts
+continuing to exist.
 
 ### Legacy-v1 fixed host installer — do not use for new environments
 

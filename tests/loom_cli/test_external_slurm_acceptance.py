@@ -17,9 +17,11 @@ from loom_cli.external_slurm_acceptance import (
     ExternalSlurmAuthorityConfig,
     canonical_json_bytes,
     load_authority_config,
+    parse_staging_worker_env,
     run_fixed_activation_verifier,
     validate_authority_payload,
     verify_authority,
+    verify_candidate_repository,
 )
 
 SHA = "a" * 40
@@ -77,6 +79,7 @@ def _config(tmp_path: Path) -> ExternalSlurmAuthorityConfig:
         broker_cancel_action="staging-allocation-cancel",
         infrastructure_nodes=INFRASTRUCTURE_NODES,
         allowed_nodes=NODES,
+        excluded_nodes=(),
         host_aliases={node: f"host-{index}" for index, node in enumerate(INFRASTRUCTURE_NODES)},
         repository_template=("/srv/loom/staging-shared/candidates/loom-remote-worker-{image_tag}"),
         worker_env_template=(
@@ -173,6 +176,7 @@ def _payload(config: ExternalSlurmAuthorityConfig) -> dict:
         "slurm_account": "loom-staging",
         "qos": "loom-staging",
         "allowed_nodes": list(config.allowed_nodes),
+        "excluded_nodes": [],
         "repository": repository,
         "worker_env": worker_env,
         "supervisor": {
@@ -213,6 +217,8 @@ def _write_signed(
         "key_id": hashlib.sha256(public).hexdigest(),
         "created_at": payload["created_at"],
         "expires_at": payload["expires_at"],
+        "allowed_nodes": list(config.allowed_nodes),
+        "excluded_nodes": [],
     }
     (config.artifact_root / "current.json").write_bytes(canonical_json_bytes(current))
 
@@ -234,6 +240,7 @@ def test_verify_authority_accepts_signed_exact_fifteen_node_closed_receipt(
 
     assert verified.payload["result"] == "pass"
     assert len(verified.payload["nodes"]) == 15
+    assert verified.payload["excluded_nodes"] == []
     assert len(verified.key_id) == 64
 
 
@@ -304,6 +311,10 @@ def test_verify_authority_rejects_current_pointer_digest_drift(tmp_path: Path) -
             lambda payload: payload.update(candidate_sha="d" * 40),
             "candidate_sha mismatch",
         ),
+        (
+            lambda payload: payload.update(excluded_nodes=["trt-gb10-7"]),
+            "excluded_nodes mismatch",
+        ),
     ],
 )
 def test_validate_authority_rejects_partial_or_mismatched_receipts(
@@ -345,6 +356,25 @@ def test_verify_authority_rejects_artifact_tamper_after_signature(
     artifact.write_bytes(canonical_json_bytes(tampered))
 
     with pytest.raises(ExternalSlurmAcceptanceError, match="signature verification"):
+        verify_authority(
+            config=config,
+            candidate_sha=SHA,
+            now=NOW + timedelta(seconds=1),
+            enforce_root_security=False,
+        )
+
+
+def test_verify_authority_rejects_current_pointer_node_scope_drift(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    _write_signed(config, _payload(config))
+    current_path = config.artifact_root / "current.json"
+    current = json.loads(current_path.read_bytes())
+    current["excluded_nodes"] = ["trt-gb10-7"]
+    current_path.write_bytes(canonical_json_bytes(current))
+
+    with pytest.raises(ExternalSlurmAcceptanceError, match="current pointer"):
         verify_authority(
             config=config,
             candidate_sha=SHA,
@@ -455,10 +485,30 @@ def test_checked_in_config_uses_full_infrastructure_for_allocation() -> None:
 
     assert config.infrastructure_nodes == INFRASTRUCTURE_NODES
     assert config.allowed_nodes == NODES
+    assert config.excluded_nodes == ()
     assert "trt-gb10-7" in config.infrastructure_nodes
     assert "trt-gb10-7" in config.allowed_nodes
     assert set(config.host_aliases) == set(config.infrastructure_nodes)
     assert config.host_aliases["trt-gb10-7"] == "gx10-0faf"
+
+
+def test_load_authority_config_rejects_any_excluded_node(tmp_path: Path) -> None:
+    path = tmp_path / "authority.toml"
+    text = CONFIG.read_text(encoding="utf-8")
+    path.write_text(
+        text.replace(
+            "excluded_nodes = []",
+            'excluded_nodes = ["trt-gb10-7"]',
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ExternalSlurmAcceptanceError,
+        match="excluded_nodes",
+    ):
+        load_authority_config(path)
 
 
 def test_load_authority_config_rejects_missing_infrastructure_inventory(
@@ -501,3 +551,230 @@ def test_load_authority_config_rejects_incomplete_infrastructure_aliases(
 
     with pytest.raises(ExternalSlurmAcceptanceError, match="host_aliases"):
         load_authority_config(path)
+
+
+def _staging_worker_env(**updates: str) -> bytes:
+    values = {
+        "IMAGE_TAG": "staging-aaaaaaa",
+        "ENV_CONFIG_VERSION": "staging-aaaaaaa",
+        "LOOM_IMAGE_TAG": "staging-aaaaaaa",
+        "LOOM_WORKER_ENV_CONFIG_VERSION": "staging-aaaaaaa",
+        "LOOM_WORKER_IMAGE_ID": "sha256:" + "d" * 64,
+        "LOOM_WORKER_CANDIDATE_SHA": SHA,
+        "LOOM_WORKER_CONTROL_PLANE_URL": "http://control.example:8080",
+        "LOOM_WORKER_GATEWAY_URL": "http://control.example:9100",
+        "LOOM_WORKER_TOKEN": "secret-token",
+        "LOOM_WORKER_MINIO_ENDPOINT": "http://control.example:9000",
+        "LOOM_WORKER_MINIO_ACCESS_KEY": "access",
+        "LOOM_WORKER_MINIO_SECRET_KEY": "secret",
+        "LOOM_WORKER_POOL_NAME": "gb10",
+        "LOOM_WORKER_MAX_CONCURRENT": "10",
+    }
+    values.update(updates)
+    return "".join(f"{key}={value}\n" for key, value in values.items()).encode()
+
+
+def test_staging_worker_env_parser_accepts_exact_closed_candidate_binding() -> None:
+    values = parse_staging_worker_env(
+        _staging_worker_env(),
+        candidate_sha=SHA,
+        pool="gb10",
+        concurrency=10,
+    )
+
+    assert values["LOOM_WORKER_CANDIDATE_SHA"] == SHA
+    assert values["LOOM_WORKER_POOL_NAME"] == "gb10"
+
+
+@pytest.mark.parametrize(
+    ("suffix", "updates", "match"),
+    [
+        ("LOOM_WORKER_POOL_NAME=duplicate\n", {}, "invalid or duplicate"),
+        ("export BAD=value\n", {}, "invalid or duplicate"),
+        ("UNDECLARED=value\n", {}, "incomplete or unknown"),
+        ("LOOM_WORKER_SUBPROCESS_GATEWAY_URL=$FOO\n", {}, "invalid or duplicate"),
+        ("LOOM_WORKER_SUBPROCESS_GATEWAY_URL=${FOO}\n", {}, "invalid or duplicate"),
+        ("", {"LOOM_WORKER_CANDIDATE_SHA": "e" * 40}, "source binding is stale"),
+        ("", {"LOOM_IMAGE_TAG": "staging-stale"}, "source binding is stale"),
+    ],
+)
+def test_staging_worker_env_parser_rejects_ambiguous_unknown_or_stale_input(
+    suffix: str,
+    updates: dict[str, str],
+    match: str,
+) -> None:
+    with pytest.raises(ExternalSlurmAcceptanceError, match=match):
+        parse_staging_worker_env(
+            _staging_worker_env(**updates) + suffix.encode(),
+            candidate_sha=SHA,
+            pool="gb10",
+            concurrency=10,
+        )
+
+
+@pytest.mark.parametrize("control", (b"\x00", b"\r"))
+def test_staging_worker_env_parser_rejects_unsafe_control_characters(
+    control: bytes,
+) -> None:
+    with pytest.raises(ExternalSlurmAcceptanceError, match="control character"):
+        parse_staging_worker_env(
+            _staging_worker_env() + b"# unsafe" + control + b"value\n",
+            candidate_sha=SHA,
+            pool="gb10",
+            concurrency=10,
+        )
+
+
+def _candidate_repository(tmp_path: Path) -> tuple[Path, str, str]:
+    repository = tmp_path / "candidate"
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repository), "config", "user.name", "Test"],
+        check=True,
+    )
+    (repository / "tracked.txt").write_text("candidate\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(repository), "add", "tracked.txt"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repository), "commit", "-q", "-m", "candidate"],
+        check=True,
+    )
+    sha = subprocess.check_output(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+    tree = subprocess.check_output(
+        ["git", "-C", str(repository), "rev-parse", "HEAD^{tree}"],
+        text=True,
+    ).strip()
+    return repository, sha, tree
+
+
+def test_candidate_repository_verifier_rejects_hidden_index_and_raw_byte_drift(
+    tmp_path: Path,
+) -> None:
+    repository, sha, tree = _candidate_repository(tmp_path)
+    assert (
+        verify_candidate_repository(
+            repository,
+            candidate_sha=sha,
+            candidate_tree=tree,
+        )["tracked_files"]
+        == 1
+    )
+
+    subprocess.run(
+        ["git", "-C", str(repository), "update-index", "--skip-worktree", "tracked.txt"],
+        check=True,
+    )
+    with pytest.raises(ExternalSlurmAcceptanceError, match="skip-worktree"):
+        verify_candidate_repository(
+            repository,
+            candidate_sha=sha,
+            candidate_tree=tree,
+        )
+    subprocess.run(
+        ["git", "-C", str(repository), "update-index", "--no-skip-worktree", "tracked.txt"],
+        check=True,
+    )
+    (repository / "tracked.txt").write_text("drifted\n", encoding="utf-8")
+    with pytest.raises(ExternalSlurmAcceptanceError, match="raw tracked bytes"):
+        verify_candidate_repository(
+            repository,
+            candidate_sha=sha,
+            candidate_tree=tree,
+        )
+
+
+def test_candidate_repository_verifier_rejects_clean_filter_interference(
+    tmp_path: Path,
+) -> None:
+    repository, _sha, _tree = _candidate_repository(tmp_path)
+    (repository / ".gitattributes").write_text(
+        "tracked.txt filter=unsafe-clean\n",
+        encoding="utf-8",
+    )
+    subprocess.run(
+        ["git", "-C", str(repository), "add", ".gitattributes"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repository), "commit", "-q", "-m", "attributes"],
+        check=True,
+    )
+    sha = subprocess.check_output(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+    tree = subprocess.check_output(
+        ["git", "-C", str(repository), "rev-parse", "HEAD^{tree}"],
+        text=True,
+    ).strip()
+
+    with pytest.raises(ExternalSlurmAcceptanceError, match="interfering Git filter"):
+        verify_candidate_repository(
+            repository,
+            candidate_sha=sha,
+            candidate_tree=tree,
+        )
+
+
+@pytest.mark.parametrize(
+    "relative",
+    (
+        "objects/info/alternates",
+        "objects/info/http-alternates",
+        "config.worktree",
+    ),
+)
+def test_candidate_repository_verifier_rejects_external_git_storage_files(
+    tmp_path: Path,
+    relative: str,
+) -> None:
+    repository, sha, tree = _candidate_repository(tmp_path)
+    path = repository / ".git" / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("../external-object-store\n", encoding="utf-8")
+
+    with pytest.raises(ExternalSlurmAcceptanceError, match="not self-contained"):
+        verify_candidate_repository(
+            repository,
+            candidate_sha=sha,
+            candidate_tree=tree,
+        )
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    (
+        ("core.worktree", "../foreign-worktree"),
+        ("core.bare", "true"),
+        ("extensions.worktreeConfig", "true"),
+        ("include.path", "../foreign-config"),
+        ("remote.origin.promisor", "true"),
+        ("remote.origin.partialCloneFilter", "blob:none"),
+    ),
+)
+def test_candidate_repository_verifier_rejects_external_git_config_resolution(
+    tmp_path: Path,
+    key: str,
+    value: str,
+) -> None:
+    repository, sha, tree = _candidate_repository(tmp_path)
+    subprocess.run(
+        ["git", "-C", str(repository), "config", "--local", key, value],
+        check=True,
+    )
+
+    with pytest.raises(ExternalSlurmAcceptanceError, match="not self-contained"):
+        verify_candidate_repository(
+            repository,
+            candidate_sha=sha,
+            candidate_tree=tree,
+        )

@@ -77,6 +77,7 @@ from scripts.ops.developer_environment_registry import (  # noqa: E402
     DeveloperEnvironmentRegistry,
     EnvironmentRecord,
     RegistryError,
+    verify_worker_image_archive,
 )
 
 JOURNAL_KIND: Final = "loom.developer-environment.deployment-journal"
@@ -124,6 +125,7 @@ CAPACITY_ROOT: Final = Path("/var/lib/loom-developer-environment-capacity")
 CAPACITY_PROGRAM: Final = Path("/usr/local/libexec/loom-developer-environment-capacity-authority")
 RUNTIME_ROOT: Final = Path("/var/lib/loom-developer-environment-runtime")
 RUNTIME_PROGRAM: Final = Path("/usr/local/libexec/loom-developer-environment-runtime-authority")
+NODE_TRANSPORT: Final = Path("/usr/local/libexec/loom-developer-sandbox-node-transport")
 DOMAIN_IDENTITY_NODES: Final = {
     "oldlab": ("oldlab-1",),
     "gb10": ("trt-gb10-1",),
@@ -143,6 +145,14 @@ LOOM_SERVICES: Final = (
     "web",
 )
 ALL_SERVICES: Final = ("postgres", "minio", *LOOM_SERVICES)
+LOCAL_BUILD_SERVICES: Final = (
+    "llm-gateway",
+    "control-plane",
+    "loom-service",
+    "egress-xds",
+)
+WORKER_REVISION_LABEL: Final = "org.opencontainers.image.revision"
+WORKER_COMMAND: Final = ("python", "-m", "loom_worker")
 SECRET_KEYS: Final = (
     "LOOM_DEV_POSTGRES_PASSWORD",
     "LOOM_DEV_MINIO_ROOT_PASSWORD",
@@ -201,6 +211,15 @@ class RegistryAuthority(Protocol):
         principal_id: str,
         expected_resource_generation: int,
         evidence: Mapping[str, str],
+    ) -> DeploymentRecord: ...
+
+    def record_worker_runtime_bindings(
+        self,
+        deployment_id: str,
+        *,
+        principal_id: str,
+        expected_resource_generation: int,
+        bindings: Mapping[str, Any],
     ) -> DeploymentRecord: ...
 
     def begin_retirement(
@@ -338,6 +357,7 @@ class DeploymentContext:
     deployment: dict[str, Any]
     host_root: Path | None = None
     effective_candidate: dict[str, Any] | None = None
+    effective_deployment: dict[str, Any] | None = None
 
     def host_path(self, value: str) -> Path:
         path = Path(value)
@@ -466,7 +486,20 @@ class DeploymentContext:
 
     @property
     def image_digest(self) -> str:
+        """Compatibility name for the exact per-architecture loom-worker config ID."""
+
         return cast(dict[str, str], self.candidate["image_digests"])[self.architecture]
+
+    @property
+    def worker_image_id(self) -> str:
+        runtime_bindings = self.deployment.get("worker_runtime_bindings")
+        domain = "oldlab" if self.architecture == "amd64" else "gb10"
+        domains = runtime_bindings.get("domains") if isinstance(runtime_bindings, dict) else None
+        binding = domains.get(domain) if isinstance(domains, dict) else None
+        runtime_image_id = binding.get("runtime_image_id") if isinstance(binding, dict) else None
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", str(runtime_image_id)) is None:
+            raise DeploymentError("deployment worker runtime image binding is invalid")
+        return str(runtime_image_id)
 
 
 def _canonical(payload: Mapping[str, Any]) -> bytes:
@@ -1713,6 +1746,8 @@ class FixedDistributedRuntimeAuthority:
                     receipt,
                     request=request,
                     environment=context.environment,
+                    candidate=context.candidate,
+                    deployment=context.deployment,
                 )
             except acceptance_probe.AcceptanceProbeError as exc:
                 raise DeploymentError(
@@ -1731,6 +1766,34 @@ class FixedDistributedRuntimeAuthority:
         retired_runtime = action in {"activate", "fence", "retire"} or (
             action == "rollback" and effective_candidate is None
         )
+        binding_deployment = (
+            context.effective_deployment
+            if action == "rollback" and effective_candidate is not None
+            else context.deployment
+        )
+        runtime_bindings = (
+            binding_deployment.get("worker_runtime_bindings")
+            if isinstance(binding_deployment, dict)
+            else None
+        )
+        domains = runtime_bindings.get("domains") if isinstance(runtime_bindings, dict) else None
+        expected_worker_image_ids = (
+            {domain: str(domains[domain]["runtime_image_id"]) for domain in ("oldlab", "gb10")}
+            if not (action == "rollback" and effective_candidate is None)
+            and isinstance(domains, dict)
+            and all(
+                isinstance(domains.get(domain), dict)
+                and re.fullmatch(
+                    r"sha256:[0-9a-f]{64}",
+                    str(domains[domain].get("runtime_image_id")),
+                )
+                is not None
+                for domain in ("oldlab", "gb10")
+            )
+            else {}
+        )
+        if not retired_runtime and set(expected_worker_image_ids) != {"oldlab", "gb10"}:
+            raise DeploymentError("distributed runtime worker image binding is invalid")
         shared_capacity = receipt.get("shared_capacity")
         expected_instances = [
             f"{context.environment['runtime_id']}-{domain}" for domain in ("oldlab", "gb10")
@@ -1817,6 +1880,7 @@ class FixedDistributedRuntimeAuthority:
                 "registry_snapshot_sha256",
                 "request_sha256",
                 "domains",
+                "worker_image_ids",
                 "nodes",
                 "remote_link",
                 "domain_runtime",
@@ -1846,6 +1910,7 @@ class FixedDistributedRuntimeAuthority:
             or receipt.get("registry_snapshot_sha256") != context.snapshot_digest
             or receipt.get("request_sha256") != request["payload_sha256"]
             or receipt.get("domains") != ["oldlab", "gb10"]
+            or receipt.get("worker_image_ids") != expected_worker_image_ids
             or receipt.get("nodes") != expected_nodes
             or receipt.get("remote_link") != {"status": "ready"}
             or receipt.get("domain_runtime") != {"status": "ready"}
@@ -2216,6 +2281,34 @@ class DeveloperEnvironmentDeployer:
         ]
         if len(candidates) != 1:
             raise DeploymentError("failed developer candidate is unavailable")
+        effective_candidate = next(
+            (
+                row
+                for row in cast(list[dict[str, Any]], snapshot["candidates"])
+                if row["candidate_id"] == environment["current_candidate_id"]
+            ),
+            None,
+        )
+        effective_deployment = (
+            max(
+                (
+                    row
+                    for row in cast(list[dict[str, Any]], snapshot["deployments"])
+                    if row["env_id"] == env_id
+                    and row["candidate_id"] == environment["current_candidate_id"]
+                    and row["phase"] == "committed"
+                ),
+                key=lambda row: (
+                    row["applied_resource_generation"],
+                    row["deployment_id"],
+                ),
+                default=None,
+            )
+            if effective_candidate is not None
+            else None
+        )
+        if (effective_candidate is None) != (effective_deployment is None):
+            raise DeploymentError("failed deployment effective runtime binding is invalid")
         return DeploymentContext(
             cast(int, snapshot["generation"]),
             cast(str, snapshot["payload_sha256"]),
@@ -2223,14 +2316,8 @@ class DeveloperEnvironmentDeployer:
             candidates[0],
             deployments[0],
             self.host_root,
-            next(
-                (
-                    row
-                    for row in cast(list[dict[str, Any]], snapshot["candidates"])
-                    if row["candidate_id"] == environment["current_candidate_id"]
-                ),
-                None,
-            ),
+            effective_candidate,
+            effective_deployment,
         )
 
     def _journal(self, context: DeploymentContext, phase: str) -> dict[str, Any]:
@@ -3623,6 +3710,240 @@ class DeveloperEnvironmentDeployer:
             raise DeploymentError("candidate bundle binding is invalid")
         return bundle
 
+    def _ensure_worker_images(self, context: DeploymentContext) -> DeploymentContext:
+        image_digests = context.candidate.get("image_digests")
+        image_archives = context.candidate.get("image_archives")
+        if (
+            not isinstance(image_digests, dict)
+            or set(image_digests) != {"amd64", "arm64"}
+            or not isinstance(image_archives, dict)
+            or set(image_archives) != {"amd64", "arm64"}
+        ):
+            raise DeploymentError("candidate worker image binding is invalid")
+        verified_archives: dict[str, Path] = {}
+        for architecture in ("amd64", "arm64"):
+            binding = image_archives.get(architecture)
+            image_id = image_digests.get(architecture)
+            if (
+                not isinstance(binding, dict)
+                or set(binding)
+                != {
+                    "path",
+                    "sha256",
+                    "size",
+                    "config_digest",
+                    "index_digest",
+                    "manifest_digest",
+                    "manifest_media_type",
+                    "load_descriptor_digest",
+                    "load_descriptor_media_type",
+                }
+                or not isinstance(binding.get("path"), str)
+                or binding.get("config_digest") != image_id
+            ):
+                raise DeploymentError("candidate worker image archive binding is invalid")
+            archive = Path(cast(str, binding["path"]))
+            try:
+                metadata = archive.lstat()
+                if self.require_root_metadata and (
+                    (metadata.st_uid, metadata.st_gid) != (0, 0)
+                    or stat.S_IMODE(metadata.st_mode) != 0o600
+                ):
+                    raise DeploymentError("candidate worker image archive metadata is unsafe")
+                verified = verify_worker_image_archive(
+                    archive,
+                    architecture=architecture,
+                    candidate_sha=context.candidate_sha,
+                    image_id=str(image_id),
+                    expected_archive_sha256=str(binding["sha256"]),
+                    expected_archive_size=cast(int, binding["size"]),
+                )
+                if any(
+                    verified.get(field) != binding.get(field)
+                    for field in (
+                        "config_digest",
+                        "index_digest",
+                        "manifest_digest",
+                        "manifest_media_type",
+                        "load_descriptor_digest",
+                        "load_descriptor_media_type",
+                    )
+                ):
+                    raise DeploymentError(
+                        "candidate worker image archive descriptor binding is invalid"
+                    )
+            except DeploymentError:
+                raise
+            except (OSError, RegistryError, TypeError, ValueError) as exc:
+                raise DeploymentError("candidate worker image archive verification failed") from exc
+            verified_archives[architecture] = archive
+
+        node_bindings: dict[str, dict[str, Any]] = {}
+        domain_bindings: dict[str, dict[str, Any]] = {}
+        for domain in ("oldlab", "gb10"):
+            architecture = "amd64" if domain == "oldlab" else "arm64"
+            binding = cast(dict[str, Any], image_archives[architecture])
+            for node in DOMAIN_RUNTIME_NODES[domain]:
+                metadata = {
+                    "schema_version": 1,
+                    "kind": "loom.developer-sandbox.worker-image-load-request",
+                    "node": node,
+                    "domain": domain,
+                    "architecture": architecture,
+                    "env_id": context.env_id,
+                    "resource_generation": context.resource_generation,
+                    "candidate_id": context.candidate_id,
+                    "candidate_sha": context.candidate_sha,
+                    "candidate_tree": context.candidate_tree,
+                    "config_digest": binding["config_digest"],
+                    "index_digest": binding["index_digest"],
+                    "load_descriptor_digest": binding["load_descriptor_digest"],
+                    "load_descriptor_media_type": binding["load_descriptor_media_type"],
+                    "archive_sha256": binding["sha256"],
+                    "archive_size": binding["size"],
+                    "registry_generation": context.snapshot_generation,
+                    "registry_payload_sha256": context.snapshot_digest,
+                }
+                metadata["payload_sha256"] = _digest(metadata)
+                result = self.runner.run(
+                    (
+                        str(NODE_TRANSPORT),
+                        "load-image",
+                        "--node",
+                        node,
+                        "--archive",
+                        str(verified_archives[architecture]),
+                        "--metadata-json",
+                        _canonical(metadata).decode("ascii").strip(),
+                    )
+                )
+                try:
+                    receipt = json.loads(result.stdout)
+                except (UnicodeError, json.JSONDecodeError) as exc:
+                    raise DeploymentError("worker image load receipt is invalid") from exc
+                unsigned = (
+                    {key: value for key, value in receipt.items() if key != "payload_sha256"}
+                    if isinstance(receipt, dict)
+                    else {}
+                )
+                if (
+                    not isinstance(receipt, dict)
+                    or receipt.get("schema_version") != 1
+                    or receipt.get("kind") != "loom.developer-sandbox.worker-image-load-receipt"
+                    or receipt.get("status") not in {"loaded", "reused"}
+                    or receipt.get("node") != node
+                    or receipt.get("domain") != domain
+                    or receipt.get("architecture") != architecture
+                    or receipt.get("candidate_id") != context.candidate_id
+                    or receipt.get("candidate_sha") != context.candidate_sha
+                    or any(
+                        receipt.get(field) != binding[field]
+                        for field in (
+                            "config_digest",
+                            "index_digest",
+                            "load_descriptor_digest",
+                            "load_descriptor_media_type",
+                        )
+                    )
+                    or receipt.get("archive_sha256") != binding["sha256"]
+                    or receipt.get("archive_size") != binding["size"]
+                    or receipt.get("registry_generation") != context.snapshot_generation
+                    or receipt.get("registry_payload_sha256") != context.snapshot_digest
+                    or receipt.get("docker_backend")
+                    not in {"classic-overlay2", "containerd-snapshotter-v1"}
+                    or (
+                        receipt.get("docker_backend") == "classic-overlay2"
+                        and (
+                            receipt.get("docker_storage_driver") != "overlay2"
+                            or receipt.get("runtime_image_id") != binding["config_digest"]
+                            or receipt.get("docker_descriptor_digest") is not None
+                            or receipt.get("docker_descriptor_media_type") is not None
+                        )
+                    )
+                    or (
+                        receipt.get("docker_backend") == "containerd-snapshotter-v1"
+                        and (
+                            receipt.get("docker_storage_driver") != "overlayfs"
+                            or receipt.get("runtime_image_id") != binding["load_descriptor_digest"]
+                            or receipt.get("docker_descriptor_digest")
+                            != binding["load_descriptor_digest"]
+                            or receipt.get("docker_descriptor_media_type")
+                            != binding["load_descriptor_media_type"]
+                        )
+                    )
+                    or receipt.get("payload_sha256") != _digest(unsigned)
+                    or result.stdout.encode("ascii") != _canonical(receipt)
+                ):
+                    raise DeploymentError("worker image load receipt binding is invalid")
+                node_binding = {
+                    "domain": domain,
+                    "architecture": architecture,
+                    "docker_driver": receipt["docker_storage_driver"],
+                    "docker_backend": receipt["docker_backend"],
+                    "config_digest": receipt["config_digest"],
+                    "load_descriptor_digest": receipt["load_descriptor_digest"],
+                    "load_descriptor_media_type": receipt["load_descriptor_media_type"],
+                    "runtime_image_id": receipt["runtime_image_id"],
+                    "docker_descriptor_digest": receipt["docker_descriptor_digest"],
+                    "docker_descriptor_media_type": receipt["docker_descriptor_media_type"],
+                    "receipt_sha256": receipt["payload_sha256"],
+                }
+                node_bindings[node] = node_binding
+                domain_binding = {
+                    key: value
+                    for key, value in node_binding.items()
+                    if key
+                    not in {
+                        "domain",
+                        "docker_descriptor_digest",
+                        "docker_descriptor_media_type",
+                        "receipt_sha256",
+                    }
+                }
+                prior = domain_bindings.setdefault(domain, domain_binding)
+                if prior != domain_binding:
+                    raise DeploymentError("worker image runtime identity differs within one domain")
+        bindings = {"nodes": node_bindings, "domains": domain_bindings}
+        persisted = context.deployment.get("worker_runtime_bindings")
+        if persisted is not None:
+            if not isinstance(persisted, dict):
+                raise DeploymentError("persisted worker runtime binding is invalid")
+            persisted_nodes = persisted.get("nodes")
+            persisted_domains = persisted.get("domains")
+            if (
+                not isinstance(persisted_nodes, dict)
+                or persisted_domains != domain_bindings
+                or set(persisted_nodes) != set(node_bindings)
+                or any(
+                    {
+                        key: value
+                        for key, value in persisted_nodes[node].items()
+                        if key != "receipt_sha256"
+                    }
+                    != {
+                        key: value
+                        for key, value in node_bindings[node].items()
+                        if key != "receipt_sha256"
+                    }
+                    for node in node_bindings
+                    if isinstance(persisted_nodes.get(node), dict)
+                )
+                or any(not isinstance(persisted_nodes.get(node), dict) for node in node_bindings)
+            ):
+                raise DeploymentError("persisted worker runtime binding drifted")
+            return context
+        self.registry.record_worker_runtime_bindings(
+            context.deployment_id,
+            principal_id=context.principal_id,
+            expected_resource_generation=context.resource_generation,
+            bindings=bindings,
+        )
+        return self._refresh_context(
+            context.env_id,
+            context.principal_id,
+            context.deployment_id,
+        )
+
     def _verify_checkout(self, context: DeploymentContext, path: Path) -> None:
         if path.is_symlink() or not path.is_dir():
             raise DeploymentError("candidate checkout is unsafe")
@@ -3781,6 +4102,7 @@ class DeveloperEnvironmentDeployer:
             "LOOM_CANDIDATE_SHA": context.candidate_sha,
             "LOOM_CANDIDATE_TREE": context.candidate_tree,
             "LOOM_CANDIDATE_IMAGE_DIGEST": context.image_digest,
+            "LOOM_WORKER_IMAGE_ID": context.worker_image_id,
             "SLURM_ACCOUNT": cast(str, environment["slurm_account"]),
             "SLURM_QOS": cast(str, environment["slurm_qos"]),
             "SLURM_USER": cast(str, environment["slurm_user"]),
@@ -3811,7 +4133,6 @@ class DeveloperEnvironmentDeployer:
             "loom.developer-environment.candidate-id": context.candidate_id,
             "loom.developer-environment.candidate-sha": context.candidate_sha,
             "loom.developer-environment.candidate-tree": context.candidate_tree,
-            "loom.developer-environment.image-digest": context.image_digest,
             "loom.developer-environment.resource-generation": str(
                 context.runtime_resource_generation
             ),
@@ -3821,14 +4142,23 @@ class DeveloperEnvironmentDeployer:
             "loom.developer-environment.registry-payload-sha256": (context.applied_registry_digest),
         }
         owner_labels = _resource_owner_labels(context)
+        service_overrides = {
+            service: {
+                "labels": (
+                    {
+                        **labels,
+                        "loom.developer-environment.image-digest": context.worker_image_id,
+                    }
+                    if service == "worker"
+                    else labels
+                ),
+                "cgroup_parent": cast(str, context.environment["cgroup_slice"]),
+            }
+            for service in ALL_SERVICES
+        }
+        service_overrides["worker"]["image"] = context.worker_image_id
         override = {
-            "services": {
-                service: {
-                    "labels": labels,
-                    "cgroup_parent": cast(str, context.environment["cgroup_slice"]),
-                }
-                for service in ALL_SERVICES
-            },
+            "services": service_overrides,
             "networks": {
                 "default": {
                     "name": f"{context.environment['compose_project']}_default",
@@ -3951,7 +4281,49 @@ class DeveloperEnvironmentDeployer:
             str(context.compose_override_path),
         )
 
+    def _verify_worker_image(self, context: DeploymentContext) -> None:
+        result = self.runner.run(
+            ("docker", "image", "inspect", context.worker_image_id),
+        )
+        if not isinstance(result.stdout, str) or len(result.stdout) > 1024 * 1024:
+            raise DeploymentError("loom-worker image inspection is invalid")
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise DeploymentError("loom-worker image inspection is invalid") from exc
+        row = payload[0] if isinstance(payload, list) and len(payload) == 1 else None
+        config = row.get("Config") if isinstance(row, dict) else None
+        labels = config.get("Labels") if isinstance(config, dict) else None
+        runtime_bindings = context.deployment.get("worker_runtime_bindings")
+        domains = runtime_bindings.get("domains") if isinstance(runtime_bindings, dict) else None
+        domain = "oldlab" if context.architecture == "amd64" else "gb10"
+        binding = domains.get(domain) if isinstance(domains, dict) else None
+        descriptor = row.get("Descriptor") if isinstance(row, dict) else None
+        if (
+            not isinstance(row, dict)
+            or not isinstance(binding, dict)
+            or row.get("Id") != context.worker_image_id
+            or row.get("Os") != "linux"
+            or row.get("Architecture") != context.architecture
+            or not isinstance(labels, dict)
+            or labels.get(WORKER_REVISION_LABEL) != context.candidate_sha
+            or config.get("Cmd") != list(WORKER_COMMAND)
+            or config.get("Entrypoint") not in (None, [])
+        ):
+            raise DeploymentError("loom-worker image binding is invalid")
+        if binding.get("docker_backend") == "classic-overlay2":
+            if descriptor not in (None, {}):
+                raise DeploymentError("loom-worker descriptor binding is invalid")
+        elif (
+            binding.get("docker_backend") != "containerd-snapshotter-v1"
+            or not isinstance(descriptor, dict)
+            or descriptor.get("digest") != binding.get("load_descriptor_digest")
+            or descriptor.get("mediaType") != binding.get("load_descriptor_media_type")
+        ):
+            raise DeploymentError("loom-worker descriptor binding is invalid")
+
     def _prepare_services(self, context: DeploymentContext) -> None:
+        self._verify_worker_image(context)
         self._write_compose_assets(context)
         self.runner.run(
             (*self._compose_argv(context), "config", "--quiet"),
@@ -3978,11 +4350,15 @@ class DeveloperEnvironmentDeployer:
             cwd=context.checkout,
         )
         self.runner.run(
+            (*self._compose_argv(context), "build", *LOCAL_BUILD_SERVICES),
+            cwd=context.checkout,
+        )
+        self.runner.run(
             (
                 *self._compose_argv(context),
                 "up",
                 "--detach",
-                "--build",
+                "--no-build",
                 "--remove-orphans",
                 "--force-recreate",
             ),
@@ -3990,6 +4366,7 @@ class DeveloperEnvironmentDeployer:
         )
 
     def _rebind_committed_services(self, context: DeploymentContext) -> None:
+        self._verify_worker_image(context)
         self._write_compose_assets(context)
         self.runner.run(
             (*self._compose_argv(context), "config", "--quiet"),
@@ -4000,6 +4377,7 @@ class DeveloperEnvironmentDeployer:
                 *self._compose_argv(context),
                 "up",
                 "--detach",
+                "--no-build",
                 "--remove-orphans",
                 "--force-recreate",
             ),
@@ -4189,8 +4567,6 @@ class DeveloperEnvironmentDeployer:
                 "--filter",
                 f"label=loom.developer-environment.candidate-tree={context.candidate_tree}",
                 "--filter",
-                f"label=loom.developer-environment.image-digest={context.image_digest}",
-                "--filter",
                 "label=loom.developer-environment.resource-generation="
                 f"{manifest['resource_generation']}",
                 "--filter",
@@ -4204,6 +4580,31 @@ class DeveloperEnvironmentDeployer:
         ).stdout.splitlines()
         if len(set(bound_containers)) != len(ALL_SERVICES):
             raise DeploymentError("container candidate and image binding is invalid")
+        worker_containers = self.runner.run(
+            (
+                "docker",
+                "ps",
+                "--filter",
+                f"label=loom.developer-environment.env-id={context.env_id}",
+                "--filter",
+                "label=com.docker.compose.service=worker",
+                "--filter",
+                f"label=loom.developer-environment.image-digest={context.worker_image_id}",
+                "--format={{.ID}}",
+            )
+        ).stdout.splitlines()
+        if len(worker_containers) != 1:
+            raise DeploymentError("loom-worker container binding is invalid")
+        actual_worker_image = self.runner.run(
+            (
+                "docker",
+                "inspect",
+                "--format={{.Image}}",
+                worker_containers[0],
+            )
+        ).stdout.strip()
+        if actual_worker_image != context.worker_image_id:
+            raise DeploymentError("loom-worker container image binding is invalid")
         ports = cast(dict[str, int], context.environment["ports"])
         for name, port, path in (
             ("control-plane", ports["control_plane"], "/healthz"),
@@ -4368,6 +4769,7 @@ class DeveloperEnvironmentDeployer:
                         deployment,
                         self.host_root,
                     )
+                    replay = self._ensure_worker_images(replay)
                     self._verify_bundle(replay)
                     self._verify_checkout(replay, replay.checkout)
                     self._verify_services(replay)
@@ -4521,6 +4923,9 @@ class DeveloperEnvironmentDeployer:
                 deployment_id=deployment_id,
                 host_root=self.host_root,
             )
+            # Image distribution is additive and candidate-scoped.  Complete
+            # it on every runtime node before the first host/resource mutation.
+            context = self._ensure_worker_images(context)
             # Once the registry owns an exact deployment, make its boot resume
             # durable before the first host, Docker, or capacity mutation.
             self._enable_recovery_unit(context)

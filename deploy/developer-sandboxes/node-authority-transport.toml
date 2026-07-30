@@ -86,7 +86,7 @@ hostname = "gx10-0152"
 name = "oldlab2-controller"
 kind = "authority"
 initiator = "oldlab-2"
-verbs = ["transact", "check"]
+verbs = ["transact", "check", "load-image"]
 targets = [
   "oldlab-1",
   "oldlab-2",

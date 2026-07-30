@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import gzip
+import hashlib
+import io
 import json
 import os
 import socket
 import sqlite3
+import tarfile
 import threading
 import types
 from collections.abc import Callable, Set
@@ -15,6 +19,135 @@ from typing import Any
 
 import pytest
 from scripts.ops import developer_environment_registry as registry
+
+
+def _worker_image_archive(
+    path: Path,
+    *,
+    architecture: str = "amd64",
+    candidate_sha: str = "a" * 40,
+    provenance: bool = False,
+) -> tuple[str, str, int]:
+    layer_raw = b"verified OCI hybrid layer\n"
+    layer_blob = gzip.compress(layer_raw, mtime=0)
+    layer_digest = hashlib.sha256(layer_blob).hexdigest()
+    config = {
+        "architecture": architecture,
+        "os": "linux",
+        "config": {
+            "Labels": {"org.opencontainers.image.revision": candidate_sha},
+            "Cmd": ["python", "-m", "loom_worker"],
+            "Entrypoint": None,
+        },
+        "rootfs": {
+            "type": "layers",
+            "diff_ids": [f"sha256:{hashlib.sha256(layer_raw).hexdigest()}"],
+        },
+    }
+    config_raw = json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
+    config_digest = hashlib.sha256(config_raw).hexdigest()
+    oci_manifest = {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "digest": f"sha256:{config_digest}",
+            "size": len(config_raw),
+        },
+        "layers": [
+            {
+                "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                "digest": f"sha256:{layer_digest}",
+                "size": len(layer_blob),
+            }
+        ],
+    }
+    oci_manifest_raw = json.dumps(oci_manifest, sort_keys=True, separators=(",", ":")).encode()
+    oci_manifest_digest = hashlib.sha256(oci_manifest_raw).hexdigest()
+    load_descriptor_digest = oci_manifest_digest
+    load_descriptor_media_type = "application/vnd.oci.image.manifest.v1+json"
+    extra_files: dict[str, bytes] = {}
+    if provenance:
+        attestation_raw = json.dumps(
+            {"schemaVersion": 2, "attestation": "fixture"},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        attestation_digest = hashlib.sha256(attestation_raw).hexdigest()
+        load_index = {
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": [
+                {
+                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                    "digest": f"sha256:{oci_manifest_digest}",
+                    "size": len(oci_manifest_raw),
+                    "platform": {"os": "linux", "architecture": architecture},
+                },
+                {
+                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                    "digest": f"sha256:{attestation_digest}",
+                    "size": len(attestation_raw),
+                    "platform": {"os": "unknown", "architecture": "unknown"},
+                    "annotations": {
+                        "vnd.docker.reference.type": "attestation-manifest",
+                        "vnd.docker.reference.digest": f"sha256:{oci_manifest_digest}",
+                    },
+                },
+            ],
+        }
+        load_index_raw = json.dumps(
+            load_index,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        load_descriptor_digest = hashlib.sha256(load_index_raw).hexdigest()
+        load_descriptor_media_type = "application/vnd.oci.image.index.v1+json"
+        extra_files = {
+            f"blobs/sha256/{load_descriptor_digest}": load_index_raw,
+            f"blobs/sha256/{attestation_digest}": attestation_raw,
+        }
+    index = {
+        "schemaVersion": 2,
+        "manifests": [
+            {
+                "mediaType": load_descriptor_media_type,
+                "digest": f"sha256:{load_descriptor_digest}",
+                "size": len(
+                    extra_files.get(
+                        f"blobs/sha256/{load_descriptor_digest}",
+                        oci_manifest_raw,
+                    )
+                ),
+            }
+        ],
+    }
+    files = {
+        "manifest.json": json.dumps(
+            [
+                {
+                    "Config": f"blobs/sha256/{config_digest}",
+                    "RepoTags": [f"loom-worker:{candidate_sha[:12]}-{architecture}"],
+                    "Layers": [f"blobs/sha256/{layer_digest}"],
+                }
+            ],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode(),
+        "index.json": json.dumps(index, sort_keys=True, separators=(",", ":")).encode(),
+        f"blobs/sha256/{oci_manifest_digest}": oci_manifest_raw,
+        f"blobs/sha256/{config_digest}": config_raw,
+        f"blobs/sha256/{layer_digest}": layer_blob,
+        **extra_files,
+    }
+    with tarfile.open(path, "w:") as archive:
+        for name, content in files.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(content)
+            info.mode = 0o600
+            archive.addfile(info, io.BytesIO(content))
+    raw = path.read_bytes()
+    return f"sha256:{config_digest}", hashlib.sha256(raw).hexdigest(), len(raw)
 
 
 def _missing_identity(_value: object) -> None:
@@ -43,6 +176,29 @@ def _candidate(
     principal: str | None = None,
     sha: str = "a" * 40,
 ) -> dict[str, Any]:
+    amd64_config = "sha256:" + "d" * 64
+    arm64_config = "sha256:" + "e" * 64
+
+    def archive_binding(
+        *,
+        config_digest: str,
+        archive_digest: str,
+        index_digest: str,
+        manifest_digest: str,
+        size: int,
+    ) -> dict[str, Any]:
+        media_type = "application/vnd.oci.image.manifest.v1+json"
+        return {
+            "sha256": archive_digest,
+            "size": size,
+            "config_digest": config_digest,
+            "index_digest": index_digest,
+            "manifest_digest": manifest_digest,
+            "manifest_media_type": media_type,
+            "load_descriptor_digest": manifest_digest,
+            "load_descriptor_media_type": media_type,
+        }
+
     return {
         "schema_version": registry.SCHEMA_VERSION,
         "kind": registry.CANDIDATE_KIND,
@@ -54,8 +210,24 @@ def _candidate(
         "bundle_sha256": "c" * 64,
         "bundle_size": 1024,
         "image_digests": {
-            "amd64": "sha256:" + "d" * 64,
-            "arm64": "sha256:" + "e" * 64,
+            "amd64": amd64_config,
+            "arm64": arm64_config,
+        },
+        "image_archives": {
+            "amd64": archive_binding(
+                config_digest=amd64_config,
+                archive_digest="f" * 64,
+                index_digest="sha256:" + "1" * 64,
+                manifest_digest="sha256:" + "2" * 64,
+                size=2048,
+            ),
+            "arm64": archive_binding(
+                config_digest=arm64_config,
+                archive_digest="0" * 64,
+                index_digest="sha256:" + "3" * 64,
+                manifest_digest="sha256:" + "4" * 64,
+                size=4096,
+            ),
         },
     }
 
@@ -79,6 +251,63 @@ def _deploy(
             environment.resource_generation if generation is None else generation
         ),
     }
+
+
+def _runtime_bindings(candidate: registry.CandidateRecord) -> dict[str, Any]:
+    nodes: dict[str, dict[str, Any]] = {}
+    domains: dict[str, dict[str, Any]] = {}
+    for domain, architecture in registry.WORKER_RUNTIME_BINDING_DOMAINS.items():
+        archive = candidate.image_archives[architecture]
+        backend = "containerd-snapshotter-v1" if domain == "oldlab" else "classic-overlay2"
+        driver = registry.WORKER_RUNTIME_BACKENDS[backend]
+        runtime_image_id = (
+            archive["load_descriptor_digest"]
+            if backend == "containerd-snapshotter-v1"
+            else archive["config_digest"]
+        )
+        domain_binding = {
+            "architecture": architecture,
+            "docker_driver": driver,
+            "docker_backend": backend,
+            "config_digest": archive["config_digest"],
+            "load_descriptor_digest": archive["load_descriptor_digest"],
+            "load_descriptor_media_type": archive["load_descriptor_media_type"],
+            "runtime_image_id": runtime_image_id,
+        }
+        domains[domain] = domain_binding
+        for node in registry.FLEET_NODES:
+            node_domain = "oldlab" if node.startswith("oldlab-") else "gb10"
+            if node_domain != domain:
+                continue
+            nodes[node] = {
+                "domain": domain,
+                **domain_binding,
+                "docker_descriptor_digest": (
+                    archive["load_descriptor_digest"]
+                    if backend == "containerd-snapshotter-v1"
+                    else None
+                ),
+                "docker_descriptor_media_type": (
+                    archive["load_descriptor_media_type"]
+                    if backend == "containerd-snapshotter-v1"
+                    else None
+                ),
+                "receipt_sha256": hashlib.sha256(node.encode("ascii")).hexdigest(),
+            }
+    return {"nodes": nodes, "domains": domains}
+
+
+def _record_runtime_bindings(
+    authority: registry.DeveloperEnvironmentRegistry,
+    deployment: registry.DeploymentRecord,
+    candidate: registry.CandidateRecord,
+) -> registry.DeploymentRecord:
+    return authority.record_worker_runtime_bindings(
+        deployment.deployment_id,
+        principal_id=deployment.principal_id,
+        expected_resource_generation=deployment.expected_resource_generation,
+        bindings=_runtime_bindings(candidate),
+    )
 
 
 def _finalization_evidence() -> dict[str, str]:
@@ -143,6 +372,359 @@ def _legacy_deployment_table(path: Path, *, committed: bool) -> None:
     finally:
         connection.close()
     path.chmod(0o600)
+
+
+def _downgrade_worker_image_binding_schema(path: Path) -> None:
+    """Rewrite a current fixture to the last unmarked image-binding schema."""
+
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("PRAGMA foreign_keys = OFF")
+        metadata = connection.execute(
+            "SELECT singleton, schema_version, generation FROM registry_meta"
+        ).fetchall()
+        candidates = connection.execute(
+            """
+            SELECT candidate_id, principal_id, env_id, lifecycle_epoch,
+                   repository_id, candidate_sha, candidate_tree, bundle_sha256,
+                   bundle_size, image_digests_json, imported_at
+            FROM candidates
+            """
+        ).fetchall()
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("DROP TABLE candidates")
+        connection.execute(
+            """
+            CREATE TABLE candidates (
+                candidate_id TEXT PRIMARY KEY,
+                principal_id TEXT NOT NULL,
+                env_id TEXT NOT NULL REFERENCES environments(env_id),
+                lifecycle_epoch INTEGER NOT NULL CHECK (lifecycle_epoch >= 1),
+                repository_id TEXT NOT NULL,
+                candidate_sha TEXT NOT NULL,
+                candidate_tree TEXT NOT NULL,
+                bundle_sha256 TEXT NOT NULL,
+                bundle_size INTEGER NOT NULL,
+                image_digests_json TEXT NOT NULL,
+                imported_at TEXT NOT NULL,
+                UNIQUE (env_id, candidate_sha, candidate_tree, bundle_sha256)
+            )
+            """
+        )
+        connection.executemany(
+            "INSERT INTO candidates VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            candidates,
+        )
+        connection.execute("DROP TABLE registry_meta")
+        connection.execute(
+            """
+            CREATE TABLE registry_meta (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                schema_version INTEGER NOT NULL,
+                generation INTEGER NOT NULL CHECK (generation >= 0)
+            )
+            """
+        )
+        connection.executemany(
+            "INSERT INTO registry_meta VALUES (?, ?, ?)",
+            metadata,
+        )
+        connection.execute("COMMIT")
+    except Exception:
+        connection.execute("ROLLBACK")
+        raise
+    finally:
+        connection.close()
+    path.chmod(0o600)
+
+
+def _mark_as_worker_image_binding_v2(path: Path) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(
+            "UPDATE registry_meta SET database_schema_version = 2 WHERE singleton = 1"
+        )
+        connection.execute(
+            """
+            UPDATE candidates
+            SET image_binding_kind = 'docker-config-id', image_binding_version = 1
+            """
+        )
+        deployment_columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(deployments)")
+        }
+        if "worker_runtime_bindings_json" in deployment_columns:
+            connection.execute("ALTER TABLE deployments DROP COLUMN worker_runtime_bindings_json")
+        connection.commit()
+    finally:
+        connection.close()
+    path.chmod(0o600)
+
+
+def test_empty_worker_image_binding_v2_history_upgrades_atomically(
+    tmp_path: Path,
+) -> None:
+    authority = _new_registry(tmp_path)
+    environment = authority.register(
+        _register("oidc:example:v2-empty", "registration-v2-empty"),
+    )
+    _mark_as_worker_image_binding_v2(authority.database)
+
+    upgraded = registry.DeveloperEnvironmentRegistry(authority.database)
+
+    assert upgraded.lookup(environment.env_id).state == "ready"
+    connection = sqlite3.connect(authority.database)
+    try:
+        metadata = connection.execute(
+            "SELECT database_schema_version FROM registry_meta WHERE singleton = 1"
+        ).fetchone()
+        deployment_columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(deployments)")
+        }
+    finally:
+        connection.close()
+    assert metadata == (registry.DATABASE_SCHEMA_VERSION,)
+    assert "worker_runtime_bindings_json" in deployment_columns
+
+
+def test_populated_worker_image_binding_v2_history_fails_byte_unchanged(
+    tmp_path: Path,
+) -> None:
+    authority = _new_registry(tmp_path)
+    environment = authority.register(
+        _register("oidc:example:v2-populated", "registration-v2-populated"),
+    )
+    candidate = authority.import_candidate(
+        _candidate(environment, "candidate-v2-populated"),
+    )
+    authority.begin_deployment(
+        _deploy(environment, candidate, "deployment-v2-populated"),
+    )
+    _mark_as_worker_image_binding_v2(authority.database)
+    before = authority.database.read_bytes()
+
+    with pytest.raises(
+        registry.RegistryError,
+        match="worker image binding v2-to-v3 requires explicit migration",
+    ):
+        registry.DeveloperEnvironmentRegistry(authority.database)
+
+    assert authority.database.read_bytes() == before
+    connection = sqlite3.connect(authority.database)
+    try:
+        metadata = connection.execute(
+            "SELECT database_schema_version FROM registry_meta WHERE singleton = 1"
+        ).fetchone()
+        candidate_marker = connection.execute(
+            "SELECT image_binding_kind, image_binding_version FROM candidates"
+        ).fetchone()
+    finally:
+        connection.close()
+    assert metadata == (2,)
+    assert candidate_marker == ("docker-config-id", 1)
+
+
+def test_new_registry_persists_worker_config_id_schema_and_candidate_identity(
+    tmp_path: Path,
+) -> None:
+    authority = _new_registry(tmp_path)
+    environment = authority.register(
+        _register("oidc:example:image-schema", "registration-image-schema"),
+    )
+    candidate = authority.import_candidate(
+        _candidate(environment, "candidate-image-schema"),
+    )
+
+    connection = sqlite3.connect(authority.database)
+    try:
+        metadata = connection.execute(
+            """
+            SELECT schema_version, database_schema_version
+            FROM registry_meta WHERE singleton = 1
+            """
+        ).fetchone()
+        candidate_columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(candidates)")
+        }
+    finally:
+        connection.close()
+
+    assert metadata == (registry.SCHEMA_VERSION, registry.DATABASE_SCHEMA_VERSION)
+    assert {"image_binding_kind", "image_binding_version"}.issubset(candidate_columns)
+    assert candidate.image_binding_kind == registry.WORKER_IMAGE_BINDING_KIND
+    assert candidate.image_binding_version == registry.WORKER_IMAGE_BINDING_VERSION
+    expected_identity = {
+        "principal_id": environment.principal_id,
+        "env_id": environment.env_id,
+        "lifecycle_epoch": environment.lifecycle_epoch,
+        "repository_id": "qianyi-sun/loom",
+        "image_binding_kind": registry.WORKER_IMAGE_BINDING_KIND,
+        "image_binding_version": registry.WORKER_IMAGE_BINDING_VERSION,
+        "candidate_sha": candidate.candidate_sha,
+        "candidate_tree": candidate.candidate_tree,
+        "bundle_sha256": candidate.bundle_sha256,
+        "image_digests": candidate.image_digests,
+        "image_archives": registry._archive_identity(candidate.image_archives),
+    }
+    assert candidate.candidate_id == "cand-" + registry._digest(expected_identity)[:40]
+    assert authority.snapshot()["candidates"][0] == asdict(candidate)
+
+
+def test_unbound_legacy_registry_with_ready_and_retired_environments_upgrades(
+    tmp_path: Path,
+) -> None:
+    authority = _new_registry(tmp_path)
+    ready = authority.register(
+        _register("oidc:example:legacy-ready", "registration-legacy-ready"),
+    )
+    retiring = authority.register(
+        _register("oidc:example:legacy-retired", "registration-legacy-retired"),
+    )
+    quarantined = authority.begin_retirement(
+        retiring.env_id,
+        principal_id=retiring.principal_id,
+        expected_resource_generation=retiring.resource_generation,
+    )
+    retired = authority.retire_environment(
+        retiring.env_id,
+        principal_id=retiring.principal_id,
+        expected_resource_generation=quarantined.resource_generation,
+    )
+    connection = sqlite3.connect(authority.database)
+    try:
+        connection.execute("DELETE FROM registration_requests")
+        connection.commit()
+    finally:
+        connection.close()
+    _downgrade_worker_image_binding_schema(authority.database)
+
+    upgraded = registry.DeveloperEnvironmentRegistry(authority.database)
+
+    assert upgraded.lookup(ready.env_id).state == "ready"
+    assert upgraded.lookup(retired.env_id).state == "retired"
+    connection = sqlite3.connect(authority.database)
+    try:
+        metadata = connection.execute(
+            "SELECT database_schema_version FROM registry_meta WHERE singleton = 1"
+        ).fetchone()
+        candidate_columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(candidates)")
+        }
+        request_count = connection.execute("SELECT COUNT(*) FROM registration_requests").fetchone()
+    finally:
+        connection.close()
+    assert metadata == (registry.DATABASE_SCHEMA_VERSION,)
+    assert {"image_binding_kind", "image_binding_version"}.issubset(candidate_columns)
+    assert request_count == (0,)
+    assert upgraded.snapshot_path.read_bytes() == upgraded.snapshot_bytes()
+
+
+def test_unbound_legacy_registry_with_request_history_fails_unchanged(
+    tmp_path: Path,
+) -> None:
+    authority = _new_registry(tmp_path)
+    authority.register(
+        _register("oidc:example:legacy-request", "registration-legacy-request"),
+    )
+    _downgrade_worker_image_binding_schema(authority.database)
+
+    with pytest.raises(
+        registry.RegistryError,
+        match="worker image binding requires explicit migration",
+    ):
+        registry.DeveloperEnvironmentRegistry(authority.database)
+
+    connection = sqlite3.connect(authority.database)
+    try:
+        meta_columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(registry_meta)")
+        }
+        candidate_columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(candidates)")
+        }
+        request_count = connection.execute("SELECT COUNT(*) FROM registration_requests").fetchone()
+    finally:
+        connection.close()
+    assert "database_schema_version" not in meta_columns
+    assert not {"image_binding_kind", "image_binding_version"}.intersection(candidate_columns)
+    assert request_count == (1,)
+
+
+def test_populated_unbound_legacy_registry_fails_without_partial_migration(
+    tmp_path: Path,
+) -> None:
+    authority = _new_registry(tmp_path)
+    environment = authority.register(
+        _register("oidc:example:legacy-bound", "registration-legacy-bound"),
+    )
+    candidate = authority.import_candidate(
+        _candidate(environment, "candidate-legacy-bound"),
+    )
+    _downgrade_worker_image_binding_schema(authority.database)
+
+    with pytest.raises(
+        registry.RegistryError,
+        match="worker image binding requires explicit migration",
+    ):
+        registry.DeveloperEnvironmentRegistry(authority.database)
+
+    connection = sqlite3.connect(authority.database)
+    try:
+        meta_columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(registry_meta)")
+        }
+        candidate_columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(candidates)")
+        }
+        candidate_row = connection.execute(
+            "SELECT candidate_id, image_digests_json FROM candidates"
+        ).fetchone()
+        request_count = connection.execute("SELECT COUNT(*) FROM candidate_requests").fetchone()
+    finally:
+        connection.close()
+    assert "database_schema_version" not in meta_columns
+    assert not {"image_binding_kind", "image_binding_version"}.intersection(candidate_columns)
+    assert candidate_row == (
+        candidate.candidate_id,
+        json.dumps(candidate.image_digests, sort_keys=True, separators=(",", ":")),
+    )
+    assert request_count == (1,)
+
+
+def test_unbound_legacy_registry_with_in_progress_environment_fails_unchanged(
+    tmp_path: Path,
+) -> None:
+    authority = _new_registry(tmp_path)
+    environment = authority.register(
+        _register("oidc:example:legacy-progress", "registration-legacy-progress"),
+    )
+    authority.begin_retirement(
+        environment.env_id,
+        principal_id=environment.principal_id,
+        expected_resource_generation=environment.resource_generation,
+    )
+    _downgrade_worker_image_binding_schema(authority.database)
+
+    with pytest.raises(
+        registry.RegistryError,
+        match="requires ready or retired environments",
+    ):
+        registry.DeveloperEnvironmentRegistry(authority.database)
+
+    connection = sqlite3.connect(authority.database)
+    try:
+        meta_columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(registry_meta)")
+        }
+        candidate_columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(candidates)")
+        }
+        state = connection.execute("SELECT state FROM environments").fetchone()
+    finally:
+        connection.close()
+    assert "database_schema_version" not in meta_columns
+    assert not {"image_binding_kind", "image_binding_version"}.intersection(candidate_columns)
+    assert state == ("quarantined",)
 
 
 def test_legacy_empty_deployment_table_adds_applied_binding_columns(
@@ -824,6 +1406,94 @@ def test_candidate_import_is_owner_bound_and_idempotent(tmp_path: Path) -> None:
         authority.import_candidate(metadata_drift)
 
 
+def test_candidate_rejects_one_worker_config_id_for_both_architectures(
+    tmp_path: Path,
+) -> None:
+    authority = _new_registry(tmp_path)
+    environment = authority.register(
+        _register("oidc:example:owner", "registration-key-owner"),
+    )
+    request = _candidate(environment, "candidate-worker-images")
+    request["image_digests"]["arm64"] = request["image_digests"]["amd64"]
+
+    with pytest.raises(registry.RegistryError, match="candidate import binding is invalid"):
+        authority.import_candidate(request)
+
+
+def test_worker_image_archive_accepts_buildx_oci_hybrid_and_binds_all_digests(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "worker-amd64.tar"
+    image_id, archive_sha256, archive_size = _worker_image_archive(archive)
+
+    verified = registry.verify_worker_image_archive(
+        archive,
+        architecture="amd64",
+        candidate_sha="a" * 40,
+        image_id=image_id,
+        expected_archive_sha256=archive_sha256,
+        expected_archive_size=archive_size,
+    )
+
+    assert verified["architecture"] == "amd64"
+    assert verified["archive_sha256"] == archive_sha256
+    assert verified["archive_size"] == archive_size
+    assert verified["config_digest"] == image_id
+    assert registry.IMAGE_DIGEST_RE.fullmatch(verified["index_digest"])
+    assert registry.IMAGE_DIGEST_RE.fullmatch(verified["manifest_digest"])
+    assert verified["manifest_media_type"] == "application/vnd.oci.image.manifest.v1+json"
+    assert verified["load_descriptor_digest"] == verified["manifest_digest"]
+    assert verified["load_descriptor_media_type"] == verified["manifest_media_type"]
+    assert verified["tag"] == "loom-worker:aaaaaaaaaaaa-amd64"
+
+
+def test_worker_image_archive_binds_provenance_index_separately_from_runtime_manifest(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "worker-amd64-provenance.tar"
+    image_id, archive_sha256, archive_size = _worker_image_archive(
+        archive,
+        provenance=True,
+    )
+
+    verified = registry.verify_worker_image_archive(
+        archive,
+        architecture="amd64",
+        candidate_sha="a" * 40,
+        image_id=image_id,
+        expected_archive_sha256=archive_sha256,
+        expected_archive_size=archive_size,
+    )
+
+    assert verified["config_digest"] == image_id
+    assert verified["load_descriptor_media_type"] == ("application/vnd.oci.image.index.v1+json")
+    assert verified["manifest_media_type"] == "application/vnd.oci.image.manifest.v1+json"
+    assert verified["load_descriptor_digest"] != verified["manifest_digest"]
+
+
+def test_worker_image_archive_rejects_dangerous_unreferenced_member(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "worker-amd64.tar"
+    image_id, _archive_sha256, _archive_size = _worker_image_archive(archive)
+    rewritten = tmp_path / "worker-amd64-dangerous.tar"
+    with tarfile.open(archive, "r:") as source, tarfile.open(rewritten, "w:") as target:
+        for member in source.getmembers():
+            target.addfile(member, source.extractfile(member) if member.isfile() else None)
+        link = tarfile.TarInfo("unreferenced-link")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "../../etc/shadow"
+        target.addfile(link)
+
+    with pytest.raises(registry.RegistryError, match="unsafe member types"):
+        registry.verify_worker_image_archive(
+            rewritten,
+            architecture="amd64",
+            candidate_sha="a" * 40,
+            image_id=image_id,
+        )
+
+
 def test_deployment_phases_replay_and_generation_fence(tmp_path: Path) -> None:
     authority = _new_registry(tmp_path)
     environment = authority.register(
@@ -836,7 +1506,7 @@ def test_deployment_phases_replay_and_generation_fence(tmp_path: Path) -> None:
 
     deployment = authority.begin_deployment(request)
     assert authority.begin_deployment(request) == deployment
-    current = deployment
+    current = _record_runtime_bindings(authority, deployment, candidate)
     precommit: dict[str, Any] | None = None
     for expected, following in zip(
         registry.DEPLOY_PHASES[:-1],
@@ -1039,6 +1709,7 @@ def test_retired_environment_revives_same_identity_and_clears_candidate(
     deployment = authority.begin_deployment(
         _deploy(original, candidate, "deployment-key-owner"),
     )
+    deployment = _record_runtime_bindings(authority, deployment, candidate)
     for expected, following in zip(
         registry.DEPLOY_PHASES[:-1],
         registry.DEPLOY_PHASES[1:],
@@ -1685,7 +2356,7 @@ def test_post_materialization_failure_cannot_reallocate_ports(
     deployment = authority.begin_deployment(
         _deploy(environment, candidate, "deployment-unsafe-port-repair"),
     )
-    current = deployment
+    current = _record_runtime_bindings(authority, deployment, candidate)
     for expected, following in (
         ("requested", "resources-verified"),
         ("resources-verified", "candidate-materialized"),
@@ -1804,6 +2475,20 @@ def test_snapshot_verifier_rejects_resigned_tampered_and_inactive_rows(
     candidate_path["candidates"][0]["bundle_path"] = "/tmp/candidate.bundle"
     tampered_payloads.append(candidate_path)
 
+    duplicate_worker_image = copy()
+    duplicate_worker_image["candidates"][0]["image_digests"]["arm64"] = duplicate_worker_image[
+        "candidates"
+    ][0]["image_digests"]["amd64"]
+    tampered_payloads.append(duplicate_worker_image)
+
+    missing_worker_image_kind = copy()
+    missing_worker_image_kind["candidates"][0].pop("image_binding_kind")
+    tampered_payloads.append(missing_worker_image_kind)
+
+    wrong_worker_image_version = copy()
+    wrong_worker_image_version["candidates"][0]["image_binding_version"] = 1
+    tampered_payloads.append(wrong_worker_image_version)
+
     deployment_relation = copy()
     deployment_relation["deployments"][0]["phase"] = "committed"
     tampered_payloads.append(deployment_relation)
@@ -1842,6 +2527,8 @@ def test_current_snapshot_is_published_after_every_mutation_phase(
     candidate = authority.import_candidate(_candidate(environment, "candidate-key-owner"))
     assert_current()
     deployment = authority.begin_deployment(_deploy(environment, candidate, "deployment-key-owner"))
+    assert_current()
+    deployment = _record_runtime_bindings(authority, deployment, candidate)
     assert_current()
     advanced = authority.advance_deployment(
         deployment.deployment_id,

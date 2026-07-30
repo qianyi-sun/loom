@@ -301,7 +301,12 @@ def test_build_sbatch_request_uses_environment_specific_worker_settings() -> Non
         'export LOOM_WORKER_COMPOSE_PROJECT="loom-${LOOM_WORKER_SANDBOX_IDENTITY}-'
         '${project_candidate}-${project_job}"'
     ) in request.stdin
-    assert 'docker compose "${compose_args[@]}" up --build &' in request.stdin
+    assert 'docker compose "${compose_args[@]}" up --no-build &' in request.stdin
+    assert 'docker compose "${compose_args[@]}" config --format json' in request.stdin
+    assert 're.fullmatch(r"sha256:[0-9a-f]{64}",str(image))' in request.stdin
+    assert "docker inspect --format '{{.Image}}'" in request.stdin
+    assert 'if [[ "$running_worker_image_id" != "$expected_worker_image_id" ]]' in request.stdin
+    assert "worker container did not start with the exact image config ID" in request.stdin
     assert 'docker compose "${compose_args[@]}" down --remove-orphans' in request.stdin
     assert 'cd "$LOOM_REMOTE_WORKER_REPO_DIR"' in request.stdin
 
@@ -373,6 +378,7 @@ def test_systemd_nonexclusive_sbatch_binds_exact_allocation_and_reads_back_pid()
     assert '--docker-driver "$LOOM_WORKER_DOCKER_CGROUP_DRIVER"' in request.stdin
     assert '--job-start-time "${slurm_identity[3]}"' in request.stdin
     assert 'docker compose "${compose_args[@]}" ps -q worker' in request.stdin
+    assert "docker inspect --format '{{.Image}}'" in request.stdin
     assert "docker inspect --format '{{.State.Pid}}'" in request.stdin
     assert 'Path(f"/proc/{pid}/cgroup")' in request.stdin
     assert "if parent not in child.parents" in request.stdin
@@ -843,7 +849,7 @@ def test_build_sbatch_request_cleans_up_compose_on_exit() -> None:
     assert "trap cleanup EXIT" in request.stdin
     assert "trap 'cleanup 130' INT" in request.stdin
     assert "trap 'cleanup 143' TERM" in request.stdin
-    assert 'docker compose "${compose_args[@]}" up --build &' in request.stdin
+    assert 'docker compose "${compose_args[@]}" up --no-build &' in request.stdin
     assert "compose_pid=$!" in request.stdin
     assert 'wait "$compose_pid"' in request.stdin
     assert 'docker compose "${compose_args[@]}" down --remove-orphans' in request.stdin

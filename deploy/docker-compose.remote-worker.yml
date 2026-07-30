@@ -7,10 +7,11 @@
 
 services:
   worker:
-    image: loom-worker:${LOOM_IMAGE_TAG:-dev}
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile.worker
+    # Registry-backed distributed workers use the Docker config ID, not a
+    # mutable tag or a local build fallback.  The controller verifies this
+    # exact ID, OS/architecture, and revision label before startup and reads
+    # the running container's `.Image` back afterwards.
+    image: ${LOOM_WORKER_IMAGE_ID:?set exact loom-worker image config ID}
     environment:
       - LOOM_WORKER_CONTROL_PLANE_URL=${LOOM_WORKER_CONTROL_PLANE_URL:?set LOOM_WORKER_CONTROL_PLANE_URL}
       - LOOM_WORKER_GATEWAY_URL=${LOOM_WORKER_GATEWAY_URL:?set LOOM_WORKER_GATEWAY_URL}
@@ -67,6 +68,7 @@ services:
       - LOOM_WORKER_CANDIDATE_SHA=${LOOM_WORKER_CANDIDATE_SHA:-legacy}
       - LOOM_WORKER_SLURM_JOB_ID=${LOOM_WORKER_SLURM_JOB_ID:-none}
       - LOOM_WORKER_COMPOSE_PROJECT=${LOOM_WORKER_COMPOSE_PROJECT:-manual}
+      - LOOM_WORKER_IMAGE_ID=${LOOM_WORKER_IMAGE_ID:?set exact loom-worker image config ID}
       - LOOM_WORKER_SLURM_ALLOCATED_GPUS=${LOOM_WORKER_SLURM_ALLOCATED_GPUS:--1}
       - LOOM_WORKER_SLURM_GPU_DEVICE_IDS=${LOOM_WORKER_SLURM_GPU_DEVICE_IDS:-}
     volumes:
@@ -88,6 +90,7 @@ services:
       loom.candidate_sha: ${LOOM_WORKER_CANDIDATE_SHA:-legacy}
       loom.slurm_job_id: ${LOOM_WORKER_SLURM_JOB_ID:-none}
       loom.compose_project: ${LOOM_WORKER_COMPOSE_PROJECT:-manual}
+      loom.worker_image_id: ${LOOM_WORKER_IMAGE_ID:?set exact loom-worker image config ID}
     # Slurm jobs export "no" so dockerd cannot restart a worker outside the
     # allocation after a host/daemon restart. Fixed remote workers retain the
     # historical on-failure policy.

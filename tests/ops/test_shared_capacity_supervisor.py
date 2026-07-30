@@ -1176,21 +1176,18 @@ def test_main_emits_only_generic_failure(tmp_path: Path, capsys) -> None:
     assert captured.err == '{"error":"shared-capacity-supervisor-failed-safely"}\n'
 
 
-def test_checked_in_config_and_exact_candidate_service_renderer(tmp_path: Path) -> None:
+def test_checked_in_base_is_identity_free_and_fails_closed_until_rendered(
+    tmp_path: Path,
+) -> None:
     checked = ROOT / "deploy/developer-sandboxes/shared-capacity-supervisor/config.toml"
     installed = tmp_path / "supervisor.toml"
     _write(installed, checked.read_text())
-    config = supervisor.load_config(installed)
-    assert config.pool_slot_budgets == {"gb10": 120, "oldlab": 20}
-    assert config.pool_pending_slot_budgets == {"gb10": 24, "oldlab": 10}
-    assert config.instances == (
-        "devansh-gb10",
-        "devansh-oldlab",
-        "hongjian-gb10",
-        "hongjian-oldlab",
-        "qianyi-gb10",
-        "qianyi-oldlab",
-    )
+    assert all(name not in checked.read_text() for name in ("qianyi", "hongjian", "devansh"))
+    with pytest.raises(supervisor.SupervisorError, match="non-empty"):
+        supervisor.load_config(installed)
+
+
+def test_exact_candidate_service_renderer() -> None:
     template = (
         ROOT / "deploy/developer-sandboxes/loom-shared-capacity-supervisor.service"
     ).read_text()

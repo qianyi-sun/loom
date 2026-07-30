@@ -78,8 +78,17 @@ def _parser() -> argparse.ArgumentParser:
     candidate_import.add_argument("--bundle", type=Path, required=True)
     candidate_import.add_argument("--candidate-sha", required=True)
     candidate_import.add_argument("--candidate-tree", required=True)
-    candidate_import.add_argument("--amd64-image-digest", required=True)
-    candidate_import.add_argument("--arm64-image-digest", required=True)
+    candidate_import.add_argument(
+        "--amd64-image-digest",
+        required=True,
+        help="exact linux/amd64 loom-worker Docker config ID (sha256:<64-hex>)",
+    )
+    candidate_import.add_argument(
+        "--arm64-image-digest",
+        required=True,
+        help="exact linux/arm64 loom-worker Docker config ID (sha256:<64-hex>)",
+    )
+    _image_archive_arguments(candidate_import)
 
     status = commands.add_parser("status", allow_abbrev=False)
     status.add_argument("--env-id", required=True)
@@ -115,11 +124,35 @@ def _candidate_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--candidate-sha", required=True)
     parser.add_argument("--candidate-tree", required=True)
-    parser.add_argument("--amd64-image-digest", required=True)
-    parser.add_argument("--arm64-image-digest", required=True)
+    parser.add_argument(
+        "--amd64-image-digest",
+        required=True,
+        help="exact linux/amd64 loom-worker Docker config ID (sha256:<64-hex>)",
+    )
+    parser.add_argument(
+        "--arm64-image-digest",
+        required=True,
+        help="exact linux/arm64 loom-worker Docker config ID (sha256:<64-hex>)",
+    )
+    _image_archive_arguments(parser)
 
 
-def _bundle_binding(path: Path) -> tuple[int, int, str]:
+def _image_archive_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--amd64-image-archive",
+        type=Path,
+        required=True,
+        help="linux/amd64 buildx --output type=docker archive",
+    )
+    parser.add_argument(
+        "--arm64-image-archive",
+        type=Path,
+        required=True,
+        help="linux/arm64 buildx --output type=docker archive",
+    )
+
+
+def _artifact_binding(path: Path) -> tuple[int, int, str]:
     descriptor = -1
     try:
         descriptor = os.open(
@@ -133,7 +166,7 @@ def _bundle_binding(path: Path) -> tuple[int, int, str]:
             or before.st_uid != os.getuid()
             or before.st_size < 1
         ):
-            raise ClientError("bundle metadata is unsafe")
+            raise ClientError("artifact metadata is unsafe")
         digest = hashlib.sha256()
         offset = 0
         while offset < before.st_size:
@@ -143,14 +176,14 @@ def _bundle_binding(path: Path) -> tuple[int, int, str]:
                 offset,
             )
             if not chunk:
-                raise ClientError("bundle content is incomplete")
+                raise ClientError("artifact content is incomplete")
             digest.update(chunk)
             offset += len(chunk)
         if os.pread(descriptor, 1, before.st_size):
-            raise ClientError("bundle size changed")
+            raise ClientError("artifact size changed")
         after = os.fstat(descriptor)
         if _stable_identity(before) != _stable_identity(after):
-            raise ClientError("bundle metadata changed")
+            raise ClientError("artifact metadata changed")
         return descriptor, before.st_size, digest.hexdigest()
     except ClientError:
         if descriptor >= 0:
@@ -159,12 +192,12 @@ def _bundle_binding(path: Path) -> tuple[int, int, str]:
     except OSError as exc:
         if descriptor >= 0:
             os.close(descriptor)
-        raise ClientError("bundle is unavailable") from exc
+        raise ClientError("artifact is unavailable") from exc
 
 
 def _build_request(
     arguments: argparse.Namespace,
-) -> tuple[dict[str, Any], int | None]:
+) -> tuple[dict[str, Any], list[int]]:
     common = {"schema_version": SCHEMA_VERSION}
     if arguments.command == "register":
         return (
@@ -174,7 +207,7 @@ def _build_request(
                 "idempotency_key": arguments.idempotency_key,
                 "display_name": arguments.display_name,
             },
-            None,
+            [],
         )
     if arguments.command == "status":
         return (
@@ -183,12 +216,12 @@ def _build_request(
                 "kind": STATUS_KIND,
                 "env_id": arguments.env_id,
             },
-            None,
+            [],
         )
     if arguments.command == "snapshot":
-        return ({**common, "kind": SNAPSHOT_KIND}, None)
+        return ({**common, "kind": SNAPSHOT_KIND}, [])
     if arguments.command == "check":
-        return ({**common, "kind": CHECK_KIND}, None)
+        return ({**common, "kind": CHECK_KIND}, [])
     if arguments.command == "rollback":
         return (
             {
@@ -196,7 +229,7 @@ def _build_request(
                 "kind": ROLLBACK_KIND,
                 "idempotency_key": arguments.idempotency_key,
             },
-            None,
+            [],
         )
     if arguments.command == "destroy":
         return (
@@ -205,7 +238,7 @@ def _build_request(
                 "kind": DESTROY_KIND,
                 "idempotency_key": arguments.idempotency_key,
             },
-            None,
+            [],
         )
     if arguments.command == "begin-deploy":
         return (
@@ -217,10 +250,27 @@ def _build_request(
                 "candidate_id": arguments.candidate_id,
                 "expected_resource_generation": (arguments.expected_resource_generation),
             },
-            None,
+            [],
         )
     if arguments.command == "import":
-        descriptor, size, digest = _bundle_binding(arguments.bundle)
+        descriptors: list[int] = []
+        try:
+            bundle_descriptor, size, digest = _artifact_binding(arguments.bundle)
+            descriptors.append(bundle_descriptor)
+            archive_bindings = {}
+            for architecture in ("amd64", "arm64"):
+                archive_descriptor, archive_size, archive_digest = _artifact_binding(
+                    getattr(arguments, f"{architecture}_image_archive")
+                )
+                descriptors.append(archive_descriptor)
+                archive_bindings[architecture] = {
+                    "sha256": archive_digest,
+                    "size": archive_size,
+                }
+        except Exception:
+            for opened in descriptors:
+                os.close(opened)
+            raise
         return (
             {
                 **common,
@@ -235,11 +285,29 @@ def _build_request(
                     "amd64": arguments.amd64_image_digest,
                     "arm64": arguments.arm64_image_digest,
                 },
+                "image_archives": archive_bindings,
             },
-            descriptor,
+            descriptors,
         )
     if arguments.command in {"create", "update"}:
-        descriptor, size, digest = _bundle_binding(arguments.bundle)
+        descriptors = []
+        try:
+            bundle_descriptor, size, digest = _artifact_binding(arguments.bundle)
+            descriptors.append(bundle_descriptor)
+            archive_bindings = {}
+            for architecture in ("amd64", "arm64"):
+                archive_descriptor, archive_size, archive_digest = _artifact_binding(
+                    getattr(arguments, f"{architecture}_image_archive")
+                )
+                descriptors.append(archive_descriptor)
+                archive_bindings[architecture] = {
+                    "sha256": archive_digest,
+                    "size": archive_size,
+                }
+        except Exception:
+            for opened in descriptors:
+                os.close(opened)
+            raise
         request = {
             **common,
             "kind": CREATE_KIND if arguments.command == "create" else UPDATE_KIND,
@@ -252,24 +320,25 @@ def _build_request(
                 "amd64": arguments.amd64_image_digest,
                 "arm64": arguments.arm64_image_digest,
             },
+            "image_archives": archive_bindings,
         }
         if arguments.command == "create":
             request["display_name"] = arguments.display_name
-        return request, descriptor
+        return request, descriptors
     raise ClientError("command is unsupported")
 
 
 def _exchange(
     request: Mapping[str, Any],
-    descriptor: int | None,
+    descriptors: Sequence[int],
 ) -> dict[str, Any]:
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     try:
         connection.connect(str(SOCKET_PATH))
         ancillary: list[tuple[int, int, bytes]] = []
-        if descriptor is not None:
-            descriptors = array.array("i", [descriptor])
-            ancillary = [(socket.SOL_SOCKET, socket.SCM_RIGHTS, descriptors.tobytes())]
+        if descriptors:
+            descriptor_array = array.array("i", descriptors)
+            ancillary = [(socket.SOL_SOCKET, socket.SCM_RIGHTS, descriptor_array.tobytes())]
         connection.sendmsg([_canonical(request)], ancillary)
         raw, received_ancillary, flags, _address = connection.recvmsg(
             MAX_RESPONSE_BYTES + 1,
@@ -316,16 +385,16 @@ def _exchange(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    descriptor: int | None = None
+    descriptors: list[int] = []
     try:
         arguments = _parser().parse_args(list(argv) if argv is not None else None)
-        request, descriptor = _build_request(arguments)
-        response = _exchange(request, descriptor)
+        request, descriptors = _build_request(arguments)
+        response = _exchange(request, descriptors)
     except ClientError:
         sys.stderr.write("error: developer environment request failed safely\n")
         return 1
     finally:
-        if descriptor is not None:
+        for descriptor in descriptors:
             os.close(descriptor)
     sys.stdout.buffer.write(_canonical(response))
     return 0 if response["status"] == "succeeded" else 1

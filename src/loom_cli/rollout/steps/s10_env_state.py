@@ -18,11 +18,13 @@ import json
 import os
 import pwd
 import re
+import selectors
 import shlex
 import socket
 import stat
 import struct
 import subprocess
+import tarfile
 import tempfile
 import threading
 import time
@@ -109,6 +111,13 @@ _CATALOG_CACHE_ENV_PATHS = {
 _EXTERNAL_CONSUMER_VERIFY_ATTEMPTS = 13
 _EXTERNAL_CONSUMER_VERIFY_BACKOFF_SECONDS = 5.0
 _EXTERNAL_SLURM_AUTHORITY_PROGRAM = Path("/usr/local/libexec/loom-staging-external-slurm-authority")
+_GB10_ARM64_WORKER_ARCHIVE = "staging-gb10-worker-arm64.tar"
+_GB10_ARM64_WORKER_MANIFEST = "staging-gb10-worker-arm64.json"
+_WORKER_IMAGE_ID_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+_WORKER_IMAGE_CMD = ("python", "-m", "loom_worker")
+_MAX_WORKER_IMAGE_CONFIG_BYTES = 16 * 1024 * 1024
+_MAX_WORKER_IMAGE_ARCHIVE_BYTES = 16 * 1024 * 1024 * 1024
 _PORT_FORWARD_ENV_KEYS = frozenset(
     {
         "DBUS_SESSION_BUS_ADDRESS",
@@ -151,6 +160,412 @@ def _write_safe_json(
         json.dumps(value, indent=2, sort_keys=True) + "\n",
         known_values=known_values,
     )
+
+
+def _sha256_path(path: Path) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            size += len(chunk)
+            if size > _MAX_WORKER_IMAGE_ARCHIVE_BYTES:
+                raise ExternalSlurmPrereqMaterializationError(
+                    "staging GB10 worker image archive is too large",
+                )
+            digest.update(chunk)
+    if size <= 0:
+        raise ExternalSlurmPrereqMaterializationError(
+            "staging GB10 worker image archive is empty",
+        )
+    return digest.hexdigest(), size
+
+
+def _safe_tar_member_name(value: object) -> str:
+    if not isinstance(value, str):
+        raise ExternalSlurmPrereqMaterializationError(
+            "staging GB10 worker image archive member is invalid",
+        )
+    path = PurePosixPath(value)
+    if not value or path.is_absolute() or ".." in path.parts:
+        raise ExternalSlurmPrereqMaterializationError(
+            "staging GB10 worker image archive member is unsafe",
+        )
+    return value
+
+
+def _inspect_gb10_arm64_worker_archive(
+    archive: Path,
+    *,
+    candidate_sha: str,
+    image_tag: str,
+) -> dict[str, Any]:
+    try:
+        metadata = archive.lstat()
+    except OSError as exc:
+        raise ExternalSlurmPrereqMaterializationError(
+            "staging GB10 worker image archive is unavailable",
+        ) from exc
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_nlink != 1
+    ):
+        raise ExternalSlurmPrereqMaterializationError(
+            "staging GB10 worker image archive is unsafe",
+        )
+    archive_sha256, archive_size = _sha256_path(archive)
+    expected_tag = f"loom-worker:{image_tag}-arm64"
+    try:
+        with tarfile.open(archive, mode="r:*") as image:
+            member_list = image.getmembers()
+            member_names = [_safe_tar_member_name(member.name) for member in member_list]
+            expanded_size = sum(member.size for member in member_list if member.isfile())
+            if (
+                len(member_list) > 100_000
+                or len(set(member_names)) != len(member_names)
+                or expanded_size > _MAX_WORKER_IMAGE_ARCHIVE_BYTES
+                or any(not member.isfile() and not member.isdir() for member in member_list)
+            ):
+                raise ExternalSlurmPrereqMaterializationError(
+                    "staging GB10 worker image archive members are invalid",
+                )
+            members = dict(zip(member_names, member_list, strict=True))
+            manifest_member = members.get("manifest.json")
+            if (
+                manifest_member is None
+                or not manifest_member.isfile()
+                or manifest_member.size <= 0
+                or manifest_member.size > 1024 * 1024
+            ):
+                raise ExternalSlurmPrereqMaterializationError(
+                    "staging GB10 worker image archive manifest is invalid",
+                )
+            manifest_stream = image.extractfile(manifest_member)
+            if manifest_stream is None:
+                raise ExternalSlurmPrereqMaterializationError(
+                    "staging GB10 worker image archive manifest is unavailable",
+                )
+            manifest = json.loads(manifest_stream.read())
+            if (
+                not isinstance(manifest, list)
+                or len(manifest) != 1
+                or not isinstance(manifest[0], dict)
+            ):
+                raise ExternalSlurmPrereqMaterializationError(
+                    "staging GB10 worker image archive manifest is invalid",
+                )
+            descriptor = manifest[0]
+            config_name = _safe_tar_member_name(descriptor.get("Config"))
+            repo_tags = descriptor.get("RepoTags")
+            if not isinstance(repo_tags, list) or repo_tags != [expected_tag]:
+                raise ExternalSlurmPrereqMaterializationError(
+                    "staging GB10 worker image archive tag is invalid",
+                )
+            layers = descriptor.get("Layers")
+            if (
+                not isinstance(layers, list)
+                or not layers
+                or not all(isinstance(layer, str) for layer in layers)
+                or len(set(layers)) != len(layers)
+            ):
+                raise ExternalSlurmPrereqMaterializationError(
+                    "staging GB10 worker image archive layers are invalid",
+                )
+            for layer_value in layers:
+                layer_name = _safe_tar_member_name(layer_value)
+                layer_member = members.get(layer_name)
+                if layer_member is None or not layer_member.isfile() or layer_member.size <= 0:
+                    raise ExternalSlurmPrereqMaterializationError(
+                        "staging GB10 worker image archive layer is invalid",
+                    )
+                layer_stream = image.extractfile(layer_member)
+                if layer_stream is None:
+                    raise ExternalSlurmPrereqMaterializationError(
+                        "staging GB10 worker image archive layer is unavailable",
+                    )
+                layer_digest = hashlib.sha256()
+                while chunk := layer_stream.read(1024 * 1024):
+                    layer_digest.update(chunk)
+                layer_filename = PurePosixPath(layer_name).name.removesuffix(".tar")
+                if layer_filename != layer_digest.hexdigest():
+                    raise ExternalSlurmPrereqMaterializationError(
+                        "staging GB10 worker image archive layer digest drifted",
+                    )
+            config_member = members.get(config_name)
+            if (
+                config_member is None
+                or not config_member.isfile()
+                or config_member.size <= 0
+                or config_member.size > _MAX_WORKER_IMAGE_CONFIG_BYTES
+            ):
+                raise ExternalSlurmPrereqMaterializationError(
+                    "staging GB10 worker image config is invalid",
+                )
+            config_stream = image.extractfile(config_member)
+            if config_stream is None:
+                raise ExternalSlurmPrereqMaterializationError(
+                    "staging GB10 worker image config is unavailable",
+                )
+            config_raw = config_stream.read()
+    except ExternalSlurmPrereqMaterializationError:
+        raise
+    except (OSError, tarfile.TarError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ExternalSlurmPrereqMaterializationError(
+            "staging GB10 worker image archive cannot be inspected",
+        ) from exc
+
+    try:
+        config = json.loads(config_raw)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ExternalSlurmPrereqMaterializationError(
+            "staging GB10 worker image config is invalid",
+        ) from exc
+    runtime = config.get("config") if isinstance(config, dict) else None
+    labels = runtime.get("Labels") if isinstance(runtime, dict) else None
+    source_archive_sha256 = (
+        labels.get("loom.source-archive.sha256") if isinstance(labels, dict) else None
+    )
+    entrypoint = runtime.get("Entrypoint") if isinstance(runtime, dict) else None
+    command = runtime.get("Cmd") if isinstance(runtime, dict) else None
+    config_digest = hashlib.sha256(config_raw).hexdigest()
+    image_id = f"sha256:{config_digest}"
+    config_filename = PurePosixPath(config_name).name.removesuffix(".json")
+    if (
+        not isinstance(config, dict)
+        or config.get("os") != "linux"
+        or config.get("architecture") != "arm64"
+        or config_filename != config_digest
+        or not isinstance(labels, dict)
+        or labels.get("org.opencontainers.image.revision") != candidate_sha
+        or not isinstance(source_archive_sha256, str)
+        or _SHA256_RE.fullmatch(source_archive_sha256) is None
+        or command != list(_WORKER_IMAGE_CMD)
+        or entrypoint not in (None, [])
+        or _WORKER_IMAGE_ID_RE.fullmatch(image_id) is None
+    ):
+        raise ExternalSlurmPrereqMaterializationError(
+            "staging GB10 worker image contract is invalid",
+        )
+    return {
+        "schema_version": 1,
+        "kind": "loom.staging-gb10-worker-arm64-image",
+        "candidate_sha": candidate_sha,
+        "image_tag": image_tag,
+        "image_id": image_id,
+        "archive_path": str(archive),
+        "archive_sha256": archive_sha256,
+        "archive_size": archive_size,
+        "source_archive_sha256": source_archive_sha256,
+        "os": "linux",
+        "architecture": "arm64",
+        "cmd": list(_WORKER_IMAGE_CMD),
+        "entrypoint": [],
+    }
+
+
+def _cleanup_gb10_worker_image_staging(archive: Path) -> None:
+    """Remove only prior crash artifacts from the rollout-owned step directory."""
+
+    patterns = (
+        f".{archive.name}.tmp-*",
+        f".{archive.name}.source-*.tar",
+        f".{archive.name}.transport-stderr-*",
+    )
+    for pattern in patterns:
+        for stale in archive.parent.glob(pattern):
+            try:
+                metadata = stale.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise ExternalSlurmPrereqMaterializationError(
+                    "staging GB10 worker image crash recovery failed",
+                ) from exc
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or stat.S_ISLNK(metadata.st_mode)
+                or metadata.st_uid != os.geteuid()
+                or metadata.st_nlink != 1
+            ):
+                raise ExternalSlurmPrereqMaterializationError(
+                    "staging GB10 worker image crash artifact is unsafe",
+                )
+            stale.unlink()
+
+
+def _prepare_gb10_arm64_worker_image(
+    ctx: RolloutContext,
+    step_dir: StepDir,
+) -> dict[str, Any]:
+    archive = step_dir.artifact_path(_GB10_ARM64_WORKER_ARCHIVE)
+    manifest_path = step_dir.artifact_path(_GB10_ARM64_WORKER_MANIFEST)
+    _cleanup_gb10_worker_image_staging(archive)
+    if archive.exists() and not manifest_path.exists():
+        inspected = _inspect_gb10_arm64_worker_archive(
+            archive,
+            candidate_sha=ctx.resolved_sha,
+            image_tag=ctx.image_tag,
+        )
+        _write_safe_json(manifest_path, inspected)
+        os.chmod(manifest_path, 0o600)
+        return inspected
+    if os.path.lexists(archive) != os.path.lexists(manifest_path):
+        raise ExternalSlurmPrereqMaterializationError(
+            "staging GB10 worker image evidence is incomplete",
+        )
+    if archive.exists():
+        inspected = _inspect_gb10_arm64_worker_archive(
+            archive,
+            candidate_sha=ctx.resolved_sha,
+            image_tag=ctx.image_tag,
+        )
+        try:
+            recorded = json.loads(manifest_path.read_bytes())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ExternalSlurmPrereqMaterializationError(
+                "staging GB10 worker image manifest is invalid",
+            ) from exc
+        if recorded != inspected:
+            raise ExternalSlurmPrereqMaterializationError(
+                "staging GB10 worker image evidence drifted",
+            )
+        return inspected
+
+    from loom_cli.rollout.operator.protected_gb10_transport import (
+        native_worker_build_ssh_argv,
+    )
+
+    candidate_root = candidate_worktree(step_dir)
+    temporary = archive.with_name(f".{archive.name}.tmp-{os.getpid()}")
+    source_archive = archive.with_name(f".{archive.name}.source-{os.getpid()}.tar")
+    if os.path.lexists(temporary) or os.path.lexists(source_archive):
+        raise ExternalSlurmPrereqMaterializationError(
+            "staging GB10 worker image build stage already exists",
+        )
+    try:
+        source_result = run_captured(
+            (
+                "/usr/bin/git",
+                "archive",
+                "--format=tar",
+                f"--output={source_archive}",
+                ctx.resolved_sha,
+            ),
+            cwd=candidate_root,
+            stdout_log=step_dir.artifact_path(
+                "staging-gb10-worker-arm64-source.stdout",
+            ),
+            stderr_log=step_dir.artifact_path(
+                "staging-gb10-worker-arm64-source.stderr",
+            ),
+            sanitize_return=True,
+        )
+        if source_result.returncode != 0:
+            raise ExternalSlurmPrereqMaterializationError(
+                "staging GB10 exact source archive failed",
+            )
+        os.chmod(source_archive, 0o600)
+        source_sha256, source_size = _sha256_path(source_archive)
+        if source_size > 1024 * 1024 * 1024:
+            raise ExternalSlurmPrereqMaterializationError(
+                "staging GB10 exact source archive is too large",
+            )
+        candidate_config = candidate_relative_path(ctx.cluster_config_path, step_dir)
+        if not candidate_config.is_absolute():
+            candidate_config = candidate_root / candidate_config
+        argv = native_worker_build_ssh_argv(
+            candidate_config.resolve(strict=True),
+            candidate_sha=ctx.resolved_sha,
+            image_tag=ctx.image_tag,
+            source_sha256=source_sha256,
+        )
+        remote: subprocess.Popen[bytes] | None = None
+        output_size = 0
+        stderr_size = 0
+        with (
+            source_archive.open("rb") as source,
+            temporary.open("xb") as output,
+        ):
+            remote = subprocess.Popen(
+                argv,
+                stdin=source,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                if remote.stdout is None or remote.stderr is None:
+                    raise ExternalSlurmPrereqMaterializationError(
+                        "staging GB10 native build transport is unavailable",
+                    )
+                deadline = time.monotonic() + 3600
+                with selectors.DefaultSelector() as selector:
+                    selector.register(remote.stdout, selectors.EVENT_READ, "stdout")
+                    selector.register(remote.stderr, selectors.EVENT_READ, "stderr")
+                    while selector.get_map():
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise subprocess.TimeoutExpired(argv, 3600)
+                        events = selector.select(timeout=min(1.0, remaining))
+                        if not events and remote.poll() is None:
+                            continue
+                        for key, _mask in events:
+                            chunk = os.read(key.fd, 1024 * 1024)
+                            if not chunk:
+                                selector.unregister(key.fileobj)
+                                continue
+                            if key.data == "stdout":
+                                output_size += len(chunk)
+                                if output_size > _MAX_WORKER_IMAGE_ARCHIVE_BYTES:
+                                    raise ExternalSlurmPrereqMaterializationError(
+                                        "staging GB10 native worker image archive is too large",
+                                    )
+                                output.write(chunk)
+                            else:
+                                stderr_size += len(chunk)
+                                if stderr_size > 64 * 1024:
+                                    raise ExternalSlurmPrereqMaterializationError(
+                                        "staging GB10 native build diagnostic is too large",
+                                    )
+                remote.wait(timeout=max(0.1, deadline - time.monotonic()))
+            finally:
+                if remote.poll() is None:
+                    remote.kill()
+                    remote.wait()
+        _write_safe_text(
+            step_dir.artifact_path("staging-gb10-worker-arm64-build.stderr"),
+            (
+                "native GB10 arm64 build completed\n"
+                if remote.returncode == 0 and stderr_size == 0
+                else "native GB10 arm64 build failed safely\n"
+            ),
+        )
+        if remote.returncode != 0 or stderr_size > 64 * 1024 or output_size <= 0:
+            raise ExternalSlurmPrereqMaterializationError(
+                "staging GB10 native arm64 worker image build failed",
+            )
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, archive)
+        inspected = _inspect_gb10_arm64_worker_archive(
+            archive,
+            candidate_sha=ctx.resolved_sha,
+            image_tag=ctx.image_tag,
+        )
+        _write_safe_json(manifest_path, inspected)
+        os.chmod(manifest_path, 0o600)
+    except ExternalSlurmPrereqMaterializationError:
+        if not manifest_path.exists():
+            archive.unlink(missing_ok=True)
+        raise
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        if not manifest_path.exists():
+            archive.unlink(missing_ok=True)
+        raise ExternalSlurmPrereqMaterializationError(
+            "staging GB10 native arm64 worker image build failed",
+        ) from exc
+    finally:
+        temporary.unlink(missing_ok=True)
+        source_archive.unlink(missing_ok=True)
+    return inspected
 
 
 @dataclass(frozen=True)
@@ -1565,6 +1980,7 @@ def _materialize_env_file(
     requested_concurrency: object,
     worker_token: str | None,
     worker_token_env_key: str,
+    worker_image_id: str | None = None,
     fixed_private_namespace: bool = False,
 ) -> dict[str, Any]:
     if (
@@ -1572,10 +1988,7 @@ def _materialize_env_file(
         or ".." in env_file.parts
         or not env_file.name.startswith("staging-gb10-worker-staging-")
         or not env_file.name.endswith(".env")
-        or (
-            fixed_private_namespace
-            and env_file.parent != _SHARED_WORKER_ENV_ROOT
-        )
+        or (fixed_private_namespace and env_file.parent != _SHARED_WORKER_ENV_ROOT)
     ):
         raise ExternalSlurmPrereqMaterializationError(
             "external runner env destination is outside the fixed system namespace",
@@ -1606,10 +2019,7 @@ def _materialize_env_file(
         or stat.S_ISLNK(parent.st_mode)
         or parent.st_uid != os.geteuid()
         or parent.st_gid != expected_gid
-        or (
-            expected_mode is not None
-            and stat.S_IMODE(parent.st_mode) != expected_mode
-        )
+        or (expected_mode is not None and stat.S_IMODE(parent.st_mode) != expected_mode)
     ):
         raise ExternalSlurmPrereqMaterializationError(
             "external runner private preparation namespace has unsafe owner or mode",
@@ -1634,6 +2044,12 @@ def _materialize_env_file(
         "LOOM_WORKER_POOL_NAME": pool_name,
         "LOOM_WORKER_CANDIDATE_SHA": candidate_sha,
     }
+    if worker_image_id is not None:
+        if _WORKER_IMAGE_ID_RE.fullmatch(worker_image_id) is None:
+            raise ExternalSlurmPrereqMaterializationError(
+                "external runner worker image config ID is invalid",
+            )
+        updates["LOOM_WORKER_IMAGE_ID"] = worker_image_id
     if requested_concurrency is not None:
         updates["LOOM_WORKER_MAX_CONCURRENT"] = str(requested_concurrency)
     if worker_token is not None:
@@ -1654,6 +2070,7 @@ def _materialize_env_file(
         "worker_token_key": worker_token_env_key if worker_token is not None else None,
         "worker_token": "[REDACTED]" if worker_token is not None else None,
         "worker_token_fingerprint": token_fingerprint,
+        "worker_image_id": worker_image_id,
     }
 
 
@@ -1792,9 +2209,7 @@ def _validate_repo_root(repo_dir: Path, expected_ref: str) -> _BoundDirectory:
             "external runner repository authority is unavailable",
         ) from exc
     mode = stat.S_IMODE(root.identity.st_mode)
-    production_private_root = (
-        _SHARED_WORKER_REPO_ROOT == _PRIVATE_PREPARED_ROOT / "candidates"
-    )
+    production_private_root = _SHARED_WORKER_REPO_ROOT == _PRIVATE_PREPARED_ROOT / "candidates"
     expected_gid = os.getegid()
     expected_mode = 0o700
     if not production_private_root:
@@ -2940,6 +3355,14 @@ def _materialize_external_slurm_runner_prerequisites(
                     "external runner private preparation namespace is unsafe",
                 )
             os.chmod(directory, 0o700)
+    gb10_worker_image = (
+        _prepare_gb10_arm64_worker_image(ctx, step_dir)
+        if authority_required
+        and ctx.environment == "staging"
+        and ctx.scope == "current-gb10"
+        and (checked_pools is None or "gb10" in checked_pools)
+        else None
+    )
     source_repo = candidate_worktree(step_dir)
     expected_repo_ref = str(settings.get("expected_repo_ref") or ctx.image_tag)
     for policy in _external_slurm_policies(profile):
@@ -2984,6 +3407,11 @@ def _materialize_external_slurm_runner_prerequisites(
                 requested_concurrency=actuator_config.get("requested_concurrency"),
                 worker_token=worker_token,
                 worker_token_env_key=worker_token_env_key,
+                worker_image_id=(
+                    str(gb10_worker_image["image_id"])
+                    if pool_name == "gb10" and gb10_worker_image is not None
+                    else None
+                ),
                 fixed_private_namespace=production_private_roots,
             )
         )

@@ -297,7 +297,7 @@ One invocation performs this ordered cycle:
 
 1. read broker status and reject more than one nonterminal request for any
    sandbox/pool instance;
-2. read at most one observation from each of the six configured files;
+2. read at most one observation from each registry-rendered instance file;
 3. accept an observation only when its sandbox, pool, candidate, request,
    epoch, policy lease state, timestamp, sequence, and digest exactly match the
    current broker binding. Stale or wrong-binding observations fail the cycle;

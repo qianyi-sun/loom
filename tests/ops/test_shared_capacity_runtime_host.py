@@ -216,11 +216,106 @@ def _full_registry_snapshot(
             "env_id": env_id,
             "lifecycle_epoch": 1,
             "repository_id": "qianyi-sun/loom",
+            "image_binding_kind": registry.WORKER_IMAGE_BINDING_KIND,
+            "image_binding_version": registry.WORKER_IMAGE_BINDING_VERSION,
             "candidate_sha": candidate_sha,
             "candidate_tree": candidate_tree,
             "bundle_sha256": bundle_sha256,
         }
         candidate_id = "cand-" + registry._digest(candidate_identity)[:40]
+        amd64_config = "sha256:" + f"{index + 2:x}" * 64
+        arm64_config = "sha256:" + f"{index + 3:x}" * 64
+        image_archives = {
+            "amd64": {
+                "path": str(
+                    registry.worker_image_archive_path(
+                        registry.SYSTEM_CANDIDATE_ROOT,
+                        candidate_id,
+                        "amd64",
+                    ),
+                ),
+                "sha256": f"{index + 4:x}" * 64,
+                "size": 2048,
+                "config_digest": amd64_config,
+                "index_digest": "sha256:" + f"{index + 5:x}" * 64,
+                "manifest_digest": "sha256:" + f"{index + 6:x}" * 64,
+                "manifest_media_type": "application/vnd.oci.image.manifest.v1+json",
+                "load_descriptor_digest": "sha256:" + f"{index + 6:x}" * 64,
+                "load_descriptor_media_type": ("application/vnd.oci.image.manifest.v1+json"),
+            },
+            "arm64": {
+                "path": str(
+                    registry.worker_image_archive_path(
+                        registry.SYSTEM_CANDIDATE_ROOT,
+                        candidate_id,
+                        "arm64",
+                    ),
+                ),
+                "sha256": f"{index + 7:x}" * 64,
+                "size": 4096,
+                "config_digest": arm64_config,
+                "index_digest": "sha256:" + f"{index + 8:x}" * 64,
+                "manifest_digest": "sha256:" + f"{index + 9:x}" * 64,
+                "manifest_media_type": "application/vnd.oci.image.manifest.v1+json",
+                "load_descriptor_digest": "sha256:" + f"{index + 9:x}" * 64,
+                "load_descriptor_media_type": ("application/vnd.oci.image.manifest.v1+json"),
+            },
+        }
+        candidate_identity["image_digests"] = {
+            "amd64": amd64_config,
+            "arm64": arm64_config,
+        }
+        candidate_identity["image_archives"] = {
+            architecture: {field: value for field, value in binding.items() if field != "path"}
+            for architecture, binding in image_archives.items()
+        }
+        candidate_id = "cand-" + registry._digest(candidate_identity)[:40]
+        for architecture, archive_binding in image_archives.items():
+            archive_binding["path"] = str(
+                registry.worker_image_archive_path(
+                    registry.SYSTEM_CANDIDATE_ROOT,
+                    candidate_id,
+                    architecture,
+                ),
+            )
+        binding_nodes: dict[str, dict[str, object]] = {}
+        binding_domains: dict[str, dict[str, object]] = {}
+        for domain, architecture in registry.WORKER_RUNTIME_BINDING_DOMAINS.items():
+            archive_binding = image_archives[architecture]
+            backend = "containerd-snapshotter-v1" if domain == "oldlab" else "classic-overlay2"
+            runtime_image_id = (
+                archive_binding["load_descriptor_digest"]
+                if domain == "oldlab"
+                else archive_binding["config_digest"]
+            )
+            domain_binding = {
+                "architecture": architecture,
+                "docker_driver": registry.WORKER_RUNTIME_BACKENDS[backend],
+                "docker_backend": backend,
+                "config_digest": archive_binding["config_digest"],
+                "load_descriptor_digest": archive_binding["load_descriptor_digest"],
+                "load_descriptor_media_type": archive_binding["load_descriptor_media_type"],
+                "runtime_image_id": runtime_image_id,
+            }
+            binding_domains[domain] = domain_binding
+            for node in registry.FLEET_NODES:
+                if ("oldlab" if node.startswith("oldlab-") else "gb10") != domain:
+                    continue
+                binding_nodes[node] = {
+                    "domain": domain,
+                    **domain_binding,
+                    "docker_descriptor_digest": (
+                        archive_binding["load_descriptor_digest"] if domain == "oldlab" else None
+                    ),
+                    "docker_descriptor_media_type": (
+                        archive_binding["load_descriptor_media_type"]
+                        if domain == "oldlab"
+                        else None
+                    ),
+                    "receipt_sha256": registry._digest(
+                        {"node": node, "candidate_id": candidate_id},
+                    ),
+                }
         resources = registry.DeveloperEnvironmentRegistry._dynamic_resources(
             env_id,
             runtime_id,
@@ -258,6 +353,8 @@ def _full_registry_snapshot(
                 "env_id": env_id,
                 "lifecycle_epoch": 1,
                 "repository_id": "qianyi-sun/loom",
+                "image_binding_kind": registry.WORKER_IMAGE_BINDING_KIND,
+                "image_binding_version": registry.WORKER_IMAGE_BINDING_VERSION,
                 "candidate_sha": candidate_sha,
                 "candidate_tree": candidate_tree,
                 "bundle_sha256": bundle_sha256,
@@ -266,9 +363,10 @@ def _full_registry_snapshot(
                     registry.SYSTEM_CANDIDATE_ROOT / candidate_id / "candidate.bundle",
                 ),
                 "image_digests": {
-                    "amd64": f"sha256:{index + 2:x}" * 1 + f"{index + 2:x}" * 63,
-                    "arm64": f"sha256:{index + 3:x}" * 1 + f"{index + 3:x}" * 63,
+                    "amd64": amd64_config,
+                    "arm64": arm64_config,
                 },
+                "image_archives": image_archives,
                 "imported_at": "2026-07-29T12:01:00Z",
             },
         )
@@ -284,6 +382,10 @@ def _full_registry_snapshot(
                 f"{index + 5:x}" * 64 if state == "active" else None
             ),
             "finalization_payload_sha256": None,
+            "worker_runtime_bindings": {
+                "nodes": binding_nodes,
+                "domains": binding_domains,
+            },
             "phase": "committed" if state == "active" else deploying_phase,
             "previous_candidate_id": (None),
             "request_digest": f"{index + 4:x}" * 64,
@@ -775,6 +877,58 @@ def test_registry_snapshot_adds_fourth_developer_without_static_config(
     rebound = host._cohort_from_runtime_manifest(host._runtime_manifest(cohort))
     assert rebound.environments == cohort.environments
     assert rebound.provisioning_environments == cohort.provisioning_environments
+
+
+def test_identity_free_supervisor_base_cannot_inject_instances(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = host.REPO_ROOT / "deploy/developer-sandboxes/shared-capacity-supervisor/config.toml"
+    base_payload = host.tomllib.loads(base.read_text(encoding="utf-8"))
+    assert base_payload["instances"] == []
+
+    candidate = host.Candidate(SHA, TREE, host.REPO_ROOT)
+    monkeypatch.setattr(
+        host,
+        "_read_candidate_file",
+        lambda _candidate, _relative: base.read_bytes(),
+    )
+    legacy_rendered = host.tomllib.loads(
+        host._render_supervisor_config(candidate).decode("ascii"),
+    )
+    assert legacy_rendered["instances"] == list(TEST_INSTANCES)
+    monkeypatch.setattr(
+        host,
+        "_COHORT_CACHE",
+        host.RegistryCohort(
+            generation=8,
+            payload_sha256="8" * 64,
+            environments=(),
+        ),
+    )
+    with pytest.raises(host.RuntimeHostError, match="instance cohort is invalid"):
+        host._render_supervisor_config(candidate)
+
+    monkeypatch.setattr(host, "_registry_supervisor_base", lambda: base_payload)
+    dynamic_instances = tuple(
+        sorted(
+            (
+                "e-fourthdev-gb10",
+                "e-fourthdev-oldlab",
+                "e-fifthdev-gb10",
+                "e-fifthdev-oldlab",
+            ),
+        ),
+    )
+    dynamic_rendered = host.tomllib.loads(
+        host._render_registry_supervisor_config_for_instances(dynamic_instances).decode("ascii"),
+    )
+    assert tuple(dynamic_rendered["instances"]) == dynamic_instances
+    assert all(
+        name not in dynamic_rendered["instances"]
+        for name in ("qianyi-gb10", "hongjian-gb10", "devansh-gb10")
+    )
+    with pytest.raises(host.RuntimeHostError, match="instance cohort is invalid"):
+        host._render_registry_supervisor_config_for_instances(())
 
 
 def test_registry_snapshot_tamper_and_resealed_internal_drift_fail_closed(
@@ -4636,6 +4790,15 @@ def test_retire_environment_migrates_supervisor_before_removing_target_configs(
         "active": True,
     }
     assert not any("scancel" in command for command in fixture.commands)
+
+
+def test_registry_candidate_requires_distinct_domain_worker_config_ids() -> None:
+    snapshot = _full_registry_snapshot(("new-dev",))
+    candidate = snapshot["candidates"][0]
+    candidate["image_digests"]["arm64"] = candidate["image_digests"]["amd64"]
+
+    with pytest.raises(host.RuntimeHostError, match="candidate binding"):
+        host._validate_registry_candidate_row(candidate)
 
 
 def test_retire_environment_rolls_back_bytes_units_and_old_supervisor(

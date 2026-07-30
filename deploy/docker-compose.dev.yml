@@ -203,7 +203,10 @@ services:
     restart: on-failure
 
   worker:
-    image: loom-worker:${LOOM_DEV_IMAGE_TAG:-dev}
+    # The persistent developer-environment deployer supplies the exact
+    # candidate-bound Docker config ID here and always starts with --no-build.
+    # Interactive local development retains the ordinary mutable dev default.
+    image: "${LOOM_WORKER_IMAGE_ID:-loom-worker:dev}"
     build:
       context: ..
       dockerfile: deploy/Dockerfile.worker

@@ -8,6 +8,10 @@ from typing import Any
 import pytest
 from scripts.ops import developer_environment_registry as registry
 from scripts.ops import developer_sandbox_crossover_probe as probe
+from tests.ops.worker_runtime_binding_fixtures import (
+    rich_image_archives,
+    worker_runtime_bindings,
+)
 
 
 def _register(principal: str, index: int) -> dict[str, Any]:
@@ -25,6 +29,8 @@ def _candidate(
     index: int,
 ) -> dict[str, Any]:
     digit = format(index + 1, "x")
+    amd64_config = "sha256:" + format(index + 1, "x") * 64
+    arm64_config = "sha256:" + format(index + 5, "x") * 64
     return {
         "schema_version": 1,
         "kind": registry.CANDIDATE_KIND,
@@ -36,9 +42,14 @@ def _candidate(
         "bundle_sha256": format(index + 9, "x") * 64,
         "bundle_size": 1024 + index,
         "image_digests": {
-            "amd64": "sha256:" + format(index + 1, "x") * 64,
-            "arm64": "sha256:" + format(index + 5, "x") * 64,
+            "amd64": amd64_config,
+            "arm64": arm64_config,
         },
+        "image_archives": rich_image_archives(
+            amd64_config=amd64_config,
+            arm64_config=arm64_config,
+            seed=f"crossover-{index}",
+        ),
     }
 
 
@@ -59,6 +70,12 @@ def _active_snapshot(tmp_path: Path, count: int = 4) -> dict[str, Any]:
             "expected_resource_generation": 1,
         }
         deployment = authority.begin_deployment(request)
+        deployment = authority.record_worker_runtime_bindings(
+            deployment.deployment_id,
+            principal_id=environment.principal_id,
+            expected_resource_generation=1,
+            bindings=worker_runtime_bindings(candidate),
+        )
         for expected, following in zip(
             registry.DEPLOY_PHASES[:-1],
             registry.DEPLOY_PHASES[1:],

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import gzip
 import hashlib
+import io
 import json
 import os
 import stat
 import subprocess
+import tarfile
 import threading
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -42,6 +45,18 @@ class FakeRunner:
         self.systemd_unit_file_state = "disabled"
         self.compose_service_states: dict[str, str] = {}
         self.postgres_checkpoints = 0
+        self.expected_worker_image_id = ""
+        self.expected_worker_architecture = ""
+        self.expected_worker_revision = ""
+        self.worker_image_id_override: str | None = None
+        self.worker_os_override: str | None = None
+        self.worker_architecture_override: str | None = None
+        self.worker_revision_override: str | None = None
+        self.worker_command_override: list[str] | None = None
+        self.worker_entrypoint_override: list[str] | None = None
+        self.worker_container_image_override: str | None = None
+        self.worker_architectures: dict[str, str] = {}
+        self.worker_revisions: dict[str, str] = {}
 
     def run(
         self,
@@ -55,6 +70,34 @@ class FakeRunner:
         command = tuple(argv)
         with self.lock:
             self.calls.append(command)
+        if command[:2] == (str(deploy.NODE_TRANSPORT), "load-image"):
+            request = json.loads(command[command.index("--metadata-json") + 1])
+            receipt = deploy._bound(
+                {
+                    "schema_version": 1,
+                    "kind": "loom.developer-sandbox.worker-image-load-receipt",
+                    "status": "reused",
+                    "node": request["node"],
+                    "domain": request["domain"],
+                    "architecture": request["architecture"],
+                    "candidate_id": request["candidate_id"],
+                    "candidate_sha": request["candidate_sha"],
+                    "config_digest": request["config_digest"],
+                    "index_digest": request["index_digest"],
+                    "load_descriptor_digest": request["load_descriptor_digest"],
+                    "load_descriptor_media_type": request["load_descriptor_media_type"],
+                    "runtime_image_id": request["config_digest"],
+                    "archive_sha256": request["archive_sha256"],
+                    "archive_size": request["archive_size"],
+                    "registry_generation": request["registry_generation"],
+                    "registry_payload_sha256": request["registry_payload_sha256"],
+                    "docker_storage_driver": "overlay2",
+                    "docker_backend": "classic-overlay2",
+                    "docker_descriptor_digest": None,
+                    "docker_descriptor_media_type": None,
+                }
+            )
+            return deploy.CommandResult(0, deploy._canonical(receipt).decode("ascii"))
         if command[0] == "git":
             result = subprocess.run(
                 command,
@@ -94,10 +137,59 @@ class FakeRunner:
                 for service, state in self.compose_service_states.items()
             ]
             return deploy.CommandResult(0, json.dumps(rows))
+        if command[:3] == ("docker", "image", "inspect"):
+            requested_image_id = command[-1]
+            return deploy.CommandResult(
+                0,
+                json.dumps(
+                    [
+                        {
+                            "Id": self.worker_image_id_override or requested_image_id,
+                            "Os": self.worker_os_override or "linux",
+                            "Architecture": self.worker_architecture_override
+                            or self.worker_architectures.get(
+                                requested_image_id,
+                                self.expected_worker_architecture,
+                            ),
+                            "Config": {
+                                "Cmd": self.worker_command_override or list(deploy.WORKER_COMMAND),
+                                "Entrypoint": self.worker_entrypoint_override,
+                                "Labels": {
+                                    deploy.WORKER_REVISION_LABEL: (
+                                        self.worker_revision_override
+                                        or self.worker_revisions.get(
+                                            requested_image_id,
+                                            self.expected_worker_revision,
+                                        )
+                                    )
+                                },
+                            },
+                        }
+                    ]
+                ),
+            )
         if command[:2] == ("docker", "ps"):
+            if any("com.docker.compose.service=worker" in value for value in command):
+                image_filter = next(
+                    value
+                    for value in command
+                    if "loom.developer-environment.image-digest=" in value
+                )
+                image_id = image_filter.rsplit("=", 1)[1]
+                return deploy.CommandResult(0, f"worker-container|{image_id}\n")
             return deploy.CommandResult(
                 0,
                 "".join(f"container-{index}\n" for index in range(len(deploy.ALL_SERVICES))),
+            )
+        if command[:2] == ("docker", "inspect"):
+            selected = (
+                command[-1].split("|", 1)[1]
+                if command[-1].startswith("worker-container|")
+                else self.expected_worker_image_id
+            )
+            return deploy.CommandResult(
+                0,
+                (self.worker_container_image_override or selected) + "\n",
             )
         if (
             command[0] == "docker"
@@ -294,9 +386,22 @@ class FakeDistributedRuntimeAuthority:
 
 
 class DistributedRuntimeReceiptRunner:
-    def __init__(self, root: Path) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        worker_image_ids: Mapping[str, str] | None = None,
+    ) -> None:
         self.root = root
         self.calls: list[tuple[str, ...]] = []
+        self.worker_image_ids = (
+            dict(worker_image_ids)
+            if worker_image_ids is not None
+            else {
+                "oldlab": "sha256:" + "a" * 64,
+                "gb10": "sha256:" + "b" * 64,
+            }
+        )
 
     def run(
         self,
@@ -357,6 +462,7 @@ class DistributedRuntimeReceiptRunner:
             "registry_snapshot_sha256": request["registry_snapshot_sha256"],
             "request_sha256": request["payload_sha256"],
             "domains": ["oldlab", "gb10"],
+            "worker_image_ids": ({} if action == "rollback" else self.worker_image_ids),
             "nodes": [
                 node
                 for domain in ("oldlab", "gb10")
@@ -579,6 +685,40 @@ def _candidate(
     suffix: str,
 ) -> registry.CandidateRecord:
     bundle, sha, tree, raw = _source_candidate(tmp_path, suffix)
+    image_digests: dict[str, str] = {}
+    image_archive_sources: dict[str, Path] = {}
+    image_archives: dict[str, dict[str, Any]] = {}
+    for architecture in ("amd64", "arm64"):
+        archive = tmp_path / f"worker-{suffix}-{architecture}.tar"
+        image_id = _worker_image_archive(
+            archive,
+            architecture=architecture,
+            candidate_sha=sha,
+        )
+        archive_raw = archive.read_bytes()
+        image_digests[architecture] = image_id
+        image_archive_sources[architecture] = archive
+        verified = registry.verify_worker_image_archive(
+            archive,
+            architecture=architecture,
+            candidate_sha=sha,
+            image_id=image_id,
+        )
+        image_archives[architecture] = {
+            "sha256": hashlib.sha256(archive_raw).hexdigest(),
+            "size": len(archive_raw),
+            **{
+                field: verified[field]
+                for field in (
+                    "config_digest",
+                    "index_digest",
+                    "manifest_digest",
+                    "manifest_media_type",
+                    "load_descriptor_digest",
+                    "load_descriptor_media_type",
+                )
+            },
+        }
     record = authority.import_candidate(
         {
             "schema_version": 1,
@@ -590,17 +730,133 @@ def _candidate(
             "candidate_tree": tree,
             "bundle_sha256": hashlib.sha256(raw).hexdigest(),
             "bundle_size": len(raw),
-            "image_digests": {
-                "amd64": "sha256:" + "a" * 64,
-                "arm64": "sha256:" + "b" * 64,
-            },
+            "image_digests": image_digests,
+            "image_archives": image_archives,
         }
     )
     persisted = Path(record.bundle_path)
     persisted.parent.mkdir(mode=0o700, parents=True)
     persisted.write_bytes(bundle.read_bytes())
     persisted.chmod(0o600)
+    for architecture, source in image_archive_sources.items():
+        archive = Path(record.image_archives[architecture]["path"])
+        archive.write_bytes(source.read_bytes())
+        archive.chmod(0o600)
     return record
+
+
+def _record_worker_runtime_bindings(
+    authority: registry.DeveloperEnvironmentRegistry,
+    deployment: registry.DeploymentRecord,
+    candidate: registry.CandidateRecord,
+) -> registry.DeploymentRecord:
+    domains: dict[str, dict[str, Any]] = {}
+    nodes: dict[str, dict[str, Any]] = {}
+    for domain, architecture in (("oldlab", "amd64"), ("gb10", "arm64")):
+        archive = candidate.image_archives[architecture]
+        domain_binding = {
+            "architecture": architecture,
+            "docker_driver": "overlay2",
+            "docker_backend": "classic-overlay2",
+            "config_digest": archive["config_digest"],
+            "load_descriptor_digest": archive["load_descriptor_digest"],
+            "load_descriptor_media_type": archive["load_descriptor_media_type"],
+            "runtime_image_id": archive["config_digest"],
+        }
+        domains[domain] = domain_binding
+        for node in deploy.DOMAIN_RUNTIME_NODES[domain]:
+            nodes[node] = {
+                "domain": domain,
+                **domain_binding,
+                "docker_descriptor_digest": None,
+                "docker_descriptor_media_type": None,
+                "receipt_sha256": hashlib.sha256(node.encode("ascii")).hexdigest(),
+            }
+    return authority.record_worker_runtime_bindings(
+        deployment.deployment_id,
+        principal_id=deployment.principal_id,
+        expected_resource_generation=deployment.expected_resource_generation,
+        bindings={"nodes": nodes, "domains": domains},
+    )
+
+
+def _worker_image_archive(
+    path: Path,
+    *,
+    architecture: str,
+    candidate_sha: str,
+) -> str:
+    layer_raw = f"{architecture} deploy layer\n".encode()
+    layer_blob = gzip.compress(layer_raw, mtime=0)
+    layer_digest = hashlib.sha256(layer_blob).hexdigest()
+    config = {
+        "architecture": architecture,
+        "os": "linux",
+        "config": {
+            "Labels": {"org.opencontainers.image.revision": candidate_sha},
+            "Cmd": ["python", "-m", "loom_worker"],
+            "Entrypoint": None,
+        },
+        "rootfs": {
+            "type": "layers",
+            "diff_ids": [f"sha256:{hashlib.sha256(layer_raw).hexdigest()}"],
+        },
+    }
+    config_raw = json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
+    config_digest = hashlib.sha256(config_raw).hexdigest()
+    manifest = {
+        "schemaVersion": 2,
+        "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "digest": f"sha256:{config_digest}",
+            "size": len(config_raw),
+        },
+        "layers": [
+            {
+                "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                "digest": f"sha256:{layer_digest}",
+                "size": len(layer_blob),
+            }
+        ],
+    }
+    manifest_raw = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    manifest_digest = hashlib.sha256(manifest_raw).hexdigest()
+    files = {
+        "manifest.json": json.dumps(
+            [
+                {
+                    "Config": f"blobs/sha256/{config_digest}",
+                    "RepoTags": [f"loom-worker:{candidate_sha[:12]}-{architecture}"],
+                    "Layers": [f"blobs/sha256/{layer_digest}"],
+                }
+            ],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode(),
+        "index.json": json.dumps(
+            {
+                "schemaVersion": 2,
+                "manifests": [
+                    {
+                        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                        "digest": f"sha256:{manifest_digest}",
+                        "size": len(manifest_raw),
+                    }
+                ],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode(),
+        f"blobs/sha256/{manifest_digest}": manifest_raw,
+        f"blobs/sha256/{config_digest}": config_raw,
+        f"blobs/sha256/{layer_digest}": layer_blob,
+    }
+    with tarfile.open(path, "w:") as archive:
+        for name, content in files.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(content)
+            archive.addfile(info, io.BytesIO(content))
+    return f"sha256:{config_digest}"
 
 
 def _deployer(
@@ -670,6 +926,17 @@ def _deployer(
             }
         ),
     )
+    verify_worker_image = instance._verify_worker_image
+
+    def bind_worker_image(context: deploy.DeploymentContext) -> None:
+        runner.expected_worker_image_id = context.worker_image_id
+        runner.expected_worker_architecture = context.architecture
+        runner.expected_worker_revision = context.candidate_sha
+        runner.worker_architectures[context.worker_image_id] = context.architecture
+        runner.worker_revisions[context.worker_image_id] = context.candidate_sha
+        verify_worker_image(context)
+
+    monkeypatch.setattr(instance, "_verify_worker_image", bind_worker_image)
     monkeypatch.setattr(instance, "_ensure_identity", lambda _context: None)
     monkeypatch.setattr(deploy.urllib.request, "urlopen", lambda *_args, **_kwargs: _Response())
     return instance
@@ -1038,6 +1305,7 @@ def test_fourth_developer_deploys_without_fixed_profile_or_resource_choice(
     assert f"SLURM_ACCOUNT={fourth.slurm_account}" in compose_env
     assert f"SLURM_QOS={fourth.slurm_qos}" in compose_env
     assert f"SLURM_USER={fourth.slurm_user}" in compose_env
+    assert f"LOOM_WORKER_IMAGE_ID={result['image_digest']}" in compose_env
     assert (lifecycle_root / "host-manifest.json").read_bytes() == committed_manifest
     assert (lifecycle_root / "compose.override.json").read_bytes() == committed_override
     manifest = json.loads((lifecycle_root / "host-manifest.json").read_text(encoding="ascii"))
@@ -1071,12 +1339,85 @@ def test_fourth_developer_deploys_without_fixed_profile_or_resource_choice(
             "applied_registry_payload_sha256"
         ],
     }
+    assert override["services"]["worker"]["image"] == result["image_digest"]
+    assert all(
+        "loom.developer-environment.image-digest" not in override["services"][service]["labels"]
+        for service in deploy.ALL_SERVICES
+        if service != "worker"
+    )
+    build_calls = [
+        call for call in runner.calls if call[:2] == ("docker", "compose") and "build" in call
+    ]
+    assert any(
+        call[-len(deploy.LOCAL_BUILD_SERVICES) :] == deploy.LOCAL_BUILD_SERVICES
+        for call in build_calls
+    )
+    assert all(call[-1] != "worker" for call in build_calls)
+    assert all(
+        "--build" not in call
+        for call in runner.calls
+        if call[:2] == ("docker", "compose") and "up" in call
+    )
     assert (
         "systemctl",
         "enable",
         f"loom-developer-environment@{fourth.systemd_instance}.service",
     ) in runner.calls
     assert len(snapshot["deployments"]) == 1
+
+
+@pytest.mark.parametrize(
+    ("override", "value"),
+    (
+        ("worker_image_id_override", "sha256:" + "f" * 64),
+        ("worker_os_override", "windows"),
+        ("worker_architecture_override", "unsupported"),
+        ("worker_revision_override", "f" * 40),
+        ("worker_command_override", ["/usr/local/bin/node-bootstrap"]),
+        ("worker_entrypoint_override", ["/usr/local/bin/foreign-entrypoint"]),
+    ),
+)
+def test_worker_image_preflight_rejects_wrong_artifact_architecture_or_revision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    override: str,
+    value: str | list[str],
+) -> None:
+    authority = registry.DeveloperEnvironmentRegistry(tmp_path / "registry.sqlite3")
+    environment = _register(authority, "oidc:example:worker-preflight", 1)
+    candidate = _candidate(authority, environment, tmp_path, "worker-preflight")
+    runner = FakeRunner()
+    setattr(runner, override, value)
+    instance = _deployer(authority, tmp_path, runner, monkeypatch)
+
+    with pytest.raises(deploy.DeploymentError, match="loom-worker image binding is invalid"):
+        _converge(instance, environment, candidate, suffix="worker-preflight")
+
+    assert not any(call[:2] == ("docker", "compose") for call in runner.calls)
+
+
+def test_worker_post_start_readback_rejects_different_container_image(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = registry.DeveloperEnvironmentRegistry(tmp_path / "registry.sqlite3")
+    environment = _register(authority, "oidc:example:worker-post-start", 1)
+    candidate = _candidate(authority, environment, tmp_path, "worker-post-start")
+    runner = FakeRunner()
+    runner.worker_container_image_override = "sha256:" + "f" * 64
+    instance = _deployer(authority, tmp_path, runner, monkeypatch)
+
+    with pytest.raises(
+        deploy.DeploymentError,
+        match="loom-worker container image binding is invalid",
+    ):
+        _converge(instance, environment, candidate, suffix="worker-post-start")
+
+    assert any(
+        call[:3] == ("docker", "inspect", "--format={{.Image}}")
+        and call[-1].startswith("worker-container|sha256:")
+        for call in runner.calls
+    )
 
 
 def test_root_lifecycle_tree_owns_lock_journal_manifest_and_compose_inputs(
@@ -1416,6 +1757,7 @@ def test_recorded_finalization_resume_performs_zero_mutations_or_new_probe(
             "expected_resource_generation": environment.resource_generation,
         }
     )
+    deployment = _record_worker_runtime_bindings(authority, deployment, candidate)
     for expected, following in zip(
         registry.DEPLOY_PHASES[:-2],
         registry.DEPLOY_PHASES[1:-1],
@@ -1574,6 +1916,7 @@ def test_interrupted_update_rollback_replays_same_failed_deployment(
             "expected_resource_generation": active.resource_generation,
         }
     )
+    deployment = _record_worker_runtime_bindings(authority, deployment, second)
 
     class FailOnce(FakeDistributedRuntimeAuthority):
         def __init__(self) -> None:
@@ -1638,6 +1981,7 @@ def test_first_create_rollback_retires_capacity_before_releasing_registry(
             "expected_resource_generation": environment.resource_generation,
         }
     )
+    deployment = _record_worker_runtime_bindings(authority, deployment, candidate)
     for expected, following in zip(
         registry.DEPLOY_PHASES[:3],
         registry.DEPLOY_PHASES[1:4],
@@ -1703,6 +2047,7 @@ def test_first_create_abort_failure_keeps_registry_deployment_in_flight(
             "expected_resource_generation": environment.resource_generation,
         }
     )
+    deployment = _record_worker_runtime_bindings(authority, deployment, candidate)
     for expected, following in zip(
         registry.DEPLOY_PHASES[:3],
         registry.DEPLOY_PHASES[1:4],
@@ -1793,6 +2138,7 @@ def test_fixed_capacity_authority_requires_both_digest_bound_domains(
             "expected_resource_generation": environment.resource_generation,
         }
     )
+    deployment = _record_worker_runtime_bindings(authority, deployment, candidate)
     snapshot = authority.snapshot()
     environment_row = next(
         row for row in snapshot["environments"] if row["env_id"] == environment.env_id
@@ -1939,6 +2285,7 @@ def test_fixed_distributed_runtime_uses_only_registry_deployment_identity(
             "expected_resource_generation": environment.resource_generation,
         }
     )
+    deployment = _record_worker_runtime_bindings(authority, deployment, candidate)
     snapshot = authority.snapshot()
     context = deploy._context(
         snapshot,
@@ -1947,7 +2294,13 @@ def test_fixed_distributed_runtime_uses_only_registry_deployment_identity(
         host_root=tmp_path / "host",
     )
     runtime_root = tmp_path / "runtime-authority"
-    runner = DistributedRuntimeReceiptRunner(runtime_root)
+    runner = DistributedRuntimeReceiptRunner(
+        runtime_root,
+        worker_image_ids={
+            "oldlab": candidate.image_digests["amd64"],
+            "gb10": candidate.image_digests["arm64"],
+        },
+    )
     runtime_authority = deploy.FixedDistributedRuntimeAuthority(
         runner,
         root=runtime_root,
@@ -1960,6 +2313,14 @@ def test_fixed_distributed_runtime_uses_only_registry_deployment_identity(
         if action in {"reconcile", "check"}:
             assert receipt["status"] == "prepared"
             assert receipt["shared_capacity"]["activation_status"] == "installed"
+        assert receipt["worker_image_ids"] == (
+            {}
+            if action == "rollback"
+            else {
+                "oldlab": candidate.image_digests["amd64"],
+                "gb10": candidate.image_digests["arm64"],
+            }
+        )
         assert receipt["nodes"] == [
             node for domain in ("oldlab", "gb10") for node in deploy.DOMAIN_RUNTIME_NODES[domain]
         ]
@@ -1997,6 +2358,70 @@ def test_fixed_distributed_runtime_uses_only_registry_deployment_identity(
     ]
 
 
+@pytest.mark.parametrize(
+    "worker_image_ids",
+    (
+        {
+            "oldlab": "sha256:" + "b" * 64,
+            "gb10": "sha256:" + "a" * 64,
+        },
+        {"oldlab": "sha256:" + "a" * 64},
+        {
+            "oldlab": "sha256:" + "a" * 64,
+            "gb10": "sha256:" + "b" * 64,
+            "other": "sha256:" + "c" * 64,
+        },
+        {
+            "oldlab": "sha256:" + "c" * 64,
+            "gb10": "sha256:" + "b" * 64,
+        },
+    ),
+    ids=("swapped", "missing-domain", "extra-domain", "digest-drift"),
+)
+def test_fixed_distributed_runtime_rejects_unbound_worker_image_ids(
+    tmp_path: Path,
+    worker_image_ids: Mapping[str, str],
+) -> None:
+    authority = registry.DeveloperEnvironmentRegistry(tmp_path / "registry" / "registry.sqlite3")
+    environment = _register(authority, "oidc:example:distributed-image-binding", 1)
+    candidate = _candidate(authority, environment, tmp_path, "distributed-image-binding")
+    deployment = authority.begin_deployment(
+        {
+            "schema_version": 1,
+            "kind": registry.DEPLOY_KIND,
+            "principal_id": environment.principal_id,
+            "idempotency_key": "distributed-image-binding-deployment",
+            "env_id": environment.env_id,
+            "candidate_id": candidate.candidate_id,
+            "expected_resource_generation": environment.resource_generation,
+        }
+    )
+    deployment = _record_worker_runtime_bindings(authority, deployment, candidate)
+    snapshot = authority.snapshot()
+    context = deploy._context(
+        snapshot,
+        next(row for row in snapshot["environments"] if row["env_id"] == environment.env_id),
+        deployment_id=deployment.deployment_id,
+        host_root=tmp_path / "host",
+    )
+    runtime_root = tmp_path / "runtime-authority"
+    runtime_authority = deploy.FixedDistributedRuntimeAuthority(
+        DistributedRuntimeReceiptRunner(
+            runtime_root,
+            worker_image_ids=worker_image_ids,
+        ),
+        root=runtime_root,
+        program=tmp_path / "fixed-runtime-authority",
+        require_root_metadata=False,
+    )
+
+    with pytest.raises(
+        deploy.DeploymentError,
+        match="distributed runtime receipt binding is invalid",
+    ):
+        runtime_authority.reconcile(context)
+
+
 def test_fixed_runtime_rejects_generic_receipt_as_acceptance_probe(
     tmp_path: Path,
 ) -> None:
@@ -2031,6 +2456,192 @@ def test_fixed_runtime_rejects_generic_receipt_as_acceptance_probe(
 
     with pytest.raises(deploy.DeploymentError, match="input is unavailable"):
         runtime_authority.acceptance_probe(context)
+
+
+def test_fixed_runtime_acceptance_validator_receives_exact_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = registry.DeveloperEnvironmentRegistry(tmp_path / "registry" / "registry.sqlite3")
+    environment = _register(authority, "oidc:example:acceptance-candidate", 1)
+    candidate = _candidate(authority, environment, tmp_path, "acceptance-candidate")
+    deployment = authority.begin_deployment(
+        {
+            "schema_version": 1,
+            "kind": registry.DEPLOY_KIND,
+            "principal_id": environment.principal_id,
+            "idempotency_key": "acceptance-candidate-deployment",
+            "env_id": environment.env_id,
+            "candidate_id": candidate.candidate_id,
+            "expected_resource_generation": environment.resource_generation,
+        }
+    )
+    snapshot = authority.snapshot()
+    context = deploy._context(
+        snapshot,
+        next(row for row in snapshot["environments"] if row["env_id"] == environment.env_id),
+        deployment_id=deployment.deployment_id,
+        host_root=tmp_path / "host",
+    )
+    runtime_root = tmp_path / "runtime-authority"
+
+    class CombinedReceiptRunner:
+        def run(
+            self,
+            argv: Sequence[str],
+            *,
+            cwd: Path | None = None,
+            env: Mapping[str, str] | None = None,
+            expected: frozenset[int] = frozenset({0}),
+        ) -> deploy.CommandResult:
+            del argv, cwd, env, expected
+            path = runtime_root / "acceptance-probes" / deployment.deployment_id / "combined.json"
+            path.parent.mkdir(parents=True)
+            path.write_bytes(deploy._canonical({"candidate-bound": True}))
+            path.chmod(0o600)
+            return deploy.CommandResult(0, "")
+
+    seen: list[Mapping[str, Any]] = []
+
+    def validate(
+        receipt: Mapping[str, Any],
+        *,
+        request: Mapping[str, Any],
+        environment: Mapping[str, Any],
+        candidate: Mapping[str, Any],
+        deployment: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        del request, environment, deployment
+        seen.append(candidate)
+        return dict(receipt)
+
+    monkeypatch.setattr(deploy.acceptance_probe, "_validate_combined_receipt", validate)
+    runtime_authority = deploy.FixedDistributedRuntimeAuthority(
+        CombinedReceiptRunner(),
+        root=runtime_root,
+        program=tmp_path / "fixed-runtime-authority",
+        require_root_metadata=False,
+    )
+
+    assert runtime_authority.acceptance_probe(context) == {"candidate-bound": True}
+    assert seen == [context.candidate]
+
+
+def test_fixed_runtime_rollback_receipt_binds_restored_worker_images(
+    tmp_path: Path,
+) -> None:
+    authority = registry.DeveloperEnvironmentRegistry(tmp_path / "registry" / "registry.sqlite3")
+    environment = _register(authority, "oidc:example:runtime-rollback-images", 1)
+    failed = _candidate(authority, environment, tmp_path, "runtime-rollback-failed")
+    deployment = authority.begin_deployment(
+        {
+            "schema_version": 1,
+            "kind": registry.DEPLOY_KIND,
+            "principal_id": environment.principal_id,
+            "idempotency_key": "runtime-rollback-images-deployment",
+            "env_id": environment.env_id,
+            "candidate_id": failed.candidate_id,
+            "expected_resource_generation": environment.resource_generation,
+        }
+    )
+    snapshot = authority.snapshot()
+    context = deploy._context(
+        snapshot,
+        next(row for row in snapshot["environments"] if row["env_id"] == environment.env_id),
+        deployment_id=deployment.deployment_id,
+        host_root=tmp_path / "host",
+    )
+    restored = {
+        **context.candidate,
+        "candidate_id": "cand-" + "9" * 40,
+        "candidate_sha": "8" * 40,
+        "candidate_tree": "7" * 40,
+        "image_digests": {
+            "amd64": "sha256:" + "1" * 64,
+            "arm64": "sha256:" + "2" * 64,
+        },
+    }
+    context = deploy.DeploymentContext(
+        snapshot_generation=context.snapshot_generation,
+        snapshot_digest=context.snapshot_digest,
+        environment=context.environment,
+        candidate=context.candidate,
+        deployment=context.deployment,
+        host_root=context.host_root,
+        effective_candidate=restored,
+        effective_deployment={
+            "worker_runtime_bindings": {
+                "domains": {
+                    "oldlab": {"runtime_image_id": restored["image_digests"]["amd64"]},
+                    "gb10": {"runtime_image_id": restored["image_digests"]["arm64"]},
+                }
+            }
+        },
+    )
+    runtime_root = tmp_path / "runtime-authority"
+
+    class RestoredReceiptRunner(DistributedRuntimeReceiptRunner):
+        def run(
+            self,
+            argv: Sequence[str],
+            *,
+            cwd: Path | None = None,
+            env: Mapping[str, str] | None = None,
+            expected: frozenset[int] = frozenset({0}),
+        ) -> deploy.CommandResult:
+            result = super().run(argv, cwd=cwd, env=env, expected=expected)
+            action = tuple(argv)[1]
+            if action != "rollback":
+                return result
+            path = runtime_root / "receipts" / f"{deployment.deployment_id}-rollback.json"
+            receipt = json.loads(path.read_text(encoding="ascii"))
+            receipt.update(
+                {
+                    "status": "prepared",
+                    "effective_candidate_id": restored["candidate_id"],
+                    "effective_candidate_sha": restored["candidate_sha"],
+                    "effective_candidate_tree": restored["candidate_tree"],
+                    "worker_image_ids": {
+                        "oldlab": restored["image_digests"]["amd64"],
+                        "gb10": restored["image_digests"]["arm64"],
+                    },
+                    "shared_capacity": {
+                        "schema_version": 1,
+                        "status": "prepared",
+                        "runtime_id": context.environment["runtime_id"],
+                        "candidate_id": restored["candidate_id"],
+                        "candidate_sha": restored["candidate_sha"],
+                        "candidate_tree": restored["candidate_tree"],
+                        "resource_generation": context.runtime_resource_generation,
+                        "registry_generation": context.snapshot_generation,
+                        "registry_payload_sha256": context.snapshot_digest,
+                        "instances": [
+                            f"{context.environment['runtime_id']}-{domain}"
+                            for domain in ("oldlab", "gb10")
+                        ],
+                        "activation_status": "installed",
+                    },
+                }
+            )
+            unsigned = {key: value for key, value in receipt.items() if key != "payload_sha256"}
+            path.write_bytes(
+                deploy._canonical({**unsigned, "payload_sha256": deploy._digest(unsigned)})
+            )
+            return result
+
+    runtime_authority = deploy.FixedDistributedRuntimeAuthority(
+        RestoredReceiptRunner(runtime_root),
+        root=runtime_root,
+        program=tmp_path / "fixed-runtime-authority",
+        require_root_metadata=False,
+    )
+
+    receipt = runtime_authority.rollback(context)
+
+    assert receipt["worker_image_ids"] == {
+        "oldlab": restored["image_digests"]["amd64"],
+        "gb10": restored["image_digests"]["arm64"],
+    }
 
 
 def test_retire_rejects_foreign_or_nonterminal_job_without_cancelling(

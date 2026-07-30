@@ -26,6 +26,13 @@ def test_service_image_exposes_immutable_build_revision_to_runtime() -> None:
     assert text.index("pip install --no-cache-dir -e .") < text.index("ARG LOOM_BUILD_SHA=unknown")
 
 
+def test_worker_image_exposes_immutable_build_revision_for_runtime_binding() -> None:
+    text = (ROOT / "deploy" / "Dockerfile.worker").read_text()
+
+    assert "ARG LOOM_BUILD_SHA=unknown" in text
+    assert 'LABEL org.opencontainers.image.revision="${LOOM_BUILD_SHA}"' in text
+
+
 def test_control_plane_source_is_readable_by_declared_nonroot_workloads() -> None:
     text = (ROOT / "deploy" / "Dockerfile.control-plane").read_text()
 

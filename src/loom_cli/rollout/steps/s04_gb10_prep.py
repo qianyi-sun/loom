@@ -23,8 +23,10 @@ import hashlib
 import json
 import os
 import re
+import selectors
 import shlex
 import stat
+import subprocess
 import time
 import tomllib
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -64,9 +66,9 @@ _SIMPLE_SYSTEMD_SERVICE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@-]*\.service\Z
 _GB10_NODE_AGENT_UNIT_DIR = PurePosixPath("deploy/worker-pools/gb10")
 _NODE_AGENT_TIMER_SETTLE_ATTEMPTS = 16
 _NODE_AGENT_TIMER_SETTLE_INTERVAL_SECONDS = 2.0
-_EXTERNAL_GB10_HOSTS = tuple(
-    f"trt-gb10-{number}" for number in range(1, 16)
-)
+_EXTERNAL_GB10_HOSTS = tuple(f"trt-gb10-{number}" for number in range(1, 16))
+_GB10_ARM64_WORKER_ARCHIVE = "staging-gb10-worker-arm64.tar"
+_GB10_ARM64_WORKER_MANIFEST = "staging-gb10-worker-arm64.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -404,9 +406,7 @@ def _external_authority_retirement_mode(
         raise invalid()
     state = desired[0]
     intents = state.get("host_intents") if isinstance(state, dict) else None
-    expected_legacy_hosts = {
-        f"trt-gb10-{number}": "stopped" for number in range(1, 16)
-    }
+    expected_legacy_hosts = {f"trt-gb10-{number}": "stopped" for number in range(1, 16)}
     gb10_policies = [
         item for item in policies if isinstance(item, dict) and item.get("pool_name") == "gb10"
     ]
@@ -437,8 +437,7 @@ def _external_authority_retirement_mode(
         or actuator.get("exclusive") is not False
         or actuator.get("slurm_account") != "loom-staging"
         or actuator.get("qos_normal") != "loom-staging"
-        or gb10_supervisors[0].get("service_name")
-        != "loom-autoscaler-gb10-staging.service"
+        or gb10_supervisors[0].get("service_name") != "loom-autoscaler-gb10-staging.service"
         or gb10_supervisors[0].get("timer_name") != "loom-autoscaler-gb10-staging.timer"
         or gb10_supervisors[0].get("enabled") is not True
         or gb10_supervisors[0].get("active") is not True
@@ -468,17 +467,7 @@ _GB10_KNOWN_HOSTS = "/etc/loom/staging-rollout-gb10-known-hosts"
 _SHARED_WORKER_REPO_ROOT = Path("/srv/loom/staging-shared/candidates")
 
 
-def _ssh(
-    host: GB10Host,
-    remote_cmd: str,
-    *,
-    stdin_text: str | None = None,
-) -> SubprocessResult:
-    """Run a remote command over SSH with reasonable options.
-
-    ``BatchMode=yes`` disables password prompts (fails fast if key
-    auth isn't set up). ``ConnectTimeout=10`` bounds hang-on-connect.
-    """
+def _ssh_argv(host: GB10Host, remote_cmd: str) -> list[str]:
     argv = ["/usr/bin/ssh"]
     if host.ssh_config_path:
         argv.extend(["-F", host.ssh_config_path])
@@ -504,6 +493,18 @@ def _ssh(
             remote_cmd,
         ]
     )
+    return argv
+
+
+def _ssh(
+    host: GB10Host,
+    remote_cmd: str,
+    *,
+    stdin_text: str | None = None,
+) -> SubprocessResult:
+    """Run a remote command over SSH with reasonable options."""
+
+    argv = _ssh_argv(host, remote_cmd)
     return run_captured(argv, stdin_text=stdin_text)
 
 
@@ -783,6 +784,13 @@ def _retire_external_user_authority(
 
     if host.node_agent_service is None:
         return False, f"node-agent authority is undeclared on {host.ssh_target}"
+    try:
+        archive, image_artifact = _external_worker_image_artifact(
+            ctx,
+            host_dir=host_dir,
+        )
+    except CandidateToolingError as exc:
+        return False, str(exc)
     boot = _ssh(host, "cat /proc/sys/kernel/random/boot_id")
     boot_id = boot.stdout.strip()
     if boot.returncode != 0 or not boot_id or any(character.isspace() for character in boot_id):
@@ -809,6 +817,21 @@ def _retire_external_user_authority(
         plan,
         (GB10MutationKind.LEGACY_RETIRE, GB10MutationKind.SERVICE_TIMER),
     )
+    if not _external_worker_image_exact(
+        host,
+        plan,
+        expected_image_id=str(image_artifact["image_id"]),
+    ):
+        loaded = _load_external_worker_image(
+            host,
+            archive=archive,
+        )
+        if not loaded or not _external_worker_image_exact(
+            host,
+            plan,
+            expected_image_id=str(image_artifact["image_id"]),
+        ):
+            return False, f"exact arm64 worker image load failed on {host.ssh_target}"
     result = _ssh(host, "python3 -c " + shlex.quote(source))
     _write_prep_log(
         host_dir,
@@ -825,9 +848,121 @@ def _retire_external_user_authority(
     )
 
 
+def _external_worker_image_artifact(
+    ctx: RolloutContext,
+    *,
+    host_dir: Path,
+) -> tuple[Path, dict[str, object]]:
+    from loom_cli.rollout.steps.s10_env_state import (
+        _inspect_gb10_arm64_worker_archive,
+    )
+
+    env_state_dir = host_dir.parent.parent / "11-env-state"
+    archive = env_state_dir / _GB10_ARM64_WORKER_ARCHIVE
+    manifest_path = env_state_dir / _GB10_ARM64_WORKER_MANIFEST
+    try:
+        inspected = _inspect_gb10_arm64_worker_archive(
+            archive,
+            candidate_sha=ctx.resolved_sha,
+            image_tag=ctx.image_tag,
+        )
+        recorded = json.loads(manifest_path.read_bytes())
+    except Exception as exc:
+        raise CandidateToolingError(
+            "staging GB10 arm64 worker image evidence is unavailable",
+        ) from exc
+    if recorded != inspected:
+        raise CandidateToolingError(
+            "staging GB10 arm64 worker image evidence drifted",
+        )
+    return archive, inspected
+
+
+def _external_worker_image_exact(
+    host: GB10Host,
+    plan: object,
+    *,
+    expected_image_id: str | None = None,
+) -> bool:
+    from loom_cli.rollout.operator.protected_gb10_transport import (
+        retirement_worker_image_observation_source,
+    )
+
+    source = retirement_worker_image_observation_source(plan)  # type: ignore[arg-type]
+    result = _ssh(host, "python3 -c " + shlex.quote(source))
+    if result.returncode != 0 or result.stderr or not 0 < len(result.stdout) <= 1024:
+        return False
+    try:
+        payload = json.loads(result.stdout)
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        isinstance(payload, dict)
+        and set(payload) == {"candidate_sha", "exact", "image_id"}
+        and payload.get("candidate_sha") == getattr(plan, "candidate_sha", None)
+        and payload.get("exact") is True
+        and (expected_image_id is None or payload.get("image_id") == expected_image_id)
+    )
+
+
+def _load_external_worker_image(
+    host: GB10Host,
+    *,
+    archive: Path,
+) -> bool:
+    argv = _ssh_argv(host, "/usr/bin/env docker image load")
+    process: subprocess.Popen[bytes] | None = None
+    stdout_size = 0
+    stderr_size = 0
+    try:
+        with archive.open("rb") as stream:
+            process = subprocess.Popen(
+                argv,
+                stdin=stream,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            if process.stdout is None or process.stderr is None:
+                return False
+            deadline = time.monotonic() + 3600
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+                selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+                while selector.get_map():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(argv, 3600)
+                    events = selector.select(timeout=min(1.0, remaining))
+                    if not events and process.poll() is None:
+                        continue
+                    for key, _mask in events:
+                        chunk = os.read(key.fd, 64 * 1024)
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            continue
+                        if key.data == "stdout":
+                            stdout_size += len(chunk)
+                            if stdout_size > 64 * 1024:
+                                return False
+                        else:
+                            stderr_size += len(chunk)
+                            if stderr_size > 64 * 1024:
+                                return False
+            process.wait(timeout=max(0.1, deadline - time.monotonic()))
+    except (OSError, subprocess.SubprocessError):
+        return False
+    finally:
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait()
+    return bool(process is not None and process.returncode == 0 and stderr_size == 0)
+
+
 def _verify_external_user_authority(
     ctx: RolloutContext,
     host: GB10Host,
+    *,
+    host_dir: Path,
 ) -> VerifyOutcome:
     from loom_cli.rollout.operator.protected_gb10_transport import (
         GB10TransportTarget,
@@ -836,6 +971,13 @@ def _verify_external_user_authority(
 
     if host.node_agent_service is None:
         return VerifyOutcome.MISMATCH
+    try:
+        _, image_artifact = _external_worker_image_artifact(
+            ctx,
+            host_dir=host_dir,
+        )
+    except CandidateToolingError:
+        return VerifyOutcome.UNKNOWN
     target = GB10TransportTarget(
         ssh_target=host.ssh_target,
         repo_path=PurePosixPath(host.repo_path),
@@ -869,11 +1011,22 @@ def _verify_external_user_authority(
         payload = json.loads(result.stdout)
     except (TypeError, ValueError):
         return VerifyOutcome.MISMATCH
-    return (
+    retirement_exact = (
         VerifyOutcome.MATCH
         if payload.get("baseline_ready") is True
         and payload.get("legacy_absent") is True
         and payload.get("service_timer_exact") is True
+        else VerifyOutcome.MISMATCH
+    )
+    if retirement_exact is not VerifyOutcome.MATCH:
+        return retirement_exact
+    return (
+        VerifyOutcome.MATCH
+        if _external_worker_image_exact(
+            host,
+            plan,
+            expected_image_id=str(image_artifact["image_id"]),
+        )
         else VerifyOutcome.MISMATCH
     )
 
@@ -1135,7 +1288,11 @@ class GB10PrepStep(BaseStep):
             if tuple(host.ssh_target for host in hosts) != _EXTERNAL_GB10_HOSTS:
                 return VerifyOutcome.MISMATCH
             for host in hosts:
-                outcome = _verify_external_user_authority(ctx, host)
+                outcome = _verify_external_user_authority(
+                    ctx,
+                    host,
+                    host_dir=_host_evidence_dir(step_dir, host),
+                )
                 if outcome is not VerifyOutcome.MATCH:
                     return outcome
             return VerifyOutcome.MATCH
@@ -1360,10 +1517,7 @@ class GB10PrepStep(BaseStep):
             message = redact_rollout_text(str(exc))
             step_dir.stderr_path().write_text(message + "\n", encoding="utf-8")
             return RunResult(exit_code=2, error=message)
-        if (
-            external_retirement
-            and tuple(host.ssh_target for host in hosts) != _EXTERNAL_GB10_HOSTS
-        ):
+        if external_retirement and tuple(host.ssh_target for host in hosts) != _EXTERNAL_GB10_HOSTS:
             error = "external GB10 retirement inventory is not the exact 15-node fleet"
             step_dir.stderr_path().write_text(error + "\n")
             return RunResult(exit_code=1, error=error)

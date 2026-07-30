@@ -573,6 +573,7 @@ def _validate_registry_candidate_row(row: object) -> dict[str, Any]:
         )
         or not isinstance(image_digests, dict)
         or set(image_digests) != {"amd64", "arm64"}
+        or image_digests["amd64"] == image_digests["arm64"]
         or any(
             registry_contract.IMAGE_DIGEST_RE.fullmatch(str(digest)) is None
             for digest in image_digests.values()
@@ -1580,7 +1581,10 @@ def _render_supervisor_config(candidate: Candidate) -> bytes:
         payload = tomllib.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         raise RuntimeHostError("candidate supervisor config is invalid") from exc
-    instances = "\n".join(f'  "{instance}",' for instance in _instances())
+    cohort = _instances()
+    if not cohort:
+        raise RuntimeHostError("candidate supervisor instance cohort is invalid")
+    instances = "\n".join(f'  "{instance}",' for instance in cohort)
     return (
         "\n".join(
             (

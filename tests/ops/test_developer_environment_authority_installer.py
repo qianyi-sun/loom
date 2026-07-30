@@ -227,7 +227,7 @@ def _authority_installer(
         ),
         account_resolver=lambda name: types.SimpleNamespace(
             pw_name=name,
-            pw_uid=uid,
+            pw_uid={"qianyi": 2005, "hongjian": 2006, "devansh": 2012}[name],
         ),
     )
     value._verify_candidate = lambda _sha, _tree: None  # type: ignore[method-assign]
@@ -864,6 +864,53 @@ def test_upgrade_replaces_assets_and_preserves_previous_generation_backups(
     assert installed_cli.read_bytes() == changed.read_bytes()
     transactions = filesystem_root / installer.TRANSACTION_ROOT.relative_to("/")
     assert any(path.is_dir() for path in transactions.iterdir())
+
+
+def test_upgrade_does_not_depend_on_removed_legacy_owner(
+    tmp_path: Path,
+    filesystem_root: Path,
+) -> None:
+    first_source = _candidate_source(tmp_path, "candidate-one")
+    commands = FakeHostCommands(filesystem_root, os.getgid())
+    first = _authority_installer(
+        filesystem_root=filesystem_root,
+        source_root=first_source,
+        runner=commands,
+    )
+    first.install(
+        action="environment-authority-bootstrap",
+        candidate_sha=SHA_ONE,
+        candidate_tree=TREE_ONE,
+    )
+
+    second_source = _candidate_source(tmp_path, "candidate-two")
+    changed = second_source / "scripts/ops/developer_environment_cli.py"
+    changed.write_bytes(changed.read_bytes() + b"\n# upgraded candidate\n")
+    upgraded = _authority_installer(
+        filesystem_root=filesystem_root,
+        source_root=second_source,
+        runner=commands,
+    )
+
+    def removed_legacy_owner(name: str) -> object:
+        if name == "devansh":
+            raise KeyError(name)
+        return types.SimpleNamespace(
+            pw_name=name,
+            pw_uid={"qianyi": 2005, "hongjian": 2006}[name],
+        )
+
+    upgraded.account_resolver = removed_legacy_owner
+    commands.calls.clear()
+
+    report = upgraded.install(
+        action="environment-authority-upgrade",
+        candidate_sha=SHA_TWO,
+        candidate_tree=TREE_TWO,
+    )
+
+    assert report["status"] == "succeeded"
+    assert not any(command[:1] == ("/usr/sbin/usermod",) for command in commands.calls)
 
 
 def test_mid_asset_crash_is_recovered_to_previous_install(

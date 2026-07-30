@@ -29,6 +29,69 @@ REAL_VALIDATE_RUNTIME_ATTESTATION = adapter._validate_runtime_attestation
 REAL_SHARED_COLLECTOR_LOCK = adapter._shared_collector_lock
 
 
+def _archive_binding(
+    *,
+    config_digest: str,
+    archive_digest: str,
+    index_digest: str,
+    manifest_digest: str,
+    size: int,
+) -> dict[str, Any]:
+    media_type = "application/vnd.oci.image.manifest.v1+json"
+    return {
+        "sha256": archive_digest,
+        "size": size,
+        "config_digest": config_digest,
+        "index_digest": index_digest,
+        "manifest_digest": manifest_digest,
+        "manifest_media_type": media_type,
+        "load_descriptor_digest": manifest_digest,
+        "load_descriptor_media_type": media_type,
+    }
+
+
+def _runtime_bindings(candidate: Any) -> dict[str, Any]:
+    registry = adapter.registry_contract
+    nodes: dict[str, dict[str, Any]] = {}
+    domains: dict[str, dict[str, Any]] = {}
+    for domain, architecture in registry.WORKER_RUNTIME_BINDING_DOMAINS.items():
+        archive = candidate.image_archives[architecture]
+        backend = "containerd-snapshotter-v1" if domain == "oldlab" else "classic-overlay2"
+        binding = {
+            "architecture": architecture,
+            "docker_driver": registry.WORKER_RUNTIME_BACKENDS[backend],
+            "docker_backend": backend,
+            "config_digest": archive["config_digest"],
+            "load_descriptor_digest": archive["load_descriptor_digest"],
+            "load_descriptor_media_type": archive["load_descriptor_media_type"],
+            "runtime_image_id": (
+                archive["load_descriptor_digest"]
+                if backend == "containerd-snapshotter-v1"
+                else archive["config_digest"]
+            ),
+        }
+        domains[domain] = binding
+        for node in registry.FLEET_NODES:
+            node_domain = "oldlab" if node.startswith("oldlab-") else "gb10"
+            if node_domain == domain:
+                nodes[node] = {
+                    "domain": domain,
+                    **binding,
+                    "docker_descriptor_digest": (
+                        archive["load_descriptor_digest"]
+                        if backend == "containerd-snapshotter-v1"
+                        else None
+                    ),
+                    "docker_descriptor_media_type": (
+                        archive["load_descriptor_media_type"]
+                        if backend == "containerd-snapshotter-v1"
+                        else None
+                    ),
+                    "receipt_sha256": hashlib.sha256(node.encode("ascii")).hexdigest(),
+                }
+    return {"nodes": nodes, "domains": domains}
+
+
 def _candidate_binding(candidate_sha: str = SHA) -> adapter.CandidateBinding:
     if candidate_sha == SHA:
         return adapter.CandidateBinding(
@@ -125,6 +188,22 @@ def _active_dynamic_registry(
                 "amd64": "sha256:" + "d" * 64,
                 "arm64": "sha256:" + "e" * 64,
             },
+            "image_archives": {
+                "amd64": _archive_binding(
+                    config_digest="sha256:" + "d" * 64,
+                    archive_digest="f" * 64,
+                    index_digest="sha256:" + "1" * 64,
+                    manifest_digest="sha256:" + "2" * 64,
+                    size=2048,
+                ),
+                "arm64": _archive_binding(
+                    config_digest="sha256:" + "e" * 64,
+                    archive_digest="0" * 64,
+                    index_digest="sha256:" + "3" * 64,
+                    manifest_digest="sha256:" + "4" * 64,
+                    size=4096,
+                ),
+            },
         },
     )
     deployment = authority.begin_deployment(
@@ -137,6 +216,12 @@ def _active_dynamic_registry(
             "candidate_id": candidate.candidate_id,
             "expected_resource_generation": environment.resource_generation,
         },
+    )
+    deployment = authority.record_worker_runtime_bindings(
+        deployment.deployment_id,
+        principal_id=environment.principal_id,
+        expected_resource_generation=environment.resource_generation,
+        bindings=_runtime_bindings(candidate),
     )
     for expected, following in zip(
         registry.DEPLOY_PHASES[:-1],
