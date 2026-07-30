@@ -104,6 +104,34 @@ def test_signed_url_format(app, artifact_seed):  # type: ignore[no-untyped-def]
         assert body["url"].startswith("http")
         assert body["expires_in_sec"] > 0
         assert body["key"] == f"{team_a}/{trial_a}/step/out.json"
+        assert body["bucket"] == "artifacts"
+
+
+def test_signed_url_uses_configured_artifacts_bucket(
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_url: str,
+    artifact_seed: tuple,
+):  # type: ignore[no-untyped-def]
+    team_a, _, trial_a, _, raw_a, _, _ = artifact_seed
+    for k, v in {
+        "LOOM_CP_DB_URL": postgres_url,
+        "LOOM_CP_MINIO_ENDPOINT": "http://minio:9000",
+        "LOOM_CP_MINIO_ACCESS_KEY": "x",
+        "LOOM_CP_MINIO_SECRET_KEY": "y",
+        "LOOM_CP_LLM_GATEWAY_URL": "http://gw:9100/",
+        "LOOM_CP_ARTIFACTS_BUCKET": "loom-staging-artifacts",
+        "LOOM_CP_TRAJECTORIES_BUCKET": "loom-staging-trajectories",
+    }.items():
+        monkeypatch.setenv(k, v)
+    configured = create_app(ControlPlaneSettings(_env_file=None))
+    with TestClient(configured) as client:
+        r = client.post(
+            "/artifacts/upload-url",
+            headers={"Authorization": f"Bearer {raw_a}"},
+            json={"trial_id": str(trial_a), "key": "step/out.json"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["bucket"] == "loom-staging-artifacts"
 
 
 def test_signed_url_rejects_unauth(app, artifact_seed):  # type: ignore[no-untyped-def]

@@ -2,7 +2,7 @@
 # Operator-tunable knobs for `loom cluster render --config <FILE>`.
 # Each value below is the default; uncomment + edit to override.
 
-# Object-store bucket used by loom-service for safe artifacts. Set per environment when deployments share an object-store endpoint.
+# Object-store bucket for trial artifacts. Rendered into control-plane, worker, and loom-service env. Set per environment when deployments share an object-store endpoint.
 artifacts_bucket = "artifacts"
 # Optional container registry prefix applied to every locally-built loom-* image reference in the rendered manifest (no trailing slash). Empty (default) keeps the historical unprefixed shape that kind's in-cluster load-images path depends on. For multi-node k3s / production, set to the registry host+port (e.g. 192.168.50.13:5000) and point each node's /etc/rancher/k3s/registries.yaml at the same endpoint so containerd can pull without side-channel image imports.
 container_registry = ""
@@ -42,7 +42,7 @@ postgres_storage_gi = 50
 provider_egress_allowlist = []
 # Backend runtime identity written to LOOM_ENV for service/control-plane/gateway pods. Staging profiles must set this to staging; production profiles set production.
 runtime_environment = "production"
-# Object-store bucket used by loom-service for trial trajectories. Set per environment when deployments share an object-store endpoint.
+# Object-store bucket for trial trajectories. Rendered into control-plane, worker, and loom-service env. Set per environment when deployments share an object-store endpoint.
 trajectories_bucket = "trajectories"
 # Registry repo path for the shared trial-image cache (#547 item #2). Enables cross-node build sharing so workers on node B can pull layered images built on node A instead of rebuilding. Empty (default) = per-worker local cache only. Set to e.g. `ghcr.io/qianyi-sun/loom-trial-cache` on staging/production to activate. Workers need push+pull credentials via a mounted docker-config secret; without them the pull-fail case falls back cleanly to a local build (harmless).
 trial_cache_registry_repo = ""

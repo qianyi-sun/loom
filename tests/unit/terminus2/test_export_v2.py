@@ -300,6 +300,35 @@ def test_resolve_native_artifacts_fails_on_hash_mismatch() -> None:
     assert exc.value.code == "missing_native_artifact"
 
 
+def test_resolve_native_artifacts_reads_indexed_bucket_not_settings() -> None:
+    """Historical uploads may live in ``artifacts`` while service settings
+    point at an env-specific bucket name."""
+    trial = _trial()
+    native = b"{}"
+    digest = hashlib.sha256(native).hexdigest()
+    key = trial.trajectory_index["artifacts"][0]["key"]
+    trial.trajectory_index["artifacts"][0]["bucket"] = "artifacts"
+    trial.trajectory_index["artifacts"][0]["content_hash"] = f"sha256:{digest}"
+    events = _typed_turn_chain(trial_id=trial.id)
+    events[-1] = Terminus2ArtifactRefEvent(
+        **_base(trial_id=trial.id, seq=6),
+        kind=EventKind.TERMINUS2_ARTIFACT_REF,
+        artifact_kind="terminus_2.pane",
+        sandbox_path="/app/.loom/agent/trajectory.json",
+        content_hash=digest,
+        size_bytes=len(native),
+        share_policy="restricted",
+    )
+    client = _FakeS3({("artifacts", key): native})
+    resolved = resolve_native_artifacts(
+        trial,
+        events,
+        client=client,
+        artifacts_bucket="loom-staging-artifacts",
+    )
+    assert resolved["native/harbor_trajectory.json"] == native
+
+
 def test_build_per_trial_v2_bundle_happy_path() -> None:
     trial = _trial()
     native = b"{}"

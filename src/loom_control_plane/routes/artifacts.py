@@ -60,7 +60,7 @@ async def mint_artifact_upload_url(
     _validate_key(key)
 
     settings = request.app.state.settings
-    bucket = "artifacts"
+    bucket = settings.artifacts_bucket
 
     # Bug 6 fix: for team tokens, additionally verify the trial belongs to
     # that team — otherwise a team A token could mint upload URLs that land

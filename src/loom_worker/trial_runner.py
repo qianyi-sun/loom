@@ -85,6 +85,10 @@ class LocalTrialRunner:
 
     local_trajectory_root: Path
     state_patch_callback: StatePatchCallback
+    # Must match control-plane + loom-service bucket settings for the
+    # environment. Defaults preserve local/dev behavior.
+    trajectory_bucket: str = "trajectories"
+    artifacts_bucket: str = "artifacts"
     output_projection_callback: OutputProjectionCallback | None = None
     # Plan 9/11 amendment A11.1: optional fetcher the worker plumbs
     # through to Trial via TrialContext.llm_calls_fetcher. None means
@@ -259,6 +263,8 @@ class LocalTrialRunner:
             verifier=verifier,
             object_store=self.object_store,
             local_trajectory_path=(self.local_trajectory_root / f"{self.trial_id}.jsonl"),
+            trajectory_bucket=self.trajectory_bucket,
+            artifacts_bucket=self.artifacts_bucket,
             llm_calls_fetcher=self.llm_calls_fetcher,
             sandbox_network=(sandbox_bridge.name if sandbox_bridge is not None else None),
             on_driver_started=on_driver_started_cb,

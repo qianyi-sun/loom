@@ -1231,20 +1231,52 @@ def test_render_worker_pool_name_schema_default() -> None:
 def test_render_can_override_service_object_buckets() -> None:
     """Environment-specific cluster configs must not share artifact or
     trajectory buckets by accident when they use the same object-store
-    endpoint.
+    endpoint. Control-plane and workers must receive the same overrides
+    so signed-URL uploads and trial object writes land where loom-service
+    expects to read them.
     """
-    cfg = ClusterConfig(
+    cfg = _default_cfg(
         trajectories_bucket="loom-prod-trajectories",
         artifacts_bucket="loom-prod-artifacts",
     )
     docs = _load_docs(render_manifests(cfg))
-    service = next(
-        d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-service"
+    expected = {
+        "loom-service": (
+            "LOOM_SVC_TRAJECTORIES_BUCKET",
+            "LOOM_SVC_ARTIFACTS_BUCKET",
+        ),
+        "loom-control-plane": (
+            "LOOM_CP_TRAJECTORIES_BUCKET",
+            "LOOM_CP_ARTIFACTS_BUCKET",
+        ),
+        "loom-family-orchestrator": (
+            "LOOM_CP_TRAJECTORIES_BUCKET",
+            "LOOM_CP_ARTIFACTS_BUCKET",
+        ),
+    }
+    for name, (traj_env, art_env) in expected.items():
+        workload = next(
+            d
+            for d in docs
+            if d["kind"] == "Deployment" and d["metadata"]["name"] == name
+        )
+        env = workload["spec"]["template"]["spec"]["containers"][0]["env"]
+        by_name = {entry["name"]: entry["value"] for entry in env if "value" in entry}
+        assert by_name[traj_env] == "loom-prod-trajectories", name
+        assert by_name[art_env] == "loom-prod-artifacts", name
+
+    worker = next(
+        d
+        for d in docs
+        if d["metadata"]["name"] == "loom-worker"
+        and d["kind"] in {"Deployment", "StatefulSet"}
     )
-    env = service["spec"]["template"]["spec"]["containers"][0]["env"]
-    by_name = {entry["name"]: entry["value"] for entry in env if "value" in entry}
-    assert by_name["LOOM_SVC_TRAJECTORIES_BUCKET"] == "loom-prod-trajectories"
-    assert by_name["LOOM_SVC_ARTIFACTS_BUCKET"] == "loom-prod-artifacts"
+    worker_env = worker["spec"]["template"]["spec"]["containers"][0]["env"]
+    worker_by_name = {
+        entry["name"]: entry["value"] for entry in worker_env if "value" in entry
+    }
+    assert worker_by_name["LOOM_WORKER_TRAJECTORIES_BUCKET"] == "loom-prod-trajectories"
+    assert worker_by_name["LOOM_WORKER_ARTIFACTS_BUCKET"] == "loom-prod-artifacts"
 
 
 def test_render_uses_strict_undefined_so_missing_var_fails_loudly(

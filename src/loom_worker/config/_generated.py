@@ -20,6 +20,7 @@ class WorkerSettings(BaseSettings):
         extra="forbid",
     )
 
+    artifacts_bucket: str = "artifacts"
     benchmark_cache: Path | None = None
     blocking_io_max_workers: int | None = None
     candidate_sha: str = ""
@@ -76,6 +77,7 @@ class WorkerSettings(BaseSettings):
     task_image_build_max_files: int = Field(default=2000, validation_alias="LOOM_TASK_IMAGE_BUILD_MAX_FILES")
     task_materialize_timeout_sec: float = 300.0
     token: SecretStr
+    trajectories_bucket: str = "trajectories"
     trajectory_cache_dir: Path = Path("/var/lib/loom/trajectories")
     trial_cache_base_image_pull_timeout_sec: float = 1800.0
     trial_cache_build_lock_timeout_sec: float = 1800.0

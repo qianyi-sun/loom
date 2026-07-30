@@ -390,6 +390,25 @@ def _index_artifacts(trial: Trial) -> list[dict[str, Any]]:
     return [item for item in raw if isinstance(item, dict)]
 
 
+def _resolve_indexed_artifact_bucket(
+    item: dict[str, Any],
+    *,
+    default_bucket: str,
+) -> str:
+    """Prefer the bucket recorded at upload time over the service setting.
+
+    Workers historically wrote to the CP default ``artifacts`` /
+    ``trajectories`` buckets while loom-service was configured with
+    env-specific names (e.g. ``loom-staging-artifacts``). Download routes
+    already follow the indexed bucket; delivery export must do the same so
+    historical trials remain exportable after config alignment.
+    """
+    bucket = item.get("bucket")
+    if isinstance(bucket, str) and bucket.strip():
+        return bucket.strip()
+    return default_bucket
+
+
 def _artifact_key_matches(key: str, *, suffix: str) -> bool:
     return key.endswith(suffix) or suffix in key
 
@@ -445,13 +464,13 @@ def resolve_native_artifacts(
         archive_path: str,
         key_suffix: str,
     ) -> None:
-        candidate_keys = [
-            item["key"]
+        candidates = [
+            item
             for item in indexed
             if isinstance(item.get("key"), str)
             and _artifact_key_matches(item["key"], suffix=key_suffix)
         ]
-        if not candidate_keys:
+        if not candidates:
             raise Tb2V2ExportError(
                 "missing_native_artifact",
                 {
@@ -464,10 +483,14 @@ def resolve_native_artifacts(
                     "sandbox_path": ref.sandbox_path,
                 },
             )
+        indexed_item = candidates[0]
         data = _fetch_artifact_bytes(
             client,
-            bucket=artifacts_bucket,
-            key=candidate_keys[0],
+            bucket=_resolve_indexed_artifact_bucket(
+                indexed_item,
+                default_bucket=artifacts_bucket,
+            ),
+            key=str(indexed_item["key"]),
         )
         actual_hash = hashlib.sha256(data).hexdigest()
         expected_hash = _normalize_hash(ref.content_hash)
@@ -537,7 +560,7 @@ def _verifier_index_fields(
     item: dict[str, Any],
     *,
     artifacts_bucket: str,
-) -> tuple[str, str, int, str]:
+) -> tuple[str, str, str, int, str]:
     key = item.get("key")
     step_name = item.get("step_name")
     if (
@@ -561,11 +584,15 @@ def _verifier_index_fields(
                 "expected_prefix": expected_prefix,
             },
         )
-    if item.get("bucket") != artifacts_bucket:
+    bucket = _resolve_indexed_artifact_bucket(
+        item,
+        default_bucket=artifacts_bucket,
+    )
+    if not bucket:
         raise Tb2V2ExportError(
             "invalid_verifier_artifact_index",
             {
-                "message": "verifier artifact bucket does not match export bucket",
+                "message": "verifier artifact bucket is required",
                 "key": key,
             },
         )
@@ -609,7 +636,7 @@ def _verifier_index_fields(
             "invalid_verifier_artifact_index",
             {"message": "verifier artifact relative path is unsafe", "key": key},
         )
-    return key, rel, size, match.group(1)
+    return key, bucket, rel, size, match.group(1)
 
 
 def _fetch_bounded_verifier_artifact(
@@ -823,7 +850,7 @@ def resolve_verifier_artifacts(
 
     fetched: dict[tuple[str, str], tuple[dict[str, Any], bytes, str]] = {}
     for item in sorted(candidates, key=lambda row: str(row.get("key"))):
-        key, rel, size, expected_hash = _verifier_index_fields(
+        key, bucket, rel, size, expected_hash = _verifier_index_fields(
             trial,
             item,
             artifacts_bucket=artifacts_bucket,
@@ -862,7 +889,7 @@ def resolve_verifier_artifacts(
             )
         data = _fetch_bounded_verifier_artifact(
             client,
-            bucket=artifacts_bucket,
+            bucket=bucket,
             key=key,
             indexed_size=size,
             max_bytes=max_bytes,

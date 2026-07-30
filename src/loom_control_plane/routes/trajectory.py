@@ -176,7 +176,11 @@ def _artifact_type_from_item(item: dict[str, Any]) -> str:
     return "evidence_bundle"
 
 
-def _artifact_storage_from_item(item: dict[str, Any]) -> dict[str, Any] | None:
+def _artifact_storage_from_item(
+    item: dict[str, Any],
+    *,
+    default_bucket: str = "artifacts",
+) -> dict[str, Any] | None:
     key = item.get("key")
     if not isinstance(key, str) or not key:
         return None
@@ -189,7 +193,7 @@ def _artifact_storage_from_item(item: dict[str, Any]) -> dict[str, Any] | None:
     media_type = item.get("media_type")
     return {
         "backend": "object_store",
-        "bucket": bucket if isinstance(bucket, str) and bucket else "artifacts",
+        "bucket": bucket if isinstance(bucket, str) and bucket else default_bucket,
         "key": key,
         "media_type": (
             media_type if isinstance(media_type, str) and media_type
@@ -257,6 +261,9 @@ def _artifact_descriptors_from_index(
     trial: TrialRow,
     batch: Batch | None,
     index_payload: dict[str, Any],
+    *,
+    artifacts_bucket: str = "artifacts",
+    trajectories_bucket: str = "trajectories",
 ) -> list[dict[str, Any]]:
     descriptors: list[dict[str, Any]] = []
     trial_share_status = _share_status(trial.share_status, "pending_scan")
@@ -275,7 +282,7 @@ def _artifact_descriptors_from_index(
             ),
             storage=_storage_from_s3_uri(
                 index_payload.get("trajectory_uri"),
-                default_bucket="trajectories",
+                default_bucket=trajectories_bucket,
                 default_key=f"{default_prefix}/events.jsonl",
                 media_type="application/x-ndjson",
                 size_bytes=index_payload.get("trajectory_size_bytes", 0),
@@ -296,7 +303,7 @@ def _artifact_descriptors_from_index(
             content_hash=_content_hash(index_payload.get("atif_sha256")),
             storage=_storage_from_s3_uri(
                 index_payload.get("atif_uri"),
-                default_bucket="trajectories",
+                default_bucket=trajectories_bucket,
                 default_key=f"{default_prefix}/atif.json",
                 media_type="application/json",
                 size_bytes=index_payload.get("atif_size_bytes", 0),
@@ -316,7 +323,10 @@ def _artifact_descriptors_from_index(
         for item in artifacts:
             if not isinstance(item, dict):
                 continue
-            storage = _artifact_storage_from_item(item)
+            storage = _artifact_storage_from_item(
+                item,
+                default_bucket=artifacts_bucket,
+            )
             if storage is None:
                 continue
             status = _share_status(item.get("share_status"), "pending_scan")
@@ -444,6 +454,8 @@ async def _sync_typed_artifacts_from_index(
     *,
     trial_id: UUID,
     index_payload: dict[str, Any],
+    artifacts_bucket: str = "artifacts",
+    trajectories_bucket: str = "trajectories",
 ) -> None:
     trial = (await session.execute(
         select(TrialRow).where(TrialRow.id == trial_id),
@@ -461,7 +473,13 @@ async def _sync_typed_artifacts_from_index(
             select(Batch).where(Batch.id == trial.batch_id),
         )).scalar_one_or_none()
 
-    descriptors = _artifact_descriptors_from_index(trial, batch, index_payload)
+    descriptors = _artifact_descriptors_from_index(
+        trial,
+        batch,
+        index_payload,
+        artifacts_bucket=artifacts_bucket,
+        trajectories_bucket=trajectories_bucket,
+    )
     if not descriptors:
         return
 
@@ -585,6 +603,10 @@ async def patch_trajectory_index(
                     session,
                     trial_id=trial_id,
                     index_payload=index_payload,
+                    artifacts_bucket=request.app.state.settings.artifacts_bucket,
+                    trajectories_bucket=(
+                        request.app.state.settings.trajectories_bucket
+                    ),
                 )
             except TrajectoryLifecycleEvidenceError as exc:
                 raise HTTPException(
@@ -625,7 +647,7 @@ async def get_trajectory_url(
     url = request.app.state.minio_client.generate_presigned_url(
         "get_object",
         Params={
-            "Bucket": "trajectories",
+            "Bucket": settings.trajectories_bucket,
             "Key": f"{row.team_id}/{trial_id}/events.jsonl",
         },
         ExpiresIn=settings.signed_url_expiry_sec,
