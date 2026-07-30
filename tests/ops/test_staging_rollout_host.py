@@ -847,8 +847,7 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
         assert "__CANDIDATE_VENV__" not in wrapper
         assert str(host.LEGACY_VENV) not in wrapper
     assert installer.filesystem.path(host.BROKER_PATH).read_text(encoding="utf-8") == (
-        "#!/bin/sh\nset -eu\n\n"
-        'exec /usr/local/libexec/loom-rollout-broker --env staging "$@"\n'
+        '#!/bin/sh\nset -eu\n\nexec /usr/local/libexec/loom-rollout-broker --env staging "$@"\n'
     )
     sudoers = installer.filesystem.path(host.SUDOERS_PATH).read_text(encoding="utf-8")
     assert "--env dev *" in sudoers
@@ -1198,6 +1197,27 @@ def test_missing_install_attestation_is_repaired_in_one_controlled_transaction(
     assert record["installation_state"] == "ready"
     assert record["admission_enabled"] is True
     assert record["maintenance_enabled"] is False
+
+
+def test_install_activates_ownership_maintenance_only_when_opted_in(tmp_path: Path) -> None:
+    # #1085 phase 3: the installer writes the merged-dev (version, policy) opt-in
+    # flag only when explicitly requested; the default config omits it entirely.
+    default_dir = tmp_path / "default"
+    default_dir.mkdir()
+    default_installer, _default_system = _installer(default_dir)
+    default_installer.install(TEAM_ID)
+    default_rendered = default_installer.filesystem.path(host.CONFIG_PATH).read_text(
+        encoding="utf-8"
+    )
+    assert "ownership_maintenance_allowed" not in default_rendered
+
+    opted_dir = tmp_path / "opted"
+    opted_dir.mkdir()
+    opted_installer, _opted_system = _installer(opted_dir)
+    opted_installer.install(TEAM_ID, allow_ownership_maintenance=True)
+    rendered = opted_installer.filesystem.path(host.CONFIG_PATH).read_text(encoding="utf-8")
+    assert "schema_version = 1" in rendered
+    assert "ownership_maintenance_allowed = true" in rendered
 
 
 def test_sealed_cumulative_install_records_exact_source_and_checks_candidate(
