@@ -24,6 +24,7 @@ import os
 import re
 import sys
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC
 from importlib import resources
@@ -86,6 +87,7 @@ from loom_cli.minio_storage_preflight import (
     render_minio_storage_preflight_json,
     render_minio_storage_preflight_table,
 )
+from loom_cli.rollout.shadow_reconcile import compute_drift
 from loom_cli.rollout_lock import (
     DEFAULT_ROLLOUT_LOCK_TTL_SECONDS,
     RolloutAttribution,
@@ -1686,8 +1688,7 @@ def _frontend_route_context(config: ClusterConfig) -> dict[str, Any]:
             )
         if config.ingress_host != "yylx.world":
             raise ValueError(
-                f"frontend_route_path_from={route_path_from!r} must use "
-                "ingress_host='yylx.world'",
+                f"frontend_route_path_from={route_path_from!r} must use ingress_host='yylx.world'",
             )
 
     return {
@@ -2058,6 +2059,92 @@ def _render(args: argparse.Namespace) -> int:
         sys.stderr.write(f"error: {exc}\n")
         return 2
     sys.stdout.write(manifests)
+    return 0
+
+
+def _kubectl_get_json(
+    kind: str,
+    namespace: str,
+    name: str,
+    *,
+    context: str | None,
+) -> dict[str, Any] | None:
+    """Read one live object as JSON (read-only). Returns None if it doesn't exist."""
+    import subprocess
+
+    cmd = ["kubectl", "get", kind, name, "-o", "json"]
+    if namespace:
+        cmd.extend(["-n", namespace])
+    if context:
+        cmd.extend(["--context", context])
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        stderr = proc.stderr.strip()
+        if "NotFound" in stderr or "not found" in stderr.lower():
+            return None
+        raise RuntimeError(f"kubectl get {kind}/{name} failed: {stderr[:200]}")
+    return cast("dict[str, Any]", json.loads(proc.stdout))
+
+
+def _read_live_objects(
+    desired: list[dict[str, Any]],
+    *,
+    context: str | None,
+    getter: Callable[..., dict[str, Any] | None] | None = None,
+) -> list[dict[str, Any]]:
+    """Read the live counterpart of each desired object (read-only); skip absent ones."""
+    # Resolve the reader at call time (not as a default arg) so it stays patchable.
+    resolve = getter if getter is not None else _kubectl_get_json
+    live: list[dict[str, Any]] = []
+    for obj in desired:
+        kind = str(obj.get("kind", ""))
+        metadata = obj.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        name = str(metadata.get("name", ""))
+        namespace = str(metadata.get("namespace", ""))
+        if not kind or not name:
+            continue
+        found = resolve(kind, namespace, name, context=context)
+        if found is not None:
+            live.append(found)
+    return live
+
+
+def _reconcile(args: argparse.Namespace) -> int:
+    """Read-only shadow reconcile: render desired, read live, report drift as JSON."""
+    import yaml
+
+    if not getattr(args, "shadow", False):
+        sys.stderr.write("error: only --shadow (read-only observe) is supported today\n")
+        return 2
+    try:
+        cfg_path = Path(args.config).resolve() if args.config else None
+        config = load_cluster_config(cfg_path)
+    except (FileNotFoundError, ValueError) as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+    try:
+        manifests = render_manifests(config)
+    except (RuntimeError, ValueError) as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+
+    desired = [
+        doc for doc in yaml.safe_load_all(manifests) if isinstance(doc, dict) and doc.get("kind")
+    ]
+    try:
+        live = _read_live_objects(desired, context=args.context)
+    except RuntimeError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+
+    report = compute_drift(
+        desired,
+        live,
+        environment=config.namespace,
+        target=args.target or config.image_tag,
+    )
+    sys.stdout.write(json.dumps(report.to_dict(), indent=2) + "\n")
     return 0
 
 
@@ -3207,10 +3294,7 @@ def _check_workload_trust_contract(
         return PreflightCheck(
             name="workload-trust-contract",
             outcome="fail",
-            detail=(
-                f"protected environment {environment!r} has invalid "
-                f"workload contract: {exc}"
-            ),
+            detail=(f"protected environment {environment!r} has invalid workload contract: {exc}"),
             remediation=(
                 "Declare the exact v1 [workload_contract] tuple: "
                 "internal_trusted with all three capability flags set to false."
@@ -3470,12 +3554,9 @@ def _protected_target_environment_failure_check() -> PreflightCheck:
     return PreflightCheck(
         name="protected-target-environment",
         outcome="fail",
-        detail=(
-            "explicit environment conflicts with an authoritative protected namespace"
-        ),
+        detail=("explicit environment conflicts with an authoritative protected namespace"),
         remediation=(
-            "Use the protected namespace's matching environment or a "
-            "non-protected namespace."
+            "Use the protected namespace's matching environment or a non-protected namespace."
         ),
     )
 
@@ -4014,8 +4095,7 @@ def _prepare_statefulsets_for_apply(
                 apply_docs.append(doc)
                 continue
             errors.append(
-                f"could not read existing StatefulSet {name!r}: "
-                f"{_exception_to_note(exc)}"
+                f"could not read existing StatefulSet {name!r}: {_exception_to_note(exc)}"
             )
             continue
 
@@ -4139,19 +4219,11 @@ def _prune_k8s_defaults(value: Any) -> Any:
 def _statefulset_mutable_patch(doc: dict[str, Any]) -> dict[str, Any]:
     patch: dict[str, Any] = {}
     metadata = _dict_child(doc, "metadata")
-    metadata_patch = {
-        key: metadata[key]
-        for key in ("labels", "annotations")
-        if key in metadata
-    }
+    metadata_patch = {key: metadata[key] for key in ("labels", "annotations") if key in metadata}
     if metadata_patch:
         patch["metadata"] = metadata_patch
     spec = _dict_child(doc, "spec")
-    spec_patch = {
-        key: spec[key]
-        for key in _STATEFULSET_MUTABLE_SPEC_FIELDS
-        if key in spec
-    }
+    spec_patch = {key: spec[key] for key in _STATEFULSET_MUTABLE_SPEC_FIELDS if key in spec}
     if spec_patch:
         patch["spec"] = spec_patch
     return patch
@@ -4312,9 +4384,9 @@ def _up(args: argparse.Namespace) -> int:
         except ValueError as exc:
             sys.stderr.write(f"error: {exc}\n")
             return 1
-    if (
-        snapshot.protected_target == "production"
-        and explicit_environment not in (None, "production")
+    if snapshot.protected_target == "production" and explicit_environment not in (
+        None,
+        "production",
     ):
         sys.stderr.write(
             "error: protected cluster config target production conflicts with "
@@ -4353,9 +4425,7 @@ def _up(args: argparse.Namespace) -> int:
         workload_contract_profile=snapshot.workload_contract_profile,
     )
     if workload_contract_check is not None and workload_contract_check.outcome == "fail":
-        sys.stderr.write(
-            "error: workload-trust-contract preflight failed — refusing to apply.\n"
-        )
+        sys.stderr.write("error: workload-trust-contract preflight failed — refusing to apply.\n")
         sys.stderr.write(
             _format_preflight_table(
                 PreflightReport(
@@ -4752,8 +4822,7 @@ def _guard_protected_destructive_down(args: argparse.Namespace) -> int | None:
         )
     except ValueError:
         sys.stderr.write(
-            "error: protected-target-environment conflict — "
-            "refusing destructive operation.\n",
+            "error: protected-target-environment conflict — refusing destructive operation.\n",
         )
         return 1
     if environment not in PROTECTED_ENVIRONMENTS:
@@ -5049,7 +5118,9 @@ def _bootstrap_secrets(args: argparse.Namespace) -> int:
     # Resolve pgbouncer_enabled: CLI flag overrides schema default.
     pgbouncer_entry = schema.render_config.get("pgbouncer")
     schema_pgbouncer_default: bool = bool(
-        pgbouncer_entry.fields.get("enabled", False) if pgbouncer_entry and pgbouncer_entry.fields else False
+        pgbouncer_entry.fields.get("enabled", False)
+        if pgbouncer_entry and pgbouncer_entry.fields
+        else False
     )
     cli_pgbouncer: bool | None = getattr(args, "pgbouncer", None)
     pgbouncer_enabled: bool = schema_pgbouncer_default if cli_pgbouncer is None else cli_pgbouncer
@@ -5070,7 +5141,9 @@ def _derive_pool_dsn(args: argparse.Namespace) -> int:
 
     try:
         pool_dsn = _rewrite_dsn_host_port(
-            args.dsn, host="loom-pgbouncer", port=6432,
+            args.dsn,
+            host="loom-pgbouncer",
+            port=6432,
         )
     except ValueError as exc:
         print(f"derive-pool-dsn: {exc}", file=sys.stderr)
@@ -5313,6 +5386,35 @@ def dispatch(argv: list[str]) -> int:
         ),
     )
     p_render.set_defaults(handler=_render)
+
+    p_reconcile = sub.add_parser(
+        "reconcile",
+        help=(
+            "Read-only shadow reconcile: render the desired manifests and report "
+            "desired-vs-live drift as JSON. Never writes (requires --shadow)."
+        ),
+    )
+    p_reconcile.add_argument(
+        "--config",
+        default=None,
+        help="Path to cluster-config.toml. Omit for all defaults.",
+    )
+    p_reconcile.add_argument(
+        "--context",
+        default=None,
+        help="kubectl context for the read-only live read.",
+    )
+    p_reconcile.add_argument(
+        "--target",
+        default=None,
+        help="Identity label for the desired version (defaults to the config image tag).",
+    )
+    p_reconcile.add_argument(
+        "--shadow",
+        action="store_true",
+        help="Read-only: observe and report drift, never write. Required today.",
+    )
+    p_reconcile.set_defaults(handler=_reconcile)
 
     p_preflight = sub.add_parser(
         "preflight",
@@ -5970,7 +6072,7 @@ def dispatch(argv: list[str]) -> int:
     p_derive = sub.add_parser(
         "derive-pool-dsn",
         help="Derive the pgbouncer pool DSN from a direct-to-Postgres DSN "
-             "by rewriting host+port (#609).",
+        "by rewriting host+port (#609).",
     )
     p_derive.add_argument(
         "dsn",
