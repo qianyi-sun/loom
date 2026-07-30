@@ -5,6 +5,7 @@ from __future__ import annotations
 import httpx
 
 from loom.errors import (
+    AgentError,
     AgentSetupTimeoutError,
     DriverError,
     TrajectoryFlushFailedError,
@@ -79,6 +80,18 @@ def test_tmux_no_server_mid_dispatch_is_agent_error():
 def test_tmux_session_lost_guard_message_is_agent_error():
     reason, msg = classify_failure_message(
         "Terminus2 tmux session/server lost mid-dispatch."
+    )
+    assert reason == FailureReason.AGENT_ERROR
+    assert msg == "Terminus2 tmux server disappeared mid-dispatch."
+
+
+def test_tmux_soft_recover_recreate_failure_message_is_agent_error():
+    """Soft-recover recreate failure must stay actionable agent_error (#1068)."""
+    reason, msg = classify_failure(
+        AgentError(
+            "Terminus2 tmux session/server lost mid-dispatch. "
+            "Recreate failed: boom"
+        )
     )
     assert reason == FailureReason.AGENT_ERROR
     assert msg == "Terminus2 tmux server disappeared mid-dispatch."

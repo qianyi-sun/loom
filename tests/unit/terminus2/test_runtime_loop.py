@@ -420,20 +420,41 @@ class _FakeExecResult:
 class _RecoverableSession:
     """Session that can die once and come back via recreate execs."""
 
-    def __init__(self, *, recreate_ok: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        recreate_ok: bool = True,
+        die_after_calls: int | None = None,
+        raise_no_server_on_call: int | None = None,
+    ) -> None:
         self._alive = True
         self.calls = 0
+        self.keystrokes: list[object] = []
         self._session_name = "terminus-2"
         self._user = None
         self._tmux_start_session = "tmux new-session -d -s terminus-2 'bash --login'"
         self._previous_buffer = "stale-pane"
         self._recreate_ok = recreate_ok
+        self._die_after_calls = die_after_calls
+        self._raise_no_server_on_call = raise_no_server_on_call
         self.environment = self
         self.exec_commands: list[str] = []
 
     async def send_keys(self, *args: object, **kwargs: object) -> None:
-        del args, kwargs
+        del kwargs
         self.calls += 1
+        self.keystrokes.append(args[0] if args else None)
+        if self._raise_no_server_on_call == self.calls:
+            self._alive = False
+            raise RuntimeError(
+                "loom-trial-main: failed to send non-blocking keys: "
+                "command=\"tmux send-keys -t terminus-2 -- 'chmod +x "
+                "/tmp/verify-artifacts.sh\\n'\", "
+                "return_code=1, stderr='no server running on "
+                "/tmp/tmux-0/default\\n', stdout=''"
+            )
+        if self._die_after_calls is not None and self.calls >= self._die_after_calls:
+            self._alive = False
 
     async def is_session_alive(self) -> bool:
         return self._alive
@@ -523,6 +544,72 @@ async def test_tmux_alive_guard_fails_closed_when_recreate_fails() -> None:
     _install_tmux_session_alive_guard(agent)
 
     session._alive = False
-    with pytest.raises(AgentError, match="lost mid-dispatch"):
+    with pytest.raises(AgentError, match="lost mid-dispatch") as excinfo:
         await agent._session.send_keys("chmod +x /tmp/x\n")
+    assert session.calls == 1
+    # Acceptance: actionable agent_error, not empty internal_error (#1068 / #1075).
+    from loom.errors import classify_failure
+    from loom.models.result import FailureReason
+
+    reason, msg = classify_failure(excinfo.value)
+    assert reason == FailureReason.AGENT_ERROR
+    assert msg == "Terminus2 tmux server disappeared mid-dispatch."
+
+
+@pytest.mark.asyncio
+async def test_tmux_mid_batch_disappearance_soft_recovers_without_replay() -> None:
+    """#1068 regression: session dies between commands in one Harbor batch.
+
+    Mirrors the staging failure shape (large write / paste, then next
+    ``send_keys`` hits ``no server running``): soft-recover once, do not
+    replay the failed chmod, suppress the remainder of the batch, and surface
+    an honest recovery observation for the next model turn.
+    """
+    heredoc = "cat > /tmp/verify-artifacts.sh <<'EOF'\n#!/bin/bash\necho ok\nEOF\n"
+    chmod_cmd = "chmod +x /tmp/verify-artifacts.sh\n"
+    follow_on = "ls -la /tmp/verify-artifacts.sh\n"
+
+    session = _RecoverableSession(raise_no_server_on_call=2)
+    agent = type("_Agent", (), {"_session": session})()
+    _install_tmux_session_alive_guard(agent)
+
+    await agent._session.send_keys(heredoc)
+    await agent._session.send_keys(chmod_cmd)  # raises no-server → soft recover
+    await agent._session.send_keys(follow_on)  # suppressed (same batch)
+
+    assert session.keystrokes == [heredoc, chmod_cmd]
+    assert follow_on not in session.keystrokes
+    assert session.keystrokes.count(chmod_cmd) == 1  # not replayed
+    assert any("new-session" in cmd for cmd in session.exec_commands)
+
+    output = await agent._session.get_incremental_output()
+    assert "recreated once" in output
+    assert "NOT re-run" in output
+    assert "Current directory: /app" in output
+
+    # Later turns work again after the notice is drained.
+    await agent._session.send_keys("pwd\n")
+    assert session.keystrokes[-1] == "pwd\n"
+
+
+@pytest.mark.asyncio
+async def test_tmux_alive_guard_fails_closed_without_environment() -> None:
+    class _BareSession:
+        def __init__(self) -> None:
+            self.calls = 0
+            self._alive = False
+
+        async def send_keys(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+            self.calls += 1
+
+        async def is_session_alive(self) -> bool:
+            return self._alive
+
+    session = _BareSession()
+    agent = type("_Agent", (), {"_session": session})()
+    _install_tmux_session_alive_guard(agent)
+
+    with pytest.raises(AgentError, match="lost mid-dispatch"):
+        await agent._session.send_keys("echo x\n")
     assert session.calls == 1
