@@ -119,6 +119,11 @@ def test_browser_artifact_is_exact_restricted_and_candidate_bound(tmp_path: Path
         item["backend"]["service"]["name"] for item in ingress["spec"]["rules"][0]["http"]["paths"]
     ] == ["loom-service", "loom-web"]
     job = resources[("Job", BROWSER_JOB_NAME)]
+    # Bounded retry (#1085 phase 2): the flaky headless-browser smoke gets up to
+    # 3 attempts (each self-capped at --timeout-ms=60s) inside the 900s deadline,
+    # so a single transient blip no longer marks the rehearsal job-not-complete.
+    assert job["spec"]["backoffLimit"] == 2
+    assert job["spec"]["activeDeadlineSeconds"] == 900
     pod = job["spec"]["template"]["spec"]
     assert "loom.openai.dev/plan-sha256" not in job["metadata"]["labels"]
     assert (
