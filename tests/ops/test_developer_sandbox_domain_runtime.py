@@ -41,6 +41,7 @@ def _registry_snapshot() -> dict[str, object]:
             {
                 "env_id": env_id,
                 "principal_id": principal,
+                "layout_version": "legacy-v1",
                 "runtime_id": sandbox,
                 "state": "active",
                 "resource_generation": 2,
@@ -237,15 +238,13 @@ def test_checked_in_contract_has_two_independent_domains_and_stable_groups() -> 
     assert gb10_peers["trt-gb10-7"] == "gx10-0faf"
 
 
-def test_fourth_environment_uses_registry_allocated_identity_and_paths(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    snapshot = _registry_snapshot()
+def _append_dynamic_environment(snapshot: dict[str, object]) -> dict[str, object]:
     environment = dict(snapshot["environments"][0])
     environment.update(
         {
             "env_id": "denv-dynamic-44444444",
             "principal_id": "unix-uid:31444",
+            "layout_version": "dynamic-v1",
             "runtime_id": "e-fourth",
             "resource_generation": 4,
             "service_user": "loom-e-fourth",
@@ -292,12 +291,33 @@ def test_fourth_environment_uses_registry_allocated_identity_and_paths(
             "phase": "committed",
         },
     )
+    return environment
+
+
+def test_fourth_environment_uses_registry_allocated_identity_and_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _registry_snapshot()
+    environment = _append_dynamic_environment(snapshot)
     monkeypatch.setattr(runtime, "_load_registry_snapshot", lambda _path: snapshot)
 
     config = runtime.load_config(_CONFIG)
     paths = runtime.runtime_paths(config.domains["gb10"], "e-fourth", "4" * 40)
     assert config.sandbox_groups["e-fourth"].slurm_account == "lda-fourth"
-    assert str(paths.candidate).startswith(environment["candidate_root"])
+    assert paths.candidate == Path(str(environment["candidate_root"])) / ("4" * 40)
+    assert paths.env == (Path(str(environment["runtime_root"])) / ("4" * 40) / "worker-gb10.env")
+
+
+def test_dynamic_environment_rejects_non_registry_root_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _registry_snapshot()
+    environment = _append_dynamic_environment(snapshot)
+    environment["runtime_root"] = "/shared_work/loom/runtime/environments/arbitrary"
+    monkeypatch.setattr(runtime, "_load_registry_snapshot", lambda _path: snapshot)
+
+    with pytest.raises(runtime.ConvergenceError, match="root binding"):
+        runtime.load_config(_CONFIG)
 
 
 def test_first_committed_registry_generation_is_an_active_runtime_member(
@@ -573,6 +593,148 @@ def test_host_converge_creates_empty_candidate_namespace_before_materialize(
         assert stat.S_IMODE(path.stat().st_mode) == 0o2750
 
 
+def test_fresh_dynamic_domain_converges_materializes_and_attests_exact_roots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _registry_snapshot()
+    _append_dynamic_environment(snapshot)
+    monkeypatch.setattr(runtime, "_load_registry_snapshot", lambda _path: snapshot)
+    loaded = runtime.load_config(_CONFIG)
+    sandbox = "e-fourth"
+    original_group = loaded.sandbox_groups[sandbox]
+    shared = tmp_path / "shared_work"
+    shared.mkdir()
+    candidate_root = shared / "loom/candidates/environments/denv-dynamic-44444444"
+    runtime_root = shared / "loom/runtime/environments/denv-dynamic-44444444"
+    group = replace(
+        original_group,
+        candidate_root=candidate_root,
+        runtime_root=runtime_root,
+    )
+    domain = replace(
+        loaded.domains["gb10"],
+        candidate_root=shared / "loom/candidates/sandboxes",
+        publisher_hostname="publisher",
+        candidate_roots={sandbox: candidate_root},
+        runtime_roots={sandbox: runtime_root},
+    )
+    config = replace(
+        loaded,
+        state_root=tmp_path / "transactions",
+        sandbox_groups={sandbox: group},
+        domains={"gb10": domain},
+    )
+    identity = runtime.CandidateIdentity("4" * 40, "5" * 40)
+    ownership: list[tuple[Path, int, int]] = []
+    monkeypatch.setattr(runtime, "_require_root", lambda: None)
+    monkeypatch.setattr(runtime, "_hostname", lambda: "publisher")
+    monkeypatch.setattr(
+        runtime,
+        "identity_plan",
+        lambda *_args: {"groups": {sandbox: "ok"}},
+    )
+    monkeypatch.setattr(runtime, "_service_identity_status", lambda *_args: "ok")
+    monkeypatch.setattr(runtime, "_user_has_group", lambda *_args: True)
+    monkeypatch.setattr(runtime, "_atomic_install", lambda *_args: None)
+    monkeypatch.setattr(runtime, "_ensure_attestation_key", lambda *_args: "a" * 64)
+    monkeypatch.setattr(
+        os,
+        "chown",
+        lambda path, uid, gid: ownership.append((Path(path), uid, gid)),
+    )
+    monkeypatch.setattr(runtime, "_transaction_lock", lambda *_args: _no_lock())
+    monkeypatch.setattr(runtime, "_write_json", lambda *_args, **_kwargs: None)
+
+    def publish_candidate(
+        _source: Path,
+        target: Path,
+        _identity: object,
+        shared_gid: int,
+    ) -> bool:
+        target.mkdir()
+        os.chown(target, 0, shared_gid)
+        target.chmod(0o2750)
+        return True
+
+    peer_candidates = [{"hostname": peer.hostname, "candidate_inode": 41} for peer in domain.peers]
+    monkeypatch.setattr(runtime, "_publish_candidate", publish_candidate)
+    monkeypatch.setattr(runtime, "_peer_candidate_readback", lambda *_args: peer_candidates)
+
+    runtime.converge_host(_CONFIG, config, domain)
+    runtime.converge_materialize(
+        config,
+        domain,
+        sandbox,
+        tmp_path / "candidate.bundle",
+        identity,
+    )
+
+    seed = tmp_path / "worker.env"
+    seed.write_text("redacted=test-only\n", encoding="utf-8")
+    seed.chmod(0o600)
+    monkeypatch.setattr(runtime, "_recover_orphaned_transactions", lambda *_args: None)
+    monkeypatch.setattr(runtime, "_read_and_verify_fleet", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(runtime, "attest_plan", lambda *_args: {"operation": "attest"})
+    monkeypatch.setattr(runtime, "_secure_seed", lambda path, **_kwargs: path)
+    monkeypatch.setattr(runtime, "_parse_env_references", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        runtime,
+        "_create_receipt",
+        lambda *_args: (tmp_path / "receipt.json", {}),
+    )
+    peer_runtime = [
+        {"hostname": peer.hostname, "candidate_inode": 41, "env_inode": 42} for peer in domain.peers
+    ]
+    monkeypatch.setattr(runtime, "_peer_readback", lambda *_args: peer_runtime)
+    monkeypatch.setattr(runtime, "_emit_attestation", lambda *_args, **_kwargs: {"ok": True})
+
+    runtime.converge_attest(config, domain, sandbox, seed, identity)
+
+    for root in (candidate_root, runtime_root):
+        assert root.is_dir()
+        assert stat.S_IMODE(root.stat().st_mode) == 0o2750
+        assert (root, 0, config.shared_gid) in ownership
+    candidate_sha = candidate_root / identity.sha
+    runtime_sha = runtime_root / identity.sha
+    assert stat.S_IMODE(candidate_sha.stat().st_mode) == 0o2750
+    assert stat.S_IMODE(runtime_sha.stat().st_mode) == 0o2750
+    assert (runtime_sha, 0, group.gid) in ownership
+    env = runtime_sha / "worker-gb10.env"
+    assert env.read_text(encoding="utf-8") == "redacted=test-only\n"
+    assert stat.S_IMODE(env.stat().st_mode) == 0o600
+    assert any(uid == group.uid and gid == group.gid for _path, uid, gid in ownership)
+
+
+def test_legacy_runtime_parents_use_registry_root_without_recomputation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = runtime.load_config(_CONFIG)
+    sandbox = "qianyi"
+    base = tmp_path / "shared_work/loom"
+    base.mkdir(parents=True)
+    runtime_root = base / "runtime/sandboxes/qianyi"
+    group = replace(config.sandbox_groups[sandbox], runtime_root=runtime_root)
+    domain = replace(
+        config.domains["oldlab"],
+        runtime_root=tmp_path / "must-not-be-used",
+        runtime_roots={**config.domains["oldlab"].runtime_roots, sandbox: runtime_root},
+        candidate_roots={
+            **config.domains["oldlab"].candidate_roots,
+            sandbox: group.candidate_root,
+        },
+    )
+    monkeypatch.setattr(os, "chown", lambda *_args: None)
+
+    runtime._ensure_runtime_parents(config, domain, group, "a" * 40, sandbox)
+
+    assert runtime_root.is_dir()
+    assert stat.S_IMODE(runtime_root.stat().st_mode) == 0o2750
+    assert stat.S_IMODE((runtime_root / ("a" * 40)).stat().st_mode) == 0o2750
+    assert not domain.runtime_root.exists()
+
+
 def test_publish_plan_is_exact_sha_and_secret_safe(tmp_path: Path) -> None:
     config = runtime.load_config(_CONFIG)
     repo, sha = _repository(tmp_path)
@@ -655,6 +817,11 @@ def test_materialize_is_independent_of_fleet_and_env(
         runtime,
         "runtime_paths",
         lambda *_args: SimpleNamespace(candidate=candidate, env=tmp_path / "never.env"),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_ensure_candidate_root",
+        lambda *_args: candidate.parent,
     )
     monkeypatch.setattr(runtime, "_require_directory", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(runtime, "_publish_candidate", lambda *_args: True)

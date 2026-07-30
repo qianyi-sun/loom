@@ -124,6 +124,7 @@ def _evidence() -> dict[str, Any]:
         },
         "containers": containers,
         "cgroup": {
+            "layout_version": "legacy-cgroupfs-v0",
             "job_path": job_path,
             "controllers": ["cpu", "memory", "pids"],
             "delegated": True,
@@ -190,6 +191,120 @@ def _evidence() -> dict[str, Any]:
     }
 
 
+def _systemd_evidence() -> dict[str, Any]:
+    evidence = _evidence()
+    candidate_sha = evidence["candidate_sha"]
+    candidate_tree = "b" * 40
+    job = evidence["job"]
+    job.update(
+        {
+            "job_start_time": "2026-07-27T13:55:00",
+            "pool": "gb10",
+            "account": "lda-staging",
+            "env_id": "denv-sandbox-0001",
+            "resource_generation": 7,
+            "candidate_id": f"cand-{candidate_sha}",
+            "candidate_tree": candidate_tree,
+            "node": "trt-gb10-1",
+        },
+    )
+    evidence["node"] = {
+        "hostname": "trt-gb10-1.internal",
+        "slurm_node_name": "trt-gb10-1",
+    }
+    allocation = job["allocation"]
+    allocation["gpu_ids"] = ["0"]
+    evidence["devices"]["allocated_ids"] = ["0"]
+    job_path = "/sys/fs/cgroup/slurm/uid_1000/job_1234"
+    identity = {
+        "cluster": "trt-gb10",
+        "node": "trt-gb10-1",
+        "job_id": job["job_id"],
+        "job_start_time": job["job_start_time"],
+        "account": job["account"],
+        "env_id": job["env_id"],
+        "resource_generation": job["resource_generation"],
+        "runtime_id": evidence["sandbox"],
+        "candidate_id": job["candidate_id"],
+        "candidate_sha": candidate_sha,
+        "candidate_tree": candidate_tree,
+    }
+    identity_digest = hashlib.sha256(
+        ACCEPTANCE.live_acceptance._canonical_digest_bytes(identity),
+    ).hexdigest()
+    systemd_slice = f"loom-job-{job['job_id']}-{identity_digest[:40]}.slice"
+    live_path = f"/loom.slice/loom-job.slice/loom-job-{job['job_id']}.slice/{systemd_slice}"
+    receipt = {
+        "schema_version": 1,
+        "kind": "loom.slurm-systemd-slice-receipt",
+        "systemd_slice": systemd_slice,
+        "slice_identity_sha256": identity_digest,
+        "unit_sha256": hashlib.sha256(b"systemd unit").hexdigest(),
+        "job_id": job["job_id"],
+        "job_start_time": job["job_start_time"],
+        "cluster": "trt-gb10",
+        "node_list": job["node"],
+        "account": job["account"],
+        "env_id": job["env_id"],
+        "resource_generation": job["resource_generation"],
+        "runtime_id": evidence["sandbox"],
+        "candidate_id": job["candidate_id"],
+        "candidate_sha": candidate_sha,
+        "candidate_tree": candidate_tree,
+        "cpu_max": "1200000 100000",
+        "memory_max": str(allocation["memory_bytes"]),
+        "memory_swap_max_source": "max",
+        "memory_swap_max_effective": "0",
+        "pids_max": str(allocation["pids"]),
+        "cpuset_cpus": "0-11",
+        "cpuset_mems": "0",
+        "gpu_tres": allocation["tres"],
+        "gpu_detail": "gpu(IDX:0)",
+        "payload_sha256": "",
+    }
+    unsigned = {key: value for key, value in receipt.items() if key != "payload_sha256"}
+    receipt["payload_sha256"] = hashlib.sha256(
+        ACCEPTANCE.live_acceptance._canonical_digest_bytes(unsigned),
+    ).hexdigest()
+    evidence["cgroup"] = {
+        "layout_version": "systemd-mirror-v1",
+        "job_path": job_path,
+        "container_parent": systemd_slice,
+        "slurm_job_id": job["job_id"],
+        "slurm_pid_cgroup_paths": [f"{job_path}/step_batch"],
+        "controllers": ["cpu", "memory", "pids"],
+        "delegated_controllers": ["cpu", "memory", "pids"],
+        "delegated": True,
+        "cpu_cores_max": allocation["cpu_cores"],
+        "memory_bytes_max": allocation["memory_bytes"],
+        "pids_max": allocation["pids"],
+        "pids_current": 32,
+        "systemd_slice_receipt": receipt,
+        "systemd_slice_live": {
+            "path": live_path,
+            "cpu_cores_max": allocation["cpu_cores"],
+            "memory_bytes_max": allocation["memory_bytes"],
+            "memory_swap_bytes_max": 0,
+            "pids_max": allocation["pids"],
+            "cpuset_cpus": receipt["cpuset_cpus"],
+            "cpuset_mems": receipt["cpuset_mems"],
+        },
+    }
+    for index, container in enumerate(evidence["containers"], start=1):
+        container["cgroup_parent"] = systemd_slice
+        container["cgroup_path"] = f"{live_path}/docker/{index:012x}"
+        container["device_ids"] = ["0"] if container["role"] == "trial" else []
+    return evidence
+
+
+def _refresh_systemd_receipt(evidence: dict[str, Any]) -> None:
+    receipt = evidence["cgroup"]["systemd_slice_receipt"]
+    unsigned = {key: value for key, value in receipt.items() if key != "payload_sha256"}
+    receipt["payload_sha256"] = hashlib.sha256(
+        ACCEPTANCE.live_acceptance._canonical_digest_bytes(unsigned),
+    ).hexdigest()
+
+
 def _failures(evidence: dict[str, Any]) -> list[str]:
     schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
     return ACCEPTANCE.verify_evidence(evidence, schema)
@@ -200,6 +315,92 @@ def test_schema_is_valid_and_complete_fixture_passes() -> None:
     Draft202012Validator.check_schema(schema)
 
     assert _failures(_evidence()) == []
+
+
+def test_versioned_systemd_mirror_fixture_passes_closed_schema_and_semantics() -> None:
+    assert _failures(_systemd_evidence()) == []
+
+
+def test_public_schema_requires_an_explicit_cgroup_layout_discriminator() -> None:
+    evidence = _evidence()
+    del evidence["cgroup"]["layout_version"]
+
+    assert any("schema violation" in failure for failure in _failures(evidence))
+
+    evidence = _evidence()
+    evidence["cgroup"]["container_parent"] = evidence["cgroup"]["job_path"]
+
+    assert any("schema violation" in failure for failure in _failures(evidence))
+
+    evidence = _evidence()
+    evidence["job"]["job_start_time"] = "2026-07-27T13:55:00"
+
+    assert any("schema violation" in failure for failure in _failures(evidence))
+
+
+@pytest.mark.parametrize(
+    ("attack", "expected"),
+    [
+        ("unknown_receipt_field", "schema violation"),
+        ("reused_job_id", "versioned cgroup evidence"),
+        ("start_format", "schema violation"),
+        ("live_limit_drift", "versioned cgroup evidence"),
+        ("slice_escape", "versioned cgroup evidence"),
+        ("coordinated_path_rewrite", "schema violation"),
+        ("receipt_swap", "schema violation"),
+        ("live_swap", "schema violation"),
+        ("gpu_identity_drift", "versioned cgroup evidence"),
+        ("gpu_multi_container", "versioned cgroup evidence"),
+        ("systemd_null_receipt", "schema violation"),
+        ("cgroupfs_nonnull_receipt", "schema violation"),
+    ],
+)
+def test_versioned_systemd_mirror_rejects_adversarial_evidence(
+    attack: str,
+    expected: str,
+) -> None:
+    evidence = _systemd_evidence()
+    if attack == "unknown_receipt_field":
+        evidence["cgroup"]["systemd_slice_receipt"]["unexpected"] = True
+    elif attack == "reused_job_id":
+        evidence["job"]["job_start_time"] = "2026-07-27T13:56:00"
+    elif attack == "start_format":
+        evidence["job"]["job_start_time"] = "2026-07-27T13:55:00Z"
+    elif attack == "live_limit_drift":
+        evidence["cgroup"]["systemd_slice_live"]["pids_max"] -= 1
+    elif attack == "slice_escape":
+        evidence["containers"][0]["cgroup_path"] = (
+            f"/wrong.slice/{evidence['cgroup']['container_parent']}/docker/escape"
+        )
+    elif attack == "coordinated_path_rewrite":
+        rewritten = f"/foreign.slice/{evidence['cgroup']['container_parent']}"
+        evidence["cgroup"]["systemd_slice_live"]["path"] = rewritten
+        for index, container in enumerate(evidence["containers"], start=1):
+            container["cgroup_path"] = f"{rewritten}/docker/{index:012x}"
+    elif attack == "receipt_swap":
+        receipt = evidence["cgroup"]["systemd_slice_receipt"]
+        receipt["memory_swap_max_source"] = "1"
+        receipt["memory_swap_max_effective"] = "1"
+        evidence["cgroup"]["systemd_slice_live"]["memory_swap_bytes_max"] = 1
+        _refresh_systemd_receipt(evidence)
+    elif attack == "live_swap":
+        evidence["cgroup"]["systemd_slice_live"]["memory_swap_bytes_max"] = 1
+    elif attack == "gpu_identity_drift":
+        evidence["cgroup"]["systemd_slice_receipt"]["gpu_detail"] = "gpu(IDX:1)"
+        _refresh_systemd_receipt(evidence)
+    elif attack == "gpu_multi_container":
+        evidence["containers"][0]["device_ids"] = ["0"]
+    elif attack == "systemd_null_receipt":
+        evidence["cgroup"]["systemd_slice_receipt"] = None
+    else:
+        cgroup = evidence["cgroup"]
+        cgroup["layout_version"] = "cgroupfs-job-v1"
+        cgroup["container_parent"] = cgroup["job_path"]
+        for index, container in enumerate(evidence["containers"], start=1):
+            container["cgroup_parent"] = cgroup["job_path"]
+            container["cgroup_path"] = f"{cgroup['job_path']}/docker/{index:012x}"
+
+    assert any(expected in failure for failure in _failures(evidence))
 
 
 @pytest.mark.parametrize(
@@ -234,7 +435,20 @@ def test_slurm_tres_must_bind_cpu_memory_and_gpu() -> None:
     evidence = _evidence()
     evidence["job"]["allocation"]["tres"] = "cpu=12,mem=16000M"
 
-    assert any("GPU allocation" in item for item in _failures(evidence))
+    assert any("GPU count" in item for item in _failures(evidence))
+
+    evidence = _evidence()
+    evidence["job"]["allocation"]["tres"] = "cpu=12,mem=16000M,gres/gpu=2"
+
+    assert any("GPU count" in item for item in _failures(evidence))
+
+
+def test_legacy_gpu_assignment_rejects_duplicate_container_exposure() -> None:
+    evidence = _evidence()
+    denied = next(container for container in evidence["containers"] if not container["device_ids"])
+    denied["device_ids"] = ["GPU-0"]
+
+    assert any("exactly one container" in failure for failure in _failures(evidence))
 
 
 def test_plan_is_explicitly_read_only_and_lists_stop_rules() -> None:
@@ -814,6 +1028,9 @@ def test_gate6_bridge_verifies_dynamic_pairs_and_unchanged_gb10_v1() -> None:
     assert len(artifacts) == 8
     assert bundle["registry_generation"] == 42
     schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+    assert {artifact["cgroup"]["layout_version"] for artifact in artifacts.values()} == {
+        "legacy-cgroupfs-v0"
+    }
     assert all(
         ACCEPTANCE.verify_evidence(artifacts[(sandbox, "gb10")], schema) == []
         for sandbox in live["candidates"]

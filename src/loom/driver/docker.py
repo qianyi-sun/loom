@@ -14,6 +14,8 @@ import asyncio
 import contextlib
 import io
 import logging
+import os
+import re
 import shlex
 import tarfile
 import threading
@@ -70,6 +72,19 @@ def _tmpfs_specs_to_docker_map(specs: tuple[str, ...]) -> dict[str, str]:
 def _validated_cgroup_parent(value: str) -> str:
     if "\x00" in value or "\n" in value or "\r" in value:
         raise DriverError("Docker cgroup parent is malformed")
+    slice_match = re.fullmatch(
+        r"loom-job-([1-9][0-9]*)-[0-9a-f]{40}\.slice",
+        value,
+    )
+    if slice_match is not None:
+        slurm_job_id = os.environ.get("LOOM_WORKER_SLURM_JOB_ID", "")
+        if re.fullmatch(r"[1-9][0-9]*", slurm_job_id) is None:
+            raise DriverError("Docker systemd cgroup parent needs a valid Slurm job ID")
+        if slice_match.group(1) != slurm_job_id:
+            raise DriverError("Docker systemd cgroup parent does not match the Slurm job ID")
+        return value
+    if value.endswith(".slice"):
+        raise DriverError("Docker systemd cgroup parent is malformed")
     path = PurePosixPath(value)
     if not path.is_absolute() or path == PurePosixPath("/"):
         raise DriverError("Docker cgroup parent must be a non-root absolute path")

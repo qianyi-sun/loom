@@ -987,6 +987,26 @@ def _preflight_revival_candidate(
         shutil.rmtree(working_root, ignore_errors=True)
 
 
+def _reconcile_predeployment_ports(
+    authority: Any,
+    environment: Any,
+    *,
+    expected_resource_generation: int | None = None,
+) -> Any:
+    try:
+        return authority.reconcile_predeployment_ports(
+            environment.env_id,
+            principal_id=environment.principal_id,
+            expected_resource_generation=(
+                environment.resource_generation
+                if expected_resource_generation is None
+                else expected_resource_generation
+            ),
+        )
+    except registry.RegistryError as exc:
+        raise AuthorityError("pre-deployment port recovery failed safely") from exc
+
+
 def _dispatch(
     request: Mapping[str, Any],
     descriptors: list[int],
@@ -1030,7 +1050,7 @@ def _dispatch(
             )
         )
     if kind == BEGIN_DEPLOY_KIND:
-        _owned_environment(
+        environment = _owned_environment(
             authority,
             env_id=request["env_id"],
             principal_id=principal_id,
@@ -1045,6 +1065,15 @@ def _dispatch(
                 candidate,
                 Path(authority.candidate_root),
             )
+            rebound = _reconcile_predeployment_ports(
+                authority,
+                environment,
+                expected_resource_generation=request["expected_resource_generation"],
+            )
+            if rebound.resource_generation != environment.resource_generation:
+                raise AuthorityError(
+                    "deployment resource identity changed; refresh and retry",
+                )
             record = authority.begin_deployment(
                 {
                     "schema_version": request["schema_version"],
@@ -1139,6 +1168,7 @@ def _dispatch(
                 phase="candidate-import",
             ),
         )
+        environment = _reconcile_predeployment_ports(authority, environment)
         try:
             return _deployment_result(
                 selected.converge(

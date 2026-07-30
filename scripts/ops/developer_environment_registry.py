@@ -19,13 +19,15 @@ import os
 import pwd
 import re
 import secrets
+import socket
 import sqlite3
 import stat
+import struct
 import sys
 import tempfile
 import threading
 import tomllib
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence, Set
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
@@ -40,6 +42,10 @@ SYSTEM_SNAPSHOT: Final = SYSTEM_ROOT / "current-snapshot.json"
 CURRENT_SNAPSHOT_PATH: Final = SYSTEM_SNAPSHOT
 SYSTEM_FLEET_IDENTITY_INVENTORY: Final = SYSTEM_ROOT / "fleet-identity-inventory.json"
 SYSTEM_SEED: Final = Path("/usr/local/share/loom/developer-environment-registry-seed.toml")
+EXPECTED_ALLOCATOR_HOST: Final = "trt-eai-oldlab-2"
+PROC_NET_TCP: Final = (Path("/proc/net/tcp"), Path("/proc/net/tcp6"))
+DOCKER_SOCKET: Final = Path("/var/run/docker.sock")
+DOCKER_API_MAX_BYTES: Final = 4 << 20
 
 REGISTER_KIND: Final = "loom.developer-environment.register"
 CANDIDATE_KIND: Final = "loom.developer-environment.candidate-import"
@@ -255,6 +261,277 @@ NODE_IDENTITY_INVENTORY_FIELDS: Final = {
 
 class RegistryError(RuntimeError):
     """A bounded, secret-safe registry failure."""
+
+
+def _proc_listener_ports(path: Path) -> set[int]:
+    """Read one bounded procfs TCP table and reject malformed inventory."""
+
+    descriptor = -1
+    try:
+        lexical = path.lstat()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+        )
+        opened = os.fstat(descriptor)
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(65_536, (4 << 20) + 1 - total))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > 4 << 20:
+                raise RegistryError("host port inventory exceeds its size bound")
+            chunks.append(chunk)
+        rebound = os.fstat(descriptor)
+        current = path.lstat()
+    except RegistryError:
+        raise
+    except OSError as exc:
+        raise RegistryError("host port inventory is unavailable") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    identities = {(item.st_dev, item.st_ino) for item in (lexical, opened, rebound, current)}
+    if len(identities) != 1 or not stat.S_ISREG(opened.st_mode) or stat.S_ISLNK(lexical.st_mode):
+        raise RegistryError("host port inventory metadata is unsafe")
+    try:
+        lines = b"".join(chunks).decode("ascii").splitlines()
+    except UnicodeDecodeError as exc:
+        raise RegistryError("host port inventory is malformed") from exc
+    if not lines or "local_address" not in lines[0].split():
+        raise RegistryError("host port inventory is malformed")
+    listeners: set[int] = set()
+    for line in lines[1:]:
+        fields = line.split()
+        if (
+            len(fields) < 10
+            or ":" not in fields[1]
+            or re.fullmatch(r"[0-9A-Fa-f]{2}", fields[3]) is None
+        ):
+            raise RegistryError("host port inventory is malformed")
+        _address, raw_port = fields[1].rsplit(":", 1)
+        if re.fullmatch(r"[0-9A-Fa-f]{4}", raw_port) is None:
+            raise RegistryError("host port inventory is malformed")
+        port = int(raw_port, 16)
+        if port < 1 or port > 65_535:
+            raise RegistryError("host port inventory is malformed")
+        if fields[3].upper() == "0A":
+            listeners.add(port)
+    return listeners
+
+
+def collect_host_listener_ports(
+    paths: Sequence[Path] = PROC_NET_TCP,
+) -> frozenset[int]:
+    """Collect the canonical allocator host's current TCP listeners as root."""
+
+    hostname = socket.gethostname().split(".", 1)[0].rstrip(".").lower()
+    if os.getuid() != 0 or os.geteuid() != 0 or hostname != EXPECTED_ALLOCATOR_HOST:
+        raise RegistryError("host port inventory authority is unavailable")
+    if tuple(paths) != PROC_NET_TCP:
+        raise RegistryError("host port inventory paths are not fixed")
+    listeners: set[int] = set()
+    for path in paths:
+        listeners.update(_proc_listener_ports(path))
+    return frozenset(listeners)
+
+
+def _decode_bounded_chunked_body(encoded: bytes) -> bytes:
+    """Decode Docker's HTTP/1.1 chunked body without accepting extensions/trailers."""
+
+    decoded = bytearray()
+    offset = 0
+    while True:
+        line_end = encoded.find(b"\r\n", offset)
+        if line_end < 0:
+            raise RegistryError("Docker port inventory chunk framing is malformed")
+        raw_size = encoded[offset:line_end]
+        if re.fullmatch(rb"[0-9A-Fa-f]{1,8}", raw_size) is None:
+            raise RegistryError("Docker port inventory chunk size is malformed")
+        size = int(raw_size, 16)
+        offset = line_end + 2
+        if size == 0:
+            if encoded[offset:] != b"\r\n":
+                raise RegistryError("Docker port inventory chunk terminator is malformed")
+            return bytes(decoded)
+        if size > DOCKER_API_MAX_BYTES or len(decoded) + size > DOCKER_API_MAX_BYTES:
+            raise RegistryError("Docker port inventory body exceeds its size bound")
+        chunk_end = offset + size
+        if chunk_end + 2 > len(encoded) or encoded[chunk_end : chunk_end + 2] != b"\r\n":
+            raise RegistryError("Docker port inventory chunk framing is malformed")
+        decoded.extend(encoded[offset:chunk_end])
+        offset = chunk_end + 2
+
+
+def _docker_published_ports(
+    path: Path,
+    *,
+    expected_uid: int,
+) -> set[int]:
+    """Read Docker's published-port reservations over one fixed Unix socket."""
+
+    client: socket.socket | None = None
+    try:
+        before = path.lstat()
+        if (
+            not stat.S_ISSOCK(before.st_mode)
+            or stat.S_ISLNK(before.st_mode)
+            or before.st_uid != expected_uid
+            or before.st_mode & 0o002
+        ):
+            raise RegistryError("Docker port inventory socket metadata is unsafe")
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(5)
+        client.connect(str(path))
+        connected = path.lstat()
+        if (before.st_dev, before.st_ino, before.st_mode, before.st_uid, before.st_gid) != (
+            connected.st_dev,
+            connected.st_ino,
+            connected.st_mode,
+            connected.st_uid,
+            connected.st_gid,
+        ):
+            raise RegistryError("Docker port inventory socket identity drifted")
+        if hasattr(socket, "SO_PEERCRED"):
+            credentials = client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+            _pid, peer_uid, _gid = struct.unpack("3i", credentials)
+            if peer_uid != expected_uid:
+                raise RegistryError("Docker port inventory peer identity is invalid")
+        client.sendall(
+            b"GET /containers/json?all=1 HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n",
+        )
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = client.recv(min(65_536, DOCKER_API_MAX_BYTES + 65_537 - total))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > DOCKER_API_MAX_BYTES + 65_536:
+                raise RegistryError("Docker port inventory response exceeds its size bound")
+            chunks.append(chunk)
+        after = path.lstat()
+    except RegistryError:
+        raise
+    except (OSError, TimeoutError) as exc:
+        raise RegistryError("Docker port inventory is unavailable") from exc
+    finally:
+        if client is not None:
+            client.close()
+    if (
+        before.st_dev,
+        before.st_ino,
+        before.st_mode,
+        before.st_uid,
+        before.st_gid,
+    ) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_mode,
+        after.st_uid,
+        after.st_gid,
+    ):
+        raise RegistryError("Docker port inventory socket identity drifted")
+    response = b"".join(chunks)
+    if b"\r\n\r\n" not in response:
+        raise RegistryError("Docker port inventory HTTP response is malformed")
+    header, body = response.split(b"\r\n\r\n", 1)
+    if len(header) > 65_536:
+        raise RegistryError("Docker port inventory HTTP headers exceed their size bound")
+    try:
+        lines = header.decode("ascii").split("\r\n")
+    except UnicodeDecodeError as exc:
+        raise RegistryError("Docker port inventory HTTP response is malformed") from exc
+    if not lines or re.fullmatch(r"HTTP/1\.[01] 200(?: [ -~]*)?", lines[0]) is None:
+        raise RegistryError("Docker port inventory HTTP status is invalid")
+    headers: dict[str, str] = {}
+    for line in lines[1:]:
+        if ":" not in line:
+            raise RegistryError("Docker port inventory HTTP response is malformed")
+        name, value = line.split(":", 1)
+        normalized = name.strip().lower()
+        if (
+            re.fullmatch(r"[a-z0-9-]+", normalized) is None
+            or normalized in headers
+            or "\r" in value
+            or "\n" in value
+        ):
+            raise RegistryError("Docker port inventory HTTP response is malformed")
+        headers[normalized] = value.strip()
+    allowed_headers = {
+        "api-version",
+        "connection",
+        "content-length",
+        "content-type",
+        "date",
+        "docker-experimental",
+        "ostype",
+        "server",
+        "transfer-encoding",
+    }
+    if set(headers) - allowed_headers:
+        raise RegistryError("Docker port inventory HTTP binding is invalid")
+    content_length = headers.get("content-length")
+    transfer_encoding = headers.get("transfer-encoding")
+    if transfer_encoding is not None:
+        if transfer_encoding.lower() != "chunked" or content_length is not None:
+            raise RegistryError("Docker port inventory HTTP binding is invalid")
+        body = _decode_bounded_chunked_body(body)
+    elif (
+        content_length is None
+        or re.fullmatch(r"[0-9]+", content_length) is None
+        or int(content_length) != len(body)
+        or len(body) > DOCKER_API_MAX_BYTES
+    ):
+        raise RegistryError("Docker port inventory HTTP binding is invalid")
+    try:
+        payload = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RegistryError("Docker port inventory payload is malformed") from exc
+    if not isinstance(payload, list):
+        raise RegistryError("Docker port inventory payload is malformed")
+    published: set[int] = set()
+    for container in payload:
+        if (
+            not isinstance(container, dict)
+            or DIGEST_RE.fullmatch(str(container.get("Id"))) is None
+            or not isinstance(container.get("Ports"), list)
+        ):
+            raise RegistryError("Docker port inventory container binding is invalid")
+        for entry in container["Ports"]:
+            if not isinstance(entry, dict) or set(entry) not in (
+                {"PrivatePort", "Type"},
+                {"IP", "PrivatePort", "PublicPort", "Type"},
+            ):
+                raise RegistryError("Docker port inventory port binding is invalid")
+            if (
+                not _plain_integer(entry.get("PrivatePort"), minimum=1)
+                or entry["PrivatePort"] > 65_535
+                or entry.get("Type") not in {"tcp", "udp", "sctp"}
+                or (
+                    "PublicPort" in entry
+                    and (
+                        not _plain_integer(entry["PublicPort"], minimum=1)
+                        or entry["PublicPort"] > 65_535
+                        or not isinstance(entry.get("IP"), str)
+                        or len(entry["IP"]) > 64
+                    )
+                )
+            ):
+                raise RegistryError("Docker port inventory port binding is invalid")
+            if "PublicPort" in entry:
+                published.add(int(entry["PublicPort"]))
+    return published
+
+
+def collect_host_reserved_ports() -> frozenset[int]:
+    """Collect all fixed-host TCP listeners and Docker published reservations."""
+
+    listeners = collect_host_listener_ports()
+    published = _docker_published_ports(DOCKER_SOCKET, expected_uid=0)
+    return frozenset(set(listeners) | published)
 
 
 @dataclass(frozen=True, slots=True)
@@ -621,6 +898,7 @@ class DeveloperEnvironmentRegistry:
         snapshot_path: Path | None = None,
         fleet_identity_inventory_path: Path | None = None,
         system_mode: bool = False,
+        port_inventory_collector: Callable[[], Set[int]] | None = None,
     ) -> None:
         policy = policy or AllocationPolicy()
         policy.validate()
@@ -640,6 +918,11 @@ class DeveloperEnvironmentRegistry:
         self.snapshot_lock_path = database.parent / ".current-snapshot.lock"
         self.snapshot_dirty = False
         self.system_mode = system_mode
+        self.port_inventory_collector = (
+            collect_host_reserved_ports
+            if system_mode and port_inventory_collector is None
+            else port_inventory_collector
+        )
         self.policy = policy
         self.database.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
@@ -989,6 +1272,7 @@ class DeveloperEnvironmentRegistry:
                     applied_registry_generation INTEGER,
                     applied_registry_payload_sha256 TEXT,
                     finalization_payload_sha256 TEXT,
+                    failed_from_phase TEXT,
                     phase TEXT NOT NULL
                         CHECK (
                             phase IN (
@@ -1016,6 +1300,21 @@ class DeveloperEnvironmentRegistry:
                     payload_json TEXT NOT NULL,
                     payload_sha256 TEXT NOT NULL UNIQUE,
                     created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS port_allocation_journal (
+                    journal_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    env_id TEXT NOT NULL REFERENCES environments(env_id),
+                    action TEXT NOT NULL CHECK (action IN ('initial', 'pre-deployment-reallocation')),
+                    expected_resource_generation INTEGER NOT NULL,
+                    applied_resource_generation INTEGER NOT NULL,
+                    registry_generation INTEGER NOT NULL,
+                    prior_ports_json TEXT NOT NULL,
+                    allocated_ports_json TEXT NOT NULL,
+                    reserved_ports_json TEXT NOT NULL,
+                    reservation_inventory_sha256 TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE (env_id, applied_resource_generation)
                 );
                 COMMIT;
                 """
@@ -1063,6 +1362,10 @@ class DeveloperEnvironmentRegistry:
                             f"ALTER TABLE deployments ADD COLUMN {column} {declaration}"
                         )
                 connection.execute("COMMIT")
+            if "failed_from_phase" not in deployment_columns:
+                connection.execute(
+                    "ALTER TABLE deployments ADD COLUMN failed_from_phase TEXT",
+                )
         except Exception:
             try:
                 connection.execute("ROLLBACK")
@@ -1289,10 +1592,87 @@ class DeveloperEnvironmentRegistry:
                 return identity
         raise RegistryError("registry UID allocation is exhausted")
 
-    def _allocate_ports(self, connection: sqlite3.Connection) -> dict[str, int]:
+    def _host_port_inventory(self) -> tuple[set[int], str]:
+        collector = self.port_inventory_collector
+        if collector is None:
+            return set(), _digest({"reserved_ports": []})
+        try:
+            collected = collector()
+        except RegistryError:
+            raise
+        except Exception as exc:
+            raise RegistryError("host port inventory collection failed safely") from exc
+        if not isinstance(collected, Set):
+            raise RegistryError("host port inventory is malformed")
+        ports = set(collected)
+        if any(
+            not isinstance(port, int) or isinstance(port, bool) or port < 1 or port > 65_535
+            for port in ports
+        ):
+            raise RegistryError("host port inventory is malformed")
+        ordered = sorted(ports)
+        return ports, _digest({"reserved_ports": ordered})
+
+    @staticmethod
+    def _record_port_allocation(
+        connection: sqlite3.Connection,
+        *,
+        env_id: str,
+        action: str,
+        expected_resource_generation: int,
+        applied_resource_generation: int,
+        registry_generation: int,
+        prior_ports: Mapping[str, int],
+        allocated_ports: Mapping[str, int],
+        reserved_ports: set[int],
+        reservation_inventory_sha256: str,
+    ) -> None:
+        if (
+            action not in {"initial", "pre-deployment-reallocation"}
+            or set(allocated_ports) != set(PORT_NAMES)
+            or (prior_ports and set(prior_ports) != set(PORT_NAMES))
+            or DIGEST_RE.fullmatch(reservation_inventory_sha256) is None
+        ):
+            raise RegistryError("port allocation journal binding is invalid")
+        connection.execute(
+            """
+            INSERT INTO port_allocation_journal(
+                env_id, action, expected_resource_generation,
+                applied_resource_generation, registry_generation,
+                prior_ports_json, allocated_ports_json, reserved_ports_json,
+                reservation_inventory_sha256, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                env_id,
+                action,
+                expected_resource_generation,
+                applied_resource_generation,
+                registry_generation,
+                json.dumps(dict(prior_ports), sort_keys=True, separators=(",", ":")),
+                json.dumps(dict(allocated_ports), sort_keys=True, separators=(",", ":")),
+                json.dumps(sorted(reserved_ports), separators=(",", ":")),
+                reservation_inventory_sha256,
+                _timestamp(),
+            ),
+        )
+
+    def _allocate_ports(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        reserved_ports: set[int],
+        excluding_env_id: str | None = None,
+    ) -> dict[str, int]:
         used = {
-            int(row["port"]) for row in connection.execute("SELECT port FROM environment_ports")
+            int(row["port"])
+            for row in connection.execute(
+                "SELECT port FROM environment_ports"
+                + (" WHERE env_id != ?" if excluding_env_id is not None else ""),
+                (() if excluding_env_id is None else (excluding_env_id,)),
+            )
         }
+        used.update(reserved_ports)
         base = self.policy.port_start
         while base + max(PORT_OFFSETS.values()) <= self.policy.port_end:
             ports = {name: base + offset for name, offset in PORT_OFFSETS.items()}
@@ -1300,6 +1680,91 @@ class DeveloperEnvironmentRegistry:
                 return ports
             base += self.policy.port_block_size
         raise RegistryError("registry port allocation is exhausted")
+
+    def reconcile_predeployment_ports(
+        self,
+        env_id: str,
+        *,
+        principal_id: str,
+        expected_resource_generation: int,
+    ) -> EnvironmentRecord:
+        """Repair one pristine dynamic allocation after a listener TOCTOU race."""
+
+        if (
+            ENV_ID_RE.fullmatch(env_id) is None
+            or PRINCIPAL_RE.fullmatch(principal_id) is None
+            or not _plain_integer(expected_resource_generation, minimum=1)
+        ):
+            raise RegistryError("pre-deployment port recovery binding is invalid")
+        if self.port_inventory_collector is None:
+            return self.lookup(env_id, principal_id=principal_id)
+        reserved_ports, inventory_sha256 = self._host_port_inventory()
+        with self._transaction() as connection:
+            environment = self._environment(connection, env_id)
+            if environment.principal_id != principal_id:
+                raise RegistryError("pre-deployment port recovery ownership is invalid")
+            if environment.resource_generation != expected_resource_generation:
+                raise RegistryError("pre-deployment port recovery generation is stale")
+            deployments = connection.execute(
+                """
+                SELECT phase, failed_from_phase, applied_resource_generation,
+                    applied_registry_generation, applied_registry_payload_sha256,
+                    finalization_payload_sha256
+                FROM deployments WHERE env_id = ?
+                """,
+                (env_id,),
+            ).fetchall()
+            safe_failed_history = all(
+                row["phase"] == "failed"
+                and row["failed_from_phase"] == "requested"
+                and row["applied_resource_generation"] is None
+                and row["applied_registry_generation"] is None
+                and row["applied_registry_payload_sha256"] is None
+                and row["finalization_payload_sha256"] is None
+                for row in deployments
+            )
+            # Legacy seeds and every environment with deployment history keep
+            # their published immutable identity. Only failures fenced while
+            # still in the initial requested phase prove that no immutable
+            # resource publication was accepted.
+            if (
+                environment.layout_version != "dynamic-v1"
+                or environment.state != "ready"
+                or environment.current_candidate_id is not None
+                or not safe_failed_history
+            ):
+                return environment
+            if not (set(environment.ports.values()) & reserved_ports):
+                return environment
+            ports = self._allocate_ports(
+                connection,
+                reserved_ports=reserved_ports,
+                excluding_env_id=env_id,
+            )
+            connection.execute("DELETE FROM environment_ports WHERE env_id = ?", (env_id,))
+            connection.executemany(
+                "INSERT INTO environment_ports(env_id, name, port) VALUES (?, ?, ?)",
+                ((env_id, name, port) for name, port in sorted(ports.items())),
+            )
+            applied_generation = environment.resource_generation + 1
+            connection.execute(
+                "UPDATE environments SET resource_generation = ? WHERE env_id = ?",
+                (applied_generation, env_id),
+            )
+            registry_generation = self._bump_generation(connection)
+            self._record_port_allocation(
+                connection,
+                env_id=env_id,
+                action="pre-deployment-reallocation",
+                expected_resource_generation=environment.resource_generation,
+                applied_resource_generation=applied_generation,
+                registry_generation=registry_generation,
+                prior_ports=environment.ports,
+                allocated_ports=ports,
+                reserved_ports=reserved_ports,
+                reservation_inventory_sha256=inventory_sha256,
+            )
+            return self._environment(connection, env_id)
 
     @staticmethod
     def _dynamic_resources(env_id: str, runtime_id: str) -> dict[str, str]:
@@ -1379,7 +1844,11 @@ class DeveloperEnvironmentRegistry:
                 token_bytes=8,
             )
             uid = self._allocate_uid(connection)
-            ports = self._allocate_ports(connection)
+            reserved_ports, reservation_inventory_sha256 = self._host_port_inventory()
+            ports = self._allocate_ports(
+                connection,
+                reserved_ports=reserved_ports,
+            )
             resources = self._dynamic_resources(env_id, runtime_id)
             created_at = _timestamp()
             connection.execute(
@@ -1435,7 +1904,19 @@ class DeveloperEnvironmentRegistry:
                 "INSERT INTO registration_requests VALUES (?, ?, ?, ?)",
                 (principal_id, key, request_digest, env_id),
             )
-            self._bump_generation(connection)
+            registry_generation = self._bump_generation(connection)
+            self._record_port_allocation(
+                connection,
+                env_id=env_id,
+                action="initial",
+                expected_resource_generation=1,
+                applied_resource_generation=1,
+                registry_generation=registry_generation,
+                prior_ports={},
+                allocated_ports=ports,
+                reserved_ports=reserved_ports,
+                reservation_inventory_sha256=reservation_inventory_sha256,
+            )
             return self._environment(connection, env_id)
 
     def registration_idempotency_replay(
@@ -2478,10 +2959,11 @@ class DeveloperEnvironmentRegistry:
                     applied_resource_generation = NULL,
                     applied_registry_generation = NULL,
                     applied_registry_payload_sha256 = NULL,
-                    finalization_payload_sha256 = NULL
+                    finalization_payload_sha256 = NULL,
+                    failed_from_phase = ?
                 WHERE deployment_id = ?
                 """,
-                (_timestamp(), deployment_id),
+                (_timestamp(), expected_phase, deployment_id),
             )
             connection.execute(
                 "DELETE FROM deployment_finalizations WHERE deployment_id = ?",

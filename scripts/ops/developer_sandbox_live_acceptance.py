@@ -159,6 +159,12 @@ CONTAINER_ROLES = ("worker", "trial", "verifier", "sidecar")
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SESSION_RE = re.compile(r"^[0-9a-f]{32}$")
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+_SYSTEMD_SLICE_RE = re.compile(r"^loom-job-([1-9][0-9]*)-([0-9a-f]{40})\.slice$")
+_SLURM_START_TIME_RE = re.compile(
+    r"^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])"
+    r"T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]$",
+)
+_CPUSET_RE = re.compile(r"^[0-9]+(?:-[0-9]+)?(?:,[0-9]+(?:-[0-9]+)?)*$")
 _SANDBOX_RE = re.compile(r"^[a-z][a-z0-9-]{0,47}$")
 _SERVICE_USER_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _ENV_ID_RE = re.compile(r"^denv-[a-z0-9-]{8,64}$")
@@ -629,6 +635,347 @@ def _strict_descendant(child: str, parent: str) -> bool:
         and parent_path != PurePosixPath("/")
         and parent_path in child_path.parents
     )
+
+
+_CGROUP_EVIDENCE_FIELDS = frozenset(
+    {
+        "layout_version",
+        "job_path",
+        "container_parent",
+        "slurm_job_id",
+        "slurm_pid_cgroup_paths",
+        "controllers",
+        "delegated_controllers",
+        "delegated",
+        "cpu_cores_max",
+        "memory_bytes_max",
+        "pids_max",
+        "pids_current",
+        "systemd_slice_receipt",
+        "systemd_slice_live",
+    },
+)
+_SYSTEMD_SLICE_RECEIPT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "kind",
+        "systemd_slice",
+        "slice_identity_sha256",
+        "unit_sha256",
+        "job_id",
+        "job_start_time",
+        "cluster",
+        "node_list",
+        "account",
+        "env_id",
+        "resource_generation",
+        "runtime_id",
+        "candidate_id",
+        "candidate_sha",
+        "candidate_tree",
+        "cpu_max",
+        "memory_max",
+        "memory_swap_max_source",
+        "memory_swap_max_effective",
+        "pids_max",
+        "cpuset_cpus",
+        "cpuset_mems",
+        "gpu_tres",
+        "gpu_detail",
+        "payload_sha256",
+    },
+)
+_SYSTEMD_SLICE_LIVE_FIELDS = frozenset(
+    {
+        "path",
+        "cpu_cores_max",
+        "memory_bytes_max",
+        "memory_swap_bytes_max",
+        "pids_max",
+        "cpuset_cpus",
+        "cpuset_mems",
+    },
+)
+
+
+def _strict_systemd_slice_descendant(child: Any, live_path: Any) -> bool:
+    return (
+        isinstance(child, str)
+        and isinstance(live_path, str)
+        and _strict_descendant(child, live_path)
+    )
+
+
+def _canonical_systemd_slice_control_group(unit: str) -> str | None:
+    match = _SYSTEMD_SLICE_RE.fullmatch(unit)
+    if match is None:
+        return None
+    job_id = match.group(1)
+    return f"/loom.slice/loom-job.slice/loom-job-{job_id}.slice/{unit}"
+
+
+def _positive_gpu_tres_count(value: Any) -> int | None:
+    if not isinstance(value, str):
+        return None
+    counts: list[int] = []
+    for item in value.split(","):
+        name, separator, raw = item.partition("=")
+        if not separator or (name != "gres/gpu" and not name.startswith("gres/gpu:")):
+            continue
+        if re.fullmatch(r"[1-9][0-9]*", raw) is None:
+            return None
+        counts.append(int(raw))
+    return sum(counts) if counts else None
+
+
+def _gpu_detail_ids(value: Any) -> set[str] | None:
+    if (
+        not isinstance(value, str)
+        or value in {"", "(null)", "None", "not-required"}
+        or "mig" in value.lower()
+        or len(value) > 4096
+    ):
+        return None
+    result: set[str] = set()
+    for descriptor in value.split(","):
+        match = re.fullmatch(
+            r"gpu(?::[A-Za-z0-9_.-]+)*\(IDX:([0-9]+(?:-[0-9]+)?)\)",
+            descriptor,
+        )
+        if match is None:
+            return None
+        start_text, separator, end_text = match.group(1).partition("-")
+        start = int(start_text)
+        end = int(end_text) if separator else start
+        if start > 4095 or end < start or end > 4095:
+            return None
+        for index in range(start, end + 1):
+            identity = str(index)
+            if identity in result:
+                return None
+            result.add(identity)
+    return result or None
+
+
+def _validate_cgroup_evidence(
+    cgroup: Any,
+    containers: Any,
+    *,
+    job_id: Any,
+    job_start_time: Any,
+    node: Any,
+    pool: str,
+    account: Any,
+    sandbox: Any,
+    environment: Mapping[str, Any],
+    candidate_sha: Any,
+    candidate_tree: Any,
+    allocation: Any,
+) -> None:
+    if (
+        not isinstance(cgroup, Mapping)
+        or set(cgroup) != _CGROUP_EVIDENCE_FIELDS
+        or not isinstance(containers, list)
+        or not isinstance(allocation, Mapping)
+        or not isinstance(job_id, str)
+        or re.fullmatch(r"[1-9][0-9]*", job_id) is None
+        or not isinstance(job_start_time, str)
+        or _SLURM_START_TIME_RE.fullmatch(job_start_time) is None
+    ):
+        raise AcceptanceError("cgroup evidence shape or job start identity is invalid")
+    job_path = cgroup.get("job_path")
+    container_parent = cgroup.get("container_parent")
+    slurm_paths = cgroup.get("slurm_pid_cgroup_paths")
+    if (
+        not isinstance(job_path, str)
+        or f"job_{job_id}" not in PurePosixPath(job_path).parts
+        or cgroup.get("slurm_job_id") != job_id
+        or not isinstance(slurm_paths, list)
+        or not slurm_paths
+        or any(
+            not isinstance(path, str) or not _strict_descendant(path, job_path)
+            for path in slurm_paths
+        )
+        or set(cgroup.get("controllers", ())) != {"cpu", "memory", "pids"}
+        or set(cgroup.get("delegated_controllers", ())) != {"cpu", "memory", "pids"}
+        or cgroup.get("delegated") is not True
+        or cgroup.get("cpu_cores_max") != allocation.get("cpu_cores")
+        or cgroup.get("memory_bytes_max") != allocation.get("memory_bytes")
+        or cgroup.get("pids_max") != allocation.get("pids")
+        or not isinstance(cgroup.get("pids_current"), int)
+        or isinstance(cgroup.get("pids_current"), bool)
+        or cgroup["pids_current"] < 0
+        or cgroup["pids_current"] > cgroup["pids_max"]
+        or any(
+            not isinstance(container, Mapping) or container.get("cgroup_parent") != container_parent
+            for container in containers
+        )
+    ):
+        raise AcceptanceError("Slurm job cgroup binding or limits are invalid")
+    expected_gpu_count = allocation.get("gpu_count")
+    allocation_gpu_tres_count = _positive_gpu_tres_count(allocation.get("tres"))
+    container_gpu_sets: list[set[str]] = []
+    gpu_shape_valid = True
+    for container in containers:
+        raw_gpu_ids = container.get(
+            "gpu_ids",
+            container.get("device_ids", container.get("limits", {}).get("gpu_ids", ())),
+        )
+        if (
+            not isinstance(raw_gpu_ids, list)
+            or any(not isinstance(gpu_id, str) or not gpu_id for gpu_id in raw_gpu_ids)
+            or len(raw_gpu_ids) != len(set(raw_gpu_ids))
+        ):
+            gpu_shape_valid = False
+            container_gpu_sets.append(set())
+        else:
+            container_gpu_sets.append(set(raw_gpu_ids))
+    allocated_container_gpu_sets = [gpu_ids for gpu_ids in container_gpu_sets if gpu_ids]
+    if (
+        not isinstance(expected_gpu_count, int)
+        or isinstance(expected_gpu_count, bool)
+        or expected_gpu_count < 0
+        or not gpu_shape_valid
+        or (
+            expected_gpu_count == 0
+            and (allocation_gpu_tres_count is not None or allocated_container_gpu_sets)
+        )
+        or (
+            expected_gpu_count > 0
+            and (
+                allocation_gpu_tres_count != expected_gpu_count
+                or len(allocated_container_gpu_sets) != 1
+                or len(allocated_container_gpu_sets[0]) != expected_gpu_count
+            )
+        )
+    ):
+        raise AcceptanceError("container GPU assignment does not match the Slurm allocation")
+    layout = cgroup.get("layout_version")
+    if layout == "cgroupfs-job-v1":
+        if (
+            container_parent != job_path
+            or cgroup.get("systemd_slice_receipt") is not None
+            or cgroup.get("systemd_slice_live") is not None
+            or any(
+                not _strict_descendant(
+                    str(container.get("observed_cgroup_path")),
+                    job_path,
+                )
+                for container in containers
+            )
+        ):
+            raise AcceptanceError("cgroupfs container escaped its Slurm job cgroup")
+        return
+    if layout != "systemd-mirror-v1":
+        raise AcceptanceError("cgroup layout version is invalid")
+    receipt = cgroup.get("systemd_slice_receipt")
+    live = cgroup.get("systemd_slice_live")
+    if (
+        not isinstance(container_parent, str)
+        or _SYSTEMD_SLICE_RE.fullmatch(container_parent) is None
+        or not isinstance(receipt, Mapping)
+        or set(receipt) != _SYSTEMD_SLICE_RECEIPT_FIELDS
+        or not isinstance(live, Mapping)
+        or set(live) != _SYSTEMD_SLICE_LIVE_FIELDS
+    ):
+        raise AcceptanceError("systemd mirror evidence shape is invalid")
+    unsigned = {key: value for key, value in receipt.items() if key != "payload_sha256"}
+    identity = {
+        "cluster": receipt.get("cluster"),
+        "node": str(receipt.get("node_list", "")).lower(),
+        "job_id": receipt.get("job_id"),
+        "job_start_time": receipt.get("job_start_time"),
+        "account": receipt.get("account"),
+        "env_id": receipt.get("env_id"),
+        "resource_generation": receipt.get("resource_generation"),
+        "runtime_id": receipt.get("runtime_id"),
+        "candidate_id": receipt.get("candidate_id"),
+        "candidate_sha": receipt.get("candidate_sha"),
+        "candidate_tree": receipt.get("candidate_tree"),
+    }
+    identity_digest = hashlib.sha256(_canonical_digest_bytes(identity)).hexdigest()
+    cpu_fields = str(receipt.get("cpu_max", "")).split()
+    try:
+        cpu_quota, cpu_period = (int(value) for value in cpu_fields)
+    except (TypeError, ValueError):
+        cpu_quota, cpu_period = 0, 0
+    expected_cluster = "trt-oldlab" if pool == "oldlab" else "trt-gb10"
+    receipt_gpu_count = _positive_gpu_tres_count(receipt.get("gpu_tres"))
+    receipt_gpu_ids = _gpu_detail_ids(receipt.get("gpu_detail"))
+    if (
+        receipt.get("schema_version") != 1
+        or receipt.get("kind") != "loom.slurm-systemd-slice-receipt"
+        or receipt.get("systemd_slice") != container_parent
+        or receipt.get("slice_identity_sha256") != identity_digest
+        or container_parent != f"loom-job-{job_id}-{identity_digest[:40]}.slice"
+        or _DIGEST_RE.fullmatch(str(receipt.get("unit_sha256"))) is None
+        or receipt.get("payload_sha256")
+        != hashlib.sha256(_canonical_digest_bytes(unsigned)).hexdigest()
+        or receipt.get("job_id") != job_id
+        or receipt.get("job_start_time") != job_start_time
+        or receipt.get("cluster") != expected_cluster
+        or str(receipt.get("node_list", "")).lower() != str(node).lower()
+        or receipt.get("account") != account
+        or receipt.get("env_id") != environment.get("env_id")
+        or receipt.get("resource_generation") != environment.get("resource_generation")
+        or receipt.get("runtime_id") != sandbox
+        or receipt.get("candidate_id") != environment.get("candidate_id")
+        or receipt.get("candidate_sha") != candidate_sha
+        or receipt.get("candidate_tree") != candidate_tree
+        or len(cpu_fields) != 2
+        or cpu_quota <= 0
+        or cpu_period <= 0
+        or cpu_quota != cgroup["cpu_cores_max"] * cpu_period
+        or receipt.get("memory_max") != str(cgroup["memory_bytes_max"])
+        or receipt.get("pids_max") != str(cgroup["pids_max"])
+        or receipt.get("memory_swap_max_source")
+        not in {
+            "max",
+            str(receipt.get("memory_swap_max_effective")),
+        }
+        or receipt.get("memory_swap_max_effective") != "0"
+        or not isinstance(receipt.get("cpuset_cpus"), str)
+        or _CPUSET_RE.fullmatch(receipt["cpuset_cpus"]) is None
+        or not isinstance(receipt.get("cpuset_mems"), str)
+        or _CPUSET_RE.fullmatch(receipt["cpuset_mems"]) is None
+        or (
+            expected_gpu_count == 0
+            and (
+                receipt.get("gpu_tres") != "not-required"
+                or receipt.get("gpu_detail") != "not-required"
+                or allocated_container_gpu_sets
+            )
+        )
+        or (
+            expected_gpu_count != 0
+            and (
+                receipt_gpu_count != expected_gpu_count
+                or receipt_gpu_ids is None
+                or len(receipt_gpu_ids) != expected_gpu_count
+                or len(allocated_container_gpu_sets) != 1
+                or allocated_container_gpu_sets[0] != receipt_gpu_ids
+            )
+        )
+    ):
+        raise AcceptanceError("systemd mirror receipt binding or limits are invalid")
+    live_path = live.get("path")
+    if (
+        live_path != _canonical_systemd_slice_control_group(container_parent)
+        or live.get("cpu_cores_max") != cgroup["cpu_cores_max"]
+        or live.get("memory_bytes_max") != cgroup["memory_bytes_max"]
+        or live.get("memory_swap_bytes_max") != 0
+        or live.get("pids_max") != cgroup["pids_max"]
+        or live.get("cpuset_cpus") != receipt["cpuset_cpus"]
+        or live.get("cpuset_mems") != receipt["cpuset_mems"]
+        or any(
+            not _strict_systemd_slice_descendant(
+                container.get("observed_cgroup_path"),
+                live_path,
+            )
+            for container in containers
+        )
+    ):
+        raise AcceptanceError("systemd mirror live path or limits drifted")
 
 
 def _matrix(values: Sequence[Mapping[str, Any]], *keys: str) -> set[tuple[Any, ...]]:
@@ -1273,6 +1620,23 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
         roles = [container["role"] for container in envelope["containers"]]
         if set(roles) != set(CONTAINER_ROLES) or len(roles) != len(CONTAINER_ROLES):
             failures.append("runtime envelope must contain exactly four container roles")
+        try:
+            _validate_cgroup_evidence(
+                envelope["cgroup"],
+                envelope["containers"],
+                job_id=envelope["job_id"],
+                job_start_time=envelope.get("job_start_time"),
+                node=envelope["node"],
+                pool=envelope["pool"],
+                account=envelope["account"],
+                sandbox=envelope["sandbox"],
+                environment=registry_environments[envelope["sandbox"]],
+                candidate_sha=envelope["candidate_sha"],
+                candidate_tree=envelope["candidate_tree"],
+                allocation=allocation,
+            )
+        except AcceptanceError as exc:
+            failures.append(f"runtime envelope cgroup evidence is invalid: {exc}")
         sums = {"cpu_cores": 0.0, "memory_bytes": 0, "pids": 0}
         container_ids: set[str] = set()
         observed_gpu_ids: set[str] = set()
@@ -1280,13 +1644,6 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
             if container["container_id"] in container_ids:
                 failures.append("runtime envelope container ID is duplicated")
             container_ids.add(container["container_id"])
-            if container["cgroup_parent"] != envelope["cgroup"]["job_path"]:
-                failures.append(f"{container['role']} cgroup parent does not match the job")
-            if not _strict_descendant(
-                container["observed_cgroup_path"],
-                envelope["cgroup"]["job_path"],
-            ):
-                failures.append(f"{container['role']} escaped the Slurm job cgroup")
             for field in sums:
                 sums[field] += container["limits"][field]
             if container["observed_limits"] != container["limits"]:
@@ -3602,7 +3959,6 @@ def _validate_platform_health_authority(
         containers = job.get("containers")
         policy = expected_policy[pool][0]
         job_id = job.get("job_id")
-        job_path = cgroup.get("job_path") if isinstance(cgroup, dict) else None
         networks = job.get("compose_networks")
         project = job.get("compose_project")
         if (
@@ -3637,31 +3993,12 @@ def _validate_platform_health_authority(
                     ("gpu_count", 0),
                 )
             )
-            or not isinstance(cgroup, dict)
-            or set(cgroup.get("controllers", ())) != {"cpu", "memory", "pids"}
-            or cgroup.get("slurm_job_id") != job_id
-            or not isinstance(job_path, str)
-            or f"job_{job_id}" not in PurePosixPath(job_path).parts
-            or not isinstance(cgroup.get("slurm_pid_cgroup_paths"), list)
-            or not cgroup["slurm_pid_cgroup_paths"]
-            or any(
-                not isinstance(path, str) or not _strict_descendant(path, job_path)
-                for path in cgroup["slurm_pid_cgroup_paths"]
-            )
-            or cgroup.get("cpu_cores_max") != allocation.get("cpu_cores")
-            or cgroup.get("memory_bytes_max") != allocation.get("memory_bytes")
-            or cgroup.get("pids_max") != allocation.get("pids")
             or not isinstance(containers, list)
             or {container.get("role") for container in containers if isinstance(container, dict)}
             != set(CONTAINER_ROLES)
             or len(containers) != len(CONTAINER_ROLES)
             or any(
                 not isinstance(container, dict)
-                or container.get("cgroup_parent") != job_path
-                or not _strict_descendant(
-                    str(container.get("observed_cgroup_path")),
-                    job_path,
-                )
                 or container.get("limits", {}).get("cpu_cores") != policy["container_cpus"]
                 or container.get("limits", {}).get("memory_bytes")
                 != policy["container_memory_mib"] * 1024**2
@@ -3673,12 +4010,6 @@ def _validate_platform_health_authority(
                 and (
                     not isinstance(job.get("host"), str)
                     or not job["host"]
-                    or cgroup.get("delegated") is not True
-                    or set(cgroup.get("delegated_controllers", ())) != {"cpu", "memory", "pids"}
-                    or not isinstance(cgroup.get("pids_current"), int)
-                    or isinstance(cgroup.get("pids_current"), bool)
-                    or cgroup["pids_current"] < 0
-                    or cgroup["pids_current"] > cgroup["pids_max"]
                     or not isinstance(job.get("device_probe"), dict)
                     or any(
                         not isinstance(container, dict)
@@ -3718,6 +4049,23 @@ def _validate_platform_health_authority(
             )
         ):
             raise AcceptanceError("platform-health mixed job evidence is invalid")
+        try:
+            _validate_cgroup_evidence(
+                cgroup,
+                containers,
+                job_id=job_id,
+                job_start_time=job.get("job_start_time"),
+                node=node,
+                pool=pool,
+                account=job.get("account"),
+                sandbox=sandbox,
+                environment=registry_environments[str(sandbox)],
+                candidate_sha=job.get("candidate_sha"),
+                candidate_tree=job.get("candidate_tree"),
+                allocation=allocation,
+            )
+        except (AcceptanceError, KeyError) as exc:
+            raise AcceptanceError("platform-health mixed job cgroup evidence is invalid") from exc
         combinations.add((sandbox, pool))
         compose_projects.add(project)
         compose_networks.update(networks)

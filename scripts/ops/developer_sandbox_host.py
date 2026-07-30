@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Any
 
 from scripts.ops import developer_environment_registry as environment_registry
+from scripts.ops import developer_sandbox_slurm_policy as slurm_policy
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SOURCE_PROFILES = REPO_ROOT / "deploy/developer-sandboxes"
@@ -107,6 +108,11 @@ UNIT_NAME = "loom-developer-sandbox@{sandbox}.service"
 RENEWAL_TIMER = "loom-developer-sandbox-attestation-renewal.timer"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+SYSTEMD_SLICE_RE = re.compile(r"^loom-job-[1-9][0-9]*-[0-9a-f]{40}\.slice$")
+SYSTEMD_SLICE_RECEIPT_ROOT = Path(
+    "/run/loom-developer-sandbox-slurm-policy/systemd-slices",
+)
+SYSTEMD_UNIT_ROOT = Path("/run/systemd/system")
 SLURM_AUTHORITY_BINDING_RE = re.compile(
     r"^slurm-policy-v1:(trt-oldlab|trt-gb10):[0-9a-f]{64}:[0-9a-f]{64}$",
 )
@@ -219,8 +225,14 @@ class Profile:
     def desired_file(self) -> Path:
         return DESIRED_ROOT / f"{self.sandbox}.json"
 
-    def worker_runtime_env(self, sha: str) -> Path:
-        return NFS_RUNTIME_ROOT / self.sandbox / sha / "worker-oldlab.env"
+    @property
+    def private_runtime_root(self) -> Path:
+        return self.state_root / "runtime"
+
+    def worker_runtime_env(self, sha: str, domain: str = "oldlab") -> Path:
+        if SHA_RE.fullmatch(sha) is None or domain not in {"oldlab", "gb10"}:
+            raise HostConvergeError("worker runtime identity is invalid")
+        return self.runtime_root / sha / f"worker-{domain}.env"
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,6 +316,7 @@ def _load_profile(path: Path) -> Profile:
         if not isinstance(name, str) or type(value) is not int or not 1 <= value <= 65535:
             raise HostConvergeError(f"profile ports are invalid: {path}")
         parsed_ports[name] = value
+    private_runtime_root = Path(str(raw.get("runtime_root", "")))
     profile = Profile(
         sandbox=sandbox,
         compose_project=str(raw.get("compose_project", "")),
@@ -312,7 +325,7 @@ def _load_profile(path: Path) -> Profile:
         state_root=Path(str(raw.get("state_root", ""))),
         cache_root=Path(str(raw.get("cache_root", ""))),
         evidence_root=Path(str(raw.get("evidence_root", ""))),
-        runtime_root=Path(str(raw.get("runtime_root", ""))),
+        runtime_root=NFS_RUNTIME_ROOT / sandbox,
         ports=parsed_ports,
     )
     if profile.compose_project != f"loom-sandbox-{sandbox}":
@@ -327,7 +340,7 @@ def _load_profile(path: Path) -> Profile:
     expected_children = {
         profile.cache_root: expected_state / "cache",
         profile.evidence_root: expected_state / "evidence",
-        profile.runtime_root: expected_state / "runtime",
+        private_runtime_root: expected_state / "runtime",
     }
     if any(actual != expected for actual, expected in expected_children.items()):
         raise HostConvergeError(f"invalid private roots in {path}")
@@ -737,10 +750,31 @@ def _converge_staging_shared_namespace(
 
 def staging_allocation_identity_converge(
     config: StagingAllocationConfig,
+    *,
+    candidate_sha: str,
+    candidate_tree: str,
+    authority_generation: int,
+    authority_convergence_id: str,
+    authority_request_id: str,
+    authority_requested_at: str,
 ) -> dict[str, Any]:
     node = _staging_allocation_node(config)
     identity = _converge_staging_identity(config)
     namespace = _converge_staging_shared_namespace(config)
+    profile = _staging_slurm_profile(config, REPO_ROOT)
+    try:
+        guard = slurm_policy.reconcile_staging_guard_binding(
+            Path("/"),
+            profile,
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+            authority_generation=authority_generation,
+            authority_convergence_id=authority_convergence_id,
+            authority_request_id=authority_request_id,
+            authority_requested_at=authority_requested_at,
+        )
+    except slurm_policy.PolicyError as exc:
+        raise HostConvergeError("staging allocation guard convergence failed safely") from exc
     return {
         "schema_version": 1,
         "kind": "staging_external_slurm_identity_bootstrap",
@@ -748,6 +782,7 @@ def staging_allocation_identity_converge(
         "canonical_host": socket.gethostname().rstrip(".").lower(),
         "service_identity": identity,
         "namespace": namespace,
+        "guard_binding": guard,
         "result": "pass",
     }
 
@@ -984,6 +1019,447 @@ def _staging_worker_heartbeat(
         raise HostConvergeError("staging worker heartbeat failed safely") from exc
 
 
+def _staging_guard_binding(
+    *,
+    candidate_sha: str,
+    candidate_tree: str,
+) -> dict[str, Any]:
+    try:
+        binding = slurm_policy.load_staging_guard_binding(required=True)
+    except slurm_policy.PolicyError as exc:
+        raise HostConvergeError("staging allocation guard binding is unavailable") from exc
+    assert binding is not None
+    if binding["candidate_sha"] != candidate_sha or binding["candidate_tree"] != candidate_tree:
+        raise HostConvergeError("staging allocation guard candidate binding drifted")
+    return binding
+
+
+def _staging_candidate_set_identity(
+    *,
+    candidate_sha: str,
+    candidate_tree: str,
+) -> tuple[dict[str, Any], str]:
+    binding = _staging_guard_binding(
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+    )
+    try:
+        candidate_set = slurm_policy.load_slurm_candidate_set()
+    except slurm_policy.PolicyError as exc:
+        raise HostConvergeError("staging allocation candidate set is unavailable") from exc
+    guard_binding = candidate_set["candidate_bindings"].get("loom-staging")
+    if (
+        not isinstance(guard_binding, dict)
+        or guard_binding
+        != {
+            "env_id": binding["env_id"],
+            "resource_generation": binding["resource_generation"],
+            "sandbox": binding["runtime_id"],
+            "service_user": binding["service_user"],
+            "slurm_qos": binding["slurm_qos"],
+            "candidate_id": binding["candidate_id"],
+            "candidate_sha": binding["candidate_sha"],
+            "candidate_tree": binding["candidate_tree"],
+        }
+        or DIGEST_RE.fullmatch(str(candidate_set.get("candidate_set_sha256"))) is None
+    ):
+        raise HostConvergeError("staging allocation candidate-set binding drifted")
+    return binding, str(candidate_set["candidate_set_sha256"])
+
+
+def _staging_allocation_job_name(
+    *,
+    candidate_sha: str,
+    node: str,
+    candidate_set_sha256: str,
+    resource_generation: int,
+) -> str:
+    if (
+        SHA_RE.fullmatch(candidate_sha) is None
+        or re.fullmatch(r"trt-gb10-(?:[1-9]|1[0-5])", node) is None
+        or DIGEST_RE.fullmatch(candidate_set_sha256) is None
+        or type(resource_generation) is not int
+        or resource_generation < 1
+    ):
+        raise HostConvergeError("staging allocation job identity is invalid")
+    return (
+        f"loom827-staging-{candidate_sha[:12]}-{node}-"
+        f"g{candidate_set_sha256}-a{resource_generation}"
+    )
+
+
+def _staging_slurm_profile(
+    config: StagingAllocationConfig,
+    repository: Path,
+) -> slurm_policy.Profile:
+    try:
+        profile = slurm_policy.load_profile(
+            repository / "deploy/slurm/developer-sandboxes/gb10.toml",
+        )
+    except slurm_policy.PolicyError as exc:
+        raise HostConvergeError("staging allocation Slurm profile is invalid") from exc
+    if (
+        profile.cluster != config.cluster
+        or profile.controller != config.controller
+        or profile.submit_host != config.submit_host
+        or profile.allowed_nodes != config.allowed_nodes
+        or profile.infrastructure_nodes != config.infrastructure_nodes
+        or profile.host_aliases
+        != {node: host.lower() for node, host in config.host_aliases.items()}
+        or profile.job_pids_max != 65536
+        or profile.docker_cgroup_driver not in {"cgroupfs", "systemd"}
+    ):
+        raise HostConvergeError("staging allocation Slurm profile binding drifted")
+    return profile
+
+
+def _staging_allocation_job_start_time(
+    config: StagingAllocationConfig,
+    *,
+    job_id: str,
+    node: str,
+) -> str:
+    output = _run(("scontrol", "show", "job", "--oneliner", job_id)).stdout
+    fields = {
+        name: re.findall(rf"(?:^|\s){name}=(\S+)", output)
+        for name in ("JobId", "Account", "UserId", "NodeList", "StartTime")
+    }
+    expected_user_prefix = f"{config.batch_user}("
+    if (
+        any(len(values) != 1 for values in fields.values())
+        or fields["JobId"][0] != job_id
+        or fields["Account"][0] != config.slurm_account
+        or not fields["UserId"][0].startswith(expected_user_prefix)
+        or fields["NodeList"][0].lower() != node.lower()
+        or fields["StartTime"][0] in {"", "Unknown", "None", "(null)"}
+        or any(character.isspace() for character in fields["StartTime"][0])
+    ):
+        raise HostConvergeError("staging allocation Slurm start identity drifted")
+    return str(fields["StartTime"][0])
+
+
+def _staging_cgroup_command(
+    config: StagingAllocationConfig,
+    profile: slurm_policy.Profile,
+    binding: Mapping[str, Any],
+    *,
+    cgroup_program: Path,
+    job_id: str,
+    node: str,
+    job_start_time: str,
+) -> tuple[str, ...]:
+    return (
+        "/usr/bin/python3",
+        "-I",
+        "-B",
+        str(cgroup_program),
+        "--job-id",
+        job_id,
+        "--pids-max",
+        str(profile.job_pids_max),
+        "--wait-seconds",
+        "30",
+        "--docker-driver",
+        profile.docker_cgroup_driver,
+        "--cluster",
+        config.cluster,
+        "--node",
+        node,
+        "--job-start-time",
+        job_start_time,
+        "--account",
+        config.slurm_account,
+        "--env-id",
+        str(binding["env_id"]),
+        "--resource-generation",
+        str(binding["resource_generation"]),
+        "--runtime-id",
+        str(binding["runtime_id"]),
+        "--candidate-id",
+        str(binding["candidate_id"]),
+        "--candidate-sha",
+        str(binding["candidate_sha"]),
+        "--candidate-tree",
+        str(binding["candidate_tree"]),
+    )
+
+
+def _staging_slice_identity(
+    config: StagingAllocationConfig,
+    binding: Mapping[str, Any],
+    *,
+    job_id: str,
+    node: str,
+    job_start_time: str,
+) -> tuple[str, str]:
+    identity = {
+        "cluster": config.cluster,
+        "node": node.lower(),
+        "job_id": job_id,
+        "job_start_time": job_start_time,
+        "account": config.slurm_account,
+        "env_id": binding["env_id"],
+        "resource_generation": binding["resource_generation"],
+        "runtime_id": binding["runtime_id"],
+        "candidate_id": binding["candidate_id"],
+        "candidate_sha": binding["candidate_sha"],
+        "candidate_tree": binding["candidate_tree"],
+    }
+    digest = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("ascii"),
+    ).hexdigest()
+    return f"loom-job-{job_id}-{digest[:40]}.slice", digest
+
+
+def _staging_systemd_slice_receipt(
+    config: StagingAllocationConfig,
+    binding: Mapping[str, Any],
+    *,
+    job_id: str,
+    node: str,
+    job_start_time: str,
+    cgroup_parent: str,
+    receipt_root: Path = SYSTEMD_SLICE_RECEIPT_ROOT,
+    unit_root: Path = SYSTEMD_UNIT_ROOT,
+    expected_authority_uid: int = 0,
+    expected_authority_gid: int = 0,
+) -> dict[str, Any]:
+    expected_unit, identity_sha256 = _staging_slice_identity(
+        config,
+        binding,
+        job_id=job_id,
+        node=node,
+        job_start_time=job_start_time,
+    )
+    if cgroup_parent != expected_unit:
+        raise HostConvergeError("staging allocation systemd slice identity drifted")
+    receipt_path = receipt_root / f"{cgroup_parent}.json"
+    unit_path = unit_root / cgroup_parent
+    try:
+        receipt_metadata = receipt_path.lstat()
+        unit_metadata = unit_path.lstat()
+        raw = receipt_path.read_bytes()
+        unit = unit_path.read_bytes()
+        receipt = json.loads(raw)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HostConvergeError("staging allocation systemd receipt is unavailable") from exc
+    fields = {
+        "schema_version",
+        "kind",
+        "systemd_slice",
+        "slice_identity_sha256",
+        "unit_sha256",
+        "job_id",
+        "job_start_time",
+        "cluster",
+        "node_list",
+        "account",
+        "env_id",
+        "resource_generation",
+        "runtime_id",
+        "candidate_id",
+        "candidate_sha",
+        "candidate_tree",
+        "cpu_max",
+        "memory_max",
+        "memory_swap_max_source",
+        "memory_swap_max_effective",
+        "pids_max",
+        "cpuset_cpus",
+        "cpuset_mems",
+        "gpu_tres",
+        "gpu_detail",
+        "payload_sha256",
+    }
+    unsigned = (
+        {key: value for key, value in receipt.items() if key != "payload_sha256"}
+        if isinstance(receipt, dict)
+        else {}
+    )
+    if (
+        not isinstance(receipt, dict)
+        or set(receipt) != fields
+        or raw != json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode("ascii") + b"\n"
+        or not stat.S_ISREG(receipt_metadata.st_mode)
+        or stat.S_ISLNK(receipt_metadata.st_mode)
+        or receipt_metadata.st_nlink != 1
+        or (receipt_metadata.st_uid, receipt_metadata.st_gid)
+        != (expected_authority_uid, expected_authority_gid)
+        or stat.S_IMODE(receipt_metadata.st_mode) != 0o444
+        or not stat.S_ISREG(unit_metadata.st_mode)
+        or stat.S_ISLNK(unit_metadata.st_mode)
+        or unit_metadata.st_nlink != 1
+        or (unit_metadata.st_uid, unit_metadata.st_gid)
+        != (expected_authority_uid, expected_authority_gid)
+        or stat.S_IMODE(unit_metadata.st_mode) != 0o644
+        or receipt.get("schema_version") != 1
+        or receipt.get("kind") != "loom.slurm-systemd-slice-receipt"
+        or receipt.get("systemd_slice") != cgroup_parent
+        or receipt.get("slice_identity_sha256") != identity_sha256
+        or receipt.get("unit_sha256") != hashlib.sha256(unit).hexdigest()
+        or receipt.get("job_id") != job_id
+        or receipt.get("job_start_time") != job_start_time
+        or receipt.get("cluster") != config.cluster
+        or receipt.get("node_list") != node.lower()
+        or receipt.get("account") != config.slurm_account
+        or receipt.get("env_id") != binding["env_id"]
+        or receipt.get("resource_generation") != binding["resource_generation"]
+        or receipt.get("runtime_id") != binding["runtime_id"]
+        or receipt.get("candidate_id") != binding["candidate_id"]
+        or receipt.get("candidate_sha") != binding["candidate_sha"]
+        or receipt.get("candidate_tree") != binding["candidate_tree"]
+        or receipt.get("pids_max") != "65536"
+        or receipt.get("payload_sha256")
+        != hashlib.sha256(
+            json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode("ascii"),
+        ).hexdigest()
+    ):
+        raise HostConvergeError("staging allocation systemd receipt binding drifted")
+    return receipt
+
+
+def _cpuset_values(value: str) -> set[int]:
+    result: set[int] = set()
+    for item in value.split(","):
+        start, separator, end = item.partition("-")
+        if not start.isdecimal() or (separator and not end.isdecimal()):
+            raise HostConvergeError("staging allocation systemd cpuset is invalid")
+        lower = int(start)
+        upper = int(end) if separator else lower
+        if lower > upper or upper > 1_000_000:
+            raise HostConvergeError("staging allocation systemd cpuset is invalid")
+        result.update(range(lower, upper + 1))
+    if not result:
+        raise HostConvergeError("staging allocation systemd cpuset is empty")
+    return result
+
+
+def _staging_systemd_container_containment(
+    compose: Sequence[str],
+    *,
+    environment: Mapping[str, str],
+    repository: Path,
+    service: str,
+    systemd_slice: str,
+    receipt: Mapping[str, Any],
+    proc_root: Path = Path("/proc"),
+    cgroup_root: Path = Path("/sys/fs/cgroup"),
+) -> dict[str, str]:
+    identity = subprocess.run(
+        (*compose, "ps", "--quiet", service),
+        cwd=repository,
+        env=dict(environment),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    container_id = identity.stdout.strip()
+    inspected = subprocess.run(
+        ("docker", "inspect", "--format", "{{.State.Pid}}", container_id),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    control_group = subprocess.run(
+        (
+            "systemctl",
+            "show",
+            "--property=ControlGroup",
+            "--value",
+            systemd_slice,
+        ),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    pid = inspected.stdout.strip()
+    live_slice = control_group.stdout.strip()
+    slice_match = re.fullmatch(
+        r"loom-job-([1-9][0-9]*)-[0-9a-f]{40}\.slice",
+        systemd_slice,
+    )
+    expected_live_slice = (
+        f"/loom.slice/loom-job.slice/loom-job-{slice_match.group(1)}.slice/{systemd_slice}"
+        if slice_match is not None
+        else ""
+    )
+    if (
+        identity.returncode
+        or re.fullmatch(r"[0-9a-f]{12,64}", container_id) is None
+        or inspected.returncode
+        or not pid.isdecimal()
+        or int(pid) <= 1
+        or control_group.returncode
+        or not live_slice.startswith("/")
+        or live_slice == "/"
+        or "\x00" in live_slice
+        or ".." in live_slice.split("/")
+        or live_slice != expected_live_slice
+    ):
+        raise HostConvergeError("staging allocation container identity readback failed")
+    try:
+        proc_cgroup = (proc_root / pid / "cgroup").read_text(encoding="utf-8")
+    except OSError as exc:
+        raise HostConvergeError("staging allocation container cgroup is unavailable") from exc
+    unified = [row.partition("::")[2] for row in proc_cgroup.splitlines() if row.startswith("0::")]
+    if len(unified) != 1:
+        raise HostConvergeError("staging allocation container cgroup is ambiguous")
+    observed = Path(unified[0])
+    live_slice_path = Path(live_slice)
+    if (
+        not observed.is_absolute()
+        or observed == live_slice_path
+        or live_slice_path not in observed.parents
+    ):
+        raise HostConvergeError("staging allocation container is not a strict slice descendant")
+    slice_path = cgroup_root / live_slice_path.relative_to("/")
+    try:
+        actual_cpu = (slice_path / "cpu.max").read_text(encoding="utf-8").strip().split()
+        source_cpu = str(receipt["cpu_max"]).split()
+        actual_memory = (slice_path / "memory.max").read_text(encoding="utf-8").strip()
+        actual_swap = (slice_path / "memory.swap.max").read_text(encoding="utf-8").strip()
+        actual_pids = (slice_path / "pids.max").read_text(encoding="utf-8").strip()
+        actual_cpus = (slice_path / "cpuset.cpus.effective").read_text(encoding="utf-8").strip()
+        actual_mems = (slice_path / "cpuset.mems.effective").read_text(encoding="utf-8").strip()
+    except (OSError, KeyError) as exc:
+        raise HostConvergeError("staging allocation systemd live limits are unavailable") from exc
+    if (
+        len(actual_cpu) != 2
+        or len(source_cpu) != 2
+        or not all(value.isdecimal() for value in (*actual_cpu, *source_cpu))
+        or int(actual_cpu[0]) * int(source_cpu[1]) > int(source_cpu[0]) * int(actual_cpu[1])
+        or not actual_memory.isdecimal()
+        or not str(receipt["memory_max"]).isdecimal()
+        or int(actual_memory) > int(receipt["memory_max"])
+        or not actual_swap.isdecimal()
+        or not str(receipt["memory_swap_max_effective"]).isdecimal()
+        or int(actual_swap) > int(receipt["memory_swap_max_effective"])
+        or not actual_pids.isdecimal()
+        or not str(receipt["pids_max"]).isdecimal()
+        or int(actual_pids) > int(receipt["pids_max"])
+        or not _cpuset_values(actual_cpus).issubset(
+            _cpuset_values(str(receipt["cpuset_cpus"])),
+        )
+        or not _cpuset_values(actual_mems).issubset(
+            _cpuset_values(str(receipt["cpuset_mems"])),
+        )
+    ):
+        raise HostConvergeError("staging allocation systemd live limits are weaker than Slurm")
+    return {
+        "container_id": container_id,
+        "observed_cgroup": unified[0],
+        "cpu_max": " ".join(actual_cpu),
+        "memory_max": actual_memory,
+        "memory_swap_max": actual_swap,
+        "pids_max": actual_pids,
+        "cpuset_cpus": actual_cpus,
+        "cpuset_mems": actual_mems,
+    }
+
+
 def staging_allocation_node_check(
     config: StagingAllocationConfig,
     *,
@@ -1013,27 +1489,39 @@ def staging_allocation_node_check(
         candidate_sha=candidate_sha,
         candidate_tree=candidate_tree,
     )
-    job_id = os.environ["SLURM_JOB_ID"]
     repository = Path(binding["repository"]["path"])
+    profile = _staging_slurm_profile(config, repository)
+    guard_binding, candidate_set_sha256 = _staging_candidate_set_identity(
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+    )
+    job_id = os.environ["SLURM_JOB_ID"]
     worker_env = Path(binding["worker_env"]["path"])
+    job_start_time = _staging_allocation_job_start_time(
+        config,
+        job_id=job_id,
+        node=node,
+    )
     compose_project = f"loom-staging-{request_id[:12]}-{node.replace('trt-', '')}"
     base_compose = repository / "deploy/docker-compose.remote-worker.yml"
     cgroup_compose = repository / "deploy/docker-compose.remote-worker.cgroup-parent.yml"
     if not base_compose.is_file() or not cgroup_compose.is_file():
         raise HostConvergeError("staging worker Compose assets are unavailable")
     cgroup_program = repository / "src/loom_control_plane/slurm_job_cgroup.py"
+    docker_driver = _run(
+        ("docker", "info", "--format", "{{.CgroupDriver}}"),
+    ).stdout.strip()
+    if docker_driver != profile.docker_cgroup_driver:
+        raise HostConvergeError("staging allocation Docker cgroup driver drifted")
     cgroup = subprocess.run(
-        (
-            "/usr/bin/python3",
-            "-I",
-            "-B",
-            str(cgroup_program),
-            "--job-id",
-            job_id,
-            "--pids-max",
-            "65536",
-            "--wait-seconds",
-            "30",
+        _staging_cgroup_command(
+            config,
+            profile,
+            guard_binding,
+            cgroup_program=cgroup_program,
+            job_id=job_id,
+            node=node,
+            job_start_time=job_start_time,
         ),
         check=False,
         capture_output=True,
@@ -1041,8 +1529,27 @@ def staging_allocation_node_check(
         timeout=45,
     )
     cgroup_parent = cgroup.stdout.strip()
-    if cgroup.returncode != 0 or not cgroup_parent.startswith("/"):
+    if (
+        cgroup.returncode != 0
+        or (profile.docker_cgroup_driver == "cgroupfs" and not cgroup_parent.startswith("/"))
+        or (
+            profile.docker_cgroup_driver == "systemd"
+            and SYSTEMD_SLICE_RE.fullmatch(cgroup_parent) is None
+        )
+    ):
         raise HostConvergeError("staging allocation cgroup guard failed")
+    slice_receipt = (
+        _staging_systemd_slice_receipt(
+            config,
+            guard_binding,
+            job_id=job_id,
+            node=node,
+            job_start_time=job_start_time,
+            cgroup_parent=cgroup_parent,
+        )
+        if profile.docker_cgroup_driver == "systemd"
+        else None
+    )
     compose_environment = {
         "PATH": "/usr/local/bin:/usr/bin:/bin",
         "LANG": "C.UTF-8",
@@ -1085,6 +1592,17 @@ def staging_allocation_node_check(
     )
     if config_result.returncode != 0 or len(config_result.stdout) > 4 * 1024 * 1024:
         raise HostConvergeError("staging worker Compose config failed safely")
+    try:
+        rendered = json.loads(config_result.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HostConvergeError("staging worker Compose config is invalid") from exc
+    services = rendered.get("services") if isinstance(rendered, dict) else None
+    if (
+        not isinstance(services, dict)
+        or not isinstance(services.get("worker"), dict)
+        or services["worker"].get("cgroup_parent") != cgroup_parent
+    ):
+        raise HostConvergeError("staging worker Compose cgroup binding drifted")
     compose_config_sha256 = hashlib.sha256(config_result.stdout).hexdigest()
     registered_at = ""
     first_heartbeat_at = ""
@@ -1093,6 +1611,7 @@ def staging_allocation_node_check(
     worker_id = ""
     stopped_at = ""
     cleanup_verified = False
+    container_cgroup: dict[str, str] | None = None
     try:
         up = subprocess.run(
             (*compose, "up", "--detach", "--no-build", "worker"),
@@ -1104,6 +1623,16 @@ def staging_allocation_node_check(
         )
         if up.returncode != 0:
             raise HostConvergeError("staging worker failed to start")
+        if profile.docker_cgroup_driver == "systemd":
+            assert slice_receipt is not None
+            container_cgroup = _staging_systemd_container_containment(
+                compose,
+                environment=compose_environment,
+                repository=repository,
+                service="worker",
+                systemd_slice=cgroup_parent,
+                receipt=slice_receipt,
+            )
         deadline = time.monotonic() + 90
         registration = re.compile(
             rb"worker_registered worker_id=([0-9a-f-]{36})",
@@ -1239,6 +1768,18 @@ def staging_allocation_node_check(
         "cancel_requested_at": cancel_requested_at,
         "stopped_at": stopped_at,
         "docker_server_version": docker_version,
+        "docker_cgroup_driver": docker_driver,
+        "job_start_time": job_start_time,
+        "cgroup_parent": cgroup_parent,
+        "cgroup_mode": (
+            "direct-slurm-cgroup"
+            if profile.docker_cgroup_driver == "cgroupfs"
+            else "allocation-mirrored-systemd-slice"
+        ),
+        "candidate_set_sha256": candidate_set_sha256,
+        "guard_binding_payload_sha256": guard_binding["payload_sha256"],
+        "systemd_slice_receipt": slice_receipt,
+        "container_cgroup": container_cgroup,
         "compose_config_sha256": compose_config_sha256,
         "orphan_containers": 0,
         "orphan_networks": 0,
@@ -1407,18 +1948,32 @@ def staging_allocation_submit(
         raise HostConvergeError("staging allocation submit request is invalid")
     identity = _staging_identity_snapshot(config)
     namespace = _converge_staging_shared_namespace(config)
-    _staging_candidate_binding(
+    candidate_binding = _staging_candidate_binding(
         config,
         candidate_sha=candidate_sha,
         candidate_tree=candidate_tree,
     )
+    repository = Path(candidate_binding["repository"]["path"])
+    profile = _staging_slurm_profile(config, repository)
+    guard_binding, candidate_set_sha256 = _staging_candidate_set_identity(
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+    )
+    driver = _run(("docker", "info", "--format", "{{.CgroupDriver}}")).stdout.strip()
+    if driver != profile.docker_cgroup_driver:
+        raise HostConvergeError("staging allocation submit Docker driver drifted")
     slurm = _staging_slurm_live_config(config)
     _staging_prepare_result_directory(
         config,
         candidate_sha=candidate_sha,
         request_id=request_id,
     )
-    job_name = f"loom-staging-worker-{request_id[:16]}"
+    job_name = _staging_allocation_job_name(
+        candidate_sha=candidate_sha,
+        node=requested_node,
+        candidate_set_sha256=candidate_set_sha256,
+        resource_generation=int(guard_binding["resource_generation"]),
+    )
     worker = (
         str(INSTALLED_PROGRAM),
         "staging-allocation-worker",
@@ -1474,6 +2029,9 @@ def staging_allocation_submit(
         "candidate_tree": candidate_tree,
         "job_id": match.group(1),
         "job_name": job_name,
+        "candidate_set_sha256": candidate_set_sha256,
+        "resource_generation": guard_binding["resource_generation"],
+        "docker_cgroup_driver": driver,
         "node": requested_node,
         "cluster": slurm["cluster"],
         "account": slurm["account"],
@@ -1509,9 +2067,18 @@ def staging_allocation_cancel(
         or _staging_allocation_node(config) != config.submit_host
     ):
         raise HostConvergeError("staging allocation cancel request is invalid")
+    guard_binding, candidate_set_sha256 = _staging_candidate_set_identity(
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+    )
     rows = _staging_sacct_rows(config, job_id)
     base = [row for row in rows if len(row) == 10 and row[0] == job_id]
-    expected_name = f"loom-staging-worker-{submit_request_id[:16]}"
+    expected_name = _staging_allocation_job_name(
+        candidate_sha=candidate_sha,
+        node=requested_node,
+        candidate_set_sha256=candidate_set_sha256,
+        resource_generation=int(guard_binding["resource_generation"]),
+    )
     if (
         len(base) != 1
         or base[0][1] != expected_name
@@ -1600,6 +2167,10 @@ def _staging_load_node_result(
     request_id: str,
     node: str,
 ) -> dict[str, Any]:
+    guard_binding, candidate_set_sha256 = _staging_candidate_set_identity(
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+    )
     path = _staging_result_path(
         config,
         candidate_sha=candidate_sha,
@@ -1624,6 +2195,29 @@ def _staging_load_node_result(
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise HostConvergeError("staging allocation node result is invalid") from exc
+    driver = payload.get("docker_cgroup_driver") if isinstance(payload, dict) else None
+    cgroup_parent = payload.get("cgroup_parent") if isinstance(payload, dict) else None
+    systemd_receipt = payload.get("systemd_slice_receipt") if isinstance(payload, dict) else None
+    container_cgroup = payload.get("container_cgroup") if isinstance(payload, dict) else None
+    cgroup_binding_valid = (
+        driver == "cgroupfs"
+        and isinstance(cgroup_parent, str)
+        and cgroup_parent.startswith("/")
+        and systemd_receipt is None
+        and container_cgroup is None
+    ) or (
+        driver == "systemd"
+        and isinstance(cgroup_parent, str)
+        and SYSTEMD_SLICE_RE.fullmatch(cgroup_parent) is not None
+        and isinstance(systemd_receipt, dict)
+        and systemd_receipt.get("systemd_slice") == cgroup_parent
+        and systemd_receipt.get("candidate_sha") == candidate_sha
+        and systemd_receipt.get("candidate_tree") == candidate_tree
+        and systemd_receipt.get("resource_generation") == guard_binding["resource_generation"]
+        and isinstance(container_cgroup, dict)
+        and isinstance(container_cgroup.get("observed_cgroup"), str)
+        and f"/{cgroup_parent}/" in container_cgroup["observed_cgroup"]
+    )
     if (
         not isinstance(payload, dict)
         or raw
@@ -1641,6 +2235,11 @@ def _staging_load_node_result(
         or payload.get("request_id") != request_id
         or payload.get("candidate_sha") != candidate_sha
         or payload.get("candidate_tree") != candidate_tree
+        or payload.get("candidate_set_sha256") != candidate_set_sha256
+        or payload.get("guard_binding_payload_sha256") != guard_binding["payload_sha256"]
+        or not isinstance(payload.get("job_start_time"), str)
+        or not payload["job_start_time"]
+        or not cgroup_binding_valid
         or payload.get("node") != node
         or payload.get("canonical_host") != config.host_aliases[node]
         or payload.get("service_identity") != _staging_identity_snapshot(config)
@@ -1679,6 +2278,15 @@ def staging_allocation_probe(
         candidate_sha=candidate_sha,
         candidate_tree=candidate_tree,
     )
+    repository = Path(binding["repository"]["path"])
+    profile = _staging_slurm_profile(config, repository)
+    guard_binding, candidate_set_sha256 = _staging_candidate_set_identity(
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+    )
+    driver = _run(("docker", "info", "--format", "{{.CgroupDriver}}")).stdout.strip()
+    if driver != profile.docker_cgroup_driver:
+        raise HostConvergeError("staging allocation probe Docker driver drifted")
     slurm = _staging_slurm_live_config(config)
     request_root = _staging_prepare_result_directory(
         config,
@@ -1687,8 +2295,13 @@ def staging_allocation_probe(
     )
     jobs: dict[str, tuple[str, str]] = {}
     try:
-        for index, node in enumerate(config.allowed_nodes, start=1):
-            job_name = f"loom-staging-accept-{request_id[:12]}-{index:02d}"
+        for node in config.allowed_nodes:
+            job_name = _staging_allocation_job_name(
+                candidate_sha=candidate_sha,
+                node=node,
+                candidate_set_sha256=candidate_set_sha256,
+                resource_generation=int(guard_binding["resource_generation"]),
+            )
             node_check = (
                 str(INSTALLED_PROGRAM),
                 "staging-allocation-node-check",
@@ -2156,7 +2769,7 @@ def _private_child_names(profile: Profile) -> tuple[str, ...]:
     children = (
         profile.cache_root,
         profile.evidence_root,
-        profile.runtime_root,
+        profile.private_runtime_root,
         profile.secrets_root,
     )
     if any(
@@ -3639,7 +4252,7 @@ def _candidate_environment(profile: Profile, candidate: Path) -> dict[str, str]:
     return {
         "PATH": "/usr/local/bin:/usr/bin:/bin",
         "LANG": "C.UTF-8",
-        "HOME": str(profile.runtime_root),
+        "HOME": str(profile.private_runtime_root),
         "PYTHONPATH": str(candidate / "src"),
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": "/dev/null",
@@ -6962,6 +7575,12 @@ def _parser() -> argparse.ArgumentParser:
         "staging-allocation-identity-converge",
         allow_abbrev=False,
     )
+    staging_identity.add_argument("--candidate-sha", required=True)
+    staging_identity.add_argument("--candidate-tree", required=True)
+    staging_identity.add_argument("--authority-generation", required=True, type=int)
+    staging_identity.add_argument("--authority-convergence-id", required=True)
+    staging_identity.add_argument("--authority-request-id", required=True)
+    staging_identity.add_argument("--authority-requested-at", required=True)
     staging_identity.add_argument("--execute", action="store_true")
     for command in (
         "staging-allocation-node-check",
@@ -7011,6 +7630,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise HostConvergeError("staging identity convergence requires --execute")
             result = staging_allocation_identity_converge(
                 load_staging_allocation_config(),
+                candidate_sha=args.candidate_sha,
+                candidate_tree=args.candidate_tree,
+                authority_generation=args.authority_generation,
+                authority_convergence_id=args.authority_convergence_id,
+                authority_request_id=args.authority_request_id,
+                authority_requested_at=args.authority_requested_at,
             )
         elif args.command == "staging-allocation-node-check":
             result = staging_allocation_node_check(

@@ -194,8 +194,46 @@ def test_remote_worker_compose_container_caps_passthrough() -> None:
 def test_nonexclusive_compose_overlay_requires_exact_cgroup_parent() -> None:
     worker = _worker_service(_CGROUP_COMPOSE)
 
-    assert worker == {
-        "cgroup_parent": ("${LOOM_WORKER_CGROUP_PARENT:?set by the Slurm batch controller}"),
+    identity = {
+        "LOOM_WORKER_ENV_ID": ("${LOOM_WORKER_ENV_ID:?set by the registry-bound Slurm controller}"),
+        "LOOM_WORKER_RESOURCE_GENERATION": (
+            "${LOOM_WORKER_RESOURCE_GENERATION:?set by the registry-bound Slurm controller}"
+        ),
+        "LOOM_WORKER_CANDIDATE_ID": (
+            "${LOOM_WORKER_CANDIDATE_ID:?set by the registry-bound Slurm controller}"
+        ),
+        "LOOM_WORKER_CANDIDATE_TREE": (
+            "${LOOM_WORKER_CANDIDATE_TREE:?set by the registry-bound Slurm controller}"
+        ),
+        "LOOM_WORKER_REGISTRY_GENERATION": (
+            "${LOOM_WORKER_REGISTRY_GENERATION:?set by the candidate env file}"
+        ),
+        "LOOM_WORKER_REGISTRY_PAYLOAD_SHA256": (
+            "${LOOM_WORKER_REGISTRY_PAYLOAD_SHA256:?set by the candidate env file}"
+        ),
+    }
+    assert worker["cgroup_parent"] == (
+        "${LOOM_WORKER_CGROUP_PARENT:?set by the Slurm batch controller}"
+    )
+    assert worker["environment"] == identity
+    assert worker["labels"] == {
+        f"loom.{key.removeprefix('LOOM_WORKER_').lower()}": value for key, value in identity.items()
+    }
+    merged_labels = {
+        **_worker_service(_COMPOSE)["labels"],
+        **worker["labels"],
+    }
+    assert set(merged_labels) == {
+        "loom.sandbox",
+        "loom.candidate_sha",
+        "loom.slurm_job_id",
+        "loom.compose_project",
+        "loom.env_id",
+        "loom.resource_generation",
+        "loom.candidate_id",
+        "loom.candidate_tree",
+        "loom.registry_generation",
+        "loom.registry_payload_sha256",
     }
 
 

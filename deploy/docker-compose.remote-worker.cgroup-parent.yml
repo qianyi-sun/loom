@@ -1,8 +1,23 @@
 # Non-exclusive Slurm containment overlay.
 #
-# The controller adds this file only after it discovers and validates the exact
-# delegated Slurm job cgroup.  The required expansion fails before Docker
-# creates the worker if that allocation-bound value is absent.
+# The controller adds this file only after it resolves a driver-compatible,
+# allocation-bound cgroupfs path or systemd slice. It then reads back the worker
+# PID and live limits; the required expansion fails before Docker creates the
+# worker if the parent is absent.
 services:
   worker:
     cgroup_parent: ${LOOM_WORKER_CGROUP_PARENT:?set by the Slurm batch controller}
+    environment:
+      LOOM_WORKER_ENV_ID: ${LOOM_WORKER_ENV_ID:?set by the registry-bound Slurm controller}
+      LOOM_WORKER_RESOURCE_GENERATION: ${LOOM_WORKER_RESOURCE_GENERATION:?set by the registry-bound Slurm controller}
+      LOOM_WORKER_CANDIDATE_ID: ${LOOM_WORKER_CANDIDATE_ID:?set by the registry-bound Slurm controller}
+      LOOM_WORKER_CANDIDATE_TREE: ${LOOM_WORKER_CANDIDATE_TREE:?set by the registry-bound Slurm controller}
+      LOOM_WORKER_REGISTRY_GENERATION: ${LOOM_WORKER_REGISTRY_GENERATION:?set by the candidate env file}
+      LOOM_WORKER_REGISTRY_PAYLOAD_SHA256: ${LOOM_WORKER_REGISTRY_PAYLOAD_SHA256:?set by the candidate env file}
+    labels:
+      loom.env_id: ${LOOM_WORKER_ENV_ID:?set by the registry-bound Slurm controller}
+      loom.resource_generation: ${LOOM_WORKER_RESOURCE_GENERATION:?set by the registry-bound Slurm controller}
+      loom.candidate_id: ${LOOM_WORKER_CANDIDATE_ID:?set by the registry-bound Slurm controller}
+      loom.candidate_tree: ${LOOM_WORKER_CANDIDATE_TREE:?set by the registry-bound Slurm controller}
+      loom.registry_generation: ${LOOM_WORKER_REGISTRY_GENERATION:?set by the candidate env file}
+      loom.registry_payload_sha256: ${LOOM_WORKER_REGISTRY_PAYLOAD_SHA256:?set by the candidate env file}

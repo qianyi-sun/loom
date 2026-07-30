@@ -880,7 +880,7 @@ description = "Controller-owned non-exclusive Slurm containment marker. When tru
 used_by     = ["worker"]
 python_type = "str"
 default     = ""
-description = "Exact delegated Slurm job cgroup discovered from the batch process. Passed unchanged to Docker HostConfig CgroupParent for the worker, trial, verifier, and sidecar containers. Empty is allowed only when require_cgroup_parent is false."
+description = "Driver-compatible allocation-bound cgroupfs path or systemd slice discovered from the batch process. Passed unchanged to Docker HostConfig CgroupParent for the worker, trial, verifier, and sidecar containers; the launched worker PID and live limits are read back before acceptance. Empty is allowed only when require_cgroup_parent is false."
 
 [service_config.sandbox_identity]
 used_by     = ["worker"]

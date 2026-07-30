@@ -37,8 +37,8 @@ class FakeRunner:
         self.qos: set[str] = set()
         self.users: dict[str, tuple[str, str]] = {}
         self.resource_labels: dict[tuple[str, str], dict[str, str]] = {}
-        self.systemd_load_state = "not-found"
-        self.systemd_fragment = ""
+        self.systemd_load_state = "loaded"
+        self.systemd_fragment = "/etc/systemd/system/loom-developer-environment@.service"
         self.systemd_unit_file_state = "disabled"
         self.compose_service_states: dict[str, str] = {}
         self.postgres_checkpoints = 0
@@ -126,8 +126,8 @@ class FakeRunner:
             self.systemd_unit_file_state = "enabled"
             return deploy.CommandResult(0, "")
         if command[:3] == ("systemctl", "disable", "--now"):
-            self.systemd_load_state = "not-found"
-            self.systemd_fragment = ""
+            self.systemd_load_state = "loaded"
+            self.systemd_fragment = "/etc/systemd/system/loom-developer-environment@.service"
             self.systemd_unit_file_state = "disabled"
             return deploy.CommandResult(0, "")
         if command[0] == "sacctmgr":
@@ -797,6 +797,102 @@ def test_exact_environment_fence_and_drain_precede_registry_transitions(
     ]
 
 
+def test_direct_deployer_reloads_reallocated_ports_before_fence_and_begin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    listeners: set[int] = set()
+    authority = registry.DeveloperEnvironmentRegistry(
+        tmp_path / "registry.sqlite3",
+        port_inventory_collector=lambda: frozenset(listeners),
+    )
+    environment = _register(authority, "oidc:example:direct-port-race", 1)
+    candidate = _candidate(authority, environment, tmp_path, "direct-port-race")
+    old_ports = dict(environment.ports)
+    listeners.add(environment.ports["control_plane"])
+    runner = FakeRunner()
+    instance = _deployer(authority, tmp_path, runner, monkeypatch)
+    observed: list[tuple[str, int]] = []
+
+    def fence(runtime_id: str, intent_sha256: str) -> dict[str, Any]:
+        current = authority.lookup(environment.env_id)
+        observed.append(("fence", current.resource_generation))
+        return deploy._bound(
+            {
+                "status": "ready",
+                "runtime_id": runtime_id,
+                "intent_sha256": intent_sha256,
+                "admission_token": intent_sha256[:32],
+            }
+        )
+
+    instance.environment_admission_fence = fence
+    original_begin = authority.begin_deployment
+
+    def begin(payload: Mapping[str, Any]) -> registry.DeploymentRecord:
+        observed.append(("begin", int(payload["expected_resource_generation"])))
+        return original_begin(payload)
+
+    monkeypatch.setattr(authority, "begin_deployment", begin)
+
+    result = _converge(instance, environment, candidate)
+    current = authority.lookup(environment.env_id)
+    compose_env = (
+        instance._global_runtime_path(
+            "lifecycle",
+            "environments",
+            environment.env_id,
+        )
+        / "compose.env"
+    ).read_text(encoding="ascii")
+
+    assert result["status"] == "committed"
+    assert observed[:2] == [("fence", 2), ("begin", 2)]
+    assert min(current.ports.values()) == 23_016
+    assert str(current.ports["control_plane"]) in compose_env
+    assert str(old_ports["control_plane"]) not in compose_env
+
+
+def test_direct_deployer_inventory_failure_precedes_fence_and_begin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def collect() -> frozenset[int]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return frozenset()
+        raise registry.RegistryError("inventory failed")
+
+    authority = registry.DeveloperEnvironmentRegistry(
+        tmp_path / "registry.sqlite3",
+        port_inventory_collector=collect,
+    )
+    environment = _register(authority, "oidc:example:inventory-failure", 1)
+    candidate = _candidate(authority, environment, tmp_path, "inventory-failure")
+    instance = _deployer(authority, tmp_path, FakeRunner(), monkeypatch)
+    fenced: list[str] = []
+
+    def unexpected_fence(runtime_id: str, _intent: str) -> dict[str, Any]:
+        fenced.append(runtime_id)
+        return {}
+
+    instance.environment_admission_fence = unexpected_fence
+    monkeypatch.setattr(
+        authority,
+        "begin_deployment",
+        lambda _payload: pytest.fail("deployment must remain unopened"),
+    )
+
+    with pytest.raises(deploy.DeploymentError, match="port recovery failed safely"):
+        _converge(instance, environment, candidate)
+
+    assert fenced == []
+    assert authority.snapshot()["deployments"] == []
+
+
 def test_fence_crash_replays_same_active_intent_before_registry_transition(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1247,6 +1343,61 @@ def test_crash_replay_resumes_same_deployment_and_candidate(
     )
 
 
+@pytest.mark.parametrize(
+    ("failed_phase", "failed_action"),
+    (
+        ("requested", "_ensure_resources"),
+        ("resources-verified", "_materialize_candidate"),
+        ("candidate-materialized", "_prepare_services"),
+    ),
+)
+def test_boot_resume_unit_precedes_resource_work_and_replays_exact_deployment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failed_phase: str,
+    failed_action: str,
+) -> None:
+    authority = registry.DeveloperEnvironmentRegistry(tmp_path / "registry" / "registry.sqlite3")
+    environment = _register(authority, f"oidc:example:boot-{failed_phase}", 1)
+    candidate = _candidate(authority, environment, tmp_path, f"boot-{failed_phase}")
+    runner = FakeRunner()
+    instance = _deployer(authority, tmp_path, runner, monkeypatch)
+    original = getattr(instance, failed_action)
+    failed = False
+
+    def fail_once(context: deploy.DeploymentContext) -> None:
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise deploy.DeploymentError("injected pre-commit crash")
+        original(context)
+
+    monkeypatch.setattr(instance, failed_action, fail_once)
+
+    with pytest.raises(deploy.DeploymentError, match="injected pre-commit crash"):
+        _converge(instance, environment, candidate, suffix=f"boot-{failed_phase}")
+
+    active = [
+        row
+        for row in authority.snapshot()["deployments"]
+        if row["env_id"] == environment.env_id and row["phase"] not in {"committed", "failed"}
+    ]
+    unit = f"loom-developer-environment@{environment.systemd_instance}.service"
+    enable = ("systemctl", "enable", unit)
+    assert len(active) == 1
+    assert active[0]["phase"] == failed_phase
+    assert active[0]["candidate_id"] == candidate.candidate_id
+    assert runner.systemd_unit_file_state == "enabled"
+    assert runner.calls.count(enable) == 1
+
+    resumed = instance.resume(runtime_id=environment.systemd_instance)
+
+    assert resumed["deployment_id"] == active[0]["deployment_id"]
+    assert resumed["candidate_id"] == candidate.candidate_id
+    assert resumed["status"] == "committed"
+    assert runner.calls.count(enable) == 1
+
+
 def test_recorded_finalization_resume_performs_zero_mutations_or_new_probe(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1397,6 +1548,7 @@ def test_committed_update_can_rollback_to_exact_previous_candidate(
     assert result["candidate_id"] == first.candidate_id
     restored = authority.lookup(environment.env_id, principal_id=environment.principal_id)
     assert restored.current_candidate_id == first.candidate_id
+    assert runner.systemd_unit_file_state == "enabled"
 
 
 def test_interrupted_update_rollback_replays_same_failed_deployment(
@@ -1474,6 +1626,7 @@ def test_first_create_rollback_retires_capacity_before_releasing_registry(
     candidate = _candidate(authority, environment, tmp_path, "create-abort")
     runner = FakeRunner()
     instance = _deployer(authority, tmp_path, runner, monkeypatch)
+    runner.systemd_unit_file_state = "enabled"
     deployment = authority.begin_deployment(
         {
             "schema_version": 1,
@@ -1508,6 +1661,13 @@ def test_first_create_rollback_retires_capacity_before_releasing_registry(
 
     assert result["status"] == "ready"
     assert [item.deployment_id for item in capacity.aborted_contexts] == [deployment.deployment_id]
+    assert (
+        "systemctl",
+        "disable",
+        "--now",
+        f"loom-developer-environment@{environment.systemd_instance}.service",
+    ) in runner.calls
+    assert runner.systemd_unit_file_state == "disabled"
     snapshot = authority.snapshot()
     failed = next(
         item
@@ -1952,6 +2112,12 @@ def test_exact_owned_retirement_is_persistent_and_idempotent(
     runtime_authority = instance.distributed_runtime_authority
     assert isinstance(runtime_authority, FakeDistributedRuntimeAuthority)
     assert runtime_authority.actions[-1:] == ["retire"]
+    assert (
+        "systemctl",
+        "disable",
+        "--now",
+        f"loom-developer-environment@{environment.systemd_instance}.service",
+    ) in runner.calls
     commands = [" ".join(call) for call in runner.calls]
     assert any(retired.postgres_volume in command for command in commands)
     assert any(retired.minio_volume in command for command in commands)

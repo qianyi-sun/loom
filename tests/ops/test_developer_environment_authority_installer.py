@@ -319,6 +319,11 @@ def test_bootstrap_replay_and_readback_install_closed_fixed_assets(
     ).read_text(encoding="utf-8")
     assert "ReadWritePaths=-/var/lib/loom-developer-environment-runtime" in authority_unit
     assert "ReadWritePaths=-/var/lib\n" not in authority_unit
+    assert "ProtectProc=invisible" in authority_unit
+    assert "ProcSubset=all" in authority_unit
+    assert "ProcSubset=pid" not in authority_unit
+    assert "ReadOnlyPaths=/var/run/docker.sock" in authority_unit
+    assert "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6" in authority_unit
 
 
 def test_readback_rejects_group_writable_installed_import_ancestor(

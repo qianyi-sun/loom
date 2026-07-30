@@ -53,6 +53,10 @@ _QUEUE_RUNNING_STMT = (
 )
 _SAFE_JOB_NAME_RE = re.compile(r"[^A-Za-z0-9_-]+")
 _SAFE_SANDBOX_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+_SAFE_CLUSTER_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
+_ENV_ID_RE = re.compile(r"^denv-[a-z0-9-]{8,64}$")
+_RUNTIME_ID_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
+_CANDIDATE_ID_RE = re.compile(r"^cand-[0-9a-f]{40}$")
 _CANDIDATE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _GPU_TRES_RE = re.compile(r"^gpu(?::[A-Za-z0-9_.-]+)?:(?P<count>[1-9][0-9]*)$")
 
@@ -79,6 +83,7 @@ class ElasticSlurmWorkerControllerConfig:
     scancel_path: str
     command_timeout_seconds: float
     exclusive: bool = True
+    scontrol_path: str = "/usr/bin/scontrol"
     slurm_account: str = ""
     slurm_qos: str = ""
     slurm_reservation: str = ""
@@ -100,7 +105,14 @@ class ElasticSlurmWorkerControllerConfig:
     # Aggregate pids.max applied by the administrator-owned root guard to the
     # non-exclusive job cgroup. 0 is allowed only for exclusive jobs.
     job_pids_max: int = 0
+    docker_cgroup_driver: str = "cgroupfs"
+    slurm_cluster: str = ""
+    env_id: str = ""
+    resource_generation: int = 0
+    runtime_id: str = ""
+    candidate_id: str = ""
     candidate_sha: str = ""
+    candidate_tree: str = ""
     gpu_tres: str = ""
     requested_gpus: int = 0
 
@@ -231,6 +243,55 @@ def _parse_gpu_tres(value: str) -> tuple[str, int]:
     return cleaned, int(match.group("count"))
 
 
+def _validate_cgroup_driver_contract(
+    *,
+    exclusive: bool,
+    docker_cgroup_driver: str,
+    slurm_cluster: str,
+    slurm_account: str,
+    env_id: str,
+    resource_generation: int,
+    runtime_id: str,
+    candidate_id: str,
+    candidate_sha: str,
+    candidate_tree: str,
+) -> None:
+    if docker_cgroup_driver not in {"cgroupfs", "systemd"}:
+        raise ValueError("docker_cgroup_driver must be cgroupfs or systemd")
+    if exclusive or docker_cgroup_driver != "systemd":
+        return
+    if (
+        _SAFE_CLUSTER_RE.fullmatch(slurm_cluster) is None
+        or _ENV_ID_RE.fullmatch(env_id) is None
+        or _RUNTIME_ID_RE.fullmatch(runtime_id) is None
+        or _CANDIDATE_ID_RE.fullmatch(candidate_id) is None
+    ):
+        raise ValueError(
+            "systemd non-exclusive workers require closed cluster, "
+            "environment, runtime, and candidate identities",
+        )
+    if _SAFE_CLUSTER_RE.fullmatch(slurm_account) is None:
+        raise ValueError(
+            "slurm_account is required for systemd non-exclusive workers",
+        )
+    if (
+        isinstance(resource_generation, bool)
+        or not isinstance(resource_generation, int)
+        or resource_generation < 1
+    ):
+        raise ValueError(
+            "resource_generation must be positive for systemd non-exclusive workers",
+        )
+    if _CANDIDATE_SHA_RE.fullmatch(candidate_sha) is None:
+        raise ValueError(
+            "candidate_sha is required for systemd non-exclusive workers",
+        )
+    if _CANDIDATE_SHA_RE.fullmatch(candidate_tree) is None:
+        raise ValueError(
+            "candidate_tree is required for systemd non-exclusive workers",
+        )
+
+
 def build_controller_config(
     *,
     enabled: bool,
@@ -254,6 +315,7 @@ def build_controller_config(
     scancel_path: str,
     command_timeout_seconds: float,
     exclusive: bool = True,
+    scontrol_path: str = "/usr/bin/scontrol",
     slurm_account: str = "",
     slurm_qos: str = "",
     slurm_reservation: str = "",
@@ -269,7 +331,14 @@ def build_controller_config(
     container_memory_mib: int = 0,
     container_pids: int = 0,
     job_pids_max: int = 0,
+    docker_cgroup_driver: str = "cgroupfs",
+    slurm_cluster: str = "",
+    env_id: str = "",
+    resource_generation: int = 0,
+    runtime_id: str = "",
+    candidate_id: str = "",
     candidate_sha: str = "",
+    candidate_tree: str = "",
     gpu_tres: str = "",
 ) -> ElasticSlurmWorkerControllerConfig | None:
     if not enabled:
@@ -293,6 +362,14 @@ def build_controller_config(
     sacct_path = _require_nonempty(sacct_path, "sacct_path")
     scancel_path = _require_nonempty(scancel_path, "scancel_path")
     sinfo_path = _require_nonempty(sinfo_path, "sinfo_path")
+    scontrol_path = _require_nonempty(scontrol_path, "scontrol_path")
+    scontrol = Path(scontrol_path)
+    if (
+        not scontrol.is_absolute()
+        or ".." in scontrol.parts
+        or re.fullmatch(r"/[A-Za-z0-9_./-]+", scontrol_path) is None
+    ):
+        raise ValueError("scontrol_path must be a safe absolute path")
 
     _require_positive(requested_cpus, "requested_cpus")
     _require_positive(requested_memory_mib, "requested_memory_mib")
@@ -327,6 +404,27 @@ def build_controller_config(
     candidate_sha = candidate_sha.strip()
     if candidate_sha and _CANDIDATE_SHA_RE.fullmatch(candidate_sha) is None:
         raise ValueError("candidate_sha must be a 40-character lowercase Git SHA")
+    candidate_tree = candidate_tree.strip()
+    if candidate_tree and _CANDIDATE_SHA_RE.fullmatch(candidate_tree) is None:
+        raise ValueError("candidate_tree must be a 40-character lowercase Git tree")
+    docker_cgroup_driver = docker_cgroup_driver.strip()
+    slurm_cluster = slurm_cluster.strip()
+    env_id = env_id.strip()
+    runtime_id = runtime_id.strip()
+    candidate_id = candidate_id.strip()
+    slurm_account = slurm_account.strip()
+    _validate_cgroup_driver_contract(
+        exclusive=exclusive,
+        docker_cgroup_driver=docker_cgroup_driver,
+        slurm_cluster=slurm_cluster,
+        slurm_account=slurm_account,
+        env_id=env_id,
+        resource_generation=resource_generation,
+        runtime_id=runtime_id,
+        candidate_id=candidate_id,
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+    )
     gpu_tres, requested_gpus = _parse_gpu_tres(gpu_tres)
     if not exclusive:
         _require_positive(container_cpus, "container_cpus for non-exclusive workers")
@@ -344,7 +442,6 @@ def build_controller_config(
                 "candidate_sha is required for non-exclusive workers and must be a "
                 "40-character lowercase Git SHA",
             )
-
     if max_jobs > len(allowed_nodes):
         raise ValueError("max_jobs cannot exceed the number of allowed nodes")
     if pending_job_cap > max_jobs:
@@ -371,7 +468,8 @@ def build_controller_config(
         scancel_path=scancel_path,
         command_timeout_seconds=command_timeout_seconds,
         exclusive=exclusive,
-        slurm_account=slurm_account.strip(),
+        scontrol_path=scontrol_path,
+        slurm_account=slurm_account,
         slurm_qos=slurm_qos.strip(),
         slurm_reservation=slurm_reservation.strip(),
         sinfo_path=sinfo_path,
@@ -386,7 +484,14 @@ def build_controller_config(
         container_memory_mib=container_memory_mib,
         container_pids=container_pids,
         job_pids_max=job_pids_max,
+        docker_cgroup_driver=docker_cgroup_driver,
+        slurm_cluster=slurm_cluster,
+        env_id=env_id,
+        resource_generation=resource_generation,
+        runtime_id=runtime_id,
+        candidate_id=candidate_id,
         candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
         gpu_tres=gpu_tres,
         requested_gpus=requested_gpus,
     )
@@ -601,6 +706,12 @@ def slurm_submission_config_for_node(
 
 
 def slurm_sandbox_identity(config: ElasticSlurmWorkerControllerConfig) -> str:
+    source = config.runtime_id or config.environment
+    normalized = _SAFE_JOB_NAME_RE.sub("-", source.lower()).strip("-")
+    return (normalized or "sandbox")[:63]
+
+
+def _slurm_job_name_identity(config: ElasticSlurmWorkerControllerConfig) -> str:
     normalized = _SAFE_JOB_NAME_RE.sub("-", config.environment.lower()).strip("-")
     return (normalized or "sandbox")[:63]
 
@@ -626,8 +737,21 @@ def build_sbatch_request(
         resource_aware=config.resource_aware,
         max_concurrency_per_node=config.max_concurrency_per_node,
     )
-    job_node = _SAFE_JOB_NAME_RE.sub("-", node).strip("-") or "worker"
+    _validate_cgroup_driver_contract(
+        exclusive=config.exclusive,
+        docker_cgroup_driver=config.docker_cgroup_driver,
+        slurm_cluster=config.slurm_cluster,
+        slurm_account=config.slurm_account,
+        env_id=config.env_id,
+        resource_generation=config.resource_generation,
+        runtime_id=config.runtime_id,
+        candidate_id=config.candidate_id,
+        candidate_sha=config.candidate_sha,
+        candidate_tree=config.candidate_tree,
+    )
+    job_node = _SAFE_JOB_NAME_RE.sub("-", node.lower()).strip("-") or "worker"
     sandbox_identity = slurm_sandbox_identity(config)
+    job_name_identity = _slurm_job_name_identity(config)
     candidate_sha = config.candidate_sha or "legacy"
     candidate_label = candidate_sha[:12]
     export_vars = [
@@ -657,11 +781,27 @@ def build_sbatch_request(
         # the remote-worker env file cannot opt itself out of containment.
         export_vars.append("LOOM_WORKER_REQUIRE_CGROUP_PARENT=1")
         export_vars.append(f"LOOM_WORKER_JOB_PIDS_MAX={config.job_pids_max}")
+        export_vars.append(
+            f"LOOM_WORKER_DOCKER_CGROUP_DRIVER={config.docker_cgroup_driver}",
+        )
+        if config.docker_cgroup_driver == "systemd":
+            export_vars.extend(
+                (
+                    f"LOOM_WORKER_SLURM_CLUSTER={config.slurm_cluster}",
+                    f"LOOM_WORKER_SCONTROL_PATH={config.scontrol_path}",
+                    f"LOOM_WORKER_SLURM_ACCOUNT={config.slurm_account}",
+                    f"LOOM_WORKER_ENV_ID={config.env_id}",
+                    f"LOOM_WORKER_RESOURCE_GENERATION={config.resource_generation}",
+                    f"LOOM_WORKER_RUNTIME_ID={config.runtime_id}",
+                    f"LOOM_WORKER_CANDIDATE_ID={config.candidate_id}",
+                    f"LOOM_WORKER_CANDIDATE_TREE={config.candidate_tree}",
+                ),
+            )
     export = ",".join(export_vars)
     args = [
         config.sbatch_path,
         "--parsable",
-        f"--job-name={f'loom-{sandbox_identity}-{candidate_label}-{job_node}'[:128]}",
+        f"--job-name={f'loom-{job_name_identity}-{candidate_label}-{job_node}'[:128]}",
         f"--nodelist={node}",
     ]
     if config.exclusive:
@@ -708,11 +848,63 @@ export LOOM_WORKER_COMPOSE_PROJECT="loom-${LOOM_WORKER_SANDBOX_IDENTITY}-${proje
 cd "$LOOM_REMOTE_WORKER_REPO_DIR"
 compose_files=(-f deploy/docker-compose.remote-worker.yml)
 if [[ "${LOOM_WORKER_REQUIRE_CGROUP_PARENT:-0}" == "1" ]]; then
+  # Registry generation/digest come only from the root-rendered exact-candidate
+  # env file. Never let an ambient submit-shell value override --env-file.
+  unset LOOM_WORKER_REGISTRY_GENERATION LOOM_WORKER_REGISTRY_PAYLOAD_SHA256
+  cgroup_identity_args=()
+  if [[ "${LOOM_WORKER_DOCKER_CGROUP_DRIVER:?}" == "systemd" ]]; then
+    : "${SLURM_JOB_NODELIST:?SLURM_JOB_NODELIST is required}"
+    mapfile -t slurm_identity < <(
+      "$LOOM_WORKER_SCONTROL_PATH" show job --oneliner --details "$SLURM_JOB_ID" |
+        /usr/bin/python3 -I -B -c 'import re,sys
+row=sys.stdin.read().strip()
+matches=re.findall(r"(?:^| )([A-Za-z][A-Za-z0-9]*)=(.*?)(?= [A-Za-z][A-Za-z0-9]*=|$)",row)
+values={}
+for key,value in matches:
+    if key in values:
+        raise SystemExit("duplicate scontrol field")
+    values[key]=value
+required=("JobId","Account","NodeList","StartTime")
+if any(not values.get(key) for key in required):
+    raise SystemExit("missing scontrol allocation identity")
+job_id,account,node,start=(values[key] for key in required)
+if job_id != sys.argv[1] or account != sys.argv[2] or node != sys.argv[3]:
+    raise SystemExit("scontrol allocation identity mismatch")
+if re.fullmatch(r"[1-9][0-9]*(?:_[0-9]+)?",job_id) is None:
+    raise SystemExit("invalid scontrol JobId")
+if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}",account) is None:
+    raise SystemExit("invalid scontrol Account")
+if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}",node) is None:
+    raise SystemExit("invalid scontrol NodeList")
+if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}",start) is None:
+    raise SystemExit("invalid scontrol StartTime")
+print(job_id); print(account); print(node); print(start)' \
+          "$SLURM_JOB_ID" "$LOOM_WORKER_SLURM_ACCOUNT" "$SLURM_JOB_NODELIST"
+    )
+    if [[ "${#slurm_identity[@]}" -ne 4 ]]; then
+      echo "error: exact Slurm allocation identity is required" >&2
+      exit 2
+    fi
+    cgroup_identity_args=(
+      --cluster "$LOOM_WORKER_SLURM_CLUSTER"
+      --node "${slurm_identity[2]}"
+      --job-start-time "${slurm_identity[3]}"
+      --account "${slurm_identity[1]}"
+      --env-id "$LOOM_WORKER_ENV_ID"
+      --resource-generation "$LOOM_WORKER_RESOURCE_GENERATION"
+      --runtime-id "$LOOM_WORKER_RUNTIME_ID"
+      --candidate-id "$LOOM_WORKER_CANDIDATE_ID"
+      --candidate-sha "$LOOM_WORKER_CANDIDATE_SHA"
+      --candidate-tree "$LOOM_WORKER_CANDIDATE_TREE"
+    )
+  fi
   export LOOM_WORKER_CGROUP_PARENT="$(
     PYTHONPATH="$LOOM_REMOTE_WORKER_REPO_DIR/src" \
       /usr/bin/python3 -m loom_control_plane.slurm_job_cgroup \
       --job-id "$SLURM_JOB_ID" \
       --pids-max "$LOOM_WORKER_JOB_PIDS_MAX" \
+      --docker-driver "$LOOM_WORKER_DOCKER_CGROUP_DRIVER" \
+      "${cgroup_identity_args[@]}" \
       --wait-seconds 30
   )"
   : "${LOOM_WORKER_CGROUP_PARENT:?delegated Slurm job cgroup is required}"
@@ -742,6 +934,113 @@ trap 'cleanup 130' INT
 trap 'cleanup 143' TERM
 docker compose "${compose_args[@]}" up --build &
 compose_pid=$!
+if [[ "${LOOM_WORKER_DOCKER_CGROUP_DRIVER:-cgroupfs}" == "systemd" ]]; then
+  containment_deadline=$((SECONDS + 30))
+  containment_verified=0
+  while (( SECONDS <= containment_deadline )); do
+    if ! kill -0 "$compose_pid" 2>/dev/null; then
+      if wait "$compose_pid"; then
+        echo "error: compose exited before worker containment was verified" >&2
+        exit 2
+      else
+        exit $?
+      fi
+    fi
+    mapfile -t worker_container_ids < <(
+      docker compose "${compose_args[@]}" ps -q worker | sed '/^$/d'
+    )
+    if [[ "${#worker_container_ids[@]}" -eq 1 ]]; then
+      post_start_parent="$(
+        PYTHONPATH="$LOOM_REMOTE_WORKER_REPO_DIR/src" \
+          /usr/bin/python3 -m loom_control_plane.slurm_job_cgroup \
+          --job-id "$SLURM_JOB_ID" \
+          --pids-max "$LOOM_WORKER_JOB_PIDS_MAX" \
+          --docker-driver "$LOOM_WORKER_DOCKER_CGROUP_DRIVER" \
+          "${cgroup_identity_args[@]}" \
+          --wait-seconds 0
+      )"
+      if [[ "$post_start_parent" != "$LOOM_WORKER_CGROUP_PARENT" ]]; then
+        echo "error: allocation cgroup parent changed after worker start" >&2
+        exit 2
+      fi
+      worker_pid="$(
+        docker inspect --format '{{.State.Pid}}' "${worker_container_ids[0]}"
+      )"
+      slice_cgroup="$(
+        /usr/bin/systemctl show --property=ControlGroup --value "$LOOM_WORKER_CGROUP_PARENT"
+      )"
+      if /usr/bin/python3 -I -B -c 'import json,re,sys
+from fractions import Fraction
+from pathlib import Path,PurePosixPath
+unit,pid,parent_raw=sys.argv[1:]
+unit_match=re.fullmatch(r"loom-job-([1-9][0-9]*)-[0-9a-f]{40}[.]slice",unit)
+if unit_match is None:
+    raise SystemExit(1)
+if re.fullmatch(r"[1-9][0-9]*",pid) is None:
+    raise SystemExit(1)
+parent=PurePosixPath(parent_raw)
+if not parent.is_absolute() or parent == PurePosixPath("/"):
+    raise SystemExit(1)
+expected_parent=PurePosixPath(
+    f"/loom.slice/loom-job.slice/loom-job-{unit_match.group(1)}.slice/{unit}"
+)
+if parent != expected_parent:
+    raise SystemExit(1)
+rows=Path(f"/proc/{pid}/cgroup").read_text().splitlines()
+unified=[row.partition("::")[2] for row in rows if row.startswith("0::")]
+if len(unified) != 1:
+    raise SystemExit(1)
+child=PurePosixPath(unified[0])
+if parent not in child.parents:
+    raise SystemExit(1)
+receipt_path=Path("/run/loom-developer-sandbox-slurm-policy/systemd-slices")/f"{unit}.json"
+receipt=json.loads(receipt_path.read_text())
+if receipt.get("systemd_slice") != unit:
+    raise SystemExit(1)
+cgroup_root=Path("/sys/fs/cgroup")/parent.relative_to("/")
+def value(name):
+    return (cgroup_root/name).read_text().strip()
+def ceiling(raw):
+    return None if raw == "max" else int(raw)
+def no_looser(actual,expected):
+    left,right=ceiling(actual),ceiling(expected)
+    return right is None or (left is not None and left <= right)
+def cpu(raw):
+    quota,period=raw.split()
+    return None if quota == "max" else Fraction(int(quota),int(period))
+def cpu_no_looser(actual,expected):
+    left,right=cpu(actual),cpu(expected)
+    return right is None or (left is not None and left <= right)
+def cpuset(raw):
+    result=set()
+    for item in raw.split(","):
+        first,sep,last=item.partition("-")
+        result.update(range(int(first),int(last)+1) if sep else (int(first),))
+    return result
+checks=(
+    cpu_no_looser(value("cpu.max"),str(receipt["cpu_max"])),
+    no_looser(value("memory.max"),str(receipt["memory_max"])),
+    no_looser(value("memory.swap.max"),str(receipt["memory_swap_max_effective"])),
+    no_looser(value("pids.max"),str(receipt["pids_max"])),
+    cpuset(value("cpuset.cpus.effective")) <= cpuset(str(receipt["cpuset_cpus"])),
+    cpuset(value("cpuset.mems.effective")) <= cpuset(str(receipt["cpuset_mems"])),
+)
+raise SystemExit(0 if all(checks) else 1)' \
+        "$LOOM_WORKER_CGROUP_PARENT" "$worker_pid" "$slice_cgroup"; then
+        containment_verified=1
+        break
+      fi
+    elif [[ "${#worker_container_ids[@]}" -gt 1 ]]; then
+      echo "error: compose project returned multiple worker containers" >&2
+      exit 2
+    fi
+    sleep 1
+  done
+  if [[ "$containment_verified" -ne 1 ]]; then
+    echo "error: worker container did not enter the exact bounded systemd slice" >&2
+    exit 2
+  fi
+fi
 wait "$compose_pid"
 """
     return SbatchRequest(args=tuple(args), stdin=stdin)
@@ -1229,6 +1528,17 @@ def _worker_env(config: ElasticSlurmWorkerControllerConfig) -> dict[str, str]:
         "LOOM_WORKER_CANDIDATE_SHA": config.candidate_sha,
         "LOOM_WORKER_SLURM_ALLOCATED_GPUS": str(config.requested_gpus),
     }
+    if config.docker_cgroup_driver == "systemd":
+        env.update(
+            {
+                "LOOM_WORKER_DOCKER_CGROUP_DRIVER": "systemd",
+                "LOOM_WORKER_ENV_ID": config.env_id,
+                "LOOM_WORKER_RESOURCE_GENERATION": str(config.resource_generation),
+                "LOOM_WORKER_RUNTIME_ID": config.runtime_id,
+                "LOOM_WORKER_CANDIDATE_ID": config.candidate_id,
+                "LOOM_WORKER_CANDIDATE_TREE": config.candidate_tree,
+            },
+        )
     try:
         fingerprint = worker_token_fingerprint_from_env_file(Path(config.env_file))
     except OSError as exc:

@@ -90,6 +90,32 @@ def _dynamic_profile(tmp_path: Path, sandbox: str = "qianyi") -> host.Profile:
     )
 
 
+def test_worker_runtime_env_uses_profile_root_for_both_domains(tmp_path: Path) -> None:
+    profile = replace(
+        _dynamic_profile(tmp_path),
+        runtime_root=tmp_path / "shared/runtime/environments/denv-test",
+    )
+
+    assert profile.worker_runtime_env(SHA, "oldlab") == (
+        profile.runtime_root / SHA / "worker-oldlab.env"
+    )
+    assert profile.worker_runtime_env(SHA, "gb10") == (
+        profile.runtime_root / SHA / "worker-gb10.env"
+    )
+    with pytest.raises(host.HostConvergeError, match="runtime identity"):
+        profile.worker_runtime_env(SHA, "arbitrary")
+
+
+def test_legacy_profile_separates_shared_and_private_runtime_roots() -> None:
+    profile = next(item for item in host.load_profiles() if item.sandbox == "qianyi")
+
+    assert profile.runtime_root == host.NFS_RUNTIME_ROOT / "qianyi"
+    assert profile.private_runtime_root == profile.state_root / "runtime"
+    assert profile.worker_runtime_env(SHA) == (
+        host.NFS_RUNTIME_ROOT / "qianyi" / SHA / "worker-oldlab.env"
+    )
+
+
 def _current_identity(user: str) -> host.Identity:
     return host.Identity(
         user=user,
@@ -2699,3 +2725,248 @@ def test_staging_allocation_config_separates_producer_batch_and_system_mount() -
     assert set(config.host_aliases) == set(config.infrastructure_nodes)
     assert config.host_aliases["trt-gb10-7"] == "gx10-0faf"
     assert "trt-gb10-7" in config.allowed_nodes
+
+
+def _fixed_staging_binding() -> dict[str, object]:
+    return host.slurm_policy.staging_guard_binding_payload(
+        candidate_sha=SHA,
+        candidate_tree="b" * 40,
+        authority_generation=7,
+        authority_convergence_id="c" * 64,
+        authority_request_id="d" * 64,
+        authority_requested_at="2026-07-29T12:00:00Z",
+    )
+
+
+@pytest.mark.parametrize(
+    "line",
+    (
+        "JobId=999 Account=loom-staging UserId=loom-staging-worker(31024) "
+        "NodeList=trt-gb10-2 StartTime=2026-07-29T12:00:00",
+        "JobId=123 Account=loom-dev-qianyi UserId=loom-staging-worker(31024) "
+        "NodeList=trt-gb10-2 StartTime=2026-07-29T12:00:00",
+        "JobId=123 Account=loom-staging UserId=someone(31024) "
+        "NodeList=trt-gb10-2 StartTime=2026-07-29T12:00:00",
+        "JobId=123 Account=loom-staging UserId=loom-staging-worker(31024) "
+        "NodeList=trt-gb10-3 StartTime=2026-07-29T12:00:00",
+        "JobId=123 Account=loom-staging UserId=loom-staging-worker(31024) "
+        "NodeList=trt-gb10-2 StartTime=Unknown",
+    ),
+)
+def test_staging_allocation_job_start_rejects_wrong_closed_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    line: str,
+) -> None:
+    config = host.load_staging_allocation_config(
+        Path("deploy/developer-sandboxes/staging-external-slurm-authority.toml"),
+    )
+    monkeypatch.setattr(
+        host,
+        "_run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, line, ""),
+    )
+
+    with pytest.raises(host.HostConvergeError, match="start identity"):
+        host._staging_allocation_job_start_time(
+            config,
+            job_id="123",
+            node="trt-gb10-2",
+        )
+
+
+def test_staging_cgroup_command_uses_only_profile_and_authority_binding() -> None:
+    config = host.load_staging_allocation_config(
+        Path("deploy/developer-sandboxes/staging-external-slurm-authority.toml"),
+    )
+    profile = host.slurm_policy.load_profile(
+        Path("deploy/slurm/developer-sandboxes/gb10.toml"),
+    )
+    binding = _fixed_staging_binding()
+
+    command = host._staging_cgroup_command(
+        config,
+        profile,
+        binding,
+        cgroup_program=Path("/candidate/src/loom_control_plane/slurm_job_cgroup.py"),
+        job_id="123",
+        node="trt-gb10-2",
+        job_start_time="2026-07-29T12:00:00",
+    )
+
+    assert command[command.index("--docker-driver") + 1] == "systemd"
+    assert command[command.index("--job-start-time") + 1] == "2026-07-29T12:00:00"
+    assert command[command.index("--env-id") + 1] == f"denv-staging-{SHA}"
+    assert command[command.index("--resource-generation") + 1] == "7"
+    assert command[command.index("--candidate-id") + 1] == f"cand-{SHA}"
+    assert command[command.index("--candidate-tree") + 1] == "b" * 40
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("candidate", "limit", "unit", "receipt-extra"),
+)
+def test_staging_systemd_slice_receipt_rejects_adversarial_drift(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    config = host.load_staging_allocation_config(
+        Path("deploy/developer-sandboxes/staging-external-slurm-authority.toml"),
+    )
+    binding = _fixed_staging_binding()
+    unit_name, identity_digest = host._staging_slice_identity(
+        config,
+        binding,
+        job_id="123",
+        node="trt-gb10-2",
+        job_start_time="2026-07-29T12:00:00",
+    )
+    receipt_root = tmp_path / "receipts"
+    unit_root = tmp_path / "units"
+    receipt_root.mkdir()
+    unit_root.mkdir()
+    unit = b"[Slice]\nCPUQuota=200%\n"
+    (unit_root / unit_name).write_bytes(unit)
+    (unit_root / unit_name).chmod(0o644)
+    unsigned: dict[str, object] = {
+        "schema_version": 1,
+        "kind": "loom.slurm-systemd-slice-receipt",
+        "systemd_slice": unit_name,
+        "slice_identity_sha256": identity_digest,
+        "unit_sha256": hashlib.sha256(unit).hexdigest(),
+        "job_id": "123",
+        "job_start_time": "2026-07-29T12:00:00",
+        "cluster": "trt-gb10",
+        "node_list": "trt-gb10-2",
+        "account": "loom-staging",
+        "env_id": binding["env_id"],
+        "resource_generation": 7,
+        "runtime_id": "staging",
+        "candidate_id": binding["candidate_id"],
+        "candidate_sha": SHA,
+        "candidate_tree": "b" * 40,
+        "cpu_max": "200000 100000",
+        "memory_max": "12058624000",
+        "memory_swap_max_source": "max",
+        "memory_swap_max_effective": "0",
+        "pids_max": "65536",
+        "cpuset_cpus": "0-1",
+        "cpuset_mems": "0",
+        "gpu_tres": "not-required",
+        "gpu_detail": "not-required",
+    }
+    if mutation == "candidate":
+        unsigned["candidate_tree"] = "e" * 40
+    elif mutation == "limit":
+        unsigned["pids_max"] = "65537"
+    elif mutation == "unit":
+        unsigned["unit_sha256"] = "f" * 64
+    elif mutation == "receipt-extra":
+        unsigned["unexpected"] = True
+    receipt = {
+        **unsigned,
+        "payload_sha256": hashlib.sha256(
+            json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode("ascii"),
+        ).hexdigest(),
+    }
+    receipt_path = receipt_root / f"{unit_name}.json"
+    receipt_path.write_text(
+        json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n",
+    )
+    receipt_path.chmod(0o444)
+
+    with pytest.raises(host.HostConvergeError, match="receipt binding"):
+        host._staging_systemd_slice_receipt(
+            config,
+            binding,
+            job_id="123",
+            node="trt-gb10-2",
+            job_start_time="2026-07-29T12:00:00",
+            cgroup_parent=unit_name,
+            receipt_root=receipt_root,
+            unit_root=unit_root,
+            expected_authority_uid=os.getuid(),
+            expected_authority_gid=os.getgid(),
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("exact", "nested-same-name", "wrong-live-root", "weak-memory"),
+)
+def test_staging_container_containment_uses_live_systemd_control_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    systemd_slice = "loom-job-123-" + "a" * 40 + ".slice"
+    live_slice = Path("/loom.slice") / "loom-job.slice" / "loom-job-123.slice" / systemd_slice
+    if mutation == "wrong-live-root":
+        live_slice = Path("/system.slice") / systemd_slice
+    observed = live_slice / "docker-deadbeef.scope"
+    if mutation == "nested-same-name":
+        observed = Path("/foreign.slice") / systemd_slice / "docker-deadbeef.scope"
+    proc_root = tmp_path / "proc"
+    cgroup_root = tmp_path / "cgroup"
+    (proc_root / "4242").mkdir(parents=True)
+    (proc_root / "4242/cgroup").write_text(f"0::{observed}\n")
+    slice_path = cgroup_root / live_slice.relative_to("/")
+    slice_path.mkdir(parents=True)
+    limits = {
+        "cpu.max": "200000 100000\n",
+        "memory.max": ("12058624001\n" if mutation == "weak-memory" else "12058624000\n"),
+        "memory.swap.max": "0\n",
+        "pids.max": "65536\n",
+        "cpuset.cpus.effective": "0-1\n",
+        "cpuset.mems.effective": "0\n",
+    }
+    for name, value in limits.items():
+        (slice_path / name).write_text(value)
+    calls = iter(
+        (
+            subprocess.CompletedProcess([], 0, "deadbeefcafe\n", ""),
+            subprocess.CompletedProcess([], 0, "4242\n", ""),
+            subprocess.CompletedProcess([], 0, f"{live_slice}\n", ""),
+        ),
+    )
+    monkeypatch.setattr(host.subprocess, "run", lambda *_args, **_kwargs: next(calls))
+    receipt = {
+        "cpu_max": "200000 100000",
+        "memory_max": "12058624000",
+        "memory_swap_max_effective": "0",
+        "pids_max": "65536",
+        "cpuset_cpus": "0-1",
+        "cpuset_mems": "0",
+    }
+
+    if mutation == "exact":
+        assert host._staging_systemd_container_containment(
+            ("docker", "compose"),
+            environment={},
+            repository=tmp_path,
+            service="worker",
+            systemd_slice=systemd_slice,
+            receipt=receipt,
+            proc_root=proc_root,
+            cgroup_root=cgroup_root,
+        ) == {
+            "container_id": "deadbeefcafe",
+            "observed_cgroup": str(observed),
+            "cpu_max": "200000 100000",
+            "memory_max": "12058624000",
+            "memory_swap_max": "0",
+            "pids_max": "65536",
+            "cpuset_cpus": "0-1",
+            "cpuset_mems": "0",
+        }
+    else:
+        with pytest.raises(host.HostConvergeError):
+            host._staging_systemd_container_containment(
+                ("docker", "compose"),
+                environment={},
+                repository=tmp_path,
+                service="worker",
+                systemd_slice=systemd_slice,
+                receipt=receipt,
+                proc_root=proc_root,
+                cgroup_root=cgroup_root,
+            )

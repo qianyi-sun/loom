@@ -749,6 +749,7 @@ def _staging_infrastructure_receipt(
                 node=node,
                 candidate_sha=SHA,
                 candidate_tree=TREE,
+                generation=generation,
                 convergence_id=convergence_id,
                 requested_at=requested_at,
             ),
@@ -3539,6 +3540,7 @@ def test_staging_accounting_action_has_no_caller_policy_surface() -> None:
         node="trt-gb10-1",
         candidate_sha=SHA,
         candidate_tree=TREE,
+        generation=1,
         convergence_id="3" * 64,
         requested_at="2026-07-29T12:00:00Z",
     )
@@ -3568,6 +3570,7 @@ def test_staging_accounting_action_has_no_caller_policy_surface() -> None:
                     "node": "trt-gb10-1",
                     "candidate_sha": SHA,
                     "candidate_tree": TREE,
+                    "generation": 1,
                     "convergence_id": "3" * 64,
                     "requested_at": "2026-07-29T12:00:00Z",
                 },
@@ -3577,6 +3580,7 @@ def test_staging_accounting_action_has_no_caller_policy_surface() -> None:
         "node": "trt-gb10-1",
         "candidate_sha": SHA,
         "candidate_tree": TREE,
+        "generation": 1,
         "convergence_id": "3" * 64,
         "requested_at": "2026-07-29T12:00:00Z",
     }
@@ -3586,6 +3590,7 @@ def test_staging_accounting_action_has_no_caller_policy_surface() -> None:
             node="trt-gb10-2",
             candidate_sha=SHA,
             candidate_tree=TREE,
+            generation=1,
             convergence_id="3" * 64,
             requested_at="2026-07-29T12:00:00Z",
         )
@@ -3604,6 +3609,100 @@ def test_staging_accounting_action_has_no_caller_policy_surface() -> None:
             verb="transact",
             policy=_policy("trt-gb10-2"),
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("generation", 0),
+        ("generation", "1"),
+        ("candidate_sha", "f" * 40),
+        ("candidate_tree", "e" * 40),
+        ("extra", "forbidden"),
+    ],
+)
+def test_staging_infrastructure_operation_rejects_schema_or_binding_drift(
+    field: str,
+    value: object,
+) -> None:
+    envelope = json.loads(
+        authority._staging_infrastructure_operation_envelope(
+            action="staging-allocation-bootstrap",
+            node="trt-gb10-7",
+            candidate_sha=SHA,
+            candidate_tree=TREE,
+            generation=17,
+            convergence_id="3" * 64,
+            requested_at="2026-07-29T12:00:00Z",
+        ),
+    )
+    operation = json.loads(
+        base64.b64decode(envelope["payload_base64"], validate=True),
+    )
+    operation[field] = value
+    unsigned = {key: item for key, item in operation.items() if key != "request_id"}
+    operation["request_id"] = hashlib.sha256(authority._canonical(unsigned)).hexdigest()
+
+    with pytest.raises(
+        authority.NodeAuthorityError,
+        match="staging infrastructure operation payload",
+    ):
+        authority._parse_request(
+            _request(
+                action="staging-allocation-bootstrap",
+                node="trt-gb10-7",
+                domain="gb10",
+                sandbox="staging",
+                payload_kind="staging-infrastructure-operation-request",
+                payload_bytes=authority._canonical(operation),
+            ),
+            verb="transact",
+            policy=_policy("trt-gb10-7"),
+        )
+
+
+def test_staging_identity_converge_command_binds_full_authority_transaction() -> None:
+    envelope = json.loads(
+        authority._staging_infrastructure_operation_envelope(
+            action="staging-allocation-bootstrap",
+            node="trt-gb10-7",
+            candidate_sha=SHA,
+            candidate_tree=TREE,
+            generation=17,
+            convergence_id="3" * 64,
+            requested_at="2026-07-29T12:00:00Z",
+        ),
+    )
+    operation = base64.b64decode(envelope["payload_base64"], validate=True)
+    request = authority._parse_request(
+        _request(
+            action="staging-allocation-bootstrap",
+            node="trt-gb10-7",
+            domain="gb10",
+            sandbox="staging",
+            payload_kind="staging-infrastructure-operation-request",
+            payload_bytes=operation,
+        ),
+        verb="transact",
+        policy=_policy("trt-gb10-7"),
+    )
+    payload = json.loads(operation)
+
+    assert authority._staging_identity_converge_argv(request)[-13:] == (
+        "--candidate-sha",
+        SHA,
+        "--candidate-tree",
+        TREE,
+        "--authority-generation",
+        "17",
+        "--authority-convergence-id",
+        "3" * 64,
+        "--authority-request-id",
+        payload["request_id"],
+        "--authority-requested-at",
+        "2026-07-29T12:00:00Z",
+        "--execute",
+    )
 
 
 def _staging_accounting_journal(*, phase: str = "qos") -> dict[str, object]:
@@ -3701,6 +3800,7 @@ def test_staging_bootstrap_covers_infrastructure_nodes_and_returns_fixed_roots(
         node=node,
         candidate_sha=SHA,
         candidate_tree=TREE,
+        generation=1,
         convergence_id="3" * 64,
         requested_at="2026-07-29T12:00:00Z",
     )
@@ -3787,6 +3887,22 @@ def test_staging_bootstrap_covers_infrastructure_nodes_and_returns_fixed_roots(
                 "repository_root_mode": "0o750",
                 "worker_env_root_mode": "0o750",
                 "result_root_mode": "0o2770",
+            },
+            "guard_binding": {
+                "schema_version": 1,
+                "kind": "loom.staging-external-slurm.guard-binding-convergence",
+                "cluster": "trt-gb10",
+                "candidate_sha": SHA,
+                "candidate_tree": TREE,
+                "authority_generation": 1,
+                "authority_convergence_id": "3" * 64,
+                "authority_request_id": json.loads(operation_payload)["request_id"],
+                "candidate_set_sha256": "4" * 64,
+                "candidate_set_generation": 17,
+                "binding_payload_sha256": "5" * 64,
+                "policy_phase": "committed",
+                "replayed": False,
+                "status": "committed",
             },
             "result": "pass",
         },

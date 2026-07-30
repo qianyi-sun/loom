@@ -335,6 +335,28 @@ def _registry_contract() -> types.ModuleType:
 
 _REGISTRY = _registry_contract()
 REGISTRY_SNAPSHOT_PATH = Path(_REGISTRY.SYSTEM_SNAPSHOT)
+STAGING_GUARD_BINDING_PATH = Path(
+    "/var/lib/loom-developer-sandbox-slurm-policy/staging-binding-trt-gb10.json",
+)
+_STAGING_GUARD_BINDING_FIELDS = {
+    "schema_version",
+    "kind",
+    "cluster",
+    "account",
+    "service_user",
+    "slurm_qos",
+    "runtime_id",
+    "env_id",
+    "resource_generation",
+    "candidate_id",
+    "candidate_sha",
+    "candidate_tree",
+    "authority_generation",
+    "authority_convergence_id",
+    "authority_request_id",
+    "authority_requested_at",
+    "payload_sha256",
+}
 _CAPACITY_ROOT = Path("/var/lib/loom-developer-environment-capacity")
 _CAPACITY_TRANSPORT_PROGRAM = Path(
     "/usr/local/libexec/loom-developer-sandbox-node-transport",
@@ -591,6 +613,139 @@ def _candidate_set_sha256(bindings: Mapping[str, Mapping[str, Any]]) -> str:
     return hashlib.sha256(
         json.dumps(bindings, sort_keys=True, separators=(",", ":")).encode("ascii"),
     ).hexdigest()
+
+
+def staging_guard_binding_payload(
+    *,
+    candidate_sha: str,
+    candidate_tree: str,
+    authority_generation: int,
+    authority_convergence_id: str,
+    authority_request_id: str,
+    authority_requested_at: str,
+) -> dict[str, Any]:
+    """Derive the fixed staging guard identity from one authority transaction."""
+
+    try:
+        requested_at = datetime.fromisoformat(
+            authority_requested_at.replace("Z", "+00:00"),
+        )
+    except ValueError as exc:
+        raise PolicyError("staging guard authority timestamp is invalid") from exc
+    if (
+        _CANDIDATE_RE.fullmatch(candidate_sha) is None
+        or _CANDIDATE_RE.fullmatch(candidate_tree) is None
+        or type(authority_generation) is not int
+        or authority_generation < 1
+        or _REGISTRY.DIGEST_RE.fullmatch(authority_convergence_id) is None
+        or _REGISTRY.DIGEST_RE.fullmatch(authority_request_id) is None
+        or requested_at.tzinfo is None
+        or requested_at.astimezone(UTC).isoformat().replace("+00:00", "Z") != authority_requested_at
+    ):
+        raise PolicyError("staging guard authority transaction is invalid")
+    unsigned = {
+        "schema_version": 1,
+        "kind": "loom.staging-external-slurm.guard-binding",
+        "cluster": "trt-gb10",
+        "account": "loom-staging",
+        "service_user": "loom-staging-worker",
+        "slurm_qos": "loom-staging",
+        "runtime_id": "staging",
+        "env_id": f"denv-staging-{candidate_sha}",
+        "resource_generation": authority_generation,
+        "candidate_id": f"cand-{candidate_sha}",
+        "candidate_sha": candidate_sha,
+        "candidate_tree": candidate_tree,
+        "authority_generation": authority_generation,
+        "authority_convergence_id": authority_convergence_id,
+        "authority_request_id": authority_request_id,
+        "authority_requested_at": authority_requested_at,
+    }
+    return {
+        **unsigned,
+        "payload_sha256": hashlib.sha256(
+            json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode("ascii"),
+        ).hexdigest(),
+    }
+
+
+def _validated_staging_guard_binding(payload: object) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise PolicyError("staging guard binding is invalid")
+    unsigned = {key: value for key, value in payload.items() if key != "payload_sha256"}
+    expected = staging_guard_binding_payload(
+        candidate_sha=str(payload.get("candidate_sha", "")),
+        candidate_tree=str(payload.get("candidate_tree", "")),
+        authority_generation=(
+            int(payload["authority_generation"])
+            if type(payload.get("authority_generation")) is int
+            else 0
+        ),
+        authority_convergence_id=str(payload.get("authority_convergence_id", "")),
+        authority_request_id=str(payload.get("authority_request_id", "")),
+        authority_requested_at=str(payload.get("authority_requested_at", "")),
+    )
+    if (
+        set(payload) != _STAGING_GUARD_BINDING_FIELDS
+        or payload != expected
+        or payload.get("resource_generation") != payload.get("authority_generation")
+        or payload.get("payload_sha256")
+        != hashlib.sha256(
+            json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode("ascii"),
+        ).hexdigest()
+    ):
+        raise PolicyError("staging guard binding is invalid")
+    return dict(payload)
+
+
+def load_staging_guard_binding(
+    path: Path = STAGING_GUARD_BINDING_PATH,
+    *,
+    required: bool = False,
+    require_root_ownership: bool = True,
+) -> dict[str, Any] | None:
+    if not path.exists():
+        if required:
+            raise PolicyError("staging guard binding is unavailable")
+        return None
+    raw, _metadata = _read_bound_regular_file(
+        path,
+        expected_uid=0 if require_root_ownership else os.geteuid(),
+        expected_gid=0 if require_root_ownership else os.getegid(),
+        expected_mode=0o600,
+        description="staging guard binding",
+        max_bytes=64 * 1024,
+    )
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PolicyError("staging guard binding is invalid") from exc
+    if raw != json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("ascii") + b"\n":
+        raise PolicyError("staging guard binding is not canonical")
+    return _validated_staging_guard_binding(payload)
+
+
+def _merge_staging_guard_binding(
+    bindings: Mapping[str, Mapping[str, Any]],
+    staging: Mapping[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    merged = {account: dict(binding) for account, binding in bindings.items()}
+    if staging is None:
+        return _candidate_bindings(None, merged)
+    validated = _validated_staging_guard_binding(staging)
+    if "loom-staging" in merged:
+        raise PolicyError("staging guard account collides with the developer registry")
+    merged["loom-staging"] = {
+        "env_id": validated["env_id"],
+        "resource_generation": validated["resource_generation"],
+        "sandbox": validated["runtime_id"],
+        "service_user": validated["service_user"],
+        "slurm_qos": validated["slurm_qos"],
+        "candidate_id": validated["candidate_id"],
+        "candidate_sha": validated["candidate_sha"],
+        "candidate_tree": validated["candidate_tree"],
+    }
+    return _candidate_bindings(None, merged)
 
 
 def _read_registry_snapshot(
@@ -901,16 +1056,18 @@ def slurm_candidate_set_from_snapshot(
     deployment_id: str | None = None,
     target_resource_generation: int | None = None,
     include_retiring: bool = False,
+    staging_binding: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Produce the exact registry-bound payload consumed by node authorities."""
 
-    bindings, _provisioning = _registry_candidate_bindings(
+    developer_bindings, _provisioning = _registry_candidate_bindings(
         snapshot,
         include_provisioning=include_provisioning,
         deployment_id=deployment_id,
         target_resource_generation=target_resource_generation,
         include_retiring=include_retiring,
     )
+    bindings = _merge_staging_guard_binding(developer_bindings, staging_binding)
     registry_generation = snapshot.get("generation")
     registry_digest = snapshot.get("payload_sha256")
     if (
@@ -951,6 +1108,7 @@ def load_slurm_candidate_set(
     require_root_ownership: bool = True,
     generation: int | None = None,
     convergence_id: str | None = None,
+    staging_binding_path: Path = STAGING_GUARD_BINDING_PATH,
 ) -> dict[str, Any]:
     snapshot = _read_registry_snapshot(
         path,
@@ -960,6 +1118,11 @@ def load_slurm_candidate_set(
         snapshot,
         generation=generation,
         convergence_id=convergence_id,
+        staging_binding=load_staging_guard_binding(
+            staging_binding_path,
+            required=False,
+            require_root_ownership=require_root_ownership,
+        ),
     )
 
 
@@ -969,9 +1132,13 @@ def _require_current_registry_bindings(
     path: Path = REGISTRY_SNAPSHOT_PATH,
 ) -> dict[str, Any]:
     snapshot = _read_registry_snapshot(path, require_root_ownership=True)
-    expected, _provisioning = _registry_candidate_bindings(
+    expected_developers, _provisioning = _registry_candidate_bindings(
         snapshot,
         include_provisioning=True,
+    )
+    expected = _merge_staging_guard_binding(
+        expected_developers,
+        load_staging_guard_binding(required=False),
     )
     if dict(bindings) != expected:
         raise PolicyError("Slurm candidate bindings are stale against the current registry")
@@ -1170,8 +1337,8 @@ def load_profile(path: Path) -> Profile:
     if len(set(users)) != len(users):
         raise PolicyError("sandbox users must be distinct")
     driver = docker.get("cgroup_driver")
-    if driver != "cgroupfs":
-        raise PolicyError("Docker cgroup driver must be cgroupfs for Slurm job paths")
+    if driver not in {"cgroupfs", "systemd"}:
+        raise PolicyError("Docker cgroup driver must be cgroupfs or systemd")
     for key in required_cgroup - {"plugin"}:
         if cgroup[key] is not True:
             raise PolicyError(f"cgroup.{key} must stay fail-closed true")
@@ -1366,6 +1533,12 @@ def render_daemon_json(current: str, profile: Profile) -> str:
         raise PolicyError("Docker daemon.json is invalid JSON") from exc
     if not isinstance(payload, dict):
         raise PolicyError("Docker daemon.json must contain an object")
+    if profile.docker_cgroup_driver == "systemd":
+        # The live fleets already use Docker's systemd cgroup driver. Preserve
+        # the administrator-owned daemon bytes exactly: the allocation path is
+        # implemented with per-job systemd slices and never needs a daemon
+        # restart or a daemon.json rewrite.
+        return current
     raw_opts = payload.get("exec-opts", [])
     if not isinstance(raw_opts, list) or any(not isinstance(item, str) for item in raw_opts):
         raise PolicyError("Docker exec-opts must be a string array")
@@ -1815,6 +1988,74 @@ def _read_exact_env_values(
     return values
 
 
+def _allocation_job_start_time(
+    job_id: str,
+    *,
+    account: str,
+    node: str,
+) -> str:
+    output = _run(("scontrol", "show", "job", "--oneliner", job_id), timeout=10)
+    fields = {
+        name: re.findall(rf"(?:^|\s){name}=(\S+)", output)
+        for name in ("JobId", "Account", "NodeList", "StartTime")
+    }
+    if (
+        any(len(values) != 1 for values in fields.values())
+        or fields["JobId"][0] != job_id
+        or fields["Account"][0] != account
+        or fields["NodeList"][0].lower() != node.lower()
+        or fields["StartTime"][0] in {"", "Unknown", "None", "(null)"}
+    ):
+        raise PolicyError("allocation-side Slurm start identity drifted")
+    return str(fields["StartTime"][0])
+
+
+def _allocation_cgroup_command(
+    profile: Profile,
+    *,
+    cgroup_program: Path,
+    job_id: str,
+    node: str,
+    account: str,
+    binding: Mapping[str, Any],
+    job_start_time: str,
+) -> tuple[str, ...]:
+    return (
+        "/usr/bin/python3",
+        "-I",
+        "-B",
+        str(cgroup_program),
+        "--job-id",
+        job_id,
+        "--pids-max",
+        str(profile.job_pids_max),
+        "--wait-seconds",
+        "30",
+        "--docker-driver",
+        profile.docker_cgroup_driver,
+        "--cluster",
+        profile.cluster,
+        "--node",
+        node,
+        "--job-start-time",
+        job_start_time,
+        "--account",
+        account,
+        "--env-id",
+        str(binding["env_id"]),
+        "--resource-generation",
+        str(binding["resource_generation"]),
+        "--runtime-id",
+        str(binding["sandbox"]),
+        "--candidate-id",
+        str(binding["candidate_id"]),
+        "--candidate-sha",
+        str(binding["candidate_sha"]),
+        "--candidate-tree",
+        str(binding["candidate_tree"]),
+    )
+
+
 def allocation_node_check(
     profile: Profile,
     *,
@@ -1834,6 +2075,14 @@ def allocation_node_check(
 ) -> dict[str, Any]:
     """Run the secret-safe compute-side portion of the #827 matrix."""
     account = _sandbox_account(profile, sandbox)
+    environment_binding = profile.environment_bindings.get(account)
+    if not profile.environment_bindings:
+        environment_binding = _offline_candidate_bindings(
+            profile,
+            candidate_sha,
+        ).get(account)
+    if not isinstance(environment_binding, Mapping):
+        raise PolicyError("allocation-side environment binding is unavailable")
     service_user = _sandbox_service_user(profile, sandbox)
     try:
         sandbox_identity = pwd.getpwnam(service_user)
@@ -1881,20 +2130,22 @@ def allocation_node_check(
     job_id = os.environ.get("SLURM_JOB_ID", "")
     if re.fullmatch(r"[1-9][0-9]*", job_id) is None:
         raise PolicyError("allocation-side Slurm job identity is unavailable")
-    cgroup_program = candidate_root / "src/loom_control_plane/slurm_job_cgroup.py"
+    slurm_node = _slurm_node_for_host(profile, host) or host
+    job_start_time = _allocation_job_start_time(
+        job_id,
+        account=account,
+        node=slurm_node,
+    )
     try:
         cgroup_completed = subprocess.run(
-            (
-                "/usr/bin/python3",
-                "-I",
-                "-B",
-                str(cgroup_program),
-                "--job-id",
-                job_id,
-                "--pids-max",
-                str(profile.job_pids_max),
-                "--wait-seconds",
-                "30",
+            _allocation_cgroup_command(
+                profile,
+                cgroup_program=(candidate_root / "src/loom_control_plane/slurm_job_cgroup.py"),
+                job_id=job_id,
+                node=slurm_node,
+                account=account,
+                binding=environment_binding,
+                job_start_time=job_start_time,
             ),
             check=False,
             capture_output=True,
@@ -1904,7 +2155,14 @@ def allocation_node_check(
     except (OSError, subprocess.SubprocessError) as exc:
         raise PolicyError("allocation-side cgroup guard validation failed safely") from exc
     cgroup_parent = cgroup_completed.stdout.strip()
-    if cgroup_completed.returncode or not cgroup_parent.startswith("/"):
+    if (
+        cgroup_completed.returncode
+        or (profile.docker_cgroup_driver == "cgroupfs" and not cgroup_parent.startswith("/"))
+        or (
+            profile.docker_cgroup_driver == "systemd"
+            and re.fullmatch(r"loom-job-[1-9][0-9]*-[0-9a-f]{40}\.slice", cgroup_parent) is None
+        )
+    ):
         raise PolicyError("allocation-side cgroup guard validation failed")
     base_compose = candidate_root / "deploy/docker-compose.remote-worker.yml"
     sandbox_compose = candidate_root / "deploy/docker-compose.remote-worker.sandbox-link.yml"
@@ -1956,6 +2214,38 @@ def allocation_node_check(
         or services["sandbox-link"].get("cgroup_parent") != cgroup_parent
     ):
         raise PolicyError("allocation-side Docker Compose cgroup binding drifted")
+    if profile.docker_cgroup_driver == "systemd":
+        slice_identity = {
+            "cluster": profile.cluster,
+            "node": slurm_node.lower(),
+            "job_id": job_id,
+            "job_start_time": job_start_time,
+            "account": account,
+            "env_id": environment_binding["env_id"],
+            "resource_generation": environment_binding["resource_generation"],
+            "runtime_id": environment_binding["sandbox"],
+            "candidate_id": environment_binding["candidate_id"],
+            "candidate_sha": environment_binding["candidate_sha"],
+            "candidate_tree": environment_binding["candidate_tree"],
+        }
+        slice_identity_sha256 = hashlib.sha256(
+            json.dumps(
+                slice_identity,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("ascii"),
+        ).hexdigest()
+        receipt_path = (
+            Path("/run/loom-developer-sandbox-slurm-policy/systemd-slices")
+            / f"{cgroup_parent}.json"
+        )
+        try:
+            slice_receipt_sha256 = hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise PolicyError("allocation-side systemd slice receipt is unavailable") from exc
+    else:
+        slice_identity_sha256 = None
+        slice_receipt_sha256 = None
     result = {
         "schema_version": 2,
         "sandbox": sandbox,
@@ -1970,7 +2260,15 @@ def allocation_node_check(
         "concurrency": expected_concurrency,
         "docker_cgroup_driver": docker_driver,
         "job_id": job_id,
+        "job_start_time": job_start_time,
         "cgroup_parent": cgroup_parent,
+        "cgroup_mode": (
+            "direct-slurm-cgroup"
+            if profile.docker_cgroup_driver == "cgroupfs"
+            else "allocation-mirrored-systemd-slice"
+        ),
+        "slice_identity_sha256": slice_identity_sha256,
+        "slice_receipt_sha256": slice_receipt_sha256,
         "cgroup_guard_verified": True,
         "compose_verified": True,
     }
@@ -1998,7 +2296,7 @@ def desired_files(
     if _CANDIDATE_RE.fullmatch(candidate) is None:
         raise PolicyError("candidate SHA must be an exact lowercase Git SHA")
     if candidate_bindings is None:
-        if root == Path("/"):
+        if root == Path("/") and profile.docker_cgroup_driver != "systemd":
             raise PolicyError("live Slurm policy requires the complete candidate set")
         bindings = _offline_candidate_bindings(profile, candidate)
     else:
@@ -2026,7 +2324,7 @@ def desired_files(
         root / "etc/loom/slurm-job-cgroup-guard.json": (
             json.dumps(
                 {
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "cluster": profile.cluster,
                     "controller": profile.controller,
                     "submit_host": profile.submit_host,
@@ -2041,6 +2339,7 @@ def desired_files(
                     "pids_max": profile.job_pids_max,
                     "poll_interval_seconds": 0.2,
                     "require_gpu_probe": profile.gpu_tres_per_slot > 0,
+                    "docker_cgroup_driver": profile.docker_cgroup_driver,
                 },
                 indent=2,
                 sort_keys=True,
@@ -3676,12 +3975,21 @@ def _stop_guard_before_status_invalidation() -> None:
 
 
 def _restart_services(profile: Profile, slurm_node: str) -> datetime:
+    if profile.docker_cgroup_driver == "systemd":
+        guard_reload_boundary = datetime.now(UTC)
+        _run(("systemctl", "daemon-reload"))
+        _run(("systemctl", "enable", "loom-slurm-job-cgroup-guard.service"))
+        _run(("systemctl", "start", "loom-slurm-job-cgroup-guard.service"))
+        _run(("systemctl", "reload", "loom-slurm-job-cgroup-guard.service"))
+        _run(("scontrol", "reconfigure"))
+        return guard_reload_boundary
     _stop_guard_before_status_invalidation()
     _invalidate_guard_status(Path("/"))
     guard_restart_boundary = datetime.now(UTC)
     _run(("systemctl", "daemon-reload"))
     _run(("systemctl", "enable", "loom-slurm-job-cgroup-guard.service"))
-    _run(("systemctl", "restart", "docker"))
+    if profile.docker_cgroup_driver != "systemd":
+        _run(("systemctl", "restart", "docker"))
     _run(("systemctl", "restart", "slurmd"))
     _run(("systemctl", "start", "loom-slurm-job-cgroup-guard.service"))
     if slurm_node == profile.controller:
@@ -4266,6 +4574,15 @@ def recover_pending_drains(root: Path = Path("/")) -> dict[str, Any]:
 
 def _restore_services(root: Path, profile: Profile, slurm_node: str) -> datetime:
     guard_unit = root / "etc/systemd/system/loom-slurm-job-cgroup-guard.service"
+    if profile.docker_cgroup_driver == "systemd":
+        guard_reload_boundary = datetime.now(UTC)
+        _run(("systemctl", "daemon-reload"))
+        if guard_unit.exists():
+            _run(("systemctl", "enable", "loom-slurm-job-cgroup-guard.service"))
+            _run(("systemctl", "start", "loom-slurm-job-cgroup-guard.service"))
+            _run(("systemctl", "reload", "loom-slurm-job-cgroup-guard.service"))
+        _run(("scontrol", "reconfigure"))
+        return guard_reload_boundary
     _stop_guard_before_status_invalidation()
     _invalidate_guard_status(root)
     guard_restart_boundary = datetime.now(UTC)
@@ -4284,7 +4601,8 @@ def _restore_services(root: Path, profile: Profile, slurm_node: str) -> datetime
         )
         if active_code == 0 or enabled_code == 0:
             raise PolicyError("restored cgroup guard should be inactive and disabled")
-    _run(("systemctl", "restart", "docker"))
+    if profile.docker_cgroup_driver != "systemd":
+        _run(("systemctl", "restart", "docker"))
     _run(("systemctl", "restart", "slurmd"))
     if guard_unit.exists():
         _run(("systemctl", "start", "loom-slurm-job-cgroup-guard.service"))
@@ -4951,7 +5269,7 @@ def _load_allocation_result(
         raise PolicyError("allocation node result is invalid") from exc
     if (
         not isinstance(payload, dict)
-        or payload.get("schema_version") != 1
+        or payload.get("schema_version") != 2
         or bytes(content) != _canonical_json_bytes(payload) + b"\n"
     ):
         raise PolicyError("allocation node result is not canonical")
@@ -7578,6 +7896,15 @@ def _allocation_node_evidence(
     arguments: Sequence[str],
     node_result: Mapping[str, Any],
 ) -> dict[str, Any]:
+    account = _sandbox_account(profile, sandbox)
+    environment_binding = profile.environment_bindings.get(account)
+    if not profile.environment_bindings:
+        environment_binding = _offline_candidate_bindings(
+            profile,
+            candidate_sha,
+        ).get(account)
+    if not isinstance(environment_binding, Mapping):
+        raise PolicyError("allocation matrix environment binding is unavailable")
     base_rows = [row for row in rows if row[0] == job_id]
     srun_rows = [row for row in rows if row[0] == f"{job_id}.0"]
     expected_host = profile.host_aliases[node]
@@ -7587,13 +7914,13 @@ def _allocation_node_evidence(
         or base_rows[0][1] != job_name
         or _normalize_probe_job_state(base_rows[0][2]) != "COMPLETED"
         or base_rows[0][3].lower() != node.lower()
-        or base_rows[0][5] != _sandbox_account(profile, sandbox)
+        or base_rows[0][5] != account
         or base_rows[0][6] != _sandbox_service_user(profile, sandbox)
         or base_rows[0][7] != profile.cluster
         or base_rows[0][8] != _sandbox_qos(profile, sandbox)
         or _normalize_probe_job_state(srun_rows[0][2]) != "COMPLETED"
         or srun_rows[0][3].lower() != node.lower()
-        or srun_rows[0][5] != _sandbox_account(profile, sandbox)
+        or srun_rows[0][5] != account
         or srun_rows[0][6] != _sandbox_service_user(profile, sandbox)
         or srun_rows[0][7] != profile.cluster
     ):
@@ -7603,9 +7930,9 @@ def _allocation_node_evidence(
     if not gpu_verified:
         raise PolicyError("allocation matrix GPU TRES readback drifted")
     expected_compute = {
-        "schema_version": 1,
+        "schema_version": 2,
         "sandbox": sandbox,
-        "account": _sandbox_account(profile, sandbox),
+        "account": account,
         "candidate_sha": candidate_sha,
         "candidate_tree": binding["repository"]["candidate_tree"],
         "host": expected_host,
@@ -7616,15 +7943,61 @@ def _allocation_node_evidence(
         "concurrency": expected_concurrency,
         "docker_cgroup_driver": profile.docker_cgroup_driver,
         "job_id": job_id,
+        "job_start_time": node_result.get("job_start_time"),
         "cgroup_parent": node_result.get("cgroup_parent"),
+        "cgroup_mode": (
+            "direct-slurm-cgroup"
+            if profile.docker_cgroup_driver == "cgroupfs"
+            else "allocation-mirrored-systemd-slice"
+        ),
+        "slice_identity_sha256": node_result.get("slice_identity_sha256"),
+        "slice_receipt_sha256": node_result.get("slice_receipt_sha256"),
         "cgroup_guard_verified": True,
         "compose_verified": True,
     }
+    job_start_time = node_result.get("job_start_time")
+    cgroup_parent = node_result.get("cgroup_parent")
+    if not isinstance(job_start_time, str) or not job_start_time:
+        raise PolicyError("allocation-side Slurm start identity is unavailable")
+    if profile.docker_cgroup_driver == "cgroupfs":
+        cgroup_binding_valid = (
+            isinstance(cgroup_parent, str)
+            and cgroup_parent.startswith("/")
+            and f"job_{job_id}" in cgroup_parent.split("/")
+            and node_result.get("slice_identity_sha256") is None
+            and node_result.get("slice_receipt_sha256") is None
+        )
+    else:
+        slice_identity = {
+            "cluster": profile.cluster,
+            "node": node.lower(),
+            "job_id": job_id,
+            "job_start_time": job_start_time,
+            "account": account,
+            "env_id": environment_binding["env_id"],
+            "resource_generation": environment_binding["resource_generation"],
+            "runtime_id": environment_binding["sandbox"],
+            "candidate_id": environment_binding["candidate_id"],
+            "candidate_sha": environment_binding["candidate_sha"],
+            "candidate_tree": environment_binding["candidate_tree"],
+        }
+        expected_identity_sha256 = hashlib.sha256(
+            json.dumps(
+                slice_identity,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("ascii"),
+        ).hexdigest()
+        cgroup_binding_valid = (
+            cgroup_parent == f"loom-job-{job_id}-{expected_identity_sha256[:40]}.slice"
+            and node_result.get("slice_identity_sha256") == expected_identity_sha256
+            and isinstance(node_result.get("slice_receipt_sha256"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", str(node_result["slice_receipt_sha256"])) is not None
+        )
     if (
         node_result != expected_compute
         or not isinstance(node_result.get("env_device"), int)
-        or not isinstance(node_result.get("cgroup_parent"), str)
-        or f"job_{job_id}" not in str(node_result["cgroup_parent"]).split("/")
+        or not cgroup_binding_valid
     ):
         raise PolicyError("allocation-side compute result binding drifted")
     return {
@@ -7634,7 +8007,7 @@ def _allocation_node_evidence(
         "job_name": job_name,
         "state": "COMPLETED",
         "sandbox": sandbox,
-        "account": _sandbox_account(profile, sandbox),
+        "account": account,
         "qos": base_rows[0][8],
         "alloc_tres": alloc_tres,
         "gpu_verified": gpu_verified,
@@ -8835,7 +9208,12 @@ def _recover_orphan(
     if journal.get("phase") in {"committed", "rolled_back"}:
         return journal
     drain: dict[str, Any] | None = None
-    if root == Path("/") and journal.get("restart") is True and slurm_node is not None:
+    if (
+        root == Path("/")
+        and journal.get("restart") is True
+        and slurm_node is not None
+        and profile.docker_cgroup_driver != "systemd"
+    ):
         drain = _acquire_restart_drain(
             root,
             profile,
@@ -8889,6 +9267,14 @@ def _validate_live_apply(
             raise PolicyError("live apply requires root")
         if slurm_node is None:
             raise PolicyError(f"host {host!r} is outside the infrastructure inventory")
+        if profile.docker_cgroup_driver == "systemd":
+            docker_driver = _run(
+                ("docker", "info", "--format", "{{.CgroupDriver}}"),
+            ).strip()
+            if docker_driver != "systemd":
+                raise PolicyError(
+                    "live systemd-slice policy requires the existing Docker systemd driver",
+                )
         live_config = _parse_key_values(_run(("scontrol", "show", "config")))
         if live_config.get("ClusterName") != profile.cluster:
             raise PolicyError("live Slurm cluster identity does not match the profile")
@@ -8950,7 +9336,11 @@ def _release_committed_transaction_drain(
     slurm_node: str | None,
     journal: Mapping[str, Any],
 ) -> None:
-    if root != Path("/") or journal.get("restart") is not True:
+    if (
+        root != Path("/")
+        or journal.get("restart") is not True
+        or profile.docker_cgroup_driver == "systemd"
+    ):
         return
     if slurm_node is None:
         raise PolicyError("committed Slurm transaction lacks an infrastructure node")
@@ -9096,7 +9486,7 @@ def apply(
                 handle.flush()
                 _run(("dockerd", "--validate", "--config-file", handle.name))
         drain: dict[str, Any] | None = None
-        if root == Path("/") and restart:
+        if root == Path("/") and restart and profile.docker_cgroup_driver != "systemd":
             if slurm_node is None:
                 raise PolicyError("live restart lacks an infrastructure Slurm node")
             drain = _acquire_restart_drain(
@@ -9238,6 +9628,144 @@ def apply(
         "restart_requested": restart,
         "accounting_requested": apply_accounting,
         "live_readback": live,
+    }
+
+
+def reconcile_staging_guard_binding(
+    root: Path,
+    profile: Profile,
+    *,
+    candidate_sha: str,
+    candidate_tree: str,
+    authority_generation: int,
+    authority_convergence_id: str,
+    authority_request_id: str,
+    authority_requested_at: str,
+    registry_snapshot: Path = REGISTRY_SNAPSHOT_PATH,
+    binding_path: Path = STAGING_GUARD_BINDING_PATH,
+) -> dict[str, Any]:
+    """Persist and apply the fixed staging lane without restarting shared daemons."""
+
+    if (
+        root != Path("/")
+        or os.geteuid() != 0
+        or profile.cluster != "trt-gb10"
+        or profile.docker_cgroup_driver != "systemd"
+        or binding_path != STAGING_GUARD_BINDING_PATH
+    ):
+        raise PolicyError("staging guard binding requires the fixed live GB10 authority")
+    requested = staging_guard_binding_payload(
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+        authority_generation=authority_generation,
+        authority_convergence_id=authority_convergence_id,
+        authority_request_id=authority_request_id,
+        authority_requested_at=authority_requested_at,
+    )
+    existing = load_staging_guard_binding(binding_path, required=False)
+    if existing is not None and (
+        int(requested["authority_generation"]) < int(existing["authority_generation"])
+        or int(requested["authority_generation"]) > int(existing["authority_generation"]) + 1
+        or (
+            requested["authority_generation"] == existing["authority_generation"]
+            and requested != existing
+        )
+        or (
+            requested["authority_generation"] == int(existing["authority_generation"]) + 1
+            and (
+                requested["authority_convergence_id"] == existing["authority_convergence_id"]
+                or datetime.fromisoformat(
+                    str(requested["authority_requested_at"]).replace("Z", "+00:00"),
+                )
+                <= datetime.fromisoformat(
+                    str(existing["authority_requested_at"]).replace("Z", "+00:00"),
+                )
+            )
+        )
+    ):
+        raise PolicyError("staging guard authority generation regressed, skipped, or replayed")
+    snapshot = _read_registry_snapshot(
+        registry_snapshot,
+        require_root_ownership=True,
+    )
+    candidate_set = slurm_candidate_set_from_snapshot(
+        snapshot,
+        staging_binding=requested,
+    )
+    bindings = _candidate_bindings(profile, candidate_set["candidate_bindings"])
+    candidate_set_digest = _candidate_set_sha256(bindings)
+    transaction_payload_sha256 = hashlib.sha256(
+        json.dumps(
+            {
+                "authority_binding": requested,
+                "candidate_bindings": bindings,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii"),
+    ).hexdigest()
+    transaction_convergence_id = hashlib.sha256(
+        (f"{authority_convergence_id}:{candidate_set_digest}:{transaction_payload_sha256}").encode(
+            "ascii"
+        ),
+    ).hexdigest()
+    journal = _load_journal(_journal_path(root, profile))
+    exact_replay = (
+        journal is not None
+        and journal.get("phase") == "committed"
+        and journal.get("transaction_id") == authority_request_id
+        and journal.get("candidate_bindings") == bindings
+        and journal.get("candidate_set_convergence_id") == transaction_convergence_id
+        and journal.get("candidate_set_payload_sha256") == transaction_payload_sha256
+    )
+    if exact_replay:
+        transaction_generation = int(journal["candidate_set_generation"])
+    else:
+        transaction_generation = (
+            int(journal["candidate_set_generation"]) + 1
+            if journal is not None and journal.get("phase") == "committed"
+            else max(1, int(snapshot["generation"]))
+        )
+    applied = apply(
+        root,
+        profile,
+        restart=True,
+        apply_accounting=False,
+        candidate_sha=candidate_sha,
+        candidate_bindings=bindings,
+        transaction_id=authority_request_id,
+        generation=transaction_generation,
+        convergence_id=transaction_convergence_id,
+        payload_sha256=transaction_payload_sha256,
+    )
+    _prepare_private_directory(
+        binding_path.parent,
+        enforce_root_ownership=True,
+        create=True,
+    )
+    _atomic_write(
+        binding_path,
+        json.dumps(requested, sort_keys=True, separators=(",", ":")) + "\n",
+        mode=0o600,
+    )
+    persisted = load_staging_guard_binding(binding_path, required=True)
+    if persisted != requested:
+        raise PolicyError("staging guard binding persistence readback drifted")
+    return {
+        "schema_version": 1,
+        "kind": "loom.staging-external-slurm.guard-binding-convergence",
+        "cluster": profile.cluster,
+        "candidate_sha": candidate_sha,
+        "candidate_tree": candidate_tree,
+        "authority_generation": authority_generation,
+        "authority_convergence_id": authority_convergence_id,
+        "authority_request_id": authority_request_id,
+        "candidate_set_sha256": candidate_set_digest,
+        "candidate_set_generation": transaction_generation,
+        "binding_payload_sha256": requested["payload_sha256"],
+        "policy_phase": applied["phase"],
+        "replayed": bool(applied.get("replayed")),
+        "status": "committed",
     }
 
 
@@ -9394,7 +9922,7 @@ def rollback(
             candidate_bindings=bindings,
         )
         drain: dict[str, Any] | None = None
-        if root == Path("/"):
+        if root == Path("/") and profile.docker_cgroup_driver != "systemd":
             if slurm_node is None:
                 raise PolicyError("live rollback lacks an infrastructure Slurm node")
             drain = _acquire_restart_drain(
@@ -12625,6 +13153,111 @@ def _validate_acceptance_probe_compose(
             raise PolicyError("allocation acceptance probe Compose binding drifted")
 
 
+def _cpuset_values(value: str) -> set[int]:
+    result: set[int] = set()
+    for item in value.split(","):
+        start_text, separator, end_text = item.partition("-")
+        if not start_text.isdecimal() or (separator and not end_text.isdecimal()):
+            raise PolicyError("allocation systemd slice cpuset is invalid")
+        start = int(start_text)
+        end = int(end_text) if separator else start
+        if end < start or end - start > 1_000_000:
+            raise PolicyError("allocation systemd slice cpuset is invalid")
+        result.update(range(start, end + 1))
+    if not result:
+        raise PolicyError("allocation systemd slice cpuset is empty")
+    return result
+
+
+def _verify_systemd_container_containment(
+    compose: Sequence[str],
+    *,
+    environment: Mapping[str, str],
+    source_root: Path,
+    service: str,
+    systemd_slice: str,
+) -> None:
+    try:
+        identity = subprocess.run(
+            (*compose, "ps", "--quiet", service),
+            cwd=source_root,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        container_id = identity.stdout.strip()
+        if identity.returncode or re.fullmatch(r"[0-9a-f]{12,64}", container_id) is None:
+            raise PolicyError("allocation container identity readback failed")
+        inspected = subprocess.run(
+            ("docker", "inspect", "--format", "{{.State.Pid}}", container_id),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        pid = inspected.stdout.strip()
+        if inspected.returncode or not pid.isdecimal() or int(pid) <= 1:
+            raise PolicyError("allocation container PID readback failed")
+        proc_cgroup = Path(f"/proc/{pid}/cgroup").read_text(encoding="utf-8")
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PolicyError("allocation container cgroup readback failed safely") from exc
+    unified = [row.partition("::")[2] for row in proc_cgroup.splitlines() if row.startswith("0::")]
+    if len(unified) != 1:
+        raise PolicyError("allocation container unified cgroup is ambiguous")
+    parts = Path(unified[0]).parts
+    if systemd_slice not in parts:
+        raise PolicyError("allocation container is outside its systemd slice")
+    slice_index = parts.index(systemd_slice)
+    slice_path = Path("/sys/fs/cgroup").joinpath(*parts[1 : slice_index + 1])
+    receipt_path = (
+        Path("/run/loom-developer-sandbox-slurm-policy/systemd-slices") / f"{systemd_slice}.json"
+    )
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        actual_cpu = (slice_path / "cpu.max").read_text(encoding="utf-8").strip().split()
+        source_cpu = str(receipt["cpu_max"]).split()
+        actual_memory = (slice_path / "memory.max").read_text(encoding="utf-8").strip()
+        actual_swap = (slice_path / "memory.swap.max").read_text(encoding="utf-8").strip()
+        actual_pids = (slice_path / "pids.max").read_text(encoding="utf-8").strip()
+        actual_cpus = (
+            (slice_path / "cpuset.cpus.effective")
+            .read_text(
+                encoding="utf-8",
+            )
+            .strip()
+        )
+        actual_mems = (
+            (slice_path / "cpuset.mems.effective")
+            .read_text(
+                encoding="utf-8",
+            )
+            .strip()
+        )
+    except (OSError, KeyError, UnicodeError, json.JSONDecodeError) as exc:
+        raise PolicyError("allocation systemd slice live limits are unavailable") from exc
+    if (
+        len(actual_cpu) != 2
+        or len(source_cpu) != 2
+        or not all(value.isdecimal() for value in (*actual_cpu, *source_cpu))
+        or int(actual_cpu[0]) * int(source_cpu[1]) > int(source_cpu[0]) * int(actual_cpu[1])
+        or not actual_memory.isdecimal()
+        or int(actual_memory) > int(receipt["memory_max"])
+        or not actual_swap.isdecimal()
+        or int(actual_swap) > int(receipt["memory_swap_max_effective"])
+        or not actual_pids.isdecimal()
+        or int(actual_pids) > int(receipt["pids_max"])
+        or not _cpuset_values(actual_cpus).issubset(
+            _cpuset_values(str(receipt["cpuset_cpus"])),
+        )
+        or not _cpuset_values(actual_mems).issubset(
+            _cpuset_values(str(receipt["cpuset_mems"])),
+        )
+    ):
+        raise PolicyError("allocation systemd slice live limits are weaker than Slurm")
+
+
 def run_acceptance_probe_job(
     profile: Profile,
     *,
@@ -12663,19 +13296,31 @@ def run_acceptance_probe_job(
     ):
         raise PolicyError("allocation acceptance probe execution binding drifted")
     source_root = Path(__file__).resolve().parents[2]
+    allocation_node = _slurm_node_for_host(profile, _canonical_host())
+    if allocation_node is None:
+        raise PolicyError("allocation acceptance probe node is outside the profile")
+    job_start_time = _allocation_job_start_time(
+        job_id,
+        account=str(request["slurm_account"]),
+        node=allocation_node,
+    )
     try:
         cgroup_completed = subprocess.run(
-            (
-                "/usr/bin/python3",
-                "-I",
-                "-B",
-                str(source_root / _ACCEPTANCE_CGROUP_PROGRAM),
-                "--job-id",
-                job_id,
-                "--pids-max",
-                str(profile.job_pids_max),
-                "--wait-seconds",
-                "30",
+            _allocation_cgroup_command(
+                profile,
+                cgroup_program=source_root / _ACCEPTANCE_CGROUP_PROGRAM,
+                job_id=job_id,
+                node=allocation_node,
+                account=str(request["slurm_account"]),
+                binding={
+                    "env_id": request["env_id"],
+                    "resource_generation": request["applied_resource_generation"],
+                    "sandbox": request["runtime_id"],
+                    "candidate_id": request["candidate_id"],
+                    "candidate_sha": request["candidate_sha"],
+                    "candidate_tree": request["candidate_tree"],
+                },
+                job_start_time=job_start_time,
             ),
             check=False,
             capture_output=True,
@@ -12685,7 +13330,14 @@ def run_acceptance_probe_job(
     except (OSError, subprocess.SubprocessError) as exc:
         raise PolicyError("allocation acceptance probe cgroup is unavailable") from exc
     cgroup_parent = cgroup_completed.stdout.strip()
-    if cgroup_completed.returncode or not cgroup_parent.startswith("/"):
+    if (
+        cgroup_completed.returncode
+        or (profile.docker_cgroup_driver == "cgroupfs" and not cgroup_parent.startswith("/"))
+        or (
+            profile.docker_cgroup_driver == "systemd"
+            and re.fullmatch(r"loom-job-[1-9][0-9]*-[0-9a-f]{40}\.slice", cgroup_parent) is None
+        )
+    ):
         raise PolicyError("allocation acceptance probe cgroup is unavailable")
     compose_environment, project = _acceptance_probe_compose_environment(
         request,
@@ -12747,6 +13399,14 @@ def run_acceptance_probe_job(
             )
             if completed.returncode:
                 raise PolicyError("allocation acceptance probe container failed")
+            if suffix[0] == "up" and profile.docker_cgroup_driver == "systemd":
+                _verify_systemd_container_containment(
+                    compose,
+                    environment=compose_environment,
+                    source_root=source_root,
+                    service="sandbox-link",
+                    systemd_slice=cgroup_parent,
+                )
     except (OSError, subprocess.SubprocessError, PolicyError) as exc:
         failure = (
             exc

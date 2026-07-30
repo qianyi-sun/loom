@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import subprocess
+import sys
+
 import pytest
 
 from loom_control_plane.elastic_slurm_worker_controller import (
@@ -12,6 +15,7 @@ from loom_control_plane.elastic_slurm_worker_controller import (
     build_sbatch_request,
     compute_controller_decision,
     parse_sinfo_node_resources,
+    slurm_compose_project_identity,
     slurm_submission_config_for_node,
     with_node_resource_snapshot,
 )
@@ -322,6 +326,248 @@ def test_build_sbatch_request_can_disable_exclusive_node_allocation() -> None:
     assert '--pids-max "$LOOM_WORKER_JOB_PIDS_MAX"' in request.stdin
     assert "--wait-seconds 30" in request.stdin
     assert "docker-compose.remote-worker.cgroup-parent.yml" in request.stdin
+
+
+def _systemd_nonexclusive_overrides() -> dict[str, object]:
+    return {
+        "exclusive": False,
+        "environment": "sandbox-dev-a",
+        "container_cpus": 2.0,
+        "container_memory_mib": 4096,
+        "container_pids": 512,
+        "job_pids_max": 3072,
+        "docker_cgroup_driver": "systemd",
+        "slurm_cluster": "trt-oldlab",
+        "slurm_account": "loom-dev-a",
+        "env_id": "denv-developer01",
+        "resource_generation": 7,
+        "runtime_id": "dev-a",
+        "candidate_id": "cand-" + "b" * 40,
+        "candidate_sha": "a" * 40,
+        "candidate_tree": "c" * 40,
+    }
+
+
+def test_systemd_nonexclusive_sbatch_binds_exact_allocation_and_reads_back_pid() -> None:
+    request = build_sbatch_request(
+        _config(**_systemd_nonexclusive_overrides()),
+        node="oldlab-4",
+    )
+
+    export_arg = next(arg for arg in request.args if arg.startswith("--export="))
+    for expected in (
+        "LOOM_WORKER_SANDBOX_IDENTITY=dev-a",
+        "LOOM_WORKER_DOCKER_CGROUP_DRIVER=systemd",
+        "LOOM_WORKER_SLURM_CLUSTER=trt-oldlab",
+        "LOOM_WORKER_SCONTROL_PATH=/usr/bin/scontrol",
+        "LOOM_WORKER_SLURM_ACCOUNT=loom-dev-a",
+        "LOOM_WORKER_ENV_ID=denv-developer01",
+        "LOOM_WORKER_RESOURCE_GENERATION=7",
+        "LOOM_WORKER_RUNTIME_ID=dev-a",
+        f"LOOM_WORKER_CANDIDATE_ID=cand-{'b' * 40}",
+        f"LOOM_WORKER_CANDIDATE_TREE={'c' * 40}",
+    ):
+        assert expected in export_arg
+    assert '"$LOOM_WORKER_SCONTROL_PATH" show job --oneliner --details' in request.stdin
+    assert 'required=("JobId","Account","NodeList","StartTime")' in request.stdin
+    assert '--docker-driver "$LOOM_WORKER_DOCKER_CGROUP_DRIVER"' in request.stdin
+    assert '--job-start-time "${slurm_identity[3]}"' in request.stdin
+    assert 'docker compose "${compose_args[@]}" ps -q worker' in request.stdin
+    assert "docker inspect --format '{{.State.Pid}}'" in request.stdin
+    assert 'Path(f"/proc/{pid}/cgroup")' in request.stdin
+    assert "if parent not in child.parents" in request.stdin
+    assert 'value("memory.swap.max")' in request.stdin
+    assert "worker container did not enter the exact bounded systemd slice" in request.stdin
+    assert (
+        "unset LOOM_WORKER_REGISTRY_GENERATION LOOM_WORKER_REGISTRY_PAYLOAD_SHA256"
+    ) in request.stdin
+    assert 'docker compose "${compose_args[@]}" down --remove-orphans' in request.stdin
+    assert slurm_compose_project_identity(
+        _config(**_systemd_nonexclusive_overrides()),
+        "123",
+    ).startswith("loom-dev-a-")
+
+
+def test_systemd_job_name_preserves_guard_contract_and_lowercases_node_only() -> None:
+    request = build_sbatch_request(
+        _config(**_systemd_nonexclusive_overrides()),
+        node="TRT-EAI-OLDLAB-4",
+    )
+
+    assert "--nodelist=TRT-EAI-OLDLAB-4" in request.args
+    assert "--job-name=loom-sandbox-dev-a-aaaaaaaaaaaa-trt-eai-oldlab-4" in request.args
+
+
+def _embedded_scontrol_parser(stdin: str) -> str:
+    marker = "/usr/bin/python3 -I -B -c '"
+    start = stdin.index(marker) + len(marker)
+    end = stdin.index("' ", start)
+    return stdin[start:end]
+
+
+def _embedded_post_start_verifier(stdin: str) -> str:
+    marker = "/usr/bin/python3 -I -B -c '"
+    first = stdin.index(marker)
+    start = stdin.index(marker, first + len(marker)) + len(marker)
+    return stdin[start : stdin.index("' ", start)]
+
+
+def test_post_start_verifier_rejects_noncanonical_systemd_control_group() -> None:
+    request = build_sbatch_request(
+        _config(**_systemd_nonexclusive_overrides()),
+        node="oldlab-4",
+    )
+    unit = f"loom-job-123-{'a' * 40}.slice"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            "-c",
+            _embedded_post_start_verifier(request.stdin),
+            unit,
+            "1",
+            f"/foreign.slice/{unit}",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert (
+        'f"/loom.slice/loom-job.slice/loom-job-{unit_match.group(1)}.slice/{unit}"' in request.stdin
+    )
+
+
+def test_embedded_scontrol_parser_returns_exact_allocation_fields() -> None:
+    request = build_sbatch_request(
+        _config(**_systemd_nonexclusive_overrides()),
+        node="oldlab-4",
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            "-c",
+            _embedded_scontrol_parser(request.stdin),
+            "123",
+            "loom-dev-a",
+            "oldlab-4",
+        ],
+        input=(
+            "JobId=123 JobName=loom Account=loom-dev-a QOS=normal "
+            "NodeList=oldlab-4 StartTime=2026-07-30T12:00:00 "
+            "Command=/srv/loom --flag value"
+        ),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    assert result.stdout.splitlines() == [
+        "123",
+        "loom-dev-a",
+        "oldlab-4",
+        "2026-07-30T12:00:00",
+    ]
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        "JobId=999 Account=loom-dev-a NodeList=oldlab-4 StartTime=2026-07-30T12:00:00",
+        "JobId=123 Account=foreign NodeList=oldlab-4 StartTime=2026-07-30T12:00:00",
+        "JobId=123 Account=loom-dev-a NodeList=oldlab-5 StartTime=2026-07-30T12:00:00",
+        "JobId=123 Account=loom-dev-a NodeList=oldlab-4 StartTime=Unknown",
+        "JobId=123 Account=loom-dev-a NodeList=oldlab-4",
+    ],
+)
+def test_embedded_scontrol_parser_rejects_foreign_or_incomplete_identity(
+    record: str,
+) -> None:
+    request = build_sbatch_request(
+        _config(**_systemd_nonexclusive_overrides()),
+        node="oldlab-4",
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            "-c",
+            _embedded_scontrol_parser(request.stdin),
+            "123",
+            "loom-dev-a",
+            "oldlab-4",
+        ],
+        input=record,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+
+
+def test_systemd_sbatch_script_is_valid_bash_and_cleanup_is_project_scoped() -> None:
+    request = build_sbatch_request(
+        _config(**_systemd_nonexclusive_overrides()),
+        node="oldlab-4",
+    )
+
+    subprocess.run(
+        ["/bin/bash", "-n"],
+        input=request.stdin,
+        text=True,
+        check=True,
+    )
+    assert "docker stop" not in request.stdin
+    assert "docker kill" not in request.stdin
+    assert 'docker compose "${compose_args[@]}" down --remove-orphans' in request.stdin
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("slurm_cluster", ""),
+        ("slurm_account", ""),
+        ("env_id", ""),
+        ("resource_generation", 0),
+        ("runtime_id", ""),
+        ("candidate_id", ""),
+        ("candidate_sha", ""),
+        ("candidate_tree", ""),
+    ],
+)
+def test_systemd_nonexclusive_rejects_incomplete_registry_binding(
+    field: str,
+    value: object,
+) -> None:
+    overrides = _systemd_nonexclusive_overrides()
+    overrides[field] = value
+    with pytest.raises(ValueError):
+        build_sbatch_request(_config(**overrides), node="oldlab-4")
+
+
+def test_systemd_nonexclusive_accepts_registry_maximum_env_id_only() -> None:
+    valid = _systemd_nonexclusive_overrides()
+    valid["env_id"] = "denv-" + "a" * 64
+    assert build_sbatch_request(_config(**valid), node="oldlab-4")
+
+    invalid = dict(valid)
+    invalid["env_id"] = "denv-" + "a" * 65
+    with pytest.raises(ValueError, match="closed cluster"):
+        build_sbatch_request(_config(**invalid), node="oldlab-4")
+
+
+@pytest.mark.parametrize("path", ["scontrol", "/usr/bin/../bin/scontrol", "/usr/bin/scontrol,x"])
+def test_controller_rejects_unsafe_scontrol_path(path: str) -> None:
+    with pytest.raises(ValueError, match="safe absolute path"):
+        build_controller_config(
+            **_controller_config_kwargs(scontrol_path=path),  # type: ignore[arg-type]
+        )
 
 
 def test_exclusive_sbatch_does_not_require_cgroup_parent() -> None:

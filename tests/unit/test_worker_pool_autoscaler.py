@@ -30,6 +30,7 @@ from loom_control_plane.worker_pool_autoscaler import (
     _request_worker_drain,
     _slurm_config_from_policy,
     _validate_policy_fields,
+    _worker_env_from_slurm_config,
     autoscaler_policy_to_dict,
     compute_autoscaler_decision,
     fetch_autoscaler_status,
@@ -848,6 +849,53 @@ def test_slurm_config_from_policy_can_disable_exclusive_node_allocation() -> Non
 
     assert "--exclusive" not in request.args
     assert "--comment=loom-cgroup-v1:pids=512" in request.args
+
+
+def test_slurm_config_from_policy_threads_registry_systemd_binding() -> None:
+    row = _policy_row(
+        max_slots=1,
+        actuator_config={
+            "allowed_nodes": ["oldlab-4"],
+            "env_file": "/secure/.env.remote-worker",
+            "repo_dir": "/opt/loom",
+            "requested_concurrency": 1,
+            "requested_cpus": 2,
+            "requested_memory_mib": 8000,
+            "exclusive": False,
+            "container_cpus": 2.0,
+            "container_memory_mib": 8000,
+            "container_pids": 512,
+            "job_pids_max": 512,
+            "docker_cgroup_driver": "systemd",
+            "cluster": "trt-oldlab",
+            "scontrol_path": "/opt/slurm/bin/scontrol",
+            "slurm_account": "loom-dev-qianyi",
+            "env_id": "denv-qianyi001",
+            "resource_generation": 9,
+            "runtime_id": "qianyi",
+            "candidate_id": "cand-" + "b" * 40,
+            "candidate_sha": "a" * 40,
+            "candidate_tree": "c" * 40,
+        },
+    )
+
+    config = _slurm_config_from_policy(row)
+    request = build_sbatch_request(config, node="oldlab-4")
+
+    assert config.docker_cgroup_driver == "systemd"
+    assert config.slurm_cluster == "trt-oldlab"
+    assert config.scontrol_path == "/opt/slurm/bin/scontrol"
+    assert config.resource_generation == 9
+    assert config.candidate_tree == "c" * 40
+    assert '"$LOOM_WORKER_SCONTROL_PATH" show job --oneliner --details' in request.stdin
+    assert _worker_env_from_slurm_config(config) | {
+        "LOOM_WORKER_SANDBOX_IDENTITY": "qianyi",
+        "LOOM_WORKER_ENV_ID": "denv-qianyi001",
+        "LOOM_WORKER_RESOURCE_GENERATION": "9",
+        "LOOM_WORKER_RUNTIME_ID": "qianyi",
+        "LOOM_WORKER_CANDIDATE_ID": "cand-" + "b" * 40,
+        "LOOM_WORKER_CANDIDATE_TREE": "c" * 40,
+    } == _worker_env_from_slurm_config(config)
 
 
 def test_slurm_config_from_policy_rejects_missing_nonexclusive_job_pids_max() -> None:

@@ -32,6 +32,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.ops import developer_environment_registry as registry_contract  # noqa: E402
+
 _SCHEMA_VERSION = 1
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
@@ -58,6 +64,7 @@ _POLICY_TEMPLATE_DIR = (
     if str(Path(__file__).resolve()).startswith("/usr/local/libexec/")
     else Path(__file__).resolve().parents[2] / "deploy/developer-sandboxes/shared-capacity-policies"
 )
+_REGISTRY_SNAPSHOT_PATH = registry_contract.SYSTEM_SNAPSHOT
 _CAPACITY_BINDING_FIELDS = {
     "schema_version",
     "request_id",
@@ -163,6 +170,10 @@ class Handoff:
 
 @dataclass(frozen=True, slots=True)
 class CandidateBinding:
+    env_id: str
+    resource_generation: int
+    runtime_id: str
+    candidate_id: str
     sha: str
     tree: str
 
@@ -536,16 +547,99 @@ def load_handoff(config: AdapterConfig) -> Handoff:
     )
 
 
-def _load_sandbox_binding(config: AdapterConfig) -> CandidateBinding:
-    payload = _read_json_object(config.sandbox_state_path, label="sandbox state")
+def _load_registry_snapshot() -> dict[str, Any]:
+    try:
+        snapshot_path = _secure_regular_file(
+            _REGISTRY_SNAPSHOT_PATH,
+            label="developer environment registry snapshot",
+            require_owner_only=True,
+        )
+        metadata = snapshot_path.stat()
+        if metadata.st_uid != os.geteuid() or metadata.st_gid != os.getegid():
+            raise AdapterError("developer environment registry snapshot owner is unsafe")
+        snapshot = registry_contract.DeveloperEnvironmentRegistry.verify_snapshot(
+            registry_contract._read_regular(
+                snapshot_path,
+                limit=16 * 1024 * 1024,
+            ),
+        )
+    except (OSError, registry_contract.RegistryError) as exc:
+        raise AdapterError("developer environment registry snapshot is invalid") from exc
+    return snapshot
+
+
+def _registry_environment(
+    config: AdapterConfig,
+    snapshot: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    matching_environments = [
+        row for row in snapshot["environments"] if row.get("runtime_id") == config.sandbox
+    ]
+    if len(matching_environments) != 1:
+        raise AdapterError("sandbox is not uniquely bound in the environment registry")
+    environment = matching_environments[0]
     if (
-        payload.get("schema_version") != _SCHEMA_VERSION
-        or payload.get("sandbox") != config.sandbox
-        or payload.get("compose_project") != f"loom-sandbox-{config.sandbox}"
+        environment.get("runtime_root") != str(config.runtime_root)
+        or environment.get("candidate_root") != str(config.candidate_root)
+        or environment.get("slurm_account") != config.slurm_account
+        or environment.get("slurm_qos") != config.slurm_qos
+    ):
+        raise AdapterError("adapter resources differ from the environment registry")
+    return environment
+
+
+def _historical_candidate_binding(
+    config: AdapterConfig,
+    *,
+    candidate_sha: str,
+    candidate_id: str,
+    candidate_tree: str,
+    resource_generation: int,
+) -> CandidateBinding:
+    snapshot = _load_registry_snapshot()
+    environment = _registry_environment(config, snapshot)
+    candidates = [
+        row
+        for row in snapshot["candidates"]
+        if row.get("env_id") == environment.get("env_id")
+        and row.get("candidate_id") == candidate_id
+        and row.get("candidate_sha") == candidate_sha
+        and row.get("candidate_tree") == candidate_tree
+    ]
+    if len(candidates) != 1:
+        raise AdapterError("historical registry candidate binding is not unique")
+    candidate = candidates[0]
+    deployments = [
+        row
+        for row in snapshot["deployments"]
+        if row.get("candidate_id") == candidate.get("candidate_id")
+        and row.get("env_id") == environment.get("env_id")
+        and row.get("phase") == "committed"
+        and row.get("applied_resource_generation") == resource_generation
+    ]
+    if len(deployments) != 1:
+        raise AdapterError("historical registry deployment binding is not unique")
+    return CandidateBinding(
+        env_id=str(environment["env_id"]),
+        resource_generation=resource_generation,
+        runtime_id=config.sandbox,
+        candidate_id=str(candidate["candidate_id"]),
+        sha=str(candidate["candidate_sha"]),
+        tree=str(candidate["candidate_tree"]),
+    )
+
+
+def _load_sandbox_binding(config: AdapterConfig) -> CandidateBinding:
+    state = _read_json_object(config.sandbox_state_path, label="sandbox state")
+    if (
+        state.get("schema_version") != _SCHEMA_VERSION
+        or state.get("sandbox") != config.sandbox
+        or not isinstance(state.get("compose_project"), str)
+        or not state["compose_project"]
     ):
         raise AdapterError("sandbox state identity is invalid")
-    candidate_sha = payload.get("candidate_sha")
-    candidate_tree = payload.get("candidate_tree")
+    candidate_sha = state.get("candidate_sha")
+    candidate_tree = state.get("candidate_tree")
     if (
         not isinstance(candidate_sha, str)
         or _SHA_RE.fullmatch(candidate_sha) is None
@@ -553,7 +647,36 @@ def _load_sandbox_binding(config: AdapterConfig) -> CandidateBinding:
         or _SHA_RE.fullmatch(candidate_tree) is None
     ):
         raise AdapterError("sandbox state candidate binding is invalid")
-    return CandidateBinding(sha=candidate_sha, tree=candidate_tree)
+
+    snapshot = _load_registry_snapshot()
+    environment = _registry_environment(config, snapshot)
+    current_candidate_id = environment.get("current_candidate_id")
+    matching_candidates = [
+        row for row in snapshot["candidates"] if row.get("candidate_id") == current_candidate_id
+    ]
+    if (
+        environment.get("state") != "active"
+        or state.get("compose_project") != environment.get("compose_project")
+        or type(environment.get("resource_generation")) is not int
+        or environment["resource_generation"] < 1
+        or len(matching_candidates) != 1
+    ):
+        raise AdapterError("adapter is not bound to an active registry environment")
+    candidate = matching_candidates[0]
+    if (
+        candidate.get("env_id") != environment.get("env_id")
+        or candidate.get("candidate_sha") != candidate_sha
+        or candidate.get("candidate_tree") != candidate_tree
+    ):
+        raise AdapterError("sandbox state differs from the active registry candidate")
+    return CandidateBinding(
+        env_id=str(environment["env_id"]),
+        resource_generation=int(environment["resource_generation"]),
+        runtime_id=config.sandbox,
+        candidate_id=str(candidate["candidate_id"]),
+        sha=candidate_sha,
+        tree=candidate_tree,
+    )
 
 
 def _load_sandbox_candidate(config: AdapterConfig) -> str:
@@ -723,7 +846,7 @@ def _policy_path(config: AdapterConfig) -> str:
 def _bootstrap_policy_body(
     config: AdapterConfig,
     *,
-    candidate_sha: str,
+    candidate: CandidateBinding,
 ) -> dict[str, Any]:
     path = _POLICY_TEMPLATE_DIR / f"{config.pool_name}.toml"
     resolved = _secure_regular_file(path, label="autoscaler policy template")
@@ -764,16 +887,22 @@ def _bootstrap_policy_body(
             .replace("${SLURM_QOS}", config.slurm_qos)
             .replace("${RUNTIME_ROOT}", str(config.runtime_root))
             .replace("${CANDIDATE_ROOT}", str(config.candidate_root))
-            .replace("${CANDIDATE_SHA}", candidate_sha),
+            .replace("${ENV_ID}", candidate.env_id)
+            .replace("${RUNTIME_ID}", candidate.runtime_id)
+            .replace("${CANDIDATE_ID}", candidate.candidate_id)
+            .replace("${CANDIDATE_SHA}", candidate.sha)
+            .replace("${CANDIDATE_TREE}", candidate.tree),
         ),
     )
     actuator_config = body.get("actuator_config")
+    if isinstance(actuator_config, dict):
+        actuator_config["resource_generation"] = candidate.resource_generation
     job_pids_max = payload.get("job_pids_max")
     pending_budget = payload.get("pending_slot_budget")
     expected_env_file = str(
-        config.runtime_root / candidate_sha / f"worker-{config.pool_name}.env",
+        config.runtime_root / candidate.sha / f"worker-{config.pool_name}.env",
     )
-    expected_repo_dir = str(config.candidate_root / candidate_sha)
+    expected_repo_dir = str(config.candidate_root / candidate.sha)
     if (
         not isinstance(actuator_config, dict)
         or isinstance(job_pids_max, bool)
@@ -846,7 +975,14 @@ def _validate_bootstrap_policy(
         "container_memory_mib",
         "container_pids",
         "job_pids_max",
+        "docker_cgroup_driver",
+        "cluster",
+        "env_id",
+        "resource_generation",
+        "runtime_id",
+        "candidate_id",
         "candidate_sha",
+        "candidate_tree",
         "gpu_tres",
     )
     if any(
@@ -867,6 +1003,9 @@ def _validate_bootstrap_policy(
         actuator_config.get("exclusive") is not False
         or actuator_config.get("external_runner") is not True
         or actuator_config.get("shared_capacity_managed") is not True
+        or actuator_config.get("docker_cgroup_driver") != "systemd"
+        or actuator_config.get("cluster")
+        != ("trt-oldlab" if config.pool_name == "oldlab" else "trt-gb10")
         or actuator_config["job_pids_max"]
         < actuator_config["container_pids"] * actuator_config["requested_concurrency"]
         or not actuator_config.get("allowed_nodes")
@@ -888,7 +1027,7 @@ def bootstrap_policy(
     _clock_now(_resolve_clock(now=now, clock=clock))
     with _exclusive_adapter_lock(config):
         candidate = _load_sandbox_binding(config)
-        expected = _bootstrap_policy_body(config, candidate_sha=candidate.sha)
+        expected = _bootstrap_policy_body(config, candidate=candidate)
         token = _load_admin_token(config.admin_secret_file)
         path = _policy_path(config)
         policy, missing = _get_policy(
@@ -1467,15 +1606,31 @@ def _retire_mismatched_active_policy(
     if lease_state is None or lease_state["state"] != "active":
         return
     old_candidate = lease_state["candidate_sha"]
+    actuator_config = policy.get("actuator_config")
     if (
         policy.get("enabled") is not True
         or isinstance(policy.get("max_slots"), bool)
         or not isinstance(policy.get("max_slots"), int)
         or policy["max_slots"] <= 0
         or not isinstance(old_candidate, str)
+        or not isinstance(actuator_config, dict)
+        or not isinstance(actuator_config.get("candidate_id"), str)
+        or not isinstance(actuator_config.get("candidate_tree"), str)
+        or type(actuator_config.get("resource_generation")) is not int
+        or actuator_config["resource_generation"] < 1
     ):
         raise AdapterError("mismatched active capacity policy is inconsistent")
-    expected_policy = _bootstrap_policy_body(config, candidate_sha=old_candidate)
+    historical_candidate = _historical_candidate_binding(
+        config,
+        candidate_sha=old_candidate,
+        candidate_id=actuator_config["candidate_id"],
+        candidate_tree=actuator_config["candidate_tree"],
+        resource_generation=actuator_config["resource_generation"],
+    )
+    expected_policy = _bootstrap_policy_body(
+        config,
+        candidate=historical_candidate,
+    )
     _validate_bootstrap_policy(
         policy,
         config=config,
@@ -1694,7 +1849,7 @@ def _run_once_unlocked(
 
         expected_policy = _bootstrap_policy_body(
             config,
-            candidate_sha=candidate_sha,
+            candidate=candidate,
         )
         if policy is not None:
             _validate_bootstrap_policy(

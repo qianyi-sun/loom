@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
+import socket
 import sqlite3
+import threading
 import types
+from collections.abc import Callable, Set
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
@@ -91,8 +95,13 @@ def _new_registry(
     tmp_path: Path,
     *,
     policy: registry.AllocationPolicy | None = None,
+    port_inventory_collector: Callable[[], Set[int]] | None = None,
 ) -> registry.DeveloperEnvironmentRegistry:
-    return registry.DeveloperEnvironmentRegistry(tmp_path / "registry.sqlite3", policy=policy)
+    return registry.DeveloperEnvironmentRegistry(
+        tmp_path / "registry.sqlite3",
+        policy=policy,
+        port_inventory_collector=port_inventory_collector,
+    )
 
 
 def _legacy_deployment_table(path: Path, *, committed: bool) -> None:
@@ -243,7 +252,11 @@ def _fleet_identity_inventory(
 def test_registration_is_stable_across_idempotent_replay_and_display_change(
     tmp_path: Path,
 ) -> None:
-    authority = _new_registry(tmp_path)
+    listeners: set[int] = set()
+    authority = _new_registry(
+        tmp_path,
+        port_inventory_collector=lambda: frozenset(listeners),
+    )
     principal = "oidc:example:subject-123"
     first_request = _register(principal, "registration-key-0001", display_name="Old Name")
 
@@ -402,7 +415,11 @@ def test_legacy_seed_import_is_exact_and_idempotent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    authority = _new_registry(tmp_path)
+    listeners: set[int] = set()
+    authority = _new_registry(
+        tmp_path,
+        port_inventory_collector=lambda: frozenset(listeners),
+    )
     owner_uids = {"qianyi": 501, "hongjian": 502, "devansh": 503}
 
     def getpwnam(username: str) -> types.SimpleNamespace:
@@ -438,6 +455,16 @@ def test_legacy_seed_import_is_exact_and_idempotent(
         "unix-uid:503",
     ]
     qianyi, hongjian, devansh = first
+    listeners.update(qianyi.ports.values())
+    assert (
+        authority.reconcile_predeployment_ports(
+            qianyi.env_id,
+            principal_id=qianyi.principal_id,
+            expected_resource_generation=qianyi.resource_generation,
+        )
+        == qianyi
+    )
+    listeners.clear()
     assert qianyi.ports["control_plane"] == 20080
     assert hongjian.ports["control_plane"] == 21080
     assert devansh.ports["control_plane"] == 22080
@@ -998,7 +1025,11 @@ def test_retirement_is_owner_scoped_generation_fenced_and_replayable(
 def test_retired_environment_revives_same_identity_and_clears_candidate(
     tmp_path: Path,
 ) -> None:
-    authority = _new_registry(tmp_path)
+    listeners: set[int] = set()
+    authority = _new_registry(
+        tmp_path,
+        port_inventory_collector=lambda: frozenset(listeners),
+    )
     original = authority.register(
         _register("oidc:example:owner", "registration-key-owner"),
     )
@@ -1033,6 +1064,13 @@ def test_retired_environment_revives_same_identity_and_clears_candidate(
             expected_resource_generation=original.resource_generation,
         )
     active = authority.lookup(original.env_id)
+    listeners.update(active.ports.values())
+    active_readback = authority.reconcile_predeployment_ports(
+        active.env_id,
+        principal_id=active.principal_id,
+        expected_resource_generation=active.resource_generation,
+    )
+    assert active_readback.ports == original.ports
     authority.begin_retirement(
         active.env_id,
         principal_id=active.principal_id,
@@ -1053,6 +1091,13 @@ def test_retired_environment_revives_same_identity_and_clears_candidate(
     assert revived.state == "ready"
     assert revived.current_candidate_id is None
     assert revived.resource_generation == retired.resource_generation + 1
+    revived_readback = authority.reconcile_predeployment_ports(
+        revived.env_id,
+        principal_id=revived.principal_id,
+        expected_resource_generation=revived.resource_generation,
+    )
+    assert revived_readback.ports == original.ports
+    assert revived_readback.resource_generation == revived.resource_generation
     for field in (
         "env_id",
         "runtime_id",
@@ -1119,6 +1164,555 @@ def test_uid_and_port_allocator_exhaustion_fail_closed(tmp_path: Path) -> None:
     port_authority.register(_register("oidc:example:one", "registration-key-one"))
     with pytest.raises(registry.RegistryError, match="port allocation is exhausted"):
         port_authority.register(_register("oidc:example:two", "registration-key-two"))
+
+
+@pytest.mark.parametrize(
+    "listeners",
+    [
+        frozenset({23_003}),
+        frozenset(range(23_000, 23_013)),
+    ],
+)
+def test_dynamic_port_allocator_skips_partial_or_full_listener_blocks(
+    tmp_path: Path,
+    listeners: frozenset[int],
+) -> None:
+    authority = _new_registry(
+        tmp_path,
+        port_inventory_collector=lambda: listeners,
+    )
+
+    environment = authority.register(
+        _register("oidc:example:listener-skip", "registration-listener-skip"),
+    )
+
+    assert min(environment.ports.values()) == 23_016
+    assert not set(environment.ports.values()) & listeners
+
+
+def test_listener_inventory_exhaustion_is_atomic(
+    tmp_path: Path,
+) -> None:
+    authority = _new_registry(
+        tmp_path,
+        policy=registry.AllocationPolicy(
+            port_start=23_000,
+            port_end=23_031,
+            port_block_size=16,
+        ),
+        port_inventory_collector=lambda: frozenset({23_003, 23_019}),
+    )
+
+    with pytest.raises(registry.RegistryError, match="port allocation is exhausted"):
+        authority.register(
+            _register("oidc:example:listener-exhaustion", "registration-listener-exhaustion"),
+        )
+
+    assert authority.snapshot()["environments"] == []
+
+
+def test_registration_port_decision_is_persisted_across_inventory_drift(
+    tmp_path: Path,
+) -> None:
+    listeners: set[int] = {23_003}
+    calls = 0
+
+    def collect() -> frozenset[int]:
+        nonlocal calls
+        calls += 1
+        return frozenset(listeners)
+
+    authority = _new_registry(tmp_path, port_inventory_collector=collect)
+    request = _register("oidc:example:stable-ports", "registration-stable-ports")
+    first = authority.register(request)
+    listeners.update(first.ports.values())
+    replay = authority.register(request)
+    restarted = registry.DeveloperEnvironmentRegistry(
+        authority.database,
+        port_inventory_collector=collect,
+    )
+
+    assert replay.ports == first.ports
+    assert restarted.lookup(first.env_id, principal_id=first.principal_id).ports == first.ports
+    assert calls == 1
+
+
+@pytest.mark.parametrize(
+    "inventory",
+    [
+        {"not-a-port"},
+        {0},
+        {65_536},
+        {True},
+    ],
+)
+def test_malformed_host_port_inventory_fails_closed(
+    tmp_path: Path,
+    inventory: set[object],
+) -> None:
+    authority = _new_registry(
+        tmp_path,
+        port_inventory_collector=lambda: inventory,  # type: ignore[arg-type,return-value]
+    )
+
+    with pytest.raises(registry.RegistryError, match="host port inventory"):
+        authority.register(
+            _register("oidc:example:malformed-listeners", "registration-malformed-listeners"),
+        )
+
+    assert authority.snapshot()["environments"] == []
+
+
+def test_proc_listener_inventory_parses_listen_only_and_rejects_malformed(
+    tmp_path: Path,
+) -> None:
+    table = tmp_path / "tcp"
+    table.write_text(
+        "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt "
+        "uid timeout inode\n"
+        "   0: 00000000:59D8 00000000:0000 0A 00000000:00000000 00:00000000 "
+        "00000000 0 0 1 1\n"
+        "   1: 0100007F:59D9 00000000:0000 01 00000000:00000000 00:00000000 "
+        "00000000 0 0 2 1\n",
+        encoding="ascii",
+    )
+
+    assert registry._proc_listener_ports(table) == {23_000}
+
+    table.write_text(
+        "sl local_address rem_address st\n0: malformed\n",
+        encoding="ascii",
+    )
+    with pytest.raises(registry.RegistryError, match="malformed"):
+        registry._proc_listener_ports(table)
+
+
+def _query_fake_docker_socket(
+    tmp_path: Path,
+    response: bytes,
+    query: Callable[[Path], Any],
+    *,
+    drift_socket: bool = False,
+) -> Any:
+    del tmp_path
+    path = Path("/tmp") / f"loom-docker-{os.getpid()}-{id(response):x}.sock"
+    path.unlink(missing_ok=True)
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(path))
+    path.chmod(0o660)
+    server.listen(1)
+    requests: list[bytes] = []
+
+    def serve() -> None:
+        replacement: socket.socket | None = None
+        try:
+            connection, _address = server.accept()
+            with connection:
+                raw = b""
+                while b"\r\n\r\n" not in raw and len(raw) <= 65_536:
+                    chunk = connection.recv(4096)
+                    if not chunk:
+                        break
+                    raw += chunk
+                requests.append(raw)
+                if drift_socket:
+                    path.unlink()
+                    replacement = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    replacement.bind(str(path))
+                    path.chmod(0o660)
+                try:
+                    connection.sendall(response)
+                except BrokenPipeError:
+                    pass
+        finally:
+            if replacement is not None:
+                replacement.close()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        result = query(path)
+    finally:
+        thread.join(timeout=5)
+        server.close()
+        path.unlink(missing_ok=True)
+    assert len(requests) == 1
+    assert requests[0].startswith(b"GET /containers/json?all=1 HTTP/1.1\r\n")
+    return result
+
+
+def _docker_http_response(
+    payload: object,
+    *,
+    status: str = "200 OK",
+    content_length: int | None = None,
+) -> bytes:
+    body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("ascii")
+    length = len(body) if content_length is None else content_length
+    return (
+        f"HTTP/1.1 {status}\r\nContent-Type: application/json\r\n"
+        f"Content-Length: {length}\r\nConnection: close\r\n\r\n"
+    ).encode("ascii") + body
+
+
+def _docker_chunked_http_response(
+    payload: object,
+    *,
+    split_at: int | None = None,
+) -> bytes:
+    body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("ascii")
+    boundary = max(1, len(body) // 2) if split_at is None else split_at
+    chunks = (body[:boundary], body[boundary:])
+    encoded = b"".join(
+        f"{len(chunk):x}\r\n".encode("ascii") + chunk + b"\r\n" for chunk in chunks if chunk
+    )
+    return (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Api-Version: 1.52\r\n"
+        b"Content-Type: application/json\r\n"
+        b"Docker-Experimental: false\r\n"
+        b"Ostype: linux\r\n"
+        b"Server: Docker/29.1.3 (linux)\r\n"
+        b"Transfer-Encoding: chunked\r\n\r\n" + encoded + b"0\r\n\r\n"
+    )
+
+
+def test_docker_published_port_inventory_covers_proxyless_reservations(
+    tmp_path: Path,
+) -> None:
+    payload = [
+        {
+            "Id": "a" * 64,
+            "Ports": [
+                {
+                    "IP": "0.0.0.0",
+                    "PrivatePort": 8000,
+                    "PublicPort": 23_003,
+                    "Type": "tcp",
+                },
+                {"PrivatePort": 9000, "Type": "tcp"},
+            ],
+        }
+    ]
+
+    for response in (
+        _docker_http_response(payload),
+        _docker_chunked_http_response(payload),
+    ):
+        published = _query_fake_docker_socket(
+            tmp_path,
+            response,
+            lambda path: registry._docker_published_ports(
+                path,
+                expected_uid=os.getuid(),
+            ),
+        )
+
+        assert published == {23_003}
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        _docker_http_response([], status="500 Internal Server Error"),
+        _docker_http_response([], content_length=999),
+        _docker_http_response(
+            [
+                {
+                    "Id": "a" * 64,
+                    "Ports": [
+                        {
+                            "IP": "0.0.0.0",
+                            "PrivatePort": 8000,
+                            "PublicPort": 23_003,
+                            "Type": "tcp",
+                            "extra": True,
+                        }
+                    ],
+                }
+            ],
+        ),
+        (
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+            b"Content-Length: 2\r\nTransfer-Encoding: chunked\r\n\r\n[]"
+        ),
+        (
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+            b"Transfer-Encoding: chunked\r\n\r\nz\r\n[]\r\n0\r\n\r\n"
+        ),
+        (
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+            b"Transfer-Encoding: chunked\r\n\r\n2\r\n[]\r\n"
+        ),
+        (b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: gzip\r\n\r\n[]"),
+        b"not-http",
+    ],
+)
+def test_docker_published_port_inventory_rejects_malformed_responses(
+    tmp_path: Path,
+    response: bytes,
+) -> None:
+    with pytest.raises(registry.RegistryError, match="Docker port inventory"):
+        _query_fake_docker_socket(
+            tmp_path,
+            response,
+            lambda path: registry._docker_published_ports(
+                path,
+                expected_uid=os.getuid(),
+            ),
+        )
+
+
+def test_docker_published_port_inventory_rejects_oversize_and_socket_drift(
+    tmp_path: Path,
+) -> None:
+    oversized = (
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
+        + str(registry.DOCKER_API_MAX_BYTES + 1).encode("ascii")
+        + b"\r\nConnection: close\r\n\r\n"
+        + b" " * (registry.DOCKER_API_MAX_BYTES + 1)
+    )
+    with pytest.raises(registry.RegistryError, match="Docker port inventory"):
+        _query_fake_docker_socket(
+            tmp_path,
+            oversized,
+            lambda path: registry._docker_published_ports(
+                path,
+                expected_uid=os.getuid(),
+            ),
+        )
+
+    oversized_chunk = (
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+        b"Transfer-Encoding: chunked\r\n\r\n"
+        + f"{registry.DOCKER_API_MAX_BYTES + 1:x}\r\n".encode("ascii")
+        + b"0\r\n\r\n"
+    )
+    with pytest.raises(registry.RegistryError, match="size bound"):
+        _query_fake_docker_socket(
+            tmp_path,
+            oversized_chunk,
+            lambda path: registry._docker_published_ports(
+                path,
+                expected_uid=os.getuid(),
+            ),
+        )
+
+    with pytest.raises(registry.RegistryError, match="identity drifted"):
+        _query_fake_docker_socket(
+            tmp_path,
+            _docker_http_response([]),
+            lambda path: registry._docker_published_ports(
+                path,
+                expected_uid=os.getuid(),
+            ),
+            drift_socket=True,
+        )
+
+
+def test_combined_reserved_port_collector_merges_proc_and_docker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        registry,
+        "collect_host_listener_ports",
+        lambda: frozenset({23_003}),
+    )
+    monkeypatch.setattr(
+        registry,
+        "_docker_published_ports",
+        lambda path, *, expected_uid: (
+            {23_019}
+            if path == registry.DOCKER_SOCKET and expected_uid == 0
+            else pytest.fail("collector escaped its fixed Docker socket")
+        ),
+    )
+
+    assert registry.collect_host_reserved_ports() == frozenset({23_003, 23_019})
+
+
+def test_pristine_dynamic_ports_reallocate_per_generation_and_reject_stale_fence(
+    tmp_path: Path,
+) -> None:
+    listeners: set[int] = set()
+    authority = _new_registry(
+        tmp_path,
+        port_inventory_collector=lambda: frozenset(listeners),
+    )
+    environment = authority.register(
+        _register("oidc:example:port-race", "registration-port-race"),
+    )
+    authority.import_candidate(_candidate(environment, "candidate-port-race"))
+
+    before_clear = authority.snapshot()
+    clear = authority.reconcile_predeployment_ports(
+        environment.env_id,
+        principal_id=environment.principal_id,
+        expected_resource_generation=environment.resource_generation,
+    )
+    assert clear == environment
+    assert authority.snapshot() == before_clear
+
+    listeners.add(environment.ports["control_plane"])
+    first = authority.reconcile_predeployment_ports(
+        environment.env_id,
+        principal_id=environment.principal_id,
+        expected_resource_generation=environment.resource_generation,
+    )
+    assert first.resource_generation == environment.resource_generation + 1
+    assert min(first.ports.values()) == 23_016
+
+    with pytest.raises(registry.RegistryError, match="generation is stale"):
+        authority.reconcile_predeployment_ports(
+            environment.env_id,
+            principal_id=environment.principal_id,
+            expected_resource_generation=environment.resource_generation,
+        )
+
+    listeners.add(first.ports["control_plane"])
+    second = authority.reconcile_predeployment_ports(
+        first.env_id,
+        principal_id=first.principal_id,
+        expected_resource_generation=first.resource_generation,
+    )
+    assert second.resource_generation == first.resource_generation + 1
+    assert min(second.ports.values()) == 23_032
+
+    connection = sqlite3.connect(authority.database)
+    try:
+        rows = connection.execute(
+            """
+            SELECT action, expected_resource_generation, applied_resource_generation
+            FROM port_allocation_journal WHERE env_id = ? ORDER BY journal_id
+            """,
+            (environment.env_id,),
+        ).fetchall()
+    finally:
+        connection.close()
+    assert rows == [
+        ("initial", 1, 1),
+        ("pre-deployment-reallocation", 1, 2),
+        ("pre-deployment-reallocation", 2, 3),
+    ]
+
+
+def test_deployment_history_freezes_dynamic_ports_without_self_conflict(
+    tmp_path: Path,
+) -> None:
+    listeners: set[int] = set()
+    authority = _new_registry(
+        tmp_path,
+        port_inventory_collector=lambda: frozenset(listeners),
+    )
+    environment = authority.register(
+        _register("oidc:example:port-freeze", "registration-port-freeze"),
+    )
+    candidate = authority.import_candidate(_candidate(environment, "candidate-port-freeze"))
+    deployment = authority.begin_deployment(
+        _deploy(environment, candidate, "deployment-port-freeze"),
+    )
+    listeners.update(environment.ports.values())
+
+    deploying = authority.reconcile_predeployment_ports(
+        environment.env_id,
+        principal_id=environment.principal_id,
+        expected_resource_generation=environment.resource_generation,
+    )
+
+    assert deployment.phase == "requested"
+    assert deploying.state == "deploying"
+    assert deploying.ports == environment.ports
+    assert deploying.resource_generation == environment.resource_generation
+
+
+def test_requested_phase_failure_can_recover_ports_before_retry(
+    tmp_path: Path,
+) -> None:
+    listeners: set[int] = set()
+    authority = _new_registry(
+        tmp_path,
+        port_inventory_collector=lambda: frozenset(listeners),
+    )
+    environment = authority.register(
+        _register("oidc:example:failed-port-bind", "registration-failed-port-bind"),
+    )
+    candidate = authority.import_candidate(
+        _candidate(environment, "candidate-failed-port-bind"),
+    )
+    deployment = authority.begin_deployment(
+        _deploy(environment, candidate, "deployment-failed-port-bind"),
+    )
+    authority.fail_deployment(
+        deployment.deployment_id,
+        principal_id=environment.principal_id,
+        expected_phase="requested",
+        expected_resource_generation=environment.resource_generation,
+    )
+    listeners.add(environment.ports["control_plane"])
+
+    rebound = authority.reconcile_predeployment_ports(
+        environment.env_id,
+        principal_id=environment.principal_id,
+        expected_resource_generation=environment.resource_generation,
+    )
+    retried = authority.begin_deployment(
+        _deploy(
+            rebound,
+            candidate,
+            "deployment-failed-port-bind-retry",
+        ),
+    )
+
+    assert rebound.resource_generation == environment.resource_generation + 1
+    assert rebound.ports != environment.ports
+    assert retried.expected_resource_generation == rebound.resource_generation
+
+
+def test_post_materialization_failure_cannot_reallocate_ports(
+    tmp_path: Path,
+) -> None:
+    listeners: set[int] = set()
+    authority = _new_registry(
+        tmp_path,
+        port_inventory_collector=lambda: frozenset(listeners),
+    )
+    environment = authority.register(
+        _register("oidc:example:unsafe-port-repair", "registration-unsafe-port-repair"),
+    )
+    candidate = authority.import_candidate(
+        _candidate(environment, "candidate-unsafe-port-repair"),
+    )
+    deployment = authority.begin_deployment(
+        _deploy(environment, candidate, "deployment-unsafe-port-repair"),
+    )
+    current = deployment
+    for expected, following in (
+        ("requested", "resources-verified"),
+        ("resources-verified", "candidate-materialized"),
+    ):
+        current = authority.advance_deployment(
+            current.deployment_id,
+            principal_id=environment.principal_id,
+            expected_phase=expected,
+            next_phase=following,
+            expected_resource_generation=environment.resource_generation,
+        )
+    authority.fail_deployment(
+        deployment.deployment_id,
+        principal_id=environment.principal_id,
+        expected_phase="candidate-materialized",
+        expected_resource_generation=environment.resource_generation,
+    )
+    listeners.add(environment.ports["control_plane"])
+
+    unchanged = authority.reconcile_predeployment_ports(
+        environment.env_id,
+        principal_id=environment.principal_id,
+        expected_resource_generation=environment.resource_generation,
+    )
+
+    assert unchanged.ports == environment.ports
+    assert unchanged.resource_generation == environment.resource_generation
 
 
 def test_lookup_list_and_snapshot_are_owner_scoped_and_canonical(tmp_path: Path) -> None:

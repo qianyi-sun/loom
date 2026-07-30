@@ -187,8 +187,12 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
     tres = job["allocation"]["tres"]
     if "cpu=" not in tres or "mem=" not in tres:
         failures.append("Slurm TRES is missing CPU or memory allocation")
-    if allocation["gpu_ids"] and not ("gres/gpu=" in tres or "gres/gpu:" in tres):
-        failures.append("Slurm TRES is missing GPU allocation")
+    allocated_gpu_count = len(allocation["gpu_ids"])
+    tres_gpu_count = live_acceptance._positive_gpu_tres_count(tres)
+    if allocated_gpu_count and tres_gpu_count != allocated_gpu_count:
+        failures.append("Slurm TRES GPU count does not match allocated GPU identities")
+    if not allocated_gpu_count and tres_gpu_count is not None:
+        failures.append("Slurm TRES declares GPU allocation without allocated GPU identities")
 
     roles = [container["role"] for container in containers]
     if set(roles) != REQUIRED_ROLES or len(roles) != len(REQUIRED_ROLES):
@@ -198,6 +202,65 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
         if len(set(identities)) != len(identities):
             failures.append(f"container {identity_field} values must be unique")
 
+    layout_version = cgroup.get("layout_version")
+    if layout_version not in {
+        "legacy-cgroupfs-v0",
+        "cgroupfs-job-v1",
+        "systemd-mirror-v1",
+    }:
+        failures.append("cgroup layout_version is not an accepted explicit discriminator")
+    if layout_version == "legacy-cgroupfs-v0":
+        if set(cgroup) != {
+            "layout_version",
+            "job_path",
+            "controllers",
+            "delegated",
+            "cpu_cores_max",
+            "memory_bytes_max",
+            "pids_max",
+        }:
+            failures.append("legacy cgroup evidence is not the exact grandfathered shape")
+        if set(job) != {
+            "job_id",
+            "candidate_sha",
+            "sandbox",
+            "node",
+            "compose_project",
+            "allocation",
+        }:
+            failures.append("legacy job evidence is not the exact grandfathered shape")
+    versioned_cgroup = layout_version in {"cgroupfs-job-v1", "systemd-mirror-v1"}
+    if versioned_cgroup:
+        try:
+            live_acceptance._validate_cgroup_evidence(
+                cgroup,
+                [
+                    {
+                        **container,
+                        "observed_cgroup_path": container["cgroup_path"],
+                    }
+                    for container in containers
+                ],
+                job_id=job["job_id"],
+                job_start_time=job.get("job_start_time"),
+                node=job["node"],
+                pool=job.get("pool"),
+                account=job.get("account"),
+                sandbox=sandbox,
+                environment={
+                    "env_id": job.get("env_id"),
+                    "resource_generation": job.get("resource_generation"),
+                    "candidate_id": job.get("candidate_id"),
+                },
+                candidate_sha=candidate_sha,
+                candidate_tree=job.get("candidate_tree"),
+                allocation={
+                    **allocation,
+                    "gpu_count": len(allocation["gpu_ids"]),
+                },
+            )
+        except live_acceptance.AcceptanceError as exc:
+            failures.append(f"versioned cgroup evidence is invalid: {exc}")
     job_path = cgroup["job_path"]
     for container in containers:
         role = container["role"]
@@ -210,16 +273,18 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
         }
         if labels != expected_labels:
             failures.append(f"{role} container labels do not match job identity")
-        if container["cgroup_parent"] != job_path:
-            failures.append(f"{role} container cgroup parent is not the Slurm job cgroup")
-        if not _strict_descendant(container["cgroup_path"], job_path):
-            failures.append(f"{role} container is not inside the Slurm job cgroup")
+        if not versioned_cgroup:
+            if container["cgroup_parent"] != job_path:
+                failures.append(f"{role} container cgroup parent is not the Slurm job cgroup")
+            if not _strict_descendant(container["cgroup_path"], job_path):
+                failures.append(f"{role} container is not inside the Slurm job cgroup")
 
-    controllers = set(cgroup["controllers"])
-    if controllers != REQUIRED_CONTROLLERS:
-        failures.append("job cgroup must enforce cpu, memory, and pids")
-    if not cgroup["delegated"]:
-        failures.append("job cgroup delegation was not proven")
+    if not versioned_cgroup:
+        controllers = set(cgroup["controllers"])
+        if controllers != REQUIRED_CONTROLLERS:
+            failures.append("job cgroup must enforce cpu, memory, and pids")
+        if not cgroup["delegated"]:
+            failures.append("job cgroup delegation was not proven")
 
     cap_fields = ("cpu_cores", "memory_bytes", "pids")
     for field in cap_fields:
@@ -236,6 +301,16 @@ def _semantic_failures(evidence: Mapping[str, Any]) -> list[str]:
     allocated_ids = set(allocation["gpu_ids"])
     if set(devices["allocated_ids"]) != allocated_ids:
         failures.append("device allocation does not match Slurm allocation")
+    allocated_container_ids = [
+        set(container["device_ids"]) for container in containers if container["device_ids"]
+    ]
+    if allocated_ids:
+        if len(allocated_container_ids) != 1 or allocated_container_ids[0] != allocated_ids:
+            failures.append(
+                "exactly one container must receive the complete Slurm GPU allocation",
+            )
+    elif allocated_container_ids:
+        failures.append("zero-GPU allocation exposed a container GPU device")
     for container in containers:
         if not set(container["device_ids"]).issubset(allocated_ids):
             failures.append(
@@ -543,6 +618,45 @@ def _gate6_pair_artifact(
     )
     allocation = job["allocation"]
     cgroup = job["cgroup"]
+    job_evidence = {
+        "job_id": job["job_id"],
+        "candidate_sha": candidate["sha"],
+        "sandbox": sandbox,
+        "node": job["node"],
+        "compose_project": job["compose_project"],
+        "allocation": {
+            "cpu_cores": allocation["cpu_cores"],
+            "memory_bytes": allocation["memory_bytes"],
+            "pids": allocation["pids"],
+            "gpu_ids": device["allocated_ids"],
+            "tres": allocation["tres"],
+        },
+    }
+    if cgroup.get("layout_version") in {"cgroupfs-job-v1", "systemd-mirror-v1"}:
+        job_evidence.update(
+            {
+                "job_start_time": job["job_start_time"],
+                "pool": pool,
+                "account": job["account"],
+                "env_id": job["env_id"],
+                "resource_generation": job["resource_generation"],
+                "candidate_id": job["candidate_id"],
+                "candidate_tree": candidate["tree"],
+            },
+        )
+    cgroup_evidence = (
+        dict(cgroup)
+        if "layout_version" in cgroup
+        else {
+            "layout_version": "legacy-cgroupfs-v0",
+            "job_path": cgroup["job_path"],
+            "controllers": cgroup["controllers"],
+            "delegated": cgroup["delegated"],
+            "cpu_cores_max": cgroup["cpu_cores_max"],
+            "memory_bytes_max": cgroup["memory_bytes_max"],
+            "pids_max": cgroup["pids_max"],
+        }
+    )
     return {
         "schema_version": 1,
         "collected_at": mixed_checkpoint["observed_at"],
@@ -552,29 +666,9 @@ def _gate6_pair_artifact(
             "hostname": device["host"],
             "slurm_node_name": job["node"],
         },
-        "job": {
-            "job_id": job["job_id"],
-            "candidate_sha": candidate["sha"],
-            "sandbox": sandbox,
-            "node": job["node"],
-            "compose_project": job["compose_project"],
-            "allocation": {
-                "cpu_cores": allocation["cpu_cores"],
-                "memory_bytes": allocation["memory_bytes"],
-                "pids": allocation["pids"],
-                "gpu_ids": device["allocated_ids"],
-                "tres": allocation["tres"],
-            },
-        },
+        "job": job_evidence,
         "containers": containers,
-        "cgroup": {
-            "job_path": cgroup["job_path"],
-            "controllers": cgroup["controllers"],
-            "delegated": cgroup["delegated"],
-            "cpu_cores_max": cgroup["cpu_cores_max"],
-            "memory_bytes_max": cgroup["memory_bytes_max"],
-            "pids_max": cgroup["pids_max"],
-        },
+        "cgroup": cgroup_evidence,
         "aggregate_caps": {
             key: job["aggregate_limits"][key] for key in ("cpu_cores", "memory_bytes", "pids")
         },

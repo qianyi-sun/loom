@@ -11,6 +11,27 @@ from scripts.ops import developer_sandbox_slurm_policy as policy
 from scripts.ops import slurm_job_cgroup_guard as guard
 
 
+def _binding(
+    account: str,
+    sandbox: str,
+    service_user: str,
+    candidate_sha: str,
+    candidate_tree: str,
+) -> guard.CandidateBinding:
+    identity = hashlib.sha256(f"{account}:{sandbox}".encode("ascii")).hexdigest()
+    return guard.CandidateBinding(
+        account=account,
+        env_id=f"denv-{identity[:8]}",
+        resource_generation=1,
+        sandbox=sandbox,
+        service_user=service_user,
+        slurm_qos=account.replace("loom-dev-", "loom-dev-").replace("lda-", "ldq-"),
+        candidate_id=f"cand-{identity[:40]}",
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+    )
+
+
 def _candidate_set_sha256(
     bindings: dict[str, guard.CandidateBinding],
 ) -> str:
@@ -18,8 +39,12 @@ def _candidate_set_sha256(
         json.dumps(
             {
                 account: {
+                    "env_id": binding.env_id,
+                    "resource_generation": binding.resource_generation,
                     "sandbox": binding.sandbox,
                     "service_user": binding.service_user,
+                    "slurm_qos": binding.slurm_qos,
+                    "candidate_id": binding.candidate_id,
                     "candidate_sha": binding.candidate_sha,
                     "candidate_tree": binding.candidate_tree,
                 }
@@ -38,26 +63,26 @@ def _config(
         bindings
         if bindings is not None
         else {
-            "loom-dev-qianyi": guard.CandidateBinding(
-                account="loom-dev-qianyi",
-                sandbox="qianyi",
-                service_user="loom-sandbox-qianyi",
-                candidate_sha="a" * 40,
-                candidate_tree="b" * 40,
+            "loom-dev-qianyi": _binding(
+                "loom-dev-qianyi",
+                "qianyi",
+                "loom-sandbox-qianyi",
+                "a" * 40,
+                "b" * 40,
             ),
-            "loom-dev-hongjian": guard.CandidateBinding(
-                account="loom-dev-hongjian",
-                sandbox="hongjian",
-                service_user="loom-sandbox-hongjian",
-                candidate_sha="c" * 40,
-                candidate_tree="b" * 40,
+            "loom-dev-hongjian": _binding(
+                "loom-dev-hongjian",
+                "hongjian",
+                "loom-sandbox-hongjian",
+                "c" * 40,
+                "b" * 40,
             ),
-            "loom-dev-devansh": guard.CandidateBinding(
-                account="loom-dev-devansh",
-                sandbox="devansh",
-                service_user="loom-sandbox-devansh",
-                candidate_sha="d" * 40,
-                candidate_tree="b" * 40,
+            "loom-dev-devansh": _binding(
+                "loom-dev-devansh",
+                "devansh",
+                "loom-sandbox-devansh",
+                "d" * 40,
+                "b" * 40,
             ),
         }
     )
@@ -72,6 +97,7 @@ def _config(
         pids_max=32768,
         poll_interval_seconds=0.2,
         require_gpu_probe=False,
+        docker_cgroup_driver="cgroupfs",
     )
 
 
@@ -84,7 +110,10 @@ def _job(tmp_path: Path, job_id: str = "123") -> tuple[Path, Path]:
     (job / "cgroup.procs").write_text("")
     (job / "cpu.max").write_text("200000 100000\n")
     (job / "memory.max").write_text("8388608000\n")
+    (job / "memory.swap.max").write_text("max\n")
     (job / "pids.max").write_text("max\n")
+    (job / "cpuset.cpus.effective").write_text("0-1\n")
+    (job / "cpuset.mems.effective").write_text("0\n")
     return root, job
 
 
@@ -94,15 +123,19 @@ def _config_payload(
     config = config or _config()
     bindings = {
         account: {
+            "env_id": binding.env_id,
+            "resource_generation": binding.resource_generation,
             "sandbox": binding.sandbox,
             "service_user": binding.service_user,
+            "slurm_qos": binding.slurm_qos,
+            "candidate_id": binding.candidate_id,
             "candidate_sha": binding.candidate_sha,
             "candidate_tree": binding.candidate_tree,
         }
         for account, binding in config.candidate_bindings.items()
     }
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "cluster": config.cluster,
         "controller": config.controller,
         "submit_host": config.submit_host,
@@ -112,6 +145,7 @@ def _config_payload(
         "pids_max": config.pids_max,
         "poll_interval_seconds": config.poll_interval_seconds,
         "require_gpu_probe": config.require_gpu_probe,
+        "docker_cgroup_driver": config.docker_cgroup_driver,
     }
 
 
@@ -134,19 +168,19 @@ def test_dynamic_registry_bindings_accept_custom_accounts_and_service_users(
     bindings = dict(_config().candidate_bindings)
     bindings.update(
         {
-            "lda-a1b2c3d4": guard.CandidateBinding(
-                account="lda-a1b2c3d4",
-                sandbox="research-4",
-                service_user="lds-a1b2c3d4",
-                candidate_sha="e" * 40,
-                candidate_tree="f" * 40,
+            "lda-a1b2c3d4": _binding(
+                "lda-a1b2c3d4",
+                "research-4",
+                "lds-a1b2c3d4",
+                "e" * 40,
+                "f" * 40,
             ),
-            "lda-e5f6a7b8": guard.CandidateBinding(
-                account="lda-e5f6a7b8",
-                sandbox="team-27",
-                service_user="lds-e5f6a7b8",
-                candidate_sha="f" * 40,
-                candidate_tree="e" * 40,
+            "lda-e5f6a7b8": _binding(
+                "lda-e5f6a7b8",
+                "team-27",
+                "lds-e5f6a7b8",
+                "f" * 40,
+                "e" * 40,
             ),
         },
     )
@@ -174,6 +208,91 @@ def test_dynamic_registry_bindings_accept_custom_accounts_and_service_users(
     assert result["verified"] == 1
     assert result["resource_probes"]["lda-a1b2c3d4"]["service_user"] == "lds-a1b2c3d4"
     assert (job / "pids.max").read_text() == "32768\n"
+
+
+def _staging_binding() -> guard.CandidateBinding:
+    return guard.CandidateBinding(
+        account="loom-staging",
+        env_id="denv-staging-" + "a" * 40,
+        resource_generation=7,
+        sandbox="staging",
+        service_user="loom-staging-worker",
+        slurm_qos="loom-staging",
+        candidate_id="cand-" + "a" * 40,
+        candidate_sha="a" * 40,
+        candidate_tree="b" * 40,
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("env_id", "denv-staging-wrong"),
+        ("sandbox", "staging-other"),
+        ("service_user", "loom-staging-worker-other"),
+        ("slurm_qos", "loom-staging-other"),
+        ("candidate_id", "cand-" + "c" * 40),
+    ),
+)
+def test_guard_rejects_noncanonical_fixed_staging_binding(
+    tmp_path: Path,
+    field: str,
+    value: str,
+) -> None:
+    staging = replace(_staging_binding(), **{field: value})
+    config = _config({"loom-staging": staging})
+    path = tmp_path / "guard.json"
+    _write_config(path, _config_payload(config))
+
+    with pytest.raises(guard.GuardError, match="fixed staging"):
+        guard.load_config(path)
+
+
+@pytest.mark.parametrize("mutation", ("generation", "digest", "regular-name", "user"))
+def test_fixed_staging_job_name_is_candidate_set_and_generation_bound(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    staging = _staging_binding()
+    config = replace(
+        _config({"loom-staging": staging}),
+        cluster="trt-gb10",
+        controller="trt-gb10-1",
+        submit_host="trt-gb10-1",
+        allowed_nodes=frozenset({"trt-gb10-2"}),
+    )
+    root, _job_path = _job(tmp_path)
+    job_name = (
+        f"loom827-staging-{staging.candidate_sha[:12]}-trt-gb10-2-"
+        f"g{config.candidate_set_sha256}-a{staging.resource_generation}"
+    )
+    user = staging.service_user
+    if mutation == "generation":
+        job_name = job_name.rsplit("-a", 1)[0] + "-a8"
+    elif mutation == "digest":
+        job_name = job_name.replace(config.candidate_set_sha256, "f" * 64)
+    elif mutation == "regular-name":
+        job_name = "loom-sandbox-staging-aaaaaaaaaaaa-trt-gb10-2"
+    elif mutation == "user":
+        user = "loom-staging-worker-other"
+
+    result = guard.scan_once(
+        config,
+        cgroup_root=root,
+        job_lookup=lambda job_id: guard.JobRecord(
+            job_id=job_id,
+            account="loom-staging",
+            comment="loom-cgroup-v1:pids=32768",
+            job_name=job_name,
+            batch_host="trt-gb10-2",
+            node_list="trt-gb10-2",
+            user=user,
+            start_time="2026-07-29T12:00:00",
+        ),
+    )
+
+    assert result["failed"] == 1
+    assert result["verified"] == 0
 
 
 @pytest.mark.parametrize(
@@ -413,19 +532,19 @@ def test_cross_account_candidate_or_user_binding_fails_closed(tmp_path: Path) ->
     root, job = _job(tmp_path)
     config = _config(
         {
-            "lda-a1b2c3d4": guard.CandidateBinding(
-                account="lda-a1b2c3d4",
-                sandbox="runtime-a",
-                service_user="lds-a1b2c3d4",
-                candidate_sha="a" * 40,
-                candidate_tree="b" * 40,
+            "lda-a1b2c3d4": _binding(
+                "lda-a1b2c3d4",
+                "runtime-a",
+                "lds-a1b2c3d4",
+                "a" * 40,
+                "b" * 40,
             ),
-            "lda-e5f6a7b8": guard.CandidateBinding(
-                account="lda-e5f6a7b8",
-                sandbox="runtime-b",
-                service_user="lds-e5f6a7b8",
-                candidate_sha="c" * 40,
-                candidate_tree="d" * 40,
+            "lda-e5f6a7b8": _binding(
+                "lda-e5f6a7b8",
+                "runtime-b",
+                "lds-e5f6a7b8",
+                "c" * 40,
+                "d" * 40,
             ),
         },
     )
@@ -547,6 +666,7 @@ def test_gpu_profile_requires_positive_allocated_tres_probe(tmp_path: Path) -> N
             account="loom-dev-qianyi",
             comment="loom-cgroup-v1:pids=32768",
             alloc_tres="cpu=2,mem=11500M,gres/gpu=1",
+            gres_detail="gpu(IDX:0)",
             job_name="loom-sandbox-qianyi-aaaaaaaaaaaa-oldlab-1",
             batch_host="oldlab-1",
             node_list="oldlab-1",
@@ -598,3 +718,257 @@ def test_daemon_iteration_records_guard_error_without_exiting(
     assert result["failed"] == 1
     assert "controller unavailable" in result["failures"][0]["reason"]
     assert json.loads(status.read_text())["failed"] == 1
+
+
+def _systemd_record(
+    config: guard.GuardConfig,
+    *,
+    job_id: str = "123",
+    start_time: str = "2026-07-30T00:00:00",
+) -> guard.JobRecord:
+    binding = config.candidate_bindings["loom-dev-qianyi"]
+    return guard.JobRecord(
+        job_id=job_id,
+        account=binding.account,
+        comment=f"loom-cgroup-v1:pids={config.pids_max}",
+        alloc_tres="cpu=2,mem=8000M",
+        job_name=(f"loom-sandbox-{binding.sandbox}-{binding.candidate_sha[:12]}-oldlab-1"),
+        batch_host="oldlab-1",
+        node_list="oldlab-1",
+        user=binding.service_user,
+        start_time=start_time,
+        gres_detail="(null)",
+    )
+
+
+def _systemd_scan_fixture(
+    tmp_path: Path,
+) -> tuple[
+    guard.GuardConfig,
+    Path,
+    Path,
+    Path,
+    guard.JobRecord,
+    list[tuple[str, ...]],
+    dict[str, object],
+]:
+    config = replace(_config(), docker_cgroup_driver="systemd")
+    cgroup_root, _job_path = _job(tmp_path)
+    unit_root = tmp_path / "units"
+    receipt_root = tmp_path / "receipts"
+    unit_root.mkdir(mode=0o755)
+    record = _systemd_record(config)
+    commands: list[tuple[str, ...]] = []
+    result = guard.scan_once(
+        config,
+        cgroup_root=cgroup_root,
+        job_lookup=lambda _job_id: record,
+        unit_root=unit_root,
+        receipt_root=receipt_root,
+        systemd_runner=lambda argv: commands.append(tuple(argv)),
+    )
+    return (
+        config,
+        cgroup_root,
+        unit_root,
+        receipt_root,
+        record,
+        commands,
+        result,
+    )
+
+
+def test_systemd_scan_publishes_allocation_slice_without_peer_mutation(
+    tmp_path: Path,
+) -> None:
+    unit_root = tmp_path / "units"
+    unit_root.mkdir(mode=0o755)
+    peer = unit_root / "peer-production.slice"
+    peer.write_text("[Slice]\nMemoryMax=1G\n", encoding="ascii")
+    peer.chmod(0o640)
+    peer_before = (peer.read_bytes(), peer.stat().st_mode, unit_root.stat().st_mode)
+    config = replace(_config(), docker_cgroup_driver="systemd")
+    cgroup_root, _job_path = _job(tmp_path)
+    receipt_root = tmp_path / "receipts"
+    record = _systemd_record(config)
+    commands: list[tuple[str, ...]] = []
+
+    result = guard.scan_once(
+        config,
+        cgroup_root=cgroup_root,
+        job_lookup=lambda _job_id: record,
+        unit_root=unit_root,
+        receipt_root=receipt_root,
+        systemd_runner=lambda argv: commands.append(tuple(argv)),
+    )
+
+    probe = result["resource_probes"][record.account]
+    unit = str(probe["systemd_slice"])
+    assert result["failed"] == 0
+    assert (unit_root / unit).is_file()
+    assert (receipt_root / f"{unit}.json").is_file()
+    assert peer_before == (peer.read_bytes(), peer.stat().st_mode, unit_root.stat().st_mode)
+    flattened = " ".join(" ".join(command) for command in commands)
+    assert "daemon-reload" in flattened
+    for forbidden in (" stop ", " kill ", " scancel ", "restart docker", "restart slurm"):
+        assert forbidden not in f" {flattened} "
+
+
+def test_systemd_scan_clamps_finite_source_swap_to_zero(tmp_path: Path) -> None:
+    config = replace(_config(), docker_cgroup_driver="systemd")
+    cgroup_root, job_path = _job(tmp_path)
+    (job_path / "memory.swap.max").write_text("4294967296\n", encoding="ascii")
+    unit_root = tmp_path / "units"
+    receipt_root = tmp_path / "receipts"
+    unit_root.mkdir(mode=0o755)
+    record = _systemd_record(config)
+
+    result = guard.scan_once(
+        config,
+        cgroup_root=cgroup_root,
+        job_lookup=lambda _job_id: record,
+        unit_root=unit_root,
+        receipt_root=receipt_root,
+        systemd_runner=lambda _argv: None,
+    )
+
+    probe = result["resource_probes"][record.account]
+    unit = str(probe["systemd_slice"])
+    receipt = json.loads((receipt_root / f"{unit}.json").read_text(encoding="ascii"))
+    assert receipt["memory_swap_max_source"] == "4294967296"
+    assert receipt["memory_swap_max_effective"] == "0"
+    assert "MemorySwapMax=0\n" in (unit_root / unit).read_text(encoding="ascii")
+
+
+def test_systemd_scan_restart_reuses_exact_unit_and_receipt(tmp_path: Path) -> None:
+    (
+        config,
+        cgroup_root,
+        unit_root,
+        receipt_root,
+        record,
+        _commands,
+        first,
+    ) = _systemd_scan_fixture(tmp_path)
+    probe = first["resource_probes"][record.account]
+    unit = str(probe["systemd_slice"])
+    unit_before = (unit_root / unit).read_bytes()
+    receipt_before = (receipt_root / f"{unit}.json").read_bytes()
+    commands: list[tuple[str, ...]] = []
+
+    second = guard.scan_once(
+        config,
+        cgroup_root=cgroup_root,
+        job_lookup=lambda _job_id: record,
+        unit_root=unit_root,
+        receipt_root=receipt_root,
+        systemd_runner=lambda argv: commands.append(tuple(argv)),
+    )
+
+    assert second["failed"] == 0
+    assert (unit_root / unit).read_bytes() == unit_before
+    assert (receipt_root / f"{unit}.json").read_bytes() == receipt_before
+    assert not any("daemon-reload" in command for command in commands)
+
+
+def test_systemd_expired_empty_slice_is_removed_without_stop_or_kill(
+    tmp_path: Path,
+) -> None:
+    (
+        config,
+        _active_cgroup_root,
+        unit_root,
+        receipt_root,
+        record,
+        _commands,
+        first,
+    ) = _systemd_scan_fixture(tmp_path)
+    unit = str(first["resource_probes"][record.account]["systemd_slice"])
+    empty_root = tmp_path / "empty-cgroup"
+    empty_root.mkdir()
+    commands: list[tuple[str, ...]] = []
+
+    result = guard.scan_once(
+        config,
+        cgroup_root=empty_root,
+        job_lookup=lambda _job_id: pytest.fail("there is no live job"),
+        unit_root=unit_root,
+        receipt_root=receipt_root,
+        systemd_runner=lambda argv: commands.append(tuple(argv)),
+    )
+
+    assert result["failed"] == 0
+    assert not (unit_root / unit).exists()
+    assert not (receipt_root / f"{unit}.json").exists()
+    assert commands == [("/usr/bin/systemctl", "daemon-reload")]
+
+
+@pytest.mark.parametrize("residue", ("scope", "process"))
+def test_systemd_live_residue_is_preserved_and_fails_closed(
+    tmp_path: Path,
+    residue: str,
+) -> None:
+    (
+        config,
+        _active_cgroup_root,
+        unit_root,
+        receipt_root,
+        record,
+        _commands,
+        first,
+    ) = _systemd_scan_fixture(tmp_path)
+    unit = str(first["resource_probes"][record.account]["systemd_slice"])
+    empty_root = tmp_path / "empty-cgroup"
+    empty_root.mkdir()
+    slice_cgroup = guard._slice_cgroup_path(empty_root, unit)
+    slice_cgroup.mkdir(parents=True)
+    (slice_cgroup / "cgroup.procs").write_text(
+        "4242\n" if residue == "process" else "",
+        encoding="ascii",
+    )
+    if residue == "scope":
+        (slice_cgroup / "docker-deadbeef.scope").mkdir()
+    commands: list[tuple[str, ...]] = []
+
+    result = guard.scan_once(
+        config,
+        cgroup_root=empty_root,
+        job_lookup=lambda _job_id: pytest.fail("there is no live job"),
+        unit_root=unit_root,
+        receipt_root=receipt_root,
+        systemd_runner=lambda argv: commands.append(tuple(argv)),
+    )
+
+    assert result["failed"] == 1
+    assert (unit_root / unit).is_file()
+    assert (receipt_root / f"{unit}.json").is_file()
+    assert commands == []
+
+
+def test_foreign_same_prefix_unit_is_preserved_and_fails_closed(
+    tmp_path: Path,
+) -> None:
+    config = replace(_config(), docker_cgroup_driver="systemd")
+    cgroup_root = tmp_path / "cgroup"
+    unit_root = tmp_path / "units"
+    receipt_root = tmp_path / "receipts"
+    cgroup_root.mkdir()
+    unit_root.mkdir(mode=0o755)
+    receipt_root.mkdir(mode=0o755)
+    foreign = unit_root / f"loom-job-999-{'f' * 40}.slice"
+    foreign.write_text("[Slice]\nMemoryMax=1G\n", encoding="ascii")
+    foreign.chmod(0o640)
+    before = (foreign.read_bytes(), foreign.stat().st_mode)
+    commands: list[tuple[str, ...]] = []
+
+    result = guard.scan_once(
+        config,
+        cgroup_root=cgroup_root,
+        unit_root=unit_root,
+        receipt_root=receipt_root,
+        systemd_runner=lambda argv: commands.append(tuple(argv)),
+    )
+
+    assert result["failed"] == 1
+    assert before == (foreign.read_bytes(), foreign.stat().st_mode)
+    assert commands == []

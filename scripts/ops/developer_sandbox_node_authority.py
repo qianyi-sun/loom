@@ -80,6 +80,9 @@ STAGING_INFRASTRUCTURE_INSTALL_HIGH_WATER: Final = (
 STAGING_INFRASTRUCTURE_INSTALL_GENERATIONS: Final = (
     STAGING_INFRASTRUCTURE_RECEIPT_ROOT / "generations"
 )
+STAGING_GUARD_BINDING_PATH: Final = (
+    STATE_ROOT.parent / "loom-developer-sandbox-slurm-policy/staging-binding-trt-gb10.json"
+)
 NODE_TRANSPORT: Final = Path(
     "/usr/local/libexec/loom-developer-sandbox-node-transport",
 )
@@ -670,6 +673,7 @@ STAGING_INFRASTRUCTURE_OPERATION_FIELDS: Final = {
     "node",
     "candidate_sha",
     "candidate_tree",
+    "generation",
     "convergence_id",
     "requested_at",
 }
@@ -4027,6 +4031,8 @@ def _parse_request(raw: bytes, *, verb: str, policy: AuthorityPolicy) -> Request
             or operation_payload.get("node") != payload["node"]
             or operation_payload.get("candidate_sha") != payload["candidate_sha"]
             or operation_payload.get("candidate_tree") != payload["candidate_tree"]
+            or type(operation_payload.get("generation")) is not int
+            or operation_payload["generation"] < 1
             or not _is_sha(operation_payload.get("convergence_id"), length=64)
             or _canonical_utc(operation_payload.get("requested_at")) is None
             or operation_payload.get("request_id")
@@ -5278,12 +5284,27 @@ def _staging_allocation_probe_argv(request: Request) -> tuple[str, ...]:
     )
 
 
-def _staging_identity_converge_argv() -> tuple[str, ...]:
+def _staging_identity_converge_argv(request: Request) -> tuple[str, ...]:
+    if request.action != "staging-allocation-bootstrap":
+        raise NodeAuthorityError("staging identity command binding is invalid")
+    payload = json.loads(request.payload_bytes)
     return (
         "/usr/bin/python3",
         "-I",
         str(SOURCE_ROOT / HOST_AUTHORITY_RELATIVE),
         "staging-allocation-identity-converge",
+        "--candidate-sha",
+        str(payload["candidate_sha"]),
+        "--candidate-tree",
+        str(payload["candidate_tree"]),
+        "--authority-generation",
+        str(payload["generation"]),
+        "--authority-convergence-id",
+        str(payload["convergence_id"]),
+        "--authority-request-id",
+        str(payload["request_id"]),
+        "--authority-requested-at",
+        str(payload["requested_at"]),
         "--execute",
     )
 
@@ -6139,7 +6160,8 @@ def _staging_allocation_bootstrap(request: Request) -> dict[str, Any]:
     mount = _staging_mount_readback()
     account, supplementary = _staging_service_identity()
     _staging_accounting_readback()
-    converged = _run_fixed(_staging_identity_converge_argv())
+    operation = json.loads(request.payload_bytes)
+    converged = _run_fixed(_staging_identity_converge_argv(request))
     expected_identity = {
         "username": STAGING_SERVICE_USER,
         "group": STAGING_SERVICE_GROUP,
@@ -6158,6 +6180,7 @@ def _staging_allocation_bootstrap(request: Request) -> dict[str, Any]:
             "canonical_host",
             "service_identity",
             "namespace",
+            "guard_binding",
             "result",
         }
         or converged.get("schema_version") != SCHEMA_VERSION
@@ -6182,6 +6205,25 @@ def _staging_allocation_bootstrap(request: Request) -> dict[str, Any]:
             "worker_env_root_mode": "0o750",
             "result_root_mode": "0o2770",
         }
+        or not isinstance(converged.get("guard_binding"), dict)
+        or converged["guard_binding"].get("kind")
+        != "loom.staging-external-slurm.guard-binding-convergence"
+        or converged["guard_binding"].get("cluster") != "trt-gb10"
+        or converged["guard_binding"].get("candidate_sha") != request.payload["candidate_sha"]
+        or converged["guard_binding"].get("candidate_tree") != request.payload["candidate_tree"]
+        or converged["guard_binding"].get("authority_generation") != operation["generation"]
+        or converged["guard_binding"].get("authority_convergence_id") != operation["convergence_id"]
+        or converged["guard_binding"].get("authority_request_id") != operation["request_id"]
+        or not _is_sha(
+            converged["guard_binding"].get("candidate_set_sha256"),
+            length=64,
+        )
+        or not _is_sha(
+            converged["guard_binding"].get("binding_payload_sha256"),
+            length=64,
+        )
+        or converged["guard_binding"].get("policy_phase") != "committed"
+        or converged["guard_binding"].get("status") != "committed"
         or converged.get("result") != "pass"
     ):
         raise NodeAuthorityError("staging allocation bootstrap readback is invalid")
@@ -6205,6 +6247,7 @@ def _staging_allocation_bootstrap(request: Request) -> dict[str, Any]:
         "mount": mount,
         "mount_digest": hashlib.sha256(_canonical(mount)).hexdigest(),
         "path_readback": converged["namespace"],
+        "guard_binding": converged["guard_binding"],
         "status": "converged",
     }
 
@@ -6296,8 +6339,73 @@ def _staging_broker_submission_path(submit_request_id: str) -> Path:
     return STAGING_BROKER_ROOT / f"{submit_request_id}.json"
 
 
+def _staging_guard_binding(
+    *,
+    candidate_sha: str,
+    candidate_tree: str,
+) -> dict[str, Any]:
+    raw = _safe_root_file(STAGING_GUARD_BINDING_PATH, mode=0o600, limit=64 * 1024)
+    try:
+        binding = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise NodeAuthorityError("staging guard binding is invalid") from exc
+    fields = {
+        "schema_version",
+        "kind",
+        "cluster",
+        "account",
+        "service_user",
+        "slurm_qos",
+        "runtime_id",
+        "env_id",
+        "resource_generation",
+        "candidate_id",
+        "candidate_sha",
+        "candidate_tree",
+        "authority_generation",
+        "authority_convergence_id",
+        "authority_request_id",
+        "authority_requested_at",
+        "payload_sha256",
+    }
+    unsigned = (
+        {key: value for key, value in binding.items() if key != "payload_sha256"}
+        if isinstance(binding, dict)
+        else {}
+    )
+    if (
+        not isinstance(binding, dict)
+        or set(binding) != fields
+        or raw != _canonical(binding)
+        or binding.get("schema_version") != SCHEMA_VERSION
+        or binding.get("kind") != "loom.staging-external-slurm.guard-binding"
+        or binding.get("cluster") != "trt-gb10"
+        or binding.get("account") != "loom-staging"
+        or binding.get("service_user") != STAGING_SERVICE_USER
+        or binding.get("slurm_qos") != "loom-staging"
+        or binding.get("runtime_id") != "staging"
+        or binding.get("env_id") != f"denv-staging-{candidate_sha}"
+        or binding.get("candidate_id") != f"cand-{candidate_sha}"
+        or binding.get("candidate_sha") != candidate_sha
+        or binding.get("candidate_tree") != candidate_tree
+        or type(binding.get("resource_generation")) is not int
+        or binding["resource_generation"] < 1
+        or binding.get("authority_generation") != binding["resource_generation"]
+        or not _is_sha(binding.get("authority_convergence_id"), length=64)
+        or not _is_sha(binding.get("authority_request_id"), length=64)
+        or _canonical_utc(binding.get("authority_requested_at")) is None
+        or binding.get("payload_sha256") != hashlib.sha256(_canonical(unsigned)).hexdigest()
+    ):
+        raise NodeAuthorityError("staging guard binding is invalid")
+    return binding
+
+
 def _staging_broker_submit(request: Request) -> tuple[dict[str, Any], str]:
     inner = json.loads(request.payload_bytes)
+    binding = _staging_guard_binding(
+        candidate_sha=str(request.payload["candidate_sha"]),
+        candidate_tree=str(request.payload["candidate_tree"]),
+    )
     result = _run_fixed(_staging_broker_argv(request))
     expected = {
         "schema_version",
@@ -6307,6 +6415,9 @@ def _staging_broker_submit(request: Request) -> tuple[dict[str, Any], str]:
         "candidate_tree",
         "job_id",
         "job_name",
+        "candidate_set_sha256",
+        "resource_generation",
+        "docker_cgroup_driver",
         "node",
         "cluster",
         "account",
@@ -6328,7 +6439,15 @@ def _staging_broker_submit(request: Request) -> tuple[dict[str, Any], str]:
         or result.get("candidate_tree") != request.payload["candidate_tree"]
         or result.get("job_id") is None
         or re.fullmatch(r"[1-9][0-9]*", str(result["job_id"])) is None
-        or result.get("job_name") != f"loom-staging-worker-{inner['request_id'][:16]}"
+        or result.get("job_name")
+        != (
+            f"loom827-staging-{request.payload['candidate_sha'][:12]}-"
+            f"{inner['requested_node']}-g{result.get('candidate_set_sha256')}-"
+            f"a{binding['resource_generation']}"
+        )
+        or not _is_sha(result.get("candidate_set_sha256"), length=64)
+        or result.get("resource_generation") != binding["resource_generation"]
+        or result.get("docker_cgroup_driver") != "systemd"
         or result.get("node") != inner["requested_node"]
         or result.get("cluster") != "trt-gb10"
         or result.get("account") != "loom-staging"
@@ -6349,6 +6468,8 @@ def _staging_broker_submit(request: Request) -> tuple[dict[str, Any], str]:
         "node": inner["requested_node"],
         "job_id": result["job_id"],
         "job_name": result["job_name"],
+        "candidate_set_sha256": result["candidate_set_sha256"],
+        "resource_generation": result["resource_generation"],
         "user": STAGING_SERVICE_USER,
         "account": "loom-staging",
         "qos": "loom-staging",
@@ -6367,6 +6488,10 @@ def _staging_broker_submit(request: Request) -> tuple[dict[str, Any], str]:
 
 def _staging_broker_cancel(request: Request) -> tuple[dict[str, Any], str]:
     inner = json.loads(request.payload_bytes)
+    binding = _staging_guard_binding(
+        candidate_sha=str(request.payload["candidate_sha"]),
+        candidate_tree=str(request.payload["candidate_tree"]),
+    )
     submission_path = _staging_broker_submission_path(inner["submit_request_id"])
     raw = _safe_root_file(submission_path, mode=0o600, limit=64 * 1024)
     try:
@@ -6382,6 +6507,14 @@ def _staging_broker_cancel(request: Request) -> tuple[dict[str, Any], str]:
         or submission.get("candidate_tree") != request.payload["candidate_tree"]
         or submission.get("node") != inner["requested_node"]
         or submission.get("job_id") != inner["job_id"]
+        or not _is_sha(submission.get("candidate_set_sha256"), length=64)
+        or submission.get("resource_generation") != binding["resource_generation"]
+        or submission.get("job_name")
+        != (
+            f"loom827-staging-{request.payload['candidate_sha'][:12]}-"
+            f"{inner['requested_node']}-g{submission.get('candidate_set_sha256')}-"
+            f"a{binding['resource_generation']}"
+        )
         or submission.get("user") != STAGING_SERVICE_USER
         or submission.get("account") != "loom-staging"
         or submission.get("qos") != "loom-staging"
@@ -6804,6 +6937,7 @@ def _staging_infrastructure_operation_envelope(
     node: str,
     candidate_sha: str,
     candidate_tree: str,
+    generation: int,
     convergence_id: str,
     requested_at: str,
 ) -> bytes:
@@ -6814,6 +6948,7 @@ def _staging_infrastructure_operation_envelope(
         "node": node,
         "candidate_sha": candidate_sha,
         "candidate_tree": candidate_tree,
+        "generation": generation,
         "convergence_id": convergence_id,
         "requested_at": requested_at,
     }
@@ -7015,6 +7150,7 @@ def _validate_staging_infrastructure_receipt(
                 node=node,
                 candidate_sha=candidate_sha,
                 candidate_tree=candidate_tree,
+                generation=int(receipt["generation"]),
                 convergence_id=str(receipt["convergence_id"]),
                 requested_at=str(receipt["requested_at"]),
             ),
@@ -7324,6 +7460,7 @@ def _resume_staging_infrastructure_generation(
             node=node,
             candidate_sha=str(request.payload["candidate_sha"]),
             candidate_tree=str(request.payload["candidate_tree"]),
+            generation=generation,
             convergence_id=convergence_id,
             requested_at=requested_at,
         )

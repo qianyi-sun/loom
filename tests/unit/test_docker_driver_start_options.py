@@ -308,6 +308,52 @@ async def test_docker_driver_applies_exact_cgroup_parent(
     assert create_kwargs["cgroup_parent"] == ("/system.slice/slurmstepd.scope/job_123")
 
 
+def test_docker_driver_accepts_only_current_job_systemd_slice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = f"loom-job-123-{'a' * 40}.slice"
+    monkeypatch.setenv("LOOM_WORKER_SLURM_JOB_ID", "123")
+    monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+
+    assert docker_module._validated_cgroup_parent(parent) == parent
+
+
+def test_docker_driver_does_not_trust_ambient_slurm_job_id_for_systemd_slice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = f"loom-job-123-{'a' * 40}.slice"
+    monkeypatch.delenv("LOOM_WORKER_SLURM_JOB_ID", raising=False)
+    monkeypatch.setenv("SLURM_JOB_ID", "123")
+
+    with pytest.raises(DriverError, match="valid Slurm job ID"):
+        docker_module._validated_cgroup_parent(parent)
+
+
+@pytest.mark.parametrize(
+    ("parent", "job_id"),
+    [
+        (f"loom-job-456-{'a' * 40}.slice", "123"),
+        (f"loom-job-123-{'A' * 40}.slice", "123"),
+        (f"/loom-job-123-{'a' * 40}.slice", "123"),
+        ("loom-job-123.slice", "123"),
+        ("loom-job-123-" + "a" * 40 + ".slice/child", "123"),
+        (f"loom-job-123-{'a' * 40}.slice", ""),
+    ],
+)
+def test_docker_driver_rejects_unbound_or_malformed_systemd_slice(
+    monkeypatch: pytest.MonkeyPatch,
+    parent: str,
+    job_id: str,
+) -> None:
+    if job_id:
+        monkeypatch.setenv("LOOM_WORKER_SLURM_JOB_ID", job_id)
+    else:
+        monkeypatch.delenv("LOOM_WORKER_SLURM_JOB_ID", raising=False)
+
+    with pytest.raises(DriverError, match="cgroup parent"):
+        docker_module._validated_cgroup_parent(parent)
+
+
 @pytest.mark.parametrize("cgroup_parent", ["", "/", "relative/path", "/a/../b"])
 async def test_docker_driver_rejects_unsafe_cgroup_parent(
     monkeypatch: pytest.MonkeyPatch,

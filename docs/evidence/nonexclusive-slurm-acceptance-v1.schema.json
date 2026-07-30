@@ -20,6 +20,98 @@
     "soak",
     "cleanup"
   ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "cgroup": {
+            "properties": {
+              "layout_version": {
+                "enum": [
+                  "cgroupfs-job-v1",
+                  "systemd-mirror-v1"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "job": {
+            "required": [
+              "job_start_time",
+              "pool",
+              "account",
+              "env_id",
+              "resource_generation",
+              "candidate_id",
+              "candidate_sha",
+              "candidate_tree"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "cgroup": {
+            "properties": {
+              "layout_version": {
+                "const": "legacy-cgroupfs-v0"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "job": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "job_start_time"
+                  ]
+                },
+                {
+                  "required": [
+                    "pool"
+                  ]
+                },
+                {
+                  "required": [
+                    "account"
+                  ]
+                },
+                {
+                  "required": [
+                    "env_id"
+                  ]
+                },
+                {
+                  "required": [
+                    "resource_generation"
+                  ]
+                },
+                {
+                  "required": [
+                    "candidate_id"
+                  ]
+                },
+                {
+                  "required": [
+                    "candidate_tree"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  ],
   "properties": {
     "schema_version": {
       "const": 1
@@ -66,7 +158,33 @@
           "type": "string",
           "pattern": "^[1-9][0-9]*(?:_[0-9]+)?$"
         },
+        "job_start_time": {
+          "$ref": "#/$defs/slurmStartTime"
+        },
+        "pool": {
+          "enum": [
+            "oldlab",
+            "gb10"
+          ]
+        },
+        "account": {
+          "$ref": "#/$defs/name"
+        },
+        "env_id": {
+          "type": "string",
+          "pattern": "^denv-[a-z0-9-]{8,64}$"
+        },
+        "resource_generation": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "candidate_id": {
+          "type": "string",
+          "pattern": "^cand-[0-9a-f]{40}$"
+        },
         "candidate_sha": {
+          "$ref": "#/$defs/sha"
+        },
+        "candidate_tree": {
           "$ref": "#/$defs/sha"
         },
         "sandbox": {
@@ -173,7 +291,14 @@
             }
           },
           "cgroup_parent": {
-            "$ref": "#/$defs/cgroupPath"
+            "oneOf": [
+              {
+                "$ref": "#/$defs/cgroupPath"
+              },
+              {
+                "$ref": "#/$defs/systemdJobSlice"
+              }
+            ]
           },
           "cgroup_path": {
             "$ref": "#/$defs/cgroupPath"
@@ -207,7 +332,134 @@
     "cgroup": {
       "type": "object",
       "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "layout_version": {
+                "enum": [
+                  "cgroupfs-job-v1",
+                  "systemd-mirror-v1"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "layout_version",
+              "job_path",
+              "container_parent",
+              "slurm_job_id",
+              "slurm_pid_cgroup_paths",
+              "controllers",
+              "delegated_controllers",
+              "delegated",
+              "cpu_cores_max",
+              "memory_bytes_max",
+              "pids_max",
+              "pids_current",
+              "systemd_slice_receipt",
+              "systemd_slice_live"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "layout_version": {
+                "const": "legacy-cgroupfs-v0"
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "container_parent"
+                  ]
+                },
+                {
+                  "required": [
+                    "slurm_job_id"
+                  ]
+                },
+                {
+                  "required": [
+                    "slurm_pid_cgroup_paths"
+                  ]
+                },
+                {
+                  "required": [
+                    "delegated_controllers"
+                  ]
+                },
+                {
+                  "required": [
+                    "pids_current"
+                  ]
+                },
+                {
+                  "required": [
+                    "systemd_slice_receipt"
+                  ]
+                },
+                {
+                  "required": [
+                    "systemd_slice_live"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "layout_version": {
+                "const": "cgroupfs-job-v1"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "container_parent": {
+                "$ref": "#/$defs/cgroupPath"
+              },
+              "systemd_slice_receipt": {
+                "type": "null"
+              },
+              "systemd_slice_live": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "layout_version": {
+                "const": "systemd-mirror-v1"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "container_parent": {
+                "$ref": "#/$defs/systemdJobSlice"
+              },
+              "systemd_slice_receipt": {
+                "$ref": "#/$defs/systemdSliceReceipt"
+              },
+              "systemd_slice_live": {
+                "$ref": "#/$defs/systemdSliceLive"
+              }
+            }
+          }
+        }
+      ],
       "required": [
+        "layout_version",
         "job_path",
         "controllers",
         "delegated",
@@ -216,8 +468,38 @@
         "pids_max"
       ],
       "properties": {
+        "layout_version": {
+          "enum": [
+            "legacy-cgroupfs-v0",
+            "cgroupfs-job-v1",
+            "systemd-mirror-v1"
+          ]
+        },
         "job_path": {
           "$ref": "#/$defs/cgroupPath"
+        },
+        "container_parent": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/cgroupPath"
+            },
+            {
+              "$ref": "#/$defs/systemdJobSlice"
+            }
+          ]
+        },
+        "slurm_job_id": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(?:_[0-9]+)?$"
+        },
+        "slurm_pid_cgroup_paths": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/cgroupPath"
+          }
         },
         "controllers": {
           "type": "array",
@@ -235,6 +517,19 @@
         "delegated": {
           "const": true
         },
+        "delegated_controllers": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "cpu",
+              "memory",
+              "pids"
+            ]
+          }
+        },
         "cpu_cores_max": {
           "$ref": "#/$defs/positiveNumber"
         },
@@ -243,6 +538,29 @@
         },
         "pids_max": {
           "$ref": "#/$defs/positiveInteger"
+        },
+        "pids_current": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "systemd_slice_receipt": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/systemdSliceReceipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "systemd_slice_live": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/systemdSliceLive"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     },
@@ -546,6 +864,191 @@
       "type": "string",
       "pattern": "^/(?!$)[A-Za-z0-9_.:/@-]+(?:/[A-Za-z0-9_.:@-]+)*$",
       "maxLength": 1024
+    },
+    "systemdJobSlice": {
+      "type": "string",
+      "pattern": "^loom-job-[1-9][0-9]*-[0-9a-f]{40}\\.slice$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "slurmStartTime": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]$"
+    },
+    "systemdControlGroupPath": {
+      "type": "string",
+      "pattern": "^/loom\\.slice/loom-job\\.slice/loom-job-[1-9][0-9]*\\.slice/loom-job-[1-9][0-9]*-[0-9a-f]{40}\\.slice$",
+      "maxLength": 1024
+    },
+    "systemdSliceReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "kind",
+        "systemd_slice",
+        "slice_identity_sha256",
+        "unit_sha256",
+        "job_id",
+        "job_start_time",
+        "cluster",
+        "node_list",
+        "account",
+        "env_id",
+        "resource_generation",
+        "runtime_id",
+        "candidate_id",
+        "candidate_sha",
+        "candidate_tree",
+        "cpu_max",
+        "memory_max",
+        "memory_swap_max_source",
+        "memory_swap_max_effective",
+        "pids_max",
+        "cpuset_cpus",
+        "cpuset_mems",
+        "gpu_tres",
+        "gpu_detail",
+        "payload_sha256"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "kind": {
+          "const": "loom.slurm-systemd-slice-receipt"
+        },
+        "systemd_slice": {
+          "$ref": "#/$defs/systemdJobSlice"
+        },
+        "slice_identity_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "unit_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "job_id": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$"
+        },
+        "job_start_time": {
+          "$ref": "#/$defs/slurmStartTime"
+        },
+        "cluster": {
+          "enum": [
+            "trt-oldlab",
+            "trt-gb10"
+          ]
+        },
+        "node_list": {
+          "$ref": "#/$defs/name"
+        },
+        "account": {
+          "$ref": "#/$defs/name"
+        },
+        "env_id": {
+          "type": "string",
+          "pattern": "^denv-[a-z0-9-]{8,64}$"
+        },
+        "resource_generation": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/sandbox"
+        },
+        "candidate_id": {
+          "type": "string",
+          "pattern": "^cand-[0-9a-f]{40}$"
+        },
+        "candidate_sha": {
+          "$ref": "#/$defs/sha"
+        },
+        "candidate_tree": {
+          "$ref": "#/$defs/sha"
+        },
+        "cpu_max": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]* [1-9][0-9]*$"
+        },
+        "memory_max": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$"
+        },
+        "memory_swap_max_source": {
+          "type": "string",
+          "pattern": "^(?:max|0|[1-9][0-9]*)$"
+        },
+        "memory_swap_max_effective": {
+          "const": "0"
+        },
+        "pids_max": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$"
+        },
+        "cpuset_cpus": {
+          "type": "string",
+          "pattern": "^[0-9]+(?:-[0-9]+)?(?:,[0-9]+(?:-[0-9]+)?)*$"
+        },
+        "cpuset_mems": {
+          "type": "string",
+          "pattern": "^[0-9]+(?:-[0-9]+)?(?:,[0-9]+(?:-[0-9]+)?)*$"
+        },
+        "gpu_tres": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "gpu_detail": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "payload_sha256": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "systemdSliceLive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "cpu_cores_max",
+        "memory_bytes_max",
+        "memory_swap_bytes_max",
+        "pids_max",
+        "cpuset_cpus",
+        "cpuset_mems"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/systemdControlGroupPath"
+        },
+        "cpu_cores_max": {
+          "$ref": "#/$defs/positiveNumber"
+        },
+        "memory_bytes_max": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "memory_swap_bytes_max": {
+          "const": 0
+        },
+        "pids_max": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "cpuset_cpus": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "cpuset_mems": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      }
     },
     "positiveInteger": {
       "type": "integer",

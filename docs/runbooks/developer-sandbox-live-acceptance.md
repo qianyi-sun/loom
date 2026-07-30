@@ -262,8 +262,8 @@ sudo python scripts/ops/developer_sandbox_live_acceptance.py \
   --execute
 ```
 
-The same direct-root node-authority bootstrap/upgrade transaction also installs
-the platform-health collector at
+The same fixed privileged-Docker node-authority bootstrap/upgrade transaction
+also installs the platform-health collector at
 `/usr/local/libexec/loom-developer-sandbox-platform-health-authority`, its
 systemd unit at
 `/etc/systemd/system/loom-developer-sandbox-platform-health-authority.service`,

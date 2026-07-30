@@ -31,6 +31,7 @@ ReadWritePaths=-/shared_work/loom/candidates
 ReadWritePaths=-/shared_work/loom/runtime
 ReadWritePaths=/run/loom-developer-environment-authority
 ReadWritePaths=-/run/loom-developer-sandbox-installer
+ReadOnlyPaths=/var/run/docker.sock
 # groupadd/useradd use root-owned lock and temporary files beside the four
 # account databases; the fixed authority accepts no caller-selected path.
 ReadWritePaths=/etc
@@ -50,7 +51,7 @@ ProtectKernelLogs=yes
 ProtectControlGroups=yes
 ProtectClock=yes
 ProtectProc=invisible
-ProcSubset=pid
+ProcSubset=all
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=yes
 RestrictRealtime=yes

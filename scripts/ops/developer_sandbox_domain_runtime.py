@@ -158,6 +158,7 @@ class SandboxGroup:
     candidate_id: str | None
     candidate_sha: str | None
     candidate_tree: str | None
+    layout_version: str
     candidate_root: Path
     runtime_root: Path
     compose_project: str
@@ -373,6 +374,24 @@ def load_config(path: Path) -> RuntimeConfig:
             or sandbox in groups
         ):
             raise ConvergenceError("registry environment runtime identity is invalid")
+        layout_version = item["layout_version"]
+        candidate_root = _absolute_path(
+            item["candidate_root"],
+            "registry candidate_root",
+        )
+        runtime_root = _absolute_path(item["runtime_root"], "registry runtime_root")
+        if layout_version == "dynamic-v1":
+            expected_candidate_root = (
+                Path("/shared_work/loom/candidates/environments") / item["env_id"]
+            )
+            expected_runtime_root = Path("/shared_work/loom/runtime/environments") / item["env_id"]
+        elif layout_version == "legacy-v1":
+            expected_candidate_root = Path("/shared_work/loom/candidates/sandboxes") / sandbox
+            expected_runtime_root = Path("/shared_work/loom/runtime/sandboxes") / sandbox
+        else:
+            raise ConvergenceError("registry environment layout version is invalid")
+        if candidate_root != expected_candidate_root or runtime_root != expected_runtime_root:
+            raise ConvergenceError("registry environment root binding is invalid")
         gids.add(gid)
         groups[sandbox] = SandboxGroup(
             name=name,
@@ -398,8 +417,9 @@ def load_config(path: Path) -> RuntimeConfig:
             candidate_id=None if candidate is None else candidate["candidate_id"],
             candidate_sha=None if candidate is None else candidate["candidate_sha"],
             candidate_tree=None if candidate is None else candidate["candidate_tree"],
-            candidate_root=Path(item["candidate_root"]),
-            runtime_root=Path(item["runtime_root"]),
+            layout_version=layout_version,
+            candidate_root=candidate_root,
+            runtime_root=runtime_root,
             compose_project=item["compose_project"],
             slurm_account=item["slurm_account"],
             slurm_qos=item["slurm_qos"],
@@ -848,6 +868,21 @@ def runtime_paths(domain: Domain, sandbox: str, sha: str) -> RuntimePaths:
     )
 
 
+def _assigned_roots(
+    domain: Domain,
+    sandbox: str,
+    group: SandboxGroup,
+) -> tuple[Path, Path]:
+    try:
+        candidate_root = domain.candidate_roots[sandbox]
+        runtime_root = domain.runtime_roots[sandbox]
+    except KeyError:
+        raise ConvergenceError("registry environment root binding is unavailable") from None
+    if candidate_root != group.candidate_root or runtime_root != group.runtime_root:
+        raise ConvergenceError("registry environment root binding is inconsistent")
+    return candidate_root, runtime_root
+
+
 def _service_identity_status(group: SandboxGroup) -> str:
     try:
         local_group = grp.getgrnam(group.name)
@@ -1101,12 +1136,18 @@ def converge_host(config_path: Path, config: RuntimeConfig, domain: Domain) -> d
     _atomic_install(Path(__file__).resolve(), config.installed_program, 0o755)
     _atomic_install(config_path.resolve(strict=True), config.installed_config, 0o644)
     if _hostname() == domain.publisher_hostname:
-        for path in (
-            domain.candidate_root.parent.parent,
-            domain.candidate_root.parent,
-            domain.candidate_root,
-        ):
-            _ensure_directory(path, gid=config.shared_gid, mode=0o2750)
+        if any(group.layout_version == "legacy-v1" for group in config.sandbox_groups.values()):
+            for path in (
+                domain.candidate_root.parent.parent,
+                domain.candidate_root.parent,
+                domain.candidate_root,
+            ):
+                _ensure_directory(path, gid=config.shared_gid, mode=0o2750)
+        for sandbox, group in config.sandbox_groups.items():
+            if group.layout_version == "dynamic-v1":
+                candidate_root, runtime_root = _assigned_roots(domain, sandbox, group)
+                _ensure_dynamic_root(candidate_root, shared_gid=config.shared_gid)
+                _ensure_dynamic_root(runtime_root, shared_gid=config.shared_gid)
     report = dict(plan)
     report["mode"] = "applied"
     report["groups"] = {
@@ -1186,14 +1227,53 @@ def _ensure_directory(path: Path, *, gid: int, mode: int) -> None:
     os.chmod(path, mode)
 
 
-def _ensure_runtime_parents(domain: Domain, group_gid: int, sha: str, sandbox: str) -> None:
-    # The public ancestors allow traversal but not listing. Sandbox and SHA
-    # leaves are readable only by the stable per-sandbox group.
-    _ensure_directory(domain.runtime_root.parent, gid=0, mode=0o711)
-    _ensure_directory(domain.runtime_root, gid=0, mode=0o711)
-    sandbox_root = domain.runtime_root / sandbox
-    _ensure_directory(sandbox_root, gid=group_gid, mode=0o2750)
-    _ensure_directory(sandbox_root / sha, gid=group_gid, mode=0o2750)
+def _ensure_dynamic_root(root: Path, *, shared_gid: int) -> None:
+    # load_config proves the production root is the exact registry-assigned
+    # environments/<env_id> path. Start below the independently mounted
+    # /shared_work root so fresh NFS domains do not depend on another
+    # publisher's directory side effects.
+    for path in (
+        root.parent.parent.parent,
+        root.parent.parent,
+        root.parent,
+        root,
+    ):
+        _ensure_directory(path, gid=shared_gid, mode=0o2750)
+
+
+def _ensure_candidate_root(
+    config: RuntimeConfig,
+    domain: Domain,
+    sandbox: str,
+    group: SandboxGroup,
+) -> Path:
+    candidate_root, _runtime_root = _assigned_roots(domain, sandbox, group)
+    if group.layout_version == "dynamic-v1":
+        _ensure_dynamic_root(candidate_root, shared_gid=config.shared_gid)
+    else:
+        # Preserve the legacy-v1 path metadata while deriving every leaf from
+        # the verified registry binding rather than from a developer name.
+        _require_directory(candidate_root.parent, label="candidate domain root")
+        _ensure_directory(candidate_root, gid=config.shared_gid, mode=0o2750)
+    return candidate_root
+
+
+def _ensure_runtime_parents(
+    config: RuntimeConfig,
+    domain: Domain,
+    group: SandboxGroup,
+    sha: str,
+    sandbox: str,
+) -> None:
+    _candidate_root, runtime_root = _assigned_roots(domain, sandbox, group)
+    if group.layout_version == "dynamic-v1":
+        _ensure_dynamic_root(runtime_root, shared_gid=config.shared_gid)
+    else:
+        # Legacy-v1 keeps its historical traversal-only public ancestors.
+        _ensure_directory(runtime_root.parent.parent, gid=0, mode=0o711)
+        _ensure_directory(runtime_root.parent, gid=0, mode=0o711)
+        _ensure_directory(runtime_root, gid=group.gid, mode=0o2750)
+    _ensure_directory(runtime_root / sha, gid=group.gid, mode=0o2750)
 
 
 def _require_directory(path: Path, *, label: str) -> None:
@@ -1529,8 +1609,11 @@ def converge_materialize(
         else:
             _write_json(path, journal)
         paths = runtime_paths(domain, sandbox, identity.sha)
+        group = config.sandbox_groups[sandbox]
+        candidate_root = _ensure_candidate_root(config, domain, sandbox, group)
+        if paths.candidate.parent != candidate_root:
+            raise ConvergenceError("candidate path escaped the registry-assigned root")
         if journal["status"] == "prepared":
-            _require_directory(paths.candidate.parent.parent, label="candidate domain root")
             created = _publish_candidate(
                 source_bundle,
                 paths.candidate,
@@ -3419,7 +3502,8 @@ def _converge_publish_locked(
     if _service_identity_status(group) != "ok":
         raise ConvergenceError("stable sandbox service identity is not converged")
     paths = runtime_paths(domain, sandbox, identity.sha)
-    _ensure_runtime_parents(domain, group.gid, identity.sha, sandbox)
+    _ensure_candidate_root(config, domain, sandbox, group)
+    _ensure_runtime_parents(config, domain, group, identity.sha, sandbox)
     receipt_path, receipt = _create_receipt(
         config,
         domain,
@@ -3594,7 +3678,8 @@ def _converge_attest_locked(
     if _service_identity_status(group) != "ok":
         raise ConvergenceError("stable sandbox service identity is not converged")
     paths = runtime_paths(domain, sandbox, identity.sha)
-    _ensure_runtime_parents(domain, group.gid, identity.sha, sandbox)
+    _ensure_candidate_root(config, domain, sandbox, group)
+    _ensure_runtime_parents(config, domain, group, identity.sha, sandbox)
     receipt_path, receipt = _create_receipt(
         config,
         domain,

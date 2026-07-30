@@ -76,11 +76,16 @@ class StatefulOuterRunner(FakeRunner):
                     if item.startswith("--property=")
                 )
                 state = self._unit(unit)
+                environment_instance = unit.startswith(
+                    "loom-developer-environment@"
+                ) and unit.endswith(".service")
                 value = {
-                    "LoadState": "loaded" if state["enabled"] else "not-found",
+                    "LoadState": (
+                        "loaded" if environment_instance or state["enabled"] else "not-found"
+                    ),
                     "FragmentPath": (
                         "/etc/systemd/system/loom-developer-environment@.service"
-                        if state["enabled"]
+                        if environment_instance or state["enabled"]
                         else ""
                     ),
                     "UnitFileState": "enabled" if state["enabled"] else "disabled",

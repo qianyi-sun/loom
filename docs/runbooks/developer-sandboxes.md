@@ -7,13 +7,13 @@ environment. The service does not contain a developer allowlist or require a
 checked-in per-user profile. Nothing here authorizes staging or production.
 
 The root-owned registry derives the principal from the Unix socket peer and
-allocates the immutable environment ID, runtime ID, UID/GID, ports, service
-identity, Compose project, database, volumes, buckets, namespaces, roots,
-cgroup, and Slurm account/QoS. A caller cannot select or override those
-resources. `qianyi`, `hongjian`, and `devansh` are only the initial
-`legacy-v1` migration seed; their checked-in profiles preserve existing
-identities during migration and are never an admission list or the runtime
-cohort.
+allocates the immutable environment ID, runtime ID, UID/GID, service identity,
+Compose project, database, volumes, buckets, namespaces, roots, cgroup, and
+Slurm account/QoS. Its port binding is generation-fenced as described below. A
+caller cannot select or override any of those resources. `qianyi`, `hongjian`,
+and `devansh` are only the initial `legacy-v1` migration seed; their checked-in
+profiles preserve existing identities during migration and are never an
+admission list or the runtime cohort.
 
 ## Developer workflow
 
@@ -42,6 +42,19 @@ key. Inventory absence, staleness, UID/GID collision, partial domain
 convergence, or a busy node fails closed without publishing the environment as
 active.
 
+On the canonical `oldlab-2` authority host, initial port allocation and every
+allowed pre-deployment refresh merge the root-visible TCP/TCP6 listener
+inventory with Docker's published-port reservations. A pristine dynamic
+environment may be rebound atomically before its first immutable deployment
+publication; the authority appends the old and new binding to its port journal
+and advances both the resource and registry generations. A raw
+`begin-deployment` caller must refresh and retry against that new generation;
+the integrated deployer reloads it automatically. Once candidate
+materialization, deployment history, activation, retirement, or revival has
+made the binding externally observable, the ports are immutable. Missing,
+malformed, incomplete, or stale host inventory fails closed without changing
+the record.
+
 Normal lifecycle operations never take an environment name or resource path:
 
 ```bash
@@ -68,23 +81,28 @@ jobs. Reboot recovery uses the persisted registry snapshot, deployment journal,
 and `loom-developer-environment@<registry-runtime-id>.service`; adding a fourth
 or later developer requires no repository edit or authority rebuild.
 
-Adding an environment is a pure additive transition: existing candidates,
-ports, identities, Compose projects, adapter and handoff bytes, lease epochs,
-unit states, and active job IDs do not change. Retiring an environment waits
-only for that environment's owned work and resources to become terminal; peers
-continue running and never have to hand off or drain. A later `create` by the
-same principal revives the same stable environment identity with a new
-resource generation, candidate, credentials, and request key. A retired
-identity is never reassigned to another principal, and an old create key or
-secret cannot revive it.
+Adding an environment is a pure additive transition for every peer: existing
+candidates, published port bindings, identities, Compose projects, adapter and
+handoff bytes, lease epochs, unit states, and active job IDs do not change.
+Retiring an environment waits only for that environment's owned work and
+resources to become terminal; peers continue running and never have to hand
+off or drain. A later `create` by the same principal revives the same stable
+environment identity with a new resource generation, candidate, credentials,
+and request key. A retired identity is never reassigned to another principal,
+and an old create key or secret cannot revive it.
 
 ## Host path contract
 
 Provision the shared candidate namespace on the `/shared_work` NFS source, not
-independently on each client. `/shared_work/loom`, `candidates`, `sandboxes`,
-and each developer child are converged by the root domain publisher as
-`root:sharedwork` mode `2750`. Publish the exact SHA/tree independently in the
-OLDLAB and GB10 NFS domains through
+independently on each client. For `dynamic-v1`, the root publisher converges
+the registry-assigned
+`/shared_work/loom/candidates/environments/<env_id>` and
+`/shared_work/loom/runtime/environments/<env_id>` roots as
+`root:sharedwork` mode `2750`; the candidate SHA and private worker env are
+created beneath those exact roots. The `sandboxes/<runtime_id>` roots are
+reserved for the three `legacy-v1` migration records and are never used for a
+new environment. Publish the exact SHA/tree independently in the OLDLAB and
+GB10 NFS domains through
 `developer_sandbox_domain_runtime.py`; identical logical paths do not imply one
 backing filesystem. Developers have read/traverse access but cannot mutate a
 published candidate. The host installer never fetches a branch or remote URL.
@@ -118,35 +136,23 @@ write access to the broker authority.
 ## Persistent node-authority bootstrap
 
 Before the first candidate can be installed, persist the fixed node authority
-on every declared OLDLAB and GB10 peer. The supported root channels are either
-a host-root session or the repository's one-shot Docker bootstrap. Docker
-daemon access is treated as the initial host-root authority: the container
-chroots into a writable bind of the host root, installs the fixed authority on
-the host, performs installed-state readback, and exits. Docker is not a
-runtime dependency after that transaction.
+on every declared OLDLAB and GB10 peer. These hosts do not expose a direct-root
+operator login; the supported bootstrap and upgrade channel is the
+repository's one-shot privileged Docker transaction invoked by the
+authenticated host user. Docker daemon access supplies the initial host-root
+authority: the container chroots into a writable bind of the host root,
+installs the fixed authority on the host, performs installed-state readback,
+and exits. Docker is not a runtime dependency after that transaction.
 
-From a clean, root-owned checkout of the exact candidate tree, the direct
-channel is:
-
-```bash
-python3 scripts/ops/developer_sandbox_node_authority.py bootstrap \
-  --candidate-sha <SOURCE-SHA> \
-  --candidate-tree <SOURCE-TREE>
-
-python3 scripts/ops/developer_sandbox_node_authority.py bootstrap \
-  --candidate-sha <SOURCE-SHA> \
-  --candidate-tree <SOURCE-TREE> \
-  --execute
-```
-
-Plan mode is read-only. Execute mode requires a persistent host-root view of
-PID 1/systemd, the local canonical node identity, exact clean Git SHA/tree, and
+The Python bootstrap/upgrade implementation is an internal image entrypoint,
+not an operator command. It requires a persistent host-root view of PID
+1/systemd, the local canonical node identity, exact clean Git SHA/tree, and
 root-owned non-writable source assets. It installs the fixed source, policy,
 lock/journal/receipt roots, wrapper, systemd assets, and finally the validated
 sudoers file. It rolls back only files and directories created by a failed
 attempt.
 
-Where direct root login is unavailable, use
+Use
 `deploy/developer-sandboxes/Containerfile.node-bootstrap` and the fixed
 `developer_sandbox_node_docker_bootstrap.py` entrypoint. Build the image from
 the exact candidate for the node architecture and record its immutable image
@@ -219,19 +225,10 @@ inspection action.
 
 The policy pins both installed source SHA and tree. A squash-merged commit with
 the same tree but a different SHA is transactionally rebound and must not be
-treated as an unchanged installation. Upgrade through either persistent root
-channel; never delete or overwrite the installed authority by hand:
-
-```bash
-python3 scripts/ops/developer_sandbox_node_authority.py upgrade \
-  --candidate-sha <NEW-SOURCE-SHA> \
-  --candidate-tree <NEW-SOURCE-TREE>
-
-python3 scripts/ops/developer_sandbox_node_authority.py upgrade \
-  --candidate-sha <NEW-SOURCE-SHA> \
-  --candidate-tree <NEW-SOURCE-TREE> \
-  --execute
-```
+treated as an unchanged installation. Upgrade through a new closed
+`authority-upgrade` Docker request and immutable bootstrap image for the exact
+candidate; never invoke the internal Python entrypoint directly, or delete or
+overwrite the installed authority by hand.
 
 Upgrade has no runtime sudoers entry. It first verifies the old policy,
 wrapper, sudoers, fixed source,
@@ -278,7 +275,7 @@ separate evidence-driven migration for that observed database. The normal
 first install is allowed only for a new/empty registry or one with no committed
 pre-finalization rows; this preflight performs no DDL.
 
-### Persistent host installer
+### Legacy-v1 fixed host installer — do not use for new environments
 
 `scripts/ops/developer_sandbox_host.py` is the root-side converger for the
 three sandbox stacks. It is plan-only by default and has a fixed repository,
@@ -369,7 +366,7 @@ Do not copy or reveal the private files during readback. Compare only
 owner/mode, required key names, and secret fingerprints when an authorized
 isolation procedure requires it.
 
-### Persistent create, update, and check
+### Legacy-v1 persistent create, update, and check
 
 The enabled `loom-developer-sandbox@.service` is a replayable oneshot. It
 selects `create`, `update`, or `check` from the persisted lifecycle binding,
@@ -610,7 +607,9 @@ worker Compose file. A Compose-private `sandbox-link` sidecar owns the three
 mTLS credentials and exposes only ports 8080, 9100, and 9000 to the worker
 network; it publishes no host ports. The worker sees only its bearer token and
 MinIO key files. The sidecar is read-only, cannot restart outside the Slurm
-allocation, has positive CPU/memory/PID limits, inherits the job cgroup parent,
+allocation, has positive CPU/memory/PID limits, inherits the validated
+driver-compatible allocation parent (the Slurm job cgroup for `cgroupfs` or
+its receipt-bound allocation systemd slice for `systemd`),
 and carries the same sandbox/candidate/job/Compose cleanup labels. Missing,
 writable, malformed, or cross-candidate material fails before registration.
 

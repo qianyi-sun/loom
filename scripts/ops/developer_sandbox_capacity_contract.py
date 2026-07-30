@@ -59,13 +59,20 @@ _ACTUATOR_FIELDS: Final = {
     "exclusive",
     "external_runner",
     "shared_capacity_managed",
+    "docker_cgroup_driver",
+    "cluster",
     "slurm_account",
     "qos_normal",
     "container_cpus",
     "container_memory_mib",
     "container_pids",
     "job_pids_max",
+    "env_id",
+    "resource_generation",
+    "runtime_id",
+    "candidate_id",
     "candidate_sha",
+    "candidate_tree",
     "gpu_tres",
 }
 _PLATFORM_HEALTH_FIELDS: Final = {
@@ -183,7 +190,14 @@ def load_capacity_policy(
         or actuator.get("exclusive") is not False
         or actuator.get("external_runner") is not True
         or actuator.get("shared_capacity_managed") is not True
+        or actuator.get("docker_cgroup_driver") != "systemd"
+        or actuator.get("cluster") != ("trt-oldlab" if pool == "oldlab" else "trt-gb10")
+        or actuator.get("env_id") != "${ENV_ID}"
+        or actuator.get("resource_generation") != "${RESOURCE_GENERATION}"
+        or actuator.get("runtime_id") != "${RUNTIME_ID}"
+        or actuator.get("candidate_id") != "${CANDIDATE_ID}"
         or actuator.get("candidate_sha") != "${CANDIDATE_SHA}"
+        or actuator.get("candidate_tree") != "${CANDIDATE_TREE}"
         or actuator.get("slurm_account") != "${SLURM_ACCOUNT}"
         or actuator.get("qos_normal") != "${SLURM_QOS}"
         or actuator.get("env_file") != f"${{RUNTIME_ROOT}}/${{CANDIDATE_SHA}}/worker-{pool}.env"

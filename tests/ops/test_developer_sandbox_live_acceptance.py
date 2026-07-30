@@ -951,6 +951,9 @@ def _platform_health_authority(evidence: Mapping[str, Any]) -> dict[str, Any]:
             }
             for index, container in enumerate(row["containers"], start=1)
         ]
+        if policy["gpu_tres"]:
+            containers[0]["limits"]["gpu_count"] = 1
+            containers[0]["limits"]["gpu_ids"] = ["GPU-0"]
         allocation = {
             "cpu_cores": policy["requested_cpus"],
             "memory_bytes": policy["requested_memory_mib"] * 1024**2,
@@ -959,9 +962,14 @@ def _platform_health_authority(evidence: Mapping[str, Any]) -> dict[str, Any]:
             "tres": row["allocation"]["tres"],
             "exclusive": False,
         }
+        platform_cgroup = copy.deepcopy(row["cgroup"])
+        platform_cgroup["cpu_cores_max"] = allocation["cpu_cores"]
+        platform_cgroup["memory_bytes_max"] = allocation["memory_bytes"]
+        platform_cgroup["pids_max"] = allocation["pids"]
         mixed_jobs.append(
             {
                 "job_id": job_id,
+                "job_start_time": row["job_start_time"],
                 "job_name": (f"loom-{row['sandbox']}-{row['candidate_sha'][:12]}-{row['node']}"),
                 "sandbox": row["sandbox"],
                 "env_id": environment["env_id"],
@@ -979,21 +987,13 @@ def _platform_health_authority(evidence: Mapping[str, Any]) -> dict[str, Any]:
                 "allocation": allocation,
                 "compose_project": compose_project,
                 "compose_networks": compose_networks,
-                "cgroup": {
-                    "job_path": job_path,
-                    "slurm_job_id": job_id,
-                    "slurm_pid_cgroup_paths": [f"{job_path}/step_batch"],
-                    "controllers": ["cpu", "memory", "pids"],
-                    "cpu_cores_max": allocation["cpu_cores"],
-                    "memory_bytes_max": allocation["memory_bytes"],
-                    "pids_max": allocation["pids"],
-                },
+                "cgroup": platform_cgroup,
                 "containers": containers,
                 "aggregate_limits": {
                     "cpu_cores": len(containers) * policy["container_cpus"],
                     "memory_bytes": (len(containers) * policy["container_memory_mib"] * 1024**2),
                     "pids": len(containers) * policy["container_pids"],
-                    "gpu_count": 0,
+                    "gpu_count": 1 if policy["gpu_tres"] else 0,
                 },
             },
         )
@@ -1216,6 +1216,7 @@ def _runtime_envelope(
     qos: str,
 ) -> dict[str, Any]:
     job_id = str(1000 + index)
+    job_start_time = f"2026-07-30T12:{index:02d}:00"
     job_path = f"/system.slice/slurmstepd.scope/job_{job_id}"
     if pool == "gb10":
         allocation = {
@@ -1263,20 +1264,125 @@ def _runtime_envelope(
         "candidate_tree": tree,
         "observed_at": _phase_observed_at("mixed_non_loom"),
         "job_id": job_id,
+        "job_start_time": job_start_time,
         "node": node,
         "account": account,
         "qos": qos,
         "allocation": allocation,
         "cgroup": {
+            "layout_version": "cgroupfs-job-v1",
             "job_path": job_path,
+            "container_parent": job_path,
+            "slurm_job_id": job_id,
+            "slurm_pid_cgroup_paths": [f"{job_path}/step_batch"],
             "controllers": ["cpu", "memory", "pids"],
+            "delegated_controllers": ["cpu", "memory", "pids"],
             "delegated": True,
             "cpu_cores_max": allocation["cpu_cores"],
             "memory_bytes_max": allocation["memory_bytes"],
             "pids_max": allocation["pids"],
+            "pids_current": 16,
+            "systemd_slice_receipt": None,
+            "systemd_slice_live": None,
         },
         "containers": containers,
     }
+
+
+def _refresh_systemd_slice_receipt(cgroup: dict[str, Any]) -> None:
+    receipt = cgroup["systemd_slice_receipt"]
+    identity = {
+        "cluster": receipt["cluster"],
+        "node": receipt["node_list"].lower(),
+        "job_id": receipt["job_id"],
+        "job_start_time": receipt["job_start_time"],
+        "account": receipt["account"],
+        "env_id": receipt["env_id"],
+        "resource_generation": receipt["resource_generation"],
+        "runtime_id": receipt["runtime_id"],
+        "candidate_id": receipt["candidate_id"],
+        "candidate_sha": receipt["candidate_sha"],
+        "candidate_tree": receipt["candidate_tree"],
+    }
+    identity_digest = hashlib.sha256(
+        ACCEPTANCE._canonical_digest_bytes(identity),
+    ).hexdigest()
+    unit = f"loom-job-{receipt['job_id']}-{identity_digest[:40]}.slice"
+    receipt["systemd_slice"] = unit
+    receipt["slice_identity_sha256"] = identity_digest
+    unsigned = {key: value for key, value in receipt.items() if key != "payload_sha256"}
+    receipt["payload_sha256"] = hashlib.sha256(
+        ACCEPTANCE._canonical_digest_bytes(unsigned),
+    ).hexdigest()
+    cgroup["container_parent"] = unit
+    cgroup["systemd_slice_live"]["path"] = (
+        f"/loom.slice/loom-job.slice/loom-job-{receipt['job_id']}.slice/{unit}"
+    )
+
+
+def _use_systemd_mirror(
+    job: dict[str, Any],
+    environment: Mapping[str, Any],
+    *,
+    pool: str,
+) -> None:
+    cgroup = job["cgroup"]
+    allocation = job["allocation"]
+    cgroup["layout_version"] = "systemd-mirror-v1"
+    receipt = {
+        "schema_version": 1,
+        "kind": "loom.slurm-systemd-slice-receipt",
+        "systemd_slice": "",
+        "slice_identity_sha256": "",
+        "unit_sha256": hashlib.sha256(b"fixture systemd slice unit").hexdigest(),
+        "job_id": job["job_id"],
+        "job_start_time": job["job_start_time"],
+        "cluster": "trt-oldlab" if pool == "oldlab" else "trt-gb10",
+        "node_list": job["node"],
+        "account": job["account"],
+        "env_id": environment["env_id"],
+        "resource_generation": environment["resource_generation"],
+        "runtime_id": job["sandbox"],
+        "candidate_id": environment["candidate_id"],
+        "candidate_sha": job["candidate_sha"],
+        "candidate_tree": job["candidate_tree"],
+        "cpu_max": f"{allocation['cpu_cores'] * 100000} 100000",
+        "memory_max": str(allocation["memory_bytes"]),
+        "memory_swap_max_source": "max",
+        "memory_swap_max_effective": "0",
+        "pids_max": str(allocation["pids"]),
+        "cpuset_cpus": "0-7" if pool == "oldlab" else "0-15",
+        "cpuset_mems": "0",
+        "gpu_tres": allocation["tres"] if allocation["gpu_count"] else "not-required",
+        "gpu_detail": "gpu(IDX:0)" if allocation["gpu_count"] else "not-required",
+        "payload_sha256": "",
+    }
+    cgroup["systemd_slice_receipt"] = receipt
+    cgroup["systemd_slice_live"] = {
+        "path": "",
+        "cpu_cores_max": allocation["cpu_cores"],
+        "memory_bytes_max": allocation["memory_bytes"],
+        "memory_swap_bytes_max": 0,
+        "pids_max": allocation["pids"],
+        "cpuset_cpus": receipt["cpuset_cpus"],
+        "cpuset_mems": receipt["cpuset_mems"],
+    }
+    _refresh_systemd_slice_receipt(cgroup)
+    if allocation["gpu_count"]:
+        for container in job["containers"]:
+            if container.get("gpu_ids"):
+                container["gpu_ids"] = ["0"]
+            if container.get("limits", {}).get("gpu_ids"):
+                container["limits"]["gpu_ids"] = ["0"]
+    _rebind_systemd_containers(job)
+
+
+def _rebind_systemd_containers(job: dict[str, Any]) -> None:
+    cgroup = job["cgroup"]
+    live_path = cgroup["systemd_slice_live"]["path"]
+    for container in job["containers"]:
+        container["cgroup_parent"] = cgroup["container_parent"]
+        container["observed_cgroup_path"] = f"{live_path}/docker-{container['container_id']}.scope"
 
 
 def _evidence(
@@ -3332,6 +3438,198 @@ def test_runtime_account_node_and_gpu_envelopes_are_bound() -> None:
     assert any("Slurm identity does not match" in failure for failure in failures)
     assert any("node does not match" in failure for failure in failures)
     assert any("OLDLAB runtime envelope" in failure for failure in failures)
+
+
+def _validate_fixture_cgroup(
+    evidence: Mapping[str, Any],
+    job: Mapping[str, Any],
+    *,
+    pool: str,
+) -> None:
+    environments = ACCEPTANCE._registry_environments(evidence["registry_snapshot"])
+    ACCEPTANCE._validate_cgroup_evidence(
+        job["cgroup"],
+        job["containers"],
+        job_id=job["job_id"],
+        job_start_time=job["job_start_time"],
+        node=job["node"],
+        pool=pool,
+        account=job["account"],
+        sandbox=job["sandbox"],
+        environment=environments[job["sandbox"]],
+        candidate_sha=job["candidate_sha"],
+        candidate_tree=job["candidate_tree"],
+        allocation=job["allocation"],
+    )
+
+
+@pytest.mark.parametrize("pool", ACCEPTANCE.POOLS)
+def test_systemd_mirror_runtime_cgroup_is_closed_and_candidate_bound(pool: str) -> None:
+    evidence = _evidence()
+    envelope = next(row for row in evidence["runtime_envelopes"] if row["pool"] == pool)
+    environment = ACCEPTANCE._registry_environments(evidence["registry_snapshot"])[
+        envelope["sandbox"]
+    ]
+    _use_systemd_mirror(envelope, environment, pool=pool)
+
+    _validate_fixture_cgroup(evidence, envelope, pool=pool)
+
+
+@pytest.mark.parametrize(
+    ("attack", "expected"),
+    [
+        ("receipt-env", "receipt binding"),
+        ("job-reuse", "receipt binding"),
+        ("limit-drift", "receipt binding"),
+        ("live-limit-drift", "live path or limits"),
+        ("slice-escape", "live path or limits"),
+        ("same-slice-wrong-root", "live path or limits"),
+        ("coordinated-path-rewrite", "live path or limits"),
+        ("receipt-swap", "receipt binding"),
+        ("live-swap", "live path or limits"),
+        ("gpu-wrong-id", "receipt binding"),
+        ("gpu-multi-container", "GPU assignment"),
+        ("start-format", "start identity"),
+    ],
+)
+def test_systemd_mirror_rejects_receipt_reuse_limit_drift_and_escape(
+    attack: str,
+    expected: str,
+) -> None:
+    evidence = _evidence()
+    envelope = (
+        next(row for row in evidence["runtime_envelopes"] if row["pool"] == "gb10")
+        if attack in {"gpu-wrong-id", "gpu-multi-container"}
+        else evidence["runtime_envelopes"][0]
+    )
+    environment = ACCEPTANCE._registry_environments(evidence["registry_snapshot"])[
+        envelope["sandbox"]
+    ]
+    _use_systemd_mirror(envelope, environment, pool=envelope["pool"])
+    cgroup = envelope["cgroup"]
+    receipt = cgroup["systemd_slice_receipt"]
+    if attack == "receipt-env":
+        receipt["env_id"] = "denv-foreign001"
+        _refresh_systemd_slice_receipt(cgroup)
+        _rebind_systemd_containers(envelope)
+    elif attack == "job-reuse":
+        receipt["job_start_time"] = "2026-07-29T12:00:00"
+        _refresh_systemd_slice_receipt(cgroup)
+        _rebind_systemd_containers(envelope)
+    elif attack == "limit-drift":
+        receipt["memory_max"] = str(envelope["allocation"]["memory_bytes"] + 1)
+        _refresh_systemd_slice_receipt(cgroup)
+    elif attack == "live-limit-drift":
+        cgroup["systemd_slice_live"]["pids_max"] -= 1
+    elif attack == "slice-escape":
+        envelope["containers"][0]["observed_cgroup_path"] = (
+            "/loom.slice/loom-job.slice/loom-job-999-" + "f" * 40 + ".slice/docker.scope"
+        )
+    elif attack == "same-slice-wrong-root":
+        envelope["containers"][0]["observed_cgroup_path"] = (
+            f"/foreign.slice/{cgroup['container_parent']}/docker.scope"
+        )
+    elif attack == "coordinated-path-rewrite":
+        rewritten = f"/foreign.slice/{cgroup['container_parent']}"
+        cgroup["systemd_slice_live"]["path"] = rewritten
+        for container in envelope["containers"]:
+            container["observed_cgroup_path"] = (
+                f"{rewritten}/docker-{container['container_id']}.scope"
+            )
+    elif attack == "receipt-swap":
+        receipt["memory_swap_max_source"] = "1"
+        receipt["memory_swap_max_effective"] = "1"
+        cgroup["systemd_slice_live"]["memory_swap_bytes_max"] = 1
+        _refresh_systemd_slice_receipt(cgroup)
+    elif attack == "live-swap":
+        cgroup["systemd_slice_live"]["memory_swap_bytes_max"] = 1
+    elif attack == "gpu-wrong-id":
+        allocated = next(item for item in envelope["containers"] if item["gpu_ids"])
+        allocated["gpu_ids"] = ["1"]
+    elif attack == "gpu-multi-container":
+        allocated = next(item for item in envelope["containers"] if item["gpu_ids"])
+        denied = next(item for item in envelope["containers"] if not item["gpu_ids"])
+        denied["gpu_ids"] = list(allocated["gpu_ids"])
+    else:
+        envelope["job_start_time"] = "2026-07-30T12:00:00-04:00"
+
+    with pytest.raises(ACCEPTANCE.AcceptanceError, match=expected):
+        _validate_fixture_cgroup(evidence, envelope, pool=envelope["pool"])
+
+
+def test_cgroupfs_gpu_assignment_requires_one_exact_allocated_container() -> None:
+    evidence = _evidence()
+    envelope = next(row for row in evidence["runtime_envelopes"] if row["pool"] == "gb10")
+    allocated = next(item for item in envelope["containers"] if item["gpu_ids"])
+    denied = next(item for item in envelope["containers"] if not item["gpu_ids"])
+    denied["gpu_ids"] = list(allocated["gpu_ids"])
+
+    with pytest.raises(ACCEPTANCE.AcceptanceError, match="GPU assignment"):
+        _validate_fixture_cgroup(evidence, envelope, pool="gb10")
+
+
+@pytest.mark.parametrize(
+    "attack",
+    ("receipt-swap", "live-swap", "control-group-path", "start-time"),
+)
+def test_systemd_runtime_schema_rejects_noncanonical_authority(
+    attack: str,
+) -> None:
+    evidence = _evidence()
+    envelope = next(row for row in evidence["runtime_envelopes"] if row["pool"] == "gb10")
+    environment = ACCEPTANCE._registry_environments(evidence["registry_snapshot"])[
+        envelope["sandbox"]
+    ]
+    _use_systemd_mirror(envelope, environment, pool="gb10")
+    schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+    validator = Draft202012Validator(schema)
+    assert list(validator.iter_errors(evidence)) == []
+
+    if attack == "receipt-swap":
+        envelope["cgroup"]["systemd_slice_receipt"]["memory_swap_max_effective"] = "1"
+    elif attack == "live-swap":
+        envelope["cgroup"]["systemd_slice_live"]["memory_swap_bytes_max"] = 1
+    elif attack == "control-group-path":
+        envelope["cgroup"]["systemd_slice_live"]["path"] = (
+            f"/foreign.slice/{envelope['cgroup']['container_parent']}"
+        )
+    else:
+        envelope["job_start_time"] = "2026-07-30T12:00:00Z"
+
+    assert list(validator.iter_errors(evidence))
+
+
+def test_platform_health_accepts_systemd_mirror_and_keeps_peer_checks() -> None:
+    evidence = _evidence()
+    authority = _platform_health_authority(evidence)
+    mixed_job = authority["mixed_jobs"][0]
+    environment = ACCEPTANCE._registry_environments(evidence["registry_snapshot"])[
+        mixed_job["sandbox"]
+    ]
+    pool = "oldlab" if mixed_job["node"] in ACCEPTANCE.EXPECTED_NODES[:5] else "gb10"
+    _use_systemd_mirror(mixed_job, environment, pool=pool)
+    authority["payload_sha256"] = hashlib.sha256(
+        ACCEPTANCE._canonical_bytes(
+            {key: value for key, value in authority.items() if key != "payload_sha256"},
+        ),
+    ).hexdigest()
+
+    ACCEPTANCE._validate_platform_health_authority(
+        authority,
+        session_id=evidence["session"]["id"],
+        registry_snapshot=evidence["registry_snapshot"],
+        candidates={
+            sandbox: {
+                "sha": candidate["sha"],
+                "tree": candidate["tree"],
+            }
+            for sandbox, candidate in evidence["candidates"].items()
+        },
+    )
+
+    peer_before = copy.deepcopy(evidence["peer_workloads"])
+    _validate_fixture_cgroup(evidence, mixed_job, pool=pool)
+    assert evidence["peer_workloads"] == peer_before
 
 
 def test_faults_require_exact_set_zero_orphans_and_bounded_recovery() -> None:

@@ -13,9 +13,11 @@ external-root exact-tree bootstrap documented in
 only the fixed node-authority `transact` and `check` commands; it never receives
 raw `install`, `tar`, `rm`, `chown`, `chmod`, `python3`, or candidate-path
 authority. If that fixed GB10 authority is unavailable, publication remains
-fail-closed. Docker group membership is not a bootstrap fallback.
-Changing the pinned source tree uses the same runbook's journaled direct-root
-`upgrade`; manual deletion or in-place source replacement is unsupported.
+fail-closed. Docker group membership alone is not a runtime-authority
+fallback. Changing the pinned source tree uses the same runbook's journaled
+`authority-upgrade` privileged-Docker transaction; manual deletion, an
+operator-invoked internal Python entrypoint, or in-place source replacement is
+unsupported.
 
 The root-owned registry snapshot is the only environment-membership source.
 It supplies the runtime ID, service user/group and UID/GID, candidate and
@@ -27,10 +29,13 @@ handoff.
 
 ## Stable identity and path contract
 
-Both domains use the same logical candidate path:
+For a normal `dynamic-v1` environment, both domains use the exact
+registry-assigned environment roots:
 
 ```text
-/shared_work/loom/candidates/sandboxes/<sandbox>/<40-hex-SHA>
+/shared_work/loom/candidates/environments/<env_id>/<40-hex-SHA>
+/shared_work/loom/runtime/environments/<env_id>/<SHA>/worker-oldlab.env
+/shared_work/loom/runtime/environments/<env_id>/<SHA>/worker-gb10.env
 ```
 
 The candidate directory is a standalone clean Git checkout at that exact
@@ -40,14 +45,21 @@ RENAME_NOREPLACE)`, owned by `root:sharedwork`, and read-only to the
 and directories are recursively checked for exact ownership and absence of
 group/world write bits.
 
-Each domain has a separate private runtime env:
+The fixed three `legacy-v1` migration records retain their pre-registry paths
+only so migration does not rename existing resources:
 
 ```text
+/shared_work/loom/candidates/sandboxes/<sandbox>/<40-hex-SHA>
 /shared_work/loom/runtime/sandboxes/<sandbox>/<SHA>/worker-oldlab.env
 /shared_work/loom/runtime/sandboxes/<sandbox>/<SHA>/worker-gb10.env
 ```
 
-The env is owned by the registry-assigned non-login batch service identity at
+New environments must never be placed under `sandboxes/`. The publisher takes
+the candidate and runtime roots from the verified registry binding, creates
+those exact roots independently in each NFS domain, and never derives a path
+from a developer name.
+
+Each private env is owned by the registry-assigned non-login batch service identity at
 mode `0600`; its sandbox and SHA parents are mode `2750` with that identity's
 dedicated primary group. `sharedwork`, the human developer account, and other
 environment service identities never get secret-env access.

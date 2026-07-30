@@ -84,6 +84,7 @@ def test_live_apply_revalidates_cluster_and_controller(
         ("scontrol", "show", "config"): (
             "ClusterName = trt-oldlab\nSlurmctldHost = TRT-EAI-OLDLAB-1\n"
         ),
+        ("docker", "info", "--format", "{{.CgroupDriver}}"): "systemd\n",
     }
     monkeypatch.setattr(policy, "_run", lambda argv: responses[tuple(argv)])
 
@@ -189,7 +190,10 @@ def test_restart_drain_is_candidate_owned_reused_after_crash_and_released(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    loaded = policy.load_profile(GB10_PROFILE)
+    loaded = replace(
+        policy.load_profile(GB10_PROFILE),
+        docker_cgroup_driver="cgroupfs",
+    )
     root = tmp_path / "root"
     admission, commands = _mock_slurm_admission(
         monkeypatch,
@@ -541,7 +545,10 @@ def test_recovery_candidate_invocation_has_no_cancellation_or_override_surface(
 def test_live_apply_busy_timeout_precedes_snapshot_and_transaction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    loaded = policy.load_profile(GB10_PROFILE)
+    loaded = replace(
+        policy.load_profile(GB10_PROFILE),
+        docker_cgroup_driver="cgroupfs",
+    )
     drain = {"phase": "drained"}
     monkeypatch.setattr(
         policy,
@@ -593,7 +600,10 @@ def test_live_apply_busy_timeout_precedes_snapshot_and_transaction(
 def test_live_rollback_busy_timeout_precedes_snapshot_and_transaction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    loaded = policy.load_profile(GB10_PROFILE)
+    loaded = replace(
+        policy.load_profile(GB10_PROFILE),
+        docker_cgroup_driver="cgroupfs",
+    )
     drain = {"phase": "drained"}
     target = Path(
         "/var/lib/loom-developer-sandbox-slurm-policy/snapshots/20260729T120000.000000Z",
@@ -655,7 +665,10 @@ def test_live_rollback_busy_timeout_precedes_snapshot_and_transaction(
 def test_pretransaction_snapshot_failure_releases_owned_drain(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    loaded = policy.load_profile(GB10_PROFILE)
+    loaded = replace(
+        policy.load_profile(GB10_PROFILE),
+        docker_cgroup_driver="cgroupfs",
+    )
     drain = {"phase": "quiesced"}
     released: list[dict[str, str]] = []
     monkeypatch.setattr(
@@ -953,7 +966,10 @@ def test_timer_completed_rollback_transaction_replay_is_read_only(
 def test_committed_replay_releases_only_its_exact_pending_drain(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    loaded = policy.load_profile(GB10_PROFILE)
+    loaded = replace(
+        policy.load_profile(GB10_PROFILE),
+        docker_cgroup_driver="cgroupfs",
+    )
     bindings = policy._offline_candidate_bindings(loaded, "a" * 40)
     journal: dict[str, object] = {
         "restart": True,
@@ -1024,7 +1040,7 @@ def test_committed_replay_releases_only_its_exact_pending_drain(
         )
 
 
-def test_interrupted_rollback_recovery_can_retry_same_exact_transaction(
+def test_systemd_interrupted_rollback_retry_does_not_drain_peer_jobs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     loaded = policy.load_profile(GB10_PROFILE)
@@ -1054,9 +1070,7 @@ def test_interrupted_rollback_recovery_can_retry_same_exact_transaction(
         "apply_accounting": False,
         "accounting_snapshot": None,
     }
-    drain = {"phase": "quiesced"}
     restored: list[Path] = []
-    released: list[dict[str, object]] = []
     monkeypatch.setattr(
         policy,
         "_validate_live_apply",
@@ -1071,10 +1085,22 @@ def test_interrupted_rollback_recovery_can_retry_same_exact_transaction(
     )
     monkeypatch.setattr(policy, "_validate_snapshot_path", lambda _root, path: path)
     monkeypatch.setattr(policy, "desired_files", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(policy, "_acquire_restart_drain", lambda *_args, **_kwargs: drain)
-    monkeypatch.setattr(policy, "_wait_for_restart_quiescence", lambda *_args: None)
+    monkeypatch.setattr(
+        policy,
+        "_acquire_restart_drain",
+        lambda *_args, **_kwargs: pytest.fail("systemd rollback must not drain"),
+    )
+    monkeypatch.setattr(
+        policy,
+        "_wait_for_restart_quiescence",
+        lambda *_args: pytest.fail("systemd rollback must not wait for peer jobs"),
+    )
     monkeypatch.setattr(policy, "_snapshot", lambda *_args, **_kwargs: retry_snapshot)
-    monkeypatch.setattr(policy, "_mark_restart_drain_transacting", lambda *_args: None)
+    monkeypatch.setattr(
+        policy,
+        "_mark_restart_drain_transacting",
+        lambda *_args: pytest.fail("systemd rollback must not own a drain"),
+    )
     monkeypatch.setattr(policy, "_write_journal", lambda *_args: None)
     monkeypatch.setattr(
         policy,
@@ -1095,7 +1121,7 @@ def test_interrupted_rollback_recovery_can_retry_same_exact_transaction(
     monkeypatch.setattr(
         policy,
         "_release_restart_drain",
-        lambda _root, _profile, payload: released.append(dict(payload)),
+        lambda *_args: pytest.fail("systemd rollback must not release a drain"),
     )
 
     result = policy.rollback(
@@ -1107,13 +1133,12 @@ def test_interrupted_rollback_recovery_can_retry_same_exact_transaction(
     )
 
     assert restored == [target]
-    assert released == [drain]
     assert result["phase"] == "committed"
     assert result["restored_snapshot"] == str(target)
     assert result["recovery_snapshot"] == str(retry_snapshot)
 
 
-def test_controller_rollback_orphan_recovery_keeps_drain_accounting_flag_false(
+def test_systemd_controller_rollback_orphan_recovery_does_not_drain_peer_jobs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     loaded = policy.load_profile(GB10_PROFILE)
@@ -1140,8 +1165,6 @@ def test_controller_rollback_orphan_recovery_keeps_drain_accounting_flag_false(
         "restart": True,
         "apply_accounting": True,
     }
-    acquired: list[dict[str, object]] = []
-    drain = {"phase": "drained"}
     monkeypatch.setattr(policy, "_load_policy_journal", lambda *_args, **_kwargs: journal)
     monkeypatch.setattr(policy, "_validate_snapshot_path", lambda _root, path: path)
     monkeypatch.setattr(
@@ -1152,13 +1175,21 @@ def test_controller_rollback_orphan_recovery_keeps_drain_accounting_flag_false(
     monkeypatch.setattr(policy, "_snapshot_manifest_rows", lambda *_args: [])
     monkeypatch.setattr(policy, "_validated_accounting_snapshot", lambda *_args: {})
 
-    def acquire(*_args: object, **kwargs: object) -> dict[str, object]:
-        acquired.append(dict(kwargs))
-        return drain
-
-    monkeypatch.setattr(policy, "_acquire_restart_drain", acquire)
-    monkeypatch.setattr(policy, "_wait_for_restart_quiescence", lambda *_args: None)
-    monkeypatch.setattr(policy, "_mark_restart_drain_transacting", lambda *_args: None)
+    monkeypatch.setattr(
+        policy,
+        "_acquire_restart_drain",
+        lambda *_args, **_kwargs: pytest.fail("systemd recovery must not drain"),
+    )
+    monkeypatch.setattr(
+        policy,
+        "_wait_for_restart_quiescence",
+        lambda *_args: pytest.fail("systemd recovery must not wait for peer jobs"),
+    )
+    monkeypatch.setattr(
+        policy,
+        "_mark_restart_drain_transacting",
+        lambda *_args: pytest.fail("systemd recovery must not own a drain"),
+    )
     monkeypatch.setattr(policy, "_restore_snapshot", lambda *_args: None)
     monkeypatch.setattr(policy, "_restore_accounting", lambda *_args: None)
     monkeypatch.setattr(policy, "_restore_services", lambda *_args: None)
@@ -1179,9 +1210,6 @@ def test_controller_rollback_orphan_recovery_keeps_drain_accounting_flag_false(
 
     assert recovered is journal
     assert recovered["phase"] == "rolled_back"
-    assert len(acquired) == 1
-    assert acquired[0]["operation"] == "rollback"
-    assert acquired[0]["apply_accounting"] is False
 
 
 def test_terminal_legacy_policy_journal_is_archived_durably(tmp_path: Path) -> None:
@@ -1192,7 +1220,7 @@ def test_terminal_legacy_policy_journal_is_archived_durably(tmp_path: Path) -> N
     path = policy._journal_path(root, loaded)
     now = datetime.now(UTC).isoformat()
     legacy = {
-        "schema_version": 2,
+        "schema_version": 1,
         "operation": "apply",
         "cluster": loaded.cluster,
         "host": policy._canonical_host(),
@@ -1231,7 +1259,7 @@ def test_nonterminal_legacy_policy_journal_fails_closed(tmp_path: Path) -> None:
     path = policy._journal_path(root, loaded)
     now = datetime.now(UTC).isoformat()
     legacy = {
-        "schema_version": 1,
+        "schema_version": 2,
         "operation": "apply",
         "cluster": loaded.cluster,
         "host": policy._canonical_host(),
@@ -1366,7 +1394,7 @@ def test_profile_is_exact_three_sandbox_fairshare_contract() -> None:
         "loom-sandbox-hongjian",
         "loom-sandbox-devansh",
     )
-    assert loaded.docker_cgroup_driver == "cgroupfs"
+    assert loaded.docker_cgroup_driver == "systemd"
     assert loaded.slurm["accounting_storage_enforce"] == ("associations,limits,qos,safe")
 
 
@@ -1481,6 +1509,8 @@ def test_live_validation_accepts_infrastructure_only_node(
         lambda argv: (
             "ClusterName = trt-gb10\nSlurmctldHost = trt-gb10-1\n"
             if tuple(argv) == ("scontrol", "show", "config")
+            else "systemd\n"
+            if tuple(argv) == ("docker", "info", "--format", "{{.CgroupDriver}}")
             else ""
         ),
     )
@@ -1513,7 +1543,7 @@ def test_render_preserves_unrelated_settings_and_removes_duplicate_keys(
     assert "PriorityWeightFairshare=10000" in rendered
 
 
-def test_daemon_merge_preserves_existing_keys_and_replaces_driver(
+def test_systemd_profile_preserves_existing_daemon_bytes(
     tmp_path: Path,
 ) -> None:
     loaded = policy.load_profile(PROFILE)
@@ -1522,8 +1552,9 @@ def test_daemon_merge_preserves_existing_keys_and_replaces_driver(
     rendered = policy.desired_files(root, loaded)[root / "etc/docker/daemon.json"]
     payload = json.loads(rendered)
 
+    assert rendered == (root / "etc/docker/daemon.json").read_text()
     assert payload["features"] == {"containerd-snapshotter": False}
-    assert payload["exec-opts"] == ["native.cgroupdriver=cgroupfs"]
+    assert payload["exec-opts"] == ["native.cgroupdriver=systemd"]
 
 
 def test_apply_to_offline_root_is_idempotent_and_snapshots(
@@ -2328,7 +2359,10 @@ def test_service_reload_failure_restores_files(
 def test_restart_stops_guard_before_invalidating_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    loaded = policy.load_profile(GB10_PROFILE)
+    loaded = replace(
+        policy.load_profile(GB10_PROFILE),
+        docker_cgroup_driver="cgroupfs",
+    )
     events: list[tuple[str, ...]] = []
 
     def run_status(argv: tuple[str, ...]) -> tuple[int, str]:
@@ -2354,6 +2388,40 @@ def test_restart_stops_guard_before_invalidating_status(
     assert ("systemctl", "restart", "loom-slurm-job-cgroup-guard.service") not in events
 
 
+def test_systemd_reload_never_restarts_docker_or_slurm_daemons(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = policy.load_profile(GB10_PROFILE)
+    commands: list[tuple[str, ...]] = []
+    monkeypatch.setattr(policy, "_run", lambda argv: commands.append(tuple(argv)) or "")
+
+    policy._restart_services(loaded, "trt-gb10-7")
+
+    root = tmp_path / "root"
+    unit = root / "etc/systemd/system/loom-slurm-job-cgroup-guard.service"
+    unit.parent.mkdir(parents=True)
+    unit.write_text("[Service]\n", encoding="ascii")
+    policy._restore_services(root, loaded, "trt-gb10-7")
+
+    assert ("scontrol", "reconfigure") in commands
+    assert (
+        "systemctl",
+        "reload",
+        "loom-slurm-job-cgroup-guard.service",
+    ) in commands
+    flattened = " ".join(" ".join(command) for command in commands)
+    for forbidden in (
+        "restart docker",
+        "restart slurmd",
+        "restart slurmctld",
+        "systemctl stop",
+        "systemctl kill",
+        "scancel",
+    ):
+        assert forbidden not in flattened
+
+
 def _live_outputs(profile: policy.Profile) -> dict[str, str]:
     slurm = "\n".join(
         f"{key} = {profile.slurm[field]}" for key, field in policy._SLURM_KEYS.items()
@@ -2372,7 +2440,7 @@ def _live_outputs(profile: policy.Profile) -> dict[str, str]:
     )
     return {
         "scontrol": slurm,
-        "docker": "cgroupfs\n",
+        "docker": f"{profile.docker_cgroup_driver}\n",
         "enabled": "enabled\n",
         "active": "active\n",
         "qos": "loom-dev|0|02:00:00|10|20\n",
@@ -3852,7 +3920,10 @@ def test_allocation_node_check_binds_raw_inputs_docker_and_compose(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    loaded = policy.load_profile(PROFILE)
+    loaded = replace(
+        policy.load_profile(PROFILE),
+        docker_cgroup_driver="cgroupfs",
+    )
     candidate = "8" * 40
     batch_uid = os.getuid()
     batch_gid = os.getgid()
@@ -3893,7 +3964,16 @@ def test_allocation_node_check_binds_raw_inputs_docker_and_compose(
             "LOOM_WORKER_MAX_CONCURRENT": "4",
         },
     )
-    monkeypatch.setattr(policy, "_run", lambda *_args, **_kwargs: "cgroupfs\n")
+    monkeypatch.setattr(
+        policy,
+        "_run",
+        lambda argv, **_kwargs: (
+            "JobId=123 Account=loom-dev-qianyi "
+            "NodeList=TRT-EAI-OLDLAB-1 StartTime=2026-07-30T00:00:00"
+            if tuple(argv[:3]) == ("scontrol", "show", "job")
+            else "cgroupfs\n"
+        ),
+    )
 
     def fake_subprocess_run(
         argv: tuple[str, ...],
@@ -4053,7 +4133,10 @@ def test_allocation_matrix_resume_selects_only_unfinished_nodes() -> None:
 def test_completed_crash_replays_original_attempt_before_deleting_result(
     tmp_path: Path,
 ) -> None:
-    loaded = policy.load_profile(PROFILE)
+    loaded = replace(
+        policy.load_profile(PROFILE),
+        docker_cgroup_driver="cgroupfs",
+    )
     candidate = "c" * 40
     node = loaded.allowed_nodes[0]
     batch_uid = os.geteuid()
@@ -4116,7 +4199,7 @@ def test_completed_crash_replays_original_attempt_before_deleting_result(
     )
     job_id = "789"
     node_result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "sandbox": SANDBOX,
         "account": loaded.child_accounts[0],
         "candidate_sha": candidate,
@@ -4129,7 +4212,11 @@ def test_completed_crash_replays_original_attempt_before_deleting_result(
         "concurrency": 1,
         "docker_cgroup_driver": loaded.docker_cgroup_driver,
         "job_id": job_id,
+        "job_start_time": "2026-07-30T00:00:00",
         "cgroup_parent": f"/sys/fs/cgroup/slurm/job_{job_id}",
+        "cgroup_mode": "direct-slurm-cgroup",
+        "slice_identity_sha256": None,
+        "slice_receipt_sha256": None,
         "cgroup_guard_verified": True,
         "compose_verified": True,
     }
@@ -5595,6 +5682,80 @@ def _capacity_fixture() -> tuple[dict[str, object], dict[str, object]]:
         "registry_payload_sha256": request["registry_snapshot_sha256"],
     }
     return request, candidate_set
+
+
+def _fixed_staging_guard_binding() -> dict[str, object]:
+    return policy.staging_guard_binding_payload(
+        candidate_sha="e" * 40,
+        candidate_tree="f" * 40,
+        authority_generation=17,
+        authority_convergence_id="8" * 64,
+        authority_request_id="9" * 64,
+        authority_requested_at="2026-07-29T12:00:00Z",
+    )
+
+
+def test_staging_guard_binding_is_fixed_and_merged_into_full_candidate_digest() -> None:
+    request, candidate_set = _capacity_fixture()
+    developer_bindings = candidate_set["candidate_bindings"]
+    staging = _fixed_staging_guard_binding()
+
+    merged = policy._merge_staging_guard_binding(developer_bindings, staging)
+
+    assert set(merged) == {request["slurm_account"], "loom-staging"}
+    assert merged["loom-staging"] == {
+        "env_id": f"denv-staging-{'e' * 40}",
+        "resource_generation": 17,
+        "sandbox": "staging",
+        "service_user": "loom-staging-worker",
+        "slurm_qos": "loom-staging",
+        "candidate_id": f"cand-{'e' * 40}",
+        "candidate_sha": "e" * 40,
+        "candidate_tree": "f" * 40,
+    }
+    assert policy._candidate_set_sha256(merged) != candidate_set["candidate_set_sha256"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("cluster", "trt-oldlab"),
+        ("account", "lda-staging"),
+        ("service_user", "root"),
+        ("resource_generation", 18),
+        ("candidate_sha", "a" * 40),
+        ("authority_generation", 18),
+        ("authority_convergence_id", "7" * 64),
+        ("payload_sha256", "6" * 64),
+        ("extra", "forbidden"),
+    ],
+)
+def test_staging_guard_binding_rejects_noncanonical_authority_drift(
+    field: str,
+    value: object,
+) -> None:
+    binding = _fixed_staging_guard_binding()
+    binding[field] = value
+
+    with pytest.raises(policy.PolicyError, match="staging guard binding"):
+        policy._validated_staging_guard_binding(binding)
+
+
+def test_staging_guard_binding_load_requires_canonical_closed_receipt(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "staging-binding.json"
+    binding = _fixed_staging_guard_binding()
+    path.write_bytes(
+        json.dumps(binding, sort_keys=True, separators=(",", ":")).encode("ascii") + b" \n",
+    )
+    path.chmod(0o600)
+
+    with pytest.raises(policy.PolicyError, match="not canonical"):
+        policy.load_staging_guard_binding(
+            path,
+            require_root_ownership=False,
+        )
 
 
 def test_candidate_set_selects_only_latest_applied_committed_registry_binding(
@@ -7204,7 +7365,10 @@ def test_acceptance_probe_job_uses_fixed_private_compose_and_exact_labels(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    loaded = policy.load_profile(PROFILE)
+    loaded = replace(
+        policy.load_profile(PROFILE),
+        docker_cgroup_driver="cgroupfs",
+    )
     _snapshot, raw = _acceptance_probe_fixture(tmp_path)
     request = json.loads(raw)
     request_path = (
@@ -7296,6 +7460,15 @@ def test_acceptance_probe_job_uses_fixed_private_compose_and_exact_labels(
     )
     monkeypatch.setattr(policy.os, "environ", {**os.environ, "SLURM_JOB_ID": job_id})
     monkeypatch.setattr(policy.subprocess, "run", run)
+    monkeypatch.setattr(policy, "_canonical_host", lambda: "trt-eai-oldlab-2")
+    monkeypatch.setattr(
+        policy,
+        "_run",
+        lambda *_args, **_kwargs: (
+            f"JobId=34567 Account={request['slurm_account']} "
+            "NodeList=trt-EAI-OLDLAB-2 StartTime=2026-07-30T00:00:00"
+        ),
+    )
     monkeypatch.setattr(
         policy,
         "_acceptance_probe_output",

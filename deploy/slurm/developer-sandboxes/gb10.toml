@@ -80,7 +80,7 @@ constrain_devices = true
 enable_controllers = true
 
 [docker]
-cgroup_driver = "cgroupfs"
+cgroup_driver = "systemd"
 
 [accounting]
 parent_account = "loom-dev"

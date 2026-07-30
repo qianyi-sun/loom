@@ -75,6 +75,7 @@ from scripts.ops.developer_environment_registry import (  # noqa: E402
     SYSTEM_SNAPSHOT,
     DeploymentRecord,
     DeveloperEnvironmentRegistry,
+    EnvironmentRecord,
     RegistryError,
 )
 
@@ -170,6 +171,14 @@ class DeploymentError(RuntimeError):
 
 
 class RegistryAuthority(Protocol):
+    def reconcile_predeployment_ports(
+        self,
+        env_id: str,
+        *,
+        principal_id: str,
+        expected_resource_generation: int,
+    ) -> EnvironmentRecord: ...
+
     def registration_idempotency_replay(
         self,
         *,
@@ -3408,6 +3417,7 @@ class DeveloperEnvironmentDeployer:
         context = self._active_committed_context(environment)
         if context is None:
             return
+        self._enable_recovery_unit(context)
         self._verify_bundle(context)
         self._verify_checkout(context, context.checkout)
         self._rebind_committed_services(context)
@@ -4215,9 +4225,8 @@ class DeveloperEnvironmentDeployer:
     def _unit(context: DeploymentContext) -> str:
         return f"loom-developer-environment@{context.environment['systemd_instance']}.service"
 
-    def _verify_persistence(self, context: DeploymentContext) -> None:
-        unit = self._unit(context)
-        properties = {
+    def _persistence_properties(self, unit: str) -> dict[str, str]:
+        return {
             property_name: self.runner.run(
                 (
                     "systemctl",
@@ -4229,6 +4238,9 @@ class DeveloperEnvironmentDeployer:
             ).stdout.strip()
             for property_name in ("LoadState", "FragmentPath", "UnitFileState")
         }
+
+    def _verify_persistence(self, context: DeploymentContext) -> None:
+        properties = self._persistence_properties(self._unit(context))
         if properties != {
             "LoadState": "loaded",
             "FragmentPath": "/etc/systemd/system/loom-developer-environment@.service",
@@ -4236,9 +4248,42 @@ class DeveloperEnvironmentDeployer:
         }:
             raise DeploymentError("developer environment reboot persistence is invalid")
 
-    def _verify_and_enable(self, context: DeploymentContext) -> None:
+    def _enable_recovery_unit(self, context: DeploymentContext) -> None:
+        unit = self._unit(context)
+        properties = self._persistence_properties(unit)
+        if (
+            properties["LoadState"] != "loaded"
+            or properties["FragmentPath"]
+            != "/etc/systemd/system/loom-developer-environment@.service"
+            or properties["UnitFileState"] not in {"disabled", "enabled"}
+        ):
+            raise DeploymentError("developer environment recovery unit is invalid")
+        if properties["UnitFileState"] != "enabled":
+            self.runner.run(("systemctl", "enable", unit))
+        self._verify_persistence(context)
+
+    def _disable_recovery_unit(self, environment: Mapping[str, Any]) -> None:
+        unit = f"loom-developer-environment@{environment['systemd_instance']}.service"
+        properties = self._persistence_properties(unit)
+        if properties["LoadState"] in {"", "not-found"}:
+            if properties["FragmentPath"] != "" or properties["UnitFileState"] not in {
+                "",
+                "disabled",
+            }:
+                raise DeploymentError("developer environment recovery unit is invalid")
+            return
+        if (
+            properties["LoadState"] != "loaded"
+            or properties["FragmentPath"]
+            != "/etc/systemd/system/loom-developer-environment@.service"
+            or properties["UnitFileState"] not in {"disabled", "enabled"}
+        ):
+            raise DeploymentError("developer environment recovery unit is invalid")
+        if properties["UnitFileState"] == "enabled":
+            self.runner.run(("systemctl", "disable", "--now", unit))
+
+    def _verify_services_and_persistence(self, context: DeploymentContext) -> None:
         self._verify_services(context)
-        self.runner.run(("systemctl", "enable", self._unit(context)))
         self._verify_persistence(context)
 
     def converge(
@@ -4377,6 +4422,37 @@ class DeveloperEnvironmentDeployer:
                     raise DeploymentError("developer environment already exists")
                 if operation == "update" and environment["current_candidate_id"] is None:
                     raise DeploymentError("developer environment is not active")
+                try:
+                    recovered = self.registry.reconcile_predeployment_ports(
+                        cast(str, environment["env_id"]),
+                        principal_id=cast(str, environment["principal_id"]),
+                        expected_resource_generation=cast(
+                            int,
+                            environment["resource_generation"],
+                        ),
+                    )
+                except RegistryError as exc:
+                    raise DeploymentError(
+                        "pre-deployment port recovery failed safely",
+                    ) from exc
+                if (
+                    recovered.env_id != environment["env_id"]
+                    or recovered.principal_id != environment["principal_id"]
+                    or recovered.resource_generation < environment["resource_generation"]
+                ):
+                    raise DeploymentError("pre-deployment port recovery binding is invalid")
+                if recovered.resource_generation != environment["resource_generation"]:
+                    snapshot, environment = self._environment(
+                        env_id=cast(str, environment["env_id"]),
+                        principal_id=cast(str, environment["principal_id"]),
+                    )
+                    if (
+                        environment["resource_generation"] != recovered.resource_generation
+                        or environment["ports"] != recovered.ports
+                    ):
+                        raise DeploymentError(
+                            "pre-deployment port recovery readback is invalid",
+                        )
                 intent_environment = dict(environment)
                 intent_snapshot = dict(snapshot)
                 self._fence_admission_intent(
@@ -4445,12 +4521,15 @@ class DeveloperEnvironmentDeployer:
                 deployment_id=deployment_id,
                 host_root=self.host_root,
             )
+            # Once the registry owns an exact deployment, make its boot resume
+            # durable before the first host, Docker, or capacity mutation.
+            self._enable_recovery_unit(context)
             actions = {
                 "resources-verified": self._ensure_resources,
                 "candidate-materialized": self._materialize_candidate,
                 "services-prepared": self._prepare_services,
                 "capacity-ready": self._ensure_capacity,
-                "verified": self._verify_and_enable,
+                "verified": self._verify_services_and_persistence,
             }
             while context.deployment["phase"] != "committed":
                 current_phase = cast(str, context.deployment["phase"])
@@ -5077,21 +5156,23 @@ class DeveloperEnvironmentDeployer:
 
     def _retire_systemd_unit(self, environment: Mapping[str, Any]) -> str:
         unit = f"loom-developer-environment@{environment['systemd_instance']}.service"
-        load_state = self.runner.run(
-            ("systemctl", "show", unit, "--property=LoadState", "--value"),
-            expected=frozenset({0, 1}),
-        ).stdout.strip()
-        if load_state in {"", "not-found"}:
+        properties = self._persistence_properties(unit)
+        if properties["LoadState"] in {"", "not-found"}:
+            if properties["FragmentPath"] != "" or properties["UnitFileState"] not in {
+                "",
+                "disabled",
+            }:
+                raise DeploymentError("systemd instance is foreign or unbound")
             return "missing-after-authorized-retry"
-        fragment = self.runner.run(
-            ("systemctl", "show", unit, "--property=FragmentPath", "--value"),
-            expected=frozenset({0}),
-        ).stdout.strip()
         if (
-            load_state != "loaded"
-            or fragment != "/etc/systemd/system/loom-developer-environment@.service"
+            properties["LoadState"] != "loaded"
+            or properties["FragmentPath"]
+            != "/etc/systemd/system/loom-developer-environment@.service"
+            or properties["UnitFileState"] not in {"disabled", "enabled"}
         ):
             raise DeploymentError("systemd instance is foreign or unbound")
+        if properties["UnitFileState"] == "disabled":
+            return "missing-after-authorized-retry"
         self.runner.run(
             ("systemctl", "disable", "--now", unit),
             expected=frozenset({0}),
@@ -5854,6 +5935,8 @@ class DeveloperEnvironmentDeployer:
                     )
                 if self._manifest_belongs_to(context):
                     self._stop_exact_owned(context)
+                if active_context is None:
+                    self._disable_recovery_unit(post_fail_environment)
             snapshot, environment = self._environment(env_id=env_id, principal_id=principal_id)
             self._restore_active_local(environment)
             self._write_rollback_operation(
@@ -5892,6 +5975,8 @@ class DeveloperEnvironmentDeployer:
                     )
                 if self._manifest_belongs_to(failed_context):
                     self._stop_exact_owned(failed_context)
+                if active_context is None:
+                    self._disable_recovery_unit(environment)
                 snapshot, environment = self._environment(
                     env_id=env_id,
                     principal_id=principal_id,

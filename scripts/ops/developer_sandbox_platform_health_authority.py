@@ -124,6 +124,46 @@ UUID_RE: Final = re.compile(
 JOB_ID_RE: Final = re.compile(r"^[1-9][0-9]*(?:_[0-9]+)?$")
 CONTAINER_ID_RE: Final = re.compile(r"^[0-9a-f]{12,64}$")
 SAFE_NAME_RE: Final = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+ENV_ID_RE: Final = re.compile(r"^denv-[a-z0-9-]{8,64}$")
+CANDIDATE_ID_RE: Final = re.compile(r"^cand-[0-9a-f]{40}$")
+SLURM_START_TIME_RE: Final = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$",
+)
+SYSTEMD_SLICE_RE: Final = re.compile(
+    r"^loom-job-[1-9][0-9]*-[0-9a-f]{40}\.slice$",
+)
+SYSTEMD_SLICE_RECEIPT_ROOT: Final = Path(
+    "/run/loom-developer-sandbox-slurm-policy/systemd-slices",
+)
+SYSTEMD_UNIT_ROOT: Final = Path("/run/systemd/system")
+SYSTEMD_SLICE_RECEIPT_FIELDS: Final = {
+    "schema_version",
+    "kind",
+    "systemd_slice",
+    "slice_identity_sha256",
+    "unit_sha256",
+    "job_id",
+    "job_start_time",
+    "cluster",
+    "node_list",
+    "account",
+    "env_id",
+    "resource_generation",
+    "runtime_id",
+    "candidate_id",
+    "candidate_sha",
+    "candidate_tree",
+    "cpu_max",
+    "memory_max",
+    "memory_swap_max_source",
+    "memory_swap_max_effective",
+    "pids_max",
+    "cpuset_cpus",
+    "cpuset_mems",
+    "gpu_tres",
+    "gpu_detail",
+    "payload_sha256",
+}
 MAX_FILE_BYTES: Final = 16 * 1024 * 1024
 MAX_COMMAND_BYTES: Final = 8 * 1024 * 1024
 ROOT_UID: Final = 0
@@ -1475,12 +1515,12 @@ def _strict_descendant(child: str, parent: str) -> bool:
 
 
 def _cgroup_binds_slurm_job(job_path: str, job_id: str) -> bool:
-    """Bind a cgroup to the independently queried Slurm JobId.
+    """Bind one Slurm job root to the independently queried Slurm JobId.
 
-    Docker's caller-controlled ``CgroupParent`` is not an authority.  Accepted
-    job roots must contain Slurm's exact ``job_<JobId>`` identity as one path
-    component; this makes a cross-job parent swap fail even when both parents
-    have finite controllers.
+    Docker's caller-controlled ``CgroupParent`` is never sufficient authority.
+    Accepted roots must contain Slurm's exact ``job_<JobId>`` identity as one
+    path component; this makes a cross-job swap fail even when both roots have
+    finite controllers.
     """
 
     path = PurePosixPath(job_path)
@@ -1490,6 +1530,290 @@ def _cgroup_binds_slurm_job(job_path: str, job_id: str) -> bool:
         and all(part not in {".", ".."} for part in path.parts)
         and f"job_{job_id}" in path.parts
     )
+
+
+def _slurm_job_root(paths: Sequence[str], job_id: str) -> str:
+    """Derive one exact Slurm job root from independently indexed job PIDs."""
+
+    marker = f"job_{job_id}"
+    roots: set[PurePosixPath] = set()
+    for raw in paths:
+        path = PurePosixPath(raw)
+        indexes = [index for index, part in enumerate(path.parts) if part == marker]
+        if (
+            not path.is_absolute()
+            or path == PurePosixPath("/")
+            or len(indexes) != 1
+            or any(part in {".", ".."} for part in path.parts)
+        ):
+            raise PlatformHealthError("Slurm job PID cgroup identity is invalid")
+        root = PurePosixPath(*path.parts[: indexes[0] + 1])
+        if not _strict_descendant(str(path), str(root)):
+            raise PlatformHealthError("Slurm job PID is outside its job cgroup")
+        roots.add(root)
+    if len(roots) != 1:
+        raise PlatformHealthError("Slurm job PID cgroup roots are ambiguous")
+    root = str(next(iter(roots)))
+    if not _cgroup_binds_slurm_job(root, job_id):
+        raise PlatformHealthError("Slurm job cgroup is not bound to its JobId")
+    return root
+
+
+def _container_cgroup_layout(observed_path: str, cgroup_parent: str) -> tuple[str, str]:
+    """Validate one Docker cgroup parent and return layout plus live parent path."""
+
+    if cgroup_parent.startswith("/"):
+        if not _strict_descendant(observed_path, cgroup_parent):
+            raise PlatformHealthError("Docker container escaped its Slurm job cgroup")
+        return "cgroupfs-job-v1", cgroup_parent
+    if SYSTEMD_SLICE_RE.fullmatch(cgroup_parent) is None:
+        raise PlatformHealthError("Docker cgroup parent is invalid")
+    job_id_match = re.fullmatch(
+        r"loom-job-([1-9][0-9]*)-[0-9a-f]{40}\.slice",
+        cgroup_parent,
+    )
+    if job_id_match is None:
+        raise PlatformHealthError("Docker systemd slice identity is invalid")
+    canonical_slice_path = PurePosixPath(
+        "/",
+        "loom.slice",
+        "loom-job.slice",
+        f"loom-job-{job_id_match.group(1)}.slice",
+        cgroup_parent,
+    )
+    observed = PurePosixPath(observed_path)
+    indexes = [index for index, part in enumerate(observed.parts) if part == cgroup_parent]
+    if (
+        not observed.is_absolute()
+        or observed == PurePosixPath("/")
+        or len(indexes) != 1
+        or any(part in {".", ".."} for part in observed.parts)
+    ):
+        raise PlatformHealthError("Docker systemd slice cgroup is invalid")
+    slice_path = PurePosixPath(*observed.parts[: indexes[0] + 1])
+    if slice_path != canonical_slice_path or not _strict_descendant(str(observed), str(slice_path)):
+        raise PlatformHealthError("Docker container escaped its systemd slice")
+    return "systemd-mirror-v1", str(slice_path)
+
+
+def _cpuset_values(value: str) -> set[int]:
+    result: set[int] = set()
+    for item in value.split(","):
+        start_text, separator, end_text = item.partition("-")
+        if (
+            not start_text.isdecimal()
+            or (separator and not end_text.isdecimal())
+            or (not separator and end_text)
+        ):
+            raise PlatformHealthError("cgroup cpuset is invalid")
+        start = int(start_text)
+        end = int(end_text) if separator else start
+        if end < start or end - start > 1_000_000:
+            raise PlatformHealthError("cgroup cpuset is invalid")
+        result.update(range(start, end + 1))
+    if not result:
+        raise PlatformHealthError("cgroup cpuset is empty")
+    return result
+
+
+def _cpu_quota(value: str) -> tuple[int, int]:
+    fields = value.split()
+    if (
+        len(fields) != 2
+        or fields[0] == "max"
+        or not all(item.isdecimal() for item in fields)
+        or int(fields[0]) < 1
+        or int(fields[1]) < 1
+    ):
+        raise PlatformHealthError("cgroup CPU limit is not finite")
+    return int(fields[0]), int(fields[1])
+
+
+def _finite_integer_value(value: str, *, allow_zero: bool = False) -> int:
+    if value == "max" or not value.isdecimal():
+        raise PlatformHealthError("cgroup integer limit is not finite")
+    parsed = int(value)
+    if parsed < (0 if allow_zero else 1):
+        raise PlatformHealthError("cgroup integer limit is not finite")
+    return parsed
+
+
+def _systemd_slice_identity(identity: Mapping[str, Any]) -> tuple[str, str]:
+    expected_fields = {
+        "cluster",
+        "node",
+        "job_id",
+        "job_start_time",
+        "account",
+        "env_id",
+        "resource_generation",
+        "runtime_id",
+        "candidate_id",
+        "candidate_sha",
+        "candidate_tree",
+    }
+    if (
+        set(identity) != expected_fields
+        or not isinstance(identity.get("cluster"), str)
+        or SAFE_NAME_RE.fullmatch(str(identity["cluster"])) is None
+        or not isinstance(identity.get("node"), str)
+        or SAFE_NAME_RE.fullmatch(str(identity["node"])) is None
+        or re.fullmatch(r"[1-9][0-9]*", str(identity.get("job_id"))) is None
+        or SLURM_START_TIME_RE.fullmatch(str(identity.get("job_start_time"))) is None
+        or SAFE_NAME_RE.fullmatch(str(identity.get("account"))) is None
+        or ENV_ID_RE.fullmatch(str(identity.get("env_id"))) is None
+        or type(identity.get("resource_generation")) is not int
+        or int(identity["resource_generation"]) < 1
+        or SAFE_NAME_RE.fullmatch(str(identity.get("runtime_id"))) is None
+        or CANDIDATE_ID_RE.fullmatch(str(identity.get("candidate_id"))) is None
+        or SHA_RE.fullmatch(str(identity.get("candidate_sha"))) is None
+        or SHA_RE.fullmatch(str(identity.get("candidate_tree"))) is None
+    ):
+        raise PlatformHealthError("systemd slice identity is invalid")
+    digest = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("ascii"),
+    ).hexdigest()
+    unit = f"loom-job-{identity['job_id']}-{digest[:40]}.slice"
+    if SYSTEMD_SLICE_RE.fullmatch(unit) is None:
+        raise PlatformHealthError("systemd slice identity is invalid")
+    return unit, digest
+
+
+def _validated_systemd_slice_receipt_payload(
+    receipt: object,
+    *,
+    identity: Mapping[str, Any],
+    limits: Mapping[str, str],
+    expected_gpu_tres: str,
+    expected_gpu_detail: str,
+) -> dict[str, Any]:
+    if not isinstance(receipt, dict):
+        raise PlatformHealthError("systemd slice receipt is invalid")
+    unit, identity_digest = _systemd_slice_identity(identity)
+    unsigned = {key: value for key, value in receipt.items() if key != "payload_sha256"}
+    expected = {
+        "systemd_slice": unit,
+        "slice_identity_sha256": identity_digest,
+        "job_id": identity["job_id"],
+        "job_start_time": identity["job_start_time"],
+        "cluster": identity["cluster"],
+        "node_list": identity["node"],
+        "account": identity["account"],
+        "env_id": identity["env_id"],
+        "resource_generation": identity["resource_generation"],
+        "runtime_id": identity["runtime_id"],
+        "candidate_id": identity["candidate_id"],
+        "candidate_sha": identity["candidate_sha"],
+        "candidate_tree": identity["candidate_tree"],
+        **dict(limits),
+        "gpu_tres": expected_gpu_tres,
+        "gpu_detail": expected_gpu_detail,
+    }
+    source_swap = str(receipt.get("memory_swap_max_source"))
+    if source_swap != "max":
+        _finite_integer_value(source_swap, allow_zero=True)
+    expected_swap = "0"
+    if (
+        set(receipt) != SYSTEMD_SLICE_RECEIPT_FIELDS
+        or receipt.get("schema_version") != 1
+        or receipt.get("kind") != "loom.slurm-systemd-slice-receipt"
+        or any(receipt.get(key) != value for key, value in expected.items())
+        or receipt.get("memory_swap_max_effective") != expected_swap
+        or DIGEST_RE.fullmatch(str(receipt.get("unit_sha256"))) is None
+        or receipt.get("payload_sha256")
+        != hashlib.sha256(
+            json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode("ascii"),
+        ).hexdigest()
+    ):
+        raise PlatformHealthError("systemd slice receipt binding is invalid")
+    _cpu_quota(str(receipt["cpu_max"]))
+    _finite_integer_value(str(receipt["memory_max"]))
+    _finite_integer_value(str(receipt["pids_max"]))
+    _cpuset_values(str(receipt["cpuset_cpus"]))
+    _cpuset_values(str(receipt["cpuset_mems"]))
+    return dict(receipt)
+
+
+def _load_systemd_slice_receipt(
+    unit: str,
+    *,
+    identity: Mapping[str, Any],
+    limits: Mapping[str, str],
+    expected_gpu_tres: str,
+    expected_gpu_detail: str,
+) -> dict[str, Any]:
+    raw = _read_secure_bytes(
+        SYSTEMD_SLICE_RECEIPT_ROOT / f"{unit}.json",
+        label="systemd slice receipt",
+        mode=0o444,
+    )
+    try:
+        receipt = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PlatformHealthError("systemd slice receipt JSON is invalid") from exc
+    if raw != _canonical(receipt):
+        raise PlatformHealthError("systemd slice receipt is not canonical")
+    validated = _validated_systemd_slice_receipt_payload(
+        receipt,
+        identity=identity,
+        limits=limits,
+        expected_gpu_tres=expected_gpu_tres,
+        expected_gpu_detail=expected_gpu_detail,
+    )
+    if validated["systemd_slice"] != unit:
+        raise PlatformHealthError("systemd slice receipt reached a foreign unit")
+    unit_bytes = _read_secure_bytes(
+        SYSTEMD_UNIT_ROOT / unit,
+        label="systemd slice unit",
+        mode=0o644,
+    )
+    if hashlib.sha256(unit_bytes).hexdigest() != validated["unit_sha256"]:
+        raise PlatformHealthError("systemd slice unit digest drifted")
+    return validated
+
+
+def _systemd_slice_live_evidence(
+    slice_path: str,
+    *,
+    receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    live_cpu = _read_cgroup_limit(slice_path, "cpu.max")
+    live_memory = _read_cgroup_limit(slice_path, "memory.max")
+    live_swap = _read_cgroup_limit(slice_path, "memory.swap.max")
+    live_pids = _read_cgroup_limit(slice_path, "pids.max")
+    live_cpus = _read_cgroup_limit(slice_path, "cpuset.cpus.effective")
+    live_mems = _read_cgroup_limit(slice_path, "cpuset.mems.effective")
+    live_quota, live_period = _cpu_quota(live_cpu)
+    source_quota, source_period = _cpu_quota(str(receipt["cpu_max"]))
+    memory = _finite_integer_value(live_memory)
+    swap = _finite_integer_value(live_swap, allow_zero=True)
+    pids = _finite_integer_value(live_pids)
+    if (
+        live_quota * source_period > source_quota * live_period
+        or memory > _finite_integer_value(str(receipt["memory_max"]))
+        or swap
+        > _finite_integer_value(
+            str(receipt["memory_swap_max_effective"]),
+            allow_zero=True,
+        )
+        or pids > _finite_integer_value(str(receipt["pids_max"]))
+        or not _cpuset_values(live_cpus).issubset(
+            _cpuset_values(str(receipt["cpuset_cpus"])),
+        )
+        or not _cpuset_values(live_mems).issubset(
+            _cpuset_values(str(receipt["cpuset_mems"])),
+        )
+    ):
+        raise PlatformHealthError("systemd slice live limits are weaker than Slurm")
+    return {
+        "path": slice_path,
+        "cpu_cores_max": live_quota / live_period,
+        "memory_bytes_max": memory,
+        "memory_swap_bytes_max": swap,
+        "pids_max": pids,
+        "cpuset_cpus": live_cpus,
+        "cpuset_mems": live_mems,
+    }
 
 
 def _slurm_job_pid_cgroups(job_id: str, *, run: Run) -> tuple[str, ...]:
@@ -1589,6 +1913,39 @@ def _gpu_count(tres: str) -> int:
     )
 
 
+def _gpu_detail_ids(value: str) -> set[str]:
+    """Parse the exact physical GPU indexes authorized by Slurm GresDetail."""
+
+    if (
+        not isinstance(value, str)
+        or value in {"", "(null)", "None"}
+        or "mig" in value.lower()
+        or len(value) > 4096
+    ):
+        raise PlatformHealthError("Slurm GPU detail identity is unavailable")
+    result: set[str] = set()
+    for descriptor in value.split(","):
+        match = re.fullmatch(
+            r"gpu(?::[A-Za-z0-9_.-]+)*\(IDX:([0-9]+(?:-[0-9]+)?)\)",
+            descriptor,
+        )
+        if match is None:
+            raise PlatformHealthError("Slurm GPU detail identity is ambiguous")
+        start_text, separator, end_text = match.group(1).partition("-")
+        start = int(start_text)
+        end = int(end_text) if separator else start
+        if start > 4095 or end < start or end > 4095:
+            raise PlatformHealthError("Slurm GPU detail identity is out of range")
+        for index in range(start, end + 1):
+            identity = str(index)
+            if identity in result:
+                raise PlatformHealthError("Slurm GPU detail identity is duplicated")
+            result.add(identity)
+    if not result:
+        raise PlatformHealthError("Slurm GPU detail identity is empty")
+    return result
+
+
 def _job_readback(
     *,
     sandbox: str,
@@ -1617,6 +1974,7 @@ def _job_readback(
     user = values.get("UserId", "").split("(", 1)[0]
     job_name = values.get("JobName", "")
     comment = values.get("Comment", "")
+    job_start_time = values.get("StartTime", "")
     pids_match = re.fullmatch(r"loom-cgroup-v1:pids=([1-9][0-9]*)", comment)
     shared = values.get("Shared", values.get("OverSubscribe", ""))
     if (
@@ -1629,6 +1987,7 @@ def _job_readback(
         or values.get("NodeList", "").lower() != expected_node.lower()
         or values.get("NumNodes") != "1"
         or not values.get("NumCPUs", "").isdigit()
+        or SLURM_START_TIME_RE.fullmatch(job_start_time) is None
         or pids_match is None
         or shared not in {"OK", "YES", "USER", "1"}
     ):
@@ -1636,6 +1995,7 @@ def _job_readback(
     tres = values.get("AllocTRES", "")
     return {
         "job_id": job_id,
+        "job_start_time": job_start_time,
         "job_name": job_name,
         "sandbox": sandbox,
         "candidate_sha": candidate_sha,
@@ -1650,6 +2010,7 @@ def _job_readback(
             "pids": int(pids_match.group(1)),
             "gpu_count": _gpu_count(tres),
             "tres": tres,
+            "gpu_detail": values.get("GresDetail", ""),
             "exclusive": False,
         },
     }
@@ -1743,11 +2104,10 @@ def _container_observations(
         if not isinstance(pid, int) or isinstance(pid, bool) or pid < 1:
             raise PlatformHealthError("Docker container PID is invalid")
         cgroup_parent = host_config.get("CgroupParent")
-        if not isinstance(cgroup_parent, str) or not cgroup_parent.startswith("/"):
+        if not isinstance(cgroup_parent, str):
             raise PlatformHealthError("Docker cgroup parent is invalid")
         observed_path = _proc_cgroup(pid)
-        if not _strict_descendant(observed_path, cgroup_parent):
-            raise PlatformHealthError("Docker container escaped its Slurm job cgroup")
+        _container_cgroup_layout(observed_path, cgroup_parent)
         nano_cpus = host_config.get("NanoCpus")
         memory = host_config.get("Memory")
         pids = host_config.get("PidsLimit")
@@ -1857,6 +2217,20 @@ def _container_observations(
             },
         )
         slurm_pid_paths = _slurm_job_pid_cgroups(job_id, run=run)
+        container_layouts = {
+            _container_cgroup_layout(
+                str(item["observed_cgroup_path"]),
+                str(item["cgroup_parent"]),
+            )
+            for item in job_containers
+        }
+        if len(container_layouts) != 1:
+            raise PlatformHealthError("candidate job container cgroup layout is not closed")
+        layout_version, live_container_parent = next(iter(container_layouts))
+        if layout_version == "cgroupfs-job-v1":
+            job_path = str(job_containers[0]["cgroup_parent"])
+        else:
+            job_path = _slurm_job_root(slurm_pid_paths, job_id)
         if not _cgroup_binds_slurm_job(job_path, job_id) or any(
             not _strict_descendant(path, job_path) for path in slurm_pid_paths
         ):
@@ -1876,8 +2250,61 @@ def _container_observations(
             "pids",
         }.issubset(delegated_controllers):
             raise PlatformHealthError("Slurm job cgroup controllers are incomplete")
+        raw_limits = {
+            "cpu_max": _read_cgroup_limit(job_path, "cpu.max"),
+            "memory_max": _read_cgroup_limit(job_path, "memory.max"),
+            "memory_swap_max_source": _read_cgroup_limit(
+                job_path,
+                "memory.swap.max",
+            ),
+            "pids_max": _read_cgroup_limit(job_path, "pids.max"),
+            "cpuset_cpus": _read_cgroup_limit(
+                job_path,
+                "cpuset.cpus.effective",
+            ),
+            "cpuset_mems": _read_cgroup_limit(
+                job_path,
+                "cpuset.mems.effective",
+            ),
+        }
+        allocation = slurm["allocation"]
+        if layout_version == "systemd-mirror-v1":
+            expected_cluster = "trt-oldlab" if "oldlab" in expected_node.lower() else "trt-gb10"
+            identity = {
+                "cluster": expected_cluster,
+                "node": expected_node.lower(),
+                "job_id": job_id,
+                "job_start_time": slurm["job_start_time"],
+                "account": slurm["account"],
+                "env_id": environment["env_id"],
+                "resource_generation": environment["resource_generation"],
+                "runtime_id": sandbox,
+                "candidate_id": environment["candidate_id"],
+                "candidate_sha": candidate_sha,
+                "candidate_tree": candidates[sandbox]["tree"],
+            }
+            systemd_receipt = _load_systemd_slice_receipt(
+                str(job_containers[0]["cgroup_parent"]),
+                identity=identity,
+                limits=raw_limits,
+                expected_gpu_tres=(
+                    str(allocation["tres"]) if policy["gpu_tres"] else "not-required"
+                ),
+                expected_gpu_detail=(
+                    str(allocation["gpu_detail"]) if policy["gpu_tres"] else "not-required"
+                ),
+            )
+            systemd_live = _systemd_slice_live_evidence(
+                live_container_parent,
+                receipt=systemd_receipt,
+            )
+        else:
+            systemd_receipt = None
+            systemd_live = None
         cgroup = {
+            "layout_version": layout_version,
             "job_path": job_path,
+            "container_parent": str(job_containers[0]["cgroup_parent"]),
             "slurm_job_id": job_id,
             "slurm_pid_cgroup_paths": sorted(slurm_pid_paths),
             "controllers": controllers,
@@ -1887,6 +2314,8 @@ def _container_observations(
             "memory_bytes_max": _integer_limit(job_path, "memory.max"),
             "pids_max": _integer_limit(job_path, "pids.max"),
             "pids_current": _integer_limit(job_path, "pids.current"),
+            "systemd_slice_receipt": systemd_receipt,
+            "systemd_slice_live": systemd_live,
         }
         totals = {
             "cpu_cores": sum(item["limits"]["cpu_cores"] for item in job_containers),
@@ -1894,7 +2323,6 @@ def _container_observations(
             "pids": sum(item["limits"]["pids"] for item in job_containers),
             "gpu_count": sum(item["limits"]["gpu_count"] for item in job_containers),
         }
-        allocation = slurm["allocation"]
         expected_gpu_count = 1 if policy["gpu_tres"] else 0
         if (
             allocation["cpu_cores"] != policy["requested_cpus"]
@@ -1929,10 +2357,12 @@ def _container_observations(
             {device for item in allocated_containers for device in item["limits"]["gpu_ids"]},
         )
         if policy["gpu_tres"]:
+            slurm_allocated_ids = _gpu_detail_ids(str(allocation["gpu_detail"]))
             if (
                 len(allocated_ids) != expected_gpu_count
                 or not allocated_containers
                 or not denial_containers
+                or set(allocated_ids) != slurm_allocated_ids
             ):
                 raise PlatformHealthError("GB10 GPU device assignment is not closed")
             gpu_query = "index" if all(device.isdigit() for device in allocated_ids) else "uuid"
@@ -1952,7 +2382,11 @@ def _container_observations(
                     raise PlatformHealthError("allocated GB10 GPU is not usable")
             method = "docker-nvidia-smi-and-device-denial-v1"
         else:
-            if allocated_containers or allocated_ids:
+            if (
+                allocated_containers
+                or allocated_ids
+                or allocation["gpu_detail"] not in {"", "(null)", "None"}
+            ):
                 raise PlatformHealthError("OLDLAB unexpectedly exposes a GPU device")
             method = "docker-no-device-exposure-v1"
         for container in denial_containers:
@@ -2294,6 +2728,167 @@ def _validate_node_result(
         raise PlatformHealthError("node observation is from the future")
 
 
+def _validate_mixed_job_cgroup(
+    job: Mapping[str, Any],
+    cgroup: Mapping[str, Any],
+    containers: Sequence[Mapping[str, Any]],
+    *,
+    policy: Mapping[str, Any],
+) -> None:
+    expected_fields = {
+        "layout_version",
+        "job_path",
+        "container_parent",
+        "slurm_job_id",
+        "slurm_pid_cgroup_paths",
+        "controllers",
+        "delegated_controllers",
+        "delegated",
+        "cpu_cores_max",
+        "memory_bytes_max",
+        "pids_max",
+        "pids_current",
+        "systemd_slice_receipt",
+        "systemd_slice_live",
+    }
+    job_id = str(job.get("job_id"))
+    job_path = str(cgroup.get("job_path"))
+    layout = cgroup.get("layout_version")
+    allocation = job.get("allocation")
+    pid_paths = cgroup.get("slurm_pid_cgroup_paths")
+    if (
+        set(cgroup) != expected_fields
+        or not isinstance(allocation, dict)
+        or layout not in {"cgroupfs-job-v1", "systemd-mirror-v1"}
+        or cgroup.get("slurm_job_id") != job_id
+        or not _cgroup_binds_slurm_job(job_path, job_id)
+        or cgroup.get("delegated") is not True
+        or not {"cpu", "memory", "pids"}.issubset(
+            set(cgroup.get("delegated_controllers", [])),
+        )
+        or not isinstance(pid_paths, list)
+        or not pid_paths
+        or any(
+            not isinstance(path, str) or not _strict_descendant(path, job_path)
+            for path in pid_paths
+        )
+        or cgroup.get("cpu_cores_max") != allocation.get("cpu_cores")
+        or cgroup.get("memory_bytes_max") != allocation.get("memory_bytes")
+        or cgroup.get("pids_max") != allocation.get("pids")
+        or not isinstance(cgroup.get("pids_current"), int)
+        or isinstance(cgroup.get("pids_current"), bool)
+        or int(cgroup["pids_current"]) < 0
+        or int(cgroup["pids_current"]) > int(cgroup["pids_max"])
+    ):
+        raise PlatformHealthError("mixed job cgroup evidence is invalid")
+    if layout == "cgroupfs-job-v1":
+        if (
+            cgroup.get("container_parent") != job_path
+            or cgroup.get("systemd_slice_receipt") is not None
+            or cgroup.get("systemd_slice_live") is not None
+            or any(
+                _container_cgroup_layout(
+                    str(item.get("observed_cgroup_path")),
+                    str(item.get("cgroup_parent")),
+                )
+                != ("cgroupfs-job-v1", job_path)
+                for item in containers
+            )
+        ):
+            raise PlatformHealthError("cgroupfs job containment evidence is invalid")
+        return
+
+    receipt = cgroup.get("systemd_slice_receipt")
+    live = cgroup.get("systemd_slice_live")
+    expected_cluster = "trt-oldlab" if "oldlab" in str(job.get("node")).lower() else "trt-gb10"
+    identity = {
+        "cluster": expected_cluster,
+        "node": str(job.get("node")).lower(),
+        "job_id": job_id,
+        "job_start_time": job.get("job_start_time"),
+        "account": job.get("account"),
+        "env_id": job.get("env_id"),
+        "resource_generation": job.get("resource_generation"),
+        "runtime_id": job.get("sandbox"),
+        "candidate_id": job.get("candidate_id"),
+        "candidate_sha": job.get("candidate_sha"),
+        "candidate_tree": job.get("candidate_tree"),
+    }
+    if not isinstance(receipt, dict) or not isinstance(live, dict):
+        raise PlatformHealthError("systemd mirror evidence is incomplete")
+    receipt_limits = {
+        key: str(receipt.get(key))
+        for key in (
+            "cpu_max",
+            "memory_max",
+            "memory_swap_max_source",
+            "pids_max",
+            "cpuset_cpus",
+            "cpuset_mems",
+        )
+    }
+    validated_receipt = _validated_systemd_slice_receipt_payload(
+        receipt,
+        identity=identity,
+        limits=receipt_limits,
+        expected_gpu_tres=(str(allocation.get("tres")) if policy["gpu_tres"] else "not-required"),
+        expected_gpu_detail=(
+            str(allocation.get("gpu_detail")) if policy["gpu_tres"] else "not-required"
+        ),
+    )
+    expected_live_fields = {
+        "path",
+        "cpu_cores_max",
+        "memory_bytes_max",
+        "memory_swap_bytes_max",
+        "pids_max",
+        "cpuset_cpus",
+        "cpuset_mems",
+    }
+    source_quota, source_period = _cpu_quota(str(validated_receipt["cpu_max"]))
+    live_path = str(live.get("path"))
+    if (
+        set(live) != expected_live_fields
+        or cgroup.get("container_parent") != validated_receipt["systemd_slice"]
+        or not isinstance(live.get("cpu_cores_max"), int | float)
+        or isinstance(live.get("cpu_cores_max"), bool)
+        or float(live["cpu_cores_max"]) <= 0
+        or float(live["cpu_cores_max"]) > source_quota / source_period
+        or source_quota / source_period != float(cgroup["cpu_cores_max"])
+        or not isinstance(live.get("memory_bytes_max"), int)
+        or isinstance(live.get("memory_bytes_max"), bool)
+        or int(live["memory_bytes_max"]) < 1
+        or int(live["memory_bytes_max"]) > int(validated_receipt["memory_max"])
+        or int(validated_receipt["memory_max"]) != int(cgroup["memory_bytes_max"])
+        or not isinstance(live.get("memory_swap_bytes_max"), int)
+        or isinstance(live.get("memory_swap_bytes_max"), bool)
+        or int(live["memory_swap_bytes_max"]) < 0
+        or int(live["memory_swap_bytes_max"]) > int(validated_receipt["memory_swap_max_effective"])
+        or not isinstance(live.get("pids_max"), int)
+        or isinstance(live.get("pids_max"), bool)
+        or int(live["pids_max"]) < 1
+        or int(live["pids_max"]) > int(validated_receipt["pids_max"])
+        or int(validated_receipt["pids_max"]) != int(cgroup["pids_max"])
+        or not isinstance(live.get("cpuset_cpus"), str)
+        or not _cpuset_values(str(live["cpuset_cpus"])).issubset(
+            _cpuset_values(str(validated_receipt["cpuset_cpus"])),
+        )
+        or not isinstance(live.get("cpuset_mems"), str)
+        or not _cpuset_values(str(live["cpuset_mems"])).issubset(
+            _cpuset_values(str(validated_receipt["cpuset_mems"])),
+        )
+        or any(
+            _container_cgroup_layout(
+                str(item.get("observed_cgroup_path")),
+                str(item.get("cgroup_parent")),
+            )
+            != ("systemd-mirror-v1", live_path)
+            for item in containers
+        )
+    ):
+        raise PlatformHealthError("systemd mirror containment evidence is invalid")
+
+
 def _verify_mixed_job_policy(
     job: Mapping[str, Any],
     *,
@@ -2327,10 +2922,18 @@ def _verify_mixed_job_policy(
         if isinstance(containers, list)
         else set()
     )
+    if isinstance(cgroup, dict) and isinstance(containers, list):
+        _validate_mixed_job_cgroup(
+            job,
+            cgroup,
+            containers,
+            policy=policy,
+        )
     if (
         set(job)
         != {
             "job_id",
+            "job_start_time",
             "job_name",
             "sandbox",
             "env_id",
@@ -2358,32 +2961,13 @@ def _verify_mixed_job_policy(
         or not isinstance(cgroup, dict)
         or not isinstance(containers, list)
         or JOB_ID_RE.fullmatch(str(job_id)) is None
+        or SLURM_START_TIME_RE.fullmatch(str(job.get("job_start_time"))) is None
         or SAFE_NAME_RE.fullmatch(str(job.get("host"))) is None
         or allocation.get("cpu_cores") != policy["requested_cpus"]
         or allocation.get("memory_bytes") != policy["requested_memory_mib"] * 1024**2
         or allocation.get("pids") != policy["job_pids_max"]
         or allocation.get("gpu_count") != (1 if policy["gpu_tres"] else 0)
         or allocation.get("exclusive") is not False
-        or cgroup.get("job_path") is None
-        or cgroup.get("slurm_job_id") != job_id
-        or cgroup.get("delegated") is not True
-        or not {"cpu", "memory", "pids"}.issubset(
-            set(cgroup.get("delegated_controllers", [])),
-        )
-        or not _cgroup_binds_slurm_job(str(cgroup["job_path"]), str(job_id))
-        or not isinstance(cgroup.get("slurm_pid_cgroup_paths"), list)
-        or not cgroup["slurm_pid_cgroup_paths"]
-        or any(
-            not isinstance(path, str) or not _strict_descendant(path, str(cgroup["job_path"]))
-            for path in cgroup["slurm_pid_cgroup_paths"]
-        )
-        or cgroup.get("cpu_cores_max") != allocation["cpu_cores"]
-        or cgroup.get("memory_bytes_max") != allocation["memory_bytes"]
-        or cgroup.get("pids_max") != allocation["pids"]
-        or not isinstance(cgroup.get("pids_current"), int)
-        or isinstance(cgroup.get("pids_current"), bool)
-        or cgroup["pids_current"] < 0
-        or cgroup["pids_current"] > cgroup["pids_max"]
         or len(containers) != len(ROLES)
         or {item.get("role") for item in containers if isinstance(item, dict)} != set(ROLES)
         or any(
@@ -2418,11 +3002,7 @@ def _verify_mixed_job_policy(
                 "loom.registry_generation": str(job.get("registry_generation")),
                 "loom.registry_payload_sha256": job.get("registry_payload_sha256"),
             }
-            or item.get("cgroup_parent") != cgroup["job_path"]
-            or not _strict_descendant(
-                str(item.get("observed_cgroup_path")),
-                str(cgroup["job_path"]),
-            )
+            or item.get("cgroup_parent") != cgroup["container_parent"]
             or item.get("limits", {}).get("cpu_cores") != policy["container_cpus"]
             or item.get("limits", {}).get("memory_bytes")
             != policy["container_memory_mib"] * 1024**2
@@ -2449,6 +3029,11 @@ def _verify_mixed_job_policy(
         or job["device_probe"]["unallocated_denied"] is not True
         or not isinstance(job["device_probe"]["allocated_ids"], list)
         or set(job["device_probe"]["allocated_ids"]) != allocated_device_ids
+        or (
+            policy["gpu_tres"]
+            and _gpu_detail_ids(str(allocation.get("gpu_detail"))) != allocated_device_ids
+        )
+        or (not policy["gpu_tres"] and allocation.get("gpu_detail") not in {"", "(null)", "None"})
         or len(job["device_probe"]["allocated_ids"]) != (1 if policy["gpu_tres"] else 0)
         or set(job["device_probe"]["allocated_probe_container_ids"]) != allocated_container_ids
         or set(job["device_probe"]["denial_probe_container_ids"])

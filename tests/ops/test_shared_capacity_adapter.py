@@ -19,10 +19,161 @@ ROOT = Path(__file__).resolve().parents[2]
 SHA = "a" * 40
 OTHER_SHA = "b" * 40
 TREE = "c" * 40
+OTHER_TREE = "d" * 40
+ENV_ID = "denv-qianyi001"
+CANDIDATE_ID = "cand-" + "1" * 40
+OTHER_CANDIDATE_ID = "cand-" + "2" * 40
 REQUEST_ID = "11111111-1111-4111-8111-111111111111"
 CAPACITY_TIME = "2026-07-28T14:00:00Z"
 REAL_VALIDATE_RUNTIME_ATTESTATION = adapter._validate_runtime_attestation
 REAL_SHARED_COLLECTOR_LOCK = adapter._shared_collector_lock
+
+
+def _candidate_binding(candidate_sha: str = SHA) -> adapter.CandidateBinding:
+    if candidate_sha == SHA:
+        return adapter.CandidateBinding(
+            env_id=ENV_ID,
+            resource_generation=3,
+            runtime_id="qianyi",
+            candidate_id=CANDIDATE_ID,
+            sha=SHA,
+            tree=TREE,
+        )
+    return adapter.CandidateBinding(
+        env_id=ENV_ID,
+        resource_generation=2,
+        runtime_id="qianyi",
+        candidate_id=OTHER_CANDIDATE_ID,
+        sha=OTHER_SHA,
+        tree=OTHER_TREE,
+    )
+
+
+def _registry_snapshot() -> dict[str, Any]:
+    return {
+        "environments": [
+            {
+                "env_id": ENV_ID,
+                "runtime_id": "qianyi",
+                "state": "active",
+                "resource_generation": 3,
+                "compose_project": "loom-sandbox-qianyi",
+                "runtime_root": "/shared_work/loom/runtime/sandboxes/qianyi",
+                "candidate_root": "/shared_work/loom/candidates/sandboxes/qianyi",
+                "slurm_account": "loom-dev-qianyi",
+                "slurm_qos": "loom-dev-qianyi",
+                "current_candidate_id": CANDIDATE_ID,
+            },
+        ],
+        "candidates": [
+            {
+                "candidate_id": CANDIDATE_ID,
+                "env_id": ENV_ID,
+                "candidate_sha": SHA,
+                "candidate_tree": TREE,
+            },
+            {
+                "candidate_id": OTHER_CANDIDATE_ID,
+                "env_id": ENV_ID,
+                "candidate_sha": OTHER_SHA,
+                "candidate_tree": OTHER_TREE,
+            },
+        ],
+        "deployments": [
+            {
+                "candidate_id": OTHER_CANDIDATE_ID,
+                "env_id": ENV_ID,
+                "phase": "committed",
+                "applied_resource_generation": 2,
+            },
+            {
+                "candidate_id": CANDIDATE_ID,
+                "env_id": ENV_ID,
+                "phase": "committed",
+                "applied_resource_generation": 3,
+            },
+        ],
+    }
+
+
+def _active_dynamic_registry(
+    tmp_path: Path,
+) -> tuple[dict[str, Any], Any, Any]:
+    registry = adapter.registry_contract
+    authority = registry.DeveloperEnvironmentRegistry(tmp_path / "dynamic-registry.sqlite3")
+    environment = authority.register(
+        {
+            "schema_version": registry.SCHEMA_VERSION,
+            "kind": registry.REGISTER_KIND,
+            "principal_id": "oidc:example:fourth",
+            "idempotency_key": "dynamic-registration-fourth",
+            "display_name": "Fourth developer",
+        },
+    )
+    candidate = authority.import_candidate(
+        {
+            "schema_version": registry.SCHEMA_VERSION,
+            "kind": registry.CANDIDATE_KIND,
+            "principal_id": environment.principal_id,
+            "idempotency_key": "dynamic-candidate-fourth",
+            "env_id": environment.env_id,
+            "candidate_sha": SHA,
+            "candidate_tree": TREE,
+            "bundle_sha256": "c" * 64,
+            "bundle_size": 1024,
+            "image_digests": {
+                "amd64": "sha256:" + "d" * 64,
+                "arm64": "sha256:" + "e" * 64,
+            },
+        },
+    )
+    deployment = authority.begin_deployment(
+        {
+            "schema_version": registry.SCHEMA_VERSION,
+            "kind": registry.DEPLOY_KIND,
+            "principal_id": environment.principal_id,
+            "idempotency_key": "dynamic-deployment-fourth",
+            "env_id": environment.env_id,
+            "candidate_id": candidate.candidate_id,
+            "expected_resource_generation": environment.resource_generation,
+        },
+    )
+    for expected, following in zip(
+        registry.DEPLOY_PHASES[:-1],
+        registry.DEPLOY_PHASES[1:],
+        strict=True,
+    ):
+        if following == "committed":
+            authority.prepare_deployment_finalization(
+                deployment.deployment_id,
+                principal_id=environment.principal_id,
+                expected_resource_generation=environment.resource_generation,
+            )
+            authority.record_deployment_finalization(
+                deployment.deployment_id,
+                principal_id=environment.principal_id,
+                expected_resource_generation=environment.resource_generation,
+                evidence={
+                    "capacity_finalize_receipt_sha256": "1" * 64,
+                    "capacity_finalize_check_receipt_sha256": "2" * 64,
+                    "runtime_reconcile_receipt_sha256": "3" * 64,
+                    "runtime_prepare_check_receipt_sha256": "4" * 64,
+                    "acceptance_probe_receipt_sha256": "5" * 64,
+                },
+            )
+        authority.advance_deployment(
+            deployment.deployment_id,
+            principal_id=environment.principal_id,
+            expected_phase=expected,
+            next_phase=following,
+            expected_resource_generation=environment.resource_generation,
+        )
+    active = authority.lookup(environment.env_id)
+    return (
+        authority.verify_snapshot(authority.snapshot_bytes()),
+        active,
+        candidate,
+    )
 
 
 def _lease_state(
@@ -190,6 +341,7 @@ def _policy(
     draining: int | None = 0,
     capacity_lease_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    candidate = _candidate_binding(candidate_sha)
     template = tomllib.loads(
         (ROOT / "deploy/developer-sandboxes/shared-capacity-policies/gb10.toml")
         .read_text()
@@ -198,8 +350,14 @@ def _policy(
         .replace("${SLURM_QOS}", "loom-dev-qianyi")
         .replace("${RUNTIME_ROOT}", "/shared_work/loom/runtime/sandboxes/qianyi")
         .replace("${CANDIDATE_ROOT}", "/shared_work/loom/candidates/sandboxes/qianyi")
-        .replace("${CANDIDATE_SHA}", candidate_sha),
+        .replace("${ENV_ID}", candidate.env_id)
+        .replace("${RESOURCE_GENERATION}", str(candidate.resource_generation))
+        .replace("${RUNTIME_ID}", candidate.runtime_id)
+        .replace("${CANDIDATE_ID}", candidate.candidate_id)
+        .replace("${CANDIDATE_SHA}", candidate_sha)
+        .replace("${CANDIDATE_TREE}", candidate.tree),
     )["policy"]
+    template["actuator_config"]["resource_generation"] = candidate.resource_generation
     return {
         **template,
         "environment": "sandbox-qianyi",
@@ -297,6 +455,7 @@ def _accepted_runtime_attestation(monkeypatch: pytest.MonkeyPatch) -> None:
         "_shared_collector_lock",
         accepted_collector_lock,
     )
+    monkeypatch.setattr(adapter, "_load_registry_snapshot", _registry_snapshot)
 
 
 def _last_put(control_plane: FakeControlPlane | EmptyControlPlane) -> dict[str, Any]:
@@ -376,6 +535,55 @@ def test_apply_is_candidate_bound_persistent_and_idempotent(tmp_path: Path) -> N
         "GET",
         "GET",
     ]
+
+
+def test_fourth_dynamic_registry_environment_uses_exact_compose_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot, environment, candidate = _active_dynamic_registry(tmp_path)
+    state_path = tmp_path / "dynamic-sandbox-state.json"
+    _write(
+        state_path,
+        json.dumps(
+            {
+                "schema_version": 1,
+                "sandbox": environment.runtime_id,
+                "compose_project": environment.compose_project,
+                "candidate_sha": candidate.candidate_sha,
+                "candidate_tree": candidate.candidate_tree,
+            },
+        )
+        + "\n",
+    )
+    config = adapter.AdapterConfig(
+        sandbox=environment.runtime_id,
+        environment=f"sandbox-{environment.runtime_id}",
+        pool_name="gb10",
+        slurm_account=environment.slurm_account,
+        slurm_qos=environment.slurm_qos,
+        runtime_root=Path(environment.runtime_root),
+        candidate_root=Path(environment.candidate_root),
+        control_plane_url="http://127.0.0.1:20080",
+        admin_secret_file=tmp_path / "admin.toml",
+        handoff_path=tmp_path / "handoff.json",
+        observation_path=tmp_path / "observation.json",
+        adapter_state_path=tmp_path / "adapter.json",
+        sandbox_state_path=state_path,
+        runtime_attestation_root=tmp_path / "attestations",
+        max_slots_bound=120,
+        timeout_seconds=10,
+    )
+    monkeypatch.setattr(adapter, "_load_registry_snapshot", lambda: snapshot)
+
+    binding = adapter._load_sandbox_binding(config)
+
+    assert environment.layout_version == "dynamic-v1"
+    assert environment.compose_project.startswith("loom-env-")
+    assert environment.compose_project != f"loom-sandbox-{environment.runtime_id}"
+    assert binding.runtime_id == environment.runtime_id
+    assert binding.env_id == environment.env_id
+    assert binding.candidate_id == candidate.candidate_id
 
 
 def test_periodic_receipt_renewal_keeps_adapter_enabled_beyond_thirty_minutes(
@@ -627,7 +835,7 @@ def test_missing_policy_expired_first_handoff_retires_then_new_epoch_activates(
 
 def test_bootstrap_rejects_existing_policy_authority_drift(tmp_path: Path) -> None:
     config, _ = _fixture(tmp_path)
-    expected = adapter._bootstrap_policy_body(config, candidate_sha=SHA)
+    expected = adapter._bootstrap_policy_body(config, candidate=_candidate_binding())
     policy = {
         **expected,
         "environment": "sandbox-qianyi",
@@ -660,7 +868,7 @@ def test_bootstrap_rejects_job_pid_budget_below_concurrency_bound(
     monkeypatch.setattr(adapter, "_POLICY_TEMPLATE_DIR", templates)
 
     with pytest.raises(adapter.AdapterError, match="below concurrency bound"):
-        adapter._bootstrap_policy_body(config, candidate_sha=SHA)
+        adapter._bootstrap_policy_body(config, candidate=_candidate_binding())
 
 
 def test_handoff_epoch_regression_and_same_epoch_rewrite_fail_closed(
@@ -741,6 +949,102 @@ def test_candidate_mismatch_retires_old_exact_active_lease(
     assert put["max_slots"] == 0
     assert put["shared_capacity_binding"] == old_binding
     assert control_plane.policy["capacity_lease_state"]["state"] == "retiring"
+
+
+def test_historical_binding_selects_exact_generation_across_redeploys(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, _ = _fixture(tmp_path)
+    snapshot = _registry_snapshot()
+    snapshot["deployments"].append(
+        {
+            "candidate_id": OTHER_CANDIDATE_ID,
+            "env_id": ENV_ID,
+            "phase": "committed",
+            "applied_resource_generation": 8,
+        },
+    )
+    monkeypatch.setattr(adapter, "_load_registry_snapshot", lambda: snapshot)
+
+    binding = adapter._historical_candidate_binding(
+        config,
+        candidate_sha=OTHER_SHA,
+        candidate_id=OTHER_CANDIDATE_ID,
+        candidate_tree=OTHER_TREE,
+        resource_generation=2,
+    )
+
+    assert binding == _candidate_binding(OTHER_SHA)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("env_id", "denv-foreign01"),
+        ("resource_generation", 99),
+        ("candidate_id", CANDIDATE_ID),
+        ("candidate_tree", TREE),
+    ],
+)
+def test_candidate_mismatch_refuses_drifted_historical_registry_binding(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    config, handoff_path = _fixture(tmp_path)
+    payload = json.loads(handoff_path.read_text())
+    payload["candidate_sha"] = OTHER_SHA
+    _write(handoff_path, json.dumps(payload) + "\n")
+    old_binding = {
+        "schema_version": 1,
+        "request_id": REQUEST_ID,
+        "lease_epoch": 3,
+        "candidate_sha": OTHER_SHA,
+        "preemptible": True,
+    }
+    policy = _policy(
+        candidate_sha=OTHER_SHA,
+        max_slots=12,
+        enabled=True,
+        capacity_lease_state=_lease_state(old_binding, enabled=True),
+    )
+    policy["actuator_config"][field] = value
+    control_plane = FakeControlPlane(policy)
+
+    with pytest.raises(
+        adapter.AdapterError,
+        match=r"immutable bootstrap|historical registry",
+    ):
+        adapter.run_once(
+            config,
+            now=datetime(2026, 7, 28, 14, 0, tzinfo=UTC),
+            http_json=control_plane,
+        )
+
+    assert [call["method"] for call in control_plane.calls] == ["GET"]
+
+
+@pytest.mark.parametrize("mutation", ["env", "generation", "tree", "candidate_id"])
+def test_current_binding_rejects_registry_state_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    config, _ = _fixture(tmp_path)
+    snapshot = _registry_snapshot()
+    if mutation == "env":
+        snapshot["candidates"][0]["env_id"] = "denv-foreign01"
+    elif mutation == "generation":
+        snapshot["environments"][0]["resource_generation"] = 0
+    elif mutation == "tree":
+        snapshot["candidates"][0]["candidate_tree"] = OTHER_TREE
+    else:
+        snapshot["environments"][0]["current_candidate_id"] = OTHER_CANDIDATE_ID
+    monkeypatch.setattr(adapter, "_load_registry_snapshot", lambda: snapshot)
+
+    with pytest.raises(adapter.AdapterError):
+        adapter._load_sandbox_binding(config)
 
 
 def test_policy_candidate_mismatch_never_mutates_policy(tmp_path: Path) -> None:
@@ -929,7 +1233,7 @@ def test_combined_runtime_attestation_closed_schema_and_digest(
 
     digest = REAL_VALIDATE_RUNTIME_ATTESTATION(
         config,
-        candidate=adapter.CandidateBinding(SHA, TREE),
+        candidate=_candidate_binding(),
         now=now,
     )
 
@@ -951,7 +1255,7 @@ def test_combined_runtime_attestation_rejects_removed_live_receipt(
     with pytest.raises(adapter.AdapterError, match="unreadable"):
         REAL_VALIDATE_RUNTIME_ATTESTATION(
             config,
-            candidate=adapter.CandidateBinding(SHA, TREE),
+            candidate=_candidate_binding(),
             now=datetime(2026, 7, 28, 14, 0, tzinfo=UTC),
         )
 
@@ -1009,7 +1313,7 @@ def test_combined_runtime_attestation_rejects_stale_or_bad_receipt(
     with pytest.raises(adapter.AdapterError, match=message):
         REAL_VALIDATE_RUNTIME_ATTESTATION(
             config,
-            candidate=adapter.CandidateBinding(SHA, TREE),
+            candidate=_candidate_binding(),
             now=now,
         )
 
@@ -1428,7 +1732,7 @@ def test_checked_in_configs_cover_three_sandboxes_and_two_pools() -> None:
         assert config.runtime_attestation_root == Path(
             "/var/lib/loom-shared-capacity/runtime-attestations",
         )
-        policy = adapter._bootstrap_policy_body(config, candidate_sha=SHA)
+        policy = adapter._bootstrap_policy_body(config, candidate=_candidate_binding())
         actuator = policy["actuator_config"]
         assert policy["enabled"] is False
         assert policy["max_slots"] == 0

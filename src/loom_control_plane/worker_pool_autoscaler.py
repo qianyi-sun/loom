@@ -1280,6 +1280,7 @@ def _slurm_config_from_policy(
             actor_config.get("command_timeout_seconds") or 20.0,
         ),
         exclusive=_optional_bool(actor_config.get("exclusive"), default=True),
+        scontrol_path=str(actor_config.get("scontrol_path") or "/usr/bin/scontrol"),
         slurm_account=str(actor_config.get("slurm_account") or ""),
         slurm_qos=str(actor_config.get("qos_normal") or actor_config.get("slurm_qos") or ""),
         slurm_reservation=str(actor_config.get("slurm_reservation") or ""),
@@ -1298,7 +1299,16 @@ def _slurm_config_from_policy(
         container_memory_mib=int(actor_config.get("container_memory_mib") or 0),
         container_pids=int(actor_config.get("container_pids") or 0),
         job_pids_max=actor_config.get("job_pids_max", 0),
+        docker_cgroup_driver=str(
+            actor_config.get("docker_cgroup_driver") or "cgroupfs",
+        ),
+        slurm_cluster=str(actor_config.get("cluster") or ""),
+        env_id=str(actor_config.get("env_id") or ""),
+        resource_generation=actor_config.get("resource_generation", 0),
+        runtime_id=str(actor_config.get("runtime_id") or ""),
+        candidate_id=str(actor_config.get("candidate_id") or ""),
         candidate_sha=str(actor_config.get("candidate_sha") or ""),
+        candidate_tree=str(actor_config.get("candidate_tree") or ""),
         gpu_tres=str(actor_config.get("gpu_tres") or ""),
     )
     if config is None:
@@ -1319,6 +1329,17 @@ def _worker_env_from_slurm_config(
         "LOOM_WORKER_CANDIDATE_SHA": config.candidate_sha,
         "LOOM_WORKER_SLURM_ALLOCATED_GPUS": str(config.requested_gpus),
     }
+    if config.docker_cgroup_driver == "systemd":
+        env.update(
+            {
+                "LOOM_WORKER_DOCKER_CGROUP_DRIVER": "systemd",
+                "LOOM_WORKER_ENV_ID": config.env_id,
+                "LOOM_WORKER_RESOURCE_GENERATION": str(config.resource_generation),
+                "LOOM_WORKER_RUNTIME_ID": config.runtime_id,
+                "LOOM_WORKER_CANDIDATE_ID": config.candidate_id,
+                "LOOM_WORKER_CANDIDATE_TREE": config.candidate_tree,
+            },
+        )
     # #896: propagate per-container caps when configured (0/unset = unbounded).
     if config.container_cpus > 0:
         env["LOOM_WORKER_CONTAINER_CPUS"] = str(config.container_cpus)

@@ -115,6 +115,7 @@ _SETUP_FAILURE_TRUNCATION_MARKER = (
     "\n...[truncated setup diagnostic; preserved trailing output]...\n"
 )
 _SLURM_JOB_ID_RE = re.compile(r"^[1-9][0-9]*(?:_[0-9]+)?$")
+_SYSTEMD_JOB_SLICE_RE = re.compile(r"^loom-job-([1-9][0-9]*)-[0-9a-f]{40}\.slice$")
 
 logger = logging.getLogger(__name__)
 
@@ -261,6 +262,20 @@ def _worker_cgroup_parent(settings: WorkerSettings) -> str | None:
         return None
     if "\x00" in raw_parent or "\n" in raw_parent or "\r" in raw_parent:
         raise RuntimeError("worker cgroup parent is malformed")
+    slice_match = _SYSTEMD_JOB_SLICE_RE.fullmatch(raw_parent)
+    if slice_match is not None:
+        slurm_job_id = str(getattr(settings, "slurm_job_id", "")).strip()
+        if _SLURM_JOB_ID_RE.fullmatch(slurm_job_id) is None:
+            raise RuntimeError(
+                "systemd worker cgroup parent needs a valid Slurm job ID",
+            )
+        if slice_match.group(1) != slurm_job_id:
+            raise RuntimeError(
+                "systemd worker cgroup parent does not match the Slurm job ID",
+            )
+        return raw_parent
+    if raw_parent.endswith(".slice"):
+        raise RuntimeError("worker cgroup parent systemd slice is malformed")
     parent = PurePosixPath(raw_parent)
     if not parent.is_absolute() or parent == PurePosixPath("/"):
         raise RuntimeError("worker cgroup parent must be a non-root absolute path")

@@ -1183,16 +1183,30 @@ job scope, and verifies all of the following before Docker starts:
 - the job scope's actual `pids.max` exactly matches the controller-requested
   aggregate PID ceiling.
 
-The wrapper exports the validated path as `LOOM_WORKER_CGROUP_PARENT`, adds
+The wrapper exports the driver-compatible parent as
+`LOOM_WORKER_CGROUP_PARENT`, adds
 `deploy/docker-compose.remote-worker.cgroup-parent.yml`, and sets the
 controller-owned `LOOM_WORKER_REQUIRE_CGROUP_PARENT=1` marker. The overlay
-places the Compose worker beneath that parent. The worker validates the same
-binding before registration and passes it unchanged to Docker
-`HostConfig.CgroupParent` for every trial, verifier-only driver, and task
-sidecar. The worker requires a Slurm marker followed by `job_<SLURM_JOB_ID>`
-(or the base job component for an array task); a different job, a `job_*`
-outside Slurm, a marker without a job component, or an opaque scope fails
-startup. There is no fallback to Docker's default cgroup parent.
+places the Compose worker beneath that parent and passes it unchanged to
+Docker `HostConfig.CgroupParent` for every trial, verifier-only driver, and
+task sidecar. With Docker `cgroupfs`, this remains the absolute validated
+Slurm `job_<SLURM_JOB_ID>` path. With Docker `systemd`, the root guard instead
+publishes a deterministic `loom-job-<job-id>-<identity>.slice` and a
+root-owned canonical receipt. The identity includes the Slurm start time,
+node/account, registry environment and generation, runtime, candidate ID,
+SHA, and tree; the receipt binds the exact finite Slurm CPU, memory, swap,
+PID, and cpuset ceilings and the unit digest. The batch helper independently
+rereads those Slurm limits before returning the slice name. A missing,
+conflicting, stale, over-permissive, or foreign unit fails startup. There is
+no fallback to Docker's default cgroup parent.
+
+The guard never moves an existing process and does not start the slice;
+Docker creates its own scope below the published slice. Restart recovery
+reuses only byte-identical unit and receipt data. Expiry cleanup removes only
+an exact validated slice with no process and no `.scope`; live or ambiguous
+residue is preserved for inspection. Current systemd-profile convergence
+reloads only the guard plus Slurm configuration and never restarts Docker,
+`slurmd`, or `slurmctld`, so unrelated jobs and containers remain unchanged.
 
 Every non-exclusive actuator config must also provide `job_pids_max` as a
 positive JSON integer. It must be at least `container_pids` multiplied by the
@@ -1280,8 +1294,9 @@ Record only the bounded fields allowed by the schema.
 The snapshot must bind one full candidate SHA to the exact sandbox, node,
 Slurm job, and Compose project. It must include exactly the worker, trial,
 verifier, and sidecar containers; prove that every container is a strict child
-of the finite Slurm job cgroup; and account conservatively for the sum of all
-CPU, memory, PID, and device caps. It also requires:
+of either the finite Slurm job cgroup (`cgroupfs`) or its exact receipt-bound,
+equal-or-stricter systemd mirror; and account conservatively for the sum of
+all CPU, memory, PID, and device caps. It also requires:
 
 - allocated-device usability and denial of an unallocated device;
 - reviewed node CPU, memory, PID, concurrency, Kubernetes, MinIO, and Longhorn

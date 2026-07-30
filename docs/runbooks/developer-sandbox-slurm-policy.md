@@ -63,23 +63,43 @@ the exact merged candidate:
 2. CPU, RAM, swap, and device controllers are constrained and delegated;
    opted-in Loom jobs also carry the reviewed finite PID ceiling in the exact
    `loom-cgroup-v1:pids=<N>` Slurm comment;
-3. the Docker daemon selected by the Loom worker uses the `cgroupfs` driver so
-   an absolute Slurm job-cgroup path can be passed as `CgroupParent`;
-4. the three child accounts have equal fair-share under the aggregate
-   `loom-dev` budget, with no small per-developer resource ceiling;
+3. the Docker daemon selected by the Loom worker uses the checked-in driver.
+   Current OLDLAB and GB10 profiles preserve the already-live `systemd`
+   driver. The root guard publishes one allocation-bound systemd slice whose
+   CPU, memory, swap, PID, and cpuset ceilings are equal to or stricter than
+   the exact Slurm job cgroup, and Docker receives that slice name as
+   `CgroupParent`. A legacy `cgroupfs` profile may instead pass the validated
+   absolute Slurm job-cgroup path;
+4. every registry-derived child account has equal fair-share under the
+   aggregate `loom-dev` budget, with no small per-developer resource ceiling;
 5. every worker, trial, verifier, and sidecar is a strict child of the finite
-   Slurm job cgroup and the aggregate caps stay within its allocation; and
+   driver-compatible parent: the Slurm job cgroup for `cgroupfs`, or the exact
+   equal-or-stricter allocation slice for `systemd`; the aggregate caps stay
+   within the Slurm allocation; and
 6. the candidate-bound acceptance artifact passes
    `scripts/ops/nonexclusive_slurm_acceptance.py verify`.
 
-The host Docker cgroup driver cannot be changed while jobs, containers, or GPU
-compute processes are active. The supported host converger takes a
-candidate-owned Slurm drain for one node, waits for all three activity classes
-to clear, applies the checked-in profile, restarts Docker and `slurmd`, and
-reads back the effective settings before moving to the next node. A foreign
-DRAIN/DOWN is preserved and blocks the transaction. The controller is changed
-last. Do not edit `/etc/slurm`, `/etc/docker/daemon.json`, or SlurmDB
-associations by hand.
+The current systemd-driver convergence is non-disruptive: it preserves
+`/etc/docker/daemon.json`, reloads the root guard, asks Slurm to reconfigure,
+and never restarts Docker, `slurmd`, or `slurmctld`; it does not stop, kill, or
+cancel any peer workload. Changing a legacy host's Docker cgroup driver
+remains a separate disruptive migration. That legacy path must take a
+candidate-owned Slurm drain, wait for jobs, containers, and GPU processes to
+clear, and read back the effective settings before moving to the next node.
+A foreign DRAIN/DOWN is preserved and blocks that migration. Do not edit
+`/etc/slurm`, `/etc/docker/daemon.json`, or SlurmDB associations by hand.
+
+For the systemd path the slice name binds cluster, node, Slurm job ID and
+start time, registry environment ID and resource generation, runtime and
+candidate identities, SHA, and tree. The guard writes the unit under
+`/run/systemd/system` plus a root-owned canonical receipt under
+`/run/loom-developer-sandbox-slurm-policy/systemd-slices`. The batch helper
+accepts only that exact unit/receipt pair after independently rereading the
+Slurm cgroup limits. Job-ID reuse therefore produces a different slice. The
+guard removes only an expired, exactly validated, empty unit; any process,
+Docker scope, malformed receipt, conflicting bytes, or foreign same-prefix
+unit is preserved and fails closed without `systemctl stop`, `kill`, or
+`scancel`.
 
 Both target clusters currently run Slurm 23.11.4. In that release, the root
 Prolog runs outside cgroups and runs before `PrologFlags=Contain` creates the

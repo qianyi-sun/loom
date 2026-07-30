@@ -107,6 +107,39 @@ def test_required_worker_cgroup_parent_accepts_slurm_scope() -> None:
     assert ml._worker_cgroup_parent(settings) == ("/system.slice/slurmstepd.scope/job_123")  # type: ignore[arg-type]
 
 
+def test_required_worker_cgroup_parent_accepts_job_bound_systemd_slice() -> None:
+    settings = _FakeSettings()
+    settings.require_cgroup_parent = True
+    settings.cgroup_parent = f"loom-job-123-{'a' * 40}.slice"
+    settings.slurm_job_id = "123"
+
+    assert ml._worker_cgroup_parent(settings) == settings.cgroup_parent  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("parent", "job_id"),
+    [
+        (f"loom-job-456-{'a' * 40}.slice", "123"),
+        (f"loom-job-123-{'A' * 40}.slice", "123"),
+        (f"/loom-job-123-{'a' * 40}.slice", "123"),
+        ("loom-job-123.slice", "123"),
+        ("loom-job-123-" + "a" * 40 + ".slice/child", "123"),
+        (f"loom-job-123-{'a' * 40}.slice", ""),
+    ],
+)
+def test_worker_cgroup_parent_rejects_unbound_or_malformed_systemd_slice(
+    parent: str,
+    job_id: str,
+) -> None:
+    settings = _FakeSettings()
+    settings.require_cgroup_parent = True
+    settings.cgroup_parent = parent
+    settings.slurm_job_id = job_id
+
+    with pytest.raises(RuntimeError, match=r"cgroup parent|Slurm job ID|systemd slice"):
+        ml._worker_cgroup_parent(settings)  # type: ignore[arg-type]
+
+
 def test_required_worker_cgroup_parent_rejects_missing_slurm_job_id() -> None:
     settings = _FakeSettings()
     settings.require_cgroup_parent = True

@@ -7,6 +7,7 @@ import json
 import os
 import socket
 import subprocess
+from collections.abc import Callable, Set
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -156,8 +157,15 @@ def _import_request(
     }
 
 
-def _new_registry(tmp_path: Path) -> registry.DeveloperEnvironmentRegistry:
-    return registry.DeveloperEnvironmentRegistry(tmp_path / "registry.sqlite3")
+def _new_registry(
+    tmp_path: Path,
+    *,
+    port_inventory_collector: Callable[[], Set[int]] | None = None,
+) -> registry.DeveloperEnvironmentRegistry:
+    return registry.DeveloperEnvironmentRegistry(
+        tmp_path / "registry.sqlite3",
+        port_inventory_collector=port_inventory_collector,
+    )
 
 
 class _FakeDeployer:
@@ -889,6 +897,118 @@ def test_candidate_import_and_begin_deploy_are_durable_idempotent_transactions(
     assert first["result"]["deployed"] is False
     assert first["result"]["mutation_started"] is False
     assert len(restarted.snapshot()["deployments"]) == 1
+
+
+def test_begin_deploy_port_race_persists_refresh_then_exact_retry_succeeds(
+    tmp_path: Path,
+) -> None:
+    listeners: set[int] = set()
+    registry_authority = _new_registry(
+        tmp_path,
+        port_inventory_collector=lambda: frozenset(listeners),
+    )
+    environment = _call(
+        registry_authority,
+        _register_request(),
+        tmp_path,
+    )["result"]
+    candidate_bundle = _bundle(tmp_path)
+    descriptor = os.open(candidate_bundle[0], os.O_RDONLY)
+    try:
+        imported = _call(
+            registry_authority,
+            _import_request(environment, candidate_bundle),
+            tmp_path,
+            descriptors=[descriptor],
+        )["result"]
+    finally:
+        os.close(descriptor)
+    request = {
+        "schema_version": 1,
+        "kind": authority.BEGIN_DEPLOY_KIND,
+        "idempotency_key": "deployment-port-race-0001",
+        "env_id": environment["env_id"],
+        "candidate_id": imported["candidate_id"],
+        "expected_resource_generation": environment["resource_generation"],
+    }
+    listeners.add(environment["ports"]["control_plane"])
+
+    refresh = _call(registry_authority, request, tmp_path)
+    rebound = registry_authority.lookup(environment["env_id"])
+
+    assert refresh["status"] == "failed"
+    assert rebound.resource_generation == environment["resource_generation"] + 1
+    assert rebound.ports != environment["ports"]
+    assert registry_authority.snapshot()["deployments"] == []
+
+    before_stale = registry_authority.snapshot()
+    stale = _call(registry_authority, request, tmp_path)
+    assert stale["status"] == "failed"
+    assert registry_authority.snapshot() == before_stale
+
+    retry = _call(
+        registry_authority,
+        {
+            **request,
+            "idempotency_key": "deployment-port-race-retry",
+            "expected_resource_generation": rebound.resource_generation,
+        },
+        tmp_path,
+    )
+    assert retry["status"] == "succeeded"
+    assert retry["result"]["expected_resource_generation"] == rebound.resource_generation
+
+
+def test_combined_create_reloads_ports_after_predeployment_race(
+    tmp_path: Path,
+) -> None:
+    inventories = iter((frozenset(), frozenset({23_003})))
+    registry_authority = _new_registry(
+        tmp_path,
+        port_inventory_collector=lambda: next(inventories),
+    )
+    bundle = _bundle(tmp_path)
+    request = _import_request(
+        {"env_id": "not-sent"},
+        bundle,
+        key="combined-port-race-0001",
+    )
+    request.pop("env_id")
+    request["kind"] = authority.CREATE_KIND
+    request["display_name"] = "Port Race"
+    deployer = _FakeDeployer()
+    descriptor = os.open(bundle[0], os.O_RDONLY)
+    try:
+        response = _call(
+            registry_authority,
+            request,
+            tmp_path,
+            descriptors=[descriptor],
+            deployer=deployer,
+        )
+    finally:
+        os.close(descriptor)
+
+    environment = registry_authority.list_environments()[0]
+    assert response["status"] == "succeeded"
+    assert environment.resource_generation == 2
+    assert min(environment.ports.values()) == 23_016
+    assert deployer.calls == [
+        (
+            "converge",
+            {
+                "env_id": environment.env_id,
+                "principal_id": environment.principal_id,
+                "candidate_id": response["result"]["candidate_id"],
+                "idempotency_key": authority._internal_idempotency_key(
+                    principal_id=environment.principal_id,
+                    public_key=request["idempotency_key"],
+                    phase="deploy",
+                ),
+                "operation": "create",
+            },
+        ),
+    ]
 
 
 def test_candidate_and_environment_cannot_cross_principals(
