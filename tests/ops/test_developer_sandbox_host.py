@@ -2949,6 +2949,146 @@ def test_staging_allocation_submit_recovers_without_duplicate_sbatch(
     assert f"--comment=loom-cgroup-v1:pids=65536:r={request_id}" in last_sbatch
 
 
+def test_staging_allocation_submit_replays_completed_wal_without_slurm(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A durable submitted WAL must return without squeue/sbatch/sacct."""
+    config = host.load_staging_allocation_config(
+        Path("deploy/developer-sandboxes/staging-external-slurm-authority.toml"),
+    )
+    request_id = "7" * 64
+    candidate_tree = "b" * 40
+    candidate_set = "c" * 64
+    wal_root = tmp_path / "wal"
+    wal_root.mkdir(parents=True)
+    job_name = host._staging_allocation_job_name(
+        candidate_sha=SHA,
+        node="trt-gb10-8",
+        candidate_set_sha256=candidate_set,
+        resource_generation=7,
+        request_id=request_id,
+    )
+    wrapped = " ".join(
+        (
+            "/usr/bin/srun",
+            "--nodes=1",
+            "--ntasks=1",
+            "--nodelist=trt-gb10-8",
+            str(host.INSTALLED_PROGRAM),
+            "staging-allocation-worker",
+            "--candidate-sha",
+            SHA,
+            "--candidate-tree",
+            candidate_tree,
+            "--request-id",
+            request_id,
+        )
+    )
+    result = {
+        "schema_version": 1,
+        "kind": "staging_external_slurm_allocation_submission",
+        "request_id": request_id,
+        "candidate_sha": SHA,
+        "candidate_tree": candidate_tree,
+        "job_id": "27182",
+        "job_name": job_name,
+        "candidate_set_sha256": candidate_set,
+        "resource_generation": 7,
+        "docker_cgroup_driver": "systemd",
+        "node": "trt-gb10-8",
+        "cluster": "trt-gb10",
+        "account": "loom-staging",
+        "qos": "loom-staging",
+        "user": "loom-staging-worker",
+        "uid": 31024,
+        "gid": 31024,
+        "service_identity": {},
+        "mount": {},
+        "submitted_at": "2026-07-30T00:00:00Z",
+        "status": "submitted",
+    }
+    wal = {
+        "schema_version": 1,
+        "kind": "staging_external_slurm_submission_wal",
+        "candidate_sha": SHA,
+        "candidate_tree": candidate_tree,
+        "request_id": request_id,
+        "requested_node": "trt-gb10-8",
+        "candidate_set_sha256": candidate_set,
+        "resource_generation": 7,
+        "job_name": job_name,
+        "cluster": config.cluster,
+        "partition": config.partition,
+        "account": config.slurm_account,
+        "qos": config.qos,
+        "user": config.batch_user,
+        "wrapped": wrapped,
+        "phase": "submitted",
+        "prepared_at": "2026-07-30T00:00:00Z",
+        "result": result,
+        "result_sha256": hashlib.sha256(host._staging_submission_wal_bytes(result)).hexdigest(),
+    }
+    unsigned = {key: value for key, value in wal.items() if key != "payload_sha256"}
+    wal["payload_sha256"] = hashlib.sha256(host._staging_submission_wal_bytes(unsigned)).hexdigest()
+    (wal_root / f"{request_id}.json").write_bytes(host._staging_submission_wal_bytes(wal))
+
+    def fake_run(argv: tuple[str, ...] | list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        command = tuple(argv)
+        if command[:2] == ("docker", "info"):
+            return subprocess.CompletedProcess(command, 0, "systemd\n", "")
+        pytest.fail(f"completed WAL replay must not contact Slurm: {command}")
+
+    monkeypatch.setattr(host, "STAGING_SUBMISSION_WAL_ROOT", wal_root)
+    monkeypatch.setattr(
+        host, "_ensure_root_private_directory", lambda path: path.mkdir(parents=True, exist_ok=True)
+    )
+    monkeypatch.setattr(host, "_read_combined_receipt_bytes", lambda path: path.read_bytes())
+    monkeypatch.setattr(host.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(host, "_staging_allocation_node", lambda _config: "trt-gb10-1")
+    monkeypatch.setattr(host, "_staging_identity_snapshot", lambda _config: {})
+    monkeypatch.setattr(host, "_converge_staging_shared_namespace", lambda _config: {})
+    monkeypatch.setattr(
+        host,
+        "_staging_candidate_binding",
+        lambda *_args, **_kwargs: {"repository": {"path": "/candidate"}},
+    )
+    monkeypatch.setattr(
+        host,
+        "_staging_slurm_profile",
+        lambda *_args: SimpleNamespace(docker_cgroup_driver="systemd"),
+    )
+    monkeypatch.setattr(
+        host,
+        "_staging_candidate_set_identity",
+        lambda **_kwargs: ({"resource_generation": 7}, candidate_set),
+    )
+    monkeypatch.setattr(
+        host,
+        "_staging_slurm_live_config",
+        lambda _config: {
+            "cluster": "trt-gb10",
+            "account": "loom-staging",
+            "qos": "loom-staging",
+        },
+    )
+    monkeypatch.setattr(
+        host,
+        "_staging_prepare_result_directory",
+        lambda *_args, **_kwargs: tmp_path,
+    )
+    monkeypatch.setattr(host, "_run", fake_run)
+
+    replayed = host._staging_allocation_submit_locked(
+        config,
+        candidate_sha=SHA,
+        candidate_tree=candidate_tree,
+        request_id=request_id,
+        requested_node="trt-gb10-8",
+    )
+    assert replayed == result
+
+
 def _fixed_staging_binding() -> dict[str, object]:
     return host.slurm_policy.staging_guard_binding_payload(
         candidate_sha=SHA,
