@@ -354,7 +354,7 @@ spec:
     assert audit_boundary(yaml_text, require_network_policies=False) == []
 
 
-@pytest.mark.parametrize("prefix", ["dev", "prod"])
+@pytest.mark.parametrize("prefix", ["dev", "prod", "staging"])
 def test_audit_accepts_exact_canonical_prefixed_ingress_routes(prefix: str) -> None:
     api_path = f"/(?-i:{prefix})/(api/v1((/[^/%]+)*/?))$"
     spa_path = f"/(?-i:{prefix})/(([^/%]+/)*[^/%]+/?)?$"
