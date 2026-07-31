@@ -261,13 +261,15 @@ Attach these to the release issue or release PR:
 - For the final #49/#129 full/max-slot three-cluster canary, use
   [`docs/runbooks/full-max-slot-canary-runbook.md`](full-max-slot-canary-runbook.md).
   The canary must wait for a clean staging anchor, completed #190 targeted
-  durability validation, and an explicit coordinator `GO`. The batch must use
-  repeated `--required-worker-pool` flags for `oldlab` and
-  `gb10`; terminal evidence must include `runs.worker_pool_coverage`
-  and `runs.claimed_without_started` from the smoke gate. Staging
-  clusters run with `k8s_worker.enabled=false` (#383) so x86_64
-  coverage is delivered by the Slurm-managed `oldlab` pool, not by an
-  in-cluster `k8s-worker` Deployment.
+  durability validation, and an explicit coordinator `GO`. Per #1109, the
+  user eval workload batch must not carry `--required-worker-pool`; submit
+  pool coverage on a separate `loom admin batches submit-on-behalf` canary
+  with repeated `--required-worker-pool` flags for `oldlab` and `gb10`.
+  Terminal evidence must include `runs.worker_pool_coverage` (from the
+  coverage canary batch) and `runs.claimed_without_started` from the smoke
+  gate. Staging clusters run with `k8s_worker.enabled=false` (#383) so
+  x86_64 coverage is delivered by the Slurm-managed `oldlab` pool, not by
+  an in-cluster `k8s-worker` Deployment.
 
 The broker-owned rollout generates the release manifest before protected
 apply. It is the machine-readable expected-state anchor for image/render
@@ -470,19 +472,23 @@ the first GB10/ARM64 canary also creates a worker-local compatibility base
 image on the ARM64 Docker daemon before building the task image, because the
 upstream tag is amd64-only.
 Do not rely on theoretical max-slot saturation to prove worker-pool coverage.
-For v1.0's GB10-only staging gate, require `--required-worker-pool gb10`.
-For v1.1/full-cluster mixed-pool evidence, create the release/acceptance batch
-with repeated `--required-worker-pool` flags, for example
+Per #1109, user `loom eval batch create` must not pass
+`--required-worker-pool` (N tasks → exactly N trials). Worker-pool coverage
+is operator-only via `loom admin batches submit-on-behalf` (or rollout
+admin-on-behalf smoke) on a **separate** canary batch.
+For v1.0's GB10-only staging gate, require `--required-worker-pool gb10` on
+that admin canary. For v1.1/full-cluster mixed-pool evidence, repeat
+`--required-worker-pool` flags on the admin canary, for example
 `--required-worker-pool oldlab --required-worker-pool gb10`. On clusters
 that intentionally host a dedicated k8s worker node pool, add
 `--required-worker-pool k8s-worker` as well. The service adds one
-pool-pinned coverage trial per required pool while leaving the normal portable
-trials portable. When a target pool's CPU architecture is known from active
-workers or autoscaler policy, coverage uses a selected task compatible with that
+pool-pinned coverage trial per required pool on that admin batch only.
+When a target pool's CPU architecture is known from active workers or
+autoscaler policy, coverage uses a selected task compatible with that
 architecture; otherwise fanout records `required_worker_pool_incompatible`
 instead of submitting a permanently unclaimable coverage trial. The
 `scripts/staging_smoke_gate.py --required-worker-pool` check must later
-prove each required pool has terminal batch evidence.
+prove each required pool has terminal evidence on the **coverage** batch.
 
 Run the benchmark reward gate after catalog provisioning and again after the
 supported-benchmark acceptance batch or batches reach a terminal state:
@@ -723,9 +729,9 @@ The staging launch gate passes only when:
 - the smoke report's final `service.no_oom_restarts` row is `PASS` after all
   HTTP/API route probes for the deployed `loom-service` pods;
 - the smoke report's `runs.worker_pool_coverage` row is `PASS` for any
-  release-required worker pool such as `oldlab`; create the source batch with
-  matching `loom eval batch create --required-worker-pool ...` flags instead
-  of depending on max-slot pressure to assign work to the pool;
+  release-required worker pool such as `oldlab`; create that coverage evidence
+  with `loom admin batches submit-on-behalf --required-worker-pool ...` on a
+  separate canary batch (#1109), not via user `loom eval batch create`;
 - any GB10/opencode timeout or reclaim evidence is explicit
   `agent_timeout` with stale-running/debug-evidence fields, and no batch is left
   indefinitely `running` because a child trial exceeded its watchdog deadline;

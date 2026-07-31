@@ -27,7 +27,17 @@ def test_operator_runbook_staging_batch_smoke_matches_cli_contract() -> None:
     assert "--provider mz_tn_canada_qianyi" in runbook
     assert "--model glm-5.1-thinking" in runbook
     assert "--agent opencode" in runbook
+    # #1109: coverage stays on admin on-behalf, not user eval create.
+    assert "loom admin batches submit-on-behalf" in runbook
     assert "--required-worker-pool gb10" in runbook
+    assert (
+        "loom eval batch create \\\n"
+        "     --name-suffix oracle-smoke \\\n"
+        "     --task-filter '{\"task_ids\":[\"loom-smoke/gb10-oracle-hello-world\"]}' \\\n"
+        "     --agent oracle \\\n"
+        "     --n-per-task 1 \\\n"
+        "     --required-worker-pool gb10"
+    ) not in runbook
 
 
 def test_operator_runbook_staging_gate_matches_current_launch_scope() -> None:

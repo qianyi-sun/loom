@@ -5400,8 +5400,13 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
     trajectory uploads start. The CLI commands below keep the no-model canary
     separate from the provider-backed path:
    ```bash
+   # #1109: pool coverage is operator-only. Use admin on-behalf for
+   # release/GB10 coverage canaries (not loom eval batch create).
    # No-model oracle canary; no provider/model flags are needed.
-   loom eval batch create \
+   loom admin batches submit-on-behalf \
+     --represented-username <active-user> \
+     --team-id <agentic-rl-team-id> \
+     --admin-actor <operator-name> \
      --name-suffix oracle-smoke \
      --task-filter '{"task_ids":["loom-smoke/gb10-oracle-hello-world"]}' \
      --agent oracle \
@@ -5412,8 +5417,10 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    # provider smoke because it exercises codex + YibuAPI OpenAI-compatible.
    # Platform admins must pass the provider owner's team id explicitly;
    # provider-name lookup is scoped to that team.
-   loom eval batch create \
+   loom admin batches submit-on-behalf \
+     --represented-username <active-user> \
      --team-id <agentic-rl-team-id> \
+     --admin-actor <operator-name> \
      --name-suffix opencode-yibuapi-smoke \
      --task-filter '{"task_ids":["source-useful-frontier-5003/shard003__software_development__buildsqliteissuetrackercli"]}' \
      --provider mz_tn_canada_qianyi \
@@ -5428,25 +5435,18 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    For mixed-pool release evidence, repeat `--required-worker-pool` for every
    pool that must produce terminal evidence, for example `oldlab`,
    `k8s-worker`, and `gb10`. The service adds one extra pool-pinned
-   coverage trial for each requested pool while leaving the normal batch trials
-   portable. When a target pool's CPU architecture is known from active workers
-   or autoscaler policy, the coverage trial is selected from tasks compatible
-   with that architecture; if the selected task slate cannot satisfy the pool,
-   fanout records `required_worker_pool_incompatible` instead of submitting an
-   unclaimable queued trial. Do not depend on theoretical max-slot saturation
-   alone to force OLDLAB/k8s/GB10 participation; the smoke gate below checks the
+   coverage trial for each requested pool on that **admin canary batch**
+   only (#1109). User `loom eval batch create` must not pass this flag
+   (N tasks → exactly N trials). When a target pool's CPU architecture is
+   known from active workers or autoscaler policy, the coverage trial is
+   selected from tasks compatible with that architecture; if the selected
+   task slate cannot satisfy the pool, fanout records
+   `required_worker_pool_incompatible` instead of submitting an unclaimable
+   queued trial. Do not depend on theoretical max-slot saturation alone to
+   force OLDLAB/k8s/GB10 participation; the smoke gate below checks the
    resulting terminal pool coverage explicitly.
-   `loom eval batch create` validates local built-in agents first, but falls
-   back to the deployed `/api/v1/agents` catalog when local `loom-launcher`
-   adapters are absent. A fresh rollout/operator venv can therefore submit a
-   service-mode `codex` batch as long as the target staging service catalog
-   lists `codex` as ready.
-   If the canary must represent a named active user/team but the user's
-   browser session or user-owned API token is unavailable, use the audited
-   `loom admin batches submit-on-behalf` flow above instead of minting a
-   legacy team token or writing directly to the database. Preserve the returned
-   batch id and the `batch.submit_on_behalf` audit event in the evidence
-   bundle.
+   Preserve the returned batch id and the `batch.submit_on_behalf` audit
+   event in the evidence bundle.
    Re-run `batch show` until `state` reaches a terminal value.
 11. **Live progress visibility.** While the batch runs, the SPA Monitor page
    shows planned trials and current state transitions, and
@@ -5790,7 +5790,6 @@ loom eval batch create \
   --task-filter "@$COMPAT_GATE_DIR/corrected-task-filter.json" \
   --n-per-task 1 \
   --name "compat-verifier-gate-${CORRECTED_BENCHMARK_ID}" \
-  --required-worker-pool gb10 \
   | tee "$COMPAT_GATE_DIR/canaries/corrected-batch-create.txt"
 
 loom eval batch show "$CORRECTED_BATCH_ID" --format json \

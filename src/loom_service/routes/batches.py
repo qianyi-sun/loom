@@ -206,10 +206,6 @@ class _CreateBatch(BaseModel):
     # may omit this or pass their own team id; cross-team values require
     # admin scope and are used for provider validation + Batch.team_id.
     team_id: UUID | None = None
-    # Issue #188: operator/release canaries can require deterministic
-    # terminal coverage from named worker pools. The batch runner adds
-    # one extra pool-pinned coverage trial per normalized entry.
-    required_worker_pools: list[str] = Field(default_factory=list, max_length=20)
     budget_usd: float | None = Field(default=None, ge=0)
     budget_policy: Literal["none", "soft", "hard"] = "none"
     budget_confirmed: bool = False
@@ -218,6 +214,10 @@ class _CreateBatch(BaseModel):
 class _AdminCreateBatchOnBehalf(_CreateBatch):
     represented_user_id: UUID | None = None
     represented_username: str | None = Field(default=None, max_length=64)
+    # Issue #188 / #1109: operator/release canaries only. User
+    # POST /batches must not admit this field — coverage trials belong
+    # on a separate admin on-behalf batch identity.
+    required_worker_pools: list[str] = Field(default_factory=list, max_length=20)
 
 
 class _RerunFailedBatch(BaseModel):
@@ -789,7 +789,7 @@ async def _create_batch_record(
     catalog = known_names()
     trial_config = _sanitize_trial_config(payload.trial_config)
     required_worker_pools = _normalize_required_worker_pools(
-        payload.required_worker_pools,
+        getattr(payload, "required_worker_pools", []) or [],
     )
     _reject_if_k8s_worker_unavailable(request, required_worker_pools)
 
@@ -1215,6 +1215,27 @@ async def _create_batch_record(
     }
 
 
+def _reject_required_worker_pools_on_user_batch(raw_body: object) -> None:
+    """#1109: coverage pools are operator-only (admin on-behalf)."""
+    if not isinstance(raw_body, dict):
+        return
+    pools = raw_body.get("required_worker_pools")
+    if pools is None:
+        return
+    if pools == [] or pools == ():
+        return
+    _reject_submission(
+        reason="required_worker_pools_not_allowed_on_user_batches",
+        status_code=400,
+        detail=(
+            "required_worker_pools is operator-only (#1109). Use "
+            "POST /api/v1/admin/batches/on-behalf for release coverage "
+            "canaries. User evaluation batches must create exactly N "
+            "trials for N tasks with no injected pool-coverage trials."
+        ),
+    )
+
+
 @router.post("/batches", status_code=201)
 async def create_batch(
     request: Request,
@@ -1228,6 +1249,11 @@ async def create_batch(
     except HTTPException:
         SUBMISSION_REJECTS_TOTAL.labels(reason="permission").inc()
         raise
+    try:
+        raw_body = await request.json()
+    except Exception:
+        raw_body = None
+    _reject_required_worker_pools_on_user_batch(raw_body)
     response = await _create_batch_record(
         request,
         s,

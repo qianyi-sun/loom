@@ -1837,9 +1837,11 @@ class Batch(Base):
         server_default=text("'[]'::jsonb"),
         default=list,
     )
-    # Issue #188: release canaries can request deterministic terminal
-    # coverage on named worker pools. The batch runner emits one extra
-    # pool-pinned coverage trial per entry; ordinary batches keep [].
+    # Issue #188 / #1109: operator/admin canaries can request
+    # deterministic terminal coverage on named worker pools. The batch
+    # runner emits one extra pool-pinned coverage trial per entry.
+    # User POST /batches no longer admits this field; ordinary user
+    # eval batches keep [].
     required_worker_pools: Mapped[list[str]] = mapped_column(
         JSONB,
         nullable=False,

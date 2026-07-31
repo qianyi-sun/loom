@@ -38,13 +38,15 @@ Stop before submitting any workload unless every item in this section is true.
 4. #271 rollout/startup stability validation has completed on the clean
    anchor. The rollout evidence must not show control-plane, service, worker,
    Postgres, or DNS dependency crash loops.
-5. #188 pool coverage is configured in the canary submission with repeated
+5. #188 pool coverage is configured on a **separate** admin on-behalf
+   canary (#1109) with repeated
    `--required-worker-pool oldlab --required-worker-pool gb10`. The
    selected task slate must include at least one task compatible with each
    required pool's CPU architecture when that architecture is known from active
    workers or autoscaler policy; fanout records
    `required_worker_pool_incompatible` rather than submitting an unclaimable
-   coverage trial when it cannot satisfy a pool.
+   coverage trial when it cannot satisfy a pool. The user eval workload batch
+   must not carry `required_worker_pools`.
 6. #193 coverage expectations are explicit. The current canary covers the
    release-gate observable `claimed_without_started=0` through batch debug
    evidence and `scripts/staging_smoke_gate.py`. It does not replace a
@@ -270,15 +272,18 @@ Stop if either `whoami` response is not a non-admin user-owned API token, if
 The workload must be selected by the coordinator before GO. Preserve the task
 filter as an artifact so later reviewers can recompute the expected count.
 
-Use one of these shapes:
+Use one of these shapes for the **user eval workload** batch (#1109: no
+pool-coverage injection into the user batch):
 
 - Full100 release shape: SkillLearnBench full100, `n_per_task=2`, expected
-  normal trials `200`, plus three #188 coverage trials.
+  trials `200`.
 - Theoretical max-slot shape: 28 coordinator-selected portable tasks,
-  `n_per_task=7`, expected normal trials `196`, plus three #188 coverage
-  trials. If the target is an exact aggregate-slot count, account for the
-  three additional #188 coverage trials when choosing task count and
-  `n_per_task`.
+  `n_per_task=7`, expected trials `196`.
+
+Worker-pool coverage (#188) is a **separate** operator/admin canary batch
+submitted via `loom admin batches submit-on-behalf --required-worker-pool ...`
+so release evidence has its own batch identity and does not change the user
+eval expected count.
 
 Create exactly one task-filter artifact.
 
@@ -306,7 +311,9 @@ jq . "$CANARY_DIR/04-submit/task-filter.json" \
 Do not synthesize the 28-task filter during execution. It must be the exact
 coordinator-approved portable task list for the clean anchor.
 
-Submit only after explicit GO:
+Submit only after explicit GO.
+
+### User eval workload (exactly N trials)
 
 ```bash
 export N_PER_TASK=<2-for-full100-or-7-for-28-task-max-slot>
@@ -321,8 +328,6 @@ loom eval batch create \
   --n-per-task "$N_PER_TASK" \
   --backend docker \
   --storage-preflight-evidence "$CANARY_DIR/01-clean-anchor/minio-storage-preflight-$IMAGE_TAG.json" \
-  --required-worker-pool oldlab \
-  --required-worker-pool gb10 \
   | tee "$CANARY_DIR/04-submit/batch-create.txt"
 ```
 
@@ -332,7 +337,7 @@ space or provision backing storage before submission. Only use
 recorded in `$CANARY_DIR/07-summary`; the override means the operator accepts
 the object-store capacity risk for this run.
 
-Immediately record the batch id and expected count:
+Immediately record the user workload batch id and expected count:
 
 ```bash
 export CANARY_BATCH_ID=<batch-uuid-from-create-output>
@@ -345,11 +350,46 @@ jq '{id, state, expected_trial_count, required_worker_pools}' \
   | tee "$CANARY_DIR/04-submit/batch-created-summary.json"
 ```
 
-Stop if `required_worker_pools` is not exactly
-`["oldlab","gb10"]` or if the expected count does not include the two
-#188 coverage trials. During the watch loop, also stop if batch debug or
-detail output records a `required_worker_pool_incompatible` fanout error; the
-task slate is not valid release evidence for all required pools.
+Stop if `required_worker_pools` is not `[]` or if `expected_trial_count`
+is not exactly the normal workload count (no #188 coverage addend).
+
+### Separate operator pool-coverage canary (#1109)
+
+Submit pool coverage on its own admin on-behalf batch so release evidence
+does not inflate the user eval batch:
+
+```bash
+loom admin batches submit-on-behalf \
+  --represented-username "$SMOKE_ON_BEHALF_USERNAME" \
+  --team-id "$AGENTIC_RL_TEAM_ID" \
+  --admin-actor "$ADMIN_ACTOR" \
+  --name "full-max-slot-coverage-$RUN_ID" \
+  --task-filter '{"task_ids":["loom-smoke/gb10-oracle-hello-world"]}' \
+  --agent oracle \
+  --n-per-task 1 \
+  --backend docker \
+  --required-worker-pool oldlab \
+  --required-worker-pool gb10 \
+  | tee "$CANARY_DIR/04-submit/coverage-batch-create.txt"
+
+export COVERAGE_BATCH_ID=<batch-uuid-from-coverage-create-output>
+
+loom eval batch show "$COVERAGE_BATCH_ID" --format json \
+  | tee "$CANARY_DIR/04-submit/coverage-batch-created.json"
+
+jq '{id, state, expected_trial_count, required_worker_pools}' \
+  "$CANARY_DIR/04-submit/coverage-batch-created.json" \
+  | tee "$CANARY_DIR/04-submit/coverage-batch-created-summary.json"
+```
+
+Stop if coverage `required_worker_pools` is not exactly
+`["oldlab","gb10"]` or if the coverage expected count does not include the
+two #188 coverage trials (1 task + 2 pools → expected 3). During the watch
+loop, also stop if batch debug or detail output records a
+`required_worker_pool_incompatible` fanout error; the task slate is not
+valid release evidence for all required pools. Point
+`scripts/staging_smoke_gate.py --batch-id` at `$COVERAGE_BATCH_ID` for
+`runs.worker_pool_coverage` checks.
 
 ## Watch Loop
 
