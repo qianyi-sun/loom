@@ -1127,12 +1127,12 @@ description = "Human-readable public SPA environment label shown in the UI chrom
 [render_config.frontend_route_path]
 python_type = "str"
 default     = ""
-description = "Public SPA path prefix on ingress_host. Empty means host root; production uses /prod and staging uses /dev."
+description = "Public SPA path prefix on ingress_host. Empty means host root; canonical hosted environments use /dev, /staging, and /prod."
 
 [render_config.frontend_api_base_path]
 python_type = "str"
 default     = ""
-description = "Public path prefix prepended by the SPA API client before /api/v1. Must match frontend_route_path for protected prod/dev routes."
+description = "Public path prefix prepended by the SPA API client before /api/v1. Must match frontend_route_path for protected dev/staging/prod routes."
 
 [render_config.frontend_route_path_from]
 python_type = "str"

@@ -138,8 +138,8 @@ Normal flow:
    public API/SPA smoke, provider smoke, benchmark reward gate,
    score-positive canary gate before any full production benchmark batch,
    benchmark score-alignment gate, redaction scan, worker-capacity smoke, and
-   rollback evidence. For first prod, also include prod/dev frontend route
-   evidence, prod/staging state and worker isolation evidence, and the
+   rollback evidence. For first prod, also include dev/staging/prod frontend
+   route evidence, cross-environment state and worker isolation evidence, and the
    raw-delivery/export requirement status from the operator-free user E2E gate.
    The worker-isolation evidence must include the prod-first shared-capacity
    report generated from `deploy/worker-capacity/prod-first.toml`. Validate the
@@ -760,7 +760,7 @@ knob you need.
    For first prod, also generate the shared physical worker-capacity contract.
    This is a repo-only desired-state/evidence check: it does not mutate worker
    pools, mint tokens, or read live credentials. The default manifest assigns
-   every eligible GB10/OLDLAB slot to production and leaves staging/dev at zero
+   every eligible GB10/OLDLAB slot to production and leaves staging at zero
    borrowed slots. The physical and scheduling inventory remains all 15 GB10
    hosts. Ten slots per host is a theoretical maximum, not guaranteed current
    capacity. Fresh health/resource observations determine placement; a healthy
@@ -770,7 +770,7 @@ knob you need.
    entrypoint on port `2221` and reaches private `trt-gb10-2..15` on port `22`
    through `ProxyJump trt-gb10-1`. When an observed worker
    registration/status artifact is available, pass it with `--observed-json`
-   so the report fails on prod/dev
+   so the report fails on production/staging
    environment, API URL, image tag, source commit, compose service, Kubernetes
    deployment, slot-count, or worker-identity drift:
 

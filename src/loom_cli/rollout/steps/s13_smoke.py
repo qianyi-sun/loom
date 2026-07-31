@@ -64,7 +64,7 @@ class _AdminOnBehalfConfig:
 
 
 def _ingress_base(ctx: RolloutContext) -> str:
-    # Cluster-config declares ingress_host plus optional prod/dev route
+    # Cluster-config declares ingress_host plus an optional environment route
     # prefixes; smoke exercises the same public API base as users.
     from loom_cli.cluster_config import load_cluster_config
 

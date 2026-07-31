@@ -49,13 +49,13 @@ k8s_deployment = "loom-prod-worker"
 k8s_namespace = "loom-prod"
 
 [environments.staging]
-name = "development"
-api_url = "https://yylx.world/dev/api"
+name = "staging"
+api_url = "https://yylx.world/staging/api"
 image_tag = "dev-2222222"
 source_commit = "2222222222222222222222222222222222222222"
-compose_service = "loom-dev-worker"
-k8s_deployment = "loom-dev-worker"
-k8s_namespace = "loom-dev"
+compose_service = "loom-staging-worker"
+k8s_deployment = "loom-staging-worker"
+k8s_namespace = "loom-staging"
 
 {hosts}
 """.lstrip(),
@@ -103,7 +103,7 @@ state = "eligible"
     )
     manifest.write_text(
         manifest.read_text(encoding="utf-8").replace(
-            'name = "development"',
+            'name = "staging"',
             'name = "production"',
             1,
         ),
@@ -183,11 +183,11 @@ state = "eligible"
                         "worker_id": "worker-prod-1",
                         "host": "gb10-1",
                         "environment": "production",
-                        "api_url": "https://yylx.world/dev/api?token=loom_api_livevalue",
+                        "api_url": "https://yylx.world/staging/api?token=loom_api_livevalue",
                         "image_tag": "dev-2222222",
                         "source_git_commit": "2222222222222222222222222222222222222222",
-                        "compose_service": "loom-dev-worker",
-                        "k8s_deployment": "loom-dev-worker",
+                        "compose_service": "loom-staging-worker",
+                        "k8s_deployment": "loom-staging-worker",
                         "max_concurrent": 10,
                         "service_token": "Bearer sk-live-secret-value",
                     },
@@ -243,8 +243,8 @@ staging_slots = 1
                     {
                         "worker_id": "shared-worker-id",
                         "host": "gb10-1",
-                        "environment": "development",
-                        "api_url": "https://yylx.world/dev/api",
+                        "environment": "staging",
+                        "api_url": "https://yylx.world/staging/api",
                         "image_tag": "dev-2222222",
                         "source_git_commit": "2222222222222222222222222222222222222222",
                         "max_concurrent": 1,
@@ -496,8 +496,8 @@ state = "eligible"
                     {
                         "worker_id": "staging-worker-1",
                         "host": "gb10-1",
-                        "environment": "development",
-                        "api_url": "https://yylx.world/dev/api",
+                        "environment": "staging",
+                        "api_url": "https://yylx.world/staging/api",
                         "image_tag": "dev-2222222",
                         "source_git_commit": "2222222222222222222222222222222222222222",
                         "max_concurrent": 1,
@@ -506,8 +506,8 @@ state = "eligible"
                     {
                         "worker_id": "staging-worker-2",
                         "host": "gb10-2",
-                        "environment": "development",
-                        "api_url": "https://yylx.world/dev/api",
+                        "environment": "staging",
+                        "api_url": "https://yylx.world/staging/api",
                         "image_tag": "dev-2222222",
                         "source_git_commit": "2222222222222222222222222222222222222222",
                         "max_concurrent": 1,
@@ -664,8 +664,8 @@ staging_slots = 1
                     {
                         "worker_id": "staging-worker-1",
                         "host": "gb10-1",
-                        "environment": "development",
-                        "api_url": "https://yylx.world/dev/api?token=loom_api_livevalue",
+                        "environment": "staging",
+                        "api_url": "https://yylx.world/staging/api?token=loom_api_livevalue",
                         "image_tag": "dev-2222222",
                         "source_git_commit": "2222222222222222222222222222222222222222",
                         "max_concurrent": 1,
@@ -815,8 +815,8 @@ state = "eligible"
                     {
                         "worker_id": "staging-worker-1",
                         "host": "gb10-1",
-                        "environment": "development",
-                        "api_url": "https://yylx.world/dev/api",
+                        "environment": "staging",
+                        "api_url": "https://yylx.world/staging/api",
                         "image_tag": "dev-2222222",
                         "source_git_commit": "2222222222222222222222222222222222222222",
                         "max_concurrent": 1,
@@ -825,8 +825,8 @@ state = "eligible"
                     {
                         "worker_id": "staging-worker-2",
                         "host": "gb10-2",
-                        "environment": "development",
-                        "api_url": "https://yylx.world/dev/api",
+                        "environment": "staging",
+                        "api_url": "https://yylx.world/staging/api",
                         "image_tag": "dev-2222222",
                         "source_git_commit": "2222222222222222222222222222222222222222",
                         "max_concurrent": 1,
@@ -913,8 +913,8 @@ staging_slots = 1
                     {
                         "worker_id": "staging-worker-1",
                         "host": "gb10-1",
-                        "environment": "development",
-                        "api_url": "https://yylx.world/dev/api",
+                        "environment": "staging",
+                        "api_url": "https://yylx.world/staging/api",
                         "image_tag": "dev-2222222",
                         "source_git_commit": "2222222222222222222222222222222222222222",
                         "max_concurrent": 1,

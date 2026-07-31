@@ -648,9 +648,10 @@ ingress-nginx continues to own HSTS at the TLS boundary.
 80. The TLS `loom-ingress` routes `<ingress_host>/api/v1/*` to
 `loom-service:8090` and everything else to `loom-web:80`; nginx inside
 `loom-web` falls back to `index.html` for client-side React Router paths. The
-first production profiles use `https://yylx.world/prod` and
-`https://yylx.world/dev`, with API calls routed under `/prod/api/v1` and
-`/dev/api/v1` and rewritten to the service's `/api/v1` surface.
+canonical hosted profiles use `https://yylx.world/dev`,
+`https://yylx.world/staging`, and `https://yylx.world/prod`, with API calls
+routed under the matching `/dev/api/v1`, `/staging/api/v1`, or `/prod/api/v1`
+prefix and rewritten to the service's `/api/v1` surface.
 
 For local dev: `cd web && npm run dev` runs Vite's dev server on
 :5173 with HMR. Vite's `server.proxy` config sends `/api/*` to

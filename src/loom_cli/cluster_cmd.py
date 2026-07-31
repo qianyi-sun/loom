@@ -1663,7 +1663,7 @@ def _frontend_route_context(config: ClusterConfig) -> dict[str, Any]:
     )
     if api_base_path != route_path:
         raise ValueError(
-            "frontend_api_base_path must match frontend_route_path for prod/dev route isolation",
+            "frontend_api_base_path must match frontend_route_path for dev/staging/prod route isolation",
         )
     if environment == "production" and route_path != "/prod":
         raise ValueError("production frontend_environment must use frontend_route_path=/prod")

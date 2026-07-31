@@ -7,6 +7,9 @@ they don't get rewritten; supersede with a new ADR if needed.
 
 ## Records
 
+- **[env-domain-topology.md](env-domain-topology.md)** — accepted single-origin
+  environment routing: `/dev`, `/staging`, and `/prod`, with explicit
+  path-prefix isolation requirements and no environment subdomains.
 - **[v1-workload-trust-contract.md](v1-workload-trust-contract.md)** — v1's
   machine-enforced `internal_trusted` contract; TaskSet transforms fail closed
   and post-v1 #758 owns untrusted arbitrary-code isolation.

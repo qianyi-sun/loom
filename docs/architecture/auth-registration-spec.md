@@ -306,8 +306,9 @@ list, audit, and diagnostics expose only safe prefixes.
 
 Setup, reset, and invite links are generated from the configured public origin
 when available. Deployed Kubernetes profiles render `LOOM_SVC_PUBLIC_BASE_URL`
-as the public browser route base, for example `https://yylx.world/dev` for
-staging and `https://yylx.world/prod` for production; compatibility deployments
+as the public browser route base: `https://yylx.world/dev` for development,
+`https://yylx.world/staging` for staging, and `https://yylx.world/prod` for
+production; compatibility deployments
 may still set `LOOM_PUBLIC_BASE_URL`. If neither is set, Loom uses trusted
 forwarded `proto`/`host` headers and finally the request base URL, preserving
 local/dev behavior without asking operators to manually rewrite one-time link

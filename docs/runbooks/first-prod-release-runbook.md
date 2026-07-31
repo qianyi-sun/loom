@@ -16,7 +16,7 @@ dry run and then know exactly which commands become live production actions.
 | Label | Meaning |
 |---|---|
 | `DRY-RUN SAFE` | Repo-only or local-file-only. Safe for a reviewer to run without production secrets, live kubeconfig, live database access, or staging/prod workload authority. |
-| `READ-ONLY LIVE` | Reads public or already-sanitized live evidence. Does not mutate prod, staging, workers, DB, object storage, or Git tags, but still needs release-owner coordination when it hits canonical prod/dev URLs. |
+| `READ-ONLY LIVE` | Reads public or already-sanitized live evidence. Does not mutate prod, staging, workers, DB, object storage, or Git tags, but still needs release-owner coordination when it hits canonical dev/staging/prod URLs. |
 | `LIVE PROD AUTHORITY REQUIRED` | Needs production GitHub Environment approval, production deploy rights, production kubeconfig, release tag push rights, or authority to change live desired state. Do not run from a docs review or local dry run. |
 
 Never put raw token, provider key, database password, MinIO credential,
@@ -126,7 +126,7 @@ runtime secret.
 `DRY-RUN SAFE`
 
 This proves the default first-prod desired state: production owns all eligible
-shared physical capacity, staging/dev owns zero borrowed slots, and unreachable
+shared physical capacity, staging owns zero borrowed slots, and unreachable
 hosts stay out of both pools.
 
 ```bash
@@ -544,8 +544,9 @@ values, signed URLs, database credentials, MinIO credentials, shell traces, or
 argv token flags. It must include:
 
 - production environment, route, API base, user role, and token source;
-- prod/dev route and API-base separation for `https://yylx.world/prod` and
-  `https://yylx.world/dev`;
+- dev/staging/prod route and API-base separation for
+  `https://yylx.world/dev`, `https://yylx.world/staging`, and
+  `https://yylx.world/prod`;
 - `cli_api` pass records for `submit`, `monitor`, `batch_detail`,
   `batch_debug`, `trial_detail`, `trial_debug`, `download_atif`,
   `download_trajectory`, `download_artifact`, `delivery_bundle`, and
@@ -633,9 +634,9 @@ Operator-free user E2E gate: FAIL
 
 Stop condition: do not treat #493 as complete when this repo-side validator
 passes against synthetic evidence. Keep #493 open until the authorized live
-normal-user prod/dev route validation is run and the same validator accepts the
+normal-user dev/staging/prod route validation is run and the same validator accepts the
 redacted evidence package without raw secrets, signed URLs, operator-only
-surfaces, or prod/dev route confusion.
+surfaces, or dev/staging/prod route confusion.
 
 ### 8. Production Release Gate
 
@@ -921,7 +922,7 @@ Release gate validation: FAIL
 ```
 
 Stop condition: missing required checks, stale candidate/image mismatch, active
-staging capacity without override, shared prod/dev state, route mismatch, missing
+staging capacity without override, shared cross-environment state, route mismatch, missing
 final `service.no_oom_restarts` smoke evidence after route probes, missing or
 failing `hf_mirror_token_boundary` evidence for SkillLearnBench mirrored
 `s3://` runtime sources and worker HF token absence, or any forbidden evidence

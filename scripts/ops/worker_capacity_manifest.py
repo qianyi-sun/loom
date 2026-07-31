@@ -2,7 +2,7 @@
 """Validate and stage prod-first shared worker capacity desired state.
 
 The manifest is a release contract, not a live mutator. It describes how shared
-physical GB10/OLDLAB hosts are assigned between production and staging/dev, then
+physical GB10/OLDLAB hosts are assigned between production and staging, then
 optionally compares that desired state with a secret-free observed worker
 registration artifact.
 
@@ -10,7 +10,7 @@ Lifecycle commands are file-only:
 
 * ``status`` reports the effective staging lease state, TTL expiry, and optional
   prod-pressure drain/recovery evidence.
-* ``lease-staging`` previews or writes a bounded staging/dev lease.
+* ``lease-staging`` previews or writes a bounded staging lease.
 * ``drain-staging`` stops new staging claims and reports running vs. idle staging slots.
 * ``release-staging`` idempotently returns staging desired slots to zero.
 """

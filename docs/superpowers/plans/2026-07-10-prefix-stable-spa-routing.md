@@ -1,5 +1,12 @@
 # Prefix-Stable SPA Routing Implementation Plan
 
+> **Historical plan:** this plan predates the independent `/staging` route.
+> The accepted current contract is `/dev`, `/staging`, and `/prod` on
+> `yylx.world`; see
+> [`../../architecture/adr/env-domain-topology.md`](../../architecture/adr/env-domain-topology.md).
+> Examples below that use `/dev` for staging are historical evidence and must
+> not be used as current configuration or acceptance input.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make `/dev`, `/prod`, and every prefixed deep link load one immutable Loom web build with canonical redirects, correctly prefixed assets, and executable ingress/browser smoke coverage.

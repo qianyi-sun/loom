@@ -21,13 +21,13 @@ k8s_deployment = "loom-prod-worker"
 k8s_namespace = "loom-prod"
 
 [environments.staging]
-name = "development"
-api_url = "https://yylx.world/dev/api"
+name = "staging"
+api_url = "https://yylx.world/staging/api"
 image_tag = "${STAGING_IMAGE_TAG}"
 source_commit = "${STAGING_SOURCE_COMMIT}"
-compose_service = "loom-dev-worker"
-k8s_deployment = "loom-dev-worker"
-k8s_namespace = "loom-dev"
+compose_service = "loom-staging-worker"
+k8s_deployment = "loom-staging-worker"
+k8s_namespace = "loom-staging"
 
 [[hosts]]
 name = "trt-gb10-1"
