@@ -67,6 +67,7 @@ _REQUIRES_NETWORK_POLICY: frozenset[str] = frozenset({
     "loom-minio",
     "loom-gateway-router",
     "loom-worker-router",
+    "loom-minio-router",
 })
 
 # Workloads that legitimately need a hostPort. The cluster-deploy
@@ -75,6 +76,9 @@ _REQUIRES_NETWORK_POLICY: frozenset[str] = frozenset({
 # - `loom-worker-router` binds hostPort 30080 (socat TCP forwarder giving
 #   EXTERNAL workers a private node-IP endpoint into the control-plane;
 #   the CP's bearer-token auth gates it, and it is not publicly routable)
+# - `loom-minio-router` binds hostPort 30900 (socat TCP forwarder giving
+#   the same EXTERNAL workers a private node-IP endpoint into the loom-minio
+#   object store; MinIO's S3v4 signature auth gates it, not publicly routable)
 # - `loom-llm-gateway-sandbox` binds hostPort 8443 (TLS-terminating
 #   HTTP CONNECT proxy, #547 item #3, closes #78 Phase B)
 # Sandbox Docker containers spawned by the worker + external workers
@@ -84,6 +88,7 @@ _REQUIRES_NETWORK_POLICY: frozenset[str] = frozenset({
 _HOSTPORT_ALLOWLIST: frozenset[str] = frozenset({
     "loom-gateway-router",
     "loom-worker-router",
+    "loom-minio-router",
     "loom-llm-gateway-sandbox",
 })
 

@@ -1,0 +1,92 @@
+# loom-minio-router — per-node TCP proxy from hostPort 30900 to the
+# in-cluster `loom-minio` object-store Service (:9000).
+#
+# Companion to loom-worker-router: EXTERNAL workers (e.g. the GB10 fleet)
+# run on separate hosts that share the private node network but cannot
+# resolve in-cluster Service DNS or reach ClusterIPs. loom-worker-router
+# gives them the control-plane; this router gives them the object store,
+# which they need directly (static-key MinIO access) to ensure runtime
+# buckets and upload trajectories/artifacts. Without it a worker
+# registers and claims but dies at bucket-ensure (`loom-minio` name does
+# not resolve off-cluster).
+#
+# It is reachable only on the private node network (the public gateway
+# forwards :443→ingress only, not arbitrary node ports). MinIO enforces
+# its own S3 v4 signature auth with the worker's static keys, so the
+# plain TCP forward adds no new trust surface — auth happens at MinIO
+# behind us, exactly as loom-worker-router relies on control-plane
+# bearer-token auth.
+#
+# Why an exception in `loom cluster audit`: hostPort declarations are
+# flagged by the boundary auditor. This DaemonSet legitimately needs
+# hostPort 30900 (the external-worker object-store endpoint); the
+# auditor's allowlist (cluster_boundary.py) lists `loom-minio-router` as
+# an exempted hostPort user.
+
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: loom-minio-router
+spec:
+  selector:
+    matchLabels: { app: loom-minio-router }
+  template:
+    metadata:
+      labels: { app: loom-minio-router }
+    spec:
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: router
+          image: alpine/socat:1.7.4.4
+          # TCP-LISTEN on 30900 (host port via hostPort below) → forks
+          # one socat per connection, each TCP-connecting to the
+          # in-cluster loom-minio Service. `reuseaddr` avoids the
+          # TIME_WAIT bind hold after pod restart; `fork` lets multiple
+          # workers connect concurrently.
+          args:
+            - "-d"
+            - "TCP-LISTEN:30900,reuseaddr,fork"
+            - "TCP:loom-minio.{{ namespace }}.svc.cluster.local:9000"
+          ports:
+            - name: minio
+              containerPort: 30900
+              hostPort: 30900
+              protocol: TCP
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+          # No probes: socat has no healthcheck endpoint; readiness
+          # derives from process liveness — k8s restarts a crashed socat.
+
+---
+# NetworkPolicy: router pod ingress from anywhere on the node (hostPort
+# traffic arrives via the node-local stack), egress to the in-cluster
+# loom-minio Service + kube-dns only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: loom-minio-router
+spec:
+  podSelector:
+    matchLabels: { app: loom-minio-router }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports:
+        - { port: 30900, protocol: TCP }
+  egress:
+    - to:
+        - podSelector: { matchLabels: { app: loom-minio } }
+      ports:
+        - { port: 9000, protocol: TCP }
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }

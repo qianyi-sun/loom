@@ -86,6 +86,9 @@ spec:
     - podSelector:
         matchLabels:
           app: loom-staging-data-lifecycle
+    - podSelector:
+        matchLabels:
+          app: loom-minio-router
     ports:
     - port: 9000
       protocol: TCP
