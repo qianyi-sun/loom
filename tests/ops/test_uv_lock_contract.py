@@ -234,10 +234,19 @@ def test_deploy_environment_installs_locked_runtime() -> None:
     assert "uv run --no-sync" in deploy_script
 
     # The staging rollout host installer (scripts/ops/staging_rollout_host.py)
-    # must also bind its runtime venv to the uv.lock digest, but dev has since
-    # restructured that installer and the original binding was dropped in an
-    # earlier merge. Re-grafting + validating it against the real rollout host
-    # is tracked separately (#920) so it is not asserted here.
+    # binds its runtime venv to the checked-out uv.lock and force-reinstalls every
+    # workspace/path package so a changed candidate never leaves a stale wheel,
+    # then fails closed on an incompatible dependency set (#920 / #935).
+    installer = (ROOT / "scripts/ops/staging_rollout_host.py").read_text(encoding="utf-8")
+    assert '"--locked"' in installer
+    assert '"--frozen"' not in installer
+    assert '"pip",\n' in installer and '"check",\n' in installer
+    for package in (
+        "loom-benchmarks",
+        "loom-benchmark-terminal-bench-2",
+        "loom-launcher",
+    ):
+        assert f'"{package}"' in installer
 
 
 def test_runbook_uv_commands_never_resolve_implicitly() -> None:

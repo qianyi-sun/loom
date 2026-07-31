@@ -122,6 +122,19 @@ KNOWN_HOSTS_PATH = Path("/etc/loom/staging-rollout-gb10-known-hosts")
 SYSTEM_PYTHON = Path("/usr/bin/python3")
 UV_BINARY = Path("/usr/local/bin/uv")
 SYSTEM_SHELL = Path("/bin/sh")
+
+# The runtime venv sync force-reinstalls every workspace/path package so a changed
+# candidate (same 0.1.0 version, new source content) never leaves a stale wheel
+# behind — uv otherwise skips reinstalling a path package whose version is
+# unchanged (#920 / #935). The root ``loom`` project plus every member under
+# ``[tool.uv.workspace]`` in the repo pyproject.toml must appear here;
+# ``test_uv_lock_contract`` proves this set stays complete.
+CANDIDATE_WORKSPACE_REINSTALL_PACKAGES = (
+    "loom",
+    "loom-benchmarks",
+    "loom-benchmark-terminal-bench-2",
+    "loom-launcher",
+)
 SYSTEM_GIT = Path("/usr/bin/git")
 SEALED_SOURCE_UPLOAD_PACK = f"{SYSTEM_GIT} -c safe.directory={INSTALL_SOURCE / '.git'} upload-pack"
 
@@ -2682,10 +2695,16 @@ class HostSystem:
         self._validate_system_python_version(system_python)
         environment = {"PATH": _ROOT_PATH, "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}
         environment["UV_PROJECT_ENVIRONMENT"] = str(venv)
+        reinstall_args: list[str] = []
+        for package in CANDIDATE_WORKSPACE_REINSTALL_PACKAGES:
+            reinstall_args.extend(("--reinstall-package", package))
         self.runner.run(
             [
                 str(uv),
                 "sync",
+                # Bind the runtime venv to the checked-out uv.lock; never resolve
+                # implicitly and never accept a stale lock (#920).
+                "--locked",
                 "--project",
                 str(source_root),
                 "--no-editable",
@@ -2693,10 +2712,20 @@ class HostSystem:
                 "cluster",
                 "--extra",
                 "rollout",
-                "--reinstall-package",
-                "loom",
+                *reinstall_args,
                 "--python",
                 str(system_python),
+            ],
+            env=environment,
+        )
+        # Fail closed if the locked install left an incompatible dependency set.
+        self.runner.run(
+            [
+                str(uv),
+                "pip",
+                "check",
+                "--python",
+                str(venv / "bin" / "python"),
             ],
             env=environment,
         )

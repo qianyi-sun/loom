@@ -6,6 +6,7 @@ import json
 import os
 import stat
 import threading
+import tomllib
 from pathlib import Path
 from typing import ClassVar
 
@@ -3204,6 +3205,9 @@ def test_sync_venv_uses_fixed_root_tools_and_candidate_constraints(
             if call == _runtime_probe_argv(1001, host._PACKAGE_RUNTIME_PROBE):
                 events.append("broker-import")
                 return host.CommandResult(0)
+            if call[1:3] == ["pip", "check"]:
+                events.append("pip-check")
+                return host.CommandResult(0)
             events.append("uv-sync")
             return host.CommandResult(0)
 
@@ -3238,6 +3242,7 @@ def test_sync_venv_uses_fixed_root_tools_and_candidate_constraints(
     assert sync_call == [
         "/usr/local/bin/uv",
         "sync",
+        "--locked",
         "--project",
         str(source_root),
         "--no-editable",
@@ -3247,6 +3252,12 @@ def test_sync_venv_uses_fixed_root_tools_and_candidate_constraints(
         "rollout",
         "--reinstall-package",
         "loom",
+        "--reinstall-package",
+        "loom-benchmarks",
+        "--reinstall-package",
+        "loom-benchmark-terminal-bench-2",
+        "--reinstall-package",
+        "loom-launcher",
         "--python",
         "/usr/bin/python3.12",
     ]
@@ -3257,7 +3268,23 @@ def test_sync_venv_uses_fixed_root_tools_and_candidate_constraints(
         "LC_ALL": "C.UTF-8",
         "UV_PROJECT_ENVIRONMENT": str(TEST_CANDIDATE_VENV),
     }
-    assert events == ["uv-sync", "harden-lock", "validate-authority", "broker-import"]
+    pip_check_call, _ = next(
+        call for call in runner.calls if call[0][1:3] == ["pip", "check"]
+    )
+    assert pip_check_call == [
+        "/usr/local/bin/uv",
+        "pip",
+        "check",
+        "--python",
+        str(TEST_CANDIDATE_VENV / "bin" / "python"),
+    ]
+    assert events == [
+        "uv-sync",
+        "pip-check",
+        "harden-lock",
+        "validate-authority",
+        "broker-import",
+    ]
     assert runner.calls[-5:] == [
         (["getent", "passwd", host.SERVICE_USER], {"check": False}),
         (["getent", "group", host.SERVICE_GROUP], {"check": False}),
@@ -3265,6 +3292,26 @@ def test_sync_venv_uses_fixed_root_tools_and_candidate_constraints(
         (["id", "-g", host.SERVICE_USER], {"check": False}),
         (_runtime_probe_argv(1001, host._PACKAGE_RUNTIME_PROBE), {"check": False}),
     ]
+
+
+def test_candidate_workspace_reinstall_packages_cover_pyproject_members() -> None:
+    # A workspace/path member added to the repo pyproject but omitted from the
+    # installer's force-reinstall set would silently ship a stale wheel on a
+    # same-version candidate change — the exact #920 / #935 gap. Bind them.
+    pyproject = tomllib.loads(
+        (host.REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    members = pyproject["tool"]["uv"]["workspace"]["members"]
+    assert members, "expected at least one uv workspace member"
+    member_names = {
+        tomllib.loads(
+            (host.REPO_ROOT / member / "pyproject.toml").read_text(encoding="utf-8")
+        )["project"]["name"]
+        for member in members
+    }
+    reinstall = set(host.CANDIDATE_WORKSPACE_REINSTALL_PACKAGES)
+    assert member_names <= reinstall
+    assert "loom" in reinstall  # the root project is force-reinstalled too
 
 
 def test_sync_venv_rejects_broken_installed_broker_import(
