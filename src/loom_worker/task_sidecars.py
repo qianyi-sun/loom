@@ -80,7 +80,7 @@ class DockerTaskSidecarRuntime:
         self.docker_api_timeout_sec = docker_api_timeout_sec
         self.setup_slot_provider = setup_slot_provider
         # #896: per-container hard caps for setup-sidecar containers on
-        # non-exclusive (packed) workers. 0 = unbounded (default).
+        # non-exclusive (packed) workers. Slurm admission requires positive caps.
         self.container_cpus = container_cpus
         self.container_memory_mib = container_memory_mib
         self.container_pids = container_pids
@@ -290,7 +290,7 @@ class DockerTaskSidecarRuntime:
         if healthcheck is not None:
             kwargs["healthcheck"] = healthcheck
         # #896: apply per-container hard caps when configured (>0); unset
-        # (0) preserves the current unbounded behavior for exclusive pools.
+        # (0) remains available to non-Slurm callers; Slurm admission rejects it.
         if self.container_cpus > 0:
             kwargs["nano_cpus"] = int(self.container_cpus * 1_000_000_000)
         if self.container_memory_mib > 0:

@@ -64,9 +64,8 @@ services:
       nofile:
         soft: 65536
         hard: 65536
-    # #896: per-container hard caps for non-exclusive (packed) workers. Defaults
-    # are unbounded (cpus 0 / mem 0m / pids -1 all mean "no limit" to Docker), so
-    # exclusive pools that never set LOOM_WORKER_CONTAINER_* are unchanged.
+    # #896: per-container hard caps for non-exclusive (packed) workers. Loom
+    # Slurm admission requires positive values; incomplete policies stay disabled.
     cpus: ${LOOM_WORKER_CONTAINER_CPUS:-0}
     mem_limit: ${LOOM_WORKER_CONTAINER_MEMORY_MIB:-0}m
     pids_limit: ${LOOM_WORKER_CONTAINER_PIDS:--1}

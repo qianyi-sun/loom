@@ -116,7 +116,7 @@ class TrialContext:
     cp_event_sink: CpEventSink | None = None
     # #896: per-container hard resource caps for the trial container on
     # non-exclusive (packed) workers. 0 = unbounded (default), which
-    # keeps exclusive GB10 pools byte-for-byte unchanged. Forwarded into
+    # is rejected for Loom Slurm workers. Forwarded into
     # StartOptions so DockerDriver applies nano_cpus / mem_limit /
     # pids_limit at container create.
     container_cpus: float = 0.0

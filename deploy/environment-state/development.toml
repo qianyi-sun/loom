@@ -27,10 +27,9 @@ environment = "development"
 #     acceptance matrix passes;
 #   - #896 requires container-isolation evidence before any non-exclusive
 #     (packed) worker runs.
-# So the checked-in state is enabled=false + exclusive=true (a single worker
-# owning a whole GB10 node is safe without the isolation gate). The intended
-# post-gate target is enabled=true + exclusive=false (pack multiple envs' workers
-# per node) -- flip both only after #827 AND #896 are satisfied.
+# The checked-in state is enabled=false + exclusive=false. Disabled is the
+# fail-closed safety gate until #827 and #896 pass; Loom never falls back to
+# whole-node exclusive allocation.
 # min_slots=0 = scale to zero when idle, no warm floor. NOTE: with min_slots=0
 # the #877 QoS-boost trigger (count < min_slots) is unreachable, so it provides
 # NO dev-priority guarantee here; a priority mechanism is defined when the row
@@ -79,10 +78,9 @@ requested_concurrency = 5
 max_jobs = 1
 pending_job_cap = 1
 time_limit = "2-00:00:00"
-# Fail-closed: exclusive=true (one worker per GB10 node) is the safe checked-in
-# value. The exclusive=false packing target is gated on #896 + #827 (see the
-# pool comment above); flip to false only after both are satisfied.
-exclusive = true
+# Non-exclusive is the only supported Loom Slurm contract. Keep the policy
+# disabled until #896 + #827 prove the required containment and allocation path.
+exclusive = false
 external_runner = true
 
 # --- OLDLAB pool (x86_64, DOUBLE-DUTY nodes: k3s + MinIO + slurmd) ------------
@@ -96,7 +94,7 @@ external_runner = true
 pool_name = "oldlab"
 actuator = "slurm"
 enabled = false
-disabled_reason = "gated on #896 container isolation + double-duty headroom measurement; exclusive=true is not viable on nodes shared with k3s/MinIO, so the disable IS the safety gate"
+disabled_reason = "gated on #896 container isolation + double-duty headroom measurement; disabled is the safety gate and whole-node exclusivity is unsupported"
 min_slots = 0
 max_slots = 4
 scale_up_threshold_slots = 1

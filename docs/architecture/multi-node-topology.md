@@ -167,7 +167,7 @@ CNPG-side alerts come from the operator's built-in `PodMonitor` (`monitoring.ena
 
 - **Cross-region failover.** Both replicas + backups live in the same physical LAN. Disaster recovery is out of scope until we have off-site backups.
 - **Multi-writer Postgres.** CNPG runs single-primary with read replicas. No BDR-style multi-master.
-- **Packed workers without isolation caps.** Double-duty colocation is the model, but `exclusive=false` (multiple workers per node) stays gated on #896's per-container caps + container-isolation evidence; `exclusive=true` (one worker per node) is the fail-closed default until then.
+- **Packed workers without isolation caps.** Double-duty colocation is the model and Loom Slurm workers always use `exclusive=false`. Until #896's per-container caps and container-isolation evidence pass, the fail-closed state is a disabled worker policy, not whole-node exclusivity.
 - **arm64 in the control-plane cluster.** GB10 stays worker-only. If the control plane ever needs to reach 5+ nodes, add more OLDLAB or purchase more x86 hardware — do not extend into GB10.
 
 ## Related documents

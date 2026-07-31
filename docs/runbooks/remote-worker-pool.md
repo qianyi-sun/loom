@@ -358,6 +358,11 @@ On Slurm-managed pools, dry-run one worker job per included plan row:
 scripts/ops/worker_pool_slurm_submit.sh worker-plan.csv \
   --env-file /secure/path/.env.remote-worker \
   --repo-dir /opt/loom \
+  --sandbox-identity staging \
+  --candidate-sha "$CANDIDATE_SHA" \
+  --container-cpus 2 \
+  --container-memory-mib 4096 \
+  --container-pids 512 \
   --dry-run
 ```
 
@@ -367,13 +372,20 @@ After reviewing the printed `sbatch` commands, submit:
 scripts/ops/worker_pool_slurm_submit.sh worker-plan.csv \
   --env-file /secure/path/.env.remote-worker \
   --repo-dir /opt/loom \
+  --sandbox-identity staging \
+  --candidate-sha "$CANDIDATE_SHA" \
+  --container-cpus 2 \
+  --container-memory-mib 4096 \
+  --container-pids 512 \
   --yes
 ```
 
 The script uses `--nodelist=<host>` for each included row and exports
 the row's `recommended_concurrency` as `LOOM_WORKER_MAX_CONCURRENT`.
-It requests the row's CPU and memory values and `--exclusive` so a
-remote worker can consume the node up to the measured stable boundary.
+It requests the row's CPU and memory values without `--exclusive`, binds the
+exact candidate and sandbox identity, and requires positive per-container CPU,
+memory, and PID ceilings. Keep submission disabled until the target pool has
+passed #896 containment acceptance; whole-node exclusivity is not a fallback.
 Keep the env file untracked and available on each worker node. The `--repo-dir`
 path must also exist with `deploy/docker-compose.remote-worker.yml` on every
 included node; prefer a shared checkout path such as
@@ -1328,10 +1340,10 @@ For OLDLAB Slurm, autoscaler `actuator_config` must include allowed nodes,
 remote worker env file, remote checkout path, requested CPU/memory, requested
 worker concurrency, max jobs, pending-job cap, and Slurm command paths if
 they differ from `sbatch`, `squeue`, `sacct`, `scancel`, and `sinfo`.
-Autoscaler Slurm submissions request exclusive node allocation by default.
-Set `actuator_config.exclusive=false` only for deliberately shared Slurm nodes
-after lowering `requested_cpus`, `requested_memory_mib`, and
-`requested_concurrency` to a load-tested slice that coexists with other jobs.
+Autoscaler Slurm submissions always use `actuator_config.exclusive=false`.
+Exclusive allocation is rejected. Keep a policy disabled until requested CPU,
+memory, PID, GPU/TRES, per-container ceilings, and exact candidate identity are
+complete and the load-tested slice safely coexists with other jobs.
 Non-exclusive admission fails closed unless all of
 `container_cpus`, `container_memory_mib`, and `container_pids` are positive,
 `environment` is a lowercase sandbox identity, and `candidate_sha` is the
@@ -1447,7 +1459,11 @@ available only on the OLDLAB submit host, mark the policy as externally run:
     "reserved_memory_mib": 24576,
     "max_concurrency_per_node": 8,
     "max_cpu_load_ratio": 1.0,
-    "exclusive": true
+    "exclusive": false,
+    "container_cpus": 2,
+    "container_memory_mib": 4096,
+    "container_pids": 512,
+    "candidate_sha": "<exact-40-character-candidate-sha>"
   }
 }
 ```
@@ -1507,7 +1523,11 @@ allocatable capacity remains resource-observation driven:
     "max_jobs": 15,
     "pending_job_cap": 2,
     "time_limit": "2-00:00:00",
-    "exclusive": true
+    "exclusive": false,
+    "container_cpus": 2,
+    "container_memory_mib": 4096,
+    "container_pids": 512,
+    "candidate_sha": "<exact-40-character-candidate-sha>"
   }
 }
 ```

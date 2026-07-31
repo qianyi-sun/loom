@@ -844,19 +844,19 @@ description = "Docker SDK API timeout in seconds for worker-created clients. Kee
 used_by     = ["worker"]
 python_type = "float"
 default     = 0.0
-description = "#896 per-container hard CPU cap (in cores) for the trial and setup-sidecar containers this worker creates. Maps to Docker nano_cpus. 0 = unbounded (default), which keeps exclusive GB10 pools unchanged; non-exclusive (packed) double-duty nodes set a positive ceiling so an escaped container cannot starve co-tenants (k3s/MinIO/Longhorn)."
+description = "#896 per-container hard CPU cap (in cores) for the trial and setup-sidecar containers this worker creates. Maps to Docker nano_cpus. Loom Slurm policies use exclusive=false and require a positive ceiling; keep the policy disabled when containment is incomplete."
 
 [service_config.container_memory_mib]
 used_by     = ["worker"]
 python_type = "int"
 default     = 0
-description = "#896 per-container hard memory cap in MiB for the trial and setup-sidecar containers this worker creates. Maps to Docker mem_limit. 0 = unbounded (default); non-exclusive (packed) nodes set a positive ceiling so an escaped container cannot exhaust RAM on a shared double-duty node."
+description = "#896 per-container hard memory cap in MiB for the trial and setup-sidecar containers this worker creates. Maps to Docker mem_limit. Loom Slurm policies use exclusive=false and require a positive ceiling; keep the policy disabled when containment is incomplete."
 
 [service_config.container_pids]
 used_by     = ["worker"]
 python_type = "int"
 default     = 0
-description = "#896 per-container hard PID cap for the trial and setup-sidecar containers this worker creates. Maps to Docker pids_limit. 0 = unbounded (default); non-exclusive (packed) nodes set a positive ceiling to bound fork-bomb blast radius on a shared double-duty node."
+description = "#896 per-container hard PID cap for the trial and setup-sidecar containers this worker creates. Maps to Docker pids_limit. Loom Slurm policies use exclusive=false and require a positive ceiling; keep the policy disabled when containment is incomplete."
 
 [service_config.sandbox_identity]
 used_by     = ["worker"]

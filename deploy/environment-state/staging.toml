@@ -53,7 +53,9 @@ requested_concurrency = 10
 max_jobs = 14
 pending_job_cap = 2
 time_limit = "2-00:00:00"
-exclusive = true
+# Non-exclusive is the only supported Loom Slurm contract. The disabled policy
+# is the safety gate until #827 and #896 acceptance is complete.
+exclusive = false
 external_runner = true
 
 # GATED: enabled=false until #896 lands. OLDLAB nodes (trt-eai-oldlab-1..5) also
@@ -66,7 +68,7 @@ external_runner = true
 pool_name = "oldlab"
 actuator = "slurm"
 enabled = false
-disabled_reason = "gated on #896 container isolation + double-duty headroom measurement; exclusive=true is not viable on nodes shared with k3s/MinIO, so the disable IS the safety gate"
+disabled_reason = "gated on #896 container isolation + double-duty headroom measurement; disabled is the safety gate and whole-node exclusivity is unsupported"
 min_slots = 0
 max_slots = 4
 scale_up_threshold_slots = 1

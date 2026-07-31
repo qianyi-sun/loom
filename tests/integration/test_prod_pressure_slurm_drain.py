@@ -57,6 +57,13 @@ _SLURM_ACTUATOR_CONFIG = {
     "max_jobs": 1,
     "pending_job_cap": 1,
     "time_limit": "7-00:00:00",
+    # Non-exclusive Loom Slurm workers require the full containment contract:
+    # positive per-container caps plus an exact candidate SHA.
+    "exclusive": False,
+    "container_cpus": 2.0,
+    "container_memory_mib": 4096,
+    "container_pids": 512,
+    "candidate_sha": "a" * 40,
 }
 
 

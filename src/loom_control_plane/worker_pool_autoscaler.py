@@ -1028,7 +1028,7 @@ def _slurm_config_from_policy(
         command_timeout_seconds=float(
             actor_config.get("command_timeout_seconds") or 20.0,
         ),
-        exclusive=_optional_bool(actor_config.get("exclusive"), default=True),
+        exclusive=_optional_bool(actor_config.get("exclusive"), default=False),
         slurm_account=str(actor_config.get("slurm_account") or ""),
         slurm_qos=str(actor_config.get("qos_normal") or actor_config.get("slurm_qos") or ""),
         slurm_reservation=str(actor_config.get("slurm_reservation") or ""),

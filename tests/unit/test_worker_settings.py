@@ -160,7 +160,7 @@ def test_container_caps_parse_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_container_caps_default_unbounded(monkeypatch: pytest.MonkeyPatch) -> None:
-    # #896: absent env → 0/unbounded so exclusive pools are unchanged.
+    # Absent env remains 0 for non-Slurm callers; Slurm admission rejects it.
     monkeypatch.setenv("LOOM_WORKER_CONTROL_PLANE_URL", "http://cp:8080")
     monkeypatch.setenv("LOOM_WORKER_GATEWAY_URL", "http://gw:9100")
     monkeypatch.setenv("LOOM_WORKER_TOKEN", "loom_w_test")

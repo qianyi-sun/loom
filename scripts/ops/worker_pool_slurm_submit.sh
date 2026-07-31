@@ -3,7 +3,9 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/ops/worker_pool_slurm_submit.sh PLAN_CSV --env-file PATH --repo-dir PATH [--dry-run|--yes]
+Usage: scripts/ops/worker_pool_slurm_submit.sh PLAN_CSV --env-file PATH --repo-dir PATH \
+  --sandbox-identity NAME --candidate-sha SHA --container-cpus N \
+  --container-memory-mib N --container-pids N [--dry-run|--yes]
 
 Submit one remote Loom worker Slurm job for every included row emitted by
 worker_pool_plan.py. The command defaults to --dry-run and prints the sbatch
@@ -13,6 +15,11 @@ Required:
   PLAN_CSV       CSV from scripts/ops/worker_pool_plan.py
   --env-file     Untracked remote-worker env file path available on each node
   --repo-dir     Loom checkout path available on each node
+  --sandbox-identity  Lowercase environment/sandbox identity
+  --candidate-sha     Exact 40-character lowercase candidate SHA
+  --container-cpus    Positive per-container CPU ceiling
+  --container-memory-mib  Positive per-container memory ceiling in MiB
+  --container-pids    Positive per-container PID ceiling
 
 Optional:
   --partition    Slurm partition name
@@ -35,6 +42,11 @@ repo_dir=
 partition=
 time_limit="7-00:00:00"
 submit=0
+sandbox_identity=
+candidate_sha=
+container_cpus=
+container_memory_mib=
+container_pids=
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -52,6 +64,26 @@ while [[ $# -gt 0 ]]; do
       ;;
     --time)
       time_limit=${2:-}
+      shift 2
+      ;;
+    --sandbox-identity)
+      sandbox_identity=${2:-}
+      shift 2
+      ;;
+    --candidate-sha)
+      candidate_sha=${2:-}
+      shift 2
+      ;;
+    --container-cpus)
+      container_cpus=${2:-}
+      shift 2
+      ;;
+    --container-memory-mib)
+      container_memory_mib=${2:-}
+      shift 2
+      ;;
+    --container-pids)
+      container_pids=${2:-}
       shift 2
       ;;
     --yes)
@@ -82,6 +114,26 @@ if [[ -z "$repo_dir" ]]; then
   echo "error: --repo-dir is required" >&2
   exit 2
 fi
+if [[ ! "$sandbox_identity" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]]; then
+  echo "error: --sandbox-identity must be a lowercase Slurm sandbox identity" >&2
+  exit 2
+fi
+if [[ ! "$candidate_sha" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "error: --candidate-sha must be an exact 40-character lowercase SHA" >&2
+  exit 2
+fi
+if [[ ! "$container_cpus" =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ ]] || [[ "$container_cpus" =~ ^0+([.]0+)?$ ]]; then
+  echo "error: --container-cpus must be positive" >&2
+  exit 2
+fi
+if [[ ! "$container_memory_mib" =~ ^[1-9][0-9]*$ ]]; then
+  echo "error: --container-memory-mib must be positive" >&2
+  exit 2
+fi
+if [[ ! "$container_pids" =~ ^[1-9][0-9]*$ ]]; then
+  echo "error: --container-pids must be positive" >&2
+  exit 2
+fi
 
 quote() {
   printf '%q' "$1"
@@ -97,7 +149,9 @@ emit_slurm_script() {
 set -euo pipefail
 cd ${repo_q}
 export LOOM_WORKER_MAX_CONCURRENT=${concurrency}
-compose_args=(--env-file ${env_q} -f deploy/docker-compose.remote-worker.yml)
+export LOOM_WORKER_SLURM_JOB_ID="\$SLURM_JOB_ID"
+export LOOM_WORKER_COMPOSE_PROJECT="loom-\${LOOM_WORKER_SANDBOX_IDENTITY}-\${LOOM_WORKER_CANDIDATE_SHA:0:12}-\${SLURM_JOB_ID}"
+compose_args=(--project-name "\$LOOM_WORKER_COMPOSE_PROJECT" --env-file ${env_q} -f deploy/docker-compose.remote-worker.yml)
 
 cleanup() {
   status=\${1:-\$?}
@@ -131,7 +185,7 @@ submit_row() {
   repo_q=$(quote "$repo_dir")
 
   local -a sbatch_args
-  sbatch_args=(--job-name="$job_name" --nodelist="$host" --exclusive --time="$time_limit")
+  sbatch_args=(--job-name="$job_name" --nodelist="$host" --time="$time_limit")
   if [[ -n "$partition" ]]; then
     sbatch_args+=(--partition="$partition")
   fi
@@ -141,7 +195,7 @@ submit_row() {
   if [[ -n "$mem_mib" ]]; then
     sbatch_args+=(--mem="${mem_mib}M")
   fi
-  sbatch_args+=(--export="ALL,LOOM_WORKER_MAX_CONCURRENT=${concurrency},LOOM_REMOTE_WORKER_ENV_FILE=${env_file},LOOM_REMOTE_WORKER_REPO_DIR=${repo_dir}")
+  sbatch_args+=(--export="ALL,LOOM_WORKER_MAX_CONCURRENT=${concurrency},LOOM_REMOTE_WORKER_ENV_FILE=${env_file},LOOM_REMOTE_WORKER_REPO_DIR=${repo_dir},LOOM_WORKER_SANDBOX_IDENTITY=${sandbox_identity},LOOM_WORKER_CANDIDATE_SHA=${candidate_sha},LOOM_WORKER_CONTAINER_CPUS=${container_cpus},LOOM_WORKER_CONTAINER_MEMORY_MIB=${container_memory_mib},LOOM_WORKER_CONTAINER_PIDS=${container_pids}")
 
   if [[ "$submit" -eq 0 ]]; then
     printf 'sbatch'

@@ -1016,8 +1016,8 @@ async def _spawn_trial(
             family_state_volumes=family_state_volumes,
             workspace_staging_policy=workspace_staging_policy,
             # #896: per-container hard caps for non-exclusive (packed)
-            # workers. 0/unset = unbounded (default), keeping exclusive
-            # GB10 pools unchanged. Applied to both the trial container
+            # workers. Loom Slurm admission rejects 0/unset; non-Slurm callers
+            # retain their own defaults. Applied to both the trial container
             # (via TrialContext → StartOptions) and the setup sidecars.
             container_cpus=settings.container_cpus,
             container_memory_mib=settings.container_memory_mib,
