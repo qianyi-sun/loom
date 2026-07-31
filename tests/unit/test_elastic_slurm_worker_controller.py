@@ -280,7 +280,6 @@ def test_build_sbatch_request_uses_environment_specific_worker_settings() -> Non
         "--parsable",
         "--job-name=loom-production-legacy-oldlab-4",
         "--nodelist=oldlab-4",
-        "--exclusive",
         "--time=7-00:00:00",
         "--partition=cpu",
         "--cpus-per-task=12",
@@ -302,10 +301,9 @@ def test_build_sbatch_request_uses_environment_specific_worker_settings() -> Non
     assert 'cd "$LOOM_REMOTE_WORKER_REPO_DIR"' in request.stdin
 
 
-def test_build_sbatch_request_can_disable_exclusive_node_allocation() -> None:
-    request = build_sbatch_request(_config(exclusive=False), node="oldlab-4")
-
-    assert "--exclusive" not in request.args
+def test_build_sbatch_request_rejects_exclusive_node_allocation() -> None:
+    with pytest.raises(ValueError, match="exclusive Loom Slurm workers"):
+        build_sbatch_request(_config(exclusive=True), node="oldlab-4")
 
 
 def test_build_sbatch_request_emits_account_qos_reservation_when_set() -> None:
@@ -350,7 +348,7 @@ def test_build_sbatch_request_exports_container_caps_when_set() -> None:
 
 
 def test_build_sbatch_request_omits_container_caps_when_default() -> None:
-    # #896: 0/unset caps must NOT be exported so exclusive pools are unchanged.
+    # Non-Slurm callers may still omit caps; Loom Slurm admission rejects this.
     request = build_sbatch_request(_config(), node="oldlab-4")
 
     export_arg = next(a for a in request.args if a.startswith("--export="))
@@ -381,6 +379,11 @@ def _controller_config_kwargs(**overrides: object) -> dict[str, object]:
         "sacct_path": "sacct",
         "scancel_path": "scancel",
         "command_timeout_seconds": 20.0,
+        "exclusive": False,
+        "container_cpus": 2.0,
+        "container_memory_mib": 4096,
+        "container_pids": 512,
+        "candidate_sha": "a" * 40,
     }
     values.update(overrides)
     return values
@@ -441,6 +444,13 @@ def test_nonexclusive_admission_requires_complete_containment(
         )
 
 
+def test_build_controller_config_rejects_exclusive_workers() -> None:
+    with pytest.raises(ValueError, match="exclusive Loom Slurm workers"):
+        build_controller_config(
+            **_controller_config_kwargs(exclusive=True),  # type: ignore[arg-type]
+        )
+
+
 def test_gpu_tres_is_validated_and_emitted_in_sbatch_request() -> None:
     config = build_controller_config(
         **_controller_config_kwargs(  # type: ignore[arg-type]
@@ -489,6 +499,10 @@ def test_build_controller_config_threads_account_qos_reservation() -> None:
         slurm_account="loom-staging",
         slurm_qos="loom-staging-normal",
         slurm_reservation="loom-staging-min",
+        container_cpus=2.0,
+        container_memory_mib=4096,
+        container_pids=512,
+        candidate_sha="a" * 40,
     )
 
     assert config is not None
@@ -557,6 +571,10 @@ def test_build_controller_config_parses_allowed_nodes_and_caps() -> None:
         sacct_path="sacct",
         scancel_path="scancel",
         command_timeout_seconds=20.0,
+        container_cpus=2.0,
+        container_memory_mib=4096,
+        container_pids=512,
+        candidate_sha="a" * 40,
     )
 
     assert config.allowed_nodes == ("oldlab-1", "oldlab-2", "oldlab-3")

@@ -131,9 +131,9 @@ class LocalTrialRunner:
     # Trial.run → TrajectoryWriter to mirror events through.
     cp_event_sink: CpEventSink | None = None
     # #896: per-container hard resource caps for the trial + setup-sidecar
-    # containers this runner creates. 0 = unbounded (default), which keeps
-    # exclusive GB10 pools unchanged. main_loop populates these from
-    # WorkerSettings.container_* (env LOOM_WORKER_CONTAINER_*).
+    # containers this runner creates. Loom Slurm admission requires positive
+    # values; 0 remains available only to non-Slurm callers. main_loop populates
+    # these from WorkerSettings.container_* (env LOOM_WORKER_CONTAINER_*).
     container_cpus: float = 0.0
     container_memory_mib: int = 0
     container_pids: int = 0

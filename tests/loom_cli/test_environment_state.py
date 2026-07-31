@@ -209,7 +209,7 @@ def test_committed_production_profile_ships_fail_closed() -> None:
 
     gb10 = next(row for row in profile.autoscaler_policies if row["pool_name"] == "gb10")
     assert gb10["enabled"] is False
-    assert gb10["actuator_config"]["exclusive"] is True  # safe without #896
+    assert gb10["actuator_config"]["exclusive"] is False
 
     desired = next(row for row in profile.gb10_desired_states if row["pool_name"] == "gb10")
     assert desired["target_slots"] == 0

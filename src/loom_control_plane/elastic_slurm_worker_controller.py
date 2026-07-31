@@ -78,7 +78,7 @@ class ElasticSlurmWorkerControllerConfig:
     sacct_path: str
     scancel_path: str
     command_timeout_seconds: float
-    exclusive: bool = True
+    exclusive: bool = False
     slurm_account: str = ""
     slurm_qos: str = ""
     slurm_reservation: str = ""
@@ -90,8 +90,8 @@ class ElasticSlurmWorkerControllerConfig:
     reserved_memory_mib: int = 24_576
     max_concurrency_per_node: int = 8
     max_cpu_load_ratio: float = 1.0
-    # #896 per-container hard caps for non-exclusive (packed) workers. 0 = unset
-    # (unbounded, backward-compatible). When set, exported into the worker env so
+    # #896 per-container hard caps for non-exclusive (packed) workers. Slurm
+    # admission requires positive values. They are exported into the worker env so
     # the compose worker + trial/sidecar containers get an absolute CPU/mem/pids
     # ceiling, bounding an escaped container's contention on a double-duty node.
     container_cpus: float = 0.0
@@ -223,7 +223,7 @@ def build_controller_config(
     sacct_path: str,
     scancel_path: str,
     command_timeout_seconds: float,
-    exclusive: bool = True,
+    exclusive: bool = False,
     slurm_account: str = "",
     slurm_qos: str = "",
     slurm_reservation: str = "",
@@ -289,22 +289,26 @@ def build_controller_config(
     if candidate_sha and _CANDIDATE_SHA_RE.fullmatch(candidate_sha) is None:
         raise ValueError("candidate_sha must be a 40-character lowercase Git SHA")
     gpu_tres, requested_gpus = _parse_gpu_tres(gpu_tres)
-    if not exclusive:
-        _require_positive(container_cpus, "container_cpus for non-exclusive workers")
-        _require_positive(
-            container_memory_mib,
-            "container_memory_mib for non-exclusive workers",
+    if exclusive:
+        raise ValueError(
+            "exclusive Loom Slurm workers are unsupported; configure exclusive=false "
+            "and keep the policy disabled until containment is complete",
         )
-        _require_positive(container_pids, "container_pids for non-exclusive workers")
-        if _SAFE_SANDBOX_ID_RE.fullmatch(environment) is None:
-            raise ValueError(
-                "environment must be a lowercase sandbox identity for non-exclusive workers",
-            )
-        if _CANDIDATE_SHA_RE.fullmatch(candidate_sha) is None:
-            raise ValueError(
-                "candidate_sha is required for non-exclusive workers and must be a "
-                "40-character lowercase Git SHA",
-            )
+    _require_positive(container_cpus, "container_cpus for non-exclusive workers")
+    _require_positive(
+        container_memory_mib,
+        "container_memory_mib for non-exclusive workers",
+    )
+    _require_positive(container_pids, "container_pids for non-exclusive workers")
+    if _SAFE_SANDBOX_ID_RE.fullmatch(environment) is None:
+        raise ValueError(
+            "environment must be a lowercase sandbox identity for non-exclusive workers",
+        )
+    if _CANDIDATE_SHA_RE.fullmatch(candidate_sha) is None:
+        raise ValueError(
+            "candidate_sha is required for non-exclusive workers and must be a "
+            "40-character lowercase Git SHA",
+        )
 
     if max_jobs > len(allowed_nodes):
         raise ValueError("max_jobs cannot exceed the number of allowed nodes")
@@ -594,7 +598,7 @@ def build_sbatch_request(
         "LOOM_WORKER_RESTART_POLICY=no",
     ]
     # #896: only export the per-container caps when configured (>0). Unset leaves
-    # the compose/driver defaults unbounded, so exclusive pools are unaffected.
+    # non-Slurm compose/driver callers may still use their own defaults.
     if config.container_cpus > 0:
         export_vars.append(f"LOOM_WORKER_CONTAINER_CPUS={config.container_cpus}")
     if config.container_memory_mib > 0:
@@ -611,7 +615,9 @@ def build_sbatch_request(
         f"--nodelist={node}",
     ]
     if config.exclusive:
-        args.append("--exclusive")
+        raise ValueError(
+            "exclusive Loom Slurm workers are unsupported; use exclusive=false",
+        )
     args.append(f"--time={config.time_limit}")
     if config.partition:
         args.append(f"--partition={config.partition}")

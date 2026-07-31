@@ -124,6 +124,16 @@ def test_worker_pool_slurm_submit_dry_run_uses_plan_rows(tmp_path: Path) -> None
             "/secure/.env.remote-worker",
             "--repo-dir",
             "/opt/loom",
+            "--sandbox-identity",
+            "staging",
+            "--candidate-sha",
+            "a" * 40,
+            "--container-cpus",
+            "2",
+            "--container-memory-mib",
+            "4096",
+            "--container-pids",
+            "512",
             "--dry-run",
         ],
         text=True,
@@ -135,6 +145,8 @@ def test_worker_pool_slurm_submit_dry_run_uses_plan_rows(tmp_path: Path) -> None
     assert "LOOM_WORKER_MAX_CONCURRENT=32" in result.stdout
     assert "worker-b" not in result.stdout
     assert "sbatch" in result.stdout
+    assert "--exclusive" not in result.stdout
+    assert "LOOM_WORKER_CONTAINER_CPUS=2" in result.stdout
 
 
 def test_worker_pool_slurm_submit_dry_run_cleans_up_compose_on_exit(
@@ -159,6 +171,16 @@ def test_worker_pool_slurm_submit_dry_run_cleans_up_compose_on_exit(
             "/secure/.env.remote-worker",
             "--repo-dir",
             "/opt/loom",
+            "--sandbox-identity",
+            "staging",
+            "--candidate-sha",
+            "a" * 40,
+            "--container-cpus",
+            "2",
+            "--container-memory-mib",
+            "4096",
+            "--container-pids",
+            "512",
             "--dry-run",
         ],
         text=True,

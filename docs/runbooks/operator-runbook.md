@@ -6344,11 +6344,10 @@ activate a reduced profile, substitute TB2.0, or merge incomplete evidence.
   path such as `/shared_work/<operator>/loom-remote-worker-${IMAGE_TAG}`; a
   control-node `/home` checkout can be incomplete on OLDLAB 4/5 and must not be
   assumed valid without a Slurm-side check.
-  Autoscaler Slurm jobs default to exclusive node allocation. For shared
-  OLDLAB validation where a node already has another small Slurm job, set the
-  policy `actuator_config.exclusive=false` only with a reduced, tested CPU,
-  memory, and worker-concurrency slice; leave exclusive allocation enabled for
-  full-node production capacity.
+  Autoscaler Slurm jobs always use `actuator_config.exclusive=false`; exclusive
+  allocation is rejected so GB10/OLDLAB remain available to other Slurm users.
+  Keep the policy disabled until it has a reduced, tested CPU, memory, PID,
+  GPU/TRES, and worker-concurrency slice plus positive container caps.
   Slurm worker jobs install an `EXIT`/`INT`/`TERM` trap around Docker Compose;
   normal exits, idle exits, and `scancel` release the compose worker container
   with `docker compose down --remove-orphans` instead of leaving an orphaned
@@ -6388,7 +6387,11 @@ activate a reduced profile, substitute TB2.0, or merge incomplete evidence.
       "reserved_memory_mib": 24576,
       "max_concurrency_per_node": 8,
       "max_cpu_load_ratio": 1.0,
-      "exclusive": true
+      "exclusive": false,
+      "container_cpus": 2,
+      "container_memory_mib": 4096,
+      "container_pids": 512,
+      "candidate_sha": "<exact-40-character-candidate-sha>"
     }
   }
   ```
@@ -6560,9 +6563,9 @@ activate a reduced profile, substitute TB2.0, or merge incomplete evidence.
   Slurm job records before each autoscaler decision, so pending/running/stale
   job status and `loom_slurm_worker_*` metrics do not depend on an in-pod
   Slurm controller.
-  `actuator_config.exclusive` defaults to `true`; set it to `false` only when
-  the requested CPU, memory, and concurrency are intentionally sized for a
-  shared Slurm node.
+  `actuator_config.exclusive` defaults to `false`; setting it to `true` is
+  rejected. If shared-node containment is incomplete, keep the policy disabled
+  instead of reserving an entire node.
 - Until Docker sandbox CPU/RAM limits are enforced per trial, treat
   higher worker concurrency as an operator decision backed by load-test
   evidence, not just a CPU-count formula.

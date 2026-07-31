@@ -9,9 +9,9 @@
 #
 # SHIPS DISABLED (fail-closed). Applying this profile does NOT activate any
 # prod worker: the GB10 row is enabled=false until the first prod go-live
-# decision. exclusive=true (one worker per node) is safe without #896; the
-# exclusive=false packing target stays gated on #896 container-isolation
-# evidence, same as dev/staging.
+# decision. Non-exclusive allocation is the only supported Loom Slurm contract;
+# the policy remains disabled until #896 container-isolation evidence is
+# complete, rather than falling back to whole-node exclusivity.
 #
 # Apply after image rollout with:
 #   loom admin environment-state apply \
@@ -70,7 +70,9 @@ requested_concurrency = 10
 max_jobs = 14
 pending_job_cap = 2
 time_limit = "2-00:00:00"
-exclusive = true
+# Keep disabled until #896 acceptance; do not use whole-node exclusivity as a
+# fallback.
+exclusive = false
 external_runner = true
 
 [[gb10_worker_pool_desired_states]]

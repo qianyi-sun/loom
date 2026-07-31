@@ -7,8 +7,9 @@ production-like validation.
   each node.
 - `worker-plan.csv` is the Slurm launch plan consumed by
   `scripts/ops/worker_pool_slurm_submit.sh`.
-- `dry-run-2026-06-24.txt` records generated `sbatch` commands for all included
-  nodes using the shared checkout path validated during issue #435.
+- `dry-run-2026-06-24.txt` is immutable historical evidence of the retired
+  whole-node launch contract. Do not replay it; current Loom Slurm submissions
+  omit `--exclusive` and require the non-exclusive containment inputs below.
 - `smoke-evidence-2026-06-24.json` records the staging OLDLAB 4/5 worker
   smoke batch id, worker ids, Slurm job ids, runtime, trial counts, and failure
   count.
@@ -16,9 +17,9 @@ production-like validation.
   elastic Slurm controller from #432. For #45 and later, use the worker-pool
   autoscaler policy as the normal desired-capacity control surface; the same
   Slurm node, checkout, env-file, CPU, memory, concurrency, max-job, and
-  pending-cap settings map into the policy `actuator_config`. Slurm submissions
-  are exclusive by default; set `actuator_config.exclusive=false` only for
-  deliberately shared partial-node validation slices.
+  pending-cap settings map into the policy `actuator_config`. Loom Slurm
+  submissions always use `exclusive=false`; keep the policy disabled until
+  shared-node containment and positive per-container caps are proven.
 
 The initial capacity slice is intentionally conservative: one Slurm job per
 node, `12 CPU`, `58000M`, and `LOOM_WORKER_MAX_CONCURRENT=6`. Raise concurrency

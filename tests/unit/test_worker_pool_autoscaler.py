@@ -121,6 +121,11 @@ def test_slurm_config_from_policy_threads_account_qos_reservation() -> None:
             "slurm_account": "loom-staging",
             "slurm_qos": "loom-staging-normal",
             "slurm_reservation": "loom-staging-min",
+            "exclusive": False,
+            "container_cpus": 2.0,
+            "container_memory_mib": 4096,
+            "container_pids": 512,
+            "candidate_sha": "a" * 40,
         },
     )
     config = _slurm_config_from_policy(row)
@@ -213,7 +218,17 @@ def _policy_row(**overrides: object) -> WorkerPoolAutoscalerPolicy:
         "created_at": now - timedelta(days=1),
         "updated_at": now,
     }
+    actor_overrides = overrides.pop("actuator_config", None)
     values.update(overrides)
+    if actor_overrides is not None:
+        values["actuator_config"] = dict(cast(dict[str, Any], actor_overrides))
+    actor_config = cast(dict[str, Any], values["actuator_config"])
+    if values["actuator"] == "slurm":
+        actor_config.setdefault("exclusive", False)
+        actor_config.setdefault("container_cpus", 2.0)
+        actor_config.setdefault("container_memory_mib", 4096)
+        actor_config.setdefault("container_pids", 512)
+        actor_config.setdefault("candidate_sha", "a" * 40)
     return WorkerPoolAutoscalerPolicy(**values)
 
 
@@ -798,6 +813,11 @@ def test_slurm_config_from_policy_uses_actuator_config_defaults_and_overrides() 
             "sacct_path": "/usr/bin/sacct",
             "scancel_path": "/usr/bin/scancel",
             "command_timeout_seconds": 5.5,
+            "exclusive": False,
+            "container_cpus": 2.0,
+            "container_memory_mib": 4096,
+            "container_pids": 512,
+            "candidate_sha": "a" * 40,
         },
     )
 
@@ -819,13 +839,18 @@ def test_slurm_config_from_policy_uses_actuator_config_defaults_and_overrides() 
             "requested_concurrency": 6,
             "requested_cpus": 12,
             "requested_memory_mib": 58000,
+            "exclusive": False,
+            "container_cpus": 2.0,
+            "container_memory_mib": 4096,
+            "container_pids": 512,
+            "candidate_sha": "a" * 40,
         },
     )
 
     assert _slurm_config_from_policy(csv_row).allowed_nodes == ("oldlab-4",)
 
 
-def test_slurm_config_from_policy_can_disable_exclusive_node_allocation() -> None:
+def test_slurm_config_from_policy_uses_nonexclusive_node_allocation() -> None:
     row = _policy_row(
         max_slots=1,
         actuator_config={
@@ -846,6 +871,28 @@ def test_slurm_config_from_policy_can_disable_exclusive_node_allocation() -> Non
     request = build_sbatch_request(_slurm_config_from_policy(row), node="oldlab-4")
 
     assert "--exclusive" not in request.args
+
+
+def test_slurm_config_from_policy_rejects_exclusive_node_allocation() -> None:
+    row = _policy_row(
+        max_slots=1,
+        actuator_config={
+            "allowed_nodes": ["oldlab-4"],
+            "env_file": "/secure/.env.remote-worker",
+            "repo_dir": "/opt/loom",
+            "requested_concurrency": 1,
+            "requested_cpus": 2,
+            "requested_memory_mib": 8000,
+            "exclusive": True,
+            "container_cpus": 2.0,
+            "container_memory_mib": 8000,
+            "container_pids": 512,
+            "candidate_sha": "a" * 40,
+        },
+    )
+
+    with pytest.raises(ValueError, match="exclusive Loom Slurm workers"):
+        _slurm_config_from_policy(row)
 
 
 async def test_policy_upsert_and_status_helpers_use_normalized_fields() -> None:
