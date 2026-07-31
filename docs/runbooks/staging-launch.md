@@ -263,11 +263,14 @@ Attach these to the release issue or release PR:
   The canary must wait for a clean staging anchor, completed #190 targeted
   durability validation, and an explicit coordinator `GO`. Per #1109, the
   user eval workload batch must not carry `--required-worker-pool`; submit
-  pool coverage on a separate `loom admin batches submit-on-behalf` canary
-  with repeated `--required-worker-pool` flags for `oldlab` and `gb10`.
-  Terminal evidence must include `runs.worker_pool_coverage` (from the
-  coverage canary batch) and `runs.claimed_without_started` from the smoke
-  gate. Staging clusters run with `k8s_worker.enabled=false` (#383) so
+  the v1.0 architecture gate as two separate
+  `loom admin batches submit-on-behalf` canaries using the same reviewed
+  portable Terminal-Bench-like task: one with
+  `--required-worker-pool oldlab` and one with
+  `--required-worker-pool gb10`. Terminal evidence must include an
+  independently identified `runs.worker_pool_coverage` result for each
+  architecture canary and `runs.claimed_without_started` from the user-flow
+  smoke gate. Staging clusters run with `k8s_worker.enabled=false` (#383) so
   x86_64 coverage is delivered by the Slurm-managed `oldlab` pool, not by
   an in-cluster `k8s-worker` Deployment.
 
@@ -462,9 +465,11 @@ discover the same failure later. For release/full100 gates, do not reduce the
 object count/concurrency below the documented values without recording why the
 environment cannot sustain the probe.
 
-For mixed-architecture full100 gates, warm task images before the large batch.
-Run a small architecture-targeted canary on every required worker pool, confirm
-the shared trial-cache registry or worker-local cache is reused, and treat any
+For the v1.0 dual-architecture gate, warm the selected portable
+Terminal-Bench-like task image before any larger batch. Run the same task in
+two independently identified operator canaries, one on x86_64/OLDLAB and one
+on arm64/GB10, confirm the shared trial-cache registry or worker-local cache is
+reused, and treat any
 `task_image_build_timeout` / `building Docker image ... exceeded ...s` failure
 as a platform setup blocker rather than model-quality evidence.
 For Terminus 2 task bundles that inherit from `mictern2/terminus2-full:latest`,
@@ -476,13 +481,13 @@ Per #1109, user `loom eval batch create` must not pass
 `--required-worker-pool` (N tasks → exactly N trials). Worker-pool coverage
 is operator-only via `loom admin batches submit-on-behalf` (or rollout
 admin-on-behalf smoke) on a **separate** canary batch.
-For v1.0's GB10-only staging gate, require `--required-worker-pool gb10` on
-that admin canary. For v1.1/full-cluster mixed-pool evidence, repeat
-`--required-worker-pool` flags on the admin canary, for example
-`--required-worker-pool oldlab --required-worker-pool gb10`. On clusters
-that intentionally host a dedicated k8s worker node pool, add
-`--required-worker-pool k8s-worker` as well. The service adds one
-pool-pinned coverage trial per required pool on that admin batch only.
+For v1.0, create two separate admin canary batches using the same reviewed
+portable Terminal-Bench-like task: require `oldlab` on the x86_64 canary and
+`gb10` on the arm64 canary. Do not combine the two architecture proofs by
+adding repeated pool flags to a single user or architecture batch. On clusters
+that intentionally host a dedicated k8s worker node pool, test it through an
+additional independently identified operator canary. The service adds the
+pool-pinned coverage trial only to the corresponding admin batch.
 When a target pool's CPU architecture is known from active workers or
 autoscaler policy, coverage uses a selected task compatible with that
 architecture; otherwise fanout records `required_worker_pool_incompatible`

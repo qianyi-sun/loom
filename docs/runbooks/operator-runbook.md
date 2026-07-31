@@ -5433,12 +5433,13 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    # then tail it:
    loom eval batch show <batch-id>
    ```
-   For mixed-pool release evidence, repeat `--required-worker-pool` for every
-   pool that must produce terminal evidence, for example `oldlab`,
-   `k8s-worker`, and `gb10`. The service adds one extra pool-pinned
-   coverage trial for each requested pool on that **admin canary batch**
-   only (#1109). User `loom eval batch create` must not pass this flag
-   (N tasks → exactly N trials). When a target pool's CPU architecture is
+   For the v1.0 dual-architecture release gate, submit two independently
+   identified admin canary batches using the same reviewed portable
+   Terminal-Bench-like task: one requires `oldlab`/x86_64 and the other
+   requires `gb10`/arm64. The service adds a pool-pinned coverage trial only
+   to the corresponding **admin canary batch** (#1109). User
+   `loom eval batch create` must not pass this flag (N tasks → exactly N
+   trials). When a target pool's CPU architecture is
    known from active workers or autoscaler policy, the coverage trial is
    selected from tasks compatible with that architecture; if the selected
    task slate cannot satisfy the pool, fanout records
@@ -5920,13 +5921,14 @@ is missing. Do not close them from local tests alone.
     it reports a restart-count increase during the smoke, an `OOMKilled` last
     state, or an unexpected current restart count, inspect `loom-service`
     memory, previous pod logs, and large batch detail/cancel traffic before
-    accepting the gate. For v1.0's GB10-only gate, the
-    `runs.worker_pool_coverage` row must pass with
-    `--required-worker-pool gb10`; a missing pool means the batch did not
-    produce deterministic terminal evidence on the GB10 worker pool. For
-    v1.1/full-cluster OLDLAB-required evidence, repeat the same pattern with an
-    additional `--required-worker-pool oldlab` constraint so the gate is
-    deterministic rather than a post-hoc DB distribution check.
+    accepting the gate. For v1.0, run this gate twice against two separate
+    operator canary batches built from the same reviewed portable
+    Terminal-Bench-like task. The x86_64 invocation requires `oldlab`; the
+    arm64 invocation requires `gb10`. Both `runs.worker_pool_coverage` rows
+    must pass with exact-candidate worker identity, model/agent execution,
+    artifacts, trajectory, verifier output, and numeric reward. A post-hoc DB
+    distribution check or a single GB10-only batch is not dual-architecture
+    acceptance.
 19. **Teardown clean.** On shared staging, delete only the disposable smoke
     teams, users, provider connections, runs, and test objects created by this
     checklist through their supported application APIs. Never run `loom cluster
@@ -5993,6 +5995,9 @@ For the final staging #49/#129 full/max-slot three-cluster canary, use
 That runbook is GO-gated: prepare the commands, preflight checklist, stop
 conditions, and evidence directory up front, but do not submit the canary until
 the coordinator confirms the clean anchor and #190 targeted durability evidence.
+The full/max-slot stress remains broader than the minimum v1.0 architecture
+gate; v1.0 still requires the paired Terminal-Bench-like x86_64 and arm64
+canaries even when the large stress run is deferred.
 
 ## Terminal-Bench 2.1 revision-6 staging readiness
 

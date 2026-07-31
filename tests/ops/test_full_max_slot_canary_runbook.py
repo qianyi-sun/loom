@@ -14,9 +14,16 @@ def test_full_max_slot_runbook_defaults_to_external_worker_pools() -> None:
     assert "--required-worker-pool gb10" in text
     assert "--required-worker-pool k8s-worker" not in text
     assert '"oldlab","k8s-worker","gb10"' not in text
-    # #1109: coverage is on a separate admin canary, not user eval create.
+    # #49/#1109: architecture coverage uses two operator-only canaries, not
+    # additional trials or pool selectors in the normal user eval batch.
     assert "loom admin batches submit-on-behalf" in text
-    assert "Separate operator pool-coverage canary" in text
+    assert "Separate operator architecture canaries" in text
+    assert "export X86_COVERAGE_BATCH_ID=" in text
+    assert "export ARM_COVERAGE_BATCH_ID=" in text
+    assert text.count("$DUAL_ARCH_CANARY_TASK_ID") == 2
+    assert "Stop if `required_worker_pools` is not `[]`" in text
+    assert "--batch-id \"$X86_COVERAGE_BATCH_ID\"" in text
+    assert "--batch-id \"$ARM_COVERAGE_BATCH_ID\"" in text
     assert (
         "--storage-preflight-evidence \"$CANARY_DIR/01-clean-anchor/"
         "minio-storage-preflight-$IMAGE_TAG.json\" \\\n"

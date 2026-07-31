@@ -372,6 +372,13 @@ benchmarks, including SkillFlow today, keep the `TaskConfig` default
 `environment.cpu_arch = "x86_64"` until dual-architecture reward/artifact
 evidence exists.
 
+For v1.0 release acceptance, #49/#715 additionally require the same reviewed
+portable Terminal-Bench-like canary task to run end to end in separate
+operator-only x86_64 and arm64 batches. This is a worker/runtime portability
+gate, not a claim that every canonical Terminal-Bench 2.1 task image is
+multi-architecture. Tasks without real portability evidence retain their
+explicit architecture constraint and fail preflight on incompatible workers.
+
 The #307 reasoning/browsing wave pins and publishes complete selected official
 sets: GPQA Extended (546), MATH-500 (500), Hendrycks MATH test (5000),
 MMLU-Pro test (12032), tau2-bench default leaderboard domains (278), and
