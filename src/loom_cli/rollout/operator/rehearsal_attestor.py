@@ -16,6 +16,7 @@ from loom_cli.rollout.preflight_pipeline import (
 )
 from loom_cli.rollout.rehearsal_restore_evidence import build_restore_verification_evidence
 
+from .backup import BackupError
 from .backup_lease import BackupLease
 from .checkpoint_lease import CriticalCheckpointEvidence, RestoreVerificationEvidence
 from .model import PreflightRequest
@@ -71,7 +72,14 @@ class RehearsalLeaseAttestor:
         )
         if not rehearsal.passed:
             codes = ",".join(sorted(blocker.failure_code for blocker in rehearsal.blockers))
-            raise ValueError(f"isolated rehearsal blocked: {codes}")
+            # Raise a typed, stage-coded BackupError (not a bare ValueError) so the
+            # worker surfaces `restore_rehearsal_blocked` instead of collapsing every
+            # rehearsal failure to a generic `backup_failed`, and preserves the actual
+            # component blocker codes in the secret-safe diagnostic (#924).
+            raise BackupError(
+                "restore_rehearsal_blocked",
+                diagnostic=f"isolated restore rehearsal blocked: {codes}",
+            )
         if cancelled():
             raise ValueError("rehearsal cancelled before publication")
         self.store.publish_preflight_rehearsal(request.request_id, rehearsal)

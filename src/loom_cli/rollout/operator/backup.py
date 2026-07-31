@@ -203,6 +203,7 @@ _STAGE_PUBLIC_REASONS: dict[str, BackupPublicReason] = {
     "latest_publish_failed": "backup_manifest_failed",
     "backup_cleanup_failed": "backup_cleanup_failed",
     "backup_retirement_failed": "backup_retirement_failed",
+    "restore_rehearsal_blocked": "backup_precondition_failed",
 }
 
 
