@@ -119,6 +119,8 @@ image and gateway-ledger bridge:
 
 ```bash
 loom auth login --server https://yylx.world/dev ...
+# #1109: user eval create has no --required-worker-pool. For release/GB10
+# coverage evidence use loom admin batches submit-on-behalf separately.
 loom eval batch create \
   --name-suffix terminus2-gate3-smoke \
   --agent terminus-2 \
@@ -126,8 +128,7 @@ loom eval batch create \
   --model <preflight-passing-model> \
   --benchmark loom-smoke \
   --task-filter '{"task_ids":["loom-smoke/gb10-oracle-hello-world"]}' \
-  --n-per-task 1 \
-  --required-worker-pool gb10
+  --n-per-task 1
 ```
 
 Evidence checklist:

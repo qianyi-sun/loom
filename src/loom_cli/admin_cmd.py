@@ -2146,8 +2146,10 @@ def dispatch(argv: list[str]) -> int:
         action="append",
         default=[],
         help=(
-            "Require one extra coverage trial to run on this worker pool. "
-            "Repeat for mixed-pool release canaries."
+            "Operator/release coverage only (#1109): add one extra "
+            "pool-pinned coverage trial on this worker pool. Repeat for "
+            "mixed-pool release canaries. Not for user eval batches — "
+            "use a separate on-behalf canary batch instead."
         ),
     )
     p_submit_on_behalf.add_argument(

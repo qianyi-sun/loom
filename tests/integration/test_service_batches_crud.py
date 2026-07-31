@@ -1436,10 +1436,10 @@ async def test_post_batch_with_n_per_task_multiplies_count(
     assert body["n_per_task"] == 3
 
 
-async def test_post_batch_required_worker_pools_adds_coverage_count(
+async def test_post_batch_rejects_required_worker_pools_on_user_path(
     camp_setup: tuple[FastAPI, str, UUID],
-    postgres_url: str,
 ) -> None:
+    """#1109: user eval batches must not admit pool-coverage trials."""
     app, raw, _team_id = camp_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
@@ -1457,12 +1457,50 @@ async def test_post_batch_required_worker_pools_adds_coverage_count(
             },
         )
 
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert "required_worker_pools is operator-only" in detail
+    assert "#1109" in detail
+
+
+async def test_admin_on_behalf_required_worker_pools_adds_coverage_count(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    """#188 / #1109: coverage +1 stays on admin on-behalf canaries only."""
+    app, _raw, team_id = camp_setup
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        represented_username = conn.execute(
+            select(User.username).where(User.username.like("BatchOwner-%")),
+        ).scalar_one()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/admin/batches/on-behalf",
+            headers={
+                "Authorization": f"Bearer {RAW_ADMIN_TOKEN}",
+                "X-Loom-Admin-Actor": "release-operator",
+            },
+            json={
+                "represented_username": represented_username,
+                "team_id": str(team_id),
+                "name": "MIT with deterministic pool coverage",
+                "task_filter": {"license": "MIT"},
+                "trial_config": {},
+                "required_worker_pools": [" oldlab ", "k8s-worker", "oldlab"],
+            },
+        )
+
     assert r.status_code == 201, r.text
     body = r.json()
     assert body["required_worker_pools"] == ["oldlab", "k8s-worker"]
     assert body["expected_trial_count"] == 5
 
-    sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:
         row = s.execute(
@@ -1472,15 +1510,22 @@ async def test_post_batch_required_worker_pools_adds_coverage_count(
     assert row.required_worker_pools == ["oldlab", "k8s-worker"]
 
 
-async def test_post_batch_rejects_k8s_worker_pool_when_disabled(
+async def test_admin_on_behalf_rejects_k8s_worker_pool_when_disabled(
     camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
 ) -> None:
     """#383: On profiles with k8s_worker.enabled=false the k8s worker
     Deployment is not rendered, so a submission that requires the
     k8s-worker pool would queue a coverage trial no worker can claim.
     The API must fail loudly at submit time instead of silently
     accepting it."""
-    app, raw, _team_id = camp_setup
+    app, _raw, team_id = camp_setup
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        represented_username = conn.execute(
+            select(User.username).where(User.username.like("BatchOwner-%")),
+        ).scalar_one()
+    sync_engine.dispose()
     # Simulate rendering with k8s_worker.enabled=false by flipping the
     # loom-service Settings that the renderer would have injected.
     original = app.state.settings.k8s_worker_enabled
@@ -1492,9 +1537,14 @@ async def test_post_batch_rejects_k8s_worker_pool_when_disabled(
             base_url="http://svc",
         ) as ac:
             r = await ac.post(
-                "/api/v1/batches",
-                headers={"Authorization": f"Bearer {raw}"},
+                "/api/v1/admin/batches/on-behalf",
+                headers={
+                    "Authorization": f"Bearer {RAW_ADMIN_TOKEN}",
+                    "X-Loom-Admin-Actor": "release-operator",
+                },
                 json={
+                    "represented_username": represented_username,
+                    "team_id": str(team_id),
                     "name": "coverage on disabled cluster",
                     "task_filter": {"license": "MIT"},
                     "trial_config": {},
@@ -1511,12 +1561,19 @@ async def test_post_batch_rejects_k8s_worker_pool_when_disabled(
     assert "oldlab" in detail
 
 
-async def test_post_batch_without_k8s_worker_pool_still_works_when_disabled(
+async def test_admin_on_behalf_without_k8s_worker_pool_still_works_when_disabled(
     camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
 ) -> None:
     """The rejection is targeted: a submission that only requires
     `oldlab` on a k8s-worker-disabled cluster is unaffected."""
-    app, raw, _team_id = camp_setup
+    app, _raw, team_id = camp_setup
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        represented_username = conn.execute(
+            select(User.username).where(User.username.like("BatchOwner-%")),
+        ).scalar_one()
+    sync_engine.dispose()
     original = app.state.settings.k8s_worker_enabled
     app.state.settings.k8s_worker_enabled = False
     try:
@@ -1526,9 +1583,14 @@ async def test_post_batch_without_k8s_worker_pool_still_works_when_disabled(
             base_url="http://svc",
         ) as ac:
             r = await ac.post(
-                "/api/v1/batches",
-                headers={"Authorization": f"Bearer {raw}"},
+                "/api/v1/admin/batches/on-behalf",
+                headers={
+                    "Authorization": f"Bearer {RAW_ADMIN_TOKEN}",
+                    "X-Loom-Admin-Actor": "release-operator",
+                },
                 json={
+                    "represented_username": represented_username,
+                    "team_id": str(team_id),
                     "name": "oldlab-only coverage on disabled cluster",
                     "task_filter": {"license": "MIT"},
                     "trial_config": {},

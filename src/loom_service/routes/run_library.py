@@ -1957,12 +1957,13 @@ async def clone_run_library_batch_config(
         team_id=ctx.team_id,
     )
     combinations = list(source.combinations or [])
-    required_worker_pools = list(source.required_worker_pools or [])
+    # #1109: user clone must not re-inject operator pool-coverage trials.
+    required_worker_pools: list[str] = []
     expected = expected_trial_count(
         task_count=len(resolved_task_ids),
         n_per_task=source.n_per_task,
         combinations=combinations,
-    ) + len(required_worker_pools)
+    )
 
     token_prefix = ctx.token_hash.hex()[:8] if ctx.token_hash else "00000000"
     provenance: list[dict[str, Any]] = [
@@ -2160,13 +2161,14 @@ async def reuse_run_library_artifact(
         team_id=ctx.team_id,
     )
     combinations = list(batch.combinations or []) if batch else []
-    required_worker_pools = list(batch.required_worker_pools or []) if batch else []
+    # #1109: user artifact reuse must not re-inject operator pool-coverage.
+    required_worker_pools: list[str] = []
     n_per_task = batch.n_per_task if batch else 1
     expected = expected_trial_count(
         task_count=len(resolved_task_ids),
         n_per_task=n_per_task,
         combinations=combinations,
-    ) + len(required_worker_pools)
+    )
     provenance.extend(benchmark_provenance)
     derived_id = uuid4()
     derived_created_at = datetime.now(UTC)

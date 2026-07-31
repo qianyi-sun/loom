@@ -2161,8 +2161,9 @@ async def test_clone_config_uses_destination_provider_and_records_provenance(
         assert row.provider_connection_id != conn_a
         assert row.source_provenance[0]["source_batch_id"] == str(batch_shared)
         assert row.resolved_task_ids == [run_library_setup["task_id"]]
-        assert row.required_worker_pools == ["gpu-a", "gpu-b"]
-        assert row.expected_trial_count == 3
+        # #1109: clone must not re-inject source pool-coverage trials.
+        assert row.required_worker_pools == []
+        assert row.expected_trial_count == 1
     sync_engine.dispose()
 
 
@@ -2393,6 +2394,7 @@ async def test_reuse_shared_artifact_creates_provenance_and_blocks_raw(
         row = s.execute(
             select(Batch).where(Batch.id == UUID(body["batch_id"])),
         ).scalar_one()
-        assert row.required_worker_pools == ["gpu-a", "gpu-b"]
-        assert row.expected_trial_count == 3
+        # #1109: artifact reuse must not re-inject source pool-coverage.
+        assert row.required_worker_pools == []
+        assert row.expected_trial_count == 1
     sync_engine.dispose()
