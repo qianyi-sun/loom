@@ -521,15 +521,16 @@ GB10/OLDLAB machines remain shared physical capacity. The release contract is
 belongs to production, staging/dev has `staging_slots = 0`, and any staging borrow must
 be explicit, bounded to at most one slot per host, and drained back before the
 borrow window ends. The physical v1.0 GB10 inventory remains all 15 hosts at 10
-slots each, but #822 marks node 7 unreachable and assigns it zero production or
-staging slots. Staging's current fail-closed active set is the other 14 hosts /
-140 slots. The repo-owned `deploy/worker-pools/gb10/ssh_config` routes
+theoretical slots each. All 15 remain heartbeat-managed. A healthy busy node
+advertises zero or reduced free capacity, receives no new Loom allocation, and
+returns automatically after resource release. The repo-owned
+`deploy/worker-pools/gb10/ssh_config` routes
 the private `trt-gb10-2..15` addresses on port `22` through
 `ProxyJump trt-gb10-1`; `trt-gb10-1` is the only public entrypoint and uses
 port `2221`.
-The manifest represents node 7 as `unreachable` until its separate merged
-re-admission gate passes; it can also represent future `staging_draining` and
-`host_draining` states when live evidence requires them.
+The manifest must distinguish inventory membership, health, and current
+capacity. It may represent temporary health or drain states without removing a
+node from the complete 15-host expected set.
 
 Generate the secret-safe desired-vs-observed evidence before a production
 promotion:
@@ -1033,7 +1034,7 @@ Recommended idle-exit values:
 |---|---:|---|
 | Fixed Kubernetes worker | unset | Keep baseline capacity online. |
 | Dev or staging elastic Slurm | 300 seconds | Release idle allocations quickly while preserving short queue bursts. |
-| Staging GB10 release-managed Compose | 7200 seconds | Keep all 14 active hosts fresh through bounded-parallel prep, release-gate, and smoke validation while #822 excludes node 7. |
+| Staging GB10 release-managed Compose | 7200 seconds | Keep all 15 inventory hosts represented in heartbeat/health evidence through bounded-parallel prep, release-gate, and smoke validation. |
 | Production OLDLAB elastic Slurm | 600-900 seconds | Avoid churn during real batch bursts; use 900 seconds when submissions are bursty. |
 
 Keep Slurm `--time` as a hard upper bound even when idle-exit is enabled.
@@ -1466,8 +1467,9 @@ environment/pool authority.
 For GB10, use the same Slurm actuator rather than the legacy `gb10` actuator
 for normal capacity. The backend remains `docker` because each worker runs
 Docker sandboxes, while the autoscaler actuator is `slurm` because capacity is
-requested and released through the GB10 Slurm partition. While #822 excludes
-node 7, the declared 14-node, 10-slot shape has a ceiling of 140 slots:
+requested and released through the GB10 Slurm partition. The declared inventory
+contains all 15 nodes. The 150-slot value below is a physical maximum; current
+allocatable capacity remains resource-observation driven:
 
 ```json
 {
@@ -1475,7 +1477,7 @@ node 7, the declared 14-node, 10-slot shape has a ceiling of 140 slots:
   "enabled": false,
   "disabled_reason": "#827: service identity and exact-candidate allocation attestation are not yet proven for every allowed GB10 node",
   "min_slots": 0,
-  "max_slots": 140,
+  "max_slots": 150,
   "actuator_config": {
     "backend": "docker",
     "cpu_arch": "arm64",
@@ -1487,6 +1489,7 @@ node 7, the declared 14-node, 10-slot shape has a ceiling of 140 slots:
       "trt-gb10-4",
       "trt-gb10-5",
       "trt-gb10-6",
+      "trt-gb10-7",
       "trt-gb10-8",
       "trt-gb10-9",
       "trt-gb10-10",
@@ -1501,7 +1504,7 @@ node 7, the declared 14-node, 10-slot shape has a ceiling of 140 slots:
     "requested_cpus": 20,
     "requested_memory_mib": 115000,
     "requested_concurrency": 10,
-    "max_jobs": 14,
+    "max_jobs": 15,
     "pending_job_cap": 2,
     "time_limit": "2-00:00:00",
     "exclusive": true
@@ -1563,8 +1566,8 @@ Install/check runs a bounded, self-cleaning private-claim/access-gate/publish/
 collision probe as the service identity before accepting the NFS publication
 contract.
 
-Broker preflight checks the fixed 14 active GB10 nodes against the root as the
-`qianyi` consumer. The 13 NFS clients must report the exact source and NFSv4
+Broker preflight checks all 15 GB10 inventory nodes against the root as the
+`qianyi` consumer. The NFS clients must report the exact source and NFSv4
 identity, while `trt-gb10-2` must report its ext4 export backend. After
 publication and before environment-state apply, step 11 reads the verifier
 from the exact resolved commit's Git blob, not the mutable rollout worktree,

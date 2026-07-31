@@ -6,11 +6,12 @@ Date: 2026-07-13
 
 Tracking: [#803](https://github.com/qianyi-sun/loom/issues/803)
 
-Temporary amendment (2026-07-14): [#822](https://github.com/qianyi-sun/loom/issues/822)
-keeps the full 15-host SSH/trust inventory but excludes `trt-gb10-7` from the
-active staging target. Until a separate merged re-admission change passes, the
-acceptance boundary is all 14 active GB10 hosts and 140 slots, with node 7
-persistently stopped/unreachable and no runtime override.
+Membership amendment (2026-07-31):
+[#822](https://github.com/qianyi-sun/loom/issues/822) keeps the complete
+`trt-gb10-1..15` inventory in trust, heartbeat, health, scheduling, and
+acceptance. A healthy busy node advertises reduced or zero available resources;
+it is not statically excluded and becomes eligible automatically after resource
+release. See `docs/architecture/gb10-dynamic-capacity.md`.
 
 ## Context
 
@@ -181,10 +182,10 @@ before Docker receives the fixed read-only bind.
 The root installation owns the runner source, venv, client, broker, sudoers,
 policy config, and install ledger. The service account owns the candidate
 checkout, request ledger, kubeconfig, generated worker env, runtime locks, and
-a dedicated Ed25519 GB10 deploy identity. Under #822, that public key is
-bootstrapped to the exact 14-host active set; the full 15-host checked-in
-topology remains validated and is retained for legacy-ledger revocation. The
-private key remains mode 0600 and is never shared with an operator.
+a dedicated Ed25519 GB10 deploy identity. That public key is bootstrapped to
+the complete 15-host authority. Health or resource pressure may block current
+placement without changing trust or inventory membership. The private key
+remains mode 0600 and is never shared with an operator.
 The `loom-rollout` passwd UID and `id -u loom-rollout` must resolve to the same
 nonzero value. Its passwd primary GID, the GID of the named `loom-rollout`
 group, and `id -g loom-rollout` must likewise resolve to the same nonzero value.
@@ -293,8 +294,8 @@ fetches from the immutable shared candidate. Its upload-pack trusts only the
 candidate-bound `.git` directory, so the consumer can read service-owned Git
 objects without changing ownership or writing persistent Git configuration.
 
-The broker preflight verifies the fixed 14 active GB10 nodes can consume the
-shared root as `qianyi` without writing it. The 13 NFS clients must report the
+The broker preflight verifies all 15 GB10 inventory nodes can consume the
+shared root as `qianyi` without writing it. The NFS clients must report the
 exact source and NFSv4 mount identity; `trt-gb10-2` must report the ext4 export
 backend at the same mountpoint. After publication and before
 environment-state mutation, step 11 captures verifier bytes from the exact
@@ -486,9 +487,8 @@ Uninstall is fail-closed: remove admission, acquire maintenance under the same
 launch lock, prove no request is active, revoke the exact service public key on
 every host in the root-owned revocation ledger, remove only installer-recorded
 ACLs/memberships/linger/key material, and retain request and rollout evidence.
-A legacy ledger can contain all 15 inventory hosts; a #822-era install records
-the 14 active hosts. A failed upgrade retains that durable ledger so uninstall
-cannot leave stale remote trust.
+The ledger contains all 15 inventory hosts. A failed upgrade retains that
+durable ledger so uninstall cannot leave stale remote trust.
 
 Before the first ACL mutation, the root-owned provisional install record stores
 the complete ACL preimage and expected postimage for every required mask
@@ -544,9 +544,9 @@ required broker-owned phase. Only one full staging rollout can be active.
 The service and audit boundary remains operational rather than adversarial
 while the operators retain root/Docker access. Production authority and GitHub
 Environment approval are unchanged. The backup, protected preflight,
-environment-state, release-gate, and smoke gates apply to all 14 active GB10
-hosts under #822; the full 15-host inventory remains validated and cannot be
-changed through a runtime host override.
+environment-state, release-gate, and smoke gates retain all 15 GB10 hosts in
+heartbeat/health evidence. Current allocatable capacity is dynamic and cannot
+be changed by deleting a busy or unhealthy host from expected inventory.
 
 ## Validation and acceptance
 
