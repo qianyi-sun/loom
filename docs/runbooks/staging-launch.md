@@ -634,10 +634,10 @@ special files, or a
 non-exact resolved SHA fail closed. Publication is no-replace and immutable:
 an exact existing target is accepted only after full index/physical-tree
 validation, and drift is never replaced or implicitly cleaned during rollout
-or resume. Broker preflight verifies the fixed 14 active nodes can read/search
-but not write the root. After publish and before environment-state apply, step
-11 streams trusted verifier bytes over protected SSH stdin (never from the
-target) and requires all 14 nodes to agree on exact HEAD, clean status,
+or resume. Broker preflight verifies all 15 inventory nodes can read/search but
+not write the root. After publish and before environment-state apply, step 11
+streams trusted verifier bytes over protected SSH stdin (never from the target)
+and requires all 15 nodes to agree on exact HEAD, clean status,
 index/modes, deterministic tracked-file readability, and content identity.
 The 13 clients must report the exact NFSv4 source and `trt-gb10-2` the ext4
 backend; mount/device/inode values remain sanitized evidence. Private worker

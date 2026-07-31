@@ -255,9 +255,13 @@ drains them on failure:
 `READ-ONLY LIVE` until the validation command starts; `LIVE PROD AUTHORITY
 REQUIRED` for the desired-state and node-agent mutations.
 
-While #822 remains open, the merged capacity authority excludes node 7. The
-runner rejects any attempt to add it back through `--hosts`; use the 14-host
-set below only from the fixed merged candidate. Re-admission is a separate PR.
+The capacity authority retains all 15 GB10 hosts. The runner must not accept a
+smaller expected inventory as a workaround for resource pressure or a health
+failure. A healthy busy node remains heartbeat-managed with zero or reduced
+available capacity, and work is placed on another eligible node. Current code
+that still rejects node 7 is non-canonical implementation debt under #822; do
+not run this mutable command until a merged candidate implements the 15-node
+contract.
 
 ```bash
 uv run --no-sync python scripts/ops/staging_validation_capacity_runner.py \
@@ -265,7 +269,7 @@ uv run --no-sync python scripts/ops/staging_validation_capacity_runner.py \
   --admin-token file:/shared_work/qianyi/loom-worker-capacity/staging-admin-token \
   --environment staging \
   --pool-name gb10 \
-  --hosts trt-gb10-1,trt-gb10-2,trt-gb10-3,trt-gb10-4,trt-gb10-5,trt-gb10-6,trt-gb10-8,trt-gb10-9,trt-gb10-10,trt-gb10-11,trt-gb10-12,trt-gb10-13,trt-gb10-14,trt-gb10-15 \
+  --hosts trt-gb10-1,trt-gb10-2,trt-gb10-3,trt-gb10-4,trt-gb10-5,trt-gb10-6,trt-gb10-7,trt-gb10-8,trt-gb10-9,trt-gb10-10,trt-gb10-11,trt-gb10-12,trt-gb10-13,trt-gb10-14,trt-gb10-15 \
   --ssh-config deploy/worker-pools/gb10/ssh_config \
   --ssh-identity /shared_work/qianyi/loom-worker-capacity/staging-gb10-rollout-ed25519 \
   --lease-ttl 6h \

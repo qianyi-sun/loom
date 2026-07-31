@@ -6,8 +6,8 @@ sealed candidate `e833dd3` (serving `/dev`) to the tip of `dev` (serving
 `/staging`), in one coordinated maintenance window.
 
 This is a high-blast-radius operation — it moves the public `yylx.world` route,
-migrates the live staging database, and renames the worker pool across 14 GB10
-hosts. Run it as a supervised window with the abort path in hand, not
+migrates the live staging database, and renames the worker pool across the full
+15-host GB10 inventory. Run it as a supervised window with the abort path in hand, not
 unattended.
 
 ## Why a single window
@@ -45,7 +45,7 @@ outside the window):
    `0070` (capacity) and conflict on the existing table. The migration must
    `stamp 0072` first (accept the content it has), then run `0073`. If the
    driver does not do this, step 4 includes the manual stamp.
-2. **How the dev candidate is materialized on the 14 GB10 shared checkouts**
+2. **How the dev candidate is materialized on all 15 GB10 shared checkouts**
    (`gb10.candidate-source`): via the `loom-staging-rollout-gb10-trust` broker
    command, the driver's GB10 prep step, or the shared-repo export authority
    (#890/#891). Confirm which, and that the operator has the access.

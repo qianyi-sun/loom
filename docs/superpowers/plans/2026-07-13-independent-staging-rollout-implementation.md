@@ -1034,3 +1034,10 @@ Remove only process artifacts created for installation/testing: temporary bootst
 ## Completion gates
 
 Repository implementation is ready for live installation only when Tasks 1-9 pass and the PR is merged into `dev`. The operator-independence slice is accepted only when Task 10 proves both operators' authenticated dry-run attribution, a real detached merged-code rollout, singleton rejection, all existing rollout gates, and zero raw secret leakage. #803 remains open until its separate canonical identity inventory/bootstrap/rotation acceptance is also implemented or explicitly split into a linked issue.
+> **Superseded GB10 membership policy (2026-07-31):** This archived plan
+> preserves historical active-14/140-slot rollout assumptions for provenance;
+> they are not operative design or runbook instructions. The current contract
+> keeps `trt-gb10-1..15` in heartbeat, health, scheduling, and acceptance, with
+> dynamic resource availability and no static node-7 exclusion. See
+> `docs/architecture/gb10-dynamic-capacity.md` and #822.
+>

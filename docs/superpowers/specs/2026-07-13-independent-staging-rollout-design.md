@@ -430,3 +430,10 @@ changing Qianyi's existing emergency key.
 Rollback does not weaken cluster state, restore an older image directly, or
 permit an arbitrary ref. A code rollback is a merged revert on `dev` followed
 by another normal staging request.
+> **Superseded GB10 membership policy (2026-07-31):** This archived design
+> preserves historical active-14/140-slot assumptions for provenance; they are
+> not operative architecture or acceptance requirements. The current contract
+> keeps `trt-gb10-1..15` in heartbeat, health, scheduling, and acceptance, with
+> dynamic resource availability and no static node-7 exclusion. See
+> `docs/architecture/gb10-dynamic-capacity.md` and #822.
+>

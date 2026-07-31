@@ -1004,7 +1004,7 @@ with bounded concurrency. Nested GB10 fleet probes use four workers each, so
 the dependency DAG cannot exceed eight concurrent SSH operations when mount,
 host-readiness, and candidate-source checks overlap. This avoids turning the
 shared NFS checkout probe into a load-induced false blocker while retaining a
-complete 14-host result inside the Tier 0 budget. It validates the manager
+complete 15-host result inside the Tier 0 budget. It validates the manager
 version, linger, boot ID,
 completed oneshot result, enabled timer, and only the documented
 `active/running` to `active/waiting` transient transition. The exact

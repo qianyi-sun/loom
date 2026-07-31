@@ -68,11 +68,13 @@ Existing accepted evidence includes:
 This evidence remains useful only where its scope matches a matrix row. It does
 not substitute for a fresh final-candidate matrix run.
 
-Current operational amendment: #822 temporarily removes `trt-gb10-7` from the
-staging rollout target. Fresh candidate evidence must cover all 14 active hosts
-and 140 slots, while preserving node 7 as stopped/unreachable; the historical
-15-host HF-boundary evidence above remains historical rather than a current
-reachability claim.
+Current membership contract: #822 retains the complete `trt-gb10-1..15`
+inventory in heartbeat, health, scheduling, and acceptance. Fresh candidate
+evidence must report all 15 hosts. The physical maximum may be 150 slots, but
+current allocatable capacity is derived from fresh resource observations; a
+healthy busy host remains visible with reduced or zero capacity and becomes
+eligible automatically after resources are released. The evidence above remains
+historical and does not substitute for a fresh candidate-bound readback.
 
 ## Program Structure
 
