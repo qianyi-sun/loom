@@ -39,12 +39,15 @@ _EXPECTED_INGRESS_ROUTES: dict[str, str] = {
 _EXPECTED_PREFIXED_INGRESS_ROUTES: dict[str, frozenset[str]] = {
     "loom-service": frozenset({
         "/(?-i:prod)/(api/v1((/[^/%]+)*/?))$",
+        "/(?-i:staging)/(api/v1((/[^/%]+)*/?))$",
         "/(?-i:dev)/(api/v1((/[^/%]+)*/?))$",
     }),
     "loom-web": frozenset({
         "/(?-i:prod)/(([^/%]+/)*[^/%]+/?)?$",
+        "/(?-i:staging)/(([^/%]+/)*[^/%]+/?)?$",
         "/(?-i:dev)/(([^/%]+/)*[^/%]+/?)?$",
         "/(?-i:prod)$",
+        "/(?-i:staging)$",
         "/(?-i:dev)$",
     }),
 }
@@ -245,7 +248,7 @@ def _audit_ingress(
                             f"only at {expected_path!r}; found path "
                             f"{actual_path!r}. Public ingress may expose "
                             f"only SPA '/' and API '/api/v1', or their "
-                            f"canonical /prod and /dev prefixed routes."
+                            f"canonical /prod, /staging, and /dev prefixed routes."
                         ),
                     ))
     # `defaultBackend` catches every request that doesn't match a

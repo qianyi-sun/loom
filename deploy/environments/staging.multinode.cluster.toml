@@ -1,0 +1,81 @@
+# Staging on the multi-node OLDLAB k3s cluster (the live staging as of the
+# 2026-07 cutover). This is the version-controlled desired state for the
+# sanctioned k3s deploy path — see docs/runbooks/deploy-staging-k3s.md.
+#
+# Kept as a SEPARATE file from staging.cluster.toml (which still describes the
+# single-node kind rollback anchor) until the kind cluster is wiped under #881;
+# at that point this becomes the canonical staging config.
+#
+# `image_tag` is a default; the deploy script overrides it with the freshly
+# built candidate sha (staging-<shortsha>). `container_registry` is the on-host
+# registry; k3s rewrites 192.168.50.13:5000 -> the loom-registry container via
+# /etc/rancher/k3s/registries.yaml.
+namespace = "loom-staging"
+container_registry = "192.168.50.13:5000"
+image_tag = "staging-5eeed714"
+runtime_environment = "staging"
+ingress_host = "yylx.world"
+ingress_redirect_hosts = ["www.yylx.world"]
+ingress_tls_secret_name = "loom-staging-tls"
+frontend_environment = "staging"
+frontend_environment_label = "Staging"
+frontend_route_path = "/staging"
+frontend_api_base_path = "/staging"
+trajectories_bucket = "loom-staging-trajectories"
+artifacts_bucket = "loom-staging-artifacts"
+env_state_profile = "../environment-state/staging.toml"
+# Dynamic (Longhorn) provisioning for the multi-node distributed backends.
+persistent_storage_backend = "dynamic"
+persistent_storage_host_path_root = "/data/loom-staging"
+
+# Shared trial-image cache (#547 item #2): workers on any node pull a layered
+# image built on any other node. Falls back to local build without push creds.
+trial_cache_registry_repo = "ghcr.io/qianyi-sun/loom-trial-cache"
+
+# Trial execution capacity comes from the release-managed external worker pools,
+# not an in-cluster loom-worker Deployment. GB10 pool active; OLDLAB pool gated
+# off until #896 container isolation lands.
+[replicas]
+web = 1
+
+[k8s_worker]
+enabled = false
+
+[workload_contract]
+workload_trust_mode = "internal_trusted"
+taskset_transforms_enabled = false
+taskset_transform_network_isolated = false
+untrusted_workload_isolation = false
+
+[gb10_pool]
+# #822: trt-gb10-7 remains in the fixed SSH inventory but is not an active
+# rollout target. Re-admission requires a separate merged change and evidence.
+ssh_config = "../worker-pools/gb10/ssh_config"
+ssh_identity_file = "/var/lib/loom-staging-rollout/gb10-deploy-ed25519"
+hosts = [
+  { ssh_target = "trt-gb10-1", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
+  { ssh_target = "trt-gb10-2", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
+  { ssh_target = "trt-gb10-3", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
+  { ssh_target = "trt-gb10-4", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
+  { ssh_target = "trt-gb10-5", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
+  { ssh_target = "trt-gb10-6", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
+  { ssh_target = "trt-gb10-8", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
+  { ssh_target = "trt-gb10-9", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
+  { ssh_target = "trt-gb10-10", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
+  { ssh_target = "trt-gb10-11", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
+  { ssh_target = "trt-gb10-12", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
+  { ssh_target = "trt-gb10-13", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
+  { ssh_target = "trt-gb10-14", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
+  { ssh_target = "trt-gb10-15", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
+]
+
+# Multi-node distributed backends on the 5-node OLDLAB k3s cluster: 4-pod
+# distributed MinIO (Longhorn PVCs, required hostname anti-affinity, PDB
+# min_available=3) + CNPG 3-replica Postgres.
+[topology]
+multi_node = true
+storage_backend = "longhorn"
+postgres_replicas = 3
+minio_replicas = 4
+anti_affinity = "required"
+min_available = 3
