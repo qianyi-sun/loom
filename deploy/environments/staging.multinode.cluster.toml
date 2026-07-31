@@ -32,9 +32,9 @@ persistent_storage_host_path_root = "/data/loom-staging"
 # image built on any other node. Falls back to local build without push creds.
 trial_cache_registry_repo = "ghcr.io/qianyi-sun/loom-trial-cache"
 
-# Trial execution capacity comes from the release-managed external worker pools,
-# not an in-cluster loom-worker Deployment. GB10 pool active; OLDLAB pool gated
-# off until #896 container isolation lands.
+# Trial execution capacity comes from the release-managed external worker pools
+# (GB10 + OLDLAB), wired on the worker substrate itself — not defined here, so
+# this deploy config carries no per-host worker paths.
 [replicas]
 web = 1
 
@@ -46,28 +46,6 @@ workload_trust_mode = "internal_trusted"
 taskset_transforms_enabled = false
 taskset_transform_network_isolated = false
 untrusted_workload_isolation = false
-
-[gb10_pool]
-# #822: trt-gb10-7 remains in the fixed SSH inventory but is not an active
-# rollout target. Re-admission requires a separate merged change and evidence.
-ssh_config = "../worker-pools/gb10/ssh_config"
-ssh_identity_file = "/var/lib/loom-staging-rollout/gb10-deploy-ed25519"
-hosts = [
-  { ssh_target = "trt-gb10-1", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-2", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-3", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-4", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-5", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-6", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-8", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-9", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-10", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-11", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-12", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-13", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-14", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
-  { ssh_target = "trt-gb10-15", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
-]
 
 # Multi-node distributed backends on the 5-node OLDLAB k3s cluster: 4-pod
 # distributed MinIO (Longhorn PVCs, required hostname anti-affinity, PDB
