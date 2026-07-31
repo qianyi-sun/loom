@@ -7,7 +7,7 @@ import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 
@@ -212,7 +212,7 @@ def _install_tmux_session_alive_guard(agent: Any) -> None:
 
     async def _get_incremental_with_recovery_notice(*args: Any, **kwargs: Any) -> str:
         nonlocal suppress_keys, pending_notice
-        output = await original_get_incremental(*args, **kwargs)
+        output = cast(str, await original_get_incremental(*args, **kwargs))
         if pending_notice is None:
             return output
         notice = pending_notice
