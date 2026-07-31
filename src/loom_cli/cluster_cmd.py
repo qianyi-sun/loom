@@ -1322,6 +1322,11 @@ _TEMPLATE_ORDER: tuple[str, ...] = (
     # Docker containers a stable hostPort:30443 endpoint to dial the
     # in-cluster gateway through. Carries its own NetworkPolicy.
     "gateway-router.yaml.j2",
+    # worker-router DaemonSet — per-node hostPort forwarder giving
+    # EXTERNAL workers (GB10) a stable private-network node-IP:30080
+    # endpoint into the in-cluster control-plane. Bearer-token auth is
+    # enforced at the control-plane behind it; boundary-allowlisted.
+    "worker-router.yaml.j2",
     # llm-gateway-sandbox DaemonSet (#547 item #3) — TLS-terminating
     # HTTP CONNECT proxy on hostPort 8443 that verifies the step-JWT
     # before tunneling to the in-cluster gateway. Renders only when

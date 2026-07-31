@@ -1,0 +1,93 @@
+# loom-worker-router — per-node TCP proxy from hostPort 30080 to the
+# in-cluster `loom-control-plane` Service (:8080).
+#
+# Why a DaemonSet + hostPort instead of exposing the control-plane via
+# Ingress: the control-plane carries worker + admin routes that must NOT
+# be reachable from the public internet. But EXTERNAL workers (e.g. the
+# GB10 fleet) are not k8s pods — they run on separate hosts that share
+# the private node network yet cannot resolve in-cluster Service DNS or
+# reach ClusterIPs. This router gives them a stable, private-network
+# `node-IP:30080` endpoint to dial; the router pod proxies the TCP
+# stream into the in-cluster control-plane Service. It is reachable only
+# on the private node network (the public gateway forwards :443→ingress
+# only, not arbitrary node ports), so the control-plane stays off the
+# public surface.
+#
+# No extra auth here (plain TCP forward, mirroring loom-gateway-router):
+# every control-plane worker route already authenticates the caller with
+# a bearer token (`verify_bearer_token`), and admin routes with an admin
+# token — auth happens at the control-plane behind us.
+#
+# Why an exception in `loom cluster audit`: hostPort declarations are
+# flagged by the boundary auditor. This DaemonSet legitimately needs
+# hostPort 30080 (the external-worker endpoint); the auditor's allowlist
+# (cluster_boundary.py) lists `loom-worker-router` as an exempted
+# hostPort user.
+
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: loom-worker-router
+spec:
+  selector:
+    matchLabels: { app: loom-worker-router }
+  template:
+    metadata:
+      labels: { app: loom-worker-router }
+    spec:
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: router
+          image: alpine/socat:1.7.4.4
+          # TCP-LISTEN on 30080 (host port via hostPort below) → forks
+          # one socat per connection, each TCP-connecting to the
+          # in-cluster loom-control-plane Service. `reuseaddr` avoids the
+          # TIME_WAIT bind hold after pod restart; `fork` lets multiple
+          # workers connect concurrently.
+          args:
+            - "-d"
+            - "TCP-LISTEN:30080,reuseaddr,fork"
+            - "TCP:loom-control-plane.{{ namespace }}.svc.cluster.local:8080"
+          ports:
+            - name: worker
+              containerPort: 30080
+              hostPort: 30080
+              protocol: TCP
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+          # No probes: socat has no healthcheck endpoint; readiness
+          # derives from process liveness — k8s restarts a crashed socat.
+
+---
+# NetworkPolicy: router pod ingress from anywhere on the node (hostPort
+# traffic arrives via the node-local stack), egress to the in-cluster
+# control-plane + kube-dns only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: loom-worker-router
+spec:
+  podSelector:
+    matchLabels: { app: loom-worker-router }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports:
+        - { port: 30080, protocol: TCP }
+  egress:
+    - to:
+        - podSelector: { matchLabels: { app: loom-control-plane } }
+      ports:
+        - { port: 8080, protocol: TCP }
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }

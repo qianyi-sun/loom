@@ -130,6 +130,9 @@ spec:
     - podSelector:
         matchLabels:
           app: loom-service
+    - podSelector:
+        matchLabels:
+          app: loom-worker-router
     ports:
     - port: 8080
       protocol: TCP
