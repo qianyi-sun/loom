@@ -309,7 +309,10 @@ jobs:
           # test doesn't false-fail when the worker Deployment is
           # legitimately absent (staging/production) and doesn't
           # false-pass when it's legitimately present (development).
-          if grep -Fq "name: loom-worker" /tmp/manifests.yaml; then
+          # Anchor to end-of-line so this does NOT match `loom-worker-router`
+          # (the per-node control-plane hostPort forwarder), only the
+          # `loom-worker` Deployment itself.
+          if grep -Eq "name: loom-worker$" /tmp/manifests.yaml; then
             echo "manifest includes loom-worker → verifying it exists in cluster"
             kubectl --context kind-loom-smoke -n loom get deploy loom-worker
           else
@@ -341,7 +344,9 @@ jobs:
           # included it (#383 made it conditional on
           # k8s_worker.enabled).
           manifest = open("/tmp/manifests.yaml").read()
-          if "name: loom-worker" in manifest:
+          # Trailing newline so this does NOT match `loom-worker-router`,
+          # only the `loom-worker` Deployment name value itself.
+          if "name: loom-worker\n" in manifest:
               expected.add("loom-worker")
           missing = expected - names
           if missing:

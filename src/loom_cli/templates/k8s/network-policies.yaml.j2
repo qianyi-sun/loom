@@ -233,10 +233,13 @@ spec:
   policyTypes: [Ingress, Egress]
   ingress:
     # CP is reached by workers (claim, state PATCH) and by
-    # loom-service forwarders. NOT exposed via Ingress per #77.
+    # loom-service forwarders. NOT exposed via public Ingress per #77;
+    # external workers reach it privately through loom-worker-router
+    # (per-node hostPort forwarder), so that router is an allowed client.
     - from:
         - podSelector: { matchLabels: { app: loom-worker } }
         - podSelector: { matchLabels: { app: loom-service } }
+        - podSelector: { matchLabels: { app: loom-worker-router } }
       ports:
         - { port: 8080, protocol: TCP }
   egress:

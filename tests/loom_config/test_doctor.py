@@ -83,6 +83,36 @@ def test_clean_cluster_has_no_violations() -> None:
     assert report.violations == []
 
 
+def test_router_proxy_pods_are_not_classified_as_a_service() -> None:
+    # `loom-worker-router` / `loom-minio-router` socat pods share a name
+    # prefix with the `worker` / `minio` schema services but carry none of
+    # their env. Doctor must not flag every declared env var as missing on
+    # them (regression: kind staging smoke storage-lifecycle round-trip).
+    schema = load_schema(Path("config/loom-schema.toml"))
+    secret_keys = set()
+    for name in schema.service_config:
+        e = schema.service_config[name]
+        if e.secret is None:
+            continue
+        for svc in e.used_by:
+            secret_keys.add(e.secret_key_for(svc))
+    pod_envs = {svc: set() for svc in ()}
+    for svc in schema.service_prefix:
+        pod_envs[f"loom-{svc}-0"] = {
+            e.env_var_for(svc) for e in schema.service_config_for(svc)
+        }
+    # Bare socat proxy pods with no env whatsoever.
+    pod_envs["loom-worker-router-p2bnb"] = set()
+    pod_envs["loom-gateway-router-abcde"] = set()
+    pod_envs["loom-minio-router-zzz12"] = set()
+    core = _fake_clients(secret_keys, pod_envs)
+    report = reconcile(schema, core, namespace="loom")
+    missing_env_pods = {
+        v.detail for v in report.violations if v.kind == "missing_env"
+    }
+    assert missing_env_pods == set(), missing_env_pods
+
+
 def test_family_orchestrator_gateway_secrets_are_schema_owned() -> None:
     schema = load_schema(Path("config/loom-schema.toml"))
     secret_keys = set()
