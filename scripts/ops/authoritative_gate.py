@@ -156,6 +156,13 @@ class GitHubClient:
         self._repo_path = "/".join(quote(part, safe="") for part in owner_repo)
         self._token = token
         self._api_url = api_url.rstrip("/")
+        self._request_count = 0
+
+    @property
+    def request_count(self) -> int:
+        """Return attempted GitHub REST calls for this publisher invocation."""
+
+        return self._request_count
 
     def _request(
         self,
@@ -165,6 +172,7 @@ class GitHubClient:
         query: Mapping[str, str | int] | None = None,
         payload: Mapping[str, Any] | None = None,
     ) -> Any:
+        self._request_count += 1
         url = f"{self._api_url}{path}"
         if query:
             url = f"{url}?{urlencode(query)}"
@@ -2722,6 +2730,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         required=True,
     )
     args = parser.parse_args(argv)
+    client: GitHubClient | None = None
     try:
         event = json.loads(args.event_path.read_text(encoding="utf-8"))
         if not isinstance(event, Mapping):
@@ -2734,10 +2743,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = process_event(event, client, context=args.context)
     except (OSError, json.JSONDecodeError, PublisherError, ValueError) as exc:
         print(f"authoritative gate publisher failed: {exc}", file=sys.stderr)
+        print(
+            json.dumps(
+                {
+                    "api_calls": client.request_count if client is not None else 0,
+                    "outcome": "publisher_error",
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
         return 1
     print(
         json.dumps(
-            {"outcome": result.outcome, "contexts": list(result.contexts)},
+            {
+                "api_calls": client.request_count,
+                "outcome": result.outcome,
+                "contexts": list(result.contexts),
+            },
             sort_keys=True,
         )
     )

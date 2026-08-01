@@ -1,5 +1,13 @@
 # publisher-contract: dynamic-run-name-v3
 name: authoritative-gates
+run-name: >-
+  publisher-metrics-v1
+  trigger=${{ github.event_name }}
+  source_workflow=${{ github.event.workflow_run.workflow_id || 0 }}
+  source_run=${{ github.event.workflow_run.id || 0 }}
+  source_attempt=${{ github.event.workflow_run.run_attempt || 0 }}
+  delivery=${{ github.event.action }}
+  pull=${{ github.event.pull_request.number || 0 }}
 
 on:
   pull_request_target:
