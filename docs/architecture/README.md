@@ -145,11 +145,12 @@ there.
   proactive probe for Responses API support extending the Chat-fallback
   shim.
 
-## Self-service runtime registration (post-v1)
+## Historical self-service runtime registration design
 
 - **[self-service-runtime-registration.md](self-service-runtime-registration.md)**
-  — `ModelEndpoint`, `ServingDeployment`, `EvaluationHarness`
-  registration, validation, GB10 serving, and run references.
+  — historical `ModelEndpoint`, `ServingDeployment`, and `EvaluationHarness`
+  design. The self-service GB10/vLLM product is not planned under closed #144;
+  this document is not a supported-feature contract.
 - **[pipeline-platform-governance.md](pipeline-platform-governance.md)** —
   post-v1 governance baseline for pipeline extensibility, typed artifacts,
   RunGraph, recipes, plugins, SkillMarkdown injection, and data-production

@@ -250,8 +250,12 @@ emits `CompletionTable`, `TrajectoryDataset`, `DemonstrationDataset`,
 `PreferencePairDataset`, `ReasoningTraceDataset`, `VerifierLabelDataset`,
 `DataQualityReport`, and `TrainingDataExport`.
 
-TaskSet registration and data-production behavior are deferred to the
-post-v1 epics carinrc#569, carinrc#575, and carinrc#576 (historical archive).
+TaskSet registration and the current trajectory/data-production export substrate
+are implemented under #11 and #10. The earlier carinrc#569, carinrc#575, and
+carinrc#576 tickets are historical design and migration references, not pending
+implementation carriers. User TaskSets follow the current `internal_trusted`
+boundary: transform declarations fail closed and do not imply arbitrary
+untrusted-code isolation.
 
 ## Anti-patterns
 
@@ -293,11 +297,14 @@ Preflight should fail with actionable diagnostics.
 
 ## Roadmap Guardrails
 
-Post-v1 implementation should proceed in dependency order:
+Remaining post-v1 implementation should preserve the historical dependency
+order while treating completed foundations as existing platform contracts:
 
 1. Decide skill injection and typed artifact contracts (carinrc#567, carinrc#568).
 2. Implement `SkillMarkdown` injection and typed artifact registry MVP (carinrc#573, carinrc#574).
-3. Decide and implement TaskSet/data-production registration (carinrc#569, carinrc#575, carinrc#576).
+3. Maintain the implemented TaskSet registration and trajectory/data-production
+   export contracts (#11 and #10; historical carinrc#569, carinrc#575, and
+   carinrc#576).
 4. Decide and implement RunGraph and custom container boundaries (carinrc#570, carinrc#571, carinrc#577, carinrc#578).
 5. Decide recipe/plugin versioning and implement the first official SkillOpt recipe (carinrc#572, carinrc#579).
 

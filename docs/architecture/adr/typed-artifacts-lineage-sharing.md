@@ -1,6 +1,6 @@
 # ADR: Typed Artifact Schema, Lineage, and Sharing
 
-Status: accepted for post-v1 planning
+Status: accepted and implemented for the base registry, lineage, safety, and reuse contract
 
 Date: 2026-06-26
 
@@ -8,6 +8,11 @@ Tracking (pre-migration archive on the carinrc/loom tracker): parent
 carinrc#566; decision issue carinrc#568; related implementation carinrc#574;
 related skill artifact work carinrc#567 and carinrc#573; related
 data-production work carinrc#569 and carinrc#576.
+
+Implementation note (2026-08-01): #12 completed the typed artifact registry and
+Run Library policy, and #10 completed the supported trajectory/ATIF delivery
+export surface. Additional dataset artifact types remain extensions of this
+contract rather than missing base-registry acceptance.
 
 ## Context
 
