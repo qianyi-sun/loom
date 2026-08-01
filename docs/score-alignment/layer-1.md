@@ -1,7 +1,7 @@
 # Benchmark Score Alignment
 
-This document defines the Layer 1 score-credibility gate for the v1.0 benchmark
-support set.
+This document defines the Layer 1 score-credibility contract for Loom's
+benchmark catalog. #32 owns this post-v1 alignment program.
 
 Layer 1 is model-independent. It answers: given the same final answer, patch,
 or task artifact, does Loom assign the same task-level reward and aggregate
@@ -15,8 +15,8 @@ in the static manifest.
 ## Manifest
 
 The machine-readable contract lives in
-[`docs/score-alignment/manifest.json`](manifest.json). Every
-v1.0-supported benchmark must have:
+[`docs/score-alignment/manifest.json`](manifest.json). Every benchmark that
+makes a user-facing score-credibility claim must have:
 
 - a canonical reference source;
 - Harbor support status and parity decision;
@@ -35,7 +35,12 @@ The gate intentionally does not call model-provider APIs. It validates that the
 score-alignment evidence contract is complete enough to drive replay against
 Harbor or the upstream canonical evaluator.
 
-## Current v1.0 Scope
+## Catalog score-contract scope
+
+The table is broader than first-production native support. #715 currently owns
+the v1.0 platform-valid execution gates for canonical Terminal-Bench 2.1 rev 6
+and SkillLearnBench. Other rows remain post-v1 score-alignment work unless they
+are explicitly promoted into #715.
 
 | Benchmark | Canonical reference | Displayed metric | Layer 1 parity target |
 |---|---|---|---|
@@ -77,8 +82,19 @@ API/debug evidence reports `llm_evidence_status=no_calls_invalid` or
 `partial_no_calls` unless a supplemental retry succeeds and records
 `calls_observed`. In particular, `no_call_reason=codex_high_demand_no_call`
 means Codex exited before any Loom Gateway request, so the reward row is not
-clean model/provider evidence and cannot satisfy #6 score-alignment or #85
+clean model/provider evidence and cannot satisfy #32 score-alignment or #85
 request-parameter audit baselines by itself.
+
+For SkillLearnBench, deterministic same-artifact replay and live agent
+comparison have different acceptance semantics:
+
+- replaying one frozen output/artifact set through Loom and upstream verifier
+  paths must produce identical task rewards and aggregate semantics;
+- matched live Codex/model runs are statistical evidence and must classify
+  platform failures, runtime failures, artifact-production gaps, verifier
+  disagreements, and expected model-output variance separately;
+- architecture coverage is an independent operator-only #49/#715 gate and is
+  never injected into a normal user evaluation batch.
 
 The manifest may record `harbor_support.status="unknown"` while support is not
 confirmed. That is intentionally explicit: the parity target is the upstream

@@ -1,9 +1,13 @@
 # Benchmark Score Alignment
 
-The score-credibility manifest for Loom's v1.0 benchmark support set. Three
-layers of increasing depth, each answering a different question about
-whether Loom's numeric task rewards are trustworthy relative to the
-canonical reference implementation.
+This directory is the canonical post-v1 score-alignment contract tracked by
+#32. It preserves historical evidence from superseded benchmark-specific
+tickets such as #6 without making official-harness parity a v1.0 release gate.
+
+First-production acceptance remains in #715: supported benchmarks must run
+through ordinary user-visible surfaces, terminate with diagnosable evidence,
+and produce a valid numeric verifier reward. That release requirement is
+separate from the deeper canonical-harness comparisons documented here.
 
 ## Layers
 
@@ -14,9 +18,9 @@ canonical reference implementation.
 - **[layer-2.md](layer-2.md)** — adapter-level reports. Per-benchmark
   evidence that Loom's parsing, verifier, and reward math match the upstream
   contract.
-- **[layer-3.md](layer-3.md)** — paired-run alignment reports. Direct
-  numeric-agreement runs between Loom and Harbor/upstream references on the
-  same model + task set, so any residual delta is attributable.
+- **[layer-3.md](layer-3.md)** — matched live-run reports. These quantify
+  agreement and variance after pins and effective request settings are aligned;
+  they do not require stochastic agent runs to produce identical task outputs.
 
 ## Data
 
@@ -26,5 +30,6 @@ canonical reference implementation.
 ## When to update
 
 Update Layer 1 whenever a supported benchmark's reward semantics change
-(new benchmark added, verifier rewritten, aggregate changed). Layer 2 and
-Layer 3 append new evidence as it lands; don't rewrite prior reports.
+(new benchmark added, verifier rewritten, aggregate changed). Preserve frozen
+Layer 2/3 evidence, but correct its authority and interpretation when a later
+decision supersedes an old release or architecture claim.

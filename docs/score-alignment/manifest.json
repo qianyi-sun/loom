@@ -653,13 +653,13 @@
         "source_type": "upstream_repository",
         "title": "SkillLearnBench",
         "url": "https://github.com/cxcscmu/SkillLearnBench",
-        "version_or_revision": "main",
+        "version_or_revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46",
         "justification": "SkillLearnBench score credibility depends on replaying the same task artifact through the upstream verifier semantics."
       },
       "harbor_support": {
         "status": "not_supported",
         "parity_target": "The canonical upstream SkillLearnBench task-bundle scorer is the parity target. Real Harbor (harbor-framework/harbor at 2ead3f1f, see docs/research/harbor-adapter-snapshot-2026-06-25.md) ships no SkillLearnBench adapter — SkillLearnBench is a Loom-supported external benchmark not in Harbor's catalog.",
-        "decision": "Real Harbor (harbor-framework/harbor at 2ead3f1f) ships no SkillLearnBench adapter (see docs/research/harbor-adapter-snapshot-2026-06-25.md); SkillLearnBench is not in Harbor's catalog. Loom's SkillLearnBench adapter passes through the upstream task bundle's structure unchanged, so pytest IS the canonical SkillLearnBench evaluator by construction. Equivalence is proven by replay, not paired-runtime comparison."
+        "decision": "Real Harbor (harbor-framework/harbor at 2ead3f1f) ships no SkillLearnBench adapter (see docs/research/harbor-adapter-snapshot-2026-06-25.md); SkillLearnBench is not in Harbor's catalog. Loom's SkillLearnBench adapter passes through the upstream task bundle's structure unchanged, so the upstream task verifier is canonical. Deterministic equivalence is proven by replaying identical frozen artifacts; matched live-agent runs quantify variance and must not require task-output identity."
       },
       "score_semantics": {
         "task_set": "SkillLearnBench tasks imported from the upstream repository.",
@@ -713,6 +713,21 @@
             "verdict": "Loom verifier shim matches upstream tests/test.sh semantics for the 57 passing tasks. The 16 outliers (4 families) all hit a single OracleAgent invocation issue tracked at #548 — not a Loom × SLB integration regression.",
             "follow_ups": [
               "#548"
+            ]
+          },
+          {
+            "case_id": "slb-codex-qwen36-three-way-historical",
+            "agent": "codex",
+            "method": "human_authored",
+            "model": "qwen3.6-35b-a3b",
+            "upstream_revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46",
+            "trial_count": 100,
+            "reference": "runtime-clean upstream baseline compared with one historical Loom ARM run and one historical local-dev x86 run",
+            "per_task_table": "docs/evidence/2026-06-30-slb-three-way-codex-qwen36.csv",
+            "report": "docs/evidence/2026-06-30-slb-three-way-codex-qwen36.md",
+            "verdict": "Frozen historical statistical evidence: upstream 18/100, Loom ARM 11/100, Loom local-dev x86 18/100; 74/100 three-way task matches. This is not strict full100 parity or current release architecture acceptance.",
+            "follow_ups": [
+              "#32"
             ]
           }
         ]
