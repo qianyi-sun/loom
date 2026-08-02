@@ -185,7 +185,7 @@ app; if you don't have one yet, follow the request-access flow in
 
 ```bash
 export LOOM_PASSWORD=...
-loom auth login --server https://yylx.world/dev --username USER --password env:LOOM_PASSWORD
+loom auth login --server https://yylx.world/staging --username USER --password env:LOOM_PASSWORD
 loom auth whoami
 ```
 
@@ -403,7 +403,7 @@ bundle** card. API clients can call
 `GET /api/v1/batches/{id}/delivery-export`, and download through the returned
 route-aware `/api/v1/batches/.../delivery-export/.../download` URL. On hosted
 staging/prod this URL includes the public route prefix, for example
-`https://yylx.world/dev/api/v1/...` or `https://yylx.world/prod/api/v1/...`.
+`https://yylx.world/staging/api/v1/...` or `https://yylx.world/prod/api/v1/...`.
 Creating a bundle requires submit/admin scope; reading or downloading an
 existing bundle only requires normal read access. These routes are team-scoped
 and never expose raw MinIO/S3 URLs.
@@ -532,7 +532,7 @@ Use this path when working through the public UI.
 > admin to create it and enable public registration. Full flow:
 > [Web sessions and teams](#web-sessions-and-teams).
 
-1. Open [https://yylx.world/dev](https://yylx.world/dev) or your local Loom URL. First production uses [https://yylx.world/prod](https://yylx.world/prod).
+1. Open [https://yylx.world/staging](https://yylx.world/staging) for the shared staging service, [https://yylx.world/dev](https://yylx.world/dev) for development, or your local Loom URL. Production uses [https://yylx.world/prod](https://yylx.world/prod).
 2. Sign in and select the team that owns the run.
 3. Open **Providers**.
    - Add a third-party provider connection, or register a self-hosted

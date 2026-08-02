@@ -216,10 +216,10 @@ Attach these to the release issue or release PR:
   also attach the secret-safe output from
   `uv run --no-sync python scripts/ops/worker_capacity_manifest.py --manifest
   deploy/worker-capacity/prod-first.toml`. The report must show production as
-  the default owner of all eligible GB10/OLDLAB slots, staging/dev at zero slots
+  the default owner of all eligible GB10/OLDLAB slots, staging at zero slots
   unless an explicit bounded borrow is active, and no worker identity, API URL,
   image tag, source commit, compose service, or Kubernetes deployment crossing
-  the prod/dev boundary. If a bounded staging lease is active, the evidence must
+  the production/staging boundary. If a bounded staging lease is active, the evidence must
   include the prod-pressure counts used by `status`; nonzero prod pressure must
   produce `prod_pressure.cause=prod_capacity_pressure`,
   `new_staging_claims_allowed=false`, idle staging slots returned to prod, and running

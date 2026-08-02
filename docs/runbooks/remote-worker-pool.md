@@ -530,7 +530,7 @@ the next reconcile can replace missing capacity on another allowed node.
 First production runs on a separate prod control plane and state profile, but
 GB10/OLDLAB machines remain shared physical capacity. The release contract is
 `deploy/worker-capacity/prod-first.toml`: by default every eligible host slot
-belongs to production, staging/dev has `staging_slots = 0`, and any staging borrow must
+belongs to production, staging has `staging_slots = 0`, and any staging borrow must
 be explicit, bounded to at most one slot per host, and drained back before the
 borrow window ends. The physical v1.0 GB10 inventory remains all 15 hosts at 10
 theoretical slots each. All 15 remain heartbeat-managed. A healthy busy node
@@ -562,11 +562,11 @@ The observed artifact may come from Control Plane worker registration/status,
 GB10 node-agent status, or a composed release evidence collector, but it must
 not include raw service tokens, provider keys, MinIO credentials, or signed
 URLs. The validator redacts secret-bearing fields before writing JSON or
-Markdown and fails on prod/dev crosses in worker identity, API URL, image tag,
+Markdown and fails on production/staging crosses in worker identity, API URL, image tag,
 source commit, compose service, Kubernetes deployment, host state, or observed
 slot counts.
 
-Short-lived staging/dev capacity borrows use the same repo-only manifest helper.
+Short-lived staging capacity borrows use the same repo-only manifest helper.
 The commands below preview first and only write a new desired-state file when
 `--apply` is present; they do not contact a live control plane, mutate worker
 pools, or read secrets.

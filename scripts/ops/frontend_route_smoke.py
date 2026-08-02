@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""HTTP smoke checks for executable prod/dev Loom frontend routes.
+"""HTTP smoke checks for executable dev/staging/prod Loom frontend routes.
 
 The check reads only public shells, static assets, and the
 `loom-frontend-config.json` document. It does not require live user, admin,

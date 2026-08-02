@@ -32,9 +32,11 @@ shared-provider audit, usage and cost accounting, verifier evidence, and
 reproducible result exports. That lets researchers focus on tasks, agents, and
 models while Loom keeps the execution trail and operational boundary explicit.
 
-Current shared staging route: [https://yylx.world/staging](https://yylx.world/staging)
+Canonical hosted routes:
 
-Planned first production route: [https://yylx.world/prod](https://yylx.world/prod)
+- Development: [https://yylx.world/dev](https://yylx.world/dev)
+- Staging: [https://yylx.world/staging](https://yylx.world/staging)
+- Production: [https://yylx.world/prod](https://yylx.world/prod)
 
 The `/prod` route is the target for the first `main`-based production release.
 Until the v1.0.0 release gates are complete, use `/staging` for shared staging

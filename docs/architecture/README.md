@@ -160,3 +160,7 @@ there.
 
 Architecture decision records — durable "we decided X because Y" notes for
 choices that shape post-v1 architecture. See [`adr/`](adr/README.md).
+
+- **[adr/env-domain-topology.md](adr/env-domain-topology.md)** — accepted
+  single-origin public routes for development (`/dev`), staging (`/staging`),
+  and production (`/prod`), including path-prefix isolation requirements.
