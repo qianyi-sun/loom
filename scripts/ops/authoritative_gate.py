@@ -922,6 +922,31 @@ def _ensure_unique_pull_authority(
         raise PullAuthorityError(head_sha, associated)
 
 
+def _exact_terminal_source_outcome(
+    existing: Mapping[str, Any] | None,
+    *,
+    pull_number: int,
+    generation: Generation | None,
+    run: Mapping[str, Any],
+) -> str | None:
+    """Return an already-published result only for the exact source occurrence."""
+
+    if not _check_is_terminal(existing) or generation is None:
+        return None
+    run_id = run.get("id")
+    run_attempt = run.get("run_attempt", 1)
+    if not isinstance(run_id, int) or not isinstance(run_attempt, int):
+        return None
+    if (
+        _state_generation(existing) != generation
+        or generation.pull != str(pull_number)
+        or _state_run_identity(existing) != (run_id, run_attempt)
+    ):
+        return None
+    conclusion = _string(existing.get("conclusion"))
+    return conclusion if conclusion in {"success", "failure"} else None
+
+
 def _pull_ref(pull: Mapping[str, Any], side: str) -> str:
     value = pull.get(side)
     return _string(value.get("ref")) if isinstance(value, Mapping) else ""
@@ -2564,6 +2589,22 @@ def _handle_workflow_run(
                 fresh_head_sha = (
                     _string(fresh_head.get("sha")) if isinstance(fresh_head, Mapping) else ""
                 )
+                if fresh_head_sha == head_sha:
+                    existing = _existing_custom_check(client, head_sha, spec)
+                    exact_outcome = _exact_terminal_source_outcome(
+                        existing,
+                        pull_number=pull_number,
+                        generation=event_generation,
+                        run=event_run,
+                    )
+                    if exact_outcome is not None:
+                        # Commit association and pull snapshots are eventually
+                        # consistent during merge. A concurrent publisher may
+                        # already have established the immutable result for this
+                        # exact source occurrence while the refreshed PR still
+                        # appears open. Preserve that result; never synthesize a
+                        # new success from the incomplete authority read.
+                        return PublishResult(exact_outcome)
                 if fresh_head_sha == head_sha and _pull_is_merged(fresh_pull):
                     existing = _existing_custom_check(client, head_sha, spec)
                     existing_generation = _state_generation(existing)

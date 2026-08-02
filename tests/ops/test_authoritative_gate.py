@@ -2410,6 +2410,57 @@ def test_merge_between_pull_snapshot_and_authority_read_preserves_success() -> N
     assert client.authority_association_states[-1] == ("closed",)
 
 
+def test_lagging_merge_snapshot_preserves_exact_concurrent_terminal_result() -> None:
+    class LaggingMergeSnapshotClient(FakeGitHubClient):
+        association_lag = False
+        lag_reads = 0
+
+        def list_pull_requests_for_commit(self, head_sha: str) -> Sequence[Mapping[str, Any]]:
+            if not self.association_lag:
+                return super().list_pull_requests_for_commit(head_sha)
+            self.lag_reads += 1
+            if self.lag_reads == 1:
+                # The delivery can still resolve its PR before GitHub removes
+                # the open commit association during merge.
+                return super().list_pull_requests_for_commit(head_sha)
+            # The pull snapshot may lag behind that association change and
+            # continue to report `open` for a short interval.
+            return []
+
+    client = LaggingMergeSnapshotClient()
+    current = generation()
+    completed = workflow_run(
+        run_id=9722,
+        generation=current,
+        status="completed",
+        conclusion="success",
+        include_pull=False,
+    )
+    client.runs[GATE_SPECS[0].workflow_id] = [completed]
+    client.jobs[9722] = [{"name": GATE_SPECS[0].attempt_job, "conclusion": "success"}]
+    assert process_event(workflow_event(completed), client).outcome == "success"
+
+    updates_before = len(client.updated)
+    client.association_lag = True
+    in_progress = workflow_run(
+        run_id=9722,
+        generation=current,
+        status="in_progress",
+        include_pull=False,
+    )
+
+    result = process_event(workflow_event(in_progress), client)
+
+    check = client.checks[GATE_SPECS[0].context][0]
+    assert result.outcome == "success"
+    assert client.pull["state"] == "open"
+    assert client.lag_reads == 2
+    assert len(client.updated) == updates_before
+    assert check["status"] == "completed"
+    assert check["conclusion"] == "success"
+    assert not check_payload_is_pending(check)
+
+
 def test_converted_to_draft_trusted_event_revokes_terminal_success() -> None:
     client = FakeGitHubClient()
     current = generation()
