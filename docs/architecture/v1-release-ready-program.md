@@ -158,6 +158,22 @@ Delayed invocations for an old head never write the live head. If one head is
 associated with multiple open PRs, the publisher fails closed because one
 SHA-level check cannot represent two PR metadata generations.
 
+Publisher runs stamp `publisher-metrics-v1` source identity into their run name,
+including the source workflow/run/attempt and lifecycle delivery. Each publisher
+job also emits its attempted GitHub REST call count in the terminal JSON record.
+Operators can correlate those records without changing publisher scheduling:
+
+```bash
+GITHUB_TOKEN="$(gh auth token)" python scripts/ops/authoritative_gate_metrics.py \
+  --repository qianyi-sun/loom --since 2026-08-01T00:00:00Z
+```
+
+The report separates `pull_request_target` invalidations from `workflow_run`
+lifecycle deliveries and reports publisher runs, publish jobs, and API calls per
+distinct source attempt. Runs predating `publisher-metrics-v1`, malformed run
+names, and unavailable job logs remain explicit coverage gaps rather than being
+silently included in the denominator.
+
 CheckRuns created with the workflow token are attached to the publisher's
 first GitHub Actions check suite for the candidate head. A Draft PR can
 legitimately filter every publisher matrix job, but an all-skipped suite remains

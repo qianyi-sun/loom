@@ -331,6 +331,19 @@ def test_authoritative_gate_workflow_uses_only_trusted_code() -> None:
     )
     assert workflow_source.startswith("# publisher-contract: dynamic-run-name-v3\n")
 
+    run_name = _normalized_expression(workflow["run-name"])
+    assert run_name.startswith("publisher-metrics-v1")
+    compact_run_name = "".join(run_name.split())
+    for field in (
+        "trigger=${{github.event_name}}",
+        "source_workflow=${{github.event.workflow_run.workflow_id||0}}",
+        "source_run=${{github.event.workflow_run.id||0}}",
+        "source_attempt=${{github.event.workflow_run.run_attempt||0}}",
+        "delivery=${{github.event.action}}",
+        "pull=${{github.event.pull_request.number||0}}",
+    ):
+        assert field in compact_run_name
+
     assert set(on_config) == {"pull_request_target", "workflow_run"}
     assert set(on_config["pull_request_target"]["types"]) == {
         "opened",
