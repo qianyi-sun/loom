@@ -402,11 +402,18 @@ def test_authoritative_gate_workflow_uses_only_trusted_code() -> None:
     assert "github.event.workflow_run.name" not in job_filter
     assert "github.event.workflow_run.name" not in matrix
 
-    # Actions always replaces an older pending member of a concurrency group,
-    # even when cancel-in-progress is false. A cancelled publisher job is itself
-    # a failing CheckRun in the PR rollup, so the publisher must let every trusted
-    # invocation execute and rely on its live authority reconciliation instead.
-    assert "concurrency" not in publish
+    # Serialize publishers for one context and head so two trusted deliveries
+    # cannot both observe a missing custom CheckRun and create duplicate ids.
+    # Keep every delivery queued: the publisher's live authority reconciliation
+    # is responsible for rejecting stale events without cancelling their jobs.
+    concurrency = publish["concurrency"]
+    concurrency_group = _normalized_expression(concurrency["group"])
+    assert "authoritative-gate-publisher-${{ matrix.context }}" in concurrency_group
+    assert "github.event.pull_request.head.sha" in concurrency_group
+    assert "github.event.workflow_run.head_sha" in concurrency_group
+    assert "github.run_id" in concurrency_group
+    assert concurrency["cancel-in-progress"] is False
+    assert concurrency["queue"] == "max"
 
     assert publish["timeout-minutes"] == 5
     checkout = next(

@@ -55,6 +55,15 @@ jobs:
             github.event.workflow_run.workflow_id == 302898381 && '["cluster-smoke-gate"]' ||
             github.event.workflow_run.workflow_id == 302898388 && '["staging-smoke-gate"]' ||
             '["invalid"]') }}
+    concurrency:
+      group: >-
+        authoritative-gate-publisher-${{ matrix.context }}-${{
+          github.event.pull_request.head.sha ||
+          github.event.workflow_run.head_sha ||
+          github.run_id
+        }}
+      cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
