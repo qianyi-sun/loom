@@ -5486,7 +5486,7 @@ Loom-vs-Harbor or Loom-vs-upstream runs remain separate run evidence.
    `no_call_retryable`; batch detail exposes `no_call_reason_counts` and
    `effective_no_call_reason_counts`. A Codex subprocess exit such as
    `codex_high_demand_no_call` means the agent failed before any Loom Gateway
-   request was recorded. Exclude those trials from clean #6 score-alignment
+   request was recorded. Exclude those trials from clean #32 score-alignment
    and #85 request-parameter baselines unless a retry succeeds with
    `llm_evidence_status=calls_observed`; do not count the original reward-0 row
    as clean model/provider parity evidence.

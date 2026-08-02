@@ -8,7 +8,7 @@ The output is a deterministic triage plan for rows that need later replay or
 inspection, with labels that describe the next evidence to gather rather than
 claiming a root cause from score deltas alone.
 
-Refs: #6 #32 #110.
+Refs: historical #6 evidence; current owner #32; artifact follow-up #110.
 """
 
 from __future__ import annotations

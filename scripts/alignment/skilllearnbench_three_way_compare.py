@@ -29,7 +29,7 @@ Aggregates:
   - count of arch-specific divergences
     (arm==official != x86, or x86==official != arm)
 
-Refs: #6 #49 #129.
+Refs: historical #6 evidence; current score-alignment owner #32.
 """
 
 from __future__ import annotations

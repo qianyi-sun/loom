@@ -1,7 +1,25 @@
 # SkillLearnBench three-way alignment — `codex × qwen3.6-35b-a3b × yibuapi`
 
 Date: 2026-06-30
-Refs: #6, #9, #49, #82, #83, #100, #106, #107, #110
+Refs: #6 (superseded history), #32 (current alignment owner), #82, #83, #100,
+#106, #107, #110
+
+## Status and authority
+
+This is frozen historical Layer 3 evidence, not a current release or worker-
+architecture gate. It demonstrates a controlled comparison and records where
+the three runs agreed; it does not prove strict full100 parity, production
+x86 acceptance, or an architecture-caused score difference.
+
+Current authority is split deliberately:
+
+- #32 owns deterministic verifier/artifact alignment and statistical matched
+  live-run analysis;
+- #715 requires a platform-valid, diagnosable SkillLearnBench user flow with a
+  numeric reward, not official-harness full100 equality;
+- #49/#715 validate x86_64 and arm64 through independent operator-only portable
+  Terminal-Bench-like canaries, never by adding coverage trials or pool choices
+  to a user batch.
 
 ## Scope
 
@@ -13,7 +31,9 @@ Three execution legs, joined per `task_id` across all 100 SkillLearnBench tasks:
    - Original batch `23c2da8e-b80d-49ee-86b2-36d79344443d` (100 trials, 52 succeeded, 48 platform-failed mid-run).
    - Recovery batch `a72cbe3a-3b60-4e03-899d-eba62803cb7f` (48 trials, the failed task_ids re-run after a missing migration was applied; 48/48 succeeded).
    - Comparator picks the latest succeeded trial per `task_id` across both batches via `DISTINCT ON (task_id) ORDER BY task_id, state='succeeded' DESC, started_at DESC` — so the recovery's clean retry wins over the original's pre-fix failure.
-   - x86 cluster is the local dev cluster on this host (single-node, x86_64). Production-equivalent x86 capacity on public-beta is blocked by #129 (stale OLDLAB Slurm worker) + GB10 drain (which also blocks ARM right now). Per the user's product decision, this leg is labeled `local-dev` and will be re-run on production x86 once #129 lands.
+   - x86 cluster is the historical local dev cluster on this host
+     (single-node, x86_64). This leg remains labeled `local-dev`; it must not be
+     relabeled as production or current release evidence.
 
 ## Aggregate
 
@@ -43,12 +63,19 @@ Three execution legs, joined per `task_id` across all 100 SkillLearnBench tasks:
 ## What this validates
 
 1. **The Loom × SLB end-to-end pipeline produces real, comparable scores on x86 as well as ARM.** The 18/100 aggregate matches the official adjusted baseline exactly. The 11/100 ARM baseline already in the issue chain is reproduced.
-2. **Per-architecture variance is small.** Architectures agree on 85/100 tasks. The 15 architecture-divergent tasks split roughly evenly (6 ARM-dissenting + 9 x86-dissenting), which is consistent with live model-output stochasticity rather than systematic platform drift.
-3. **Both Loom legs disagree with official on the same 11 tasks** (`loom_agrees_official_dissents`), suggesting these 11 are scoring-semantics or run-time-deterministic divergences in the official runner — not a Loom-side defect — and likely point at the same `loom_missing_expected_outputs_after_successful_trial` class as #110.
+2. **The two historical Loom legs agree on 85/100 tasks.** A single live run
+   per architecture cannot attribute the remaining 15 differences to CPU
+   architecture; repeated matched runs or frozen-artifact replay are required.
+3. **Both Loom legs disagree with official on the same 11 tasks.** This is a
+   replay priority, not proof that the official runner or Loom is wrong. Each
+   row must be classified from frozen verifier inputs and required artifacts.
 
 ## What this does NOT validate
 
-- **Production-equivalent x86.** This x86 leg ran on the local dev cluster, not on public-beta. #49's release gate explicitly requires fresh x86 capacity on the production fabric; #129 currently blocks that. Re-run this same comparison on production x86 once #129 lands.
+- **Current release or production x86 acceptance.** This x86 leg ran on local
+  dev. Current #49 acceptance uses a separate operator-only portable
+  Terminal-Bench-like canary; it does not require repeating this SkillLearnBench
+  full100 comparison.
 - **Per-task identity of the 11 loom-agrees-official-dissents tasks.** Need #110-style replay to confirm whether each one is the "missing expected output artifact" pattern or a different cause. Out of scope for this report.
 
 ## Repo-only dissent replay plan
@@ -64,11 +91,12 @@ uv run python scripts/alignment/skilllearnbench_three_way_replay_plan.py \
     --out-md /tmp/slb-three-way-replay-plan.md
 ```
 
-The current checked-in CSV yields 26 planned rows: 8
+The current checked-in CSV yields 26 historical triage rows: 8
 `likely_verifier_artifact_replay_needed`, 3
 `official_semantics_drift_candidate`, and 15
 `architecture_specific_rerun_needed`. These are replay-plan labels, not
-root-cause conclusions; later live validation still needs task-level verifier
+root-cause conclusions. The architecture label is not current #49 release
+scope; later #32 validation still needs task-level verifier
 inputs, artifacts, stdout/stderr, required-files manifests, reward JSON, and
 safe provider/model metadata.
 

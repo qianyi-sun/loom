@@ -11,6 +11,14 @@ cluster-level batch evidence** — real Loom runs against the imported
 benchmark, executed end-to-end through the worker, scored by the
 materialized verifier.
 
+Layer 3 live runs are not a deterministic equality gate. Exact equality is
+required only when both verifier paths consume the same frozen answer, patch,
+or artifact set. When agents execute live, reports must pin the task, runtime,
+verifier, model, provider, agent, and effective request settings; exclude or
+repair unclassified platform failures; and treat residual output differences
+statistically. A numeric reward of zero remains valid model evidence when calls
+and verifier evidence are complete.
+
 A benchmark earns Layer 3 evidence per (agent × method × model) triple
 that is run end-to-end. Each entry pins the upstream revision, the
 imported task slate, the batch id, the per-task outcome, and the
@@ -46,6 +54,28 @@ debug input records sanitized `trial_config.request_params` and
 gateway/provider `request_params` audit summaries, and the output
 classifies each task as aligned by provider defaults, aligned by
 explicit params, or mismatched.
+
+## skilllearnbench — controlled Codex × Qwen historical baseline
+
+Superseded issue #6 produced a frozen three-way comparison for
+`codex × qwen3.6-35b-a3b × yibuapi` across the same 100 upstream tasks:
+
+- runtime-clean upstream reference: 18/100;
+- Loom ARM/GB10: 11/100, with 83/100 task rewards matching upstream;
+- Loom x86/local-dev: 18/100, with 80/100 task rewards matching upstream;
+- ARM vs x86: 85/100 task rewards matching; all three matched on 74/100.
+
+The equal upstream/x86 aggregate does not imply task-level equality. Artifact
+replay in #82 found no confirmed Loom verifier, artifact-copy, aggregation, or
+trajectory-retrieval drift. The remaining rows mix live-output variance,
+artifact-production gaps such as #110, and hypotheses that need deterministic
+replay before being called implementation defects.
+
+This evidence is historical and does not independently satisfy v1.0 or current
+dual-architecture acceptance. #715 requires platform-valid SkillLearnBench user
+flows; #49/#715 use separate operator-only x86_64 and arm64 portable
+Terminal-Bench-like canaries. See
+[`../evidence/2026-06-30-slb-three-way-codex-qwen36.md`](../evidence/2026-06-30-slb-three-way-codex-qwen36.md).
 
 ## skilllearnbench — oracle × human_authored
 
@@ -143,22 +173,12 @@ explicit params, or mismatched.
    - reads `/logs/verifier/reward.txt`,
    - converts it into Loom's `VerifierResult` JSON.
 
-### Open follow-ups (not in this Layer 3 entry)
+### Historical scope note
 
-- **`claude-code × claude-sonnet-4-6 × human_authored` Layer 3 entry.**
-  Smoke run (trial `d248a63d-baa1-46c3-8cdb-c2c3f88b9ae4`) confirmed:
-  - skills materialization reaches the container (artifact
-    `.codex/skills/brand-guidelines/SKILL.md` for
-    `anthropic-poster-design-1`),
-  - cluster pipeline runs end-to-end through the qa-relay-anthropic
-    provider connection (`https://yibuapi.com` with anthropic dialect),
-  - claude-code CLI exits rc=1 inside the container with zero LLM calls.
-  Root cause uninvestigated — likely agent-runtime issue
-  (model-name format, env var wiring, or container-internal CLI
-  bootstrap). Filed as a separate Phase 3 follow-up.
-- **Aggregate vs. published leaderboard number.** Requires the
-  model-agent path above to first work end-to-end; only then can we
-  compare to a published cell on cxcscmu.github.io/SkillLearnBench.
+The early `claude-code × claude-sonnet-4-6` experiments mixed provider
+transport, Claude Code runtime behavior, and platform behavior. They remain
+diagnostic history and are not an open release or Layer 3 acceptance target.
+Future SkillLearnBench work follows #32's deterministic-replay-first contract.
 
 ## gpqa-diamond — paired Loom vs Harbor on claude-haiku-4-5
 
