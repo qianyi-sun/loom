@@ -1,13 +1,15 @@
 # User-brought TaskSets
 
-Status: partially implemented. TaskSet intake/list/status/materialization
-fixtures exist, and run creation now accepts team-visible TaskSets through
+Status: implemented for the current `internal_trusted` product boundary.
+TaskSet intake/list/status/rebuild/delete, CLI and web management,
+materialization, and team-visible run selection are available through
 `task_filter.task_set_id` / `task_filter.task_set_ids` and
-`loom eval batch create --task-set`. Row-oriented manifests and uploaded
-bundle archives are supported by the materializer; full TaskSet management UI
-and live staging validation are still tracked separately. This updates the
-earlier user-brought-benchmarks design by separating the
-user-facing object from the platform benchmark catalog. It complements
+`loom eval batch create --task-set`. Row-oriented manifests and uploaded bundle
+archives are supported by the materializer. The realistic bundle-backed
+100-task staging lane passed under #718; cross-team sharing and arbitrary
+untrusted transform execution remain separate future decisions. This updates
+the earlier user-brought-benchmarks design by separating the user-facing object
+from the platform benchmark catalog. It complements
 [`benchmark-adapter.md`](benchmark-adapter.md) for native platform benchmarks
 and [`sandbox-isolation.md`](sandbox-isolation.md) for verifier and transform
 trust boundaries. The release-level rule is recorded in

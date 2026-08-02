@@ -13,7 +13,7 @@ they don't get rewritten; supersede with a new ADR if needed.
 
 - **[typed-artifacts-lineage-sharing.md](typed-artifacts-lineage-sharing.md)**
   — typed artifact base schema, lineage, clone/reuse, retention, redaction,
-  and Run Library sharing policy. Post-v1 planning baseline.
+  and Run Library sharing policy. Implemented platform baseline.
 - **[skill-artifact-injection.md](skill-artifact-injection.md)** —
   SkillMarkdown artifacts and generic trial-time skill injection. Post-v1
   planning baseline.

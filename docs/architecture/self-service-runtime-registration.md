@@ -1,8 +1,19 @@
 # Self-Service Runtime Registration
 
-Status: design
+Status: partially superseded; no active self-service model-serving roadmap
 
 Date: 2026-06-29
+
+Owner disposition (2026-08-01): #144 is closed as not planned. Loom does not
+offer user-managed `ServingDeployment`, dedicated `ModelEndpoint`, or
+self-service GB10/vLLM launch/status/stop/TTL product surfaces. Supported
+provider connections and models remain the evaluation entrypoint. The
+model-serving sections below are retained as historical design only and must
+not be implemented or presented as supported without a new owner decision.
+
+The `EvaluationHarness` discussion is also design context rather than an active
+delivery commitment; any future harness-registration work requires its own
+freshly scoped roadmap item.
 
 Tracking:
 
@@ -17,7 +28,7 @@ Tracking:
 - GB10 and dual-architecture capacity gate: [#49](https://github.com/qianyi-sun/loom/issues/49)
 - Harness/provider compatibility validation: [#114](https://github.com/qianyi-sun/loom/issues/114)
 
-## Goal
+## Historical Goal (Inactive)
 
 Give teams a self-service way to register and use runtime objects without
 turning benchmark adapters or worker code into one-off integration points.
@@ -410,7 +421,7 @@ Trials and batches should snapshot:
 - validation result ids used at submission time
 - resolved provider route metadata needed by the worker or Gateway
 
-## Implementation Order
+## Historical Implementation Order (Not Authorized)
 
 Recommended follow-up split:
 
@@ -464,7 +475,7 @@ Later runtime tests should add:
   policies.
 - Sandboxed harness execution only after the security model is accepted.
 
-## Open Decisions
+## Historical Unresolved Decisions
 
 - Whether `public` registry scope ships in v1.1 or remains a documented future
   state.
