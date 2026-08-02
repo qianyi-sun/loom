@@ -498,8 +498,13 @@ matrix reproduces their failure class:
 - generated OpenAPI TypeScript client;
 - broad complexity/module-size reduction;
 - unified S3 client factory follow-up;
-- official benchmark score parity and mixed-architecture evidence already
-  assigned to later milestones.
+- official benchmark score parity beyond the candidate-bound v1.0 matrix.
+
+Dual-architecture worker readiness is not deferred. The v1.0 gate in #49/#715
+requires fresh release-aligned x86_64 and arm64 workers plus two independently
+identified operator canaries that run the same reviewed portable
+Terminal-Bench-like task end to end, once on each architecture. These canaries
+are release evidence and never add trials to a normal user batch.
 
 Each deferred systemic finding must have a focused issue with owner, priority,
 milestone, root-cause evidence, and acceptance. Deferral does not mean closure

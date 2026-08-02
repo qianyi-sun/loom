@@ -5,6 +5,12 @@ current #188/#193/#190/#271 blocker set. It is a preparation artifact only:
 do not submit the canary until the coordinating thread gives an explicit
 `GO` for the full/max-slot external-pool canary.
 
+The full/max-slot workload is broader stress evidence. The minimum v1.0 #49
+gate is two separate operator-only canaries that run the same reviewed portable
+Terminal-Bench-like task end to end: one on x86_64/OLDLAB and one on
+arm64/GB10. A normal user workload remains a separate N-to-N batch with no pool
+selector.
+
 The canary must prove that a current staging release can execute a
 SkillLearnBench full/max-slot workload across the release-managed external
 pools used by staging/prod profiles:
@@ -38,15 +44,14 @@ Stop before submitting any workload unless every item in this section is true.
 4. #271 rollout/startup stability validation has completed on the clean
    anchor. The rollout evidence must not show control-plane, service, worker,
    Postgres, or DNS dependency crash loops.
-5. #188 pool coverage is configured on a **separate** admin on-behalf
-   canary (#1109) with repeated
-   `--required-worker-pool oldlab --required-worker-pool gb10`. The
-   selected task slate must include at least one task compatible with each
-   required pool's CPU architecture when that architecture is known from active
-   workers or autoscaler policy; fanout records
+5. #49 architecture coverage is configured as **two separate** admin
+   on-behalf canaries (#1109), both using the same reviewed portable
+   Terminal-Bench-like task: one with `--required-worker-pool oldlab` and one
+   with `--required-worker-pool gb10`. The selected task must be compatible
+   with both architectures; fanout records
    `required_worker_pool_incompatible` rather than submitting an unclaimable
-   coverage trial when it cannot satisfy a pool. The user eval workload batch
-   must not carry `required_worker_pools`.
+   coverage trial when it cannot satisfy either pool. The user eval workload
+   batch must not carry `required_worker_pools`.
 6. #193 coverage expectations are explicit. The current canary covers the
    release-gate observable `claimed_without_started=0` through batch debug
    evidence and `scripts/staging_smoke_gate.py`. It does not replace a
@@ -66,6 +71,7 @@ export ROLLOUT_DIR=/data/loom-staging/rollouts/<clean-anchor-dir>
 export RUN_ID=full-max-slot-three-cluster-$(date -u +%Y%m%dT%H%M%SZ)
 export CANARY_DIR="$ROLLOUT_DIR/$RUN_ID"
 export CLUSTER_CONFIG=<path-to-clean-anchor-cluster-config.toml>
+export DUAL_ARCH_CANARY_TASK_ID='terminal-bench-2@tb2.1-r6/<reviewed-portable-task>'
 
 export PUBLIC_URL=https://loom.example.com
 export CP_URL=http://control-node.lan:18081
@@ -353,42 +359,64 @@ jq '{id, state, expected_trial_count, required_worker_pools}' \
 Stop if `required_worker_pools` is not `[]` or if `expected_trial_count`
 is not exactly the normal workload count (no #188 coverage addend).
 
-### Separate operator pool-coverage canary (#1109)
+### Separate operator architecture canaries (#1109)
 
-Submit pool coverage on its own admin on-behalf batch so release evidence
-does not inflate the user eval batch:
+Submit x86_64 and arm64 evidence as two independently identified admin
+on-behalf batches so release evidence does not inflate the user eval batch:
 
 ```bash
 loom admin batches submit-on-behalf \
   --represented-username "$SMOKE_ON_BEHALF_USERNAME" \
   --team-id "$AGENTIC_RL_TEAM_ID" \
   --admin-actor "$ADMIN_ACTOR" \
-  --name "full-max-slot-coverage-$RUN_ID" \
-  --task-filter '{"task_ids":["loom-smoke/gb10-oracle-hello-world"]}' \
-  --agent oracle \
+  --name "v1-x86-terminal-like-$RUN_ID" \
+  --task-filter "{\"task_ids\":[\"$DUAL_ARCH_CANARY_TASK_ID\"]}" \
+  --provider "$PROVIDER_CONNECTION_NAME" \
+  --model "$PROVIDER_MODEL_NAME" \
+  --agent terminus-2 \
   --n-per-task 1 \
   --backend docker \
   --required-worker-pool oldlab \
+  | tee "$CANARY_DIR/04-submit/x86-coverage-batch-create.txt"
+
+export X86_COVERAGE_BATCH_ID=<batch-uuid-from-x86-create-output>
+
+loom admin batches submit-on-behalf \
+  --represented-username "$SMOKE_ON_BEHALF_USERNAME" \
+  --team-id "$AGENTIC_RL_TEAM_ID" \
+  --admin-actor "$ADMIN_ACTOR" \
+  --name "v1-arm-terminal-like-$RUN_ID" \
+  --task-filter "{\"task_ids\":[\"$DUAL_ARCH_CANARY_TASK_ID\"]}" \
+  --provider "$PROVIDER_CONNECTION_NAME" \
+  --model "$PROVIDER_MODEL_NAME" \
+  --agent terminus-2 \
+  --n-per-task 1 \
+  --backend docker \
   --required-worker-pool gb10 \
-  | tee "$CANARY_DIR/04-submit/coverage-batch-create.txt"
+  | tee "$CANARY_DIR/04-submit/arm-coverage-batch-create.txt"
 
-export COVERAGE_BATCH_ID=<batch-uuid-from-coverage-create-output>
+export ARM_COVERAGE_BATCH_ID=<batch-uuid-from-arm-create-output>
 
-loom eval batch show "$COVERAGE_BATCH_ID" --format json \
-  | tee "$CANARY_DIR/04-submit/coverage-batch-created.json"
+loom eval batch show "$X86_COVERAGE_BATCH_ID" --format json \
+  | tee "$CANARY_DIR/04-submit/x86-coverage-batch-created.json"
+loom eval batch show "$ARM_COVERAGE_BATCH_ID" --format json \
+  | tee "$CANARY_DIR/04-submit/arm-coverage-batch-created.json"
 
 jq '{id, state, expected_trial_count, required_worker_pools}' \
-  "$CANARY_DIR/04-submit/coverage-batch-created.json" \
-  | tee "$CANARY_DIR/04-submit/coverage-batch-created-summary.json"
+  "$CANARY_DIR/04-submit/x86-coverage-batch-created.json" \
+  | tee "$CANARY_DIR/04-submit/x86-coverage-batch-created-summary.json"
+jq '{id, state, expected_trial_count, required_worker_pools}' \
+  "$CANARY_DIR/04-submit/arm-coverage-batch-created.json" \
+  | tee "$CANARY_DIR/04-submit/arm-coverage-batch-created-summary.json"
 ```
 
-Stop if coverage `required_worker_pools` is not exactly
-`["oldlab","gb10"]` or if the coverage expected count does not include the
-two #188 coverage trials (1 task + 2 pools → expected 3). During the watch
-loop, also stop if batch debug or detail output records a
+Stop unless the x86 batch requires exactly `oldlab`, the arm64 batch requires
+exactly `gb10`, and both batches preserve their expected operator-canary count.
+During the watch loop, also stop if either batch records a
 `required_worker_pool_incompatible` fanout error; the task slate is not
-valid release evidence for all required pools. Point
-`scripts/staging_smoke_gate.py --batch-id` at `$COVERAGE_BATCH_ID` for
+valid release evidence for both architectures. Run
+`scripts/staging_smoke_gate.py --batch-id` separately against
+`$X86_COVERAGE_BATCH_ID` and `$ARM_COVERAGE_BATCH_ID` for the two
 `runs.worker_pool_coverage` checks.
 
 ## Watch Loop
@@ -477,7 +505,7 @@ uv run --no-sync python scripts/staging_smoke_gate.py \
   --provider-connection-name "$PROVIDER_CONNECTION_NAME" \
   --provider-model-provider "$PROVIDER_MODEL_PROVIDER" \
   --provider-model-name "$PROVIDER_MODEL_NAME" \
-  --batch-id "$CANARY_BATCH_ID" \
+  --batch-id "$X86_COVERAGE_BATCH_ID" \
   --catalog-minio-endpoint "$STAGING_MINIO_ENDPOINT" \
   --catalog-minio-access-key env:STAGING_MINIO_ACCESS_KEY \
   --catalog-minio-secret-key env:STAGING_MINIO_SECRET_KEY \
@@ -487,12 +515,34 @@ uv run --no-sync python scripts/staging_smoke_gate.py \
   --object-store-write-check-concurrency 16 \
   --k8s-namespace "$K8S_NAMESPACE" \
   --required-worker-pool oldlab \
+  --secret-needle env:STAGING_SECRET_NEEDLE \
+  --internal-url-needle loom-minio.loom.svc.cluster.local \
+  --fail-on-skip \
+  --markdown-output "$CANARY_DIR/06-terminal/staging-smoke-x86.md" \
+  --json-output "$CANARY_DIR/06-terminal/staging-smoke-x86.json"
+
+uv run --no-sync python scripts/staging_smoke_gate.py \
+  --server-url "$PUBLIC_URL" \
+  --team-a-token env:TEAM_A_TOKEN \
+  --team-b-token env:TEAM_B_TOKEN \
+  --provider-connection-name "$PROVIDER_CONNECTION_NAME" \
+  --provider-model-provider "$PROVIDER_MODEL_PROVIDER" \
+  --provider-model-name "$PROVIDER_MODEL_NAME" \
+  --batch-id "$ARM_COVERAGE_BATCH_ID" \
+  --catalog-minio-endpoint "$STAGING_MINIO_ENDPOINT" \
+  --catalog-minio-access-key env:STAGING_MINIO_ACCESS_KEY \
+  --catalog-minio-secret-key env:STAGING_MINIO_SECRET_KEY \
+  --object-store-write-check \
+  --object-store-write-check-bucket trajectories \
+  --object-store-write-check-count 64 \
+  --object-store-write-check-concurrency 16 \
+  --k8s-namespace "$K8S_NAMESPACE" \
   --required-worker-pool gb10 \
   --secret-needle env:STAGING_SECRET_NEEDLE \
   --internal-url-needle loom-minio.loom.svc.cluster.local \
   --fail-on-skip \
-  --markdown-output "$CANARY_DIR/06-terminal/staging-smoke.md" \
-  --json-output "$CANARY_DIR/06-terminal/staging-smoke.json"
+  --markdown-output "$CANARY_DIR/06-terminal/staging-smoke-arm.md" \
+  --json-output "$CANARY_DIR/06-terminal/staging-smoke-arm.json"
 
 uv run --no-sync python scripts/benchmark_reward_gate.py readiness \
   --server-url "$PUBLIC_URL" \
@@ -512,7 +562,8 @@ Acceptance requires:
   operator-stopped runs can still be useful debugging evidence but are not
   automatic #49 acceptance.
 - `runs.claimed_without_started=0`.
-- `runs.worker_pool_coverage` passes for both required pools.
+- Separate `runs.worker_pool_coverage` evidence passes for x86_64/OLDLAB and
+  arm64/GB10.
 - `batch-debug-final.json` has terminal worker-pool evidence for `oldlab` and
   `gb10`.
 - Each architecture family has platform-successful terminal trials with
