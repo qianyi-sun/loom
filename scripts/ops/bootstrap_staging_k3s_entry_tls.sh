@@ -38,6 +38,20 @@ kubectl -n cert-manager rollout status deploy/cert-manager --timeout=180s
 log "applying LE ClusterIssuer + Certificate"
 kubectl apply -f "${here}/deploy/staging-k3s/tls-acme.yaml"
 
+# 4. GB10 fleet connectivity: socat forwards from the ports the nodes tunnel to
+#    (bb8-1 :18081/:18082/:19000/:19100) onto the k3s router hostPorts. INTERIM
+#    until the node-agent dials the routers directly (#906).
+log "installing GB10 fleet forward units (kind->k3s connectivity bridge)"
+install -m 0755 "${here}/deploy/staging-k3s/loom-k3s-fleet-fwd.sh" \
+  /usr/local/sbin/loom-k3s-fleet-fwd.sh
+install -m 0644 "${here}/deploy/staging-k3s/loom-k3s-fleet-fwd@.service" \
+  /etc/systemd/system/loom-k3s-fleet-fwd@.service
+systemctl daemon-reload
+for map in 18081-30080 18082-30080 19000-30900 19100-30443; do
+  systemctl enable --now "loom-k3s-fleet-fwd@${map}.service"
+done
+log "fleet forwards: $(systemctl is-active 'loom-k3s-fleet-fwd@18081-30080' 'loom-k3s-fleet-fwd@19000-30900' 'loom-k3s-fleet-fwd@19100-30443' | paste -sd' ')"
+
 log "done. Certificate issues within ~1 min; verify:"
 echo "  kubectl -n loom-staging get certificate yylx-world"
 echo "  # external (bb8-1->own-IP uses OUTPUT and bypasses the DNAT, so resolve elsewhere):"
