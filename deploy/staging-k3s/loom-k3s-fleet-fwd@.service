@@ -1,0 +1,11 @@
+[Unit]
+Description=GB10 fleet kind->k3s forward %i (bb8-1 hostport -> k3s router)
+After=network.target
+
+[Service]
+ExecStart=/usr/local/sbin/loom-k3s-fleet-fwd.sh %i
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
