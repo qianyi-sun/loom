@@ -50,6 +50,67 @@ class StagingCapacityEvidence:
             raise StagingAdmissionError("staging_capacity_high_water")
 
 
+@dataclass(frozen=True, slots=True)
+class DriveHeadroom:
+    """One backing drive's byte + inode headroom, in any self-consistent unit.
+
+    Only the free/total *ratio* per drive matters, so a filesystem source may
+    report raw block/inode counts while a MinIO-admin source reports bytes;
+    each drive's percentage is computed from its own totals.
+    """
+
+    total_bytes: int
+    free_bytes: int
+    total_inodes: int
+    free_inodes: int
+
+    def __post_init__(self) -> None:
+        if self.total_bytes <= 0 or self.total_inodes <= 0:
+            raise RuntimeError("staging capacity drive totals are unavailable")
+        if not 0 <= self.free_bytes <= self.total_bytes:
+            raise RuntimeError("staging capacity drive free bytes are invalid")
+        if not 0 <= self.free_inodes <= self.total_inodes:
+            raise RuntimeError("staging capacity drive free inodes are invalid")
+
+    @property
+    def disk_free_percent(self) -> int:
+        return (self.free_bytes * 100) // self.total_bytes
+
+    @property
+    def inode_free_percent(self) -> int:
+        return (self.free_inodes * 100) // self.total_inodes
+
+
+def _evidence_from_drives(
+    *,
+    namespace: str,
+    objects: Iterable[ObservedObject],
+    drives: Sequence[DriveHeadroom],
+    observed_at: datetime,
+) -> StagingCapacityEvidence:
+    """Fold the exact object inventory + per-drive headroom into fail-closed
+    evidence, pinned to the most constrained drive."""
+    if not drives:
+        raise RuntimeError("staging capacity drive headroom is unavailable")
+    observed = tuple(objects)
+    identities = [item.identity for item in observed]
+    if len(identities) != len(set(identities)):
+        raise RuntimeError("staging capacity object identities are duplicated")
+    capacity = StagingCapacity(
+        object_count=len(observed),
+        bytes_used=sum(item.size_bytes for item in observed),
+        disk_free_percent=min(drive.disk_free_percent for drive in drives),
+        inode_free_percent=min(drive.inode_free_percent for drive in drives),
+    )
+    return StagingCapacityEvidence(
+        namespace=namespace,
+        capacity=capacity,
+        policy_sha256=staging_capacity_policy_digest(),
+        evidence_sha256=capacity.evidence_digest,
+        observed_at=observed_at,
+    )
+
+
 def collect_staging_capacity(
     *,
     namespace: str,
@@ -57,15 +118,18 @@ def collect_staging_capacity(
     filesystem_paths: Sequence[Path],
     observed_at: datetime,
 ) -> StagingCapacityEvidence:
-    """Collect exact object totals plus the lowest backing-store headroom.
+    """Collect exact object totals plus the lowest backing-store headroom from
+    locally-mounted drives (single-node / hostPath MinIO).
 
-    Distributed MinIO owns one PVC per replica.  Admission must fail closed on
-    the most constrained member instead of sampling one convenient mount.
-    Callers therefore have to provide every authoritative filesystem path.
+    Each PVC/host path is stat'd once; distinct ``(st_dev, st_ino)`` identities
+    guard against sampling the same mount twice.  Admission fails closed on the
+    most constrained member.  For distributed MinIO (RWO drive PVCs that cannot
+    be co-mounted) use :func:`collect_staging_capacity_from_drives` fed by the
+    MinIO admin API instead.
     """
     if not filesystem_paths:
         raise RuntimeError("staging capacity filesystem paths are unavailable")
-    stats = []
+    drives: list[DriveHeadroom] = []
     filesystem_identities: set[tuple[int, int]] = set()
     for path in filesystem_paths:
         resolved = path.resolve(strict=True)
@@ -77,22 +141,42 @@ def collect_staging_capacity(
         value = os.statvfs(resolved)
         if value.f_blocks <= 0 or value.f_files <= 0:
             raise RuntimeError("staging capacity filesystem totals are unavailable")
-        stats.append(value)
-    observed = tuple(objects)
-    identities = [item.identity for item in observed]
-    if len(identities) != len(set(identities)):
-        raise RuntimeError("staging capacity object identities are duplicated")
-    capacity = StagingCapacity(
-        object_count=len(observed),
-        bytes_used=sum(item.size_bytes for item in observed),
-        disk_free_percent=min((item.f_bavail * 100) // item.f_blocks for item in stats),
-        inode_free_percent=min((item.f_favail * 100) // item.f_files for item in stats),
-    )
-    return StagingCapacityEvidence(
+        drives.append(
+            DriveHeadroom(
+                total_bytes=value.f_blocks,
+                free_bytes=value.f_bavail,
+                total_inodes=value.f_files,
+                free_inodes=value.f_favail,
+            )
+        )
+    return _evidence_from_drives(
         namespace=namespace,
-        capacity=capacity,
-        policy_sha256=staging_capacity_policy_digest(),
-        evidence_sha256=capacity.evidence_digest,
+        objects=objects,
+        drives=drives,
+        observed_at=observed_at,
+    )
+
+
+def collect_staging_capacity_from_drives(
+    *,
+    namespace: str,
+    objects: Iterable[ObservedObject],
+    drives: Sequence[DriveHeadroom],
+    observed_at: datetime,
+) -> StagingCapacityEvidence:
+    """Collect exact object totals plus the lowest per-drive headroom from an
+    out-of-band source (distributed MinIO admin API).
+
+    Distributed MinIO backs each replica with a ReadWriteOnce PVC already
+    attached to the running ``loom-minio-*`` pod, so the maintenance Job cannot
+    co-mount the drives (Multi-Attach).  The caller supplies every drive's
+    headroom queried over the network instead; admission still fails closed on
+    the most constrained drive.
+    """
+    return _evidence_from_drives(
+        namespace=namespace,
+        objects=objects,
+        drives=drives,
         observed_at=observed_at,
     )
 
@@ -100,7 +184,9 @@ def collect_staging_capacity(
 __all__ = [
     "CAPACITY_SOURCE",
     "STAGING_CAPACITY_FRESHNESS",
+    "DriveHeadroom",
     "StagingAdmissionError",
     "StagingCapacityEvidence",
     "collect_staging_capacity",
+    "collect_staging_capacity_from_drives",
 ]

@@ -41,11 +41,14 @@ spec:
                 - --bucket
                 - {{ artifacts_bucket }}
 {% if topology.multi_node %}
-{% for replica in range(topology.minio_replicas) %}
-                - --filesystem-path
-                - /var/lib/loom-minio-capacity/{{ replica }}
-{% endfor %}
+                # Distributed MinIO drives are RWO PVCs already attached to the
+                # loom-minio-* pods (cannot be co-mounted, #1113); read per-drive
+                # headroom from the MinIO admin API over the network instead.
+                - --capacity-source
+                - minio-admin
 {% else %}
+                - --capacity-source
+                - filesystem
                 - --filesystem-path
                 - /var/lib/loom-minio-capacity/0
 {% endif %}
@@ -72,27 +75,14 @@ spec:
               resources:
                 requests: { cpu: 100m, memory: 128Mi }
                 limits: { cpu: 1, memory: 1Gi }
+{% if not topology.multi_node %}
               volumeMounts:
-{% if topology.multi_node %}
-{% for replica in range(topology.minio_replicas) %}
-                - name: minio-capacity-{{ replica }}
-                  mountPath: /var/lib/loom-minio-capacity/{{ replica }}
-                  readOnly: true
-{% endfor %}
-{% else %}
                 - name: minio-capacity-0
                   mountPath: /var/lib/loom-minio-capacity/0
                   readOnly: true
 {% endif %}
+{% if not topology.multi_node %}
           volumes:
-{% if topology.multi_node %}
-{% for replica in range(topology.minio_replicas) %}
-            - name: minio-capacity-{{ replica }}
-              persistentVolumeClaim:
-                claimName: data-loom-minio-{{ replica }}
-                readOnly: true
-{% endfor %}
-{% else %}
             - name: minio-capacity-0
               persistentVolumeClaim:
                 claimName: data-loom-minio-0
