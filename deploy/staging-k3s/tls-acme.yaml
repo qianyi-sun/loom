@@ -1,0 +1,44 @@
+# Native Let's Encrypt issuance for yylx.world on the k3s staging cluster
+# (#1114). cert-manager self-issues + auto-renews the real cert into the
+# ingress TLS secret — replacing the retired kind->k3s sync bridge, so k3s no
+# longer depends on the kind cluster for TLS.
+#
+# PREREQUISITE — clean egress to the ACME API: the CNI pod network MITMs
+# outbound HTTPS (cert-manager sees a fake `ingress.local` cert), but the host
+# network is clean. The cert-manager *controller* must therefore run on the
+# host network; see scripts/ops/bootstrap_staging_k3s_entry_tls.sh, which
+# patches it (`hostNetwork: true` + `dnsPolicy: ClusterFirstWithHostNet`).
+#
+# PREREQUISITE — inbound HTTP-01: Let's Encrypt must reach
+# http://yylx.world/.well-known/acme-challenge/... on the k3s ingress. The
+# entry cutover (loom-staging-k3s-cutover.service) routes host :80 -> k3s :8080
+# for exactly this.
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: ops@yylx.world
+    privateKeySecretRef:
+      name: letsencrypt-prod-account
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: nginx
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: yylx-world
+  namespace: loom-staging
+spec:
+  secretName: loom-staging-tls
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  dnsNames:
+    - yylx.world
+    - www.yylx.world
