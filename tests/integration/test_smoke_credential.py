@@ -8,7 +8,10 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import Team, TeamMembership, TeamQuota, Token, User
-from loom_cli.smoke_credential import ensure_smoke_user_credential
+from loom_cli.smoke_credential import (
+    ensure_batch_runner_token,
+    ensure_smoke_user_credential,
+)
 from loom_service.password_auth import normalize_username
 
 
@@ -124,3 +127,29 @@ def test_rejects_nonpositive_ttl(postgres_url: str) -> None:
             team_name="loom-smoke-e",
             ttl_days=0,
         )
+
+
+def test_batch_runner_token_is_submit_batch_worker_token(postgres_url: str) -> None:
+    tok = ensure_batch_runner_token(postgres_url)
+    assert tok.raw_token.startswith("loom_br_")
+    row = _token_row(postgres_url, tok.raw_token)
+    assert row is not None
+    # Mirrors POST /admin/batch-runner-tokens: non-user worker token,
+    # submit:batch scope — exactly what loom-service's batch fan-out needs.
+    assert row.type == "worker"
+    assert list(row.scopes) == ["submit:batch"]
+    assert row.team_id is None
+    assert row.created_by_user_id is None
+    assert row.revoked_at is None
+    assert row.expires_at is not None
+
+
+def test_batch_runner_token_rotates_prior(postgres_url: str) -> None:
+    first = ensure_batch_runner_token(postgres_url)
+    second = ensure_batch_runner_token(postgres_url)
+    assert second.raw_token != first.raw_token
+    assert second.rotated_prior >= 1
+    first_row = _token_row(postgres_url, first.raw_token)
+    second_row = _token_row(postgres_url, second.raw_token)
+    assert first_row is not None and first_row.revoked_at is not None
+    assert second_row is not None and second_row.revoked_at is None

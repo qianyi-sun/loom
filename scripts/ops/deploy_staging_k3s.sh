@@ -122,5 +122,67 @@ else
   echo "WARN: could not provision smoke-user (loom-service not ready?)" >&2
 fi
 
+# --- 6. provision the batch-runner control-plane token ---
+#        loom-service fans batches out to the control-plane's POST /trials
+#        using LOOM_SVC_BATCH_RUNNER_CP_TOKEN (from loom-secrets/batch-runner-
+#        cp-token). A fresh/cutover DB has no valid one -> every batch 401s and
+#        never dispatches (single-trial API submits are unaffected). Mint a
+#        submit:batch worker token, store it, and restart loom-service to pick
+#        it up. Non-fatal.
+log "provision batch-runner CP token"
+if [ -n "${svc_pod}" ] && br_json="$(kubectl -n "${NS}" exec "${svc_pod}" -- \
+    sh -c 'LOOM_DB_URL="$LOOM_SVC_DB_URL" loom admin ensure-batch-runner-token --format json' \
+    2>/dev/null)"; then
+  br_token="$(printf '%s' "${br_json}" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])' 2>/dev/null || true)"
+  if [ -n "${br_token}" ]; then
+    printf '%s' "${br_token}" | kubectl -n "${NS}" patch secret loom-secrets \
+      --type merge -p "$(printf '%s' "${br_token}" | base64 | tr -d '\n' \
+        | sed 's/.*/{"data":{"batch-runner-cp-token":"&"}}/')" >/dev/null \
+      && kubectl -n "${NS}" rollout restart deploy/loom-service >/dev/null 2>&1 \
+      && log "batch-runner-cp-token stored; loom-service restarting to pick it up" \
+      || echo "WARN: could not store/apply batch-runner-cp-token" >&2
+  else
+    echo "WARN: batch-runner provisioning returned no token" >&2
+  fi
+else
+  echo "WARN: could not provision batch-runner token (loom-service not ready?)" >&2
+fi
+
+# --- 7. bootstrap the data-lifecycle mutation-epoch (idempotent; fresh-DB only) ---
+#        Retention/GC needs a staging_mutation_epochs row, which must exist
+#        BEFORE any lifecycle-bearing rows (trials/artifacts). On a fresh DB the
+#        guarded tool applies it; on an already-bootstrapped or already-dirty DB
+#        it reports not-applicable and this is a no-op (see #1137). Non-serving,
+#        non-fatal. Runs inside loom-service (has the loom package + DB + MinIO).
+log "bootstrap data-lifecycle mutation-epoch"
+if [ -n "${svc_pod}" ] \
+   && kubectl -n "${NS}" cp scripts/ops/staging_data_lifecycle_bootstrap.py \
+        "${svc_pod}":/tmp/dlb.py 2>/dev/null; then
+  dlb_env='LOOM_LIFECYCLE_DB_URL="$LOOM_SVC_DB_URL"'
+  dlb_env="${dlb_env}"' LOOM_LIFECYCLE_MINIO_ENDPOINT="$LOOM_SVC_MINIO_ENDPOINT"'
+  dlb_env="${dlb_env}"' LOOM_LIFECYCLE_MINIO_ACCESS_KEY="$LOOM_SVC_MINIO_ACCESS_KEY"'
+  dlb_env="${dlb_env}"' LOOM_LIFECYCLE_MINIO_SECRET_KEY="$LOOM_SVC_MINIO_SECRET_KEY"'
+  dlb_env="${dlb_env}"' LOOM_LIFECYCLE_MINIO_REGION=us-east-1'
+  dlb_env="${dlb_env}"' LOOM_LIFECYCLE_STORAGE_AUTH_KIND=static_keys'
+  inv="$(kubectl -n "${NS}" exec "${svc_pod}" -- \
+    sh -c "cd /app && ${dlb_env} python /tmp/dlb.py inventory --namespace ${NS}" \
+    2>/dev/null || true)"
+  applicable="$(printf '%s' "${inv}" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("applicable"))' 2>/dev/null || true)"
+  digest="$(printf '%s' "${inv}" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("inventory_digest",""))' 2>/dev/null || true)"
+  if [ "${applicable}" = "True" ] && [ -n "${digest}" ]; then
+    kubectl -n "${NS}" exec "${svc_pod}" -- sh -c \
+      "cd /app && ${dlb_env} python /tmp/dlb.py apply --namespace ${NS} \
+         --requested-by deploy_staging_k3s --request-id deploy-${TAG} \
+         --approved-inventory-digest ${digest}" >/dev/null 2>&1 \
+      && log "data-lifecycle mutation-epoch bootstrapped" \
+      || echo "WARN: data-lifecycle bootstrap apply failed" >&2
+  else
+    log "data-lifecycle bootstrap not applicable (already bootstrapped/dirty) — skipping (#1137)"
+  fi
+fi
+
 log "deploy complete: ${NS} @ ${TAG}"
 echo "Verify externally: curl -sSk --resolve yylx.world:8443:192.168.50.103 https://yylx.world:8443/staging/"
