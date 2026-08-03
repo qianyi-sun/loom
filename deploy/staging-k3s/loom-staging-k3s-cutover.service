@@ -1,0 +1,12 @@
+[Unit]
+Description=Route public :443/:80 to the k3s ingress (kind->k3s entry cutover)
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/loom-staging-k3s-cutover.sh
+
+[Install]
+WantedBy=multi-user.target
