@@ -139,6 +139,10 @@ def _require_job_template(
     expected_args = ["--action", "auto", "--namespace", _NAMESPACE]
     for bucket in expected_buckets:
         expected_args.extend(("--bucket", bucket))
+    # The sealed broker only manages the single-node kind staging runner, whose
+    # hostPath MinIO drives are stat'd locally (the distributed MinIO admin-API
+    # source, #1113, is not on this path).
+    expected_args.extend(("--capacity-source", "filesystem"))
     for filesystem_path in expected_filesystem_paths:
         expected_args.extend(("--filesystem-path", filesystem_path))
     args = _sequence(container.get("args"), "lifecycle arguments")

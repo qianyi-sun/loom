@@ -378,6 +378,19 @@ measured; missing or duplicate filesystem authority fails closed. Development
 and production renders omit the CronJob entirely. Automatic policy authority
 does not weaken the manual digest-approved `apply` or exact failed-run `resume`
 paths.
+
+The drive-mount measurement above is the single-node (`topology.multi_node =
+false`, hostPath MinIO) path, selected by `--capacity-source filesystem`. On a
+**distributed multi-node** cluster every MinIO replica owns a ReadWriteOnce
+Longhorn PVC already attached to its running `loom-minio-*` pod, so the
+maintenance Job cannot co-mount the drives (Multi-Attach, #1113). The render
+therefore passes `--capacity-source minio-admin`, which reads per-drive
+`availspace`/`totalspace` and `free_inodes`/`used_inodes` (total inodes = free +
+used) from the MinIO admin API (`GET /minio/admin/v3/info`, ordinary S3 SigV4
+auth over the existing `loom-minio:9000` egress — no drive mount, no Prometheus
+JWT). Admission still fails closed on the most constrained drive, and the object
+inventory continues to come from the exact S3 listing. The sealed single-node
+broker path is unaffected: it always renders `--capacity-source filesystem`.
 The same module also exposes an explicit `capacity` action for a reviewed,
 candidate-bound one-shot maintenance Job. That action publishes only the fresh
 capacity row and returns `gc: null`; it cannot inventory, mark, delete or resume

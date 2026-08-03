@@ -79,6 +79,48 @@ def test_staging_lifecycle_cronjob_is_staging_only_and_least_authority() -> None
     assert all(volume["persistentVolumeClaim"]["readOnly"] for volume in pod["volumes"])
 
 
+def test_single_node_lifecycle_stats_a_mounted_capacity_drive() -> None:
+    document = _resource(
+        ClusterConfig(runtime_environment="staging", namespace="loom-staging"),
+        "CronJob",
+        "loom-staging-data-lifecycle",
+    )
+    assert document is not None
+    pod = document["spec"]["jobTemplate"]["spec"]["template"]["spec"]  # type: ignore[index]
+    args = pod["containers"][0]["args"]
+    assert args[args.index("--capacity-source") + 1] == "filesystem"
+    assert "--filesystem-path" in args
+    # Single-node still mounts the one hostPath capacity PVC read-only.
+    assert [v["name"] for v in pod["volumes"]] == ["minio-capacity-0"]
+
+
+def test_multi_node_lifecycle_reads_capacity_via_minio_admin_not_pvc_mounts() -> None:
+    # #1113: distributed MinIO drives are RWO PVCs held by the loom-minio-*
+    # pods, so the maintenance Job must NOT mount them (Multi-Attach). It reads
+    # per-drive headroom from the MinIO admin API instead.
+    topology_cls = type(ClusterConfig().topology)  # type: ignore[attr-defined]
+    config = ClusterConfig(
+        runtime_environment="staging",
+        namespace="loom-staging",
+        persistent_storage_backend="dynamic",
+        topology=topology_cls(
+            multi_node=True,
+            minio_replicas=4,
+            anti_affinity="required",
+            storage_backend="longhorn",
+        ),
+    )
+    document = _resource(config, "CronJob", "loom-staging-data-lifecycle")
+    assert document is not None
+    pod = document["spec"]["jobTemplate"]["spec"]["template"]["spec"]  # type: ignore[index]
+    args = pod["containers"][0]["args"]
+    assert args[args.index("--capacity-source") + 1] == "minio-admin"
+    assert "--filesystem-path" not in args
+    # No drive PVC mounts/volumes at all — that is the Multi-Attach fix.
+    assert "volumes" not in pod
+    assert "volumeMounts" not in pod["containers"][0]
+
+
 def test_staging_lifecycle_uses_exact_physical_bucket_authority() -> None:
     document = _resource(
         ClusterConfig(

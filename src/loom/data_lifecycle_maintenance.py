@@ -14,7 +14,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from loom.data_lifecycle_capacity import collect_staging_capacity
+from loom.data_lifecycle_capacity import (
+    collect_staging_capacity,
+    collect_staging_capacity_from_drives,
+)
+from loom.data_lifecycle_capacity_minio import probe_minio_admin_drives
 from loom.data_lifecycle_capacity_sql import SqlAlchemyStagingCapacityStore
 from loom.data_lifecycle_gc import GcScope
 from loom.data_lifecycle_gc_s3 import S3ExactObjectDeleter
@@ -41,7 +45,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--action", choices=("auto", "capacity"), default="auto")
     parser.add_argument("--namespace", required=True)
     parser.add_argument("--bucket", action="append", required=True)
-    parser.add_argument("--filesystem-path", action="append", type=Path, required=True)
+    parser.add_argument(
+        "--capacity-source",
+        choices=("filesystem", "minio-admin"),
+        default="filesystem",
+        help=(
+            "How to measure per-drive disk/inode headroom. 'filesystem' stats "
+            "locally-mounted drive paths (single-node/hostPath MinIO); "
+            "'minio-admin' queries the MinIO admin API over the network "
+            "(distributed MinIO, whose RWO drive PVCs cannot be co-mounted)."
+        ),
+    )
+    parser.add_argument("--filesystem-path", action="append", type=Path, default=None)
     parser.add_argument("--requested-by", default="staging-lifecycle-cronjob")
     return parser
 
@@ -55,12 +70,36 @@ def main(argv: list[str] | None = None) -> int:
         now = datetime.now(UTC)
         object_inventory = S3ObservedObjectInventory(client)
         observed = object_inventory.load(buckets=args.bucket)
-        capacity = collect_staging_capacity(
-            namespace=args.namespace,
-            objects=observed,
-            filesystem_paths=args.filesystem_path,
-            observed_at=now,
-        )
+        if args.capacity_source == "minio-admin":
+            store = runtime.object_store
+            if store.access_key is None or store.secret_key is None:
+                raise RuntimeError(
+                    "--capacity-source minio-admin requires static "
+                    "MINIO_ACCESS_KEY / MINIO_SECRET_KEY credentials"
+                )
+            drives = probe_minio_admin_drives(
+                endpoint_url=store.endpoint_url,
+                access_key=store.access_key,
+                secret_key=store.secret_key,
+            )
+            capacity = collect_staging_capacity_from_drives(
+                namespace=args.namespace,
+                objects=observed,
+                drives=drives,
+                observed_at=now,
+            )
+        else:
+            if not args.filesystem_path:
+                raise RuntimeError(
+                    "--capacity-source filesystem requires at least one "
+                    "--filesystem-path"
+                )
+            capacity = collect_staging_capacity(
+                namespace=args.namespace,
+                objects=observed,
+                filesystem_paths=args.filesystem_path,
+                observed_at=now,
+            )
         SqlAlchemyStagingCapacityStore(engine).publish(capacity)
         document = None
         if args.action == "auto":
