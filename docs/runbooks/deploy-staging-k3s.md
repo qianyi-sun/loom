@@ -37,6 +37,26 @@ The script:
 2. Renders the desired state from the committed config with the tag substituted.
 3. Renders + applies the DB migration Job (`loom-control-plane:<tag> alembic upgrade head`, `LOOM_DB_URL` from `loom-secrets/cp-db-url`) and **waits for it to complete before** rolling the app, so pods never boot against an old schema.
 4. Applies the workloads (rolling update to the new tag) and prints `loom cluster status`.
+5. Provisions the **headless smoke-user credential** (see below) and stores it in `loom-secrets/smoke-api-token`.
+
+## Headless smoke-user credential
+
+The release-gate / operator trajectory smoke submits `oracle × gb10-smoke` via
+`POST /api/v1/trials`, which requires a **user-owned** API token — a bare admin
+or legacy team token is rejected (`require_submitting_user`). Step 5 provisions
+one in a deployment-managed way (no human login, no personal token):
+
+```bash
+# runs INSIDE loom-service — the host can't reach the CNPG DB directly
+# (NetworkPolicy), but the service pod has the loom CLI + LOOM_SVC_DB_URL.
+loom admin ensure-smoke-user --format json   # LOOM_DB_URL=$LOOM_SVC_DB_URL
+```
+
+This idempotently ensures a dedicated non-human `loom-smoke` User + Team + owner
+membership and mints a fresh user-owned `submit` token (rotating any prior one),
+which the script writes into `loom-secrets/smoke-api-token`. Point the smoke at
+it with `smoke_api_token_source` (or `LOOM_SMOKE_API_TOKEN` from that secret
+key). The identity is stable across deploys; only the token rotates.
 
 ## External entrypoint (one-time)
 

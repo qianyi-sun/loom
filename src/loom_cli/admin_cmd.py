@@ -573,6 +573,82 @@ def _rotate_worker_token(args: argparse.Namespace) -> int:
     return 0
 
 
+def _ensure_smoke_user(args: argparse.Namespace) -> int:
+    """Provision the deployment-managed headless smoke-user credential.
+
+    Idempotently ensures a dedicated non-human ``loom-smoke`` User + Team
+    and mints a fresh user-owned ``submit`` token so the release-gate /
+    operator trajectory smoke can submit ``oracle × gb10-smoke`` without a
+    human login (see loom_cli.smoke_credential). Writes directly to the
+    target service DB — run it after migrations during a deploy, then pipe
+    the token straight into the secret store.
+    """
+    from loom_cli.smoke_credential import ensure_smoke_user_credential
+
+    db_url = args.db_url
+    if not db_url:
+        sys.stderr.write(
+            "error: no database URL. Pass --db-url or set LOOM_DB_URL "
+            "(then LOOM_SVC_DB_URL) in the environment.\n",
+        )
+        return 2
+    try:
+        cred = ensure_smoke_user_credential(
+            db_url,
+            username=args.username,
+            team_name=args.team,
+            ttl_days=args.expires_in_days,
+            revoke_prior=not args.keep_prior,
+        )
+    except Exception as e:  # surface any provisioning failure to the operator
+        sys.stderr.write(f"error: could not provision smoke user: {e}\n")
+        return 1
+
+    if args.format == "json":
+        json.dump(
+            {
+                "token": cred.raw_token,
+                "token_hash_prefix": cred.token_hash_prefix,
+                "username": cred.username,
+                "team": cred.team_name,
+                "user_id": str(cred.user_id),
+                "team_id": str(cred.team_id),
+                "expires_at": (
+                    cred.expires_at.isoformat() if cred.expires_at else None
+                ),
+                "rotated_prior": cred.rotated_prior,
+            },
+            sys.stdout,
+            indent=2,
+        )
+        sys.stdout.write("\n")
+    elif args.show_secret:
+        sys.stdout.write(
+            f"Smoke-user credential provisioned.\n"
+            f"  username: {cred.username}\n"
+            f"  team:     {cred.team_name}\n"
+            f"  prefix:   {cred.token_hash_prefix}\n"
+            f"  token:    {cred.raw_token}\n"
+            f"  revoked prior tokens: {cred.rotated_prior}\n",
+        )
+    else:
+        sys.stdout.write(
+            f"Smoke-user credential provisioned "
+            f"(prefix {cred.token_hash_prefix}, "
+            f"revoked {cred.rotated_prior} prior).\n"
+            f"The raw token was NOT printed. Pipe it straight into the\n"
+            f"secret store without exposing it via shell history or `ps`:\n"
+            f"\n"
+            f"  loom admin ensure-smoke-user --format json | jq -r .token \\\n"
+            f"    | kubectl create secret generic loom-secrets \\\n"
+            f"        --from-file=smoke-api-token=/dev/stdin \\\n"
+            f"        --dry-run=client -o yaml | kubectl apply -f -\n"
+            f"\n"
+            f"Or re-run with --show-secret to print the raw token to stdout.\n",
+        )
+    return 0
+
+
 def _slurm_workers_status(args: argparse.Namespace) -> int:
     try:
         admin_token = _resolve_admin_token(args.admin_token)
@@ -1746,6 +1822,58 @@ def dispatch(argv: list[str]) -> int:
         help="Output format for terminal use or evidence artifacts.",
     )
     p_env_diagnostics.set_defaults(handler=_env_diagnostics)
+
+    p_smoke = sub.add_parser(
+        "ensure-smoke-user",
+        help=(
+            "Provision the deployment-managed headless smoke-user "
+            "credential (user-owned submit token for the trajectory smoke)."
+        ),
+    )
+    p_smoke.add_argument(
+        "--db-url",
+        default=os.environ.get("LOOM_DB_URL") or os.environ.get("LOOM_SVC_DB_URL"),
+        help=(
+            "Target service Postgres URL. Defaults to env LOOM_DB_URL, then "
+            "LOOM_SVC_DB_URL, so it isn't exposed via argv."
+        ),
+    )
+    p_smoke.add_argument(
+        "--username",
+        default="loom-smoke",
+        help="Smoke-user username (default: loom-smoke).",
+    )
+    p_smoke.add_argument(
+        "--team",
+        default="loom-smoke",
+        help="Team the smoke user owns (default: loom-smoke).",
+    )
+    p_smoke.add_argument(
+        "--expires-in-days",
+        type=int,
+        default=90,
+        help="Token lifetime in days (default: 90).",
+    )
+    p_smoke.add_argument(
+        "--keep-prior",
+        action="store_true",
+        help=(
+            "Do NOT revoke the smoke user's existing tokens. Default is to "
+            "rotate so exactly one live credential remains."
+        ),
+    )
+    p_smoke.add_argument(
+        "--show-secret",
+        action="store_true",
+        help="Print the raw token to stdout (terminal scrollback risk).",
+    )
+    p_smoke.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format.",
+    )
+    p_smoke.set_defaults(handler=_ensure_smoke_user)
 
     p_tokens = sub.add_parser(
         "tokens",
