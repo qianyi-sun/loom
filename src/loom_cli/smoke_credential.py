@@ -187,3 +187,87 @@ def ensure_smoke_user_credential(
         expires_at=expires_at,
         rotated_prior=rotated_prior,
     )
+
+
+# ---------------------------------------------------------------------------
+# Batch-runner control-plane token
+# ---------------------------------------------------------------------------
+
+_BATCH_RUNNER_TOKEN_NAME = "batch-runner (deploy-provisioned)"
+
+
+@dataclass(frozen=True)
+class BatchRunnerToken:
+    """The result of provisioning the batch-runner CP token."""
+
+    raw_token: str
+    token_hash_prefix: str
+    expires_at: datetime | None
+    rotated_prior: int
+
+
+def ensure_batch_runner_token(
+    db_url: str,
+    *,
+    ttl_days: int | None = _DEFAULT_TTL_DAYS,
+    revoke_prior: bool = True,
+) -> BatchRunnerToken:
+    """Mint the batch-runner control-plane token loom-service uses to fan
+    batches out to ``POST /trials`` on the control-plane.
+
+    Mirrors the control-plane's ``POST /admin/batch-runner-tokens``
+    (``loom_control_plane.routes.admin.issue_batch_runner_token``): a
+    non-user ``worker`` token scoped to ``submit:batch``. A fresh or
+    post-cutover DB has no valid one, so ``LOOM_SVC_BATCH_RUNNER_CP_TOKEN``
+    (from ``loom-secrets/batch-runner-cp-token``) 401s and batches never
+    dispatch. The deploy runs this against the target DB, writes the raw
+    token into ``loom-secrets``, and restarts loom-service to pick it up —
+    see ``docs/runbooks/deploy-staging-k3s.md``.
+
+    Idempotent by rotation: prior deploy-provisioned batch-runner tokens
+    (tagged by name) are revoked so exactly one is live after each run.
+    """
+    if ttl_days is not None and ttl_days <= 0:
+        raise ValueError("ttl_days must be positive when set")
+
+    engine = create_engine(db_url)
+    now = datetime.now(UTC)
+    expires_at = now + timedelta(days=ttl_days) if ttl_days is not None else None
+
+    try:
+        with sessionmaker(engine).begin() as s:
+            rotated_prior = 0
+            if revoke_prior:
+                prior = s.execute(
+                    select(Token.token_hash).where(
+                        Token.name == _BATCH_RUNNER_TOKEN_NAME,
+                        Token.revoked_at.is_(None),
+                    ),
+                ).scalars().all()
+                rotated_prior = len(prior)
+                if prior:
+                    s.execute(
+                        update(Token)
+                        .where(Token.token_hash.in_(prior))
+                        .values(revoked_at=now),
+                    )
+            raw = f"loom_br_{secrets.token_urlsafe(32)}"
+            token_hash = hashlib.sha256(raw.encode()).digest()
+            s.execute(insert(Token).values(
+                token_hash=token_hash,
+                name=_BATCH_RUNNER_TOKEN_NAME,
+                type="worker",
+                scopes=["submit:batch"],
+                team_id=None,
+                issued_at=now,
+                expires_at=expires_at,
+            ))
+    finally:
+        engine.dispose()
+
+    return BatchRunnerToken(
+        raw_token=raw,
+        token_hash_prefix=token_hash.hex()[:8],
+        expires_at=expires_at,
+        rotated_prior=rotated_prior,
+    )

@@ -38,6 +38,8 @@ The script:
 3. Renders + applies the DB migration Job (`loom-control-plane:<tag> alembic upgrade head`, `LOOM_DB_URL` from `loom-secrets/cp-db-url`) and **waits for it to complete before** rolling the app, so pods never boot against an old schema.
 4. Applies the workloads (rolling update to the new tag) and prints `loom cluster status`.
 5. Provisions the **headless smoke-user credential** (see below) and stores it in `loom-secrets/smoke-api-token`.
+6. Provisions the **batch-runner CP token** (`loom admin ensure-batch-runner-token`), stores it in `loom-secrets/batch-runner-cp-token`, and restarts loom-service — without it, batch fan-out to the control-plane `POST /trials` 401s and batches never dispatch (single-trial API submits are unaffected).
+7. Bootstraps the **data-lifecycle mutation-epoch** on a fresh DB (idempotent; no-op on an already-bootstrapped or already-dirty DB — see #1137) so retention/GC can run.
 
 ## Headless smoke-user credential
 

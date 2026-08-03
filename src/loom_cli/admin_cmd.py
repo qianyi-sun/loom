@@ -649,6 +649,73 @@ def _ensure_smoke_user(args: argparse.Namespace) -> int:
     return 0
 
 
+def _ensure_batch_runner_token(args: argparse.Namespace) -> int:
+    """Provision the deployment-managed batch-runner control-plane token.
+
+    Mints the ``submit:batch`` token loom-service uses to fan batches out
+    to the control-plane's ``POST /trials`` (see
+    loom_cli.smoke_credential.ensure_batch_runner_token). A fresh/cutover
+    DB has no valid one, so batches 401 and never dispatch. Writes directly
+    to the target DB — run after migrations, then pipe the token into
+    loom-secrets/batch-runner-cp-token and restart loom-service.
+    """
+    from loom_cli.smoke_credential import ensure_batch_runner_token
+
+    db_url = args.db_url
+    if not db_url:
+        sys.stderr.write(
+            "error: no database URL. Pass --db-url or set LOOM_DB_URL "
+            "(then LOOM_SVC_DB_URL) in the environment.\n",
+        )
+        return 2
+    try:
+        tok = ensure_batch_runner_token(
+            db_url,
+            ttl_days=args.expires_in_days,
+            revoke_prior=not args.keep_prior,
+        )
+    except Exception as e:  # surface any provisioning failure to the operator
+        sys.stderr.write(f"error: could not provision batch-runner token: {e}\n")
+        return 1
+
+    if args.format == "json":
+        json.dump(
+            {
+                "token": tok.raw_token,
+                "token_hash_prefix": tok.token_hash_prefix,
+                "expires_at": (
+                    tok.expires_at.isoformat() if tok.expires_at else None
+                ),
+                "rotated_prior": tok.rotated_prior,
+            },
+            sys.stdout,
+            indent=2,
+        )
+        sys.stdout.write("\n")
+    elif args.show_secret:
+        sys.stdout.write(
+            f"Batch-runner token provisioned.\n"
+            f"  prefix: {tok.token_hash_prefix}\n"
+            f"  token:  {tok.raw_token}\n"
+            f"  revoked prior tokens: {tok.rotated_prior}\n",
+        )
+    else:
+        sys.stdout.write(
+            f"Batch-runner token provisioned "
+            f"(prefix {tok.token_hash_prefix}, revoked {tok.rotated_prior} prior).\n"
+            f"The raw token was NOT printed. Pipe it into the secret store:\n"
+            f"\n"
+            f"  loom admin ensure-batch-runner-token --format json | jq -r .token \\\n"
+            f"    | kubectl create secret generic loom-secrets \\\n"
+            f"        --from-file=batch-runner-cp-token=/dev/stdin \\\n"
+            f"        --dry-run=client -o yaml | kubectl apply -f -\n"
+            f"  # then: kubectl rollout restart deploy/loom-service\n"
+            f"\n"
+            f"Or re-run with --show-secret to print the raw token to stdout.\n",
+        )
+    return 0
+
+
 def _slurm_workers_status(args: argparse.Namespace) -> int:
     try:
         admin_token = _resolve_admin_token(args.admin_token)
@@ -1874,6 +1941,48 @@ def dispatch(argv: list[str]) -> int:
         help="Output format.",
     )
     p_smoke.set_defaults(handler=_ensure_smoke_user)
+
+    p_br = sub.add_parser(
+        "ensure-batch-runner-token",
+        help=(
+            "Provision the deployment-managed batch-runner CP token "
+            "(submit:batch token loom-service uses to dispatch batches)."
+        ),
+    )
+    p_br.add_argument(
+        "--db-url",
+        default=os.environ.get("LOOM_DB_URL") or os.environ.get("LOOM_SVC_DB_URL"),
+        help=(
+            "Target service Postgres URL. Defaults to env LOOM_DB_URL, then "
+            "LOOM_SVC_DB_URL, so it isn't exposed via argv."
+        ),
+    )
+    p_br.add_argument(
+        "--expires-in-days",
+        type=int,
+        default=90,
+        help="Token lifetime in days (default: 90).",
+    )
+    p_br.add_argument(
+        "--keep-prior",
+        action="store_true",
+        help=(
+            "Do NOT revoke prior deploy-provisioned batch-runner tokens. "
+            "Default rotates so exactly one is live."
+        ),
+    )
+    p_br.add_argument(
+        "--show-secret",
+        action="store_true",
+        help="Print the raw token to stdout (terminal scrollback risk).",
+    )
+    p_br.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format.",
+    )
+    p_br.set_defaults(handler=_ensure_batch_runner_token)
 
     p_tokens = sub.add_parser(
         "tokens",
