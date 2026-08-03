@@ -89,7 +89,38 @@ kubectl -n "${NS}" wait --for=condition=complete "job/${migrate_job}" --timeout=
 # --- 4. apply the workloads (rolling update to the new tag) ---
 log "apply workloads"
 kubectl apply -f "${render_out}"
+kubectl -n "${NS}" rollout status deploy/loom-service --timeout=300s || true
 ${UV} loom cluster status --namespace "${NS}" --format table || true
+
+# --- 5. provision the deployment-managed headless smoke-user credential ---
+#        The release-gate / operator trajectory smoke submits oracle x gb10-smoke
+#        via POST /api/v1/trials, which needs a USER-OWNED token. Provision a
+#        dedicated non-human loom-smoke user + user-owned submit token (idempotent
+#        identity, fresh token each deploy) and store it in loom-secrets so the
+#        smoke reads it via smoke_api_token_source. Runs INSIDE loom-service: the
+#        host can't reach the CNPG DB directly (NetworkPolicy), but the service
+#        pod has the loom CLI + LOOM_SVC_DB_URL + DB reachability. Non-fatal: a
+#        smoke-credential hiccup must not fail the app rollout.
+log "provision headless smoke-user credential"
+svc_pod="$(kubectl -n "${NS}" get pod -l app=loom-service \
+  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+if [ -n "${svc_pod}" ] && smoke_json="$(kubectl -n "${NS}" exec "${svc_pod}" -- \
+    sh -c 'LOOM_DB_URL="$LOOM_SVC_DB_URL" loom admin ensure-smoke-user --format json' \
+    2>/dev/null)"; then
+  smoke_token="$(printf '%s' "${smoke_json}" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])' 2>/dev/null || true)"
+  if [ -n "${smoke_token}" ]; then
+    printf '%s' "${smoke_token}" | kubectl -n "${NS}" patch secret loom-secrets \
+      --type merge -p "$(printf '%s' "${smoke_token}" | base64 | tr -d '\n' \
+        | sed 's/.*/{"data":{"smoke-api-token":"&"}}/')" >/dev/null \
+      && log "smoke-api-token stored in ${NS}/loom-secrets" \
+      || echo "WARN: could not store smoke-api-token" >&2
+  else
+    echo "WARN: smoke-user provisioning returned no token" >&2
+  fi
+else
+  echo "WARN: could not provision smoke-user (loom-service not ready?)" >&2
+fi
 
 log "deploy complete: ${NS} @ ${TAG}"
 echo "Verify externally: curl -sSk --resolve yylx.world:8443:192.168.50.103 https://yylx.world:8443/staging/"
