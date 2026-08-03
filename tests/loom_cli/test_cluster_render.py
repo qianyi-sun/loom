@@ -41,6 +41,7 @@ _GOLDEN_FILES = (
     "ingress.yaml",
     "gateway-router.yaml",
     "worker-router.yaml",
+    "minio-router.yaml",
     # Phase C (#190) — egress proxy chain. Default replicas=0 so
     # the resources exist in the manifest but no pods until
     # operators scale up.
@@ -295,8 +296,8 @@ def test_load_config_path_none_returns_defaults() -> None:
 
 def test_render_produces_valid_yaml_with_expected_kinds() -> None:
     """Smoke: every document parses, the set covers the 8 Deployments
-    + 2 DaemonSets + 10 Services + 3 StatefulSets + 1 Ingress
-    + 1 PodDisruptionBudget + 13 NetworkPolicies + 2 ConfigMaps
+    + 3 DaemonSets + 10 Services + 3 StatefulSets + 1 Ingress
+    + 1 PodDisruptionBudget + 14 NetworkPolicies + 2 ConfigMaps
     (Grafana dashboards + egress-proxy bootstrap) expected by
     cluster-deploy.md §Component map + sandbox-isolation.md."""
     text = render_manifests(_DEFAULT_CFG)
@@ -310,7 +311,8 @@ def test_render_produces_valid_yaml_with_expected_kinds() -> None:
     # cp, service, gateway, web + egress-xds + egress-proxy +
     # pgbouncer + family-orchestrator (#672)
     assert kinds.count("Deployment") == 8
-    assert kinds.count("DaemonSet") == 2  # gateway-router + worker-router
+    # gateway-router + worker-router + minio-router
+    assert kinds.count("DaemonSet") == 3
     # postgres + pgbouncer + minio + cp + gateway + service + web
     # + ingress + egress + worker (headless, StatefulSet peer DNS) = 10
     assert kinds.count("Service") == 10
@@ -321,9 +323,9 @@ def test_render_produces_valid_yaml_with_expected_kinds() -> None:
     # pgbouncer PodDisruptionBudget.
     assert kinds.count("PodDisruptionBudget") == 1
     # NetworkPolicies: postgres + minio + cp + gateway + worker + svc
-    # + web + gateway-router + worker-router + egress-xds + egress-proxy
-    # + pgbouncer + family-orchestrator = 13.
-    assert kinds.count("NetworkPolicy") == 13
+    # + web + gateway-router + worker-router + minio-router + egress-xds
+    # + egress-proxy + pgbouncer + family-orchestrator = 14.
+    assert kinds.count("NetworkPolicy") == 14
     assert kinds.count("CronJob") == 0
     # Grafana dashboards ConfigMap + egress-proxy bootstrap ConfigMap.
     assert kinds.count("ConfigMap") == 2

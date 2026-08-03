@@ -167,6 +167,11 @@ spec:
         - podSelector: { matchLabels: { app: loom-minio } }
         - podSelector: { matchLabels: { app: loom-family-orchestrator } }
         - podSelector: { matchLabels: { app: loom-staging-data-lifecycle } }
+        # External workers reach the object store privately through
+        # loom-minio-router (hostPort 30900 → loom-minio:9000), mirroring
+        # how loom-worker-router fronts the control-plane. MinIO's S3v4
+        # signature auth guards the traffic behind this proxy.
+        - podSelector: { matchLabels: { app: loom-minio-router } }
       ports:
         - { port: 9000, protocol: TCP }
   egress:

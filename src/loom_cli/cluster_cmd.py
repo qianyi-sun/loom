@@ -1327,6 +1327,12 @@ _TEMPLATE_ORDER: tuple[str, ...] = (
     # endpoint into the in-cluster control-plane. Bearer-token auth is
     # enforced at the control-plane behind it; boundary-allowlisted.
     "worker-router.yaml.j2",
+    # minio-router DaemonSet — companion to worker-router giving the same
+    # EXTERNAL workers a stable node-IP:30900 endpoint into the in-cluster
+    # loom-minio object store (they upload trajectories/artifacts + ensure
+    # buckets directly). MinIO's own S3v4 signature auth guards it;
+    # boundary-allowlisted.
+    "minio-router.yaml.j2",
     # llm-gateway-sandbox DaemonSet (#547 item #3) — TLS-terminating
     # HTTP CONNECT proxy on hostPort 8443 that verifies the step-JWT
     # before tunneling to the in-cluster gateway. Renders only when
