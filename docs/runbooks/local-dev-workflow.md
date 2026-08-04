@@ -10,7 +10,10 @@ Use it to catch breakage on your machine first. The shared environments are
 where integration actually happens:
 
 - **local** — pre-push testing on your laptop (this runbook).
-- **dev** (`yylx.world/dev`) — post-merge integration of `refs/heads/dev`.
+- **dev** (`yylx.world/dev`) — post-merge integration of `refs/heads/dev`. Runs
+  on the shared fleet co-located with staging/prod (external Slurm workers
+  arbitrated by the autoscaler), **not** the kind + in-cluster-worker shape this
+  runbook's `local` uses.
 - **staging** / **production** — release-gated deploys.
 
 If you only need unit tests, run `pytest` directly; you do not need a local
