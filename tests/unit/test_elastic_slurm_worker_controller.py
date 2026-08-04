@@ -335,6 +335,21 @@ def test_build_sbatch_request_can_disable_exclusive_node_allocation() -> None:
     assert "docker info --format '{{.CgroupDriver}}'" in request.stdin
     assert '--docker-driver "$worker_cgroup_driver"' in request.stdin
     assert "docker-compose.remote-worker.cgroup-parent.yml" in request.stdin
+    # The generated batch script must be valid shell (a stray quote in an error
+    # message once broke `${var:?...}` parsing and failed the job in ~1s).
+    import shutil
+    import subprocess
+
+    bash = shutil.which("bash")
+    if bash is not None:
+        syntax = subprocess.run(
+            [bash, "-n"],
+            input=request.stdin,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert syntax.returncode == 0, syntax.stderr
 
 
 def test_nonexclusive_sbatch_rejects_missing_job_pids_max() -> None:

@@ -719,7 +719,7 @@ if [[ "${LOOM_WORKER_REQUIRE_CGROUP_PARENT:-0}" == "1" ]]; then
   # the allocation and discovery returns it; the cgroupfs driver nests directly
   # in the delegated job cgroup. Detecting the driver here keeps both hosts safe.
   worker_cgroup_driver="$(docker info --format '{{.CgroupDriver}}' 2>/dev/null || true)"
-  : "${worker_cgroup_driver:?could not read Docker's cgroup driver}"
+  : "${worker_cgroup_driver:?could not read the Docker cgroup driver}"
   export LOOM_WORKER_CGROUP_PARENT="$(
     PYTHONPATH="$LOOM_REMOTE_WORKER_REPO_DIR/src" \
       /usr/bin/python3 -m loom_control_plane.slurm_job_cgroup \

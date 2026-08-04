@@ -181,6 +181,45 @@ def test_docker_parent_systemd_waits_for_guard_slice(
     assert sleeps == pytest.approx([0.1])
 
 
+def test_docker_parent_systemd_retries_partially_populated_slice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The guard registers the slice unit and enables its controllers a moment
+    # later; a slice dir whose scalars are not yet readable must be retried, not
+    # failed closed (regression: discovery raised on the first missing cpuset).
+    proc_cgroup, root = _cgroup_fixture(tmp_path)
+    nested = root / "loom.slice" / "loom-job.slice" / "loom-job-123.slice"
+    nested.mkdir(parents=True)  # dir exists but no cgroup scalars yet
+    now = 100.0
+    sleeps: list[float] = []
+
+    monkeypatch.setattr(cgroup_module.time, "monotonic", lambda: now)
+
+    def populate(delay: float) -> None:
+        nonlocal now
+        sleeps.append(delay)
+        now += delay
+        (nested / "cpuset.cpus.effective").write_text("0-1", encoding="utf-8")
+        (nested / "pids.max").write_text("3072", encoding="utf-8")
+        (nested / "memory.max").write_text("536870912", encoding="utf-8")
+
+    monkeypatch.setattr(cgroup_module.time, "sleep", populate)
+
+    assert (
+        discover_docker_cgroup_parent(
+            docker_driver="systemd",
+            job_id="123",
+            pids_max=3072,
+            wait_seconds=1.0,
+            proc_cgroup=proc_cgroup,
+            cgroup_root=root,
+        )
+        == "loom-job-123.slice"
+    )
+    assert sleeps == pytest.approx([0.1])
+
+
 def test_docker_parent_systemd_binds_array_task_to_base_slice(tmp_path: Path) -> None:
     proc_cgroup, root = _cgroup_fixture(tmp_path)
     _write_slice(root, unit="loom-job-123.slice")

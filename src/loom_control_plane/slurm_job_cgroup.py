@@ -371,20 +371,21 @@ def _slice_binding_shortfall(
     if not host_slice_path.is_dir():
         return "the guard-owned systemd slice is not present"
 
-    slice_cpus = _parse_cpu_set(
-        _read_cgroup_scalar(
-            host_slice_path / "cpuset.cpus.effective",
-            description="the systemd slice cpuset",
-        ),
-    )
-    slice_pids_max = _read_cgroup_scalar(
-        host_slice_path / "pids.max",
-        description="the systemd slice pids.max",
-    )
-    slice_memory_max = _read_cgroup_scalar(
-        host_slice_path / "memory.max",
-        description="the systemd slice memory.max",
-    )
+    # The guard enables the slice's controllers asynchronously just after it
+    # registers the unit, so a scalar that is not yet readable means "not ready
+    # yet" (retry within the bounded wait), never a hard failure.
+    def _slice_scalar(name: str) -> str | None:
+        try:
+            return (host_slice_path / name).read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+
+    cpuset_raw = _slice_scalar("cpuset.cpus.effective")
+    slice_pids_max = _slice_scalar("pids.max")
+    slice_memory_max = _slice_scalar("memory.max")
+    if cpuset_raw is None or slice_pids_max is None or slice_memory_max is None:
+        return "the guard-owned systemd slice is not fully populated"
+    slice_cpus = _parse_cpu_set(cpuset_raw)
     if not slice_cpus or not slice_cpus.issubset(allocation_cpus):
         return "the guard-owned systemd slice cpuset does not bind the allocation"
     if slice_pids_max != str(pids_max):
