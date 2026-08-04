@@ -1864,3 +1864,8 @@ def test_lint_and_static_does_not_restore_opaque_analysis_state() -> None:
         not str(step.get("uses", "")).startswith("actions/cache@") for step in steps
     )
     assert "Cache mypy" not in {step.get("name") for step in steps}
+
+
+def test_disposable_publisher_probe_requires_a_real_fix() -> None:
+    """Deliberate red phase for the post-activation publisher acceptance probe."""
+    raise AssertionError("disposable publisher acceptance probe")
