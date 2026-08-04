@@ -2070,8 +2070,19 @@ group/world write bits are removed only
 inside that maintenance transaction and only after full service ownership,
 ordinary entry type, and contained-symlink validation; foreign ownership,
 special files, or escaping symlinks fail closed. Candidate readiness repeats
-the complete non-writable-tree validation before any Git command. Before any
-ACL write, the provisional root-owned ledger stores
+the complete non-writable-tree validation before any Git command.
+
+The merged host 7 endpoint correction from `192.168.20.17` to
+`192.168.20.77` is the sole approved trust-topology hash migration. The root
+installer accepts only that exact old/new digest pair; any other hostname,
+port, jump-host, user, identity, or known-hosts topology drift remains
+fail-closed. After publishing the candidate known-hosts authority, the
+installer uses the existing service identity to verify every active host before
+adding a newly active host to the revocation ledger. A failed remote check
+leaves that host unrecorded, admission disabled, and maintenance active; never
+edit the ledger or `/etc/loom/staging-rollout-gb10-known-hosts` by hand.
+
+Before any ACL write, the provisional root-owned ledger stores
 the complete before and expected after ACL for every mask change. A retry accepts
 only those exact states and never resamples drift as a new baseline. The write
 also upgrades legacy schema v1 or trust-ledger schema v2 install records to v3;

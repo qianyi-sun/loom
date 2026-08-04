@@ -3567,6 +3567,32 @@ class HostSystem:
         )
         return result.returncode == 0
 
+    def reconcile_gb10_active_hosts(self, venv: Path, source_sha: str) -> bool:
+        result = self.runner.run(
+            [
+                str(venv / "bin/python"),
+                "-I",
+                "-B",
+                str(_candidate_trust_tool_path(source_sha)),
+                "--ssh-config",
+                str(_candidate_ssh_config_path(source_sha)),
+                "reconcile-active-hosts",
+            ],
+            **self._trust_command_kwargs(),
+        )
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise InstallError("GB10 active-host trust result is invalid") from exc
+        if (
+            not isinstance(payload, dict)
+            or payload.get("action") != "reconcile-active-hosts"
+            or payload.get("ok") is not True
+            or not isinstance(payload.get("hosts"), list)
+        ):
+            raise InstallError("GB10 active-host trust result is invalid")
+        return bool(payload["hosts"])
+
     def prepare_gb10_trust_ledger(
         self,
         source_sha: str,
@@ -5195,6 +5221,8 @@ class HostInstaller:
                     credential_refresh_units_changed = True
             if self.system.install_owner(destination, owner, mode, group=group):
                 changes.append(f"ownership:{destination}")
+        if self.system.reconcile_gb10_active_hosts(candidate_venv, source_sha):
+            changes.append("trust-active-hosts")
         if self.system.ensure_credential_refresh_timer(
             reload_units=credential_refresh_units_changed
         ):

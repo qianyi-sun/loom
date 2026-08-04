@@ -504,6 +504,15 @@ the legacy source SHA until migration succeeds, so a crash cannot reinterpret
 the new candidate as the old trust topology. An interrupted v2 migration that
 already lost that binding is ambiguous and fails closed.
 
+The host 7 address correction has one explicit merged topology transition:
+the digest for `192.168.20.17` may advance only to the reviewed digest for
+`192.168.20.77`. The transition is root-installer-only and cannot authorize a
+general endpoint change. Once candidate known-hosts are installed, any active
+host missing from the revocation ledger is added only after the service key
+successfully verifies all active hosts through the candidate SSH authority.
+This keeps uninstall complete without treating repository membership alone as
+proof that remote trust exists.
+
 ## Alternatives considered
 
 ### Share Qianyi's key and personal runner
