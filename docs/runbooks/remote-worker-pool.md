@@ -1199,16 +1199,27 @@ job scope, and verifies all of the following before Docker starts:
 - the job scope's actual `pids.max` exactly matches the controller-requested
   aggregate PID ceiling.
 
-The wrapper exports the validated path as `LOOM_WORKER_CGROUP_PARENT`, adds
+Docker's cgroup driver decides what shape that parent takes, so the wrapper
+reads `docker info --format '{{.CgroupDriver}}'` and passes it to discovery:
+
+- **cgroupfs** accepts a raw path, so the parent is the delegated
+  `job_<id>` cgroup itself and containers nest directly inside the allocation.
+- **systemd** rejects anything but a `.slice`, so the administrator-owned root
+  guard registers `loom-job-<id>.slice` capped to the allocation and discovery
+  returns that unit. Because only `root` can register a system slice, the
+  unprivileged worker trusts it by reading the slice's own cgroup limits and
+  requiring them to bind the live allocation: the slice cpuset must be a
+  non-empty subset of the job's allocated CPUs, its `pids.max` must equal the
+  guard-applied aggregate ceiling, and its `memory.max` must be finite.
+
+The wrapper exports the discovered parent as `LOOM_WORKER_CGROUP_PARENT`, adds
 `deploy/docker-compose.remote-worker.cgroup-parent.yml`, and sets the
 controller-owned `LOOM_WORKER_REQUIRE_CGROUP_PARENT=1` marker. The overlay
-places the Compose worker beneath that parent. The worker validates the same
-binding before registration and passes it unchanged to Docker
-`HostConfig.CgroupParent` for every trial, verifier-only driver, and task
-sidecar. The worker requires a Slurm marker followed by `job_<SLURM_JOB_ID>`
-(or the base job component for an array task); a different job, a `job_*`
-outside Slurm, a marker without a job component, or an opaque scope fails
-startup. There is no fallback to Docker's default cgroup parent.
+places the Compose worker beneath that parent. The worker passes it unchanged to
+Docker `HostConfig.CgroupParent` for every trial, verifier-only driver, and task
+sidecar. A different job, an unsafe path, an unsupported driver, or a slice that
+does not bind the allocation fails startup; there is no fallback to Docker's
+default cgroup parent.
 
 **Image builds on contained workers (#1146):** the cgroup parent binds every
 *runtime* container (worker, trial, verifier-only driver, sidecar run). Image
@@ -1228,8 +1239,19 @@ configured concurrency ceiling (`requested_concurrency`, or
 `max_concurrency_per_node` for a resource-aware policy). The controller emits
 only the closed, versioned Slurm comment
 `loom-cgroup-v1:pids=<job_pids_max>`. A persistent, administrator-owned root
-cgroup-guard daemon must accept that exact grammar, reject all other comment
-forms, wait for the allocation cgroup to exist, and apply the value there.
+guard consumes that exact grammar. The repository ships it as
+`scripts/ops/slurm_job_cgroup_guard.py` with a systemd unit at
+`deploy/slurm/loom-slurm-job-cgroup-guard.service`; install the script at
+`/usr/libexec/loom-slurm-job-cgroup-guard`, set `LOOM_GUARD_NODE` (the exact
+Slurm NodeName) in `/etc/loom/slurm-job-cgroup-guard.env`, then
+`systemctl enable --now loom-slurm-job-cgroup-guard`. Each pass the guard polls
+`squeue` for RUNNING jobs on its node carrying the reviewed comment and, for
+each, delegates `cpu memory pids` into the `job_<id>` cgroup, writes the
+reviewed `pids.max`, and registers `loom-job-<id>.slice` capped to the
+allocation (`AllowedCPUs` = the job cpuset, `TasksMax` = the PID ceiling,
+`MemoryMax` = the allocated memory); it stops the slice once the job leaves the
+queue. It only ever touches cgroups carrying the reviewed comment and units
+named `loom-job-<digits>.slice`, and never edits `slurm.conf` or `cgroup.conf`.
 Ordinary Slurm 23.11 Prolog is not a valid implementation: it runs outside the
 job cgroup and `_run_prolog` precedes creation of the extern step; the later
 `RunInJob` facility is unavailable in 23.11. The root guard enables controller
@@ -1248,11 +1270,12 @@ Cluster administrators must first configure cgroup v2, Slurm
 controls include `cpu memory pids`. Compute nodes must also provide
 `/usr/bin/python3`; the wrapper uses that fixed interpreter path so cgroup
 discovery never depends on a login shell, virtual environment, or ambient
-`PATH`. The repository does not change
-`slurm.conf`, `cgroup.conf`, systemd delegation, the root guard service, or
-Docker daemon policy. A
-missing controller, non-delegated scope, wrong job identity, cgroup v1/hybrid
-host, or unsafe path stops the batch before `docker compose up`.
+`PATH`. The repository ships the root guard (above) but does not change
+`slurm.conf`, `cgroup.conf`, systemd delegation, or Docker daemon policy;
+the guard is the only sanctioned way to delegate `pids` and register the
+allocation-capped slice. A missing controller, non-delegated scope, wrong job
+identity, cgroup v1/hybrid host, or unsafe path stops the batch before
+`docker compose up`.
 
 Exclusive and unmanaged remote workers do not add the overlay and preserve
 their current Docker parent. Do not set `LOOM_WORKER_CGROUP_PARENT` manually in

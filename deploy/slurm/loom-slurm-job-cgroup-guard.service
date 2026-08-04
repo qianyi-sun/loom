@@ -1,0 +1,25 @@
+[Unit]
+# Administrator-owned root guard for non-exclusive Loom Slurm workers (#896).
+# It delegates the pids controller into each opted-in job cgroup and registers
+# an allocation-capped loom-job-<id>.slice so Docker's systemd cgroup driver has
+# a valid, contained parent. Install the guard script at the ExecStart path and
+# set LOOM_GUARD_NODE (the exact Slurm NodeName) in the EnvironmentFile.
+Description=Loom Slurm job cgroup guard (pids delegation + allocation-capped slice)
+Documentation=https://github.com/qianyi-sun/loom/blob/dev/docs/runbooks/remote-worker-pool.md
+After=slurmd.service docker.service
+Wants=slurmd.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+EnvironmentFile=/etc/loom/slurm-job-cgroup-guard.env
+ExecStart=/usr/bin/python3 -I -B /usr/libexec/loom-slurm-job-cgroup-guard --node ${LOOM_GUARD_NODE}
+Restart=always
+RestartSec=2s
+# The guard must write cgroup controls and drive systemd slices, so it runs as
+# root without privilege dropping; it only ever touches job cgroups carrying the
+# reviewed comment and units named loom-job-<digits>.slice.
+
+[Install]
+WantedBy=multi-user.target

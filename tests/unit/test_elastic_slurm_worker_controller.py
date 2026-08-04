@@ -330,6 +330,10 @@ def test_build_sbatch_request_can_disable_exclusive_node_allocation() -> None:
     assert '--job-id "$SLURM_JOB_ID"' in request.stdin
     assert '--pids-max "$LOOM_WORKER_JOB_PIDS_MAX"' in request.stdin
     assert "--wait-seconds 30" in request.stdin
+    # The parent must be discovered against Docker's live cgroup driver so the
+    # systemd driver receives a ``.slice`` and cgroupfs the raw job cgroup.
+    assert "docker info --format '{{.CgroupDriver}}'" in request.stdin
+    assert '--docker-driver "$worker_cgroup_driver"' in request.stdin
     assert "docker-compose.remote-worker.cgroup-parent.yml" in request.stdin
 
 
