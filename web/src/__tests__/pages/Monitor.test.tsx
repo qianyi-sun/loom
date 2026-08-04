@@ -505,7 +505,7 @@ describe("Monitor human-readable labels", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("gb10")).toBeInTheDocument();
     expect(screen.getByText("staging-x86")).toBeInTheDocument();
-    expect(screen.getByText("Active slots")).toBeInTheDocument();
+    expect(screen.getByText("Used / active slots")).toBeInTheDocument();
     expect(screen.getByText("Max")).toBeInTheDocument();
     expect(screen.getAllByText("slurm").length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText("1/10")).toBeInTheDocument();

@@ -378,6 +378,7 @@ async def test_overview_summarizes_signed_in_team_readiness(
         r = await ac.get("/api/v1/overview")
 
     assert r.status_code == 200, r.text
+    assert r.headers["cache-control"] == "no-store"
     body = r.json()
     assert body["status"] == "ready"
     assert body["team_context"] == {
@@ -468,6 +469,7 @@ async def test_monitor_summary_scopes_state_counts_and_worker_capacity(
         )
 
     assert r.status_code == 200, r.text
+    assert r.headers["cache-control"] == "no-store"
     body = r.json()
     assert body["scope"] == {
         "view": "trials",

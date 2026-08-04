@@ -250,7 +250,7 @@ function ResourcePoolBreakdown({
               "Backend",
               "Arch",
               "Autoscaler",
-              "Active slots",
+              "Used / active slots",
               "Pending",
               "Desired",
               "Max",

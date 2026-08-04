@@ -968,10 +968,14 @@ function qs(
 }
 
 export const api = {
-  getOverview: () => apiFetch<OverviewSummary>("/api/v1/overview"),
+  getOverview: () =>
+    apiFetch<OverviewSummary>("/api/v1/overview", { cache: "no-store" }),
   getMonitorSummary: (
     q: Record<string, string | undefined> = {},
-  ) => apiFetch<MonitorSummary>(`/api/v1/monitor/summary${qs(q)}`),
+  ) =>
+    apiFetch<MonitorSummary>(`/api/v1/monitor/summary${qs(q)}`, {
+      cache: "no-store",
+    }),
   authMe: loadAuthSession,
   publicTeams: () => apiFetch<{ items: PublicTeam[] }>("/api/v1/auth/public-teams"),
   loginPassword: (username: string, password: string) =>
