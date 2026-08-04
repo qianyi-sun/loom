@@ -255,7 +255,11 @@ On each worker host:
 - The host can reach the control node's Control Plane, Gateway, and
   MinIO endpoints.
 - The host has either a Loom checkout that can build `deploy/Dockerfile.worker`
-  or access to a registry image tagged as `loom-worker:<tag>`.
+  or access to a registry image tagged as `loom-worker:<tag>`. The
+  remote-worker Compose build runs over the host network
+  (`build.network: host`) because on many worker hosts the default Docker
+  bridge egress is intercepted and `pip`'s TLS handshake fails with
+  `CERTIFICATE_VERIFY_FAILED`; only the host network has clean egress.
 - A worker token has been minted by an operator. See
   [operator-runbook.md](operator-runbook.md#worker-tokens--loom-admin-tokens-worker).
 
@@ -1228,12 +1232,16 @@ cgroup-guard daemon must accept that exact grammar, reject all other comment
 forms, wait for the allocation cgroup to exist, and apply the value there.
 Ordinary Slurm 23.11 Prolog is not a valid implementation: it runs outside the
 job cgroup and `_run_prolog` precedes creation of the extern step; the later
-`RunInJob` facility is unavailable in 23.11. Before Compose starts, the batch
-wrapper performs structural validation once, then waits up to 30 seconds using
-monotonic 100 ms polling only for `pids.max` to appear and exactly match. A
-wrong job, unsafe path, missing controller, or invalid delegation fails
-immediately; a missing/stopped guard, an unbounded `max`, or a stale/different
-value fails when the bounded wait expires.
+`RunInJob` facility is unavailable in 23.11. The root guard enables controller
+delegation and writes `pids.max` asynchronously just after the job starts, so
+the batch wrapper first fixes the allocation-owned job path from
+`/proc/self/cgroup` (a wrong job, unsafe path, symlink, or non-domain scope
+fails immediately, never polling), then waits up to 30 seconds using monotonic
+100 ms polling for the guard's delegation to converge: `cpu memory pids` in both
+`cgroup.controllers` and `cgroup.subtree_control`, no internal processes, and
+`pids.max` present and exactly matching. Transient shortfalls during start-up
+are retried; a missing/stopped guard, a never-delegated subtree, an unbounded
+`max`, or a stale/different value fails closed when the bounded wait expires.
 
 Cluster administrators must first configure cgroup v2, Slurm
 `proctrack/cgroup` and `task/cgroup`, and a delegated job scope whose subtree
