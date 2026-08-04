@@ -521,6 +521,19 @@ def _active_policy_sha256(inventory: SshInventory) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+# Exact merged endpoint corrections may migrate the revocation ledger only
+# through the root installer.  The first entry is the former trt-gb10-7
+# 192.168.20.17 topology; the second is the verified 192.168.20.77 topology.
+_APPROVED_TOPOLOGY_MIGRATIONS = frozenset(
+    {
+        (
+            "6d7774112e223285303d877b34cc1a29fe5fe5e4e7ef5f3a4e2f831598f757eb",
+            "b37440bdace95d23b62e5ebf2061a3313baedaf91c33b90a9482e118bcdc91c0",
+        )
+    }
+)
+
+
 def _validate_legacy_topology(
     current: SshInventory,
     previous: SshInventory,
@@ -1364,15 +1377,18 @@ def _migrate_active_policy(
     inventory: SshInventory,
     key_fingerprint: str,
 ) -> RevocationLedger:
-    _validate_ledger_binding(
-        ledger,
-        inventory=inventory,
-        key_fingerprint=key_fingerprint,
-        require_active_policy=False,
-    )
+    if ledger.key_fingerprint != key_fingerprint:
+        raise TrustConfigurationError("GB10 trust revocation ledger key binding is invalid")
+    topology_sha256 = _topology_sha256(inventory)
+    if (
+        ledger.topology_sha256 != topology_sha256
+        and (ledger.topology_sha256, topology_sha256)
+        not in _APPROVED_TOPOLOGY_MIGRATIONS
+    ):
+        raise TrustConfigurationError("GB10 trust revocation ledger topology binding is invalid")
     updated = RevocationLedger(
         key_fingerprint=ledger.key_fingerprint,
-        topology_sha256=ledger.topology_sha256,
+        topology_sha256=topology_sha256,
         active_policy_sha256=_active_policy_sha256(inventory),
         revocation_hosts=ledger.revocation_hosts,
     )
@@ -1495,6 +1511,7 @@ def _parser() -> argparse.ArgumentParser:
     subparsers.add_parser("register-legacy-ledger", allow_abbrev=False)
     subparsers.add_parser("validate-ledger", allow_abbrev=False)
     subparsers.add_parser("migrate-active-policy", allow_abbrev=False)
+    subparsers.add_parser("reconcile-active-hosts", allow_abbrev=False)
     subparsers.add_parser("finalize-check", allow_abbrev=False)
     legacy_topology = subparsers.add_parser(
         "validate-legacy-topology",
@@ -1569,7 +1586,13 @@ def main(
     try:
         config_payload = _read_bounded_regular_file(ssh_config_path)
         inventory = parse_ssh_inventory(config_payload.decode("utf-8"))
-        if args.operation in {"bootstrap", "rotate-bootstrap", "check", "revoke"}:
+        if args.operation in {
+            "bootstrap",
+            "rotate-bootstrap",
+            "check",
+            "reconcile-active-hosts",
+            "revoke",
+        }:
             _read_known_hosts_authority(
                 known_hosts_path,
                 expected_uid=expected_uid,
@@ -1647,6 +1670,35 @@ def main(
                 key_fingerprint=key_fingerprint,
             )
             results = ()
+        elif args.operation == "reconcile-active-hosts":
+            if not _installer_lock_authority:
+                raise TrustConfigurationError(
+                    "active-host reconciliation requires merged installer authority"
+                )
+            ledger = _load_bound_ledger(
+                store,
+                inventory=inventory,
+                key_fingerprint=key_fingerprint,
+            )
+            missing_hosts = tuple(
+                host for host in inventory.active_hosts if host not in ledger.revocation_hosts
+            )
+            if missing_hosts:
+                results = converge_trust(
+                    "check",
+                    hosts=inventory.active_hosts,
+                    ssh_config=ssh_config_path,
+                    payload=public_key,
+                    run=run,
+                )
+                if all(result.ok for result in results):
+                    ledger = _register_revocation_hosts(
+                        store,
+                        ledger=ledger,
+                        hosts=inventory.active_hosts,
+                    )
+            else:
+                results = ()
         else:
             ledger = _load_bound_ledger(
                 store,

@@ -595,6 +595,11 @@ class FakeSystem:
         assert source_sha in {"a" * 40, "b" * 40}
         return self.trust_ready
 
+    def reconcile_gb10_active_hosts(self, venv: Path, source_sha: str) -> bool:
+        self._observe_runtime_venv(venv)
+        assert source_sha in {"a" * 40, "b" * 40}
+        return False
+
     def run_post_install_preflight(self) -> dict[str, object]:
         self.preflights += 1
         return {
@@ -3364,6 +3369,37 @@ def test_gb10_trust_probe_binds_exact_candidate_runtime() -> None:
             },
         )
     ]
+
+
+def test_gb10_active_host_reconcile_binds_exact_candidate_runtime() -> None:
+    class ProbeRunner:
+        def __init__(self) -> None:
+            self.calls: list[tuple[list[str], dict[str, object]]] = []
+
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            self.calls.append((list(argv), dict(kwargs)))
+            return host.CommandResult(
+                0,
+                json.dumps(
+                    {
+                        "action": "reconcile-active-hosts",
+                        "hosts": [{"host": "trt-gb10-7", "ok": True, "status": "present"}],
+                        "ledger_hosts_remaining": 15,
+                        "ok": True,
+                        "remote_user": "qianyi",
+                    }
+                ),
+            )
+
+    runner = ProbeRunner()
+
+    assert host.HostSystem(runner).reconcile_gb10_active_hosts(
+        TEST_CANDIDATE_VENV,
+        TEST_CANDIDATE_SHA,
+    )
+    assert runner.calls[0][0][-1] == "reconcile-active-hosts"
+    assert runner.calls[0][0][0] == str(TEST_CANDIDATE_VENV / "bin/python")
+    assert runner.calls[0][1]["env"]["PYTHONDONTWRITEBYTECODE"] == "1"
 
 
 def test_service_git_disables_optional_locks_and_replace_refs() -> None:

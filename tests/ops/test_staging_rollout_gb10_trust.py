@@ -663,6 +663,63 @@ def test_explicit_active14_to_active15_migration_preserves_revocation_hosts(
     assert bootstrapped.revocation_hosts == inventory15.hosts
 
 
+def test_exact_host7_endpoint_migration_updates_topology_and_active_policy(
+    tmp_path: Path,
+) -> None:
+    config, _public_path, _identity, public_key = _write_inputs(tmp_path)
+    inventory15 = trust.parse_ssh_inventory(config.read_text(encoding="utf-8"))
+    old_hostnames = tuple(
+        "192.168.20.17" if host == "trt-gb10-7" else hostname
+        for host, hostname in zip(inventory15.hosts, inventory15.hostnames, strict=True)
+    )
+    inventory14 = replace(
+        inventory15,
+        active_hosts=tuple(host for host in inventory15.hosts if host != "trt-gb10-7"),
+        hostnames=old_hostnames,
+    )
+    store = trust.RevocationLedgerStore(
+        path=_ledger_path(tmp_path),
+        expected_uid=os.geteuid(),
+        expected_gid=os.getegid(),
+    )
+    ledger = trust._initialize_ledger(
+        store,
+        inventory=inventory14,
+        key_fingerprint=trust._key_fingerprint(public_key),
+    )
+    ledger = trust._register_revocation_hosts(
+        store,
+        ledger=ledger,
+        hosts=inventory14.active_hosts,
+    )
+
+    migrated = trust._migrate_active_policy(
+        store,
+        ledger=ledger,
+        inventory=inventory15,
+        key_fingerprint=trust._key_fingerprint(public_key),
+    )
+
+    assert migrated.topology_sha256 == trust._topology_sha256(inventory15)
+    assert migrated.active_policy_sha256 == trust._active_policy_sha256(inventory15)
+    assert migrated.revocation_hosts == inventory14.active_hosts
+
+    unapproved = replace(
+        inventory15,
+        hostnames=tuple(
+            "192.168.20.78" if host == "trt-gb10-7" else hostname
+            for host, hostname in zip(inventory15.hosts, inventory15.hostnames, strict=True)
+        ),
+    )
+    with pytest.raises(trust.TrustConfigurationError, match="topology binding"):
+        trust._migrate_active_policy(
+            store,
+            ledger=ledger,
+            inventory=unapproved,
+            key_fingerprint=trust._key_fingerprint(public_key),
+        )
+
+
 def test_active_policy_migration_requires_inherited_installer_lock(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -701,6 +758,102 @@ def test_active_policy_migration_requires_inherited_installer_lock(
 
     assert installer_rc == 0
     assert json.loads(capsys.readouterr().out)["ok"] is True
+
+
+def test_installer_reconciles_verified_new_active_host_into_revocation_ledger(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, public_path, _identity, _public_key_bytes = _write_inputs(tmp_path)
+    inventory = trust.parse_ssh_inventory(config.read_text(encoding="utf-8"))
+    _register_ledger_hosts(
+        tmp_path,
+        config,
+        public_path,
+        tuple(host for host in inventory.hosts if host != "trt-gb10-7"),
+    )
+    calls: list[str] = []
+
+    def fake_run(argv, **_kwargs):
+        calls.append(argv[-2])
+        return subprocess.CompletedProcess(argv, 0, b'{"status":"present"}\n', b"")
+
+    standalone_rc = _main(
+        ["reconcile-active-hosts"],
+        tmp_path=tmp_path,
+        config=config,
+        public_path=public_path,
+        run=fake_run,
+    )
+    assert standalone_rc == 2
+    assert calls == []
+    assert "merged installer authority" in capsys.readouterr().err
+
+    lock_path = _lock_path(tmp_path)
+    with trust._trust_lifecycle_lock(
+        lock_path,
+        expected_uid=os.getuid(),
+        expected_gid=os.getgid(),
+    ) as lock_fd:
+        monkeypatch.setenv(trust._INHERITED_LOCK_FD_ENV, str(lock_fd))
+        installer_rc = trust.main(
+            ["reconcile-active-hosts"],
+            run=fake_run,
+            ssh_config_path=config,
+            known_hosts_path=_known_hosts_path(tmp_path),
+            public_key_path=public_path,
+            ledger_path=_ledger_path(tmp_path),
+            lock_path=lock_path,
+            expected_uid=os.getuid(),
+            expected_gid=os.getgid(),
+        )
+
+    assert installer_rc == 0
+    assert calls == list(inventory.active_hosts)
+    report = json.loads(capsys.readouterr().out)
+    assert report["ok"] is True
+    assert report["ledger_hosts_remaining"] == 15
+    ledger = trust.RevocationLedger.from_bytes(_ledger_path(tmp_path).read_bytes())
+    assert ledger.revocation_hosts == inventory.hosts
+
+
+def test_installer_does_not_record_new_active_host_when_service_check_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, public_path, _identity, _public_key_bytes = _write_inputs(tmp_path)
+    inventory = trust.parse_ssh_inventory(config.read_text(encoding="utf-8"))
+    prior_hosts = tuple(host for host in inventory.hosts if host != "trt-gb10-7")
+    _register_ledger_hosts(tmp_path, config, public_path, prior_hosts)
+
+    def fake_run(argv, **_kwargs):
+        if argv[-2] == "trt-gb10-7":
+            return subprocess.CompletedProcess(argv, 255, b"", b"transport failed")
+        return subprocess.CompletedProcess(argv, 0, b'{"status":"present"}\n', b"")
+
+    lock_path = _lock_path(tmp_path)
+    with trust._trust_lifecycle_lock(
+        lock_path,
+        expected_uid=os.getuid(),
+        expected_gid=os.getgid(),
+    ) as lock_fd:
+        monkeypatch.setenv(trust._INHERITED_LOCK_FD_ENV, str(lock_fd))
+        installer_rc = trust.main(
+            ["reconcile-active-hosts"],
+            run=fake_run,
+            ssh_config_path=config,
+            known_hosts_path=_known_hosts_path(tmp_path),
+            public_key_path=public_path,
+            ledger_path=_ledger_path(tmp_path),
+            lock_path=lock_path,
+            expected_uid=os.getuid(),
+            expected_gid=os.getgid(),
+        )
+
+    assert installer_rc == 1
+    ledger = trust.RevocationLedger.from_bytes(_ledger_path(tmp_path).read_bytes())
+    assert ledger.revocation_hosts == prior_hosts
 
 
 def test_lifecycle_lock_rejects_unsafe_metadata_before_state_access(
