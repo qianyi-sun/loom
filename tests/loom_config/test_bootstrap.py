@@ -84,3 +84,13 @@ def test_bootstrap_omits_optional_family_orchestrator_gateway_secrets() -> None:
     schema = load_schema(Path("config/loom-schema.toml"))
     line = render_bootstrap_command(schema, namespace="loom", smoke_defaults=False)
     assert "--from-literal=family-orchestrator-token=" not in line
+
+
+def test_dev_worker_token_matches_smoke_default() -> None:
+    """`ensure-dev-worker-token` seeds a DB row whose plaintext must equal
+    the `worker-token` value bootstrap-secrets --smoke-defaults writes into
+    loom-secrets; otherwise workers 401. Guard the two against drift."""
+    from loom_cli.smoke_credential import _DEV_WORKER_TOKEN
+    from loom_config.bootstrap import _SMOKE_DEFAULTS
+
+    assert _DEV_WORKER_TOKEN == _SMOKE_DEFAULTS["worker-token"]

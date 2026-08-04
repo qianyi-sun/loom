@@ -4562,6 +4562,27 @@ def _run_migration_job(
         sys.stderr.write("error: could not determine migration Job name.\n")
         return False
 
+    # Wait for Postgres to accept connections before applying the Job. On a
+    # fresh cluster `up` applies the app + migration in quick succession
+    # while the Postgres StatefulSet is still starting; the migration pod's
+    # backoffLimit=1 means a connection-refused racing that start fails the
+    # Job outright. (staging/prod migrate as a separate post-Postgres step.)
+    pg_wait = [
+        "kubectl", "wait", "-n", namespace,
+        "--for=condition=ready", "pod", "-l", "app=loom-postgres",
+        f"--timeout={timeout_sec}s",
+    ]
+    if context:
+        pg_wait.extend(["--context", context])
+    pg = subprocess.run(pg_wait, capture_output=True, text=True)
+    if pg.returncode != 0:
+        sys.stderr.write(
+            "error: Postgres did not become ready before the migration Job: "
+            f"{pg.stderr.strip()}\n",
+        )
+        return False
+    sys.stdout.write("  Postgres ready; applying migration Job...\n")
+
     apply_cmd = ["kubectl", "apply", "-n", namespace, "-f", "-"]
     if context:
         apply_cmd.extend(["--context", context])

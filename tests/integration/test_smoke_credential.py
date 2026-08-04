@@ -153,3 +153,57 @@ def test_batch_runner_token_rotates_prior(postgres_url: str) -> None:
     second_row = _token_row(postgres_url, second.raw_token)
     assert first_row is not None and first_row.revoked_at is not None
     assert second_row is not None and second_row.revoked_at is None
+
+
+def _worker_token_rows(postgres_url: str, token_hash: bytes) -> list[Token]:
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as s:
+            return list(
+                s.execute(
+                    select(Token).where(Token.token_hash == token_hash)
+                ).scalars().all()
+            )
+    finally:
+        engine.dispose()
+
+
+def test_ensure_dev_worker_token_seeds_fixed_smoke_token(
+    postgres_url: str,
+) -> None:
+    """The seeded row matches the fixed --smoke-defaults worker-token
+    (sha256 of the plaintext) with the worker:report scope, so in-cluster
+    workers authenticate without a mint/patch/restart."""
+    from loom_cli.smoke_credential import (
+        _DEV_WORKER_TOKEN,
+        ensure_dev_worker_token,
+    )
+
+    token_hash = hashlib.sha256(_DEV_WORKER_TOKEN.encode()).digest()
+
+    res = ensure_dev_worker_token(postgres_url)
+    assert res.created is True
+    assert res.token_hash_prefix == token_hash.hex()[:8]
+
+    rows = _worker_token_rows(postgres_url, token_hash)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.type == "worker"
+    assert "worker:report" in row.scopes
+    assert row.team_id is None
+    assert row.revoked_at is None
+
+
+def test_ensure_dev_worker_token_is_idempotent(postgres_url: str) -> None:
+    """Re-running is a get-or-create no-op — never a second row."""
+    from loom_cli.smoke_credential import (
+        _DEV_WORKER_TOKEN,
+        ensure_dev_worker_token,
+    )
+
+    ensure_dev_worker_token(postgres_url)
+    second = ensure_dev_worker_token(postgres_url)
+    assert second.created is False
+
+    token_hash = hashlib.sha256(_DEV_WORKER_TOKEN.encode()).digest()
+    assert len(_worker_token_rows(postgres_url, token_hash)) == 1

@@ -18,6 +18,13 @@ spec:
       containers:
         - name: minio
           image: {{ minio_image }}
+          # Single-node dev/local: the image is side-loaded (or already
+          # cached) on the kind/k3d node. `minio_image` is commonly untagged
+          # (→ `:latest`), whose default pull policy is Always — which
+          # ErrImagePulls on an offline/air-gapped or cached node. Pin
+          # IfNotPresent so a present image is reused. (Distributed staging
+          # uses minio-distributed.yaml.j2.)
+          imagePullPolicy: IfNotPresent
           args: ["server", "/data", "--console-address", ":9001"]
           env:
             - name: MINIO_ROOT_USER
