@@ -1,4 +1,4 @@
-schema_version = 1
+schema_version = 2
 repository = "qianyi-sun/loom"
 expected_hostname = "trt-eai-oldlab-5"
 state_root = "/var/lib/loom-ci-runner-pool"
@@ -26,3 +26,24 @@ cloud_image_url = "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu
 cloud_image_sha256 = "d1940f7d69d343355e183dff1e08a59852d32e7309baa7a4bad8365b11b005ac"
 actions_runner_url = "https://github.com/actions/runner/releases/download/v2.336.0/actions-runner-linux-x64-2.336.0.tar.gz"
 actions_runner_sha256 = "04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d"
+
+[[work_classes]]
+name = "normal"
+label = "loom-ci-normal"
+slots = 4
+routing_variable = "LOOM_CI_NORMAL_RUNS_ON"
+hosted_overflow_after_seconds = 300
+
+[[work_classes]]
+name = "image"
+label = "loom-ci-image"
+slots = 5
+routing_variable = "LOOM_CI_IMAGE_RUNS_ON"
+hosted_overflow_after_seconds = 900
+
+[[work_classes]]
+name = "smoke"
+label = "loom-ci-smoke"
+slots = 2
+routing_variable = "LOOM_CI_SMOKE_RUNS_ON"
+hosted_overflow_after_seconds = 300

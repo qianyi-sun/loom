@@ -190,7 +190,7 @@ jobs:
       needs.plan.outputs.gate_mode == 'full' &&
       needs.plan.outputs.required == 'true'
     runs-on: >-
-      ${{ fromJSON(vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
+      ${{ fromJSON(vars.LOOM_CI_SMOKE_RUNS_ON || vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
     # Manifest-owned start-policy image builds (uncached) + kind boot +
     # ingress-nginx + apply + wait-for-ready can run 30-40 min on a cold
     # runner. 45 leaves headroom for the wait step's worst case.
@@ -1186,7 +1186,7 @@ jobs:
       needs.plan.outputs.gate_mode == 'full' &&
       needs.plan.outputs.required == 'true'
     runs-on: >-
-      ${{ fromJSON(vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
+      ${{ fromJSON(vars.LOOM_CI_SMOKE_RUNS_ON || vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5

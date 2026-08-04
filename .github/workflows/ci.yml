@@ -282,7 +282,7 @@ jobs:
   lint-and-static:
     name: lint-and-static
     runs-on: >-
-      ${{ fromJSON(vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
+      ${{ fromJSON(vars.LOOM_CI_NORMAL_RUNS_ON || vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
     needs: workflow-plan
     timeout-minutes: 12
     if: >-
@@ -327,7 +327,7 @@ jobs:
   tests-root:
     name: tests-root (${{ matrix.shard }})
     runs-on: >-
-      ${{ fromJSON(vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
+      ${{ fromJSON(vars.LOOM_CI_NORMAL_RUNS_ON || vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
     needs: workflow-plan
     timeout-minutes: 15
     if: >-
@@ -472,7 +472,7 @@ jobs:
   tests-packages:
     name: tests-packages
     runs-on: >-
-      ${{ fromJSON(vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
+      ${{ fromJSON(vars.LOOM_CI_NORMAL_RUNS_ON || vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
     needs: workflow-plan
     timeout-minutes: 10
     if: >-
@@ -523,7 +523,7 @@ jobs:
   runtime-payload:
     name: runtime-payload
     runs-on: >-
-      ${{ fromJSON(vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
+      ${{ fromJSON(vars.LOOM_CI_NORMAL_RUNS_ON || vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
     needs: workflow-plan
     timeout-minutes: 10
     if: >-
@@ -680,7 +680,7 @@ jobs:
   go-checks:
     name: go-checks
     runs-on: >-
-      ${{ fromJSON(vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
+      ${{ fromJSON(vars.LOOM_CI_NORMAL_RUNS_ON || vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
     needs: workflow-plan
     if: needs.workflow-plan.outputs.gate_mode == 'full'
     steps:
@@ -709,7 +709,7 @@ jobs:
   web-checks:
     name: web-checks
     runs-on: >-
-      ${{ fromJSON(vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
+      ${{ fromJSON(vars.LOOM_CI_NORMAL_RUNS_ON || vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
     needs: workflow-plan
     timeout-minutes: 20
     if: >-
@@ -782,7 +782,7 @@ jobs:
   integration:
     name: integration (${{ matrix.shard }})
     runs-on: >-
-      ${{ fromJSON(vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
+      ${{ fromJSON(vars.LOOM_CI_NORMAL_RUNS_ON || vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
     needs: workflow-plan
     timeout-minutes: 20
     if: >-
@@ -857,7 +857,7 @@ jobs:
   integration-docker:
     name: integration-docker
     runs-on: >-
-      ${{ fromJSON(vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
+      ${{ fromJSON(vars.LOOM_CI_NORMAL_RUNS_ON || vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
     needs: workflow-plan
     timeout-minutes: 40
     if: >-

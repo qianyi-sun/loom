@@ -233,7 +233,7 @@ jobs:
       needs.plan.outputs.required == 'true' &&
       needs.plan.outputs.images != '[]'
     runs-on: >-
-      ${{ fromJSON(vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
+      ${{ fromJSON(vars.LOOM_CI_IMAGE_RUNS_ON || vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
     timeout-minutes: 45
     permissions:
       contents: read

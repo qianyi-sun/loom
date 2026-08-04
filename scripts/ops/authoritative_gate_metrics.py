@@ -720,6 +720,38 @@ class GitHubMetricsClient:
             run.setdefault("jobs", [])
         return collected
 
+    def collect_run_jobs(
+        self,
+        *,
+        run_id: int,
+        attempt: int,
+    ) -> list[Mapping[str, Any]]:
+        """Collect one exact workflow attempt without fetching job logs."""
+
+        return self._collect_jobs(
+            {"id": run_id, "run_attempt": attempt},
+            include_logs=False,
+        )
+
+    def collect_run_attempt(
+        self,
+        *,
+        run_id: int,
+        attempt: int,
+    ) -> Mapping[str, Any]:
+        """Collect metadata and jobs for one exact workflow attempt."""
+
+        response = self._json(f"/repos/{self._repo_path}/actions/runs/{run_id}")
+        if not isinstance(response, Mapping) or response.get("id") != run_id:
+            raise MetricsError("GitHub workflow run response is invalid")
+        latest_attempt = response.get("run_attempt")
+        if type(latest_attempt) is not int or not 1 <= attempt <= latest_attempt:
+            raise MetricsError("GitHub workflow run attempt is invalid")
+        record = dict(response)
+        record["requested_attempt"] = attempt
+        record["jobs"] = self.collect_run_jobs(run_id=run_id, attempt=attempt)
+        return record
+
     def _collect_jobs(
         self,
         run: Mapping[str, Any],

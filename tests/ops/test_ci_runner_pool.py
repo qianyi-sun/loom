@@ -66,13 +66,13 @@ class FakeAPI:
         self.next_id = 100
         self.deleted: list[int] = []
         self.generated: list[tuple[str, tuple[str, ...]]] = []
-        self.route_present = False
+        self.route_variables_present: set[str] = set()
 
     def list_runners(self) -> list[dict[str, Any]]:
         return [dict(item) for item in self.runners.values()]
 
-    def routing_variable_present(self) -> bool:
-        return self.route_present
+    def routing_variable_present(self, name: str) -> bool:
+        return name in self.route_variables_present
 
     def generate_jit_config(
         self,
@@ -88,6 +88,7 @@ class FakeAPI:
             "name": name,
             "status": "offline",
             "busy": False,
+            "labels": [{"name": label} for label in labels],
         }
         return runner_id, f"opaque-jit-{runner_id}"
 
@@ -97,8 +98,31 @@ class FakeAPI:
 
 
 def _profile(tmp_path: Path, *, slots: int = 2) -> pool.PoolProfile:
+    work_classes = (
+        pool.WorkClassProfile(
+            name="normal",
+            label="loom-ci-normal",
+            slots=slots,
+            routing_variable="LOOM_CI_NORMAL_RUNS_ON",
+            hosted_overflow_after_seconds=300,
+        ),
+        pool.WorkClassProfile(
+            name="image",
+            label="loom-ci-image",
+            slots=0,
+            routing_variable="LOOM_CI_IMAGE_RUNS_ON",
+            hosted_overflow_after_seconds=900,
+        ),
+        pool.WorkClassProfile(
+            name="smoke",
+            label="loom-ci-smoke",
+            slots=0,
+            routing_variable="LOOM_CI_SMOKE_RUNS_ON",
+            hosted_overflow_after_seconds=300,
+        ),
+    )
     profile = pool.PoolProfile(
-        schema_version=1,
+        schema_version=2,
         repository="qianyi-sun/loom",
         expected_hostname="trt-eai-oldlab-5",
         state_root=tmp_path / "state",
@@ -113,6 +137,7 @@ def _profile(tmp_path: Path, *, slots: int = 2) -> pool.PoolProfile:
         host_cpu_budget=22,
         host_memory_budget_mib=81_920,
         labels=pool.EXPECTED_LABELS,
+        work_classes=work_classes,
         cloud_image_url=(
             "https://cloud-images.ubuntu.com/releases/noble/release/"
             "ubuntu-24.04-server-cloudimg-amd64.img"
@@ -162,6 +187,7 @@ def test_checked_in_oldlab5_profile_is_bounded_and_pinned() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     profile = pool.load_profile(repo_root / "deploy/ci-runners/oldlab5.toml")
 
+    assert profile.schema_version == 2
     assert profile.slots == 11
     assert profile.vcpus_per_slot == 8
     assert profile.total_guest_vcpus == 88
@@ -169,6 +195,12 @@ def test_checked_in_oldlab5_profile_is_bounded_and_pinned() -> None:
     assert profile.total_memory_mib == 67_584
     assert profile.host_memory_budget_mib == 81_920
     assert profile.labels == pool.EXPECTED_LABELS
+    assert {
+        work_class.name: work_class.slots for work_class in profile.work_classes
+    } == {"normal": 4, "image": 5, "smoke": 2}
+    assert profile.labels_for_slot(0)[-1] == "loom-ci-normal"
+    assert profile.labels_for_slot(4)[-1] == "loom-ci-image"
+    assert profile.labels_for_slot(10)[-1] == "loom-ci-smoke"
     assert profile.cloud_image_sha256 == (
         "d1940f7d69d343355e183dff1e08a59852d32e7309baa7a4bad8365b11b005ac"
     )
@@ -200,6 +232,24 @@ def test_profile_rejects_resource_budget_or_label_expansion(tmp_path: Path) -> N
         replace(
             profile,
             labels=(*pool.EXPECTED_LABELS, "production"),
+        ).validate()
+
+    with pytest.raises(pool.PoolConfigError, match="work class slots"):
+        replace(
+            profile,
+            work_classes=(
+                replace(profile.work_classes[0], slots=profile.slots - 1),
+                *profile.work_classes[1:],
+            ),
+        ).validate()
+
+    with pytest.raises(pool.PoolConfigError, match="contract is invalid"):
+        replace(
+            profile,
+            work_classes=(
+                replace(profile.work_classes[0], label="production"),
+                *profile.work_classes[1:],
+            ),
         ).validate()
 
 
@@ -558,6 +608,11 @@ def test_reconcile_creates_one_ephemeral_vm_per_slot_without_jit_in_state(
     assert result["created_slots"] == [0, 1]
     assert len(api.generated) == 2
     assert len(runner.containers) == 2
+    assert all(
+        labels == (*pool.EXPECTED_LABELS, "loom-ci-normal")
+        for _, labels in api.generated
+    )
+    assert all("-normal-" in name for name, _ in api.generated)
     for slot in (0, 1):
         state_root = profile.state_root / f"slot-{slot:02d}"
         state = json.loads((state_root / "state.json").read_text())
@@ -633,6 +688,43 @@ def test_reconcile_removes_jit_iso_after_runner_is_online(
     assert not jit_iso.exists()
 
 
+def test_reconcile_replaces_online_runner_with_wrong_work_class_label(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _profile(tmp_path, slots=1)
+    _seal_golden(profile)
+    _allow_execute(monkeypatch)
+    runner = FakeRunner()
+    api = FakeAPI()
+    pool.reconcile(
+        profile,
+        candidate_sha=CANDIDATE_SHA,
+        execute=True,
+        api=api,
+        runner=runner,
+    )
+    state = next(iter(pool._existing_states(profile).values()))
+    api.runners[state.runner_id]["status"] = "online"
+    api.runners[state.runner_id]["labels"] = [
+        {"name": label} for label in pool.EXPECTED_LABELS
+    ]
+
+    result = pool.reconcile(
+        profile,
+        candidate_sha=CANDIDATE_SHA,
+        execute=True,
+        api=api,
+        runner=runner,
+    )
+
+    assert result["cleaned_slots"] == [0]
+    assert result["created_slots"] == [0]
+    assert state.runner_id in api.deleted
+    replacement = next(iter(pool._existing_states(profile).values()))
+    assert replacement.runner_id != state.runner_id
+
+
 def test_drain_refuses_while_routing_variable_exists(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -649,9 +741,34 @@ def test_drain_refuses_while_routing_variable_exists(
         api=api,
         runner=runner,
     )
-    api.route_present = True
+    api.route_variables_present.add(pool.ROUTING_VARIABLE)
 
     with pytest.raises(pool.PoolOperationError, match=pool.ROUTING_VARIABLE):
+        pool.drain(profile, execute=True, api=api, runner=runner)
+
+    assert runner.containers
+    assert not api.deleted
+
+
+def test_drain_refuses_while_any_class_route_variable_exists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _profile(tmp_path, slots=1)
+    _seal_golden(profile)
+    _allow_execute(monkeypatch)
+    runner = FakeRunner()
+    api = FakeAPI()
+    pool.reconcile(
+        profile,
+        candidate_sha=CANDIDATE_SHA,
+        execute=True,
+        api=api,
+        runner=runner,
+    )
+    api.route_variables_present.add("LOOM_CI_IMAGE_RUNS_ON")
+
+    with pytest.raises(pool.PoolOperationError, match="LOOM_CI_IMAGE_RUNS_ON"):
         pool.drain(profile, execute=True, api=api, runner=runner)
 
     assert runner.containers
@@ -711,6 +828,13 @@ def test_status_is_secret_safe_and_reports_online_capacity(
 
     assert report["healthy"] is True
     assert report["ready_slots"] == 1
+    assert report["work_classes"]["normal"]["ready_slots"] == 1
+    assert report["work_classes"]["image"]["ready_slots"] == 0
+    assert report["slots"][0]["work_class"] == "normal"
+    assert report["slots"][0]["labels_match"] is True
+    assert report["routing_variables_present"] == {
+        name: False for name in pool.ROUTING_VARIABLES
+    }
     assert "opaque-jit" not in json.dumps(report)
 
 
