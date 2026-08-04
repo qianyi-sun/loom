@@ -184,21 +184,58 @@ kubectl -n loom-local wait --for=condition=ready pod --all --timeout=180s
 > worker credential (the throwaway smoke value). Never run it against a real
 > environment — those mint per-worker tokens via `loom admin tokens worker mint`.
 
-## 6. Reach the API and run a trial
+## 6. Provision a task and run an oracle trial
 
-There is no public ingress or TLS locally — reach the service through a
-port-forward. The `loom-service` Service listens on **8090** (not 80):
+A fresh cluster has **no tasks** (`GET /api/v1/tasks` is empty; note `loom
+datasets list` shows pip *adapters*, not cluster tasks). Publish the
+checked-in oracle smoke bundle into MinIO + the DB — egress-free, no
+HuggingFace — then submit an **oracle** trial: the OracleAgent runs the
+task's `solution/solve.sh` deterministically, so it needs **no model or
+provider** and works fully offline.
+
+The host CLI can't resolve in-cluster services, so port-forward first:
 
 ```
-kubectl -n loom-local port-forward svc/loom-service 8090:8090
+kubectl -n loom-local port-forward svc/loom-postgres 15432:5432 &
+kubectl -n loom-local port-forward svc/loom-minio    19000:9000 &
+kubectl -n loom-local port-forward svc/loom-service  8090:8090  &
+sleep 3
+
+export LOOM_DB_URL='postgresql+psycopg://loom:loom@127.0.0.1:15432/loom'
+export LOOM_MINIO_ENDPOINT='http://127.0.0.1:19000'
+export LOOM_MINIO_ACCESS_KEY=minioadmin LOOM_MINIO_SECRET_KEY=minioadmin
+
+# 1. Publish the bundle → benchmark `loom-smoke` + task
+#    `loom-smoke/gb10-oracle-hello-world` (uploads objects + inserts DB rows).
+uv run --no-sync python -m loom_cli datasets publish-local \
+  deploy/catalog/gb10-smoke --bucket loom-benchmarks --imported-by local:dev
+
+# 2. Mint a user-owned submit token (the trial route rejects non-user tokens).
+SMOKE_TOKEN=$(uv run --no-sync python -m loom_cli admin ensure-smoke-user \
+  --format json | jq -r .token)
+
+# 3. Submit the oracle trial — same payload the release-gate smoke uses
+#    (src/loom_cli/rollout/steps/s13_smoke.py). Omit required_worker_pool so
+#    any local worker can claim it (the default `gb10` would strand it).
+TRIAL=$(curl -sS -X POST http://localhost:8090/api/v1/trials \
+  -H "Authorization: Bearer ${SMOKE_TOKEN}" -H 'Content-Type: application/json' \
+  -d '{"task_id":"loom-smoke/gb10-oracle-hello-world",
+       "config":{"agent_name":"oracle","agent_model":null},
+       "idempotency_key":"local-oracle-1"}' | jq -r '.id')
+
+# 4. Poll to a terminal state.
+watch -n3 "curl -sS http://localhost:8090/api/v1/trials/${TRIAL} \
+  -H 'Authorization: Bearer ${SMOKE_TOKEN}' | jq -r '.state'"
 ```
 
-Then submit a small batch through the CLI/API against `http://localhost:8090`
-and confirm the trials reach a terminal state. With `k8s_worker` enabled,
-`POST /api/v1/batches` accepts the `k8s-worker` pool and the in-cluster
-`loom-worker` StatefulSet executes the trials on your local node. (Trials that
-call a model need a real provider key in `loom-secrets` — the `--smoke-defaults`
-keys are placeholders.)
+The oracle runs `solution/solve.sh` in an in-cluster sandbox **built from
+the task's `environment/Dockerfile`** — so the worker node needs enough
+egress to pull the base image and any `RUN pip install` in that Dockerfile.
+On a normal machine the sandbox builds and the trial reaches `succeeded`;
+behind a TLS-intercepting proxy or air-gapped, pre-build + side-load the
+task image (see the restricted-egress section). Model-based agents instead
+need a real provider connection + key — the `--smoke-defaults` provider
+keys are placeholders.
 
 ## 7. Advanced optional: external Slurm
 
