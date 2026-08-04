@@ -32,6 +32,13 @@ persistent_storage_host_path_root = "/data/loom-staging"
 # image built on any other node. Falls back to local build without push creds.
 trial_cache_registry_repo = "ghcr.io/qianyi-sun/loom-trial-cache"
 
+# Operator QA relay exposed to agents as `local/yibu/<model>` (e.g. gpt-4o-mini).
+# The gateway forwards these to the OpenAI-compatible upstream; the API key comes
+# from loom-secrets/qa-relay-api-key (bootstrapped one-time, see the runbook). This
+# is what lets real LLM agents (litellm, mini-swe-agent) run genuine evals against
+# staging without per-team BYO provider connections.
+gateway_local_providers = ["yibu|https://yibuapi.com/v1|qa-relay-api-key"]
+
 # Trial execution capacity comes from the release-managed external worker pools
 # (GB10 + OLDLAB), wired on the worker substrate itself — not defined here, so
 # this deploy config carries no per-host worker paths.

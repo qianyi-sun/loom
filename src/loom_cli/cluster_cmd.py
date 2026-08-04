@@ -1859,6 +1859,39 @@ def _provider_egress_rules(config: ClusterConfig) -> list[dict[str, int | str]]:
     ]
 
 
+def _gateway_local_providers(config: ClusterConfig) -> list[dict[str, str]]:
+    """Parse the ``gateway_local_providers`` allowlist into render rows.
+
+    Each entry is ``<name>|<base_url>|<secret_key>``. ``name`` becomes
+    the ``local/<name>/<model>`` route segment and the uppercased
+    ``LOOM_GW_LOCAL_<NAME>_*`` env-var stem; ``base_url`` is rendered as
+    a literal value; ``secret_key`` is the ``loom-secrets`` key holding
+    the upstream API key. Empty allowlist (the default / production)
+    renders nothing.
+    """
+    rows: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for entry in config.gateway_local_providers:
+        parts = entry.split("|")
+        if len(parts) != 3 or not all(part.strip() for part in parts):
+            raise ValueError(
+                "gateway_local_providers entries must be "
+                f"'<name>|<base_url>|<secret_key>', got {entry!r}"
+            )
+        name, base_url, secret_key = (part.strip() for part in parts)
+        env_stem = name.upper().replace("-", "_")
+        if not env_stem.replace("_", "").isalnum():
+            raise ValueError(
+                f"gateway_local_providers name {name!r} must be alphanumeric "
+                "(dashes/underscores allowed) so it forms a valid env-var stem"
+            )
+        if env_stem in seen:
+            raise ValueError(f"gateway_local_providers has a duplicate name {name!r}")
+        seen.add(env_stem)
+        rows.append({"env_stem": env_stem, "base_url": base_url, "secret_key": secret_key})
+    return rows
+
+
 def render_manifests(config: ClusterConfig) -> str:
     """Render every template and join with `---` separators. Output is
     valid YAML that can be piped directly into `kubectl apply -f -`.
@@ -1908,6 +1941,7 @@ def render_manifests(config: ClusterConfig) -> str:
     ctx.update(_runtime_environment_context(config))
     ctx["ingress_redirect_hosts"] = _ingress_redirect_hosts(config)
     ctx["provider_egress_rules"] = _provider_egress_rules(config)
+    ctx["gateway_local_providers"] = _gateway_local_providers(config)
     try:
         ipaddress.ip_address(config.ingress_host)
         ctx["ingress_host_is_ip"] = True
