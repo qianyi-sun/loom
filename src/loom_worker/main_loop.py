@@ -906,6 +906,9 @@ async def _spawn_trial(
                     settings,
                     worker_id,
                 ),
+                require_containment=bool(
+                    getattr(settings, "require_cgroup_parent", False)
+                ),
             )
             # #317 Phase 1: if the chosen agent declares an
             # install_script, layer the agent install onto the task

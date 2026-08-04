@@ -20,6 +20,7 @@ from uuid import UUID
 import docker
 from docker.errors import ImageNotFound
 
+from loom.driver.build_containment import forbid_build_when_contained
 from loom.models.healthcheck import HealthcheckSpec
 from loom.models.task import TaskConfig, TaskSidecarConfig
 from loom_worker.task_image import (
@@ -235,6 +236,10 @@ class DockerTaskSidecarRuntime:
             return
         except ImageNotFound:
             pass
+        # #1146: sidecar image builds run outside the Slurm job cgroup. A
+        # container_cgroup_parent means this is a containment-required
+        # (non-exclusive) worker — refuse the build; pre-build/cache the image.
+        forbid_build_when_contained(bool(self.container_cgroup_parent), tag)
         rel_dockerfile = dockerfile.relative_to(build_context).as_posix()
         _enforce_build_context_limits(build_context)
         self._client.images.build(
