@@ -19,6 +19,22 @@ class _FetchUpstream(Protocol):
     ) -> Path: ...
 
 
+@pytest.fixture(autouse=True)
+def _stub_cluster_up_migration(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`loom cluster up` now runs a DB migration Job (`alembic upgrade
+    head`) via kubectl after apply and before the readiness wait. Unit
+    tests that drive `up` already stub the other cluster-touching seams
+    (`apply_manifests`, `wait_for_ready`); default the migration to a no-op
+    success here so they never shell out to kubectl. Tests that assert
+    migration behavior override this with their own stub.
+    """
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd._run_migration_job",
+        lambda **_kwargs: True,
+        raising=False,
+    )
+
+
 @pytest.fixture()
 def tmp_xdg_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point XDG_CONFIG_HOME at a tmp dir so loom_cli.config doesn't

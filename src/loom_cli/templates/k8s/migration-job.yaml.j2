@@ -20,11 +20,13 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: loom-migrate-{{ image_tag | replace('.', '-') | lower }}-{{ job_suffix }}
+  name: loom-migrate-{{ job_name_tag }}-{{ job_suffix }}
   namespace: {{ namespace }}
   labels:
     app: loom-migration
-    loom.image-tag: {{ image_tag }}
+    # Quoted so a numeric-looking tag (e.g. `0.7`) stays a string label
+    # value rather than being parsed as a YAML float.
+    loom.image-tag: "{{ image_tag }}"
 spec:
   # Job scheduling metadata (backoffLimit=1 lets kubectl surface a
   # migration failure in a single retry rather than a stuck loop).

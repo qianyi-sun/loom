@@ -4516,6 +4516,97 @@ def _up(args: argparse.Namespace) -> int:
             lease.release(status="released" if rc == 0 else "failed")
 
 
+def _run_migration_job(
+    *,
+    namespace: str,
+    context: str | None,
+    image_tag: str,
+    container_registry: str,
+    wait: bool,
+    timeout_sec: int,
+) -> bool:
+    """Render and apply the sanctioned Alembic migration Job, then (unless
+    ``wait`` is False) block until it completes.
+
+    The control-plane and service assert the schema is at Alembic head on
+    startup and refuse to boot otherwise. ``cluster up`` applies the app
+    manifest, so without this step the app pods crash-loop on a fresh or
+    behind database. ``alembic upgrade head`` is idempotent, so running it
+    on every ``up`` is safe. Returns True on success (or on apply-only when
+    ``wait`` is False), False on any failure.
+    """
+    import shutil
+    import subprocess
+    from datetime import datetime
+
+    import yaml as _yaml
+
+    from loom_cli.cluster_migration import render_migration_manifest
+
+    if shutil.which("kubectl") is None:
+        sys.stderr.write(
+            "error: kubectl is required to run the migration Job.\n",
+        )
+        return False
+
+    job_suffix = datetime.now(UTC).strftime("%Y%m%dt%H%M%Sz")
+    manifest = render_migration_manifest(
+        image_tag=image_tag,
+        namespace=namespace,
+        job_suffix=job_suffix,
+        container_registry=container_registry,
+    )
+    try:
+        job_name = next(d for d in _yaml.safe_load_all(manifest) if d)["metadata"]["name"]
+    except (StopIteration, KeyError, TypeError):
+        sys.stderr.write("error: could not determine migration Job name.\n")
+        return False
+
+    apply_cmd = ["kubectl", "apply", "-n", namespace, "-f", "-"]
+    if context:
+        apply_cmd.extend(["--context", context])
+    applied = subprocess.run(apply_cmd, input=manifest, capture_output=True, text=True)
+    if applied.returncode != 0:
+        sys.stderr.write(
+            f"error: applying migration Job failed (exit {applied.returncode}):\n"
+            f"{applied.stderr}\n",
+        )
+        return False
+    sys.stdout.write(
+        f"  job.batch/{job_name} applied (alembic upgrade head)\n",
+    )
+
+    if not wait:
+        sys.stdout.write(
+            "  Skipping migration wait (--no-wait); app pods start once "
+            "the Job completes.\n",
+        )
+        return True
+
+    sys.stdout.write(f"  Waiting for migration Job {job_name} to complete...\n")
+    wait_cmd = [
+        "kubectl", "wait", "-n", namespace,
+        f"job/{job_name}",
+        "--for=condition=complete",
+        f"--timeout={timeout_sec}s",
+    ]
+    if context:
+        wait_cmd.extend(["--context", context])
+    waited = subprocess.run(wait_cmd, capture_output=True, text=True)
+    if waited.returncode != 0:
+        logs_cmd = ["kubectl", "logs", "-n", namespace, f"job/{job_name}", "--tail=40"]
+        if context:
+            logs_cmd.extend(["--context", context])
+        logs = subprocess.run(logs_cmd, capture_output=True, text=True)
+        sys.stderr.write(
+            f"error: migration Job {job_name} did not complete: "
+            f"{waited.stderr.strip()}\n{logs.stdout}\n",
+        )
+        return False
+    sys.stdout.write(f"  Migration Job {job_name} complete.\n")
+    return True
+
+
 def _up_impl(
     args: argparse.Namespace,
     snapshot: _ClusterUpConfigSnapshot,
@@ -4632,6 +4723,30 @@ def _up_impl(
             "rollout with stale resources.\n",
         )
         return 1
+
+    # 3b. Database migration. The control-plane and service assert the
+    # schema is at Alembic head on startup and refuse to boot otherwise;
+    # `up` applied the app manifest above, so run the sanctioned migration
+    # Job now (after apply → postgres + secrets exist; before the readiness
+    # wait → `up` only reports ready once the schema is migrated). Under
+    # --no-wait we apply the Job but don't block on it.
+    if not args.skip_migrate:
+        migrated = _run_migration_job(
+            namespace=args.namespace,
+            context=args.context,
+            image_tag=config.image_tag,
+            container_registry=getattr(config, "container_registry", "") or "",
+            wait=not args.no_wait,
+            timeout_sec=args.timeout,
+        )
+        if not migrated:
+            sys.stderr.write(
+                "error: database migration failed; the control-plane and "
+                "service will not start until the schema is at head. Fix "
+                "the cause and re-run, or pass --skip-migrate if migrations "
+                "are applied by a separate step.\n",
+            )
+            return 1
 
     if args.no_wait:
         sys.stdout.write(
@@ -5654,6 +5769,19 @@ def dispatch(argv: list[str]) -> int:
         help=(
             "Apply manifests and return immediately without waiting "
             "for components to reach ready state."
+        ),
+    )
+    p_up.add_argument(
+        "--skip-migrate",
+        dest="skip_migrate",
+        action="store_true",
+        help=(
+            "Skip the automatic DB migration Job. `up` normally runs "
+            "`alembic upgrade head` (as the sanctioned app=loom-migration "
+            "Job) after apply and before the readiness wait, because the "
+            "control-plane and service refuse to start until the schema is "
+            "at head. Use only when migrations are applied by a separate "
+            "step (e.g. the staging/prod rollout chain)."
         ),
     )
     p_up.add_argument(

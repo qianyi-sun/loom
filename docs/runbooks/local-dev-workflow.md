@@ -120,40 +120,75 @@ namespace, `eval` the printed commands, then bring the stack up:
 kubectl create namespace loom-local
 
 # --smoke-defaults = throwaway local secret values (never real prod refs).
-# eval runs the printed `kubectl create secret` commands:
+# Under --smoke-defaults this prints TWO `kubectl create secret` commands:
+# `loom-secrets` (DB/MinIO/provider keys) AND `loom-admin-secret` (the
+# singleton admin bearer the control-plane + service mount, which `up`
+# preflight requires). eval runs both:
 eval "$(uv run --no-sync python -m loom_cli cluster bootstrap-secrets \
   --namespace loom-local --smoke-defaults --no-pgbouncer)"
 
-# up re-renders identically, applies, and waits for readiness by default
-# (--no-wait to skip). Namespace is inferred from the config.
+# up re-renders identically, applies, runs the DB migration Job
+# (`alembic upgrade head`), then waits for readiness by default (--no-wait
+# to skip). Namespace is inferred from the config.
 uv run --no-sync python -m loom_cli cluster up \
   --config deploy/local/local.cluster.toml
 ```
 
 `up` deploys the control plane, service, `loom-worker`, single-pod Postgres, and
-standalone MinIO into the cluster and waits until they report ready. There is no
-separate local process to start.
+standalone MinIO into the cluster, applies the schema migration (the app pods
+assert schema-at-head and won't start otherwise), and waits until they report
+ready. There is no separate local process to start. (Pass `--skip-migrate` only
+if a separate step already applied migrations.)
 
 > The render + command contract above is covered by a render regression
 > (`tests/loom_cli/test_cluster_render.py::test_local_example_template_renders`).
 > The full kind end-to-end (image build → ingress → apply) is environment-gated;
 > run it once on your machine to confirm your Docker/kind versions.
 
-## 5. Reach the API and run a trial
+## 5. Seed a worker token
+
+Workers authenticate to the control-plane with a DB-registered token
+(`worker:report` scope); the placeholder in `loom-secrets/worker-token` is
+**not** registered, so a fresh stack logs `401` at `/workers/register` until you
+mint one. Port-forward the control-plane and mint a token into `loom-secrets`,
+then restart the workers so they pick it up:
+
+```
+kubectl -n loom-local port-forward deploy/loom-control-plane 18080:8080 &
+
+# The admin bearer is the smoke token from step 4's loom-admin-secret.
+printf 'loom_admin_smoke-local-dev-not-for-production-use-0' > /tmp/loom-admin-tok
+
+uv run --no-sync python -m loom_cli admin tokens worker mint \
+  --cp-url http://localhost:18080 --admin-token file:/tmp/loom-admin-tok \
+  --format json | jq -r .token > /tmp/loom-worker-tok
+
+kubectl -n loom-local patch secret loom-secrets --type=merge \
+  -p "{\"data\":{\"worker-token\":\"$(base64 -w0 /tmp/loom-worker-tok)\"}}"
+kubectl -n loom-local rollout restart statefulset/loom-worker
+rm -f /tmp/loom-admin-tok /tmp/loom-worker-tok
+```
+
+Confirm the workers register: `kubectl -n loom-local logs loom-worker-0 --tail=5`
+should show `/workers/register` → `200` and `/trials/claim` polling.
+
+## 6. Reach the API and run a trial
 
 There is no public ingress or TLS locally — reach the service through a
-port-forward (the exact namespace/svc are printed by `cluster up`):
+port-forward. The `loom-service` Service listens on **8090** (not 80):
 
 ```
-kubectl -n loom-local port-forward svc/loom-service 8080:80
+kubectl -n loom-local port-forward svc/loom-service 8090:8090
 ```
 
-Then submit a small batch through the CLI/API against `http://localhost:8080`
+Then submit a small batch through the CLI/API against `http://localhost:8090`
 and confirm the trials reach a terminal state. With `k8s_worker` enabled,
 `POST /api/v1/batches` accepts the `k8s-worker` pool and the in-cluster
-`loom-worker` Deployment executes the trials on your local node.
+`loom-worker` StatefulSet executes the trials on your local node. (Trials that
+call a model need a real provider key in `loom-secrets` — the `--smoke-defaults`
+keys are placeholders.)
 
-## 6. Advanced optional: external Slurm
+## 7. Advanced optional: external Slurm
 
 Use this **only** if you have a submit host that can reach the shared Slurm
 cluster AND make your candidate + worker env-file visible on the allocated
@@ -184,7 +219,7 @@ override only if your submit host differs. Confirm `sbatch --version` works from
 the control-plane process environment before continuing. Pick exactly one worker
 path — never enable both the `k8s_worker` pool and Slurm submission.
 
-## 7. Tear down
+## 8. Tear down
 
 ```
 kind delete cluster --name loom-local   # or: k3d cluster delete loom-local
@@ -192,3 +227,28 @@ kind delete cluster --name loom-local   # or: k3d cluster delete loom-local
 
 Nothing here is tracked by the operator or the environment identity contract,
 so teardown is unconditional — delete and recreate freely.
+
+## Troubleshooting: restricted-egress / air-gapped clusters
+
+The default flow above assumes the kind node and your `docker build` have clean
+internet egress. Behind a TLS-intercepting corporate proxy (self-signed CA) or
+fully offline, several steps need the images side-loaded from the host instead:
+
+- **`docker build` fails with a pip/npm TLS error** (`CERTIFICATE_VERIFY_FAILED`,
+  self-signed cert). The build container's egress is intercepted. Build on a host
+  with clean egress, or pull the pre-built release images from a registry you can
+  reach and retag them to `:0.7`.
+- **kind node `ImagePullBackOff`** for `registry.k8s.io/ingress-nginx/*`,
+  `minio/minio`, `envoyproxy/envoy`, etc. The node can't pull. Pull each on the
+  host (`docker pull`) and import it into the node:
+  `docker save <image> | docker exec -i loom-local-control-plane ctr -n k8s.io images import -`.
+  (`kind load` may fail on registry.k8s.io images that carry attestation
+  manifests — the `ctr import` above avoids that.) For the pinned ingress images,
+  strip the `@sha256:` digest from `deploy/k8s/ingress-nginx-kind.yaml` so they
+  resolve against the tag you imported.
+- **`loom-minio` stuck `ErrImagePull` after `up`.** The rendered `minio/minio`
+  reference is untagged, so its `imagePullPolicy` defaults to `Always` — kubelet
+  re-pulls on every pod start even when the image is cached. Offline, patch it:
+  `kubectl -n loom-local patch statefulset/loom-minio --type=json -p
+  '[{"op":"replace","path":"/spec/template/spec/containers/0/imagePullPolicy","value":"IfNotPresent"}]'`
+  then delete the pod so it recreates from cache.

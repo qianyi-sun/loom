@@ -654,6 +654,13 @@ def _patch_full_up_path(
             failed=[],
         ),
     )
+
+    def _migrate(**kwargs):  # type: ignore[no-untyped-def]
+        captures["migrate_called"] = True
+        captures["migrate_kwargs"] = kwargs
+        return True
+
+    monkeypatch.setattr("loom_cli.cluster_cmd._run_migration_job", _migrate)
     return captures
 
 
@@ -672,6 +679,65 @@ def test_cli_up_happy_path(
     out = capsys.readouterr().out
     assert "Preflight" in out
     assert "loom-service configured" in out
+
+
+def test_cli_up_runs_migration_before_wait(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`up` runs the Alembic migration Job after apply and waits for it
+    (wait=True unless --no-wait) so the app never boots against a schema
+    that isn't at head."""
+    captures = _patch_full_up_path(monkeypatch)
+    rc = main(["cluster", "up"])
+    assert rc == 0
+    assert captures.get("migrate_called") is True
+    assert captures["migrate_kwargs"]["wait"] is True
+    assert captures.get("waited") is True
+
+
+def test_cli_up_skip_migrate_skips_migration(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--skip-migrate leaves migrations to a separate step (staging/prod
+    rollout chain) and never invokes the migration Job."""
+    captures = _patch_full_up_path(monkeypatch)
+    rc = main(["cluster", "up", "--skip-migrate"])
+    assert rc == 0
+    assert captures.get("migrate_called") is not True
+
+
+def test_cli_up_no_wait_applies_migration_without_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--no-wait still applies the migration Job (so the app can recover)
+    but passes wait=False so `up` returns without blocking."""
+    captures = _patch_full_up_path(monkeypatch)
+    rc = main(["cluster", "up", "--no-wait"])
+    assert rc == 0
+    assert captures.get("migrate_called") is True
+    assert captures["migrate_kwargs"]["wait"] is False
+    assert captures.get("waited") is not True
+
+
+def test_cli_up_migration_failure_fails_up(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A failed migration must fail `up` (exit 1) rather than roll an app
+    that will crash-loop on the un-migrated schema."""
+    captures = _patch_full_up_path(monkeypatch)
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd._run_migration_job",
+        lambda **_kwargs: False,
+    )
+    rc = main(["cluster", "up"])
+    assert rc == 1
+    assert captures.get("waited") is not True
+    err = capsys.readouterr().err
+    assert "migration failed" in err
 
 
 def test_cli_up_prunes_disabled_worker_resources_before_wait(
