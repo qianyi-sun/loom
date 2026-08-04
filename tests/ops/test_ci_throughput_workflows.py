@@ -383,6 +383,10 @@ def test_authoritative_gate_workflow_uses_only_trusted_code() -> None:
     publish = workflow["jobs"]["publish"]
     job_filter = publish["if"]
     assert "github.event_name == 'workflow_run'" in job_filter
+    # GitHub does not emit workflow_run.requested for reruns. Suppress only the
+    # redundant first-attempt in_progress job, while preserving rerun invalidation.
+    assert "github.event.action != 'in_progress'" in job_filter
+    assert "github.event.workflow_run.run_attempt > 1" in job_filter
     assert (
         'contains(fromJSON(\'["pull_request","merge_group"]\'), github.event.workflow_run.event)'
     ) in _normalized_expression(job_filter)

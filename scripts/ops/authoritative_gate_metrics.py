@@ -10,16 +10,26 @@ import re
 import sys
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from threading import local
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 DEFAULT_PUBLISHER_WORKFLOW_ID = 318631340
+DEFAULT_WORKERS = 8
+MAX_WORKERS = 32
 RUN_NAME_VERSION = "publisher-metrics-v1"
 PUBLISH_JOB_PREFIX = "publish authoritative gate ("
+SOURCE_WORKFLOW_NAMES = {
+    302898379: "CI",
+    302898384: "images",
+    302898381: "cluster-smoke",
+    302898388: "staging-smoke",
+}
 RUN_NAME_FIELDS = (
     "trigger",
     "source_workflow",
@@ -144,10 +154,28 @@ def summarize_runs(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     legacy_runs = 0
     failed_runs = 0
     publish_jobs = 0
+    publish_jobs_skipped = 0
     workflow_publish_jobs = 0
+    workflow_publish_jobs_skipped = 0
     jobs_with_metrics = 0
+    workflow_jobs_with_metrics = 0
+    pull_request_jobs_with_metrics = 0
+    job_log_errors = 0
+    job_logs_skipped = 0
+    job_logs_without_metrics = 0
     api_calls = 0
     workflow_api_calls = 0
+    pull_request_api_calls = 0
+    pull_request_publish_jobs = 0
+    pull_request_publish_jobs_skipped = 0
+    first_attempt_in_progress_runs = 0
+    first_attempt_in_progress_publish_jobs = 0
+    first_attempt_in_progress_publish_jobs_skipped = 0
+    first_attempt_in_progress_jobs_with_metrics = 0
+    first_attempt_in_progress_api_calls = 0
+    source_workflows: dict[int, dict[str, Any]] = {}
+    attempt_run_counts: Counter[tuple[int, int, int]] = Counter()
+    log_error_examples: list[dict[str, Any]] = []
 
     for run in runs:
         title = run.get("display_title")
@@ -165,9 +193,32 @@ def summarize_runs(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         instrumented_runs += 1
         trigger_counts[identity.trigger] += 1
         lifecycle_counts[identity.delivery] += 1
+        is_first_attempt_in_progress = (
+            identity.trigger == "workflow_run"
+            and identity.delivery == "in_progress"
+            and identity.source_attempt == 1
+        )
+        if is_first_attempt_in_progress:
+            first_attempt_in_progress_runs += 1
         source_key = identity.source_attempt_key
         if source_key is not None:
             source_attempts.add(source_key)
+            attempt_run_counts[source_key] += 1
+            workflow_stats = source_workflows.setdefault(
+                identity.source_workflow,
+                {
+                    "api_calls": 0,
+                    "attempts": set(),
+                    "deliveries": Counter(),
+                    "publish_jobs": 0,
+                    "publish_jobs_skipped": 0,
+                    "publish_jobs_with_metrics": 0,
+                    "publisher_runs": 0,
+                },
+            )
+            workflow_stats["attempts"].add(source_key)
+            workflow_stats["deliveries"][identity.delivery] += 1
+            workflow_stats["publisher_runs"] += 1
         if run.get("conclusion") not in {None, "", "success", "skipped", "neutral"}:
             failed_runs += 1
         jobs = run.get("jobs", [])
@@ -179,40 +230,165 @@ def summarize_runs(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             ):
                 continue
             publish_jobs += 1
+            job_was_skipped = job.get("conclusion") == "skipped"
+            if job_was_skipped:
+                publish_jobs_skipped += 1
+            if is_first_attempt_in_progress:
+                first_attempt_in_progress_publish_jobs += 1
+                if job_was_skipped:
+                    first_attempt_in_progress_publish_jobs_skipped += 1
             if identity.trigger == "workflow_run":
                 workflow_publish_jobs += 1
+                source_workflows[identity.source_workflow]["publish_jobs"] += 1
+                if job_was_skipped:
+                    workflow_publish_jobs_skipped += 1
+                    source_workflows[identity.source_workflow]["publish_jobs_skipped"] += 1
+            else:
+                pull_request_publish_jobs += 1
+                if job_was_skipped:
+                    pull_request_publish_jobs_skipped += 1
             log = job.get("log")
             metrics = extract_job_metrics(log) if isinstance(log, str) else None
             if metrics is not None:
                 jobs_with_metrics += 1
                 job_api_calls = int(metrics["api_calls"])
                 api_calls += job_api_calls
+                if is_first_attempt_in_progress:
+                    first_attempt_in_progress_jobs_with_metrics += 1
+                    first_attempt_in_progress_api_calls += job_api_calls
                 if identity.trigger == "workflow_run":
+                    workflow_jobs_with_metrics += 1
                     workflow_api_calls += job_api_calls
+                    source_workflows[identity.source_workflow]["api_calls"] += job_api_calls
+                    source_workflows[identity.source_workflow]["publish_jobs_with_metrics"] += 1
+                else:
+                    pull_request_jobs_with_metrics += 1
+                    pull_request_api_calls += job_api_calls
+            elif job_was_skipped:
+                pass
+            elif job.get("log_skipped") is True:
+                job_logs_skipped += 1
+            elif "log_error" in job:
+                job_log_errors += 1
+                if len(log_error_examples) < 5:
+                    log_error_examples.append(
+                        {
+                            "error": str(job["log_error"]),
+                            "job_id": job.get("id"),
+                            "run_id": run.get("id"),
+                        }
+                    )
+            else:
+                job_logs_without_metrics += 1
 
     workflow_run_count = trigger_counts["workflow_run"]
     distinct_attempts = len(source_attempts)
+    source_workflow_summary: dict[str, Any] = {}
+    for workflow_id, stats in sorted(source_workflows.items()):
+        attempts = len(stats["attempts"])
+        executed_publish_jobs = stats["publish_jobs"] - stats["publish_jobs_skipped"]
+        api_calls_complete = stats["publish_jobs_with_metrics"] == executed_publish_jobs
+        source_workflow_summary[str(workflow_id)] = {
+            "api_calls": stats["api_calls"],
+            "api_calls_complete": api_calls_complete,
+            "attempts": attempts,
+            "deliveries": dict(sorted(stats["deliveries"].items())),
+            "name": SOURCE_WORKFLOW_NAMES.get(workflow_id, "unknown"),
+            "per_attempt": {
+                "api_calls": _ratio(stats["api_calls"], attempts)
+                if api_calls_complete
+                else None,
+                "executed_publish_jobs": _ratio(executed_publish_jobs, attempts),
+                "publish_jobs": _ratio(stats["publish_jobs"], attempts),
+                "publisher_runs": _ratio(stats["publisher_runs"], attempts),
+            },
+            "executed_publish_jobs": executed_publish_jobs,
+            "publish_jobs": stats["publish_jobs"],
+            "publisher_runs": stats["publisher_runs"],
+        }
+    run_count_distribution = Counter(attempt_run_counts.values())
     return {
         "coverage": {
             "instrumented_runs": instrumented_runs,
+            "publish_job_log_error_examples": log_error_examples,
+            "publish_job_log_errors": job_log_errors,
+            "publish_job_logs_skipped": job_logs_skipped,
+            "publish_job_logs_without_metrics": job_logs_without_metrics,
             "legacy_runs": legacy_runs,
             "malformed_runs": malformed_runs,
             "publish_jobs_with_metrics": jobs_with_metrics,
-            "publish_jobs_without_metrics": publish_jobs - jobs_with_metrics,
+            "publish_jobs_skipped": publish_jobs_skipped,
+            "publish_jobs_without_metrics": (
+                publish_jobs - jobs_with_metrics - publish_jobs_skipped
+            ),
         },
         "failures": {"publisher_runs": failed_runs},
+        "first_attempt_in_progress": {
+            "api_calls": first_attempt_in_progress_api_calls,
+            "api_calls_complete": (
+                first_attempt_in_progress_jobs_with_metrics
+                == first_attempt_in_progress_publish_jobs
+                - first_attempt_in_progress_publish_jobs_skipped
+            ),
+            "executed_publish_jobs": (
+                first_attempt_in_progress_publish_jobs
+                - first_attempt_in_progress_publish_jobs_skipped
+            ),
+            "publish_jobs": first_attempt_in_progress_publish_jobs,
+            "publisher_runs": first_attempt_in_progress_runs,
+        },
         "lifecycle_deliveries": dict(sorted(lifecycle_counts.items())),
+        "publisher_runs_per_source_attempt_distribution": {
+            str(count): occurrences for count, occurrences in sorted(run_count_distribution.items())
+        },
+        "source_workflows": source_workflow_summary,
         "totals": {
             "api_calls": api_calls,
+            "api_calls_complete": jobs_with_metrics + publish_jobs_skipped == publish_jobs,
             "distinct_source_attempts": distinct_attempts,
             "publish_jobs": publish_jobs,
             "publisher_runs": len(runs),
             "trigger_counts": dict(sorted(trigger_counts.items())),
         },
         "per_source_attempt": {
-            "api_calls": _ratio(workflow_api_calls, distinct_attempts),
+            "api_calls": _ratio(workflow_api_calls, distinct_attempts)
+            if workflow_jobs_with_metrics
+            == workflow_publish_jobs - workflow_publish_jobs_skipped
+            else None,
+            "executed_publish_jobs": _ratio(
+                workflow_publish_jobs - workflow_publish_jobs_skipped,
+                distinct_attempts,
+            ),
             "publish_jobs": _ratio(workflow_publish_jobs, distinct_attempts),
             "publisher_runs": _ratio(workflow_run_count, distinct_attempts),
+        },
+        "pull_request_target": {
+            "api_calls": pull_request_api_calls,
+            "api_calls_complete": (
+                pull_request_jobs_with_metrics + pull_request_publish_jobs_skipped
+                == pull_request_publish_jobs
+            ),
+            "executed_publish_jobs": (
+                pull_request_publish_jobs - pull_request_publish_jobs_skipped
+            ),
+            "per_run": {
+                "api_calls": _ratio(pull_request_api_calls, trigger_counts["pull_request_target"])
+                if (
+                    pull_request_jobs_with_metrics + pull_request_publish_jobs_skipped
+                    == pull_request_publish_jobs
+                )
+                else None,
+                "executed_publish_jobs": _ratio(
+                    pull_request_publish_jobs - pull_request_publish_jobs_skipped,
+                    trigger_counts["pull_request_target"],
+                ),
+                "publish_jobs": _ratio(
+                    pull_request_publish_jobs,
+                    trigger_counts["pull_request_target"],
+                ),
+            },
+            "publish_jobs": pull_request_publish_jobs,
+            "publisher_runs": trigger_counts["pull_request_target"],
         },
     }
 
@@ -237,7 +413,14 @@ class GitHubMetricsClient:
         self._token = token
         self._repo_path = "/".join(quote(part, safe="") for part in owner_repo)
         self._api_url = api_url.rstrip("/")
-        self._opener = build_opener(SafeRedirectHandler())
+        self._thread_state = local()
+
+    def _opener(self) -> Any:
+        opener = getattr(self._thread_state, "opener", None)
+        if opener is None:
+            opener = build_opener(SafeRedirectHandler())
+            self._thread_state.opener = opener
+        return opener
 
     def _request(self, path: str, *, query: Mapping[str, str | int] | None = None) -> bytes:
         url = f"{self._api_url}{path}"
@@ -253,7 +436,7 @@ class GitHubMetricsClient:
             },
         )
         try:
-            with self._opener.open(request, timeout=30) as response:
+            with self._opener().open(request, timeout=30) as response:
                 return response.read()
         except HTTPError as exc:
             raise MetricsError(f"GitHub API GET {path} returned HTTP {exc.code}") from exc
@@ -274,8 +457,10 @@ class GitHubMetricsClient:
         since: datetime,
         until: datetime,
         max_runs: int,
+        workers: int,
+        include_logs: bool,
     ) -> list[Mapping[str, Any]]:
-        collected: list[Mapping[str, Any]] = []
+        collected: list[dict[str, Any]] = []
         page = 1
         while len(collected) < max_runs:
             response = self._json(
@@ -295,21 +480,39 @@ class GitHubMetricsClient:
                 if not since <= created <= until:
                     continue
                 record = dict(run)
-                title = run.get("display_title")
-                record["jobs"] = (
-                    self._collect_jobs(run)
-                    if isinstance(title, str) and title.startswith(f"{RUN_NAME_VERSION} ")
-                    else []
-                )
                 collected.append(record)
                 if len(collected) >= max_runs:
                     break
             if len(batch) < 100:
                 break
             page += 1
+        instrumented = [
+            (index, run)
+            for index, run in enumerate(collected)
+            if isinstance(run.get("display_title"), str)
+            and str(run["display_title"]).startswith(f"{RUN_NAME_VERSION} ")
+        ]
+        if workers == 1:
+            for index, run in instrumented:
+                collected[index]["jobs"] = self._collect_jobs(run, include_logs=include_logs)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {
+                    executor.submit(self._collect_jobs, run, include_logs=include_logs): index
+                    for index, run in instrumented
+                }
+                for future in as_completed(futures):
+                    collected[futures[future]]["jobs"] = future.result()
+        for run in collected:
+            run.setdefault("jobs", [])
         return collected
 
-    def _collect_jobs(self, run: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    def _collect_jobs(
+        self,
+        run: Mapping[str, Any],
+        *,
+        include_logs: bool,
+    ) -> list[Mapping[str, Any]]:
         run_id = run.get("id")
         attempt = run.get("run_attempt")
         if not isinstance(run_id, int) or not isinstance(attempt, int):
@@ -327,6 +530,14 @@ class GitHubMetricsClient:
                 raise MetricsError("GitHub jobs response is invalid")
             record = dict(job)
             if str(job.get("name", "")).startswith(PUBLISH_JOB_PREFIX):
+                if job.get("conclusion") == "skipped":
+                    record["log_unavailable_reason"] = "skipped_job"
+                    collected.append(record)
+                    continue
+                if not include_logs:
+                    record["log_skipped"] = True
+                    collected.append(record)
+                    continue
                 job_id = job.get("id")
                 if not isinstance(job_id, int):
                     raise MetricsError("GitHub job identity is invalid")
@@ -347,6 +558,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--until", type=parse_timestamp, default=datetime.now(UTC))
     parser.add_argument("--workflow-id", type=int, default=DEFAULT_PUBLISHER_WORKFLOW_ID)
     parser.add_argument("--max-runs", type=int, default=200)
+    parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
+    parser.add_argument(
+        "--skip-logs",
+        action="store_true",
+        help="collect run/job amplification without downloading API-call records from job logs",
+    )
     parser.add_argument("--api-url", default=os.environ.get("GITHUB_API_URL", "https://api.github.com"))
     return parser
 
@@ -355,6 +572,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.max_runs < 1:
         print("authoritative gate metrics failed: --max-runs must be positive", file=sys.stderr)
+        return 2
+    if not 1 <= args.workers <= MAX_WORKERS:
+        print(
+            f"authoritative gate metrics failed: --workers must be between 1 and {MAX_WORKERS}",
+            file=sys.stderr,
+        )
         return 2
     if args.until < args.since:
         print("authoritative gate metrics failed: --until precedes --since", file=sys.stderr)
@@ -370,11 +593,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             since=args.since,
             until=args.until,
             max_runs=args.max_runs,
+            workers=args.workers,
+            include_logs=not args.skip_logs,
         )
     except MetricsError as exc:
         print(f"authoritative gate metrics failed: {exc}", file=sys.stderr)
         return 1
-    print(json.dumps(summarize_runs(runs), indent=2, sort_keys=True))
+    summary = summarize_runs(runs)
+    observed = [
+        created_at
+        for run in runs
+        if isinstance((created_at := run.get("created_at")), str)
+    ]
+    summary["sample"] = {
+        "max_runs": args.max_runs,
+        "observed_created_at_max": max(observed) if observed else None,
+        "observed_created_at_min": min(observed) if observed else None,
+        "runs_collected": len(runs),
+        "since": args.since.isoformat().replace("+00:00", "Z"),
+        "truncated": len(runs) == args.max_runs,
+        "until": args.until.isoformat().replace("+00:00", "Z"),
+        "workers": args.workers,
+    }
+    print(json.dumps(summary, indent=2, sort_keys=True))
     return 0
 
 
