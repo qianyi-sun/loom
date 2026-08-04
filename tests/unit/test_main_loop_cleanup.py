@@ -28,6 +28,93 @@ def test_runtime_identity_labels_allow_legacy_settings() -> None:
     """Pre-containment workers remain valid and intentionally unlabelled."""
     assert ml._runtime_identity_labels(_FakeSettings()) == ()  # type: ignore[arg-type]
     assert ml._slurm_gpu_device_ids(_FakeSettings()) == ()  # type: ignore[arg-type]
+    assert ml._worker_cgroup_parent(_FakeSettings()) is None  # type: ignore[arg-type]
+
+
+def test_required_worker_cgroup_parent_fails_closed_when_missing() -> None:
+    settings = _FakeSettings()
+    settings.require_cgroup_parent = True
+    settings.cgroup_parent = ""
+
+    with pytest.raises(RuntimeError, match="requires an allocation cgroup"):
+        ml._worker_cgroup_parent(settings)  # type: ignore[arg-type]
+
+
+def test_required_worker_cgroup_parent_accepts_slurm_scope() -> None:
+    settings = _FakeSettings()
+    settings.require_cgroup_parent = True
+    settings.cgroup_parent = "/system.slice/slurmstepd.scope/job_123"
+    settings.slurm_job_id = "123"
+
+    assert ml._worker_cgroup_parent(settings) == ("/system.slice/slurmstepd.scope/job_123")  # type: ignore[arg-type]
+
+
+def test_required_worker_cgroup_parent_rejects_missing_slurm_job_id() -> None:
+    settings = _FakeSettings()
+    settings.require_cgroup_parent = True
+    settings.cgroup_parent = "/system.slice/slurmstepd.scope/job_123"
+    settings.slurm_job_id = ""
+
+    with pytest.raises(RuntimeError, match="needs a valid Slurm job ID"):
+        ml._worker_cgroup_parent(settings)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("parent", "job_id", "match"),
+    [
+        (
+            "/system.slice/slurmstepd.scope/job_456",
+            "123",
+            "does not match the Slurm job ID",
+        ),
+        (
+            "/evil/job_123",
+            "123",
+            "no identifiable Slurm scope",
+        ),
+        (
+            "/system.slice/slurmstepd.scope/step_batch",
+            "123",
+            "no job scope after the Slurm marker",
+        ),
+        (
+            "/evil/job_123/system.slice/slurmstepd.scope",
+            "123",
+            "no job scope after the Slurm marker",
+        ),
+    ],
+)
+def test_required_worker_cgroup_parent_rejects_unbound_scope(
+    parent: str,
+    job_id: str,
+    match: str,
+) -> None:
+    settings = _FakeSettings()
+    settings.require_cgroup_parent = True
+    settings.cgroup_parent = parent
+    settings.slurm_job_id = job_id
+
+    with pytest.raises(RuntimeError, match=match):
+        ml._worker_cgroup_parent(settings)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("parent", "job_id"),
+    [
+        ("/system.slice/slurmstepd.scope/job_123_4", "123_4"),
+        ("/system.slice/slurmstepd.scope/job_123", "123_4"),
+    ],
+)
+def test_required_worker_cgroup_parent_accepts_array_job_binding(
+    parent: str,
+    job_id: str,
+) -> None:
+    settings = _FakeSettings()
+    settings.require_cgroup_parent = True
+    settings.cgroup_parent = parent
+    settings.slurm_job_id = job_id
+
+    assert ml._worker_cgroup_parent(settings) == parent  # type: ignore[arg-type]
 
 
 def test_setup_failure_classifier_recognizes_task_image_build_timeout() -> None:
@@ -110,8 +197,7 @@ async def test_setup_failure_patch_preserves_long_docker_build_error_tail() -> N
     detail = (
         "failed to build layered image 'loom-trial-cache:abc123': "
         "The command '/bin/sh -c bash /tmp/install.sh' returned a non-zero code: 1\n"
-        "build log (last 121 lines):\n"
-        + "\n".join(build_lines)
+        "build log (last 121 lines):\n" + "\n".join(build_lines)
     )
 
     await ml._mark_setup_failed(
@@ -154,10 +240,12 @@ class _FakeCPClient:
         return []
 
     async def pre_start_heartbeat(self, *, trial_id, worker_id) -> bool:  # type: ignore[no-untyped-def]
-        self.pre_start_heartbeat_calls.append({
-            "trial_id": trial_id,
-            "worker_id": worker_id,
-        })
+        self.pre_start_heartbeat_calls.append(
+            {
+                "trial_id": trial_id,
+                "worker_id": worker_id,
+            }
+        )
         return True
 
     async def patch_state(
@@ -189,13 +277,15 @@ class _FakeCPClient:
         failure_message: str | None,
         retry_after_sec: float,
     ) -> bool:  # type: ignore[no-untyped-def]
-        self.retry_calls.append({
-            "trial_id": trial_id,
-            "worker_id": worker_id,
-            "failure_reason": failure_reason,
-            "failure_message": failure_message,
-            "retry_after_sec": retry_after_sec,
-        })
+        self.retry_calls.append(
+            {
+                "trial_id": trial_id,
+                "worker_id": worker_id,
+                "failure_reason": failure_reason,
+                "failure_message": failure_message,
+                "retry_after_sec": retry_after_sec,
+            }
+        )
         return True
 
 
@@ -209,13 +299,15 @@ class _RetryRaisingCPClient(_FakeCPClient):
         failure_message: str | None,
         retry_after_sec: float,
     ) -> bool:  # type: ignore[no-untyped-def]
-        self.retry_calls.append({
-            "trial_id": trial_id,
-            "worker_id": worker_id,
-            "failure_reason": failure_reason,
-            "failure_message": failure_message,
-            "retry_after_sec": retry_after_sec,
-        })
+        self.retry_calls.append(
+            {
+                "trial_id": trial_id,
+                "worker_id": worker_id,
+                "failure_reason": failure_reason,
+                "failure_message": failure_message,
+                "retry_after_sec": retry_after_sec,
+            }
+        )
         request = httpx.Request("POST", f"http://cp/trials/{trial_id}/retry")
         raise httpx.ConnectError("control-plane retry report failed", request=request)
 
@@ -230,13 +322,15 @@ class _RetryFalseCPClient(_FakeCPClient):
         failure_message: str | None,
         retry_after_sec: float,
     ) -> bool:  # type: ignore[no-untyped-def]
-        self.retry_calls.append({
-            "trial_id": trial_id,
-            "worker_id": worker_id,
-            "failure_reason": failure_reason,
-            "failure_message": failure_message,
-            "retry_after_sec": retry_after_sec,
-        })
+        self.retry_calls.append(
+            {
+                "trial_id": trial_id,
+                "worker_id": worker_id,
+                "failure_reason": failure_reason,
+                "failure_message": failure_message,
+                "retry_after_sec": retry_after_sec,
+            }
+        )
         return False
 
 
@@ -612,11 +706,7 @@ async def test_long_setup_failure_writes_redacted_diagnostic_file(
         )
         await pool.wait_all(timeout=2.0)
 
-    diagnostic_path = (
-        settings.trajectory_cache_dir
-        / "setup-diagnostics"
-        / f"{trial_id}.log"
-    )
+    diagnostic_path = settings.trajectory_cache_dir / "setup-diagnostics" / f"{trial_id}.log"
     failure_message = str(cp.patch_calls[0]["failure_message"])
     assert len(failure_message) <= 1000
     assert str(diagnostic_path) in failure_message
@@ -638,9 +728,7 @@ async def test_setup_transport_disconnect_requeues_when_trial_policy_allows() ->
     worker_id = uuid4()
 
     async def fail_layered_image(**_kwargs: object) -> str:
-        raise httpx.RemoteProtocolError(
-            "Server disconnected without sending a response."
-        )
+        raise httpx.RemoteProtocolError("Server disconnected without sending a response.")
 
     with patch.object(ml, "_resolve_layered_trial_image", fail_layered_image):
         await ml._spawn_trial(
@@ -947,9 +1035,7 @@ async def test_pre_start_heartbeat_runs_while_setup_waits() -> None:
             if cp.pre_start_heartbeat_calls:
                 break
             await asyncio.sleep(0.005)
-        assert cp.pre_start_heartbeat_calls == [
-            {"trial_id": trial_id, "worker_id": worker_id}
-        ]
+        assert cp.pre_start_heartbeat_calls == [{"trial_id": trial_id, "worker_id": worker_id}]
         cp.release_bundle.set()
         await spawn_task
         await pool.wait_all(timeout=2.0)
@@ -1008,7 +1094,11 @@ async def test_materialize_timeout_marks_claimed_trial_failed() -> None:
             return source == "hf://PRHW/private@rev/task-1"
 
         async def materialize(
-            self, *, source: str, task_dir: Path, trial_id,  # type: ignore[no-untyped-def]
+            self,
+            *,
+            source: str,
+            task_dir: Path,
+            trial_id,  # type: ignore[no-untyped-def]
         ) -> Path:
             await asyncio.Event().wait()
             return task_dir
@@ -1062,8 +1152,7 @@ async def test_setup_failure_redacts_secret_detail_before_state_patch() -> None:
 
     async def fail_materialize(**_kwargs: object) -> Path:
         raise RuntimeError(
-            "hf auth failed with Authorization: Bearer "
-            "hf_abcdefghijklmnopqrstuvwxyz1234567890"
+            "hf auth failed with Authorization: Bearer hf_abcdefghijklmnopqrstuvwxyz1234567890"
         )
 
     settings = _FakeSettings()

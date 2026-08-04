@@ -122,6 +122,7 @@ class TrialContext:
     container_cpus: float = 0.0
     container_memory_mib: int = 0
     container_pids: int = 0
+    container_cgroup_parent: str | None = None
     runtime_identity_labels: tuple[tuple[str, str], ...] = ()
     slurm_allocated_gpus: int = -1
     slurm_gpu_device_ids: tuple[str, ...] = ()
@@ -241,6 +242,7 @@ class Trial:
                             container_cpus=self.ctx.container_cpus,
                             container_memory_mib=self.ctx.container_memory_mib,
                             container_pids=self.ctx.container_pids,
+                            cgroup_parent=self.ctx.container_cgroup_parent,
                             slurm_allocated_gpus=self.ctx.slurm_allocated_gpus,
                             slurm_gpu_device_ids=self.ctx.slurm_gpu_device_ids,
                         )

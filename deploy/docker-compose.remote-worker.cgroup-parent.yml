@@ -1,0 +1,8 @@
+# Non-exclusive Slurm containment overlay.
+#
+# The controller adds this file only after it discovers and validates the exact
+# delegated Slurm job cgroup.  The required expansion fails before Docker
+# creates the worker if that allocation-bound value is absent.
+services:
+  worker:
+    cgroup_parent: ${LOOM_WORKER_CGROUP_PARENT:?set by the Slurm batch controller}
