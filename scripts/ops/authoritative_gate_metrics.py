@@ -143,6 +143,95 @@ def _ratio(numerator: int, denominator: int) -> float | None:
     return round(numerator / denominator, 3) if denominator else None
 
 
+def _percent_reduction(baseline: float, current: float | None) -> float | None:
+    if baseline <= 0 or current is None:
+        return None
+    return round((baseline - current) / baseline * 100, 3)
+
+
+def evaluate_track2_acceptance(
+    summary: Mapping[str, Any],
+    *,
+    baseline_api_calls_per_attempt: float,
+    baseline_executed_publish_jobs_per_attempt: float,
+    baseline_publisher_runs_per_attempt: float | None = None,
+    minimum_reduction_percent: float = 40.0,
+    minimum_terminal_source_attempts: int = 30,
+) -> dict[str, Any]:
+    """Evaluate the #1130 Track 2 terminal-attempt acceptance boundary."""
+
+    coverage = summary["source_attempt_coverage"]
+    terminal_metrics = summary["terminal_per_source_attempt"]
+    failures = summary["failures"]["by_class"]
+    terminal_attempts = int(coverage["terminal"])
+    current_api_calls = terminal_metrics["api_calls"]
+    current_executed_jobs = terminal_metrics["executed_publish_jobs"]
+    current_publisher_runs = terminal_metrics["publisher_runs"]
+    api_reduction = _percent_reduction(
+        baseline_api_calls_per_attempt,
+        current_api_calls,
+    )
+    executed_job_reduction = _percent_reduction(
+        baseline_executed_publish_jobs_per_attempt,
+        current_executed_jobs,
+    )
+    publisher_run_reduction = (
+        _percent_reduction(baseline_publisher_runs_per_attempt, current_publisher_runs)
+        if baseline_publisher_runs_per_attempt is not None
+        else None
+    )
+    criteria = {
+        "api_call_reduction": {
+            "actual_percent": api_reduction,
+            "passed": api_reduction is not None
+            and api_reduction >= minimum_reduction_percent,
+            "required_percent": minimum_reduction_percent,
+        },
+        "complete_terminal_delivery_coverage": {
+            "passed": coverage["terminal_without_invalidation"] == 0
+            and coverage["terminal_without_complete_publish_metrics"] == 0,
+            "terminal_without_complete_publish_metrics": coverage[
+                "terminal_without_complete_publish_metrics"
+            ],
+            "terminal_without_invalidation": coverage["terminal_without_invalidation"],
+        },
+        "executed_publish_job_reduction": {
+            "actual_percent": executed_job_reduction,
+            "passed": executed_job_reduction is not None
+            and executed_job_reduction >= minimum_reduction_percent,
+            "required_percent": minimum_reduction_percent,
+        },
+        "minimum_terminal_source_attempts": {
+            "actual": terminal_attempts,
+            "passed": terminal_attempts >= minimum_terminal_source_attempts,
+            "required": minimum_terminal_source_attempts,
+        },
+        "publisher_transport_integrity": {
+            "cancelled_runs": int(failures.get("publisher_cancelled", 0)),
+            "passed": failures.get("publisher_cancelled", 0) == 0
+            and failures.get("publisher_transport_failure", 0) == 0,
+            "transport_failure_runs": int(failures.get("publisher_transport_failure", 0)),
+        },
+    }
+    return {
+        "baseline": {
+            "api_calls_per_source_attempt": baseline_api_calls_per_attempt,
+            "executed_publish_jobs_per_source_attempt": (
+                baseline_executed_publish_jobs_per_attempt
+            ),
+            "publisher_runs_per_source_attempt": baseline_publisher_runs_per_attempt,
+        },
+        "criteria": criteria,
+        "current_terminal_attempts": {
+            "api_calls_per_source_attempt": current_api_calls,
+            "executed_publish_jobs_per_source_attempt": current_executed_jobs,
+            "publisher_runs_per_source_attempt": current_publisher_runs,
+        },
+        "publisher_run_record_reduction_percent": publisher_run_reduction,
+        "status": "pass" if all(item["passed"] for item in criteria.values()) else "fail",
+    }
+
+
 def summarize_runs(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Summarize publisher runs plus attached publish-job logs."""
 
@@ -153,6 +242,8 @@ def summarize_runs(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     malformed_runs = 0
     legacy_runs = 0
     failed_runs = 0
+    failure_classes: Counter[str] = Counter()
+    failure_examples: list[dict[str, Any]] = []
     publish_jobs = 0
     publish_jobs_skipped = 0
     workflow_publish_jobs = 0
@@ -175,6 +266,7 @@ def summarize_runs(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     first_attempt_in_progress_api_calls = 0
     source_workflows: dict[int, dict[str, Any]] = {}
     attempt_run_counts: Counter[tuple[int, int, int]] = Counter()
+    source_attempt_stats: dict[tuple[int, int, int], dict[str, Any]] = {}
     log_error_examples: list[dict[str, Any]] = []
 
     for run in runs:
@@ -204,6 +296,17 @@ def summarize_runs(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         if source_key is not None:
             source_attempts.add(source_key)
             attempt_run_counts[source_key] += 1
+            attempt_stats = source_attempt_stats.setdefault(
+                source_key,
+                {
+                    "api_calls": 0,
+                    "deliveries": Counter(),
+                    "publish_jobs": 0,
+                    "publish_jobs_skipped": 0,
+                    "publish_jobs_with_metrics": 0,
+                },
+            )
+            attempt_stats["deliveries"][identity.delivery] += 1
             workflow_stats = source_workflows.setdefault(
                 identity.source_workflow,
                 {
@@ -219,20 +322,27 @@ def summarize_runs(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             workflow_stats["attempts"].add(source_key)
             workflow_stats["deliveries"][identity.delivery] += 1
             workflow_stats["publisher_runs"] += 1
-        if run.get("conclusion") not in {None, "", "success", "skipped", "neutral"}:
+        run_conclusion = run.get("conclusion")
+        run_failed = run_conclusion not in {None, "", "success", "skipped", "neutral"}
+        if run_failed:
             failed_runs += 1
         jobs = run.get("jobs", [])
         if not isinstance(jobs, Sequence) or isinstance(jobs, (str, bytes)):
             continue
+        run_publish_jobs = 0
+        run_publish_jobs_skipped = 0
+        run_publish_jobs_with_metrics = 0
         for job in jobs:
             if not isinstance(job, Mapping) or not str(job.get("name", "")).startswith(
                 PUBLISH_JOB_PREFIX
             ):
                 continue
             publish_jobs += 1
+            run_publish_jobs += 1
             job_was_skipped = job.get("conclusion") == "skipped"
             if job_was_skipped:
                 publish_jobs_skipped += 1
+                run_publish_jobs_skipped += 1
             if is_first_attempt_in_progress:
                 first_attempt_in_progress_publish_jobs += 1
                 if job_was_skipped:
@@ -240,9 +350,11 @@ def summarize_runs(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             if identity.trigger == "workflow_run":
                 workflow_publish_jobs += 1
                 source_workflows[identity.source_workflow]["publish_jobs"] += 1
+                source_attempt_stats[source_key]["publish_jobs"] += 1
                 if job_was_skipped:
                     workflow_publish_jobs_skipped += 1
                     source_workflows[identity.source_workflow]["publish_jobs_skipped"] += 1
+                    source_attempt_stats[source_key]["publish_jobs_skipped"] += 1
             else:
                 pull_request_publish_jobs += 1
                 if job_was_skipped:
@@ -250,6 +362,7 @@ def summarize_runs(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             log = job.get("log")
             metrics = extract_job_metrics(log) if isinstance(log, str) else None
             if metrics is not None:
+                run_publish_jobs_with_metrics += 1
                 jobs_with_metrics += 1
                 job_api_calls = int(metrics["api_calls"])
                 api_calls += job_api_calls
@@ -261,6 +374,8 @@ def summarize_runs(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
                     workflow_api_calls += job_api_calls
                     source_workflows[identity.source_workflow]["api_calls"] += job_api_calls
                     source_workflows[identity.source_workflow]["publish_jobs_with_metrics"] += 1
+                    source_attempt_stats[source_key]["api_calls"] += job_api_calls
+                    source_attempt_stats[source_key]["publish_jobs_with_metrics"] += 1
                 else:
                     pull_request_jobs_with_metrics += 1
                     pull_request_api_calls += job_api_calls
@@ -281,8 +396,69 @@ def summarize_runs(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             else:
                 job_logs_without_metrics += 1
 
+        if run_failed:
+            if run_conclusion == "cancelled":
+                failure_class = "publisher_cancelled"
+            elif (
+                run_publish_jobs > 0
+                and run_publish_jobs_with_metrics
+                == run_publish_jobs - run_publish_jobs_skipped
+            ):
+                failure_class = "authoritative_result"
+            else:
+                failure_class = "publisher_transport_failure"
+            failure_classes[failure_class] += 1
+            if len(failure_examples) < 10:
+                failure_examples.append(
+                    {
+                        "class": failure_class,
+                        "conclusion": run_conclusion,
+                        "delivery": identity.delivery,
+                        "run_id": run.get("id"),
+                        "source_attempt": identity.source_attempt,
+                        "source_run": identity.source_run,
+                        "source_workflow": identity.source_workflow,
+                    }
+                )
+
     workflow_run_count = trigger_counts["workflow_run"]
     distinct_attempts = len(source_attempts)
+    terminal_attempt_keys = {
+        key
+        for key, stats in source_attempt_stats.items()
+        if stats["deliveries"]["completed"] > 0
+    }
+    terminal_publish_jobs = sum(
+        source_attempt_stats[key]["publish_jobs"] for key in terminal_attempt_keys
+    )
+    terminal_publish_jobs_skipped = sum(
+        source_attempt_stats[key]["publish_jobs_skipped"] for key in terminal_attempt_keys
+    )
+    terminal_publish_jobs_with_metrics = sum(
+        source_attempt_stats[key]["publish_jobs_with_metrics"] for key in terminal_attempt_keys
+    )
+    terminal_api_calls = sum(
+        source_attempt_stats[key]["api_calls"] for key in terminal_attempt_keys
+    )
+    terminal_publisher_runs = sum(attempt_run_counts[key] for key in terminal_attempt_keys)
+    terminal_with_invalidation = {
+        key
+        for key in terminal_attempt_keys
+        if source_attempt_stats[key]["deliveries"]["requested"] > 0
+        or source_attempt_stats[key]["deliveries"]["in_progress"] > 0
+    }
+    terminal_with_complete_metrics = {
+        key
+        for key in terminal_attempt_keys
+        if source_attempt_stats[key]["publish_jobs_with_metrics"]
+        + source_attempt_stats[key]["publish_jobs_skipped"]
+        == source_attempt_stats[key]["publish_jobs"]
+    }
+    incomplete_terminal_keys = sorted(
+        (terminal_attempt_keys - terminal_with_invalidation)
+        | (terminal_attempt_keys - terminal_with_complete_metrics)
+    )
+    terminal_attempt_count = len(terminal_attempt_keys)
     source_workflow_summary: dict[str, Any] = {}
     for workflow_id, stats in sorted(source_workflows.items()):
         attempts = len(stats["attempts"])
@@ -322,7 +498,11 @@ def summarize_runs(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
                 publish_jobs - jobs_with_metrics - publish_jobs_skipped
             ),
         },
-        "failures": {"publisher_runs": failed_runs},
+        "failures": {
+            "by_class": dict(sorted(failure_classes.items())),
+            "examples": failure_examples,
+            "publisher_runs": failed_runs,
+        },
         "first_attempt_in_progress": {
             "api_calls": first_attempt_in_progress_api_calls,
             "api_calls_complete": (
@@ -342,6 +522,39 @@ def summarize_runs(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             str(count): occurrences for count, occurrences in sorted(run_count_distribution.items())
         },
         "source_workflows": source_workflow_summary,
+        "source_attempt_coverage": {
+            "active_or_incomplete": distinct_attempts - terminal_attempt_count,
+            "incomplete_terminal_examples": [
+                {
+                    "source_attempt": key[2],
+                    "source_run": key[1],
+                    "source_workflow": key[0],
+                }
+                for key in incomplete_terminal_keys[:10]
+            ],
+            "observed": distinct_attempts,
+            "terminal": terminal_attempt_count,
+            "terminal_with_complete_publish_metrics": len(terminal_with_complete_metrics),
+            "terminal_with_invalidation": len(terminal_with_invalidation),
+            "terminal_without_complete_publish_metrics": len(
+                terminal_attempt_keys - terminal_with_complete_metrics
+            ),
+            "terminal_without_invalidation": len(
+                terminal_attempt_keys - terminal_with_invalidation
+            ),
+        },
+        "terminal_per_source_attempt": {
+            "api_calls": _ratio(terminal_api_calls, terminal_attempt_count)
+            if terminal_publish_jobs_with_metrics
+            == terminal_publish_jobs - terminal_publish_jobs_skipped
+            else None,
+            "executed_publish_jobs": _ratio(
+                terminal_publish_jobs - terminal_publish_jobs_skipped,
+                terminal_attempt_count,
+            ),
+            "publish_jobs": _ratio(terminal_publish_jobs, terminal_attempt_count),
+            "publisher_runs": _ratio(terminal_publisher_runs, terminal_attempt_count),
+        },
         "totals": {
             "api_calls": api_calls,
             "api_calls_complete": jobs_with_metrics + publish_jobs_skipped == publish_jobs,
@@ -559,6 +772,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--workflow-id", type=int, default=DEFAULT_PUBLISHER_WORKFLOW_ID)
     parser.add_argument("--max-runs", type=int, default=200)
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
+    parser.add_argument("--baseline-api-calls-per-attempt", type=float)
+    parser.add_argument("--baseline-executed-publish-jobs-per-attempt", type=float)
+    parser.add_argument("--baseline-publisher-runs-per-attempt", type=float)
+    parser.add_argument("--minimum-reduction-percent", type=float, default=40.0)
+    parser.add_argument("--minimum-terminal-source-attempts", type=int, default=30)
+    parser.add_argument("--require-acceptance", action="store_true")
     parser.add_argument(
         "--skip-logs",
         action="store_true",
@@ -581,6 +800,47 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     if args.until < args.since:
         print("authoritative gate metrics failed: --until precedes --since", file=sys.stderr)
+        return 2
+    acceptance_baselines = (
+        args.baseline_api_calls_per_attempt,
+        args.baseline_executed_publish_jobs_per_attempt,
+    )
+    acceptance_requested = any(value is not None for value in acceptance_baselines) or (
+        args.baseline_publisher_runs_per_attempt is not None
+    )
+    if acceptance_requested and not all(
+        value is not None and value > 0 for value in acceptance_baselines
+    ):
+        print(
+            "authoritative gate metrics failed: both positive acceptance baselines are required",
+            file=sys.stderr,
+        )
+        return 2
+    if args.baseline_publisher_runs_per_attempt is not None and (
+        args.baseline_publisher_runs_per_attempt <= 0
+    ):
+        print(
+            "authoritative gate metrics failed: publisher-runs baseline must be positive",
+            file=sys.stderr,
+        )
+        return 2
+    if not 0 <= args.minimum_reduction_percent <= 100:
+        print(
+            "authoritative gate metrics failed: minimum reduction must be between 0 and 100",
+            file=sys.stderr,
+        )
+        return 2
+    if args.minimum_terminal_source_attempts < 1:
+        print(
+            "authoritative gate metrics failed: minimum terminal source attempts must be positive",
+            file=sys.stderr,
+        )
+        return 2
+    if args.require_acceptance and not all(value is not None for value in acceptance_baselines):
+        print(
+            "authoritative gate metrics failed: --require-acceptance needs both baselines",
+            file=sys.stderr,
+        )
         return 2
     try:
         client = GitHubMetricsClient(
@@ -615,7 +875,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         "until": args.until.isoformat().replace("+00:00", "Z"),
         "workers": args.workers,
     }
+    if acceptance_requested:
+        summary["track2_acceptance"] = evaluate_track2_acceptance(
+            summary,
+            baseline_api_calls_per_attempt=args.baseline_api_calls_per_attempt,
+            baseline_executed_publish_jobs_per_attempt=(
+                args.baseline_executed_publish_jobs_per_attempt
+            ),
+            baseline_publisher_runs_per_attempt=args.baseline_publisher_runs_per_attempt,
+            minimum_reduction_percent=args.minimum_reduction_percent,
+            minimum_terminal_source_attempts=args.minimum_terminal_source_attempts,
+        )
     print(json.dumps(summary, indent=2, sort_keys=True))
+    if args.require_acceptance and summary["track2_acceptance"]["status"] != "pass":
+        return 3
     return 0
 
 

@@ -12,6 +12,7 @@ from scripts.ops.authoritative_gate import GitHubAPIError, GitHubClient
 from scripts.ops.authoritative_gate_metrics import (
     GitHubMetricsClient,
     MetricsError,
+    evaluate_track2_acceptance,
     extract_job_metrics,
     parse_run_name,
     summarize_runs,
@@ -74,6 +75,76 @@ def test_extract_job_metrics_handles_actions_timestamp_prefix() -> None:
         "contexts": ["repository-checks"],
         "outcome": "success",
     }
+
+
+def test_track2_acceptance_uses_terminal_attempts_and_ignores_expected_red_results() -> None:
+    acceptance = evaluate_track2_acceptance(
+        {
+            "failures": {"by_class": {"authoritative_result": 7}},
+            "source_attempt_coverage": {
+                "terminal": 86,
+                "terminal_without_complete_publish_metrics": 0,
+                "terminal_without_invalidation": 0,
+            },
+            "terminal_per_source_attempt": {
+                "api_calls": 20.256,
+                "executed_publish_jobs": 1.849,
+                "publisher_runs": 4.395,
+            },
+        },
+        baseline_api_calls_per_attempt=64.8,
+        baseline_executed_publish_jobs_per_attempt=4.767,
+        baseline_publisher_runs_per_attempt=4.767,
+    )
+
+    assert acceptance["status"] == "pass"
+    assert acceptance["criteria"]["minimum_terminal_source_attempts"] == {
+        "actual": 86,
+        "passed": True,
+        "required": 30,
+    }
+    assert acceptance["criteria"]["executed_publish_job_reduction"] == {
+        "actual_percent": 61.213,
+        "passed": True,
+        "required_percent": 40.0,
+    }
+    assert acceptance["criteria"]["api_call_reduction"] == {
+        "actual_percent": 68.741,
+        "passed": True,
+        "required_percent": 40.0,
+    }
+    assert acceptance["publisher_run_record_reduction_percent"] == 7.804
+
+
+def test_track2_acceptance_fails_closed_on_transport_or_coverage_gap() -> None:
+    acceptance = evaluate_track2_acceptance(
+        {
+            "failures": {
+                "by_class": {
+                    "publisher_cancelled": 1,
+                    "publisher_transport_failure": 2,
+                }
+            },
+            "source_attempt_coverage": {
+                "terminal": 12,
+                "terminal_without_complete_publish_metrics": 1,
+                "terminal_without_invalidation": 1,
+            },
+            "terminal_per_source_attempt": {
+                "api_calls": None,
+                "executed_publish_jobs": 4.2,
+                "publisher_runs": 4.2,
+            },
+        },
+        baseline_api_calls_per_attempt=64.8,
+        baseline_executed_publish_jobs_per_attempt=4.767,
+    )
+
+    assert acceptance["status"] == "fail"
+    assert not acceptance["criteria"]["minimum_terminal_source_attempts"]["passed"]
+    assert not acceptance["criteria"]["complete_terminal_delivery_coverage"]["passed"]
+    assert not acceptance["criteria"]["publisher_transport_integrity"]["passed"]
+    assert not acceptance["criteria"]["api_call_reduction"]["passed"]
 
 
 class FakeResponse:
@@ -201,7 +272,21 @@ def test_summarize_runs_exposes_amplification_and_coverage_gaps() -> None:
         "publish_jobs_with_metrics": 3,
         "publish_jobs_without_metrics": 1,
     }
-    assert summary["failures"] == {"publisher_runs": 1}
+    assert summary["failures"] == {
+        "by_class": {"publisher_transport_failure": 1},
+        "examples": [
+            {
+                "class": "publisher_transport_failure",
+                "conclusion": "failure",
+                "delivery": "completed",
+                "run_id": None,
+                "source_attempt": 1,
+                "source_run": 1001,
+                "source_workflow": 302898379,
+            }
+        ],
+        "publisher_runs": 1,
+    }
     assert summary["first_attempt_in_progress"] == {
         "api_calls": 6,
         "api_calls_complete": True,
@@ -234,6 +319,106 @@ def test_summarize_runs_exposes_amplification_and_coverage_gaps() -> None:
             "publisher_runs": 3,
         }
     }
+    assert summary["source_attempt_coverage"] == {
+        "active_or_incomplete": 0,
+        "incomplete_terminal_examples": [
+            {
+                "source_attempt": 1,
+                "source_run": 1001,
+                "source_workflow": 302898379,
+            }
+        ],
+        "observed": 1,
+        "terminal": 1,
+        "terminal_with_complete_publish_metrics": 0,
+        "terminal_with_invalidation": 1,
+        "terminal_without_complete_publish_metrics": 1,
+        "terminal_without_invalidation": 0,
+    }
+    assert summary["terminal_per_source_attempt"] == {
+        "api_calls": None,
+        "executed_publish_jobs": 3.0,
+        "publish_jobs": 3.0,
+        "publisher_runs": 3.0,
+    }
+
+
+def test_summarize_runs_distinguishes_authoritative_failure_from_transport_failure() -> None:
+    summary = summarize_runs(
+        [
+            {
+                "conclusion": "failure",
+                "display_title": run_name(delivery="completed"),
+                "id": 9001,
+                "jobs": [
+                    {
+                        "conclusion": "failure",
+                        "log": (
+                            '2026-08-04T20:00:00Z {"api_calls": 9, '
+                            '"outcome": "failure"}'
+                        ),
+                        "name": "publish authoritative gate (repository-checks)",
+                    }
+                ],
+            }
+        ]
+    )
+
+    assert summary["failures"] == {
+        "by_class": {"authoritative_result": 1},
+        "examples": [
+            {
+                "class": "authoritative_result",
+                "conclusion": "failure",
+                "delivery": "completed",
+                "run_id": 9001,
+                "source_attempt": 1,
+                "source_run": 1001,
+                "source_workflow": 302898379,
+            }
+        ],
+        "publisher_runs": 1,
+    }
+    assert summary["source_attempt_coverage"] == {
+        "active_or_incomplete": 0,
+        "incomplete_terminal_examples": [
+            {
+                "source_attempt": 1,
+                "source_run": 1001,
+                "source_workflow": 302898379,
+            }
+        ],
+        "observed": 1,
+        "terminal": 1,
+        "terminal_with_complete_publish_metrics": 1,
+        "terminal_with_invalidation": 0,
+        "terminal_without_complete_publish_metrics": 0,
+        "terminal_without_invalidation": 1,
+    }
+
+
+def test_summarize_runs_keeps_cancelled_publishers_out_of_authoritative_results() -> None:
+    summary = summarize_runs(
+        [
+            {
+                "conclusion": "cancelled",
+                "display_title": run_name(delivery="requested"),
+                "id": 9002,
+                "jobs": [
+                    {
+                        "conclusion": "success",
+                        "log": (
+                            '2026-08-04T20:00:00Z {"api_calls": 5, '
+                            '"outcome": "in_progress"}'
+                        ),
+                        "name": "publish authoritative gate (repository-checks)",
+                    }
+                ],
+            }
+        ]
+    )
+
+    assert summary["failures"]["by_class"] == {"publisher_cancelled": 1}
 
 
 def test_collect_runs_fetches_instrumented_jobs_concurrently_and_preserves_order() -> None:

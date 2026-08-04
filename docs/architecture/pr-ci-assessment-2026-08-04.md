@@ -73,12 +73,66 @@ expected steady-state reduction is 174 executed jobs and 2,526 API calls per
 300 publisher runs. A post-merge window is still required to verify the actual
 reduction and that rerun invalidation remains intact.
 
+## Post-merge Track 2 acceptance
+
+The fixed post-merge window from `2026-08-04T19:05:53Z` through
+`2026-08-04T20:20:00Z` contains 403 publisher workflow records for 88 observed
+source attempts. The sample is not truncated. Two attempts were still active or
+had not yet received a `completed` delivery at the cutoff, so the acceptance
+ratios use only the 86 terminal source attempts. This prevents an active tail
+from making job or API-call amplification look artificially low.
+
+All 86 terminal attempts had both a fail-closed `requested` or `in_progress`
+delivery and complete publish-job metrics. There were no terminal attempts with
+a missing invalidation, missing terminal metrics, publisher transport failure,
+or cancelled publisher. Seven publisher workflow records concluded `failure`,
+but all seven contained the publisher's terminal metrics record and are
+classified as `authoritative_result`: the workflow correctly published a red
+authoritative outcome rather than failing to transport the outcome.
+
+| Terminal-attempt metric | Before | After | Reduction |
+| --- | ---: | ---: | ---: |
+| Executed publisher jobs per source attempt | 4.767 | 1.849 | 61.213% |
+| Publisher API calls per source attempt | 64.8 | 20.256 | 68.741% |
+| Publisher workflow records per source attempt | 4.767 | 4.395 | 7.804% |
+
+The Track 2 runtime-amplification target is met for executed publisher jobs and
+API calls without omitting terminal authority. The remaining workflow records
+are lightweight skipped deliveries: 206 first-attempt `in_progress` records in
+this window executed zero publish jobs and made zero publisher API calls. Their
+record-count reduction remains an explicit residual rather than being presented
+as a 40% workflow-record reduction.
+
+Reproduce the fail-closed acceptance decision with:
+
+```bash
+GITHUB_TOKEN="$(gh auth token)" python scripts/ops/authoritative_gate_metrics.py \
+  --repository qianyi-sun/loom \
+  --since 2026-08-04T19:05:53Z \
+  --until 2026-08-04T20:20:00Z \
+  --max-runs 1000 \
+  --workers 16 \
+  --baseline-executed-publish-jobs-per-attempt 4.767 \
+  --baseline-api-calls-per-attempt 64.8 \
+  --baseline-publisher-runs-per-attempt 4.767 \
+  --minimum-terminal-source-attempts 30 \
+  --minimum-reduction-percent 40 \
+  --require-acceptance
+```
+
+The command exits with status 3 if the minimum terminal sample, delivery/log
+coverage, publisher transport integrity, executed-job reduction, or API-call
+reduction fails. An authoritative red result does not count as publisher
+transport failure. Rollback is removal of the acceptance-only reporting fields
+and CLI switches; this slice does not alter lifecycle triggers, protected
+contexts, concurrency, runner routing, or live capacity.
+
 ## Six-track assessment
 
 | Track | Current evidence | Assessment and next gate |
 | --- | --- | --- |
 | 1. Authoritative correctness | PR #1131 is merged. The fixed sample has no failed publisher workflows and complete metrics coverage. | The state machine is substantially hardened, but issue acceptance still requires a disposable PR that proves fail-closed behavior, label churn, one app-15368 CheckRun per protected context, and exact-source rerun invalidation. Keep this track open. |
-| 2. Lifecycle amplification | 4.767 publisher jobs and 64.8 API calls per source attempt; first-attempt `in_progress` accounts for 174 jobs and 2,526 calls. | This Draft implements the highest-confidence reduction and adds repeatable measurement. Verify the post-merge delta before considering broader trigger or API changes. |
+| 2. Lifecycle amplification | In 86 terminal post-merge attempts, executed publisher jobs fell 61.213% and API calls fell 68.741%; all terminal attempts retained complete authority evidence. | Runtime amplification passes the 40% target. Lightweight workflow records fell only 7.804% and remain a separately reported residual; do not weaken rerun invalidation merely to suppress those records. |
 | 3. Capacity isolation | Live snapshot: 10 registered oldlab ephemeral KVM runners, 9 online and busy, 1 offline. `LOOM_CI_ACCELERATOR_RUNS_ON` routes accelerator work to the shared oldlab-5 pool. | Saturation is observable, while class reservation and light/heavy separation are absent. Design and rehearse a separate light-lane capacity policy before any live route mutation. This Draft makes no route change. |
 | 4. Architecture-native coverage | Locked-environment validation has a native `ubuntu-24.04-arm` job. PR image builds still request `linux/amd64,linux/arm64` on x64 oldlab runners through QEMU. | Native ARM coverage exists for one boundary, but image-build cost and failure attribution are not architecture-isolated. Split native x86/ARM image validation only after runner inventory, cache ownership, and required-context aggregation are specified. |
 | 5. Duplicate work and metadata fast paths | Earlier six-PR baseline: 428 workflows, about 850 jobs, 5.1 runner-hours. Superseded-generation cancellations are common. Planner workflows still start and check out before deciding some metadata-only cases; cross-workflow artifacts are not reused comprehensively. | After publisher dedupe, prioritize pre-checkout planning and durable plan/artifact reuse. Preserve fail-closed path inference and keep label changes that add coverage authoritative. |
@@ -86,9 +140,9 @@ reduction and that rerun invalidation remains intact.
 
 ## Recommended execution order
 
-1. Merge and measure the first-attempt `in_progress` job filter after its Draft
-   CI and disposable correctness acceptance pass.
-2. Classify cancellations and reruns before changing retry policy; otherwise
+1. Preserve the accepted first-attempt `in_progress` job filter and repeat its
+   terminal-attempt acceptance report when publisher behavior changes.
+2. Classify source-workflow cancellations and reruns before changing retry policy; otherwise
    superseded PR generations can be mistaken for instability.
 3. Move cheap metadata/path decisions ahead of checkout and establish reusable
    plan artifacts.
