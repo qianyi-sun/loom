@@ -202,6 +202,41 @@ def test_waits_for_root_guard_to_apply_job_pids_max(
     assert sleeps == pytest.approx([0.1])
 
 
+def test_waits_for_root_guard_to_delegate_controllers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The guard enables subtree delegation asynchronously after the job starts;
+    # discovery must poll for it within the bounded wait rather than failing
+    # closed the instant it observes an as-yet-undelegated subtree.
+    proc_cgroup, root = _cgroup_fixture(tmp_path, subtree_control="")
+    subtree_path = root / "system.slice/slurmstepd.scope/job_123/cgroup.subtree_control"
+    now = 100.0
+    sleeps: list[float] = []
+
+    monkeypatch.setattr(cgroup_module.time, "monotonic", lambda: now)
+
+    def apply_guard_delegation(delay: float) -> None:
+        nonlocal now
+        sleeps.append(delay)
+        now += delay
+        subtree_path.write_text("cpu memory pids", encoding="utf-8")
+
+    monkeypatch.setattr(cgroup_module.time, "sleep", apply_guard_delegation)
+
+    assert (
+        discover_slurm_job_cgroup(
+            job_id="123",
+            pids_max=3072,
+            wait_seconds=1.0,
+            proc_cgroup=proc_cgroup,
+            cgroup_root=root,
+        )
+        == "/system.slice/slurmstepd.scope/job_123"
+    )
+    assert sleeps == pytest.approx([0.1])
+
+
 def test_job_pids_max_wait_times_out_deterministically(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

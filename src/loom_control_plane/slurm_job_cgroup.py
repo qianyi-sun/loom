@@ -90,35 +90,71 @@ def _read_words(path: Path, *, description: str) -> set[str]:
         raise SlurmJobCgroupError(f"cannot read {description}") from exc
 
 
-def _wait_for_pids_max(
-    path: Path,
-    *,
-    expected: int,
-    wait_seconds: float,
-) -> None:
-    """Wait only for the root guard's pids.max write to converge."""
+class _PendingDelegationError(Exception):
+    """Internal signal that the root guard has not finished delegating yet.
 
-    deadline = time.monotonic() + wait_seconds
-    expected_text = str(expected)
-    while True:
-        if path.is_symlink():
-            raise SlurmJobCgroupError("symlinks are forbidden for Slurm pids.max")
-        try:
-            actual = path.read_text(encoding="utf-8").strip()
-        except FileNotFoundError:
-            actual = None
-        except OSError as exc:
-            raise SlurmJobCgroupError("cannot read the Slurm job cgroup pids.max") from exc
-        if actual == expected_text:
-            return
+    These conditions are transient while a Slurm job is starting and the
+    administrator-owned cgroup guard is still enabling controller delegation
+    and writing ``pids.max``; they are retried within the bounded wait.
+    Permanent, structural violations raise :class:`SlurmJobCgroupError`
+    directly so the bounded wait is skipped.
+    """
 
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise SlurmJobCgroupError(
-                "the Slurm job cgroup pids.max did not converge to the requested "
-                "aggregate limit before the bounded wait expired",
-            )
-        time.sleep(min(_POLL_INTERVAL_SECONDS, remaining))
+
+def _verify_delegated(host_job_path: Path, *, pids_max: int) -> None:
+    """Prove the job cgroup is fully delegated, or signal what is pending.
+
+    The root guard enables controller delegation and writes ``pids.max``
+    asynchronously once the job starts, so a first observation frequently
+    predates convergence.  Transient shortfalls raise :class:`_PendingDelegationError`
+    (retried by the caller); only violations that can never become safe raise
+    :class:`SlurmJobCgroupError`.
+    """
+
+    controllers = _read_words(
+        host_job_path / "cgroup.controllers",
+        description="Slurm job cgroup controllers",
+    )
+    if not _REQUIRED_CONTROLLERS.issubset(controllers):
+        raise _PendingDelegationError(
+            "the Slurm job cgroup does not expose cpu, memory, and pids",
+        )
+    subtree_control = _read_words(
+        host_job_path / "cgroup.subtree_control",
+        description="Slurm job cgroup subtree controls",
+    )
+    if not _REQUIRED_CONTROLLERS.issubset(subtree_control):
+        raise _PendingDelegationError(
+            "the Slurm job cgroup is not delegated for cpu, memory, and pids",
+        )
+
+    try:
+        cgroup_type = (host_job_path / "cgroup.type").read_text(encoding="utf-8").strip()
+        resident_processes = (host_job_path / "cgroup.procs").read_text(encoding="utf-8").split()
+    except OSError as exc:
+        raise SlurmJobCgroupError("cannot verify the Slurm job cgroup type") from exc
+    if cgroup_type != "domain":
+        raise SlurmJobCgroupError("the Slurm job cgroup must be a domain cgroup")
+    if resident_processes:
+        raise _PendingDelegationError(
+            "the delegated Slurm job cgroup contains internal processes",
+        )
+
+    pids_max_path = host_job_path / "pids.max"
+    if pids_max_path.is_symlink():
+        raise SlurmJobCgroupError("symlinks are forbidden for Slurm pids.max")
+    try:
+        actual_pids_max = pids_max_path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        raise _PendingDelegationError(
+            "the Slurm job cgroup pids.max did not converge to the requested aggregate limit",
+        ) from None
+    except OSError as exc:
+        raise SlurmJobCgroupError("cannot read the Slurm job cgroup pids.max") from exc
+    if actual_pids_max != str(pids_max):
+        raise _PendingDelegationError(
+            "the Slurm job cgroup pids.max did not converge to the requested aggregate limit",
+        )
 
 
 def discover_slurm_job_cgroup(
@@ -176,51 +212,19 @@ def discover_slurm_job_cgroup(
     if not host_process_path.is_dir() or not host_job_path.is_dir():
         raise SlurmJobCgroupError("the Slurm cgroup path is not a directory")
 
-    controllers = _read_words(
-        host_job_path / "cgroup.controllers",
-        description="Slurm job cgroup controllers",
-    )
-    subtree_control = _read_words(
-        host_job_path / "cgroup.subtree_control",
-        description="Slurm job cgroup subtree controls",
-    )
-    if not _REQUIRED_CONTROLLERS.issubset(controllers):
-        raise SlurmJobCgroupError(
-            "the Slurm job cgroup does not expose cpu, memory, and pids",
-        )
-    if not _REQUIRED_CONTROLLERS.issubset(subtree_control):
-        raise SlurmJobCgroupError(
-            "the Slurm job cgroup is not delegated for cpu, memory, and pids",
-        )
-
-    try:
-        cgroup_type = (
-            (host_job_path / "cgroup.type")
-            .read_text(
-                encoding="utf-8",
-            )
-            .strip()
-        )
-        resident_processes = (
-            (host_job_path / "cgroup.procs")
-            .read_text(
-                encoding="utf-8",
-            )
-            .split()
-        )
-    except OSError as exc:
-        raise SlurmJobCgroupError("cannot verify the Slurm job cgroup type") from exc
-    if cgroup_type != "domain":
-        raise SlurmJobCgroupError("the Slurm job cgroup must be a domain cgroup")
-    if resident_processes:
-        raise SlurmJobCgroupError(
-            "the delegated Slurm job cgroup contains internal processes",
-        )
-    _wait_for_pids_max(
-        host_job_path / "pids.max",
-        expected=pids_max,
-        wait_seconds=float(wait_seconds),
-    )
+    deadline = time.monotonic() + float(wait_seconds)
+    while True:
+        try:
+            _verify_delegated(host_job_path, pids_max=pids_max)
+        except _PendingDelegationError as pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SlurmJobCgroupError(
+                    f"{pending} before the bounded wait expired",
+                ) from None
+            time.sleep(min(_POLL_INTERVAL_SECONDS, remaining))
+            continue
+        break
 
     return job_path.as_posix()
 

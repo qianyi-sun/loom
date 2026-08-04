@@ -11,6 +11,11 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.worker
+      # Build over the host network. On worker hosts the default docker bridge
+      # egress is intercepted/broken (pip's TLS handshake fails with
+      # CERTIFICATE_VERIFY_FAILED); only the host has clean egress. See
+      # docs/runbooks/remote-worker-pool.md.
+      network: host
     environment:
       - LOOM_WORKER_CONTROL_PLANE_URL=${LOOM_WORKER_CONTROL_PLANE_URL:?set LOOM_WORKER_CONTROL_PLANE_URL}
       - LOOM_WORKER_GATEWAY_URL=${LOOM_WORKER_GATEWAY_URL:?set LOOM_WORKER_GATEWAY_URL}
