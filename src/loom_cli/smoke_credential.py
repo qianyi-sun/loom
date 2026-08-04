@@ -271,3 +271,77 @@ def ensure_batch_runner_token(
         expires_at=expires_at,
         rotated_prior=rotated_prior,
     )
+
+
+# ---------------------------------------------------------------------------
+# Dev/smoke worker token
+# ---------------------------------------------------------------------------
+
+_DEV_WORKER_TOKEN_NAME = "dev worker (smoke-provisioned)"
+
+# Fixed plaintext that MUST equal the `worker-token` value emitted by
+# `loom cluster bootstrap-secrets --smoke-defaults` (loom_config.bootstrap
+# _SMOKE_DEFAULTS). Because that same value lands in `loom-secrets/worker-token`
+# which the loom-worker pods carry, seeding a DB token with this exact plaintext
+# lets workers authenticate at `/workers/register` with NO token mint, secret
+# patch, or restart. A drift guard test asserts the two stay equal.
+_DEV_WORKER_TOKEN = "smoke-worker-token"
+
+# Matches the control-plane's `POST /admin/worker-tokens` scopes
+# (loom_control_plane.routes.admin.issue_worker_token).
+_DEV_WORKER_TOKEN_SCOPES = ["worker:claim", "worker:report", "worker:index"]
+
+
+@dataclass(frozen=True)
+class DevWorkerToken:
+    """Result of seeding the dev/smoke worker token."""
+
+    token_hash_prefix: str
+    created: bool
+
+
+def ensure_dev_worker_token(
+    db_url: str,
+    *,
+    raw_token: str = _DEV_WORKER_TOKEN,
+) -> DevWorkerToken:
+    """Idempotently seed a worker token whose plaintext matches the
+    `--smoke-defaults` `worker-token`, so the in-cluster loom-worker pods
+    authenticate at `/workers/register` with no mint/patch/restart.
+
+    LOCAL/DEV ONLY. Uses a fixed, well-known throwaway plaintext (the same
+    value `bootstrap-secrets --smoke-defaults` already writes into
+    `loom-secrets`). Never run this against a real environment — it would
+    install a guessable worker credential. Writes directly to the target DB
+    (run after migrations); get-or-create by token hash, so re-running is a
+    no-op.
+    """
+    engine = create_engine(db_url)
+    now = datetime.now(UTC)
+    token_hash = hashlib.sha256(raw_token.encode()).digest()
+    try:
+        with sessionmaker(engine).begin() as s:
+            existing = s.execute(
+                select(Token.token_hash).where(
+                    Token.token_hash == token_hash,
+                    Token.revoked_at.is_(None),
+                ),
+            ).scalars().first()
+            created = existing is None
+            if created:
+                s.execute(insert(Token).values(
+                    token_hash=token_hash,
+                    name=_DEV_WORKER_TOKEN_NAME,
+                    type="worker",
+                    scopes=list(_DEV_WORKER_TOKEN_SCOPES),
+                    team_id=None,
+                    issued_at=now,
+                    expires_at=None,
+                ))
+    finally:
+        engine.dispose()
+
+    return DevWorkerToken(
+        token_hash_prefix=token_hash.hex()[:8],
+        created=created,
+    )

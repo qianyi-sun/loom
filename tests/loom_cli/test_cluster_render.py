@@ -1977,3 +1977,14 @@ def test_render_distributed_minio_omits_single_node_shape() -> None:
     pv_names = {d["metadata"]["name"] for d in docs if d["kind"] == "PersistentVolume"}
     assert "loom-minio-data" not in pv_names
     assert "loom-staging-minio-data" not in pv_names
+
+
+def test_single_node_minio_pins_ifnotpresent_pull_policy() -> None:
+    """The single-node MinIO's `minio_image` is commonly untagged (→
+    `:latest`), whose default pull policy is Always — which ErrImagePulls
+    on a cached/offline kind/k3d node. The single-node template must pin
+    IfNotPresent. (Distributed staging uses minio-distributed.yaml.j2.)"""
+    from importlib import resources
+
+    text = (resources.files("loom_cli.templates.k8s") / "minio.yaml.j2").read_text()
+    assert "imagePullPolicy: IfNotPresent" in text

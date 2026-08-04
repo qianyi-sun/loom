@@ -716,6 +716,47 @@ def _ensure_batch_runner_token(args: argparse.Namespace) -> int:
     return 0
 
 
+def _ensure_dev_worker_token(args: argparse.Namespace) -> int:
+    """Seed the fixed dev/smoke worker token so the in-cluster loom-worker
+    pods authenticate at `/workers/register` with no mint/patch/restart.
+
+    LOCAL/DEV ONLY — installs a guessable, well-known worker credential
+    (the same throwaway value `bootstrap-secrets --smoke-defaults` writes
+    into `loom-secrets/worker-token`). Writes directly to the target DB;
+    run after migrations. Idempotent (get-or-create by token hash).
+    """
+    from loom_cli.smoke_credential import ensure_dev_worker_token
+
+    db_url = args.db_url
+    if not db_url:
+        sys.stderr.write(
+            "error: no database URL. Pass --db-url or set LOOM_DB_URL "
+            "(then LOOM_CP_DB_URL) in the environment.\n",
+        )
+        return 2
+    try:
+        res = ensure_dev_worker_token(db_url)
+    except Exception as e:  # surface any provisioning failure to the operator
+        sys.stderr.write(f"error: could not seed dev worker token: {e}\n")
+        return 1
+
+    if args.format == "json":
+        json.dump(
+            {"token_hash_prefix": res.token_hash_prefix, "created": res.created},
+            sys.stdout,
+            indent=2,
+        )
+        sys.stdout.write("\n")
+    else:
+        state = "seeded" if res.created else "already present"
+        sys.stdout.write(
+            f"Dev worker token {state} (prefix {res.token_hash_prefix}).\n"
+            f"loom-worker pods carrying the --smoke-defaults worker-token now "
+            f"register; crash-looping workers recover on their next retry.\n",
+        )
+    return 0
+
+
 def _slurm_workers_status(args: argparse.Namespace) -> int:
     try:
         admin_token = _resolve_admin_token(args.admin_token)
@@ -1983,6 +2024,29 @@ def dispatch(argv: list[str]) -> int:
         help="Output format.",
     )
     p_br.set_defaults(handler=_ensure_batch_runner_token)
+
+    p_dwt = sub.add_parser(
+        "ensure-dev-worker-token",
+        help=(
+            "LOCAL/DEV ONLY: seed the fixed --smoke-defaults worker token "
+            "so in-cluster workers register with no mint/patch/restart."
+        ),
+    )
+    p_dwt.add_argument(
+        "--db-url",
+        default=os.environ.get("LOOM_DB_URL") or os.environ.get("LOOM_CP_DB_URL"),
+        help=(
+            "Target Postgres URL. Defaults to env LOOM_DB_URL, then "
+            "LOOM_CP_DB_URL, so it isn't exposed via argv."
+        ),
+    )
+    p_dwt.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format.",
+    )
+    p_dwt.set_defaults(handler=_ensure_dev_worker_token)
 
     p_tokens = sub.add_parser(
         "tokens",

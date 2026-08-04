@@ -145,32 +145,37 @@ app pods assert schema-at-head and won't start otherwise); it is opt-in because
 > The full kind end-to-end (image build → ingress → apply) is environment-gated;
 > run it once on your machine to confirm your Docker/kind versions.
 
-## 5. Seed a worker token
+## 5. Seed the dev worker token
 
-Workers authenticate to the control-plane with a DB-registered token
-(`worker:report` scope); the placeholder in `loom-secrets/worker-token` is
-**not** registered, so a fresh stack logs `401` at `/workers/register` until you
-mint one. Port-forward the control-plane and mint a token into `loom-secrets`,
-then restart the workers so they pick it up:
+Workers authenticate to the control-plane with a **DB-registered** token
+(`worker:report` scope). The `--smoke-defaults` placeholder in
+`loom-secrets/worker-token` isn't registered, so a fresh stack logs `401` at
+`/workers/register` until you seed a matching row. `ensure-dev-worker-token`
+seeds a token whose plaintext equals that placeholder, so the workers already
+carry the right value — **no mint, secret patch, or restart needed**. Run it
+against the cluster Postgres via a port-forward (the same way the CI smokes run
+alembic):
 
 ```
-kubectl -n loom-local port-forward deploy/loom-control-plane 18080:8080 &
+kubectl -n loom-local port-forward svc/loom-postgres 15432:5432 &
+PF=$!; sleep 3
 
-# The admin bearer is the smoke token from step 4's loom-admin-secret.
-printf 'loom_admin_smoke-local-dev-not-for-production-use-0' > /tmp/loom-admin-tok
+CP_DB_URL=$(kubectl -n loom-local get secret loom-secrets \
+  -o jsonpath='{.data.cp-db-url}' | base64 -d \
+  | sed -E 's#@[^/]+/#@localhost:15432/#')
 
-uv run --no-sync python -m loom_cli admin tokens worker mint \
-  --cp-url http://localhost:18080 --admin-token file:/tmp/loom-admin-tok \
-  --format json | jq -r .token > /tmp/loom-worker-tok
-
-kubectl -n loom-local patch secret loom-secrets --type=merge \
-  -p "{\"data\":{\"worker-token\":\"$(base64 -w0 /tmp/loom-worker-tok)\"}}"
-kubectl -n loom-local rollout restart statefulset/loom-worker
-rm -f /tmp/loom-admin-tok /tmp/loom-worker-tok
+LOOM_DB_URL="$CP_DB_URL" uv run --no-sync python -m loom_cli \
+  admin ensure-dev-worker-token
+kill $PF
 ```
 
-Confirm the workers register: `kubectl -n loom-local logs loom-worker-0 --tail=5`
-should show `/workers/register` → `200` and `/trials/claim` polling.
+Crash-looping workers recover on their next retry (no manual restart). Confirm:
+`kubectl -n loom-local logs loom-worker-0 --tail=5` should show
+`/workers/register` → `200` and `/trials/claim` polling.
+
+> **LOCAL/DEV ONLY.** `ensure-dev-worker-token` installs a fixed, guessable
+> worker credential (the throwaway smoke value). Never run it against a real
+> environment — those mint per-worker tokens via `loom admin tokens worker mint`.
 
 ## 6. Reach the API and run a trial
 
