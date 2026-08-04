@@ -284,6 +284,22 @@ def validate_profiles(profiles: list[EnvironmentProfile], repo_root: Path) -> li
         if profile.environment == "production" and "beta" in profile.frontend_route.lower():
             errors.append("production: frontend_route must not contain beta wording")
 
+        # Reserved dev-instance space: per-developer dev environments derive
+        # `loom-dev-<name>` namespaces and `/dev-<name>` routes (see
+        # loom.dev_instance / docs/architecture/multi-dev-env-design.md). A base
+        # env must never fall inside that space, or a dev instance could collide
+        # with it.
+        if profile.namespace.startswith("loom-dev-"):
+            errors.append(
+                f"{profile.environment}: namespace {profile.namespace!r} is in the "
+                "reserved dev-instance space (loom-dev-<name>)",
+            )
+        if _url_path(profile.frontend_route).startswith("/dev-"):
+            errors.append(
+                f"{profile.environment}: frontend_route path is in the reserved "
+                "dev-instance space (/dev-<name>)",
+            )
+
     return errors
 
 
