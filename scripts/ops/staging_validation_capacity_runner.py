@@ -34,7 +34,7 @@ from loom_cli.secret_source import (
 )
 
 FULL_GB10_HOSTS = tuple(f"trt-gb10-{i}" for i in range(1, 16))
-TEMPORARILY_EXCLUDED_HOSTS = frozenset({"trt-gb10-7"})
+TEMPORARILY_EXCLUDED_HOSTS: frozenset[str] = frozenset()
 DEFAULT_HOSTS = tuple(host for host in FULL_GB10_HOSTS if host not in TEMPORARILY_EXCLUDED_HOSTS)
 EXPECTED_MAX_CONCURRENT = 10
 FULL_GIT_SHA_RE = re.compile(r"[0-9a-f]{40}")

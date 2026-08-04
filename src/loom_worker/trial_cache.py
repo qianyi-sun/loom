@@ -45,6 +45,7 @@ from docker.errors import APIError, BuildError, ImageNotFound, NotFound
 if TYPE_CHECKING:
     from loom_launcher.adapter import AgentAdapter
 
+from loom.driver.build_containment import forbid_build_when_contained
 from loom_worker.config import WorkerSettings
 from loom_worker.control_plane_client import HttpControlPlaneClient
 
@@ -154,6 +155,7 @@ def _build_layered_image_sync(
     tag: str,
     base_digest: str,
     install_script: str,
+    require_containment: bool = False,
 ) -> None:
     """Synthesize a Dockerfile that layers `install_script` on top of
     `base_digest`, then run `docker build`. Tempdir cleanup is automatic.
@@ -171,6 +173,10 @@ def _build_layered_image_sync(
             RUN bash /tmp/install.sh && rm /tmp/install.sh
         """)
         )
+        # #1146: layered builds run outside the Slurm job cgroup — refuse on
+        # containment-required (non-exclusive) workers; the layered image must
+        # be pre-built/pushed to the shared trial-image cache instead.
+        forbid_build_when_contained(require_containment, tag)
         try:
             client.images.build(
                 path=str(ctx_path),
@@ -553,6 +559,9 @@ async def resolve_trial_image(
                     tag=local_tag,
                     base_digest=task_image_digest,
                     install_script=install_script,
+                    require_containment=bool(
+                        getattr(settings, "require_cgroup_parent", False)
+                    ),
                 )
 
                 # AWAITED push under the slot — prevents the v3 race

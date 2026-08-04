@@ -442,7 +442,7 @@ def test_fixed_transport_target_rejects_path_authority_drift(repo, env_file) -> 
 
 def test_fixed_transport_factory_binds_checked_in_staging_inventory() -> None:
     repo_root = Path(__file__).resolve().parents[4]
-    hosts = tuple(f"trt-gb10-{index}" for index in range(1, 16) if index != 7)
+    hosts = tuple(f"trt-gb10-{index}" for index in range(1, 16))
     transport = build_fixed_gb10_ssh_transport(
         repo_root / "deploy/environments/staging.cluster.toml",
         expected_hosts=hosts,

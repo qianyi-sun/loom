@@ -177,7 +177,7 @@ def make_config(tmp_path: Path) -> OperatorConfig:
     ssh_config.chmod(0o644)
     cluster = runner / "deploy/environments/staging.cluster.toml"
     hosts = ",\n".join(
-        f'  {{ ssh_target = "trt-gb10-{number}" }}' for number in range(1, 16) if number != 7
+        f'  {{ ssh_target = "trt-gb10-{number}" }}' for number in range(1, 16)
     )
     cluster.write_text(
         "\n".join(
@@ -391,10 +391,10 @@ def test_collect_preflight_probes_only_exact_merged_active_gb10_set(tmp_path: Pa
     assert report.passed, report.to_dict()
     probed_hosts = tuple(argv[-2] for argv in calls if argv[:1] == ["ssh"] and argv[-1] == "true")
     assert probed_hosts == preflight_module.ACTIVE_GB10_HOSTS
-    assert len(probed_hosts) == 14
-    assert "trt-gb10-7" not in probed_hosts
+    assert len(probed_hosts) == 15
+    assert "trt-gb10-7" in probed_hosts
     assert len(preflight_module.FULL_GB10_HOSTS) == 15
-    assert set(preflight_module.FULL_GB10_HOSTS) - set(probed_hosts) == {"trt-gb10-7"}
+    assert set(preflight_module.FULL_GB10_HOSTS) == set(probed_hosts)
     topology = next(check for check in report.checks if check.name == "gb10-topology")
     assert topology.passed is True
     shared_probes = tuple(argv[-2] for argv in calls if argv[:1] == ["ssh"] and argv[-1] != "true")
@@ -402,7 +402,7 @@ def test_collect_preflight_probes_only_exact_merged_active_gb10_set(tmp_path: Pa
     shared = next(check for check in report.checks if check.name == "gb10-shared-repository")
     assert shared.passed is True
     assert shared.evidence is not None
-    assert shared.evidence.endswith("hosts=14")
+    assert shared.evidence.endswith("hosts=15")
 
 
 def test_collect_preflight_decodes_repository_st_dev_before_mount_comparison(
@@ -694,7 +694,6 @@ def test_collect_preflight_rejects_one_shared_repository_host_failure(
 @pytest.mark.parametrize(
     "configured_hosts",
     [
-        preflight_module.FULL_GB10_HOSTS,
         preflight_module.ACTIVE_GB10_HOSTS[:-1],
         tuple(reversed(preflight_module.ACTIVE_GB10_HOSTS)),
         (*preflight_module.ACTIVE_GB10_HOSTS[:-1], preflight_module.ACTIVE_GB10_HOSTS[0]),
@@ -733,8 +732,8 @@ def test_collect_preflight_rejects_full_topology_digest_drift_without_ssh(
     ssh_config = config.runner_repo / "deploy/worker-pools/gb10/ssh_config"
     ssh_config.write_text(
         ssh_config.read_text(encoding="utf-8").replace(
-            "HostName 192.168.20.17",
-            "HostName 192.168.20.117",
+            "HostName 192.168.20.77",
+            "HostName 192.168.20.177",
         ),
         encoding="utf-8",
     )

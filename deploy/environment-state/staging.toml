@@ -17,7 +17,7 @@ actuator = "slurm"
 enabled = false
 disabled_reason = "#827: service identity and exact-candidate allocation attestation are not yet proven for every allowed GB10 node"
 min_slots = 0
-max_slots = 140
+max_slots = 150
 scale_up_threshold_slots = 1
 scale_down_idle_seconds = 600
 scale_up_cooldown_seconds = 60
@@ -36,6 +36,7 @@ allowed_nodes = [
   "trt-gb10-4",
   "trt-gb10-5",
   "trt-gb10-6",
+  "trt-gb10-7",
   "trt-gb10-8",
   "trt-gb10-9",
   "trt-gb10-10",
@@ -50,7 +51,7 @@ repo_dir = "/shared_work2/qianyi/.loom-staging-rollout/worker-repos/loom-remote-
 requested_cpus = 20
 requested_memory_mib = 115000
 requested_concurrency = 10
-max_jobs = 14
+max_jobs = 15
 pending_job_cap = 2
 time_limit = "2-00:00:00"
 # Non-exclusive is the only supported Loom Slurm contract. The disabled policy
@@ -110,7 +111,7 @@ image_tag = "${IMAGE_TAG}"
 max_concurrent = 10
 env_config_version = "${ENV_CONFIG_VERSION}"
 source_git_commit = "${GIT_SHA}"
-target_slots = 140
+target_slots = 150
 
 [gb10_worker_pool_desired_states.host_intents]
 trt-gb10-1 = "active"
@@ -119,7 +120,7 @@ trt-gb10-3 = "active"
 trt-gb10-4 = "active"
 trt-gb10-5 = "active"
 trt-gb10-6 = "active"
-trt-gb10-7 = "stopped"
+trt-gb10-7 = "active"
 trt-gb10-8 = "active"
 trt-gb10-9 = "active"
 trt-gb10-10 = "active"

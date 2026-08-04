@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+from datetime import UTC, datetime
+from threading import Barrier, get_ident
+from typing import Any
 from urllib.error import HTTPError
 
 import pytest
 from scripts.ops import authoritative_gate
 from scripts.ops.authoritative_gate import GitHubAPIError, GitHubClient
 from scripts.ops.authoritative_gate_metrics import (
+    GitHubMetricsClient,
     MetricsError,
     extract_job_metrics,
     parse_run_name,
@@ -160,27 +165,293 @@ def test_summarize_runs_exposes_amplification_and_coverage_gaps() -> None:
 
     assert summary["totals"] == {
         "api_calls": 12,
+        "api_calls_complete": False,
         "distinct_source_attempts": 1,
         "publish_jobs": 4,
         "publisher_runs": 5,
         "trigger_counts": {"pull_request_target": 1, "workflow_run": 3},
     }
     assert summary["per_source_attempt"] == {
-        "api_calls": 10.0,
+        "api_calls": None,
+        "executed_publish_jobs": 3.0,
         "publish_jobs": 3.0,
         "publisher_runs": 3.0,
     }
+    assert summary["pull_request_target"] == {
+        "api_calls": 2,
+        "api_calls_complete": True,
+        "executed_publish_jobs": 1,
+        "per_run": {
+            "api_calls": 2.0,
+            "executed_publish_jobs": 1.0,
+            "publish_jobs": 1.0,
+        },
+        "publish_jobs": 1,
+        "publisher_runs": 1,
+    }
     assert summary["coverage"] == {
         "instrumented_runs": 4,
+        "publish_job_log_error_examples": [],
+        "publish_job_log_errors": 0,
+        "publish_job_logs_skipped": 0,
+        "publish_job_logs_without_metrics": 1,
         "legacy_runs": 1,
         "malformed_runs": 0,
+        "publish_jobs_skipped": 0,
         "publish_jobs_with_metrics": 3,
         "publish_jobs_without_metrics": 1,
     }
     assert summary["failures"] == {"publisher_runs": 1}
+    assert summary["first_attempt_in_progress"] == {
+        "api_calls": 6,
+        "api_calls_complete": True,
+        "executed_publish_jobs": 1,
+        "publish_jobs": 1,
+        "publisher_runs": 1,
+    }
     assert summary["lifecycle_deliveries"] == {
         "completed": 1,
         "in_progress": 1,
         "requested": 1,
         "synchronize": 1,
     }
+    assert summary["publisher_runs_per_source_attempt_distribution"] == {"3": 1}
+    assert summary["source_workflows"] == {
+        "302898379": {
+            "api_calls": 10,
+            "api_calls_complete": False,
+            "attempts": 1,
+            "deliveries": {"completed": 1, "in_progress": 1, "requested": 1},
+            "name": "CI",
+            "per_attempt": {
+                "api_calls": None,
+                "executed_publish_jobs": 3.0,
+                "publish_jobs": 3.0,
+                "publisher_runs": 3.0,
+            },
+            "executed_publish_jobs": 3,
+            "publish_jobs": 3,
+            "publisher_runs": 3,
+        }
+    }
+
+
+def test_collect_runs_fetches_instrumented_jobs_concurrently_and_preserves_order() -> None:
+    barrier = Barrier(2)
+    worker_threads: set[int] = set()
+
+    class ParallelClient(GitHubMetricsClient):
+        def __init__(self) -> None:
+            super().__init__(
+                token="token",
+                repository="qianyi-sun/loom",
+                api_url="https://api.github.test",
+            )
+
+        def _json(
+            self,
+            path: str,
+            *,
+            query: Mapping[str, str | int] | None = None,
+        ) -> Any:
+            assert path.endswith("/runs")
+            return {
+                "workflow_runs": [
+                    {
+                        "id": run_id,
+                        "run_attempt": 1,
+                        "created_at": f"2026-08-0{run_id}T00:00:00Z",
+                        "display_title": run_name(run=run_id),
+                    }
+                    for run_id in (1, 2)
+                ]
+            }
+
+        def _collect_jobs(
+            self,
+            run: Mapping[str, Any],
+            *,
+            include_logs: bool,
+        ) -> list[Mapping[str, Any]]:
+            assert include_logs is True
+            worker_threads.add(get_ident())
+            barrier.wait(timeout=2)
+            return [{"name": f"job-{run['id']}"}]
+
+    client = ParallelClient()
+    runs = client.collect_runs(
+        workflow_id=318631340,
+        since=datetime(2026, 8, 1, tzinfo=UTC),
+        until=datetime(2026, 8, 3, tzinfo=UTC),
+        max_runs=2,
+        workers=2,
+        include_logs=True,
+    )
+
+    assert [run["id"] for run in runs] == [1, 2]
+    assert [run["jobs"] for run in runs] == [[{"name": "job-1"}], [{"name": "job-2"}]]
+    assert len(worker_threads) == 2
+
+
+def test_summarize_runs_treats_workflow_skips_as_complete_zero_cost() -> None:
+    summary = summarize_runs(
+        [
+            {
+                "display_title": run_name(
+                    trigger="pull_request_target",
+                    workflow=0,
+                    run=0,
+                    attempt=0,
+                    delivery="opened",
+                    pull=1144,
+                ),
+                "conclusion": "success",
+                "jobs": [
+                    {
+                        "conclusion": "skipped",
+                        "name": "publish authoritative gate (${{ matrix.context }})",
+                    }
+                ],
+            }
+        ]
+    )
+
+    assert summary["totals"]["api_calls_complete"] is True
+    assert summary["first_attempt_in_progress"] == {
+        "api_calls": 0,
+        "api_calls_complete": True,
+        "executed_publish_jobs": 0,
+        "publish_jobs": 0,
+        "publisher_runs": 0,
+    }
+    assert summary["coverage"]["publish_jobs_skipped"] == 1
+    assert summary["coverage"]["publish_jobs_without_metrics"] == 0
+    assert summary["pull_request_target"] == {
+        "api_calls": 0,
+        "api_calls_complete": True,
+        "executed_publish_jobs": 0,
+        "per_run": {
+            "api_calls": 0.0,
+            "executed_publish_jobs": 0.0,
+            "publish_jobs": 1.0,
+        },
+        "publish_jobs": 1,
+        "publisher_runs": 1,
+    }
+
+
+def test_summarize_runs_treats_source_workflow_skips_as_complete_zero_cost() -> None:
+    summary = summarize_runs(
+        [
+            {
+                "display_title": run_name(delivery="in_progress"),
+                "conclusion": "success",
+                "jobs": [
+                    {
+                        "conclusion": "skipped",
+                        "name": "publish authoritative gate (repository-checks)",
+                    }
+                ],
+            }
+        ]
+    )
+
+    assert summary["totals"]["api_calls_complete"] is True
+    assert summary["first_attempt_in_progress"] == {
+        "api_calls": 0,
+        "api_calls_complete": True,
+        "executed_publish_jobs": 0,
+        "publish_jobs": 1,
+        "publisher_runs": 1,
+    }
+    assert summary["per_source_attempt"] == {
+        "api_calls": 0.0,
+        "executed_publish_jobs": 0.0,
+        "publish_jobs": 1.0,
+        "publisher_runs": 1.0,
+    }
+    assert summary["source_workflows"]["302898379"] == {
+        "api_calls": 0,
+        "api_calls_complete": True,
+        "attempts": 1,
+        "deliveries": {"in_progress": 1},
+        "executed_publish_jobs": 0,
+        "name": "CI",
+        "per_attempt": {
+            "api_calls": 0.0,
+            "executed_publish_jobs": 0.0,
+            "publish_jobs": 1.0,
+            "publisher_runs": 1.0,
+        },
+        "publish_jobs": 1,
+        "publisher_runs": 1,
+    }
+
+
+def test_collect_jobs_can_skip_log_downloads(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = GitHubMetricsClient(
+        token="token",
+        repository="qianyi-sun/loom",
+        api_url="https://api.github.test",
+    )
+    monkeypatch.setattr(
+        client,
+        "_json",
+        lambda *_args, **_kwargs: {
+            "jobs": [{"id": 44, "name": "publish authoritative gate (repository-checks)"}]
+        },
+    )
+    monkeypatch.setattr(
+        client,
+        "_request",
+        lambda *_args, **_kwargs: pytest.fail("job logs must not be downloaded"),
+    )
+
+    jobs = client._collect_jobs({"id": 11, "run_attempt": 1}, include_logs=False)
+
+    assert jobs == [
+        {
+            "id": 44,
+            "name": "publish authoritative gate (repository-checks)",
+            "log_skipped": True,
+        }
+    ]
+
+
+def test_collect_jobs_does_not_request_logs_for_workflow_skips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = GitHubMetricsClient(
+        token="token",
+        repository="qianyi-sun/loom",
+        api_url="https://api.github.test",
+    )
+    monkeypatch.setattr(
+        client,
+        "_json",
+        lambda *_args, **_kwargs: {
+            "jobs": [
+                {
+                    "conclusion": "skipped",
+                    "id": 44,
+                    "name": "publish authoritative gate (${{ matrix.context }})",
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        client,
+        "_request",
+        lambda *_args, **_kwargs: pytest.fail("skipped jobs do not have logs"),
+    )
+
+    jobs = client._collect_jobs({"id": 11, "run_attempt": 1}, include_logs=True)
+
+    assert jobs == [
+        {
+            "conclusion": "skipped",
+            "id": 44,
+            "log_unavailable_reason": "skipped_job",
+            "name": "publish authoritative gate (${{ matrix.context }})",
+        }
+    ]

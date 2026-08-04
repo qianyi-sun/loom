@@ -22,6 +22,7 @@ from typing import Any
 import docker
 from docker.errors import BuildError, ImageNotFound
 
+from loom.driver.build_containment import forbid_build_when_contained
 from loom.models.task import TaskConfig
 
 # Type alias for the optional build-slot provider a caller can pass to
@@ -139,6 +140,7 @@ async def resolve_task_image(
     task_checksum: str,
     docker_api_timeout_sec: int | None = None,
     build_slot_provider: BuildSlotProvider | None = None,
+    require_containment: bool = False,
 ) -> str:
     """Return the Docker image a service worker should use for this task.
 
@@ -202,6 +204,7 @@ async def resolve_task_image(
                     dockerfile=dockerfile,
                     build_context=build_context,
                     docker_api_timeout_sec=docker_api_timeout_sec,
+                    require_containment=require_containment,
                 ),
                 timeout=timeout,
             )
@@ -296,6 +299,7 @@ def _ensure_dockerfile_image(
     dockerfile: Path,
     build_context: Path,
     docker_api_timeout_sec: int | None = None,
+    require_containment: bool = False,
 ) -> None:
     configured_dockerfile = task_config.environment.dockerfile
     assert configured_dockerfile is not None
@@ -311,11 +315,16 @@ def _ensure_dockerfile_image(
         except ImageNotFound:
             pass
 
+        # #1146: a build here would run outside the Slurm job cgroup — refuse
+        # on containment-required (non-exclusive) workers; the image must be
+        # pre-built/cached.
+        forbid_build_when_contained(require_containment, tag)
         rel_dockerfile = dockerfile.relative_to(build_context).as_posix()
         _enforce_build_context_limits(build_context)
         _ensure_terminus_2_arm64_base_if_needed(
             client=client,
             dockerfile=dockerfile,
+            require_containment=require_containment,
         )
         client.images.build(
             path=str(build_context),
@@ -367,6 +376,7 @@ def _ensure_terminus_2_arm64_base_if_needed(
     *,
     client: Any,
     dockerfile: Path,
+    require_containment: bool = False,
 ) -> None:
     if not _dockerfile_uses_base_image(dockerfile, TERMINUS_2_FULL_IMAGE):
         return
@@ -381,6 +391,8 @@ def _ensure_terminus_2_arm64_base_if_needed(
         except ImageNotFound:
             pass
 
+        # #1146: refuse the base build on a containment-required worker.
+        forbid_build_when_contained(require_containment, TERMINUS_2_FULL_IMAGE)
         try:
             with tempfile.TemporaryDirectory(
                 prefix="loom-terminus-2-arm64-base-",

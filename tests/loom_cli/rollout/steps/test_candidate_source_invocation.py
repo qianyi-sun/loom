@@ -4088,7 +4088,7 @@ def test_current_candidate_worker_binding_is_stable_across_heartbeat_timestamps(
                             "updated_at": timestamp,
                             "host_intents": {
                                 "trt-gb10-1": "active",
-                                "trt-gb10-7": "stopped",
+                                "trt-gb10-2": "stopped",
                             },
                         }
                     ],

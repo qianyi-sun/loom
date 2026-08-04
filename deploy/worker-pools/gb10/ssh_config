@@ -23,7 +23,7 @@ Host trt-gb10-6
   ProxyJump trt-gb10-1
 
 Host trt-gb10-7
-  HostName 192.168.20.17
+  HostName 192.168.20.77
   ProxyJump trt-gb10-1
 
 Host trt-gb10-8

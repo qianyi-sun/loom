@@ -20,6 +20,7 @@ from uuid import UUID
 import docker
 from docker.errors import ImageNotFound
 
+from loom.driver.build_containment import forbid_build_when_contained
 from loom.models.healthcheck import HealthcheckSpec
 from loom.models.task import TaskConfig, TaskSidecarConfig
 from loom_worker.task_image import (
@@ -70,6 +71,7 @@ class DockerTaskSidecarRuntime:
         container_cpus: float = 0.0,
         container_memory_mib: int = 0,
         container_pids: int = 0,
+        container_cgroup_parent: str | None = None,
         runtime_identity_labels: tuple[tuple[str, str], ...] = (),
     ) -> None:
         self.task_config = task_config
@@ -84,6 +86,7 @@ class DockerTaskSidecarRuntime:
         self.container_cpus = container_cpus
         self.container_memory_mib = container_memory_mib
         self.container_pids = container_pids
+        self.container_cgroup_parent = container_cgroup_parent
         self.runtime_identity_labels = runtime_identity_labels
         self._client: Any | None = None
         self._containers: list[Any] = []
@@ -233,6 +236,10 @@ class DockerTaskSidecarRuntime:
             return
         except ImageNotFound:
             pass
+        # #1146: sidecar image builds run outside the Slurm job cgroup. A
+        # container_cgroup_parent means this is a containment-required
+        # (non-exclusive) worker — refuse the build; pre-build/cache the image.
+        forbid_build_when_contained(bool(self.container_cgroup_parent), tag)
         rel_dockerfile = dockerfile.relative_to(build_context).as_posix()
         _enforce_build_context_limits(build_context)
         self._client.images.build(
@@ -297,6 +304,8 @@ class DockerTaskSidecarRuntime:
             kwargs["mem_limit"] = self.container_memory_mib * 1024 * 1024
         if self.container_pids > 0:
             kwargs["pids_limit"] = self.container_pids
+        if self.container_cgroup_parent is not None:
+            kwargs["cgroup_parent"] = self.container_cgroup_parent
         create_kwargs = dict(kwargs)
         create_kwargs.pop("remove", None)
         container = self._client.containers.create(image, **create_kwargs)

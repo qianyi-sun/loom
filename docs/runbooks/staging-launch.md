@@ -704,10 +704,11 @@ node-agent service and timer must match the installed units, and the timer must
 be enabled and active/waiting. After the rollout session disconnects, wait more
 than one timer period, stop one declared-active canary worker, and require the
 same candidate image and a fresh linked heartbeat to return within the next
-period. A stopped/excluded host, including the current node 7 exception, must
-not return. Do not leave a legacy production node-agent timer sharing the
-staging tunnel ports or Compose root; fence or isolate it before connectivity
-is restored.
+period. A host with an explicit maintenance or health-failure stop intent must
+not return until that intent is cleared, but it remains visible in the complete
+15-host health inventory. Do not leave a legacy production node-agent timer
+sharing the staging tunnel ports or Compose root; fence or isolate it before
+connectivity is restored.
 
 For OLDLAB 1-5, use the committed staged files in
 `deploy/worker-pools/oldlab/` as the source of truth for included nodes,

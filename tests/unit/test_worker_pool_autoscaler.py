@@ -229,6 +229,11 @@ def _policy_row(**overrides: object) -> WorkerPoolAutoscalerPolicy:
         actor_config.setdefault("container_memory_mib", 4096)
         actor_config.setdefault("container_pids", 512)
         actor_config.setdefault("candidate_sha", "a" * 40)
+        # #896: non-exclusive workers require a positive job cgroup PID ceiling
+        # (>= container_pids * concurrency). Default generously to cover the
+        # higher concurrencies some scale-up tests use (512 * 16); tests
+        # exercising the guard pass 0 explicitly.
+        actor_config.setdefault("job_pids_max", 8192)
     return WorkerPoolAutoscalerPolicy(**values)
 
 
@@ -864,6 +869,7 @@ def test_slurm_config_from_policy_uses_nonexclusive_node_allocation() -> None:
             "container_cpus": 2.0,
             "container_memory_mib": 8000,
             "container_pids": 512,
+            "job_pids_max": 512,
             "candidate_sha": "a" * 40,
         },
     )
@@ -871,6 +877,30 @@ def test_slurm_config_from_policy_uses_nonexclusive_node_allocation() -> None:
     request = build_sbatch_request(_slurm_config_from_policy(row), node="oldlab-4")
 
     assert "--exclusive" not in request.args
+    assert "--comment=loom-cgroup-v1:pids=512" in request.args
+
+
+def test_slurm_config_from_policy_rejects_missing_nonexclusive_job_pids_max() -> None:
+    row = _policy_row(
+        max_slots=1,
+        actuator_config={
+            "allowed_nodes": ["oldlab-4"],
+            "env_file": "/secure/.env.remote-worker",
+            "repo_dir": "/opt/loom",
+            "requested_concurrency": 1,
+            "requested_cpus": 2,
+            "requested_memory_mib": 8000,
+            "exclusive": False,
+            "container_cpus": 2.0,
+            "container_memory_mib": 8000,
+            "container_pids": 512,
+            "candidate_sha": "a" * 40,
+            "job_pids_max": 0,
+        },
+    )
+
+    with pytest.raises(ValueError, match="job_pids_max is required"):
+        _slurm_config_from_policy(row)
 
 
 def test_slurm_config_from_policy_rejects_exclusive_node_allocation() -> None:

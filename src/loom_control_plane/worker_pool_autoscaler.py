@@ -1046,6 +1046,7 @@ def _slurm_config_from_policy(
         container_cpus=float(actor_config.get("container_cpus") or 0.0),
         container_memory_mib=int(actor_config.get("container_memory_mib") or 0),
         container_pids=int(actor_config.get("container_pids") or 0),
+        job_pids_max=actor_config.get("job_pids_max", 0),
         candidate_sha=str(actor_config.get("candidate_sha") or ""),
         gpu_tres=str(actor_config.get("gpu_tres") or ""),
     )

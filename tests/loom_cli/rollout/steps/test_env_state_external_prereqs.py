@@ -206,7 +206,7 @@ def _consumer_verification_fixture(
     return ctx, step_dir, records, calls
 
 
-def test_post_publish_consumer_verification_streams_trusted_verifier_to_exact_14_hosts(
+def test_post_publish_consumer_verification_streams_trusted_verifier_to_exact_15_hosts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -216,12 +216,12 @@ def test_post_publish_consumer_verification_streams_trusted_verifier_to_exact_14
 
     assert evidence is not None
     assert evidence["passed"] is True
-    assert evidence["host_count"] == 14
-    assert evidence["expected_host_count"] == 14
+    assert evidence["host_count"] == 15
+    assert evidence["expected_host_count"] == 15
     assert evidence["tracked_entries"] == 10
     assert evidence["tree_content_sha256"] == "e" * 64
     assert len(str(evidence["verifier_sha256"])) == 64
-    assert len(calls) == 14
+    assert len(calls) == 15
     assert [host for host, _, _ in calls] == list(ACTIVE_GB10_HOSTS)
     assert all(command.startswith("/usr/bin/python3 - --root ") for _, command, _ in calls)
     assert all(stdin_text == "# trusted verifier bytes\n" for _, _, stdin_text in calls)
@@ -233,7 +233,7 @@ def test_post_publish_consumer_verification_streams_trusted_verifier_to_exact_14
         )
     )
     assert persisted == evidence
-    assert len({node["root_device"] for node in persisted["nodes"]}) == 14
+    assert len({node["root_device"] for node in persisted["nodes"]}) == 15
 
 
 def test_post_publish_consumer_verification_rejects_divergent_host_content_identity(
@@ -272,7 +272,7 @@ def test_post_publish_consumer_verification_rejects_divergent_host_content_ident
         )
     )
     assert persisted["passed"] is False
-    assert persisted["host_count"] == 13
+    assert persisted["host_count"] == 14
     assert persisted["failed_attempts"] == 1
     assert persisted["failed_host"] == "trt-gb10-15"
     assert persisted["failure_class"] == "content_identity"
@@ -308,9 +308,9 @@ def test_post_publish_consumer_verification_retries_transient_verifier_failure(
 
     assert evidence is not None
     assert evidence["passed"] is True
-    assert evidence["host_count"] == 14
-    assert len(calls) == 15
-    assert [node["attempts"] for node in evidence["nodes"]] == [2] + [1] * 13
+    assert evidence["host_count"] == 15
+    assert len(calls) == 16
+    assert [node["attempts"] for node in evidence["nodes"]] == [2] + [1] * 14
 
 
 def test_post_publish_consumer_verification_covers_shared_visibility_window(
@@ -344,9 +344,9 @@ def test_post_publish_consumer_verification_covers_shared_visibility_window(
 
     assert evidence is not None
     assert evidence["passed"] is True
-    assert evidence["host_count"] == 14
-    assert len(calls) == 21
-    assert [node["attempts"] for node in evidence["nodes"]] == [8] + [1] * 13
+    assert evidence["host_count"] == 15
+    assert len(calls) == 22
+    assert [node["attempts"] for node in evidence["nodes"]] == [8] + [1] * 14
     assert sleeps == [5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0]
 
 

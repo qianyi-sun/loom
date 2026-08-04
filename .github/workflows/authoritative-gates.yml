@@ -43,7 +43,9 @@ jobs:
       (github.event_name == 'workflow_run' &&
        contains(fromJSON('["pull_request","merge_group"]'), github.event.workflow_run.event) &&
        contains(fromJSON('[302898379,302898384,302898381,302898388]'),
-                github.event.workflow_run.workflow_id)) ||
+                github.event.workflow_run.workflow_id) &&
+       (github.event.action != 'in_progress' ||
+        github.event.workflow_run.run_attempt > 1)) ||
       (github.event_name == 'pull_request_target' &&
        (github.event.action == 'converted_to_draft' ||
         (!github.event.pull_request.draft &&

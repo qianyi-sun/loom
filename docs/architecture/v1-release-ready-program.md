@@ -146,17 +146,26 @@ heads use the same publisher contract. Push and manual runs report distinct
 `*-push` and `*-manual` aggregate names so a `dev` push check cannot collide
 with the protected custom check on a later `dev`-to-`main` promotion head. Push
 workflow-run events and non-authoritative workflow ID/name pairs are also
-rejected by the publisher. Publisher jobs deliberately have no Actions
-concurrency group. GitHub keeps at most one pending member of a concurrency
-group and cancels the older pending job even when `cancel-in-progress` is
-`false`; that cancelled GitHub-managed job CheckRun can poison the PR rollup
-and cannot be rewritten by the workflow token. Every trusted publisher
-invocation therefore executes. The state machine arbitrates concurrent and
+rejected by the publisher. Publisher jobs serialize on context and candidate
+head with `queue: max` and `cancel-in-progress: false`. The explicit max queue
+is required: GitHub's default single-pending concurrency behavior replaces and
+cancels an older pending job, while `queue: max` retains up to 100 pending jobs
+for that group. A cancelled GitHub-managed job CheckRun can poison the PR
+rollup and cannot be rewritten by the workflow token. Every trusted delivery
+within that bounded queue therefore executes. The state machine arbitrates
 out-of-order invocations from live PR state, ordered issue events, the exact
 source-run attempt, and final authority re-reads rather than delivery order.
 Delayed invocations for an old head never write the live head. If one head is
 associated with multiple open PRs, the publisher fails closed because one
 SHA-level check cannot represent two PR metadata generations.
+
+For a source workflow's first attempt, the `requested` delivery performs the
+fail-closed invalidation and the redundant `in_progress` publisher job is
+filtered. The `in_progress` job remains enabled when `run_attempt > 1` because
+GitHub does not emit `workflow_run.requested` when a workflow is rerun. Terminal
+`completed` deliveries are never filtered. This job-level filter reduces API
+work without removing lifecycle events needed to invalidate either an initial
+attempt or a rerun.
 
 Publisher runs stamp `publisher-metrics-v1` source identity into their run name,
 including the source workflow/run/attempt and lifecycle delivery. Each publisher
@@ -165,14 +174,18 @@ Operators can correlate those records without changing publisher scheduling:
 
 ```bash
 GITHUB_TOKEN="$(gh auth token)" python scripts/ops/authoritative_gate_metrics.py \
-  --repository qianyi-sun/loom --since 2026-08-01T00:00:00Z
+  --repository qianyi-sun/loom --since 2026-08-01T00:00:00Z --workers 8
 ```
 
 The report separates `pull_request_target` invalidations from `workflow_run`
 lifecycle deliveries and reports publisher runs, publish jobs, and API calls per
-distinct source attempt. Runs predating `publisher-metrics-v1`, malformed run
-names, and unavailable job logs remain explicit coverage gaps rather than being
-silently included in the denominator.
+distinct source attempt and source workflow. Job and log requests are fetched
+with a bounded worker pool; `--workers 1` provides a serial diagnostic path.
+Use `--skip-logs` only for a quick run/job structural baseline: the report marks
+every skipped log and intentionally leaves API-call coverage incomplete. Runs
+predating `publisher-metrics-v1`, malformed run names, unavailable job logs, and
+logs without a terminal metrics record remain explicit coverage gaps rather
+than being silently included in the denominator.
 
 CheckRuns created with the workflow token are attached to the publisher's
 first GitHub Actions check suite for the candidate head. A Draft PR can
@@ -206,6 +219,17 @@ and protected CheckRun IDs on the tracking issue.
 Keep a durable documentation or test improvement in the probe's final tree so
 removing the deliberate failure is itself a real fix rather than a
 tree-identical re-anchor.
+
+`workflow_run` uses the workflow on the repository's default branch, so a PR
+that changes this trusted publisher cannot exercise its candidate workflow
+definition before merge. Pre-merge admission therefore covers the candidate's
+contract tests, exact latest-`dev` rebase, and four exact-head required checks.
+Immediately after default-branch activation, run the disposable acceptance
+sequence above before declaring the publisher change accepted or beginning a
+subsequent publisher change. If the activated candidate fails that sequence,
+keep affected PRs stopped and revert it through the normal protected-PR path.
+See GitHub's
+[workflow-run event documentation](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_run).
 
 Manual dispatch remains available, but aggregate jobs report
 `repository-checks-manual`, `images-gate-manual`,

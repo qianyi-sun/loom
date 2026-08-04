@@ -76,6 +76,10 @@ class StartOptions:
     container_cpus: float = 0.0
     container_memory_mib: int = 0
     container_pids: int = 0
+    # Exact host cgroup v2 parent for Docker HostConfig.CgroupParent.
+    # Non-exclusive Slurm workers require an allocation-owned absolute path;
+    # None preserves unmanaged/local and exclusive-worker behavior.
+    cgroup_parent: str | None = None
     # #1023: -1 preserves unmanaged/local Docker behavior. Slurm workers set
     # this to their exact allocation (including 0) and pass the host-visible
     # SLURM_JOB_GPUS IDs so Docker cannot select a device outside the job.

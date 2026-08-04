@@ -24,6 +24,7 @@ class WorkerSettings(BaseSettings):
     benchmark_cache: Path | None = None
     blocking_io_max_workers: int | None = None
     candidate_sha: str = ""
+    cgroup_parent: str = ""
     claim_poll_interval_sec: float = 1.0
     compose_project: str = ""
     container_cpus: float = 0.0
@@ -54,6 +55,7 @@ class WorkerSettings(BaseSettings):
     minio_secret_key: SecretStr
     pool_name: str = "default"
     pre_start_heartbeat_interval_sec: float = 60.0
+    require_cgroup_parent: bool = False
     sandbox_identity: str = ""
     sandbox_isolation: bool = False
     sandbox_singleton_image: str = "loom-llm-gateway-sandbox:dev"
