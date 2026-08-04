@@ -128,17 +128,17 @@ eval "$(uv run --no-sync python -m loom_cli cluster bootstrap-secrets \
   --namespace loom-local --smoke-defaults --no-pgbouncer)"
 
 # up re-renders identically, applies, runs the DB migration Job
-# (`alembic upgrade head`), then waits for readiness by default (--no-wait
+# (`alembic upgrade head`, via --migrate), then waits for readiness (--no-wait
 # to skip). Namespace is inferred from the config.
 uv run --no-sync python -m loom_cli cluster up \
-  --config deploy/local/local.cluster.toml
+  --config deploy/local/local.cluster.toml --migrate
 ```
 
 `up` deploys the control plane, service, `loom-worker`, single-pod Postgres, and
-standalone MinIO into the cluster, applies the schema migration (the app pods
-assert schema-at-head and won't start otherwise), and waits until they report
-ready. There is no separate local process to start. (Pass `--skip-migrate` only
-if a separate step already applied migrations.)
+standalone MinIO into the cluster and waits until they report ready. There is no
+separate local process to start. `--migrate` runs the schema migration Job (the
+app pods assert schema-at-head and won't start otherwise); it is opt-in because
+`cluster up` leaves migration an explicit operator step for staging/production.
 
 > The render + command contract above is covered by a render regression
 > (`tests/loom_cli/test_cluster_render.py::test_local_example_template_renders`).

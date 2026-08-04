@@ -4724,13 +4724,15 @@ def _up_impl(
         )
         return 1
 
-    # 3b. Database migration. The control-plane and service assert the
-    # schema is at Alembic head on startup and refuse to boot otherwise;
-    # `up` applied the app manifest above, so run the sanctioned migration
-    # Job now (after apply → postgres + secrets exist; before the readiness
-    # wait → `up` only reports ready once the schema is migrated). Under
-    # --no-wait we apply the Job but don't block on it.
-    if not args.skip_migrate:
+    # 3b. Database migration (opt-in via --migrate). The control-plane and
+    # service assert the schema is at Alembic head on startup and refuse to
+    # boot otherwise. `cluster up` deliberately leaves migration an explicit
+    # operator action for staging/production (see staging-smoke.yml, which
+    # orchestrates it between two `up` calls); single-node local/dev bring-up
+    # opts in so it's one command. Runs after apply (postgres + secrets
+    # exist) and before the readiness wait; under --no-wait we apply the Job
+    # but don't block on it.
+    if getattr(args, "migrate", False):
         migrated = _run_migration_job(
             namespace=args.namespace,
             context=args.context,
@@ -4743,8 +4745,7 @@ def _up_impl(
             sys.stderr.write(
                 "error: database migration failed; the control-plane and "
                 "service will not start until the schema is at head. Fix "
-                "the cause and re-run, or pass --skip-migrate if migrations "
-                "are applied by a separate step.\n",
+                "the cause and re-run.\n",
             )
             return 1
 
@@ -5772,16 +5773,16 @@ def dispatch(argv: list[str]) -> int:
         ),
     )
     p_up.add_argument(
-        "--skip-migrate",
-        dest="skip_migrate",
+        "--migrate",
+        dest="migrate",
         action="store_true",
         help=(
-            "Skip the automatic DB migration Job. `up` normally runs "
-            "`alembic upgrade head` (as the sanctioned app=loom-migration "
-            "Job) after apply and before the readiness wait, because the "
-            "control-plane and service refuse to start until the schema is "
-            "at head. Use only when migrations are applied by a separate "
-            "step (e.g. the staging/prod rollout chain)."
+            "Run the DB migration Job (`alembic upgrade head`, as the "
+            "sanctioned app=loom-migration Job) after apply and before the "
+            "readiness wait. Off by default: `cluster up` leaves migration "
+            "an explicit operator step for staging/production. Pass this for "
+            "single-node local/dev bring-up, where the control-plane and "
+            "service otherwise crash-loop on a schema that isn't at head."
         ),
     )
     p_up.add_argument(
