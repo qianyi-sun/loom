@@ -70,6 +70,7 @@ class DockerTaskSidecarRuntime:
         container_cpus: float = 0.0,
         container_memory_mib: int = 0,
         container_pids: int = 0,
+        container_cgroup_parent: str | None = None,
         runtime_identity_labels: tuple[tuple[str, str], ...] = (),
     ) -> None:
         self.task_config = task_config
@@ -84,6 +85,7 @@ class DockerTaskSidecarRuntime:
         self.container_cpus = container_cpus
         self.container_memory_mib = container_memory_mib
         self.container_pids = container_pids
+        self.container_cgroup_parent = container_cgroup_parent
         self.runtime_identity_labels = runtime_identity_labels
         self._client: Any | None = None
         self._containers: list[Any] = []
@@ -297,6 +299,8 @@ class DockerTaskSidecarRuntime:
             kwargs["mem_limit"] = self.container_memory_mib * 1024 * 1024
         if self.container_pids > 0:
             kwargs["pids_limit"] = self.container_pids
+        if self.container_cgroup_parent is not None:
+            kwargs["cgroup_parent"] = self.container_cgroup_parent
         create_kwargs = dict(kwargs)
         create_kwargs.pop("remove", None)
         container = self._client.containers.create(image, **create_kwargs)
