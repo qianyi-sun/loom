@@ -1456,6 +1456,32 @@ empty (no flag emitted, so existing configs are unchanged):
   Note: with `min_slots=0` the boost condition is unreachable, so `qos_boost`
   never fires — set a positive `min_slots` if you want a boost floor.
 
+### Environment priority: prod > staging > dev
+
+On the shared GB10 + OLDLAB nodes, environments must not compete as equals.
+Priority is enforced **Loom-side**, so it needs no change to the shared Slurm
+controller (which on this cluster does not weight QoS — `PriorityWeightQOS=0` —
+and runs with preemption off):
+
+1. **Active reclaim (#892).** When production has queued demand it cannot
+   satisfy, the prod-pressure bridge marks the lower-priority pools' policies
+   `prod_pressure_state = "draining"`. The scheduler claim query then **fences
+   new claims** on those pools (`claim.py`), so staging/dev stop taking work,
+   drain gracefully (in-flight trials finish — no kills), and their desired slots
+   recover once pressure clears. See "prod-pressure handling" above.
+2. **Submit priority + min/max.** Within what a pool may run, `submit_priority`
+   orders trials, and `min_slots` / `max_slots` bound each pool: the autoscaler
+   keeps at least `min_slots` warm and never overshoots `max_slots` (see clamp
+   below). Give production a positive `min_slots` at activation so it always
+   holds a warm floor; staging/dev default to `min_slots = 0` (scale to zero) and
+   yield first.
+
+The `qos_normal` / `qos_boost` bindings above stay **empty** on these pools:
+the `loom-*` QoS tiers do not exist on the controller, and adding them would
+require a cluster-wide `PriorityWeightQOS` change affecting every other user —
+unnecessary given the reclaim already delivers env-priority. Set a real
+`qos_normal` (e.g. `normal`) only if a future controller enables QoS weighting.
+
 ### max_slots clamp (no overshoot)
 
 The autoscaler never submits a worker that would push the pool's committed slot

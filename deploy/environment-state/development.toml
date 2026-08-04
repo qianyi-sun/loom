@@ -75,6 +75,13 @@ repo_dir = "/shared_work/loom/candidates/development/${IMAGE_TAG}"
 requested_cpus = 10
 requested_memory_mib = 57500
 requested_concurrency = 5
+# Per-trial container caps (#896): concurrency * cap == the Slurm
+# allocation above, so trials cannot exceed the lease. job_pids_max is
+# the job cgroup PID ceiling (>= container_pids * concurrency).
+container_cpus = 2.0
+container_memory_mib = 11500
+container_pids = 512
+job_pids_max = 2560
 max_jobs = 1
 pending_job_cap = 1
 time_limit = "2-00:00:00"
@@ -123,6 +130,13 @@ repo_dir = "/shared_work/loom/candidates/development/${IMAGE_TAG}"
 requested_cpus = 4
 requested_memory_mib = 16000
 requested_concurrency = 2
+# Per-trial container caps (#896): concurrency * cap == the Slurm
+# allocation above, so trials cannot exceed the lease. job_pids_max is
+# the job cgroup PID ceiling (>= container_pids * concurrency).
+container_cpus = 2.0
+container_memory_mib = 8000
+container_pids = 512
+job_pids_max = 1024
 max_jobs = 2
 pending_job_cap = 1
 time_limit = "2-00:00:00"

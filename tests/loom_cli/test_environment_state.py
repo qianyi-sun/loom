@@ -222,6 +222,48 @@ def test_committed_production_profile_ships_fail_closed() -> None:
     assert "15452" in " ".join(supervisor["args"])  # reserved prod gb10 port
 
 
+def test_committed_slurm_pools_carry_containment_contract() -> None:
+    """#896/#1143: every committed non-exclusive Slurm pool must ship the full
+    containment contract (per-container caps + a job_pids_max ceiling that fits
+    the lease), while staying disabled until #896 acceptance + authorized
+    activation. Env-priority (prod > staging > dev) is enforced Loom-side by the
+    prod-pressure claim fence (#892), not by Slurm QoS, so these pools carry no
+    Slurm-controller QoS dependency (this cluster does not weight QoS)."""
+    variables = {
+        "IMAGE_TAG": "x-abc1234",
+        "ENV_CONFIG_VERSION": "x-abc1234",
+        "GIT_SHA": "abc1234def5678901234567890123456789012ab",
+    }
+    for env in ("development", "staging", "production"):
+        profile = load_environment_state_profile(
+            Path(f"deploy/environment-state/{env}.toml"),
+            variables=variables,
+            expected_environment=env,
+        )
+        slurm_pools = [p for p in profile.autoscaler_policies if p.get("actuator") == "slurm"]
+        assert slurm_pools, f"{env} has no slurm pool"
+        for policy in slurm_pools:
+            cfg = policy["actuator_config"]
+            # The gate stays closed; this increment only makes the config
+            # activation-ready. Flipping enabled=true is a separate authorized step.
+            assert policy["enabled"] is False
+            assert cfg["exclusive"] is False
+            cpus = cfg["container_cpus"]
+            mem = cfg["container_memory_mib"]
+            pids = cfg["container_pids"]
+            conc = cfg["requested_concurrency"]
+            assert cpus > 0 and mem > 0 and pids > 0
+            # Job cgroup PID ceiling must cover every concurrent trial container.
+            assert cfg["job_pids_max"] >= pids * conc
+            # Per-trial caps must fit within the reserved Slurm lease so trials
+            # cannot exceed the allocation.
+            assert conc * cpus <= cfg["requested_cpus"]
+            assert conc * mem <= cfg["requested_memory_mib"]
+            # No dependency on a Slurm-controller QoS tier that does not exist
+            # (env-priority is the #892 reclaim, not --qos).
+            assert not cfg.get("qos_normal")
+
+
 def test_load_environment_state_profile_requires_placeholder_values(tmp_path: Path) -> None:
     profile_path = tmp_path / "staging.state.toml"
     _write_profile(profile_path)

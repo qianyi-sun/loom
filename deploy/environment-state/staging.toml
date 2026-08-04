@@ -51,6 +51,13 @@ repo_dir = "/shared_work2/qianyi/.loom-staging-rollout/worker-repos/loom-remote-
 requested_cpus = 20
 requested_memory_mib = 115000
 requested_concurrency = 10
+# Per-trial container caps (#896): concurrency * cap == the Slurm
+# allocation above, so trials cannot exceed the lease. job_pids_max is
+# the job cgroup PID ceiling (>= container_pids * concurrency).
+container_cpus = 2.0
+container_memory_mib = 11500
+container_pids = 512
+job_pids_max = 5120
 max_jobs = 15
 pending_job_cap = 2
 time_limit = "2-00:00:00"
@@ -98,6 +105,13 @@ repo_dir = "/shared_work2/qianyi/.loom-staging-rollout/worker-repos/loom-remote-
 requested_cpus = 4
 requested_memory_mib = 16000
 requested_concurrency = 2
+# Per-trial container caps (#896): concurrency * cap == the Slurm
+# allocation above, so trials cannot exceed the lease. job_pids_max is
+# the job cgroup PID ceiling (>= container_pids * concurrency).
+container_cpus = 2.0
+container_memory_mib = 8000
+container_pids = 512
+job_pids_max = 1024
 max_jobs = 2
 pending_job_cap = 1
 time_limit = "2-00:00:00"
