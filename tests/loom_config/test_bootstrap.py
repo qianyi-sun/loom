@@ -42,16 +42,17 @@ def test_bootstrap_includes_infra_secrets() -> None:
     assert "--from-literal=secret-store-master-key=" in line
 
 
-def test_bootstrap_smoke_defaults_emits_admin_secret(tmp_path: Path) -> None:
-    """`cluster up` preflight requires `loom-admin-secret`; under smoke
-    defaults, bootstrap-secrets must emit it too so a single
-    `eval "$(...)"` unblocks local/dev bring-up."""
+def test_bootstrap_admin_secret_flag_emits_admin_secret(tmp_path: Path) -> None:
+    """`cluster up` preflight requires `loom-admin-secret`; with
+    `--admin-secret` (opt-in, smoke only) bootstrap-secrets emits it too so
+    a single `eval "$(...)"` unblocks local/dev bring-up."""
     from loom_config.bootstrap import _SMOKE_ADMIN_TOKEN
 
     out = render_bootstrap_command(
         load_schema(Path("config/loom-schema.toml")),
         namespace="loom-local",
         smoke_defaults=True,
+        admin_secret=True,
     )
     assert "kubectl create secret generic loom-admin-secret" in out
     assert "--namespace=loom-local" in out
@@ -64,15 +65,19 @@ def test_bootstrap_smoke_defaults_emits_admin_secret(tmp_path: Path) -> None:
     assert verifier.verify(_SMOKE_ADMIN_TOKEN)
 
 
-def test_bootstrap_without_smoke_defaults_omits_admin_secret() -> None:
-    """Real deploys provision `loom-admin-secret` out of band with a real
-    token; bootstrap-secrets must not inject a throwaway one there."""
-    out = render_bootstrap_command(
-        load_schema(Path("config/loom-schema.toml")),
-        namespace="loom",
-        smoke_defaults=False,
+def test_bootstrap_omits_admin_secret_by_default() -> None:
+    """Off by default (even under --smoke-defaults) so callers that create
+    `loom-admin-secret` themselves — the cluster/staging smoke workflows,
+    real deploys — don't collide with a duplicate `create`."""
+    schema = load_schema(Path("config/loom-schema.toml"))
+    # smoke defaults, no --admin-secret
+    assert "loom-admin-secret" not in render_bootstrap_command(
+        schema, namespace="loom", smoke_defaults=True
     )
-    assert "loom-admin-secret" not in out
+    # non-smoke, even if the flag is set
+    assert "loom-admin-secret" not in render_bootstrap_command(
+        schema, namespace="loom", smoke_defaults=False, admin_secret=True
+    )
 
 
 def test_bootstrap_omits_optional_family_orchestrator_gateway_secrets() -> None:

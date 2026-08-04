@@ -5292,6 +5292,7 @@ def _bootstrap_secrets(args: argparse.Namespace) -> int:
             smoke_defaults=args.smoke_defaults,
             rotate=args.rotate,
             pgbouncer_enabled=pgbouncer_enabled,
+            admin_secret=getattr(args, "admin_secret", False),
         )
     )
     return 0
@@ -6231,6 +6232,18 @@ def dispatch(argv: list[str]) -> int:
         "--rotate",
         action="store_true",
         help="Run each entry's `generate` command to mint fresh values.",
+    )
+    p_boot.add_argument(
+        "--admin-secret",
+        dest="admin_secret",
+        action="store_true",
+        help=(
+            "Also emit a throwaway `loom-admin-secret` create command "
+            "(requires --smoke-defaults). Off by default so callers that "
+            "create it themselves don't collide; pass it for one-shot "
+            "single-node local/dev bring-up where `cluster up` preflight "
+            "requires the secret."
+        ),
     )
     p_boot.add_argument(
         "--pgbouncer",

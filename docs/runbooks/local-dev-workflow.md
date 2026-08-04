@@ -120,12 +120,12 @@ namespace, `eval` the printed commands, then bring the stack up:
 kubectl create namespace loom-local
 
 # --smoke-defaults = throwaway local secret values (never real prod refs).
-# Under --smoke-defaults this prints TWO `kubectl create secret` commands:
-# `loom-secrets` (DB/MinIO/provider keys) AND `loom-admin-secret` (the
-# singleton admin bearer the control-plane + service mount, which `up`
-# preflight requires). eval runs both:
+# --admin-secret adds a second `kubectl create secret` for `loom-admin-secret`
+# (the singleton admin bearer the control-plane + service mount, which `up`
+# preflight requires); it's opt-in so callers that create it themselves don't
+# collide. eval runs both printed commands:
 eval "$(uv run --no-sync python -m loom_cli cluster bootstrap-secrets \
-  --namespace loom-local --smoke-defaults --no-pgbouncer)"
+  --namespace loom-local --smoke-defaults --no-pgbouncer --admin-secret)"
 
 # up re-renders identically, applies, runs the DB migration Job
 # (`alembic upgrade head`, via --migrate), then waits for readiness (--no-wait

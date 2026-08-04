@@ -129,6 +129,7 @@ def render_bootstrap_command(
     smoke_defaults: bool = False,
     rotate: bool = False,
     pgbouncer_enabled: bool = False,
+    admin_secret: bool = False,
 ) -> str:
     parts = ["kubectl create secret generic loom-secrets",
              f"--namespace={namespace}"]
@@ -171,12 +172,13 @@ def render_bootstrap_command(
 
     command = " \\\n    ".join(parts)
 
-    # Under smoke defaults, also emit the singleton admin secret so a
-    # local/dev `eval "$(... bootstrap-secrets --smoke-defaults)"` satisfies
-    # the `cluster up` preflight in one shot. Emitted as a second command
-    # (newline-separated) so `eval` runs both. Real deploys omit this and
-    # provision `loom-admin-secret` with a real token out of band.
-    if smoke_defaults:
+    # Opt-in (`--admin-secret`, smoke only): also emit the singleton admin
+    # secret so a local/dev `eval "$(...)"` satisfies the `cluster up`
+    # preflight in one shot. Off by default so callers that create
+    # `loom-admin-secret` themselves (the cluster/staging smoke workflows,
+    # real deploys) don't collide with a duplicate. Emitted as a second
+    # command (newline-separated) so `eval` runs both.
+    if smoke_defaults and admin_secret:
         command += "\n" + _render_smoke_admin_secret_command(namespace)
 
     return command
