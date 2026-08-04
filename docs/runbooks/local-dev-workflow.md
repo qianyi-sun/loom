@@ -301,3 +301,15 @@ fully offline, several steps need the images side-loaded from the host instead:
   `kubectl -n loom-local patch statefulset/loom-minio --type=json -p
   '[{"op":"replace","path":"/spec/template/spec/containers/0/imagePullPolicy","value":"IfNotPresent"}]'`
   then delete the pod so it recreates from cache.
+- **A trial's sandbox build fails on `RUN pip install`.** The worker builds the
+  task's `environment/Dockerfile` via the host Docker daemon (docker.sock), so
+  any `RUN` that reaches pypi/npm fails the same way. Pre-build the sandbox image
+  on the host, offline: `pip download <deps> -d wheels` (host egress), then a
+  Dockerfile that `COPY wheels /wheels` + `RUN pip install --no-index
+  --find-links=/wheels <deps>` (no network). Point the task at it — either
+  `[environment] docker_image = "<your-tag>"`, or a task `environment/Dockerfile`
+  of just `FROM <your-tag>` with no `RUN`. `resolve_task_image` uses a declared
+  `docker_image` directly and skips the build entirely
+  (`src/loom/driver/task_image.py`); a bare-`FROM` Dockerfile builds offline
+  since it needs no network. The image only has to exist on the host daemon the
+  worker shares.
