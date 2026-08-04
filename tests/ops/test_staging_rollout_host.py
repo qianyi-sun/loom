@@ -806,7 +806,7 @@ def test_installer_known_hosts_authority_rejects_missing_or_malformed_hosts() ->
         host._validate_known_hosts_authority(b"\n".join(payload.splitlines()[:-1]) + b"\n")
     with pytest.raises(host.InstallError, match="host coverage"):
         host._validate_known_hosts_authority(
-            payload.replace(b"192.168.20.17,trt-gb10-7", b"192.168.20.99,trt-gb10-7")
+            payload.replace(b"192.168.20.77,trt-gb10-7", b"192.168.20.99,trt-gb10-7")
         )
 
 

@@ -41,7 +41,7 @@ def test_active_payload_sets_host_intents_slots_and_idle_ttl() -> None:
         "env_config_version": "staging-abc1234",
         "source_git_commit": "a" * 40,
         "host_intents": {
-            "trt-gb10-7": "stopped",
+            "trt-gb10-7": "active",
             "trt-gb10-8": "active",
         },
         "rollout_policy": {"mode": "all"},
@@ -60,7 +60,7 @@ def test_active_payload_sets_host_intents_slots_and_idle_ttl() -> None:
     assert payload["host_intents"] == {
         "trt-gb10-1": "active",
         "trt-gb10-2": "active",
-        "trt-gb10-7": "stopped",
+        "trt-gb10-7": "active",
         "trt-gb10-8": "active",
     }
     assert payload["env"]["LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS"] == "14400"
@@ -86,7 +86,6 @@ def test_release_payload_zeroes_slots_and_does_not_extend_idle_ttl() -> None:
     assert payload["target_slots"] == 0
     assert payload["host_intents"] == {
         "trt-gb10-1": "stopped",
-        "trt-gb10-7": "stopped",
     }
     assert payload["env"]["LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS"] == "14400"
 
@@ -287,11 +286,12 @@ def test_parse_ttl_suffixes() -> None:
         runner._parse_ttl("forever")
 
 
-def test_default_hosts_exclude_only_registered_blocker() -> None:
+def test_default_hosts_are_the_exact_full_inventory() -> None:
     assert len(runner.FULL_GB10_HOSTS) == 15
-    assert len(runner.DEFAULT_HOSTS) == 14
-    assert "trt-gb10-7" not in runner.DEFAULT_HOSTS
-    assert set(runner.FULL_GB10_HOSTS) - set(runner.DEFAULT_HOSTS) == {"trt-gb10-7"}
+    assert len(runner.DEFAULT_HOSTS) == 15
+    assert "trt-gb10-7" in runner.DEFAULT_HOSTS
+    assert runner.DEFAULT_HOSTS == runner.FULL_GB10_HOSTS
+    assert runner.TEMPORARILY_EXCLUDED_HOSTS == frozenset()
     assert runner.EXPECTED_MAX_CONCURRENT == 10
 
 
@@ -350,60 +350,6 @@ def test_status_mismatches_reject_concurrency_drift(field: str, value: int) -> N
     )
 
     assert errors == [f"trt-gb10-1: {field}={value!r}"]
-
-
-@pytest.mark.parametrize(
-    ("excluded_worker_fresh", "expected"),
-    [
-        (False, []),
-        (True, ["trt-gb10-7: temporarily excluded host still has a fresh worker"]),
-    ],
-)
-def test_status_mismatches_fail_closed_on_fresh_excluded_worker(
-    excluded_worker_fresh: bool,
-    expected: list[str],
-) -> None:
-    active = {
-        "hostname": "trt-gb10-1",
-        "environment": ENVIRONMENT,
-        "pool_name": POOL_NAME,
-        "desired_intent": "active",
-        "current_intent": "active",
-        "desired_max_concurrent": 10,
-        "current_max_concurrent": 10,
-        "apply_state": "applied",
-        "current_image_tag": "staging-abc1234",
-        "current_env_config_version": "staging-abc1234",
-        "source_git_commit": SOURCE_SHA,
-        "source_git_dirty": False,
-        "worker_id": "worker-1",
-        "worker_status": "active",
-        "worker_fresh": True,
-        "worker_backend_names": ["docker"],
-    }
-    excluded = {
-        "hostname": "trt-gb10-7",
-        "environment": ENVIRONMENT,
-        "pool_name": POOL_NAME,
-        "desired_intent": "stopped",
-        "current_intent": "stopped",
-        "apply_state": "stopped",
-        "worker_fresh": excluded_worker_fresh,
-        "worker_backend_names": ["docker"],
-    }
-
-    errors = runner.status_mismatches(
-        {"nodes": [active, excluded], "unlinked_workers": []},
-        hosts=("trt-gb10-1",),
-        environment=ENVIRONMENT,
-        pool_name=POOL_NAME,
-        intent="active",
-        image_tag="staging-abc1234",
-        env_config_version="staging-abc1234",
-        source_git_commit=SOURCE_SHA,
-    )
-
-    assert errors == expected
 
 
 def test_status_mismatches_rejects_fresh_undeclared_host() -> None:
@@ -645,36 +591,6 @@ def test_runner_rejects_invalid_candidate_before_any_desired_state_mutation(
     ]
 
 
-def test_status_mismatches_rejects_excluded_host_not_converged_to_stopped() -> None:
-    active = _active_node("trt-gb10-1", "worker-1")
-    excluded = {
-        "hostname": "trt-gb10-7",
-        "environment": ENVIRONMENT,
-        "pool_name": POOL_NAME,
-        "desired_intent": "active",
-        "current_intent": "draining",
-        "apply_state": "draining",
-        "worker_fresh": False,
-    }
-
-    errors = runner.status_mismatches(
-        {"nodes": [active, excluded], "unlinked_workers": []},
-        hosts=("trt-gb10-1",),
-        environment=ENVIRONMENT,
-        pool_name=POOL_NAME,
-        intent="active",
-        image_tag="staging-abc1234",
-        env_config_version="staging-abc1234",
-        source_git_commit=SOURCE_SHA,
-    )
-
-    assert errors == [
-        "trt-gb10-7: excluded desired_intent='active'",
-        "trt-gb10-7: excluded current_intent='draining'",
-        "trt-gb10-7: excluded apply_state='draining'",
-    ]
-
-
 @pytest.mark.parametrize(
     "value",
     [
@@ -684,7 +600,7 @@ def test_status_mismatches_rejects_excluded_host_not_converged_to_stopped() -> N
         "unregistered-host",
     ],
 )
-def test_host_list_rejects_excluded_duplicate_or_unknown_hosts(value: str) -> None:
+def test_host_list_rejects_incomplete_duplicate_or_unknown_hosts(value: str) -> None:
     with pytest.raises(argparse.ArgumentTypeError):
         runner._host_list(value)
 
@@ -699,7 +615,7 @@ def test_host_list_accepts_only_exact_merged_active_set() -> None:
         runner._host_list(",".join(runner.DEFAULT_HOSTS[:-1]))
 
 
-def test_payload_forces_excluded_host_stopped_and_preserves_other_intents() -> None:
+def test_payload_preserves_other_inventory_intents() -> None:
     current = {
         "image_tag": "staging-abc1234",
         "max_concurrent": 10,
@@ -721,26 +637,9 @@ def test_payload_forces_excluded_host_stopped_and_preserves_other_intents() -> N
     assert payload["target_slots"] == 10
     assert payload["host_intents"] == {
         "trt-gb10-1": "active",
-        "trt-gb10-7": "stopped",
+        "trt-gb10-7": "active",
         "trt-gb10-8": "draining",
     }
-
-
-def test_payload_rejects_runtime_readdition_of_excluded_host() -> None:
-    current = {
-        "image_tag": "staging-abc1234",
-        "max_concurrent": 10,
-        "env_config_version": "staging-abc1234",
-    }
-
-    with pytest.raises(ValueError, match="merged re-admission"):
-        runner.desired_state_payload(
-            current,
-            hosts=("trt-gb10-7",),
-            intent="active",
-            ttl_seconds=14400,
-            adjust_idle_exit=False,
-        )
 
 
 def _node_agent_args(tmp_path: Path, *, dry_run: bool = False) -> argparse.Namespace:

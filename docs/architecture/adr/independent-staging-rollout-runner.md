@@ -563,8 +563,8 @@ Repository verification is necessary but not live acceptance. Installation on
 shared `platform-dev` is allowed only after the implementation has merged into
 `dev`. Live acceptance must then prove both Hongjian and Devansh dry-run with
 distinct authenticated identities and the same fresh merged SHA, unauthorized
-and concurrent-start rejection, detached cross-operator observation, all 14
-active GB10 hosts converged, node 7 stopped/unreachable, every existing release
-gate and smoke passed, and zero
+and concurrent-start rejection, detached cross-operator observation, all 15
+GB10 hosts present in heartbeat/health evidence with healthy hosts converged,
+every existing release gate and smoke passed, and zero
 raw secret matches. #803 remains open for its broader identity inventory and
 rotation scope after this operator-independence slice lands.
