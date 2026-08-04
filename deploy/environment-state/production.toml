@@ -32,7 +32,7 @@ disabled_reason = "prod not yet live; enable=true at the first prod go-live deci
 # borrowed slots when prod queues work. max_slots is the full pool; prod wins
 # contention via the prod-pressure policy, not by reserving nodes.
 min_slots = 0
-max_slots = 140
+max_slots = 150
 scale_up_threshold_slots = 1
 scale_down_idle_seconds = 600
 scale_up_cooldown_seconds = 60
@@ -51,6 +51,7 @@ allowed_nodes = [
   "trt-gb10-4",
   "trt-gb10-5",
   "trt-gb10-6",
+  "trt-gb10-7",
   "trt-gb10-8",
   "trt-gb10-9",
   "trt-gb10-10",
@@ -67,7 +68,7 @@ repo_dir = "/shared_work/loom-prod-rollout/worker-repos/loom-remote-worker-${IMA
 requested_cpus = 20
 requested_memory_mib = 115000
 requested_concurrency = 10
-max_jobs = 14
+max_jobs = 15
 pending_job_cap = 2
 time_limit = "2-00:00:00"
 # Keep disabled until #896 acceptance; do not use whole-node exclusivity as a

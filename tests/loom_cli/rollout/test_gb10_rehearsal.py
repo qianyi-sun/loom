@@ -77,8 +77,8 @@ def _trust_inputs(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_authority_round_trip_requires_the_exact_active_inventory(tmp_path: Path) -> None:
     authority = _authority(tmp_path)
     assert GB10RehearsalAuthority.from_record(authority.to_record()) == authority
-    assert len(authority.hosts) == 14
-    assert "trt-gb10-7" not in authority.hosts
+    assert len(authority.hosts) == 15
+    assert "trt-gb10-7" in authority.hosts
 
     record = authority.to_record()
     record["hosts"] = list(ACTIVE_GB10_HOSTS[:-1])
@@ -105,7 +105,7 @@ def test_execute_uses_only_fixed_ssh_and_isolated_unit_on_all_hosts(
     assert evidence.cleanup_verified
     assert not evidence.blockers
     assert set(evidence.host_boot_ids) == set(ACTIVE_GB10_HOSTS)
-    assert len(calls) == 14
+    assert len(calls) == 15
     assert {call[-2] for call in calls} == set(ACTIVE_GB10_HOSTS)
     assert all(
         call[:6] == ("ssh", "-F", str(authority.ssh_config), "-i", str(authority.identity), "-o")
@@ -164,7 +164,7 @@ def test_execute_aggregates_independent_host_blockers(
         "trt-gb10-1": "transport-unavailable",
         "trt-gb10-2": "activation-failed",
     }
-    assert len(evidence.host_boot_ids) == 12
+    assert len(evidence.host_boot_ids) == 13
     assert not evidence.cleanup_verified
 
 
@@ -185,7 +185,7 @@ def test_cleanup_is_fleet_wide_and_rejects_nonempty_readback(
     evidence = FixedGB10RehearsalTransport(authority, 501, run).cleanup(contract)
 
     assert evidence.blockers == {"trt-gb10-3": "cleanup-readback-drift"}
-    assert len(evidence.host_boot_ids) == 13
+    assert len(evidence.host_boot_ids) == 14
 
 
 def test_local_authority_drift_fails_before_any_ssh(

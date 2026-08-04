@@ -5,12 +5,12 @@
 > only on `dev`; they are not a human approval or merge gate. The protected
 > staging paths continue to select full CI through the planner.
 
-> **Temporary capacity amendment (2026-07-14):** #822 supersedes this plan's
-> active all-15-host acceptance statements while `trt-gb10-7` is unreachable.
-> Keep all 15 aliases in the fixed SSH/legacy trust inventory, but require all
-> 14 active hosts and 140 slots for broker preflight, rollout, release-gate, and
-> smoke. Node 7 remains stopped with no runtime override until a separate
-> merged re-admission change passes fresh evidence.
+> **Membership amendment (2026-07-31):** #822 makes the complete
+> `trt-gb10-1..15` inventory canonical for trust, heartbeat, health, scheduling,
+> rollout, and acceptance. A healthy busy host remains visible with reduced or
+> zero allocatable capacity; a health failure is temporarily unschedulable but
+> remains in inventory. Active-14 / 140-slot assumptions below are superseded
+> historical implementation debt.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -33,7 +33,7 @@
 - The lifecycle lock is distinct from the existing per-mutation rollout lock so child `cluster up` and `environment-state` operations do not deadlock.
 - A broker-created and service-owned envelope is mandatory before any non-dry-run `staging` driver creates rollout evidence or mutates staging.
 - The broker creates and verifies Postgres, MinIO, and Kubernetes Secret backup components before publishing the driver envelope, active pointer, transient unit, or rollout evidence. A partial backup never advances `latest`; it records a safe request failure while the launch mutex is still held.
-- All 14 active GB10 hosts under #822, protected preflight, environment-state, release-gate, catalog provisioning, and smoke acceptance remain required; the full 15-host topology stays validated for legacy trust and re-admission.
+- All 15 GB10 hosts under #822 remain in protected preflight, heartbeat/health evidence, environment-state, release-gate, catalog provisioning, and smoke acceptance; current allocatable capacity is dynamic and is not a membership count.
 - Raw tokens, private keys, credential file bodies, complete environments, private endpoints, and unredacted subprocess errors never enter argv, request evidence, status output, logs returned to operators, or summaries.
 - Current broad host-admin and Docker grants are not revoked in this slice. This is an operational safety and attribution boundary, not a confidentiality boundary against a deliberate root-equivalent administrator.
 - No production authority changes, unmerged branch testing, pull-request ref testing, or shared-staging rollout before merge.
@@ -56,7 +56,7 @@ Create the focused package `src/loom_cli/rollout/operator/`:
 - `backup.py`: Postgres dump, MinIO bucket mirror, Secret export, metadata manifest, immutable verification, and `latest` publication.
 - `preflight.py`: redacted installation, Docker/Buildx, kube, data path,
   credential fingerprint, backup-tool, fixed 15-host GB10 topology validation,
-  and SSH checks for the exact merged 14-host active set under #822.
+  and SSH/health checks for the complete merged 15-host set under #822.
 - `redaction.py`: exact-known-secret plus central Loom redaction for operator-visible logs/status.
 - `broker.py`: the five public commands and `start --dry-run`.
 - `worker.py`: detached driver execution from a finalized envelope, terminal bookkeeping, and lock release.
@@ -685,7 +685,7 @@ def test_backup_failure_never_publishes_envelope_or_starts_unit(tmp_path):
 
 - [ ] **Step 3: Implement redacted preflight and broker orchestration**
 
-Preflight verifies checkout ownership/cleanliness, fixed origin, required executables and Python imports, Docker and `docker buildx`, kube context/namespace, data-root read/write/traverse, credential readability and expected fingerprints, catalog env readability, backup commands, all 14 active GB10 BatchMode connections with the service key, and the exact full-15 SSH topology. It reports fingerprints only as `sha256:<12-hex> len=<N>` and never variable values.
+Preflight verifies checkout ownership/cleanliness, fixed origin, required executables and Python imports, Docker and `docker buildx`, kube context/namespace, data-root read/write/traverse, credential readability and expected fingerprints, catalog env readability, backup commands, all 15 GB10 BatchMode connections with the service key, and the exact full-15 SSH topology. It reports fingerprints only as `sha256:<12-hex> len=<N>` and never variable values.
 
 `start` authenticates first, acquires the non-blocking launch mutex, reconciles singleton availability, runs preflight, fresh-fetches, and creates an immutable request. It then either records a non-active preview or creates and verifies the backup synchronously. A real start publishes the finalized attempt-1 driver envelope, reserves the active pointer, and only then launches systemd. Backup failure records a safe terminal event and starts no unit or active pointer. A successful start returns request ID, SHA, image tag, unit, and safe status.
 
@@ -832,15 +832,15 @@ Implement command execution behind an injected runner and filesystem/passwd/grou
 - [ ] **Step 4: Implement service public-key trust bootstrap and revocation**
 
 Bootstrap reads the service `.pub` file and sends it over stdin to a fixed
-remote script for the exact 14-host active set under #822; it never prints the
-key. The full 15-host topology remains fixed for validation and legacy-ledger
+remote script for the complete 15-host set under #822; it never prints the key.
+The same topology remains fixed for validation and legacy-ledger
 revocation/migration. The remote script inserts one comment-marked key
 idempotently, preserves other `authorized_keys` entries, and enforces
 directory/file modes. Revocation removes only the line whose decoded key
 fingerprint matches the service public key and fails on ambiguity.
 
-Test the exact active-14 bootstrap/check expansion, full-15 topology and legacy
-revocation expansion, a repeated bootstrap, preservation of unrelated
+Test the exact full-15 bootstrap/check and legacy revocation expansion, a
+repeated bootstrap, preservation of unrelated
 keys/comments, partial-host failure reporting, ambiguous fingerprint refusal,
 and exact-key revocation with fake SSH transports. No test fixture contains a
 real private key.
@@ -908,7 +908,7 @@ Document install/update, `start --dry-run`, `start`, `status`, `logs`, `resume`,
 
 - [ ] **Step 4: Add documentation contract tests**
 
-Assert the runbook names every public command, says `origin/dev` is fresh-fetched, forbids unmerged refs, preserves the full 15-host inventory while requiring the #822 active 14-host set, and no longer instructs operators to use Qianyi's key/unit. Assert the design status becomes `approved for implementation` until code/live acceptance is complete.
+Assert the runbook names every public command, says `origin/dev` is fresh-fetched, forbids unmerged refs, requires the complete #822 15-host inventory, and no longer instructs operators to use Qianyi's key/unit. Assert the design status becomes `approved for implementation` until code/live acceptance is complete.
 
 - [ ] **Step 5: Run doc contracts and commit**
 
@@ -993,7 +993,7 @@ On `platform-dev`, fetch `origin`, verify the implementation PR's squash-merge S
 
 - [ ] **Step 2: Converge service identity and GB10 public-key trust**
 
-Generate the service key through the installer, use the existing admin identity only for the one-time public-key bootstrap, and run service preflight. Required result: Docker/Buildx, kube context, data roots, protected source fingerprints, backup tools, and all 14 active GB10 SSH checks pass while the exact 15-host topology validates; the private key remains owner-only.
+Generate the service key through the installer, use the existing admin identity only for the one-time public-key bootstrap, and run service preflight. Required result: Docker/Buildx, kube context, data roots, protected source fingerprints, backup tools, and all 15 GB10 SSH/health checks pass; the private key remains owner-only.
 
 - [ ] **Step 3: Prove distinct operator attribution with dry runs**
 
@@ -1009,7 +1009,7 @@ The initiating operator disconnects after `start` returns. Reconnect and verify 
 
 - [ ] **Step 6: Verify the full existing rollout gate**
 
-Require every existing rollout step to complete, all 14 active GB10 hosts to converge, node 7 to remain stopped/unreachable, environment-state/catalog/release-gate to pass, and admin-on-behalf smoke to succeed. Correlate request ID, attempt, rollout ID, SHA, image tag, unit, state, lock events, and summary.
+Require every existing rollout step to complete, all 15 GB10 hosts to appear in heartbeat/health evidence, healthy hosts to converge, environment-state/catalog/release-gate to pass, and admin-on-behalf smoke to succeed. A healthy busy host may report zero allocatable capacity without leaving inventory. Correlate request ID, attempt, rollout ID, SHA, image tag, unit, state, lock events, and summary.
 
 - [ ] **Step 7: Run the live secret-boundary scan**
 
@@ -1018,9 +1018,9 @@ Run the metadata-only verifier against process argv, journald export, request le
 - [ ] **Step 8: Record the result without closing #803**
 
 Comment on #803 with merged SHA, request/rollout IDs, both dry-run identities,
-singleton rejection, exact active-14 convergence plus the fixed full-15
-topology digest, node 7 stopped/unreachable evidence, release-gate/smoke
-result, and zero-match secret scan. Remove `[WIP]` and return the Project card
+singleton rejection, full-15 heartbeat/health evidence and topology digest,
+dynamic capacity summary, release-gate/smoke result, and zero-match secret
+scan. Remove `[WIP]` and return the Project card
 to the correct non-active state if the broader identity inventory/rotation
 work is not immediately continuing. Keep #803 open and name its remaining
 OLDLAB/GB10 identity/bootstrap scope.

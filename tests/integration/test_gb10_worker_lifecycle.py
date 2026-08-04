@@ -357,7 +357,7 @@ def test_status_lists_fresh_worker_without_node_report_as_unlinked(
 ) -> None:
     worker_id = _seed_worker(
         postgres_url,
-        hostname="trt-gb10-7",
+        hostname="trt-gb10-2",
         pool_name="gb10",
         capabilities=[{"backend": "docker"}],
     )
@@ -372,7 +372,7 @@ def test_status_lists_fresh_worker_without_node_report_as_unlinked(
                 "env_config_version": "staging-abc123",
                 "host_intents": {
                     "trt-gb10-1": "active",
-                    "trt-gb10-7": "stopped",
+                    "trt-gb10-2": "stopped",
                 },
             },
         )
@@ -388,7 +388,7 @@ def test_status_lists_fresh_worker_without_node_report_as_unlinked(
     assert body["unlinked_workers"] == [
         {
             "worker_id": worker_id,
-            "hostname": "trt-gb10-7",
+            "hostname": "trt-gb10-2",
             "pool_name": "gb10",
             "worker_status": "active",
             "worker_last_seen_at": body["unlinked_workers"][0]["worker_last_seen_at"],

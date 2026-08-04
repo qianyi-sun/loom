@@ -5,12 +5,13 @@
 Status: approved for implementation on 2026-07-13. Repository implementation
 does not authorize shared-staging use before merge and live acceptance.
 
-Temporary amendment (2026-07-14): #822 supersedes this document's active
-all-15-host statements while `trt-gb10-7` is unreachable. The checked-in SSH
-and legacy trust inventory remains 15 hosts, but broker bootstrap, preflight,
-rollout, capacity, release-gate, and smoke require every one of the other 14
-active hosts / 140 slots. Node 7 stays stopped and cannot be restored by a
-runtime flag; re-admission requires a separate merged change and fresh evidence.
+Membership amendment (2026-07-31): #822 restores the complete
+`trt-gb10-1..15` inventory as the only canonical topology for trust, heartbeat,
+health, scheduling, rollout, and acceptance. A healthy busy host remains visible
+and reports reduced or zero capacity; a health failure is temporarily
+unschedulable but is not removed from inventory. The former active-14 / 140-slot
+exception is historical implementation debt and is not an acceptable steady
+state.
 
 This design implements the operator-independence portion of #803. Hongjian and
 Devansh must each be able to update Loom staging after code has merged without
@@ -28,7 +29,8 @@ request even if `origin/dev` advances later.
 This slice does not grant production promotion authority, change GitHub
 Environment policy, or weaken the merged active-GB10, backup, protected
 preflight, environment-state, release-gate, or smoke acceptance. Under #822
-that means all 14 active hosts while the full 15-host topology remains fixed.
+that means all 15 hosts remain represented in heartbeat, health, scheduling,
+and acceptance evidence, with allocatable capacity derived dynamically.
 Production authority remains governed by #757.
 
 ## Root cause
@@ -123,9 +125,9 @@ only for that account. Its root-managed installation consists of:
   point that operators cannot modify.
 
 Generate a new service-owned GB10 deploy key instead of copying Qianyi's
-private key. A fresh #822-era install bootstraps its public key only on the
-exact 14-host active set; the fixed 15-host topology remains the authority for
-validation and legacy-key revocation. The private file remains owner-only so
+private key. A fresh install bootstraps its public key on the complete 15-host
+inventory, which is also the authority for validation and legacy-key
+revocation. The private file remains owner-only so
 the existing GB10 identity preflight continues to fail closed on group/world
 exposure. A broker-owned cluster-config materialization supplies that key
 path; users cannot override it.
@@ -290,7 +292,7 @@ Hongjian or Devansh
   -> create and verify protected backup
   -> detached loom-rollout systemd user unit
   -> existing rollout driver with broker envelope
-  -> all protected steps, exact 14-host active GB10 set, release gate, smoke
+  -> all protected steps, complete 15-host GB10 inventory, release gate, smoke
   -> request/attempt/state/summary evidence
   -> status and redacted logs available to every operator
 ```
@@ -315,9 +317,10 @@ Hongjian or Devansh
   only after terminal bookkeeping; allow explicit resume.
 - Cancellation: preserve resumable state and record the cancelling operator and
   reason.
-- Any active GB10 host unreachable or unconverged, or any drift in the fixed
+- Any GB10 host missing, unreachable, or unconverged, or any drift in the fixed
   15-host topology authority: retain the existing fail-closed
-  prep/release-gate result. Node 7 remains stopped/unreachable under #822.
+  prep/release-gate result. Report health separately from current allocatable
+  capacity; do not silently remove a host from inventory.
 
 ## Alternatives rejected
 
@@ -391,7 +394,7 @@ Live acceptance on `platform-dev` must prove:
 
 1. The service preflight passes for checkout ownership, clean/fresh remote,
    dependencies, Docker, kube context, data paths, credentials, backup tools,
-   all 14 active GB10 connections, and exact full-15 topology validation.
+   all 15 GB10 connections, and exact full-15 topology validation.
 2. Hongjian and Devansh each run `start --dry-run`; evidence records the correct
    distinct OS user and the same fresh merged `origin/dev` SHA.
 3. An unauthorized user is rejected, and an intentional simultaneous request
@@ -402,9 +405,10 @@ Live acceptance on `platform-dev` must prove:
    a real failure or cancellation occurs. Repository and isolated integration
    tests prove the resume path when the live rollout completes normally; the
    live acceptance does not manufacture a driver/pod failure or edit state.
-6. The rollout completes every existing step, all 14 active GB10 hosts
-   converge, node 7 remains stopped/unreachable, the release gate and smoke
-   pass, and request/attempt/rollout correlation is complete.
+6. The rollout completes every existing step, all 15 GB10 hosts appear in
+   heartbeat/health evidence, healthy hosts converge, the release gate and
+   smoke pass, and request/attempt/rollout correlation is complete. A busy host
+   may advertise zero allocatable capacity without being removed from inventory.
 7. No raw secret appears in argv, journald, request evidence, rollout evidence,
    or the final summary.
 

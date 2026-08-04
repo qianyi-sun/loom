@@ -44,8 +44,6 @@ taskset_transform_network_isolated = false
 untrusted_workload_isolation = false
 
 [gb10_pool]
-# #822: trt-gb10-7 remains in the fixed SSH inventory but is not an active
-# rollout target. Re-admission requires a separate merged change and evidence.
 ssh_config = "../worker-pools/gb10/ssh_config"
 ssh_identity_file = "/var/lib/loom-staging-rollout/gb10-deploy-ed25519"
 hosts = [
@@ -55,6 +53,7 @@ hosts = [
   { ssh_target = "trt-gb10-4", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
   { ssh_target = "trt-gb10-5", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
   { ssh_target = "trt-gb10-6", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
+  { ssh_target = "trt-gb10-7", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
   { ssh_target = "trt-gb10-8", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
   { ssh_target = "trt-gb10-9", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },
   { ssh_target = "trt-gb10-10", repo_path = "/home/qianyi/loom-worker-build-staging", env_file_path = "/home/qianyi/loom-worker-build-staging/.env", repo_url = "https://github.com/qianyi-sun/loom.git", node_agent_service = "loom-gb10-node-agent.service" },

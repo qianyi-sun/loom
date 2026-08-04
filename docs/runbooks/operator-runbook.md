@@ -2111,9 +2111,9 @@ construct that argv from a validated private envelope.
 The broker intentionally does not use `ssh -A`. Step 12 authenticates with the
 service-owned `/var/lib/loom-staging-rollout/gb10-deploy-ed25519` declared by
 the candidate-bound cluster config. The private file is mode 0600, is never
-shared with operators, and is not committed or printed. While #822 is open,
-every rollout keeps the merged 14-active-host fail-closed gate and refuses a
-runtime re-addition of node 7. Host checkout, env update, legacy worker
+shared with operators, and is not committed or printed. Under #822, every
+rollout uses the complete 15-host inventory and fails closed when any host is
+missing from heartbeat/health evidence. Host checkout, env update, legacy worker
 retirement, and node-agent start remain ordered per host while the fixed broker
 policy bounds concurrency across independent hosts.
 
@@ -2135,9 +2135,9 @@ sudo ./scripts/ops/staging_rollout_host.py uninstall --retain-ledger
 
 Uninstall removes admission, takes the maintenance/launch lock, refuses an
 active request, and revokes only the recorded service public key from every
-host in the root-owned revocation ledger. New #822-era installs record the 14
-active hosts; a legacy ledger can retain all 15 until node 7 is reachable and
-its old trust is removed. Only installer-recorded ACLs/memberships/linger and
+host in the root-owned revocation ledger. New installs record the complete 15
+hosts; legacy ledgers are reconciled to the same topology before trust is
+changed. Only installer-recorded ACLs/memberships/linger and
 generated key/runtime state are removed, while each recorded ACL preimage is
 restored, including removal of a wholly installer-created default ACL. A
 pre-existing service ACL is never removed merely because its mask required

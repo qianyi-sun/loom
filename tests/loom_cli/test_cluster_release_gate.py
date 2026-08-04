@@ -485,10 +485,9 @@ def _external_workers_manifest_section() -> dict[str, Any]:
                 "max_concurrent": 10,
                 "env_config_version": "staging-abc123",
                 "source_git_commit": "a" * 40,
-                "target_slots": 140,
+                "target_slots": 150,
                 "host_intents": {
-                    **{f"trt-gb10-{index}": "active" for index in range(1, 16) if index != 7},
-                    "trt-gb10-7": "stopped",
+                    f"trt-gb10-{index}": "active" for index in range(1, 16)
                 },
             },
         ],
@@ -515,17 +514,14 @@ def _catalog_manifest_section() -> dict[str, Any]:
     }
 
 
-_ACTIVE_GB10_HOSTS = [f"trt-gb10-{index}" for index in range(1, 16) if index != 7]
+_ACTIVE_GB10_HOSTS = [f"trt-gb10-{index}" for index in range(1, 16)]
 
 
 def _hf_external_workers_manifest_section() -> dict[str, Any]:
     external_workers = _external_workers_manifest_section()
     desired = external_workers["gb10_desired_states"][0]
-    desired["target_slots"] = 140
-    desired["host_intents"] = {
-        **{host: "active" for host in _ACTIVE_GB10_HOSTS},
-        "trt-gb10-7": "stopped",
-    }
+    desired["target_slots"] = 150
+    desired["host_intents"] = {host: "active" for host in _ACTIVE_GB10_HOSTS}
     return external_workers
 
 
@@ -643,7 +639,7 @@ def _hf_boundary_evidence(
             "direct_hf_egress_required": False,
             "materialized_from_internal_source": True,
             "gb10_hf_token_check_summary": {
-                "checked_hosts": 14,
+                "checked_hosts": 15,
                 "checked_host_names": _ACTIVE_GB10_HOSTS,
                 "ssh_failed_hosts": [],
                 "docker_ps_failed_hosts": [],
@@ -651,7 +647,7 @@ def _hf_boundary_evidence(
                 "env_file_missing_hosts": [],
                 "env_file_hf_token_present_hosts": [],
                 "hosts_with_container_hf_token_present": [],
-                "containers_checked": 14,
+                "containers_checked": 15,
                 "inspect_failed": [],
             },
         },
@@ -1596,9 +1592,9 @@ def test_release_gate_rejects_hf_boundary_when_gb10_checks_do_not_run() -> None:
 @pytest.mark.parametrize(
     "drift",
     [
-        "thirteen-hosts",
-        "fifteen-hosts",
-        "wrong-fourteen-host-set",
+        "fourteen-hosts",
+        "sixteen-hosts",
+        "wrong-fifteen-host-set",
         "missing-failure-list",
         "non-list-failure-field",
     ],
@@ -1610,16 +1606,16 @@ def test_hf_boundary_rejects_inexact_or_incomplete_gb10_coverage(drift: str) -> 
     gb10_status = _gb10_status_for_external_workers(external_workers)
     artifact = _hf_boundary_evidence(gb10_status=gb10_status)
     summary = artifact["worker_boundary"]["gb10_hf_token_check_summary"]
-    if drift == "thirteen-hosts":
-        summary["checked_hosts"] = 13
+    if drift == "fourteen-hosts":
+        summary["checked_hosts"] = 14
         summary["checked_host_names"] = _ACTIVE_GB10_HOSTS[:-1]
-        summary["containers_checked"] = 13
-    elif drift == "fifteen-hosts":
-        summary["checked_hosts"] = 15
+        summary["containers_checked"] = 14
+    elif drift == "sixteen-hosts":
+        summary["checked_hosts"] = 16
         summary["checked_host_names"] = [*_ACTIVE_GB10_HOSTS, "trt-gb10-7"]
-        summary["containers_checked"] = 15
-    elif drift == "wrong-fourteen-host-set":
-        summary["checked_host_names"] = [*_ACTIVE_GB10_HOSTS[:-1], "trt-gb10-7"]
+        summary["containers_checked"] = 16
+    elif drift == "wrong-fifteen-host-set":
+        summary["checked_host_names"] = [*_ACTIVE_GB10_HOSTS[:-1], "trt-gb10-14"]
     elif drift == "missing-failure-list":
         summary.pop("docker_ps_failed_hosts")
     elif drift == "non-list-failure-field":

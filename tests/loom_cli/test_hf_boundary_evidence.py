@@ -99,15 +99,15 @@ def _canary_summary() -> dict[str, object]:
 def _worker_boundary() -> dict[str, object]:
     return {
         "summary": {
-            "checked_hosts": 14,
-            "checked_host_names": [f"trt-gb10-{number}" for number in range(1, 16) if number != 7],
+            "checked_hosts": 15,
+            "checked_host_names": [f"trt-gb10-{number}" for number in range(1, 16)],
             "ssh_failed_hosts": [],
             "docker_ps_failed_hosts": [],
             "hosts_without_containers": [],
             "env_file_missing_hosts": [],
             "env_file_hf_token_present_hosts": [],
             "hosts_with_container_hf_token_present": [],
-            "containers_checked": 14,
+            "containers_checked": 15,
             "inspect_failed": [],
         }
     }
