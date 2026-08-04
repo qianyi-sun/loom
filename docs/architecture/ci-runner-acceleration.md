@@ -7,15 +7,26 @@ candidate, or publishing boundaries.
 
 ## Routing contract
 
-Compute-heavy jobs read the repository configuration variable
-`LOOM_CI_ACCELERATOR_RUNS_ON` as a JSON array accepted by GitHub Actions
-`runs-on`. When the variable is absent or empty, every migrated job defaults to
-`["ubuntu-latest"]`.
+Compute-heavy jobs use one of three work-class repository variables as a JSON
+array accepted by GitHub Actions `runs-on`:
 
-The accepted oldlab-5 value is:
+- normal tests: `LOOM_CI_NORMAL_RUNS_ON`;
+- untrusted image builds: `LOOM_CI_IMAGE_RUNS_ON`;
+- cluster and staging smoke: `LOOM_CI_SMOKE_RUNS_ON`.
+
+During migration, an absent class variable falls back to the legacy
+`LOOM_CI_ACCELERATOR_RUNS_ON` value. When both the class variable and legacy
+variable are absent or empty, the job defaults to `["ubuntu-latest"]`. This
+ordering lets the repository contract merge without changing the active route;
+class activation remains a separate, explicitly authorized operation.
+
+The accepted class-specific oldlab-5 values append exactly one reserved-pool
+label to the shared boundary:
 
 ```json
-["self-hosted","linux","x64","loom-ci","oldlab-5","ephemeral-kvm"]
+["self-hosted","linux","x64","loom-ci","oldlab-5","ephemeral-kvm","loom-ci-normal"]
+["self-hosted","linux","x64","loom-ci","oldlab-5","ephemeral-kvm","loom-ci-image"]
+["self-hosted","linux","x64","loom-ci","oldlab-5","ephemeral-kvm","loom-ci-smoke"]
 ```
 
 The first migration slice covers:
@@ -70,6 +81,17 @@ CPUs. Every QEMU container is attached to
 `loom-ci-runner-pool.slice`, which caps the entire pool at 22 physical CPUs and
 80 GiB while equal CPU shares prevent one guest from reserving the host.
 
+The checked-in reservation assigns four slots to normal tests, five to image
+builds, and two to cluster/staging smoke. A runner is registered with exactly
+one of `loom-ci-normal`, `loom-ci-image`, or `loom-ci-smoke`; status is healthy
+only when the runner's GitHub labels match the class reserved for its local
+slot. Therefore an eleven-way image matrix can use at most five oldlab slots
+and cannot consume the four normal-test or two smoke reservations. Zero-slot
+classes are accepted only by unit-test profiles; the checked-in production
+profile and its regression test require `4/5/2`.
+This is pool profile schema 2; a schema-1 profile is rejected rather than being
+silently interpreted as class-isolated.
+
 This shape avoids hard-partitioning oldlab-5 into eleven 2-core machines. A
 cold, isolated `agent-sandbox` multi-architecture build on 2026-07-28 measured
 784 seconds at 2 vCPU/6 GiB and 791 seconds at 8 vCPU/6 GiB. The 0.9% difference
@@ -95,6 +117,45 @@ sudo /usr/local/libexec/loom-ci-runner-pool \
 Each run creates a fresh overlay from the same sealed golden image and has an
 independent Docker daemon and BuildKit cache. It never registers a GitHub
 runner.
+
+## Work-class queue metrics
+
+`scripts/ops/ci_runner_capacity_metrics.py` collects exact Actions job attempts
+and reports queue (`created_at` to `started_at`), execution (`started_at` to
+`completed_at`), failure count, and total runner-active seconds by both work
+class and runner class. Planner, aggregator, publisher, and skipped jobs are
+excluded by an explicit workflow/job-name contract. Missing timestamps,
+unsupported workflows, negative durations, and non-terminal jobs fail closed.
+
+The final pre-isolation attempt for PR #1156 used the shared classless pool:
+
+| Work class | Runs | Jobs | Queue p50 / p95 / max | Execution p50 / p95 / max |
+| --- | --- | ---: | --- | --- |
+| normal | CI `30950724994` | 9 | 450 / 644 / 645 s | 38 / 330 / 399 s |
+| image | images `30950714254` | 11 | 451 / 615 / 616 s | 263 / 391 / 886 s |
+| smoke | cluster `30950714243`, staging `30950719444` | 3 | 208 / 208 / 259 s | 308 / 308 / 341 s |
+
+All 23 selected jobs succeeded. This single-head snapshot is the Track 3
+before datum, not the controlled A/B acceptance by itself. At readback time the
+repository had 11 online, idle `oldlab5-kvm-*` runners, none with a class label,
+and only the legacy route variable existed.
+
+With `GITHUB_TOKEN` or `GH_TOKEN` supplied through an existing secret-safe
+environment, reproduce the report with:
+
+```bash
+uv run --no-sync python scripts/ops/ci_runner_capacity_metrics.py \
+  --repository qianyi-sun/loom \
+  --run CI:30950724994 \
+  --run images:30950714254 \
+  --run cluster-smoke:30950714243 \
+  --run staging-smoke:30950719444
+```
+
+For the post-activation controlled attempt, add `--require-bounded-wait`. It
+exits `3` unless every class has at least one terminal job, zero failures, and
+queue p95 no greater than its configured boundary. Preserve the full JSON from
+both attempts; aggregate wall time alone is not valid acceptance evidence.
 
 ## Build and preflight
 
@@ -188,6 +249,10 @@ sudo /usr/local/libexec/loom-ci-runner-pool \
 The JIT configuration is stored only long enough for the runner to become
 online, then unlinked. A completed guest is deleted along with its writable
 overlay and stale GitHub runner record before the slot is replenished.
+`status` reports target, ready, and busy slots separately for normal, image,
+and smoke work. An online runner missing its reserved class label is not ready;
+reconcile replaces it only when it is idle and fails closed if GitHub still
+reports it busy.
 
 Rollback routing first. Drain refuses to proceed while
 `LOOM_CI_ACCELERATOR_RUNS_ON` exists and never removes a runner GitHub reports
@@ -204,13 +269,30 @@ sudo /usr/local/libexec/loom-ci-runner-pool \
 
 ## Activation and rollback
 
-Activation is an explicit repository operation after the pool prerequisites
-pass:
+Activation is an explicit live repository operation after the pool
+prerequisites pass. Merging the repository contract does not authorize any of
+these commands. The controlled migration order is:
+
+1. remove the legacy route, drain all classless runners, install the exact
+   merged candidate, and reconcile until `status` reports `4/5/2` ready slots
+   with matching labels;
+2. set the three class variables below;
+3. dispatch a non-release acceptance PR that selects normal, image, cluster,
+   and staging lanes;
+4. collect queue delay, execution time, failures, and runner-active time by
+   work class, then compare the same head/input identity with the hosted
+   control attempt.
 
 ```bash
-gh variable set LOOM_CI_ACCELERATOR_RUNS_ON \
+gh variable set LOOM_CI_NORMAL_RUNS_ON \
   --repo qianyi-sun/loom \
-  --body '["self-hosted","linux","x64","loom-ci","oldlab-5","ephemeral-kvm"]'
+  --body '["self-hosted","linux","x64","loom-ci","oldlab-5","ephemeral-kvm","loom-ci-normal"]'
+gh variable set LOOM_CI_IMAGE_RUNS_ON \
+  --repo qianyi-sun/loom \
+  --body '["self-hosted","linux","x64","loom-ci","oldlab-5","ephemeral-kvm","loom-ci-image"]'
+gh variable set LOOM_CI_SMOKE_RUNS_ON \
+  --repo qianyi-sun/loom \
+  --body '["self-hosted","linux","x64","loom-ci","oldlab-5","ephemeral-kvm","loom-ci-smoke"]'
 ```
 
 Immediately dispatch or synchronize a non-release acceptance PR that selects
@@ -218,14 +300,29 @@ repository, image, cluster, and staging lanes. Confirm the runner labels,
 exact-head protected contexts, job results, queue delay, wall clock, and guest
 cleanup before admitting another PR.
 
-Rollback is a repository-variable removal followed by rerunning the affected
-workflow on the same head:
+The queue boundaries are five minutes for normal tests, fifteen minutes for
+image builds, and five minutes for smoke. They are evidence thresholds, not
+permission for an unattended route mutation. If one class crosses its boundary
+while its reserved slots are unavailable, an authorized operator may set only
+that class variable to `["ubuntu-latest"]`, cancel the still-queued attempt,
+and rerun the affected workflow on the same head. Already queued jobs do not
+move when a variable changes. Required checks remain pending/failing until the
+replacement terminal result is published; there is no success fallback.
+
+Full rollback is required when any class is below its target ready capacity,
+labels or candidate identity drift, guest cleanup fails, the controlled A/B
+regresses its class-specific queue or failure boundary, or the host exceeds its
+CPU/memory budget. Delete every class route and the legacy route before drain,
+then rerun affected workflows on the same head:
 
 ```bash
+gh variable delete LOOM_CI_NORMAL_RUNS_ON --repo qianyi-sun/loom
+gh variable delete LOOM_CI_IMAGE_RUNS_ON --repo qianyi-sun/loom
+gh variable delete LOOM_CI_SMOKE_RUNS_ON --repo qianyi-sun/loom
 gh variable delete LOOM_CI_ACCELERATOR_RUNS_ON --repo qianyi-sun/loom
 ```
 
-Because the workflow default is `["ubuntu-latest"]`, the replacement run
-returns to GitHub-hosted placement without a code change. Removing the variable
-does not move an already queued job; cancel and rerun the affected workflow
-after rollback. Protected checks remain fail-closed throughout.
+Because the final workflow default is `["ubuntu-latest"]`, the replacement run
+returns to GitHub-hosted placement without a code change. The pool refuses to
+drain while any of the four routing variables still exists. Protected checks
+remain fail-closed throughout.

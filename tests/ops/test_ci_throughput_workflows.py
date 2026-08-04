@@ -111,10 +111,20 @@ def _normalized_expression(value: str) -> str:
     return " ".join(value.split())
 
 
-ACCELERATOR_RUNS_ON = (
-    "${{ fromJSON(vars.LOOM_CI_ACCELERATOR_RUNS_ON || "
-    """'["ubuntu-latest"]') }}"""
-)
+WORK_CLASS_RUNS_ON = {
+    "normal": (
+        "${{ fromJSON(vars.LOOM_CI_NORMAL_RUNS_ON || "
+        "vars.LOOM_CI_ACCELERATOR_RUNS_ON || '[\"ubuntu-latest\"]') }}"
+    ),
+    "image": (
+        "${{ fromJSON(vars.LOOM_CI_IMAGE_RUNS_ON || "
+        "vars.LOOM_CI_ACCELERATOR_RUNS_ON || '[\"ubuntu-latest\"]') }}"
+    ),
+    "smoke": (
+        "${{ fromJSON(vars.LOOM_CI_SMOKE_RUNS_ON || "
+        "vars.LOOM_CI_ACCELERATOR_RUNS_ON || '[\"ubuntu-latest\"]') }}"
+    ),
+}
 OLDLAB_UV_MANIFEST = (
     "${{ startsWith(runner.name, 'oldlab5-kvm-') && "
     "'http://127.0.0.1:8181/uv.ndjson' || '' }}"
@@ -140,6 +150,14 @@ ACCELERATED_JOBS = {
     },
 }
 
+ACCELERATED_WORK_CLASSES = {
+    ".github/workflows/ci.yml": "normal",
+    ".github/workflows/images.yml": "image",
+    ".github/workflows/cluster-smoke.yml": "smoke",
+    ".github/workflows/staging-smoke.yml": "smoke",
+    ".github/workflows/cluster-deploy-spikes.yml": "smoke",
+}
+
 GITHUB_HOSTED_CONTROL_JOBS = {
     ".github/workflows/ci.yml": {
         "workflow-plan",
@@ -153,11 +171,12 @@ GITHUB_HOSTED_CONTROL_JOBS = {
 }
 
 
-def test_profitable_ci_jobs_use_opt_in_accelerator_with_hosted_default() -> None:
+def test_accelerated_jobs_use_isolated_work_class_with_legacy_and_hosted_fallback() -> None:
     for workflow_path, job_ids in ACCELERATED_JOBS.items():
         jobs = _workflow(workflow_path)["jobs"]
+        expected_runs_on = WORK_CLASS_RUNS_ON[ACCELERATED_WORK_CLASSES[workflow_path]]
         for job_id in job_ids:
-            assert jobs[job_id]["runs-on"] == ACCELERATOR_RUNS_ON
+            assert jobs[job_id]["runs-on"] == expected_runs_on
 
 
 def test_accelerated_workflows_use_local_uv_manifest_only_on_oldlab() -> None:

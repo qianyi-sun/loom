@@ -603,6 +603,42 @@ def test_collect_jobs_can_skip_log_downloads(monkeypatch: pytest.MonkeyPatch) ->
     ]
 
 
+def test_collect_run_attempt_binds_metadata_and_exact_attempt_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = GitHubMetricsClient(
+        token="token",
+        repository="qianyi-sun/loom",
+        api_url="https://api.github.test",
+    )
+    monkeypatch.setattr(
+        client,
+        "_json",
+        lambda *_args, **_kwargs: {
+            "id": 11,
+            "run_attempt": 3,
+            "event": "pull_request",
+            "head_sha": "a" * 40,
+        },
+    )
+    observed: list[tuple[int, int]] = []
+
+    def collect_jobs(*, run_id: int, attempt: int) -> list[Mapping[str, Any]]:
+        observed.append((run_id, attempt))
+        return [{"id": 44}]
+
+    monkeypatch.setattr(client, "collect_run_jobs", collect_jobs)
+
+    run = client.collect_run_attempt(run_id=11, attempt=2)
+
+    assert observed == [(11, 2)]
+    assert run["requested_attempt"] == 2
+    assert run["jobs"] == [{"id": 44}]
+
+    with pytest.raises(MetricsError, match="attempt is invalid"):
+        client.collect_run_attempt(run_id=11, attempt=4)
+
+
 def test_collect_jobs_does_not_request_logs_for_workflow_skips(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

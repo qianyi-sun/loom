@@ -30,7 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 EXPECTED_REPOSITORY = "qianyi-sun/loom"
 EXPECTED_HOSTNAME = "trt-eai-oldlab-5"
 EXPECTED_LABELS = (
@@ -42,6 +42,15 @@ EXPECTED_LABELS = (
     "ephemeral-kvm",
 )
 ROUTING_VARIABLE = "LOOM_CI_ACCELERATOR_RUNS_ON"
+WORK_CLASS_CONTRACTS = {
+    "normal": ("loom-ci-normal", "LOOM_CI_NORMAL_RUNS_ON"),
+    "image": ("loom-ci-image", "LOOM_CI_IMAGE_RUNS_ON"),
+    "smoke": ("loom-ci-smoke", "LOOM_CI_SMOKE_RUNS_ON"),
+}
+ROUTING_VARIABLES = (
+    ROUTING_VARIABLE,
+    *(contract[1] for contract in WORK_CLASS_CONTRACTS.values()),
+)
 MAX_SLOTS = 11
 HOST_CPU_BUDGET = 22
 HOST_MEMORY_BUDGET_MIB = 80 * 1024
@@ -105,6 +114,31 @@ class PoolOperationError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class WorkClassProfile:
+    name: str
+    label: str
+    slots: int
+    routing_variable: str
+    hosted_overflow_after_seconds: int
+
+    def validate(self) -> None:
+        expected = WORK_CLASS_CONTRACTS.get(self.name)
+        if expected is None:
+            raise PoolConfigError(f"unknown work class: {self.name}")
+        if (self.label, self.routing_variable) != expected:
+            raise PoolConfigError(f"work class {self.name} contract is invalid")
+        if type(self.slots) is not int or not 0 <= self.slots <= MAX_SLOTS:
+            raise PoolConfigError(f"work class {self.name} slots must be in 0..{MAX_SLOTS}")
+        if (
+            type(self.hosted_overflow_after_seconds) is not int
+            or not 60 <= self.hosted_overflow_after_seconds <= 3600
+        ):
+            raise PoolConfigError(
+                f"work class {self.name} hosted overflow must be in 60..3600 seconds",
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class PoolProfile:
     schema_version: int
     repository: str
@@ -121,6 +155,7 @@ class PoolProfile:
     host_cpu_budget: int
     host_memory_budget_mib: int
     labels: tuple[str, ...]
+    work_classes: tuple[WorkClassProfile, ...]
     cloud_image_url: str
     cloud_image_sha256: str
     actions_runner_url: str
@@ -141,6 +176,19 @@ class PoolProfile:
     @property
     def actions_runner_name(self) -> str:
         return Path(self.actions_runner_url).name
+
+    def work_class_for_slot(self, slot: int) -> WorkClassProfile:
+        if not 0 <= slot < self.slots:
+            raise PoolConfigError(f"slot must be in 0..{self.slots - 1}")
+        offset = 0
+        for work_class in self.work_classes:
+            offset += work_class.slots
+            if slot < offset:
+                return work_class
+        raise PoolConfigError(f"slot {slot} has no work class")
+
+    def labels_for_slot(self, slot: int) -> tuple[str, ...]:
+        return (*self.labels, self.work_class_for_slot(slot).label)
 
     @property
     def golden_image(self) -> Path:
@@ -187,6 +235,16 @@ class PoolProfile:
             raise PoolConfigError("aggregate memory budget exceeds 80 GiB")
         if self.labels != EXPECTED_LABELS:
             raise PoolConfigError(f"labels must be exactly {list(EXPECTED_LABELS)}")
+        expected_names = tuple(WORK_CLASS_CONTRACTS)
+        actual_names = tuple(work_class.name for work_class in self.work_classes)
+        if actual_names != expected_names:
+            raise PoolConfigError(
+                f"work classes must be ordered exactly as {list(expected_names)}",
+            )
+        for work_class in self.work_classes:
+            work_class.validate()
+        if sum(work_class.slots for work_class in self.work_classes) != self.slots:
+            raise PoolConfigError("work class slots must sum to pool slots")
         for field, value in (
             ("cloud_image_url", self.cloud_image_url),
             ("actions_runner_url", self.actions_runner_url),
@@ -241,7 +299,7 @@ class SubprocessCommandRunner:
 class GitHubRunnerAPI(Protocol):
     def list_runners(self) -> list[dict[str, Any]]: ...
 
-    def routing_variable_present(self) -> bool: ...
+    def routing_variable_present(self, name: str) -> bool: ...
 
     def generate_jit_config(
         self,
@@ -306,10 +364,12 @@ class GitHubAPI:
             raise PoolOperationError("GitHub runner inventory is malformed")
         return [dict(item) for item in runners if isinstance(item, dict)]
 
-    def routing_variable_present(self) -> bool:
+    def routing_variable_present(self, name: str) -> bool:
+        if name not in ROUTING_VARIABLES:
+            raise PoolOperationError("routing variable is outside the accepted contract")
         payload = self._request(
             "GET",
-            f"/actions/variables/{ROUTING_VARIABLE}",
+            f"/actions/variables/{name}",
             allow_not_found=True,
         )
         return payload is not None
@@ -385,6 +445,7 @@ def load_profile(path: Path) -> PoolProfile:
         "host_cpu_budget",
         "host_memory_budget_mib",
         "labels",
+        "work_classes",
         "cloud_image_url",
         "cloud_image_sha256",
         "actions_runner_url",
@@ -397,6 +458,24 @@ def load_profile(path: Path) -> PoolProfile:
             f"profile fields mismatch: missing={missing}, unknown={unknown}",
         )
     try:
+        raw_work_classes = raw["work_classes"]
+        if not isinstance(raw_work_classes, list):
+            raise PoolConfigError("work_classes must be a TOML array of tables")
+        work_classes = tuple(
+            WorkClassProfile(
+                name=item["name"],
+                label=item["label"],
+                slots=item["slots"],
+                routing_variable=item["routing_variable"],
+                hosted_overflow_after_seconds=item[
+                    "hosted_overflow_after_seconds"
+                ],
+            )
+            for item in raw_work_classes
+            if isinstance(item, dict)
+        )
+        if len(work_classes) != len(raw_work_classes):
+            raise PoolConfigError("work class entries must be tables")
         profile = PoolProfile(
             schema_version=raw["schema_version"],
             repository=raw["repository"],
@@ -413,6 +492,7 @@ def load_profile(path: Path) -> PoolProfile:
             host_cpu_budget=raw["host_cpu_budget"],
             host_memory_budget_mib=raw["host_memory_budget_mib"],
             labels=tuple(raw["labels"]),
+            work_classes=work_classes,
             cloud_image_url=raw["cloud_image_url"],
             cloud_image_sha256=raw["cloud_image_sha256"],
             actions_runner_url=raw["actions_runner_url"],
@@ -1071,6 +1151,19 @@ def _runner_inventory(
     return inventory
 
 
+def _runner_labels(record: Mapping[str, Any] | None) -> set[str]:
+    if record is None:
+        return set()
+    raw_labels = record.get("labels")
+    if not isinstance(raw_labels, Sequence) or isinstance(raw_labels, (str, bytes)):
+        return set()
+    labels: set[str] = set()
+    for item in raw_labels:
+        if isinstance(item, Mapping) and isinstance(item.get("name"), str):
+            labels.add(item["name"])
+    return labels
+
+
 def _verify_candidate_sha(candidate_sha: str) -> None:
     if _GIT_SHA_RE.fullmatch(candidate_sha) is None:
         raise PoolConfigError("candidate_sha must be a full lowercase Git SHA")
@@ -1547,14 +1640,15 @@ def _create_slot(
     if slot_root.exists():
         raise PoolOperationError(f"slot {slot} already has local state")
     slot_root.mkdir(parents=True, mode=0o700)
+    work_class = profile.work_class_for_slot(slot)
     nonce = uuid.uuid4().hex[:12]
-    runner_name = f"{profile.runner_name_prefix}-{slot:02d}-{nonce}"
+    runner_name = f"{profile.runner_name_prefix}-{work_class.name}-{slot:02d}-{nonce}"
     container_name = f"loom-ci-runner-{slot:02d}-{nonce}"
     runner_id: int | None = None
     try:
         runner_id, jit_config = api.generate_jit_config(
             name=runner_name,
-            labels=profile.labels,
+            labels=profile.labels_for_slot(slot),
         )
         _require_success(
             runner,
@@ -1684,6 +1778,17 @@ def reconcile(
         "target_slots": profile.slots,
         "existing_slots": sorted(states),
         "create_slots": [slot for slot in range(profile.slots) if slot not in states],
+        "work_classes": {
+            work_class.name: {
+                "label": work_class.label,
+                "target_slots": work_class.slots,
+                "routing_variable": work_class.routing_variable,
+                "hosted_overflow_after_seconds": (
+                    work_class.hosted_overflow_after_seconds
+                ),
+            }
+            for work_class in profile.work_classes
+        },
     }
     if not execute:
         return plan
@@ -1702,6 +1807,18 @@ def reconcile(
         if _container_running(runner, state.container_name):
             record = inventory.get(state.runner_id)
             if record is not None and record.get("status") == "online":
+                expected_label = profile.work_class_for_slot(slot).label
+                if expected_label not in _runner_labels(record):
+                    if _runner_busy(record):
+                        raise PoolOperationError(
+                            "busy runner does not match its reserved work class",
+                        )
+                    _remove_container(runner, state.container_name)
+                    api.delete_runner(state.runner_id)
+                    _safe_remove_slot(profile, slot)
+                    del states[slot]
+                    cleaned.append(slot)
+                    continue
                 (_slot_root(profile, slot) / "jit.iso").unlink(missing_ok=True)
             continue
         record = inventory.get(state.runner_id)
@@ -1754,9 +1871,13 @@ def drain(
         return plan
     if api is None:
         raise PoolOperationError("GitHub API credentials are required")
-    if api.routing_variable_present():
+    active_routing_variables = [
+        name for name in ROUTING_VARIABLES if api.routing_variable_present(name)
+    ]
+    if active_routing_variables:
         raise PoolOperationError(
-            f"delete repository variable {ROUTING_VARIABLE} before draining",
+            "delete repository routing variables before draining: "
+            + ", ".join(active_routing_variables),
         )
     inventory = _runner_inventory(api, profile)
     busy: list[int] = []
@@ -1789,32 +1910,69 @@ def status(
 ) -> dict[str, object]:
     states = _existing_states(profile)
     inventory = _runner_inventory(api, profile) if api is not None else {}
+    work_classes: dict[str, dict[str, object]] = {
+        work_class.name: {
+            "label": work_class.label,
+            "target_slots": work_class.slots,
+            "ready_slots": 0,
+            "busy_slots": 0,
+            "routing_variable": work_class.routing_variable,
+            "hosted_overflow_after_seconds": (
+                work_class.hosted_overflow_after_seconds
+            ),
+        }
+        for work_class in profile.work_classes
+    }
     slots: list[dict[str, object]] = []
     for slot, state in states.items():
         record = inventory.get(state.runner_id)
+        work_class = profile.work_class_for_slot(slot)
+        container_running = _container_running(runner, state.container_name)
+        labels_match = work_class.label in _runner_labels(record)
+        ready = bool(
+            container_running
+            and labels_match
+            and record
+            and record.get("status") == "online"
+        )
+        busy = bool(record and record.get("busy") is True)
+        if ready:
+            work_classes[work_class.name]["ready_slots"] += 1
+        if busy:
+            work_classes[work_class.name]["busy_slots"] += 1
         slots.append(
             {
                 "slot": slot,
+                "work_class": work_class.name,
+                "work_class_label": work_class.label,
                 "runner_name": state.runner_name,
-                "container_running": _container_running(
-                    runner,
-                    state.container_name,
-                ),
+                "container_running": container_running,
                 "github_status": record.get("status") if record else "absent",
-                "github_busy": bool(record and record.get("busy") is True),
+                "github_busy": busy,
+                "labels_match": labels_match,
             },
         )
-    route_present = api.routing_variable_present() if api is not None else None
+    route_presence = (
+        {name: api.routing_variable_present(name) for name in ROUTING_VARIABLES}
+        if api is not None
+        else None
+    )
     ready = sum(
         1
         for item in slots
-        if item["container_running"] and item["github_status"] == "online"
+        if item["container_running"]
+        and item["github_status"] == "online"
+        and item["labels_match"]
     )
     return {
         "operation": "status",
         "target_slots": profile.slots,
         "ready_slots": ready,
-        "routing_variable_present": route_present,
+        "routing_variable_present": (
+            route_presence[ROUTING_VARIABLE] if route_presence is not None else None
+        ),
+        "routing_variables_present": route_presence,
+        "work_classes": work_classes,
         "slots": slots,
         "healthy": ready == profile.slots,
     }
