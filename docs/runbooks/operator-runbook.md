@@ -877,9 +877,10 @@ knob you need.
    because it proves no external worker target was declared. A GB10 desired
    state without `[gb10_pool]` hosts is also a release-contract error because
    rollout step 12 would have no actual hosts to prepare. For the v1.0 staging
-   gate, the canonical profile and SSH authority enumerate the same complete
-   15-host inventory. Current checked-in active-14 configuration is
-   non-canonical implementation debt under #822.
+   gate, the canonical profile, worker-pool configuration, and SSH authority
+   enumerate the same complete 15-host inventory. The former active-14/static
+   host-7 exclusion has been removed; #822 continues to own dynamic busy-node
+   placement, resource-release recovery, and health-failure acceptance.
    `deploy/environments/staging.cluster.toml` points `[gb10_pool].ssh_config` at that config
    plus `[gb10_pool].ssh_identity_file` at a platform-dev-local deploy
    identity. Step 12 therefore does not depend on `platform-dev` having
