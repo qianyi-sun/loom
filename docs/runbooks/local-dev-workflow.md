@@ -127,18 +127,19 @@ kubectl create namespace loom-local
 eval "$(uv run --no-sync python -m loom_cli cluster bootstrap-secrets \
   --namespace loom-local --smoke-defaults --no-pgbouncer --admin-secret)"
 
-# up re-renders identically, applies, runs the DB migration Job
-# (`alembic upgrade head`, via --migrate), then waits for readiness (--no-wait
-# to skip). Namespace is inferred from the config.
+# up applies, waits for Postgres, then runs the DB migration Job
+# (`alembic upgrade head`, via --migrate). --no-wait skips the readiness
+# wait: the workers won't pass readiness until step 5 seeds their token, so
+# don't block here. Namespace is inferred from the config.
 uv run --no-sync python -m loom_cli cluster up \
-  --config deploy/local/local.cluster.toml --migrate
+  --config deploy/local/local.cluster.toml --migrate --no-wait
 ```
 
 `up` deploys the control plane, service, `loom-worker`, single-pod Postgres, and
-standalone MinIO into the cluster and waits until they report ready. There is no
-separate local process to start. `--migrate` runs the schema migration Job (the
-app pods assert schema-at-head and won't start otherwise); it is opt-in because
-`cluster up` leaves migration an explicit operator step for staging/production.
+standalone MinIO into the cluster. `--migrate` waits for Postgres and then runs
+the schema migration Job (the app pods assert schema-at-head and won't start
+otherwise); it is opt-in because `cluster up` leaves migration an explicit
+operator step for staging/production. Readiness is confirmed after step 5.
 
 > The render + command contract above is covered by a render regression
 > (`tests/loom_cli/test_cluster_render.py::test_local_example_template_renders`).
@@ -169,7 +170,13 @@ LOOM_DB_URL="$CP_DB_URL" uv run --no-sync python -m loom_cli \
 kill $PF
 ```
 
-Crash-looping workers recover on their next retry (no manual restart). Confirm:
+Crash-looping workers recover on their next retry (no manual restart). Confirm
+the whole stack reaches ready:
+
+```
+kubectl -n loom-local wait --for=condition=ready pod --all --timeout=180s
+```
+
 `kubectl -n loom-local logs loom-worker-0 --tail=5` should show
 `/workers/register` → `200` and `/trials/claim` polling.
 
