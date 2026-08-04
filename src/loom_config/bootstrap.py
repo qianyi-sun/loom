@@ -43,6 +43,25 @@ def _rewrite_dsn_host_port(dsn: str, *, host: str, port: int) -> str:
 _PGBOUNCER_HOST = "loom-pgbouncer"
 _PGBOUNCER_PORT = 6432
 
+# Throwaway singleton admin bearer for `--smoke-defaults` (local/dev) only.
+# `control-plane` and `loom-service` mount `loom-admin-secret`
+# (key `secrets.toml`, TOML `[admin].token`) and `cluster up` preflight
+# refuses to apply without it. The token satisfies AdminSecretVerifier's
+# rule (prefix `loom_admin_` + >=32-char suffix). NEVER a real credential —
+# real deploys provision `loom-admin-secret` out of band.
+_SMOKE_ADMIN_TOKEN = "loom_admin_smoke-local-dev-not-for-production-use-0"
+
+
+def _render_smoke_admin_secret_command(namespace: str) -> str:
+    """Render the `kubectl create secret generic loom-admin-secret` command
+    carrying a throwaway `secrets.toml` for smoke/local bring-up."""
+    secrets_toml = f'[admin]\ntoken = "{_SMOKE_ADMIN_TOKEN}"\n'
+    return " \\\n    ".join([
+        "kubectl create secret generic loom-admin-secret",
+        f"--namespace={namespace}",
+        f"--from-literal=secrets.toml={shlex.quote(secrets_toml)}",
+    ])
+
 
 _SMOKE_DEFAULTS: Mapping[str, str] = {
     "step-jwt-signing-key":   "smoke-jwt-key-do-not-use-in-prod",
@@ -110,6 +129,7 @@ def render_bootstrap_command(
     smoke_defaults: bool = False,
     rotate: bool = False,
     pgbouncer_enabled: bool = False,
+    admin_secret: bool = False,
 ) -> str:
     parts = ["kubectl create secret generic loom-secrets",
              f"--namespace={namespace}"]
@@ -150,4 +170,15 @@ def render_bootstrap_command(
                 pool_value = f"$(loom cluster derive-pool-dsn {shlex.quote(direct_url)})"
             parts.append(f"--from-literal={pool_key}={shlex.quote(pool_value)}")
 
-    return " \\\n    ".join(parts)
+    command = " \\\n    ".join(parts)
+
+    # Opt-in (`--admin-secret`, smoke only): also emit the singleton admin
+    # secret so a local/dev `eval "$(...)"` satisfies the `cluster up`
+    # preflight in one shot. Off by default so callers that create
+    # `loom-admin-secret` themselves (the cluster/staging smoke workflows,
+    # real deploys) don't collide with a duplicate. Emitted as a second
+    # command (newline-separated) so `eval` runs both.
+    if smoke_defaults and admin_secret:
+        command += "\n" + _render_smoke_admin_secret_command(namespace)
+
+    return command

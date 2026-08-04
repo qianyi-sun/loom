@@ -114,6 +114,31 @@ class TestRenderMigrationManifest:
         job = next(d for d in yaml.safe_load_all(text) if d)
         assert job["metadata"]["namespace"] == "loom"
 
+    def test_image_ref_preserves_literal_tag_while_name_is_normalised(self) -> None:
+        """The DNS-1123 normalisation for the Job *name* must never leak
+        into the pulled *image* tag or the `loom.image-tag` label.
+
+        A release tag like ``0.7`` (single-node local/dev) or
+        ``Staging.05ab776`` names a real pushed image and is a valid
+        Docker tag + valid k8s label value. Rewriting dots/uppercase in
+        the image reference made the migration Job ImagePullBackOff
+        against a tag that was never built — the exact failure seen
+        bringing up a single-node dev cluster whose images are tagged
+        ``0.7``.
+        """
+        text = render_migration_manifest(
+            image_tag="0.7",
+            namespace="loom-local",
+            job_suffix="a",
+        )
+        job = next(d for d in yaml.safe_load_all(text) if d)
+        container = job["spec"]["template"]["spec"]["containers"][0]
+        # Image keeps the literal tag...
+        assert container["image"] == "loom-control-plane:0.7"
+        assert job["metadata"]["labels"]["loom.image-tag"] == "0.7"
+        # ...while the Job's object name is still RFC 1123 safe.
+        assert job["metadata"]["name"] == "loom-migrate-0-7-a"
+
     def test_job_name_normalizes_uppercase_and_dots(self) -> None:
         """RFC 1123 name convention: dashes + lowercase alphanumerics."""
         text = render_migration_manifest(

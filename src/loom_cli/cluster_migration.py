@@ -93,7 +93,14 @@ def render_migration_manifest(
     )
     template = env.get_template("migration-job.yaml.j2")
     return template.render(
-        image_tag=_normalise_dns_component(image_tag),
+        # The image reference and the `loom.image-tag` label must carry the
+        # *literal* release tag — that names a real pushed image. Dotted or
+        # uppercase tags (e.g. `0.7` for local dev, `Staging.05ab776`) are
+        # valid Docker tags and valid k8s label values, so pass them raw.
+        # Only the k8s *object name* needs RFC 1123 normalisation, done
+        # separately as `job_name_tag` so it never rewrites the pulled tag.
+        image_tag=image_tag,
+        job_name_tag=_normalise_dns_component(image_tag),
         namespace=namespace,
         job_suffix=_normalise_dns_component(job_suffix),
         container_registry=container_registry,
