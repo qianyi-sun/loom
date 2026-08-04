@@ -14,8 +14,11 @@ resource observations. Resource contention does not change inventory
 membership.
 
 The former active-14/140-slot policy and static `trt-gb10-7` exclusion are
-superseded. Existing checked-in configuration and runtime evidence that still
-express that policy are implementation debt, not the target contract.
+superseded. The checked-in inventory, worker-pool configuration, trust
+topology, readiness gates, tests, and runbooks now use the complete 15-host
+membership. Historical runtime evidence that expresses the former policy is
+dated evidence only, not the target contract. #822 continues to own dynamic
+resource observation and placement acceptance across that fixed membership.
 
 ## Health and capacity are separate
 
