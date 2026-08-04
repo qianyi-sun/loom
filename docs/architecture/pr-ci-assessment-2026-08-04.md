@@ -120,5 +120,11 @@ and [Actions limits](https://docs.github.com/en/actions/reference/limits).
   `v1-release-ready-program.md` remains mandatory immediately after the
   default-branch workflow is activated; a `workflow_run` PR cannot execute its
   candidate publisher definition before merge.
+- Capture disposable-PR evidence from the commit CheckRuns endpoint, not only
+  the rendered PR checks list. For the final probe head, record each protected
+  context's CheckRun ID, GitHub App ID, status, conclusion, generation marker,
+  and source run/attempt. This distinguishes one stable authoritative CheckRun
+  being updated from duplicate same-name checks that can look equivalent in the
+  PR UI.
 - Runner-pool isolation, route-variable changes, merge, and deployment are
   separate authorities. None is authorized by this assessment.
