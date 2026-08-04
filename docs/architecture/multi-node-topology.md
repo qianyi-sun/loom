@@ -30,7 +30,7 @@ fields = {
 
 Profiles pin explicit values so a schema-default flip cannot silently break existing deployments:
 
-- `development.cluster.toml`: pinned `multi_node = false` (kind is single-node by construction)
+- `development.cluster.toml`: pinned `multi_node = false` (shared dev is a lightweight env co-located with staging/prod on the fleet — single-node-shaped backends by choice, not distributed; trial execution runs on the shared external-Slurm workers, arbitrated per-env by the autoscaler)
 - `staging.cluster.toml`: pinned `multi_node = false` **temporarily**; flipped `true` in the same PR that lands k3s cutover
 - `production.cluster.toml`: pinned `multi_node = true`, `storage_backend = "longhorn"`, 3 Postgres replicas, 4 MinIO replicas, required anti-affinity
 
