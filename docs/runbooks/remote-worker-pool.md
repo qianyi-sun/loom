@@ -1206,6 +1206,16 @@ sidecar. The worker requires a Slurm marker followed by `job_<SLURM_JOB_ID>`
 outside Slurm, a marker without a job component, or an opaque scope fails
 startup. There is no fallback to Docker's default cgroup parent.
 
+**Known residual (must close before activation — #1146):** the cgroup parent
+binds every *runtime* container (worker, trial, verifier-only driver, sidecar
+run). It does **not** yet bind image **build** containers — `docker-py`'s
+`images.build()` exposes no `cgroup_parent`, so task-Dockerfile, layered
+trial-cache, and sidecar-image builds run in host-daemon containers outside the
+`job_<id>` cgroup. A `RUN` step can therefore escape the allocation caps during
+the build window. Build content is semi-trusted (task Dockerfiles / adapter
+installers, serialized per #275), but a non-exclusive pool must not be flipped
+to `enabled=true` until #1146 contains builds (or bars them on packed nodes).
+
 Every non-exclusive actuator config must also provide `job_pids_max` as a
 positive JSON integer. It must be at least `container_pids` multiplied by the
 configured concurrency ceiling (`requested_concurrency`, or
