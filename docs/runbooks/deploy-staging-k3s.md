@@ -21,7 +21,7 @@ llm-gateway, family-orchestrator, egress-xds) plus the gateway-router DaemonSet.
 1. **k3s kubeconfig** — `export KUBECONFIG=/etc/rancher/k3s/k3s.yaml` (cluster-admin, on the control-plane host bb8-1). The default `~/.kube/config` only has the kind contexts.
 2. **On-host registry** — the `loom-registry` container serves `:5000`. k3s rewrites `192.168.50.13:5000` → `http://192.168.50.103:5000` via `/etc/rancher/k3s/registries.yaml`; images are pushed over `localhost:5000` (docker's insecure `127.0.0.0/8`).
 3. **Docker with host networking** — image builds use `--network=host` because the docker bridge network is MITM'd with a self-signed cert (pip/npm fail TLS verify); the host egress has valid certs.
-4. **Secrets bootstrapped** (one-time, not created by the render): namespace `loom-staging` must hold `loom-secrets` (`cp-db-url`, `svc-db-url`, `gw-db-url`, `minio-access-key`, `minio-secret-key`, provider API keys, …) and the CNPG `loom-postgres-cnpg-credentials`. DB URLs use the namespace-relative host `loom-postgres:5432` so they stay coherent. The deploy script fails closed if these are absent.
+4. **Secrets bootstrapped** (one-time, not created by the render): namespace `loom-staging` must hold `loom-secrets` (`cp-db-url`, `svc-db-url`, `gw-db-url`, `minio-access-key`, `minio-secret-key`, provider API keys, …) and the CNPG `loom-postgres-cnpg-credentials`. DB URLs use the namespace-relative host `loom-postgres:5432` so they stay coherent. The deploy script fails closed if these are absent. **Optional — QA relay for real LLM evals:** to let agents run genuine evals through the operator relay (see [Local-provider relay](#local-provider-relay-real-llm-evals)), also put the relay API key in `loom-secrets` under the key named by `gateway_local_providers` (`qa-relay-api-key` for the `yibu` entry): `kubectl -n loom-staging patch secret loom-secrets --type merge -p "{\"data\":{\"qa-relay-api-key\":\"$(printf %s "$KEY" | base64 -w0)\"}}"`. The env is rendered with `optional: true`, so a missing key doesn't crash the gateway — only `local/yibu/*` routes 400 until it's set.
 5. **Public entry + TLS** (one-time, idempotent — `scripts/ops/bootstrap_staging_k3s_entry_tls.sh`): installs the entry cutover (host `:443/:80` → k3s ingress `:8443/:8080`, persisted via `loom-staging-k3s-cutover.service`) and native Let's Encrypt issuance. cert-manager self-issues + auto-renews `loom-staging/loom-staging-tls` (#1114) — no kind dependency. It runs the controller on `hostNetwork` (the CNI pod net MITMs outbound HTTPS; only the host has clean ACME egress) and applies `deploy/staging-k3s/tls-acme.yaml`. It also installs the **GB10 fleet forwards** (`loom-k3s-fleet-fwd@.service` instances) that route the ports the nodes tunnel to — bb8-1 `:18081`/`:18082`→`:30080` (worker-router), `:19000`→`:30900` (minio-router), `:19100`→`:30443` (gateway-router) — so the fleet reaches k3s instead of kind (INTERIM until the node-agent dials the routers directly, #906). **NOTE:** the cert-manager `hostNetwork` patch is applied imperatively; re-run this script after any cert-manager reinstall/upgrade. Rollback to the kind entry: delete the two `PREROUTING` DNAT rules + `systemctl disable loom-staging-k3s-cutover.service`.
 
 ## Deploy
@@ -59,6 +59,42 @@ membership and mints a fresh user-owned `submit` token (rotating any prior one),
 which the script writes into `loom-secrets/smoke-api-token`. Point the smoke at
 it with `smoke_api_token_source` (or `LOOM_SMOKE_API_TOKEN` from that secret
 key). The identity is stable across deploys; only the token rotates.
+
+## Local-provider relay (real LLM evals)
+
+Staging carries an operator QA relay so real LLM agents (`litellm`,
+`mini-swe-agent`) can run genuine evals — not just the no-LLM `oracle` smoke.
+`gateway_local_providers` in the staging config declares OpenAI-compatible
+upstreams the gateway exposes as `local/<name>/<model>` routes:
+
+```toml
+# deploy/environments/staging.multinode.cluster.toml
+gateway_local_providers = ["yibu|https://yibuapi.com/v1|qa-relay-api-key"]
+```
+
+Each `<name>|<base_url>|<secret_key>` entry renders `LOOM_GW_LOCAL_<NAME>_BASE_URL`
+(literal) + `LOOM_GW_LOCAL_<NAME>_API_KEY` (from `loom-secrets/<secret_key>`,
+`optional: true`) onto the gateway Deployment. Empty on production, so prod stays
+relay-free. The gateway forwards `local/yibu/<model>` to the upstream as the
+OpenAI dialect (`loom_llm_gateway/routes/chat.py`, `local` provider path); no
+per-team BYO provider connection is involved.
+
+Submit a real eval (routes to `local/yibu/gpt-4o-mini`):
+
+```bash
+# from inside loom-service (has the smoke token in loom-secrets/smoke-api-token):
+curl -sS -X POST http://localhost:8090/api/v1/trials \
+  -H "Authorization: Bearer $SMOKE_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"task_id":"loom-smoke/gb10-oracle-hello-world",
+       "config":{"agent_name":"litellm",
+         "agent_model":{"provider":"openai","name":"gpt-4o-mini",
+                        "source":"local-server","local_server":"yibu"}}}'
+```
+
+`agent_model.source="local-server"` + `local_server="yibu"` is what serializes to
+the gateway `model="local/yibu/gpt-4o-mini"` (`ModelSpec.to_gateway_model_string`).
+A worker claims it, the agent calls the gateway, and an `llm_calls` row lands
+(`model=yibu/gpt-4o-mini`, real token counts) plus a trajectory in MinIO.
 
 ## External entrypoint (one-time)
 

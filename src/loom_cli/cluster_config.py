@@ -156,6 +156,7 @@ if TYPE_CHECKING:
         frontend_environment_label: str = "Local development"
         frontend_route_path: str = ""
         frontend_api_base_path: str = ""
+        gateway_local_providers: tuple[str, ...] = ()
         frontend_route_path_from: str = ""
         artifacts_bucket: str = "artifacts"
         gateway_hpa: _GatewayHpaConfig = field(default_factory=_GatewayHpaConfig)
