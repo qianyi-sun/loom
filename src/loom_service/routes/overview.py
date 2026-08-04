@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -346,7 +346,10 @@ def _summary(status: str) -> str:
 
 
 @router.get("/overview")
-async def get_overview(sc: SessionAndCtx) -> dict[str, Any]:
+async def get_overview(response: Response, sc: SessionAndCtx) -> dict[str, Any]:
+    # Worker health is heartbeat-derived and can change within seconds. Keep
+    # browsers and intermediary caches from replaying an old readiness result.
+    response.headers["Cache-Control"] = "no-store"
     session, ctx = sc
     require_scope(ctx, "read:own")
     team_id = _target_team_id(ctx)

@@ -138,6 +138,29 @@ describe("apiFetch", () => {
     );
   });
 
+  it("bypasses HTTP caches for live overview and monitor summaries", async () => {
+    const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await api.getOverview();
+    await api.getMonitorSummary({ view: "trials" });
+
+    expect(spy).toHaveBeenNthCalledWith(
+      1,
+      "/api/v1/overview",
+      expect.objectContaining({ cache: "no-store", credentials: "include" }),
+    );
+    expect(spy).toHaveBeenNthCalledWith(
+      2,
+      "/api/v1/monitor/summary?view=trials",
+      expect.objectContaining({ cache: "no-store", credentials: "include" }),
+    );
+  });
+
   it("sends admin actor header when approving a team registration", async () => {
     const spy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ registration: { id: "reg-1" } }), {

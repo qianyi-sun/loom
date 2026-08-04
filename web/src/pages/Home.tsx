@@ -305,6 +305,9 @@ export default function Home(): JSX.Element {
   const query = useQuery({
     queryKey: ["overview"],
     queryFn: () => api.getOverview(),
+    // Worker heartbeat freshness is 30 seconds. Refresh frequently enough for
+    // the readiness card to stop advertising a dead pool within that window.
+    refetchInterval: 10_000,
   });
 
   if (query.isPending) return <LoadingState label="Loading overview..." />;

@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Response
 from sqlalchemy import func, select
 
 from loom.db.schema import Batch, Trial
@@ -90,6 +90,7 @@ def _resource_trials_stmt() -> Any:
 
 @router.get("/monitor/summary")
 async def get_monitor_summary(
+    response: Response,
     sc: SessionAndCtx,
     view: Annotated[View, Query()] = "batches",
     team_id: Annotated[UUID | None, Query()] = None,
@@ -108,6 +109,9 @@ async def get_monitor_summary(
         Query(description="selected table state; summary still counts all states"),
     ] = None,
 ) -> dict[str, Any]:
+    # Capacity and queue state are heartbeat-derived. A cached response can
+    # otherwise make offline workers appear claimable long after they stop.
+    response.headers["Cache-Control"] = "no-store"
     session, ctx = sc
     require_scope(ctx, "read:own")
     target_team = resolve_monitor_team_filter(ctx, team_id)
