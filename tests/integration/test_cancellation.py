@@ -8,18 +8,19 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, delete, insert
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Task, Team, Token, Trial, User
+from loom.db.schema import Task, Team, TeamQuota, Token, Trial, User
 from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
 
 
 @pytest.fixture
-def cancel_seed(postgres_url: str) -> Iterator[tuple[str, UUID, UUID, UUID]]:
+def cancel_seed(postgres_url: str) -> Iterator[tuple[str, str, UUID, UUID, UUID]]:
     engine = create_engine(postgres_url)
     session_factory = sessionmaker(engine)
     team_id = uuid4()
     user_id = uuid4()
     raw = f"t_{uuid4().hex}"
+    admin_raw = f"a_{uuid4().hex}"
     queued = uuid4()
     running = uuid4()
     done = uuid4()
@@ -38,6 +39,13 @@ def cancel_seed(postgres_url: str) -> Iterator[tuple[str, UUID, UUID, UUID]]:
             created_by_user_id=user_id,
             issued_at=datetime.now(UTC), expires_at=None,
         ))
+        # A platform-admin token: no team_id, admin type.
+        s.execute(insert(Token).values(
+            token_hash=hashlib.sha256(admin_raw.encode()).digest(),
+            type="admin", scopes=["admin:trials"], team_id=None,
+            created_by_user_id=user_id,
+            issued_at=datetime.now(UTC), expires_at=None,
+        ))
         s.execute(insert(Task).values(id="t", checksum="0" * 64, config={}))
         for tid, state in [
             (queued, "queued"), (running, "running"), (done, "succeeded"),
@@ -49,11 +57,14 @@ def cancel_seed(postgres_url: str) -> Iterator[tuple[str, UUID, UUID, UUID]]:
             ))
         s.commit()
     try:
-        yield raw, queued, running, done
+        yield raw, admin_raw, queued, running, done
     finally:
         with session_factory() as s:
             s.execute(delete(Trial))
             s.execute(delete(Token))
+            # The control plane lazily materializes a team_quotas row; clear it
+            # before the team so teardown does not trip the FK.
+            s.execute(delete(TeamQuota).where(TeamQuota.team_id == team_id))
             s.execute(delete(User).where(User.id == user_id))
             s.execute(delete(Team))
             s.execute(delete(Task))
@@ -78,7 +89,7 @@ def app(
 
 
 def test_cancel_queued(app, cancel_seed):  # type: ignore[no-untyped-def]
-    raw, queued, _, _ = cancel_seed
+    raw, _admin, queued, _, _ = cancel_seed
     with TestClient(app) as client:
         r = client.post(
             f"/trials/{queued}/cancel",
@@ -89,7 +100,7 @@ def test_cancel_queued(app, cancel_seed):  # type: ignore[no-untyped-def]
 
 
 def test_cancel_running(app, cancel_seed):  # type: ignore[no-untyped-def]
-    raw, _, running, _ = cancel_seed
+    raw, _admin, _, running, _ = cancel_seed
     with TestClient(app) as client:
         r = client.post(
             f"/trials/{running}/cancel",
@@ -99,10 +110,30 @@ def test_cancel_running(app, cancel_seed):  # type: ignore[no-untyped-def]
 
 
 def test_cancel_terminal_returns_409(app, cancel_seed):  # type: ignore[no-untyped-def]
-    raw, _, _, done = cancel_seed
+    raw, _admin, _, _, done = cancel_seed
     with TestClient(app) as client:
         r = client.post(
             f"/trials/{done}/cancel",
             headers={"Authorization": f"Bearer {raw}"},
         )
         assert r.status_code == 409
+
+
+def test_cancel_as_platform_admin(app, cancel_seed):  # type: ignore[no-untyped-def]
+    # #1020: a platform-admin token (no team_id) may cancel a team's trial
+    # instead of getting a 401 from the team_id requirement.
+    _raw, admin_raw, queued, _, _ = cancel_seed
+    with TestClient(app) as client:
+        r = client.post(
+            f"/trials/{queued}/cancel",
+            headers={"Authorization": f"Bearer {admin_raw}"},
+        )
+        assert r.status_code == 200
+        assert r.json()["state"] == "cancelled"
+
+
+def test_cancel_requires_a_token(app, cancel_seed):  # type: ignore[no-untyped-def]
+    _raw, _admin, queued, _, _ = cancel_seed
+    with TestClient(app) as client:
+        r = client.post(f"/trials/{queued}/cancel")
+        assert r.status_code == 401
