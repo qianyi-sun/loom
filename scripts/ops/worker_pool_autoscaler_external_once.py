@@ -25,6 +25,7 @@ import tempfile
 import time
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -33,6 +34,11 @@ from sqlalchemy.exc import ArgumentError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.db.schema import WorkerPoolAutoscalerPolicy
+from loom.dev_instance import dev_pool_instance_name
+from loom_control_plane.global_dev_fleet_autoscaler import (
+    GlobalDevAutoscalerError,
+    capacity_grants_from_report,
+)
 from loom_control_plane.worker_pool_autoscaler import (
     reconcile_worker_pool_autoscaler_once,
 )
@@ -104,6 +110,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--db-connect-timeout-sec", type=float, default=10.0)
     parser.add_argument("--freshness-sec", type=int, default=120)
     parser.add_argument(
+        "--capacity-grants-json",
+        type=Path,
+        help="Global development-fleet autoscaler report for hard grant ceilings.",
+    )
+    parser.add_argument(
+        "--deployment-generation",
+        type=int,
+        help="Exact deployment generation bound to the capacity grant.",
+    )
+    parser.add_argument(
         "--validate-only",
         action="store_true",
         help=(
@@ -152,6 +168,30 @@ def _scoped_environment(value: object) -> str:
             "--environment must be an exact non-empty value without surrounding whitespace"
         )
     return value
+
+
+def _load_capacity_grants(args: argparse.Namespace) -> dict[Any, Any] | None:
+    path = args.capacity_grants_json
+    generation = args.deployment_generation
+    if (path is None) != (generation is None):
+        raise ExternalAutoscalerConfigurationError(
+            "--capacity-grants-json and --deployment-generation must be provided together"
+        )
+    if path is None:
+        return None
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation <= 0:
+        raise ExternalAutoscalerConfigurationError(
+            "--deployment-generation must be a positive integer"
+        )
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise GlobalDevAutoscalerError("capacity grant report must be an object")
+        return capacity_grants_from_report(raw)
+    except (OSError, json.JSONDecodeError, GlobalDevAutoscalerError) as exc:
+        raise ExternalAutoscalerConfigurationError(
+            "capacity grant report is unavailable or invalid"
+        ) from exc
 
 
 def _validated_port(value: object, field: str) -> int:
@@ -442,6 +482,13 @@ async def _validate_requested_external_policies(
 async def _main_async(args: argparse.Namespace) -> None:
     environment = _scoped_environment(args.environment)
     pool_names = _scoped_pool_names(args.pool_name)
+    capacity_grants = _load_capacity_grants(args)
+    if capacity_grants is None and any(
+        dev_pool_instance_name(pool_name) is not None for pool_name in pool_names
+    ):
+        raise ExternalAutoscalerConfigurationError(
+            "dev pools require --capacity-grants-json and --deployment-generation"
+        )
     port_forward = _database_port_forward_config(args)
     db_connect_timeout_sec = _validated_timeout(
         args.db_connect_timeout_sec,
@@ -476,13 +523,19 @@ async def _main_async(args: argparse.Namespace) -> None:
                         )
                     )
                     return
+                reconcile_kwargs: dict[str, Any] = {
+                    "environment": environment,
+                    "freshness_sec": args.freshness_sec,
+                    "include_external_policies": True,
+                    "external_only": True,
+                    "pool_names": pool_names,
+                }
+                if capacity_grants is not None:
+                    reconcile_kwargs["capacity_grants"] = capacity_grants
+                    reconcile_kwargs["deployment_generation"] = args.deployment_generation
                 decisions = await reconcile_worker_pool_autoscaler_once(
                     session,
-                    environment=environment,
-                    freshness_sec=args.freshness_sec,
-                    include_external_policies=True,
-                    external_only=True,
-                    pool_names=pool_names,
+                    **reconcile_kwargs,
                 )
                 await session.commit()
             print(json.dumps([decision.__dict__ for decision in decisions], default=str))

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -45,6 +46,7 @@ from loom_control_plane.elastic_slurm_worker_controller import (
     slurm_sandbox_identity,
     slurm_submission_config_for_node,
 )
+from loom_control_plane.shared_capacity_broker import AutoscalerGrantHandoff
 from loom_control_plane.slurm_worker_jobs import (
     ACTIVE_STATES,
     reconcile_slurm_worker_jobs,
@@ -119,6 +121,66 @@ class SlurmScaleUpActuatorResult:
     error: str | None = None
     blocked_reason: str | None = None
     blocked_details: dict[str, Any] | None = None
+
+
+def apply_global_dev_capacity_grant(
+    policy: AutoscalerPolicyConfig,
+    grant: AutoscalerGrantHandoff | None,
+    *,
+    deployment_generation: int | None,
+    now: datetime | None = None,
+) -> AutoscalerPolicyConfig:
+    """Apply one exact global grant as a hard local autoscaler ceiling.
+
+    Any missing, stale, expired, or differently bound grant clamps scaling to
+    zero for this tick. Existing workers then follow the normal drain-first path;
+    the global ledger keeps their slots committed until termination is observed.
+    """
+    now = now or datetime.now(UTC)
+    actor_config = policy.actuator_config or {}
+    candidate_sha = str(actor_config.get("candidate_sha") or "")
+    reason: str | None = None
+    if grant is None:
+        reason = "missing"
+    elif deployment_generation is None or deployment_generation <= 0:
+        reason = "deployment_generation_missing"
+    elif grant.environment != policy.environment or grant.pool_name != policy.pool_name:
+        reason = "scope_mismatch"
+    elif grant.deployment_generation != deployment_generation:
+        reason = "deployment_generation_mismatch"
+    elif grant.candidate_sha != candidate_sha:
+        reason = "candidate_mismatch"
+    else:
+        try:
+            expires_at = datetime.fromisoformat(grant.expires_at.replace("Z", "+00:00"))
+        except ValueError:
+            reason = "expiry_invalid"
+        else:
+            if expires_at.tzinfo is None or expires_at.astimezone(UTC) <= now.astimezone(UTC):
+                reason = "expired"
+    if reason is not None:
+        return replace(
+            policy,
+            # Keep the decision engine enabled at a zero ceiling: queued work
+            # is blocked from scale-up, while idle workers can still drain.
+            enabled=policy.enabled,
+            min_slots=0,
+            max_slots=0,
+            disabled_reason=f"global_dev_capacity_grant_{reason}",
+        )
+    assert grant is not None
+    effective_max = min(policy.max_slots, grant.max_slots)
+    return replace(
+        policy,
+        enabled=policy.enabled,
+        min_slots=min(policy.min_slots, effective_max),
+        max_slots=effective_max,
+        disabled_reason=(
+            policy.disabled_reason
+            if grant.enabled and effective_max > 0
+            else "global_dev_capacity_grant_zero"
+        ),
+    )
 
 
 def select_slurm_qos(
@@ -1273,6 +1335,7 @@ async def _apply_slurm_scale_up(
     *,
     runner: SlurmWorkerCommandRunner | None,
     now: datetime,
+    max_slots: int | None = None,
 ) -> SlurmScaleUpActuatorResult:
     try:
         config = _slurm_config_from_policy(row)
@@ -1384,7 +1447,7 @@ async def _apply_slurm_scale_up(
     # reconcile that starts below ``min_slots`` and crosses it mid-loop gives the
     # boost QoS only to the jobs submitted while still below the floor.
     committed_slots = active_plus_pending
-    remaining_budget = row.max_slots - active_plus_pending
+    remaining_budget = (row.max_slots if max_slots is None else max_slots) - active_plus_pending
     actuator_error: str | None = None
     for node in slurm_decision.submit_nodes:
         if remaining_budget <= 0:
@@ -1919,6 +1982,8 @@ async def reconcile_worker_pool_autoscaler_once(
     include_external_policies: bool = False,
     external_only: bool = False,
     pool_names: tuple[str, ...] | None = None,
+    capacity_grants: Mapping[tuple[str, str], AutoscalerGrantHandoff] | None = None,
+    deployment_generation: int | None = None,
 ) -> list[AutoscalerDecision]:
     now = now or datetime.now(UTC)
     scoped_environment = _exact_autoscaler_environment(environment)
@@ -1946,6 +2011,14 @@ async def reconcile_worker_pool_autoscaler_once(
     )
     decisions: list[AutoscalerDecision] = []
     for row in policies:
+        effective_policy = _policy_to_config(row)
+        if capacity_grants is not None and dev_pool_instance_name(row.pool_name) is not None:
+            effective_policy = apply_global_dev_capacity_grant(
+                effective_policy,
+                capacity_grants.get((row.environment, row.pool_name)),
+                deployment_generation=deployment_generation,
+                now=now,
+            )
         uses_external_runner = _policy_uses_external_runner(row)
         if uses_external_runner and not include_external_policies:
             continue
@@ -1980,7 +2053,7 @@ async def reconcile_worker_pool_autoscaler_once(
                 decision = _base_decision(
                     action=str(prod_pressure_summary["action"]),
                     reason=f"prod_pressure grace={prod_pressure_summary['grace_action']}",
-                    policy=_policy_to_config(row),
+                    policy=effective_policy,
                     observation=observation,
                     desired_slots=0,
                 )
@@ -1996,7 +2069,7 @@ async def reconcile_worker_pool_autoscaler_once(
             freshness_sec=freshness_sec,
         )
         decision = compute_autoscaler_decision(
-            _policy_to_config(row),
+            effective_policy,
             observation,
             now=now,
         )
@@ -2023,6 +2096,7 @@ async def reconcile_worker_pool_autoscaler_once(
                 decision,
                 runner=slurm_runner,
                 now=now,
+                max_slots=effective_policy.max_slots,
             )
             actuator_error = slurm_result.error
             actuator_blocked_reason = slurm_result.blocked_reason

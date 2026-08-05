@@ -20,11 +20,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 # ── Envelope defaults (operator-tunable via control-plane config) ────────────
-#: Max concurrent Slurm worker slots a single dev instance may request.
-PER_INSTANCE_CAP = 2
-#: Ceiling on the SUM of ``max_slots`` across all live dev instances, so N
-#: developers collectively cannot out-commit the fleet's dev-tier share.
+#: Runtime ceiling enforced by the one global development-fleet autoscaler.
 DEV_FLEET_BUDGET = 8
+#: Maximum demand one instance may publish. This is deliberately the whole
+#: shared budget: an idle cohort lets one developer burst to all dev capacity,
+#: while the global allocator fairly divides it under concurrent demand.
+PER_INSTANCE_CAP = DEV_FLEET_BUDGET
 
 #: Public subdomain base for dev instances: ``<name>.dev.<INGRESS_HOST>``.
 INGRESS_HOST = "yylx.world"
@@ -202,8 +203,9 @@ def validate_dev_instance(
                     f"{field} {getattr(identity, field)!r} collides with instance {other.name!r}",
                 )
 
-    # 4. Autoscaler policy envelope: dev instances only run on Slurm, at or
-    # below the per-instance cap, and within the fleet-wide dev budget.
+    # 4. Autoscaler policy envelope: dev instances only run on Slurm. The max
+    # is a demand ceiling, not a reservation; the global authority applies the
+    # fleet budget transactionally at runtime.
     if requested_policy.actuator != "slurm":
         errors.append(
             f"dev instances must use the slurm actuator, got {requested_policy.actuator!r}",
@@ -216,14 +218,4 @@ def validate_dev_instance(
         errors.append(
             f"max_slots {requested_policy.max_slots} exceeds PER_INSTANCE_CAP {PER_INSTANCE_CAP}",
         )
-    # 5. Fleet budget: this instance's max_slots + every *other* live dev
-    # instance's max_slots must stay within DEV_FLEET_BUDGET.
-    other_committed = sum(ref.max_slots for ref in other_instances if ref.name != name)
-    if other_committed + requested_policy.max_slots > DEV_FLEET_BUDGET:
-        errors.append(
-            f"fleet budget exceeded: {other_committed} committed by other dev "
-            f"instances + {requested_policy.max_slots} requested > "
-            f"DEV_FLEET_BUDGET {DEV_FLEET_BUDGET}",
-        )
-
     return errors

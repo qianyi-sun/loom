@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from loom_control_plane.shared_capacity_broker import (
+    AutoscalerGrantHandoff,
     BrokerBudgets,
     BrokerError,
     LeaseObservation,
@@ -105,6 +106,51 @@ def _record_parts(record: Mapping[str, object]) -> tuple[dict[str, object], dict
     if not isinstance(request, dict) or not isinstance(lease, dict):
         raise GlobalDevAutoscalerError("capacity authority returned an invalid record")
     return request, lease
+
+
+def capacity_grants_from_report(
+    document: Mapping[str, object],
+) -> dict[tuple[str, str], AutoscalerGrantHandoff]:
+    """Parse the versioned global report into exact local handoffs."""
+    if document.get("schema_version") != 1 or document.get("authority") != (
+        "global-dev-fleet-autoscaler"
+    ):
+        raise GlobalDevAutoscalerError("capacity grant report authority is invalid")
+    raw_grants = document.get("grants")
+    if not isinstance(raw_grants, list):
+        raise GlobalDevAutoscalerError("capacity grant report grants must be an array")
+    grants: dict[tuple[str, str], AutoscalerGrantHandoff] = {}
+    fields = set(AutoscalerGrantHandoff.__dataclass_fields__)
+    for raw in raw_grants:
+        if not isinstance(raw, dict) or set(raw) != fields:
+            raise GlobalDevAutoscalerError("capacity grant fields are invalid")
+        try:
+            grant = AutoscalerGrantHandoff(**raw)
+        except TypeError as exc:
+            raise GlobalDevAutoscalerError("capacity grant types are invalid") from exc
+        if (
+            grant.schema_version != 1
+            or not isinstance(grant.environment, str)
+            or _ENVIRONMENT_RE.fullmatch(grant.environment) is None
+            or not isinstance(grant.pool_name, str)
+            or _POOL_RE.fullmatch(grant.pool_name) is None
+            or not _is_int(grant.deployment_generation)
+            or grant.deployment_generation <= 0
+            or not isinstance(grant.candidate_sha, str)
+            or _SHA_RE.fullmatch(grant.candidate_sha) is None
+            or not _is_int(grant.lease_epoch)
+            or grant.lease_epoch < 0
+            or not _is_int(grant.max_slots)
+            or grant.max_slots < 0
+            or grant.min_slots != 0
+            or grant.preemptible is not True
+        ):
+            raise GlobalDevAutoscalerError("capacity grant contract is invalid")
+        key = (grant.environment, grant.pool_name)
+        if key in grants:
+            raise GlobalDevAutoscalerError("capacity grant report contains a duplicate scope")
+        grants[key] = grant
+    return grants
 
 
 class GlobalDevFleetAutoscaler:
@@ -358,4 +404,5 @@ __all__ = [
     "DevCapacityDemand",
     "GlobalDevAutoscalerError",
     "GlobalDevFleetAutoscaler",
+    "capacity_grants_from_report",
 ]
