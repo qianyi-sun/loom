@@ -29,6 +29,12 @@ DEV_FLEET_BUDGET = 8
 #: Public subdomain base for dev instances: ``<name>.dev.<INGRESS_HOST>``.
 INGRESS_HOST = "yylx.world"
 
+#: Worker-pool name prefix for dev instances (``dev-<name>``). The autoscaler
+#: policy-upsert admission path uses this to recognize a dev pool and enforce
+#: the dev envelope (:func:`validate_dev_instance`) fail-closed. Must stay in
+#: lockstep with ``DevInstanceIdentity.worker_pool`` below.
+DEV_POOL_PREFIX = "dev-"
+
 # ``<name>`` must be a valid RFC 1123 DNS label that starts with a letter and
 # ends with an alphanumeric (so the derived namespace/subdomain are valid),
 # 1–20 chars.
@@ -128,9 +134,23 @@ def derive_identity(name: str) -> DevInstanceIdentity:
         artifacts_bucket=f"loom-dev-{name}-artifacts",
         route_host=f"{name}.dev.{INGRESS_HOST}",
         route_path=f"/dev-{name}",
-        worker_pool=f"dev-{name}",
+        worker_pool=f"{DEV_POOL_PREFIX}{name}",
         provider_connection_namespace=f"dev-{name}",
     )
+
+
+def dev_pool_instance_name(pool_name: str) -> str | None:
+    """Recover the dev-instance ``name`` a ``dev-<name>`` worker pool belongs to.
+
+    Returns ``None`` when ``pool_name`` is not a dev-instance pool (so base
+    pools like ``oldlab`` / ``gb10`` are untouched by the dev-envelope
+    admission). Pure and cheap; the caller still runs the full
+    :func:`validate_dev_instance` guardrail on the recovered name.
+    """
+    if not pool_name.startswith(DEV_POOL_PREFIX):
+        return None
+    name = pool_name[len(DEV_POOL_PREFIX) :]
+    return name or None
 
 
 def validate_dev_instance(
@@ -179,16 +199,14 @@ def validate_dev_instance(
         ):
             if getattr(identity, field) == getattr(other_id, field):
                 errors.append(
-                    f"{field} {getattr(identity, field)!r} collides with "
-                    f"instance {other.name!r}",
+                    f"{field} {getattr(identity, field)!r} collides with instance {other.name!r}",
                 )
 
     # 4. Autoscaler policy envelope: dev instances only run on Slurm, at or
     # below the per-instance cap, and within the fleet-wide dev budget.
     if requested_policy.actuator != "slurm":
         errors.append(
-            f"dev instances must use the slurm actuator, got "
-            f"{requested_policy.actuator!r}",
+            f"dev instances must use the slurm actuator, got {requested_policy.actuator!r}",
         )
     if requested_policy.min_slots < 0:
         errors.append("min_slots must be >= 0")
@@ -196,14 +214,11 @@ def validate_dev_instance(
         errors.append("max_slots must be >= min_slots")
     if requested_policy.max_slots > PER_INSTANCE_CAP:
         errors.append(
-            f"max_slots {requested_policy.max_slots} exceeds PER_INSTANCE_CAP "
-            f"{PER_INSTANCE_CAP}",
+            f"max_slots {requested_policy.max_slots} exceeds PER_INSTANCE_CAP {PER_INSTANCE_CAP}",
         )
     # 5. Fleet budget: this instance's max_slots + every *other* live dev
     # instance's max_slots must stay within DEV_FLEET_BUDGET.
-    other_committed = sum(
-        ref.max_slots for ref in other_instances if ref.name != name
-    )
+    other_committed = sum(ref.max_slots for ref in other_instances if ref.name != name)
     if other_committed + requested_policy.max_slots > DEV_FLEET_BUDGET:
         errors.append(
             f"fleet budget exceeded: {other_committed} committed by other dev "

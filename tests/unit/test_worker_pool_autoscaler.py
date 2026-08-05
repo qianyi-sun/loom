@@ -2429,3 +2429,108 @@ async def test_apply_gb10_scale_up_creates_desired_state_and_selects_hosts() -> 
         "trt-gb10-3": "stopped",
     }
     assert len(session.executed) == 4
+
+
+# ── Dev-instance pool admission (design phase 4 / #1166) ─────────────────────
+# `upsert_autoscaler_policy` must reject any `dev-<name>` pool policy outside the
+# dev envelope (slurm-only, PER_INSTANCE_CAP, DEV_FLEET_BUDGET) — enforced no
+# matter which caller writes the policy. Base pools stay untouched.
+
+
+async def _upsert_dev(
+    session: _FakeSession,
+    *,
+    pool_name: str,
+    actuator: str = "slurm",
+    min_slots: int = 0,
+    max_slots: int = 1,
+) -> Any:
+    return await upsert_autoscaler_policy(
+        cast(Any, session),
+        environment="development",
+        pool_name=pool_name,
+        actuator=actuator,
+        enabled=False,
+        min_slots=min_slots,
+        max_slots=max_slots,
+        scale_up_threshold_slots=1,
+        scale_down_idle_seconds=600,
+        scale_up_cooldown_seconds=60,
+        scale_down_cooldown_seconds=300,
+        drain_timeout_seconds=600,
+        now=datetime(2026, 8, 5, 12, 0, tzinfo=UTC),
+    )
+
+
+async def test_dev_pool_within_envelope_upserts() -> None:
+    from loom.dev_instance import PER_INSTANCE_CAP
+
+    # First execute → the "other dev pools" query (none); second → get policy.
+    session = _FakeSession([_FakeResult(rows=[]), _FakeResult(scalar=None)])
+    created = await _upsert_dev(
+        session, pool_name="dev-alice", max_slots=PER_INSTANCE_CAP,
+    )
+    assert created in session.added
+    assert created.pool_name == "dev-alice"
+    assert created.max_slots == PER_INSTANCE_CAP
+
+
+async def test_dev_pool_exceeds_per_instance_cap_rejected() -> None:
+    from loom.dev_instance import PER_INSTANCE_CAP
+
+    session = _FakeSession([_FakeResult(rows=[])])
+    with pytest.raises(ValueError, match="PER_INSTANCE_CAP"):
+        await _upsert_dev(
+            session, pool_name="dev-alice", max_slots=PER_INSTANCE_CAP + 1,
+        )
+    assert session.added == []  # rejected before any write
+
+
+async def test_dev_pool_wrong_actuator_rejected() -> None:
+    # `gb10` passes _validate_policy_fields but dev instances must use slurm.
+    session = _FakeSession([_FakeResult(rows=[])])
+    with pytest.raises(ValueError, match="slurm"):
+        await _upsert_dev(session, pool_name="dev-alice", actuator="gb10")
+    assert session.added == []
+
+
+async def test_dev_pool_exceeds_fleet_budget_rejected() -> None:
+    from loom.dev_instance import DEV_FLEET_BUDGET, PER_INSTANCE_CAP
+
+    # Other live dev pools already commit the whole budget; one more slot tips it.
+    committed = DEV_FLEET_BUDGET
+    others = [
+        ("dev-bob", PER_INSTANCE_CAP),
+        ("dev-carol", PER_INSTANCE_CAP),
+        ("dev-dan", PER_INSTANCE_CAP),
+        ("dev-eve", committed - 3 * PER_INSTANCE_CAP),
+    ]
+    session = _FakeSession([_FakeResult(rows=others)])
+    with pytest.raises(ValueError, match="fleet budget"):
+        await _upsert_dev(session, pool_name="dev-alice", max_slots=PER_INSTANCE_CAP)
+    assert session.added == []
+
+
+async def test_dev_pool_ignores_malformed_peer_pool() -> None:
+    from loom.dev_instance import PER_INSTANCE_CAP
+
+    # A legacy/hand-written malformed dev pool must not 500 an unrelated valid
+    # upsert — it's skipped in budget accounting rather than crashing.
+    others = [("dev-Bad_Name", PER_INSTANCE_CAP), ("dev-", 99)]
+    session = _FakeSession([_FakeResult(rows=others), _FakeResult(scalar=None)])
+    created = await _upsert_dev(
+        session, pool_name="dev-alice", max_slots=PER_INSTANCE_CAP,
+    )
+    assert created.pool_name == "dev-alice"
+
+
+async def test_non_dev_pool_skips_dev_envelope() -> None:
+    # A base pool is untouched by dev admission: gb10 actuator + large slot
+    # counts are fine, and only the get-policy query runs (no dev-pool query).
+    session = _FakeSession([_FakeResult(scalar=None)])
+    created = await _upsert_dev(
+        session, pool_name="oldlab", actuator="gb10", max_slots=99,
+    )
+    assert created.pool_name == "oldlab"
+    assert created.max_slots == 99
+    assert len(session.executed) == 1  # only get_autoscaler_policy ran

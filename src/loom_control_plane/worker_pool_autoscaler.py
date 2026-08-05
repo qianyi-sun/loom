@@ -21,6 +21,15 @@ from loom.db.schema import (
     Worker,
     WorkerPoolAutoscalerPolicy,
 )
+from loom.dev_instance import (
+    DEV_POOL_PREFIX,
+    DevInstanceRef,
+    InvalidDevInstanceNameError,
+    RequestedPolicy,
+    dev_pool_instance_name,
+    validate_dev_instance,
+    validate_name,
+)
 from loom.worker_token import (
     WORKER_AUTH_FINGERPRINT_ENV_KEY,
     worker_token_fingerprint_from_env_file,
@@ -465,6 +474,66 @@ async def get_autoscaler_policy(
     ).scalar_one_or_none()
 
 
+async def _enforce_dev_pool_envelope(
+    session: AsyncSession,
+    *,
+    pool_name: str,
+    actuator: str,
+    min_slots: int,
+    max_slots: int,
+) -> None:
+    """Reject a ``dev-<name>`` pool policy that falls outside the dev envelope.
+
+    No-op for non-dev pools (base pools like ``oldlab``/``gb10`` are untouched).
+    For a dev pool, delegates to :func:`validate_dev_instance` — the single
+    source of truth the guarded dev-instances endpoint also uses — passing every
+    *other* live dev pool as the fleet-budget peer set so the Σ(max_slots) cap is
+    enforced across all instances. Raises ``ValueError`` (→ HTTP 400) on any
+    envelope violation.
+    """
+    name = dev_pool_instance_name(pool_name)
+    if name is None:
+        return
+    other_dev = (
+        await session.execute(
+            select(
+                WorkerPoolAutoscalerPolicy.pool_name,
+                WorkerPoolAutoscalerPolicy.max_slots,
+            ).where(
+                WorkerPoolAutoscalerPolicy.pool_name.startswith(DEV_POOL_PREFIX),
+                WorkerPoolAutoscalerPolicy.pool_name != pool_name,
+            ),
+        )
+    ).all()
+    others: list[DevInstanceRef] = []
+    for other_pool, other_max in other_dev:
+        other_name = dev_pool_instance_name(other_pool)
+        if other_name is None:
+            continue
+        try:
+            validate_name(other_name)
+        except InvalidDevInstanceNameError:
+            # A malformed ``dev-<garbage>`` pool can't be a legitimate dev
+            # instance (the guarded endpoint would have rejected it) — don't
+            # let it 500 an unrelated upsert; surface it and skip it as a
+            # budget peer.
+            logger.warning(
+                "skipping malformed dev pool %r in fleet-budget accounting",
+                other_pool,
+            )
+            continue
+        others.append(DevInstanceRef(name=other_name, max_slots=int(other_max)))
+    errors = validate_dev_instance(
+        name,
+        RequestedPolicy(actuator=actuator, min_slots=min_slots, max_slots=max_slots),
+        others,
+    )
+    if errors:
+        raise ValueError(
+            f"dev pool {pool_name!r} policy is outside the dev envelope: " + "; ".join(errors),
+        )
+
+
 async def upsert_autoscaler_policy(
     session: AsyncSession,
     *,
@@ -496,6 +565,19 @@ async def upsert_autoscaler_policy(
         scale_up_cooldown_seconds=scale_up_cooldown_seconds,
         scale_down_cooldown_seconds=scale_down_cooldown_seconds,
         drain_timeout_seconds=drain_timeout_seconds,
+    )
+    # Dev-instance admission (design phase 4 / #1166): a ``dev-<name>`` pool
+    # policy must stay inside the dev envelope — slurm actuator, per-instance
+    # cap, and the fleet-wide Σ(max_slots) budget across all live dev pools.
+    # Enforced here (fail-closed, defense-in-depth) so it holds no matter which
+    # caller writes the policy — the guarded dev-instances endpoint AND any
+    # direct admin API call route through this one function.
+    await _enforce_dev_pool_envelope(
+        session,
+        pool_name=pool_name,
+        actuator=actuator,
+        min_slots=min_slots,
+        max_slots=max_slots,
     )
     now = now or datetime.now(UTC)
     row = await get_autoscaler_policy(
