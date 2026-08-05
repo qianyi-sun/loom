@@ -20,6 +20,12 @@ _JOB_ID_RE = re.compile(r"^[1-9][0-9]*(?:_[0-9]+)?$")
 _REQUIRED_CONTROLLERS = frozenset({"cpu", "memory", "pids"})
 _MAX_WAIT_SECONDS = 60.0
 _POLL_INTERVAL_SECONDS = 0.1
+# The administrator-owned root guard registers exactly this slice for a job so
+# Docker's systemd cgroup driver has a valid ``.slice`` parent capped to the
+# allocation.  Only ``root`` can register a system slice, which is what lets an
+# unprivileged worker trust a slice it did not create.
+_SLICE_UNIT_RE = re.compile(r"^loom-job-[1-9][0-9]*\.slice$")
+_SUPPORTED_DOCKER_DRIVERS = frozenset({"cgroupfs", "systemd"})
 
 
 class SlurmJobCgroupError(ValueError):
@@ -229,13 +235,179 @@ def discover_slurm_job_cgroup(
     return job_path.as_posix()
 
 
+def _slice_cgroup_subpath(slice_unit: str) -> PurePosixPath:
+    """Expand a systemd slice unit name into its nested cgroup v2 subpath.
+
+    systemd nests slices on ``-`` boundaries, so ``a-b-c.slice`` is created at
+    ``a.slice/a-b.slice/a-b-c.slice``.
+    """
+
+    if not slice_unit.endswith(".slice"):
+        raise SlurmJobCgroupError("the systemd slice unit name is malformed")
+    stem = slice_unit[: -len(".slice")]
+    if not stem or stem.startswith("-") or stem.endswith("-") or "--" in stem:
+        raise SlurmJobCgroupError("the systemd slice unit name is malformed")
+    components = stem.split("-")
+    parts = ["-".join(components[: index + 1]) + ".slice" for index in range(len(components))]
+    return PurePosixPath("/", *parts)
+
+
+def _read_cgroup_scalar(path: Path, *, description: str) -> str:
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise SlurmJobCgroupError(f"cannot read {description}") from exc
+
+
+def _parse_cpu_set(spec: str) -> frozenset[int]:
+    cpus: set[int] = set()
+    for token in spec.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        low, separator, high = token.partition("-")
+        try:
+            if separator:
+                cpus.update(range(int(low), int(high) + 1))
+            else:
+                cpus.add(int(token))
+        except ValueError as exc:
+            raise SlurmJobCgroupError("a cpuset list is malformed") from exc
+    return frozenset(cpus)
+
+
+def discover_docker_cgroup_parent(
+    *,
+    docker_driver: str,
+    job_id: str,
+    pids_max: int,
+    wait_seconds: float = 0.0,
+    proc_cgroup: Path = Path("/proc/self/cgroup"),
+    cgroup_root: Path = Path("/sys/fs/cgroup"),
+) -> str:
+    """Return a Docker-driver-compatible cgroup parent bound to the allocation.
+
+    ``cgroupfs`` accepts a raw path, so the delegated Slurm job cgroup itself is
+    the parent and containers nest directly inside the allocation.  ``systemd``
+    requires a ``.slice``; the administrator-owned root guard registers
+    ``loom-job-<id>.slice`` capped to the allocation.  Because only ``root`` can
+    register a system slice, an unprivileged worker proves containment by reading
+    the slice's own cgroup limits and requiring them to bind the live allocation:
+    the slice cpuset must be a non-empty subset of the job's allocated CPUs, its
+    ``pids.max`` must equal the guard-applied aggregate ceiling, and its
+    ``memory.max`` must be finite.  There is no fallback to Docker's default
+    parent.
+    """
+
+    if docker_driver not in _SUPPORTED_DOCKER_DRIVERS:
+        raise SlurmJobCgroupError(
+            "the Docker cgroup driver is unsupported; use cgroupfs or systemd",
+        )
+
+    job_path = discover_slurm_job_cgroup(
+        job_id=job_id,
+        pids_max=pids_max,
+        wait_seconds=wait_seconds,
+        proc_cgroup=proc_cgroup,
+        cgroup_root=cgroup_root,
+    )
+    if docker_driver == "cgroupfs":
+        return job_path
+
+    base_job_id = job_id.split("_", 1)[0]
+    slice_unit = f"loom-job-{base_job_id}.slice"
+    if _SLICE_UNIT_RE.fullmatch(slice_unit) is None:
+        raise SlurmJobCgroupError("cannot derive the systemd slice for the Slurm job")
+
+    try:
+        root = cgroup_root.resolve(strict=True)
+        host_job_path = (root / job_path.removeprefix("/")).resolve(strict=True)
+        host_job_path.relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise SlurmJobCgroupError("the Slurm job cgroup path is unavailable") from exc
+
+    allocation_cpus = _parse_cpu_set(
+        _read_cgroup_scalar(
+            host_job_path / "cpuset.cpus.effective",
+            description="the Slurm job cpuset",
+        ),
+    )
+    if not allocation_cpus:
+        raise SlurmJobCgroupError("the Slurm job cgroup has no effective cpuset to bind")
+
+    expected_slice_path = root / _slice_cgroup_subpath(slice_unit).relative_to("/")
+    deadline = time.monotonic() + float(wait_seconds)
+    while True:
+        reason = _slice_binding_shortfall(
+            expected_slice_path=expected_slice_path,
+            root=root,
+            allocation_cpus=allocation_cpus,
+            pids_max=pids_max,
+        )
+        if reason is None:
+            return slice_unit
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise SlurmJobCgroupError(f"{reason} before the bounded wait expired")
+        time.sleep(min(_POLL_INTERVAL_SECONDS, remaining))
+
+
+def _slice_binding_shortfall(
+    *,
+    expected_slice_path: Path,
+    root: Path,
+    allocation_cpus: frozenset[int],
+    pids_max: int,
+) -> str | None:
+    """Return why the guard-owned slice does not yet bind the allocation, or None."""
+
+    try:
+        host_slice_path = expected_slice_path.resolve(strict=True)
+        host_slice_path.relative_to(root)
+    except (OSError, ValueError):
+        return "the guard-owned systemd slice is not present"
+    if host_slice_path != expected_slice_path:
+        raise SlurmJobCgroupError("symlinks are forbidden in the systemd slice path")
+    if not host_slice_path.is_dir():
+        return "the guard-owned systemd slice is not present"
+
+    # The guard enables the slice's controllers asynchronously just after it
+    # registers the unit, so a scalar that is not yet readable means "not ready
+    # yet" (retry within the bounded wait), never a hard failure.
+    def _slice_scalar(name: str) -> str | None:
+        try:
+            return (host_slice_path / name).read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+
+    cpuset_raw = _slice_scalar("cpuset.cpus.effective")
+    slice_pids_max = _slice_scalar("pids.max")
+    slice_memory_max = _slice_scalar("memory.max")
+    if cpuset_raw is None or slice_pids_max is None or slice_memory_max is None:
+        return "the guard-owned systemd slice is not fully populated"
+    slice_cpus = _parse_cpu_set(cpuset_raw)
+    if not slice_cpus or not slice_cpus.issubset(allocation_cpus):
+        return "the guard-owned systemd slice cpuset does not bind the allocation"
+    if slice_pids_max != str(pids_max):
+        return "the guard-owned systemd slice pids.max does not bind the aggregate ceiling"
+    if slice_memory_max == "max":
+        return "the guard-owned systemd slice memory ceiling is unbounded"
+    return None
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Print the current delegated Slurm job cgroup or fail closed.",
+        description="Print the Docker cgroup parent for the current Slurm job or fail closed.",
     )
     parser.add_argument("--job-id", required=True)
     parser.add_argument("--pids-max", required=True, type=int)
     parser.add_argument("--wait-seconds", type=float, default=0.0)
+    parser.add_argument(
+        "--docker-driver",
+        choices=sorted(_SUPPORTED_DOCKER_DRIVERS),
+        default="cgroupfs",
+        help="Docker's cgroup driver; systemd requires the guard-owned slice.",
+    )
     return parser
 
 
@@ -243,7 +415,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         print(
-            discover_slurm_job_cgroup(
+            discover_docker_cgroup_parent(
+                docker_driver=args.docker_driver,
                 job_id=args.job_id,
                 pids_max=args.pids_max,
                 wait_seconds=args.wait_seconds,

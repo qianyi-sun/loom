@@ -49,6 +49,35 @@ def test_required_worker_cgroup_parent_accepts_slurm_scope() -> None:
     assert ml._worker_cgroup_parent(settings) == ("/system.slice/slurmstepd.scope/job_123")  # type: ignore[arg-type]
 
 
+def test_required_worker_cgroup_parent_accepts_guard_slice() -> None:
+    # Docker's systemd driver takes the guard-owned slice unit, not a path.
+    settings = _FakeSettings()
+    settings.require_cgroup_parent = True
+    settings.cgroup_parent = "loom-job-123.slice"
+    settings.slurm_job_id = "123"
+
+    assert ml._worker_cgroup_parent(settings) == "loom-job-123.slice"  # type: ignore[arg-type]
+
+
+def test_required_worker_cgroup_parent_accepts_guard_slice_for_array_base() -> None:
+    settings = _FakeSettings()
+    settings.require_cgroup_parent = True
+    settings.cgroup_parent = "loom-job-123.slice"
+    settings.slurm_job_id = "123_7"
+
+    assert ml._worker_cgroup_parent(settings) == "loom-job-123.slice"  # type: ignore[arg-type]
+
+
+def test_required_worker_cgroup_parent_rejects_mismatched_slice() -> None:
+    settings = _FakeSettings()
+    settings.require_cgroup_parent = True
+    settings.cgroup_parent = "loom-job-456.slice"
+    settings.slurm_job_id = "123"
+
+    with pytest.raises(RuntimeError, match="slice does not match the Slurm job ID"):
+        ml._worker_cgroup_parent(settings)  # type: ignore[arg-type]
+
+
 def test_required_worker_cgroup_parent_rejects_missing_slurm_job_id() -> None:
     settings = _FakeSettings()
     settings.require_cgroup_parent = True

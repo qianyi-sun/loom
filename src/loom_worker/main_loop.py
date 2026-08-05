@@ -111,6 +111,9 @@ _SETUP_FAILURE_TRUNCATION_MARKER = (
     "\n...[truncated setup diagnostic; preserved trailing output]...\n"
 )
 _SLURM_JOB_ID_RE = re.compile(r"^[1-9][0-9]*(?:_[0-9]+)?$")
+# Docker's systemd cgroup driver takes the guard-owned allocation slice as a
+# unit name rather than a filesystem path.
+_WORKER_SLICE_RE = re.compile(r"^loom-job-([1-9][0-9]*)\.slice$")
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +196,21 @@ def _worker_cgroup_parent(settings: WorkerSettings) -> str | None:
         return None
     if "\x00" in raw_parent or "\n" in raw_parent or "\r" in raw_parent:
         raise RuntimeError("worker cgroup parent is malformed")
+    slice_match = _WORKER_SLICE_RE.fullmatch(raw_parent)
+    if slice_match is not None:
+        # Docker's systemd driver takes the guard-owned `loom-job-<id>.slice`;
+        # bind it to this job so a worker cannot be pointed at another job's slice.
+        if required:
+            slurm_job_id = str(getattr(settings, "slurm_job_id", "")).strip()
+            if _SLURM_JOB_ID_RE.fullmatch(slurm_job_id) is None:
+                raise RuntimeError(
+                    "required worker cgroup parent needs a valid Slurm job ID",
+                )
+            if slice_match.group(1) != slurm_job_id.split("_", 1)[0]:
+                raise RuntimeError(
+                    "required worker cgroup parent slice does not match the Slurm job ID",
+                )
+        return raw_parent
     parent = PurePosixPath(raw_parent)
     if not parent.is_absolute() or parent == PurePosixPath("/"):
         raise RuntimeError("worker cgroup parent must be a non-root absolute path")
@@ -906,9 +924,7 @@ async def _spawn_trial(
                     settings,
                     worker_id,
                 ),
-                require_containment=bool(
-                    getattr(settings, "require_cgroup_parent", False)
-                ),
+                require_containment=bool(getattr(settings, "require_cgroup_parent", False)),
             )
             # #317 Phase 1: if the chosen agent declares an
             # install_script, layer the agent install onto the task

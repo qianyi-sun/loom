@@ -7,6 +7,7 @@ import pytest
 from loom_control_plane import slurm_job_cgroup as cgroup_module
 from loom_control_plane.slurm_job_cgroup import (
     SlurmJobCgroupError,
+    discover_docker_cgroup_parent,
     discover_slurm_job_cgroup,
 )
 
@@ -37,7 +38,202 @@ def _cgroup_fixture(
     (job_dir / "cgroup.procs").write_text(resident_processes, encoding="utf-8")
     if pids_max is not None:
         (job_dir / "pids.max").write_text(pids_max, encoding="utf-8")
+    (job_dir / "cpuset.cpus.effective").write_text("0-3", encoding="utf-8")
     return proc_cgroup, root
+
+
+def _write_slice(
+    root: Path,
+    *,
+    unit: str = "loom-job-123.slice",
+    cpuset: str = "0-1",
+    pids_max: str = "3072",
+    memory_max: str = "536870912",
+) -> Path:
+    """Create the guard-owned systemd slice at its nested cgroup v2 path."""
+
+    components = unit.removesuffix(".slice").split("-")
+    nested = root
+    for index in range(len(components)):
+        nested = nested / ("-".join(components[: index + 1]) + ".slice")
+    nested.mkdir(parents=True)
+    (nested / "cpuset.cpus.effective").write_text(cpuset, encoding="utf-8")
+    (nested / "pids.max").write_text(pids_max, encoding="utf-8")
+    (nested / "memory.max").write_text(memory_max, encoding="utf-8")
+    return nested
+
+
+def test_docker_parent_cgroupfs_returns_raw_job_path(tmp_path: Path) -> None:
+    proc_cgroup, root = _cgroup_fixture(tmp_path)
+
+    assert (
+        discover_docker_cgroup_parent(
+            docker_driver="cgroupfs",
+            job_id="123",
+            pids_max=3072,
+            proc_cgroup=proc_cgroup,
+            cgroup_root=root,
+        )
+        == "/system.slice/slurmstepd.scope/job_123"
+    )
+
+
+def test_docker_parent_systemd_returns_bound_slice(tmp_path: Path) -> None:
+    proc_cgroup, root = _cgroup_fixture(tmp_path)
+    _write_slice(root)
+
+    assert (
+        discover_docker_cgroup_parent(
+            docker_driver="systemd",
+            job_id="123",
+            pids_max=3072,
+            proc_cgroup=proc_cgroup,
+            cgroup_root=root,
+        )
+        == "loom-job-123.slice"
+    )
+
+
+def test_docker_parent_rejects_unknown_driver(tmp_path: Path) -> None:
+    proc_cgroup, root = _cgroup_fixture(tmp_path)
+
+    with pytest.raises(SlurmJobCgroupError, match="Docker cgroup driver is unsupported"):
+        discover_docker_cgroup_parent(
+            docker_driver="containerd",
+            job_id="123",
+            pids_max=3072,
+            proc_cgroup=proc_cgroup,
+            cgroup_root=root,
+        )
+
+
+def test_docker_parent_systemd_requires_present_slice(tmp_path: Path) -> None:
+    proc_cgroup, root = _cgroup_fixture(tmp_path)  # no slice created
+
+    with pytest.raises(SlurmJobCgroupError, match="slice is not present"):
+        discover_docker_cgroup_parent(
+            docker_driver="systemd",
+            job_id="123",
+            pids_max=3072,
+            proc_cgroup=proc_cgroup,
+            cgroup_root=root,
+        )
+
+
+@pytest.mark.parametrize(
+    ("cpuset", "pids_max", "memory_max", "match"),
+    [
+        ("0-7", "3072", "536870912", "cpuset does not bind"),
+        ("0-1", "9999", "536870912", "pids.max does not bind"),
+        ("0-1", "3072", "max", "memory ceiling is unbounded"),
+    ],
+)
+def test_docker_parent_systemd_rejects_unbound_slice(
+    tmp_path: Path,
+    cpuset: str,
+    pids_max: str,
+    memory_max: str,
+    match: str,
+) -> None:
+    proc_cgroup, root = _cgroup_fixture(tmp_path)
+    _write_slice(root, cpuset=cpuset, pids_max=pids_max, memory_max=memory_max)
+
+    with pytest.raises(SlurmJobCgroupError, match=match):
+        discover_docker_cgroup_parent(
+            docker_driver="systemd",
+            job_id="123",
+            pids_max=3072,
+            proc_cgroup=proc_cgroup,
+            cgroup_root=root,
+        )
+
+
+def test_docker_parent_systemd_waits_for_guard_slice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proc_cgroup, root = _cgroup_fixture(tmp_path)
+    now = 100.0
+    sleeps: list[float] = []
+
+    monkeypatch.setattr(cgroup_module.time, "monotonic", lambda: now)
+
+    def register_slice(delay: float) -> None:
+        nonlocal now
+        sleeps.append(delay)
+        now += delay
+        if not sleeps[:-1]:  # create the slice on the first sleep
+            _write_slice(root)
+
+    monkeypatch.setattr(cgroup_module.time, "sleep", register_slice)
+
+    assert (
+        discover_docker_cgroup_parent(
+            docker_driver="systemd",
+            job_id="123",
+            pids_max=3072,
+            wait_seconds=1.0,
+            proc_cgroup=proc_cgroup,
+            cgroup_root=root,
+        )
+        == "loom-job-123.slice"
+    )
+    assert sleeps == pytest.approx([0.1])
+
+
+def test_docker_parent_systemd_retries_partially_populated_slice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The guard registers the slice unit and enables its controllers a moment
+    # later; a slice dir whose scalars are not yet readable must be retried, not
+    # failed closed (regression: discovery raised on the first missing cpuset).
+    proc_cgroup, root = _cgroup_fixture(tmp_path)
+    nested = root / "loom.slice" / "loom-job.slice" / "loom-job-123.slice"
+    nested.mkdir(parents=True)  # dir exists but no cgroup scalars yet
+    now = 100.0
+    sleeps: list[float] = []
+
+    monkeypatch.setattr(cgroup_module.time, "monotonic", lambda: now)
+
+    def populate(delay: float) -> None:
+        nonlocal now
+        sleeps.append(delay)
+        now += delay
+        (nested / "cpuset.cpus.effective").write_text("0-1", encoding="utf-8")
+        (nested / "pids.max").write_text("3072", encoding="utf-8")
+        (nested / "memory.max").write_text("536870912", encoding="utf-8")
+
+    monkeypatch.setattr(cgroup_module.time, "sleep", populate)
+
+    assert (
+        discover_docker_cgroup_parent(
+            docker_driver="systemd",
+            job_id="123",
+            pids_max=3072,
+            wait_seconds=1.0,
+            proc_cgroup=proc_cgroup,
+            cgroup_root=root,
+        )
+        == "loom-job-123.slice"
+    )
+    assert sleeps == pytest.approx([0.1])
+
+
+def test_docker_parent_systemd_binds_array_task_to_base_slice(tmp_path: Path) -> None:
+    proc_cgroup, root = _cgroup_fixture(tmp_path)
+    _write_slice(root, unit="loom-job-123.slice")
+
+    assert (
+        discover_docker_cgroup_parent(
+            docker_driver="systemd",
+            job_id="123_4",
+            pids_max=3072,
+            proc_cgroup=proc_cgroup,
+            cgroup_root=root,
+        )
+        == "loom-job-123.slice"
+    )
 
 
 def test_discovers_named_slurm_job_scope(tmp_path: Path) -> None:

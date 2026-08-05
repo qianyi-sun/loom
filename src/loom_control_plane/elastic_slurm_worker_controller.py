@@ -714,12 +714,19 @@ export LOOM_WORKER_COMPOSE_PROJECT="loom-${LOOM_WORKER_SANDBOX_IDENTITY}-${proje
 cd "$LOOM_REMOTE_WORKER_REPO_DIR"
 compose_files=(-f deploy/docker-compose.remote-worker.yml)
 if [[ "${LOOM_WORKER_REQUIRE_CGROUP_PARENT:-0}" == "1" ]]; then
+  # Docker's systemd cgroup driver only accepts a ``.slice`` parent, so the
+  # administrator-owned root guard registers ``loom-job-<id>.slice`` capped to
+  # the allocation and discovery returns it; the cgroupfs driver nests directly
+  # in the delegated job cgroup. Detecting the driver here keeps both hosts safe.
+  worker_cgroup_driver="$(docker info --format '{{.CgroupDriver}}' 2>/dev/null || true)"
+  : "${worker_cgroup_driver:?could not read the Docker cgroup driver}"
   export LOOM_WORKER_CGROUP_PARENT="$(
     PYTHONPATH="$LOOM_REMOTE_WORKER_REPO_DIR/src" \
       /usr/bin/python3 -m loom_control_plane.slurm_job_cgroup \
       --job-id "$SLURM_JOB_ID" \
       --pids-max "$LOOM_WORKER_JOB_PIDS_MAX" \
-      --wait-seconds 30
+      --wait-seconds 30 \
+      --docker-driver "$worker_cgroup_driver"
   )"
   : "${LOOM_WORKER_CGROUP_PARENT:?delegated Slurm job cgroup is required}"
   compose_files+=(-f deploy/docker-compose.remote-worker.cgroup-parent.yml)
