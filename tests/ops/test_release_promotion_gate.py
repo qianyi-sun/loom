@@ -144,7 +144,7 @@ def _passing_evidence(overrides: dict[str, Any] | None = None) -> dict[str, Any]
         "cluster_render_audit": {
             "status": "pass",
             "url": "https://github.com/qianyi-sun/loom/actions/runs/1003",
-            "staging_config": "deploy/environments/staging.cluster.toml",
+            "staging_config": "deploy/environments/staging.multinode.cluster.toml",
             "production_config": "deploy/environments/production.cluster.toml",
         },
         "migration_dry_run": {
@@ -998,7 +998,7 @@ def test_release_promotion_workflow_uploads_candidate_evidence() -> None:
     )
     assert validate_step < verify_step < upload_step
     assert "scripts/validate_environment_isolation.py" in str(job)
-    assert "deploy/environments/staging.cluster.toml" in str(job)
+    assert "deploy/environments/staging.multinode.cluster.toml" in str(job)
     assert "deploy/environments/production.cluster.toml" in str(job)
     assert "actions/upload-artifact" in str(job)
     assert "release-gate-evidence" in str(job)

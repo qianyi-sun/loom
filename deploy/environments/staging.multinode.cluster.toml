@@ -2,9 +2,9 @@
 # 2026-07 cutover). This is the version-controlled desired state for the
 # sanctioned k3s deploy path — see docs/runbooks/deploy-staging-k3s.md.
 #
-# Kept as a SEPARATE file from staging.cluster.toml (which still describes the
-# single-node kind rollback anchor) until the kind cluster is wiped under #881;
-# at that point this becomes the canonical staging config.
+# Kept as a separate file from staging.cluster.toml, which remains bound to the
+# protected legacy rollout-broker contract. This file is the live k3s render
+# authority; the former kind runtime is not a live acceptance or rollback lane.
 #
 # `image_tag` is a default; the deploy script overrides it with the freshly
 # built candidate sha (staging-<shortsha>). `container_registry` is the on-host

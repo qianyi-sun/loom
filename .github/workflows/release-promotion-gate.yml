@@ -114,10 +114,10 @@ jobs:
       - name: Render and audit staging manifests
         run: |
           uv run --no-sync loom cluster render \
-            --config deploy/environments/staging.cluster.toml \
+            --config deploy/environments/staging.multinode.cluster.toml \
             > staging-rendered.yaml
           uv run --no-sync loom cluster audit \
-            --config deploy/environments/staging.cluster.toml
+            --config deploy/environments/staging.multinode.cluster.toml
 
       - name: Render and audit production manifests
         run: |

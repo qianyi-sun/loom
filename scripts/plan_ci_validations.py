@@ -291,14 +291,10 @@ def plan_validations(
     )
     cluster_exact = {
         ".github/workflows/cluster-smoke.yml",
+        ".github/workflows/release-promotion-gate.yml",
+        "scripts/ops/deploy_staging_k3s.sh",
         "src/loom_cli/cluster_cmd.py",
         "src/loom_cli/cluster_config.py",
-        "src/loom_cli/rollout/steps/candidate_source.py",
-        "src/loom_cli/rollout/steps/s03_kind_cluster.py",
-        "src/loom_cli/rollout/steps/subprocess_util.py",
-        "tests/loom_cli/rollout/steps/test_candidate_source_invocation.py",
-        "tests/loom_cli/rollout/steps/test_s03_kind_cluster.py",
-        "tests/loom_cli/rollout/steps/test_subprocess_util.py",
         "web/src/__tests__/AuthContext.test.tsx",
         "web/src/auth/AuthContext.tsx",
         "config/loom-schema.toml",
@@ -307,9 +303,14 @@ def plan_validations(
         "src/loom_cli/templates/k8s/",
         "deploy/k8s/",
         "deploy/environments/",
+        "deploy/staging-k3s/",
     )
+    retired_kind_exact = {
+        "deploy/k8s/ingress-nginx-kind.yaml",
+    }
     staging_exact = {
         ".github/workflows/staging-smoke.yml",
+        ".github/workflows/release-promotion-gate.yml",
         "pyproject.toml",
         "config/loom-schema.toml",
         "src/loom/driver/docker.py",
@@ -317,16 +318,10 @@ def plan_validations(
         "deploy/nginx-spa.conf",
         "deploy/nginx-spa-security-headers.conf",
         "deploy/web-runtime-config.sh",
-        "deploy/k8s/ingress-nginx-kind.yaml",
         "scripts/ops/frontend_security_headers.py",
         "scripts/ops/frontend_route_smoke.py",
-        "src/loom_cli/rollout/steps/candidate_source.py",
-        "src/loom_cli/rollout/steps/s03_kind_cluster.py",
-        "src/loom_cli/rollout/steps/subprocess_util.py",
+        "scripts/ops/deploy_staging_k3s.sh",
         "src/loom_cli/templates/k8s/ingress.yaml.j2",
-        "tests/loom_cli/rollout/steps/test_candidate_source_invocation.py",
-        "tests/loom_cli/rollout/steps/test_s03_kind_cluster.py",
-        "tests/loom_cli/rollout/steps/test_subprocess_util.py",
         "tests/ops/test_frontend_security_headers.py",
         "web/package-lock.json",
         "web/package.json",
@@ -339,6 +334,7 @@ def plan_validations(
     staging_prefixes = (
         "deploy/Dockerfile.",
         "deploy/environments/",
+        "deploy/staging-k3s/",
         "src/loom_service/",
         "src/loom_control_plane/",
         "src/loom_llm_gateway/",
@@ -387,7 +383,11 @@ def plan_validations(
         if image_match:
             select("images", f"path:{path}")
             matched_owner = True
-        if _matches(path, exact=cluster_exact, prefixes=cluster_prefixes):
+        if path in retired_kind_exact:
+            # Retained only as a rollback/development artifact. Live staging
+            # runs on k3s, so this path must not consume either live smoke lane.
+            matched_owner = True
+        elif _matches(path, exact=cluster_exact, prefixes=cluster_prefixes):
             select("cluster_smoke", f"path:{path}")
             matched_owner = True
         if _matches(path, exact=staging_exact, prefixes=staging_prefixes):

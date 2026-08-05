@@ -205,7 +205,7 @@ def test_staging_pr_gate_is_credential_free_and_does_not_depend_on_real_aws() ->
 
     assert workflow["permissions"] == {"contents": "read"}
     assert "smoke-storage-aws-s3" not in jobs
-    assert set(gate["needs"]) == {"plan", "smoke", "system-smoke"}
+    assert set(gate["needs"]) == {"plan", "system-smoke"}
 
     gate_step = _named_step(gate, "Enforce selected staging smoke results")
     assert "AWS_S3_RESULT" not in gate_step["env"]
@@ -223,61 +223,6 @@ def test_staging_pr_gate_is_credential_free_and_does_not_depend_on_real_aws() ->
             step.get("with", {}).get("persist-credentials") is False
             for step in _checkout_steps(job)
         )
-
-
-def test_staging_kind_smoke_never_receives_admin_browser_credentials() -> None:
-    workflow = _workflow(".github/workflows/staging-smoke.yml")
-    smoke = workflow["jobs"]["smoke"]
-    bootstrap = _named_step(smoke, "Bootstrap namespace + Secrets")["run"]
-    deny_probe = _named_step(
-        smoke,
-        "Verify staging admin exchange stays hidden in kind",
-    )["run"]
-    step_names = [step.get("name") for step in smoke["steps"]]
-
-    assert 'ADMIN_TOKEN="loom_admin_$(openssl rand -hex 24)"' in bootstrap
-    assert 'echo "::add-mask::${ADMIN_TOKEN}"' in bootstrap
-    assert "umask 077" in bootstrap
-    assert "trap cleanup_bootstrap_secret EXIT" in bootstrap
-    assert 'rm -f "$admin_toml"' in bootstrap
-    assert "GITHUB_ENV" not in bootstrap
-    assert "/tmp/loom-staging-admin-token" not in bootstrap
-    assert "--request POST" in deny_probe
-    assert "--data-binary '{'" in deny_probe
-    assert "Authorization:" not in deny_probe
-    assert "Bearer" not in deny_probe
-    assert "ADMIN_TOKEN" not in deny_probe
-    assert "--admin-token-source" not in deny_probe
-    assert "${{ secrets." not in str(smoke)
-    assert "Verify authenticated staging admin browser surfaces" not in step_names
-    assert "Upload sanitized staging admin browser report" not in step_names
-    assert "Cleanup staging admin browser secret files" not in step_names
-    assert "loom-staging-admin-browser-smoke.json" not in str(smoke)
-
-
-@pytest.mark.parametrize(
-    ("event_name", "image_tag"),
-    [
-        ("pull_request\npush", "smoke-123"),
-        ("pull_request", "smoke-123; id"),
-        ("pull_request", "../smoke-123"),
-        ("workflow_dispatch", "--push"),
-    ],
-)
-def test_staging_smoke_rejects_malformed_event_and_image_tag(
-    event_name: str,
-    image_tag: str,
-) -> None:
-    workflow = _workflow(".github/workflows/staging-smoke.yml")
-    step = _named_step(workflow["jobs"]["smoke"], "Validate staging smoke inputs")
-
-    result = _run_validation_step(
-        step,
-        env={"EVENT_NAME": event_name, "IMAGE_TAG": image_tag},
-    )
-
-    assert result.returncode != 0
-    assert "FAIL:" in result.stderr
 
 
 @pytest.mark.parametrize(

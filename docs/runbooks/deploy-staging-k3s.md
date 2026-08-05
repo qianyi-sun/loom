@@ -108,15 +108,17 @@ reboots:
 # = iptables -t nat -I PREROUTING 1 -p tcp --dport 443 -j DNAT --to-destination 192.168.50.103:8443
 ```
 
-The legacy single-node **kind** cluster remains bound to the host-local `:443`
-underneath this rule as the rollback anchor.
+The former single-node kind deployment is retired and is not a live rollback
+anchor. Do not remove the k3s entry rule unless a separately verified endpoint
+has first been established.
 
 ## Verify
 
 ```bash
-# the real external path (bb8-1's own /etc/hosts sends yylx.world -> 127.0.0.1,
-# which bypasses the PREROUTING DNAT and hits the kind anchor — so resolve to
-# the k3s front explicitly):
+# Verify the public path and, when a host-local mapping bypasses PREROUTING,
+# resolve the k3s front explicitly:
+curl -sSk https://yylx.world/staging/
+curl -sSk https://yylx.world/staging/api/v1/health
 curl -sSk --resolve yylx.world:8443:192.168.50.103 https://yylx.world:8443/staging/
 curl -sSk --resolve yylx.world:8443:192.168.50.103 https://yylx.world:8443/staging/api/v1/health
 kubectl -n loom-staging get pods
@@ -126,6 +128,7 @@ Expect the SPA (`/staging/assets/index-*.js`), `/api/v1/health` = `{"status":"ok
 
 ## Rollback
 
-- **Fast (entrypoint):** remove the DNAT so `:443` falls back to the kind anchor:
-  `sudo iptables -t nat -D PREROUTING -p tcp --dport 443 -j DNAT --to-destination 192.168.50.103:8443` (and remove the `@reboot` cron entry).
 - **Redeploy a prior sha:** re-run the script with the previous `<git-sha>` (workloads roll back; DB migrations are forward-only — a schema rollback is a separate restore).
+- **Entrypoint rollback:** switch only to a separately verified replacement
+  endpoint. Removing the DNAT without such an endpoint is an outage, because
+  the retired kind runtime is no longer underneath it.

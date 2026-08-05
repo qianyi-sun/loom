@@ -34,7 +34,8 @@ The first migration slice covers:
 - lint/static, root test shards, package tests, runtime payload, Go, and web;
 - fast and Docker integration;
 - untrusted multi-architecture image builds;
-- cluster smoke, staging smoke, system smoke, and deploy spikes.
+- the mutation-free live-k3s render contract, manifest-owned system smoke, and
+  deploy spikes.
 
 Planning, aggregation, protected gate publication, and trusted image publishing
 remain on GitHub-hosted runners. The Linux ARM locked-environment check also
@@ -96,6 +97,16 @@ classes are accepted only by unit-test profiles; the checked-in production
 profile and its regression test require `5/4/2`.
 This is pool profile schema 2; a schema-1 profile is rejected rather than being
 silently interpreted as class-isolated.
+
+The first isolated Track 3 A/B briefly selected two obsolete kind deployment
+rehearsals in addition to the manifest-owned system smoke. Those two jobs no
+longer represented live staging after its migration to the five-node k3s
+cluster, and their simultaneous occupancy of both smoke slots caused the
+cluster lane to breach its queue boundary. That result is workflow-contract
+drift, not evidence that the pool needs a twelfth guest. The required context
+names stay stable, but their selected work is now one mutation-free k3s render
+contract plus one manifest-owned system smoke. The accepted `5/4/2` profile
+therefore remains the Track 3 candidate for the replacement A/B.
 
 This shape avoids hard-partitioning oldlab-5 into eleven 2-core machines. A
 cold, isolated `agent-sandbox` multi-architecture build on 2026-07-28 measured

@@ -70,7 +70,7 @@ def test_summary_separates_workflow_work_class_and_runner_class() -> None:
             _run(
                 "cluster-smoke",
                 3,
-                [_job("kind smoke (render → apply → status → down)")],
+                [_job("cluster contract (render live k3s topology)")],
             ),
         ],
     )
@@ -161,7 +161,7 @@ def test_bounded_wait_rejects_single_max_breach_hidden_by_p95() -> None:
             _run(
                 "cluster-smoke",
                 3,
-                [_job("kind smoke (render → apply → status → down)")],
+                [_job("cluster contract (render live k3s topology)")],
             ),
             _run(
                 "staging-smoke",
@@ -207,7 +207,7 @@ def test_bounded_wait_requires_all_four_workflows_on_one_head() -> None:
         _run(
             "cluster-smoke",
             3,
-            [_job("kind smoke (render → apply → status → down)")],
+            [_job("cluster contract (render live k3s topology)")],
         ),
         _run("staging-smoke", 4, [_job("manifest-owned system smoke")]),
     ]

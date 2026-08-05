@@ -193,29 +193,26 @@ def test_cluster_template_change_selects_cluster_and_staging() -> None:
     assert plan.images is False
 
 
-def test_pinned_ingress_controller_change_selects_cluster_and_staging() -> None:
+def test_retired_kind_ingress_change_does_not_select_live_smokes() -> None:
     plan = plan_validations(
         changed_paths=["deploy/k8s/ingress-nginx-kind.yaml"],
         labels=set(),
         event_name="pull_request",
     )
 
-    assert plan.cluster_smoke is True
-    assert plan.staging_smoke is True
+    assert plan.cluster_smoke is False
+    assert plan.staging_smoke is False
 
 
 @pytest.mark.parametrize(
     "path",
     [
-        "src/loom_cli/rollout/steps/candidate_source.py",
-        "src/loom_cli/rollout/steps/s03_kind_cluster.py",
-        "src/loom_cli/rollout/steps/subprocess_util.py",
-        "tests/loom_cli/rollout/steps/test_candidate_source_invocation.py",
-        "tests/loom_cli/rollout/steps/test_s03_kind_cluster.py",
-        "tests/loom_cli/rollout/steps/test_subprocess_util.py",
+        "deploy/environments/staging.multinode.cluster.toml",
+        "scripts/ops/deploy_staging_k3s.sh",
+        ".github/workflows/release-promotion-gate.yml",
     ],
 )
-def test_kind_cluster_rollout_contract_selects_cluster_and_staging(path: str) -> None:
+def test_k3s_staging_contract_selects_cluster_and_staging(path: str) -> None:
     plan = plan_validations(
         changed_paths=[path],
         labels=set(),

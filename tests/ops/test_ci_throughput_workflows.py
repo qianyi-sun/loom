@@ -142,8 +142,8 @@ ACCELERATED_JOBS = {
         "integration-docker",
     },
     ".github/workflows/images.yml": {"build"},
-    ".github/workflows/cluster-smoke.yml": {"smoke"},
-    ".github/workflows/staging-smoke.yml": {"smoke", "system-smoke"},
+    ".github/workflows/cluster-smoke.yml": {"cluster-contract"},
+    ".github/workflows/staging-smoke.yml": {"system-smoke"},
     ".github/workflows/cluster-deploy-spikes.yml": {
         "docker-only-spikes",
         "k8s-spikes",
@@ -550,17 +550,17 @@ def test_pytest_jobs_consume_manifest_owned_lane_paths(job_name: str, lane: str)
 
 def test_cluster_smoke_consumes_manifest_owned_lane_paths() -> None:
     workflow = _workflow(".github/workflows/cluster-smoke.yml")
-    smoke = workflow["jobs"]["smoke"]
-    scripts = "\n".join(step.get("run", "") for step in smoke["steps"])
+    contract = workflow["jobs"]["cluster-contract"]
+    scripts = "\n".join(step.get("run", "") for step in contract["steps"])
 
     assert (
         "uv run --no-sync python scripts/component_ownership.py test-paths --lane cluster-smoke"
         in scripts
     )
-    assert "uv sync --locked --all-packages --extra dev --extra cluster --extra rollout" in scripts
+    assert "uv sync --locked --all-packages --extra dev --extra cluster" in scripts
     assert "uv pip check --python .venv/bin/python" in scripts
     assert 'uv run --no-sync pytest "${test_paths[@]}"' in scripts
-    assert smoke["timeout-minutes"] >= 25
+    assert contract["timeout-minutes"] <= 15
 
 
 def test_images_workflow_uses_path_aware_matrix_plan() -> None:
@@ -830,12 +830,12 @@ def test_manual_and_filtered_contexts_have_distinct_event_specific_names() -> No
         (
             ".github/workflows/cluster-smoke.yml",
             "cluster-smoke-gate",
-            {"SMOKE_RESULT": "skipped"},
+            {"CONTRACT_RESULT": "skipped"},
         ),
         (
             ".github/workflows/staging-smoke.yml",
             "staging-smoke-gate",
-            {"SMOKE_RESULT": "skipped", "SYSTEM_SMOKE_RESULT": "skipped"},
+            {"SYSTEM_SMOKE_RESULT": "skipped"},
         ),
     ],
 )
@@ -873,12 +873,12 @@ def test_optional_gate_scripts_fail_closed_for_invalid_required(
         (
             ".github/workflows/cluster-smoke.yml",
             "cluster-smoke-gate",
-            ["SMOKE_RESULT"],
+            ["CONTRACT_RESULT"],
         ),
         (
             ".github/workflows/staging-smoke.yml",
             "staging-smoke-gate",
-            ["SMOKE_RESULT", "SYSTEM_SMOKE_RESULT"],
+            ["SYSTEM_SMOKE_RESULT"],
         ),
     ],
 )
@@ -1065,12 +1065,12 @@ def test_optional_validation_workflows_have_stable_gate_contexts() -> None:
         ".github/workflows/cluster-smoke.yml": (
             "cluster-smoke-gate",
             "cluster-smoke-gate",
-            {"smoke": "SMOKE_RESULT"},
+            {"cluster-contract": "CONTRACT_RESULT"},
         ),
         ".github/workflows/staging-smoke.yml": (
             "staging-smoke-gate",
             "staging-smoke-gate",
-            {"smoke": "SMOKE_RESULT", "system-smoke": "SYSTEM_SMOKE_RESULT"},
+            {"system-smoke": "SYSTEM_SMOKE_RESULT"},
         ),
     }
 
@@ -1382,131 +1382,6 @@ def test_pinned_ingress_controller_config_has_trusted_raw_path_guard() -> None:
     assert "nginx.ingress.kubernetes.io/configuration-snippet" not in manifest
 
 
-def test_staging_route_smoke_locks_exact_ingress_boundary_probes() -> None:
-    workflow = _workflow(".github/workflows/staging-smoke.yml")
-    steps = workflow["jobs"]["smoke"]["steps"]
-    step_names = [step.get("name") or step.get("uses") for step in steps]
-    route_contract_steps = [
-        "Install ingress-nginx (so preflight's IngressClass check passes)",
-        "loom cluster up (wait for components Ready)",
-        "Route kind ingress hosts to the local controller",
-        "Set up browser smoke Node",
-        "Install pinned browser smoke dependencies",
-        "Verify prefixed frontend routes through ingress-nginx",
-        "Verify prefixed frontend routes mount in Chromium",
-        "Upload frontend route browser trace",
-        "Verify staging admin exchange stays hidden in kind",
-        "Verify /healthz on every service via port-forward",
-    ]
-    route_contract_indices = [step_names.index(name) for name in route_contract_steps]
-    assert route_contract_indices == sorted(route_contract_indices)
-
-    route_step = next(
-        step
-        for step in steps
-        if step.get("name") == "Verify prefixed frontend routes through ingress-nginx"
-    )
-    script = route_step["run"]
-    syntax = subprocess.run(
-        ["bash", "-n"],
-        input=script,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert syntax.returncode == 0, syntax.stderr
-
-    probes = (
-        "/devil",
-        "/devapi",
-        "/prodfoo",
-        "/DEV",
-        "/Dev/",
-        "/dEv/monitor",
-        "/PROD",
-        "/Prod/api/v1/health",
-        "/D%45V/monitor",
-        "/d%45v/api/v1/health",
-        "/d%65v/monitor",
-        "/PR%4fD/",
-        "/pr%4Fd/",
-        "/dev%2Fmonitor",
-        "/dev/%2Fmonitor",
-        "/dev%5Cmonitor",
-        "/dev/%5cmonitor",
-        r"/dev\monitor",
-        r"/dev/\monitor",
-        "/dev//monitor",
-        "/dev/monitor//details",
-        "/dev/api/v1/%2Fhealth",
-        "/dev/api/v1/%5Chealth",
-        r"/dev/api/v1\health",
-        "/dev/api/v1//health",
-        "/dev/api/v1/health//",
-    )
-    for probe in probes:
-        assert probe in script
-    assert "--path-as-is --no-location --max-redirs 0" in script
-    assert 'if [[ "$status" != "404" ]]' in script
-    assert "grep -qi '^location:' \"$headers\"" in script
-    assert 'if [[ "$root_asset_status" != "404" ]]' in script
-    assert "grep -qi '^location:' \"$root_asset_headers\"" in script
-    assert 'if [[ "$health_status" != "200" ]]' in script
-    assert "require_singleton_header" in script
-    assert '"$health_headers" content-type mime application/json' in script
-    assert '! require_singleton_header "$www_headers" location exact \\' in script
-    assert "'https://yylx.world/dev?next=%2Fmonitor&x=1'; then" in script
-    assert '! require_singleton_header "$canonical_headers" location exact \\' in script
-    assert "'/dev/?next=%2Fmonitor&x=1'; then" in script
-    assert "head -n 1" not in script
-    assert "^content-type:.*application/json" not in script
-    assert "folded response headers are not accepted" in script
-    assert 'name.decode("ascii", errors="strict")' in script
-    assert "port-forward \\\n  svc/loom-web 18081:80" in script
-    assert "http://127.0.0.1:18081${path}" in script
-    assert "https://yylx.world/dev/api/v1/health" in script
-    assert "https://www.yylx.world/dev?next=%2Fmonitor&x=1" in script
-    assert "scripts/ops/frontend_security_headers.py" in script
-    assert "--route development=https://yylx.world/dev" in script
-    assert "--route staging=https://yylx.world/dev" not in script
-    assert "--probe web_500=500=http://127.0.0.1:18082/dev/security-header-5xx-probe" in script
-    assert "--web-origin-only" in script
-    assert "index.html.security-header-smoke" in script
-    assert "trap cleanup_security_5xx_probe EXIT" in script
-    assert "trap - EXIT" in script
-
-
-def test_staging_build_and_load_share_manifest_owned_image_matrix() -> None:
-    workflow = _workflow(".github/workflows/staging-smoke.yml")
-    smoke = workflow["jobs"]["smoke"]
-    steps = {step.get("name"): step for step in smoke["steps"]}
-    resolve_script = steps["Resolve manifest-owned staging image matrix"]["run"]
-    build_script = steps["Build images (parallel)"]["run"]
-    load_script = steps["Load images into kind"]["run"]
-
-    assert "release-images --runtime-policy start" in resolve_script
-    assert smoke["env"]["STAGING_IMAGE_MATRIX"].endswith(".json")
-    assert "STAGING_IMAGE_MATRIX_SHA256" in resolve_script
-    assert "sha256sum --check --status" in build_script
-    assert "sha256sum --check --status" in load_script
-    assert 'row["dockerfile"]' in build_script
-    assert 'row["context"]' in build_script
-    assert 'row["image_name"]' in build_script
-    assert 'row["image_name"]' in load_script
-    assert "builds=(" not in build_script
-    assert "for image_name in loom-" not in load_script
-    assert 'if ! docker image inspect "$base_image"' in load_script
-    assert 'docker pull "$base_image"' in load_script
-    assert load_script.index('docker image inspect "$base_image"') < (
-        load_script.index('docker pull "$base_image"')
-    )
-    assert load_script.index('docker pull "$base_image"') < load_script.index(
-        'kind load docker-image "$base_image"',
-    )
-    assert "< <(python3" not in build_script
-    assert "< <(python3" not in load_script
-    assert 'done < "$build_rows"' in build_script
-    assert 'done < "$image_names"' in load_script
 
 
 def test_staging_active_rendered_images_are_covered_by_manifest_matrix() -> None:
@@ -1518,7 +1393,7 @@ def test_staging_active_rendered_images_are_covered_by_manifest_matrix() -> None
             "cluster",
             "render",
             "--config",
-            "deploy/environments/staging.cluster.toml",
+            "deploy/environments/staging.multinode.cluster.toml",
         ],
         cwd=REPO_ROOT,
         text=True,
@@ -1544,8 +1419,11 @@ def test_staging_active_rendered_images_are_covered_by_manifest_matrix() -> None
             continue
         for container in containers:
             image = container.get("image") if isinstance(container, dict) else None
-            if isinstance(image, str) and image.split(":", 1)[0].startswith("loom-"):
-                active_images.add(image.split(":", 1)[0])
+            if not isinstance(image, str):
+                continue
+            image_name = image.rsplit("/", 1)[-1].split(":", 1)[0]
+            if image_name.startswith("loom-"):
+                active_images.add(image_name)
 
     manifest = component_ownership.load_manifest(
         REPO_ROOT / "config/component-ownership.toml"
@@ -1591,119 +1469,6 @@ def test_web_nginx_has_same_raw_path_and_case_guard_as_controller() -> None:
     ) in config
 
 
-def test_staging_browser_route_smoke_uses_pinned_bundled_chromium() -> None:
-    workflow = _workflow(".github/workflows/staging-smoke.yml")
-    steps = workflow["jobs"]["smoke"]["steps"]
-
-    setup = next(step for step in steps if step.get("name") == "Set up browser smoke Node")
-    install = next(
-        step for step in steps if step.get("name") == "Install pinned browser smoke dependencies"
-    )
-    browser = next(
-        step
-        for step in steps
-        if step.get("name") == "Verify prefixed frontend routes mount in Chromium"
-    )
-    upload = next(
-        step for step in steps if step.get("name") == "Upload frontend route browser trace"
-    )
-
-    assert setup["uses"] == (f"actions/setup-node@{_locked_action_sha('actions/setup-node')}")
-    assert str(setup["with"]["node-version"]) == "20"
-    assert setup["with"]["cache-dependency-path"] == "web/package-lock.json"
-    assert install["working-directory"] == "web"
-    assert "npm ci" in install["run"]
-    assert "npx --no-install playwright install --with-deps chromium" in install["run"]
-    assert "CI=true npm --prefix web run smoke:routes --" in browser["run"]
-    assert "--route https://yylx.world/dev" in browser["run"]
-    assert "--insecure-for-kind" in browser["run"]
-    assert "--trace /tmp/loom-frontend-route-browser-trace.zip" in browser["run"]
-    assert upload["if"] == "always()"
-    assert upload["uses"] == (
-        f"actions/upload-artifact@{_locked_action_sha('actions/upload-artifact')}"
-    )
-    assert upload["with"]["path"] == "/tmp/loom-frontend-route-browser-trace.zip"
-    assert upload["with"]["if-no-files-found"] == "ignore"
-
-    package = json.loads((REPO_ROOT / "web/package.json").read_text(encoding="utf-8"))
-    lock = json.loads((REPO_ROOT / "web/package-lock.json").read_text(encoding="utf-8"))
-    assert package["devDependencies"]["@playwright/test"] == "1.61.1"
-    assert lock["packages"]["node_modules/@playwright/test"]["version"] == "1.61.1"
-    assert lock["packages"]["node_modules/playwright"]["version"] == "1.61.1"
-    assert lock["packages"]["node_modules/playwright-core"]["version"] == "1.61.1"
-
-
-def test_staging_kind_smoke_keeps_admin_exchange_hidden_without_credentials() -> None:
-    workflow = _workflow(".github/workflows/staging-smoke.yml")
-    steps = workflow["jobs"]["smoke"]["steps"]
-    names = [step.get("name") for step in steps]
-    anonymous_index = names.index("Verify prefixed frontend routes mount in Chromium")
-    anonymous_trace_index = names.index("Upload frontend route browser trace")
-    deny_index = names.index("Verify staging admin exchange stays hidden in kind")
-    assert anonymous_index < anonymous_trace_index < deny_index
-    for forbidden_step in (
-        "Verify authenticated staging admin browser surfaces",
-        "Upload sanitized staging admin browser report",
-        "Cleanup staging admin browser secret files",
-    ):
-        assert forbidden_step not in names
-    assert "smoke:staging-admin" not in str(workflow)
-
-    bootstrap = next(step for step in steps if step.get("name") == "Bootstrap namespace + Secrets")[
-        "run"
-    ]
-    assert "/tmp/loom-staging-admin-token" not in bootstrap
-    assert "$GITHUB_ENV" not in bootstrap
-
-    cluster_config = next(
-        step for step in steps if step.get("name") == "Generate cluster-config.toml"
-    )["run"]
-    assert 'runtime_environment = "development"' in cluster_config
-    assert 'runtime_environment = "staging"' not in cluster_config
-    assert 'frontend_environment = "development"' in cluster_config
-    assert 'frontend_environment = "staging"' not in cluster_config
-
-    deny_script = steps[deny_index]["run"]
-    syntax = subprocess.run(
-        ["bash", "-n"],
-        input=deny_script,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert syntax.returncode == 0, syntax.stderr
-    assert "--request POST" in deny_script
-    assert "--data-binary '{'" in deny_script
-    assert "https://yylx.world/dev/api/v1/auth/staging-admin-browser-session" in deny_script
-    assert '[[ "$status" != "404" ]]' in deny_script
-    assert '!= \'{"detail":"not found"}\'' in deny_script
-    assert "grep -Eqi '^(location|set-cookie|x-loom-build-sha):'" in deny_script
-    for forbidden in (
-        "Authorization",
-        "ADMIN_TOKEN",
-        "smoke:staging-admin",
-        "loom-staging-admin-browser-smoke.json",
-    ):
-        assert forbidden not in deny_script
-
-    build = next(step for step in steps if step.get("name") == "Build images (parallel)")
-    assert "checkout_sha=$(git rev-parse HEAD)" in build["run"]
-    assert 'build_args+=(--build-arg "LOOM_BUILD_SHA=${checkout_sha}")' in build["run"]
-    assert "org.opencontainers.image.revision" in build["run"]
-    assert '[[ "$service_revision" == "$checkout_sha" ]]' in build["run"]
-
-    adr = (REPO_ROOT / "docs/architecture/adr/independent-staging-rollout-runner.md").read_text(
-        encoding="utf-8"
-    )
-    launch = (REPO_ROOT / "docs/runbooks/staging-launch.md").read_text(
-        encoding="utf-8",
-    )
-    operator = (REPO_ROOT / "docs/runbooks/operator-runbook.md").read_text(
-        encoding="utf-8",
-    )
-    assert "Broker-owned step 16" in adr
-    assert "broker-owned step 16" in launch
-    assert "Broker-owned step 16" in operator
 
 
 def test_staging_admin_browser_smoke_is_bounded_and_secret_safe() -> None:
@@ -1796,7 +1561,7 @@ def test_real_aws_s3_storage_smoke_is_not_a_pull_request_gate() -> None:
     gate = jobs["staging-smoke-gate"]
 
     assert "smoke-storage-aws-s3" not in jobs
-    assert set(gate["needs"]) == {"plan", "smoke", "system-smoke"}
+    assert set(gate["needs"]) == {"plan", "system-smoke"}
     assert "ci-aws" not in str(workflow)
 
 
