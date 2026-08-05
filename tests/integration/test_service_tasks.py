@@ -382,6 +382,22 @@ async def test_pagination(tasks_setup: tuple[FastAPI, str]) -> None:
     assert j2["next_cursor"] is None
 
 
+async def test_offset_is_rejected_not_silently_ignored(
+    tasks_setup: tuple[FastAPI, str],
+) -> None:
+    # #917: paging by offset must fail fast with guidance, not silently return
+    # the first page (which loops a bulk consumer forever).
+    app, raw = tasks_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        r = await ac.get(
+            "/api/v1/tasks?offset=2",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+    assert r.status_code == 400
+    assert "cursor" in r.json()["detail"]
+
+
 async def test_get_task_detail(tasks_setup: tuple[FastAPI, str]) -> None:
     app, raw = tasks_setup
     transport = httpx.ASGITransport(app=app)
