@@ -138,6 +138,54 @@ def test_bounded_wait_fails_on_queue_boundary_or_job_failure() -> None:
     assert acceptance["criteria"]["smoke"]["passed"] is True
 
 
+def test_bounded_wait_rejects_single_max_breach_hidden_by_p95() -> None:
+    normal_jobs = [
+        _job(
+            f"integration ({index}-of-9)",
+            started="2026-08-04T21:00:10Z",
+            completed="2026-08-04T21:01:10Z",
+        )
+        for index in range(1, 9)
+    ]
+    normal_jobs.append(
+        _job(
+            "lint-and-static",
+            started="2026-08-04T21:05:01Z",
+            completed="2026-08-04T21:06:01Z",
+        ),
+    )
+    summary = metrics.summarize_runs(
+        [
+            _run("CI", 1, normal_jobs),
+            _run("images", 2, [_job("worker (multi-arch)")]),
+            _run(
+                "cluster-smoke",
+                3,
+                [_job("kind smoke (render → apply → status → down)")],
+            ),
+            _run(
+                "staging-smoke",
+                4,
+                [_job("manifest-owned system smoke")],
+            ),
+        ],
+    )
+
+    acceptance = metrics.evaluate_bounded_wait(summary)
+
+    assert summary["by_work_class"]["normal"]["queue_seconds"]["p95"] == 10
+    assert acceptance["status"] == "fail"
+    assert acceptance["criteria"]["normal"] == {
+        "jobs": 9,
+        "queue_p95_seconds": 10,
+        "queue_max_seconds": 301,
+        "queue_boundary_breaches": 1,
+        "required_max_seconds": 300,
+        "failures": 0,
+        "passed": False,
+    }
+
+
 def test_bounded_wait_requires_an_observed_job_in_every_class() -> None:
     summary = metrics.summarize_runs(
         [
