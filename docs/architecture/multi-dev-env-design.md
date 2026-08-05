@@ -1,6 +1,8 @@
 # Multiple per-developer dev environments
 
-Status: design
+Status: global capacity arbitration implemented; see
+`docs/architecture/global-dev-fleet-autoscaler.md`. Static admission-budget
+descriptions below are retained as historical context.
 
 Refs: #857 (dev/staging/prod identity), #894 (subdomain-per-env),
 `docs/architecture/issue45-worker-autoscaler-design.md` (worker-pool

@@ -40,16 +40,19 @@ def _broker(tmp_path: Path, clock: Clock) -> SharedCapacityBroker:
 
 def _request(
     broker: SharedCapacityBroker,
-    sandbox: SandboxId,
+    sandbox: SandboxId | str,
     *,
     candidate_sha: str = SHA_A,
     pool: str = "gb10",
     min_slots: int = 0,
     target_slots: int = 10,
     ttl_seconds: int = 3600,
+    deployment_generation: int = 1,
 ) -> str:
+    sandbox_name = sandbox.value if isinstance(sandbox, SandboxId) else sandbox
     request, _ = broker.request_capacity(
         sandbox=sandbox,
+        deployment_generation=deployment_generation,
         candidate_sha=candidate_sha,
         pool=pool,
         min_slots=min_slots,
@@ -57,7 +60,7 @@ def _request(
         ttl_seconds=ttl_seconds,
         purpose="large-batch-runtime-validation",
         preemptible=True,
-        idempotency_key=f"{sandbox.value}:{pool}:{candidate_sha}",
+        idempotency_key=f"{sandbox_name}:{pool}:{candidate_sha}",
     )
     return request.id
 
@@ -82,7 +85,7 @@ def _budgets(
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
-        ("sandbox", "unknown", "allowlist"),
+        ("sandbox", "NOT-AN-ENV", "environment identifier"),
         ("candidate_sha", "abc1234", "40-hex"),
         ("pool", "../gb10", "identifier"),
         ("target_slots", 10_001, "10000"),
@@ -174,6 +177,7 @@ def test_request_is_idempotent_but_key_cannot_be_rebound(
     with pytest.raises(BrokerError, match="already bound"):
         broker.request_capacity(
             sandbox=SandboxId.QIANYI,
+            deployment_generation=1,
             candidate_sha=SHA_B,
             pool="gb10",
             min_slots=0,
@@ -183,6 +187,62 @@ def test_request_is_idempotent_but_key_cannot_be_rebound(
             preemptible=True,
             idempotency_key=f"qianyi:gb10:{SHA_A}",
         )
+
+
+def test_deployment_generation_is_persisted_and_fenced_by_idempotency(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    broker = _broker(tmp_path, clock)
+    request, _ = broker.request_capacity(
+        sandbox="dev-alice",
+        deployment_generation=7,
+        candidate_sha=SHA_A,
+        pool="gb10",
+        min_slots=0,
+        target_slots=4,
+        ttl_seconds=3600,
+        purpose="candidate-runtime-validation",
+        preemptible=True,
+        idempotency_key="generation-fence",
+    )
+    assert request.deployment_generation == 7
+
+    report = broker.reconcile(_budgets(global_slots=4, pools={"gb10": 4}))
+    assert report["requests"][0]["request"]["deployment_generation"] == 7  # type: ignore[index]
+    assert report["handoffs"][0]["deployment_generation"] == 7  # type: ignore[index]
+
+    with pytest.raises(BrokerError, match="already bound"):
+        broker.request_capacity(
+            sandbox="dev-alice",
+            deployment_generation=8,
+            candidate_sha=SHA_A,
+            pool="gb10",
+            min_slots=0,
+            target_slots=4,
+            ttl_seconds=3600,
+            purpose="candidate-runtime-validation",
+            preemptible=True,
+            idempotency_key="generation-fence",
+        )
+
+
+def test_request_ttl_can_be_renewed_without_changing_lease_identity(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    broker = _broker(tmp_path, clock)
+    request_id = _request(broker, "dev-alice", ttl_seconds=120)
+    report = broker.reconcile(_budgets(global_slots=2, pools={"gb10": 2}))
+    original = report["requests"][0]  # type: ignore[index]
+
+    clock.advance(seconds=60)
+    renewed = broker.renew(request_id, ttl_seconds=300)
+
+    assert renewed["request"]["id"] == request_id  # type: ignore[index]
+    assert renewed["lease"]["lease_epoch"] == original["lease"]["lease_epoch"]  # type: ignore[index]
+    assert renewed["request"]["expires_at"] == "2026-07-27T20:06:00Z"  # type: ignore[index]
+    assert broker.status(request_id=request_id)["audit"][-1]["event_type"] == "ttl_renewed"  # type: ignore[index]
 
 
 def test_three_sandboxes_share_minimum_and_burst_without_overshoot(
@@ -218,6 +278,39 @@ def test_three_sandboxes_share_minimum_and_burst_without_overshoot(
         and handoff["candidate_sha"] in {SHA_A, SHA_B, SHA_C}
         for handoff in report["handoffs"]  # type: ignore[union-attr]
     )
+
+
+def test_dynamic_registry_cohort_is_not_limited_to_legacy_sandboxes(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    broker = _broker(tmp_path, clock)
+    environments = (
+        "development",
+        "dev-alice",
+        "dev-bob",
+        "dev-fourth-person",
+    )
+    for index, environment in enumerate(environments, start=1):
+        _request(
+            broker,
+            environment,
+            candidate_sha=f"{index:x}" * 40,
+            min_slots=1,
+            target_slots=8,
+        )
+
+    report = broker.reconcile(_budgets(global_slots=8, pools={"gb10": 8}))
+
+    grants = {
+        item["request"]["sandbox"]: item["lease"]["granted_slots"]
+        for item in report["requests"]  # type: ignore[union-attr]
+    }
+    assert grants == {environment: 2 for environment in environments}
+    assert {
+        handoff["environment"]
+        for handoff in report["handoffs"]  # type: ignore[union-attr]
+    } == set(environments)
 
 
 def test_global_pool_and_pending_slot_budgets_all_clamp_grants(
@@ -458,8 +551,7 @@ def test_status_matches_published_evidence_schema(tmp_path: Path) -> None:
     report = broker.reconcile(_budgets(global_slots=3, pools={"gb10": 3}))
     schema = json.loads(
         (
-            Path(__file__).parents[2]
-            / "docs/evidence/shared-sandbox-capacity-evidence.schema.json"
+            Path(__file__).parents[2] / "docs/evidence/shared-sandbox-capacity-evidence.schema.json"
         ).read_text(encoding="utf-8"),
     )
     jsonschema.Draft202012Validator(schema).validate(report)

@@ -129,19 +129,18 @@ class TestValidateDevInstance:
         )
         assert any("min_slots must be >= 0" in e for e in errs)
 
-    def test_fleet_budget_boundary_ok(self) -> None:
-        # others commit DEV_FLEET_BUDGET - cap; a new cap-sized instance fits.
-        others = [DevInstanceRef(name="bob", max_slots=DEV_FLEET_BUDGET - PER_INSTANCE_CAP)]
+    def test_instance_can_request_the_whole_shared_budget(self) -> None:
+        others = [DevInstanceRef(name="bob", max_slots=PER_INSTANCE_CAP)]
         assert validate_dev_instance("alice", _ok_policy(PER_INSTANCE_CAP), others) == []
 
-    def test_fleet_budget_exceeded_rejected(self) -> None:
+    def test_other_demand_ceilings_are_not_treated_as_reservations(self) -> None:
         others = [DevInstanceRef(name="bob", max_slots=DEV_FLEET_BUDGET)]
         errs = validate_dev_instance("alice", _ok_policy(1), others)
-        assert any("fleet budget exceeded" in e for e in errs)
+        assert errs == []
 
     def test_update_same_name_does_not_count_against_budget_twice(self) -> None:
-        # re-validating an existing instance: its own prior max_slots (passed in
-        # `other_instances` by a naive caller) is excluded by name.
+        # Re-validating an existing instance remains valid if a caller includes
+        # its prior registry row in the distinctness cohort.
         others = [DevInstanceRef(name="alice", max_slots=DEV_FLEET_BUDGET)]
         assert validate_dev_instance("alice", _ok_policy(PER_INSTANCE_CAP), others) == []
 

@@ -136,14 +136,10 @@ async def test_create_rejects_over_cap_without_mutating() -> None:
     assert await store.get("alice") is None
 
 
-async def test_create_rejects_when_fleet_budget_exceeded() -> None:
+async def test_create_allows_many_instances_to_share_the_runtime_budget() -> None:
     store, rec = _FakeStore(), _Recorder()
-    # Pre-seed active instances that already commit the whole budget.
-    from loom.dev_instance import DEV_FLEET_BUDGET
-
-    committed = 0
-    i = 0
-    while committed < DEV_FLEET_BUDGET:
+    # Policy maxima express demand. They do not reserve slots at provisioning.
+    for i in range(4):
         await store.upsert(
             DevInstanceRecord(
                 name=f"peer{i}",
@@ -154,14 +150,11 @@ async def test_create_rejects_when_fleet_budget_exceeded() -> None:
                 created_at=_NOW,
             )
         )
-        committed += PER_INSTANCE_CAP
-        i += 1
-    with pytest.raises(DevInstanceRejectedError) as exc:
-        await _provisioner(store, rec).create(
-            "alice", owner_user_id="u1", min_slots=0, max_slots=PER_INSTANCE_CAP
-        )
-    assert any("fleet budget" in r for r in exc.value.reasons)
-    assert rec.calls == []
+    result = await _provisioner(store, rec).create(
+        "alice", owner_user_id="u1", min_slots=0, max_slots=PER_INSTANCE_CAP
+    )
+    assert result.status == "ready"
+    assert f"policy.upsert:alice:{PER_INSTANCE_CAP}" in rec.calls
 
 
 async def test_create_is_idempotent_when_already_ready() -> None:

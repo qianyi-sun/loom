@@ -14,6 +14,7 @@ from loom_control_plane.elastic_slurm_worker_controller import (
     SlurmNodeResource,
     build_sbatch_request,
 )
+from loom_control_plane.shared_capacity_broker import AutoscalerGrantHandoff
 from loom_control_plane.worker_pool_autoscaler import (
     AutoscalerDecision,
     AutoscalerObservation,
@@ -30,12 +31,89 @@ from loom_control_plane.worker_pool_autoscaler import (
     _request_worker_drain,
     _slurm_config_from_policy,
     _validate_policy_fields,
+    apply_global_dev_capacity_grant,
     autoscaler_policy_to_dict,
     compute_autoscaler_decision,
     fetch_autoscaler_status,
     select_slurm_qos,
     upsert_autoscaler_policy,
 )
+
+
+def _dev_policy_config() -> AutoscalerPolicyConfig:
+    return AutoscalerPolicyConfig(
+        environment="development",
+        pool_name="dev-alice",
+        actuator="slurm",
+        enabled=True,
+        min_slots=0,
+        max_slots=8,
+        scale_up_threshold_slots=1,
+        scale_down_idle_seconds=60,
+        scale_up_cooldown_seconds=10,
+        scale_down_cooldown_seconds=10,
+        drain_timeout_seconds=60,
+        actuator_config={"candidate_sha": "a" * 40},
+    )
+
+
+def _dev_grant(*, max_slots: int = 3, generation: int = 7) -> AutoscalerGrantHandoff:
+    return AutoscalerGrantHandoff(
+        schema_version=1,
+        request_id="request-1",
+        lease_epoch=2,
+        sandbox="development",
+        environment="development",
+        deployment_generation=generation,
+        candidate_sha="a" * 40,
+        pool_name="dev-alice",
+        enabled=max_slots > 0,
+        min_slots=0,
+        max_slots=max_slots,
+        expires_at="2026-08-05T13:00:00Z",
+        preemptible=True,
+    )
+
+
+def test_global_dev_grant_is_a_hard_candidate_bound_policy_ceiling() -> None:
+    effective = apply_global_dev_capacity_grant(
+        _dev_policy_config(),
+        _dev_grant(max_slots=3),
+        deployment_generation=7,
+        now=datetime(2026, 8, 5, 12, 0, tzinfo=UTC),
+    )
+    assert effective.enabled is True
+    assert effective.max_slots == 3
+
+
+@pytest.mark.parametrize("grant", [None, _dev_grant(generation=8)])
+def test_missing_or_wrong_generation_global_grant_fails_closed(
+    grant: AutoscalerGrantHandoff | None,
+) -> None:
+    effective = apply_global_dev_capacity_grant(
+        _dev_policy_config(),
+        grant,
+        deployment_generation=7,
+        now=datetime(2026, 8, 5, 12, 0, tzinfo=UTC),
+    )
+    assert effective.enabled is True
+    assert effective.max_slots == 0
+    assert effective.disabled_reason is not None
+    decision = compute_autoscaler_decision(
+        effective,
+        AutoscalerObservation(
+            active_slots=0,
+            pending_slots=0,
+            draining_slots=0,
+            occupied_slots=0,
+            queued_slots=1,
+            idle_worker_ids=(),
+            drained_worker_ids=(),
+        ),
+        now=datetime(2026, 8, 5, 12, 0, tzinfo=UTC),
+    )
+    assert decision.action == "blocked"
+    assert decision.reason == "max_slots_reached"
 
 
 def test_select_slurm_qos_uses_boost_below_min() -> None:
@@ -2484,7 +2562,7 @@ async def test_apply_gb10_scale_up_creates_desired_state_and_selects_hosts() -> 
 
 # ── Dev-instance pool admission (design phase 4 / #1166) ─────────────────────
 # `upsert_autoscaler_policy` must reject any `dev-<name>` pool policy outside the
-# dev envelope (slurm-only, PER_INSTANCE_CAP, DEV_FLEET_BUDGET) — enforced no
+# dev envelope (slurm-only and per-instance demand ceiling) — enforced no
 # matter which caller writes the policy. Base pools stay untouched.
 
 
@@ -2549,21 +2627,17 @@ async def test_dev_pool_wrong_actuator_rejected() -> None:
     assert session.added == []
 
 
-async def test_dev_pool_exceeds_fleet_budget_rejected() -> None:
-    from loom.dev_instance import DEV_FLEET_BUDGET, PER_INSTANCE_CAP
+async def test_dev_pool_maxima_are_demand_not_static_fleet_reservations() -> None:
+    from loom.dev_instance import PER_INSTANCE_CAP
 
-    # Other live dev pools already commit the whole budget; one more slot tips it.
-    committed = DEV_FLEET_BUDGET
-    others = [
-        ("dev-bob", PER_INSTANCE_CAP),
-        ("dev-carol", PER_INSTANCE_CAP),
-        ("dev-dan", PER_INSTANCE_CAP),
-        ("dev-eve", committed - 3 * PER_INSTANCE_CAP),
-    ]
-    session = _FakeSession([_FakeResult(rows=others)])
-    with pytest.raises(ValueError, match="fleet budget"):
-        await _upsert_dev(session, pool_name="dev-alice", max_slots=PER_INSTANCE_CAP)
-    assert session.added == []
+    others = [("dev-bob", PER_INSTANCE_CAP), ("dev-carol", PER_INSTANCE_CAP)]
+    session = _FakeSession([_FakeResult(rows=others), _FakeResult(scalar=None)])
+    created = await _upsert_dev(
+        session,
+        pool_name="dev-alice",
+        max_slots=PER_INSTANCE_CAP,
+    )
+    assert created.max_slots == PER_INSTANCE_CAP
 
 
 async def test_dev_pool_ignores_malformed_peer_pool() -> None:

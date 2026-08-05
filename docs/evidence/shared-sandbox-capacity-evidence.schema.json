@@ -55,11 +55,8 @@
       "pattern": "^[0-9a-f]{40}$"
     },
     "sandbox": {
-      "enum": [
-        "qianyi",
-        "hongjian",
-        "devansh"
-      ]
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,62}$"
     },
     "state": {
       "enum": [
@@ -157,6 +154,7 @@
       "required": [
         "id",
         "sandbox",
+        "deployment_generation",
         "candidate_sha",
         "pool",
         "min_slots",
@@ -178,6 +176,10 @@
         },
         "sandbox": {
           "$ref": "#/$defs/sandbox"
+        },
+        "deployment_generation": {
+          "type": "integer",
+          "minimum": 1
         },
         "candidate_sha": {
           "$ref": "#/$defs/fullSha"
@@ -300,6 +302,7 @@
         "lease_epoch",
         "sandbox",
         "environment",
+        "deployment_generation",
         "candidate_sha",
         "pool_name",
         "enabled",
@@ -323,11 +326,11 @@
           "$ref": "#/$defs/sandbox"
         },
         "environment": {
-          "enum": [
-            "sandbox-qianyi",
-            "sandbox-hongjian",
-            "sandbox-devansh"
-          ]
+          "$ref": "#/$defs/sandbox"
+        },
+        "deployment_generation": {
+          "type": "integer",
+          "minimum": 1
         },
         "candidate_sha": {
           "$ref": "#/$defs/fullSha"
@@ -380,7 +383,8 @@
             "grant_reduced",
             "lease_observed",
             "cancel_requested",
-            "ttl_expired"
+            "ttl_expired",
+            "ttl_renewed"
           ]
         },
         "occurred_at": {

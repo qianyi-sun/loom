@@ -25,6 +25,7 @@ from uuid import uuid4
 
 _SHA_RE = re.compile(r"[0-9a-f]{40}")
 _POOL_RE = re.compile(r"[a-z][a-z0-9-]{0,31}")
+_ENVIRONMENT_RE = re.compile(r"[a-z][a-z0-9-]{0,62}")
 _IDEMPOTENCY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 _PURPOSE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._:/()#,+-]{0,199}")
 _SECRET_HINT_RE = re.compile(
@@ -32,7 +33,7 @@ _SECRET_HINT_RE = re.compile(
     r"\bsk-[A-Za-z0-9_-]{8,})",
     re.IGNORECASE,
 )
-_SCHEMA_VERSION = "1"
+_SCHEMA_VERSION = "2"
 _MAX_TTL_SECONDS = 24 * 60 * 60
 _MAX_REQUEST_SLOTS = 10_000
 _MAX_BUDGET_SLOTS = 100_000
@@ -62,7 +63,8 @@ class RequestState(StrEnum):
 @dataclass(frozen=True, slots=True)
 class CapacityRequest:
     id: str
-    sandbox: SandboxId
+    sandbox: str
+    deployment_generation: int
     candidate_sha: str
     pool: str
     min_slots: int
@@ -78,10 +80,7 @@ class CapacityRequest:
     terminal_reason: str | None = None
 
     def public_dict(self) -> dict[str, object]:
-        value = asdict(self)
-        value["sandbox"] = self.sandbox.value
-        value["state"] = self.state.value
-        return value
+        return {**asdict(self), "state": self.state.value}
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +139,7 @@ class AutoscalerGrantHandoff:
     lease_epoch: int
     sandbox: str
     environment: str
+    deployment_generation: int
     candidate_sha: str
     pool_name: str
     enabled: bool
@@ -203,10 +203,7 @@ class _MutableRecord:
 
     @property
     def eligible(self) -> bool:
-        return (
-            not self.request.cancel_requested
-            and self.request.state != RequestState.TERMINAL
-        )
+        return not self.request.cancel_requested and self.request.state != RequestState.TERMINAL
 
 
 def _utc(value: datetime) -> datetime:
@@ -244,9 +241,17 @@ def _nonnegative_int(value: object, field: str) -> int:
     return value
 
 
+def _runtime_environment(identifier: str) -> str:
+    """Map a legacy sandbox name or dynamic registry ID to runtime identity."""
+    if identifier in {item.value for item in SandboxId}:
+        return f"sandbox-{identifier}"
+    return identifier
+
+
 def _validate_request_input(
     *,
     sandbox: SandboxId | str,
+    deployment_generation: int,
     candidate_sha: str,
     pool: str,
     min_slots: int,
@@ -255,13 +260,16 @@ def _validate_request_input(
     purpose: str,
     preemptible: bool,
     idempotency_key: str,
-) -> tuple[SandboxId, str, str, str, str]:
-    try:
-        normalized_sandbox = (
-            sandbox if isinstance(sandbox, SandboxId) else SandboxId(str(sandbox))
-        )
-    except ValueError as exc:
-        raise BrokerError("sandbox is not in the fixed developer allowlist") from exc
+) -> tuple[str, str, str, str, str]:
+    normalized_sandbox = sandbox.value if isinstance(sandbox, SandboxId) else str(sandbox)
+    if _ENVIRONMENT_RE.fullmatch(normalized_sandbox) is None:
+        raise BrokerError("sandbox must be a lowercase bounded environment identifier")
+    if (
+        isinstance(deployment_generation, bool)
+        or not isinstance(deployment_generation, int)
+        or deployment_generation <= 0
+    ):
+        raise BrokerError("deployment_generation must be a positive integer")
     if _SHA_RE.fullmatch(candidate_sha) is None:
         raise BrokerError("candidate_sha must be a full lowercase 40-hex commit")
     if _POOL_RE.fullmatch(pool) is None:
@@ -291,16 +299,20 @@ def _validate_request_input(
     if _PURPOSE_RE.fullmatch(purpose) is None or _SECRET_HINT_RE.search(purpose):
         raise BrokerError("purpose must be bounded secret-free operator text")
     idempotency_key = _exact_text(idempotency_key, "idempotency_key")
-    if (
-        _IDEMPOTENCY_RE.fullmatch(idempotency_key) is None
-        or _SECRET_HINT_RE.search(idempotency_key)
+    if _IDEMPOTENCY_RE.fullmatch(idempotency_key) is None or _SECRET_HINT_RE.search(
+        idempotency_key
     ):
         raise BrokerError("idempotency_key has invalid or secret-like content")
     return normalized_sandbox, candidate_sha, pool, purpose, idempotency_key
 
 
 class SharedCapacityBroker:
-    """Single persistent authority for all developer-sandbox capacity."""
+    """Single persistent authority for a dynamic development cohort.
+
+    ``SandboxId`` remains a legacy-v1 input convenience, but the durable
+    authority accepts any validated registry environment identifier.  Cohort
+    membership is therefore data-driven rather than compiled into this module.
+    """
 
     def __init__(self, state_db: Path, *, clock: Any | None = None) -> None:
         if not state_db.is_absolute():
@@ -320,6 +332,7 @@ class SharedCapacityBroker:
                 CREATE TABLE IF NOT EXISTS capacity_requests (
                     id TEXT PRIMARY KEY,
                     sandbox TEXT NOT NULL,
+                    deployment_generation INTEGER NOT NULL DEFAULT 1,
                     candidate_sha TEXT NOT NULL,
                     pool TEXT NOT NULL,
                     min_slots INTEGER NOT NULL,
@@ -376,15 +389,29 @@ class SharedCapacityBroker:
                     "INSERT INTO broker_meta(key, value) VALUES('schema_version', ?)",
                     (_SCHEMA_VERSION,),
                 )
+            elif current["value"] == "1":
+                columns = {
+                    str(row["name"])
+                    for row in connection.execute(
+                        "PRAGMA table_info(capacity_requests)",
+                    ).fetchall()
+                }
+                if "deployment_generation" not in columns:
+                    connection.execute(
+                        "ALTER TABLE capacity_requests "
+                        "ADD COLUMN deployment_generation INTEGER NOT NULL DEFAULT 1",
+                    )
+                connection.execute(
+                    "UPDATE broker_meta SET value = ? WHERE key = 'schema_version'",
+                    (_SCHEMA_VERSION,),
+                )
             elif current["value"] != _SCHEMA_VERSION:
                 raise BrokerError("broker state schema version is unsupported")
 
     def _connect(self) -> sqlite3.Connection:
         self._validate_authority_file(self.state_db, mode=0o600)
         existing_sidecars = {
-            path
-            for path in self._sqlite_sidecar_paths()
-            if path.exists() or path.is_symlink()
+            path for path in self._sqlite_sidecar_paths() if path.exists() or path.is_symlink()
         }
         for path in existing_sidecars:
             self._validate_authority_file(path, mode=0o600)
@@ -489,6 +516,7 @@ class SharedCapacityBroker:
         purpose: str,
         preemptible: bool,
         idempotency_key: str,
+        deployment_generation: int = 1,
     ) -> tuple[CapacityRequest, CapacityLease]:
         (
             normalized_sandbox,
@@ -498,6 +526,7 @@ class SharedCapacityBroker:
             idempotency_key,
         ) = _validate_request_input(
             sandbox=sandbox,
+            deployment_generation=deployment_generation,
             candidate_sha=candidate_sha,
             pool=pool,
             min_slots=min_slots,
@@ -527,6 +556,7 @@ class SharedCapacityBroker:
                 )
                 expected = (
                     normalized_sandbox,
+                    deployment_generation,
                     candidate_sha,
                     pool,
                     min_slots,
@@ -537,6 +567,7 @@ class SharedCapacityBroker:
                 )
                 observed = (
                     request.sandbox,
+                    request.deployment_generation,
                     request.candidate_sha,
                     request.pool,
                     request.min_slots,
@@ -554,14 +585,16 @@ class SharedCapacityBroker:
             connection.execute(
                 """
                 INSERT INTO capacity_requests(
-                    id, sandbox, candidate_sha, pool, min_slots, target_slots,
+                    id, sandbox, deployment_generation, candidate_sha, pool,
+                    min_slots, target_slots,
                     ttl_seconds, purpose, preemptible, idempotency_key, state,
                     created_at, expires_at, updated_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     request_id,
-                    normalized_sandbox.value,
+                    normalized_sandbox,
+                    deployment_generation,
                     candidate_sha,
                     pool,
                     min_slots,
@@ -590,7 +623,8 @@ class SharedCapacityBroker:
                 event_type="request_created",
                 occurred_at=now_text,
                 details={
-                    "sandbox": normalized_sandbox.value,
+                    "sandbox": normalized_sandbox,
+                    "deployment_generation": deployment_generation,
                     "candidate_sha": candidate_sha,
                     "pool": pool,
                     "min_slots": min_slots,
@@ -646,6 +680,48 @@ class SharedCapacityBroker:
                 details={"reason": reason, "lease_epoch": new_epoch},
             )
             self._refresh_states(connection, now_text=now_text)
+            updated = _record_from_row(self._joined_row(connection, request_id))
+            connection.commit()
+            return self._public_record(*updated)
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def renew(self, request_id: str, *, ttl_seconds: int) -> dict[str, object]:
+        """Extend one live request without changing its grant or lease epoch."""
+        request_id = _exact_text(request_id, "request_id")
+        if (
+            isinstance(ttl_seconds, bool)
+            or not isinstance(ttl_seconds, int)
+            or not 60 <= ttl_seconds <= _MAX_TTL_SECONDS
+        ):
+            raise BrokerError(f"ttl_seconds must be in 60..{_MAX_TTL_SECONDS}")
+        now = _utc(self._clock())
+        now_text = _timestamp(now)
+        expires_at = _timestamp(now + timedelta(seconds=ttl_seconds))
+        self.initialize()
+        connection = self._transaction()
+        try:
+            request, _ = _record_from_row(self._joined_row(connection, request_id))
+            if request.cancel_requested or request.state == RequestState.TERMINAL:
+                raise BrokerError("only a live non-cancelled capacity request can be renewed")
+            connection.execute(
+                """
+                UPDATE capacity_requests
+                SET ttl_seconds = ?, expires_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (ttl_seconds, expires_at, now_text, request_id),
+            )
+            self._audit(
+                connection,
+                request_id=request_id,
+                event_type="ttl_renewed",
+                occurred_at=now_text,
+                details={"expires_at": expires_at, "ttl_seconds": ttl_seconds},
+            )
             updated = _record_from_row(self._joined_row(connection, request_id))
             connection.commit()
             return self._public_record(*updated)
@@ -744,8 +820,7 @@ class SharedCapacityBroker:
         handoffs = [
             self._handoff(record).public_dict()
             for record in records
-            if record.request.state != RequestState.TERMINAL
-            or record.lease.lease_epoch > 0
+            if record.request.state != RequestState.TERMINAL or record.lease.lease_epoch > 0
         ]
         audit_rows = connection.execute(
             """
@@ -793,8 +868,9 @@ class SharedCapacityBroker:
             schema_version=1,
             request_id=request.id,
             lease_epoch=lease.lease_epoch,
-            sandbox=request.sandbox.value,
-            environment=request.sandbox.environment,
+            sandbox=request.sandbox,
+            environment=_runtime_environment(request.sandbox),
+            deployment_generation=request.deployment_generation,
             candidate_sha=request.candidate_sha,
             pool_name=request.pool,
             enabled=lease.granted_slots > 0 and not request.cancel_requested,
@@ -811,7 +887,7 @@ class SharedCapacityBroker:
     ) -> dict[str, int]:
         eligible = [record for record in records if record.eligible]
         targets = {record.request.id: 0 for record in records}
-        sandbox_allocations = {sandbox: 0 for sandbox in SandboxId}
+        sandbox_allocations = {record.request.sandbox: 0 for record in eligible}
         pool_allocations = {pool: 0 for pool in budgets.pool_slots}
         global_remaining = budgets.global_slots
 
@@ -837,7 +913,7 @@ class SharedCapacityBroker:
                         sandbox_allocations[item.request.sandbox],
                         item.last_granted_seq,
                         item.request.created_at,
-                        item.request.sandbox.value,
+                        item.request.sandbox,
                         item.request.pool,
                         item.request.id,
                     ),
@@ -896,18 +972,14 @@ class SharedCapacityBroker:
         committed_global = sum(record.lease.committed_slots for record in records)
         committed_by_pool = {
             pool: sum(
-                record.lease.committed_slots
-                for record in records
-                if record.request.pool == pool
+                record.lease.committed_slots for record in records if record.request.pool == pool
             )
             for pool in budgets.pool_slots
         }
         pending_global = sum(record.lease.pending_slots for record in records)
         pending_by_pool = {
             pool: sum(
-                record.lease.pending_slots
-                for record in records
-                if record.request.pool == pool
+                record.lease.pending_slots for record in records if record.request.pool == pool
             )
             for pool in budgets.pool_slots
         }
@@ -921,7 +993,7 @@ class SharedCapacityBroker:
                 for record in records
                 if record.request.sandbox == sandbox
             )
-            for sandbox in SandboxId
+            for sandbox in {record.request.sandbox for record in records}
         }
 
         while True:
@@ -945,7 +1017,7 @@ class SharedCapacityBroker:
                     sandbox_grants[item.request.sandbox],
                     last_seq[item.request.id],
                     item.request.created_at,
-                    item.request.sandbox.value,
+                    item.request.sandbox,
                     item.request.pool,
                     item.request.id,
                 ),
@@ -1066,9 +1138,7 @@ class SharedCapacityBroker:
                 f"observation lease_epoch is stale for request {observation.request_id}",
             )
         nonterminal = (
-            observation.pending_slots
-            + observation.active_slots
-            + observation.draining_slots
+            observation.pending_slots + observation.active_slots + observation.draining_slots
         )
         allowed_nonterminal = max(lease.committed_slots, lease.granted_slots)
         if nonterminal > allowed_nonterminal:
@@ -1244,12 +1314,11 @@ class SharedCapacityBroker:
 
 def _record_from_row(row: sqlite3.Row) -> tuple[CapacityRequest, CapacityLease]:
     lease_state_key = "lease_state" if "lease_state" in row.keys() else "state"
-    lease_updated_key = (
-        "lease_updated_at" if "lease_updated_at" in row.keys() else "updated_at"
-    )
+    lease_updated_key = "lease_updated_at" if "lease_updated_at" in row.keys() else "updated_at"
     request = CapacityRequest(
         id=row["id"],
-        sandbox=SandboxId(row["sandbox"]),
+        sandbox=str(row["sandbox"]),
+        deployment_generation=int(row["deployment_generation"]),
         candidate_sha=row["candidate_sha"],
         pool=row["pool"],
         min_slots=int(row["min_slots"]),
@@ -1330,7 +1399,8 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     request = subparsers.add_parser("request", allow_abbrev=False)
-    request.add_argument("--sandbox", choices=[item.value for item in SandboxId], required=True)
+    request.add_argument("--sandbox", required=True)
+    request.add_argument("--deployment-generation", type=int, default=1)
     request.add_argument("--candidate-sha", required=True)
     request.add_argument("--pool", required=True)
     request.add_argument("--min-slots", type=int, required=True)
@@ -1370,6 +1440,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "request":
             request, lease = broker.request_capacity(
                 sandbox=args.sandbox,
+                deployment_generation=args.deployment_generation,
                 candidate_sha=args.candidate_sha,
                 pool=args.pool,
                 min_slots=args.min_slots,

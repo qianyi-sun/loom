@@ -1,4 +1,10 @@
-# Shared Sandbox Capacity Broker
+# Shared Sandbox Capacity Ledger (legacy interface)
+
+> This is now the internal ledger of the single global dev fleet autoscaler,
+> not a separately deployed service. New operations use
+> `scripts/ops/global_dev_fleet_autoscaler_once.py` and
+> `docs/architecture/global-dev-fleet-autoscaler.md`; the commands below remain
+> for inspection, migration, and incident recovery.
 
 The shared capacity broker is the single slot authority for the disposable
 `sandbox-qianyi`, `sandbox-hongjian`, and `sandbox-devansh` Control Planes. It
