@@ -1063,6 +1063,57 @@ async def test_load_observation_counts_slots_and_matching_queue() -> None:
     assert observation.drained_worker_ids == (str(drained_worker_id),)
 
 
+async def test_load_observation_slurm_release_excludes_unlinked_static_workers() -> None:
+    # #1021: a fresh static worker with no linked Slurm job must never be a
+    # drain candidate for the Slurm actuator (only Slurm-owned workers are),
+    # though it still counts toward pool capacity.
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    owned_id = uuid4()
+    static_id = uuid4()
+    workers = [
+        SimpleNamespace(id=owned_id, hostname="oldlab-1", max_concurrent=6, drain_state="active"),
+        SimpleNamespace(
+            id=static_id,
+            hostname="gb10-static",
+            max_concurrent=6,
+            drain_state="active",
+        ),
+    ]
+    session = _FakeSession(
+        [
+            _FakeResult(scalars=workers),
+            _FakeResult(rows=[]),  # no in-flight trials → both idle
+            _FakeResult(
+                scalars=[
+                    SimpleNamespace(
+                        job_id="run-1",
+                        state="running",
+                        requested_concurrency=6,
+                        worker_id=owned_id,
+                        nodelist="oldlab-1",
+                        redacted_env={
+                            "LOOM_REMOTE_WORKER_ENV_FILE": "/secure/.env.remote-worker",
+                            "LOOM_REMOTE_WORKER_REPO_DIR": "/opt/loom",
+                        },
+                    ),
+                ],
+            ),
+            _FakeResult(rows=[]),  # no queued trials
+        ]
+    )
+
+    observation = await _load_observation(
+        cast(Any, session),
+        _policy_row(min_slots=0),
+        now=now,
+        freshness_sec=120,
+    )
+
+    # Both workers count toward capacity, but only the Slurm-owned one is drainable.
+    assert observation.active_slots == 12
+    assert observation.idle_worker_ids == (str(owned_id),)
+
+
 async def test_load_observation_excludes_release_drift_slurm_jobs() -> None:
     now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
     worker_id = uuid4()
@@ -2468,7 +2519,9 @@ async def test_dev_pool_within_envelope_upserts() -> None:
     # First execute → the "other dev pools" query (none); second → get policy.
     session = _FakeSession([_FakeResult(rows=[]), _FakeResult(scalar=None)])
     created = await _upsert_dev(
-        session, pool_name="dev-alice", max_slots=PER_INSTANCE_CAP,
+        session,
+        pool_name="dev-alice",
+        max_slots=PER_INSTANCE_CAP,
     )
     assert created in session.added
     assert created.pool_name == "dev-alice"
@@ -2481,7 +2534,9 @@ async def test_dev_pool_exceeds_per_instance_cap_rejected() -> None:
     session = _FakeSession([_FakeResult(rows=[])])
     with pytest.raises(ValueError, match="PER_INSTANCE_CAP"):
         await _upsert_dev(
-            session, pool_name="dev-alice", max_slots=PER_INSTANCE_CAP + 1,
+            session,
+            pool_name="dev-alice",
+            max_slots=PER_INSTANCE_CAP + 1,
         )
     assert session.added == []  # rejected before any write
 
@@ -2519,7 +2574,9 @@ async def test_dev_pool_ignores_malformed_peer_pool() -> None:
     others = [("dev-Bad_Name", PER_INSTANCE_CAP), ("dev-", 99)]
     session = _FakeSession([_FakeResult(rows=others), _FakeResult(scalar=None)])
     created = await _upsert_dev(
-        session, pool_name="dev-alice", max_slots=PER_INSTANCE_CAP,
+        session,
+        pool_name="dev-alice",
+        max_slots=PER_INSTANCE_CAP,
     )
     assert created.pool_name == "dev-alice"
 
@@ -2529,7 +2586,10 @@ async def test_non_dev_pool_skips_dev_envelope() -> None:
     # counts are fine, and only the get-policy query runs (no dev-pool query).
     session = _FakeSession([_FakeResult(scalar=None)])
     created = await _upsert_dev(
-        session, pool_name="oldlab", actuator="gb10", max_slots=99,
+        session,
+        pool_name="oldlab",
+        actuator="gb10",
+        max_slots=99,
     )
     assert created.pool_name == "oldlab"
     assert created.max_slots == 99

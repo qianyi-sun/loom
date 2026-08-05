@@ -827,6 +827,11 @@ async def _load_observation(
     release_drift_hostnames: set[str] = set()
     release_drift_worker_ids_to_drain: set[str] = set()
     release_drift_worker_ids_to_release: set[str] = set()
+    # #1021: for the Slurm actuator, only workers this autoscaler actually
+    # launched (linked to an active Slurm job by worker_id or by hostname) are
+    # release/drain candidates. A fresh, unlinked, static worker must never be
+    # drained by the Slurm actuator's idle release.
+    slurm_owned_worker_ids: set[str] = set()
     if row.actuator == "slurm":
         pending_slots = 0
         expected_worker_token_fingerprint = _expected_slurm_worker_token_fingerprint(row)
@@ -851,6 +856,18 @@ async def _load_observation(
                 active_job_count_by_worker_id[job_worker_id] = (
                     active_job_count_by_worker_id.get(job_worker_id, 0) + 1
                 )
+        owned_hostnames = {
+            str(_field(job, "nodelist")) for job in slurm_jobs if _field(job, "nodelist")
+        }
+        owned_worker_ids = {
+            _field(job, "worker_id") for job in slurm_jobs if _field(job, "worker_id") is not None
+        }
+        for worker in workers:
+            if (
+                worker.id in owned_worker_ids
+                or str(getattr(worker, "hostname", "")) in owned_hostnames
+            ):
+                slurm_owned_worker_ids.add(str(worker.id))
         for job in slurm_jobs:
             slots = max(0, int(_field(job, "requested_concurrency", 0) or 0))
             if _slurm_release_state_drift(
@@ -909,7 +926,10 @@ async def _load_observation(
         in_flight = in_flight_by_worker.get(worker.id, 0)
         if worker.drain_state == "active":
             active_slots += slots
-            if in_flight == 0:
+            # #1021: static/unlinked workers still count toward capacity, but the
+            # Slurm actuator may only release workers it owns.
+            drain_eligible = row.actuator != "slurm" or str(worker.id) in slurm_owned_worker_ids
+            if in_flight == 0 and drain_eligible:
                 active_idle.append((str(worker.id), slots))
         elif worker.drain_state == "draining":
             draining_slots += slots
