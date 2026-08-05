@@ -13,6 +13,7 @@ class LoomError(Exception):
 
 # Driver layer ─────────────────────────────────────────────────────────────────
 
+
 class DriverError(LoomError):
     """Base for sandbox-driver failures."""
 
@@ -44,6 +45,7 @@ class DriverExecError(DriverError):
 
 # Agent layer ──────────────────────────────────────────────────────────────────
 
+
 class AgentError(LoomError):
     """Base for agent-runtime failures."""
 
@@ -54,6 +56,7 @@ class AgentSetupTimeoutError(AgentError):
 
 # Verifier framework ───────────────────────────────────────────────────────────
 
+
 class VerifierError(LoomError):
     """Raised when the verifier framework itself fails (registry lookup,
     dispatch). NOT raised by `VerifierResult.error` — that's a struct field
@@ -62,6 +65,7 @@ class VerifierError(LoomError):
 
 
 # Trajectory layer ─────────────────────────────────────────────────────────────
+
 
 class TrajectoryError(LoomError):
     """Base for trajectory-storage failures."""
@@ -73,12 +77,14 @@ class TrajectoryFlushFailedError(TrajectoryError):
 
 # Control plane / worker comm ──────────────────────────────────────────────────
 
+
 class WorkerLostClaimError(LoomError):
     """A fenced state-update endpoint rejected a worker because the trial no
     longer belongs to that worker (heartbeat lapsed; trial reclaimed)."""
 
 
 # Configuration ────────────────────────────────────────────────────────────────
+
 
 class ConfigError(LoomError):
     """Base for configuration failures."""
@@ -97,6 +103,7 @@ class CapabilityMismatchError(ConfigError):
 
 import re  # noqa: E402
 
+from loom.driver.build_containment import ImageBuildForbiddenError  # noqa: E402
 from loom.models.result import FailureReason  # noqa: E402
 from loom.security.redaction import redact_text  # noqa: E402
 
@@ -136,17 +143,13 @@ _TMUX_NO_SERVER_RE = re.compile(
     r"|tmux session/server lost mid-dispatch",
     re.IGNORECASE,
 )
-_TMUX_NO_SERVER_MESSAGE = (
-    "Terminus2 tmux server disappeared mid-dispatch."
-)
+_TMUX_NO_SERVER_MESSAGE = "Terminus2 tmux server disappeared mid-dispatch."
 _TMUX_DUPLICATE_SESSION_RE = re.compile(
     r"duplicate session"
     r"|Failed to start tmux session",
     re.IGNORECASE,
 )
-_TMUX_DUPLICATE_SESSION_MESSAGE = (
-    "Terminus2 tmux session already exists at setup."
-)
+_TMUX_DUPLICATE_SESSION_MESSAGE = "Terminus2 tmux session already exists at setup."
 
 
 def _redact_body(raw: str) -> str:
@@ -310,11 +313,14 @@ def is_retryable(exc: BaseException) -> bool:
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code in _RETRYABLE_HTTP_STATUSES
 
-    if isinstance(exc, (
-        httpx.TimeoutException,
-        httpx.NetworkError,
-        httpx.RemoteProtocolError,
-    )):
+    if isinstance(
+        exc,
+        (
+            httpx.TimeoutException,
+            httpx.NetworkError,
+            httpx.RemoteProtocolError,
+        ),
+    ):
         return True
 
     return False
@@ -342,8 +348,18 @@ def classify_failure(exc: BaseException) -> tuple[FailureReason, str | None]:
 
     if isinstance(exc, AgentSetupTimeoutError):
         return FailureReason.AGENT_ERROR, None
+    # #1169: a containment-required worker refuses to build an uncached image
+    # (ImageBuildForbiddenError, a RuntimeError). Surface its self-explaining
+    # message BEFORE the generic INTERNAL_ERROR fallthrough — and classify it as
+    # an env-start failure since it aborts `driver.start()`.
+    if isinstance(exc, ImageBuildForbiddenError):
+        return FailureReason.ENV_START_FAILURE, _redact_failure_excerpt(str(exc)) or None
+    # #1169: previously every DriverError was reported with a `None` message, so
+    # env-start failures (build refusals, cgroup errors, container create/start
+    # failures) surfaced with an empty `failure_message` and the cause was only
+    # recoverable by inference. Propagate the redacted DriverError text instead.
     if isinstance(exc, DriverError):
-        return FailureReason.ENV_START_FAILURE, None
+        return FailureReason.ENV_START_FAILURE, _redact_failure_excerpt(str(exc)) or None
     if isinstance(exc, VerifierError):
         return FailureReason.VERIFIER_ERROR, None
     if isinstance(exc, TrajectoryFlushFailedError):
