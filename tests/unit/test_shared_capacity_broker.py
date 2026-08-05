@@ -227,6 +227,24 @@ def test_deployment_generation_is_persisted_and_fenced_by_idempotency(
         )
 
 
+def test_request_ttl_can_be_renewed_without_changing_lease_identity(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    broker = _broker(tmp_path, clock)
+    request_id = _request(broker, "dev-alice", ttl_seconds=120)
+    report = broker.reconcile(_budgets(global_slots=2, pools={"gb10": 2}))
+    original = report["requests"][0]  # type: ignore[index]
+
+    clock.advance(seconds=60)
+    renewed = broker.renew(request_id, ttl_seconds=300)
+
+    assert renewed["request"]["id"] == request_id  # type: ignore[index]
+    assert renewed["lease"]["lease_epoch"] == original["lease"]["lease_epoch"]  # type: ignore[index]
+    assert renewed["request"]["expires_at"] == "2026-07-27T20:06:00Z"  # type: ignore[index]
+    assert broker.status(request_id=request_id)["audit"][-1]["event_type"] == "ttl_renewed"  # type: ignore[index]
+
+
 def test_three_sandboxes_share_minimum_and_burst_without_overshoot(
     tmp_path: Path,
 ) -> None:

@@ -689,6 +689,48 @@ class SharedCapacityBroker:
         finally:
             connection.close()
 
+    def renew(self, request_id: str, *, ttl_seconds: int) -> dict[str, object]:
+        """Extend one live request without changing its grant or lease epoch."""
+        request_id = _exact_text(request_id, "request_id")
+        if (
+            isinstance(ttl_seconds, bool)
+            or not isinstance(ttl_seconds, int)
+            or not 60 <= ttl_seconds <= _MAX_TTL_SECONDS
+        ):
+            raise BrokerError(f"ttl_seconds must be in 60..{_MAX_TTL_SECONDS}")
+        now = _utc(self._clock())
+        now_text = _timestamp(now)
+        expires_at = _timestamp(now + timedelta(seconds=ttl_seconds))
+        self.initialize()
+        connection = self._transaction()
+        try:
+            request, _ = _record_from_row(self._joined_row(connection, request_id))
+            if request.cancel_requested or request.state == RequestState.TERMINAL:
+                raise BrokerError("only a live non-cancelled capacity request can be renewed")
+            connection.execute(
+                """
+                UPDATE capacity_requests
+                SET ttl_seconds = ?, expires_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (ttl_seconds, expires_at, now_text, request_id),
+            )
+            self._audit(
+                connection,
+                request_id=request_id,
+                event_type="ttl_renewed",
+                occurred_at=now_text,
+                details={"expires_at": expires_at, "ttl_seconds": ttl_seconds},
+            )
+            updated = _record_from_row(self._joined_row(connection, request_id))
+            connection.commit()
+            return self._public_record(*updated)
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def reconcile(
         self,
         budgets: BrokerBudgets,

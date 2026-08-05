@@ -383,7 +383,8 @@
             "grant_reduced",
             "lease_observed",
             "cancel_requested",
-            "ttl_expired"
+            "ttl_expired",
+            "ttl_renewed"
           ]
         },
         "occurred_at": {
