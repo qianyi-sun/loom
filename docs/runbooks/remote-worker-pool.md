@@ -1241,10 +1241,20 @@ only the closed, versioned Slurm comment
 `loom-cgroup-v1:pids=<job_pids_max>`. A persistent, administrator-owned root
 guard consumes that exact grammar. The repository ships it as
 `scripts/ops/slurm_job_cgroup_guard.py` with a systemd unit at
-`deploy/slurm/loom-slurm-job-cgroup-guard.service`; install the script at
-`/usr/libexec/loom-slurm-job-cgroup-guard`, set `LOOM_GUARD_NODE` (the exact
-Slurm NodeName) in `/etc/loom/slurm-job-cgroup-guard.env`, then
-`systemctl enable --now loom-slurm-job-cgroup-guard`. Each pass the guard polls
+`deploy/slurm/loom-slurm-job-cgroup-guard.service`. Install it on each
+non-exclusive worker node with the idempotent installer:
+
+```bash
+sudo deploy/slurm/install-loom-slurm-job-cgroup-guard.sh <SLURM_NODENAME>
+```
+
+where `<SLURM_NODENAME>` is the exact, case-sensitive value from
+`sinfo -N -h -o '%N'` (the installer validates it against Slurm and fails closed
+on a mistyped name, since a wrong name would leave the guard matching no jobs).
+It drops the guard at `/usr/libexec/loom-slurm-job-cgroup-guard`, pins
+`LOOM_GUARD_NODE` in `/etc/loom/slurm-job-cgroup-guard.env`, installs the unit,
+and runs `systemctl enable --now loom-slurm-job-cgroup-guard`. Each pass the
+guard polls
 `squeue` for RUNNING jobs on its node carrying the reviewed comment and, for
 each, delegates `cpu memory pids` into the `job_<id>` cgroup, writes the
 reviewed `pids.max`, and registers `loom-job-<id>.slice` capped to the
