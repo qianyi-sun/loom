@@ -102,8 +102,29 @@ async def list_tasks(
     ] = None,
     cursor: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(gt=0, le=200)] = 50,
+    offset: Annotated[
+        int | None,
+        Query(
+            description=(
+                "Unsupported. This endpoint is cursor-paginated; pass `cursor` "
+                "from the previous response's `next_cursor`."
+            ),
+        ),
+    ] = None,
 ) -> dict[str, Any]:
     s, ctx = sc
+    # #917: reject `offset` loudly instead of silently ignoring it. FastAPI
+    # drops unknown query params, so a consumer paging by offset would keep
+    # receiving the first page (cursor=None) and loop forever. Fail fast and
+    # point at the cursor contract.
+    if offset is not None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "this endpoint uses cursor-based pagination; pass `cursor` "
+                "(from the previous response's `next_cursor`), not `offset`"
+            ),
+        )
     # Shared where clauses so the page query and the count query
     # touch the same predicate (count gets a clean COUNT(*) plan
     # rather than COUNT over an ordered subquery).
