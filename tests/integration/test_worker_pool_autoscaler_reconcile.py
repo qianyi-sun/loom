@@ -126,6 +126,23 @@ async def test_reconcile_marks_one_idle_excess_worker_draining(
                     last_seen_at=now,
                     status="active",
                 ))
+            # #1021: the Slurm actuator only releases workers it owns, so each
+            # idle worker is linked to a running Slurm job on its node.
+            for idx, worker_id in enumerate(worker_ids, start=1):
+                await s.execute(insert(SlurmWorkerJob).values(
+                    environment="production",
+                    pool_name="oldlab",
+                    nodelist=f"oldlab-{idx}",
+                    worker_id=worker_id,
+                    requested_cpus=12,
+                    requested_memory_mib=58000,
+                    requested_concurrency=6,
+                    job_id=f"job-oldlab-{idx}",
+                    slurm_state="RUNNING",
+                    state="running",
+                    redacted_env=dict(_MATCHING_SLURM_RELEASE_ENV),
+                    submitted_at=now - timedelta(seconds=300),
+                ))
             await s.execute(insert(WorkerPoolAutoscalerPolicy).values(
                 environment="production",
                 pool_name="oldlab",
@@ -138,14 +155,42 @@ async def test_reconcile_marks_one_idle_excess_worker_draining(
                 scale_up_cooldown_seconds=60,
                 scale_down_cooldown_seconds=300,
                 drain_timeout_seconds=600,
-                actuator_config={"backend": "docker", "cpu_arch": "x86_64"},
+                actuator_config={
+                    "backend": "docker",
+                    "cpu_arch": "x86_64",
+                    "allowed_nodes": ["oldlab-1", "oldlab-2"],
+                    "env_file": "/secure/.env.remote-worker",
+                    "exclusive": False,
+                    "container_cpus": 2.0,
+                    "container_memory_mib": 4096,
+                    "container_pids": 512,
+                    "candidate_sha": "a" * 40,
+                    "job_pids_max": 8192,
+                    "repo_dir": "/opt/loom",
+                    "requested_cpus": 12,
+                    "requested_memory_mib": 58000,
+                    "requested_concurrency": 6,
+                    "max_jobs": 2,
+                    "pending_job_cap": 2,
+                    "time_limit": "7-00:00:00",
+                },
                 idle_since_at=now - timedelta(seconds=601),
             ))
             await s.commit()
 
+        runner = FakeSlurmRunner()
+        runner.job_observations = [
+            SlurmWorkerJobObservation(
+                job_id=f"job-oldlab-{idx}",
+                slurm_state="RUNNING",
+                pending_reason="",
+                observed_at=now,
+            )
+            for idx in (1, 2)
+        ]
         async with session_factory() as s:
             results = await reconcile_worker_pool_autoscaler_once(
-                s, environment="production", now=now
+                s, environment="production", now=now, slurm_runner=runner
             )
             await s.commit()
 
