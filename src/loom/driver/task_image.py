@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import logging
 import os
 import platform
 import tempfile
@@ -20,10 +21,15 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 import docker
-from docker.errors import BuildError, ImageNotFound
+from docker.errors import APIError, BuildError, ImageNotFound, NotFound
 
-from loom.driver.build_containment import forbid_build_when_contained
+from loom.driver.build_containment import (
+    ImageBuildForbiddenError,
+    forbid_build_when_contained,
+)
 from loom.models.task import TaskConfig
+
+logger = logging.getLogger(__name__)
 
 # Type alias for the optional build-slot provider a caller can pass to
 # `resolve_task_image` so a task-image build (apt-get / dpkg / etc.)
@@ -120,15 +126,15 @@ def task_image_tag(task_config: TaskConfig, *, task_checksum: str) -> str:
     dockerfile = task_config.environment.dockerfile
     dockerfile_text = dockerfile.as_posix() if dockerfile is not None else ""
     build_context = task_config.environment.docker_build_context
-    build_context_text = (
-        build_context.as_posix() if build_context is not None else ""
+    build_context_text = build_context.as_posix() if build_context is not None else ""
+    material = "\n".join(
+        [
+            task_config.task.id,
+            task_checksum,
+            dockerfile_text,
+            build_context_text,
+        ]
     )
-    material = "\n".join([
-        task_config.task.id,
-        task_checksum,
-        dockerfile_text,
-        build_context_text,
-    ])
     digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
     return f"loom-task:{digest}"
 
@@ -141,6 +147,8 @@ async def resolve_task_image(
     docker_api_timeout_sec: int | None = None,
     build_slot_provider: BuildSlotProvider | None = None,
     require_containment: bool = False,
+    registry_repo: str | None = None,
+    registry_pull_timeout_sec: float = 15.0,
 ) -> str:
     """Return the Docker image a service worker should use for this task.
 
@@ -183,10 +191,23 @@ async def resolve_task_image(
     ):
         return tag
 
+    # #1169: before building, try the shared trial-image registry. A
+    # containment-required (non-exclusive Slurm) worker cannot build (it would
+    # escape the job cgroup, #1146) — but it CAN pull a pre-built base image
+    # that a non-contained builder pushed. Mirrors the layered-image path in
+    # `trial_cache.py`. On a miss, fall through to the build (which is refused
+    # under containment, with a self-explaining message per #1169 part 2).
+    if registry_repo and await _try_registry_pull_task_image(
+        tag=tag,
+        registry_repo=registry_repo,
+        pull_timeout_sec=registry_pull_timeout_sec,
+        docker_api_timeout_sec=docker_api_timeout_sec,
+    ):
+        return tag
+
     timeout = task_config.environment.build_timeout_sec
     slot_ctx: contextlib.AbstractAsyncContextManager[Any] = (
-        build_slot_provider() if build_slot_provider is not None
-        else contextlib.nullcontext()
+        build_slot_provider() if build_slot_provider is not None else contextlib.nullcontext()
     )
     try:
         async with slot_ctx:
@@ -205,6 +226,7 @@ async def resolve_task_image(
                     build_context=build_context,
                     docker_api_timeout_sec=docker_api_timeout_sec,
                     require_containment=require_containment,
+                    registry_repo=registry_repo,
                 ),
                 timeout=timeout,
             )
@@ -241,6 +263,75 @@ def _task_image_locally_cached(
             client.close()
 
 
+def _registry_tag_for(tag: str, registry_repo: str) -> str:
+    """The shared-registry ref for a local ``loom-task:<digest>`` tag.
+
+    Uses ``rpartition`` so the deterministic digest (which never contains a
+    colon) is split off the LAST colon — leaving a ``host:port/path`` registry
+    repo intact. Every worker derives the same ref for the same task image, so
+    a push by one is pullable by all.
+    """
+    key = tag.rpartition(":")[2]
+    return f"{registry_repo}:{key}"
+
+
+async def _try_registry_pull_task_image(
+    *,
+    tag: str,
+    registry_repo: str,
+    pull_timeout_sec: float,
+    docker_api_timeout_sec: int | None,
+) -> bool:
+    """Pull the pre-built base image from the shared registry, aliasing it to
+    the local ``tag``. Returns True on success; False on any miss (absent tag,
+    timeout, auth/network error) so the caller falls through to build/refuse.
+
+    Mirrors ``trial_cache._try_registry_pull`` for the base-image path so a
+    containment-required worker can PULL an image it may not build (#1169).
+    """
+    registry_tag = _registry_tag_for(tag, registry_repo)
+    client: Any = (
+        docker.from_env()
+        if docker_api_timeout_sec is None
+        else docker.from_env(timeout=docker_api_timeout_sec)
+    )
+    try:
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(client.images.pull, registry_tag),
+                timeout=pull_timeout_sec,
+            )
+        except (TimeoutError, ImageNotFound, NotFound, APIError) as exc:
+            logger.debug("task image registry pull miss %s: %s", registry_tag, exc)
+            return False
+        try:
+            repo, _, local_key = tag.rpartition(":")
+            await asyncio.to_thread(
+                lambda: client.images.get(registry_tag).tag(
+                    repository=repo, tag=local_key or "latest"
+                )
+            )
+        except APIError as exc:
+            logger.warning("pulled %s but failed to alias as %s: %s", registry_tag, tag, exc)
+            return False
+        logger.info("task image %s satisfied from registry %s", tag, registry_tag)
+        return True
+    finally:
+        with contextlib.suppress(Exception):
+            client.close()
+
+
+def _push_task_image_to_registry(client: Any, tag: str, registry_repo: str) -> None:
+    """Tag the freshly-built local ``tag`` as ``<registry_repo>:<digest>`` and
+    push it so containment-required workers can pull it. Raises on push failure
+    (the caller logs + continues — the local build already succeeded).
+    """
+    registry_tag = _registry_tag_for(tag, registry_repo)
+    repo, _, key = registry_tag.rpartition(":")
+    client.images.get(tag).tag(repository=repo, tag=key or "latest")
+    for line in client.images.push(repository=repo, tag=key, stream=True, decode=True):
+        if isinstance(line, dict) and line.get("errorDetail"):
+            raise APIError(line["errorDetail"].get("message", "push failed"))
 
 
 def _resolve_dockerfile_path(*, task_dir: Path, dockerfile: PurePosixPath) -> Path:
@@ -300,6 +391,7 @@ def _ensure_dockerfile_image(
     build_context: Path,
     docker_api_timeout_sec: int | None = None,
     require_containment: bool = False,
+    registry_repo: str | None = None,
 ) -> None:
     configured_dockerfile = task_config.environment.dockerfile
     assert configured_dockerfile is not None
@@ -339,7 +431,27 @@ def _ensure_dockerfile_image(
                 "loom.task_dockerfile": rel_dockerfile,
             },
         )
+        # #1169: this (non-contained) builder populates the shared registry so
+        # containment-required workers can PULL this base image instead of
+        # building it. Best-effort — a push failure must not fail the trial,
+        # since the image is already built locally for this worker's own use.
+        if registry_repo:
+            try:
+                _push_task_image_to_registry(client, tag, registry_repo)
+            except Exception as exc:
+                logger.warning(
+                    "task image %s built but registry push to %s failed: %s",
+                    tag,
+                    registry_repo,
+                    exc,
+                )
     except TaskImageBuildError:
+        raise
+    except ImageBuildForbiddenError:
+        # #1169: a containment refusal is not a build *failure* — let it
+        # propagate uncaught so classify_failure records it as a
+        # self-explaining ENV_START_FAILURE rather than a wrapped
+        # "failed to build" TaskImageBuildError.
         raise
     except BuildError as exc:
         # docker-py's BuildError stringifies to only the failing RUN
@@ -358,8 +470,7 @@ def _ensure_dockerfile_image(
         raise TaskImageBuildError(
             f"failed to build Docker image {tag!r} from "
             f"{configured_dockerfile.as_posix()!r}: {exc}"
-            + (f"\nbuild log (last {_BUILD_LOG_TAIL_LINES} lines):\n{tail}"
-               if tail else ""),
+            + (f"\nbuild log (last {_BUILD_LOG_TAIL_LINES} lines):\n{tail}" if tail else ""),
             diagnostic_detail=diagnostic_detail,
         ) from exc
     except Exception as exc:
@@ -424,10 +535,7 @@ def _ensure_terminus_2_arm64_base_if_needed(
             raise TaskImageBuildError(
                 "failed to build managed arm64 Terminus 2 base image "
                 f"{TERMINUS_2_FULL_IMAGE!r}: {exc}"
-                + (
-                    f"\nbuild log (last {_BUILD_LOG_TAIL_LINES} lines):\n{tail}"
-                    if tail else ""
-                ),
+                + (f"\nbuild log (last {_BUILD_LOG_TAIL_LINES} lines):\n{tail}" if tail else ""),
                 diagnostic_detail=diagnostic_detail,
             ) from exc
         except Exception as exc:

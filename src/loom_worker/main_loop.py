@@ -925,6 +925,15 @@ async def _spawn_trial(
                     worker_id,
                 ),
                 require_containment=bool(getattr(settings, "require_cgroup_parent", False)),
+                # #1169: contained pools set trial_cache_registry_repo so a
+                # base task image built+pushed by a non-contained builder is
+                # pullable here instead of (refused) rebuilt. getattr mirrors
+                # the require_cgroup_parent line above so partial/fake settings
+                # degrade gracefully (registry disabled).
+                registry_repo=(getattr(settings, "trial_cache_registry_repo", "") or None),
+                registry_pull_timeout_sec=getattr(
+                    settings, "trial_cache_registry_pull_timeout_sec", 15.0
+                ),
             )
             # #317 Phase 1: if the chosen agent declares an
             # install_script, layer the agent install onto the task
