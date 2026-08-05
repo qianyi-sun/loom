@@ -373,7 +373,7 @@ def converge(*, ensure: bool) -> dict[str, object]:
         shared_gid = grp.getgrnam(SHARED_GROUP).gr_gid
     except KeyError as exc:
         raise AuthorityError("shared repository identity is unavailable") from exc
-    if shared_gid not in consumer.groups or shared_gid in service.groups:
+    if shared_gid <= 0 or shared_gid not in consumer.groups or shared_gid in service.groups:
         raise AuthorityError("shared repository group membership is invalid")
 
     try:
@@ -438,13 +438,15 @@ def converge(*, ensure: bool) -> dict[str, object]:
         service_ok = _probe_identity(
             service,
             (
-                (parent.fd, os.W_OK, True),
+                (parent.fd, os.W_OK | os.X_OK, True),
                 (repository.fd, os.W_OK | os.X_OK, True),
             ),
         )
         consumer_ok = _probe_identity(
             consumer,
             (
+                (authority.fd, os.R_OK | os.X_OK, True),
+                (authority.fd, os.W_OK, False),
                 (repository.fd, os.R_OK | os.X_OK, True),
                 (repository.fd, os.W_OK, False),
             ),
@@ -497,9 +499,9 @@ def _converge_service_owned(
 ) -> dict[str, object]:
     """Converge a service-owned candidate tree under an operator-provisioned root.
 
-    Unlike converge() (which validates a *consumer*-owned parent), the root here
-    is owned by the rollout service and so is every level beneath it. Workers
-    (the shared group) get read+traverse only, never write -- that is the
+    Like converge(), the root here is owned by the rollout service, as is every
+    level beneath it. Workers (the shared group) get read+traverse only, never
+    write -- that is the
     immutability guarantee for published candidates (#874,
     /shared_work/loom/candidates/<env>/...). The root is provisioned once by an
     operator; this helper validates it is service-owned and ensures the chain.
@@ -516,7 +518,7 @@ def _converge_service_owned(
         shared_gid = grp.getgrnam(SHARED_GROUP).gr_gid
     except KeyError as exc:
         raise AuthorityError("shared repository identity is unavailable") from exc
-    if shared_gid not in consumer.groups or shared_gid in service.groups:
+    if shared_gid <= 0 or shared_gid not in consumer.groups or shared_gid in service.groups:
         raise AuthorityError("shared repository group membership is invalid")
 
     opened: list[BoundDirectory] = []
