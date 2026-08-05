@@ -6,6 +6,7 @@ from collections.abc import Collection, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+# Disposable #1130 Track 3 A/B probe. This branch must never merge.
 HEAVY_CHECKS = (
     "integration",
     "integration_docker",
