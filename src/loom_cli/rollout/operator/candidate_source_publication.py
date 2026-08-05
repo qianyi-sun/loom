@@ -34,7 +34,7 @@ from .installed_preflight_commands import InstalledPreflightCommands
 from .model import CandidateBinding
 from .policy import PolicyError, sanitized_child_environment
 
-_SHARED_REPOSITORY_ROOT = Path("/shared_work2/qianyi/.loom-staging-rollout/worker-repos")
+_SHARED_REPOSITORY_ROOT = Path("/shared_work2/loom-staging-rollout/worker-repos")
 
 Publication = Callable[..., Mapping[str, object]]
 

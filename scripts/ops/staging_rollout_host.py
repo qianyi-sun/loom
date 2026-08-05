@@ -69,7 +69,7 @@ SHARED_WORK_GROUP = "sharedwork"
 SHARED_WORK2_MOUNT_POINT = Path("/shared_work2")
 SHARED_WORK2_MOUNT_UNIT = "shared_work2.mount"
 SHARED_WORK2_MOUNT_UNIT_PATH = Path("/etc/systemd/system") / SHARED_WORK2_MOUNT_UNIT
-SHARED_WORKER_AUTHORITY_ROOT = SHARED_WORK2_MOUNT_POINT / "qianyi/.loom-staging-rollout"
+SHARED_WORKER_AUTHORITY_ROOT = SHARED_WORK2_MOUNT_POINT / "loom-staging-rollout"
 SHARED_WORKER_REPO_ROOT = SHARED_WORKER_AUTHORITY_ROOT / "worker-repos"
 
 RUNNER_ROOT = Path("/opt/loom-staging-runner")

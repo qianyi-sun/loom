@@ -44,9 +44,9 @@ def _config(tmp_path: Path):  # type: ignore[no-untyped-def]
 
 def _record(action: str) -> dict[str, object]:
     return {
-        "repo_action": action,
-        "repo_dir": (
-            "/shared_work2/qianyi/.loom-staging-rollout/worker-repos/"
+    "repo_action": action,
+    "repo_dir": (
+            "/shared_work2/loom-staging-rollout/worker-repos/"
             "loom-remote-worker-staging-aaaaaaa"
         ),
         "repo_group_id": 2007,

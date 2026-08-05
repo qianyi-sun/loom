@@ -31,8 +31,8 @@ SERVICE_USER = "loom-rollout"
 SERVICE_GROUP = "loom-rollout"
 CONSUMER_USER = "qianyi"
 SHARED_GROUP = "sharedwork"
-CONSUMER_PARENT = Path("/shared_work2/qianyi")
-AUTHORITY_ROOT = CONSUMER_PARENT / ".loom-staging-rollout"
+CONSUMER_PARENT = Path("/shared_work2/loom-staging-rollout")
+AUTHORITY_ROOT = CONSUMER_PARENT
 REPOSITORY_ROOT = AUTHORITY_ROOT / "worker-repos"
 
 # Service-owned candidate tree (#874): the rollout service owns the root and
@@ -390,9 +390,9 @@ def converge(*, ensure: bool) -> dict[str, object]:
             parent, parent_created = _ensure_child(
                 mount,
                 CONSUMER_PARENT.name,
-                uid=consumer.uid,
+                uid=service.uid,
                 gid=shared_gid,
-                mode=0o2775,
+                mode=0o2750,
             )
             if parent_created:
                 created.append("consumer-parent")
@@ -402,18 +402,12 @@ def converge(*, ensure: bool) -> dict[str, object]:
             raise AuthorityError("shared repository consumer parent is unavailable")
         parent_metadata = _validate_directory(
             parent,
-            uid=consumer.uid,
+            uid=service.uid,
             gid=shared_gid,
-            mode=0o2775,
+            mode=0o2750,
         )
+        authority = parent
         if ensure:
-            authority, authority_created = _ensure_child(
-                parent,
-                AUTHORITY_ROOT.name,
-                uid=service.uid,
-                gid=shared_gid,
-                mode=0o2750,
-            )
             repository, repository_created = _ensure_child(
                 authority,
                 REPOSITORY_ROOT.name,
@@ -421,14 +415,10 @@ def converge(*, ensure: bool) -> dict[str, object]:
                 gid=shared_gid,
                 mode=0o2750,
             )
-            if authority_created:
-                created.append("authority-root")
             if repository_created:
                 created.append("repository-root")
         else:
-            authority = _open_child(parent, AUTHORITY_ROOT.name)
             repository = _open_child(authority, REPOSITORY_ROOT.name)
-            _validate_directory(authority, uid=service.uid, gid=shared_gid, mode=0o2750)
             _validate_directory(repository, uid=service.uid, gid=shared_gid, mode=0o2750)
 
         if authority is None or repository is None:  # pragma: no cover - invariant
@@ -448,7 +438,7 @@ def converge(*, ensure: bool) -> dict[str, object]:
         service_ok = _probe_identity(
             service,
             (
-                (parent.fd, os.W_OK, False),
+                (parent.fd, os.W_OK, True),
                 (repository.fd, os.W_OK | os.X_OK, True),
             ),
         )
@@ -474,7 +464,7 @@ def converge(*, ensure: bool) -> dict[str, object]:
             "consumer_uid": consumer.uid,
             "shared_group": SHARED_GROUP,
             "shared_gid": shared_gid,
-            "parent_mode": "2775",
+            "parent_mode": "2750",
             "authority_mode": "2750",
             "repository_mode": "2750",
             "parent_device": parent_metadata.st_dev,
@@ -483,7 +473,7 @@ def converge(*, ensure: bool) -> dict[str, object]:
             "authority_inode": authority_metadata.st_ino,
             "repository_device": repository_metadata.st_dev,
             "repository_inode": repository_metadata.st_ino,
-            "service_capability": "parent-not-writable;repository-writable-searchable",
+            "service_capability": "parent-writable;repository-writable-searchable",
             "consumer_capability": "repository-readable-searchable-not-writable",
             "publication_capability": "private-mkdir-publish-verified",
             "mount": mount_report,
@@ -492,7 +482,7 @@ def converge(*, ensure: bool) -> dict[str, object]:
     finally:
         if repository is not None:
             os.close(repository.fd)
-        if authority is not None:
+        if authority is not None and authority is not parent:
             os.close(authority.fd)
         if parent is not None:
             os.close(parent.fd)
