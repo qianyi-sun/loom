@@ -17,6 +17,7 @@ from loom.models.result import FailureReason
 
 # ─── helpers ──────────────────────────────────────────────────────────────────
 
+
 def _http_status_error(status_code: int, body: str = "") -> httpx.HTTPStatusError:
     """Build a minimal httpx.HTTPStatusError for the given status code."""
     request = httpx.Request("POST", "http://loom-llm-gateway:9100/v1/chat/completions")
@@ -34,16 +35,41 @@ def _gateway_request() -> httpx.Request:
 
 # ─── pre-existing error types (must still return (reason, None)) ──────────────
 
+
 def test_agent_setup_timeout_to_agent_error():
     reason, msg = classify_failure(AgentSetupTimeoutError("x"))
     assert reason == FailureReason.AGENT_ERROR
     assert msg is None
 
 
-def test_driver_error_to_env_start_failure():
-    reason, msg = classify_failure(DriverError("x"))
+def test_driver_error_to_env_start_failure_surfaces_message():
+    # #1169: DriverError now propagates a redacted, self-explaining message
+    # instead of dropping it to None (empty failure_message hid the cause).
+    reason, msg = classify_failure(DriverError("container create failed: no such image"))
+    assert reason == FailureReason.ENV_START_FAILURE
+    assert msg == "container create failed: no such image"
+
+
+def test_driver_error_empty_message_stays_none():
+    reason, msg = classify_failure(DriverError(""))
     assert reason == FailureReason.ENV_START_FAILURE
     assert msg is None
+
+
+def test_image_build_forbidden_is_env_start_with_message():
+    # #1169: a containment-required worker's build refusal must be
+    # self-explaining (it aborts driver.start()).
+    from loom.driver.build_containment import ImageBuildForbiddenError
+
+    exc = ImageBuildForbiddenError(
+        "refusing to build image 'task:abc' on a containment-required "
+        "(non-exclusive Slurm) worker: pre-build and cache the image."
+    )
+    reason, msg = classify_failure(exc)
+    assert reason == FailureReason.ENV_START_FAILURE
+    assert msg is not None
+    assert "refusing to build image" in msg
+    assert "\n" not in msg  # redacted to a single line
 
 
 def test_verifier_error():
@@ -78,9 +104,7 @@ def test_tmux_no_server_mid_dispatch_is_agent_error():
 
 
 def test_tmux_session_lost_guard_message_is_agent_error():
-    reason, msg = classify_failure_message(
-        "Terminus2 tmux session/server lost mid-dispatch."
-    )
+    reason, msg = classify_failure_message("Terminus2 tmux session/server lost mid-dispatch.")
     assert reason == FailureReason.AGENT_ERROR
     assert msg == "Terminus2 tmux server disappeared mid-dispatch."
 
@@ -88,10 +112,7 @@ def test_tmux_session_lost_guard_message_is_agent_error():
 def test_tmux_soft_recover_recreate_failure_message_is_agent_error():
     """Soft-recover recreate failure must stay actionable agent_error (#1068)."""
     reason, msg = classify_failure(
-        AgentError(
-            "Terminus2 tmux session/server lost mid-dispatch. "
-            "Recreate failed: boom"
-        )
+        AgentError("Terminus2 tmux session/server lost mid-dispatch. Recreate failed: boom")
     )
     assert reason == FailureReason.AGENT_ERROR
     assert msg == "Terminus2 tmux server disappeared mid-dispatch."
@@ -123,8 +144,7 @@ def test_provider_transport_disconnect_message_classification_is_idempotent():
     prefix = "Provider transport disconnected before returning a response."
     reason, msg = classify_failure(
         RuntimeError(
-            f"{prefix} codex exited rc=1; stderr: "
-            "Server disconnected without sending a response."
+            f"{prefix} codex exited rc=1; stderr: Server disconnected without sending a response."
         )
     )
 
@@ -142,9 +162,7 @@ def test_textual_credential_scope_401_is_actionable_and_redacted() -> None:
     assert result is not None
     reason, msg = result
     assert reason == FailureReason.GATEWAY_ERROR
-    assert msg == (
-        "Loom gateway rejected a credential without llm:call scope (HTTP 401)."
-    )
+    assert msg == ("Loom gateway rejected a credential without llm:call scope (HTTP 401).")
     assert "secret-token" not in msg
 
 
@@ -158,9 +176,7 @@ def test_textual_expired_step_jwt_401_is_distinct_and_redacted() -> None:
     assert result is not None
     reason, msg = result
     assert reason == FailureReason.GATEWAY_ERROR
-    assert msg == (
-        "Loom gateway rejected an invalid or expired step token (HTTP 401)."
-    )
+    assert msg == ("Loom gateway rejected an invalid or expired step token (HTTP 401).")
     assert "secret-token" not in msg
 
 
@@ -173,6 +189,7 @@ def test_timeout_error_classification_is_phase_dependent():
 
 
 # ─── httpx.HTTPStatusError: 4xx → PROVIDER_ERROR ─────────────────────────────
+
 
 def test_http_400_is_provider_error():
     exc = _http_status_error(400, "Bad request body")
@@ -195,9 +212,7 @@ def test_http_401_scope_rejection_is_gateway_error_and_redacted():
         ),
     )
     assert reason == FailureReason.GATEWAY_ERROR
-    assert msg == (
-        "Loom gateway rejected a credential without llm:call scope (HTTP 401)."
-    )
+    assert msg == ("Loom gateway rejected a credential without llm:call scope (HTTP 401).")
     assert "supersecret" not in msg
 
 
@@ -209,9 +224,7 @@ def test_http_401_expired_step_jwt_is_distinct_and_redacted():
         ),
     )
     assert reason == FailureReason.GATEWAY_ERROR
-    assert msg == (
-        "Loom gateway rejected an invalid or expired step token (HTTP 401)."
-    )
+    assert msg == ("Loom gateway rejected an invalid or expired step token (HTTP 401).")
     assert "supersecret" not in msg
 
 
@@ -223,6 +236,7 @@ def test_http_429_is_provider_error():
 
 
 # ─── httpx.HTTPStatusError: 5xx → GATEWAY_ERROR ──────────────────────────────
+
 
 def test_http_500_is_gateway_error():
     reason, msg = classify_failure(_http_status_error(500))
@@ -250,20 +264,25 @@ def test_http_504_is_gateway_error():
 
 
 def test_gateway_read_timeout_is_gateway_error():
-    reason, msg = classify_failure(httpx.ReadTimeout("gateway timed out", request=_gateway_request()))
+    reason, msg = classify_failure(
+        httpx.ReadTimeout("gateway timed out", request=_gateway_request())
+    )
     assert reason == FailureReason.GATEWAY_ERROR
     assert msg is not None
     assert "timeout" in msg.lower()
 
 
 def test_gateway_connection_reset_is_gateway_error():
-    reason, msg = classify_failure(httpx.ConnectError("connection reset by peer", request=_gateway_request()))
+    reason, msg = classify_failure(
+        httpx.ConnectError("connection reset by peer", request=_gateway_request())
+    )
     assert reason == FailureReason.GATEWAY_ERROR
     assert msg is not None
     assert "connection" in msg.lower()
 
 
 # ─── redaction ────────────────────────────────────────────────────────────────
+
 
 def test_body_containing_gateway_url_is_stripped():
     body = "upstream error at http://loom-llm-gateway:9100/foo/bar — quota exceeded"
@@ -292,7 +311,7 @@ def test_body_truncated_to_200_chars():
     # The excerpt itself is capped at 200 chars, so total message is a bit longer
     # but the *excerpt* portion is ≤ 200 chars.
     prefix = "Provider returned HTTP 400. "
-    excerpt = msg[len(prefix):]
+    excerpt = msg[len(prefix) :]
     assert len(excerpt) <= 200
 
 
@@ -306,6 +325,7 @@ def test_body_newlines_stripped():
 
 
 # ─── 5xx body is NOT included (could leak stack traces) ──────────────────────
+
 
 def test_5xx_body_not_in_message():
     body = "Internal traceback: /opt/app/loom_gateway/main.py line 42"
