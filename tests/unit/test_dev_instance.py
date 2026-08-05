@@ -149,3 +149,23 @@ class TestValidateDevInstance:
         others = [DevInstanceRef(name=f"dev{i}", max_slots=0) for i in range(3)]
         # distinct names never collide; only the (empty) budget matters
         assert validate_dev_instance("alice", _ok_policy(0), others) == []
+
+
+class TestDevPoolInstanceName:
+    def test_recovers_name_from_dev_pool(self) -> None:
+        from loom.dev_instance import derive_identity, dev_pool_instance_name
+
+        for name in ("alice", "my-env", "x1"):
+            pool = derive_identity(name).worker_pool
+            assert dev_pool_instance_name(pool) == name
+
+    def test_none_for_base_pools(self) -> None:
+        from loom.dev_instance import dev_pool_instance_name
+
+        for pool in ("oldlab", "gb10", "default", "gb10-arm64", "development"):
+            assert dev_pool_instance_name(pool) is None
+
+    def test_none_for_bare_prefix(self) -> None:
+        from loom.dev_instance import DEV_POOL_PREFIX, dev_pool_instance_name
+
+        assert dev_pool_instance_name(DEV_POOL_PREFIX) is None
