@@ -54,19 +54,9 @@ run-name: >-
                     contains(github.event.pull_request.labels.*.name, 'ci:coverage-summary') && '1' || '0'),
              github.event.pull_request.number || 'none') }}
 
-# Validates the `loom cluster {render, up, status, down}` round-trip
-# against a real (kind) Kubernetes API. Catches manifest-schema
-# regressions and CLI-integration regressions that golden-file tests
-# can't surface.
-#
-# Scope: this smoke targets the deploy *contract*, not pod readiness.
-# We apply manifests with --skip-preflight + --no-wait, then verify:
-#   - kubectl accepts every object (schema validation by the API server)
-#   - `cluster status --format json` reads back the expected shape
-#   - `cluster down --yes` removes every applied object
-#
-# Pod readiness (loom-* containers actually starting) requires the
-# real image set and depends on `images.yml`; that's tracked separately.
+# Validates the version-controlled multi-node k3s render contract used by live
+# staging. This PR gate is intentionally mutation-free: candidate deployment
+# and live k3s readiness remain separately authorized protected acceptance.
 #
 # Trigger model:
 #   - workflow_dispatch (manual)
@@ -198,31 +188,19 @@ jobs:
           fi
           printf 'publisher_active=%s\n' "$publisher_active" >> "$GITHUB_OUTPUT"
 
-  smoke:
-    name: kind smoke (render → apply → status → down)
+  cluster-contract:
+    name: cluster contract (render live k3s topology)
     needs: plan
     if: >-
       needs.plan.outputs.gate_mode == 'full' &&
       needs.plan.outputs.required == 'true'
     runs-on: >-
       ${{ fromJSON(vars.LOOM_CI_SMOKE_RUNS_ON || vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
-    timeout-minutes: 25
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-
-      - name: Install kind
-        run: |
-          curl -sSLo /tmp/kind https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64
-          chmod +x /tmp/kind
-          sudo mv /tmp/kind /usr/local/bin/kind
-          kind --version
-
-      - name: Install kubectl
-        run: |
-          curl -sSLo /tmp/kubectl "https://dl.k8s.io/release/$(curl -s -L https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-          chmod +x /tmp/kubectl
-          sudo mv /tmp/kubectl /usr/local/bin/kubectl
-          kubectl version --client=true
+        with:
+          persist-credentials: false
 
       - name: Install uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
@@ -234,13 +212,13 @@ jobs:
           save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
           cache-dependency-glob: uv.lock
 
-      - name: Sync python deps (with [dev], [cluster], and [rollout] extras)
+      - name: Sync cluster-contract dependencies
         run: |
           uv python install 3.11
           uv sync --locked --all-packages --extra dev --extra cluster --extra rollout --python 3.11
           uv pip check --python .venv/bin/python
 
-      - name: Pytest — manifest-owned cluster smoke lane
+      - name: Verify manifest-owned k3s contract
         shell: bash
         run: |
           set -euo pipefail
@@ -249,136 +227,8 @@ jobs:
           )
           [[ ${#test_paths[@]} -gt 0 ]]
           uv run --no-sync pytest "${test_paths[@]}"
-
-      - name: Create kind cluster
-        run: |
-          kind create cluster --name loom-smoke --wait 60s
-          kubectl --context kind-loom-smoke cluster-info
-
-      - name: Create loom namespace + required Secrets
-        # Bootstrap loom-secrets from schema via `loom cluster bootstrap-secrets`.
-        # --smoke-defaults substitutes test-grade placeholder values for every
-        # secret key declared in config/loom-schema.toml, so the Secret always
-        # covers the full key set even as new entries are added to the schema.
-        # kind sets the current kubeconfig context to kind-loom-smoke, so the
-        # generated kubectl command targets the right cluster without --context.
-        run: |
-          set -e
-          kubectl --context kind-loom-smoke create namespace loom
-          eval "$(uv run --no-sync loom cluster bootstrap-secrets --namespace=loom --smoke-defaults)"
-          printf '[admin]\ntoken="smoke"\n' > /tmp/admin-secrets.toml
-          kubectl --context kind-loom-smoke -n loom create secret generic loom-admin-secret \
-            --from-file=secrets.toml=/tmp/admin-secrets.toml
-
-      - name: loom cluster render — manifests parse + match schema
-        run: |
-          uv run --no-sync python -m loom_cli cluster render > /tmp/manifests.yaml
-          wc -l /tmp/manifests.yaml
-          # Server-side dry-run validates schema against the live API.
-          kubectl --context kind-loom-smoke -n loom apply \
-            --dry-run=server -f /tmp/manifests.yaml
-
-      - name: loom cluster audit — public/internal boundary check
-        # Static check: no LoadBalancer/NodePort Services, Ingress
-        # backends on the allowlist, no hostPort declarations. Runs
-        # before apply so a boundary regression fails fast (#77).
-        run: uv run --no-sync python -m loom_cli cluster audit
-
-      - name: loom cluster up — apply, skip preflight + wait
-        # --skip-preflight: dummy Secrets pass preflight but the smoke
-        # doesn't depend on it; --no-wait: pods can't reach Ready
-        # without the real images, and we're testing the apply
-        # contract, not pod readiness.
-        run: |
-          uv run --no-sync python -m loom_cli cluster up \
-            --context kind-loom-smoke --namespace loom \
-            --skip-preflight --no-wait
-
-      - name: Verify expected workloads exist
-        run: |
-          set -e
-          kubectl --context kind-loom-smoke -n loom get deploy,sts,ds,svc,ingress
-          # Platform services must always be present regardless of profile.
-          kubectl --context kind-loom-smoke -n loom get deploy loom-service
-          kubectl --context kind-loom-smoke -n loom get deploy loom-control-plane
-          kubectl --context kind-loom-smoke -n loom get sts loom-postgres
-
-          # loom-worker is conditional on k8s_worker.enabled in the
-          # profile that was rendered. #383 flipped the schema default
-          # to false; check whichever shape got rendered so the smoke
-          # test doesn't false-fail when the worker Deployment is
-          # legitimately absent (staging/production) and doesn't
-          # false-pass when it's legitimately present (development).
-          # Anchor to end-of-line so this does NOT match `loom-worker-router`
-          # (the per-node control-plane hostPort forwarder), only the
-          # `loom-worker` Deployment itself.
-          if grep -Eq "name: loom-worker$" /tmp/manifests.yaml; then
-            echo "manifest includes loom-worker → verifying it exists in cluster"
-            kubectl --context kind-loom-smoke -n loom get deploy loom-worker
-          else
-            echo "manifest omits loom-worker (k8s_worker.enabled=false) → verifying absence"
-            if kubectl --context kind-loom-smoke -n loom get deploy loom-worker 2>/dev/null; then
-              echo "FAIL: loom-worker Deployment exists in cluster but was not in the rendered manifest" >&2
-              exit 1
-            fi
-            echo "PASS: loom-worker correctly absent"
-          fi
-
-      - name: loom cluster status --format json
-        run: |
-          uv run --no-sync python -m loom_cli cluster status \
-            --context kind-loom-smoke --namespace loom \
-            --format json | tee /tmp/status.json
-          # Sanity: the JSON shape carries the components list with
-          # known names.
-          python -c '
-          import json, os, sys
-          d = json.load(open("/tmp/status.json"))
-          names = {c["name"] for c in d["components"]}
-          # Components that must be present regardless of profile.
-          expected = {
-              "loom-service", "loom-control-plane", "loom-llm-gateway",
-              "loom-web", "postgres", "minio",
-          }
-          # loom-worker only expected when the rendered manifest
-          # included it (#383 made it conditional on
-          # k8s_worker.enabled).
-          manifest = open("/tmp/manifests.yaml").read()
-          # Trailing newline so this does NOT match `loom-worker-router`,
-          # only the `loom-worker` Deployment name value itself.
-          if "name: loom-worker\n" in manifest:
-              expected.add("loom-worker")
-          missing = expected - names
-          if missing:
-              print(f"FAIL: status missing components: {sorted(missing)}",
-                    file=sys.stderr)
-              sys.exit(1)
-          print(f"PASS: status reported {len(names)} components, "
-                f"including {sorted(expected)}")
-          '
-
-      - name: loom cluster down --yes
-        run: |
-          uv run --no-sync python -m loom_cli cluster down \
-            --context kind-loom-smoke --namespace loom --yes
-
-      - name: Verify teardown
-        run: |
-          # All deployments + statefulsets + daemonsets gone.
-          for kind in deploy sts ds; do
-            count=$(kubectl --context kind-loom-smoke -n loom get $kind \
-              -o name 2>/dev/null | wc -l)
-            if [ "$count" != "0" ]; then
-              echo "FAIL: $kind still present after down ($count items)" >&2
-              kubectl --context kind-loom-smoke -n loom get $kind
-              exit 1
-            fi
-          done
-          echo "PASS: namespace empty after down"
-
-      - name: Cleanup kind
-        if: always()
-        run: kind delete cluster --name loom-smoke
+          uv run --no-sync loom cluster audit \
+            --config deploy/environments/staging.multinode.cluster.toml
 
   cluster-smoke-gate:
     name: >-
@@ -391,14 +241,14 @@ jobs:
           'cluster-smoke-gate-filtered' }}
     runs-on: ubuntu-latest
     if: always()
-    needs: [plan, smoke]
+    needs: [plan, cluster-contract]
     steps:
       - name: Enforce selected cluster smoke result
         env:
           PLAN_RESULT: ${{ needs.plan.result }}
           GATE_MODE: ${{ needs.plan.outputs.gate_mode }}
           REQUIRED: ${{ needs.plan.outputs.required }}
-          SMOKE_RESULT: ${{ needs.smoke.result }}
+          CONTRACT_RESULT: ${{ needs.cluster-contract.result }}
         run: |
           set -euo pipefail
           [[ "$PLAN_RESULT" == "success" ]] || exit 1
@@ -407,7 +257,7 @@ jobs:
             *) echo "FAIL: invalid gate mode ${GATE_MODE@Q}" >&2; exit 1 ;;
           esac
           if [[ "$GATE_MODE" == "filtered" ]]; then
-            [[ "$SMOKE_RESULT" == "skipped" ]] || exit 1
+            [[ "$CONTRACT_RESULT" == "skipped" ]] || exit 1
             exit 0
           fi
           case "$REQUIRED" in
@@ -415,7 +265,7 @@ jobs:
             *) echo "FAIL: invalid planner boolean required=${REQUIRED@Q}" >&2; exit 1 ;;
           esac
           if [[ "$REQUIRED" == "true" ]]; then
-            [[ "$SMOKE_RESULT" == "success" ]] || exit 1
+            [[ "$CONTRACT_RESULT" == "success" ]] || exit 1
           else
-            [[ "$SMOKE_RESULT" == "skipped" || "$SMOKE_RESULT" == "success" ]] || exit 1
+            [[ "$CONTRACT_RESULT" == "skipped" || "$CONTRACT_RESULT" == "success" ]] || exit 1
           fi

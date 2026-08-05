@@ -1,16 +1,19 @@
 # Multi-node topology
 
-**Status:** design
+**Status:** deployed for live staging; production remains a separate gate
 **Issues:** #637 (Postgres HA), #610 (MinIO distributed), #641 (topology schema), #642 (HA templates)
 
 ## Motivation
 
-Loom's platform tier — Postgres, MinIO, LLM gateway, control-plane, service, pgbouncer — runs today as a single-node kind cluster on `bb8-1`. That's fine for a pilot with ~50 concurrent trials but has two hard limits:
+Loom's platform tier originally ran as a single-node kind cluster on `bb8-1`.
+That pilot topology had two hard limits:
 
 1. **Every stateful pod is a SPOF.** Postgres pod restart = ~150 in-flight trials fail. MinIO pod restart = trial finalize stalls until it recovers. Under continuous autoscaling to 100+ concurrent trials, restart events (kernel patches, image upgrades, node reboots) become user-visible incidents.
 2. **hostPath storage doesn't survive node loss.** All Postgres and MinIO data lives on `bb8-1`'s local disk. If `bb8-1` fails, the platform is offline until manual restore.
 
-The multi-node topology solves both by moving to a real five-node k8s cluster (k3s) with replicated storage (Longhorn) and operator-managed HA services (CloudNativePG for Postgres, distributed MinIO). Pgbouncer already runs 2 replicas so no change there.
+Live staging now solves both limits on a real five-node k8s cluster (k3s) with
+replicated storage (Longhorn) and operator-managed HA services (CloudNativePG
+for Postgres, distributed MinIO). Pgbouncer continues to run 2 replicas.
 
 ## The seam: `topology.multi_node`
 
@@ -31,7 +34,11 @@ fields = {
 Profiles pin explicit values so a schema-default flip cannot silently break existing deployments:
 
 - `development.cluster.toml`: pinned `multi_node = false` (shared dev is a lightweight env co-located with staging/prod on the fleet — single-node-shaped backends by choice, not distributed; trial execution runs on the shared external-Slurm workers, arbitrated per-env by the autoscaler)
-- `staging.cluster.toml`: pinned `multi_node = false` **temporarily**; flipped `true` in the same PR that lands k3s cutover
+- `staging.cluster.toml`: retained single-node profile for historical
+  broker/rollback compatibility; it is not the live staging render authority
+- `staging.multinode.cluster.toml`: live staging profile, pinned
+  `multi_node = true`, `storage_backend = "longhorn"`, 3 Postgres replicas,
+  4 MinIO replicas, and required anti-affinity
 - `production.cluster.toml`: pinned `multi_node = true`, `storage_backend = "longhorn"`, 3 Postgres replicas, 4 MinIO replicas, required anti-affinity
 
 ## Cluster shape
@@ -126,7 +133,7 @@ MinIO's distributed mode requires all pods to be running before write quorum is 
 
 Longhorn install is a runbook step, not part of `loom cluster render` output.
 
-## Cutover from single-node to multi-node
+## Live staging state after cutover
 
 **Verified prerequisites — already in place, no action needed:**
 
@@ -134,22 +141,17 @@ Longhorn install is a runbook step, not part of `loom cluster render` output.
 - CloudNativePG + Longhorn: installed and healthy; Longhorn schedulable on all five nodes.
 - 4-pod distributed MinIO: rendered from `minio-distributed.yaml.j2` with `topology.multi_node=true / minio_replicas=4 / anti_affinity=required / storage_backend=longhorn` + `persistent_storage_backend=dynamic`, deployed to a scratch namespace, and confirmed to form write quorum with all four pods spread across four distinct nodes on Longhorn (then torn down; the cutover re-creates it with the real secret).
 
-Live staging still runs on the single-node **kind** cluster on bb8-1 (`loom-staging` namespace, host-path MinIO PV `loom-staging-minio-data`, ingress on host `:443`). The k3s cluster is a **fully separate** API server fronted by nginx on host `:8443` with Longhorn (not host-path) storage — so k3s staging work cannot collide with the live kind cluster.
+Live `loom-staging` runs on the five-node k3s API with the checked-in
+`deploy/environments/staging.multinode.cluster.toml` profile. Its persistent
+state uses Longhorn, Postgres is a three-instance CNPG Cluster, and MinIO is a
+four-replica StatefulSet. The public `/staging` entry reaches the k3s ingress.
 
-**Config change (belongs in the cutover PR, not merged early):** flip `deploy/environments/staging.cluster.toml` `[topology]` to `multi_node=true`, `storage_backend="longhorn"`, `minio_replicas=4`, add `anti_affinity="required"`, and set `persistent_storage_backend="dynamic"` (so the static host-path MinIO PV stops rendering and can't shadow the StatefulSet PVC). Merging this ahead of the window would render against the live kind cluster and strand it.
-
-**Maintenance window (irreversible — data + DNS):**
-
-1. Pause new trial submissions.
-2. `pg_dump` from the kind single-node Postgres → `pg_restore` into the k3s CNPG primary (created by `loom cluster up` from the flipped config).
-3. `mc mirror` from the kind single-node MinIO → the new 4-pod distributed pool.
-4. `loom cluster up`/`apply` the flipped staging config to k3s.
-5. Verify: pgbouncer reaches the CNPG primary via the `loom-postgres` ExternalName, LISTEN watchers reach direct Postgres, workers finalize trials to distributed MinIO, MinIO reports 4 pods online.
-6. Repoint the public entrypoint from kind (`:443`) to k3s (`:8443`) and serve a **302 `/staging → /dev` redirect** on the old cluster. The `/dev` basename is baked into the SPA build's React-Router basename and loom-service `public_base_url`, so an ingress path-rewrite alone does NOT roll a client back — a redirect or DNS re-point does (#879).
-7. Keep the kind single-node Postgres/MinIO PVs on bb8-1 for 24–72h as the rollback anchor.
-8. Decommission the kind PVs after monitoring shows the k3s cluster stable.
-
-**Rollback (any time before step 8):** re-point the entrypoint back to kind `:443` (and the `/staging → /dev` redirect back to the old cluster). No data loss — the kind Postgres/MinIO are untouched until step 8. A bare `topology.multi_node=false` re-render is NOT sufficient once DNS has moved; the entrypoint re-point is the real rollback lever.
+The former kind runtime is no longer a live acceptance or rollback target.
+Any retained kind manifest or `staging.cluster.toml` setting is a development
+or historical rollback artifact and must not drive required PR smoke,
+release-promotion rendering, or current capacity sizing. Rollback now means an
+explicit previous k3s candidate plus its compatible data/schema procedure; it
+must not be implemented by silently rendering the old single-node profile.
 
 ## Failure modes and alerts
 

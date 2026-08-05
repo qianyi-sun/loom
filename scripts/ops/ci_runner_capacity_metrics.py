@@ -81,11 +81,9 @@ def _job_is_in_scope(workflow: str, name: str) -> bool:
     if workflow == "images":
         return name.endswith("(multi-arch)") and not name.startswith("publish ")
     if workflow == "cluster-smoke":
-        return name.startswith("kind smoke (")
+        return name.startswith("cluster contract (")
     if workflow == "staging-smoke":
-        return name.startswith("kind staging smoke (") or name == (
-            "manifest-owned system smoke"
-        )
+        return name == "manifest-owned system smoke"
     raise MetricsError(f"unsupported workflow: {workflow}")
 
 

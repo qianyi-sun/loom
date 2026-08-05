@@ -872,6 +872,7 @@ def test_render_ingress_routes_only_api_and_spa_backends() -> None:
         ("production.cluster.toml", "/prod"),
         ("development.cluster.toml", "/dev"),
         ("staging.cluster.toml", "/staging"),
+        ("staging.multinode.cluster.toml", "/staging"),
     ],
 )
 def test_render_profile_ingress_routes_api_and_spa_under_frontend_prefix(
@@ -1096,6 +1097,7 @@ def test_trusted_controller_guard_ignores_encoded_separator_in_query() -> None:
         ("development.cluster.toml", "development"),
         ("production.cluster.toml", "production"),
         ("staging.cluster.toml", "staging"),
+        ("staging.multinode.cluster.toml", "staging"),
     ],
 )
 def test_render_profiles_set_backend_runtime_environment(
@@ -1580,6 +1582,7 @@ def test_load_shipped_profile_files_have_explicit_k8s_worker_setting() -> None:
         # which can opt into k8s_worker for offline / no-Slurm use.
         "development.cluster.toml": False,
         "staging.cluster.toml": False,
+        "staging.multinode.cluster.toml": False,
         "production.cluster.toml": False,
     }
     for filename, want_enabled in expected.items():
@@ -1613,7 +1616,11 @@ def test_loom_service_env_carries_v1_workload_trust_contract_from_profile() -> N
         "LOOM_SVC_TASKSET_MATERIALIZER_TRANSFORM_NETWORK_ISOLATED": "False",
         "LOOM_SVC_UNTRUSTED_WORKLOAD_ISOLATION": "False",
     }
-    for profile_name in ("staging.cluster.toml", "production.cluster.toml"):
+    for profile_name in (
+        "staging.cluster.toml",
+        "staging.multinode.cluster.toml",
+        "production.cluster.toml",
+    ):
         cfg = load_cluster_config(_REPO_ROOT / "deploy" / "environments" / profile_name)
         assert (
             cfg.workload_contract.workload_trust_mode,
@@ -1869,8 +1876,8 @@ def test_local_example_template_renders() -> None:
 def _multi_node_cfg(**kwargs: object) -> ClusterConfig:
     """Build a 4-pod distributed-MinIO render config (#893).
 
-    Mirrors the [topology] values qianyi's k3s-cutover PR will flip
-    `deploy/environments/staging.cluster.toml` to. The topology
+    Mirrors the checked-in live values in
+    `deploy/environments/staging.multinode.cluster.toml`. The topology
     sub-dataclass is materialized from the schema at import time, so we
     reach it the same way the single-node tests reach `k8s_worker`
     (`type(ClusterConfig().<field>)`) rather than hand-rolling a config
@@ -1894,12 +1901,10 @@ def _multi_node_cfg(**kwargs: object) -> ClusterConfig:
 def test_render_distributed_minio_statefulset_shape() -> None:
     """Distributed (multi-node) MinIO renders as a 4-pod HA StatefulSet.
 
-    Covers the manifest shape that qianyi's k3s-cutover PR activates by
-    flipping `staging.cluster.toml [topology]` to multi_node=true /
-    minio_replicas=4 / anti_affinity="required" / storage_backend="longhorn".
-    Nothing here touches the live profile — the config is synthetic so the
-    distributed render path (`minio-distributed.yaml.j2`) has regression
-    coverage independent of that cutover flip (#893).
+    Covers the live k3s manifest shape: multi_node=true / minio_replicas=4 /
+    anti_affinity="required" / storage_backend="longhorn". The synthetic
+    config keeps the distributed render path (`minio-distributed.yaml.j2`)
+    independently testable in addition to the shipped-profile contract (#893).
     """
     docs = _load_docs(render_manifests(_multi_node_cfg()))
 
