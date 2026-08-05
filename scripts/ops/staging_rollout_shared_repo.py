@@ -31,8 +31,8 @@ SERVICE_USER = "loom-rollout"
 SERVICE_GROUP = "loom-rollout"
 CONSUMER_USER = "qianyi"
 SHARED_GROUP = "sharedwork"
-CONSUMER_PARENT = Path("/shared_work2/qianyi")
-AUTHORITY_ROOT = CONSUMER_PARENT / ".loom-staging-rollout"
+MOUNT_ROOT = Path("/shared_work2")
+AUTHORITY_ROOT = MOUNT_ROOT / "loom-staging-rollout"
 REPOSITORY_ROOT = AUTHORITY_ROOT / "worker-repos"
 
 # Service-owned candidate tree (#874): the rollout service owns the root and
@@ -373,14 +373,14 @@ def converge(*, ensure: bool) -> dict[str, object]:
         shared_gid = grp.getgrnam(SHARED_GROUP).gr_gid
     except KeyError as exc:
         raise AuthorityError("shared repository identity is unavailable") from exc
-    if shared_gid not in consumer.groups or shared_gid in service.groups:
+    if shared_gid <= 0 or shared_gid not in consumer.groups or shared_gid in service.groups:
         raise AuthorityError("shared repository group membership is invalid")
 
     try:
         mount_report = mount_identity()
     except MountError as exc:
         raise AuthorityError("shared repository mount identity is invalid") from exc
-    mount = _open_absolute(CONSUMER_PARENT.parent)
+    mount = _open_absolute(MOUNT_ROOT)
     parent: BoundDirectory | None = None
     authority: BoundDirectory | None = None
     repository: BoundDirectory | None = None
@@ -389,31 +389,25 @@ def converge(*, ensure: bool) -> dict[str, object]:
         if ensure:
             parent, parent_created = _ensure_child(
                 mount,
-                CONSUMER_PARENT.name,
-                uid=consumer.uid,
-                gid=shared_gid,
-                mode=0o2775,
-            )
-            if parent_created:
-                created.append("consumer-parent")
-        else:
-            parent = _open_child(mount, CONSUMER_PARENT.name)
-        if parent is None:  # pragma: no cover - invariant
-            raise AuthorityError("shared repository consumer parent is unavailable")
-        parent_metadata = _validate_directory(
-            parent,
-            uid=consumer.uid,
-            gid=shared_gid,
-            mode=0o2775,
-        )
-        if ensure:
-            authority, authority_created = _ensure_child(
-                parent,
                 AUTHORITY_ROOT.name,
                 uid=service.uid,
                 gid=shared_gid,
                 mode=0o2750,
             )
+            if parent_created:
+                created.append("authority-root")
+        else:
+            parent = _open_child(mount, AUTHORITY_ROOT.name)
+        if parent is None:  # pragma: no cover - invariant
+            raise AuthorityError("shared repository authority root is unavailable")
+        parent_metadata = _validate_directory(
+            parent,
+            uid=service.uid,
+            gid=shared_gid,
+            mode=0o2750,
+        )
+        authority = parent
+        if ensure:
             repository, repository_created = _ensure_child(
                 authority,
                 REPOSITORY_ROOT.name,
@@ -421,14 +415,10 @@ def converge(*, ensure: bool) -> dict[str, object]:
                 gid=shared_gid,
                 mode=0o2750,
             )
-            if authority_created:
-                created.append("authority-root")
             if repository_created:
                 created.append("repository-root")
         else:
-            authority = _open_child(parent, AUTHORITY_ROOT.name)
             repository = _open_child(authority, REPOSITORY_ROOT.name)
-            _validate_directory(authority, uid=service.uid, gid=shared_gid, mode=0o2750)
             _validate_directory(repository, uid=service.uid, gid=shared_gid, mode=0o2750)
 
         if authority is None or repository is None:  # pragma: no cover - invariant
@@ -448,13 +438,15 @@ def converge(*, ensure: bool) -> dict[str, object]:
         service_ok = _probe_identity(
             service,
             (
-                (parent.fd, os.W_OK, False),
+                (parent.fd, os.W_OK | os.X_OK, True),
                 (repository.fd, os.W_OK | os.X_OK, True),
             ),
         )
         consumer_ok = _probe_identity(
             consumer,
             (
+                (authority.fd, os.R_OK | os.X_OK, True),
+                (authority.fd, os.W_OK, False),
                 (repository.fd, os.R_OK | os.X_OK, True),
                 (repository.fd, os.W_OK, False),
             ),
@@ -474,7 +466,7 @@ def converge(*, ensure: bool) -> dict[str, object]:
             "consumer_uid": consumer.uid,
             "shared_group": SHARED_GROUP,
             "shared_gid": shared_gid,
-            "parent_mode": "2775",
+            "parent_mode": "2750",
             "authority_mode": "2750",
             "repository_mode": "2750",
             "parent_device": parent_metadata.st_dev,
@@ -483,7 +475,7 @@ def converge(*, ensure: bool) -> dict[str, object]:
             "authority_inode": authority_metadata.st_ino,
             "repository_device": repository_metadata.st_dev,
             "repository_inode": repository_metadata.st_ino,
-            "service_capability": "parent-not-writable;repository-writable-searchable",
+            "service_capability": "parent-writable;repository-writable-searchable",
             "consumer_capability": "repository-readable-searchable-not-writable",
             "publication_capability": "private-mkdir-publish-verified",
             "mount": mount_report,
@@ -492,7 +484,7 @@ def converge(*, ensure: bool) -> dict[str, object]:
     finally:
         if repository is not None:
             os.close(repository.fd)
-        if authority is not None:
+        if authority is not None and authority is not parent:
             os.close(authority.fd)
         if parent is not None:
             os.close(parent.fd)
@@ -507,9 +499,9 @@ def _converge_service_owned(
 ) -> dict[str, object]:
     """Converge a service-owned candidate tree under an operator-provisioned root.
 
-    Unlike converge() (which validates a *consumer*-owned parent), the root here
-    is owned by the rollout service and so is every level beneath it. Workers
-    (the shared group) get read+traverse only, never write -- that is the
+    Like converge(), the root here is owned by the rollout service, as is every
+    level beneath it. Workers (the shared group) get read+traverse only, never
+    write -- that is the
     immutability guarantee for published candidates (#874,
     /shared_work/loom/candidates/<env>/...). The root is provisioned once by an
     operator; this helper validates it is service-owned and ensures the chain.
@@ -526,7 +518,7 @@ def _converge_service_owned(
         shared_gid = grp.getgrnam(SHARED_GROUP).gr_gid
     except KeyError as exc:
         raise AuthorityError("shared repository identity is unavailable") from exc
-    if shared_gid not in consumer.groups or shared_gid in service.groups:
+    if shared_gid <= 0 or shared_gid not in consumer.groups or shared_gid in service.groups:
         raise AuthorityError("shared repository group membership is invalid")
 
     opened: list[BoundDirectory] = []

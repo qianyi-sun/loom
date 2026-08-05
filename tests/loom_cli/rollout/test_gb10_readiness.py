@@ -76,7 +76,7 @@ def test_candidate_source_remote_command_is_fixed_readonly_and_exact() -> None:
     )
 
     assert command.startswith("python3 -c ")
-    assert "/shared_work2/qianyi/.loom-staging-rollout/worker-repos/" in command
+    assert "/shared_work2/loom-staging-rollout/worker-repos/" in command
     assert CANDIDATE_SHA in command
     assert CANDIDATE_TREE in command
     assert "checkout" not in command

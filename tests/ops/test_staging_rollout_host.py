@@ -212,14 +212,14 @@ class FakeSystem:
         authority = self.filesystem.path(host.SHARED_WORKER_AUTHORITY_ROOT)
         repository = self.filesystem.path(host.SHARED_WORKER_REPO_ROOT)
         if authority.is_dir() and repository.is_dir():
-            parent = authority.parent
+            parent = authority
             parent_metadata = parent.stat()
             authority_metadata = authority.stat()
             repository_metadata = repository.stat()
             identity.update(
                 {
                     "schema_version": 1,
-                    "parent_mode": "2775",
+                    "parent_mode": "2750",
                     "authority_mode": "2750",
                     "repository_mode": "2750",
                     "parent_device": parent_metadata.st_dev,
@@ -228,7 +228,7 @@ class FakeSystem:
                     "authority_inode": authority_metadata.st_ino,
                     "repository_device": repository_metadata.st_dev,
                     "repository_inode": repository_metadata.st_ino,
-                    "service_capability": ("parent-not-writable;repository-writable-searchable"),
+                    "service_capability": ("parent-writable;repository-writable-searchable"),
                     "consumer_capability": "repository-readable-searchable-not-writable",
                     "publication_capability": "private-mkdir-publish-verified",
                     "mount": {
@@ -253,10 +253,6 @@ class FakeSystem:
     def ensure_shared_worker_repo_root(self) -> bool:
         self.shared_worker_repo_identity()
         changed = False
-        changed = (
-            self.filesystem.ensure_directory(host.SHARED_WORKER_AUTHORITY_ROOT.parent, 0o2775)
-            or changed
-        )
         for path in (host.SHARED_WORKER_AUTHORITY_ROOT, host.SHARED_WORKER_REPO_ROOT):
             changed = self.filesystem.ensure_directory(path, 0o2750) or changed
         return changed
@@ -1295,11 +1291,11 @@ class SharedWorkerRepoRunner:
         self.shared_group_present = True
         self.consumer_membership = True
         self.consumer_id_uid = 2005
-        self.parent_numeric = "2005:2007"
+        self.parent_numeric = "995:2007"
         self.root_numeric = "995:2007"
         self.root_metadata = "directory:loom-rollout:sharedwork:2750"
         self.symlinks: set[str] = set()
-        self.service_parent_writable = False
+        self.service_parent_writable = True
         self.consumer_readable = True
         self.consumer_writable = False
         self.consumer_searchable = True
@@ -1337,11 +1333,11 @@ class SharedWorkerRepoRunner:
                 and self.shared_group_present
                 and self.consumer_membership
                 and self.consumer_id_uid == 2005
-                and self.parent_numeric == "2005:2007"
+                and self.parent_numeric == "995:2007"
                 and self.root_numeric == "995:2007"
                 and self.root_metadata == "directory:loom-rollout:sharedwork:2750"
                 and not self.symlinks
-                and not self.service_parent_writable
+                and self.service_parent_writable
                 and self.consumer_readable
                 and self.consumer_searchable
                 and not self.consumer_writable
@@ -1362,17 +1358,17 @@ class SharedWorkerRepoRunner:
                         "consumer_uid": 2005,
                         "shared_group": host.SHARED_WORK_GROUP,
                         "shared_gid": 2007,
-                        "parent_mode": "2775",
+                        "parent_mode": "2750",
                         "authority_mode": "2750",
                         "repository_mode": "2750",
                         "parent_device": 1,
-                        "parent_inode": 2,
+                        "parent_inode": 3,
                         "authority_device": 1,
                         "authority_inode": 3,
                         "repository_device": 1,
                         "repository_inode": 4,
                         "service_capability": (
-                            "parent-not-writable;repository-writable-searchable"
+                            "parent-writable;repository-writable-searchable"
                         ),
                         "consumer_capability": ("repository-readable-searchable-not-writable"),
                         "publication_capability": "private-mkdir-publish-verified",
@@ -1507,7 +1503,7 @@ def test_shared_worker_repo_root_capabilities_are_exact_and_read_only() -> None:
         ),
         (lambda runner: setattr(runner, "root_numeric", "995:2999"), "helper"),
         (
-            lambda runner: setattr(runner, "service_parent_writable", True),
+            lambda runner: setattr(runner, "service_parent_writable", False),
             "helper",
         ),
         (lambda runner: setattr(runner, "consumer_readable", False), "helper"),

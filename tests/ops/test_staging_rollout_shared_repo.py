@@ -176,6 +176,42 @@ def test_service_owned_rejects_service_in_shared_group(
         helper._converge_service_owned(Path("/shared_work/loom"), ("candidates",), ensure=False)
 
 
+def test_service_owned_rejects_root_shared_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(helper.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(helper.grp, "getgrnam", lambda name: SimpleNamespace(gr_gid=0))
+    monkeypatch.setattr(
+        helper,
+        "_identity",
+        lambda name, *a, **k: (
+            helper.Identity(name, 2001, 2001, (2001,))
+            if name == helper.SERVICE_USER
+            else helper.Identity(name, 2005, 2005, (2005, 0))
+        ),
+    )
+    with pytest.raises(helper.AuthorityError, match="group membership is invalid"):
+        helper._converge_service_owned(Path("/shared_work/loom"), ("candidates",), ensure=False)
+
+
+def test_staging_authority_rejects_root_shared_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(helper.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(helper.grp, "getgrnam", lambda name: SimpleNamespace(gr_gid=0))
+    monkeypatch.setattr(
+        helper,
+        "_identity",
+        lambda name, *a, **k: (
+            helper.Identity(name, 2001, 2001, (2001,))
+            if name == helper.SERVICE_USER
+            else helper.Identity(name, 2005, 2005, (2005, 0))
+        ),
+    )
+    with pytest.raises(helper.AuthorityError, match="group membership is invalid"):
+        helper.converge(ensure=False)
+
+
 def test_service_cli_rejects_short_or_nonhex_sha(monkeypatch: pytest.MonkeyPatch) -> None:
     # The privileged CLI must validate a full 40-hex SHA and never touch the fs
     # for a bad one. We don't reach converge (geteuid check would fail non-root),

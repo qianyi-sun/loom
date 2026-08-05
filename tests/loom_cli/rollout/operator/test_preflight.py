@@ -40,7 +40,7 @@ def _test_shared_repository_binding(*, service_uid: int) -> dict[str, int]:
         "consumer_primary_gid": 2005,
         "shared_gid": 2007,
         "parent_device": 1,
-        "parent_inode": 11,
+        "parent_inode": 12,
         "authority_device": 1,
         "authority_inode": 12,
         "repository_device": 1,
@@ -272,7 +272,7 @@ def successful_command(argv: list[str]) -> subprocess.CompletedProcess[str]:
             else "192.168.20.12:/shared_work2"
         )
         stdout = (
-            "2005;2005,2007;2005;2007;2775;101;201;"
+            f"2005;2005,2007;{os.geteuid()};2007;2750;102;202;"
             f"{os.geteuid()};2007;2750;102;202;"
             f"{os.geteuid()};2007;2750;{REMOTE_REPOSITORY_DEVICE};"
             f"{REMOTE_REPOSITORY_INODE};"
@@ -421,7 +421,7 @@ def test_collect_preflight_decodes_repository_st_dev_before_mount_comparison(
                 else "192.168.20.12:/shared_work2"
             )
             output = (
-                "2005;2005,2007;2005;2007;2775;67;148922524;"
+                f"2005;2005,2007;{os.geteuid()};2007;2750;67;148922525;"
                 f"{os.geteuid()};2007;2750;67;148922525;"
                 f"{os.geteuid()};2007;2750;67;148922526;"
                 f"{mount_type};{mount_source};0;67\n"
@@ -446,7 +446,7 @@ def test_remote_shared_repository_probe_selects_containing_exporter_mount(
     tmp_path: Path,
 ) -> None:
     shared_root = tmp_path / "shared_work2"
-    repository = shared_root / "qianyi/.loom-staging-rollout/worker-repos"
+    repository = shared_root / "loom-staging-rollout/worker-repos"
     repository.mkdir(parents=True)
     repository.chmod(0o550)
     metadata = shared_root.stat()
@@ -485,7 +485,7 @@ def test_remote_shared_repository_probe_prefers_exact_client_mount(
     tmp_path: Path,
 ) -> None:
     shared_root = tmp_path / "shared_work2"
-    repository = shared_root / "qianyi/.loom-staging-rollout/worker-repos"
+    repository = shared_root / "loom-staging-rollout/worker-repos"
     repository.mkdir(parents=True)
     repository.chmod(0o550)
     metadata = shared_root.stat()
@@ -521,11 +521,9 @@ def test_shared_repository_binding_uses_nss_and_held_directories_not_install_rec
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    parent = tmp_path / "qianyi"
-    authority = parent / ".loom-staging-rollout"
+    authority = tmp_path / "loom-staging-rollout"
     repository = authority / "worker-repos"
     repository.mkdir(parents=True)
-    parent.chmod(0o2775)
     authority.chmod(0o2750)
     repository.chmod(0o2750)
     shared_gid = os.getegid()
@@ -554,7 +552,7 @@ def test_shared_repository_binding_uses_nss_and_held_directories_not_install_rec
         "getgrouplist",
         lambda name, primary: [primary, shared_gid] if name == "qianyi" else [primary],
     )
-    capability_results = iter((True, False))
+    capability_results = iter((True, True))
     monkeypatch.setattr(
         preflight_module.os,
         "access",
@@ -594,9 +592,9 @@ def test_shared_repository_binding_uses_nss_and_held_directories_not_install_rec
 @pytest.mark.parametrize(
     "remote_output",
     [
-        ("2004;2005,2007;2005;2007;2775;101;201;2006;2007;2750;102;202;2006;2007;2750;103;203\n"),
-        ("2005;2005;2005;2007;2775;101;201;2006;2007;2750;102;202;2006;2007;2750;103;203\n"),
-        ("2005;2005,2007;2005;2007;2775;101;201;2006;2007;2770;102;202;2006;2007;2750;103;203\n"),
+        ("2004;2005,2007;2006;2007;2750;102;202;2006;2007;2750;102;202;2006;2007;2750;103;203\n"),
+        ("2005;2005;2006;2007;2750;102;202;2006;2007;2750;102;202;2006;2007;2750;103;203\n"),
+        ("2005;2005,2007;2006;2007;2750;102;202;2006;2007;2770;102;202;2006;2007;2750;103;203\n"),
     ],
 )
 def test_collect_preflight_rejects_shared_repository_identity_membership_or_mode_drift(
@@ -645,7 +643,7 @@ def test_collect_preflight_rejects_shared_repository_mount_drift(
     def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
         if argv[:1] == ["ssh"] and argv[-2] == target and argv[-1] != "true":
             remote_output = (
-                "2005;2005,2007;2005;2007;2775;101;201;"
+                f"2005;2005,2007;{os.geteuid()};2007;2750;102;202;"
                 f"{os.geteuid()};2007;2750;102;202;"
                 f"{os.geteuid()};2007;2750;{REMOTE_REPOSITORY_DEVICE};"
                 f"{REMOTE_REPOSITORY_INODE};"

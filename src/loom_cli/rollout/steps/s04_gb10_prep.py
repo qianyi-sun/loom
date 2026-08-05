@@ -341,7 +341,7 @@ def _no_gb10_hosts_error(
 
 
 _GB10_KNOWN_HOSTS = "/etc/loom/staging-rollout-gb10-known-hosts"
-_SHARED_WORKER_REPO_ROOT = Path("/shared_work2/qianyi/.loom-staging-rollout/worker-repos")
+_SHARED_WORKER_REPO_ROOT = Path("/shared_work2/loom-staging-rollout/worker-repos")
 
 
 def _ssh(

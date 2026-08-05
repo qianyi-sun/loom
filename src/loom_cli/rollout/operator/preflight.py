@@ -57,7 +57,7 @@ FULL_GB10_HOSTS = gb10_readiness_module.FULL_GB10_HOSTS
 TEMPORARILY_EXCLUDED_GB10_HOSTS = gb10_readiness_module.TEMPORARILY_EXCLUDED_GB10_HOSTS
 ACTIVE_GB10_HOSTS = gb10_readiness_module.ACTIVE_GB10_HOSTS
 EXPECTED_GB10_SSH_CONFIG_SHA256 = "87748bfc52b81ec1a954dfbf98e87661916eb8eeb77b26222c118efd2d792df2"
-_SHARED_REPOSITORY_ROOT = Path("/shared_work2/qianyi/.loom-staging-rollout/worker-repos")
+_SHARED_REPOSITORY_ROOT = Path("/shared_work2/loom-staging-rollout/worker-repos")
 _SHARED_REPOSITORY_SOURCE = "192.168.20.12:/shared_work2"
 _MOUNTINFO = Path("/proc/self/mountinfo")
 _GB10_KNOWN_HOSTS = Path("/etc/loom/staging-rollout-gb10-known-hosts")
@@ -68,8 +68,8 @@ def _render_remote_shared_repository_probe(
     shared_root: Path = Path("/shared_work2"),
     mountinfo: Path = Path("/proc/self/mountinfo"),
 ) -> str:
-    parent = shared_root / "qianyi"
-    authority = parent / ".loom-staging-rollout"
+    authority = shared_root / "loom-staging-rollout"
+    parent = authority
     repository = authority / "worker-repos"
     return f"""
 import os
@@ -517,7 +517,7 @@ def _shared_repository_binding(
     ):
         return None
 
-    mount_point = root.parents[2]
+    mount_point = root.parents[1]
     try:
         mount_payload = mountinfo.read_text(encoding="utf-8")
         mount_metadata = os.lstat(mount_point)
@@ -580,17 +580,17 @@ def _shared_repository_binding(
             descriptors.append(next_fd)
             current_fd = next_fd
             current_path /= component
-            if current_path in {root.parent.parent, root.parent, root}:
+            if current_path in {mount_point, root.parent, root}:
                 selected[current_path] = current_fd
-        if set(selected) != {root.parent.parent, root.parent, root}:
+        if set(selected) != {mount_point, root.parent, root}:
             return None
 
-        parent = os.fstat(selected[root.parent.parent])
+        parent = os.fstat(selected[root.parent])
         authority = os.fstat(selected[root.parent])
         repository = os.fstat(selected[root])
         lexical_authority = os.stat(
             root.parent.name,
-            dir_fd=selected[root.parent.parent],
+            dir_fd=selected[mount_point],
             follow_symlinks=False,
         )
         lexical_repository = os.stat(
@@ -601,7 +601,7 @@ def _shared_repository_binding(
         if (
             not all(stat.S_ISDIR(item.st_mode) for item in (parent, authority, repository))
             or (parent.st_uid, parent.st_gid, stat.S_IMODE(parent.st_mode))
-            != (consumer.pw_uid, shared_group.gr_gid, 0o2775)
+            != (service_uid, shared_group.gr_gid, 0o2750)
             or (authority.st_uid, authority.st_gid, stat.S_IMODE(authority.st_mode))
             != (service_uid, shared_group.gr_gid, 0o2750)
             or (repository.st_uid, repository.st_gid, stat.S_IMODE(repository.st_mode))
@@ -616,10 +616,10 @@ def _shared_repository_binding(
                 dir_fd=selected[root],
                 effective_ids=True,
             )
-            or os.access(
+            or not os.access(
                 ".",
                 os.W_OK,
-                dir_fd=selected[root.parent.parent],
+                dir_fd=selected[root.parent],
                 effective_ids=True,
             )
         ):
@@ -708,9 +708,10 @@ def _validate_gb10_shared_mount_output(
     if (
         remote_uid != binding["consumer_uid"]
         or binding["shared_gid"] not in remote_groups
-        or parent[:3] != [binding["consumer_uid"], binding["shared_gid"], int("2775", 8)]
+        or parent[:3] != [binding["service_uid"], binding["shared_gid"], int("2750", 8)]
         or authority[:3] != [binding["service_uid"], binding["shared_gid"], int("2750", 8)]
         or repository[:3] != [binding["service_uid"], binding["shared_gid"], int("2750", 8)]
+        or parent[3:] != authority[3:]
         or any(value <= 0 for value in (*parent[3:], *authority[3:], *repository[3:]))
         or mount_device != repository_device
         or (

@@ -69,7 +69,7 @@ SHARED_WORK_GROUP = "sharedwork"
 SHARED_WORK2_MOUNT_POINT = Path("/shared_work2")
 SHARED_WORK2_MOUNT_UNIT = "shared_work2.mount"
 SHARED_WORK2_MOUNT_UNIT_PATH = Path("/etc/systemd/system") / SHARED_WORK2_MOUNT_UNIT
-SHARED_WORKER_AUTHORITY_ROOT = SHARED_WORK2_MOUNT_POINT / "qianyi/.loom-staging-rollout"
+SHARED_WORKER_AUTHORITY_ROOT = SHARED_WORK2_MOUNT_POINT / "loom-staging-rollout"
 SHARED_WORKER_REPO_ROOT = SHARED_WORKER_AUTHORITY_ROOT / "worker-repos"
 
 RUNNER_ROOT = Path("/opt/loom-staging-runner")
@@ -2091,10 +2091,10 @@ class HostSystem:
             "service_primary_group": SERVICE_GROUP,
             "consumer_user": SHARED_WORK_CONSUMER,
             "shared_group": SHARED_WORK_GROUP,
-            "parent_mode": "2775",
+            "parent_mode": "2750",
             "authority_mode": "2750",
             "repository_mode": "2750",
-            "service_capability": "parent-not-writable;repository-writable-searchable",
+            "service_capability": "parent-writable;repository-writable-searchable",
             "consumer_capability": "repository-readable-searchable-not-writable",
             "publication_capability": "private-mkdir-publish-verified",
         }
@@ -2118,14 +2118,17 @@ class HostSystem:
             type(payload.get(key)) is not int or int(payload[key]) < 0 for key in expected_integers
         ):
             raise InstallError("shared worker repository helper report is invalid")
+        if (payload["parent_device"], payload["parent_inode"]) != (
+            payload["authority_device"],
+            payload["authority_inode"],
+        ):
+            raise InstallError("shared worker repository helper report is invalid")
         created = payload.get("created")
-        if (
-            not isinstance(created, list)
-            or any(
-                value not in {"consumer-parent", "authority-root", "repository-root"}
-                for value in created
-            )
-            or len(set(created)) != len(created)
+        if created not in (
+            [],
+            ["authority-root"],
+            ["repository-root"],
+            ["authority-root", "repository-root"],
         ):
             raise InstallError("shared worker repository helper report is invalid")
         mount = payload.get("mount")
