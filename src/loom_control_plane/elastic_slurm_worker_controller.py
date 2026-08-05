@@ -851,6 +851,31 @@ class SubprocessSlurmCommandRunner:
         resources = parse_sinfo_node_resources(sinfo.stdout)
         return {node: resources[node] for node in nodes if node in resources}
 
+    async def resolve_node_names(self, nodes: tuple[str, ...]) -> dict[str, str]:
+        """Map each requested node to its canonical Slurm NodeName.
+
+        Slurm NodeNames are case-sensitive, so this matches case-insensitively
+        against the live ``sinfo`` node list and returns the exact NodeName. Only
+        names Slurm actually knows are included.
+        """
+        if not nodes:
+            return {}
+        config = self._config
+        sinfo = await _run_command(
+            (config.sinfo_path, "-h", "-N", "-o", "%N"),
+            timeout=config.command_timeout_seconds,
+        )
+        canonical_by_lower: dict[str, str] = {}
+        for raw in sinfo.stdout.splitlines():
+            name = raw.strip()
+            if name:
+                canonical_by_lower.setdefault(name.lower(), name)
+        return {
+            node: canonical_by_lower[node.lower()]
+            for node in nodes
+            if node.lower() in canonical_by_lower
+        }
+
     def bind_config(
         self,
         config: ElasticSlurmWorkerControllerConfig,
@@ -1060,12 +1085,66 @@ async def with_node_resource_snapshot(
     return replace(snapshot, node_resources=resources)
 
 
+async def _resolve_allowed_node_case(
+    config: ElasticSlurmWorkerControllerConfig,
+    runner: SlurmWorkerCommandRunner,
+) -> ElasticSlurmWorkerControllerConfig:
+    """Rewrite ``allowed_nodes`` to the canonical Slurm NodeNames.
+
+    Slurm rejects a nodelist whose case does not match the NodeName, so a config
+    that lists a differently-cased name silently drops that node from scheduling
+    and any submit to it fails with ``Invalid node name specified``. When the
+    runner can resolve names, replace ``allowed_nodes`` with the canonical forms
+    and drop any Slurm does not recognise. Falls back to the configured names
+    when resolution is unavailable or yields nothing, so the pool is never
+    disabled by a transient ``sinfo`` failure.
+    """
+
+    resolver = getattr(runner, "resolve_node_names", None)
+    if resolver is None:
+        return config
+    try:
+        resolved = await resolver(config.allowed_nodes)
+    except Exception as exc:  # a resolution failure must never stop the tick
+        logger.warning(
+            "elastic_slurm_worker_node_resolution_failed",
+            extra={
+                "environment": config.environment,
+                "pool_name": config.pool_name,
+                "err": str(exc),
+            },
+        )
+        return config
+
+    canonical: list[str] = []
+    dropped: list[str] = []
+    for node in config.allowed_nodes:
+        target = resolved.get(node)
+        if target is None:
+            dropped.append(node)
+        elif target not in canonical:
+            canonical.append(target)
+    if dropped:
+        logger.warning(
+            "elastic_slurm_worker_unknown_nodes",
+            extra={
+                "environment": config.environment,
+                "pool_name": config.pool_name,
+                "dropped": dropped,
+            },
+        )
+    if not canonical or tuple(canonical) == config.allowed_nodes:
+        return config
+    return replace(config, allowed_nodes=tuple(canonical))
+
+
 async def run_elastic_slurm_worker_controller_once(
     session: AsyncSession,
     *,
     config: ElasticSlurmWorkerControllerConfig,
     runner: SlurmWorkerCommandRunner,
 ) -> SlurmWorkerControllerTickResult:
+    config = await _resolve_allowed_node_case(config, runner)
     snapshot = await load_capacity_snapshot(session, config)
     if snapshot.active_job_ids:
         try:

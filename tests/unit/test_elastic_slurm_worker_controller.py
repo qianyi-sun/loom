@@ -8,6 +8,7 @@ from loom_control_plane.elastic_slurm_worker_controller import (
     SlurmNodeResource,
     SlurmWorkerCapacitySnapshot,
     SlurmWorkerControllerDecision,
+    _resolve_allowed_node_case,
     build_controller_config,
     build_sbatch_request,
     compute_controller_decision,
@@ -568,7 +569,6 @@ def test_resource_aware_job_pids_max_covers_maximum_node_concurrency() -> None:
     assert config.job_pids_max == 4096
 
 
-
 def test_gpu_tres_is_validated_and_emitted_in_sbatch_request() -> None:
     config = build_controller_config(
         **_controller_config_kwargs(  # type: ignore[arg-type]
@@ -699,3 +699,67 @@ def test_build_controller_config_parses_allowed_nodes_and_caps() -> None:
 
     assert config.allowed_nodes == ("oldlab-1", "oldlab-2", "oldlab-3")
     assert config.max_jobs == 3
+
+
+class _ResolvingRunner:
+    """Runner double exposing only case-insensitive node resolution."""
+
+    def __init__(self, mapping: dict[str, str]) -> None:
+        self._mapping = mapping
+
+    async def resolve_node_names(self, nodes: tuple[str, ...]) -> dict[str, str]:
+        return {n: self._mapping[n] for n in nodes if n in self._mapping}
+
+
+class _RaisingRunner:
+    async def resolve_node_names(self, nodes: tuple[str, ...]) -> dict[str, str]:
+        raise RuntimeError("sinfo unavailable")
+
+
+class _NoResolveRunner:
+    """A legacy runner without resolve_node_names (resolution is optional)."""
+
+
+async def test_resolve_allowed_node_case_maps_to_canonical() -> None:
+    cfg = _config(allowed_nodes=("trt-eai-oldlab-1", "trt-eai-oldlab-2"))
+    runner = _ResolvingRunner(
+        {"trt-eai-oldlab-1": "TRT-EAI-OLDLAB-1", "trt-eai-oldlab-2": "trt-EAI-OLDLAB-2"},
+    )
+
+    out = await _resolve_allowed_node_case(cfg, runner)  # type: ignore[arg-type]
+
+    assert out.allowed_nodes == ("TRT-EAI-OLDLAB-1", "trt-EAI-OLDLAB-2")
+
+
+async def test_resolve_allowed_node_case_drops_unknown_nodes() -> None:
+    cfg = _config(allowed_nodes=("trt-eai-oldlab-1", "ghost-node"))
+    runner = _ResolvingRunner({"trt-eai-oldlab-1": "TRT-EAI-OLDLAB-1"})
+
+    out = await _resolve_allowed_node_case(cfg, runner)  # type: ignore[arg-type]
+
+    assert out.allowed_nodes == ("TRT-EAI-OLDLAB-1",)
+
+
+async def test_resolve_allowed_node_case_falls_back_when_resolution_empty() -> None:
+    # A transient sinfo hiccup must not disable the pool by emptying allowed_nodes.
+    cfg = _config(allowed_nodes=("trt-eai-oldlab-1",))
+
+    out = await _resolve_allowed_node_case(cfg, _ResolvingRunner({}))  # type: ignore[arg-type]
+
+    assert out.allowed_nodes == ("trt-eai-oldlab-1",)
+
+
+async def test_resolve_allowed_node_case_falls_back_on_error() -> None:
+    cfg = _config(allowed_nodes=("trt-eai-oldlab-1",))
+
+    out = await _resolve_allowed_node_case(cfg, _RaisingRunner())  # type: ignore[arg-type]
+
+    assert out.allowed_nodes == ("trt-eai-oldlab-1",)
+
+
+async def test_resolve_allowed_node_case_noop_without_resolver() -> None:
+    cfg = _config(allowed_nodes=("trt-eai-oldlab-1",))
+
+    out = await _resolve_allowed_node_case(cfg, _NoResolveRunner())  # type: ignore[arg-type]
+
+    assert out is cfg
