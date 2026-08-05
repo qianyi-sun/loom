@@ -367,7 +367,11 @@ async def cancel_trial(
     authorization: str | None = Header(default=None),
 ) -> dict[str, str]:
     async with request.app.state.session_factory() as session:
-        ctx = await verify_bearer_token(session, authorization)
+        ctx = await verify_bearer_token(
+            session,
+            authorization,
+            admin_verifier=getattr(request.app.state, "admin_secret_verifier", None),
+        )
     if ctx is None:
         raise HTTPException(status_code=401, detail="not authorized")
     caller_is_admin = is_admin(ctx)

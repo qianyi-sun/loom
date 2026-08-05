@@ -1,6 +1,7 @@
 import hashlib
 from collections.abc import Iterator
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
@@ -12,6 +13,18 @@ from loom.db.schema import Task, Team, TeamQuota, Token, Trial, User
 from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
 
+# The singleton admin secret is the only accepted platform-admin credential
+# (DB-backed admin token rows are ignored by verify_bearer_token).
+_ADMIN_SECRET = "loom_admin_" + "C" * 43
+
+
+def _write_admin_secret(path: Path) -> None:
+    path.write_text(
+        f'[admin]\ntoken = "{_ADMIN_SECRET}"\ncreated_at = "2026-06-16T00:00:00Z"\nversion = 1\n',
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+
 
 @pytest.fixture
 def cancel_seed(postgres_url: str) -> Iterator[tuple[str, str, UUID, UUID, UUID]]:
@@ -20,7 +33,7 @@ def cancel_seed(postgres_url: str) -> Iterator[tuple[str, str, UUID, UUID, UUID]
     team_id = uuid4()
     user_id = uuid4()
     raw = f"t_{uuid4().hex}"
-    admin_raw = f"a_{uuid4().hex}"
+    admin_raw = _ADMIN_SECRET
     queued = uuid4()
     running = uuid4()
     done = uuid4()
@@ -36,13 +49,6 @@ def cancel_seed(postgres_url: str) -> Iterator[tuple[str, str, UUID, UUID, UUID]
         s.execute(insert(Token).values(
             token_hash=hashlib.sha256(raw.encode()).digest(),
             type="team", scopes=["submit"], team_id=team_id,
-            created_by_user_id=user_id,
-            issued_at=datetime.now(UTC), expires_at=None,
-        ))
-        # A platform-admin token: no team_id, admin type.
-        s.execute(insert(Token).values(
-            token_hash=hashlib.sha256(admin_raw.encode()).digest(),
-            type="admin", scopes=["admin:trials"], team_id=None,
             created_by_user_id=user_id,
             issued_at=datetime.now(UTC), expires_at=None,
         ))
@@ -74,15 +80,18 @@ def cancel_seed(postgres_url: str) -> Iterator[tuple[str, str, UUID, UUID, UUID]
 
 @pytest.fixture
 def app(
-    monkeypatch: pytest.MonkeyPatch, postgres_url: str,
-    cancel_seed: tuple[str, UUID, UUID, UUID],
+    monkeypatch: pytest.MonkeyPatch, postgres_url: str, tmp_path: Path,
+    cancel_seed: tuple[str, str, UUID, UUID, UUID],
 ):
+    secret_file = tmp_path / "admin-secrets.toml"
+    _write_admin_secret(secret_file)
     for k, v in {
         "LOOM_CP_DB_URL": postgres_url,
         "LOOM_CP_MINIO_ENDPOINT": "http://minio:9000",
         "LOOM_CP_MINIO_ACCESS_KEY": "x",
         "LOOM_CP_MINIO_SECRET_KEY": "y",
         "LOOM_CP_LLM_GATEWAY_URL": "http://gw:9100/",
+        "LOOM_CP_ADMIN_SECRET_FILE": str(secret_file),
     }.items():
         monkeypatch.setenv(k, v)
     return create_app(ControlPlaneSettings(_env_file=None))
