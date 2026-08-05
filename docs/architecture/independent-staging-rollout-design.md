@@ -1,5 +1,10 @@
 # Independent Staging Rollout Design
 
+This detailed design complements the accepted
+[`independent-staging-rollout-runner` ADR](adr/independent-staging-rollout-runner.md).
+The ADR and current runbooks govern when later amendments supersede historical
+implementation detail in this document.
+
 ## Status and scope
 
 Status: approved for implementation on 2026-07-13. Repository implementation

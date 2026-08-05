@@ -97,6 +97,10 @@ there.
 - **[cluster-deploy.md](cluster-deploy.md)** — the `loom cluster` CLI:
   `render`, `preflight`, `audit`, `up`, `down`, `doctor`,
   `bootstrap-secrets`.
+- **[independent-staging-rollout-design.md](independent-staging-rollout-design.md)**
+  — detailed design for the attributable, merged-candidate staging rollout
+  broker, including candidate binding, lifecycle locking, backup, evidence,
+  and operator acceptance boundaries.
 - **[multi-node-topology.md](multi-node-topology.md)** — Postgres HA
   (#637), distributed MinIO (#610), topology schema (#641), HA templates
   (#642).
