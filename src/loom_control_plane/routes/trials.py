@@ -10,7 +10,7 @@ from pydantic import ValidationError
 from sqlalchemy import insert, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from loom.auth import verify_bearer_token
+from loom.auth import is_admin, verify_bearer_token
 from loom.benchmark_profiles import reject_non_runnable_benchmark_profiles
 from loom.data_lifecycle_registry import ensure_trial_lifecycle_authority
 from loom.db.schema import Batch, LlmCall, TeamQuota
@@ -354,7 +354,7 @@ UPDATE trials
    SET state = 'cancelled',
        cancellation_requested_at = NOW()
  WHERE id = (:trial_id)::uuid
-   AND team_id = (:team_id)::uuid
+   AND ((:team_id)::uuid IS NULL OR team_id = (:team_id)::uuid)
    AND state IN ('queued', 'claimed', 'running')
  RETURNING id, state;
 """)
@@ -367,9 +367,19 @@ async def cancel_trial(
     authorization: str | None = Header(default=None),
 ) -> dict[str, str]:
     async with request.app.state.session_factory() as session:
-        ctx = await verify_bearer_token(session, authorization)
-    if ctx is None or ctx.team_id is None:
+        ctx = await verify_bearer_token(
+            session,
+            authorization,
+            admin_verifier=getattr(request.app.state, "admin_secret_verifier", None),
+        )
+    if ctx is None:
         raise HTTPException(status_code=401, detail="not authorized")
+    caller_is_admin = is_admin(ctx)
+    # A platform admin may cancel any trial; a team caller is scoped to its own
+    # team. A non-admin token with no team has nothing it may act on.
+    if not caller_is_admin and ctx.team_id is None:
+        raise HTTPException(status_code=401, detail="not authorized")
+    scoped_team_id = None if caller_is_admin else ctx.team_id
 
     async with request.app.state.session_factory() as session:
         row = (
@@ -378,7 +388,7 @@ async def cancel_trial(
                     _CANCEL_SQL,
                     {
                         "trial_id": trial_id,
-                        "team_id": ctx.team_id,
+                        "team_id": scoped_team_id,
                     },
                 )
             )

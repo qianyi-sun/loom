@@ -17,8 +17,10 @@ from uuid import UUID
 
 from fastapi import HTTPException
 
-from loom.auth import AuthContext, is_platform_admin_role
+from loom.auth import AuthContext, is_admin
 from loom.submission_identity import require_submitting_user as _require_submitting_user
+
+__all__ = ["is_admin"]
 
 
 def require_human_or_admin(ctx: AuthContext | None) -> AuthContext:
@@ -45,10 +47,8 @@ def require_human_or_admin(ctx: AuthContext | None) -> AuthContext:
     return ctx
 
 
-def is_admin(ctx: AuthContext) -> bool:
-    return is_platform_admin_role(ctx.role) or ctx.type == "admin" or any(
-        s.startswith("admin:") for s in ctx.scopes
-    )
+# `is_admin` is defined in loom.auth and re-exported above so the control plane
+# and service layer authorize platform-admin actions identically.
 
 
 def require_scope(ctx: AuthContext, scope: str) -> None:

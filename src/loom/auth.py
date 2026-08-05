@@ -92,6 +92,20 @@ class AuthContext:
     auth_kind: str = "bearer"
 
 
+def is_admin(ctx: AuthContext) -> bool:
+    """Return True for a platform-admin caller.
+
+    A platform admin is identified by the ``platform_admin`` browser-session
+    role, an ``admin`` token type, or any ``admin:`` scope. Shared here so the
+    control plane and service layer authorize admin actions identically.
+    """
+    return (
+        is_platform_admin_role(ctx.role)
+        or ctx.type == "admin"
+        or any(scope.startswith("admin:") for scope in ctx.scopes)
+    )
+
+
 def mint_step_jwt(
     *,
     team_id: UUID,
