@@ -81,14 +81,19 @@ CPUs. Every QEMU container is attached to
 `loom-ci-runner-pool.slice`, which caps the entire pool at 22 physical CPUs and
 80 GiB while equal CPU shares prevent one guest from reserving the host.
 
-The checked-in reservation assigns four slots to normal tests, five to image
-builds, and two to cluster/staging smoke. A runner is registered with exactly
+The checked-in reservation assigns five slots to normal tests, four to image
+builds, and two to cluster/staging smoke. This resource-neutral rebalance keeps
+the eleven-guest and host-budget limits unchanged while addressing the normal
+one-job-runner turnover breach observed during the 2026-08-05 live A/B. The
+controller timer reconciles every ten seconds so a completed disposable guest
+does not add a full thirty-second polling delay before replacement. A runner is
+registered with exactly
 one of `loom-ci-normal`, `loom-ci-image`, or `loom-ci-smoke`; status is healthy
 only when the runner's GitHub labels match the class reserved for its local
-slot. Therefore an eleven-way image matrix can use at most five oldlab slots
-and cannot consume the four normal-test or two smoke reservations. Zero-slot
+slot. Therefore an eleven-way image matrix can use at most four oldlab slots
+and cannot consume the five normal-test or two smoke reservations. Zero-slot
 classes are accepted only by unit-test profiles; the checked-in production
-profile and its regression test require `4/5/2`.
+profile and its regression test require `5/4/2`.
 This is pool profile schema 2; a schema-1 profile is rejected rather than being
 silently interpreted as class-isolated.
 
@@ -274,7 +279,7 @@ prerequisites pass. Merging the repository contract does not authorize any of
 these commands. The controlled migration order is:
 
 1. remove the legacy route, drain all classless runners, install the exact
-   merged candidate, and reconcile until `status` reports `4/5/2` ready slots
+   merged candidate, and reconcile until `status` reports `5/4/2` ready slots
    with matching labels;
 2. set the three class variables below;
 3. dispatch a non-release acceptance PR that selects normal, image, cluster,
@@ -301,8 +306,10 @@ exact-head protected contexts, job results, queue delay, wall clock, and guest
 cleanup before admitting another PR.
 
 The queue boundaries are five minutes for normal tests, fifteen minutes for
-image builds, and five minutes for smoke. They are evidence thresholds, not
-permission for an unattended route mutation. If one class crosses its boundary
+image builds, and five minutes for smoke. Every selected job must remain within
+its class boundary; a p95 below the threshold cannot hide one maximum breach.
+These are evidence thresholds, not permission for an unattended route
+mutation. If one class crosses its boundary
 while its reserved slots are unavailable, an authorized operator may set only
 that class variable to `["ubuntu-latest"]`, cancel the still-queued attempt,
 and rerun the affected workflow on the same head. Already queued jobs do not

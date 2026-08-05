@@ -194,12 +194,14 @@ def test_checked_in_oldlab5_profile_is_bounded_and_pinned() -> None:
     assert profile.host_cpu_budget == 22
     assert profile.total_memory_mib == 67_584
     assert profile.host_memory_budget_mib == 81_920
+    assert profile.reconcile_seconds == 10
     assert profile.labels == pool.EXPECTED_LABELS
     assert {
         work_class.name: work_class.slots for work_class in profile.work_classes
-    } == {"normal": 4, "image": 5, "smoke": 2}
+    } == {"normal": 5, "image": 4, "smoke": 2}
     assert profile.labels_for_slot(0)[-1] == "loom-ci-normal"
-    assert profile.labels_for_slot(4)[-1] == "loom-ci-image"
+    assert profile.labels_for_slot(4)[-1] == "loom-ci-normal"
+    assert profile.labels_for_slot(5)[-1] == "loom-ci-image"
     assert profile.labels_for_slot(10)[-1] == "loom-ci-smoke"
     assert profile.cloud_image_sha256 == (
         "d1940f7d69d343355e183dff1e08a59852d32e7309baa7a4bad8365b11b005ac"
@@ -211,13 +213,15 @@ def test_checked_in_oldlab5_profile_is_bounded_and_pinned() -> None:
 
 def test_runner_timer_arms_when_enabled_after_boot() -> None:
     repo_root = Path(__file__).resolve().parents[2]
+    profile = pool.load_profile(repo_root / "deploy/ci-runners/oldlab5.toml")
     timer = (
         repo_root / "deploy/ci-runners/loom-ci-runner-pool.timer"
     ).read_text(encoding="utf-8")
 
-    assert "OnActiveSec=30s" in timer
+    assert f"OnActiveSec={profile.reconcile_seconds}s" in timer
     assert "OnBootSec=" not in timer
-    assert "OnUnitActiveSec=30s" in timer
+    assert f"OnUnitActiveSec={profile.reconcile_seconds}s" in timer
+    assert "AccuracySec=1s" in timer
 
 
 def test_profile_rejects_resource_budget_or_label_expansion(tmp_path: Path) -> None:

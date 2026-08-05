@@ -257,19 +257,30 @@ def evaluate_bounded_wait(summary: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(metrics, Mapping):
             raise MetricsError(f"summary is missing {work_class} metrics")
         threshold = metrics.get("hosted_overflow_after_seconds")
-        p95 = metrics.get("queue_seconds", {}).get("p95")
+        queue_metrics = metrics.get("queue_seconds")
+        if not isinstance(queue_metrics, Mapping):
+            raise MetricsError(f"summary is missing {work_class} queue metrics")
+        p95 = queue_metrics.get("p95")
+        maximum = queue_metrics.get("max")
+        boundary_breaches = metrics.get("queue_boundary_breaches")
         jobs = metrics.get("jobs")
         failures = metrics.get("failures")
         criteria[work_class] = {
             "jobs": jobs,
             "queue_p95_seconds": p95,
+            "queue_max_seconds": maximum,
+            "queue_boundary_breaches": boundary_breaches,
             "required_max_seconds": threshold,
             "failures": failures,
             "passed": isinstance(jobs, int)
             and jobs > 0
             and isinstance(p95, int)
+            and isinstance(maximum, int)
+            and isinstance(boundary_breaches, int)
             and isinstance(threshold, int)
             and p95 <= threshold
+            and maximum <= threshold
+            and boundary_breaches == 0
             and failures == 0,
         }
     observed_runs = summary.get("observed_runs")
