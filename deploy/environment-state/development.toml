@@ -118,8 +118,8 @@ cpu_arch = "x86_64"
 # the validated 2026-06-24 dry-run which passed no --partition.
 partition = ""
 allowed_nodes = [
-  "trt-eai-oldlab-1",
-  "trt-eai-oldlab-2",
+  "TRT-EAI-OLDLAB-1",
+  "trt-EAI-OLDLAB-2",
   "trt-eai-oldlab-3",
   "trt-eai-oldlab-4",
   "trt-eai-oldlab-5",
