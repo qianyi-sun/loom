@@ -31,8 +31,8 @@ SERVICE_USER = "loom-rollout"
 SERVICE_GROUP = "loom-rollout"
 CONSUMER_USER = "qianyi"
 SHARED_GROUP = "sharedwork"
-CONSUMER_PARENT = Path("/shared_work2/loom-staging-rollout")
-AUTHORITY_ROOT = CONSUMER_PARENT
+MOUNT_ROOT = Path("/shared_work2")
+AUTHORITY_ROOT = MOUNT_ROOT / "loom-staging-rollout"
 REPOSITORY_ROOT = AUTHORITY_ROOT / "worker-repos"
 
 # Service-owned candidate tree (#874): the rollout service owns the root and
@@ -380,7 +380,7 @@ def converge(*, ensure: bool) -> dict[str, object]:
         mount_report = mount_identity()
     except MountError as exc:
         raise AuthorityError("shared repository mount identity is invalid") from exc
-    mount = _open_absolute(CONSUMER_PARENT.parent)
+    mount = _open_absolute(MOUNT_ROOT)
     parent: BoundDirectory | None = None
     authority: BoundDirectory | None = None
     repository: BoundDirectory | None = None
@@ -389,17 +389,17 @@ def converge(*, ensure: bool) -> dict[str, object]:
         if ensure:
             parent, parent_created = _ensure_child(
                 mount,
-                CONSUMER_PARENT.name,
+                AUTHORITY_ROOT.name,
                 uid=service.uid,
                 gid=shared_gid,
                 mode=0o2750,
             )
             if parent_created:
-                created.append("consumer-parent")
+                created.append("authority-root")
         else:
-            parent = _open_child(mount, CONSUMER_PARENT.name)
+            parent = _open_child(mount, AUTHORITY_ROOT.name)
         if parent is None:  # pragma: no cover - invariant
-            raise AuthorityError("shared repository consumer parent is unavailable")
+            raise AuthorityError("shared repository authority root is unavailable")
         parent_metadata = _validate_directory(
             parent,
             uid=service.uid,

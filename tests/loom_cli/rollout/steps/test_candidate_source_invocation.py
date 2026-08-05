@@ -126,7 +126,7 @@ def test_sealed_gb10_prep_fetches_exact_shared_candidate(
     assert "--upload-pack='/usr/bin/git -c safe.directory=" in fetch
     assert "/loom-remote-worker-staging-aaaaaaa/.git upload-pack'" in fetch
     assert (
-        "/shared_work2/qianyi/.loom-staging-rollout/worker-repos/loom-remote-worker-staging-aaaaaaa"
+        "/shared_work2/loom-staging-rollout/worker-repos/loom-remote-worker-staging-aaaaaaa"
     ) in fetch
     assert fetch.endswith(sha)
 

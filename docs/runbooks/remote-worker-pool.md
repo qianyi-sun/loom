@@ -1660,7 +1660,7 @@ allocatable capacity remains resource-observation driven:
       "trt-gb10-15"
     ],
     "env_file": "/var/lib/loom-staging-rollout/generated/staging-gb10-worker-${IMAGE_TAG}.env",
-    "repo_dir": "/shared_work2/qianyi/.loom-staging-rollout/worker-repos/loom-remote-worker-${IMAGE_TAG}",
+    "repo_dir": "/shared_work2/loom-staging-rollout/worker-repos/loom-remote-worker-${IMAGE_TAG}",
     "requested_cpus": 20,
     "requested_memory_mib": 115000,
     "requested_concurrency": 10,
@@ -1702,16 +1702,16 @@ runtime state; legacy canonical units without a marker retain their historical
 active interpretation.
 
 The platform-dev installer owns the dedicated GB10 staging checkout root at
-`/shared_work2/qianyi/.loom-staging-rollout/worker-repos` as
+`/shared_work2/loom-staging-rollout/worker-repos` as
 `loom-rollout:sharedwork` mode `2750`. It creates or verifies that root only
 while rollout admission is closed and no request is active. The service can
 write the root, while the `qianyi` Slurm submitter can read and traverse it but
 cannot write it. The checked-in exporter helper adds only
 `192.168.50.103/32` to the existing `/shared_work2` export. The platform-dev
 installer owns the exact `192.168.20.12:/shared_work2` NFSv4.2 systemd mount
-and creates the absent `qianyi` parent with fixed owner/group/mode. Mountinfo,
-filesystem type, options, and device identity are checked so a local empty
-directory cannot pass. The install record binds both account names to their resolved UID/GID,
+with fixed owner/group/mode. Mountinfo, filesystem type, options, and device
+identity are checked so a local empty directory cannot pass. The install record
+binds both account names to their resolved UID/GID,
 and readiness rechecks metadata plus effective service/consumer access.
 Token and worker-env files remain private mode-`0600` local files; only the
 immutable candidate checkout uses `/shared_work2`.

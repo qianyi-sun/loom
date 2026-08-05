@@ -81,7 +81,7 @@ def test_fixed_transport_observes_exact_candidate_without_remote_mutation(tmp_pa
     assert argv[-2] == "trt-gb10-1"
     assert plan.candidate_sha in argv[-1]
     assert plan.candidate_tree in argv[-1]
-    assert "/shared_work2/qianyi/.loom-staging-rollout/worker-repos" in argv[-1]
+    assert "/shared_work2/loom-staging-rollout/worker-repos" in argv[-1]
     assert "git fetch" not in argv[-1]
     assert "systemctl --user start" not in argv[-1]
 
@@ -392,7 +392,7 @@ def test_remote_checkout_trusts_only_exact_shared_candidate_upload_pack(tmp_path
         (GB10MutationKind.CHECKOUT,),
     )
     shared = (
-        "/shared_work2/qianyi/.loom-staging-rollout/worker-repos/"
+        "/shared_work2/loom-staging-rollout/worker-repos/"
         f"loom-remote-worker-staging-{plan.candidate_sha[:7]}"
     )
     upload_pack = f"/usr/bin/git -c safe.directory={shared}/.git upload-pack"

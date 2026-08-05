@@ -2205,7 +2205,7 @@ and redacted worker-token fingerprint only. Profiles that do not opt in to
 before rerunning step 11.
 
 For staging GB10, `repo_dir` is an exact image-tagged direct child of
-`/shared_work2/qianyi/.loom-staging-rollout/worker-repos`. First establish the
+`/shared_work2/loom-staging-rollout/worker-repos`. First establish the
 checked-in exporter authority boundary on `trt-gb10-2`. The exporter has no
 existing noninteractive root path, so this requires one explicit external
 administrator bootstrap. Provision a standalone root-owned mode-`0700`, clean,

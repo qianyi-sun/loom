@@ -625,10 +625,9 @@ the rollout step never falls back to an arbitrary path. A missing template or
 any symlink, hard link, wrong mode, oversized file, malformed dotenv entry, or
 missing required endpoint/credential key fails before environment-state apply.
 The same installer creates the external-runner checkout authority at
-`/shared_work2/qianyi/.loom-staging-rollout/worker-repos` as
-`loom-rollout:sharedwork` mode `2750`, without granting the service write
-access to its `qianyi:sharedwork` mode-`2775` parent. Before creating this
-authority, apply the checked-in exact-host export allowance on `trt-gb10-2`;
+`/shared_work2/loom-staging-rollout/worker-repos` as
+`loom-rollout:sharedwork` mode `2750`. Before creating this authority, apply
+the checked-in exact-host export allowance on `trt-gb10-2`;
 the platform-dev installer installs `shared_work2.mount` and verifies exact
 NFS source, mountpoint, NFSv4.2 options, and device identity. A local directory
 at `/shared_work2` fails closed. Runtime readiness proves that `loom-rollout`

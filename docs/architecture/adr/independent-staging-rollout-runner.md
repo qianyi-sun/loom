@@ -236,15 +236,14 @@ source `192.168.20.12:/shared_work2`, NFSv4.2, hard TCP mounts, and
 `nosuid,nodev,noexec`. Both installer and broker verify the exact mountinfo
 source, mountpoint, filesystem type, options, and device identity so a local
 empty directory cannot satisfy readiness. During an inactive,
-admission-closed transaction, the installer creates the previously absent
-`/shared_work2/qianyi` parent as `qianyi:sharedwork` mode `2775`, then creates
-`/shared_work2/qianyi/.loom-staging-rollout/worker-repos` as
-`loom-rollout:sharedwork` mode `2750` and records the resolved owner and
-consumer UID/GID values. It does not add the service to `sharedwork` or grant
-write on the operator parent. Runtime checks prove the service can write/search
-the dedicated root and the `qianyi` Slurm submitter can read/search but not
-write it. Secret/token env files remain private mode `0600` platform-dev-local
-state and are never materialized into `/shared_work2`.
+admission-closed transaction, the installer creates
+`/shared_work2/loom-staging-rollout/worker-repos` as
+`loom-rollout:sharedwork` mode `2750` and records the resolved service and
+consumer UID/GID values. It does not add the service to `sharedwork`. Runtime
+checks prove the service can write/search the dedicated root and the `qianyi`
+Slurm submitter can read/search but not write it. Secret/token env files remain
+private mode `0600` platform-dev-local state and are never materialized into
+`/shared_work2`.
 
 The constrained Docker bootstrap may transactionally advance an exporter
 authority only before its first successful install. It holds the old exclusive
