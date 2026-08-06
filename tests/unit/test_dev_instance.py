@@ -31,6 +31,8 @@ class TestDeriveIdentity:
         assert i.trajectories_bucket == "loom-dev-alice-trajectories"
         assert i.artifacts_bucket == "loom-dev-alice-artifacts"
         assert i.route_host == "alice.dev.yylx.world"
+        assert i.worker_control_plane_host == "cp-alice.dev.yylx.world"
+        assert i.worker_gateway_host == "gw-alice.dev.yylx.world"
         assert i.route_path == "/dev-alice"
         assert i.worker_pool == "dev-alice"
         assert i.provider_connection_namespace == "dev-alice"

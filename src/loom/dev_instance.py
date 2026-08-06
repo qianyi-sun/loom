@@ -75,6 +75,8 @@ class DevInstanceIdentity:
     trajectories_bucket: str
     artifacts_bucket: str
     route_host: str  # <name>.dev.yylx.world
+    worker_control_plane_host: str  # cp-<name>.dev.yylx.world
+    worker_gateway_host: str  # gw-<name>.dev.yylx.world
     route_path: str  # /dev-<name>  (interim path route)
     worker_pool: str  # dev-<name>
     provider_connection_namespace: str  # dev-<name>
@@ -134,6 +136,8 @@ def derive_identity(name: str) -> DevInstanceIdentity:
         trajectories_bucket=f"loom-dev-{name}-trajectories",
         artifacts_bucket=f"loom-dev-{name}-artifacts",
         route_host=f"{name}.dev.{INGRESS_HOST}",
+        worker_control_plane_host=f"cp-{name}.dev.{INGRESS_HOST}",
+        worker_gateway_host=f"gw-{name}.dev.{INGRESS_HOST}",
         route_path=f"/dev-{name}",
         worker_pool=f"{DEV_POOL_PREFIX}{name}",
         provider_connection_namespace=f"dev-{name}",
@@ -194,6 +198,8 @@ def validate_dev_instance(
             "trajectories_bucket",
             "artifacts_bucket",
             "route_host",
+            "worker_control_plane_host",
+            "worker_gateway_host",
             "route_path",
             "worker_pool",
             "provider_connection_namespace",

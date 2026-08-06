@@ -139,3 +139,28 @@ def test_policy_rejects_max_slots_below_min_slots(app) -> None:
 
     assert response.status_code == 400, response.text
     assert "max_slots" in response.json()["detail"]
+
+
+def test_policy_delete_requires_drained_shape_and_is_idempotent(app) -> None:
+    headers = {"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"}
+    payload = _policy_payload()
+    payload.update({"enabled": False, "min_slots": 0, "max_slots": 0})
+    with TestClient(app) as client:
+        created = client.put(
+            "/admin/worker-pool-autoscaler-policies/dev-alice/dev-alice",
+            headers=headers,
+            json=payload,
+        )
+        assert created.status_code == 200, created.text
+
+        deleted = client.delete(
+            "/admin/worker-pool-autoscaler-policies/dev-alice/dev-alice",
+            headers=headers,
+        )
+        assert deleted.status_code == 204, deleted.text
+
+        missing = client.delete(
+            "/admin/worker-pool-autoscaler-policies/dev-alice/dev-alice",
+            headers=headers,
+        )
+        assert missing.status_code == 404, missing.text

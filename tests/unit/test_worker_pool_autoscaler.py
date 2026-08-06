@@ -116,6 +116,31 @@ def test_missing_or_wrong_generation_global_grant_fails_closed(
     assert decision.reason == "max_slots_reached"
 
 
+def test_zero_global_grant_drains_existing_capacity_despite_queued_work() -> None:
+    effective = apply_global_dev_capacity_grant(
+        _dev_policy_config(),
+        None,
+        deployment_generation=7,
+        now=datetime(2026, 8, 5, 12, 0, tzinfo=UTC),
+    )
+    decision = compute_autoscaler_decision(
+        effective,
+        AutoscalerObservation(
+            active_slots=4,
+            pending_slots=2,
+            draining_slots=0,
+            occupied_slots=1,
+            queued_slots=100,
+            idle_worker_ids=("worker-idle",),
+            drained_worker_ids=(),
+        ),
+        now=datetime(2026, 8, 5, 12, 0, tzinfo=UTC),
+    )
+    assert decision.action == "drain_capacity"
+    assert decision.reason == "capacity_authority_zero"
+    assert decision.desired_slots == 0
+
+
 def test_select_slurm_qos_uses_boost_below_min() -> None:
     assert (
         select_slurm_qos(
@@ -2654,8 +2679,7 @@ async def _upsert_dev(
 async def test_dev_pool_within_envelope_upserts() -> None:
     from loom.dev_instance import PER_INSTANCE_CAP
 
-    # First execute → the "other dev pools" query (none); second → get policy.
-    session = _FakeSession([_FakeResult(rows=[]), _FakeResult(scalar=None)])
+    session = _FakeSession([_FakeResult(scalar=None)])
     created = await _upsert_dev(
         session,
         pool_name="dev-alice",
@@ -2669,7 +2693,7 @@ async def test_dev_pool_within_envelope_upserts() -> None:
 async def test_dev_pool_exceeds_per_instance_cap_rejected() -> None:
     from loom.dev_instance import PER_INSTANCE_CAP
 
-    session = _FakeSession([_FakeResult(rows=[])])
+    session = _FakeSession([])
     with pytest.raises(ValueError, match="PER_INSTANCE_CAP"):
         await _upsert_dev(
             session,
@@ -2681,7 +2705,7 @@ async def test_dev_pool_exceeds_per_instance_cap_rejected() -> None:
 
 async def test_dev_pool_wrong_actuator_rejected() -> None:
     # `gb10` passes _validate_policy_fields but dev instances must use slurm.
-    session = _FakeSession([_FakeResult(rows=[])])
+    session = _FakeSession([])
     with pytest.raises(ValueError, match="slurm"):
         await _upsert_dev(session, pool_name="dev-alice", actuator="gb10")
     assert session.added == []
@@ -2690,8 +2714,7 @@ async def test_dev_pool_wrong_actuator_rejected() -> None:
 async def test_dev_pool_maxima_are_demand_not_static_fleet_reservations() -> None:
     from loom.dev_instance import PER_INSTANCE_CAP
 
-    others = [("dev-bob", PER_INSTANCE_CAP), ("dev-carol", PER_INSTANCE_CAP)]
-    session = _FakeSession([_FakeResult(rows=others), _FakeResult(scalar=None)])
+    session = _FakeSession([_FakeResult(scalar=None)])
     created = await _upsert_dev(
         session,
         pool_name="dev-alice",
@@ -2700,24 +2723,9 @@ async def test_dev_pool_maxima_are_demand_not_static_fleet_reservations() -> Non
     assert created.max_slots == PER_INSTANCE_CAP
 
 
-async def test_dev_pool_ignores_malformed_peer_pool() -> None:
-    from loom.dev_instance import PER_INSTANCE_CAP
-
-    # A legacy/hand-written malformed dev pool must not 500 an unrelated valid
-    # upsert — it's skipped in budget accounting rather than crashing.
-    others = [("dev-Bad_Name", PER_INSTANCE_CAP), ("dev-", 99)]
-    session = _FakeSession([_FakeResult(rows=others), _FakeResult(scalar=None)])
-    created = await _upsert_dev(
-        session,
-        pool_name="dev-alice",
-        max_slots=PER_INSTANCE_CAP,
-    )
-    assert created.pool_name == "dev-alice"
-
-
 async def test_non_dev_pool_skips_dev_envelope() -> None:
     # A base pool is untouched by dev admission: gb10 actuator + large slot
-    # counts are fine, and only the get-policy query runs (no dev-pool query).
+    # counts are fine, and only the get-policy query runs.
     session = _FakeSession([_FakeResult(scalar=None)])
     created = await _upsert_dev(
         session,

@@ -1,0 +1,152 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: loom-dev-shared
+  labels:
+    app.kubernetes.io/managed-by: loom-operator
+    pod-security.kubernetes.io/enforce: baseline
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: loom-dev-postgres
+  namespace: loom-dev-shared
+spec:
+  serviceName: loom-dev-postgres
+  replicas: 1
+  selector:
+    matchLabels: { app: loom-dev-postgres }
+  template:
+    metadata:
+      labels: { app: loom-dev-postgres }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: postgres
+          image: postgres:16
+          args: ["-c", "max_connections=400"]
+          env:
+            - name: POSTGRES_USER
+              valueFrom: { secretKeyRef: { name: loom-dev-fixture, key: postgres-user } }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: loom-dev-fixture, key: postgres-password } }
+            - name: POSTGRES_DB
+              value: postgres
+          ports: [{ containerPort: 5432 }]
+          readinessProbe:
+            exec:
+              command:
+                ["/bin/sh", "-ec", "exec pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 500m, memory: 1Gi }
+            limits: { cpu: "4", memory: 8Gi }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: 100Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loom-dev-postgres
+  namespace: loom-dev-shared
+spec:
+  selector: { app: loom-dev-postgres }
+  ports: [{ port: 5432, targetPort: 5432 }]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: loom-dev-minio
+  namespace: loom-dev-shared
+spec:
+  serviceName: loom-dev-minio
+  replicas: 1
+  selector:
+    matchLabels: { app: loom-dev-minio }
+  template:
+    metadata:
+      labels: { app: loom-dev-minio }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: minio
+          image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+          args: ["server", "/data", "--console-address", ":9001"]
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom: { secretKeyRef: { name: loom-dev-fixture, key: minio-access-key } }
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom: { secretKeyRef: { name: loom-dev-fixture, key: minio-secret-key } }
+          ports: [{ containerPort: 9000 }, { containerPort: 9001 }]
+          readinessProbe:
+            httpGet: { path: /minio/health/ready, port: 9000 }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 500m, memory: 1Gi }
+            limits: { cpu: "4", memory: 8Gi }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+        # Management-only sidecar. The lifecycle controller execs a fixed,
+        # stdin-fed script here to create per-instance users and bucket-scoped
+        # policies; root credentials never enter an instance namespace.
+        - name: admin
+          image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+          command: ["/bin/sh", "-c", "sleep infinity"]
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom: { secretKeyRef: { name: loom-dev-fixture, key: minio-access-key } }
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom: { secretKeyRef: { name: loom-dev-fixture, key: minio-secret-key } }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { cpu: 100m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: 500Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loom-dev-minio
+  namespace: loom-dev-shared
+spec:
+  selector: { app: loom-dev-minio }
+  ports:
+    - { name: s3, port: 9000, targetPort: 9000 }
+    - { name: console, port: 9001, targetPort: 9001 }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: loom-dev-minio
+  namespace: loom-dev-shared
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [minio.dev.yylx.world]
+      secretName: loom-dev-minio-tls
+  rules:
+    - host: minio.dev.yylx.world
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: { name: loom-dev-minio, port: { number: 9000 } }

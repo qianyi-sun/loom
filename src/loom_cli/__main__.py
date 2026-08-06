@@ -254,6 +254,11 @@ def _build_parser() -> argparse.ArgumentParser:
         add_help=False,
     )
     sub.add_parser(
+        "dev",
+        help="Manage isolated development environments on the shared fleet",
+        add_help=False,
+    )
+    sub.add_parser(
         "cluster",
         help=(
             "Manage the Kubernetes cluster deployment "
@@ -365,6 +370,9 @@ def main(argv: list[str] | None = None) -> int:
     if raw and raw[0] == "resources":
         from loom_cli.resources_cmd import dispatch as resources_dispatch
         return resources_dispatch(raw[1:])
+    if raw and raw[0] == "dev":
+        from loom_cli.dev_cmd import dispatch as dev_dispatch
+        return dev_dispatch(raw[1:])
     if raw and raw[0] == "cluster":
         from loom_cli.cluster_cmd import dispatch as cluster_dispatch
         return cluster_dispatch(raw[1:])

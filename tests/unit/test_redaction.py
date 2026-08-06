@@ -24,7 +24,8 @@ def test_redact_text_covers_staging_secret_shapes() -> None:
         "signed=https://minio.internal:9000/artifacts/team/trial/out.txt?"
         "X-Amz-Signature=abcdef&X-Amz-Credential=minio%2F20260622 "
         "ref=loom://provider-connection/123e4567-e89b-12d3-a456-426614174000 "
-        "internal=http://loom-control-plane:8080/trials"
+        "internal=http://loom-control-plane:8080/trials "
+        "database=postgresql://dev-role:database-secret@postgres.internal/dev"
     )
 
     redacted = redact_text(raw)
@@ -40,6 +41,7 @@ def test_redact_text_covers_staging_secret_shapes() -> None:
         "X-Amz-Credential=minio%2F20260622",
         "loom://provider-connection/123e4567-e89b-12d3-a456-426614174000",
         "http://loom-control-plane:8080/trials",
+        "database-secret",
     ):
         assert leaked not in redacted
     assert "[REDACTED:" in redacted

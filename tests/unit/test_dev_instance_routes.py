@@ -1,0 +1,386 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from uuid import UUID
+
+import pytest
+from fastapi import FastAPI, HTTPException, Response
+from starlette.requests import Request
+
+from loom.auth import AuthContext
+from loom.dev_instance_provisioner import (
+    DevInstanceProvisioner,
+    DevInstanceRecord,
+    InstanceReservation,
+    OwnerAccessSnapshot,
+)
+from loom_service.routes.dev_instances import (
+    DevInstanceCreateRequest,
+    create_dev_instance,
+    delete_dev_instance,
+    get_dev_instance,
+    list_dev_instances,
+)
+
+_NOW = datetime(2026, 8, 6, tzinfo=UTC)
+_OWNER = UUID("00000000-0000-0000-0000-000000000001")
+_OTHER = UUID("00000000-0000-0000-0000-000000000002")
+_TEAM = UUID("00000000-0000-0000-0000-000000000003")
+_OPERATION = UUID("00000000-0000-0000-0000-000000000004")
+
+
+def _access(user_id: UUID = _OWNER) -> OwnerAccessSnapshot:
+    return OwnerAccessSnapshot(
+        user_id=user_id,
+        email="owner@example.test",
+        username="owner",
+        username_normalized="owner",
+        display_name="Owner",
+        password_hash="hash",
+        password_set_at=_NOW,
+        user_status="active",
+        user_disabled_at=None,
+        user_created_at=_NOW,
+        user_last_login_at=_NOW,
+        team_id=_TEAM,
+        team_name="owner-team",
+        team_created_at=_NOW,
+        membership_role="owner",
+        membership_created_at=_NOW,
+        fair_share_weight=1.0,
+        max_attempts_ceiling=3,
+        license_allowlist=("MIT",),
+        taskset_max_count=None,
+        taskset_max_storage_bytes=None,
+        allow_private_endpoints=False,
+    )
+
+
+def _ctx(user_id: UUID, *, admin: bool = False) -> AuthContext:
+    return AuthContext(
+        token_hash=b"x" * 32,
+        type="admin" if admin else "user",
+        scopes=["admin:platform"] if admin else ["read:own", "submit"],
+        team_id=_TEAM,
+        expires_at=None,
+        user_id=user_id,
+        role="platform_admin" if admin else "member",
+    )
+
+
+class _Store:
+    def __init__(self) -> None:
+        self.rows: dict[str, DevInstanceRecord] = {}
+
+    async def get(self, name: str) -> DevInstanceRecord | None:
+        return self.rows.get(name)
+
+    async def list_active(self) -> list[DevInstanceRecord]:
+        return [row for row in self.rows.values() if row.status != "deleted"]
+
+    async def list_visible(
+        self,
+        *,
+        owner_user_id: UUID | None,
+        include_deleted: bool = False,
+    ) -> list[DevInstanceRecord]:
+        rows = list(self.rows.values())
+        if owner_user_id is not None:
+            rows = [row for row in rows if row.owner_user_id == owner_user_id]
+        if not include_deleted:
+            rows = [row for row in rows if row.status != "deleted"]
+        return sorted(rows, key=lambda row: row.name)
+
+    async def claim_create(self, record: DevInstanceRecord) -> InstanceReservation:
+        current = self.rows.get(record.name)
+        if current is not None and current.status in {"ready", "provisioning", "deleting"}:
+            return InstanceReservation(current, acquired=False)
+        self.rows[record.name] = record
+        return InstanceReservation(record, acquired=True)
+
+    async def claim_destroy(
+        self,
+        name: str,
+        *,
+        operation_id: UUID,
+        keep_data: bool,
+        now: datetime,
+    ) -> InstanceReservation | None:
+        current = self.rows.get(name)
+        if current is None or current.status == "deleted":
+            return None
+        claimed = DevInstanceRecord(
+            **{
+                **current.__dict__,
+                "status": "deleting",
+                "operation_id": operation_id,
+                "operation_epoch": current.operation_epoch + 1,
+                "operation_step": (
+                    current.operation_step
+                    if current.failure_reason == "deletion_failed"
+                    else "claimed"
+                ),
+                "keep_data": keep_data,
+                "updated_at": now,
+            },
+        )
+        self.rows[name] = claimed
+        return InstanceReservation(claimed, acquired=True)
+
+    async def assert_operation(self, name: str, operation_id: UUID) -> None:
+        assert self.rows[name].operation_id == operation_id
+
+    async def set_secret_ref(self, name: str, operation_id: UUID, secret_ref: str) -> None:
+        await self.assert_operation(name, operation_id)
+        self.rows[name] = DevInstanceRecord(
+            **{**self.rows[name].__dict__, "secret_ref": secret_ref},
+        )
+
+    async def set_operation_step(self, name: str, operation_id: UUID, step: str) -> None:
+        await self.assert_operation(name, operation_id)
+        self.rows[name] = DevInstanceRecord(
+            **{**self.rows[name].__dict__, "operation_step": step},
+        )
+
+    async def complete_operation(
+        self,
+        name: str,
+        operation_id: UUID,
+        *,
+        status: str,
+        now: datetime,
+        failure_reason: str | None = None,
+    ) -> DevInstanceRecord:
+        await self.assert_operation(name, operation_id)
+        values = {
+            **self.rows[name].__dict__,
+            "status": status,
+            "updated_at": now,
+            "failure_reason": failure_reason,
+        }
+        if status == "ready":
+            values["ready_at"] = now
+            values["operation_step"] = "complete"
+        if status == "deleted":
+            values["deleted_at"] = now
+            values["operation_step"] = "complete"
+        row = DevInstanceRecord(**values)
+        self.rows[name] = row
+        return row
+
+    async def checkpoint(self) -> None:
+        return None
+
+
+class _Effects:
+    async def apply_role_and_database(self, identity, *, role_sql, create_database_sql):
+        return None
+
+    async def drop_database_and_role(self, identity):
+        return None
+
+    async def ensure_buckets(self, identity, buckets):
+        return None
+
+    async def remove_buckets(self, identity, buckets):
+        return None
+
+    async def converge(self, identity):
+        return None
+
+    async def upsert_dev_policy(self, identity, requested):
+        return None
+
+    async def drop_dev_policy(self, identity):
+        return None
+
+    async def deploy(self, identity, *, deployment_generation, candidate_sha):
+        return None
+
+    async def destroy(self, identity, *, keep_data):
+        return None
+
+    async def store(self, identity, password):
+        return f"secret://{identity.name}"
+
+    async def delete(self, identity):
+        return None
+
+    async def bootstrap(self, identity, *, password, access):
+        return None
+
+
+class _Runner:
+    def __init__(self) -> None:
+        self.created: list[DevInstanceRecord] = []
+        self.destroyed: list[DevInstanceRecord] = []
+
+    def submit_create(self, record, access):
+        assert access.user_id == record.owner_user_id
+        self.created.append(record)
+        return True
+
+    def submit_destroy(self, record):
+        self.destroyed.append(record)
+        return True
+
+
+def _request(
+    store: _Store,
+    *,
+    configured: bool = True,
+    runner: _Runner | None = None,
+) -> Request:
+    app = FastAPI()
+    app.state.dev_instance_store_factory = lambda _session: store
+
+    async def access_factory(_session, ctx):
+        assert ctx.user_id is not None
+        return _access(ctx.user_id)
+
+    app.state.dev_instance_access_snapshot_factory = access_factory
+    if runner is not None:
+        app.state.dev_instance_lifecycle_runner = runner
+    if configured:
+        effects = _Effects()
+        app.state.dev_instance_provisioner_factory = lambda bound_store: DevInstanceProvisioner(
+            store=bound_store,
+            sql=effects,
+            buckets=effects,
+            object_store_tenant=effects,
+            policy=effects,
+            cluster=effects,
+            vault=effects,
+            access=effects,
+            candidate_sha="a" * 40,
+            password_factory=lambda: "b" * 20,
+        )
+    return Request({"type": "http", "method": "GET", "path": "/", "app": app})
+
+
+async def test_create_list_get_destroy_owner_lifecycle() -> None:
+    store = _Store()
+    request = _request(store)
+    sc = (object(), _ctx(_OWNER))
+
+    created = await create_dev_instance(
+        DevInstanceCreateRequest(name="alice", min_slots=0, max_slots=2),
+        request,
+        sc,  # type: ignore[arg-type]
+    )
+    assert created.status == "ready"
+    assert created.identity.environment == "dev-alice"
+    assert created.identity.namespace == "loom-dev-alice"
+    assert "secret" not in created.model_dump()
+
+    listed = await list_dev_instances(
+        request,
+        sc,  # type: ignore[arg-type]
+        mine=False,
+        include_deleted=False,
+    )
+    assert [item.name for item in listed.items] == ["alice"]
+    assert (await get_dev_instance("alice", request, sc)).owner_user_id == _OWNER  # type: ignore[arg-type]
+
+    response = Response()
+    deleted = await delete_dev_instance(
+        "alice",
+        request,
+        sc,  # type: ignore[arg-type]
+        response,
+        keep_data=True,
+    )
+    assert deleted.status == "deleted"
+    assert deleted.keep_data is True
+    assert response.status_code == 202
+
+
+async def test_cross_owner_detail_is_hidden() -> None:
+    store = _Store()
+    request = _request(store)
+    await create_dev_instance(
+        DevInstanceCreateRequest(name="alice"),
+        request,
+        (object(), _ctx(_OWNER)),  # type: ignore[arg-type]
+    )
+    with pytest.raises(HTTPException) as exc:
+        await get_dev_instance(
+            "alice",
+            request,
+            (object(), _ctx(_OTHER)),  # type: ignore[arg-type]
+        )
+    assert exc.value.status_code == 404
+
+
+async def test_mutation_fails_closed_when_runtime_is_not_configured() -> None:
+    store = _Store()
+    with pytest.raises(HTTPException) as exc:
+        await create_dev_instance(
+            DevInstanceCreateRequest(name="alice"),
+            _request(store, configured=False),
+            (object(), _ctx(_OWNER)),  # type: ignore[arg-type]
+        )
+    assert exc.value.status_code == 503
+    assert store.rows == {}
+
+
+async def test_configured_runner_makes_accepted_lifecycle_non_blocking() -> None:
+    store = _Store()
+    runner = _Runner()
+    request = _request(store, runner=runner)
+    sc = (object(), _ctx(_OWNER))
+
+    created = await create_dev_instance(
+        DevInstanceCreateRequest(name="alice"),
+        request,
+        sc,  # type: ignore[arg-type]
+    )
+    assert created.status == "provisioning"
+    assert [record.name for record in runner.created] == ["alice"]
+
+    store.rows["alice"] = DevInstanceRecord(
+        **{**store.rows["alice"].__dict__, "status": "ready"},
+    )
+    deleted = await delete_dev_instance(
+        "alice",
+        request,
+        sc,  # type: ignore[arg-type]
+        Response(),
+        keep_data=False,
+    )
+    assert deleted.status == "deleting"
+    assert [record.name for record in runner.destroyed] == ["alice"]
+
+
+async def test_admin_can_list_all_but_owner_list_is_scoped() -> None:
+    store = _Store()
+    request = _request(store)
+    for name, owner in (("alice", _OWNER), ("bob", _OTHER)):
+        store.rows[name] = DevInstanceRecord(
+            name=name,
+            owner_user_id=owner,
+            owner_team_id=_TEAM,
+            min_slots=0,
+            max_slots=2,
+            status="ready",
+            deployment_generation=1,
+            candidate_sha="a" * 40,
+            operation_epoch=1,
+            operation_id=_OPERATION,
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+    mine = await list_dev_instances(
+        request,
+        (object(), _ctx(_OWNER)),  # type: ignore[arg-type]
+        mine=False,
+        include_deleted=False,
+    )
+    all_rows = await list_dev_instances(
+        request,
+        (object(), _ctx(_OWNER, admin=True)),  # type: ignore[arg-type]
+        mine=False,
+        include_deleted=False,
+    )
+    assert [row.name for row in mine.items] == ["alice"]
+    assert [row.name for row in all_rows.items] == ["alice", "bob"]

@@ -23,13 +23,9 @@ from loom.db.schema import (
     WorkerPoolAutoscalerPolicy,
 )
 from loom.dev_instance import (
-    DEV_POOL_PREFIX,
-    DevInstanceRef,
-    InvalidDevInstanceNameError,
     RequestedPolicy,
     dev_pool_instance_name,
     validate_dev_instance,
-    validate_name,
 )
 from loom.worker_token import (
     WORKER_AUTH_FINGERPRINT_ENV_KEY,
@@ -299,6 +295,42 @@ def compute_autoscaler_decision(
             error_message=f"release-state drift in Slurm job(s): {job_ids}",
         )
 
+    # A zero global-dev grant is an active revocation, not merely a scale-up
+    # ceiling. It must win over queued demand and cooldowns so pending Slurm
+    # submissions are cancelled and live workers stop claiming new trials.
+    # The actuator keeps running work drain-first; the broker retains its slot
+    # commitment until the matching terminal observation arrives.
+    if policy.max_slots == 0 and (
+        observation.active_slots > 0
+        or observation.pending_slots > 0
+        or observation.draining_slots > 0
+    ):
+        if observation.drained_worker_ids:
+            return _base_decision(
+                action="release_drained",
+                reason="capacity_authority_zero",
+                policy=policy,
+                observation=observation,
+                desired_slots=0,
+                worker_ids_to_release=observation.drained_worker_ids,
+            )
+        if observation.draining_slots > 0 and observation.pending_slots == 0:
+            return _base_decision(
+                action="noop",
+                reason="capacity_authority_drain_in_progress",
+                policy=policy,
+                observation=observation,
+                desired_slots=0,
+            )
+        return _base_decision(
+            action="drain_capacity",
+            reason="capacity_authority_zero",
+            policy=policy,
+            observation=observation,
+            desired_slots=0,
+            worker_ids_to_drain=observation.idle_worker_ids,
+        )
+
     active_plus_pending = observation.active_slots + observation.pending_slots
     free_plus_pending = observation.claimable_free_slots + observation.pending_slots
     queue_deficit = observation.queued_slots - free_plus_pending
@@ -536,6 +568,61 @@ async def get_autoscaler_policy(
     ).scalar_one_or_none()
 
 
+async def delete_autoscaler_policy_if_drained(
+    session: AsyncSession,
+    *,
+    environment: str,
+    pool_name: str,
+) -> bool:
+    """Delete an autoscaler policy only after every owned capacity row drained."""
+    environment = _clean_nonempty(environment, "environment")
+    pool_name = _clean_nonempty(pool_name, "pool_name")
+    row = (
+        await session.execute(
+            select(WorkerPoolAutoscalerPolicy)
+            .where(
+                WorkerPoolAutoscalerPolicy.environment == environment,
+                WorkerPoolAutoscalerPolicy.pool_name == pool_name,
+            )
+            .with_for_update(),
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        return False
+    active_job = (
+        await session.execute(
+            select(SlurmWorkerJob.id)
+            .where(
+                SlurmWorkerJob.environment == environment,
+                SlurmWorkerJob.pool_name == pool_name,
+                SlurmWorkerJob.state.in_(ACTIVE_STATES),
+            )
+            .limit(1),
+        )
+    ).scalar_one_or_none()
+    live_worker = (
+        await session.execute(
+            select(Worker.id)
+            .where(
+                Worker.pool_name == pool_name,
+                Worker.status == "active",
+                Worker.drain_state != "drained",
+            )
+            .limit(1),
+        )
+    ).scalar_one_or_none()
+    counters = (row.last_actual_slots, row.last_pending_slots, row.last_draining_slots)
+    if (
+        active_job is not None
+        or live_worker is not None
+        or any(int(value or 0) for value in counters)
+    ):
+        raise ValueError("autoscaler policy still owns active, pending, or draining capacity")
+    await session.delete(row)
+    await session.flush()
+    return True
+
+
 async def _enforce_dev_pool_envelope(
     session: AsyncSession,
     *,
@@ -548,47 +635,18 @@ async def _enforce_dev_pool_envelope(
 
     No-op for non-dev pools (base pools like ``oldlab``/``gb10`` are untouched).
     For a dev pool, delegates to :func:`validate_dev_instance` — the single
-    source of truth the guarded dev-instances endpoint also uses — passing every
-    *other* live dev pool as the fleet-budget peer set so the Σ(max_slots) cap is
-    enforced across all instances. Raises ``ValueError`` (→ HTTP 400) on any
-    envelope violation.
+    source of truth the guarded dev-instances endpoint also uses. Policy maxima
+    are demand ceilings, not static reservations; the global grant authority
+    enforces the aggregate fleet budget transactionally at runtime. Raises
+    ``ValueError`` (→ HTTP 400) on any envelope violation.
     """
     name = dev_pool_instance_name(pool_name)
     if name is None:
         return
-    other_dev = (
-        await session.execute(
-            select(
-                WorkerPoolAutoscalerPolicy.pool_name,
-                WorkerPoolAutoscalerPolicy.max_slots,
-            ).where(
-                WorkerPoolAutoscalerPolicy.pool_name.startswith(DEV_POOL_PREFIX),
-                WorkerPoolAutoscalerPolicy.pool_name != pool_name,
-            ),
-        )
-    ).all()
-    others: list[DevInstanceRef] = []
-    for other_pool, other_max in other_dev:
-        other_name = dev_pool_instance_name(other_pool)
-        if other_name is None:
-            continue
-        try:
-            validate_name(other_name)
-        except InvalidDevInstanceNameError:
-            # A malformed ``dev-<garbage>`` pool can't be a legitimate dev
-            # instance (the guarded endpoint would have rejected it) — don't
-            # let it 500 an unrelated upsert; surface it and skip it as a
-            # budget peer.
-            logger.warning(
-                "skipping malformed dev pool %r in fleet-budget accounting",
-                other_pool,
-            )
-            continue
-        others.append(DevInstanceRef(name=other_name, max_slots=int(other_max)))
     errors = validate_dev_instance(
         name,
         RequestedPolicy(actuator=actuator, min_slots=min_slots, max_slots=max_slots),
-        others,
+        (),
     )
     if errors:
         raise ValueError(
@@ -1718,6 +1776,75 @@ async def _apply_slurm_release_drained(
     return SlurmScaleUpActuatorResult()
 
 
+async def _apply_slurm_capacity_authority_drain(
+    session: AsyncSession,
+    row: WorkerPoolAutoscalerPolicy,
+    *,
+    runner: SlurmWorkerCommandRunner | None,
+    now: datetime,
+) -> SlurmScaleUpActuatorResult:
+    """Converge an externally revoked dev grant toward zero capacity.
+
+    Pending jobs have executed no user work and are safe to cancel immediately.
+    Running workers are fenced to ``draining`` so in-flight trials finish but
+    no new claims begin. Their Slurm jobs remain owned by the normal guarded
+    ``release_drained`` path, which verifies freshness, ownership, and zero
+    in-flight trials before calling ``scancel``.
+    """
+    try:
+        config = _slurm_config_from_policy(row)
+    except ValueError as exc:
+        blocked_reason, blocked_details = _slurm_config_blocker(row, exc)
+        return SlurmScaleUpActuatorResult(
+            error=str(exc),
+            blocked_reason=blocked_reason,
+            blocked_details=blocked_details,
+        )
+    runner = runner or SubprocessSlurmCommandRunner().bind_config(config)
+    pending_jobs = (
+        (
+            await session.execute(
+                select(SlurmWorkerJob)
+                .where(
+                    SlurmWorkerJob.environment == row.environment,
+                    SlurmWorkerJob.pool_name == row.pool_name,
+                    SlurmWorkerJob.state == "pending",
+                )
+                .with_for_update(),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    try:
+        for job in pending_jobs:
+            if job.job_id:
+                await runner.cancel_job(job.job_id)
+            job.state = "cancelled"
+            job.slurm_state = "CANCELLED"
+            job.pending_reason = "cancelled after global capacity grant revocation"
+            job.finished_at = now
+            job.updated_at = now
+    except Exception as exc:
+        return SlurmScaleUpActuatorResult(error=str(exc))
+
+    await session.execute(
+        update(Worker)
+        .where(
+            Worker.pool_name == row.pool_name,
+            Worker.status == "active",
+            Worker.drain_state == "active",
+        )
+        .values(
+            drain_state="draining",
+            drain_requested_at=now,
+            drain_reason="global development capacity grant revoked",
+            drain_owner="global-dev-fleet-autoscaler",
+        ),
+    )
+    return SlurmScaleUpActuatorResult()
+
+
 async def _apply_slurm_prod_pressure_drain(
     session: AsyncSession,
     row: WorkerPoolAutoscalerPolicy,
@@ -2091,7 +2218,25 @@ async def reconcile_worker_pool_autoscaler_once(
             observation,
             now=now,
         )
-        if decision.action == "request_drain":
+        if decision.action == "drain_capacity" and row.actuator == "slurm":
+            slurm_result = await _apply_slurm_capacity_authority_drain(
+                session,
+                row,
+                runner=slurm_runner,
+                now=now,
+            )
+            actuator_error = slurm_result.error
+            actuator_blocked_reason = slurm_result.blocked_reason
+            actuator_blocked_details = slurm_result.blocked_details
+            if actuator_blocked_reason is not None:
+                decision = replace(
+                    decision,
+                    action="blocked",
+                    reason=actuator_blocked_reason,
+                    blocked_reason=actuator_blocked_reason,
+                    blocked_details=actuator_blocked_details,
+                )
+        elif decision.action == "request_drain":
             await _request_worker_drain(
                 session,
                 worker_ids=decision.worker_ids_to_drain,
@@ -2174,7 +2319,7 @@ async def reconcile_worker_pool_autoscaler_once(
                 ),
             )
         if decision.action == "release_drained" or (
-            decision.action == "scale_up" and row.actuator == "slurm"
+            decision.action in {"scale_up", "drain_capacity"} and row.actuator == "slurm"
         ):
             observation = await _load_observation(
                 session,

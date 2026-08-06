@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the Loom global development fleet autoscaler
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=15s
+AccuracySec=1s
+Persistent=true
+Unit=loom-global-dev-fleet-autoscaler.service
+
+[Install]
+WantedBy=timers.target

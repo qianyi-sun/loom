@@ -529,6 +529,91 @@ class User(Base):
     )
 
 
+class DevInstance(Base):
+    """Durable lifecycle authority for one derived ``dev-<name>`` environment."""
+
+    __tablename__ = "dev_instances"
+    __table_args__ = (
+        CheckConstraint(
+            "name ~ '^[a-z]([-a-z0-9]{0,18}[a-z0-9])?$'",
+            name="dev_instances_name_check",
+        ),
+        CheckConstraint(
+            "status IN ('provisioning', 'ready', 'deleting', 'failed', 'deleted')",
+            name="dev_instances_status_check",
+        ),
+        CheckConstraint(
+            "min_slots >= 0 AND max_slots >= min_slots AND max_slots <= 8",
+            name="dev_instances_slots_check",
+        ),
+        CheckConstraint(
+            "deployment_generation > 0",
+            name="dev_instances_deployment_generation_check",
+        ),
+        CheckConstraint(
+            "candidate_sha ~ '^[0-9a-f]{40}$'",
+            name="dev_instances_candidate_sha_check",
+        ),
+        CheckConstraint(
+            "operation_epoch > 0",
+            name="dev_instances_operation_epoch_check",
+        ),
+        Index("dev_instances_owner_status_idx", "owner_user_id", "status"),
+        Index("dev_instances_team_status_idx", "owner_team_id", "status"),
+    )
+
+    name: Mapped[str] = mapped_column(Text, primary_key=True)
+    owner_user_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    owner_team_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("teams.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    min_slots: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    max_slots: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'provisioning'"),
+    )
+    deployment_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    candidate_sha: Mapped[str] = mapped_column(String(40), nullable=False)
+    operation_epoch: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        server_default=text("1"),
+    )
+    operation_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    operation_step: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        server_default=text("'claimed'"),
+    )
+    secret_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    keep_data: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+    )
+    failure_reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    ready_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
 class TeamMembership(Base):
     __tablename__ = "team_memberships"
     __table_args__ = (

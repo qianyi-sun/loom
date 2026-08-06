@@ -3,19 +3,20 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import insert, text
+from sqlalchemy import insert, select, text, update
 
 from loom.auth import verify_bearer_token
-from loom.db.schema import Token
+from loom.db.schema import Token, WorkerPoolAutoscalerPolicy
 from loom_control_plane.gb10_worker_lifecycle import (
     GB10NodeReport,
     UnsafeDesiredEnvError,
@@ -40,6 +41,7 @@ from loom_control_plane.slurm_worker_jobs import (
 )
 from loom_control_plane.worker_pool_autoscaler import (
     autoscaler_policy_to_dict,
+    delete_autoscaler_policy_if_drained,
     fetch_autoscaler_status,
     get_autoscaler_policy,
     upsert_autoscaler_policy,
@@ -176,6 +178,34 @@ async def issue_worker_token(
         expires_at = datetime.now(UTC) + timedelta(days=int(days))
 
     async with request.app.state.session_factory() as session:
+        environment = os.environ.get("LOOM_ENV", "")
+        if environment.startswith("dev-"):
+            # The management supervisor is allowed to mint a worker credential
+            # only while this isolated instance has a live, non-zero external
+            # Slurm policy. Locking the policy serializes issuance with the
+            # drain-to-zero update; teardown therefore cannot race a late token
+            # into a keep-data database after bulk revocation.
+            policy = (
+                await session.execute(
+                    select(WorkerPoolAutoscalerPolicy)
+                    .where(
+                        WorkerPoolAutoscalerPolicy.environment == environment,
+                        WorkerPoolAutoscalerPolicy.actuator == "slurm",
+                        WorkerPoolAutoscalerPolicy.enabled.is_(True),
+                        WorkerPoolAutoscalerPolicy.max_slots > 0,
+                    )
+                    .with_for_update(),
+                )
+            ).scalar_one_or_none()
+            if (
+                policy is None
+                or not isinstance(policy.actuator_config, dict)
+                or policy.actuator_config.get("external_runner") is not True
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="worker credentials require an active development capacity policy",
+                )
         await session.execute(
             insert(Token).values(
                 token_hash=token_hash,
@@ -290,6 +320,28 @@ async def revoke_token(
         )
         await session.commit()
     return {"status": "revoked"}
+
+
+@router.delete("/worker-tokens")
+async def revoke_all_worker_tokens(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, int]:
+    """Revoke every worker credential in this isolated control-plane DB."""
+    await _require_admin_scope(request, authorization, "admin:tokens")
+    if not os.environ.get("LOOM_ENV", "").startswith("dev-"):
+        raise HTTPException(
+            status_code=403,
+            detail="bulk worker-token revocation is restricted to isolated dev instances",
+        )
+    async with request.app.state.session_factory() as session:
+        result = await session.execute(
+            update(Token)
+            .where(Token.type == "worker", Token.revoked_at.is_(None))
+            .values(revoked_at=datetime.now(UTC)),
+        )
+        await session.commit()
+    return {"revoked": int(result.rowcount or 0)}
 
 
 @router.post("/slurm-worker-jobs", status_code=201, response_model=None)
@@ -433,6 +485,29 @@ async def get_worker_pool_autoscaler_policy(
             detail="worker pool autoscaler policy not found",
         )
     return autoscaler_policy_to_dict(row)
+
+
+@router.delete("/worker-pool-autoscaler-policies/{environment}/{pool_name}")
+async def delete_worker_pool_autoscaler_policy(
+    environment: str,
+    pool_name: str,
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> Response:
+    await _require_admin_scope(request, authorization, "admin:worker_pools")
+    try:
+        async with request.app.state.session_factory() as session:
+            deleted = await delete_autoscaler_policy_if_drained(
+                session,
+                environment=environment,
+                pool_name=pool_name,
+            )
+            await session.commit()
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail="worker pool autoscaler policy not found")
+    return Response(status_code=204)
 
 
 @router.get("/worker-pool-autoscalers/status")
