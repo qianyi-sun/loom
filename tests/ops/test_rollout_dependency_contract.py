@@ -120,7 +120,7 @@ def test_independent_staging_adr_and_launch_gate_preserve_acceptance_boundary() 
     launch = (ROOT / "docs/runbooks/staging-launch.md").read_text(encoding="utf-8")
     gb10 = (ROOT / "deploy/worker-pools/gb10/README.md").read_text(encoding="utf-8")
     design = (
-        ROOT / "docs/superpowers/specs/2026-07-13-independent-staging-rollout-design.md"
+        ROOT / "docs/architecture/independent-staging-rollout-design.md"
     ).read_text(encoding="utf-8")
 
     assert "Status: accepted" in adr
