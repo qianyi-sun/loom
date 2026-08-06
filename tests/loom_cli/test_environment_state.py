@@ -225,10 +225,11 @@ def test_committed_production_profile_ships_fail_closed() -> None:
 def test_committed_slurm_pools_carry_containment_contract() -> None:
     """#896/#1143: every committed non-exclusive Slurm pool must ship the full
     containment contract (per-container caps + a job_pids_max ceiling that fits
-    the lease), while staying disabled until #896 acceptance + authorized
-    activation. Env-priority (prod > staging > dev) is enforced Loom-side by the
-    prod-pressure claim fence (#892), not by Slurm QoS, so these pools carry no
-    Slurm-controller QoS dependency (this cluster does not weight QoS)."""
+    lease). Only the accepted, bounded staging/OLDLAB lane is enabled;
+    everything else remains fail-closed. Env-priority (prod > staging > dev) is
+    enforced Loom-side by the prod-pressure claim fence (#892), not by Slurm
+    QoS, so these pools carry no Slurm-controller QoS dependency (this cluster
+    does not weight QoS)."""
     variables = {
         "IMAGE_TAG": "x-abc1234",
         "ENV_CONFIG_VERSION": "x-abc1234",
@@ -244,9 +245,8 @@ def test_committed_slurm_pools_carry_containment_contract() -> None:
         assert slurm_pools, f"{env} has no slurm pool"
         for policy in slurm_pools:
             cfg = policy["actuator_config"]
-            # The gate stays closed; this increment only makes the config
-            # activation-ready. Flipping enabled=true is a separate authorized step.
-            assert policy["enabled"] is False
+            expected_enabled = env == "staging" and policy["pool_name"] == "oldlab"
+            assert policy["enabled"] is expected_enabled
             assert cfg["exclusive"] is False
             cpus = cfg["container_cpus"]
             mem = cfg["container_memory_mib"]
@@ -2170,7 +2170,7 @@ def test_committed_development_profile_ships_fail_closed_supervisors() -> None:
     )
 
 
-def test_committed_staging_profile_ships_fail_closed_supervisors() -> None:
+def test_committed_staging_profile_activates_only_oldlab_supervisor() -> None:
     profile = load_environment_state_profile(
         Path("deploy/environment-state/staging.toml"),
         variables={
@@ -2192,14 +2192,18 @@ def test_committed_staging_profile_ships_fail_closed_supervisors() -> None:
     assert gb10["active"] is False
     assert "15451" in gb10["args"]
 
-    # OLDLAB staging also remains fail-closed until #896.
+    # #906 acceptance activates only the bounded OLDLAB lane.
     oldlab = by_name["oldlab-staging"]
     assert oldlab["pool_name"] == "oldlab"
     assert oldlab["service_name"] == "loom-autoscaler-oldlab-staging.service"
     assert oldlab["timer_name"] == "loom-autoscaler-oldlab-staging.timer"
-    assert oldlab["enabled"] is False
-    assert oldlab["active"] is False
+    assert oldlab["enabled"] is True
+    assert oldlab["active"] is True
     assert "15448" in oldlab["args"]
+    assert "service/loom-postgres-rw" in oldlab["args"]
+    assert oldlab["working_directory"].startswith(
+        "/opt/loom-staging-runner/candidates/"
+    )
 
 
 def test_staging_profile_loader_rejects_candidate_self_attested_activation(
@@ -2431,8 +2435,9 @@ def test_render_supervisor_service_and_timer_contain_full_execstart() -> None:
     assert "OnUnitActiveSec=30" in timer_unit
 
 
-def test_staging_profile_defines_both_external_pools_fail_closed() -> None:
-    # GB10 stays disabled for #827 and OLDLAB stays disabled for #896.
+def test_staging_profile_keeps_gb10_closed_and_bounds_oldlab_activation() -> None:
+    # GB10 stays disabled for #827. #906 activates one OLDLAB-5 dynamic slot
+    # above the four fixed workers' 24-slot floor.
     profile = load_environment_state_profile(
         Path("deploy/environment-state/staging.toml"),
         variables={
@@ -2447,8 +2452,25 @@ def test_staging_profile_defines_both_external_pools_fail_closed() -> None:
     assert set(policies) == {"gb10", "oldlab"}
     assert policies["gb10"]["enabled"] is False
     assert "#827" in policies["gb10"]["disabled_reason"]
-    assert policies["oldlab"]["enabled"] is False
-    assert policies["oldlab"]["actuator_config"]["exclusive"] is False
+    oldlab = policies["oldlab"]
+    assert oldlab["enabled"] is True
+    assert oldlab["min_slots"] == 24
+    assert oldlab["max_slots"] == 25
+    assert oldlab["actuator_config"]["exclusive"] is False
+    assert oldlab["actuator_config"]["allowed_nodes"] == ["trt-eai-oldlab-5"]
+    assert oldlab["actuator_config"]["repo_dir"].startswith(
+        "/shared_work/loom/staging-rollout/worker-repos/"
+    )
+    assert oldlab["actuator_config"]["env_file"].startswith(
+        "/shared_work/loom/staging-rollout/worker-envs/"
+    )
+    assert oldlab["actuator_config"]["candidate_sha"] == (
+        "47426964e55b436bc9edc8ef7d66aec6db7ed8f0"
+    )
+    assert oldlab["actuator_config"]["job_output_dir"] == (
+        "/shared_work/loom/staging-rollout/job-output"
+    )
+    assert oldlab["actuator_config"]["resource_aware"] is True
 
     gb10_state = next(
         state for state in profile.gb10_desired_states if state["pool_name"] == "gb10"

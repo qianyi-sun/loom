@@ -66,56 +66,58 @@ time_limit = "2-00:00:00"
 exclusive = false
 external_runner = true
 
-# GATED: enabled=false until #896 lands. OLDLAB nodes (trt-eai-oldlab-1..5) also
-# run the k3s control plane + MinIO/Longhorn, so workers must be non-exclusive
-# (cannot claim a whole node) and capped with headroom for k8s/MinIO. The
-# resource values below are PROVISIONAL placeholders reduced from the historical
-# single-tenant profile; #896 must measure real double-duty headroom and set the
-# final values before flipping enabled=true.
+# ACTIVE, bounded OLDLAB staging lane. Four fixed workers provide 24 slots on
+# OLDLAB-1..4; the external Slurm controller may add exactly one isolated slot
+# on OLDLAB-5. The worker payload stays pinned to the service-owned candidate
+# accepted for #906 so a later control-plane release cannot silently retarget
+# this lane to an unpublished checkout. OLDLAB uses /shared_work because that is
+# the filesystem mounted by every OLDLAB node; /shared_work2 is the GB10 mount.
 [[worker_pool_autoscaler_policies]]
 pool_name = "oldlab"
 actuator = "slurm"
-enabled = false
-disabled_reason = "gated on #896 container isolation + double-duty headroom measurement; disabled is the safety gate and whole-node exclusivity is unsupported"
-min_slots = 0
-max_slots = 4
+enabled = true
+min_slots = 24
+max_slots = 25
 scale_up_threshold_slots = 1
-scale_down_idle_seconds = 600
-scale_up_cooldown_seconds = 60
-scale_down_cooldown_seconds = 300
-drain_timeout_seconds = 600
+scale_down_idle_seconds = 300
+scale_up_cooldown_seconds = 0
+scale_down_cooldown_seconds = 0
+drain_timeout_seconds = 300
 force = false
 
 [worker_pool_autoscaler_policies.actuator_config]
 backend = "docker"
 cpu_arch = "x86_64"
-# OLDLAB jobs target the default partition (addressed by --nodelist), matching
-# the validated 2026-06-24 dry-run which passed no --partition.
-partition = ""
+# The cluster's OLDLAB nodes are in the `all` partition. Restrict the initial
+# activation to OLDLAB-5 so it cannot overlap the four fixed workers.
+partition = "all"
 allowed_nodes = [
-  "TRT-EAI-OLDLAB-1",
-  "trt-EAI-OLDLAB-2",
-  "trt-eai-oldlab-3",
-  "trt-eai-oldlab-4",
   "trt-eai-oldlab-5",
 ]
-env_file = "/var/lib/loom-staging-rollout/generated/staging-oldlab-worker-${IMAGE_TAG}.env"
-repo_dir = "/shared_work2/loom-staging-rollout/worker-repos/loom-remote-worker-${IMAGE_TAG}"
-# PROVISIONAL (pending #896 headroom measurement): leave CPU/mem for k3s+MinIO.
-requested_cpus = 4
-requested_memory_mib = 16000
-requested_concurrency = 2
-# Per-trial container caps (#896): concurrency * cap == the Slurm
-# allocation above, so trials cannot exceed the lease. job_pids_max is
-# the job cgroup PID ceiling (>= container_pids * concurrency).
+env_file = "/shared_work/loom/staging-rollout/worker-envs/staging-oldlab-worker-staging-4742696.env"
+repo_dir = "/shared_work/loom/staging-rollout/worker-repos/loom-remote-worker-staging-4742696"
+candidate_sha = "47426964e55b436bc9edc8ef7d66aec6db7ed8f0"
+job_output_dir = "/shared_work/loom/staging-rollout/job-output"
+requested_cpus = 2
+requested_memory_mib = 8192
+requested_concurrency = 1
 container_cpus = 2.0
-container_memory_mib = 8000
+container_memory_mib = 4096
 container_pids = 512
-job_pids_max = 1024
-max_jobs = 2
+job_pids_max = 4096
+max_jobs = 1
 pending_job_cap = 1
-time_limit = "2-00:00:00"
-# Double-duty: cannot own the whole node — MinIO/k8s share it.
+time_limit = "00:30:00"
+# Resource-aware admission preserves headroom for k3s, MinIO, Longhorn, and the
+# isolated CI runner pool before it asks Slurm for the single dynamic lease.
+resource_aware = true
+cpu_per_slot = 2
+memory_mib_per_slot = 8192
+reserved_cpus = 4
+reserved_memory_mib = 20480
+max_concurrency_per_node = 8
+max_cpu_load_ratio = 1.0
+# Double-duty nodes cannot be claimed exclusively.
 exclusive = false
 external_runner = true
 
@@ -216,7 +218,7 @@ args = [
   "--kubeconfig", "/var/lib/loom-staging-rollout/kubeconfig",
   "--db-local-host", "127.0.0.1",
   "--db-local-port", "15451",
-  "--db-service", "service/loom-postgres",
+  "--db-service", "service/loom-postgres-rw",
   "--db-remote-port", "5432",
   "--db-port-forward-ready-timeout-sec", "10",
   "--db-port-forward-stop-timeout-sec", "5",
@@ -226,10 +228,9 @@ args = [
 enabled = false
 active = false
 
-# OLDLAB staging autoscaler supervisor — GATED enabled=false/active=false until
-# #896 (container isolation) + #827 (external-Slurm acceptance), mirroring the
-# oldlab pool's own disable above. Applying writes the unit files but does NOT
-# enable or start the timer. Port 15448 per the reserved oldlab-staging slot.
+# OLDLAB staging autoscaler supervisor. The shared working directory exists on
+# every Slurm execution node, and the `-rw` service supports kubectl
+# port-forward (the stable ExternalName service does not).
 [[external_slurm_autoscaler_supervisors]]
 name = "oldlab-staging"
 pool_name = "oldlab"
@@ -245,12 +246,12 @@ args = [
   "--kubeconfig", "/var/lib/loom-staging-rollout/kubeconfig",
   "--db-local-host", "127.0.0.1",
   "--db-local-port", "15448",
-  "--db-service", "service/loom-postgres",
+  "--db-service", "service/loom-postgres-rw",
   "--db-remote-port", "5432",
   "--db-port-forward-ready-timeout-sec", "10",
   "--db-port-forward-stop-timeout-sec", "5",
   "--db-connect-timeout-sec", "10",
   "--freshness-sec", "120",
 ]
-enabled = false
-active = false
+enabled = true
+active = true

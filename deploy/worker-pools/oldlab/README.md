@@ -40,9 +40,15 @@ configured thresholds. Use `loom worker setup status` on a worker host to see
 the current guard decision and Loom-labeled setup/trial containers before doing
 any targeted manual cleanup.
 
-For the worker-pool autoscaler, prefer the resource-aware policy rather than
-raising the fixed slice. Use `min_slots=1`, `max_slots=40`, `max_jobs=5`, and
-`pending_job_cap=2` for OLDLAB-1..5. In `actuator_config`, set:
+For the staging worker-pool autoscaler, use the bounded resource-aware policy
+in `deploy/environment-state/staging.toml`: the four fixed workers provide 24
+slots, while one dynamic job on OLDLAB-5 may raise the pool to 25 slots. The
+dynamic lease requests 2 CPU and 8192 MiB with one worker slot, keeps 4 CPU and
+20480 MiB reserved for the shared-node services, and permits at most one active
+or pending autoscaler job. Do not expand the allowed-node set or slot ceiling
+without a new shared-node acceptance result.
+
+The corresponding staging `actuator_config` uses:
 
 ```json
 {
@@ -50,23 +56,24 @@ raising the fixed slice. Use `min_slots=1`, `max_slots=40`, `max_jobs=5`, and
   "cpu_per_slot": 2,
   "memory_mib_per_slot": 8192,
   "reserved_cpus": 4,
-  "reserved_memory_mib": 24576,
+  "reserved_memory_mib": 20480,
   "max_concurrency_per_node": 8,
   "max_cpu_load_ratio": 1.0,
   "requested_cpus": 2,
   "requested_memory_mib": 8192,
-  "requested_concurrency": 1
+  "requested_concurrency": 1,
+  "max_jobs": 1,
+  "pending_job_cap": 1
 }
 ```
 
 The autoscaler queries `sinfo` before scale-up, excludes nodes that already
 have an active Loom Slurm job, unsafe Slurm state, missing resource data, high
 CPU load, low free memory, or low idle CPU, and then submits each worker with
-that node's computed safe slot count. With five safe nodes and
-`max_concurrency_per_node=8`, OLDLAB tops out at 40 slots. When shared OLDLAB
-load is already near the CPU count or free memory is low, the expected behavior
-is to keep the warm minimum and record the exclusion reason instead of forcing
-more Slurm jobs.
+that node's computed safe slot count. In staging, only OLDLAB-5 is eligible and
+the pool tops out at 25 slots. When OLDLAB-5 is already occupied or lacks the
+reserved headroom, the expected behavior is to keep the 24 fixed slots and
+record the exclusion reason instead of forcing a Slurm job.
 
 For staging release gates, supervise OLDLAB through the
 `external_slurm_autoscaler_supervisors` section in
@@ -78,13 +85,12 @@ bindings. Do not leave a free-floating ops script as the timer target; use the
 repo entrypoint `scripts/ops/worker_pool_autoscaler_external_once.py
 --environment <environment> --pool-name oldlab`.
 
-The remote-worker env file and Loom checkout path must be readable from every
-included Slurm node. For OLDLAB 4/5, do not use a control-node-local checkout
-such as `/home/qianyi/dev/loom` unless a Slurm job on that node has verified it
-contains `deploy/docker-compose.remote-worker.yml`. Use a shared checkout path
-such as `/shared_work/<operator>/loom-remote-worker` for staging style
-capacity. Keep `LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS` in the remote-worker env
-file so elastic jobs release the allocation after the Loom queue drains.
+The remote-worker env file, Loom checkout, and job-output directory must be
+readable and writable as appropriate from every included Slurm node. Staging
+uses the service-owned paths under `/shared_work/loom/staging-rollout/`; do not
+use a personal checkout under `/shared_work*/qianyi/` or a control-node-local
+home directory. Keep `LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS` in the remote-worker
+env file so elastic jobs release the allocation after the Loom queue drains.
 The generated Slurm job script also traps `EXIT`, `INT`, and `TERM` and runs
 `docker compose down --remove-orphans`, so `scancel` and idle exits clean up the
 worker container instead of leaving a live worker outside Slurm accounting.
@@ -126,15 +132,14 @@ Supporting layout, shared across environments:
 
 - Runner checkout and virtualenv: `/opt/loom-<environment>-runner/repo` and
   `/opt/loom-<environment>-runner/venv`.
-- Kubeconfig: `/etc/loom/kubeconfig/<environment>.yaml`.
+- Kubeconfig: the environment runner's least-privilege kubeconfig. Staging uses
+  `/var/lib/loom-staging-rollout/kubeconfig`.
 - Health check: `systemctl --user is-active loom-autoscaler-oldlab-<env>.timer`.
 
-The development OLDLAB supervisor ships `enabled=false` and `active=false`
-(fail-closed): applying the profile writes the unit files but does not enable or
-start the timer. Activation follows the same #827 (external-Slurm acceptance)
-and #896 (container-isolation) gates that release the OLDLAB pool itself. There
-is no committed OLDLAB supervisor for staging or production yet; those are a
-tracked follow-up.
+The staging OLDLAB supervisor ships `enabled=true` and `active=true` after the
+bounded OLDLAB-5 launch, registration, cgroup-containment, targeted drain, and
+Slurm cancellation acceptance. Development remains fail-closed, and there is
+no committed production OLDLAB activation.
 
 To temporarily exclude a node, remove it from both `worker-plan.csv` and
 `LOOM_CP_SLURM_WORKER_CONTROLLER_ALLOWED_NODES`, or lower

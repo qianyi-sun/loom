@@ -77,7 +77,7 @@ args = [
   "--kubeconfig", "/var/lib/loom-staging-rollout/kubeconfig",
   "--db-local-host", "127.0.0.1",
   "--db-local-port", "15453",
-  "--db-service", "service/loom-postgres",
+  "--db-service", "service/loom-postgres-rw",
   "--db-remote-port", "5432",
   "--db-port-forward-ready-timeout-sec", "10",
   "--db-port-forward-stop-timeout-sec", "5",
@@ -157,6 +157,9 @@ class _Control:
     def disable_timer(self, name: str) -> None:
         self.calls.append(f"disable:{name}")
         self.enabled = False
+
+    def stop_service(self, name: str) -> None:
+        self.calls.append(f"stop-service:{name}")
 
     def start_service(self, name: str, *, timeout_seconds: float) -> None:
         self.calls.append(f"service:{name}:{timeout_seconds}")
@@ -626,7 +629,7 @@ def test_target_recovery_success_supersedes_immutable_prior_failure(tmp_path: Pa
     failed_paths = tuple(
         store.unit_dir.glob(".loom-external-supervisor-compensation-*-failed.json")
     )
-    assert len(failed_paths) == 1
+    assert len(failed_paths) == len(artifact.supervisors)
     failed_payload = failed_paths[0].read_bytes()
     assert store.compensation_blockers()
 

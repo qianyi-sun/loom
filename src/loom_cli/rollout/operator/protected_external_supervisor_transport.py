@@ -287,8 +287,11 @@ class TimerCompensationEvidence:
             or (
                 predecessor is not None
                 and (
-                    self.service_name not in predecessor.unit_payloads
-                    or self.timer_name not in predecessor.unit_payloads
+                    not set(predecessor.unit_payloads).issubset(target.unit_payloads)
+                    or (
+                        (self.service_name in predecessor.unit_payloads)
+                        != (self.timer_name in predecessor.unit_payloads)
+                    )
                 )
             )
             or self.phase not in valid_reason
@@ -1801,7 +1804,11 @@ class FixedExternalSupervisorTransport:
             desired = target if target_is_active else predecessor
             current = {name: self.store.read_unit(name) for name in target.unit_payloads}
             desired_payloads = {
-                name: None if desired is None else desired.unit_payloads[name].encode()
+                name: (
+                    None
+                    if desired is None or name not in desired.unit_payloads
+                    else desired.unit_payloads[name].encode()
+                )
                 for name in target.unit_payloads
             }
             target_payloads = {
@@ -1824,18 +1831,27 @@ class FixedExternalSupervisorTransport:
 
         try:
             if desired is not None:
-                reactivation_payloads = {
-                    name: desired.unit_payloads[name].encode() for name in target.unit_payloads
-                }
+                absent_services = sorted(
+                    name
+                    for name in target.unit_payloads
+                    if name.endswith(".service") and name not in desired.unit_payloads
+                )
+                for service_name in absent_services:
+                    timer_name = f"{service_name.removesuffix('.service')}.timer"
+                    self.control.stop_timer(timer_name)
+                    self.control.disable_timer(timer_name)
+                    self.control.stop_service(service_name)
                 self.store.restore_transition(
                     {
-                        name: (current[name], reactivation_payloads[name])
+                        name: (current[name], desired_payloads[name])
                         for name in target.unit_payloads
                     }
                 )
                 self.control.daemon_reload()
                 for service_name in sorted(
-                    name for name in target.unit_payloads if name.endswith(".service")
+                    name
+                    for name in desired.unit_payloads
+                    if name.endswith(".service")
                 ):
                     timer_name = f"{service_name.removesuffix('.service')}.timer"
                     if _identity_pair_desired_active(desired, service_name, timer_name):
@@ -1882,6 +1898,16 @@ class FixedExternalSupervisorTransport:
             verified = self._verify_reactivated_identity(
                 desired,
                 require_bound_runtime=(desired.record_kind == "activation"),
+            ) and all(
+                self._verify_reconciled_runtime(
+                    service_name,
+                    f"{service_name.removesuffix('.service')}.timer",
+                    None,
+                    None,
+                )
+                for service_name in target.unit_payloads
+                if service_name.endswith(".service")
+                and service_name not in desired.unit_payloads
             )
         else:
             verified = all(
@@ -1948,7 +1974,10 @@ class FixedExternalSupervisorTransport:
                 != intent.timer_name.removesuffix(".timer")
                 for intent in intents
             )
-            or (predecessor is not None and set(predecessor.unit_payloads) != target_units)
+            or (
+                predecessor is not None
+                and not set(predecessor.unit_payloads).issubset(target_units)
+            )
         ):
             raise RuntimeError("protected external supervisor transition coverage drifted")
         return target, predecessor, frozenset(covered_units)
@@ -2502,7 +2531,7 @@ def classify_external_supervisor_live_state(
         predecessor = FixedExternalSupervisorTransport._predecessor_snapshot(observation)
     except (RuntimeError, ValueError):
         return "drifted"
-    if predecessor is not None and set(predecessor.unit_payloads) != set(expected_units):
+    if predecessor is not None and not set(predecessor.unit_payloads).issubset(expected_units):
         return "drifted"
 
     all_target = True
@@ -2514,11 +2543,13 @@ def classify_external_supervisor_live_state(
         predecessor_service = (
             None
             if predecessor is None
+            or supervisor.service_name not in predecessor.unit_payloads
             else predecessor.unit_payloads[supervisor.service_name].encode()
         )
         predecessor_timer = (
             None
             if predecessor is None
+            or supervisor.timer_name not in predecessor.unit_payloads
             else predecessor.unit_payloads[supervisor.timer_name].encode()
         )
         if service_bytes not in (predecessor_service, expected_service) or timer_bytes not in (
