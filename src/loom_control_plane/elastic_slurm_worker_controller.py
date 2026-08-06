@@ -773,18 +773,28 @@ class SubprocessSlurmCommandRunner:
         csv_ids = ",".join(job_ids)
         observations: dict[str, SlurmWorkerJobObservation] = {}
 
-        squeue = await _run_command(
-            (
-                config.squeue_path,
-                "-h",
-                "-o",
-                "%i|%T|%N|%R",
-                "-j",
-                csv_ids,
-            ),
-            timeout=config.command_timeout_seconds,
-        )
-        observations.update(_parse_slurm_observations(squeue.stdout, job_ids))
+        try:
+            squeue = await _run_command(
+                (
+                    config.squeue_path,
+                    "-h",
+                    "-o",
+                    "%i|%T|%N|%R",
+                    "-j",
+                    csv_ids,
+                ),
+                timeout=config.command_timeout_seconds,
+            )
+        except RuntimeError as exc:
+            # Slurm 23.11 exits 1 instead of returning an empty result when all
+            # requested IDs have already left squeue. Treat only that exact
+            # terminal-job condition as a cache miss so sacct can reconcile the
+            # recorded jobs. Transport, authentication, and controller errors
+            # must still fail closed.
+            if "Invalid job id specified" not in str(exc):
+                raise
+        else:
+            observations.update(_parse_slurm_observations(squeue.stdout, job_ids))
 
         missing_job_ids = tuple(job_id for job_id in job_ids if job_id not in observations)
         if missing_job_ids:
