@@ -4124,7 +4124,7 @@ def test_read_root_kubeconfig_binds_authority_to_one_descriptor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload = b"apiVersion: v1\ncurrent-context: loom-staging\n"
-    metadata = _root_kubeconfig_metadata(payload)
+    metadata = _root_kubeconfig_metadata(payload, mode=0o644)
     reads = iter((payload, b""))
     opened: list[tuple[Path, int]] = []
     closed: list[int] = []
@@ -4239,8 +4239,6 @@ def test_export_kubeconfig_uses_process_private_snapshot(
                 "view",
                 "--raw",
                 "--minify",
-                "--context",
-                "loom-staging",
             ]
             return host.CommandResult(0, source.decode())
 

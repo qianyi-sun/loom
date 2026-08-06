@@ -1213,6 +1213,7 @@ def _slurm_config_from_policy(
         job_pids_max=actor_config.get("job_pids_max", 0),
         candidate_sha=str(actor_config.get("candidate_sha") or ""),
         gpu_tres=str(actor_config.get("gpu_tres") or ""),
+        job_output_dir=str(actor_config.get("job_output_dir") or ""),
     )
     if config is None:
         raise ValueError("Slurm autoscaler policy unexpectedly disabled")
@@ -1591,6 +1592,9 @@ async def _apply_slurm_release_drained(
         .all()
     )
     worker_by_id = {str(worker.id): worker for worker in release_workers}
+    release_hostnames = {
+        str(worker.hostname) for worker in release_workers if worker.hostname
+    }
     in_flight_rows = (
         await session.execute(
             select(Trial.worker_id)
@@ -1606,7 +1610,15 @@ async def _apply_slurm_release_drained(
             await session.execute(
                 select(SlurmWorkerJob)
                 .where(
-                    SlurmWorkerJob.worker_id.in_(released_worker_ids),
+                    or_(
+                        SlurmWorkerJob.worker_id.in_(released_worker_ids),
+                        (
+                            SlurmWorkerJob.worker_id.is_(None)
+                            & SlurmWorkerJob.nodelist.in_(release_hostnames)
+                        ),
+                    ),
+                    SlurmWorkerJob.environment == current_row.environment,
+                    SlurmWorkerJob.pool_name == current_row.pool_name,
                     SlurmWorkerJob.state.in_(ACTIVE_STATES),
                 )
                 .with_for_update(),
@@ -1616,9 +1628,12 @@ async def _apply_slurm_release_drained(
         .all()
     )
     jobs_by_worker_id: dict[str, list[SlurmWorkerJob]] = {}
+    unlinked_jobs_by_hostname: dict[str, list[SlurmWorkerJob]] = {}
     for job in jobs:
         if job.worker_id is not None:
             jobs_by_worker_id.setdefault(str(job.worker_id), []).append(job)
+        elif job.nodelist:
+            unlinked_jobs_by_hostname.setdefault(str(job.nodelist), []).append(job)
 
     expected_worker_ids = {str(worker_id) for worker_id in released_worker_ids}
     in_flight_worker_ids = {
@@ -1631,10 +1646,13 @@ async def _apply_slurm_release_drained(
     jobs_to_cancel: list[SlurmWorkerJob] = []
     for worker_id in sorted(expected_worker_ids):
         worker = worker_by_id.get(worker_id)
-        worker_jobs = jobs_by_worker_id.get(worker_id, [])
         if worker is None:
             guard_errors.append(f"{worker_id}: fresh active worker missing")
             continue
+        worker_jobs = [
+            *jobs_by_worker_id.get(worker_id, []),
+            *unlinked_jobs_by_hostname.get(str(worker.hostname), []),
+        ]
         if worker.status != "active" or worker.last_seen_at < now - timedelta(
             seconds=freshness_sec
         ):

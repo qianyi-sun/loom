@@ -292,7 +292,7 @@ def test_build_sbatch_request_uses_environment_specific_worker_settings() -> Non
         "--partition=cpu",
         "--cpus-per-task=12",
         "--mem=58000M",
-        "--export=ALL,LOOM_WORKER_MAX_CONCURRENT=6,LOOM_WORKER_POOL_NAME=oldlab,LOOM_REMOTE_WORKER_ENV_FILE=/secure/.env.remote-worker,LOOM_REMOTE_WORKER_REPO_DIR=/opt/loom,LOOM_WORKER_SANDBOX_IDENTITY=production,LOOM_WORKER_CANDIDATE_SHA=legacy,LOOM_WORKER_SLURM_ALLOCATED_GPUS=0,LOOM_WORKER_RESTART_POLICY=no,LOOM_WORKER_REQUIRE_CGROUP_PARENT=1,LOOM_WORKER_JOB_PIDS_MAX=3072",
+        "--export=ALL,LOOM_WORKER_MAX_CONCURRENT=6,LOOM_WORKER_POOL_NAME=oldlab,LOOM_WORKER_HOSTNAME=oldlab-4,LOOM_REMOTE_WORKER_ENV_FILE=/secure/.env.remote-worker,LOOM_REMOTE_WORKER_REPO_DIR=/opt/loom,LOOM_WORKER_SANDBOX_IDENTITY=production,LOOM_WORKER_CANDIDATE_SHA=legacy,LOOM_WORKER_SLURM_ALLOCATED_GPUS=0,LOOM_WORKER_RESTART_POLICY=no,LOOM_WORKER_REQUIRE_CGROUP_PARENT=1,LOOM_WORKER_JOB_PIDS_MAX=3072",
     )
     assert "compose_files=(-f deploy/docker-compose.remote-worker.yml)" in (request.stdin)
     assert (
@@ -384,6 +384,37 @@ def test_build_sbatch_request_omits_account_qos_reservation_when_empty() -> None
     assert not any(arg.startswith("--account=") for arg in request.args)
     assert not any(arg.startswith("--qos=") for arg in request.args)
     assert not any(arg.startswith("--reservation=") for arg in request.args)
+
+
+def test_build_sbatch_request_uses_shared_job_output_directory() -> None:
+    config = build_controller_config(
+        **_controller_config_kwargs(  # type: ignore[arg-type]
+            job_output_dir="/shared_work/loom/staging-rollout/job-output/",
+        )
+    )
+
+    assert config is not None
+    assert config.job_output_dir == "/shared_work/loom/staging-rollout/job-output"
+    request = build_sbatch_request(config, node="oldlab-1")
+    assert (
+        "--output=/shared_work/loom/staging-rollout/job-output/slurm-%j.out"
+        in request.args
+    )
+
+
+@pytest.mark.parametrize(
+    "job_output_dir",
+    ["relative/output", "/shared_work/../private", "/shared_work/output\n--error=x"],
+)
+def test_build_controller_config_rejects_unsafe_job_output_directory(
+    job_output_dir: str,
+) -> None:
+    with pytest.raises(ValueError, match="job_output_dir"):
+        build_controller_config(
+            **_controller_config_kwargs(  # type: ignore[arg-type]
+                job_output_dir=job_output_dir,
+            )
+        )
 
 
 def test_build_sbatch_request_exports_container_caps_when_set() -> None:
