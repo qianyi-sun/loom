@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import pytest
 
+from loom_control_plane import elastic_slurm_worker_controller as controller
 from loom_control_plane.elastic_slurm_worker_controller import (
     ElasticSlurmWorkerControllerConfig,
     SlurmNodeCapacityPlan,
     SlurmNodeResource,
     SlurmWorkerCapacitySnapshot,
     SlurmWorkerControllerDecision,
+    SubprocessSlurmCommandRunner,
     _resolve_allowed_node_case,
     build_controller_config,
     build_sbatch_request,
@@ -763,3 +765,56 @@ async def test_resolve_allowed_node_case_noop_without_resolver() -> None:
     out = await _resolve_allowed_node_case(cfg, _NoResolveRunner())  # type: ignore[arg-type]
 
     assert out is cfg
+
+
+async def test_query_jobs_falls_back_to_sacct_when_squeue_rejects_terminal_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[tuple[str, ...]] = []
+
+    async def fake_run_command(
+        args: tuple[str, ...],
+        *,
+        timeout: float,
+        stdin: str | None = None,
+    ) -> controller._CommandResult:
+        del timeout, stdin
+        commands.append(args)
+        if args[0] == "squeue":
+            raise RuntimeError(
+                "Slurm command failed (1): squeue "
+                "slurm_load_jobs error: Invalid job id specified",
+            )
+        return controller._CommandResult(
+            stdout="31619|FAILED|trt-eai-oldlab-5|NonZeroExitCode\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(controller, "_run_command", fake_run_command)
+    runner = SubprocessSlurmCommandRunner().bind_config(_config())
+
+    observations = await runner.query_jobs(("31619",))
+
+    assert [(item.job_id, item.slurm_state, item.nodelist) for item in observations] == [
+        ("31619", "FAILED", "trt-eai-oldlab-5"),
+    ]
+    assert [command[0] for command in commands] == ["squeue", "sacct"]
+
+
+async def test_query_jobs_keeps_non_terminal_squeue_errors_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_run_command(
+        args: tuple[str, ...],
+        *,
+        timeout: float,
+        stdin: str | None = None,
+    ) -> controller._CommandResult:
+        del args, timeout, stdin
+        raise RuntimeError("Slurm command failed (1): squeue Unable to contact slurm controller")
+
+    monkeypatch.setattr(controller, "_run_command", fake_run_command)
+    runner = SubprocessSlurmCommandRunner().bind_config(_config())
+
+    with pytest.raises(RuntimeError, match="Unable to contact slurm controller"):
+        await runner.query_jobs(("31619",))
