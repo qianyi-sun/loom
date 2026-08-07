@@ -1318,7 +1318,9 @@ def test_compensation_journal_malformed_prefixed_entry_fails_closed(
 ) -> None:
     unit_dir = tmp_path / "units"
     unit_dir.mkdir(mode=0o700)
-    (unit_dir / name).write_bytes(payload)
+    malformed = unit_dir / name
+    malformed.write_bytes(payload)
+    malformed.chmod(0o600)
     store = AtomicUserUnitStore(unit_dir=unit_dir, service_uid=os.geteuid())
 
     with pytest.raises((RuntimeError, ValueError), match="compensation"):
