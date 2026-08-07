@@ -126,8 +126,7 @@ WORK_CLASS_RUNS_ON = {
     ),
 }
 OLDLAB_UV_MANIFEST = (
-    "${{ startsWith(runner.name, 'oldlab5-kvm-') && "
-    "'http://127.0.0.1:8181/uv.ndjson' || '' }}"
+    "${{ startsWith(runner.name, 'oldlab5-kvm-') && 'http://127.0.0.1:8181/uv.ndjson' || '' }}"
 )
 
 ACCELERATED_JOBS = {
@@ -287,9 +286,9 @@ def test_source_workflows_detect_publisher_from_base_or_trusted_promotion() -> N
         workflow = _workflow(workflow_path)
         plan_job = workflow["jobs"][plan_job_id]
         plan_step = next(step for step in plan_job["steps"] if step.get("id") == plan_step_id)
-        expected_output = f"${{{{ steps.{plan_step_id}.outputs.publisher_active }}}}"
-
-        assert plan_job["outputs"]["publisher_active"] == expected_output
+        publisher_output = plan_job["outputs"]["publisher_active"]
+        assert f"steps.{plan_step_id}.outputs.publisher_active" in publisher_output
+        assert "steps.event.outputs.publisher_active" in publisher_output
         assert plan_step["env"]["BASE_SHA"].startswith("${{ ")
         assert plan_step["env"]["TRUSTED_PROMOTION"] == (
             "${{ github.event_name == 'pull_request' && "
@@ -302,15 +301,61 @@ def test_source_workflows_detect_publisher_from_base_or_trusted_promotion() -> N
         bootstrap_fragments.add(fragment)
         assert 'git cat-file -e "${BASE_SHA}^{tree}"' in fragment
         assert '[[ "$TRUSTED_PROMOTION" == "true" ]]' in fragment
-        assert (
-            '[[ "$BASE_SHA" == "28aa5257927a3468ebc35ec7f245fecaf3226dbf" ]]'
-            in fragment
-        )
+        assert '[[ "$BASE_SHA" == "28aa5257927a3468ebc35ec7f245fecaf3226dbf" ]]' in fragment
         assert '"${BASE_SHA}:.github/workflows/authoritative-gates.yml"' in fragment
         assert "publisher-contract: dynamic-run-name-v[123]" in fragment
         assert "HEAD_SHA" not in fragment
 
     assert len(bootstrap_fragments) == 1
+
+
+def test_filtered_metadata_events_finish_before_checkout_or_gate() -> None:
+    for workflow_path, (plan_job_id, plan_step_id) in SOURCE_PLAN_CONTRACTS.items():
+        workflow = _workflow(workflow_path)
+        jobs = workflow["jobs"]
+        plan_job = jobs[plan_job_id]
+        event_step = plan_job["steps"][0]
+        checkout_step = next(
+            step
+            for step in plan_job["steps"]
+            if str(step.get("uses", "")).startswith("actions/checkout@")
+        )
+        planner_step = next(step for step in plan_job["steps"] if step.get("id") == plan_step_id)
+        gate_id = GATE_CONTRACTS[workflow_path][0]
+
+        assert event_step["name"] == "Classify metadata event before checkout"
+        assert event_step["id"] == "event"
+        assert "github.event.pull_request.draft" in event_step["env"]["FILTERED_EVENT"]
+        assert "checkout_required=false" in event_step["run"]
+        assert "gate_mode=filtered" in event_step["run"]
+        assert checkout_step["if"] == "steps.event.outputs.checkout_required == 'true'"
+        assert planner_step["if"] == "steps.event.outputs.checkout_required == 'true'"
+        assert "needs." in jobs[gate_id]["if"]
+        assert "outputs.gate_mode != 'filtered'" in jobs[gate_id]["if"]
+
+
+def test_filtered_metadata_classifier_emits_no_checkout_contract(tmp_path: Path) -> None:
+    for workflow_path, (plan_job_id, _plan_step_id) in SOURCE_PLAN_CONTRACTS.items():
+        event_step = _workflow(workflow_path)["jobs"][plan_job_id]["steps"][0]
+        github_output = tmp_path / (Path(workflow_path).stem + "-output.txt")
+        result = subprocess.run(
+            ["bash"],
+            input=event_step["run"],
+            text=True,
+            capture_output=True,
+            env={
+                **os.environ,
+                "FILTERED_EVENT": "true",
+                "GITHUB_OUTPUT": str(github_output),
+            },
+            check=False,
+        )
+
+        assert result.returncode == 0, (workflow_path, result.stderr)
+        outputs = github_output.read_text(encoding="utf-8")
+        assert "checkout_required=false" in outputs
+        assert "gate_mode=filtered" in outputs
+        assert "publisher_active=false" in outputs
 
 
 def test_source_gate_names_switch_only_after_base_publisher_is_active() -> None:
@@ -533,7 +578,9 @@ def test_images_builds_use_planner_selection() -> None:
     workflow = _workflow(".github/workflows/images.yml")
     jobs = workflow["jobs"]
 
-    assert jobs["plan"]["outputs"]["required"] == "${{ steps.plan.outputs.required }}"
+    required_output = jobs["plan"]["outputs"]["required"]
+    assert "steps.plan.outputs.required" in required_output
+    assert "steps.event.outputs.required" in required_output
     assert jobs["build"]["needs"] == "plan"
     assert "needs.plan.outputs.required == 'true'" in jobs["build"]["if"]
 
@@ -762,15 +809,97 @@ def test_images_merge_groups_select_a_nonempty_matrix() -> None:
 def test_images_merge_groups_do_not_publish_or_write_cache() -> None:
     workflow = _workflow(".github/workflows/images.yml")
     build_steps = workflow["jobs"]["build"]["steps"]
-    build_script = "\n".join(str(step["run"]) for step in build_steps if "run" in step)
+    build_step = next(
+        step
+        for step in build_steps
+        if step.get("name") == "Build without registry or cache write authority"
+    )
+    build_script = build_step["run"]
     publish = workflow["jobs"]["publish"]
 
     assert "docker login" not in build_script
     assert "--push" not in build_script
     assert "--cache-to" not in build_script
     assert 'merge_group) image_tag="merge-group-${sha_short}"' in build_script
+    assert "github.event_name == 'pull_request'" in build_step["env"]["INTERNAL_PULL_REQUEST"]
+    assert "type=oci" in build_script
+    assert "type=registry" not in build_script
     assert "github.event_name == 'push'" in publish["if"]
     assert any(step.get("name") == "Log in to GHCR" for step in publish["steps"])
+
+
+def test_image_candidates_are_internal_pr_only_and_untrusted_build_is_read_only() -> None:
+    workflow = _workflow(".github/workflows/images.yml")
+    build = workflow["jobs"]["build"]
+    steps = build["steps"]
+    build_step = next(
+        step
+        for step in steps
+        if step.get("name") == "Build without registry or cache write authority"
+    )
+    archive_step = next(
+        step for step in steps if step.get("name") == "Upload reusable candidate archive"
+    )
+
+    assert build["permissions"] == {"contents": "read"}
+    assert "GITHUB_TOKEN" not in json.dumps(build_step)
+    assert "secrets." not in json.dumps(build_step)
+    assert "docker login" not in json.dumps(build)
+    assert "ghcr.io" not in json.dumps(build)
+    assert (
+        "github.event.pull_request.head.repo.full_name == github.repository"
+        in build_step["env"]["INTERNAL_PULL_REQUEST"]
+    )
+    assert (
+        "github.event.pull_request.head.repo.full_name == github.repository" in archive_step["if"]
+    )
+    assert "candidate-${HEAD_SHA}-${ARCHITECTURE}" in build_step["run"]
+
+
+def test_image_candidate_index_and_merge_resolver_are_exact_and_fail_closed() -> None:
+    jobs = _workflow(".github/workflows/images.yml")["jobs"]
+    candidate_index = jobs["candidate-index"]
+    resolver = jobs["resolve-candidate"]
+    resolver_script = resolver["steps"][1]["run"]
+    publish = jobs["publish"]
+    publish_script = next(
+        step["run"]
+        for step in publish["steps"]
+        if step.get("name") == "Build and publish trusted image"
+    )
+
+    assert set(candidate_index["needs"]) == {"plan", "build"}
+    assert "needs.build.result == 'success'" in candidate_index["if"]
+    assert (
+        "github.event.pull_request.head.repo.full_name == github.repository"
+        in (candidate_index["if"])
+    )
+    assert resolver["permissions"] == {
+        "actions": "read",
+        "contents": "read",
+        "pull-requests": "read",
+    }
+    for identity in (
+        "pull_number",
+        "source_head",
+        "source_base",
+        "source_tree",
+        "run_id",
+        "run_attempt",
+    ):
+        assert identity in resolver_script
+    assert "source_tree" in resolver_script and "push_tree" in resolver_script
+    assert "fallback" in resolver_script
+    assert "image-candidate-index-attempt-${run_attempt}" in resolver_script
+    assert "actions/runs/${run_id}/artifacts" in resolver_script
+    assert ".expired == false" in resolver_script
+    assert "$required - $available | length == 0" in resolver_script
+    assert publish["strategy"]["matrix"]["include"] == (
+        "${{ fromJSON(needs.resolve-candidate.outputs.builds) }}"
+    )
+    assert 'docker tag "$local_image" "$target"' in publish_script
+    assert 'docker push "$target"' in publish_script
+    assert "No exact candidate was available; rebuilt on trusted push." in publish_script
 
 
 def test_manifest_image_build_and_publish_pass_exact_full_head_sha() -> None:
@@ -785,7 +914,10 @@ def test_manifest_image_build_and_publish_pass_exact_full_head_sha() -> None:
             step for step in workflow["jobs"][job_name]["steps"] if step.get("name") == step_name
         )
         script = step["run"]
-        assert step["env"]["HEAD_SHA"] == "${{ github.sha }}"
+        if job_name == "build":
+            assert "github.event.pull_request.head.sha" in step["env"]["HEAD_SHA"]
+        else:
+            assert step["env"]["HEAD_SHA"] == "${{ github.sha }}"
         assert step["env"]["BUILD_CONTEXT"] == "${{ matrix.context }}"
         assert '--build-arg "LOOM_BUILD_SHA=${HEAD_SHA}"' in script
         assert 'build_args+=("$BUILD_CONTEXT")' in script
@@ -934,21 +1066,42 @@ def test_optional_gate_scripts_preserve_result_semantics(
 
 
 @pytest.mark.parametrize(
-    ("event_name", "required", "build_result", "publish_result", "manifest_result"),
+    (
+        "event_name",
+        "required",
+        "build_result",
+        "candidate_index_result",
+        "resolve_result",
+        "publish_result",
+        "manifest_result",
+        "internal_pull_request",
+    ),
     [
-        ("pull_request", "true", "success", "skipped", "skipped"),
-        ("merge_group", "true", "success", "skipped", "skipped"),
-        ("workflow_dispatch", "true", "success", "skipped", "skipped"),
-        ("push", "true", "skipped", "success", "success"),
-        ("pull_request", "false", "skipped", "skipped", "skipped"),
+        ("pull_request", "true", "success", "success", "skipped", "skipped", "skipped", "true"),
+        ("merge_group", "true", "success", "skipped", "skipped", "skipped", "skipped", "false"),
+        (
+            "workflow_dispatch",
+            "true",
+            "success",
+            "skipped",
+            "skipped",
+            "skipped",
+            "skipped",
+            "false",
+        ),
+        ("push", "true", "skipped", "skipped", "success", "success", "success", "false"),
+        ("pull_request", "false", "skipped", "skipped", "skipped", "skipped", "skipped", "true"),
     ],
 )
 def test_images_gate_separates_untrusted_build_from_trusted_publish(
     event_name: str,
     required: str,
     build_result: str,
+    candidate_index_result: str,
+    resolve_result: str,
     publish_result: str,
     manifest_result: str,
+    internal_pull_request: str,
 ) -> None:
     result = subprocess.run(
         ["bash"],
@@ -961,8 +1114,11 @@ def test_images_gate_separates_untrusted_build_from_trusted_publish(
             "GATE_MODE": "full",
             "REQUIRED": required,
             "BUILD_RESULT": build_result,
+            "CANDIDATE_INDEX_RESULT": candidate_index_result,
+            "RESOLVE_RESULT": resolve_result,
             "PUBLISH_RESULT": publish_result,
             "MANIFEST_RESULT": manifest_result,
+            "INTERNAL_PULL_REQUEST": internal_pull_request,
         },
         check=False,
     )
@@ -1091,6 +1247,8 @@ def test_optional_validation_workflows_have_stable_gate_contexts() -> None:
             "images-gate",
             {
                 "build": "BUILD_RESULT",
+                "candidate-index": "CANDIDATE_INDEX_RESULT",
+                "resolve-candidate": "RESOLVE_RESULT",
                 "publish": "PUBLISH_RESULT",
                 "publish-manifest": "MANIFEST_RESULT",
             },
@@ -1301,13 +1459,9 @@ def test_python_test_shards_are_complete_and_non_overlapping() -> None:
     assert integration_shards[0] + integration_shards[1] == integration_paths
     auth_path = "tests/integration/test_username_password_auth.py"
     schema_path = "tests/integration/test_username_password_schema.py"
-    assert any(
-        auth_path in shard and schema_path in shard for shard in integration_shards
-    )
+    assert any(auth_path in shard and schema_path in shard for shard in integration_shards)
     assert integration_paths.index(auth_path) < integration_paths.index(schema_path)
-    integration_script = "\n".join(
-        step.get("run", "") for step in jobs["integration"]["steps"]
-    )
+    integration_script = "\n".join(step.get("run", "") for step in jobs["integration"]["steps"])
     assert "--shard-strategy contiguous" in integration_script
 
     root_upload = next(
@@ -1415,8 +1569,6 @@ def test_pinned_ingress_controller_config_has_trusted_raw_path_guard() -> None:
     assert "nginx.ingress.kubernetes.io/configuration-snippet" not in manifest
 
 
-
-
 def test_staging_active_rendered_images_are_covered_by_manifest_matrix() -> None:
     result = subprocess.run(
         [
@@ -1458,9 +1610,7 @@ def test_staging_active_rendered_images_are_covered_by_manifest_matrix() -> None
             if image_name.startswith("loom-"):
                 active_images.add(image_name)
 
-    manifest = component_ownership.load_manifest(
-        REPO_ROOT / "config/component-ownership.toml"
-    )
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
     matrix_images = {
         row["image_name"]
         for row in component_ownership.release_images_for_runtime_policy(
@@ -1490,18 +1640,8 @@ def test_web_nginx_has_same_raw_path_and_case_guard_as_controller() -> None:
     assert "if ($loom_ambiguous_path) {\n        return 404;\n    }" in config
     assert "location = /staging {\n        return 308 /staging/$is_args$args;\n    }" in config
     assert "location ~ ^/(?:prod|dev|staging)/assets/(.+)$" in config
-    assert (
-        "location ~* ^/(?:.+/)+assets(?:/|$) {\n"
-        "        return 404;\n"
-        "    }"
-    ) in config
-    assert (
-        "location ~* ^/(?:prod|dev|staging)(?:/|$) {\n"
-        "        return 404;\n"
-        "    }"
-    ) in config
-
-
+    assert ("location ~* ^/(?:.+/)+assets(?:/|$) {\n        return 404;\n    }") in config
+    assert ("location ~* ^/(?:prod|dev|staging)(?:/|$) {\n        return 404;\n    }") in config
 
 
 def test_staging_admin_browser_smoke_is_bounded_and_secret_safe() -> None:
@@ -1677,7 +1817,5 @@ def test_repository_checks_uses_lightweight_coverage_tooling() -> None:
 def test_lint_and_static_does_not_restore_opaque_analysis_state() -> None:
     workflow = _workflow(".github/workflows/ci.yml")
     steps = workflow["jobs"]["lint-and-static"]["steps"]
-    assert all(
-        not str(step.get("uses", "")).startswith("actions/cache@") for step in steps
-    )
+    assert all(not str(step.get("uses", "")).startswith("actions/cache@") for step in steps)
     assert "Cache mypy" not in {step.get("name") for step in steps}

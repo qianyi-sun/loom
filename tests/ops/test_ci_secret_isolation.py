@@ -84,7 +84,7 @@ def test_images_untrusted_build_is_read_only_and_cannot_publish_or_write_cache()
     script = "\n".join(_run_blocks(build))
     assert "docker login" not in script
     assert "--push" not in script
-    assert "--output" not in script
+    assert "type=oci,dest=${archive},compression=gzip" in script
     assert "type=registry" not in script
     assert "ghcr.io" not in script
     assert "--cache-from" not in script
@@ -103,7 +103,11 @@ def test_images_publish_authority_is_push_only_on_trusted_branches() -> None:
         if job.get("permissions", {}).get("packages") == "write"
     }
     assert write_capable_jobs == {"publish", "publish-manifest"}
-    assert publish["permissions"] == {"contents": "read", "packages": "write"}
+    assert publish["permissions"] == {
+        "actions": "read",
+        "contents": "read",
+        "packages": "write",
+    }
     manifest = workflow["jobs"]["publish-manifest"]
     assert manifest["permissions"] == {"contents": "read", "packages": "write"}
     assert _normalized_expression(publish["if"]) == (
@@ -111,7 +115,8 @@ def test_images_publish_authority_is_push_only_on_trusted_branches() -> None:
         "(github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && "
         "needs.plan.outputs.gate_mode == 'full' && "
         "needs.plan.outputs.required == 'true' && "
-        "needs.plan.outputs.images != '[]'"
+        "needs.plan.outputs.images != '[]' && "
+        "needs.resolve-candidate.result == 'success'"
     )
     assert _checkout_steps(publish)
     assert all(
@@ -170,8 +175,16 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
     workflow = _workflow(".github/workflows/images.yml")
     jobs = workflow["jobs"]
 
-    assert set(jobs) == {"plan", "build", "publish", "publish-manifest", "images-gate"}
-    for job_name in ("plan", "build", "images-gate"):
+    assert set(jobs) == {
+        "plan",
+        "build",
+        "candidate-index",
+        "resolve-candidate",
+        "publish",
+        "publish-manifest",
+        "images-gate",
+    }
+    for job_name in ("plan", "build", "candidate-index", "images-gate"):
         effective = jobs[job_name].get("permissions", workflow["permissions"])
         assert effective == {"contents": "read"}
         assert "environment" not in jobs[job_name]
@@ -179,6 +192,7 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
         assert all(value != "write" for value in effective.values())
 
     assert jobs["publish"]["permissions"] == {
+        "actions": "read",
         "contents": "read",
         "packages": "write",
     }
@@ -188,6 +202,12 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
     }
     assert "environment" not in jobs["publish"]
     assert "environment" not in jobs["publish-manifest"]
+    assert jobs["resolve-candidate"]["permissions"] == {
+        "actions": "read",
+        "contents": "read",
+        "pull-requests": "read",
+    }
+    assert all(value == "read" for value in jobs["resolve-candidate"]["permissions"].values())
 
 
 def test_images_secret_and_cache_authority_is_exact() -> None:
@@ -228,8 +248,7 @@ def test_untrusted_workflows_disable_setup_uv_cache_writes(workflow_path: str) -
         inputs = step.get("with", {})
         assert inputs.get("enable-cache") is True
         assert inputs.get("save-cache") == (
-            "${{ github.event_name != 'pull_request' && "
-            "github.event_name != 'merge_group' }}"
+            "${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}"
         )
     for job in workflow["jobs"].values():
         assert job.get("continue-on-error") is not True
@@ -353,8 +372,15 @@ def test_image_input_validation_rejects_shell_metacharacters_and_ambiguous_value
         "REF_NAME": "feature-safe" if job_name == "build" else "dev",
         "PR_NUMBER": "42" if job_name == "build" else "",
         "HEAD_SHA": "a" * 40,
+        "BASE_SHA": "b" * 40,
         "REPOSITORY_OWNER": "qianyi-sun",
         "GHCR_ACTOR": "qianyi-sun",
+        "CANDIDATE_AVAILABLE": "false",
+        "CANDIDATE_ARTIFACT": "",
+        "CANDIDATE_SOURCE_HEAD": "",
+        "CANDIDATE_SOURCE_RUN": "",
+        "ARCHIVE_SHA256": "",
+        "ARCHIVE_SIZE": "0",
         **_native_arch_env(),
     }
     env[field] = payload
@@ -424,8 +450,15 @@ def test_image_input_validation_accepts_actual_github_context_shapes(
             "REF_NAME": ref_name,
             "PR_NUMBER": pr_number,
             "HEAD_SHA": "a" * 40,
+            "BASE_SHA": "b" * 40,
             "REPOSITORY_OWNER": "qianyi-sun",
             "GHCR_ACTOR": "github-actions[bot]",
+            "CANDIDATE_AVAILABLE": "false",
+            "CANDIDATE_ARTIFACT": "",
+            "CANDIDATE_SOURCE_HEAD": "",
+            "CANDIDATE_SOURCE_RUN": "",
+            "ARCHIVE_SHA256": "",
+            "ARCHIVE_SIZE": "0",
             **_native_arch_env(),
         },
     )
