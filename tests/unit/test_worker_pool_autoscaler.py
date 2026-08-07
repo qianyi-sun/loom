@@ -2193,6 +2193,66 @@ async def test_apply_slurm_release_drained_cancels_jobs_after_drain() -> None:
     assert len(session.executed) == 5
 
 
+async def test_apply_slurm_release_drained_cancels_unlinked_job_by_hostname() -> None:
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    runner = _FakeSlurmRunner()
+    worker_id = uuid4()
+    policy = _policy_row()
+    worker = SimpleNamespace(
+        id=worker_id,
+        hostname="oldlab-1",
+        status="active",
+        last_seen_at=now,
+        drain_state="draining",
+    )
+    job = SimpleNamespace(
+        job_id="9002",
+        worker_id=None,
+        environment="production",
+        pool_name="oldlab",
+        nodelist="oldlab-1",
+        state="running",
+        slurm_state="RUNNING",
+        pending_reason=None,
+        finished_at=None,
+        updated_at=None,
+    )
+    session = _FakeSession(
+        [
+            _FakeResult(scalar=policy),
+            _FakeResult(scalars=[worker]),
+            _FakeResult(rows=[]),
+            _FakeResult(scalars=[job]),
+        ],
+    )
+
+    result = await _apply_slurm_release_drained(
+        cast(Any, session),
+        policy,
+        AutoscalerDecision(
+            action="release_drained",
+            reason="drain_complete",
+            desired_slots=6,
+            actual_slots=0,
+            pending_slots=0,
+            draining_slots=6,
+            occupied_slots=0,
+            queued_slots=0,
+            worker_ids_to_release=(str(worker_id),),
+        ),
+        runner=runner,
+        now=now,
+    )
+
+    assert runner.cancelled_job_ids == ["9002"]
+    assert job.state == "cancelled"
+    assert job.slurm_state == "CANCELLED"
+    assert job.pending_reason == "cancelled after autoscaler drain"
+    assert job.finished_at == now
+    assert result.blocked_reason is None
+    assert len(session.executed) == 5
+
+
 async def test_apply_slurm_release_drained_accepts_job_that_naturally_finished() -> None:
     now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
     worker_id = uuid4()

@@ -1418,7 +1418,7 @@ async def test_reconcile_releases_drained_slurm_worker_job(
         await engine.dispose()
 
 
-async def test_reconcile_does_not_cancel_unlinked_slurm_job_by_hostname(
+async def test_reconcile_cancels_unlinked_slurm_job_by_unique_hostname(
     postgres_url: str,
 ) -> None:
     engine = create_async_engine(postgres_url)
@@ -1507,7 +1507,7 @@ async def test_reconcile_does_not_cancel_unlinked_slurm_job_by_hostname(
             await s.commit()
 
         assert results[0].action == "release_drained"
-        assert runner.cancelled_job_ids == []
+        assert runner.cancelled_job_ids == ["9001"]
 
         async with session_factory() as s:
             worker = await s.get(Worker, worker_id)
@@ -1516,7 +1516,8 @@ async def test_reconcile_does_not_cancel_unlinked_slurm_job_by_hostname(
         assert worker is not None
         assert worker.drain_state == "drained"
         assert job.worker_id is None
-        assert job.state == "running"
+        assert job.state == "cancelled"
+        assert job.pending_reason == "cancelled after autoscaler drain"
     finally:
         await engine.dispose()
 

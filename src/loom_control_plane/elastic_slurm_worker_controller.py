@@ -55,6 +55,7 @@ _SAFE_JOB_NAME_RE = re.compile(r"[^A-Za-z0-9_-]+")
 _SAFE_SANDBOX_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 _CANDIDATE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _GPU_TRES_RE = re.compile(r"^gpu(?::[A-Za-z0-9_.-]+)?:(?P<count>[1-9][0-9]*)$")
+_SAFE_OUTPUT_DIR_RE = re.compile(r"^/[A-Za-z0-9._/-]+$")
 
 
 @dataclass(frozen=True)
@@ -103,6 +104,7 @@ class ElasticSlurmWorkerControllerConfig:
     candidate_sha: str = ""
     gpu_tres: str = ""
     requested_gpus: int = 0
+    job_output_dir: str = ""
 
 
 @dataclass(frozen=True)
@@ -271,6 +273,7 @@ def build_controller_config(
     job_pids_max: int = 0,
     candidate_sha: str = "",
     gpu_tres: str = "",
+    job_output_dir: str = "",
 ) -> ElasticSlurmWorkerControllerConfig | None:
     if not enabled:
         return None
@@ -328,6 +331,12 @@ def build_controller_config(
     if candidate_sha and _CANDIDATE_SHA_RE.fullmatch(candidate_sha) is None:
         raise ValueError("candidate_sha must be a 40-character lowercase Git SHA")
     gpu_tres, requested_gpus = _parse_gpu_tres(gpu_tres)
+    job_output_dir = job_output_dir.strip().rstrip("/")
+    if job_output_dir and (
+        _SAFE_OUTPUT_DIR_RE.fullmatch(job_output_dir) is None
+        or ".." in Path(job_output_dir).parts
+    ):
+        raise ValueError("job_output_dir must be a safe absolute directory")
     if exclusive:
         raise ValueError(
             "exclusive Loom Slurm workers are unsupported; configure exclusive=false "
@@ -393,6 +402,7 @@ def build_controller_config(
         candidate_sha=candidate_sha,
         gpu_tres=gpu_tres,
         requested_gpus=requested_gpus,
+        job_output_dir=job_output_dir,
     )
 
 
@@ -638,6 +648,10 @@ def build_sbatch_request(
         "ALL",
         f"LOOM_WORKER_MAX_CONCURRENT={config.requested_concurrency}",
         f"LOOM_WORKER_POOL_NAME={config.pool_name}",
+        # Bind the worker identity to the canonical Slurm node selected by the
+        # actuator.  Docker's generated hostname is a container ID, which
+        # cannot be matched to the owning Slurm job during safe drain/release.
+        f"LOOM_WORKER_HOSTNAME={node}",
         f"LOOM_REMOTE_WORKER_ENV_FILE={config.env_file}",
         f"LOOM_REMOTE_WORKER_REPO_DIR={config.repo_dir}",
         f"LOOM_WORKER_SANDBOX_IDENTITY={sandbox_identity}",
@@ -668,6 +682,8 @@ def build_sbatch_request(
         f"--job-name={f'loom-{sandbox_identity}-{candidate_label}-{job_node}'[:128]}",
         f"--nodelist={node}",
     ]
+    if config.job_output_dir:
+        args.append(f"--output={config.job_output_dir}/slurm-%j.out")
     if config.exclusive:
         raise ValueError(
             "exclusive Loom Slurm workers are unsupported; use exclusive=false",

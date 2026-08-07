@@ -109,7 +109,10 @@ SYSCTL_PATH = Path("/etc/sysctl.d/90-loom-staging-rollout.conf")
 KUBECONFIG_PATH = STATE_ROOT / "kubeconfig"
 PREFLIGHT_CREDENTIAL_ROOT = STATE_ROOT / "credentials"
 REHEARSAL_STATE_ROOT = STATE_ROOT / "rehearsals"
-ROOT_KUBECONFIG = Path("/root/.kube/config")
+# The staging authority moved from the retired kind context to k3s.  Always
+# export from k3s' fixed root-owned source so a stale operator current-context
+# cannot silently reinstall credentials for the old cluster.
+ROOT_KUBECONFIG = Path("/etc/rancher/k3s/k3s.yaml")
 ROOT_KUBECONFIG_SNAPSHOT_PARENT = Path("/root")
 SERVICE_KEY = STATE_ROOT / "gb10-deploy-ed25519"
 INSTALL_RECORD = Path("/etc/loom/staging-rollout.install.json")
@@ -1270,7 +1273,10 @@ def _read_root_kubeconfig_source() -> bytes:
             not stat.S_ISREG(before.st_mode)
             or before.st_uid != 0
             or before.st_gid != 0
-            or stat.S_IMODE(before.st_mode) != 0o600
+            # k3s defaults this fixed root-owned file to 0644; installations
+            # hardened to 0600 are accepted as well.  No writable group/other
+            # mode is allowed.
+            or stat.S_IMODE(before.st_mode) not in {0o600, 0o644}
             or before.st_nlink != 1
             or before.st_size <= 0
             or before.st_size > _MAX_KUBECONFIG_BYTES
@@ -3413,8 +3419,6 @@ class HostSystem:
                     "view",
                     "--raw",
                     "--minify",
-                    "--context",
-                    "loom-staging",
                 ]
             )
         if not result.stdout.strip():
