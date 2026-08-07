@@ -128,6 +128,45 @@ def test_action_rejects_unknown_jobs_and_tampered_oldlab_slots(tmp_path: Path) -
         action.validate_assignment(request_value, response)
 
 
+def test_poll_accepts_only_the_exact_digest_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    action = _module()
+    environment = _environment(tmp_path, mode="oldlab-preferred-v1")
+    request_value = action.prepare(environment, tmp_path / "request-output")
+    request = leases.RouteRequest.from_mapping(request_value)
+    broker = leases.CiRunnerLeaseBroker(tmp_path / "leases.sqlite3", _config())
+    response = broker.allocate_route(request).public_dict()
+    response["oldlab_eligible"] = True
+    external_id = (
+        f"{action.CHECK_PREFIX}:{request.workflow_id}:{request.workflow_run_id}:"
+        f"{request.run_attempt}:{action._canonical_sha(request_value)}"
+    )
+    payload = {
+        "check_runs": [
+            {
+                "external_id": external_id,
+                "status": "completed",
+                "conclusion": "success",
+                "output": {"summary": json.dumps(response, sort_keys=True, separators=(",", ":"))},
+            }
+        ]
+    }
+    monkeypatch.setattr(action, "_get_json", lambda _url, _token: payload)
+    poll_output = tmp_path / "poll-output"
+
+    routes = action.poll(
+        {
+            "GITHUB_TOKEN": "opaque-token",
+            "ROUTE_REQUEST_PATH": environment["ROUTE_REQUEST_PATH"],
+        },
+        poll_output,
+    )
+
+    assert list(routes) == request_value["job_keys"]
+    assert poll_output.read_text(encoding="utf-8").startswith("routes={")
+
+
 def test_composite_action_pins_artifact_upload_and_exposes_only_routes() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     action = yaml.safe_load(
