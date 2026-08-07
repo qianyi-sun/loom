@@ -25,7 +25,13 @@ SLURM_ACCOUNT = "loom-staging"
 SLURM_QOS = "loom-staging"
 CLUSTER_NAME = "trt-gb10"
 CONTROLLER_HOST = "gx10-01c7"
-NODES = tuple(f"trt-gb10-{index}" for index in range(1, 16))
+# The shared Slurm partition moved node 10 to ``debug`` for shard scheduling
+# and replaced it with node 16.  The retired direct-agent fleet remains the
+# original 1-15 host inventory, so keep those authorities distinct.
+SLURM_NODES = tuple(
+    f"trt-gb10-{index}" for index in (*range(1, 10), *range(11, 17))
+)
+LEGACY_AGENT_NODES = tuple(f"trt-gb10-{index}" for index in range(1, 16))
 CANDIDATE_ROOT = Path("/opt/loom-staging-runner/candidates")
 INSTALLED_PATH = Path("/usr/local/libexec/loom-gb10-slurm-acceptance-authority")
 STATE_ROOT = Path("/var/lib/loom-gb10-slurm-authority")
@@ -126,12 +132,12 @@ def _load_contract(candidate_sha: str, image_tag: str) -> dict[str, Any]:
         or policy.get("min_slots") != 0
         or policy.get("max_slots") != 150
         or any(config.get(key) != value for key, value in expected_config.items())
-        or config.get("allowed_nodes") != list(NODES)
+        or config.get("allowed_nodes") != list(SLURM_NODES)
     ):
         raise AcceptanceError("GB10 Slurm policy does not match the accepted contract")
     desired = _one_row(profile.get("gb10_worker_pool_desired_states"), pool_name="gb10")
     if desired.get("target_slots") != 0 or desired.get("host_intents") != {
-        node: "stopped" for node in NODES
+        node: "stopped" for node in LEGACY_AGENT_NODES
     }:
         raise AcceptanceError("legacy GB10 node-agent authority is not retired")
     prerequisites = profile.get("external_slurm_runner_prerequisites")
@@ -355,7 +361,7 @@ def _probe_nodes(
 ) -> tuple[list[str], list[str]]:
     passed: list[str] = []
     deferred_busy: list[str] = []
-    for index, node in enumerate(NODES, start=1):
+    for index, node in enumerate(SLURM_NODES, start=1):
         node_config = _run(["/usr/bin/scontrol", "show", "node", node, "-o"]).stdout
         if re.search(r"(?:^| )Partitions=[^ ]*\bgb10\b", node_config) is None:
             raise AcceptanceError(f"canonical node is outside GB10 partition: {node}")
@@ -466,8 +472,8 @@ def main() -> int:
             "account": SLURM_ACCOUNT,
             "qos": SLURM_QOS,
         },
-        "nodes": list(NODES),
-        "node_count": len(NODES),
+        "nodes": list(SLURM_NODES),
+        "node_count": len(SLURM_NODES),
         "probed_nodes": probed_nodes,
         "probed_node_count": len(probed_nodes),
         "deferred_busy_nodes": deferred_busy_nodes,

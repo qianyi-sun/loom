@@ -140,6 +140,7 @@ def _external_worker_summary(
                 "enabled": policy.get("enabled", False),
                 "disabled_reason": policy.get("disabled_reason"),
                 "external_runner": bool(actuator_config.get("external_runner")),
+                "allowed_nodes": actuator_config.get("allowed_nodes"),
                 "env_file": actuator_config.get("env_file"),
                 "repo_dir": actuator_config.get("repo_dir"),
             }

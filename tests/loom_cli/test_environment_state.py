@@ -2211,7 +2211,21 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
     assert gb10_policy["actuator_config"]["cpu_arch"] == "arm64"
     assert gb10_policy["actuator_config"]["partition"] == "gb10"
     assert gb10_policy["actuator_config"]["allowed_nodes"] == [
-        f"trt-gb10-{index}" for index in range(1, 16)
+        "trt-gb10-1",
+        "trt-gb10-2",
+        "trt-gb10-3",
+        "trt-gb10-4",
+        "trt-gb10-5",
+        "trt-gb10-6",
+        "trt-gb10-7",
+        "trt-gb10-8",
+        "trt-gb10-9",
+        "trt-gb10-11",
+        "trt-gb10-12",
+        "trt-gb10-13",
+        "trt-gb10-14",
+        "trt-gb10-15",
+        "trt-gb10-16",
     ]
     assert gb10_policy["actuator_config"]["max_jobs"] == 15
     assert (

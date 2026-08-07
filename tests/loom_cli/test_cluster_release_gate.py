@@ -5,12 +5,14 @@ import hashlib
 import json
 import subprocess
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from loom_cli.__main__ import main
-from loom_cli.cluster_cmd import _load_root_owned_external_slurm_authority
+from loom_cli.cluster_cmd import _load_root_owned_external_slurm_authority, render_manifests
+from loom_cli.cluster_config import load_cluster_config
 from loom_cli.cluster_release_gate import (
     ReleaseGateCheck,
     ReleaseGateReport,
@@ -22,6 +24,13 @@ from loom_cli.cluster_release_gate import (
     query_live_alembic_heads,
     release_gate_report_to_dict,
 )
+from loom_cli.cluster_release_manifest import build_release_manifest
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+STAGING_GB10_NODES = [
+    *[f"trt-gb10-{index}" for index in range(1, 10)],
+    *[f"trt-gb10-{index}" for index in range(11, 17)],
+]
 
 
 class _Spec:
@@ -221,6 +230,42 @@ def _external_gb10_workers(*, enabled: bool) -> dict[str, Any]:
     return workers
 
 
+def _valid_gb10_authority(
+    manifest: dict[str, Any],
+    *,
+    nodes: list[str] | None = None,
+) -> dict[str, Any]:
+    if nodes is None:
+        nodes = STAGING_GB10_NODES
+    generated_at = datetime.now(UTC)
+    return {
+        "schema_version": 1,
+        "kind": "loom_gb10_slurm_acceptance",
+        "result": "pass",
+        "candidate_sha": manifest["release"]["git_sha"],
+        "candidate_tree": "c" * 40,
+        "profile_sha256": manifest["external_workers"]["environment_state_file"][
+            "sha256"
+        ],
+        "cluster_name": "trt-gb10",
+        "controller_host": "gx10-01c7",
+        "service_identity": {
+            "user": "loom-rollout",
+            "uid": 995,
+            "gid": 2007,
+            "account": "loom-staging",
+            "qos": "loom-staging",
+        },
+        "nodes": nodes,
+        "node_count": len(nodes),
+        "probed_nodes": nodes[1:],
+        "probed_node_count": len(nodes) - 1,
+        "deferred_busy_nodes": nodes[:1],
+        "generated_at": generated_at.isoformat(),
+        "expires_at": (generated_at + timedelta(minutes=15)).isoformat(),
+    }
+
+
 def test_release_gate_passes_for_fail_closed_external_gb10() -> None:
     check = _external_slurm_acceptance_check(
         _manifest(external_workers=_external_gb10_workers(enabled=False))
@@ -273,9 +318,27 @@ def test_release_gate_rejects_gb10_supervisor_activation_without_policy() -> Non
     assert "gb10_node_agent_authority_not_retired" in check.evidence["blockers"]
 
 
-def test_release_gate_accepts_exact_candidate_fifteen_node_authority() -> None:
+def test_release_gate_accepts_exact_candidate_partition_node_authority() -> None:
     manifest = _manifest(external_workers=_external_gb10_workers(enabled=True))
     manifest["external_workers"]["environment_state_file"] = {"sha256": "b" * 64}
+    partition_nodes = [
+        "trt-gb10-1",
+        "trt-gb10-2",
+        "trt-gb10-3",
+        "trt-gb10-4",
+        "trt-gb10-5",
+        "trt-gb10-6",
+        "trt-gb10-7",
+        "trt-gb10-8",
+        "trt-gb10-9",
+        "trt-gb10-11",
+        "trt-gb10-12",
+        "trt-gb10-13",
+        "trt-gb10-14",
+        "trt-gb10-15",
+        "trt-gb10-16",
+    ]
+    manifest["external_workers"]["slurm_pools"][0]["allowed_nodes"] = partition_nodes
     generated_at = datetime.now(UTC)
 
     check = _external_slurm_acceptance_check(
@@ -296,9 +359,9 @@ def test_release_gate_accepts_exact_candidate_fifteen_node_authority() -> None:
                 "account": "loom-staging",
                 "qos": "loom-staging",
             },
-            "nodes": [f"trt-gb10-{index}" for index in range(1, 16)],
+            "nodes": partition_nodes,
             "node_count": 15,
-            "probed_nodes": [f"trt-gb10-{index}" for index in range(2, 16)],
+            "probed_nodes": partition_nodes[1:],
             "probed_node_count": 14,
             "deferred_busy_nodes": ["trt-gb10-1"],
             "generated_at": generated_at.isoformat(),
@@ -309,6 +372,73 @@ def test_release_gate_accepts_exact_candidate_fifteen_node_authority() -> None:
     assert check is not None
     assert check.outcome == "pass"
     assert check.evidence["authority_verified"] is True
+
+
+def test_committed_staging_manifest_carries_partition_authority_into_release_gate() -> None:
+    config_path = REPO_ROOT / "deploy/environments/staging.multinode.cluster.toml"
+    environment_state_path = REPO_ROOT / "deploy/environment-state/staging.toml"
+    config = load_cluster_config(config_path)
+    manifest = build_release_manifest(
+        config=config,
+        config_path=config_path,
+        rendered_manifests=render_manifests(config),
+        environment="staging",
+        image_tag="staging-abc123",
+        git_sha="a" * 40,
+        environment_state_path=environment_state_path,
+        env_config_version="staging-abc123",
+    )
+
+    check = _external_slurm_acceptance_check(
+        manifest,
+        authority_artifact=_valid_gb10_authority(manifest),
+    )
+
+    assert manifest["external_workers"]["slurm_pools"][0]["allowed_nodes"] == (
+        STAGING_GB10_NODES
+    )
+    assert check is not None
+    assert check.outcome == "pass"
+    assert check.evidence["authority_verified"] is True
+
+
+def test_release_gate_rejects_malformed_partition_node_inventory() -> None:
+    manifest = _manifest(external_workers=_external_gb10_workers(enabled=True))
+    manifest["external_workers"]["slurm_pools"][0]["allowed_nodes"] = [
+        {"node": "trt-gb10-1"}
+    ] * 15
+
+    check = _external_slurm_acceptance_check(manifest)
+
+    assert check is not None
+    assert check.outcome == "fail"
+    assert check.evidence["authority_verified"] is False
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("schema_version", True),
+        ("node_count", 15.0),
+        ("probed_node_count", 14.0),
+    ],
+)
+def test_release_gate_rejects_non_integer_authority_counts(
+    field: str,
+    value: object,
+) -> None:
+    manifest = _manifest(external_workers=_external_gb10_workers(enabled=True))
+    workers = manifest["external_workers"]
+    workers["environment_state_file"] = {"sha256": "b" * 64}
+    workers["slurm_pools"][0]["allowed_nodes"] = STAGING_GB10_NODES
+    artifact = _valid_gb10_authority(manifest)
+    artifact[field] = value
+
+    check = _external_slurm_acceptance_check(manifest, authority_artifact=artifact)
+
+    assert check is not None
+    assert check.outcome == "fail"
+    assert check.evidence["authority_verified"] is False
 
 
 def test_release_gate_rejects_authority_with_forged_node_inventory() -> None:
