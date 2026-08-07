@@ -753,6 +753,12 @@ Already accepted grants remain usable only for their bounded grace lease. No
 component may exceed the last accepted capacity. When local admission expires,
 new claims stop; executors cancel pending work and drain when able.
 
+Proposal acceptance and authority expiry use management-database time. Local
+consumers also bound a lease by monotonic elapsed time since receipt and reject
+timestamps outside the configured clock-skew envelope. Clock disagreement may
+stop work early or delay a local fence within that envelope, but it can never
+release central capacity; terminal executor evidence is still required.
+
 The manager does not reuse any capacity while its release state is unknown.
 The management service and PostgreSQL authority must therefore run outside the
 managed worker pools with production-grade availability.
@@ -952,6 +958,7 @@ Tests must cover:
 - pending cancellation failure;
 - partial worker concurrency;
 - stale, missing, or regressing observations;
+- database/local clock skew and monotonic lease expiry;
 - terminal proof; and
 - authority-incarnation recovery after database restore.
 
