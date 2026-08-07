@@ -42,8 +42,11 @@
       "name": "language-bootstrap",
       "actions": ["actions/setup-go", "actions/setup-node"],
       "compatibility_tests": [
-        "uv run --no-sync pytest -q tests/ops/test_ci_upgrade_policy.py",
-        "actionlint .github/workflows/*.yml"
+        "uv run --no-sync pytest -q tests/ops/test_ci_action_pins.py tests/ops/test_ci_upgrade_policy.py",
+        "actionlint .github/workflows/ci.yml",
+        "test -z \"$(gofmt -l ./cmd/)\"",
+        "go vet ./cmd/...",
+        "go test -race ./cmd/..."
       ],
       "rollback": {
         "actions/setup-go": {
