@@ -199,6 +199,10 @@ def _installer(tmp_path: Path) -> tuple[PreflightCredentialInstaller, Runner]:
     return installer, runner
 
 
+def test_default_root_kubeconfig_is_the_host_k3s_authority() -> None:
+    assert CredentialPaths().root_kubeconfig == Path("/etc/rancher/k3s/k3s.yaml")
+
+
 def test_install_applies_exact_authority_and_publishes_no_secret_evidence(
     tmp_path: Path,
 ) -> None:
@@ -209,6 +213,20 @@ def test_install_applies_exact_authority_and_publishes_no_secret_evidence(
     assert result["ok"] is True
     assert len(result["changed"]) == 5
     assert installer.check()["ok"] is True
+    source_command = next(
+        command
+        for command, _stdin in runner.calls
+        if "config" in command and "view" in command
+    )
+    assert source_command == (
+        "kubectl",
+        "--kubeconfig",
+        str(installer.paths.root_kubeconfig),
+        "config",
+        "view",
+        "--raw",
+        "--minify",
+    )
     assert sum("apply" in command for command, _ in runner.calls) == 2
     assert sum("token" in command for command, _ in runner.calls) == 2
     database_calls = [

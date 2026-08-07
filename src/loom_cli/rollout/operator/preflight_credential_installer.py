@@ -49,7 +49,7 @@ from loom_cli.rollout.readonly_minio_bootstrap import (
     readonly_minio_policy_digest,
 )
 
-_ROOT_KUBECONFIG = Path("/root/.kube/config")
+_ROOT_KUBECONFIG = Path("/etc/rancher/k3s/k3s.yaml")
 _RUNNER_REPO = Path("/opt/loom-staging-runner/source")
 _READONLY_MANIFEST = _RUNNER_REPO / "deploy/k8s/staging-rollout-readonly.yaml"
 _REHEARSAL_MANIFEST = _RUNNER_REPO / "deploy/k8s/staging-rollout-rehearsal-authority.yaml"
@@ -840,8 +840,6 @@ class PreflightCredentialInstaller:
                 "view",
                 "--raw",
                 "--minify",
-                "--context",
-                "loom-staging",
             ),
             timeout=30,
         )
