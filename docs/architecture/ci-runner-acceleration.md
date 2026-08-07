@@ -33,15 +33,20 @@ The first migration slice covers:
 
 - lint/static, root test shards, package tests, runtime payload, Go, and web;
 - fast and Docker integration;
-- untrusted multi-architecture image builds;
+- untrusted AMD64 image builds (ARM64 builds use native GitHub-hosted ARM);
 - the mutation-free live-k3s render contract, manifest-owned system smoke, and
   deploy spikes.
 
 Planning, aggregation, protected gate publication, and trusted image publishing
-remain on GitHub-hosted runners. The Linux ARM locked-environment check also
-remains GitHub-hosted. Small setup-dominated jobs can remain hosted when moving
-them would consume accelerator capacity without reducing the workflow critical
-path.
+remain on GitHub-hosted runners. Image validation is architecture-aware: AMD64
+uses the accepted oldlab image class when its route is active, while ARM64 uses
+`ubuntu-24.04-arm` and never waits behind or consumes an x86_64 KVM slot. Trusted
+pushes build both architectures on matching GitHub-hosted CPUs, publish
+head-and-architecture tags, then join and verify exactly `linux/amd64` and
+`linux/arm64` in a separate manifest job. The Linux ARM locked-environment check
+also remains GitHub-hosted. Small setup-dominated jobs can remain hosted when
+moving them would consume accelerator capacity without reducing the workflow
+critical path.
 
 Changing the variable changes only placement. It must never change the job
 steps, selected test paths, permissions, timeout, protected context, image
@@ -138,10 +143,14 @@ runner.
 
 `scripts/ops/ci_runner_capacity_metrics.py` collects exact Actions job attempts
 and reports queue (`created_at` to `started_at`), execution (`started_at` to
-`completed_at`), failure count, and total runner-active seconds by both work
-class and runner class. Planner, aggregator, publisher, and skipped jobs are
-excluded by an explicit workflow/job-name contract. Missing timestamps,
-unsupported workflows, negative durations, and non-terminal jobs fail closed.
+`completed_at`), failure count, and total runner-active seconds by work class,
+runner class, and image CPU architecture. Legacy `(multi-arch)` jobs are reported
+as `emulated_multi_arch`; native jobs must be named `(linux/amd64)` or
+`(linux/arm64)`. `--require-native-architectures` fails unless both native
+architectures have terminal, failure-free evidence and no emulated job remains.
+Planner, aggregator, publisher, and skipped jobs are excluded by an explicit
+workflow/job-name contract. Missing timestamps, unsupported workflows, negative
+durations, and non-terminal jobs fail closed.
 
 The final pre-isolation attempt for PR #1156 used the shared classless pool:
 
@@ -167,6 +176,29 @@ uv run --no-sync python scripts/ops/ci_runner_capacity_metrics.py \
   --run cluster-smoke:30950714243 \
   --run staging-smoke:30950719444
 ```
+
+For Track 4 evidence, provide the same exact image workflow attempt and add
+`--require-native-architectures`. Preserve the `by_architecture` and
+`by_architecture_and_runner` sections so aggregate image time cannot hide an
+ARM64 queue or execution regression.
+
+The Track 4 hosted before-datum is images run `31050441797`, attempt 1, on head
+`97f22611af455eb27b462353c4a1257334dbc7f4`. Its eleven emulated multi-arch jobs
+had queue p50/p95/max `22/56/57s`, execution p50/p95/max `528/660/1858s`, and
+5,529 runner-active seconds. The architecture acceptance correctly fails that
+legacy sample because it contains no independently measurable native AMD64 or
+ARM64 job. Post-change acceptance must use an exact-head run with both native
+groups, zero failures, manifest verification, and separately reported queue,
+execution, and runner-active data.
+
+There is deliberately no automatic QEMU fallback. If the native ARM runner is
+unavailable, the ARM job stays queued or fails and `images-gate` remains
+non-successful. On trusted pushes, per-architecture staging tags cannot move the
+branch or short-SHA manifest tags: `publish-manifest` runs only after the entire
+native publish matrix succeeds, then rejects any platform set other than exactly
+`linux/amd64` plus `linux/arm64`. Rollback is a workflow revert followed by an
+exact-head rerun; do not weaken the gate, publish a partial manifest, or route a
+package-write job to the untrusted oldlab pool.
 
 For the post-activation controlled attempt, add `--require-bounded-wait`. It
 exits `3` unless every class has at least one terminal job, zero failures, and

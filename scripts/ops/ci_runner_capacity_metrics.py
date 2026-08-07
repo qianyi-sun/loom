@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure #1130 Track 3 queue and execution data by isolated work class."""
+"""Measure #1130 queue and execution data by work class and CPU architecture."""
 
 from __future__ import annotations
 
@@ -38,6 +38,7 @@ WORK_CLASS_THRESHOLDS = {"normal": 300, "image": 900, "smoke": 300}
 RUN_SPEC_RE = re.compile(
     r"^(CI|images|cluster-smoke|staging-smoke):([1-9][0-9]*)(?::([1-9][0-9]*))?$",
 )
+NATIVE_IMAGE_JOB_RE = re.compile(r"^.+ \(linux/(amd64|arm64)\)$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,12 +80,26 @@ def _job_is_in_scope(workflow: str, name: str) -> bool:
             or name.startswith("integration (")
         )
     if workflow == "images":
-        return name.endswith("(multi-arch)") and not name.startswith("publish ")
+        return (
+            (name.endswith("(multi-arch)") or NATIVE_IMAGE_JOB_RE.fullmatch(name))
+            and not name.startswith("publish ")
+        )
     if workflow == "cluster-smoke":
         return name.startswith("cluster contract (")
     if workflow == "staging-smoke":
         return name == "manifest-owned system smoke"
     raise MetricsError(f"unsupported workflow: {workflow}")
+
+
+def _job_architecture(workflow: str, name: str) -> str:
+    if workflow != "images":
+        return "not_applicable"
+    match = NATIVE_IMAGE_JOB_RE.fullmatch(name)
+    if match is not None:
+        return match.group(1)
+    if name.endswith("(multi-arch)"):
+        return "emulated_multi_arch"
+    raise MetricsError(f"image job has no architecture identity: {name}")
 
 
 def _label_names(job: Mapping[str, Any]) -> set[str]:
@@ -195,6 +210,7 @@ def summarize_runs(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
                     "workflow": workflow,
                     "work_class": work_class,
                     "runner_class": _runner_class(job),
+                    "architecture": _job_architecture(workflow, name),
                     "run_id": run_id,
                     "attempt": attempt,
                     "name": name,
@@ -218,9 +234,12 @@ def summarize_runs(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 
     grouped: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
     by_work_class: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    by_architecture: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for row in rows:
         grouped[(str(row["work_class"]), str(row["runner_class"]))].append(row)
         by_work_class[str(row["work_class"])].append(row)
+        if row["work_class"] == "image":
+            by_architecture[str(row["architecture"])].append(row)
 
     class_summary: dict[str, Any] = {}
     for work_class, threshold in WORK_CLASS_THRESHOLDS.items():
@@ -233,7 +252,7 @@ def summarize_runs(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         class_summary[work_class] = metrics
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "head_sha": next(iter(head_shas), None),
         "observed_runs": observed_runs,
         "jobs": rows,
@@ -242,6 +261,51 @@ def summarize_runs(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             f"{work_class}/{runner_class}": _metric_summary(group_rows)
             for (work_class, runner_class), group_rows in sorted(grouped.items())
         },
+        "by_architecture": {
+            architecture: _metric_summary(architecture_rows)
+            for architecture, architecture_rows in sorted(by_architecture.items())
+        },
+        "by_architecture_and_runner": {
+            f"{architecture}/{runner_class}": _metric_summary(architecture_rows)
+            for architecture, rows_for_architecture in sorted(by_architecture.items())
+            for runner_class in sorted(
+                {str(row["runner_class"]) for row in rows_for_architecture}
+            )
+            if (
+                architecture_rows := [
+                    row
+                    for row in rows_for_architecture
+                    if row["runner_class"] == runner_class
+                ]
+            )
+        },
+    }
+
+
+def evaluate_native_architectures(summary: Mapping[str, Any]) -> dict[str, Any]:
+    architectures = summary.get("by_architecture")
+    if not isinstance(architectures, Mapping):
+        raise MetricsError("summary is missing architecture metrics")
+    criteria: dict[str, Any] = {}
+    for architecture in ("amd64", "arm64"):
+        metrics = architectures.get(architecture)
+        jobs = metrics.get("jobs") if isinstance(metrics, Mapping) else None
+        failures = metrics.get("failures") if isinstance(metrics, Mapping) else None
+        criteria[architecture] = {
+            "jobs": jobs,
+            "failures": failures,
+            "passed": isinstance(jobs, int) and jobs > 0 and failures == 0,
+        }
+    emulated = architectures.get("emulated_multi_arch")
+    emulated_jobs = emulated.get("jobs", 0) if isinstance(emulated, Mapping) else 0
+    return {
+        "status": (
+            "pass"
+            if all(item["passed"] for item in criteria.values()) and emulated_jobs == 0
+            else "fail"
+        ),
+        "criteria": criteria,
+        "emulated_multi_arch_jobs": emulated_jobs,
     }
 
 
@@ -313,6 +377,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--repository", required=True)
     parser.add_argument("--run", dest="runs", action="append", type=parse_run_spec)
     parser.add_argument("--require-bounded-wait", action="store_true")
+    parser.add_argument("--require-native-architectures", action="store_true")
     parser.add_argument(
         "--api-url",
         default=os.environ.get("GITHUB_API_URL", "https://api.github.com"),
@@ -354,13 +419,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         summary = summarize_runs(records)
         acceptance = evaluate_bounded_wait(summary)
+        native_architectures = evaluate_native_architectures(summary)
     except (MetricsError, argparse.ArgumentTypeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     summary["bounded_wait_acceptance"] = acceptance
+    summary["native_architecture_acceptance"] = native_architectures
     summary["generated_at"] = datetime.now(UTC).isoformat()
     print(json.dumps(summary, sort_keys=True, indent=2))
-    return 3 if args.require_bounded_wait and acceptance["status"] != "pass" else 0
+    if args.require_bounded_wait and acceptance["status"] != "pass":
+        return 3
+    if args.require_native_architectures and native_architectures["status"] != "pass":
+        return 4
+    return 0
 
 
 if __name__ == "__main__":

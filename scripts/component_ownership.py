@@ -831,6 +831,22 @@ def release_image_matrix(manifest: Manifest) -> tuple[dict[str, str], ...]:
     )
 
 
+def native_release_image_matrix(
+    images: tuple[dict[str, str], ...],
+) -> tuple[dict[str, str], ...]:
+    """Expand selected images into deterministic native architecture builds."""
+
+    architectures = (
+        {"architecture": "amd64", "platform": "linux/amd64"},
+        {"architecture": "arm64", "platform": "linux/arm64"},
+    )
+    return tuple(
+        {**image, **architecture}
+        for image in images
+        for architecture in architectures
+    )
+
+
 def release_images_for_runtime_policy(
     manifest: Manifest,
     *,
@@ -1169,8 +1185,13 @@ def main(argv: list[str] | None = None) -> int:
                 fallback_all=args.fallback_all,
             )
             payload = json.dumps(matrix, separators=(",", ":"))
+            native_payload = json.dumps(
+                native_release_image_matrix(matrix),
+                separators=(",", ":"),
+            )
             with args.github_output.open("a", encoding="utf-8") as handle:
                 handle.write(f"images={payload}\n")
+                handle.write(f"native_builds={native_payload}\n")
                 handle.write(f"required={str(bool(matrix)).lower()}\n")
             print(f"selected_images={payload}")
             return 0

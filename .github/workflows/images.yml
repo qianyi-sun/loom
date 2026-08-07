@@ -59,8 +59,10 @@ run-name: >-
 # Dockerfile, build context, and source-path selection; this workflow contains
 # no editable image allowlist.
 #
-# Why multi-arch: cluster-deploy target includes ASUS Ascent GX10
-# (ARM v9.2-A). See docs/architecture/cluster-deploy.md.
+# Why native multi-arch: cluster-deploy target includes ASUS Ascent GX10
+# (ARM v9.2-A). See docs/architecture/cluster-deploy.md. AMD64 and ARM64 are
+# built on matching CPUs; trusted push jobs publish per-architecture tags and a
+# separate job joins and verifies the manifest list.
 #
 # Implementation note: we don't use docker/setup-qemu-action +
 # docker/setup-buildx-action + docker/build-push-action because the
@@ -69,9 +71,8 @@ run-name: >-
 # them is `uses:`-d — originally observed on the pre-2026-06-26
 # carinrc/loom org, kept as a precaution on qianyi-sun/loom until
 # the policy is re-audited). Instead we drive `docker buildx`
-# directly via the CLI (built into ubuntu-latest runners since Docker
-# 23) and pull `tonistiigi/binfmt` to install QEMU emulators — both
-# are plain docker operations, not marketplace actions.
+# directly via the CLI (built into the supported hosted images since Docker
+# 23). Native scheduling removes the binfmt/QEMU setup entirely.
 
 on:
   pull_request:
@@ -116,6 +117,7 @@ jobs:
       gate_mode: ${{ steps.required.outputs.gate_mode }}
       publisher_active: ${{ steps.required.outputs.publisher_active }}
       images: ${{ steps.plan.outputs.images }}
+      native_builds: ${{ steps.plan.outputs.native_builds }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
@@ -225,7 +227,7 @@ jobs:
           python3 scripts/component_ownership.py "${args[@]}"
 
   build:
-    name: ${{ matrix.image }} (multi-arch)
+    name: ${{ matrix.image }} (${{ matrix.platform }})
     needs: plan
     if: >-
       github.event_name != 'push' &&
@@ -233,14 +235,15 @@ jobs:
       needs.plan.outputs.required == 'true' &&
       needs.plan.outputs.images != '[]'
     runs-on: >-
-      ${{ fromJSON(vars.LOOM_CI_IMAGE_RUNS_ON || vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
+      ${{ matrix.architecture == 'arm64' && fromJSON('["ubuntu-24.04-arm"]') ||
+          fromJSON(vars.LOOM_CI_IMAGE_RUNS_ON || vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-24.04"]') }}
     timeout-minutes: 45
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.plan.outputs.images) }}
+        include: ${{ fromJSON(needs.plan.outputs.native_builds) }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
@@ -257,6 +260,8 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           PR_NUMBER: ${{ github.event.pull_request.number || '' }}
           HEAD_SHA: ${{ github.sha }}
+          ARCHITECTURE: ${{ matrix.architecture }}
+          PLATFORM: ${{ matrix.platform }}
         run: |
           set -euo pipefail
 
@@ -292,13 +297,16 @@ jobs:
               exit 1
               ;;
           esac
+          case "$(uname -m):$ARCHITECTURE:$PLATFORM" in
+            x86_64:amd64:linux/amd64 | aarch64:arm64:linux/arm64 | arm64:arm64:linux/arm64) ;;
+            *) echo "FAIL: runner architecture does not match the build platform" >&2; exit 1 ;;
+          esac
 
-      - name: Install QEMU + create buildx builder
-        # tonistiigi/binfmt is what docker/setup-qemu-action wraps;
-        # `docker buildx create --use` is what docker/setup-buildx-action
-        # wraps. No marketplace actions needed.
+      - name: Create native buildx builder
+        # `docker buildx create --use` is what docker/setup-buildx-action wraps.
+        # No marketplace action, privileged binfmt container, or QEMU emulator
+        # is needed because the runner CPU matches matrix.platform.
         run: |
-          docker run --privileged --rm tonistiigi/binfmt --install all
           buildx_args=(
             docker buildx create
             --name loom-builder
@@ -315,9 +323,7 @@ jobs:
           docker buildx inspect
 
       - name: Build without registry or cache write authority
-        # `docker buildx build` with explicit platforms. The buildx
-        # builder created above is the default; --platform triggers
-        # the cross-arch build via QEMU emulation.
+        # Each job builds exactly one platform on matching native hardware.
         shell: bash
         env:
           IMAGE_NAME: ${{ matrix.image }}
@@ -327,6 +333,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           PR_NUMBER: ${{ github.event.pull_request.number || '' }}
           HEAD_SHA: ${{ github.sha }}
+          PLATFORM: ${{ matrix.platform }}
         run: |
           set -euo pipefail
 
@@ -342,7 +349,7 @@ jobs:
           esac
           build_args=(
             docker buildx build
-            --platform "linux/amd64,linux/arm64"
+            --platform "$PLATFORM"
             --file "$DOCKERFILE"
             --tag "loom-ci-${IMAGE_DIGEST_NAME}:${image_tag}"
             --provenance=false
@@ -352,7 +359,7 @@ jobs:
           "${build_args[@]}"
 
   publish:
-    name: publish ${{ matrix.image }} (multi-arch)
+    name: publish ${{ matrix.image }} (${{ matrix.platform }})
     needs: plan
     if: >-
       github.event_name == 'push' &&
@@ -360,7 +367,7 @@ jobs:
       needs.plan.outputs.gate_mode == 'full' &&
       needs.plan.outputs.required == 'true' &&
       needs.plan.outputs.images != '[]'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.architecture == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 45
     permissions:
       contents: read
@@ -368,7 +375,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.plan.outputs.images) }}
+        include: ${{ fromJSON(needs.plan.outputs.native_builds) }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
@@ -386,6 +393,8 @@ jobs:
           HEAD_SHA: ${{ github.sha }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
           GHCR_ACTOR: ${{ github.actor }}
+          ARCHITECTURE: ${{ matrix.architecture }}
+          PLATFORM: ${{ matrix.platform }}
         run: |
           set -euo pipefail
 
@@ -415,11 +424,14 @@ jobs:
             echo "FAIL: invalid GHCR actor" >&2
             exit 1
           }
+          case "$(uname -m):$ARCHITECTURE:$PLATFORM" in
+            x86_64:amd64:linux/amd64 | aarch64:arm64:linux/arm64 | arm64:arm64:linux/arm64) ;;
+            *) echo "FAIL: runner architecture does not match the publish platform" >&2; exit 1 ;;
+          esac
 
-      - name: Install QEMU + create buildx builder
+      - name: Create native buildx builder
         run: |
           set -euo pipefail
-          docker run --privileged --rm tonistiigi/binfmt --install all
           docker buildx create --name loom-publisher --use --bootstrap
           docker buildx inspect
 
@@ -443,24 +455,120 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           HEAD_SHA: ${{ github.sha }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
+          ARCHITECTURE: ${{ matrix.architecture }}
+          PLATFORM: ${{ matrix.platform }}
         run: |
           set -euo pipefail
 
           owner_lower=$(printf '%s' "$REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
           image="ghcr.io/${owner_lower}/${IMAGE_DIGEST_NAME}"
-          sha_short="${HEAD_SHA:0:12}"
           build_args=(
             docker buildx build
-            --platform "linux/amd64,linux/arm64"
+            --platform "$PLATFORM"
             --file "$DOCKERFILE"
-            --tag "${image}:${sha_short}"
-            --tag "${image}:${REF_NAME}"
+            --tag "${image}:build-${HEAD_SHA}-${ARCHITECTURE}"
             --push
             --provenance=false
             --build-arg "LOOM_BUILD_SHA=${HEAD_SHA}"
           )
           build_args+=("$BUILD_CONTEXT")
           "${build_args[@]}"
+
+  publish-manifest:
+    name: publish ${{ matrix.image }} manifest
+    needs: [plan, publish]
+    if: >-
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') &&
+      needs.plan.outputs.gate_mode == 'full' &&
+      needs.plan.outputs.required == 'true' &&
+      needs.plan.outputs.images != '[]' &&
+      needs.publish.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.images) }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+
+      - name: Validate manifest inputs
+        shell: bash
+        env:
+          IMAGE_NAME: ${{ matrix.image }}
+          IMAGE_DIGEST_NAME: ${{ matrix.image_name }}
+          DOCKERFILE: ${{ matrix.dockerfile }}
+          BUILD_CONTEXT: ${{ matrix.context }}
+          REF_NAME: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          GHCR_ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          python3 scripts/component_ownership.py validate-image \
+            --image "$IMAGE_NAME" \
+            --image-name "$IMAGE_DIGEST_NAME" \
+            --dockerfile "$DOCKERFILE" \
+            --build-context "$BUILD_CONTEXT"
+          [[ "$REF_NAME" == "dev" || "$REF_NAME" == "main" ]] || exit 1
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$REPOSITORY_OWNER" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]] || exit 1
+          [[ ${#GHCR_ACTOR} -le 100 \
+            && "$GHCR_ACTOR" =~ ^[A-Za-z0-9][A-Za-z0-9-]*(\[bot\])?$ ]] || exit 1
+
+      - name: Log in to GHCR
+        shell: bash
+        env:
+          GHCR_ACTOR: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" \
+            | docker login ghcr.io --username "$GHCR_ACTOR" --password-stdin
+
+      - name: Join and verify native image manifest
+        shell: bash
+        env:
+          IMAGE_DIGEST_NAME: ${{ matrix.image_name }}
+          REF_NAME: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          owner_lower=$(printf '%s' "$REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          image="ghcr.io/${owner_lower}/${IMAGE_DIGEST_NAME}"
+          sha_short="${HEAD_SHA:0:12}"
+          docker buildx imagetools create \
+            --tag "${image}:${sha_short}" \
+            --tag "${image}:${REF_NAME}" \
+            "${image}:build-${HEAD_SHA}-amd64" \
+            "${image}:build-${HEAD_SHA}-arm64"
+          docker buildx imagetools inspect --raw "${image}:${sha_short}" \
+            > /tmp/loom-image-manifest.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          payload = json.loads(Path("/tmp/loom-image-manifest.json").read_text())
+          platforms = {
+              f"{platform['os']}/{platform['architecture']}"
+              for item in payload.get("manifests", [])
+              if isinstance((platform := item.get("platform")), dict)
+              and platform.get("os")
+              and platform.get("architecture")
+          }
+          expected = {"linux/amd64", "linux/arm64"}
+          if platforms != expected:
+              raise SystemExit(
+                  f"FAIL: manifest platforms {sorted(platforms)} != {sorted(expected)}"
+              )
+          PY
 
   images-gate:
     name: >-
@@ -473,7 +581,7 @@ jobs:
           'images-gate-filtered' }}
     runs-on: ubuntu-latest
     if: always()
-    needs: [plan, build, publish]
+    needs: [plan, build, publish, publish-manifest]
     steps:
       - name: Enforce selected image result
         env:
@@ -483,6 +591,7 @@ jobs:
           REQUIRED: ${{ needs.plan.outputs.required }}
           BUILD_RESULT: ${{ needs.build.result }}
           PUBLISH_RESULT: ${{ needs.publish.result }}
+          MANIFEST_RESULT: ${{ needs.publish-manifest.result }}
         run: |
           set -euo pipefail
           [[ "$PLAN_RESULT" == "success" ]] || exit 1
@@ -493,6 +602,7 @@ jobs:
           if [[ "$GATE_MODE" == "filtered" ]]; then
             [[ "$BUILD_RESULT" == "skipped" ]] || exit 1
             [[ "$PUBLISH_RESULT" == "skipped" ]] || exit 1
+            [[ "$MANIFEST_RESULT" == "skipped" ]] || exit 1
             exit 0
           fi
           case "$EVENT_NAME" in
@@ -507,11 +617,14 @@ jobs:
             if [[ "$EVENT_NAME" == "push" ]]; then
               [[ "$BUILD_RESULT" == "skipped" ]] || exit 1
               [[ "$PUBLISH_RESULT" == "success" ]] || exit 1
+              [[ "$MANIFEST_RESULT" == "success" ]] || exit 1
             else
               [[ "$BUILD_RESULT" == "success" ]] || exit 1
               [[ "$PUBLISH_RESULT" == "skipped" ]] || exit 1
+              [[ "$MANIFEST_RESULT" == "skipped" ]] || exit 1
             fi
           else
             [[ "$BUILD_RESULT" == "skipped" ]] || exit 1
             [[ "$PUBLISH_RESULT" == "skipped" ]] || exit 1
+            [[ "$MANIFEST_RESULT" == "skipped" ]] || exit 1
           fi

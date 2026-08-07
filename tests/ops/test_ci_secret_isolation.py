@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import platform
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,13 @@ def _named_step(job: dict[str, Any], name: str) -> dict[str, Any]:
 
 def _normalized_expression(value: str) -> str:
     return " ".join(value.split())
+
+
+def _native_arch_env() -> dict[str, str]:
+    machine = platform.machine().lower()
+    if machine in {"arm64", "aarch64"}:
+        return {"ARCHITECTURE": "arm64", "PLATFORM": "linux/arm64"}
+    return {"ARCHITECTURE": "amd64", "PLATFORM": "linux/amd64"}
 
 
 def _run_validation_step(
@@ -94,8 +102,10 @@ def test_images_publish_authority_is_push_only_on_trusted_branches() -> None:
         for job_name, job in workflow["jobs"].items()
         if job.get("permissions", {}).get("packages") == "write"
     }
-    assert write_capable_jobs == {"publish"}
+    assert write_capable_jobs == {"publish", "publish-manifest"}
     assert publish["permissions"] == {"contents": "read", "packages": "write"}
+    manifest = workflow["jobs"]["publish-manifest"]
+    assert manifest["permissions"] == {"contents": "read", "packages": "write"}
     assert _normalized_expression(publish["if"]) == (
         "github.event_name == 'push' && "
         "(github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && "
@@ -107,6 +117,20 @@ def test_images_publish_authority_is_push_only_on_trusted_branches() -> None:
     assert all(
         step.get("with", {}).get("persist-credentials") is False
         for step in _checkout_steps(publish)
+    )
+    assert _normalized_expression(manifest["if"]) == (
+        "github.event_name == 'push' && "
+        "(github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && "
+        "needs.plan.outputs.gate_mode == 'full' && "
+        "needs.plan.outputs.required == 'true' && "
+        "needs.plan.outputs.images != '[]' && "
+        "needs.publish.result == 'success'"
+    )
+    assert manifest["needs"] == ["plan", "publish"]
+    assert _checkout_steps(manifest)
+    assert all(
+        step.get("with", {}).get("persist-credentials") is False
+        for step in _checkout_steps(manifest)
     )
 
     login = _named_step(publish, "Log in to GHCR")
@@ -121,6 +145,14 @@ def test_images_publish_authority_is_push_only_on_trusted_branches() -> None:
     assert "build_args=(" in script
     assert '"${build_args[@]}"' in script
     assert "${{" not in script
+
+    manifest_script = "\n".join(_run_blocks(manifest))
+    assert "docker buildx imagetools create" in manifest_script
+    assert '"${image}:build-${HEAD_SHA}-amd64"' in manifest_script
+    assert '"${image}:build-${HEAD_SHA}-arm64"' in manifest_script
+    assert 'expected = {"linux/amd64", "linux/arm64"}' in manifest_script
+    assert "LOOM_CI_IMAGE_RUNS_ON" not in str(publish)
+    assert "LOOM_CI_IMAGE_RUNS_ON" not in str(manifest)
 
 
 def test_images_manual_dispatch_is_build_only() -> None:
@@ -138,7 +170,7 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
     workflow = _workflow(".github/workflows/images.yml")
     jobs = workflow["jobs"]
 
-    assert set(jobs) == {"plan", "build", "publish", "images-gate"}
+    assert set(jobs) == {"plan", "build", "publish", "publish-manifest", "images-gate"}
     for job_name in ("plan", "build", "images-gate"):
         effective = jobs[job_name].get("permissions", workflow["permissions"])
         assert effective == {"contents": "read"}
@@ -150,7 +182,12 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
         "contents": "read",
         "packages": "write",
     }
+    assert jobs["publish-manifest"]["permissions"] == {
+        "contents": "read",
+        "packages": "write",
+    }
     assert "environment" not in jobs["publish"]
+    assert "environment" not in jobs["publish-manifest"]
 
 
 def test_images_secret_and_cache_authority_is_exact() -> None:
@@ -163,7 +200,10 @@ def test_images_secret_and_cache_authority_is_exact() -> None:
         if isinstance(value, str) and "secrets." in value
     ]
 
-    assert secret_references == ["${{ secrets.GITHUB_TOKEN }}"]
+    assert secret_references == [
+        "${{ secrets.GITHUB_TOKEN }}",
+        "${{ secrets.GITHUB_TOKEN }}",
+    ]
     for job in workflow["jobs"].values():
         assert job.get("continue-on-error") is not True
         for step in job.get("steps", []):
@@ -315,6 +355,7 @@ def test_image_input_validation_rejects_shell_metacharacters_and_ambiguous_value
         "HEAD_SHA": "a" * 40,
         "REPOSITORY_OWNER": "qianyi-sun",
         "GHCR_ACTOR": "qianyi-sun",
+        **_native_arch_env(),
     }
     env[field] = payload
 
@@ -341,6 +382,7 @@ def test_image_input_validation_never_evaluates_command_substitution(
             "REF_NAME": "42/merge",
             "PR_NUMBER": "42",
             "HEAD_SHA": "a" * 40,
+            **_native_arch_env(),
         },
     )
 
@@ -384,6 +426,7 @@ def test_image_input_validation_accepts_actual_github_context_shapes(
             "HEAD_SHA": "a" * 40,
             "REPOSITORY_OWNER": "qianyi-sun",
             "GHCR_ACTOR": "github-actions[bot]",
+            **_native_arch_env(),
         },
     )
 

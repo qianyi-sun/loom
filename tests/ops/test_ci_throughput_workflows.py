@@ -165,7 +165,7 @@ GITHUB_HOSTED_CONTROL_JOBS = {
         "coverage-summary",
         "repository-checks",
     },
-    ".github/workflows/images.yml": {"plan", "publish", "images-gate"},
+    ".github/workflows/images.yml": {"plan", "images-gate"},
     ".github/workflows/cluster-smoke.yml": {"plan", "cluster-smoke-gate"},
     ".github/workflows/staging-smoke.yml": {"plan", "staging-smoke-gate"},
 }
@@ -176,6 +176,13 @@ def test_accelerated_jobs_use_isolated_work_class_with_legacy_and_hosted_fallbac
         jobs = _workflow(workflow_path)["jobs"]
         expected_runs_on = WORK_CLASS_RUNS_ON[ACCELERATED_WORK_CLASSES[workflow_path]]
         for job_id in job_ids:
+            if workflow_path == ".github/workflows/images.yml":
+                runs_on = jobs[job_id]["runs-on"]
+                assert "matrix.architecture == 'arm64'" in runs_on
+                assert "ubuntu-24.04-arm" in runs_on
+                assert "vars.LOOM_CI_IMAGE_RUNS_ON" in runs_on
+                assert "vars.LOOM_CI_ACCELERATOR_RUNS_ON" in runs_on
+                continue
             assert jobs[job_id]["runs-on"] == expected_runs_on
 
 
@@ -203,6 +210,17 @@ def test_planners_gates_publish_and_aggregation_stay_github_hosted() -> None:
         jobs = _workflow(workflow_path)["jobs"]
         for job_id in job_ids:
             assert jobs[job_id]["runs-on"] == "ubuntu-latest"
+
+
+def test_native_image_publish_jobs_stay_on_architecture_matched_github_hosts() -> None:
+    jobs = _workflow(".github/workflows/images.yml")["jobs"]
+
+    publish_runs_on = jobs["publish"]["runs-on"]
+    assert "matrix.architecture == 'arm64'" in publish_runs_on
+    assert "ubuntu-24.04-arm" in publish_runs_on
+    assert "ubuntu-24.04" in publish_runs_on
+    assert "vars." not in publish_runs_on
+    assert jobs["publish-manifest"]["runs-on"] == "ubuntu-24.04"
 
 
 def test_coverage_artifacts_map_hosted_and_oldlab_checkout_roots() -> None:
@@ -570,9 +588,12 @@ def test_images_workflow_uses_path_aware_matrix_plan() -> None:
 
     assert "plan" in jobs
     assert "images" in jobs["plan"]["outputs"]
+    assert "native_builds" in jobs["plan"]["outputs"]
     build = jobs["build"]
     assert build["needs"] == "plan"
-    assert build["strategy"]["matrix"]["include"] == "${{ fromJSON(needs.plan.outputs.images) }}"
+    assert build["strategy"]["matrix"]["include"] == (
+        "${{ fromJSON(needs.plan.outputs.native_builds) }}"
+    )
     plan_script = "\n".join(step.get("run", "") for step in jobs["plan"]["steps"] if "run" in step)
     assert "scripts/component_ownership.py" in plan_script
     assert "plan-images" in plan_script
@@ -594,6 +615,7 @@ def test_images_required_unowned_runtime_path_selects_all_images(tmp_path: Path)
 
     assert result.returncode == 0, result.stderr
     matrix = json.loads(_github_output_value(output, "images"))
+    native_matrix = json.loads(_github_output_value(output, "native_builds"))
     assert _github_output_value(output, "required") == "true"
     assert len(matrix) == 11
     assert {entry["image"] for entry in matrix} == {
@@ -610,6 +632,11 @@ def test_images_required_unowned_runtime_path_selects_all_images(tmp_path: Path)
         "worker",
     }
     assert all(set(entry) == {"image", "image_name", "dockerfile", "context"} for entry in matrix)
+    assert len(native_matrix) == 22
+    assert {(entry["architecture"], entry["platform"]) for entry in native_matrix} == {
+        ("amd64", "linux/amd64"),
+        ("arm64", "linux/arm64"),
+    }
 
 
 def test_images_mixed_known_and_unowned_paths_select_all_images(tmp_path: Path) -> None:
@@ -907,13 +934,13 @@ def test_optional_gate_scripts_preserve_result_semantics(
 
 
 @pytest.mark.parametrize(
-    ("event_name", "required", "build_result", "publish_result"),
+    ("event_name", "required", "build_result", "publish_result", "manifest_result"),
     [
-        ("pull_request", "true", "success", "skipped"),
-        ("merge_group", "true", "success", "skipped"),
-        ("workflow_dispatch", "true", "success", "skipped"),
-        ("push", "true", "skipped", "success"),
-        ("pull_request", "false", "skipped", "skipped"),
+        ("pull_request", "true", "success", "skipped", "skipped"),
+        ("merge_group", "true", "success", "skipped", "skipped"),
+        ("workflow_dispatch", "true", "success", "skipped", "skipped"),
+        ("push", "true", "skipped", "success", "success"),
+        ("pull_request", "false", "skipped", "skipped", "skipped"),
     ],
 )
 def test_images_gate_separates_untrusted_build_from_trusted_publish(
@@ -921,6 +948,7 @@ def test_images_gate_separates_untrusted_build_from_trusted_publish(
     required: str,
     build_result: str,
     publish_result: str,
+    manifest_result: str,
 ) -> None:
     result = subprocess.run(
         ["bash"],
@@ -934,6 +962,7 @@ def test_images_gate_separates_untrusted_build_from_trusted_publish(
             "REQUIRED": required,
             "BUILD_RESULT": build_result,
             "PUBLISH_RESULT": publish_result,
+            "MANIFEST_RESULT": manifest_result,
         },
         check=False,
     )
@@ -1060,7 +1089,11 @@ def test_optional_validation_workflows_have_stable_gate_contexts() -> None:
         ".github/workflows/images.yml": (
             "images-gate",
             "images-gate",
-            {"build": "BUILD_RESULT", "publish": "PUBLISH_RESULT"},
+            {
+                "build": "BUILD_RESULT",
+                "publish": "PUBLISH_RESULT",
+                "publish-manifest": "MANIFEST_RESULT",
+            },
         ),
         ".github/workflows/cluster-smoke.yml": (
             "cluster-smoke-gate",
