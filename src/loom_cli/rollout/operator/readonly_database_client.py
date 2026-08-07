@@ -32,7 +32,7 @@ from loom_cli.rollout.readonly_database_bootstrap import ReadonlyDatabaseCredent
 from .redaction import redact_rollout_text
 
 _NAMESPACE = "loom-staging"
-_POD = "loom-postgres-0"
+_SERVICE = "service/loom-postgres-rw"
 _REMOTE_PORT = 5432
 _START_TIMEOUT_SECONDS = 15.0
 _STOP_TIMEOUT_SECONDS = 5.0
@@ -287,7 +287,7 @@ def open_readonly_database_query(
         "--namespace",
         _NAMESPACE,
         "port-forward",
-        f"pod/{_POD}",
+        _SERVICE,
         "--address=127.0.0.1",
         f"{port}:{_REMOTE_PORT}",
         "--pod-running-timeout=15s",

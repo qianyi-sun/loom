@@ -49,13 +49,15 @@ rules:
   - apiGroups: [policy]
     resources: [poddisruptionbudgets]
     verbs: [get, list, watch]
-  # A TokenRequest bearer may open only the exact PostgreSQL and MinIO pod
-  # transports. Database authorization is independently SELECT-only and the
-  # MinIO credential is independently non-mutating and may read only exact
-  # staging object versions; this permission cannot mutate Kubernetes state.
+  # A TokenRequest bearer may open only the three fixed CloudNativePG instance
+  # transports and the exact MinIO pod. kubectl resolves loom-postgres-rw to
+  # the current CNPG primary. Database authorization is independently
+  # SELECT-only and the MinIO credential is independently non-mutating and may
+  # read only exact staging object versions; this permission cannot mutate
+  # Kubernetes state.
   - apiGroups: [""]
     resources: [pods/portforward]
-    resourceNames: [loom-minio-0, loom-postgres-0]
+    resourceNames: [loom-minio-0, loom-postgres-1, loom-postgres-2, loom-postgres-3]
     verbs: [create]
   # Read only MinIO's unauthenticated health endpoint through the Kubernetes
   # API. This cannot list or read any object, credential or other service.

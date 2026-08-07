@@ -681,7 +681,12 @@ def test_refresh_is_noop_while_both_token_requests_are_fresh(tmp_path: Path) -> 
         for command, input in runner.calls
         if input is not None and any("selfsubjectaccessreviews" in item for item in command)
     }
-    assert {"loom-postgres-0", "loom-minio-0"}.issubset(reviewed_pods)
+    assert {
+        "loom-postgres-1",
+        "loom-postgres-2",
+        "loom-postgres-3",
+        "loom-minio-0",
+    }.issubset(reviewed_pods)
 
 
 def test_refresh_rotates_both_token_requests_near_expiry(tmp_path: Path) -> None:
