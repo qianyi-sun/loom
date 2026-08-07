@@ -11,6 +11,7 @@ User=root
 Group=root
 LoadCredential=github-token:/etc/loom-ci-runner-pool/github-token
 EnvironmentFile=/etc/loom-ci-runner-pool/candidate.env
+Environment=PYTHONPATH=/usr/local/lib/loom-ci-runner-controller
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
@@ -18,4 +19,5 @@ ProtectHome=true
 ProtectSystem=strict
 ReadWritePaths=/var/lib/loom-ci-runner-pool /var/cache/loom-ci-runner-pool /run/docker.sock
 ExecStart=/usr/local/libexec/loom-ci-runner-pool --profile /etc/loom-ci-runner-pool/profile.toml --candidate-sha ${LOOM_CI_RUNNER_CANDIDATE_SHA} --token-file ${CREDENTIALS_DIRECTORY}/github-token reconcile --execute
+ExecStart=/usr/local/libexec/loom-ci-runner-route-controller --profile /etc/loom-ci-runner-pool/profile.toml --state-db /var/lib/loom-ci-runner-pool/leases.sqlite3 --repository qianyi-sun/loom --candidate-sha ${LOOM_CI_RUNNER_CANDIDATE_SHA} --token-file ${CREDENTIALS_DIRECTORY}/github-token
 TimeoutStartSec=300

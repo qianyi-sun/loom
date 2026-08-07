@@ -1,0 +1,68 @@
+name: Resolve oldlab-first CI routes
+description: Upload one bounded route request and validate the trusted controller response.
+
+inputs:
+  route-mode:
+    description: Exact activation mode; disabled keeps every job GitHub-hosted.
+    required: true
+  repository:
+    required: true
+  workflow-name:
+    required: true
+  workflow-id:
+    required: true
+  workflow-run-id:
+    required: true
+  run-attempt:
+    required: true
+  head-sha:
+    required: true
+  job-keys-json:
+    required: true
+  github-token:
+    required: false
+
+outputs:
+  routes:
+    description: JSON object mapping every requested job key to one frozen runs-on array.
+    value: ${{ steps.poll.outputs.routes || steps.request.outputs.routes }}
+
+runs:
+  using: composite
+  steps:
+    - name: Build exact route request
+      id: request
+      shell: bash
+      env:
+        ROUTE_MODE: ${{ inputs.route-mode }}
+        ROUTE_REPOSITORY: ${{ inputs.repository }}
+        ROUTE_WORKFLOW_NAME: ${{ inputs.workflow-name }}
+        ROUTE_WORKFLOW_ID: ${{ inputs.workflow-id }}
+        ROUTE_WORKFLOW_RUN_ID: ${{ inputs.workflow-run-id }}
+        ROUTE_RUN_ATTEMPT: ${{ inputs.run-attempt }}
+        ROUTE_HEAD_SHA: ${{ inputs.head-sha }}
+        ROUTE_JOB_KEYS_JSON: ${{ inputs.job-keys-json }}
+        ROUTE_REQUEST_PATH: ${{ runner.temp }}/loom-ci-route-request.json
+      run: >-
+        python3 "$GITHUB_ACTION_PATH/route.py" request
+        --github-output "$GITHUB_OUTPUT"
+
+    - name: Upload bounded route request
+      if: steps.request.outputs.active == 'true'
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ steps.request.outputs.artifact-name }}
+        path: ${{ runner.temp }}/loom-ci-route-request.json
+        if-no-files-found: error
+        retention-days: 1
+
+    - name: Await and validate trusted assignment
+      id: poll
+      if: steps.request.outputs.active == 'true'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        ROUTE_REQUEST_PATH: ${{ runner.temp }}/loom-ci-route-request.json
+      run: >-
+        python3 "$GITHUB_ACTION_PATH/route.py" poll
+        --github-output "$GITHUB_OUTPUT"

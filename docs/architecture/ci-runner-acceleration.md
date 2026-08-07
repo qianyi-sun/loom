@@ -90,6 +90,31 @@ partially leased route. The returned document includes a canonical request
 SHA-256 plus the frozen assignment, lease epoch, slot, and `runs-on` array for
 every job key.
 
+The root-owned `ci_runner_route_controller.py` is the outbound-only transport
+between GitHub and that broker. On each pool timer tick it scans a bounded set
+of `loom-ci-route-request-v1-<workflow-id>-<run>-<attempt>` artifacts, reads
+exactly one bounded `route-request.json`, and verifies the artifact, live
+workflow run, repository, workflow ID, attempt, event, and head SHA before
+allocating. The GitHub credential is sent only to `api.github.com`; artifact
+redirects are followed in a separate request with no authorization header.
+
+Oldlab eligibility additionally requires the source workflow's Git blob at the
+run head to equal the blob in the installed merged controller candidate. A PR
+that changes its workflow therefore receives a frozen all-hosted route even if
+oldlab has space. A valid assignment is published as one exact-head CheckRun
+whose external ID includes the canonical request digest. Reconciliation
+accepts only an identical replay. The controller then observes the exact
+attempt's job list and releases each matching lease only after the job, or the
+entire run when a job was never created, is terminal.
+
+Source workflows must consume `.github/actions/ci-runner-route` by the full
+merge SHA that introduced the reviewed action, never as a local action and
+never by a mutable branch. The pinned action creates the exact artifact and
+accepts only the matching successful CheckRun, request digest, job-key order,
+class labels, lease epochs, and class-bounded unique slots. A missing
+controller response fails the route-plan job; it is not permission to use
+hosted capacity while oldlab availability is unknown.
+
 Example route request:
 
 ```json
@@ -125,12 +150,11 @@ uv run --no-sync python scripts/ops/ci_runner_lease_broker.py \
   status
 ```
 
-The lease core alone does not authorize static route activation. A trusted
-router still has to obtain and publish each immutable assignment without
-exposing the runner-administration credential to PR-controlled code. Until that
-workflow integration merges and passes the controlled overflow/reuse A/B, keep
-the class variables absent and treat the pool and route as separate live
-controls.
+The controller and lease core alone do not authorize static route activation.
+The source workflow still has to upload the request, validate the immutable
+CheckRun response, and consume only its job-key assignment. Until that workflow
+integration merges and passes the controlled overflow/reuse A/B, keep the class
+variables absent and treat the pool and route as separate live controls.
 
 ## Activation prerequisites
 
@@ -309,18 +333,55 @@ docker build \
 ```
 
 Install the checked-in profile, controller, slice, service, and timer using
-root-owned files. Do not enable the timer yet. The GitHub administration token
-must be a root-owned mode-0600 file at
-`/etc/loom-ci-runner-pool/github-token`; it must have repository Actions runner
-administration access and no workflow/package/deployment credentials.
+root-owned files from the exact merged candidate. The route-controller wrapper
+loads only the separately installed candidate modules:
+
+```bash
+sudo install -D -m 0755 scripts/ops/ci_runner_pool.py \
+  /usr/local/libexec/loom-ci-runner-pool
+sudo install -D -m 0755 scripts/ops/ci_runner_route_controller.py \
+  /usr/local/libexec/loom-ci-runner-route-controller
+sudo install -D -m 0644 src/loom_control_plane/ci_runner_lease_broker.py \
+  /usr/local/lib/loom-ci-runner-controller/loom_control_plane/ci_runner_lease_broker.py
+sudo install -D -m 0644 src/loom_control_plane/ci_runner_route_controller.py \
+  /usr/local/lib/loom-ci-runner-controller/loom_control_plane/ci_runner_route_controller.py
+sudo install -D -m 0644 deploy/ci-runners/oldlab5.toml \
+  /etc/loom-ci-runner-pool/profile.toml
+sudo install -D -m 0644 deploy/ci-runners/loom-ci-runner-pool.service \
+  /etc/systemd/system/loom-ci-runner-pool.service
+sudo install -D -m 0644 deploy/ci-runners/loom-ci-runner-pool.timer \
+  /etc/systemd/system/loom-ci-runner-pool.timer
+sudo install -D -m 0644 deploy/ci-runners/loom-ci-runner-pool.slice \
+  /etc/systemd/system/loom-ci-runner-pool.slice
+```
+
+Do not enable the timer yet. The GitHub administration token must be a
+root-owned mode-0600 file at
+`/etc/loom-ci-runner-pool/github-token`; it needs repository Actions runner
+administration and artifact read, contents read, and CheckRun write access, but
+no workflow, package, deployment, or repository-content write permission.
 `/etc/loom-ci-runner-pool/candidate.env` contains only:
 
 ```text
 LOOM_CI_RUNNER_CANDIDATE_SHA=<full reviewed commit SHA>
 ```
 
-Run the secret-free checks before supplying either credential. Create a
-root-owned mode-0600 `/etc/loom-ci-runner-pool/dockerhub-credentials.json`
+Before enabling the timer or creating any route-request artifact, initialize
+the artifact high-water cursor once. Reconcile fails closed if this root-owned
+cursor is absent, so losing it cannot silently skip a waiting request:
+
+```bash
+sudo env PYTHONPATH=/usr/local/lib/loom-ci-runner-controller \
+  /usr/local/libexec/loom-ci-runner-route-controller \
+  --profile /etc/loom-ci-runner-pool/profile.toml \
+  --candidate-sha "$CANDIDATE_SHA" \
+  --token-file /etc/loom-ci-runner-pool/github-token \
+  --initialize-cursor
+```
+
+Run the secret-free host and image checks before supplying the temporary
+Docker Hub credential. Create a root-owned mode-0600
+`/etc/loom-ci-runner-pool/dockerhub-credentials.json`
 containing `{"username":"...","token":"..."}`. Use a scoped Docker Hub access
 token, not an account password. It is used only while sealing the base guest to
 populate a candidate-bound allowlisted registry containing the public

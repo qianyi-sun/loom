@@ -216,6 +216,19 @@ def test_route_replay_returns_the_same_frozen_document(tmp_path: Path) -> None:
     assert replay == first
 
 
+def test_untrusted_workflow_route_is_forced_to_hosted_without_consuming_slots(
+    tmp_path: Path,
+) -> None:
+    broker = _broker(tmp_path)
+    request = _route_request(job_count=3)
+
+    document = broker.allocate_route(request, now=NOW, allow_oldlab=False)
+
+    assert all(item.target is leases.PlacementTarget.GITHUB_HOSTED for item in document.assignments)
+    assert broker.status(now=NOW)["classes"]["normal"]["available"] == 5
+    assert broker.active_assignments() == document.assignments
+
+
 def test_batch_allocation_rolls_back_every_new_assignment_on_conflict(
     tmp_path: Path,
 ) -> None:
