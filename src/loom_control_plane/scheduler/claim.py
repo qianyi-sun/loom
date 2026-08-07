@@ -65,8 +65,17 @@ WITH next AS (
           AND w.status = 'active'
           AND w.drain_state = 'active'
           AND (
-            NULLIF(t.requires_caps->>'worker_pool', '') IS NULL
-            OR w.pool_name = t.requires_caps->>'worker_pool'
+            (
+              NULLIF(t.requires_caps->>'worker_pool', '') IS NOT NULL
+              AND w.pool_name = t.requires_caps->>'worker_pool'
+            )
+            OR (
+              NULLIF(t.requires_caps->>'worker_pool', '') IS NULL
+              AND (
+                t.autoscaler_pool_name IS NULL
+                OR w.pool_name = t.autoscaler_pool_name
+              )
+            )
           )
           -- #892: fence claims on a Slurm pool under active prod-pressure
           -- drain. GB10 pools are already fenced via w.drain_state; Slurm

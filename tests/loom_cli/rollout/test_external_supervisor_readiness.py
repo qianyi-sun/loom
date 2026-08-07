@@ -49,12 +49,25 @@ class _Result:
     returncode: int
 
 
-def _args(*, port: int = 15451, environment: str = "staging") -> list[str]:
-    return [
+def _args(
+    *,
+    port: int = 15451,
+    environment: str = "staging",
+    pool_name: str = "gb10",
+) -> list[str]:
+    cluster_name, controller_host = {
+        "gb10": ("trt-gb10", "gx10-01c7"),
+        "oldlab": ("trt-oldlab", "TRT-EAI-OLDLAB-1"),
+    }[pool_name]
+    args = [
         "--environment",
         environment,
         "--pool-name",
-        "gb10",
+        pool_name,
+        "--expected-slurm-cluster-name",
+        cluster_name,
+        "--expected-slurm-controller-host",
+        controller_host,
         "--namespace",
         "loom-staging",
         "--kubeconfig",
@@ -76,6 +89,11 @@ def _args(*, port: int = 15451, environment: str = "staging") -> list[str]:
         "--freshness-sec",
         "120",
     ]
+    if pool_name == "gb10":
+        args.extend(
+            ["--db-secret-name", "loom-external-slurm-autoscaler-db"]
+        )
+    return args
 
 
 def _toml_string(value: str) -> str:
@@ -87,6 +105,7 @@ def _supervisor(
     name: str = "gb10-staging",
     service_name: str = "loom-autoscaler-gb10-staging.service",
     timer_name: str = "loom-autoscaler-gb10-staging.timer",
+    pool_name: str = "gb10",
     port: int = 15451,
     enabled: bool = True,
     active: bool = True,
@@ -95,11 +114,13 @@ def _supervisor(
     python_path: str = _PYTHON_PATH,
     script_path: str = _SCRIPT_PATH,
 ) -> str:
-    rendered_args = ", ".join(_toml_string(item) for item in (args or _args(port=port)))
+    rendered_args = ", ".join(
+        _toml_string(item) for item in (args or _args(port=port, pool_name=pool_name))
+    )
     return f"""
 [[external_slurm_autoscaler_supervisors]]
 name = {_toml_string(name)}
-pool_name = "gb10"
+pool_name = {_toml_string(pool_name)}
 service_name = {_toml_string(service_name)}
 timer_name = {_toml_string(timer_name)}
 working_directory = {_toml_string(working_directory)}
@@ -212,10 +233,11 @@ def test_artifact_omits_only_fully_disabled_supervisors(tmp_path: Path) -> None:
         tmp_path,
         supervisors=[
             _supervisor(),
-            _supervisor(
-                name="disabled",
-                service_name="loom-autoscaler-disabled.service",
-                timer_name="loom-autoscaler-disabled.timer",
+                _supervisor(
+                    name="disabled",
+                    service_name="loom-autoscaler-disabled.service",
+                    timer_name="loom-autoscaler-disabled.timer",
+                    pool_name="oldlab",
                 port=15452,
                 enabled=False,
                 active=False,
@@ -311,6 +333,7 @@ def test_validation_ports_are_unique_and_disjoint_from_live_ports(tmp_path: Path
                     name="oldlab-staging",
                     service_name="loom-autoscaler-oldlab-staging.service",
                     timer_name="loom-autoscaler-oldlab-staging.timer",
+                    pool_name="oldlab",
                     port=15448,
                 ),
             ],
@@ -515,6 +538,33 @@ def test_builder_rejects_missing_duplicate_or_validate_only_arguments(tmp_path: 
     validate_args = [*_args(), "--validate-only"]
     with pytest.raises(ValueError, match="validate-only"):
         _build(_candidate(tmp_path / "validate", supervisors=[_supervisor(args=validate_args)]))
+
+
+def test_builder_rejects_foreign_slurm_authority_arguments(tmp_path: Path) -> None:
+    args = _args()
+    cluster_index = args.index("--expected-slurm-cluster-name") + 1
+    args[cluster_index] = "foreign-cluster"
+
+    with pytest.raises(ValueError, match="Slurm authority"):
+        _build(_candidate(tmp_path, supervisors=[_supervisor(args=args)]))
+
+
+def test_builder_requires_dedicated_gb10_database_secret(tmp_path: Path) -> None:
+    args = _args()
+    secret_index = args.index("--db-secret-name")
+    del args[secret_index : secret_index + 2]
+
+    with pytest.raises(ValueError, match="optional authority"):
+        _build(_candidate(tmp_path, supervisors=[_supervisor(args=args)]))
+
+
+def test_builder_rejects_timer_slower_than_freshness_bound(tmp_path: Path) -> None:
+    args = _args()
+    freshness_index = args.index("--freshness-sec") + 1
+    args[freshness_index] = "10"
+
+    with pytest.raises(ValueError, match="freshness"):
+        _build(_candidate(tmp_path, supervisors=[_supervisor(args=args)]))
 
 
 @pytest.mark.parametrize(

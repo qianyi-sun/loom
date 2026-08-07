@@ -51,6 +51,8 @@ force = false
 [worker_pool_autoscaler_policies.actuator_config]
 backend = "docker"
 cpu_arch = "arm64"
+slurm_cluster_name = "trt-gb10"
+slurm_controller_host = "gx10-01c7"
 partition = "gb10"
 allowed_nodes = [
   "trt-gb10-1",
@@ -114,6 +116,8 @@ force = false
 [worker_pool_autoscaler_policies.actuator_config]
 backend = "docker"
 cpu_arch = "x86_64"
+slurm_cluster_name = "trt-oldlab"
+slurm_controller_host = "TRT-EAI-OLDLAB-1"
 # OLDLAB jobs target the default partition (addressed by --nodelist), matching
 # the validated 2026-06-24 dry-run which passed no --partition.
 partition = ""
@@ -159,23 +163,25 @@ external_runner = true
 [[external_slurm_autoscaler_supervisors]]
 name = "oldlab-development"
 pool_name = "oldlab"
+execution_host = "TRT-EAI-OLDLAB-1"
 service_name = "loom-autoscaler-oldlab-dev.service"
 timer_name = "loom-autoscaler-oldlab-dev.timer"
 working_directory = "/opt/loom-development-runner/repo"
 python_path = "/opt/loom-development-runner/venv/bin/python"
 script_path = "scripts/ops/worker_pool_autoscaler_external_once.py"
-args = ["--environment", "development", "--pool-name", "oldlab", "--namespace", "loom-dev", "--kubeconfig", "/etc/loom/kubeconfig/development.yaml", "--db-local-port", "15447", "--freshness-sec", "120"]
+args = ["--environment", "development", "--pool-name", "oldlab", "--expected-slurm-cluster-name", "trt-oldlab", "--expected-slurm-controller-host", "TRT-EAI-OLDLAB-1", "--namespace", "loom-dev", "--kubeconfig", "/etc/loom/kubeconfig/development.yaml", "--db-local-port", "15447", "--freshness-sec", "120"]
 enabled = false
 active = false
 
 [[external_slurm_autoscaler_supervisors]]
 name = "gb10-development"
 pool_name = "gb10"
+execution_host = "gx10-01c7"
 service_name = "loom-autoscaler-gb10-dev.service"
 timer_name = "loom-autoscaler-gb10-dev.timer"
 working_directory = "/opt/loom-development-runner/repo"
 python_path = "/opt/loom-development-runner/venv/bin/python"
 script_path = "scripts/ops/worker_pool_autoscaler_external_once.py"
-args = ["--environment", "development", "--pool-name", "gb10", "--namespace", "loom-dev", "--kubeconfig", "/etc/loom/kubeconfig/development.yaml", "--db-local-port", "15450", "--freshness-sec", "120"]
+args = ["--environment", "development", "--pool-name", "gb10", "--expected-slurm-cluster-name", "trt-gb10", "--expected-slurm-controller-host", "gx10-01c7", "--namespace", "loom-dev", "--kubeconfig", "/etc/loom/kubeconfig/development.yaml", "--db-local-port", "15450", "--freshness-sec", "120"]
 enabled = false
 active = false

@@ -139,11 +139,16 @@ def _consumer_verification_fixture(
     malicious.write_text("print('forged')\n", encoding="utf-8")
     shared_gid = os.getegid()
     monkeypatch.setattr(env_state_module, "_SHARED_WORKER_REPO_ROOT", shared_root)
-    monkeypatch.setattr(
-        env_state_module.pwd,
-        "getpwnam",
-        lambda _name: SimpleNamespace(pw_name="qianyi", pw_uid=os.geteuid(), pw_gid=os.getegid()),
-    )
+    def service_identity(name: str) -> SimpleNamespace:
+        if name != "loom-rollout":
+            raise KeyError(name)
+        return SimpleNamespace(
+            pw_name="loom-rollout",
+            pw_uid=os.geteuid(),
+            pw_gid=os.getegid(),
+        )
+
+    monkeypatch.setattr(env_state_module.pwd, "getpwnam", service_identity)
     monkeypatch.setattr(
         env_state_module.grp,
         "getgrnam",

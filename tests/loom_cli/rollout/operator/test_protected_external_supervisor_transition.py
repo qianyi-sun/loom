@@ -59,35 +59,13 @@ def _artifact(
             f'timer_on_unit_active_sec = "{timer_on_unit_active_sec}"\n{enablement}',
             1,
         )
-    if supervisor_count == 2:
-        profile_text += f"""
-
-[[external_slurm_autoscaler_supervisors]]
-name = "gb10-staging-secondary"
-pool_name = "gb10"
-service_name = "loom-autoscaler-gb10-staging-secondary.service"
-timer_name = "loom-autoscaler-gb10-staging-secondary.timer"
-working_directory = "/opt/loom-staging-runner/candidates/${{GIT_SHA}}/repo"
-python_path = "/opt/loom-staging-runner/candidates/${{GIT_SHA}}/venv/bin/python"
-script_path = "/opt/loom-staging-runner/candidates/${{GIT_SHA}}/repo/scripts/ops/worker_pool_autoscaler_external_once.py"
-args = [
-  "--environment", "staging",
-  "--pool-name", "gb10",
-  "--namespace", "loom-staging",
-  "--kubeconfig", "/var/lib/loom-staging-rollout/kubeconfig",
-  "--db-local-host", "127.0.0.1",
-  "--db-local-port", "15453",
-  "--db-service", "service/loom-postgres-rw",
-  "--db-remote-port", "5432",
-  "--db-port-forward-ready-timeout-sec", "10",
-  "--db-port-forward-stop-timeout-sec", "5",
-  "--db-connect-timeout-sec", "10",
-  "--freshness-sec", "120",
-]
-timer_on_unit_active_sec = "{timer_on_unit_active_sec}"
-enabled = true
-active = true
-"""
+    if supervisor_count == 1:
+        oldlab_marker = "\n# OLDLAB staging autoscaler supervisor."
+        profile_text, separator, _oldlab_profile = profile_text.partition(oldlab_marker)
+        assert separator
+        profile_text += "\n"
+    else:
+        assert supervisor_count == 2
     profile.write_text(profile_text, encoding="utf-8")
     profile.chmod(0o600)
     script.chmod(0o700)

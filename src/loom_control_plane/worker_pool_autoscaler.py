@@ -31,6 +31,7 @@ from loom.worker_token import (
     WORKER_AUTH_FINGERPRINT_ENV_KEY,
     worker_token_fingerprint_from_env_file,
 )
+from loom_control_plane.autoscaler_demand_router import assign_neutral_queued_trials
 from loom_control_plane.elastic_slurm_worker_controller import (
     ElasticSlurmWorkerControllerConfig,
     SlurmWorkerCapacitySnapshot,
@@ -803,6 +804,8 @@ def _optional_bool(value: object, *, default: bool) -> bool:
 def _queued_trial_matches_policy(
     requires_caps: object,
     row: WorkerPoolAutoscalerPolicy,
+    *,
+    autoscaler_pool_name: str | None = None,
 ) -> bool:
     if not isinstance(requires_caps, dict) or not requires_caps:
         return True
@@ -816,13 +819,13 @@ def _queued_trial_matches_policy(
     if isinstance(backend, str) and backend != policy_backend:
         return False
     worker_pool = requires_caps.get("worker_pool")
-    if (
-        isinstance(worker_pool, str)
-        and worker_pool.strip()
-        and worker_pool.strip() != row.pool_name
-    ):
+    cleaned_worker_pool = worker_pool.strip() if isinstance(worker_pool, str) else ""
+    has_explicit_worker_pool = bool(cleaned_worker_pool)
+    if has_explicit_worker_pool and cleaned_worker_pool != row.pool_name:
         return False
     cpu_arch = requires_caps.get("cpu_arch")
+    if cpu_arch == "any" and not has_explicit_worker_pool:
+        return autoscaler_pool_name == row.pool_name
     if isinstance(cpu_arch, str) and cpu_arch not in {policy_arch, "any"}:
         return False
     return True
@@ -1067,11 +1070,19 @@ async def _load_observation(
 
     queued_rows = (
         await session.execute(
-            select(Trial.requires_caps).where(Trial.state == "queued"),
+            select(Trial.requires_caps, Trial.autoscaler_pool_name).where(
+                Trial.state == "queued",
+            ),
         )
     ).all()
     queued_slots = sum(
-        1 for (requires_caps,) in queued_rows if _queued_trial_matches_policy(requires_caps, row)
+        1
+        for requires_caps, autoscaler_pool_name in queued_rows
+        if _queued_trial_matches_policy(
+            requires_caps,
+            row,
+            autoscaler_pool_name=autoscaler_pool_name,
+        )
     )
 
     return AutoscalerObservation(
@@ -1258,8 +1269,16 @@ def _slurm_config_from_policy(
         resource_aware=resource_aware,
         cpu_per_slot=int(actor_config.get("cpu_per_slot") or 2),
         memory_mib_per_slot=int(actor_config.get("memory_mib_per_slot") or 8192),
-        reserved_cpus=int(actor_config.get("reserved_cpus") or 4),
-        reserved_memory_mib=int(actor_config.get("reserved_memory_mib") or 24_576),
+        reserved_cpus=int(
+            actor_config["reserved_cpus"]
+            if actor_config.get("reserved_cpus") is not None
+            else 4
+        ),
+        reserved_memory_mib=int(
+            actor_config["reserved_memory_mib"]
+            if actor_config.get("reserved_memory_mib") is not None
+            else 24_576
+        ),
         max_concurrency_per_node=int(
             actor_config.get("max_concurrency_per_node") or 8,
         ),
@@ -2132,6 +2151,12 @@ async def reconcile_worker_pool_autoscaler_once(
 ) -> list[AutoscalerDecision]:
     now = now or datetime.now(UTC)
     scoped_environment = _exact_autoscaler_environment(environment)
+    if not external_only:
+        await assign_neutral_queued_trials(
+            session,
+            environment=scoped_environment,
+            now=now,
+        )
     stmt = select(WorkerPoolAutoscalerPolicy).where(
         WorkerPoolAutoscalerPolicy.enabled.is_(True),
         WorkerPoolAutoscalerPolicy.environment == scoped_environment,

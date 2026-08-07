@@ -41,12 +41,24 @@ def _args(module: Any, *extra: str):
             "staging",
             "--pool-name",
             "gb10",
+            "--expected-slurm-cluster-name",
+            "trt-gb10",
+            "--expected-slurm-controller-host",
+            "gx10-01c7",
             "--namespace",
             "loom-staging",
             "--kubeconfig",
             "/etc/loom/kubeconfig/staging.yaml",
             *extra,
         ]
+    )
+
+
+def _authority(module: Any) -> Any:
+    return module.SlurmAuthority(
+        cluster_name="trt-gb10",
+        controller_host="gx10-01c7",
+        local_hostname="gx10-01c7",
     )
 
 
@@ -87,11 +99,89 @@ def test_parser_defaults_follow_service_home_and_concrete_database_service(
     monkeypatch.setenv("HOME", "/var/lib/loom-staging-rollout")
 
     args = module._parser().parse_args(
-        ["--environment", "staging", "--pool-name", "oldlab"]
+        [
+            "--environment",
+            "staging",
+            "--pool-name",
+            "oldlab",
+            "--expected-slurm-cluster-name",
+            "trt-oldlab",
+            "--expected-slurm-controller-host",
+            "TRT-EAI-OLDLAB-1",
+        ]
     )
 
     assert args.kubeconfig == "/var/lib/loom-staging-rollout/.kube/config"
     assert args.db_service == "service/loom-postgres-rw"
+
+
+def test_slurm_authority_probe_accepts_exact_local_cluster_and_controller(
+    module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _run(argv: list[str], **kwargs: Any) -> Any:
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "Configuration data as of 2026-08-07T17:13:56\n"
+                "ClusterName             = trt-gb10\n"
+                "SlurmctldHost[0]        = gx10-01c7(192.168.20.11)\n"
+            ),
+        )
+
+    monkeypatch.setattr(module.subprocess, "run", _run)
+    monkeypatch.setattr(module.socket, "gethostname", lambda: "gx10-01c7")
+
+    authority = module._validate_local_slurm_authority(_args(module))
+
+    assert authority == module.SlurmAuthority(
+        cluster_name="trt-gb10",
+        controller_host="gx10-01c7",
+        local_hostname="gx10-01c7",
+    )
+    assert captured["argv"] == ["/usr/bin/scontrol", "show", "config"]
+    assert captured["kwargs"] == {
+        "capture_output": True,
+        "check": False,
+        "text": True,
+        "timeout": 10.0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("cluster_name", "controller_host", "local_hostname"),
+    [
+        ("foreign-cluster", "gx10-01c7", "gx10-01c7"),
+        ("trt-gb10", "foreign-controller", "gx10-01c7"),
+        ("trt-gb10", "gx10-01c7", "foreign-host"),
+    ],
+)
+def test_slurm_authority_probe_rejects_foreign_or_non_controller_host(
+    module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    cluster_name: str,
+    controller_host: str,
+    local_hostname: str,
+) -> None:
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=(
+                f"ClusterName = {cluster_name}\n"
+                f"SlurmctldHost[0] = {controller_host}(192.0.2.10)\n"
+            ),
+        ),
+    )
+    monkeypatch.setattr(module.socket, "gethostname", lambda: local_hostname)
+
+    with pytest.raises(module.SlurmAuthorityValidationError, match="authority"):
+        module._validate_local_slurm_authority(_args(module))
 
 
 @pytest.mark.parametrize(
@@ -457,7 +547,11 @@ def test_normal_reconcile_validates_db_before_actuation_and_owns_tunnel(
             return [
                 SimpleNamespace(
                     pool_name="gb10",
-                    actuator_config={"external_runner": True},
+                    actuator_config={
+                        "external_runner": True,
+                        "slurm_cluster_name": "trt-gb10",
+                        "slurm_controller_host": "gx10-01c7",
+                    },
                 )
             ]
 
@@ -517,6 +611,11 @@ def test_normal_reconcile_validates_db_before_actuation_and_owns_tunnel(
         lambda _args, *, timeout_sec: "postgresql+psycopg://loom:secret@loom-postgres:5432/loom",
     )
     monkeypatch.setattr(module, "_database_port_forward", _tunnel)
+    monkeypatch.setattr(
+        module,
+        "_validate_local_slurm_authority",
+        lambda _args: events.append("slurm-authority") or _authority(module),
+    )
     monkeypatch.setattr(module, "create_async_engine", lambda *_args, **_kwargs: _Engine())
     monkeypatch.setattr(
         module,
@@ -529,6 +628,7 @@ def test_normal_reconcile_validates_db_before_actuation_and_owns_tunnel(
 
     assert json.loads(capsys.readouterr().out) == [{"action": "noop"}]
     assert events == [
+        "slurm-authority",
         "tunnel-start",
         "session-enter",
         "policy-query",
@@ -555,7 +655,11 @@ def test_validate_only_uses_exact_tunnel_and_read_only_policy_query(
             return [
                 SimpleNamespace(
                     pool_name="gb10",
-                    actuator_config={"external_runner": True},
+                    actuator_config={
+                        "external_runner": True,
+                        "slurm_cluster_name": "trt-gb10",
+                        "slurm_controller_host": "gx10-01c7",
+                    },
                 )
             ]
 
@@ -618,6 +722,11 @@ def test_validate_only_uses_exact_tunnel_and_read_only_policy_query(
         lambda _args, *, timeout_sec: f"postgresql+psycopg://loom:{secret}@loom-postgres:5432/loom",
     )
     monkeypatch.setattr(module, "_database_port_forward", _tunnel)
+    monkeypatch.setattr(
+        module,
+        "_validate_local_slurm_authority",
+        lambda _args: events.append("slurm-authority") or _authority(module),
+    )
     monkeypatch.setattr(module, "create_async_engine", _engine)
     monkeypatch.setattr(
         module,
@@ -633,6 +742,11 @@ def test_validate_only_uses_exact_tunnel_and_read_only_policy_query(
     assert payload == {
         "database_reachable": True,
         "mode": "validate-only",
+        "slurm_authority": {
+            "cluster_name": "trt-gb10",
+            "controller_host": "gx10-01c7",
+            "local_hostname": "gx10-01c7",
+        },
         "pools": [
             {
                 "enabled_external_policy_count": 1,
@@ -643,6 +757,7 @@ def test_validate_only_uses_exact_tunnel_and_read_only_policy_query(
     }
     assert secret not in output.out + output.err
     assert events == [
+        "slurm-authority",
         "tunnel-start",
         "engine",
         "session-enter",
@@ -673,6 +788,7 @@ def test_validate_only_fails_closed_when_policy_is_missing(module: Any) -> None:
                 _Session(),
                 environment="staging",
                 pool_names=("gb10",),
+                authority=_authority(module),
             )
         )
 
@@ -683,7 +799,11 @@ def test_validate_only_foreign_same_pool_is_missing_without_authority_leak(modul
             SimpleNamespace(
                 environment="production",
                 pool_name="gb10",
-                actuator_config={"external_runner": True},
+                actuator_config={
+                    "external_runner": True,
+                    "slurm_cluster_name": "trt-gb10",
+                    "slurm_controller_host": "gx10-01c7",
+                },
             )
         ]
     )
@@ -694,6 +814,7 @@ def test_validate_only_foreign_same_pool_is_missing_without_authority_leak(modul
                 session,
                 environment="staging",
                 pool_names=("gb10",),
+                authority=_authority(module),
             )
         )
 
@@ -708,7 +829,11 @@ def test_validate_only_mixed_same_pool_counts_only_exact_environment(module: Any
             SimpleNamespace(
                 environment=environment,
                 pool_name="gb10",
-                actuator_config={"external_runner": True},
+                actuator_config={
+                    "external_runner": True,
+                    "slurm_cluster_name": "trt-gb10",
+                    "slurm_controller_host": "gx10-01c7",
+                },
             )
             for environment in ("production", "staging")
         ]
@@ -719,6 +844,7 @@ def test_validate_only_mixed_same_pool_counts_only_exact_environment(module: Any
             session,
             environment="staging",
             pool_names=("gb10",),
+            authority=_authority(module),
         )
     )
 
@@ -730,6 +856,32 @@ def test_validate_only_mixed_same_pool_counts_only_exact_environment(module: Any
             "pool_name": "gb10",
         }
     ]
+
+
+def test_policy_validation_rejects_foreign_slurm_authority(module: Any) -> None:
+    session = _EnvironmentFilteringSession(
+        [
+            SimpleNamespace(
+                environment="staging",
+                pool_name="gb10",
+                actuator_config={
+                    "external_runner": True,
+                    "slurm_cluster_name": "foreign-cluster",
+                    "slurm_controller_host": "gx10-01c7",
+                },
+            )
+        ]
+    )
+
+    with pytest.raises(module.ExternalPolicyValidationError, match="authority"):
+        asyncio.run(
+            module._validate_requested_external_policies(
+                session,
+                environment="staging",
+                pool_names=("gb10",),
+                authority=_authority(module),
+            )
+        )
 
 
 @pytest.mark.parametrize("validate_only", [False, True])
@@ -763,6 +915,11 @@ def test_routing_override_fails_before_tunnel_engine_session_or_reconcile(
             return args
 
     monkeypatch.setattr(module, "_parser", _Parser)
+    monkeypatch.setattr(
+        module,
+        "_validate_local_slurm_authority",
+        lambda _args: _authority(module),
+    )
     monkeypatch.setattr(
         module,
         "_load_cp_db_url",

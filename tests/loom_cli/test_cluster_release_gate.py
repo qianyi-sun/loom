@@ -4,11 +4,13 @@ import copy
 import hashlib
 import json
 import subprocess
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 
 from loom_cli.__main__ import main
+from loom_cli.cluster_cmd import _load_root_owned_external_slurm_authority
 from loom_cli.cluster_release_gate import (
     ReleaseGateCheck,
     ReleaseGateReport,
@@ -186,7 +188,7 @@ def _manifest(
 
 
 def _external_gb10_workers(*, enabled: bool) -> dict[str, Any]:
-    return {
+    workers: dict[str, Any] = {
         "slurm_pools": [
             {
                 "pool_name": "gb10",
@@ -199,12 +201,24 @@ def _external_gb10_workers(*, enabled: bool) -> dict[str, Any]:
         ],
         "external_slurm_runner_prerequisites": {
             "pools": ["gb10"],
-            "materialize": False,
+            "materialize": enabled,
+            "require_external_allocation_authority": enabled,
         },
         "external_slurm_autoscaler_supervisors": [
-            {"pool_name": "gb10", "enabled": False, "active": False}
+            {"pool_name": "gb10", "enabled": enabled, "active": enabled}
         ],
     }
+    if enabled:
+        workers["gb10_desired_states"] = [
+            {
+                "pool_name": "gb10",
+                "target_slots": 0,
+                "host_intents": {
+                    f"trt-gb10-{index}": "stopped" for index in range(1, 16)
+                },
+            }
+        ]
+    return workers
 
 
 def test_release_gate_passes_for_fail_closed_external_gb10() -> None:
@@ -242,7 +256,8 @@ def test_release_gate_rejects_candidate_self_attested_external_gb10_activation()
 
     assert check is not None
     assert check.outcome == "fail"
-    assert check.evidence["blockers"] == ["external_slurm_acceptance_authority_unavailable"]
+    assert "candidate_external_slurm_self_attestation_forbidden" in check.evidence["blockers"]
+    assert "external_slurm_acceptance_authority_unavailable" in check.evidence["blockers"]
 
 
 def test_release_gate_rejects_gb10_supervisor_activation_without_policy() -> None:
@@ -254,7 +269,118 @@ def test_release_gate_rejects_gb10_supervisor_activation_without_policy() -> Non
 
     assert check is not None
     assert check.outcome == "fail"
-    assert check.evidence["blockers"] == ["external_slurm_acceptance_authority_unavailable"]
+    assert "external_slurm_acceptance_authority_unavailable" in check.evidence["blockers"]
+    assert "gb10_node_agent_authority_not_retired" in check.evidence["blockers"]
+
+
+def test_release_gate_accepts_exact_candidate_fifteen_node_authority() -> None:
+    manifest = _manifest(external_workers=_external_gb10_workers(enabled=True))
+    manifest["external_workers"]["environment_state_file"] = {"sha256": "b" * 64}
+    generated_at = datetime.now(UTC)
+
+    check = _external_slurm_acceptance_check(
+        manifest,
+        authority_artifact={
+            "schema_version": 1,
+            "kind": "loom_gb10_slurm_acceptance",
+            "result": "pass",
+            "candidate_sha": manifest["release"]["git_sha"],
+            "candidate_tree": "c" * 40,
+            "profile_sha256": "b" * 64,
+            "cluster_name": "trt-gb10",
+            "controller_host": "gx10-01c7",
+            "service_identity": {
+                "user": "loom-rollout",
+                "uid": 995,
+                "gid": 2007,
+                "account": "loom-staging",
+                "qos": "loom-staging",
+            },
+            "nodes": [f"trt-gb10-{index}" for index in range(1, 16)],
+            "node_count": 15,
+            "probed_nodes": [f"trt-gb10-{index}" for index in range(2, 16)],
+            "probed_node_count": 14,
+            "deferred_busy_nodes": ["trt-gb10-1"],
+            "generated_at": generated_at.isoformat(),
+            "expires_at": (generated_at + timedelta(minutes=15)).isoformat(),
+        },
+    )
+
+    assert check is not None
+    assert check.outcome == "pass"
+    assert check.evidence["authority_verified"] is True
+
+
+def test_release_gate_rejects_authority_with_forged_node_inventory() -> None:
+    manifest = _manifest(external_workers=_external_gb10_workers(enabled=True))
+    manifest["external_workers"]["environment_state_file"] = {"sha256": "b" * 64}
+    generated_at = datetime.now(UTC)
+    artifact = {
+        "schema_version": 1,
+        "kind": "loom_gb10_slurm_acceptance",
+        "result": "pass",
+        "candidate_sha": manifest["release"]["git_sha"],
+        "candidate_tree": "c" * 40,
+        "profile_sha256": "b" * 64,
+        "cluster_name": "trt-gb10",
+        "controller_host": "gx10-01c7",
+        "service_identity": {
+            "user": "loom-rollout",
+            "uid": 995,
+            "gid": 2007,
+            "account": "loom-staging",
+            "qos": "loom-staging",
+        },
+        "nodes": [f"trt-gb10-{index}" for index in range(1, 15)] + ["trt-gb10-16"],
+        "node_count": 15,
+        "probed_nodes": [f"trt-gb10-{index}" for index in range(1, 15)],
+        "probed_node_count": 14,
+        "deferred_busy_nodes": ["trt-gb10-16"],
+        "generated_at": generated_at.isoformat(),
+        "expires_at": (generated_at + timedelta(minutes=15)).isoformat(),
+    }
+
+    check = _external_slurm_acceptance_check(manifest, authority_artifact=artifact)
+
+    assert check is not None
+    assert check.outcome == "fail"
+    assert "external_slurm_acceptance_authority_mismatch" in check.evidence["blockers"]
+
+
+def test_release_gate_rejects_unprobed_or_malformed_authority_coverage() -> None:
+    manifest = _manifest(external_workers=_external_gb10_workers(enabled=True))
+    manifest["external_workers"]["environment_state_file"] = {"sha256": "b" * 64}
+    generated_at = datetime.now(UTC)
+    artifact = {
+        "schema_version": 1,
+        "kind": "loom_gb10_slurm_acceptance",
+        "result": "pass",
+        "candidate_sha": manifest["release"]["git_sha"],
+        "candidate_tree": "c" * 40,
+        "profile_sha256": "b" * 64,
+        "cluster_name": "trt-gb10",
+        "controller_host": "gx10-01c7",
+        "service_identity": {
+            "user": "loom-rollout",
+            "uid": 995,
+            "gid": 2007,
+            "account": "loom-staging",
+            "qos": "loom-staging",
+        },
+        "nodes": [f"trt-gb10-{index}" for index in range(1, 16)],
+        "node_count": 15,
+        "probed_nodes": [],
+        "probed_node_count": 0,
+        "deferred_busy_nodes": [{"node": "trt-gb10-1"}],
+        "generated_at": generated_at.isoformat(),
+        "expires_at": (generated_at + timedelta(minutes=15)).isoformat(),
+    }
+
+    check = _external_slurm_acceptance_check(manifest, authority_artifact=artifact)
+
+    assert check is not None
+    assert check.outcome == "fail"
+    assert "external_slurm_acceptance_authority_mismatch" in check.evidence["blockers"]
 
 
 @pytest.mark.parametrize(
@@ -2511,6 +2637,65 @@ def test_cluster_release_gate_cli_passes_environment_state_check_artifact(
     assert rc == 0
     assert captured["environment_state_check_artifact"]["ok"] is True
     assert captured["environment_state_check_path"] == str(environment_state_check_path.resolve())
+
+
+def test_cluster_release_gate_cli_passes_external_slurm_authority_artifact(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    manifest_path = tmp_path / "release-manifest.json"
+    manifest_path.write_text(
+        json.dumps(_manifest(external_workers=_external_gb10_workers(enabled=True))),
+        encoding="utf-8",
+    )
+    authority_path = tmp_path / "external-slurm-authority.json"
+    authority = {"result": "pass", "candidate_sha": "a" * 40, "node_count": 15}
+    authority_path.write_text(json.dumps(authority), encoding="utf-8")
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd._load_clients",
+        lambda _context: (object(), object(), object(), object()),
+    )
+
+    def _fake_collect_release_gate_report(**kwargs: Any) -> ReleaseGateReport:
+        captured.update(kwargs)
+        return ReleaseGateReport(environment="staging", namespace="loom", checks=[])
+
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd.collect_release_gate_report",
+        _fake_collect_release_gate_report,
+    )
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd._load_root_owned_external_slurm_authority",
+        lambda path: authority if path == authority_path.resolve() else None,
+    )
+
+    rc = main(
+        [
+            "cluster",
+            "release-gate",
+            "--manifest",
+            str(manifest_path),
+            "--external-slurm-authority",
+            str(authority_path),
+            "--dry-run",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["external_slurm_authority_artifact"] == authority
+    assert captured["external_slurm_authority_error"] is None
+
+
+def test_external_slurm_authority_loader_rejects_operator_owned_json(tmp_path) -> None:
+    path = tmp_path / "authority.json"
+    path.write_text("{}", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="root-owned"):
+        _load_root_owned_external_slurm_authority(path)
 
 
 def test_cluster_release_gate_cli_passes_hf_mirror_boundary_artifact(

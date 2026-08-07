@@ -1,0 +1,121 @@
+from __future__ import annotations
+
+from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import delete, insert, select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from loom.db.schema import Task, Team, TeamQuota, Trial, WorkerPoolAutoscalerPolicy
+from loom_control_plane.autoscaler_demand_router import assign_neutral_queued_trials
+
+
+@pytest.fixture(autouse=True)
+async def _cleanup_db(postgres_url: str) -> Iterator[None]:
+    yield
+    engine = create_async_engine(postgres_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as session:
+        await session.execute(delete(Trial))
+        await session.execute(delete(WorkerPoolAutoscalerPolicy))
+        await session.execute(delete(Task))
+        await session.execute(delete(TeamQuota))
+        await session.execute(delete(Team))
+        await session.commit()
+    await engine.dispose()
+
+
+async def test_router_assigns_each_neutral_trial_to_one_enabled_pool(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)
+    team_id = uuid4()
+    try:
+        async with factory() as session:
+            await session.execute(insert(Team).values(id=team_id, name="routing-team"))
+            await session.execute(
+                insert(Task).values(id="routing-task", checksum="0" * 64, config={})
+            )
+            for pool_name, max_slots in (("gb10", 150), ("oldlab", 5)):
+                await session.execute(
+                    insert(WorkerPoolAutoscalerPolicy).values(
+                        environment="staging",
+                        pool_name=pool_name,
+                        actuator="slurm",
+                        enabled=True,
+                        min_slots=0,
+                        max_slots=max_slots,
+                        scale_up_threshold_slots=1,
+                        scale_down_idle_seconds=60,
+                        scale_up_cooldown_seconds=0,
+                        scale_down_cooldown_seconds=0,
+                        drain_timeout_seconds=60,
+                        actuator_config={
+                            "backend": "docker",
+                            "cpu_arch": "arm64" if pool_name == "gb10" else "x86_64",
+                            "external_runner": True,
+                        },
+                    ),
+                )
+            for index, (key, requires_caps) in enumerate(
+                (
+                    ("neutral-1", {"backend": "docker", "cpu_arch": "any"}),
+                    ("neutral-2", {"backend": "docker", "cpu_arch": "any"}),
+                    (
+                        "explicit-oldlab",
+                        {
+                            "backend": "docker",
+                            "cpu_arch": "any",
+                            "worker_pool": "oldlab",
+                        },
+                    ),
+                    ("concrete-arm", {"backend": "docker", "cpu_arch": "arm64"}),
+                )
+            ):
+                await session.execute(
+                    insert(Trial).values(
+                        id=uuid4(),
+                        team_id=team_id,
+                        task_id="routing-task",
+                        config={},
+                        requires_caps=requires_caps,
+                        state="queued",
+                        idempotency_key=key,
+                        submitted_at=now + timedelta(seconds=index),
+                    ),
+                )
+            await session.commit()
+
+        async with factory() as session:
+            summary = await assign_neutral_queued_trials(
+                session,
+                environment="staging",
+                now=now,
+            )
+            await session.commit()
+
+        async with factory() as session:
+            rows = (
+                await session.execute(
+                    select(
+                        Trial.idempotency_key,
+                        Trial.autoscaler_pool_name,
+                        Trial.autoscaler_pool_assigned_at,
+                    ).order_by(Trial.idempotency_key),
+                )
+            ).all()
+
+        assert summary.assigned_count == 2
+        assert summary.unroutable_count == 0
+        assert rows == [
+            ("concrete-arm", None, None),
+            ("explicit-oldlab", None, None),
+            ("neutral-1", "gb10", now),
+            ("neutral-2", "oldlab", now),
+        ]
+    finally:
+        await engine.dispose()

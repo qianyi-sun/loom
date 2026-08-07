@@ -66,6 +66,93 @@ async def _cleanup_db(postgres_url: str):  # type: ignore[no-untyped-def]
     await engine.dispose()
 
 
+async def test_claim_honors_internal_pool_assignment_for_neutral_trial(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    team_id = uuid4()
+    trial_id = uuid4()
+    worker_ids = {"gb10": uuid4(), "oldlab": uuid4()}
+    async with session_factory() as session:
+        await session.execute(insert(Team).values(id=team_id, name=f"neutral-{team_id}"))
+        await session.execute(insert(TeamQuota).values(team_id=team_id, fair_share_weight=1.0))
+        await session.execute(
+            insert(Task).values(
+                id="neutral-claim-task",
+                checksum="0" * 64,
+                config={"schema_version": "1"},
+            ),
+        )
+        await session.execute(
+            insert(Trial).values(
+                id=trial_id,
+                team_id=team_id,
+                task_id="neutral-claim-task",
+                config={},
+                requires_caps={
+                    "os": "linux",
+                    "cpu_arch": "any",
+                    "gpu_vendor": "none",
+                    "network_policies": ["public"],
+                },
+                autoscaler_pool_name="oldlab",
+                autoscaler_pool_assigned_at=now,
+                state="queued",
+            ),
+        )
+        for pool_name, cpu_arch in (("gb10", "arm64"), ("oldlab", "x86_64")):
+            await session.execute(
+                insert(Worker).values(
+                    id=worker_ids[pool_name],
+                    hostname=f"{pool_name}-worker",
+                    version="v",
+                    pool_name=pool_name,
+                    capabilities=[
+                        {
+                            "os": "linux",
+                            "cpu_arch": cpu_arch,
+                            "gpu_vendor": "none",
+                            "network_policies": ["public"],
+                        },
+                    ],
+                    registered_at=now,
+                    last_seen_at=now,
+                    status="active",
+                ),
+            )
+        await session.commit()
+
+    async with session_factory() as session:
+        wrong_pool_claim = await claim_one(
+            session,
+            worker_id=worker_ids["gb10"],
+            worker_os=["linux"],
+            worker_cpu_arches=["arm64"],
+            worker_gpu_vendors=["none"],
+            worker_network_policies=["public"],
+        )
+        await session.commit()
+
+    assert wrong_pool_claim is None
+
+    async with session_factory() as session:
+        assigned_pool_claim = await claim_one(
+            session,
+            worker_id=worker_ids["oldlab"],
+            worker_os=["linux"],
+            worker_cpu_arches=["x86_64"],
+            worker_gpu_vendors=["none"],
+            worker_network_policies=["public"],
+        )
+        await session.commit()
+
+    assert assigned_pool_claim is not None
+    assert assigned_pool_claim["id"] == trial_id
+    await engine.dispose()
+
+
 async def test_drf_alternates_between_teams(postgres_url: str):
     engine = create_async_engine(postgres_url)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)

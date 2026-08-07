@@ -107,7 +107,7 @@ def test_repo_configs_no_longer_reference_qianyi_private_deploy_key() -> None:
 
     env_state = (REPO_ROOT / "deploy/environment-state/staging.toml").read_text(encoding="utf-8")
     assert "/shared_work/qianyi/loom-worker-capacity/staging-gb10-worker-" not in env_state
-    assert "/var/lib/loom-staging-rollout/generated/staging-gb10-worker-" in env_state
+    assert "/shared_work2/loom-staging-rollout/worker-envs/staging-gb10-worker-" in env_state
     assert "/shared_work/qianyi/loom-worker-capacity/staging-catalog-provisioning.env" in env_state
 
 
