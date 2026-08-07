@@ -93,7 +93,7 @@ every job key.
 The root-owned `ci_runner_route_controller.py` is the outbound-only transport
 between GitHub and that broker. On each pool timer tick it scans a bounded set
 of `loom-ci-route-request-v1-<workflow-id>-<run>-<attempt>` artifacts, reads
-exactly one bounded `route-request.json`, and verifies the artifact, live
+exactly one bounded `loom-ci-route-request.json`, and verifies the artifact, live
 workflow run, repository, workflow ID, attempt, event, and head SHA before
 allocating. The GitHub credential is sent only to `api.github.com`; artifact
 redirects are followed in a separate request with no authorization header.
