@@ -52,6 +52,58 @@ Changing the variable changes only placement. It must never change the job
 steps, selected test paths, permissions, timeout, protected context, image
 candidate identity, or result aggregation.
 
+## Capacity-aware preferred routing
+
+Issue [#1207](https://github.com/qianyi-sun/loom/issues/1207) supersedes static
+class-variable activation as the intended steady-state placement policy. The
+oldlab pool must remain warm and is preferred for every eligible AMD64 job, but
+a newly created job uses GitHub-hosted capacity when every slot in its class is
+already leased. Releasing an oldlab lease makes that slot the preferred target
+for the next allocation.
+
+GitHub Actions does not implement ordered fallback between a self-hosted label
+set and a GitHub-hosted label. It also does not move an already queued job when
+a repository variable changes. Consequently, toggling
+`LOOM_CI_*_RUNS_ON` based on queue age is not capacity-aware overflow and must
+not be used to claim #1207 acceptance.
+
+`scripts/ops/ci_runner_lease_broker.py` is the atomic placement authority. It
+uses a root-owned SQLite database (default
+`/var/lib/loom-ci-runner-pool/leases.sqlite3`) and the checked-in pool profile
+to enforce exactly five normal, four image, and two smoke leases across
+concurrent workflow runs. Each request binds repository, workflow run, attempt,
+job key, head SHA, and work class. An exact replay returns the frozen placement;
+changed identity fields fail closed. The broker assigns the lowest available
+oldlab class slot and returns the class-specific GitHub-hosted label only when
+all oldlab slots are already leased.
+
+A lease deadline is diagnostic, not permission to reuse a possibly queued or
+running slot. Cancellation, completion, supersession, or expiry releases a
+lease only after the trusted controller observes the exact job as terminal and
+supplies the matching lease epoch. This prevents a slow job from overlapping a
+new assignment merely because a wall-clock timeout elapsed.
+
+Example against a non-production state database:
+
+```bash
+uv run --no-sync python scripts/ops/ci_runner_lease_broker.py \
+  --state-db /tmp/loom-ci-runner-leases.sqlite3 \
+  --profile deploy/ci-runners/oldlab5.toml \
+  allocate --request-file /tmp/route-request.json
+
+uv run --no-sync python scripts/ops/ci_runner_lease_broker.py \
+  --state-db /tmp/loom-ci-runner-leases.sqlite3 \
+  --profile deploy/ci-runners/oldlab5.toml \
+  status
+```
+
+The lease core alone does not authorize static route activation. A trusted
+router still has to obtain and publish each immutable assignment without
+exposing the runner-administration credential to PR-controlled code. Until that
+workflow integration merges and passes the controlled overflow/reuse A/B, keep
+the class variables absent and treat the pool and route as separate live
+controls.
+
 ## Activation prerequisites
 
 Do not set `LOOM_CI_ACCELERATOR_RUNS_ON` until all of these are true:
