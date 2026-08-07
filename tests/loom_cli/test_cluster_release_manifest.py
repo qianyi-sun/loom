@@ -74,6 +74,7 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
         'pool_name = "oldlab"\n'
         'actuator = "slurm"\n'
         "[worker_pool_autoscaler_policies.actuator_config]\n"
+        'allowed_nodes = ["trt-eai-oldlab-3", "trt-eai-oldlab-4"]\n'
         'env_file = "/secure/staging-oldlab-${IMAGE_TAG}.env"\n'
         'repo_dir = "/srv/loom-${IMAGE_TAG}"\n'
         "external_runner = true\n"
@@ -194,6 +195,7 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
             "enabled": False,
             "disabled_reason": None,
             "external_runner": True,
+            "allowed_nodes": ["trt-eai-oldlab-3", "trt-eai-oldlab-4"],
             "env_file": "/secure/staging-oldlab-staging-abc123.env",
             "repo_dir": "/srv/loom-staging-abc123",
         },

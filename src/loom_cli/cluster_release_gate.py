@@ -857,7 +857,25 @@ def _external_slurm_acceptance_check(
     expected_profile_sha256 = (
         expected_profile.get("sha256") if isinstance(expected_profile, dict) else None
     )
-    expected_nodes = [f"trt-gb10-{index}" for index in range(1, 16)]
+    gb10_policies = [
+        pool
+        for pool in slurm_pools
+        if isinstance(pool, dict)
+        and pool.get("pool_name") == "gb10"
+        and pool.get("actuator") == "slurm"
+        and pool.get("external_runner") is True
+    ]
+    raw_expected_nodes = (
+        gb10_policies[0].get("allowed_nodes") if len(gb10_policies) == 1 else None
+    )
+    expected_nodes = (
+        raw_expected_nodes
+        if isinstance(raw_expected_nodes, list)
+        and len(raw_expected_nodes) == 15
+        and all(isinstance(node, str) and node for node in raw_expected_nodes)
+        and len(set(raw_expected_nodes)) == 15
+        else []
+    )
     authority_matches = False
     if authority_artifact is not None:
         try:
@@ -891,7 +909,8 @@ def _external_slurm_acceptance_check(
             == [node for node in expected_nodes if node in set(deferred_busy_nodes)]
         )
         authority_matches = bool(
-            authority_artifact.get("schema_version") == 1
+            type(authority_artifact.get("schema_version")) is int
+            and authority_artifact.get("schema_version") == 1
             and authority_artifact.get("kind") == "loom_gb10_slurm_acceptance"
             and authority_artifact.get("result") == "pass"
             and authority_artifact.get("candidate_sha") == release.get("git_sha")
@@ -909,7 +928,9 @@ def _external_slurm_acceptance_check(
                 "qos": "loom-staging",
             }
             and authority_artifact.get("nodes") == expected_nodes
+            and type(authority_artifact.get("node_count")) is int
             and authority_artifact.get("node_count") == len(expected_nodes)
+            and type(authority_artifact.get("probed_node_count")) is int
             and authority_artifact.get("probed_node_count") == len(probed_nodes or [])
             and coverage_matches
             and times_valid

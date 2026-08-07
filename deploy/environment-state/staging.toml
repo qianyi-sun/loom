@@ -40,12 +40,12 @@ allowed_nodes = [
   "trt-gb10-7",
   "trt-gb10-8",
   "trt-gb10-9",
-  "trt-gb10-10",
   "trt-gb10-11",
   "trt-gb10-12",
   "trt-gb10-13",
   "trt-gb10-14",
   "trt-gb10-15",
+  "trt-gb10-16",
 ]
 env_file = "/shared_work2/loom-staging-rollout/worker-envs/staging-gb10-worker-${IMAGE_TAG}.env"
 repo_dir = "/shared_work2/loom-staging-rollout/worker-repos/loom-remote-worker-${IMAGE_TAG}"

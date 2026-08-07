@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib.util
-import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -52,16 +51,122 @@ def test_authority_compiles_and_installer_parses() -> None:
     assert parse_result.returncode == 0, parse_result.stderr
 
 
-def test_authority_is_fixed_to_service_identity_and_all_fifteen_nodes() -> None:
-    source = _authority_source()
-    assert 'SERVICE_USER = "loom-rollout"' in source
-    assert "SERVICE_UID = 995" in source
-    assert "SERVICE_GID = 2007" in source
-    assert 'SLURM_ACCOUNT = "loom-staging"' in source
-    assert 'SLURM_QOS = "loom-staging"' in source
-    assert 'CLUSTER_NAME = "trt-gb10"' in source
-    assert 'CONTROLLER_HOST = "gx10-01c7"' in source
-    assert re.search(r"range\(1, 16\)", source)
+def test_authority_is_fixed_to_service_identity_and_real_slurm_partition() -> None:
+    authority = _load_authority()
+    assert authority.SERVICE_USER == "loom-rollout"
+    assert authority.SERVICE_UID == 995
+    assert authority.SERVICE_GID == 2007
+    assert authority.SLURM_ACCOUNT == "loom-staging"
+    assert authority.SLURM_QOS == "loom-staging"
+    assert authority.CLUSTER_NAME == "trt-gb10"
+    assert authority.CONTROLLER_HOST == "gx10-01c7"
+    assert authority.SLURM_NODES == (
+        "trt-gb10-1",
+        "trt-gb10-2",
+        "trt-gb10-3",
+        "trt-gb10-4",
+        "trt-gb10-5",
+        "trt-gb10-6",
+        "trt-gb10-7",
+        "trt-gb10-8",
+        "trt-gb10-9",
+        "trt-gb10-11",
+        "trt-gb10-12",
+        "trt-gb10-13",
+        "trt-gb10-14",
+        "trt-gb10-15",
+        "trt-gb10-16",
+    )
+    assert authority.LEGACY_AGENT_NODES == tuple(
+        f"trt-gb10-{number}" for number in range(1, 16)
+    )
+
+
+def test_candidate_contract_separates_slurm_nodes_from_retired_agent_nodes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _load_authority()
+    candidate_sha = "a" * 40
+    profile = (
+        tmp_path
+        / candidate_sha
+        / "repo/deploy/environment-state/staging.toml"
+    )
+    profile.parent.mkdir(parents=True)
+    profile.write_text(
+        """
+environment = "staging"
+
+[[worker_pool_autoscaler_policies]]
+pool_name = "gb10"
+actuator = "slurm"
+enabled = true
+min_slots = 0
+max_slots = 150
+
+[worker_pool_autoscaler_policies.actuator_config]
+slurm_cluster_name = "trt-gb10"
+slurm_controller_host = "gx10-01c7"
+partition = "gb10"
+external_runner = true
+slurm_account = "loom-staging"
+qos_normal = "loom-staging"
+candidate_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+allowed_nodes = [
+  "trt-gb10-1", "trt-gb10-2", "trt-gb10-3", "trt-gb10-4",
+  "trt-gb10-5", "trt-gb10-6", "trt-gb10-7", "trt-gb10-8",
+  "trt-gb10-9", "trt-gb10-11", "trt-gb10-12", "trt-gb10-13",
+  "trt-gb10-14", "trt-gb10-15", "trt-gb10-16",
+]
+repo_dir = "/shared_work2/loom-staging-rollout/worker-repos/exact"
+env_file = "/shared_work2/loom-staging-rollout/worker-envs/exact.env"
+
+[[gb10_worker_pool_desired_states]]
+pool_name = "gb10"
+target_slots = 0
+
+[gb10_worker_pool_desired_states.host_intents]
+trt-gb10-1 = "stopped"
+trt-gb10-2 = "stopped"
+trt-gb10-3 = "stopped"
+trt-gb10-4 = "stopped"
+trt-gb10-5 = "stopped"
+trt-gb10-6 = "stopped"
+trt-gb10-7 = "stopped"
+trt-gb10-8 = "stopped"
+trt-gb10-9 = "stopped"
+trt-gb10-10 = "stopped"
+trt-gb10-11 = "stopped"
+trt-gb10-12 = "stopped"
+trt-gb10-13 = "stopped"
+trt-gb10-14 = "stopped"
+trt-gb10-15 = "stopped"
+
+[external_slurm_runner_prerequisites]
+materialize = true
+require_external_allocation_authority = true
+pools = ["gb10"]
+
+[[external_slurm_autoscaler_supervisors]]
+pool_name = "gb10"
+execution_host = "gx10-01c7"
+enabled = true
+active = true
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(authority, "CANDIDATE_ROOT", tmp_path)
+
+    contract = authority._load_contract(candidate_sha, "staging-aaaaaaa")
+
+    assert contract["repo_dir"] == Path(
+        "/shared_work2/loom-staging-rollout/worker-repos/exact"
+    )
+    assert contract["env_file"] == Path(
+        "/shared_work2/loom-staging-rollout/worker-envs/exact.env"
+    )
 
 
 def test_authority_runs_real_service_user_allocations_on_each_exact_node() -> None:
