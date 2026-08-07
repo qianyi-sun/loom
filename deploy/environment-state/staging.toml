@@ -28,6 +28,8 @@ force = false
 [worker_pool_autoscaler_policies.actuator_config]
 backend = "docker"
 cpu_arch = "arm64"
+slurm_cluster_name = "trt-gb10"
+slurm_controller_host = "gx10-01c7"
 partition = "gb10"
 allowed_nodes = [
   "trt-gb10-1",
@@ -88,6 +90,8 @@ force = false
 [worker_pool_autoscaler_policies.actuator_config]
 backend = "docker"
 cpu_arch = "x86_64"
+slurm_cluster_name = "trt-oldlab"
+slurm_controller_host = "TRT-EAI-OLDLAB-1"
 # The cluster's OLDLAB nodes are in the `all` partition. Restrict the initial
 # activation to OLDLAB-5 so it cannot overlap the four fixed workers.
 partition = "all"
@@ -214,6 +218,8 @@ script_path = "/opt/loom-staging-runner/candidates/${GIT_SHA}/repo/scripts/ops/w
 args = [
   "--environment", "staging",
   "--pool-name", "gb10",
+  "--expected-slurm-cluster-name", "trt-gb10",
+  "--expected-slurm-controller-host", "gx10-01c7",
   "--namespace", "loom-staging",
   "--kubeconfig", "/var/lib/loom-staging-rollout/kubeconfig",
   "--db-local-host", "127.0.0.1",
@@ -242,6 +248,8 @@ script_path = "/opt/loom-staging-runner/candidates/${GIT_SHA}/repo/scripts/ops/w
 args = [
   "--environment", "staging",
   "--pool-name", "oldlab",
+  "--expected-slurm-cluster-name", "trt-oldlab",
+  "--expected-slurm-controller-host", "TRT-EAI-OLDLAB-1",
   "--namespace", "loom-staging",
   "--kubeconfig", "/var/lib/loom-staging-rollout/kubeconfig",
   "--db-local-host", "127.0.0.1",

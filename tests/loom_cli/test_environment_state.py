@@ -2405,6 +2405,23 @@ def test_supervisor_collision_rejects_duplicate_db_local_port(tmp_path: Path) ->
         load_environment_state_profile(profile_path)
 
 
+def test_supervisor_collision_rejects_duplicate_pool_authority(tmp_path: Path) -> None:
+    profile_path = tmp_path / "development.state.toml"
+    payload = _supervisor_profile_payload(
+        second_service="loom-autoscaler-gb10-dev.service",
+        second_port="15450",
+    )
+    payload = payload.replace('pool_name = "gb10"', 'pool_name = "oldlab"', 1)
+    payload = payload.replace('"--pool-name", "gb10"', '"--pool-name", "oldlab"', 1)
+    profile_path.write_text(payload, encoding="utf-8")
+
+    with pytest.raises(
+        EnvironmentStateProfileError,
+        match=r"duplicate pool_name 'oldlab'",
+    ):
+        load_environment_state_profile(profile_path)
+
+
 def test_render_supervisor_service_and_timer_contain_full_execstart() -> None:
     profile = load_environment_state_profile(
         Path("deploy/environment-state/staging.toml"),

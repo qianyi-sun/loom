@@ -46,7 +46,9 @@ from loom_control_plane.worker_pool_autoscaler import (
 _MAX_PORT_FORWARD_READY_TIMEOUT_SEC = 60.0
 _MAX_PORT_FORWARD_STOP_TIMEOUT_SEC = 30.0
 _MAX_PORT_FORWARD_STARTUP_OUTPUT_BYTES = 16 * 1024
+_SLURM_AUTHORITY_TIMEOUT_SEC = 10.0
 _KUBERNETES_NAME = re.compile(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?")
+_SLURM_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 
 
 class ExternalAutoscalerError(RuntimeError):
@@ -65,6 +67,10 @@ class ExternalPolicyValidationError(ExternalAutoscalerError):
     """Raised when requested external policies are missing or ambiguous."""
 
 
+class SlurmAuthorityValidationError(ExternalAutoscalerError):
+    """Raised when the local Slurm submit authority is not the expected one."""
+
+
 @dataclass(frozen=True)
 class DatabasePortForwardConfig:
     kubectl: str
@@ -76,6 +82,13 @@ class DatabasePortForwardConfig:
     remote_port: int
     ready_timeout_sec: float
     stop_timeout_sec: float
+
+
+@dataclass(frozen=True)
+class SlurmAuthority:
+    cluster_name: str
+    controller_host: str
+    local_hostname: str
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -93,6 +106,9 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
         help="Exact environment whose external-runner policies may be reconciled.",
     )
+    parser.add_argument("--expected-slurm-cluster-name", required=True)
+    parser.add_argument("--expected-slurm-controller-host", required=True)
+    parser.add_argument("--scontrol", default="/usr/bin/scontrol")
     parser.add_argument("--namespace", default="loom-staging")
     parser.add_argument(
         "--kubeconfig",
@@ -148,6 +164,71 @@ def _load_cp_db_url(args: argparse.Namespace, *, timeout_sec: float) -> str:
         timeout=timeout_sec,
     ).strip()
     return base64.b64decode(encoded).decode("utf-8")
+
+
+def _validated_slurm_identifier(value: object, field: str) -> str:
+    if not isinstance(value, str) or _SLURM_IDENTIFIER.fullmatch(value) is None:
+        raise ExternalAutoscalerConfigurationError(f"{field} must be an exact Slurm identifier")
+    return value
+
+
+def _validated_scontrol_path(value: object) -> str:
+    if not isinstance(value, str):
+        raise ExternalAutoscalerConfigurationError("--scontrol must be an absolute path")
+    parsed = Path(value)
+    if not parsed.is_absolute() or str(parsed) != value or ".." in parsed.parts:
+        raise ExternalAutoscalerConfigurationError("--scontrol must be an absolute path")
+    return value
+
+
+def _validate_local_slurm_authority(args: argparse.Namespace) -> SlurmAuthority:
+    expected_cluster = _validated_slurm_identifier(
+        args.expected_slurm_cluster_name,
+        "--expected-slurm-cluster-name",
+    )
+    expected_controller = _validated_slurm_identifier(
+        args.expected_slurm_controller_host,
+        "--expected-slurm-controller-host",
+    )
+    scontrol = _validated_scontrol_path(args.scontrol)
+    try:
+        result = subprocess.run(
+            [scontrol, "show", "config"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=_SLURM_AUTHORITY_TIMEOUT_SEC,
+        )
+        local_hostname = socket.gethostname()
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SlurmAuthorityValidationError("local Slurm authority is unavailable") from exc
+    if result.returncode != 0:
+        raise SlurmAuthorityValidationError("local Slurm authority is unavailable")
+
+    clusters: list[str] = []
+    controllers: list[str] = []
+    for line in result.stdout.splitlines():
+        key, separator, raw_value = line.partition("=")
+        if not separator:
+            continue
+        normalized_key = key.strip()
+        value = raw_value.strip()
+        if normalized_key == "ClusterName":
+            clusters.append(value)
+        elif normalized_key == "SlurmctldHost" or normalized_key.startswith("SlurmctldHost["):
+            controllers.append(value.partition("(")[0].strip())
+
+    if (
+        clusters != [expected_cluster]
+        or controllers != [expected_controller]
+        or local_hostname != expected_controller
+    ):
+        raise SlurmAuthorityValidationError("local Slurm authority does not match expectation")
+    return SlurmAuthority(
+        cluster_name=expected_cluster,
+        controller_host=expected_controller,
+        local_hostname=local_hostname,
+    )
 
 
 def _scoped_pool_names(values: Sequence[str]) -> tuple[str, ...]:
@@ -449,6 +530,7 @@ async def _validate_requested_external_policies(
     *,
     environment: str,
     pool_names: tuple[str, ...],
+    authority: SlurmAuthority,
 ) -> list[dict[str, object]]:
     result = await session.execute(
         select(WorkerPoolAutoscalerPolicy).where(
@@ -459,10 +541,22 @@ async def _validate_requested_external_policies(
         )
     )
     counts = dict.fromkeys(pool_names, 0)
+    authority_mismatches: set[str] = set()
     for row in result.scalars().all():
         actuator_config = row.actuator_config if isinstance(row.actuator_config, dict) else {}
         if actuator_config.get("external_runner") is True:
+            if (
+                actuator_config.get("slurm_cluster_name") != authority.cluster_name
+                or actuator_config.get("slurm_controller_host") != authority.controller_host
+            ):
+                authority_mismatches.add(row.pool_name)
+                continue
             counts[row.pool_name] += 1
+    if authority_mismatches:
+        raise ExternalPolicyValidationError(
+            "requested external autoscaler policy has a foreign Slurm authority: "
+            + ", ".join(sorted(authority_mismatches))
+        )
     invalid = sorted(pool_name for pool_name, count in counts.items() if count != 1)
     if invalid:
         raise ExternalPolicyValidationError(
@@ -495,6 +589,7 @@ async def _main_async(args: argparse.Namespace) -> None:
         "--db-connect-timeout-sec",
         maximum=_MAX_PORT_FORWARD_READY_TIMEOUT_SEC,
     )
+    slurm_authority = _validate_local_slurm_authority(args)
     db_url = _load_cp_db_url(args, timeout_sec=db_connect_timeout_sec)
     url = _preflight_database_url(db_url, port_forward=port_forward)
     with _database_port_forward(port_forward):
@@ -508,6 +603,7 @@ async def _main_async(args: argparse.Namespace) -> None:
                             session,
                             environment=environment,
                             pool_names=pool_names,
+                            authority=slurm_authority,
                         )
                     finally:
                         await session.rollback()
@@ -517,6 +613,11 @@ async def _main_async(args: argparse.Namespace) -> None:
                             {
                                 "mode": "validate-only",
                                 "database_reachable": True,
+                                "slurm_authority": {
+                                    "cluster_name": slurm_authority.cluster_name,
+                                    "controller_host": slurm_authority.controller_host,
+                                    "local_hostname": slurm_authority.local_hostname,
+                                },
                                 "pools": validation,
                             },
                             sort_keys=True,

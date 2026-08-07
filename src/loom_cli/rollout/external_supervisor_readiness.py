@@ -47,6 +47,10 @@ _PROTECTED_SYSTEMD_UNIT_RE = re.compile(
 )
 _KUBERNETES_NAME_RE = re.compile(r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$")
 _INTEGER_DURATION_RE = re.compile(r"^[1-9][0-9]{0,4}$")
+_STAGING_SLURM_AUTHORITIES = {
+    "gb10": ("trt-gb10", "gx10-01c7"),
+    "oldlab": ("trt-oldlab", "TRT-EAI-OLDLAB-1"),
+}
 
 _MAX_PROFILE_BYTES = 1024 * 1024
 _MAX_SCRIPT_BYTES = 2 * 1024 * 1024
@@ -58,6 +62,8 @@ _REQUIRED_ARGUMENTS = frozenset(
     {
         "--environment",
         "--pool-name",
+        "--expected-slurm-cluster-name",
+        "--expected-slurm-controller-host",
         "--namespace",
         "--kubeconfig",
         "--db-local-host",
@@ -75,6 +81,7 @@ _OPTIONAL_ARGUMENTS = frozenset(
         "--kubectl",
         "--db-secret-name",
         "--db-secret-key",
+        "--scontrol",
     }
 )
 _ALLOWED_ARGUMENTS = _REQUIRED_ARGUMENTS | _OPTIONAL_ARGUMENTS
@@ -349,6 +356,12 @@ class ExternalSupervisorIdentity:
             raise ValueError("external supervisor environment argument drifted")
         if arguments["--pool-name"] != self.pool_name:
             raise ValueError("external supervisor pool argument drifted")
+        expected_slurm_authority = _STAGING_SLURM_AUTHORITIES.get(self.pool_name)
+        if expected_slurm_authority is None or (
+            arguments["--expected-slurm-cluster-name"],
+            arguments["--expected-slurm-controller-host"],
+        ) != expected_slurm_authority:
+            raise ValueError("external supervisor Slurm authority drifted")
         if arguments["--namespace"] != STAGING_NAMESPACE:
             raise ValueError("external supervisor staging namespace is not canonical")
         if arguments["--kubeconfig"] != STAGING_KUBECONFIG:
@@ -357,6 +370,7 @@ class ExternalSupervisorIdentity:
             "--kubectl": "/usr/local/bin/kubectl",
             "--db-secret-name": "loom-secrets",
             "--db-secret-key": "cp-db-url",
+            "--scontrol": "/usr/bin/scontrol",
         }
         if any(
             flag in arguments and arguments[flag] != expected
@@ -437,7 +451,11 @@ class ExternalSupervisorIdentity:
         if "network-online.target" not in self.requires:
             raise ValueError("external supervisor network-online dependency is missing")
         _duration(self.timer_on_boot_sec, "timer_on_boot_sec")
-        _duration(self.timer_on_unit_active_sec, "timer_on_unit_active_sec")
+        timer_interval = int(
+            _duration(self.timer_on_unit_active_sec, "timer_on_unit_active_sec")
+        )
+        if timer_interval > self.freshness_sec:
+            raise ValueError("external supervisor timer exceeds its freshness bound")
         _duration(self.timer_accuracy_sec, "timer_accuracy_sec")
         _duration(self.service_timeout_sec, "service_timeout_sec", maximum=7200)
         if type(self.enabled) is not bool or type(self.active) is not bool:

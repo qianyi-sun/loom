@@ -43,6 +43,8 @@ force = false
 [worker_pool_autoscaler_policies.actuator_config]
 backend = "docker"
 cpu_arch = "arm64"
+slurm_cluster_name = "trt-gb10"
+slurm_controller_host = "gx10-01c7"
 partition = "gb10"
 allowed_nodes = [
   "trt-gb10-1",
@@ -173,6 +175,6 @@ timer_name = "loom-autoscaler-gb10-prod.timer"
 working_directory = "/opt/loom-prod-runner/repo"
 python_path = "/opt/loom-prod-runner/venv/bin/python"
 script_path = "scripts/ops/worker_pool_autoscaler_external_once.py"
-args = ["--environment", "production", "--pool-name", "gb10", "--namespace", "loom-prod", "--kubeconfig", "/etc/loom/kubeconfig/production.yaml", "--db-local-port", "15452", "--freshness-sec", "120"]
+args = ["--environment", "production", "--pool-name", "gb10", "--expected-slurm-cluster-name", "trt-gb10", "--expected-slurm-controller-host", "gx10-01c7", "--namespace", "loom-prod", "--kubeconfig", "/etc/loom/kubeconfig/production.yaml", "--db-local-port", "15452", "--freshness-sec", "120"]
 enabled = false
 active = false

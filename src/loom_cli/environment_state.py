@@ -309,7 +309,7 @@ def _validate_supervisor_collisions(
     uniqueness of the identity fields plus the DB tunnel port so a mistyped
     copy-paste in the env-state TOML fails loudly at load time.
     """
-    for field in ("name", "service_name", "timer_name"):
+    for field in ("name", "pool_name", "service_name", "timer_name"):
         seen: set[str] = set()
         for supervisor in supervisors:
             value = str(supervisor[field])
