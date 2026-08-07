@@ -3410,6 +3410,29 @@ class HostSystem:
                 except OSError:
                     pass
                 raise InstallError("private kubeconfig snapshot failed") from exc
+            current_context = self.runner.run(
+                [
+                    "kubectl",
+                    "--kubeconfig",
+                    str(snapshot),
+                    "config",
+                    "current-context",
+                ]
+            ).stdout.strip()
+            if not current_context or "\n" in current_context:
+                raise InstallError("root kubeconfig current context is invalid")
+            if current_context != "loom-staging":
+                self.runner.run(
+                    [
+                        "kubectl",
+                        "--kubeconfig",
+                        str(snapshot),
+                        "config",
+                        "rename-context",
+                        current_context,
+                        "loom-staging",
+                    ]
+                )
             result = self.runner.run(
                 [
                     "kubectl",

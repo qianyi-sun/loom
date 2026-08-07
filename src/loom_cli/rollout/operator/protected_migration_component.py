@@ -153,7 +153,7 @@ class KubernetesProtectedMigrationComponent:
                 "--namespace",
                 "loom-staging",
                 "exec",
-                "statefulset/loom-postgres",
+                "service/loom-postgres-rw",
                 "--",
                 "sh",
                 "-ceu",

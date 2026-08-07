@@ -214,7 +214,7 @@ def test_install_applies_exact_authority_and_publishes_no_secret_evidence(
     database_calls = [
         (command, stdin)
         for command, stdin in runner.calls
-        if "statefulset/loom-postgres" in command
+        if "service/loom-postgres-rw" in command
     ]
     assert len(database_calls) == 2
     assert all(stdin is not None for _command, stdin in database_calls)
@@ -271,7 +271,7 @@ def test_install_creates_exact_root_probe_authority_without_exposing_token(
     sql = next(
         stdin
         for command, stdin in runner.calls
-        if "statefulset/loom-postgres" in command
+        if "service/loom-postgres-rw" in command
         and stdin is not None
         and "readonly_probe" in stdin
     )
@@ -357,7 +357,7 @@ def test_install_accepts_silent_success_only_for_mutating_convergence(
         timeout: int,
     ) -> Result:
         command = tuple(argv)
-        if "apply" in command or "statefulset/loom-postgres" in command:
+        if "apply" in command or "service/loom-postgres-rw" in command:
             runner.calls.append((command, input))
             return Result(stdout="")
         return original_run(argv, input=input, timeout=timeout)

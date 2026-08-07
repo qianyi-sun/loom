@@ -77,6 +77,8 @@ def _stateful_substrate_resource_id(
         return f"{kind}/{name}"
     if kind == "StatefulSet" and name in {"loom-postgres", "loom-minio"}:
         return f"{kind}/{name}"
+    if kind == "Cluster" and name == "loom-postgres":
+        return f"{kind}/{name}"
     if kind == "Service" and name in {"loom-postgres", "loom-minio"}:
         return f"{kind}/{name}"
     return None
@@ -116,7 +118,6 @@ def _write_stateful_substrate_manifest(
         resource_ids.append(resource_id)
 
     required = {
-        "StatefulSet/loom-postgres",
         "Service/loom-postgres",
         "StatefulSet/loom-minio",
         "Service/loom-minio",
@@ -125,6 +126,14 @@ def _write_stateful_substrate_manifest(
     if missing:
         raise RuntimeError(
             "rendered manifest lacks required stateful substrate resources: " + ", ".join(missing),
+        )
+    postgres_controllers = {
+        "Cluster/loom-postgres",
+        "StatefulSet/loom-postgres",
+    } & set(resource_ids)
+    if len(postgres_controllers) != 1:
+        raise RuntimeError(
+            "rendered manifest must contain exactly one PostgreSQL controller",
         )
 
     target.write_text(
@@ -202,27 +211,62 @@ class MigrateStep(BaseStep):
                 ),
             )
 
-        wait_outputs: list[tuple[str, str]] = []
-        for statefulset in ("loom-postgres", "loom-minio"):
-            wait_statefulset = run_captured(
+        wait_commands: list[tuple[str, list[str]]] = []
+        if "Cluster/loom-postgres" in substrate_resources:
+            wait_commands.append(
+                (
+                    "cluster.postgresql.cnpg.io/loom-postgres",
+                    [
+                        "kubectl",
+                        "-n",
+                        ctx.namespace,
+                        "wait",
+                        "--for=condition=Ready",
+                        "cluster.postgresql.cnpg.io/loom-postgres",
+                        "--timeout=300s",
+                    ],
+                )
+            )
+        else:
+            wait_commands.append(
+                (
+                    "statefulset/loom-postgres",
+                    [
+                        "kubectl",
+                        "-n",
+                        ctx.namespace,
+                        "rollout",
+                        "status",
+                        "statefulset/loom-postgres",
+                        "--timeout=300s",
+                    ],
+                )
+            )
+        wait_commands.append(
+            (
+                "statefulset/loom-minio",
                 [
                     "kubectl",
                     "-n",
                     ctx.namespace,
                     "rollout",
                     "status",
-                    f"statefulset/{statefulset}",
+                    "statefulset/loom-minio",
                     "--timeout=300s",
-                ]
+                ],
             )
-            wait_outputs.append((statefulset, wait_statefulset.stdout))
-            if wait_statefulset.returncode != 0:
-                self.write_stderr(step_dir, wait_statefulset.stderr)
+        )
+        wait_outputs: list[tuple[str, str]] = []
+        for target_name, command in wait_commands:
+            wait_target = run_captured(command)
+            wait_outputs.append((target_name, wait_target.stdout))
+            if wait_target.returncode != 0:
+                self.write_stderr(step_dir, wait_target.stderr)
                 return RunResult(
-                    exit_code=wait_statefulset.returncode,
+                    exit_code=wait_target.returncode,
                     error=(
-                        f"stateful substrate {statefulset} did not become ready: "
-                        f"{_error_excerpt(wait_statefulset.stderr)}"
+                        f"stateful substrate {target_name} did not become ready: "
+                        f"{_error_excerpt(wait_target.stderr)}"
                     ),
                 )
 
@@ -259,7 +303,7 @@ class MigrateStep(BaseStep):
             + "\n# kubectl apply stateful substrate\n"
             + apply_substrate.stdout
             + "".join(
-                f"# kubectl rollout status statefulset/{name}\n{stdout}\n"
+                f"# kubectl readiness {name}\n{stdout}\n"
                 for name, stdout in wait_outputs
             )
             + f"# render-migration\n{render_excerpt}\n"

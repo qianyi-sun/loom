@@ -1003,7 +1003,7 @@ def collect_preflight(
                 "-n",
                 config.namespace,
                 "get",
-                "statefulset/loom-postgres",
+                "service/loom-postgres-rw",
                 "--request-timeout=10s",
             ],
         )

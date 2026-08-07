@@ -2355,7 +2355,7 @@ class BackupCreator:
                         "-n",
                         self.config.namespace,
                         "exec",
-                        "statefulset/loom-postgres",
+                        "service/loom-postgres-rw",
                         "--",
                         "sh",
                         "-ceu",

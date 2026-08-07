@@ -53,7 +53,7 @@ class KubernetesMutationEpochProvider:
                 "-n",
                 self._config.namespace,
                 "exec",
-                "statefulset/loom-postgres",
+                "service/loom-postgres-rw",
                 "--",
                 "sh",
                 "-ceu",
