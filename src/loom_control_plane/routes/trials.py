@@ -352,11 +352,12 @@ async def submit_trial(
 _CANCEL_SQL = text("""
 UPDATE trials
    SET state = 'cancelled',
-       cancellation_requested_at = NOW()
+       cancellation_requested_at = NOW(),
+       finished_at = COALESCE(finished_at, NOW())
  WHERE id = (:trial_id)::uuid
    AND ((:team_id)::uuid IS NULL OR team_id = (:team_id)::uuid)
    AND state IN ('queued', 'claimed', 'running')
- RETURNING id, state;
+ RETURNING id, state, finished_at;
 """)
 
 

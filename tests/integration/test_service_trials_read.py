@@ -1,10 +1,7 @@
 """GET /api/v1/trials list with filters + cursor pagination (Plan 18 Task 2).
 
-Plan-doc references several schema fields the v0.7 trials table
-doesn't actually carry (`aggregate_reward`, `cost_usd`, `batch_id`,
-UUID PK on tasks) — these tests target the actual schema instead.
-Reward + cost come from `Trial.result`; agent name from
-`Trial.config["agent"]`.
+Reward projections come from `Trial.result`; agent name/model from
+`Trial.config`. `batch_id` is projected when set on the trial row.
 """
 
 from __future__ import annotations

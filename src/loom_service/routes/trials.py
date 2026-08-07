@@ -9,13 +9,12 @@ Write forwarders (Task 8):
 - POST /api/v1/trials            — proxies to Control Plane /trials
 - POST /api/v1/trials/{id}/cancel — proxies to Control Plane /trials/{id}/cancel
 
-Field extraction notes: the v0.7 `trials` table does NOT carry
-`aggregate_reward` or `batch_id` columns. Reward is extracted from
-`Trial.result` (the JSONB the worker writes at finalize). LLM usage
-is aggregated from `llm_calls` so stale rate-card snapshots do not leak
-into trial read responses. Agent name + model are pulled from current top-level
-`Trial.config["agent_name"]` / `Trial.config["agent_model"]`, with
-legacy `Trial.config["agent"]` fallback for older rows.
+Field extraction notes: reward is extracted from `Trial.result` (the
+JSONB the worker writes at finalize). `batch_id` is projected when set.
+LLM usage is aggregated from `llm_calls` so stale rate-card snapshots do
+not leak into trial read responses. Agent name + model are pulled from
+current top-level `Trial.config["agent_name"]` / `Trial.config["agent_model"]`,
+with legacy `Trial.config["agent"]` fallback for older rows.
 """
 
 from __future__ import annotations
@@ -269,6 +268,7 @@ def _trial_row(
         "id": str(t.id),
         "task_id": t.task_id,
         "team_id": str(t.team_id),
+        "batch_id": str(t.batch_id) if t.batch_id is not None else None,
         "state": t.state,
         "failure_reason": t.failure_reason,
         "failure_message": t.failure_message,

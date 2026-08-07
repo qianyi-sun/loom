@@ -4,6 +4,7 @@ Loom server.
 Wraps the server-side routes:
 - POST /api/v1/trials                  → `loom eval run`
 - GET  /api/v1/trials[/{id}]           → `loom eval trial {list, show}`
+- POST /api/v1/trials/{id}/cancel      → `loom eval trial cancel`
 - POST /api/v1/batches                 → `loom eval batch create`
 - GET  /api/v1/batches[/{id}]          → `loom eval batch {list, show}`
 - POST /api/v1/batches/{id}/cancel     → `loom eval batch cancel`
@@ -57,6 +58,8 @@ _TYPE_TO_AGENT_PROVIDER: dict[str, str] = {
     "google": "google",
     "custom": "openai",
 }
+
+_TERMINAL_TRIAL_STATES = frozenset({"succeeded", "failed", "cancelled"})
 
 
 def _build_agent_model(
@@ -790,6 +793,10 @@ def _batch_cancel(args: argparse.Namespace) -> int:
             f"Cancelled batch {body.get('batch_id', args.batch_id)} "
             f"(state={body.get('state', 'cancelled')}).",
         )
+        print(
+            "Note: this cancels the whole batch and still-active trials. "
+            "To stop one hung trial, use `loom eval trial cancel <trial-id>`.",
+        )
         return 0
 
     return _run_with_error_handling(_body)
@@ -952,6 +959,61 @@ def _trial_show(args: argparse.Namespace) -> int:
         else:
             _print_trial_summary(body)
             _print_trial_download_commands(body, args.trial_id)
+        return 0
+
+    return _run_with_error_handling(_body)
+
+
+def _print_trial_cancel_next_steps(batch_id: str | None) -> None:
+    print("Next steps:")
+    print("  - Sibling trials in the batch are unaffected.")
+    print(
+        "  - The batch finishes when remaining trials are terminal "
+        "(cancelled counts toward batch completion).",
+    )
+    print(
+        "  - Delivery export still needs a succeeded attempt for this "
+        "coordinate; cancelled does not select for export.",
+    )
+    if batch_id:
+        print(
+            f"  - Then: loom eval batch rerun-plan {shlex.quote(batch_id)}",
+        )
+    else:
+        print("  - Then: loom eval batch rerun-plan <batch-id>")
+
+
+def _trial_cancel(args: argparse.Namespace) -> int:
+    """Cancel one trial without cascading to the parent batch (#1187)."""
+
+    def _body() -> int:
+        cfg = require_logged_in()
+        with authed_client(cfg) as c:
+            show_resp = c.get(f"/api/v1/trials/{args.trial_id}")
+            trial = assert_2xx(
+                show_resp,
+                action=f"show trial {args.trial_id!r}",
+            )
+            previous = str(trial.get("state") or "(unknown)")
+            batch_id = trial.get("batch_id")
+            batch_id_s = batch_id if isinstance(batch_id, str) and batch_id else None
+            if previous in _TERMINAL_TRIAL_STATES:
+                print(
+                    f"Trial {args.trial_id} already {previous}; "
+                    "no cancel needed.",
+                )
+                return 0
+            cancel_resp = c.post(f"/api/v1/trials/{args.trial_id}/cancel")
+            body = assert_2xx(
+                cancel_resp,
+                action=f"cancel trial {args.trial_id!r}",
+            )
+        new_state = str(body.get("state") or "cancelled")
+        print(
+            f"Cancelled trial {body.get('trial_id', args.trial_id)} "
+            f"({previous} → {new_state}).",
+        )
+        _print_trial_cancel_next_steps(batch_id_s)
         return 0
 
     return _run_with_error_handling(_body)
@@ -1433,7 +1495,10 @@ def dispatch(argv: list[str]) -> int:
 
     p_bx = batch_sub.add_parser(
         "cancel",
-        help="Cancel a batch + cascade-cancel its still-active trials.",
+        help=(
+            "Cancel a whole batch and cascade-cancel its still-active trials. "
+            "For one hung trial, use `loom eval trial cancel` instead."
+        ),
     )
     p_bx.add_argument("batch_id", help="Batch UUID.")
     p_bx.set_defaults(handler=_batch_cancel)
@@ -1487,7 +1552,7 @@ def dispatch(argv: list[str]) -> int:
     # --- trial ---
     p_trial = sub.add_parser(
         "trial",
-        help="Inspect trials (list/show).",
+        help="Inspect or cancel trials (list/show/debug/download/cancel).",
     )
     trial_sub = p_trial.add_subparsers(dest="trial_cmd", required=True)
 
@@ -1522,6 +1587,17 @@ def dispatch(argv: list[str]) -> int:
     p_tdebug.add_argument("trial_id", help="Trial UUID.")
     p_tdebug.add_argument("--format", choices=["text", "json"], default="text")
     p_tdebug.set_defaults(handler=_trial_debug)
+
+    p_tc = trial_sub.add_parser(
+        "cancel",
+        help=(
+            "Cancel one trial (queued/claimed/running). Does not cancel the "
+            "parent batch or sibling trials. For whole-batch cancel, use "
+            "`loom eval batch cancel`."
+        ),
+    )
+    p_tc.add_argument("trial_id", help="Trial UUID.")
+    p_tc.set_defaults(handler=_trial_cancel)
 
     p_td = trial_sub.add_parser(
         "download",
