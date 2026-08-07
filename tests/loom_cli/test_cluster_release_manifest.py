@@ -82,6 +82,10 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
         'execution_host = "TRT-EAI-OLDLAB-1"\n'
         "enabled = true\n"
         "active = true\n"
+        "[external_slurm_runner_prerequisites]\n"
+        'pools = ["oldlab"]\n'
+        "materialize = true\n"
+        "require_external_allocation_authority = true\n"
         "[[gb10_worker_pool_desired_states]]\n"
         'pool_name = "gb10"\n'
         'image_tag = "${IMAGE_TAG}"\n'
@@ -194,7 +198,11 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
             "repo_dir": "/srv/loom-staging-abc123",
         },
     ]
-    assert manifest["external_workers"]["external_slurm_runner_prerequisites"] == {}
+    assert manifest["external_workers"]["external_slurm_runner_prerequisites"] == {
+        "pools": ["oldlab"],
+        "materialize": True,
+        "require_external_allocation_authority": True,
+    }
     assert manifest["external_workers"]["external_slurm_autoscaler_supervisors"] == [
         {
             "pool_name": "oldlab",

@@ -2808,7 +2808,7 @@ def _verify_external_slurm_runner_consumers(
     step_dir: StepDir,
     records: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
-    """Verify the immutable target as qianyi on every fixed GB10 node."""
+    """Verify the immutable target as the fixed service user on every GB10 node."""
     if not records:
         return None
     if len(records) != 1 or ctx.scope != "current-gb10":
@@ -2835,7 +2835,7 @@ def _verify_external_slurm_runner_consumers(
         )
     repo = Path(repo_value)
     try:
-        consumer = pwd.getpwnam("qianyi")
+        consumer = pwd.getpwnam("loom-rollout")
         shared_gid = grp.getgrnam("sharedwork").gr_gid
         consumer_groups = {*os.getgrouplist(consumer.pw_name, consumer.pw_gid)}
     except (KeyError, OSError) as exc:

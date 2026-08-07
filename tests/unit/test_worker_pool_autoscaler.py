@@ -989,6 +989,34 @@ def test_slurm_config_from_policy_uses_actuator_config_defaults_and_overrides() 
     assert _slurm_config_from_policy(csv_row).allowed_nodes == ("oldlab-4",)
 
 
+def test_slurm_config_from_policy_preserves_explicit_zero_resource_reserves() -> None:
+    row = _policy_row(
+        max_slots=10,
+        actuator_config={
+            "allowed_nodes": ["gb10-1"],
+            "env_file": "/secure/.env.remote-worker",
+            "repo_dir": "/opt/loom",
+            "requested_concurrency": 10,
+            "requested_cpus": 20,
+            "requested_memory_mib": 115000,
+            "resource_aware": True,
+            "reserved_cpus": 0,
+            "reserved_memory_mib": 0,
+            "exclusive": False,
+            "container_cpus": 2.0,
+            "container_memory_mib": 11500,
+            "container_pids": 512,
+            "job_pids_max": 5120,
+            "candidate_sha": "a" * 40,
+        },
+    )
+
+    config = _slurm_config_from_policy(row)
+
+    assert config.reserved_cpus == 0
+    assert config.reserved_memory_mib == 0
+
+
 def test_slurm_config_from_policy_uses_nonexclusive_node_allocation() -> None:
     row = _policy_row(
         max_slots=1,

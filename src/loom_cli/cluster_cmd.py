@@ -22,6 +22,7 @@ import ipaddress
 import json
 import os
 import re
+import stat
 import sys
 import tomllib
 from collections.abc import Callable
@@ -2332,6 +2333,46 @@ def _minio_storage_preflight(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_root_owned_external_slurm_authority(path: Path) -> dict[str, Any]:
+    """Read one immutable, non-candidate-owned GB10 authority artifact."""
+
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        before = os.fstat(descriptor)
+        mode = stat.S_IMODE(before.st_mode)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != 0
+            or before.st_nlink != 1
+            or mode & 0o133 != 0
+        ):
+            raise ValueError(
+                "external Slurm authority must be one root-owned, non-writable regular file"
+            )
+        if not 0 < before.st_size <= 1024 * 1024:
+            raise ValueError("external Slurm authority size is invalid")
+        payload = os.read(descriptor, before.st_size + 1)
+        after = os.fstat(descriptor)
+        if len(payload) != before.st_size or (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
+            raise ValueError("external Slurm authority changed while being read")
+    finally:
+        os.close(descriptor)
+    loaded = json.loads(payload.decode("utf-8"))
+    if not isinstance(loaded, dict):
+        raise ValueError("external Slurm authority JSON root must be an object")
+    return loaded
+
+
 def _release_gate(args: argparse.Namespace) -> int:
     try:
         manifest_path = Path(args.manifest).resolve()
@@ -2430,6 +2471,17 @@ def _release_gate(args: argparse.Namespace) -> int:
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             hf_mirror_boundary_error = str(exc)
 
+    external_slurm_authority_artifact: dict[str, Any] | None = None
+    external_slurm_authority_error: str | None = None
+    if args.external_slurm_authority:
+        authority_path = Path(args.external_slurm_authority).resolve()
+        try:
+            external_slurm_authority_artifact = (
+                _load_root_owned_external_slurm_authority(authority_path)
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            external_slurm_authority_error = str(exc)
+
     if args.dry_run:
         live_alembic = None
         live_alembic_heads = list(manifest.get("alembic", {}).get("expected_heads", []) or [])
@@ -2471,6 +2523,8 @@ def _release_gate(args: argparse.Namespace) -> int:
         hf_mirror_boundary_artifact=hf_mirror_boundary_artifact,
         hf_mirror_boundary_path=hf_mirror_boundary_path,
         hf_mirror_boundary_error=hf_mirror_boundary_error,
+        external_slurm_authority_artifact=external_slurm_authority_artifact,
+        external_slurm_authority_error=external_slurm_authority_error,
     )
 
     if args.environment:
@@ -6185,6 +6239,14 @@ def dispatch(argv: list[str]) -> int:
             "not expose HF_TOKEN in GB10 worker env files or containers. "
             "Required for staging/production when the release manifest records "
             "the HF catalog gate."
+        ),
+    )
+    p_release_gate.add_argument(
+        "--external-slurm-authority",
+        default=None,
+        help=(
+            "Root-installed GB10 Slurm acceptance authority JSON for the exact "
+            "release candidate. Required when staging enables the GB10 Slurm pool."
         ),
     )
     p_release_gate.add_argument(

@@ -10,12 +10,11 @@
 environment = "staging"
 
 [[worker_pool_autoscaler_policies]]
-# #827: external Slurm is fail-closed until the submit-domain service identity
-# and exact-candidate allocation attestation cover every allowed GB10 node.
+# GB10 is managed only by the controller-local Slurm supervisor. The legacy
+# per-node worker agents below are retired so there is one capacity authority.
 pool_name = "gb10"
 actuator = "slurm"
-enabled = false
-disabled_reason = "#827: service identity and exact-candidate allocation attestation are not yet proven for every allowed GB10 node"
+enabled = true
 min_slots = 0
 max_slots = 150
 scale_up_threshold_slots = 1
@@ -48,8 +47,12 @@ allowed_nodes = [
   "trt-gb10-14",
   "trt-gb10-15",
 ]
-env_file = "/var/lib/loom-staging-rollout/generated/staging-gb10-worker-${IMAGE_TAG}.env"
+env_file = "/shared_work2/loom-staging-rollout/worker-envs/staging-gb10-worker-${IMAGE_TAG}.env"
 repo_dir = "/shared_work2/loom-staging-rollout/worker-repos/loom-remote-worker-${IMAGE_TAG}"
+candidate_sha = "${GIT_SHA}"
+job_output_dir = "/shared_work2/loom-staging-rollout/job-output"
+slurm_account = "loom-staging"
+qos_normal = "loom-staging"
 requested_cpus = 20
 requested_memory_mib = 115000
 requested_concurrency = 10
@@ -63,23 +66,27 @@ job_pids_max = 5120
 max_jobs = 15
 pending_job_cap = 2
 time_limit = "2-00:00:00"
-# Non-exclusive is the only supported Loom Slurm contract. The disabled policy
-# is the safety gate until #827 and #896 acceptance is complete.
+# Resource-aware admission keeps Loom within each node's currently free Slurm
+# CPU/memory envelope while sharing the institution's GB10 partition.
+resource_aware = true
+cpu_per_slot = 2
+memory_mib_per_slot = 11500
+reserved_cpus = 0
+reserved_memory_mib = 0
+max_concurrency_per_node = 10
+max_cpu_load_ratio = 1.0
 exclusive = false
 external_runner = true
 
-# ACTIVE, bounded OLDLAB staging lane. Four fixed workers provide 24 slots on
-# OLDLAB-1..4; the external Slurm controller may add exactly one isolated slot
-# on OLDLAB-5. The worker payload stays pinned to the service-owned candidate
-# accepted for #906 so a later control-plane release cannot silently retarget
-# this lane to an unpublished checkout. OLDLAB uses /shared_work because that is
-# the filesystem mounted by every OLDLAB node; /shared_work2 is the GB10 mount.
+# OLDLAB also scales from zero. Nodes 1 and 2 are excluded because they carry
+# year-long third-party Slurm reservations; nodes 3-5 are the safely schedulable
+# dynamic inventory. OLDLAB uses /shared_work, which is mounted on those nodes.
 [[worker_pool_autoscaler_policies]]
 pool_name = "oldlab"
 actuator = "slurm"
 enabled = true
-min_slots = 24
-max_slots = 25
+min_slots = 0
+max_slots = 18
 scale_up_threshold_slots = 1
 scale_down_idle_seconds = 300
 scale_up_cooldown_seconds = 0
@@ -92,26 +99,26 @@ backend = "docker"
 cpu_arch = "x86_64"
 slurm_cluster_name = "trt-oldlab"
 slurm_controller_host = "TRT-EAI-OLDLAB-1"
-# The cluster's OLDLAB nodes are in the `all` partition. Restrict the initial
-# activation to OLDLAB-5 so it cannot overlap the four fixed workers.
 partition = "all"
 allowed_nodes = [
+  "trt-eai-oldlab-3",
+  "trt-eai-oldlab-4",
   "trt-eai-oldlab-5",
 ]
 env_file = "/shared_work/loom/staging-rollout/worker-envs/staging-oldlab-worker-staging-4742696.env"
 repo_dir = "/shared_work/loom/staging-rollout/worker-repos/loom-remote-worker-staging-4742696"
 candidate_sha = "47426964e55b436bc9edc8ef7d66aec6db7ed8f0"
 job_output_dir = "/shared_work/loom/staging-rollout/job-output"
-requested_cpus = 2
-requested_memory_mib = 8192
-requested_concurrency = 1
+requested_cpus = 12
+requested_memory_mib = 49152
+requested_concurrency = 6
 container_cpus = 2.0
 container_memory_mib = 4096
 container_pids = 512
 job_pids_max = 4096
-max_jobs = 1
+max_jobs = 3
 pending_job_cap = 1
-time_limit = "00:30:00"
+time_limit = "2-00:00:00"
 # Resource-aware admission preserves headroom for k3s, MinIO, Longhorn, and the
 # isolated CI runner pool before it asks Slurm for the single dynamic lease.
 resource_aware = true
@@ -119,7 +126,7 @@ cpu_per_slot = 2
 memory_mib_per_slot = 8192
 reserved_cpus = 4
 reserved_memory_mib = 20480
-max_concurrency_per_node = 8
+max_concurrency_per_node = 6
 max_cpu_load_ratio = 1.0
 # Double-duty nodes cannot be claimed exclusively.
 exclusive = false
@@ -131,24 +138,24 @@ image_tag = "${IMAGE_TAG}"
 max_concurrent = 10
 env_config_version = "${ENV_CONFIG_VERSION}"
 source_git_commit = "${GIT_SHA}"
-target_slots = 150
+target_slots = 0
 
 [gb10_worker_pool_desired_states.host_intents]
-trt-gb10-1 = "active"
-trt-gb10-2 = "active"
-trt-gb10-3 = "active"
-trt-gb10-4 = "active"
-trt-gb10-5 = "active"
-trt-gb10-6 = "active"
-trt-gb10-7 = "active"
-trt-gb10-8 = "active"
-trt-gb10-9 = "active"
-trt-gb10-10 = "active"
-trt-gb10-11 = "active"
-trt-gb10-12 = "active"
-trt-gb10-13 = "active"
-trt-gb10-14 = "active"
-trt-gb10-15 = "active"
+trt-gb10-1 = "stopped"
+trt-gb10-2 = "stopped"
+trt-gb10-3 = "stopped"
+trt-gb10-4 = "stopped"
+trt-gb10-5 = "stopped"
+trt-gb10-6 = "stopped"
+trt-gb10-7 = "stopped"
+trt-gb10-8 = "stopped"
+trt-gb10-9 = "stopped"
+trt-gb10-10 = "stopped"
+trt-gb10-11 = "stopped"
+trt-gb10-12 = "stopped"
+trt-gb10-13 = "stopped"
+trt-gb10-14 = "stopped"
+trt-gb10-15 = "stopped"
 
 [gb10_worker_pool_desired_states.rollout_policy]
 mode = "all"
@@ -194,8 +201,8 @@ pools = ["gb10"]
 expected_repo_ref = "${IMAGE_TAG}"
 require_clean_repo = true
 require_worker_token_parity = true
-# #827: do not materialize candidate env/repo inputs for a disabled actuator.
-materialize = false
+materialize = true
+require_external_allocation_authority = true
 env_template_glob = "/var/lib/loom-staging-rollout/generated/staging-gb10-worker-staging-*.env"
 
 # --- External autoscaler supervisor (systemd --user timer) -------------------
@@ -205,8 +212,6 @@ env_template_glob = "/var/lib/loom-staging-rollout/generated/staging-gb10-worker
 # supervisors on the same host collide:
 #   oldlab  dev/staging/prod = 15447 / 15448 / 15449
 #   gb10    dev/staging/prod = 15450 / 15451 / 15452
-# #827: keep the GB10 timer stopped and disabled until the same service identity
-# and allocation attestation required by the policy gate are candidate-bound.
 [[external_slurm_autoscaler_supervisors]]
 name = "gb10-staging"
 pool_name = "gb10"
@@ -223,6 +228,7 @@ args = [
   "--expected-slurm-controller-host", "gx10-01c7",
   "--namespace", "loom-staging",
   "--kubeconfig", "/var/lib/loom-staging-rollout/kubeconfig",
+  "--db-secret-name", "loom-external-slurm-autoscaler-db",
   "--db-local-host", "127.0.0.1",
   "--db-local-port", "15451",
   "--db-service", "service/loom-postgres-rw",
@@ -232,8 +238,8 @@ args = [
   "--db-connect-timeout-sec", "10",
   "--freshness-sec", "120",
 ]
-enabled = false
-active = false
+enabled = true
+active = true
 
 # OLDLAB staging autoscaler supervisor. The shared working directory exists on
 # every Slurm execution node, and the `-rw` service supports kubectl

@@ -168,7 +168,11 @@ def _external_worker_summary(
     prerequisites: dict[str, Any] = {}
     raw_prerequisites = resolved.get("external_slurm_runner_prerequisites")
     if isinstance(raw_prerequisites, dict):
-        for field in ("pools", "materialize"):
+        for field in (
+            "pools",
+            "materialize",
+            "require_external_allocation_authority",
+        ):
             if field in raw_prerequisites:
                 prerequisites[field] = raw_prerequisites[field]
 

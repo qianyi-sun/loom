@@ -1269,8 +1269,16 @@ def _slurm_config_from_policy(
         resource_aware=resource_aware,
         cpu_per_slot=int(actor_config.get("cpu_per_slot") or 2),
         memory_mib_per_slot=int(actor_config.get("memory_mib_per_slot") or 8192),
-        reserved_cpus=int(actor_config.get("reserved_cpus") or 4),
-        reserved_memory_mib=int(actor_config.get("reserved_memory_mib") or 24_576),
+        reserved_cpus=int(
+            actor_config["reserved_cpus"]
+            if actor_config.get("reserved_cpus") is not None
+            else 4
+        ),
+        reserved_memory_mib=int(
+            actor_config["reserved_memory_mib"]
+            if actor_config.get("reserved_memory_mib") is not None
+            else 24_576
+        ),
         max_concurrency_per_node=int(
             actor_config.get("max_concurrency_per_node") or 8,
         ),

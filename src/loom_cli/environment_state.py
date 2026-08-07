@@ -371,6 +371,15 @@ def staging_gb10_external_activation_blockers(
                 blockers.append("gb10_policy_disabled_reason_missing")
 
     prereq = prerequisites if isinstance(prerequisites, dict) else {}
+    candidate_attestation_fields = {
+        "service_identity",
+        "allocation_attestation",
+        "authority_path",
+        "authority_digest",
+        "authority_passed",
+    }
+    if candidate_attestation_fields & set(prereq):
+        blockers.append("candidate_external_slurm_self_attestation_forbidden")
     pools = prereq.get("pools")
     materializes_gb10 = prereq.get("materialize") is True and (
         not isinstance(pools, list) or not pools or "gb10" in pools
@@ -390,7 +399,17 @@ def staging_gb10_external_activation_blockers(
     )
     if not activation_requested:
         return tuple(sorted(set(blockers)))
-    blockers.append("external_slurm_acceptance_authority_unavailable")
+    if prereq.get("require_external_allocation_authority") is not True:
+        blockers.append("external_slurm_allocation_authority_requirement_missing")
+    if not materializes_gb10:
+        blockers.append("external_slurm_gb10_materialization_required")
+    if len(gb10_supervisors) != 1:
+        blockers.append("external_slurm_gb10_supervisor_count_invalid")
+    elif (
+        gb10_supervisors[0].get("enabled") is not True
+        or gb10_supervisors[0].get("active") is not True
+    ):
+        blockers.append("external_slurm_gb10_supervisor_activation_incomplete")
 
     return tuple(sorted(set(blockers)))
 
