@@ -12,6 +12,7 @@ from loom.errors import (
     VerifierError,
     classify_failure,
     classify_failure_message,
+    is_platform_setup_agent_failure,
 )
 from loom.models.result import FailureReason
 
@@ -124,6 +125,25 @@ def test_tmux_duplicate_session_at_setup_is_agent_error():
     )
     assert reason == FailureReason.AGENT_ERROR
     assert msg == "Terminus2 tmux session already exists at setup."
+
+
+def test_harbor_worker_image_pin_is_task_compatibility() -> None:
+    result = classify_failure_message(
+        "terminus-2 requires harbor@527d50d preinstalled in the worker image"
+    )
+    assert result is not None
+    reason, msg = result
+    assert reason == FailureReason.TASK_COMPATIBILITY
+    assert msg == "Worker image is missing the required Harbor pin for terminus-2."
+    assert is_platform_setup_agent_failure(
+        "terminus-2 requires harbor@527d50d preinstalled in the worker image"
+    )
+    # step_runner stores the redacted message; re-classify must stay stable.
+    assert is_platform_setup_agent_failure(msg)
+    assert classify_failure_message(msg) == (
+        FailureReason.TASK_COMPATIBILITY,
+        msg,
+    )
 
 
 def test_textual_provider_transport_disconnect_is_classified_and_redacted():

@@ -23,7 +23,7 @@ from typing import Any
 import aiofiles
 
 from loom.errors import TrajectoryFlushFailedError
-from loom.models.trajectory import TrajectoryEvent
+from loom.models.trajectory import EventKind, TrajectoryEvent
 from loom.trajectory.cp_event_sink import CpEventSink
 from loom.trajectory.storage import MultipartUpload, ObjectStore
 
@@ -79,6 +79,9 @@ class TrajectoryWriter:
         self._closed = False
         self.parts_uploaded = 0
         self._next_seq = 0
+        # #1186: agents that emit gateway LLMCallEvents (terminus-2) need
+        # this count before Trial terminal-state selection.
+        self._llm_call_event_count = 0
 
     @property
     def remote_uri(self) -> str:
@@ -87,6 +90,10 @@ class TrajectoryWriter:
     @property
     def local_path(self) -> Path:
         return self._local_path
+
+    @property
+    def llm_call_event_count(self) -> int:
+        return self._llm_call_event_count
 
     async def __aenter__(self) -> TrajectoryWriter:
         self._local_path.parent.mkdir(parents=True, exist_ok=True)
@@ -108,6 +115,8 @@ class TrajectoryWriter:
         if self._closed:
             raise RuntimeError("append after close")
         event = event.model_copy(update={"seq": self._assign_seq(event.seq)})
+        if event.kind == EventKind.LLM_CALL:
+            self._llm_call_event_count += 1
         line = event.model_dump_json().encode("utf-8") + b"\n"
         await self._write_line(line)
         # #5 Slice 3b: mirror the typed event to the CP sink. Sink
@@ -132,6 +141,8 @@ class TrajectoryWriter:
         raw_seq = payload.get("seq")
         if isinstance(raw_seq, int):
             payload["seq"] = self._assign_seq(raw_seq)
+        if payload.get("kind") == EventKind.LLM_CALL.value:
+            self._llm_call_event_count += 1
         line = (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
         await self._write_line(line)
         # #5 Slice 3b: mirror to CP sink. observe_raw skips payloads

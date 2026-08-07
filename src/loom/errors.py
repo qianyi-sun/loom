@@ -151,6 +151,29 @@ _TMUX_DUPLICATE_SESSION_RE = re.compile(
 )
 _TMUX_DUPLICATE_SESSION_MESSAGE = "Terminus2 tmux session already exists at setup."
 
+# Terminus-2 / Harbor worker-image pin (#1186): pre-execution platform setup.
+# Match both the raw AgentError text and the redacted StepError message
+# written by step_runner after classify_failure_message.
+_HARBOR_WORKER_IMAGE_RE = re.compile(
+    r"requires harbor@"
+    r"|preinstalled in the worker image"
+    r"|harbor@\S+ in the worker image"
+    r"|missing the required Harbor pin",
+    re.IGNORECASE,
+)
+_HARBOR_WORKER_IMAGE_MESSAGE = (
+    "Worker image is missing the required Harbor pin for terminus-2."
+)
+
+
+def is_platform_setup_agent_failure(message: str) -> bool:
+    """True when an agent-phase error is a platform/setup failure (#1186).
+
+    These must never be suppressed by the scored-verifier carve-out: the
+    agent never attempted the task (e.g. missing harbor pin on the worker).
+    """
+    return bool(_HARBOR_WORKER_IMAGE_RE.search(message))
+
 
 def _redact_body(raw: str) -> str:
     """Strip internal URLs, collapse whitespace, and truncate to 200 chars."""
@@ -181,12 +204,18 @@ def classify_failure_message(message: str) -> tuple[FailureReason, str | None] |
     Terminus2 also surfaces Harbor tmux lifecycle failures as plain
     ``RuntimeError`` strings (#1068). Mid-run ``no server running`` is distinct
     from setup-time ``duplicate session``.
+
+    Missing Harbor pins on the worker image (#1186) are task/worker
+    compatibility failures, not model/agent logic errors.
     """
 
     if "401" in message and _TEXTUAL_CREDENTIAL_SCOPE_RE.search(message):
         return FailureReason.GATEWAY_ERROR, _CREDENTIAL_SCOPE_MESSAGE
     if "401" in message and _TEXTUAL_INVALID_BEARER_RE.search(message):
         return FailureReason.GATEWAY_ERROR, _STEP_JWT_INVALID_MESSAGE
+
+    if is_platform_setup_agent_failure(message):
+        return FailureReason.TASK_COMPATIBILITY, _HARBOR_WORKER_IMAGE_MESSAGE
 
     # Mid-run server loss before setup duplicate: a "failed to send keys"
     # message can also mention session names, but "no server running" is the

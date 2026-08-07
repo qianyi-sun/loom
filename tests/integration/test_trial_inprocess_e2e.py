@@ -15,6 +15,7 @@ from botocore.exceptions import ConnectionClosedError
 from loom.agent.oracle import OracleAgent
 from loom.driver.base import StartOptions
 from loom.driver.fake import FakeDriver, command_table_handler
+from loom.errors import AgentError
 from loom.models.exec import ExecResult
 from loom.models.result import FailureReason, TrialState
 from loom.models.task import (
@@ -25,6 +26,7 @@ from loom.models.task import (
     TaskMetadata,
     VerifierDefaults,
 )
+from loom.models.types import ModelSpec
 from loom.models.verifier import VerifierError, VerifierResult
 from loom.trajectory.storage import FakeObjectStore
 from loom.trial.trial import Trial, TrialContext
@@ -61,6 +63,34 @@ class _ScoredVerifierError:
         return VerifierResult(
             rewards={"valid": 0.0},
             error=VerifierError(kind="exec_failure", message="schema validation failed"),
+        )
+
+
+class _ScoredPassedZeroVerifier:
+    """Mirrors #1186: verifier scores an unsolved workspace as passed=0.0."""
+
+    name = "scored-zero"
+
+    async def verify(self, *, task, env, artifacts_dir, trajectory):  # type: ignore[no-untyped-def]
+        return VerifierResult(rewards={"passed": 0.0})
+
+
+class _HarborMissingAgent:
+    """Model-backed agent that fails before any LLM call (#1186)."""
+
+    mode = "in-box"
+    name = "terminus-2"
+    version = "1.0"
+    supports_os = frozenset({"linux"})
+    model = ModelSpec(provider="openai", name="glm-5.1", source="api")
+    emits_gateway_llm_call_events = True
+
+    async def setup(self, env) -> None:  # type: ignore[no-untyped-def]
+        return None
+
+    async def run(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        raise AgentError(
+            "terminus-2 requires harbor@527d50d preinstalled in the worker image",
         )
 
 
@@ -622,6 +652,44 @@ async def test_trial_run_scored_agent_error_stays_succeeded(
     assert result.steps[0].error.phase == "agent"
     assert result.steps[0].verifier_result is not None
     assert result.steps[0].verifier_result.error is not None
+
+
+async def test_trial_run_harbor_setup_error_not_succeeded_despite_reward(
+    hello_task: Path,
+    tmp_path: Path,
+):
+    """#1186: platform setup AgentError + verifier 0.0 must not count as succeeded."""
+    task = TaskConfig(
+        schema_version="1",
+        task=TaskMetadata(id="hello", name="hello"),
+        environment=EnvironmentConfig(os="linux", docker_image="alpine"),
+        agent=AgentDefaults(name="terminus-2"),
+        verifier=VerifierDefaults(name="script"),
+        steps=[StepConfig(name="main")],
+    )
+    store = FakeObjectStore()
+    trial_id = uuid4()
+    ctx = TrialContext(
+        trial_id=trial_id,
+        team_id=uuid4(),
+        task_config=task,
+        task_checksum="0" * 64,
+        task_dir=hello_task,
+        trial_config=stub_trial_config(agent_name="terminus-2"),
+        driver=FakeDriver(),
+        agent=_HarborMissingAgent(),
+        verifier=_ScoredPassedZeroVerifier(),
+        object_store=store,
+        local_trajectory_path=tmp_path / "events.jsonl",
+    )
+    result = await Trial(ctx=ctx).run()
+
+    assert result.state == TrialState.FAILED
+    assert result.failure_reason == FailureReason.TASK_COMPATIBILITY
+    assert result.reward == {"passed": 0.0}
+    assert result.steps[0].error is not None
+    assert result.steps[0].error.phase == "agent"
+    assert "Harbor pin" in (result.steps[0].error.message or "")
 
 
 async def test_trial_run_empty_reward_verifier_error_marks_failed(
