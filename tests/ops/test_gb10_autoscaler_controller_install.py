@@ -40,6 +40,16 @@ def test_installer_is_pinned_to_the_gb10_controller_and_kubectl_digest() -> None
     assert "awk -F'\"' '/\"gitVersion\"/" in source
 
 
+def test_installer_pins_the_arm64_uv_runtime_builder() -> None:
+    source = _source()
+    assert 'UV_VERSION="0.11.26"' in source
+    assert 'UV_SHA256="befa1a59c91e96eb601b0fd9a97c03dd666f17baba644b2b4db9c59a767e387e"' in source
+    assert 'UV_ARCHIVE="uv-aarch64-unknown-linux-gnu.tar.gz"' in source
+    assert "sha256sum --check" in source
+    assert '"$temporary_dir/uv-aarch64-unknown-linux-gnu/uv" /usr/local/bin/uv' in source
+    assert 'installed_uv_version="$(/usr/local/bin/uv --version)"' in source
+
+
 def test_installer_creates_only_non_personal_controller_roots() -> None:
     source = _source()
     assert 'SERVICE_USER="loom-rollout"' in source
