@@ -298,6 +298,9 @@ def test_release_gate_accepts_exact_candidate_fifteen_node_authority() -> None:
             },
             "nodes": [f"trt-gb10-{index}" for index in range(1, 16)],
             "node_count": 15,
+            "probed_nodes": [f"trt-gb10-{index}" for index in range(2, 16)],
+            "probed_node_count": 14,
+            "deferred_busy_nodes": ["trt-gb10-1"],
             "generated_at": generated_at.isoformat(),
             "expires_at": (generated_at + timedelta(minutes=15)).isoformat(),
         },
@@ -330,6 +333,45 @@ def test_release_gate_rejects_authority_with_forged_node_inventory() -> None:
         },
         "nodes": [f"trt-gb10-{index}" for index in range(1, 15)] + ["trt-gb10-16"],
         "node_count": 15,
+        "probed_nodes": [f"trt-gb10-{index}" for index in range(1, 15)],
+        "probed_node_count": 14,
+        "deferred_busy_nodes": ["trt-gb10-16"],
+        "generated_at": generated_at.isoformat(),
+        "expires_at": (generated_at + timedelta(minutes=15)).isoformat(),
+    }
+
+    check = _external_slurm_acceptance_check(manifest, authority_artifact=artifact)
+
+    assert check is not None
+    assert check.outcome == "fail"
+    assert "external_slurm_acceptance_authority_mismatch" in check.evidence["blockers"]
+
+
+def test_release_gate_rejects_unprobed_or_malformed_authority_coverage() -> None:
+    manifest = _manifest(external_workers=_external_gb10_workers(enabled=True))
+    manifest["external_workers"]["environment_state_file"] = {"sha256": "b" * 64}
+    generated_at = datetime.now(UTC)
+    artifact = {
+        "schema_version": 1,
+        "kind": "loom_gb10_slurm_acceptance",
+        "result": "pass",
+        "candidate_sha": manifest["release"]["git_sha"],
+        "candidate_tree": "c" * 40,
+        "profile_sha256": "b" * 64,
+        "cluster_name": "trt-gb10",
+        "controller_host": "gx10-01c7",
+        "service_identity": {
+            "user": "loom-rollout",
+            "uid": 995,
+            "gid": 2007,
+            "account": "loom-staging",
+            "qos": "loom-staging",
+        },
+        "nodes": [f"trt-gb10-{index}" for index in range(1, 16)],
+        "node_count": 15,
+        "probed_nodes": [],
+        "probed_node_count": 0,
+        "deferred_busy_nodes": [{"node": "trt-gb10-1"}],
         "generated_at": generated_at.isoformat(),
         "expires_at": (generated_at + timedelta(minutes=15)).isoformat(),
     }

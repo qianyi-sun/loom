@@ -31,6 +31,7 @@ INSTALLED_PATH = Path("/usr/local/libexec/loom-gb10-slurm-acceptance-authority")
 STATE_ROOT = Path("/var/lib/loom-gb10-slurm-authority")
 ARTIFACT_PATH = STATE_ROOT / "current.json"
 SHA_RE = re.compile(r"[0-9a-f]{40}")
+JOB_ID_RE = re.compile(r"[1-9][0-9]*")
 
 
 class AcceptanceError(RuntimeError):
@@ -279,16 +280,83 @@ print(json.dumps({"node": node, "candidate_sha": expected_sha}, sort_keys=True))
 """
 
 
-def _probe_nodes(candidate_sha: str, contract: dict[str, Any]) -> list[str]:
+def _cleanup_probe_jobs(job_name: str) -> None:
+    queue_command = [
+        "runuser", "-u", SERVICE_USER, "--",
+        "/usr/bin/squeue",
+        "--noheader",
+        f"--user={SERVICE_USER}",
+        f"--name={job_name}",
+        "--format=%A|%j",
+    ]
+    queued = _run(queue_command, timeout=10, check=False)
+    if queued.returncode != 0:
+        raise AcceptanceError("could not verify acceptance-probe cleanup")
+    job_ids: list[str] = []
+    for raw_line in queued.stdout.splitlines():
+        job_id, separator, queued_name = raw_line.strip().partition("|")
+        if (
+            not separator
+            or queued_name != job_name
+            or JOB_ID_RE.fullmatch(job_id) is None
+        ):
+            raise AcceptanceError("acceptance-probe cleanup evidence is invalid")
+        job_ids.append(job_id)
+    if job_ids:
+        _run(
+            [
+                "runuser", "-u", SERVICE_USER, "--",
+                "/usr/bin/scancel",
+                *job_ids,
+            ],
+            timeout=10,
+        )
+        readback = _run(queue_command, timeout=10, check=False)
+        if readback.returncode != 0 or readback.stdout.strip():
+            raise AcceptanceError("acceptance-probe cleanup did not converge")
+
+
+def _node_is_deferred_busy(
+    *,
+    node_config: str,
+    result: subprocess.CompletedProcess[str],
+) -> bool:
+    state_match = re.search(r"(?:^| )State=([A-Z]+)", node_config)
+    cpu_match = re.search(r"(?:^| )CPUAlloc=([0-9]+)", node_config)
+    memory_match = re.search(r"(?:^| )AllocMem=([0-9]+)", node_config)
+    busy_error = (
+        "Requested nodes are busy" in result.stderr
+        or "temporarily unable to accept work" in result.stderr
+    )
+    return bool(
+        result.returncode != 0
+        and busy_error
+        and state_match is not None
+        and state_match.group(1) in {"ALLOCATED", "MIXED"}
+        and (
+            (cpu_match is not None and int(cpu_match.group(1)) > 0)
+            or (memory_match is not None and int(memory_match.group(1)) > 0)
+        )
+    )
+
+
+def _probe_nodes(
+    candidate_sha: str,
+    contract: dict[str, Any],
+) -> tuple[list[str], list[str]]:
     passed: list[str] = []
-    for node in NODES:
+    deferred_busy: list[str] = []
+    for index, node in enumerate(NODES, start=1):
         node_config = _run(["/usr/bin/scontrol", "show", "node", node, "-o"]).stdout
         if re.search(r"(?:^| )Partitions=[^ ]*\bgb10\b", node_config) is None:
             raise AcceptanceError(f"canonical node is outside GB10 partition: {node}")
+        job_name = f"loom-accept-{candidate_sha[:7]}-{index}-{os.getpid()}"
         command = [
             "runuser", "-u", SERVICE_USER, "--",
             "srun",
             "--quiet",
+            "--immediate=15",
+            f"--job-name={job_name}",
             "--nodes=1",
             "--ntasks=1",
             "--cpus-per-task=1",
@@ -306,7 +374,15 @@ def _probe_nodes(candidate_sha: str, contract: dict[str, Any]) -> list[str]:
             str(contract["env_file"]),
             candidate_sha,
         ]
-        result = _run(command, timeout=180)
+        try:
+            result = _run(command, timeout=60, check=False)
+        finally:
+            _cleanup_probe_jobs(job_name)
+        if _node_is_deferred_busy(node_config=node_config, result=result):
+            deferred_busy.append(node)
+            continue
+        if result.returncode != 0:
+            raise AcceptanceError(f"node allocation failed safely: {node}")
         try:
             payload = json.loads(result.stdout)
         except json.JSONDecodeError as exc:
@@ -314,7 +390,9 @@ def _probe_nodes(candidate_sha: str, contract: dict[str, Any]) -> list[str]:
         if payload != {"candidate_sha": candidate_sha, "node": node}:
             raise AcceptanceError(f"node allocation evidence mismatched: {node}")
         passed.append(node)
-    return passed
+    if not passed:
+        raise AcceptanceError("no GB10 node accepted the real Slurm allocation probe")
+    return passed, deferred_busy
 
 
 def _write_artifact(payload: dict[str, Any]) -> None:
@@ -361,7 +439,7 @@ def main() -> int:
     _verify_controller()
     contract = _load_contract(args.candidate_sha, args.image_tag)
     candidate_tree = _verify_inputs(args.candidate_sha, contract)
-    nodes = _probe_nodes(args.candidate_sha, contract)
+    probed_nodes, deferred_busy_nodes = _probe_nodes(args.candidate_sha, contract)
     generated_at = datetime.now(UTC)
     artifact = {
         "schema_version": 1,
@@ -379,13 +457,19 @@ def main() -> int:
             "account": SLURM_ACCOUNT,
             "qos": SLURM_QOS,
         },
-        "nodes": nodes,
-        "node_count": len(nodes),
+        "nodes": list(NODES),
+        "node_count": len(NODES),
+        "probed_nodes": probed_nodes,
+        "probed_node_count": len(probed_nodes),
+        "deferred_busy_nodes": deferred_busy_nodes,
         "generated_at": generated_at.isoformat(),
         "expires_at": (generated_at + timedelta(minutes=30)).isoformat(),
     }
     _write_artifact(artifact)
-    print(f"accepted candidate={args.candidate_sha} nodes={len(nodes)}")
+    print(
+        f"accepted candidate={args.candidate_sha} "
+        f"probed={len(probed_nodes)} deferred_busy={len(deferred_busy_nodes)}"
+    )
     return 0
 
 

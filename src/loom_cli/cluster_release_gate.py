@@ -873,6 +873,23 @@ def _external_slurm_acceptance_check(
             )
         except (KeyError, TypeError, ValueError):
             times_valid = False
+        probed_nodes = authority_artifact.get("probed_nodes")
+        deferred_busy_nodes = authority_artifact.get("deferred_busy_nodes")
+        coverage_matches = bool(
+            isinstance(probed_nodes, list)
+            and probed_nodes
+            and all(isinstance(node, str) for node in probed_nodes)
+            and len(set(probed_nodes)) == len(probed_nodes)
+            and isinstance(deferred_busy_nodes, list)
+            and all(isinstance(node, str) for node in deferred_busy_nodes)
+            and len(set(deferred_busy_nodes)) == len(deferred_busy_nodes)
+            and not (set(probed_nodes) & set(deferred_busy_nodes))
+            and set(probed_nodes) | set(deferred_busy_nodes) == set(expected_nodes)
+            and probed_nodes
+            == [node for node in expected_nodes if node in set(probed_nodes)]
+            and deferred_busy_nodes
+            == [node for node in expected_nodes if node in set(deferred_busy_nodes)]
+        )
         authority_matches = bool(
             authority_artifact.get("schema_version") == 1
             and authority_artifact.get("kind") == "loom_gb10_slurm_acceptance"
@@ -893,6 +910,8 @@ def _external_slurm_acceptance_check(
             }
             and authority_artifact.get("nodes") == expected_nodes
             and authority_artifact.get("node_count") == len(expected_nodes)
+            and authority_artifact.get("probed_node_count") == len(probed_nodes or [])
+            and coverage_matches
             and times_valid
         )
     dynamic_blockers = list(blockers)
@@ -944,6 +963,11 @@ def _external_slurm_acceptance_check(
         ),
         "authority_node_count": (
             authority_artifact.get("node_count")
+            if authority_artifact is not None
+            else None
+        ),
+        "authority_probed_node_count": (
+            authority_artifact.get("probed_node_count")
             if authority_artifact is not None
             else None
         ),

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import importlib.util
 import re
 import shutil
 import subprocess
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -20,6 +22,14 @@ def _authority_source() -> str:
 
 def _installer_source() -> str:
     return INSTALLER.read_text(encoding="utf-8")
+
+
+def _load_authority() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("gb10_acceptance_authority_test", AUTHORITY)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_authority_compiles_and_installer_parses() -> None:
@@ -59,10 +69,39 @@ def test_authority_runs_real_service_user_allocations_on_each_exact_node() -> No
     assert '"runuser", "-u", SERVICE_USER, "--"' in source
     assert '"srun"' in source
     assert 'f"--nodelist={node}"' in source
+    assert '"--immediate=15"' in source
+    assert 'f"--job-name={job_name}"' in source
+    assert '"/usr/bin/scancel"' in source
     assert 'f"--account={SLURM_ACCOUNT}"' in source
     assert 'f"--qos={SLURM_QOS}"' in source
     assert "loom-slurm-job-cgroup-guard.service" in source
     assert '"docker", "info"' in source
+
+
+def test_busy_deferral_requires_a_real_busy_node_and_scheduler_error() -> None:
+    authority = _load_authority()
+    busy = subprocess.CompletedProcess(
+        args=["srun"],
+        returncode=1,
+        stdout="",
+        stderr="srun: error: Unable to allocate resources: Requested nodes are busy\n",
+    )
+    unrelated = subprocess.CompletedProcess(
+        args=["srun"], returncode=1, stdout="", stderr="invalid qos\n"
+    )
+
+    assert authority._node_is_deferred_busy(
+        node_config="NodeName=trt-gb10-1 CPUAlloc=20 AllocMem=115000 State=ALLOCATED ",
+        result=busy,
+    )
+    assert not authority._node_is_deferred_busy(
+        node_config="NodeName=trt-gb10-1 CPUAlloc=0 AllocMem=0 State=IDLE ",
+        result=busy,
+    )
+    assert not authority._node_is_deferred_busy(
+        node_config="NodeName=trt-gb10-1 CPUAlloc=20 AllocMem=115000 State=ALLOCATED ",
+        result=unrelated,
+    )
 
 
 def test_authority_binds_candidate_profile_repo_env_and_short_expiry() -> None:
@@ -74,6 +113,8 @@ def test_authority_binds_candidate_profile_repo_env_and_short_expiry() -> None:
     assert "timedelta(minutes=30)" in source
     assert '"kind": "loom_gb10_slurm_acceptance"' in source
     assert '"result": "pass"' in source
+    assert '"probed_nodes": probed_nodes' in source
+    assert '"deferred_busy_nodes": deferred_busy_nodes' in source
     assert "/home/qianyi" not in source
     assert "/shared_work2/qianyi" not in source
 
