@@ -84,17 +84,23 @@ Notes:
 - **`error` is data**, not control flow. Setting `error` does not
   invalidate `rewards` / `checks`; a verifier can both report a
   partial score AND flag what went wrong.
-- **Trial final-state promotion follows scored verifier output.**
+- **Trial final-state promotion follows scored verifier output, with
+  platform-setup exclusions (#1186).**
   Agent-phase `StepError` data is not terminal when the same step has
-  explicit verifier rewards; coding benchmark agents can exit non-zero after
-  producing code, and the verifier score, including `0.0`, is the model/agent
-  outcome. Artifact and unscored verifier phase `StepError` data still makes
-  the trial `failed`, because the platform did not complete the evaluation
-  boundary. A `VerifierResult.error` with an empty `rewards` dict also makes the
-  trial `failed` because the evaluator produced no usable score. A
-  `VerifierResult.error` with explicit rewards stays a scored outcome, so a
-  model/agent can receive `0.0` while the platform run still counts as
-  `succeeded`.
+  explicit verifier rewards **and** the agent actually attempted a scored
+  run: coding benchmark agents can exit non-zero after producing code, and
+  the verifier score, including `0.0`, is the model/agent outcome. That
+  carve-out does **not** apply when (a) the agent error is a platform/setup
+  failure (for example terminus-2 missing the required Harbor pin on the
+  worker image), or (b) the trial is model-backed (`agent.model` set) and
+  recorded zero LLM calls — those stay `failed` so batch `s=` does not
+  count infra misses as successes. Artifact and unscored verifier phase
+  `StepError` data still makes the trial `failed`, because the platform did
+  not complete the evaluation boundary. A `VerifierResult.error` with an
+  empty `rewards` dict also makes the trial `failed` because the evaluator
+  produced no usable score. A `VerifierResult.error` with explicit rewards
+  stays a scored outcome when the carve-out applies, so a model/agent can
+  receive `0.0` while the platform run still counts as `succeeded`.
 - **`confidence` is bounded [0, 1]** (Pydantic-validated). Used by
   LLM-judge to mark uncertain calls; downstream consumers can filter
   on it.

@@ -16,7 +16,11 @@ from uuid import UUID
 from loom.agent.base import AgentRuntime, InBoxAgentRuntime
 from loom.agent.oracle import OracleAgent
 from loom.driver.base import Driver, StartOptions
-from loom.errors import classify_failure, classify_failure_message
+from loom.errors import (
+    classify_failure,
+    classify_failure_message,
+    is_platform_setup_agent_failure,
+)
 from loom.models.networking import NetworkPolicy
 from loom.models.result import (
     AgentInfo,
@@ -196,6 +200,7 @@ class Trial:
         )
 
         cancelled = False
+        pending_llm_rows: list[dict[str, Any]] | None = None
         result.trajectory_uri = self.ctx.trajectory_uri
         seq = _SeqCounter()
 
@@ -303,7 +308,17 @@ class Trial:
                         )
                         result.steps.append(sr)
                     result.reward = _aggregate(self.ctx, result)
-                    terminal_failure = _first_terminal_step_failure(result)
+                    # #1186: LLM evidence must be known before terminal-state
+                    # selection so model-backed + 0-call platform failures are
+                    # not promoted to succeeded by the scored-verifier carve-out.
+                    (
+                        llm_call_count,
+                        pending_llm_rows,
+                    ) = await self._resolve_llm_call_count(writer)
+                    terminal_failure = _first_terminal_step_failure(
+                        result,
+                        llm_call_count=llm_call_count,
+                    )
                     if terminal_failure is not None:
                         result.state = TrialState.FAILED
                         result.failure_reason = terminal_failure[0]
@@ -379,22 +394,24 @@ class Trial:
                         await asyncio.shield(
                             self.ctx.driver.stop(delete=self.ctx.trial_config.delete_env),
                         )
-                # Plan 9/11 amendment A11.1: BEFORE the writer closes,
-                # query CP for llm_calls rows and append each as an
-                # LLMCallEvent-shaped dict so finalize_trajectory's ATIF
-                # projection sees them. Keep these before TrialEndEvent so
+                # Plan 9/11 amendment A11.1 / #1186: append any CP llm_calls
+                # rows fetched before terminal-state selection (or fetch now
+                # if the agent path skipped early resolve — e.g. CancelledError
+                # before steps completed). Keep these before TrialEndEvent so
                 # terminal state remains the last event in the canonical log.
-                if (
-                    self.ctx.llm_calls_fetcher is not None
-                    and not _agent_emits_gateway_llm_call_events(self.ctx.agent)
-                ):
-                    try:
+                try:
+                    if pending_llm_rows is not None:
+                        await self._append_llm_call_rows(writer, pending_llm_rows)
+                    elif (
+                        self.ctx.llm_calls_fetcher is not None
+                        and not _agent_emits_gateway_llm_call_events(self.ctx.agent)
+                    ):
                         await self._append_llm_call_events(writer)
-                    except Exception:
-                        logger.exception(
-                            "failed to fetch llm_calls; trajectory will be "
-                            "finalized without LLMCallEvents",
-                        )
+                except Exception:
+                    logger.exception(
+                        "failed to fetch llm_calls; trajectory will be "
+                        "finalized without LLMCallEvents",
+                    )
 
                 try:
                     await writer.append(
@@ -478,6 +495,41 @@ class Trial:
 
         return result
 
+    async def _resolve_llm_call_count(
+        self,
+        writer: TrajectoryWriter,
+    ) -> tuple[int, list[dict[str, Any]] | None]:
+        """Return (llm_call_count, pending_rows_to_append_or_None) for #1186.
+
+        Gateway-emitting agents (terminus-2) already wrote LLMCallEvents to
+        the trajectory writer. Other agents fetch CP ``llm_calls`` rows here
+        so terminal-state selection can see the count; append happens later
+        (before TrialEndEvent) via ``_append_llm_call_rows``.
+        """
+        if _agent_emits_gateway_llm_call_events(self.ctx.agent):
+            return writer.llm_call_event_count, None
+        if self.ctx.llm_calls_fetcher is None:
+            return 0, None
+        try:
+            rows = await self.ctx.llm_calls_fetcher(self.ctx.trial_id)
+        except Exception:
+            logger.exception(
+                "failed to fetch llm_calls before terminal-state selection; "
+                "treating llm_call_count as 0",
+            )
+            return 0, None
+        return len(rows), rows
+
+    async def _append_llm_call_rows(
+        self,
+        writer: TrajectoryWriter,
+        rows: list[dict[str, Any]],
+    ) -> None:
+        for row in rows:
+            await writer.append(
+                llm_call_row_to_event(row, trial_id=self.ctx.trial_id, seq=0)
+            )
+
     async def _append_llm_call_events(self, writer: TrajectoryWriter) -> None:
         """Plan 9/11 A11.1: query CP for llm_calls rows + project each
         into a valid LLMCallEvent on the local JSONL.
@@ -492,8 +544,7 @@ class Trial:
         """
         assert self.ctx.llm_calls_fetcher is not None
         rows = await self.ctx.llm_calls_fetcher(self.ctx.trial_id)
-        for row in rows:
-            await writer.append(llm_call_row_to_event(row, trial_id=self.ctx.trial_id, seq=0))
+        await self._append_llm_call_rows(writer, rows)
 
 
 def _agent_emits_gateway_llm_call_events(agent: AgentRuntime) -> bool:
@@ -527,18 +578,28 @@ def _merge_extra_hosts(
     )
 
 
-def _first_terminal_step_failure(result: TrialResult) -> tuple[FailureReason, str | None] | None:
+def _first_terminal_step_failure(
+    result: TrialResult,
+    *,
+    llm_call_count: int = 0,
+) -> tuple[FailureReason, str | None] | None:
+    model_backed = result.agent.model is not None
     for step in result.steps:
         verifier_result = step.verifier_result
         if step.error is not None:
             # Coding benchmark agents can exit non-zero after producing code; if
             # the verifier still produced a numeric score, keep the platform run
             # successful and let the reward carry model/agent correctness.
-            if not (
+            # #1186: do NOT suppress platform/setup agent failures, or
+            # model-backed agents that never reached the gateway/provider.
+            suppress_scored_agent_error = (
                 step.error.phase == "agent"
                 and verifier_result is not None
-                and verifier_result.rewards
-            ):
+                and bool(verifier_result.rewards)
+                and not is_platform_setup_agent_failure(step.error.message)
+                and not (model_backed and llm_call_count == 0)
+            )
+            if not suppress_scored_agent_error:
                 return _failure_from_step_error(step.error)
         if (
             verifier_result is not None
