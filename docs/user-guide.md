@@ -235,6 +235,7 @@ loom eval batch debug <batch-id> --format json
 loom eval batch rerun-plan <batch-id> --format text
 loom resources status
 loom eval trial list --state succeeded --limit 5
+loom eval trial cancel <trial-id>
 loom eval usage --start 2026-06-01 --end 2026-06-30 --include-batches
 loom eval usage --start 2026-06-01 --end 2026-06-30 \
   --provider-connection-id <provider-id> \
@@ -345,6 +346,30 @@ successful final trial. The service builds archives through a bounded spool and
 streams object-store bodies into the tar writer; the CLI streams downloads to
 disk while hashing chunks. Large raw exports should not require memory
 proportional to total archive size.
+
+### Cancel one hung trial vs cancel the batch
+
+When a single model-backed trial is stuck (for example a long provider
+`ReadTimeout` / retry loop) and siblings have already finished, cancel that
+trial only:
+
+```bash
+loom eval trial cancel <trial-id>
+```
+
+This calls `POST /api/v1/trials/{id}/cancel`. Sibling trials are unaffected, and
+the parent batch is **not** marked `cancelled`. Cancelled (like failed) counts
+as a terminal trial for **batch lifecycle** completion, so a hung last-in-flight
+trial can unblock the batch becoming `finished`.
+
+Delivery export is stricter: selection requires a **succeeded** trial per main
+coordinate. Cancelling a hang does not make that coordinate exportable. After
+the batch finishes, use `loom eval batch rerun-plan <batch-id>`, submit a
+targeted/supplemental rerun that succeeds, then create the delivery bundle.
+
+Use `loom eval batch cancel <batch-id>` only when you intend to stop the whole
+batch and cascade-cancel every still-active trial (batch state becomes
+`cancelled`).
 
 Each archive contains:
 

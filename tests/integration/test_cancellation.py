@@ -97,7 +97,7 @@ def app(
     return create_app(ControlPlaneSettings(_env_file=None))
 
 
-def test_cancel_queued(app, cancel_seed):  # type: ignore[no-untyped-def]
+def test_cancel_queued(app, cancel_seed, postgres_url: str):  # type: ignore[no-untyped-def]
     raw, _admin, queued, _, _ = cancel_seed
     with TestClient(app) as client:
         r = client.post(
@@ -106,9 +106,20 @@ def test_cancel_queued(app, cancel_seed):  # type: ignore[no-untyped-def]
         )
         assert r.status_code == 200
         assert r.json()["state"] == "cancelled"
+    engine = create_engine(postgres_url)
+    session_factory = sessionmaker(engine)
+    try:
+        with session_factory() as s:
+            trial = s.get(Trial, queued)
+            assert trial is not None
+            assert trial.state == "cancelled"
+            assert trial.cancellation_requested_at is not None
+            assert trial.finished_at is not None
+    finally:
+        engine.dispose()
 
 
-def test_cancel_running(app, cancel_seed):  # type: ignore[no-untyped-def]
+def test_cancel_running(app, cancel_seed, postgres_url: str):  # type: ignore[no-untyped-def]
     raw, _admin, _, running, _ = cancel_seed
     with TestClient(app) as client:
         r = client.post(
@@ -116,6 +127,16 @@ def test_cancel_running(app, cancel_seed):  # type: ignore[no-untyped-def]
             headers={"Authorization": f"Bearer {raw}"},
         )
         assert r.status_code == 200
+    engine = create_engine(postgres_url)
+    session_factory = sessionmaker(engine)
+    try:
+        with session_factory() as s:
+            trial = s.get(Trial, running)
+            assert trial is not None
+            assert trial.state == "cancelled"
+            assert trial.finished_at is not None
+    finally:
+        engine.dispose()
 
 
 def test_cancel_terminal_returns_409(app, cancel_seed):  # type: ignore[no-untyped-def]

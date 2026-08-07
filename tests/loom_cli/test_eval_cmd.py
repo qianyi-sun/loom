@@ -1,4 +1,4 @@
-"""`loom eval {run, batch {create,list,show,cancel}, trial {list,show}}`
+"""`loom eval {run, batch {create,list,show,cancel}, trial {list,show,cancel}}`
 against an httpx MockTransport. The route layer is exercised by the
 integration tests in tests/integration; this file pins the CLI surface
 (argparse, payload shape, output, error paths)."""
@@ -1903,7 +1903,75 @@ def test_batch_cancel(
     )
     rc = main(["eval", "batch", "cancel", _BATCH_ID])
     assert rc == 0
-    assert "Cancelled batch" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Cancelled batch" in out
+    assert "loom eval trial cancel" in out
+
+
+def test_trial_cancel_running(
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[("GET", f"/api/v1/trials/{_TRIAL_ID}")] = httpx.Response(
+        200,
+        json={
+            "id": _TRIAL_ID,
+            "state": "running",
+            "batch_id": _BATCH_ID,
+            "task_id": "demo/task",
+        },
+    )
+    mock_server.canned[("POST", f"/api/v1/trials/{_TRIAL_ID}/cancel")] = httpx.Response(
+        200,
+        json={"trial_id": _TRIAL_ID, "state": "cancelled"},
+    )
+    rc = main(["eval", "trial", "cancel", _TRIAL_ID])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert f"Cancelled trial {_TRIAL_ID}" in out
+    assert "running → cancelled" in out
+    assert "Sibling trials" in out
+    assert f"loom eval batch rerun-plan {_BATCH_ID}" in out
+    methods = [req.method for req in mock_server.requests]
+    assert methods == ["GET", "POST"]
+
+
+def test_trial_cancel_already_terminal_is_noop(
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[("GET", f"/api/v1/trials/{_TRIAL_ID}")] = httpx.Response(
+        200,
+        json={
+            "id": _TRIAL_ID,
+            "state": "succeeded",
+            "batch_id": _BATCH_ID,
+        },
+    )
+    rc = main(["eval", "trial", "cancel", _TRIAL_ID])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "already succeeded" in out
+    assert "no cancel needed" in out
+    assert [("GET", f"/api/v1/trials/{_TRIAL_ID}")] == [
+        (req.method, req.url.path) for req in mock_server.requests
+    ]
+
+
+def test_trial_cancel_forbidden(
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[("GET", f"/api/v1/trials/{_TRIAL_ID}")] = httpx.Response(
+        403,
+        json={"detail": "not authorized for this team"},
+    )
+    rc = main(["eval", "trial", "cancel", _TRIAL_ID])
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "token rejected by server while trying to show trial" in err
+    assert "not authorized for this team" in err
+    assert "Traceback" not in err
 
 
 def test_batch_delivery_bundle_creates_downloads_and_writes_checksum(

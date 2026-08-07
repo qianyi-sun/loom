@@ -245,7 +245,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub.add_parser(
         "eval",
-        help="Manage evaluation batches (batch create/show/list/cancel)",
+        help=(
+            "Manage evaluation batches and trials "
+            "(batch create/show/list/cancel; trial list/show/cancel)"
+        ),
         add_help=False,
     )
     sub.add_parser(
