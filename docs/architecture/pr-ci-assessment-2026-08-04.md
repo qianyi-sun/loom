@@ -244,6 +244,14 @@ the compatibility canary because artifact production/consumption is exercised
 by CI and images. Rollback restores both previous pins from the policy file in
 one commit; do not roll back only one side of the artifact protocol.
 
+The second batch moves `actions/setup-go` from `v5` to `v7.0.0`, replacing the
+deprecated Node 20 action runtime with Node 24 while leaving Loom's Go 1.23
+toolchain selection unchanged. Compatibility covers the locked action and
+upgrade-policy contracts, `actionlint`, `gofmt`, `go vet`, and race-enabled Go
+tests. Rollback restores the exact v5 SHA from the language-bootstrap policy;
+`actions/setup-node` and the application's own Node.js 20 test lane are not part
+of this change.
+
 Retries are operator-dispatched through `classified-ci-retry`. The workflow
 accepts only the four required source workflow IDs and terminal non-successful
 `pull_request` runs in this repository. Every request records the source run,
