@@ -48,6 +48,7 @@ def test_installer_pins_the_arm64_uv_runtime_builder() -> None:
     assert "sha256sum --check" in source
     assert '"$temporary_dir/uv-aarch64-unknown-linux-gnu/uv" /usr/local/bin/uv' in source
     assert 'installed_uv_version="$(/usr/local/bin/uv --version)"' in source
+    assert '"uv $UV_VERSION (aarch64-unknown-linux-gnu)"' in source
 
 
 def test_installer_creates_only_non_personal_controller_roots() -> None:

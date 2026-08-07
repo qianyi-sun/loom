@@ -79,7 +79,7 @@ if [ "$installed_version" != "$KUBECTL_VERSION" ]; then
   exit 1
 fi
 installed_uv_version="$(/usr/local/bin/uv --version)"
-if [ "$installed_uv_version" != "uv $UV_VERSION" ]; then
+if [ "$installed_uv_version" != "uv $UV_VERSION (aarch64-unknown-linux-gnu)" ]; then
   echo "error: uv version readback failed" >&2
   exit 1
 fi
