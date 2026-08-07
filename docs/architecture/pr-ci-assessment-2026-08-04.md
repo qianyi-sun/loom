@@ -147,7 +147,7 @@ same-repository PR is merged:
 1. Each PR image/architecture job remains `contents: read` with no registry
    credentials. Fork PRs, merge groups, and manual runs only validate builds;
    eligible same-repository PRs additionally export a local Docker archive.
-2. The gzip-compressed OCI archive is uploaded as a one-day Actions artifact.
+2. The Docker-loadable image archive is uploaded as a one-day Actions artifact.
    Its record contains
    a deterministic image/architecture artifact name, byte size, and SHA-256.
    Archive, record, and index names include the source run attempt so GitHub's
@@ -163,7 +163,7 @@ same-repository PR is merged:
    pushed tree, the source images workflow is successful, and every identity
    field matches. The resolver also requires every attempt-bound archive to
    exist and remain unexpired. Each native publish job downloads its exact source-run
-   archive, verifies size and SHA-256 before loading it, verifies architecture
+   Docker archive, verifies size and SHA-256 before loading it, verifies architecture
    and revision labels after loading, and publishes the merge-SHA build tag
    without executing `docker buildx build` again.
 5. Direct pushes, fork PRs, merge commits whose trees differ, base advancement,
