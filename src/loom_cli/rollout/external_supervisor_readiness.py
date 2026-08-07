@@ -51,6 +51,10 @@ _STAGING_SLURM_AUTHORITIES = {
     "gb10": ("trt-gb10", "gx10-01c7"),
     "oldlab": ("trt-oldlab", "TRT-EAI-OLDLAB-1"),
 }
+_STAGING_DATABASE_SECRETS = {
+    "gb10": "loom-external-slurm-autoscaler-db",
+    "oldlab": "loom-secrets",
+}
 
 _MAX_PROFILE_BYTES = 1024 * 1024
 _MAX_SCRIPT_BYTES = 2 * 1024 * 1024
@@ -368,13 +372,14 @@ class ExternalSupervisorIdentity:
             raise ValueError("external supervisor staging kubeconfig is not canonical")
         optional_authority = {
             "--kubectl": "/usr/local/bin/kubectl",
-            "--db-secret-name": "loom-secrets",
             "--db-secret-key": "cp-db-url",
             "--scontrol": "/usr/bin/scontrol",
         }
         if any(
             flag in arguments and arguments[flag] != expected
             for flag, expected in optional_authority.items()
+        ) or arguments.get("--db-secret-name", "loom-secrets") != (
+            _STAGING_DATABASE_SECRETS[self.pool_name]
         ):
             raise ValueError("external supervisor optional authority is not canonical")
         try:

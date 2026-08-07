@@ -59,7 +59,7 @@ def _args(
         "gb10": ("trt-gb10", "gx10-01c7"),
         "oldlab": ("trt-oldlab", "TRT-EAI-OLDLAB-1"),
     }[pool_name]
-    return [
+    args = [
         "--environment",
         environment,
         "--pool-name",
@@ -89,6 +89,11 @@ def _args(
         "--freshness-sec",
         "120",
     ]
+    if pool_name == "gb10":
+        args.extend(
+            ["--db-secret-name", "loom-external-slurm-autoscaler-db"]
+        )
+    return args
 
 
 def _toml_string(value: str) -> str:
@@ -541,6 +546,15 @@ def test_builder_rejects_foreign_slurm_authority_arguments(tmp_path: Path) -> No
     args[cluster_index] = "foreign-cluster"
 
     with pytest.raises(ValueError, match="Slurm authority"):
+        _build(_candidate(tmp_path, supervisors=[_supervisor(args=args)]))
+
+
+def test_builder_requires_dedicated_gb10_database_secret(tmp_path: Path) -> None:
+    args = _args()
+    secret_index = args.index("--db-secret-name")
+    del args[secret_index : secret_index + 2]
+
+    with pytest.raises(ValueError, match="optional authority"):
         _build(_candidate(tmp_path, supervisors=[_supervisor(args=args)]))
 
 
