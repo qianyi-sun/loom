@@ -324,9 +324,12 @@ build only the web image, Dockerfile-only changes build the matching component,
 and shared Python/runtime changes rebuild the affected Python images. Relevant
 pull requests, merge groups, and manual dispatches use the checked-in read-only
 build path, do not log in to GHCR, and do not use a publication cache. Manual
-dispatch is build-only. Only the checked-in `publish` job on a push to `dev` or
-`main` requests job-scoped `packages: write` authority and publishes multi-arch
-images. Same-repository branch workflow code still runs on the read-only PR
+dispatch is build-only. Image validation builds AMD64 and ARM64 in separate
+jobs on matching native CPUs; the ARM job uses `ubuntu-24.04-arm` instead of
+QEMU. Only the checked-in architecture-specific `publish` jobs and their
+manifest joiner on a push to `dev` or `main` request job-scoped `packages: write`
+authority. The joiner verifies that the final tag contains exactly the AMD64 and
+ARM64 members. Same-repository branch workflow code still runs on the read-only PR
 path; autonomous-agent hard isolation requires
 fork-only execution or an external trusted workflow/App.
 

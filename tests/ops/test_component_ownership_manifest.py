@@ -910,6 +910,26 @@ def test_release_image_matrix_is_derived_from_all_release_components() -> None:
     assert all(entry["context"] == "." for entry in matrix)
 
 
+def test_native_release_image_matrix_crosses_every_image_with_both_architectures() -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+
+    images = component_ownership.release_image_matrix(manifest)
+    matrix = component_ownership.native_release_image_matrix(images)
+
+    assert len(matrix) == len(images) * 2
+    assert {(entry["architecture"], entry["platform"]) for entry in matrix} == {
+        ("amd64", "linux/amd64"),
+        ("arm64", "linux/arm64"),
+    }
+    for image in images:
+        matching = [entry for entry in matrix if entry["image"] == image["image"]]
+        assert [entry["architecture"] for entry in matching] == ["amd64", "arm64"]
+        assert all(
+            {key: entry[key] for key in image} == image
+            for entry in matching
+        )
+
+
 def test_release_image_selection_uses_manifest_source_ownership() -> None:
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
 

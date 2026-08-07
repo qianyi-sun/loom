@@ -82,6 +82,46 @@ def test_summary_separates_workflow_work_class_and_runner_class() -> None:
     assert summary["by_work_class_and_runner"]["image/github_hosted"]["jobs"] == 1
     assert summary["jobs"][0]["queue_seconds"] == 10
     assert summary["jobs"][0]["execution_seconds"] == 60
+    assert summary["by_architecture"]["emulated_multi_arch"]["jobs"] == 1
+
+
+def test_summary_separates_native_image_architectures_and_runners() -> None:
+    summary = metrics.summarize_runs(
+        [
+            _run(
+                "images",
+                2,
+                [
+                    _job("worker (linux/amd64)"),
+                    _job(
+                        "worker (linux/arm64)",
+                        runner_name="GitHub Actions 1000000000",
+                        labels=["ubuntu-24.04-arm"],
+                    ),
+                ],
+            ),
+        ],
+    )
+
+    assert summary["schema_version"] == 2
+    assert summary["by_architecture"]["amd64"]["jobs"] == 1
+    assert summary["by_architecture"]["arm64"]["jobs"] == 1
+    assert summary["by_architecture_and_runner"]["amd64/oldlab5"]["jobs"] == 1
+    assert summary["by_architecture_and_runner"]["arm64/github_hosted"]["jobs"] == 1
+    assert metrics.evaluate_native_architectures(summary)["status"] == "pass"
+
+
+def test_native_architecture_acceptance_rejects_emulated_or_missing_architecture() -> None:
+    summary = metrics.summarize_runs(
+        [_run("images", 2, [_job("worker (multi-arch)")])],
+    )
+
+    acceptance = metrics.evaluate_native_architectures(summary)
+
+    assert acceptance["status"] == "fail"
+    assert acceptance["emulated_multi_arch_jobs"] == 1
+    assert acceptance["criteria"]["amd64"]["jobs"] is None
+    assert acceptance["criteria"]["arm64"]["jobs"] is None
 
 
 def test_summary_excludes_control_and_skipped_jobs() -> None:
