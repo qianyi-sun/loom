@@ -77,6 +77,34 @@ changed identity fields fail closed. The broker assigns the lowest available
 oldlab class slot and returns the class-specific GitHub-hosted label only when
 all oldlab slots are already leased.
 
+The trusted controller submits one schema-1 route request for the complete set
+of eligible jobs in a workflow attempt. The request also binds the immutable
+workflow name and numeric workflow ID; the broker accepts only the checked-in
+`CI`, `images`, `cluster-smoke`, and `staging-smoke` contracts and derives the
+class, exact eligible job-key allowlist, and diagnostic lease deadline instead
+of trusting caller-supplied values. A request may select a needed subset of the
+allowlist but cannot invent capacity-consuming jobs. Every selected job is allocated under one
+`BEGIN IMMEDIATE` transaction. A replay mismatch or invalid job rolls the
+entire batch back, so a controller crash or malformed request cannot publish a
+partially leased route. The returned document includes a canonical request
+SHA-256 plus the frozen assignment, lease epoch, slot, and `runs-on` array for
+every job key.
+
+Example route request:
+
+```json
+{
+  "schema_version": 1,
+  "repository": "qianyi-sun/loom",
+  "workflow_name": "CI",
+  "workflow_id": 302898379,
+  "workflow_run_id": 123456789,
+  "run_attempt": 1,
+  "head_sha": "0123456789abcdef0123456789abcdef01234567",
+  "job_keys": ["lint-static", "tests-root-1-of-4"]
+}
+```
+
 A lease deadline is diagnostic, not permission to reuse a possibly queued or
 running slot. Cancellation, completion, supersession, or expiry releases a
 lease only after the trusted controller observes the exact job as terminal and
@@ -89,7 +117,7 @@ Example against a non-production state database:
 uv run --no-sync python scripts/ops/ci_runner_lease_broker.py \
   --state-db /tmp/loom-ci-runner-leases.sqlite3 \
   --profile deploy/ci-runners/oldlab5.toml \
-  allocate --request-file /tmp/route-request.json
+  allocate-route --request-file /tmp/route-request.json
 
 uv run --no-sync python scripts/ops/ci_runner_lease_broker.py \
   --state-db /tmp/loom-ci-runner-leases.sqlite3 \

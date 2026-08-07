@@ -8,6 +8,7 @@ SQLite transaction is the capacity authority across concurrent workflow runs.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sqlite3
@@ -33,6 +34,45 @@ HOSTED_RUNS_ON = {
     "normal": ("ubuntu-latest",),
     "image": ("ubuntu-24.04",),
     "smoke": ("ubuntu-latest",),
+}
+WORKFLOW_CLASS_CONTRACTS = {
+    "CI": (
+        302898379,
+        "normal",
+        (
+            "lint-and-static",
+            "tests-root-1-of-2",
+            "tests-root-2-of-2",
+            "tests-packages",
+            "runtime-payload",
+            "go-checks",
+            "web-checks",
+            "integration-1-of-2",
+            "integration-2-of-2",
+            "integration-docker",
+        ),
+        300,
+    ),
+    "images": (
+        302898384,
+        "image",
+        (
+            "agent-sandbox",
+            "control-plane",
+            "egress-xds",
+            "family-orchestrator",
+            "llm-gateway",
+            "llm-gateway-sandbox",
+            "service",
+            "web",
+            "staging-admin-browser-smoke",
+            "rehearsal-postgres",
+            "worker",
+        ),
+        900,
+    ),
+    "cluster-smoke": (302898381, "smoke", ("cluster-contract",), 300),
+    "staging-smoke": (302898388, "smoke", ("system-smoke",), 300),
 }
 RELEASE_REASONS = {
     "completed",
@@ -168,6 +208,113 @@ class AssignmentRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class RouteRequest:
+    repository: str
+    workflow_name: str
+    workflow_id: int
+    workflow_run_id: int
+    run_attempt: int
+    head_sha: str
+    job_keys: tuple[str, ...]
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, object]) -> RouteRequest:
+        expected_keys = {
+            "schema_version",
+            "repository",
+            "workflow_name",
+            "workflow_id",
+            "workflow_run_id",
+            "run_attempt",
+            "head_sha",
+            "job_keys",
+        }
+        if set(value) != expected_keys:
+            raise LeaseBrokerError("route request fields do not match schema 1")
+        if value.get("schema_version") != 1:
+            raise LeaseBrokerError("route request schema_version must be 1")
+        job_keys_value = value.get("job_keys")
+        if not isinstance(job_keys_value, list):
+            raise LeaseBrokerError("route request job_keys must be an array")
+        request = cls(
+            repository=_exact_text(value.get("repository"), "repository"),
+            workflow_name=_exact_text(value.get("workflow_name"), "workflow_name"),
+            workflow_id=_bounded_int(
+                value.get("workflow_id"), "workflow_id", minimum=1, maximum=_MAX_RUN_ID
+            ),
+            workflow_run_id=_bounded_int(
+                value.get("workflow_run_id"),
+                "workflow_run_id",
+                minimum=1,
+                maximum=_MAX_RUN_ID,
+            ),
+            run_attempt=_bounded_int(
+                value.get("run_attempt"), "run_attempt", minimum=1, maximum=1_000_000
+            ),
+            head_sha=_exact_text(value.get("head_sha"), "head_sha"),
+            job_keys=tuple(_exact_text(item, "job_keys[]") for item in job_keys_value),
+        )
+        request.validate()
+        return request
+
+    @property
+    def work_class(self) -> str:
+        return WORKFLOW_CLASS_CONTRACTS[self.workflow_name][1]
+
+    @property
+    def lease_ttl_seconds(self) -> int:
+        return WORKFLOW_CLASS_CONTRACTS[self.workflow_name][3]
+
+    def validate(self) -> None:
+        if self.repository != EXPECTED_REPOSITORY:
+            raise LeaseBrokerError(f"repository must be {EXPECTED_REPOSITORY}")
+        contract = WORKFLOW_CLASS_CONTRACTS.get(self.workflow_name)
+        if contract is None:
+            raise LeaseBrokerError("route request workflow is not eligible")
+        expected_id, _, allowed_job_keys, _ = contract
+        if self.workflow_id != expected_id:
+            raise LeaseBrokerError("route request workflow id does not match its name")
+        if _SHA_RE.fullmatch(self.head_sha) is None:
+            raise LeaseBrokerError("head_sha must be a full lowercase commit SHA")
+        if not self.job_keys:
+            raise LeaseBrokerError("route request must contain at least one job")
+        if len(self.job_keys) != len(set(self.job_keys)):
+            raise LeaseBrokerError("route request job_keys must be unique")
+        if any(_JOB_KEY_RE.fullmatch(job_key) is None for job_key in self.job_keys):
+            raise LeaseBrokerError("route request job_key contains unsupported characters")
+        if not set(self.job_keys) <= set(allowed_job_keys):
+            raise LeaseBrokerError(
+                f"route request contains a job outside the {self.workflow_name} contract"
+            )
+
+    def assignment_requests(self) -> tuple[AssignmentRequest, ...]:
+        return tuple(
+            AssignmentRequest(
+                repository=self.repository,
+                workflow_run_id=self.workflow_run_id,
+                run_attempt=self.run_attempt,
+                job_key=job_key,
+                head_sha=self.head_sha,
+                work_class=self.work_class,
+                lease_ttl_seconds=self.lease_ttl_seconds,
+            )
+            for job_key in self.job_keys
+        )
+
+    def public_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "repository": self.repository,
+            "workflow_name": self.workflow_name,
+            "workflow_id": self.workflow_id,
+            "workflow_run_id": self.workflow_run_id,
+            "run_attempt": self.run_attempt,
+            "head_sha": self.head_sha,
+            "job_keys": list(self.job_keys),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class PlacementAssignment:
     assignment_id: int
     repository: str
@@ -191,6 +338,45 @@ class PlacementAssignment:
         value["target"] = self.target.value
         value["state"] = self.state.value
         value["runs_on"] = list(self.runs_on)
+        return value
+
+
+@dataclass(frozen=True, slots=True)
+class RouteAssignmentDocument:
+    schema_version: int
+    repository: str
+    workflow_name: str
+    workflow_id: int
+    workflow_run_id: int
+    run_attempt: int
+    head_sha: str
+    request_sha256: str
+    assignments: tuple[PlacementAssignment, ...]
+
+    @classmethod
+    def create(
+        cls,
+        request: RouteRequest,
+        assignments: Sequence[PlacementAssignment],
+    ) -> RouteAssignmentDocument:
+        canonical_request = json.dumps(
+            request.public_dict(), sort_keys=True, separators=(",", ":")
+        ).encode()
+        return cls(
+            schema_version=1,
+            repository=request.repository,
+            workflow_name=request.workflow_name,
+            workflow_id=request.workflow_id,
+            workflow_run_id=request.workflow_run_id,
+            run_attempt=request.run_attempt,
+            head_sha=request.head_sha,
+            request_sha256=hashlib.sha256(canonical_request).hexdigest(),
+            assignments=tuple(assignments),
+        )
+
+    def public_dict(self) -> dict[str, object]:
+        value = asdict(self)
+        value["assignments"] = [item.public_dict() for item in self.assignments]
         return value
 
 
@@ -362,91 +548,130 @@ class CiRunnerLeaseBroker:
     def allocate(
         self, request: AssignmentRequest, *, now: datetime | None = None
     ) -> PlacementAssignment:
-        request.validate()
-        if request.repository != self.config.repository:
-            raise LeaseBrokerError("request repository does not match broker config")
+        return self.allocate_many((request,), now=now)[0]
+
+    def allocate_many(
+        self,
+        requests: Sequence[AssignmentRequest],
+        *,
+        now: datetime | None = None,
+    ) -> tuple[PlacementAssignment, ...]:
+        if not requests or len(requests) > 100:
+            raise LeaseBrokerError("allocation batch must contain 1..100 requests")
+        identities: set[tuple[str, int, int, str]] = set()
+        for request in requests:
+            request.validate()
+            if request.repository != self.config.repository:
+                raise LeaseBrokerError("request repository does not match broker config")
+            identity = (
+                request.repository,
+                request.workflow_run_id,
+                request.run_attempt,
+                request.job_key,
+            )
+            if identity in identities:
+                raise LeaseBrokerError("allocation batch identities must be unique")
+            identities.add(identity)
         observed_at = _utc(now or datetime.now(UTC))
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            existing = connection.execute(
-                """
-                SELECT * FROM assignments
-                WHERE repository = ? AND workflow_run_id = ?
-                  AND run_attempt = ? AND job_key = ?
-                """,
-                (
-                    request.repository,
-                    request.workflow_run_id,
-                    request.run_attempt,
-                    request.job_key,
-                ),
-            ).fetchone()
-            if existing is not None:
-                assignment = self._assignment_from_row(existing)
-                self._validate_replay(assignment, request)
-                connection.commit()
-                return assignment
-
-            used_slots = {
-                int(row["slot"])
-                for row in connection.execute(
-                    """
-                    SELECT slot FROM assignments
-                    WHERE work_class = ? AND target = 'oldlab' AND state = 'assigned'
-                    """,
-                    (request.work_class,),
-                )
-            }
-            capacity = self.config.capacities[request.work_class]
-            free_slot = next((slot for slot in range(capacity) if slot not in used_slots), None)
-            target = (
-                PlacementTarget.OLDLAB if free_slot is not None else PlacementTarget.GITHUB_HOSTED
+            assignments = tuple(
+                self._allocate_in_transaction(connection, request, observed_at)
+                for request in requests
             )
-            epoch = self._next_epoch(connection)
-            created_at = _timestamp(observed_at)
-            expires_at = (
-                _timestamp(observed_at + timedelta(seconds=request.lease_ttl_seconds))
-                if target is PlacementTarget.OLDLAB
-                else None
-            )
-            cursor = connection.execute(
-                """
-                INSERT INTO assignments(
-                    repository, workflow_run_id, run_attempt, job_key, head_sha,
-                    work_class, target, slot, lease_epoch, state, created_at,
-                    lease_expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'assigned', ?, ?)
-                """,
-                (
-                    request.repository,
-                    request.workflow_run_id,
-                    request.run_attempt,
-                    request.job_key,
-                    request.head_sha,
-                    request.work_class,
-                    target.value,
-                    free_slot,
-                    epoch,
-                    created_at,
-                    expires_at,
-                ),
-            )
-            row = connection.execute(
-                "SELECT * FROM assignments WHERE assignment_id = ?",
-                (cursor.lastrowid,),
-            ).fetchone()
-            if row is None:
-                raise LeaseBrokerError("stored assignment could not be read back")
-            assignment = self._assignment_from_row(row)
             connection.commit()
-            return assignment
+            return assignments
         except BaseException:
             if connection.in_transaction:
                 connection.rollback()
             raise
         finally:
             connection.close()
+
+    def allocate_route(
+        self,
+        request: RouteRequest,
+        *,
+        now: datetime | None = None,
+    ) -> RouteAssignmentDocument:
+        request.validate()
+        assignments = self.allocate_many(request.assignment_requests(), now=now)
+        return RouteAssignmentDocument.create(request, assignments)
+
+    def _allocate_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        request: AssignmentRequest,
+        observed_at: datetime,
+    ) -> PlacementAssignment:
+        existing = connection.execute(
+            """
+            SELECT * FROM assignments
+            WHERE repository = ? AND workflow_run_id = ?
+              AND run_attempt = ? AND job_key = ?
+            """,
+            (
+                request.repository,
+                request.workflow_run_id,
+                request.run_attempt,
+                request.job_key,
+            ),
+        ).fetchone()
+        if existing is not None:
+            assignment = self._assignment_from_row(existing)
+            self._validate_replay(assignment, request)
+            return assignment
+
+        used_slots = {
+            int(row["slot"])
+            for row in connection.execute(
+                """
+                SELECT slot FROM assignments
+                WHERE work_class = ? AND target = 'oldlab' AND state = 'assigned'
+                """,
+                (request.work_class,),
+            )
+        }
+        capacity = self.config.capacities[request.work_class]
+        free_slot = next((slot for slot in range(capacity) if slot not in used_slots), None)
+        target = PlacementTarget.OLDLAB if free_slot is not None else PlacementTarget.GITHUB_HOSTED
+        epoch = self._next_epoch(connection)
+        created_at = _timestamp(observed_at)
+        expires_at = (
+            _timestamp(observed_at + timedelta(seconds=request.lease_ttl_seconds))
+            if target is PlacementTarget.OLDLAB
+            else None
+        )
+        cursor = connection.execute(
+            """
+            INSERT INTO assignments(
+                repository, workflow_run_id, run_attempt, job_key, head_sha,
+                work_class, target, slot, lease_epoch, state, created_at,
+                lease_expires_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'assigned', ?, ?)
+            """,
+            (
+                request.repository,
+                request.workflow_run_id,
+                request.run_attempt,
+                request.job_key,
+                request.head_sha,
+                request.work_class,
+                target.value,
+                free_slot,
+                epoch,
+                created_at,
+                expires_at,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM assignments WHERE assignment_id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+        if row is None:
+            raise LeaseBrokerError("stored assignment could not be read back")
+        return self._assignment_from_row(row)
 
     def release(
         self,
@@ -596,6 +821,16 @@ def _request_file(path: Path) -> AssignmentRequest:
     return AssignmentRequest.from_mapping(value)
 
 
+def _route_request_file(path: Path) -> RouteRequest:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise LeaseBrokerError("route request file is unreadable or invalid JSON") from exc
+    if not isinstance(value, dict):
+        raise LeaseBrokerError("route request file must contain one JSON object")
+    return RouteRequest.from_mapping(value)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -611,6 +846,8 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     allocate = subparsers.add_parser("allocate")
     allocate.add_argument("--request-file", type=Path, required=True)
+    allocate_route = subparsers.add_parser("allocate-route")
+    allocate_route.add_argument("--request-file", type=Path, required=True)
     release = subparsers.add_parser("release")
     release.add_argument("--assignment-id", type=int, required=True)
     release.add_argument("--lease-epoch", type=int, required=True)
@@ -627,6 +864,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         broker = CiRunnerLeaseBroker(args.state_db, config)
         if args.command == "allocate":
             result: object = broker.allocate(_request_file(args.request_file)).public_dict()
+        elif args.command == "allocate-route":
+            result = broker.allocate_route(_route_request_file(args.request_file)).public_dict()
         elif args.command == "release":
             result = broker.release(
                 assignment_id=args.assignment_id,
