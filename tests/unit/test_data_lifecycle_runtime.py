@@ -155,6 +155,7 @@ def test_all_lifecycle_entry_points_share_one_runtime_contract() -> None:
         _ROOT / "scripts/ops/staging_data_lifecycle_bootstrap.py",
         _ROOT / "scripts/ops/staging_data_lifecycle_capacity.py",
         _ROOT / "scripts/ops/staging_data_lifecycle_classify.py",
+        _ROOT / "scripts/ops/staging_data_lifecycle_dirty_epoch_reconcile.py",
         _ROOT / "scripts/ops/staging_data_lifecycle_gc.py",
         _ROOT / "scripts/ops/staging_data_lifecycle_prepare.py",
     ]
