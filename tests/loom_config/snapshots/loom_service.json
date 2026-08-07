@@ -99,6 +99,71 @@
     "default": "None",
     "required": false
   },
+  "dev_instance_candidate_sha": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
+  "dev_instance_container_registry": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
+  "dev_instance_control_plane_url_template": {
+    "annotation": "<class 'str'>",
+    "default": "'http://loom-control-plane.{namespace}.svc.cluster.local:8080'",
+    "required": false
+  },
+  "dev_instance_database_admin_url": {
+    "annotation": "pydantic.networks.PostgresDsn | None",
+    "default": "None",
+    "required": false
+  },
+  "dev_instance_deployment_generation": {
+    "annotation": "<class 'int'>",
+    "default": "1",
+    "required": false
+  },
+  "dev_instance_image_tag": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
+  "dev_instance_ingress_cert_manager_cluster_issuer": {
+    "annotation": "<class 'str'>",
+    "default": "'letsencrypt-prod'",
+    "required": false
+  },
+  "dev_instance_ingress_class_name": {
+    "annotation": "<class 'str'>",
+    "default": "'nginx'",
+    "required": false
+  },
+  "dev_instance_kube_context": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
+  "dev_instance_kubectl_path": {
+    "annotation": "<class 'pathlib.Path'>",
+    "default": "PosixPath('/usr/local/bin/kubectl')",
+    "required": false
+  },
+  "dev_instance_policy_drain_timeout_sec": {
+    "annotation": "<class 'int'>",
+    "default": "900",
+    "required": false
+  },
+  "dev_instance_slurm_actuator_config_json": {
+    "annotation": "<class 'str'>",
+    "default": "'{}'",
+    "required": false
+  },
+  "dev_instances_enabled": {
+    "annotation": "<class 'bool'>",
+    "default": "False",
+    "required": false
+  },
   "dev_reload": {
     "annotation": "<class 'bool'>",
     "default": "False",

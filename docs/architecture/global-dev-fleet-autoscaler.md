@@ -56,11 +56,16 @@ grants expire.
 
 ## Operations
 
-`scripts/ops/global_dev_fleet_autoscaler_once.py` consumes versioned `demands`
-and `observations`, updates the owner-only SQLite authority, and atomically
-writes an owner-only report. Environment runners pass that report plus their
-deployment generation to `worker_pool_autoscaler_external_once.py`; the
-existing Slurm actuator remains the worker lifecycle owner.
+`scripts/ops/global_dev_fleet_autoscaler_external_once.py` is the production
+registry-driven supervisor. It discovers the dynamic cohort, loads
+pool-scoped observations from each isolated database, updates the owner-only
+SQLite authority, atomically writes an owner-only report, refreshes
+candidate- and lifecycle-epoch-bound worker env files only for ready
+instances, and invokes the existing external Slurm reconciler with each exact
+grant. `deploy/dev-fleet/` owns its hardened systemd service/timer and
+activation runbook. The lower-level
+`global_dev_fleet_autoscaler_once.py` remains the deterministic versioned-input
+driver used for offline evidence and testing.
 
 Production pressure remains higher priority. Dev grants are preemptible and
 the global budget may be reduced to zero, but capacity is reused only after its
@@ -68,6 +73,7 @@ drain is observed.
 
 ## Activation gate
 
-Code and deterministic tests are complete. A live timer rollout still requires
-operator-provided budgets, a dynamic demand/observation feed, and an approved
-submit-host change. Developer commands never mutate the global ledger directly.
+Code, the dynamic demand/observation producer, and deterministic contracts are
+complete. A live rollout still requires operator-provided budgets,
+credentials, approved candidate evidence, and an approved submit-host change.
+Developer commands never mutate the global ledger directly.

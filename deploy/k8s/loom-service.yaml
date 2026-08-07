@@ -66,6 +66,36 @@ spec:
               name: loom-secrets
               key: svc-db-url-pool
               optional: true
+        - name: LOOM_SVC_DEV_INSTANCE_CANDIDATE_SHA
+          value: ''
+        - name: LOOM_SVC_DEV_INSTANCE_CONTAINER_REGISTRY
+          value: ''
+        - name: LOOM_SVC_DEV_INSTANCE_CONTROL_PLANE_URL_TEMPLATE
+          value: http://loom-control-plane.{namespace}.svc.cluster.local:8080
+        - name: LOOM_SVC_DEV_INSTANCE_DATABASE_ADMIN_URL
+          valueFrom:
+            secretKeyRef:
+              name: loom-secrets
+              key: dev-instance-database-admin-url
+              optional: true
+        - name: LOOM_SVC_DEV_INSTANCE_DEPLOYMENT_GENERATION
+          value: '1'
+        - name: LOOM_SVC_DEV_INSTANCE_IMAGE_TAG
+          value: ''
+        - name: LOOM_SVC_DEV_INSTANCE_INGRESS_CERT_MANAGER_CLUSTER_ISSUER
+          value: letsencrypt-prod
+        - name: LOOM_SVC_DEV_INSTANCE_INGRESS_CLASS_NAME
+          value: nginx
+        - name: LOOM_SVC_DEV_INSTANCE_KUBE_CONTEXT
+          value: ''
+        - name: LOOM_SVC_DEV_INSTANCE_KUBECTL_PATH
+          value: /usr/local/bin/kubectl
+        - name: LOOM_SVC_DEV_INSTANCE_POLICY_DRAIN_TIMEOUT_SEC
+          value: '900'
+        - name: LOOM_SVC_DEV_INSTANCE_SLURM_ACTUATOR_CONFIG_JSON
+          value: '{}'
+        - name: LOOM_SVC_DEV_INSTANCES_ENABLED
+          value: 'False'
         - name: LOOM_SVC_DEV_RELOAD
           value: 'False'
         - name: LOOM_SVC_GATEWAY_URL

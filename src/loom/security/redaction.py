@@ -59,6 +59,10 @@ _SIGNED_URL_PARAM_RE = re.compile(
     r"(?i)\b(?:X-Amz-Signature|X-Amz-Credential|X-Amz-Security-Token|"
     r"Signature|AWSAccessKeyId)=([^&\s'\"]+)",
 )
+_CREDENTIAL_URL_RE = re.compile(
+    r"\b[a-z][a-z0-9+.-]*://[^/@\s'\"]+@[^,\s'\"]+",
+    re.IGNORECASE,
+)
 _INTERNAL_URL_RE = re.compile(
     r"https?://(?:loom-control-plane|loom-llm-gateway|loom-worker|"
     r"control-plane|llm-gateway|minio)(?:[.:][^/\s'\"]*)?[^,\s'\"]*",
@@ -101,6 +105,7 @@ def redact_text(value: str, *, limit: int | None = None) -> str:
     replacements = (
         (_SIGNED_URL_RE, "[REDACTED:signed-url]"),
         (_SIGNED_URL_PARAM_RE, lambda m: f"{m.group(0).split('=', 1)[0]}=[REDACTED]"),
+        (_CREDENTIAL_URL_RE, "[REDACTED:credential-url]"),
         (_INTERNAL_URL_RE, "[REDACTED:internal-url]"),
         (_SECRET_REF_RE, "[REDACTED:secret-ref]"),
         (_BEARER_RE, lambda m: f"{m.group(1)} [REDACTED:bearer]"),
@@ -198,11 +203,7 @@ def contains_secret_like_content(content: bytes | str) -> RedactionDecision:
     while owner-team diagnostics can still retain the raw artifact.
     """
 
-    text = (
-        content.decode("utf-8", errors="ignore")
-        if isinstance(content, bytes)
-        else content
-    )
+    text = content.decode("utf-8", errors="ignore") if isinstance(content, bytes) else content
     if redact_text(text) != text:
         return RedactionDecision(
             status="blocked",

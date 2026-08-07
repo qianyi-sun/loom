@@ -40,6 +40,19 @@ class LoomServiceSettings(BaseSettings):
     control_plane_url: HttpUrl = cast(HttpUrl, "http://loom-control-plane:8080")
     db_url: PostgresDsn
     db_url_pool: PostgresDsn | None = None
+    dev_instance_candidate_sha: str = ""
+    dev_instance_container_registry: str = ""
+    dev_instance_control_plane_url_template: str = "http://loom-control-plane.{namespace}.svc.cluster.local:8080"
+    dev_instance_database_admin_url: PostgresDsn | None = None
+    dev_instance_deployment_generation: int = 1
+    dev_instance_image_tag: str = ""
+    dev_instance_ingress_cert_manager_cluster_issuer: str = "letsencrypt-prod"
+    dev_instance_ingress_class_name: str = "nginx"
+    dev_instance_kube_context: str = ""
+    dev_instance_kubectl_path: Path = Path("/usr/local/bin/kubectl")
+    dev_instance_policy_drain_timeout_sec: int = 900
+    dev_instance_slurm_actuator_config_json: str = "{}"
+    dev_instances_enabled: bool = False
     dev_reload: bool = False
     gateway_url: HttpUrl = cast(HttpUrl, "http://loom-llm-gateway:9100")
     huggingface_api_key: SecretStr | None = Field(default=None, validation_alias="HF_TOKEN")

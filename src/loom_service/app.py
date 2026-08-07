@@ -37,6 +37,8 @@ from loom.taskset.transform_sandbox import TransformSandboxConfig
 from loom.workload_trust import WorkloadTrustContract
 from loom_service.batch_runner import run_loop as batch_run_loop
 from loom_service.config import LoomServiceSettings
+from loom_service.dev_instance_lifecycle import DevInstanceLifecycleRunner
+from loom_service.dev_instance_runtime import build_dev_instance_provisioner_factory
 from loom_service.metrics import (
     HTTP_REQUEST_LATENCY_SEC,
     HTTP_REQUESTS_TOTAL,
@@ -50,6 +52,7 @@ from loom_service.routes import (
     batches,
     benchmarks,
     delivery_exports,
+    dev_instances,
     health,
     invites,
     local_servers,
@@ -135,6 +138,10 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         minio_client = create_minio_client(
             settings, endpoint_url=settings.minio_endpoint,
         )
+        dev_instance_provisioner_factory = build_dev_instance_provisioner_factory(
+            settings,
+            minio_client=minio_client,
+        )
 
         http_client = httpx.AsyncClient(
             base_url=str(settings.control_plane_url), timeout=10.0,
@@ -163,6 +170,14 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         app.state.session_factory = session_factory
         app.state.admin_secret_verifier = admin_secret_verifier
         app.state.minio_client = minio_client
+        dev_instance_lifecycle_runner = None
+        if dev_instance_provisioner_factory is not None:
+            app.state.dev_instance_provisioner_factory = dev_instance_provisioner_factory
+            dev_instance_lifecycle_runner = DevInstanceLifecycleRunner(
+                session_factory=session_factory,
+                provisioner_factory=dev_instance_provisioner_factory,
+            )
+            app.state.dev_instance_lifecycle_runner = dev_instance_lifecycle_runner
         app.state.http_client = http_client
         app.state.gateway_client = gateway_client
 
@@ -237,6 +252,8 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         try:
             yield
         finally:
+            if dev_instance_lifecycle_runner is not None:
+                await dev_instance_lifecycle_runner.close()
             runner_task.cancel()
             materializer_task.cancel()
             gc_task.cancel()
@@ -304,6 +321,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
     app.include_router(tasksets.router, prefix="/api/v1")
     app.include_router(batches.router, prefix="/api/v1")
     app.include_router(delivery_exports.router, prefix="/api/v1")
+    app.include_router(dev_instances.router, prefix="/api/v1")
     app.include_router(run_library.router, prefix="/api/v1")
     app.include_router(rate_cards.router, prefix="/api/v1")
     app.include_router(admin_audit.router, prefix="/api/v1")

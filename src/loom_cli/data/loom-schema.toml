@@ -149,6 +149,79 @@ used_by     = ["control-plane", "llm-gateway", "loom-service"]
 python_type = "bool"
 default     = false
 
+# Shared-fleet dev-instance controller. Disabled in ordinary/base deployments;
+# the operator enables it only on the management loom-service after provisioning
+# its fixture-admin credential, candidate images, Kubernetes RBAC, and external
+# Slurm supervisor.
+[service_config.dev_instances_enabled]
+used_by     = ["loom-service"]
+python_type = "bool"
+default     = false
+
+[service_config.dev_instance_database_admin_url]
+used_by     = ["loom-service"]
+python_type = "PostgresDsn"
+required    = false
+default     = ""
+secret      = { key = "dev-instance-database-admin-url" }
+description = "Maintenance-database credential allowed to create/drop only derived dev databases and roles on the shared dev fixture."
+
+[service_config.dev_instance_candidate_sha]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = ""
+
+[service_config.dev_instance_deployment_generation]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 1
+
+[service_config.dev_instance_image_tag]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = ""
+
+[service_config.dev_instance_container_registry]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = ""
+
+[service_config.dev_instance_ingress_class_name]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "nginx"
+
+[service_config.dev_instance_ingress_cert_manager_cluster_issuer]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "letsencrypt-prod"
+
+[service_config.dev_instance_kubectl_path]
+used_by     = ["loom-service"]
+python_type = "Path"
+default     = "/usr/local/bin/kubectl"
+
+[service_config.dev_instance_kube_context]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = ""
+
+[service_config.dev_instance_control_plane_url_template]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "http://loom-control-plane.{namespace}.svc.cluster.local:8080"
+
+[service_config.dev_instance_slurm_actuator_config_json]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "{}"
+description = "Non-secret JSON Slurm actuator configuration. Secret worker material remains referenced by protected env-file paths."
+
+[service_config.dev_instance_policy_drain_timeout_sec]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 900
+
 [service_config.bind_host]
 used_by     = ["control-plane", "llm-gateway", "loom-service"]
 python_type = "str"
