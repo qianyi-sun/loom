@@ -179,6 +179,7 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
 
     assert set(jobs) == {
         "plan",
+        "image-route",
         "build",
         "candidate-index",
         "resolve-candidate",
@@ -192,6 +193,12 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
         assert "environment" not in jobs[job_name]
         assert "id-token" not in effective
         assert all(value != "write" for value in effective.values())
+
+    assert jobs["image-route"]["permissions"] == {
+        "checks": "read",
+        "contents": "read",
+    }
+    assert "environment" not in jobs["image-route"]
 
     assert jobs["publish"]["permissions"] == {
         "actions": "read",
@@ -274,9 +281,12 @@ def test_staging_pr_gate_is_credential_free_and_does_not_depend_on_real_aws() ->
     assert "${{ secrets." not in str(workflow)
     assert "ci-aws" not in str(workflow)
 
-    for job in jobs.values():
+    for job_name, job in jobs.items():
         effective = job.get("permissions", workflow["permissions"])
-        assert effective == {"contents": "read"}
+        if job_name == "staging-route":
+            assert effective == {"checks": "read", "contents": "read"}
+        else:
+            assert effective == {"contents": "read"}
         assert "environment" not in job
         assert "id-token" not in effective
         assert all(value != "write" for value in effective.values())

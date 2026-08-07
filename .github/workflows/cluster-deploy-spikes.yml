@@ -24,8 +24,7 @@ concurrency:
 jobs:
   docker-only-spikes:
     name: spikes 01 + 04 + 05 (Docker only, ~30 s)
-    runs-on: >-
-      ${{ fromJSON(vars.LOOM_CI_SMOKE_RUNS_ON || vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -40,8 +39,7 @@ jobs:
 
   k8s-spikes:
     name: spikes 02 + 03 (kind cluster, ~3 min)
-    runs-on: >-
-      ${{ fromJSON(vars.LOOM_CI_SMOKE_RUNS_ON || vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5

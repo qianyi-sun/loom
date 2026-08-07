@@ -255,9 +255,66 @@ jobs:
           fi
           python3 scripts/component_ownership.py "${args[@]}"
 
+  image-route:
+    name: resolve oldlab-first image routes
+    needs: plan
+    if: >-
+      github.event_name != 'push' &&
+      needs.plan.outputs.gate_mode == 'full' &&
+      needs.plan.outputs.required == 'true' &&
+      needs.plan.outputs.images != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      checks: read
+      contents: read
+    outputs:
+      routes: ${{ steps.route.outputs.routes }}
+    steps:
+      - name: Checkout trusted route action
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          repository: qianyi-sun/loom
+          ref: 0d336557f0a3570490bd21bf85485c3e4c4a2d73
+          sparse-checkout: .github/actions/ci-runner-route
+          path: .loom-ci-route-action
+          persist-credentials: false
+
+      - name: Select native AMD64 image keys
+        id: keys
+        shell: bash
+        env:
+          NATIVE_BUILDS: ${{ needs.plan.outputs.native_builds }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          builds = json.loads(os.environ["NATIVE_BUILDS"])
+          keys = [item["image"] for item in builds if item["architecture"] == "amd64"]
+          if not keys or len(keys) != len(set(keys)):
+              raise SystemExit("native AMD64 route keys are empty or duplicated")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("job_keys=" + json.dumps(keys, separators=(",", ":")) + "\n")
+          PY
+
+      - name: Resolve immutable assignments
+        id: route
+        uses: ./.loom-ci-route-action/.github/actions/ci-runner-route
+        with:
+          route-mode: ${{ vars.LOOM_CI_ROUTE_MODE || 'disabled' }}
+          repository: ${{ github.repository }}
+          workflow-name: images
+          workflow-id: '302898384'
+          workflow-run-id: ${{ github.run_id }}
+          run-attempt: ${{ github.run_attempt }}
+          head-sha: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          job-keys-json: ${{ steps.keys.outputs.job_keys }}
+          github-token: ${{ github.token }}
+
   build:
     name: ${{ matrix.image }} (${{ matrix.platform }})
-    needs: plan
+    needs: [plan, image-route]
     if: >-
       github.event_name != 'push' &&
       needs.plan.outputs.gate_mode == 'full' &&
@@ -265,7 +322,7 @@ jobs:
       needs.plan.outputs.images != '[]'
     runs-on: >-
       ${{ matrix.architecture == 'arm64' && fromJSON('["ubuntu-24.04-arm"]') ||
-          fromJSON(vars.LOOM_CI_IMAGE_RUNS_ON || vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-24.04"]') }}
+          fromJSON(needs.image-route.outputs.routes)[matrix.image] }}
     timeout-minutes: 45
     permissions:
       contents: read

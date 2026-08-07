@@ -42,12 +42,14 @@ EXPECTED_LABELS = (
     "ephemeral-kvm",
 )
 ROUTING_VARIABLE = "LOOM_CI_ACCELERATOR_RUNS_ON"
+ROUTING_MODE_VARIABLE = "LOOM_CI_ROUTE_MODE"
 WORK_CLASS_CONTRACTS = {
     "normal": ("loom-ci-normal", "LOOM_CI_NORMAL_RUNS_ON"),
     "image": ("loom-ci-image", "LOOM_CI_IMAGE_RUNS_ON"),
     "smoke": ("loom-ci-smoke", "LOOM_CI_SMOKE_RUNS_ON"),
 }
 ROUTING_VARIABLES = (
+    ROUTING_MODE_VARIABLE,
     ROUTING_VARIABLE,
     *(contract[1] for contract in WORK_CLASS_CONTRACTS.values()),
 )
