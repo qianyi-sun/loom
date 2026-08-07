@@ -403,6 +403,8 @@ def test_collect_preflight_probes_only_exact_merged_active_gb10_set(tmp_path: Pa
     assert shared.passed is True
     assert shared.evidence is not None
     assert shared.evidence.endswith("hosts=15")
+    assert any("service/loom-postgres-rw" in argv for argv in calls)
+    assert not any("statefulset/loom-postgres" in argv for argv in calls)
 
 
 def test_collect_preflight_decodes_repository_st_dev_before_mount_comparison(

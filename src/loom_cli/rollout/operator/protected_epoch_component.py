@@ -112,7 +112,7 @@ class KubernetesProtectedEpochComponent:
                 "-n",
                 "loom-staging",
                 "exec",
-                "statefulset/loom-postgres",
+                "service/loom-postgres-rw",
                 "--",
                 "sh",
                 "-ceu",

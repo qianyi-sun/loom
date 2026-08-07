@@ -71,6 +71,14 @@ metadata:
 """
 
 
+def _rendered_cnpg_manifest() -> str:
+    return _rendered_manifest().replace(
+        "apiVersion: apps/v1\nkind: StatefulSet\nmetadata:\n  name: loom-postgres",
+        "apiVersion: postgresql.cnpg.io/v1\nkind: Cluster\nmetadata:\n  name: loom-postgres",
+        1,
+    )
+
+
 def _prepare_candidate_worktree(ev: EvidenceDirectory) -> Path:
     worktree = ev.step_dir(1, "worktree").path / "src"
     package_dir = worktree / "src" / "loom_cli"
@@ -173,3 +181,52 @@ def test_migrate_bootstraps_stateful_substrate_before_migration_job(
     ]
     assert calls[4][:4] == ["kubectl", "-n", "loom-staging", "apply"]
     assert calls[5][:5] == ["kubectl", "-n", "loom-staging", "wait", "--for=condition=complete"]
+
+
+def test_migrate_waits_for_cnpg_cluster_before_migration_job(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    ctx = make_ctx(tmp_path, namespace="loom-staging", image_tag="staging-abc123")
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    _prepare_candidate_worktree(ev)
+    ev.step_dir(7, "render").artifact_path("rendered.yaml").write_text(
+        _rendered_cnpg_manifest(),
+        encoding="utf-8",
+    )
+    step_dir = ev.step_dir(9, "migrate")
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs: Any) -> SubprocessResult:
+        calls.append(list(argv))
+        stdout = "apiVersion: batch/v1\nkind: Job\n" if list(argv)[:3] == [
+            sys.executable,
+            "-I",
+            "-c",
+        ] else "ok\n"
+        return SubprocessResult(argv=list(argv), returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s09_migrate.run_captured", fake_run)
+
+    result = MigrateStep().run(ctx, step_dir)
+
+    assert result.exit_code == 0
+    assert calls[2] == [
+        "kubectl",
+        "-n",
+        "loom-staging",
+        "wait",
+        "--for=condition=Ready",
+        "cluster.postgresql.cnpg.io/loom-postgres",
+        "--timeout=300s",
+    ]
+    assert calls[3] == [
+        "kubectl",
+        "-n",
+        "loom-staging",
+        "rollout",
+        "status",
+        "statefulset/loom-minio",
+        "--timeout=300s",
+    ]

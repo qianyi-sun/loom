@@ -63,7 +63,7 @@ def test_reads_exact_staging_epoch_through_fixed_readonly_query(tmp_path: Path) 
 
     assert provider() == 17
     argv, environment, timeout = runner.calls[0]
-    assert argv[:5] == ["kubectl", "-n", "loom-staging", "exec", "statefulset/loom-postgres"]
+    assert argv[:5] == ["kubectl", "-n", "loom-staging", "exec", "service/loom-postgres-rw"]
     assert "staging_mutation_epochs" in argv[-1]
     assert "INSERT" not in argv[-1] and "UPDATE" not in argv[-1] and "DELETE" not in argv[-1]
     assert environment == {"PATH": "/usr/bin"}

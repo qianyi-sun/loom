@@ -4222,30 +4222,38 @@ def test_read_root_kubeconfig_rejects_descriptor_change(
 def test_export_kubeconfig_uses_process_private_snapshot(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    source = b"apiVersion: v1\ncurrent-context: loom-staging\n"
+    source = b"apiVersion: v1\ncurrent-context: default\n"
+    canonical = b"apiVersion: v1\ncurrent-context: loom-staging\n"
     snapshot_path: Path | None = None
+    calls: list[list[str]] = []
 
     class KubeconfigRunner:
         def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
             nonlocal snapshot_path
             call = list(argv)
+            calls.append(call)
             assert kwargs == {}
             assert call[0:2] == ["kubectl", "--kubeconfig"]
             snapshot_path = Path(call[2])
             assert snapshot_path.read_bytes() == source
             assert stat.S_IMODE(snapshot_path.stat().st_mode) == 0o600
-            assert call[3:] == [
-                "config",
-                "view",
-                "--raw",
-                "--minify",
-            ]
-            return host.CommandResult(0, source.decode())
+            command = call[3:]
+            if command == ["config", "current-context"]:
+                return host.CommandResult(0, "default\n")
+            if command == ["config", "rename-context", "default", "loom-staging"]:
+                return host.CommandResult(0, "")
+            assert command == ["config", "view", "--raw", "--minify"]
+            return host.CommandResult(0, canonical.decode())
 
     monkeypatch.setattr(host, "_read_root_kubeconfig_source", lambda: source)
     monkeypatch.setattr(host, "ROOT_KUBECONFIG_SNAPSHOT_PARENT", tmp_path)
 
-    assert host.HostSystem(KubeconfigRunner()).export_kubeconfig() == source
+    assert host.HostSystem(KubeconfigRunner()).export_kubeconfig() == canonical
+    assert [call[3:] for call in calls] == [
+        ["config", "current-context"],
+        ["config", "rename-context", "default", "loom-staging"],
+        ["config", "view", "--raw", "--minify"],
+    ]
     assert snapshot_path is not None
     assert not snapshot_path.exists()
 

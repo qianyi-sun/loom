@@ -588,7 +588,7 @@ def test_subprocess_runner_accepts_multiline_argv_but_rejects_empty_and_nul(
             (
                 "kubectl",
                 "exec",
-                "statefulset/loom-postgres",
+                "service/loom-postgres-rw",
                 "--",
                 "sh",
                 "-ceu",
