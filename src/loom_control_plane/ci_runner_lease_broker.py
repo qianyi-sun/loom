@@ -36,10 +36,43 @@ HOSTED_RUNS_ON = {
     "smoke": ("ubuntu-latest",),
 }
 WORKFLOW_CLASS_CONTRACTS = {
-    "CI": (302898379, "normal", 12, 300),
-    "images": (302898384, "image", 11, 900),
-    "cluster-smoke": (302898381, "smoke", 1, 300),
-    "staging-smoke": (302898388, "smoke", 1, 300),
+    "CI": (
+        302898379,
+        "normal",
+        (
+            "lint-and-static",
+            "tests-root-1-of-2",
+            "tests-root-2-of-2",
+            "tests-packages",
+            "runtime-payload",
+            "go-checks",
+            "web-checks",
+            "integration-1-of-2",
+            "integration-2-of-2",
+            "integration-docker",
+        ),
+        300,
+    ),
+    "images": (
+        302898384,
+        "image",
+        (
+            "agent-sandbox",
+            "control-plane",
+            "egress-xds",
+            "family-orchestrator",
+            "llm-gateway",
+            "llm-gateway-sandbox",
+            "service",
+            "web",
+            "staging-admin-browser-smoke",
+            "rehearsal-postgres",
+            "worker",
+        ),
+        900,
+    ),
+    "cluster-smoke": (302898381, "smoke", ("cluster-contract",), 300),
+    "staging-smoke": (302898388, "smoke", ("system-smoke",), 300),
 }
 RELEASE_REASONS = {
     "completed",
@@ -238,19 +271,21 @@ class RouteRequest:
         contract = WORKFLOW_CLASS_CONTRACTS.get(self.workflow_name)
         if contract is None:
             raise LeaseBrokerError("route request workflow is not eligible")
-        expected_id, _, maximum_jobs, _ = contract
+        expected_id, _, allowed_job_keys, _ = contract
         if self.workflow_id != expected_id:
             raise LeaseBrokerError("route request workflow id does not match its name")
         if _SHA_RE.fullmatch(self.head_sha) is None:
             raise LeaseBrokerError("head_sha must be a full lowercase commit SHA")
-        if not self.job_keys or len(self.job_keys) > maximum_jobs:
-            raise LeaseBrokerError(
-                f"route request {self.workflow_name} must contain 1..{maximum_jobs} jobs"
-            )
+        if not self.job_keys:
+            raise LeaseBrokerError("route request must contain at least one job")
         if len(self.job_keys) != len(set(self.job_keys)):
             raise LeaseBrokerError("route request job_keys must be unique")
         if any(_JOB_KEY_RE.fullmatch(job_key) is None for job_key in self.job_keys):
             raise LeaseBrokerError("route request job_key contains unsupported characters")
+        if not set(self.job_keys) <= set(allowed_job_keys):
+            raise LeaseBrokerError(
+                f"route request contains a job outside the {self.workflow_name} contract"
+            )
 
     def assignment_requests(self) -> tuple[AssignmentRequest, ...]:
         return tuple(

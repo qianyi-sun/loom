@@ -61,7 +61,7 @@ def _route_request(
     head_sha: str = HEAD_SHA,
     job_count: int = 7,
 ) -> leases.RouteRequest:
-    workflow_id = leases.WORKFLOW_CLASS_CONTRACTS[workflow_name][0]
+    workflow_id, _, allowed_job_keys, _ = leases.WORKFLOW_CLASS_CONTRACTS[workflow_name]
     return leases.RouteRequest(
         repository="qianyi-sun/loom",
         workflow_name=workflow_name,
@@ -69,7 +69,7 @@ def _route_request(
         workflow_run_id=workflow_run_id,
         run_attempt=run_attempt,
         head_sha=head_sha,
-        job_keys=tuple(f"{workflow_name}-job-{index}" for index in range(job_count)),
+        job_keys=tuple(allowed_job_keys[:job_count]),
     )
 
 
@@ -151,6 +151,8 @@ def test_route_request_schema_is_exact_and_binds_workflow_contract() -> None:
         leases.RouteRequest.from_mapping({**value, "workflow_id": 1})
     with pytest.raises(leases.LeaseBrokerError, match="must be unique"):
         leases.RouteRequest.from_mapping({**value, "job_keys": ["duplicate", "duplicate"]})
+    with pytest.raises(leases.LeaseBrokerError, match="outside the CI contract"):
+        leases.RouteRequest.from_mapping({**value, "job_keys": ["invented-job"]})
 
 
 @pytest.mark.parametrize(

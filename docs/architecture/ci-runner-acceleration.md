@@ -81,8 +81,9 @@ The trusted controller submits one schema-1 route request for the complete set
 of eligible jobs in a workflow attempt. The request also binds the immutable
 workflow name and numeric workflow ID; the broker accepts only the checked-in
 `CI`, `images`, `cluster-smoke`, and `staging-smoke` contracts and derives the
-class, maximum job count, and diagnostic lease deadline instead of trusting
-caller-supplied values. Every job in the request is allocated under one
+class, exact eligible job-key allowlist, and diagnostic lease deadline instead
+of trusting caller-supplied values. A request may select a needed subset of the
+allowlist but cannot invent capacity-consuming jobs. Every selected job is allocated under one
 `BEGIN IMMEDIATE` transaction. A replay mismatch or invalid job rolls the
 entire batch back, so a controller crash or malformed request cannot publish a
 partially leased route. The returned document includes a canonical request
