@@ -163,10 +163,11 @@ The manager:
 
 ### Environment capacity agent
 
-Each environment has one logical capacity agent. Multiple process replicas are
-safe because the environment database fences application by allocation epoch.
-The agent may be integrated into the control plane rather than deployed as a
-separate daemon.
+Each environment has one logical capacity agent and worker-claim guard.
+Multiple process replicas are safe because the environment database fences
+application by allocation epoch. This component is installed from a trusted
+fleet release independently of the environment candidate. A dynamic
+development candidate cannot replace or modify it.
 
 The agent:
 
@@ -175,10 +176,19 @@ The agent:
 - reports the current candidate, deployment generation, configuration
   generation, task assignments, claims, and agent health;
 - applies accepted placement allowances using database compare-and-set;
-- mirrors accepted admission grants into the environment database;
-- clears only unclaimed assignments when an allowance is withdrawn; and
+- applies an accepted admission epoch, retained-worker claim leases, excess
+  worker drain states, and placement changes in one environment-database
+  transaction;
+- clears only unclaimed assignments when an allowance is withdrawn;
+- owns worker-token minting and the queued-to-claimed transition used by real
+  fleet workers; and
 - cannot raise its aggregate minimum, maximum, tier, owner quota, or physical
   resource profile.
+
+The agent uses a protected database role and schema. Candidate runtime and
+migration roles cannot mutate capacity grants, worker claim leases, allocation
+epochs, or token authority. Candidate services may create and manage their own
+workload records only through the bounded interfaces granted to them.
 
 ### Pool-local fleet executor
 
@@ -195,7 +205,8 @@ An executor:
 - reconciles every registered environment for that pool with per-environment
   failure isolation;
 - cancels only Loom-owned pending jobs;
-- marks excess Loom workers draining before they can claim replacement work;
+- executes the Slurm cancellation and release mechanics for the worker drain
+  plan committed by the environment-local grant application;
 - verifies terminal release against both Loom control-plane state and Slurm
   state;
 - reports pool-scoped observations and acknowledgements; and
@@ -279,12 +290,16 @@ User-authored task or candidate data cannot change this profile.
 The implementation will add versioned management-plane records equivalent to:
 
 - `capacity_authority_state`: authority incarnation, writer epoch, schema
-  version, and recovery state;
+  version, recovery state, and global pending-launch ceiling;
 - `capacity_tiers`: priority order and aggregate ceilings;
+- `capacity_accounts`: immutable owner/service identity, aggregate min/max
+  quota, live-environment quota, and fairness state;
 - `capacity_pools`: capabilities, resource envelope, pending ceiling, health,
   and configuration generation;
 - `capacity_subjects`: environment, account, tier, min/max/surge, lifecycle,
   candidate, deployment generation, and configuration generation;
+- `capacity_candidates`: immutable source, artifact, architecture, launcher,
+  attestation, and protocol bindings;
 - `capacity_worker_profiles`: environment/pool/generation resource cost,
   artifact and protocol binding, and readiness;
 - `capacity_demand_snapshots`: versioned compatibility buckets, fixed claims,
@@ -292,8 +307,12 @@ The implementation will add versioned management-plane records equivalent to:
 - `capacity_allocations`: desired slots, accepted reserved slots, unaccepted
   proposed slots, releasing slots, placement allowances, grant fencing fields,
   expiry, and state;
+- `capacity_executors`: pool-scoped identity, authority binding, accepted
+  high-water mark, heartbeat, inventory state, and local-authority evidence;
 - `capacity_executor_observations`: pool inventory, pending/active/draining
-  counts, terminal evidence, adoption results, and executor fencing fields; and
+  counts, terminal evidence, adoption results, and executor fencing fields;
+- `dev_lifecycle_limits`: global provisioning/build concurrency and global
+  live-instance limits; and
 - `capacity_audit_events`: bounded, secret-free configuration, allocation,
   acceptance, drain, release, recovery, and operator events.
 
@@ -302,21 +321,34 @@ Environment databases will add records equivalent to:
 - a mirrored capacity-admission grant keyed by physical pool, candidate,
   deployment generation, and allocation epoch;
 - placement-allowance consumption keyed by the same epoch; and
-- trial execution-generation and physical-pool assignment fields.
+- worker claim-authorization epoch plus trial execution-generation and
+  physical-pool assignment fields.
+
+Admission records and transition functions live in a protected schema owned by
+the trusted capacity role. Candidate runtime and migration roles have neither
+DDL authority over that schema nor direct permission to perform the protected
+queued-to-claimed transition. Column privileges and protected trigger/function
+checks prevent those roles from changing worker claim epoch, worker drain
+state, trial pool assignment, execution generation, or a queued trial into a
+claimed trial outside the trusted transition. Candidate migrations cannot
+disable or replace those guards.
 
 Every contract has an explicit schema version and rejects unknown fields or
 versions fail-closed.
 
 ## Capacity Accounting and Grant State
 
-### Allocation states
+### Reservation-tranche states
 
 ```text
 proposed -> accepted -> releasing -> released
 ```
 
-An allocation may remain accepted while its desired target changes. The
-manager tracks three separate quantities:
+The state machine applies to each reserved increase, not to the aggregate
+allocation row as an indivisible object. One allocation may therefore contain
+an accepted base and a proposed increase at the same time. An allocation may
+also retain accepted reservations while its desired target decreases. The
+manager tracks three separate aggregate quantities:
 
 - `desired_slots`: the current target;
 - `proposed_slots`: additional reserved capacity not yet accepted by the
@@ -349,9 +381,13 @@ and may reuse it. A late executor cannot accept a closed proposal.
 
 1. The manager publishes a lower `desired_slots` and lower placement/admission
    allowance.
-2. The environment agent clears excess unclaimed assignments and prevents
-   excess new claims.
-3. The executor cancels excess pending jobs and marks excess workers draining.
+2. One environment-database transaction advances the admission epoch, clears
+   excess unclaimed assignments, authorizes only a retained set of whole
+   workers whose capacity does not exceed the new target, and marks every
+   excess worker draining. The scheduler cannot observe the new epoch without
+   also observing the worker fences.
+3. The executor cancels excess pending jobs and applies the committed worker
+   drain plan to Slurm.
 4. `reserved_slots` remains at its old value while capacity is pending, active,
    draining, unknown, or not conclusively terminal.
 5. The executor reports a fenced full inventory and terminal release.
@@ -442,6 +478,13 @@ development tier -> immutable owner account -> owner's environments
 Creating more environment names therefore cannot create more top-level fair
 shares. Static shared development has one operator-defined service account.
 
+Progressive filling compares delivered concurrent-trial slots, first across
+accounts and then across their environments. During the minimum phase it fills
+one requested floor slot per eligible fairness round until a minimum is met;
+during the demand phase it fills one task-backed slot per round until demand or
+a ceiling is met. Resource vectors are hard feasibility constraints on those
+rounds, not fairness weights.
+
 There are no configurable fairness or pool weights. Resource costs and
 compatibility are facts supplied by operator-owned profiles.
 
@@ -478,8 +521,9 @@ oversubscribe a pool or bypass higher priority.
 
 The manager issues an exact launch allowance in addition to desired capacity.
 Proposed, accepted-but-not-active, and observed Slurm-pending capacity consume
-the pool-wide pending ceiling. Executors cannot choose a different environment
-to launch first merely because they iterate grants in a particular order.
+the global, optional tier, and physical-pool pending ceilings. Executors cannot
+choose a different environment to launch first merely because they iterate
+grants in a particular order.
 
 ## Task Placement and Scheduler Admission
 
@@ -501,23 +545,28 @@ distributed exactly-once transaction across the management and environment
 databases. It achieves one current assignment through local compare-and-set,
 idempotent epochs, and leases.
 
-The scheduler permits a claim only when:
+The trusted worker-claim guard permits a claim only when:
 
 - the worker is active and not draining;
 - the trial is assigned to the worker's physical pool;
 - worker and trial execution generations are compatible;
 - candidate and worker protocol bindings match;
+- the worker's claim-authorization epoch matches the current admission epoch;
 - the local admission grant is current and accepted; and
 - all existing scheduler, team-quota, capability, family, and retry gates pass.
 
 An unassigned globally managed trial is not claimable. This removes the
-current neutral-routing bypass.
+current neutral-routing bypass. Fleet worker credentials point at the trusted
+claim path; candidate code cannot mint an alternative worker credential or
+authorize a protected claim transition.
 
-When an allocation shrinks, the executor marks enough active workers draining
-immediately, including occupied workers. Their current trials finish, but the
-scheduler's existing worker drain-state check prevents replacement claims.
-Slurm worker concurrency may be partially sized, so the executor can converge
-to an exact slot target after larger workers drain.
+When an allocation shrinks, the environment-local transaction retains a
+deterministic set of whole workers whose combined concurrency does not exceed
+the new target and marks the rest draining immediately, including occupied
+workers. Their current trials finish, but drain state and claim epoch both
+prevent replacement claims. If existing worker sizes cannot represent the
+exact target, the system temporarily undershoots after drain and the executor
+launches a partially sized replacement worker to converge exactly.
 
 ## Priority Reclamation and Drain Semantics
 
@@ -525,9 +574,9 @@ The normal sequence is:
 
 ```text
 publish lower desired grant
--> revoke excess placement/admission
+-> atomically advance admission, retain worker leases, and fence excess workers
+-> revoke excess placement allowance
 -> cancel excess Loom-owned pending jobs
--> mark excess active Loom workers draining
 -> let claimed/running trials finish
 -> verify terminal control-plane and Slurm state
 -> acknowledge release
@@ -611,15 +660,24 @@ launcher and trusted containment profile. Candidate source cannot replace the
 Slurm submission script, Compose security definition, host mounts, cgroup
 limits, resource requests, token scope, or controller command path.
 
+The capacity agent, worker-token authority, and worker-claim guard are also
+installed from the trusted fleet release rather than the candidate. Candidate
+runtime and migration credentials cannot alter their protected database schema
+or impersonate their management/API identity. Protected column privileges and
+database guards prevent candidate roles from restoring a drained worker or
+manufacturing an authorized task claim.
+
 Candidate builds that execute user source run in a bounded isolated builder,
 not through an unrestricted host Docker socket. Activation remains gated on
 the non-exclusive containment evidence required by #896.
 
 ### Deployment generations
 
-Every trial records the execution generation active when it is submitted.
-Every worker registers its candidate and deployment generation. This prevents
-queued work from silently crossing a candidate rollout.
+Every trial records the execution generation active when it is submitted. A
+trusted submission boundary stamps that value from the current lifecycle
+state; candidate code cannot select an arbitrary generation. Every worker
+registers its candidate and deployment generation. This prevents queued work
+from silently crossing a candidate rollout.
 
 During update:
 
@@ -665,6 +723,10 @@ same environment cannot overlap.
   role and is audited.
 - Worker tokens are scoped to environment, physical pool, candidate, and
   deployment generation.
+- Only the trusted environment capacity agent may mint those worker tokens or
+  execute the protected queued-to-claimed transition.
+- The trusted submission boundary stamps trial execution generation, and only
+  an explicit authorized migration operation may change it while unclaimed.
 - Revocation is generation-scoped; deleting an old generation cannot revoke a
   current generation's workers.
 - Controller-local binding files are owner-only, immutable per generation, and
@@ -853,6 +915,8 @@ Generated scenario tests must establish:
 
 - no increase when any physical, tier, owner, environment, generation, or
   resource-vector constraint would be exceeded;
+- no proposal or launch when a global, tier, or pool pending ceiling would be
+  exceeded;
 - accepted or observed capacity is never reused before release;
 - proposed capacity can be reused only when atomic acceptance is impossible;
 - creating more environments does not increase an owner's top-level fair
@@ -903,8 +967,10 @@ Tests must cover:
 - aggregate capacity updates with default `min_slots=0`;
 - old/new generation overlap with and without surge;
 - queued task generation binding and explicit migration;
-- drain-first destroy and generation-scoped credential revocation; and
-- malicious candidate attempts to alter trusted launch containment.
+- drain-first destroy and generation-scoped credential revocation;
+- malicious candidate attempts to alter trusted launch containment; and
+- malicious candidate attempts to alter admission state, mint worker tokens,
+  or bypass the trusted claim transition.
 
 ### End-to-end acceptance
 
