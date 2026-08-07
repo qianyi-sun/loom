@@ -157,7 +157,7 @@ class KubernetesProtectedMigrationComponent:
                 "--",
                 "sh",
                 "-ceu",
-                'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -AtX '
+                'exec psql -U postgres -d loom -AtX '
                 '-v ON_ERROR_STOP=1 -c "$1"',
                 "sh",
                 _READ_REVISION_SQL,
