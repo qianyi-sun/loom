@@ -54,8 +54,10 @@ def test_installer_pins_the_arm64_uv_runtime_builder() -> None:
 def test_installer_creates_only_non_personal_controller_roots() -> None:
     source = _source()
     assert 'SERVICE_USER="loom-rollout"' in source
+    assert 'SERVICE_HOME="/var/lib/loom-rollout"' in source
     assert 'RUNTIME_ROOT="/opt/loom-staging-runner"' in source
     assert 'STATE_ROOT="/var/lib/loom-staging-rollout"' in source
     assert 'KUBECONFIG_PATH="$STATE_ROOT/kubeconfig"' in source
+    assert '"$SERVICE_HOME/.config/systemd/user"' in source
     assert "/home/qianyi" not in source
     assert "/shared_work2/qianyi" not in source

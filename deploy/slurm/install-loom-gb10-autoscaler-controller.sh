@@ -7,6 +7,7 @@ CLUSTER="trt-gb10"
 SERVICE_USER="loom-rollout"
 SERVICE_UID="995"
 SERVICE_GID="2007"
+SERVICE_HOME="/var/lib/loom-rollout"
 RUNTIME_ROOT="/opt/loom-staging-runner"
 STATE_ROOT="/var/lib/loom-staging-rollout"
 KUBECONFIG_PATH="$STATE_ROOT/kubeconfig"
@@ -37,8 +38,10 @@ if ! grep -E \
   echo "error: local Slurm cluster does not match GB10" >&2
   exit 1
 fi
+service_home="$(getent passwd "$SERVICE_USER" | cut -d: -f6)"
 if [ "$(id -u "$SERVICE_USER")" != "$SERVICE_UID" ] \
-  || [ "$(id -g "$SERVICE_USER")" != "$SERVICE_GID" ]; then
+  || [ "$(id -g "$SERVICE_USER")" != "$SERVICE_GID" ] \
+  || [ "$service_home" != "$SERVICE_HOME" ]; then
   echo "error: GB10 Slurm service identity is not installed" >&2
   exit 1
 fi
@@ -63,8 +66,8 @@ install -o root -g root -m 0755 \
 
 install -d -o root -g root -m 0755 "$RUNTIME_ROOT" "$RUNTIME_ROOT/candidates"
 install -d -o "$SERVICE_UID" -g "$SERVICE_GID" -m 0750 \
-  "$STATE_ROOT" "$STATE_ROOT/.config" "$STATE_ROOT/.config/systemd" \
-  "$STATE_ROOT/.config/systemd/user"
+  "$STATE_ROOT" "$SERVICE_HOME" "$SERVICE_HOME/.config" \
+  "$SERVICE_HOME/.config/systemd" "$SERVICE_HOME/.config/systemd/user"
 if [ -e "$KUBECONFIG_PATH" ] \
   && [ "$(stat -c '%u:%g:%a:%F' "$KUBECONFIG_PATH")" \
     != "$SERVICE_UID:$SERVICE_GID:600:regular file" ]; then
