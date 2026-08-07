@@ -203,6 +203,13 @@ def test_default_root_kubeconfig_is_the_host_k3s_authority() -> None:
     assert CredentialPaths().root_kubeconfig == Path("/etc/rancher/k3s/k3s.yaml")
 
 
+def test_install_accepts_root_owned_k3s_default_kubeconfig_mode(tmp_path: Path) -> None:
+    installer, _runner = _installer(tmp_path)
+    installer.paths.root_kubeconfig.chmod(0o644)
+
+    assert installer.install(TEAM_ID)["ok"] is True
+
+
 def test_install_applies_exact_authority_and_publishes_no_secret_evidence(
     tmp_path: Path,
 ) -> None:
