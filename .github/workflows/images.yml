@@ -400,9 +400,9 @@ jobs:
             --build-arg "LOOM_BUILD_SHA=${HEAD_SHA}"
           )
           if [[ "$INTERNAL_PULL_REQUEST" == "true" ]]; then
-            archive="/tmp/${IMAGE_NAME}-${ARCHITECTURE}.oci.tar"
+            archive="/tmp/${IMAGE_NAME}-${ARCHITECTURE}.docker.tar"
             build_args+=(--output \
-              "type=oci,dest=${archive},compression=gzip,force-compression=true,oci-mediatypes=true")
+              "type=docker,dest=${archive}")
           fi
           build_args+=("$BUILD_CONTEXT")
           "${build_args[@]}"
@@ -427,7 +427,7 @@ jobs:
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
-          archive="/tmp/${IMAGE_NAME}-${ARCHITECTURE}.oci.tar"
+          archive="/tmp/${IMAGE_NAME}-${ARCHITECTURE}.docker.tar"
           test -s "$archive"
           archive_sha256=$(sha256sum "$archive" | cut -d ' ' -f 1)
           archive_size=$(wc -c < "$archive" | tr -d ' ')
@@ -459,7 +459,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: image-candidate-archive-${{ matrix.image }}-${{ matrix.architecture }}-attempt-${{ github.run_attempt }}
-          path: /tmp/${{ matrix.image }}-${{ matrix.architecture }}.oci.tar
+          path: /tmp/${{ matrix.image }}-${{ matrix.architecture }}.docker.tar
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
@@ -770,7 +770,7 @@ jobs:
           candidate_dir="${RUNNER_TEMP}/loom-image-candidate"
           gh run download "$SOURCE_RUN_ID" --repo "$REPOSITORY" \
             --name "$CANDIDATE_ARTIFACT" --dir "$candidate_dir"
-          archive="${candidate_dir}/${IMAGE_NAME}-${ARCHITECTURE}.oci.tar"
+          archive="${candidate_dir}/${IMAGE_NAME}-${ARCHITECTURE}.docker.tar"
           test -f "$archive"
           test "$(wc -c < "$archive" | tr -d ' ')" = "$ARCHIVE_SIZE"
           printf '%s  %s\n' "$ARCHIVE_SHA256" "$archive" | sha256sum --check --strict
@@ -785,7 +785,7 @@ jobs:
           CANDIDATE_SOURCE_HEAD: ${{ needs.resolve-candidate.outputs.source_head }}
         run: |
           set -euo pipefail
-          archive="${RUNNER_TEMP}/loom-image-candidate/${IMAGE_NAME}-${ARCHITECTURE}.oci.tar"
+          archive="${RUNNER_TEMP}/loom-image-candidate/${IMAGE_NAME}-${ARCHITECTURE}.docker.tar"
           docker load --input "$archive"
           local_image="loom-ci-${IMAGE_DIGEST_NAME}:candidate-${CANDIDATE_SOURCE_HEAD}-${ARCHITECTURE}"
           inspected=$(docker image inspect "$local_image" --format '{{json .}}')

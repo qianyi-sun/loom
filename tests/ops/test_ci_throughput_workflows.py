@@ -822,7 +822,9 @@ def test_images_merge_groups_do_not_publish_or_write_cache() -> None:
     assert "--cache-to" not in build_script
     assert 'merge_group) image_tag="merge-group-${sha_short}"' in build_script
     assert "github.event_name == 'pull_request'" in build_step["env"]["INTERNAL_PULL_REQUEST"]
-    assert "type=oci" in build_script
+    assert "type=docker" in build_script
+    assert ".docker.tar" in build_script
+    assert "type=oci" not in build_script
     assert "type=registry" not in build_script
     assert "github.event_name == 'push'" in publish["if"]
     assert any(step.get("name") == "Log in to GHCR" for step in publish["steps"])
@@ -854,6 +856,7 @@ def test_image_candidates_are_internal_pr_only_and_untrusted_build_is_read_only(
         "github.event.pull_request.head.repo.full_name == github.repository" in archive_step["if"]
     )
     assert "candidate-${HEAD_SHA}-${ARCHITECTURE}" in build_step["run"]
+    assert archive_step["with"]["path"].endswith(".docker.tar")
 
 
 def test_image_candidate_index_and_merge_resolver_are_exact_and_fail_closed() -> None:
@@ -866,6 +869,11 @@ def test_image_candidate_index_and_merge_resolver_are_exact_and_fail_closed() ->
         step["run"]
         for step in publish["steps"]
         if step.get("name") == "Build and publish trusted image"
+    )
+    load_script = next(
+        step["run"]
+        for step in publish["steps"]
+        if step.get("name") == "Load and verify PR candidate archive"
     )
 
     assert set(candidate_index["needs"]) == {"plan", "build"}
@@ -900,6 +908,8 @@ def test_image_candidate_index_and_merge_resolver_are_exact_and_fail_closed() ->
     assert 'docker tag "$local_image" "$target"' in publish_script
     assert 'docker push "$target"' in publish_script
     assert "No exact candidate was available; rebuilt on trusted push." in publish_script
+    assert ".docker.tar" in load_script
+    assert 'docker load --input "$archive"' in load_script
 
 
 def test_manifest_image_build_and_publish_pass_exact_full_head_sha() -> None:

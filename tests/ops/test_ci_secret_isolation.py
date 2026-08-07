@@ -84,7 +84,9 @@ def test_images_untrusted_build_is_read_only_and_cannot_publish_or_write_cache()
     script = "\n".join(_run_blocks(build))
     assert "docker login" not in script
     assert "--push" not in script
-    assert "type=oci,dest=${archive},compression=gzip" in script
+    assert "type=docker,dest=${archive}" in script
+    assert ".docker.tar" in script
+    assert "type=oci" not in script
     assert "type=registry" not in script
     assert "ghcr.io" not in script
     assert "--cache-from" not in script
