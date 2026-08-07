@@ -210,6 +210,7 @@ env_template_glob = "/var/lib/loom-staging-rollout/generated/staging-gb10-worker
 [[external_slurm_autoscaler_supervisors]]
 name = "gb10-staging"
 pool_name = "gb10"
+execution_host = "gx10-01c7"
 service_name = "loom-autoscaler-gb10-staging.service"
 timer_name = "loom-autoscaler-gb10-staging.timer"
 working_directory = "/opt/loom-staging-runner/candidates/${GIT_SHA}/repo"
@@ -240,6 +241,7 @@ active = false
 [[external_slurm_autoscaler_supervisors]]
 name = "oldlab-staging"
 pool_name = "oldlab"
+execution_host = "TRT-EAI-OLDLAB-1"
 service_name = "loom-autoscaler-oldlab-staging.service"
 timer_name = "loom-autoscaler-oldlab-staging.timer"
 working_directory = "/opt/loom-staging-runner/candidates/${GIT_SHA}/repo"

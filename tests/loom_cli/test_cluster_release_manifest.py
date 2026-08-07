@@ -77,6 +77,11 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
         'env_file = "/secure/staging-oldlab-${IMAGE_TAG}.env"\n'
         'repo_dir = "/srv/loom-${IMAGE_TAG}"\n'
         "external_runner = true\n"
+        "[[external_slurm_autoscaler_supervisors]]\n"
+        'pool_name = "oldlab"\n'
+        'execution_host = "TRT-EAI-OLDLAB-1"\n'
+        "enabled = true\n"
+        "active = true\n"
         "[[gb10_worker_pool_desired_states]]\n"
         'pool_name = "gb10"\n'
         'image_tag = "${IMAGE_TAG}"\n'
@@ -190,7 +195,14 @@ def test_build_release_manifest_records_expected_state_without_raw_secrets(
         },
     ]
     assert manifest["external_workers"]["external_slurm_runner_prerequisites"] == {}
-    assert manifest["external_workers"]["external_slurm_autoscaler_supervisors"] == []
+    assert manifest["external_workers"]["external_slurm_autoscaler_supervisors"] == [
+        {
+            "pool_name": "oldlab",
+            "execution_host": "TRT-EAI-OLDLAB-1",
+            "enabled": True,
+            "active": True,
+        },
+    ]
     assert manifest["external_workers"]["gb10_desired_states"] == [
         {
             "environment": "staging",

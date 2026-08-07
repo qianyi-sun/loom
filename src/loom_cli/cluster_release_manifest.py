@@ -179,6 +179,7 @@ def _external_worker_summary(
         supervisors.append(
             {
                 "pool_name": supervisor.get("pool_name"),
+                "execution_host": supervisor.get("execution_host", "local"),
                 "enabled": supervisor.get("enabled", True),
                 "active": supervisor.get("active", True),
             }

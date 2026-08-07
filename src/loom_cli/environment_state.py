@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import shlex
+import socket
 import subprocess
 import tomllib
 import unicodedata
@@ -96,6 +97,7 @@ _AUTOSCALER_HARD_BLOCKERS = frozenset(
 
 _EXTERNAL_AUTOSCALER_SUPERVISOR_DEFAULTS: dict[str, Any] = {
     "args": [],
+    "execution_host": "local",
     "requires": ["network-online.target"],
     "timer_on_boot_sec": "45",
     "timer_on_unit_active_sec": "30",
@@ -483,6 +485,10 @@ def _normalize_external_slurm_autoscaler_supervisor(
         "control_plane_environment": control_plane_environment,
         "name": name,
         "pool_name": pool_name,
+        "execution_host": _systemd_text(
+            payload.get("execution_host"),
+            f"{field}.execution_host",
+        ),
         "service_name": _systemd_unit_name(
             payload.get("service_name"),
             f"{field}.service_name",
@@ -1343,14 +1349,69 @@ def _append_service_status_drift(
     )
 
 
+def _external_supervisor_is_local(
+    supervisor: dict[str, Any],
+    *,
+    hostname: str | None,
+) -> bool:
+    local_hostname = (hostname or socket.gethostname()).split(".", 1)[0].casefold()
+    execution_host = str(supervisor.get("execution_host", "local"))
+    desired_hostname = execution_host.split(".", 1)[0].casefold()
+    return desired_hostname in {"local", local_hostname}
+
+
+def _external_supervisors_for_host(
+    supervisors: list[dict[str, Any]],
+    *,
+    hostname: str | None,
+) -> list[dict[str, Any]]:
+    """Return only supervisors owned by this physical Slurm controller."""
+
+    return [
+        supervisor
+        for supervisor in supervisors
+        if _external_supervisor_is_local(supervisor, hostname=hostname)
+    ]
+
+
 def diff_external_slurm_autoscaler_supervisors(
     profile: EnvironmentStateProfile,
     *,
     runner: SubprocessRunner | None = None,
+    hostname: str | None = None,
 ) -> list[StateDrift]:
     command_runner = runner or _default_subprocess_runner
     drift: list[StateDrift] = []
-    for supervisor in profile.external_slurm_autoscaler_supervisors:
+    supervisors = _external_supervisors_for_host(
+        profile.external_slurm_autoscaler_supervisors,
+        hostname=hostname,
+    )
+    foreign_supervisors = [
+        supervisor
+        for supervisor in profile.external_slurm_autoscaler_supervisors
+        if not _external_supervisor_is_local(supervisor, hostname=hostname)
+    ]
+    for supervisor in foreign_supervisors:
+        prefix = (
+            "external_slurm_autoscaler_supervisors"
+            f"[{supervisor['environment']}/{supervisor['pool_name']}]"
+        )
+        for field, unit_name in (
+            ("service_unit", supervisor["service_name"]),
+            ("timer_unit", supervisor["timer_name"]),
+        ):
+            rc, stdout, _stderr = command_runner(
+                ["systemctl", "--user", "cat", unit_name],
+            )
+            if rc == 0:
+                drift.append(
+                    StateDrift(
+                        path=f"{prefix}.{field}",
+                        desired="absent on foreign controller",
+                        live=stdout.strip() or "installed",
+                    ),
+                )
+    for supervisor in supervisors:
         prefix = (
             "external_slurm_autoscaler_supervisors"
             f"[{supervisor['environment']}/{supervisor['pool_name']}]"
@@ -1447,15 +1508,38 @@ def apply_external_slurm_autoscaler_supervisors(
     *,
     unit_dir: Path | None = None,
     runner: SubprocessRunner | None = None,
+    hostname: str | None = None,
 ) -> list[dict[str, str]]:
-    if not profile.external_slurm_autoscaler_supervisors:
+    all_supervisors = profile.external_slurm_autoscaler_supervisors
+    supervisors = _external_supervisors_for_host(
+        all_supervisors,
+        hostname=hostname,
+    )
+    foreign_supervisors = [
+        supervisor
+        for supervisor in all_supervisors
+        if not _external_supervisor_is_local(supervisor, hostname=hostname)
+    ]
+    if not all_supervisors:
         return []
 
     command_runner = runner or _default_subprocess_runner
     target_dir = unit_dir or (Path.home() / ".config" / "systemd" / "user")
     target_dir.mkdir(parents=True, exist_ok=True)
     applied: list[dict[str, str]] = []
-    for supervisor in profile.external_slurm_autoscaler_supervisors:
+    for supervisor in foreign_supervisors:
+        timer_name = supervisor["timer_name"]
+        _run_supervisor_command_idempotent(
+            ["systemctl", "--user", "stop", timer_name],
+            runner=command_runner,
+        )
+        _run_supervisor_command_idempotent(
+            ["systemctl", "--user", "disable", timer_name],
+            runner=command_runner,
+        )
+        (target_dir / supervisor["service_name"]).unlink(missing_ok=True)
+        (target_dir / timer_name).unlink(missing_ok=True)
+    for supervisor in supervisors:
         service_path = target_dir / supervisor["service_name"]
         timer_path = target_dir / supervisor["timer_name"]
         service_path.write_text(
@@ -1478,7 +1562,7 @@ def apply_external_slurm_autoscaler_supervisors(
         ["systemctl", "--user", "daemon-reload"],
         runner=command_runner,
     )
-    for supervisor in profile.external_slurm_autoscaler_supervisors:
+    for supervisor in supervisors:
         timer_name = supervisor["timer_name"]
         enabled = supervisor["enabled"]
         active = supervisor["active"]

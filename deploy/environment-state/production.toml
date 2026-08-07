@@ -170,6 +170,7 @@ env_template_glob = "/var/lib/loom-prod-rollout/generated/prod-gb10-worker-prod-
 [[external_slurm_autoscaler_supervisors]]
 name = "gb10-production"
 pool_name = "gb10"
+execution_host = "gx10-01c7"
 service_name = "loom-autoscaler-gb10-prod.service"
 timer_name = "loom-autoscaler-gb10-prod.timer"
 working_directory = "/opt/loom-prod-runner/repo"

@@ -1208,6 +1208,7 @@ active = true
             "control_plane_environment": "staging",
             "name": "oldlab",
             "pool_name": "oldlab",
+            "execution_host": "local",
             "service_name": "loom-oldlab-autoscaler.service",
             "timer_name": "loom-oldlab-autoscaler.timer",
             "working_directory": "/home/qianyi/dev/loom-worktrees/staging-052e420",
@@ -1853,6 +1854,156 @@ active = true
             "timer": "loom-oldlab-autoscaler.timer",
         },
     ]
+
+
+def test_external_supervisor_apply_manages_local_and_retires_foreign_units(
+    tmp_path: Path,
+) -> None:
+    profile_path = tmp_path / "profile.toml"
+    profile_path.write_text(
+        """
+environment = "test"
+
+[[external_slurm_autoscaler_supervisors]]
+name = "oldlab-staging"
+pool_name = "oldlab"
+execution_host = "TRT-EAI-OLDLAB-1"
+service_name = "loom-autoscaler-oldlab-staging.service"
+timer_name = "loom-autoscaler-oldlab-staging.timer"
+working_directory = "/opt/loom/oldlab"
+python_path = "/opt/loom/oldlab/bin/python"
+script_path = "/opt/loom/oldlab/autoscaler.py"
+args = ["--environment", "test", "--pool-name", "oldlab"]
+enabled = true
+active = true
+
+[[external_slurm_autoscaler_supervisors]]
+name = "gb10-staging"
+pool_name = "gb10"
+execution_host = "gx10-01c7"
+service_name = "loom-autoscaler-gb10-staging.service"
+timer_name = "loom-autoscaler-gb10-staging.timer"
+working_directory = "/opt/loom/gb10"
+python_path = "/opt/loom/gb10/bin/python"
+script_path = "/opt/loom/gb10/autoscaler.py"
+args = ["--environment", "test", "--pool-name", "gb10"]
+enabled = true
+active = true
+""",
+        encoding="utf-8",
+    )
+    profile = load_environment_state_profile(
+        profile_path,
+        expected_environment="test",
+    )
+    commands: list[list[str]] = []
+    unit_dir = tmp_path / "units"
+    unit_dir.mkdir()
+    (unit_dir / "loom-autoscaler-oldlab-staging.service").write_text("stale\n")
+    (unit_dir / "loom-autoscaler-oldlab-staging.timer").write_text("stale\n")
+
+    def _runner(command: list[str]) -> tuple[int, str, str]:
+        commands.append(command)
+        return 0, "", ""
+
+    applied = apply_external_slurm_autoscaler_supervisors(
+        profile,
+        unit_dir=unit_dir,
+        runner=_runner,
+        hostname="gx10-01c7",
+    )
+
+    assert applied == [
+        {
+            "kind": "external_slurm_autoscaler_supervisor",
+            "service": "loom-autoscaler-gb10-staging.service",
+            "timer": "loom-autoscaler-gb10-staging.timer",
+        }
+    ]
+    assert not (unit_dir / "loom-autoscaler-oldlab-staging.service").exists()
+    assert not (unit_dir / "loom-autoscaler-oldlab-staging.timer").exists()
+    assert (unit_dir / "loom-autoscaler-gb10-staging.service").is_file()
+    assert commands == [
+        ["systemctl", "--user", "stop", "loom-autoscaler-oldlab-staging.timer"],
+        ["systemctl", "--user", "disable", "loom-autoscaler-oldlab-staging.timer"],
+        ["systemctl", "--user", "daemon-reload"],
+        [
+            "systemctl",
+            "--user",
+            "enable",
+            "--now",
+            "loom-autoscaler-gb10-staging.timer",
+        ],
+        ["systemctl", "--user", "restart", "loom-autoscaler-gb10-staging.timer"],
+    ]
+
+
+def test_external_supervisor_diff_rejects_foreign_controller_unit(tmp_path: Path) -> None:
+    profile_path = tmp_path / "profile.toml"
+    profile_path.write_text(
+        """
+environment = "test"
+
+[[external_slurm_autoscaler_supervisors]]
+name = "oldlab-staging"
+pool_name = "oldlab"
+execution_host = "TRT-EAI-OLDLAB-1"
+service_name = "loom-autoscaler-oldlab-staging.service"
+timer_name = "loom-autoscaler-oldlab-staging.timer"
+working_directory = "/opt/loom/oldlab"
+python_path = "/opt/loom/oldlab/bin/python"
+script_path = "/opt/loom/oldlab/autoscaler.py"
+args = ["--environment", "test", "--pool-name", "oldlab"]
+enabled = true
+active = true
+""",
+        encoding="utf-8",
+    )
+    profile = load_environment_state_profile(
+        profile_path,
+        expected_environment="test",
+    )
+
+    def _runner(command: list[str]) -> tuple[int, str, str]:
+        unit = command[-1]
+        if command[:3] == ["systemctl", "--user", "cat"]:
+            if unit.startswith("loom-autoscaler-oldlab-"):
+                return 0, "[Unit]\nDescription=stale foreign authority\n", ""
+            return 1, "", "unit not found"
+        raise AssertionError(command)
+
+    drift = diff_external_slurm_autoscaler_supervisors(
+        profile,
+        runner=_runner,
+        hostname="gx10-01c7",
+    )
+
+    assert [item.path for item in drift] == [
+        "external_slurm_autoscaler_supervisors[test/oldlab].service_unit",
+        "external_slurm_autoscaler_supervisors[test/oldlab].timer_unit",
+    ]
+    assert all(item.desired == "absent on foreign controller" for item in drift)
+
+
+def test_committed_staging_supervisors_bind_to_their_physical_controllers() -> None:
+    profile = load_environment_state_profile(
+        Path("deploy/environment-state/staging.toml"),
+        variables={
+            "IMAGE_TAG": "staging-test",
+            "ENV_CONFIG_VERSION": "staging-test",
+            "GIT_SHA": "a" * 40,
+        },
+        expected_environment="staging",
+    )
+
+    by_pool = {
+        supervisor["pool_name"]: supervisor["execution_host"]
+        for supervisor in profile.external_slurm_autoscaler_supervisors
+    }
+    assert by_pool == {
+        "gb10": "gx10-01c7",
+        "oldlab": "TRT-EAI-OLDLAB-1",
+    }
 
 
 def test_external_slurm_autoscaler_supervisor_apply_disables_when_enabled_false(
