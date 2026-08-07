@@ -779,6 +779,31 @@ def test_drain_refuses_while_any_class_route_variable_exists(
     assert not api.deleted
 
 
+def test_drain_refuses_while_dynamic_route_mode_exists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _profile(tmp_path, slots=1)
+    _seal_golden(profile)
+    _allow_execute(monkeypatch)
+    runner = FakeRunner()
+    api = FakeAPI()
+    pool.reconcile(
+        profile,
+        candidate_sha=CANDIDATE_SHA,
+        execute=True,
+        api=api,
+        runner=runner,
+    )
+    api.route_variables_present.add(pool.ROUTING_MODE_VARIABLE)
+
+    with pytest.raises(pool.PoolOperationError, match=pool.ROUTING_MODE_VARIABLE):
+        pool.drain(profile, execute=True, api=api, runner=runner)
+
+    assert runner.containers
+    assert not api.deleted
+
+
 def test_drain_preserves_busy_runner_and_removes_idle_runner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

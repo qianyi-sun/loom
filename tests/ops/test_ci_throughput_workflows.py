@@ -111,51 +111,9 @@ def _normalized_expression(value: str) -> str:
     return " ".join(value.split())
 
 
-WORK_CLASS_RUNS_ON = {
-    "normal": (
-        "${{ fromJSON(vars.LOOM_CI_NORMAL_RUNS_ON || "
-        "vars.LOOM_CI_ACCELERATOR_RUNS_ON || '[\"ubuntu-latest\"]') }}"
-    ),
-    "image": (
-        "${{ fromJSON(vars.LOOM_CI_IMAGE_RUNS_ON || "
-        "vars.LOOM_CI_ACCELERATOR_RUNS_ON || '[\"ubuntu-latest\"]') }}"
-    ),
-    "smoke": (
-        "${{ fromJSON(vars.LOOM_CI_SMOKE_RUNS_ON || "
-        "vars.LOOM_CI_ACCELERATOR_RUNS_ON || '[\"ubuntu-latest\"]') }}"
-    ),
-}
 OLDLAB_UV_MANIFEST = (
     "${{ startsWith(runner.name, 'oldlab5-kvm-') && 'http://127.0.0.1:8181/uv.ndjson' || '' }}"
 )
-
-ACCELERATED_JOBS = {
-    ".github/workflows/ci.yml": {
-        "lint-and-static",
-        "tests-root",
-        "tests-packages",
-        "runtime-payload",
-        "go-checks",
-        "web-checks",
-        "integration",
-        "integration-docker",
-    },
-    ".github/workflows/images.yml": {"build"},
-    ".github/workflows/cluster-smoke.yml": {"cluster-contract"},
-    ".github/workflows/staging-smoke.yml": {"system-smoke"},
-    ".github/workflows/cluster-deploy-spikes.yml": {
-        "docker-only-spikes",
-        "k8s-spikes",
-    },
-}
-
-ACCELERATED_WORK_CLASSES = {
-    ".github/workflows/ci.yml": "normal",
-    ".github/workflows/images.yml": "image",
-    ".github/workflows/cluster-smoke.yml": "smoke",
-    ".github/workflows/staging-smoke.yml": "smoke",
-    ".github/workflows/cluster-deploy-spikes.yml": "smoke",
-}
 
 GITHUB_HOSTED_CONTROL_JOBS = {
     ".github/workflows/ci.yml": {
@@ -170,19 +128,11 @@ GITHUB_HOSTED_CONTROL_JOBS = {
 }
 
 
-def test_accelerated_jobs_use_isolated_work_class_with_legacy_and_hosted_fallback() -> None:
-    for workflow_path, job_ids in ACCELERATED_JOBS.items():
-        jobs = _workflow(workflow_path)["jobs"]
-        expected_runs_on = WORK_CLASS_RUNS_ON[ACCELERATED_WORK_CLASSES[workflow_path]]
-        for job_id in job_ids:
-            if workflow_path == ".github/workflows/images.yml":
-                runs_on = jobs[job_id]["runs-on"]
-                assert "matrix.architecture == 'arm64'" in runs_on
-                assert "ubuntu-24.04-arm" in runs_on
-                assert "vars.LOOM_CI_IMAGE_RUNS_ON" in runs_on
-                assert "vars.LOOM_CI_ACCELERATOR_RUNS_ON" in runs_on
-                continue
-            assert jobs[job_id]["runs-on"] == expected_runs_on
+def test_manual_deploy_spikes_remain_explicitly_github_hosted() -> None:
+    jobs = _workflow(".github/workflows/cluster-deploy-spikes.yml")["jobs"]
+
+    assert jobs["docker-only-spikes"]["runs-on"] == "ubuntu-latest"
+    assert jobs["k8s-spikes"]["runs-on"] == "ubuntu-latest"
 
 
 def test_accelerated_workflows_use_local_uv_manifest_only_on_oldlab() -> None:
@@ -581,7 +531,7 @@ def test_images_builds_use_planner_selection() -> None:
     required_output = jobs["plan"]["outputs"]["required"]
     assert "steps.plan.outputs.required" in required_output
     assert "steps.event.outputs.required" in required_output
-    assert jobs["build"]["needs"] == "plan"
+    assert set(jobs["build"]["needs"]) == {"plan", "image-route"}
     assert "needs.plan.outputs.required == 'true'" in jobs["build"]["if"]
 
 
@@ -637,7 +587,7 @@ def test_images_workflow_uses_path_aware_matrix_plan() -> None:
     assert "images" in jobs["plan"]["outputs"]
     assert "native_builds" in jobs["plan"]["outputs"]
     build = jobs["build"]
-    assert build["needs"] == "plan"
+    assert set(build["needs"]) == {"plan", "image-route"}
     assert build["strategy"]["matrix"]["include"] == (
         "${{ fromJSON(needs.plan.outputs.native_builds) }}"
     )
@@ -1327,8 +1277,8 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
     }
     assert "gate_mode == 'full'" in jobs["fast-checks"]["if"]
     assert "gate_mode == 'preflight'" not in jobs["fast-checks"]["if"]
-    assert jobs["integration"]["needs"] == "workflow-plan"
-    assert jobs["integration-docker"]["needs"] == "workflow-plan"
+    assert set(jobs["integration"]["needs"]) == {"workflow-plan", "ci-route"}
+    assert set(jobs["integration-docker"]["needs"]) == {"workflow-plan", "ci-route"}
     assert "gate_mode == 'full'" in jobs["integration"]["if"]
     assert "gate_mode == 'full'" in jobs["integration-docker"]["if"]
     assert "repository-checks" in jobs["repository-checks"]["name"]
@@ -1342,10 +1292,13 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
         "web-checks",
     }
     assert "always()" in jobs["repository-checks"]["if"]
-    assert jobs["lint-and-static"]["needs"] == "workflow-plan"
-    assert jobs["tests-root"]["needs"] == "workflow-plan"
-    assert jobs["tests-packages"]["needs"] == "workflow-plan"
-    assert jobs["runtime-payload"]["needs"] == "workflow-plan"
+    for job_name in (
+        "lint-and-static",
+        "tests-root",
+        "tests-packages",
+        "runtime-payload",
+    ):
+        assert set(jobs[job_name]["needs"]) == {"workflow-plan", "ci-route"}
     assert "gate_mode == 'full'" in jobs["runtime-payload"]["if"]
     assert "gate_mode == 'preflight'" in jobs["runtime-payload"]["if"]
 
@@ -1401,7 +1354,7 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
     ):
         assert f'"${result_name}"' in aggregate_script
 
-    assert jobs["web-checks"]["needs"] == "workflow-plan"
+    assert set(jobs["web-checks"]["needs"]) == {"workflow-plan", "ci-route"}
     assert "needs.workflow-plan.outputs.web_checks == 'true'" in jobs["web-checks"]["if"]
     web_script = "\n".join(
         step.get("run", "") for step in jobs["web-checks"]["steps"] if "run" in step
@@ -1769,7 +1722,7 @@ def test_staging_gate_consumes_manifest_owned_system_smoke_lane() -> None:
         if step.get("name") == "Cleanup system-smoke compose stack"
     )
 
-    assert system_smoke["needs"] == "plan"
+    assert set(system_smoke["needs"]) == {"plan", "staging-route"}
     assert "needs.plan.outputs.required == 'true'" in system_smoke["if"]
     assert "uv sync --locked --all-packages --extra dev --extra cluster --extra rollout" in scripts
     assert "uv pip check --python .venv/bin/python" in scripts

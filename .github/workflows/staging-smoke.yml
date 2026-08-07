@@ -200,15 +200,51 @@ jobs:
           fi
           printf 'publisher_active=%s\n' "$publisher_active" >> "$GITHUB_OUTPUT"
 
-
-  system-smoke:
-    name: manifest-owned system smoke
+  staging-route:
+    name: resolve oldlab-first staging route
     needs: plan
     if: >-
       needs.plan.outputs.gate_mode == 'full' &&
       needs.plan.outputs.required == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      checks: read
+      contents: read
+    outputs:
+      routes: ${{ steps.route.outputs.routes }}
+    steps:
+      - name: Checkout trusted route action
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          repository: qianyi-sun/loom
+          ref: 0d336557f0a3570490bd21bf85485c3e4c4a2d73
+          sparse-checkout: .github/actions/ci-runner-route
+          path: .loom-ci-route-action
+          persist-credentials: false
+
+      - name: Resolve immutable assignment
+        id: route
+        uses: ./.loom-ci-route-action/.github/actions/ci-runner-route
+        with:
+          route-mode: ${{ vars.LOOM_CI_ROUTE_MODE || 'disabled' }}
+          repository: ${{ github.repository }}
+          workflow-name: staging-smoke
+          workflow-id: '302898388'
+          workflow-run-id: ${{ github.run_id }}
+          run-attempt: ${{ github.run_attempt }}
+          head-sha: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          job-keys-json: '["system-smoke"]'
+          github-token: ${{ github.token }}
+
+  system-smoke:
+    name: manifest-owned system smoke
+    needs: [plan, staging-route]
+    if: >-
+      needs.plan.outputs.gate_mode == 'full' &&
+      needs.plan.outputs.required == 'true'
     runs-on: >-
-      ${{ fromJSON(vars.LOOM_CI_SMOKE_RUNS_ON || vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
+      ${{ fromJSON(needs.staging-route.outputs.routes)['system-smoke'] }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5

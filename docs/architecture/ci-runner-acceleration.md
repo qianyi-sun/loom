@@ -7,18 +7,18 @@ candidate, or publishing boundaries.
 
 ## Routing contract
 
-Compute-heavy jobs use one of three work-class repository variables as a JSON
-array accepted by GitHub Actions `runs-on`:
+Every eligible workflow has a small GitHub-hosted route-plan job. With
+`LOOM_CI_ROUTE_MODE` absent or equal to `disabled`, the pinned route action
+returns the class's GitHub-hosted label for every selected job. Setting the
+variable to exactly `oldlab-preferred-v1` activates trusted per-job assignment;
+any other value fails closed.
 
-- normal tests: `LOOM_CI_NORMAL_RUNS_ON`;
-- untrusted image builds: `LOOM_CI_IMAGE_RUNS_ON`;
-- cluster and staging smoke: `LOOM_CI_SMOKE_RUNS_ON`.
-
-During migration, an absent class variable falls back to the legacy
-`LOOM_CI_ACCELERATOR_RUNS_ON` value. When both the class variable and legacy
-variable are absent or empty, the job defaults to `["ubuntu-latest"]`. This
-ordering lets the repository contract merge without changing the active route;
-class activation remains a separate, explicitly authorized operation.
+The retired static variables `LOOM_CI_NORMAL_RUNS_ON`,
+`LOOM_CI_IMAGE_RUNS_ON`, `LOOM_CI_SMOKE_RUNS_ON`, and
+`LOOM_CI_ACCELERATOR_RUNS_ON` are no longer workflow placement inputs. Keep
+them absent so stale operator state cannot be mistaken for active routing.
+The separate manual `cluster-deploy-spikes` proof remains explicitly
+GitHub-hosted and is not part of the required-check route contract.
 
 The accepted class-specific oldlab-5 values append exactly one reserved-pool
 label to the shared boundary:
@@ -48,7 +48,7 @@ also remains GitHub-hosted. Small setup-dominated jobs can remain hosted when
 moving them would consume accelerator capacity without reducing the workflow
 critical path.
 
-Changing the variable changes only placement. It must never change the job
+Changing the route mode changes only placement. It must never change the job
 steps, selected test paths, permissions, timeout, protected context, image
 candidate identity, or result aggregation.
 
@@ -158,7 +158,7 @@ variables absent and treat the pool and route as separate live controls.
 
 ## Activation prerequisites
 
-Do not set `LOOM_CI_ACCELERATOR_RUNS_ON` until all of these are true:
+Do not set `LOOM_CI_ROUTE_MODE=oldlab-preferred-v1` until all of these are true:
 
 1. oldlab-5 launches runners only inside disposable KVM guests. A workflow
    never executes directly on the host and never receives the host Docker
@@ -453,11 +453,11 @@ reconcile replaces it only when it is idle and fails closed if GitHub still
 reports it busy.
 
 Rollback routing first. Drain refuses to proceed while
-`LOOM_CI_ACCELERATOR_RUNS_ON` exists and never removes a runner GitHub reports
-as busy:
+`LOOM_CI_ROUTE_MODE` or any retired static route variable exists and never
+removes a runner GitHub reports as busy:
 
 ```bash
-gh variable delete LOOM_CI_ACCELERATOR_RUNS_ON --repo qianyi-sun/loom
+gh variable delete LOOM_CI_ROUTE_MODE --repo qianyi-sun/loom
 
 sudo /usr/local/libexec/loom-ci-runner-pool \
   --profile /etc/loom-ci-runner-pool/profile.toml \
@@ -471,10 +471,11 @@ Activation is an explicit live repository operation after the pool
 prerequisites pass. Merging the repository contract does not authorize any of
 these commands. The controlled migration order is:
 
-1. remove the legacy route, drain all classless runners, install the exact
+1. remove every retired static route, drain all classless runners, install the exact
    merged candidate, and reconcile until `status` reports `5/4/2` ready slots
    with matching labels;
-2. set the three class variables below;
+2. initialize the controller cursor, enable the persistent timer, verify one
+   clean controller tick, then set the single route-mode variable below;
 3. dispatch a non-release acceptance PR that selects normal, image, cluster,
    and staging lanes;
 4. collect queue delay, execution time, failures, and runner-active time by
@@ -482,15 +483,8 @@ these commands. The controlled migration order is:
    control attempt.
 
 ```bash
-gh variable set LOOM_CI_NORMAL_RUNS_ON \
-  --repo qianyi-sun/loom \
-  --body '["self-hosted","linux","x64","loom-ci","oldlab-5","ephemeral-kvm","loom-ci-normal"]'
-gh variable set LOOM_CI_IMAGE_RUNS_ON \
-  --repo qianyi-sun/loom \
-  --body '["self-hosted","linux","x64","loom-ci","oldlab-5","ephemeral-kvm","loom-ci-image"]'
-gh variable set LOOM_CI_SMOKE_RUNS_ON \
-  --repo qianyi-sun/loom \
-  --body '["self-hosted","linux","x64","loom-ci","oldlab-5","ephemeral-kvm","loom-ci-smoke"]'
+gh variable set LOOM_CI_ROUTE_MODE \
+  --repo qianyi-sun/loom --body 'oldlab-preferred-v1'
 ```
 
 Immediately dispatch or synchronize a non-release acceptance PR that selects
@@ -502,27 +496,27 @@ The queue boundaries are five minutes for normal tests, fifteen minutes for
 image builds, and five minutes for smoke. Every selected job must remain within
 its class boundary; a p95 below the threshold cannot hide one maximum breach.
 These are evidence thresholds, not permission for an unattended route
-mutation. If one class crosses its boundary
-while its reserved slots are unavailable, an authorized operator may set only
-that class variable to `["ubuntu-latest"]`, cancel the still-queued attempt,
-and rerun the affected workflow on the same head. Already queued jobs do not
-move when a variable changes. Required checks remain pending/failing until the
+mutation. If one class crosses its boundary, delete `LOOM_CI_ROUTE_MODE` before
+cancelling and rerunning the affected workflow on the same head. Existing jobs
+keep their immutable assignment; only the replacement workflow receives the
+disabled-mode hosted map. Required checks remain pending/failing until the
 replacement terminal result is published; there is no success fallback.
 
 Full rollback is required when any class is below its target ready capacity,
 labels or candidate identity drift, guest cleanup fails, the controlled A/B
 regresses its class-specific queue or failure boundary, or the host exceeds its
-CPU/memory budget. Delete every class route and the legacy route before drain,
+CPU/memory budget. Delete the mode and every retired static route before drain,
 then rerun affected workflows on the same head:
 
 ```bash
+gh variable delete LOOM_CI_ROUTE_MODE --repo qianyi-sun/loom
 gh variable delete LOOM_CI_NORMAL_RUNS_ON --repo qianyi-sun/loom
 gh variable delete LOOM_CI_IMAGE_RUNS_ON --repo qianyi-sun/loom
 gh variable delete LOOM_CI_SMOKE_RUNS_ON --repo qianyi-sun/loom
 gh variable delete LOOM_CI_ACCELERATOR_RUNS_ON --repo qianyi-sun/loom
 ```
 
-Because the final workflow default is `["ubuntu-latest"]`, the replacement run
-returns to GitHub-hosted placement without a code change. The pool refuses to
-drain while any of the four routing variables still exists. Protected checks
-remain fail-closed throughout.
+Because disabled mode returns the class's GitHub-hosted label, the replacement
+run returns to hosted placement without a code change. The pool refuses to
+drain while the mode or any retired routing variable still exists. Protected
+checks remain fail-closed throughout.

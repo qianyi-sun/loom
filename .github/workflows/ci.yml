@@ -256,6 +256,80 @@ jobs:
         if: steps.plan.outputs.docs_only == 'true'
         run: echo "Only docs/repo metadata changed; heavy checks skipped."
 
+  ci-route:
+    name: resolve oldlab-first routes
+    needs: workflow-plan
+    if: >-
+      needs.workflow-plan.outputs.docs_only != 'true' &&
+      (needs.workflow-plan.outputs.gate_mode == 'full' ||
+       needs.workflow-plan.outputs.gate_mode == 'preflight')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      checks: read
+      contents: read
+    outputs:
+      routes: ${{ steps.route.outputs.routes }}
+    steps:
+      - name: Checkout trusted route action
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          repository: qianyi-sun/loom
+          ref: 0d336557f0a3570490bd21bf85485c3e4c4a2d73
+          sparse-checkout: .github/actions/ci-runner-route
+          path: .loom-ci-route-action
+          persist-credentials: false
+
+      - name: Select eligible job keys
+        id: keys
+        shell: bash
+        env:
+          GATE_MODE: ${{ needs.workflow-plan.outputs.gate_mode }}
+          DOCS_ONLY: ${{ needs.workflow-plan.outputs.docs_only }}
+          WEB_CHECKS: ${{ needs.workflow-plan.outputs.web_checks }}
+          INTEGRATION: ${{ needs.workflow-plan.outputs.integration }}
+          INTEGRATION_DOCKER: ${{ needs.workflow-plan.outputs.integration_docker }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          gate = os.environ["GATE_MODE"]
+          keys = []
+          if gate == "full" and os.environ["DOCS_ONLY"] != "true":
+              keys.extend([
+                  "lint-and-static",
+                  "tests-root-1-of-2",
+                  "tests-root-2-of-2",
+                  "tests-packages",
+                  "go-checks",
+              ])
+          if gate in {"full", "preflight"}:
+              keys.append("runtime-payload")
+          if gate in {"full", "preflight"} and os.environ["WEB_CHECKS"] == "true":
+              keys.append("web-checks")
+          if gate == "full" and os.environ["INTEGRATION"] == "true":
+              keys.extend(["integration-1-of-2", "integration-2-of-2"])
+          if gate == "full" and os.environ["INTEGRATION_DOCKER"] == "true":
+              keys.append("integration-docker")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("job_keys=" + json.dumps(keys, separators=(",", ":")) + "\n")
+          PY
+
+      - name: Resolve immutable assignments
+        id: route
+        uses: ./.loom-ci-route-action/.github/actions/ci-runner-route
+        with:
+          route-mode: ${{ vars.LOOM_CI_ROUTE_MODE || 'disabled' }}
+          repository: ${{ github.repository }}
+          workflow-name: CI
+          workflow-id: '302898379'
+          workflow-run-id: ${{ github.run_id }}
+          run-attempt: ${{ github.run_attempt }}
+          head-sha: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          job-keys-json: ${{ steps.keys.outputs.job_keys }}
+          github-token: ${{ github.token }}
+
   locked-environments:
     name: locked-environment (${{ matrix.target }})
     needs: workflow-plan
@@ -317,8 +391,8 @@ jobs:
   lint-and-static:
     name: lint-and-static
     runs-on: >-
-      ${{ fromJSON(vars.LOOM_CI_NORMAL_RUNS_ON || vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
-    needs: workflow-plan
+      ${{ fromJSON(needs.ci-route.outputs.routes)['lint-and-static'] }}
+    needs: [workflow-plan, ci-route]
     timeout-minutes: 12
     if: >-
       needs.workflow-plan.outputs.docs_only != 'true' &&
@@ -365,8 +439,8 @@ jobs:
   tests-root:
     name: tests-root (${{ matrix.shard }})
     runs-on: >-
-      ${{ fromJSON(vars.LOOM_CI_NORMAL_RUNS_ON || vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
-    needs: workflow-plan
+      ${{ fromJSON(needs.ci-route.outputs.routes)[format('tests-root-{0}', matrix.shard)] }}
+    needs: [workflow-plan, ci-route]
     timeout-minutes: 15
     if: >-
       needs.workflow-plan.outputs.docs_only != 'true' &&
@@ -510,8 +584,8 @@ jobs:
   tests-packages:
     name: tests-packages
     runs-on: >-
-      ${{ fromJSON(vars.LOOM_CI_NORMAL_RUNS_ON || vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
-    needs: workflow-plan
+      ${{ fromJSON(needs.ci-route.outputs.routes)['tests-packages'] }}
+    needs: [workflow-plan, ci-route]
     timeout-minutes: 10
     if: >-
       needs.workflow-plan.outputs.docs_only != 'true' &&
@@ -561,8 +635,8 @@ jobs:
   runtime-payload:
     name: runtime-payload
     runs-on: >-
-      ${{ fromJSON(vars.LOOM_CI_NORMAL_RUNS_ON || vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
-    needs: workflow-plan
+      ${{ fromJSON(needs.ci-route.outputs.routes)['runtime-payload'] }}
+    needs: [workflow-plan, ci-route]
     timeout-minutes: 10
     if: >-
       needs.workflow-plan.outputs.docs_only != 'true' &&
@@ -718,8 +792,8 @@ jobs:
   go-checks:
     name: go-checks
     runs-on: >-
-      ${{ fromJSON(vars.LOOM_CI_NORMAL_RUNS_ON || vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
-    needs: workflow-plan
+      ${{ fromJSON(needs.ci-route.outputs.routes)['go-checks'] }}
+    needs: [workflow-plan, ci-route]
     if: needs.workflow-plan.outputs.gate_mode == 'full'
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -747,8 +821,8 @@ jobs:
   web-checks:
     name: web-checks
     runs-on: >-
-      ${{ fromJSON(vars.LOOM_CI_NORMAL_RUNS_ON || vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
-    needs: workflow-plan
+      ${{ fromJSON(needs.ci-route.outputs.routes)['web-checks'] }}
+    needs: [workflow-plan, ci-route]
     timeout-minutes: 20
     if: >-
       needs.workflow-plan.outputs.web_checks == 'true' &&
@@ -820,8 +894,8 @@ jobs:
   integration:
     name: integration (${{ matrix.shard }})
     runs-on: >-
-      ${{ fromJSON(vars.LOOM_CI_NORMAL_RUNS_ON || vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
-    needs: workflow-plan
+      ${{ fromJSON(needs.ci-route.outputs.routes)[format('integration-{0}', matrix.shard)] }}
+    needs: [workflow-plan, ci-route]
     timeout-minutes: 20
     if: >-
       needs.workflow-plan.outputs.gate_mode == 'full' &&
@@ -895,8 +969,8 @@ jobs:
   integration-docker:
     name: integration-docker
     runs-on: >-
-      ${{ fromJSON(vars.LOOM_CI_NORMAL_RUNS_ON || vars.LOOM_CI_ACCELERATOR_RUNS_ON || '["ubuntu-latest"]') }}
-    needs: workflow-plan
+      ${{ fromJSON(needs.ci-route.outputs.routes)['integration-docker'] }}
+    needs: [workflow-plan, ci-route]
     timeout-minutes: 40
     if: >-
       needs.workflow-plan.outputs.gate_mode == 'full' &&
