@@ -555,6 +555,7 @@ class CiRunnerLeaseBroker:
         requests: Sequence[AssignmentRequest],
         *,
         now: datetime | None = None,
+        allow_oldlab: bool = True,
     ) -> tuple[PlacementAssignment, ...]:
         if not requests or len(requests) > 100:
             raise LeaseBrokerError("allocation batch must contain 1..100 requests")
@@ -577,7 +578,12 @@ class CiRunnerLeaseBroker:
         try:
             connection.execute("BEGIN IMMEDIATE")
             assignments = tuple(
-                self._allocate_in_transaction(connection, request, observed_at)
+                self._allocate_in_transaction(
+                    connection,
+                    request,
+                    observed_at,
+                    allow_oldlab=allow_oldlab,
+                )
                 for request in requests
             )
             connection.commit()
@@ -594,9 +600,14 @@ class CiRunnerLeaseBroker:
         request: RouteRequest,
         *,
         now: datetime | None = None,
+        allow_oldlab: bool = True,
     ) -> RouteAssignmentDocument:
         request.validate()
-        assignments = self.allocate_many(request.assignment_requests(), now=now)
+        assignments = self.allocate_many(
+            request.assignment_requests(),
+            now=now,
+            allow_oldlab=allow_oldlab,
+        )
         return RouteAssignmentDocument.create(request, assignments)
 
     def _allocate_in_transaction(
@@ -604,6 +615,8 @@ class CiRunnerLeaseBroker:
         connection: sqlite3.Connection,
         request: AssignmentRequest,
         observed_at: datetime,
+        *,
+        allow_oldlab: bool,
     ) -> PlacementAssignment:
         existing = connection.execute(
             """
@@ -634,7 +647,11 @@ class CiRunnerLeaseBroker:
             )
         }
         capacity = self.config.capacities[request.work_class]
-        free_slot = next((slot for slot in range(capacity) if slot not in used_slots), None)
+        free_slot = (
+            next((slot for slot in range(capacity) if slot not in used_slots), None)
+            if allow_oldlab
+            else None
+        )
         target = PlacementTarget.OLDLAB if free_slot is not None else PlacementTarget.GITHUB_HOSTED
         epoch = self._next_epoch(connection)
         created_at = _timestamp(observed_at)
@@ -769,6 +786,16 @@ class CiRunnerLeaseBroker:
                 for item in classes.values()
             ),
         }
+
+    def active_assignments(self) -> tuple[PlacementAssignment, ...]:
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                "SELECT * FROM assignments WHERE state = 'assigned' ORDER BY assignment_id"
+            ).fetchall()
+        finally:
+            connection.close()
+        return tuple(self._assignment_from_row(row) for row in rows)
 
     def _assignment_from_row(self, row: sqlite3.Row) -> PlacementAssignment:
         target = PlacementTarget(str(row["target"]))
