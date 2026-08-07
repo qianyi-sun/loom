@@ -34,7 +34,12 @@ def test_readonly_preflight_rbac_is_namespace_scoped_and_non_mutating() -> None:
         {
             "apiGroups": [""],
             "resources": ["pods/portforward"],
-            "resourceNames": ["loom-minio-0", "loom-postgres-0"],
+            "resourceNames": [
+                "loom-minio-0",
+                "loom-postgres-1",
+                "loom-postgres-2",
+                "loom-postgres-3",
+            ],
             "verbs": ["create"],
         }
     ]

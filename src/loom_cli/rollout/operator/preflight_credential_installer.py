@@ -497,7 +497,23 @@ class PreflightCredentialInstaller:
                 (
                     {
                         "group": "",
-                        "name": "loom-postgres-0",
+                        "name": "loom-postgres-1",
+                        "namespace": "loom-staging",
+                        "resource": "pods",
+                        "subresource": "portforward",
+                        "verb": "create",
+                    },
+                    {
+                        "group": "",
+                        "name": "loom-postgres-2",
+                        "namespace": "loom-staging",
+                        "resource": "pods",
+                        "subresource": "portforward",
+                        "verb": "create",
+                    },
+                    {
+                        "group": "",
+                        "name": "loom-postgres-3",
                         "namespace": "loom-staging",
                         "resource": "pods",
                         "subresource": "portforward",

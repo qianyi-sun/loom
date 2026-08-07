@@ -14,6 +14,10 @@ POSTGRES_EXEC_CONSUMERS = (
     "src/loom_cli/rollout/operator/protected_migration_component.py",
     "src/loom_cli/rollout/operator/protected_production_defaults_component.py",
 )
+POSTGRES_PRIMARY_CONSUMERS = (
+    *POSTGRES_EXEC_CONSUMERS,
+    "src/loom_cli/rollout/operator/readonly_database_client.py",
+)
 POSTGRES_SHELL_CONSUMERS = tuple(
     path
     for path in POSTGRES_EXEC_CONSUMERS
@@ -22,7 +26,7 @@ POSTGRES_SHELL_CONSUMERS = tuple(
 
 
 def test_protected_postgres_consumers_follow_cnpg_primary_service() -> None:
-    for relative_path in POSTGRES_EXEC_CONSUMERS:
+    for relative_path in POSTGRES_PRIMARY_CONSUMERS:
         source = (ROOT / relative_path).read_text(encoding="utf-8")
         assert CNPG_PRIMARY_SERVICE in source, relative_path
         assert LEGACY_POSTGRES_STATEFULSET not in source, relative_path

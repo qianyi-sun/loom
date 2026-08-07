@@ -126,7 +126,7 @@ def test_client_binds_exact_transport_and_keeps_password_out_of_process(tmp_path
                 "--namespace",
                 "loom-staging",
                 "port-forward",
-                "pod/loom-postgres-0",
+                "service/loom-postgres-rw",
                 "--address=127.0.0.1",
                 "15432:5432",
                 "--pod-running-timeout=15s",

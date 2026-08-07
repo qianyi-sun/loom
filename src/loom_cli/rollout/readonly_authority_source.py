@@ -26,7 +26,14 @@ _SAFE_REVIEW_RESOURCES = frozenset(
     }
 )
 _SAFE_TRANSPORT_RESOURCE = ("", "pods/portforward")
-_SAFE_TRANSPORT_NAMES = frozenset({"loom-minio-0", "loom-postgres-0"})
+_SAFE_TRANSPORT_NAMES = frozenset(
+    {
+        "loom-minio-0",
+        "loom-postgres-1",
+        "loom-postgres-2",
+        "loom-postgres-3",
+    }
+)
 
 
 class CommandResult(Protocol):
