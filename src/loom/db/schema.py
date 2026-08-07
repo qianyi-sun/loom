@@ -2088,6 +2088,14 @@ class Trial(Base):
     task_id: Mapped[str] = mapped_column(String, ForeignKey("tasks.id"), nullable=False)
     config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     requires_caps: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    # Internal capacity routing for architecture-neutral queued trials. User
+    # requirements remain immutable in requires_caps; this assignment makes
+    # independent pool autoscalers count the demand exactly once.
+    autoscaler_pool_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    autoscaler_pool_assigned_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
     state: Mapped[str] = mapped_column(String, nullable=False)
     failure_reason: Mapped[str | None] = mapped_column(String, nullable=True)
     failure_message: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -796,7 +796,7 @@ def test_clean_nonempty_strips_values_and_rejects_blank() -> None:
         _clean_nonempty("  ", "environment")
 
 
-def test_queued_trial_capability_matching_uses_policy_backend_and_arch() -> None:
+def test_queued_trial_capability_matching_routes_neutral_demand_exactly_once() -> None:
     slurm = _policy_row(
         actuator="slurm",
         actuator_config={"backend": "docker", "cpu_arch": "x86_64"},
@@ -811,7 +811,38 @@ def test_queued_trial_capability_matching_uses_policy_backend_and_arch() -> None
     assert _queued_trial_matches_policy(None, slurm) is True
     assert _queued_trial_matches_policy({"backend": "docker"}, slurm) is True
     assert _queued_trial_matches_policy({"backend": "k8s"}, slurm) is False
-    assert _queued_trial_matches_policy({"cpu_arch": "any"}, slurm) is True
+    assert (
+        _queued_trial_matches_policy(
+            {"cpu_arch": "any"},
+            slurm,
+            autoscaler_pool_name="oldlab",
+        )
+        is True
+    )
+    assert (
+        _queued_trial_matches_policy(
+            {"cpu_arch": "any"},
+            gb10,
+            autoscaler_pool_name="oldlab",
+        )
+        is False
+    )
+    assert (
+        _queued_trial_matches_policy(
+            {"cpu_arch": "any"},
+            slurm,
+            autoscaler_pool_name=None,
+        )
+        is False
+    )
+    assert (
+        _queued_trial_matches_policy(
+            {"cpu_arch": "any"},
+            gb10,
+            autoscaler_pool_name=None,
+        )
+        is False
+    )
     assert _queued_trial_matches_policy({"cpu_arch": "arm64"}, slurm) is False
     assert _queued_trial_matches_policy({"cpu_arch": "arm64"}, gb10) is True
     assert _queued_trial_matches_policy({"worker_pool": "oldlab"}, slurm) is True
@@ -1142,9 +1173,9 @@ async def test_load_observation_counts_slots_and_matching_queue() -> None:
             ),
             _FakeResult(
                 rows=[
-                    ({"backend": "docker", "cpu_arch": "x86_64"},),
-                    ({"backend": "docker", "cpu_arch": "arm64"},),
-                    ({},),
+                    ({"backend": "docker", "cpu_arch": "x86_64"}, None),
+                    ({"backend": "docker", "cpu_arch": "arm64"}, None),
+                    ({}, None),
                 ],
             ),
         ]

@@ -1074,6 +1074,114 @@ async def test_external_slurm_runner_reconcile_can_be_scoped_to_one_pool(
         await engine.dispose()
 
 
+async def test_neutral_trial_assignment_scales_exactly_one_slurm_pool(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    team_id = uuid4()
+    trial_id = uuid4()
+    try:
+        async with session_factory() as s:
+            await s.execute(insert(Team).values(id=team_id, name="neutral-team"))
+            await s.execute(
+                insert(Task).values(id="neutral-task", checksum="0" * 64, config={}),
+            )
+            await s.execute(
+                insert(Trial).values(
+                    id=trial_id,
+                    team_id=team_id,
+                    task_id="neutral-task",
+                    config={},
+                    requires_caps={"backend": "docker", "cpu_arch": "any"},
+                    state="queued",
+                    idempotency_key="neutral-trial",
+                ),
+            )
+            for pool_name, node, cpu_arch in (
+                ("gb10", "gb10-1", "arm64"),
+                ("oldlab", "oldlab-1", "x86_64"),
+            ):
+                await s.execute(
+                    insert(WorkerPoolAutoscalerPolicy).values(
+                        environment="production",
+                        pool_name=pool_name,
+                        actuator="slurm",
+                        enabled=True,
+                        min_slots=0,
+                        max_slots=1,
+                        scale_up_threshold_slots=1,
+                        scale_down_idle_seconds=600,
+                        scale_up_cooldown_seconds=60,
+                        scale_down_cooldown_seconds=300,
+                        drain_timeout_seconds=600,
+                        actuator_config={
+                            "backend": "docker",
+                            "cpu_arch": cpu_arch,
+                            "external_runner": True,
+                            "allowed_nodes": [node],
+                            "env_file": "/secure/.env.remote-worker",
+                            "exclusive": False,
+                            "container_cpus": 2.0,
+                            "container_memory_mib": 4096,
+                            "container_pids": 512,
+                            "candidate_sha": "a" * 40,
+                            "job_pids_max": 8192,
+                            "repo_dir": "/opt/loom",
+                            "requested_cpus": 2,
+                            "requested_memory_mib": 8000,
+                            "requested_concurrency": 1,
+                            "max_jobs": 1,
+                            "pending_job_cap": 1,
+                            "time_limit": "04:00:00",
+                        },
+                    ),
+                )
+            await s.commit()
+
+        async with session_factory() as s:
+            control_plane_results = await reconcile_worker_pool_autoscaler_once(
+                s,
+                environment="production",
+                now=now,
+            )
+            await s.commit()
+
+        assert control_plane_results == []
+        async with session_factory() as s:
+            assigned_pool = (
+                await s.execute(
+                    select(Trial.autoscaler_pool_name).where(Trial.id == trial_id),
+                )
+            ).scalar_one()
+
+        assert assigned_pool in {"gb10", "oldlab"}
+
+        runner = FakeSlurmRunner()
+        async with session_factory() as s:
+            external_results = await reconcile_worker_pool_autoscaler_once(
+                s,
+                environment="production",
+                now=now,
+                slurm_runner=runner,
+                include_external_policies=True,
+                external_only=True,
+            )
+            await s.commit()
+
+        assert [result.action for result in external_results].count("scale_up") == 1
+        assert runner.submitted_nodes == [f"{assigned_pool}-1"]
+        async with session_factory() as s:
+            jobs = (await s.execute(select(SlurmWorkerJob))).scalars().all()
+
+        assert [(job.pool_name, job.nodelist) for job in jobs] == [
+            (assigned_pool, f"{assigned_pool}-1"),
+        ]
+    finally:
+        await engine.dispose()
+
+
 async def test_external_reconcile_never_executes_same_pool_from_foreign_environment(
     postgres_url: str,
 ) -> None:
