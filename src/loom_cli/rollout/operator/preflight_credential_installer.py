@@ -826,11 +826,7 @@ class PreflightCredentialInstaller:
             raise CredentialInstallError("readonly MinIO policy authority drifted")
 
     def _minified_source_kubeconfig(self) -> bytes:
-        self._read_private(
-            self.paths.root_kubeconfig,
-            expected_uid=self.root_uid,
-            expected_gid=self.root_gid,
-        )
+        self._read_root_kubeconfig(self.paths.root_kubeconfig)
         result = self._command(
             (
                 "kubectl",
@@ -1007,6 +1003,24 @@ class PreflightCredentialInstaller:
                 except FileNotFoundError:
                     pass
         return True
+
+    def _read_root_kubeconfig(self, path: Path) -> bytes:
+        try:
+            metadata = os.lstat(path)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or stat.S_ISLNK(metadata.st_mode)
+                or metadata.st_uid != self.root_uid
+                or metadata.st_gid != self.root_gid
+                or stat.S_IMODE(metadata.st_mode) not in {0o600, 0o644}
+                or metadata.st_nlink != 1
+                or metadata.st_size <= 0
+                or metadata.st_size > 1 << 20
+            ):
+                raise CredentialInstallError("root kubeconfig authority is unsafe")
+            return path.read_bytes()
+        except OSError as exc:
+            raise CredentialInstallError("root kubeconfig authority is unavailable") from exc
 
     @staticmethod
     def _read_private(path: Path, *, expected_uid: int, expected_gid: int) -> bytes:
