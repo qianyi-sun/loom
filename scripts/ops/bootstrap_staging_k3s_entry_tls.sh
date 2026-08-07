@@ -25,7 +25,10 @@ install -m 0755 "${here}/deploy/staging-k3s/loom-staging-k3s-cutover.sh" \
 install -m 0644 "${here}/deploy/staging-k3s/loom-staging-k3s-cutover.service" \
   /etc/systemd/system/loom-staging-k3s-cutover.service
 systemctl daemon-reload
-systemctl enable --now loom-staging-k3s-cutover.service
+systemctl enable loom-staging-k3s-cutover.service
+# The unit is a RemainAfterExit oneshot. ``enable --now`` does not re-execute
+# an already-active unit after this script replaces its cutover executable.
+systemctl restart loom-staging-k3s-cutover.service
 log "entry cutover: $(systemctl is-active loom-staging-k3s-cutover.service)"
 
 # 2. cert-manager controller needs host-network egress to reach Let's Encrypt.

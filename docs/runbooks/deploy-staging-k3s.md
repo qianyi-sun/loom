@@ -99,13 +99,14 @@ A worker claims it, the agent calls the gateway, and an `llm_calls` row lands
 ## External entrypoint (one-time)
 
 Public `https://yylx.world/staging/` reaches k3s through an iptables DNAT that
-redirects the host `:443` to the k3s ingress-nginx (`:8443`), persisted across
-reboots:
+redirects only the host entry address on `:443` to the k3s ingress-nginx
+(`:8443`), persisted across reboots. The destination match is intentional: a
+port-only PREROUTING rule also hijacks Docker/container HTTPS egress.
 
 ```bash
 # installed once; idempotent re-insert on @reboot via root crontab
 /usr/local/sbin/loom-staging-k3s-cutover.sh
-# = iptables -t nat -I PREROUTING 1 -p tcp --dport 443 -j DNAT --to-destination 192.168.50.103:8443
+# = iptables -t nat -I PREROUTING 1 -d 192.168.50.103/32 -p tcp --dport 443 -j DNAT --to-destination 192.168.50.103:8443
 ```
 
 The former single-node kind deployment is retired and is not a live rollback
