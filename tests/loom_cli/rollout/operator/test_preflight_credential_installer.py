@@ -218,6 +218,11 @@ def test_install_applies_exact_authority_and_publishes_no_secret_evidence(
     ]
     assert len(database_calls) == 2
     assert all(stdin is not None for _command, stdin in database_calls)
+    assert all(
+        command[command.index("-U") : command.index("-U") + 4]
+        == ("-U", "postgres", "-d", "loom")
+        for command, _stdin in database_calls
+    )
     assert all("--stdin" in command for command, _stdin in database_calls)
     assert any("PASSWORD" in (stdin or "") for _command, stdin in database_calls)
     assert any("readonly_probe" in (stdin or "") for _command, stdin in database_calls)

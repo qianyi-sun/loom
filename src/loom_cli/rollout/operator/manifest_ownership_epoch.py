@@ -38,7 +38,7 @@ class ManifestOwnershipEpochClaimer:
                 "--",
                 "sh",
                 "-ceu",
-                'sql="$1"; shift; exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" '
+                'sql="$1"; shift; exec psql -U postgres -d loom '
                 '-AtX -v ON_ERROR_STOP=1 "$@" -c "$sql"',
                 "sh",
                 statement,

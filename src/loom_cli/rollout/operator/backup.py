@@ -62,7 +62,7 @@ logger = logging.getLogger(__name__)
 
 _PRIVATE_FILE_MODE = 0o600
 _PRIVATE_DIRECTORY_MODE = 0o700
-_POSTGRES_DUMP_COMMAND = 'exec pg_dump -Fc -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+_POSTGRES_DUMP_COMMAND = "exec pg_dump -Fc -U postgres -d loom"
 _MINIO_BUCKETS = (
     "loom-staging-trajectories",
     "loom-staging-artifacts",
