@@ -111,18 +111,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      event_relevant: ${{ steps.plan.outputs.event_relevant }}
-      full_gate: ${{ steps.plan.outputs.full_gate }}
-      gate_mode: ${{ steps.plan.outputs.gate_mode }}
-      publisher_active: ${{ steps.plan.outputs.publisher_active }}
-      docs_only: ${{ steps.plan.outputs.docs_only }}
-      integration: ${{ steps.plan.outputs.integration }}
-      integration_docker: ${{ steps.plan.outputs.integration_docker }}
-      images: ${{ steps.plan.outputs.images }}
-      cluster_smoke: ${{ steps.plan.outputs.cluster_smoke }}
-      staging_smoke: ${{ steps.plan.outputs.staging_smoke }}
-      coverage_summary: ${{ steps.plan.outputs.coverage_summary }}
-      web_checks: ${{ steps.plan.outputs.web_checks }}
+      event_relevant: ${{ steps.plan.outputs.event_relevant || steps.event.outputs.event_relevant }}
+      full_gate: ${{ steps.plan.outputs.full_gate || steps.event.outputs.full_gate }}
+      gate_mode: ${{ steps.plan.outputs.gate_mode || steps.event.outputs.gate_mode }}
+      publisher_active: ${{ steps.plan.outputs.publisher_active || steps.event.outputs.publisher_active }}
+      docs_only: ${{ steps.plan.outputs.docs_only || steps.event.outputs.docs_only }}
+      integration: ${{ steps.plan.outputs.integration || steps.event.outputs.integration }}
+      integration_docker: ${{ steps.plan.outputs.integration_docker || steps.event.outputs.integration_docker }}
+      images: ${{ steps.plan.outputs.images || steps.event.outputs.images }}
+      cluster_smoke: ${{ steps.plan.outputs.cluster_smoke || steps.event.outputs.cluster_smoke }}
+      staging_smoke: ${{ steps.plan.outputs.staging_smoke || steps.event.outputs.staging_smoke }}
+      coverage_summary: ${{ steps.plan.outputs.coverage_summary || steps.event.outputs.coverage_summary }}
+      web_checks: ${{ steps.plan.outputs.web_checks || steps.event.outputs.web_checks }}
     # Skip on push to dev: every squash-merge to dev carries the same
     # content the PR CI just validated, so re-running burns minutes
     # for no signal. Push to main still runs (release-branch safety
@@ -131,12 +131,47 @@ jobs:
       github.event_name != 'push' ||
       github.ref != 'refs/heads/dev'
     steps:
+      - name: Classify metadata event before checkout
+        id: event
+        shell: bash
+        env:
+          FILTERED_EVENT: >-
+            ${{ github.event_name == 'pull_request' &&
+                (github.event.pull_request.draft ||
+                 github.event.action == 'converted_to_draft' ||
+                 (contains(fromJSON('["labeled","unlabeled"]'), github.event.action) &&
+                  !contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'), github.event.label.name)) ||
+                 (github.event.action == 'edited' && github.event.changes.base == null)) }}
+        run: |
+          set -euo pipefail
+          if [[ "$FILTERED_EVENT" == "true" ]]; then
+            {
+              echo 'checkout_required=false'
+              echo 'event_relevant=false'
+              echo 'full_gate=false'
+              echo 'gate_mode=filtered'
+              echo 'publisher_active=false'
+              echo 'docs_only=true'
+              echo 'integration=false'
+              echo 'integration_docker=false'
+              echo 'images=false'
+              echo 'cluster_smoke=false'
+              echo 'staging_smoke=false'
+              echo 'coverage_summary=false'
+              echo 'web_checks=false'
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo 'checkout_required=true' >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        if: steps.event.outputs.checkout_required == 'true'
         with:
           fetch-depth: 0
 
       - name: Plan required validations
         id: plan
+        if: steps.event.outputs.checkout_required == 'true'
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -998,7 +1033,10 @@ jobs:
           needs.workflow-plan.outputs.gate_mode == 'full' && 'repository-checks-attempt' ||
           'repository-checks-filtered' }}
     runs-on: ubuntu-latest
-    if: always() && (github.event_name != 'push' || github.ref != 'refs/heads/dev')
+    if: >-
+      always() &&
+      (github.event_name != 'push' || github.ref != 'refs/heads/dev') &&
+      needs.workflow-plan.outputs.gate_mode != 'filtered'
     needs:
       - workflow-plan
       - fast-checks
