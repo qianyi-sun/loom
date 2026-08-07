@@ -14,7 +14,7 @@
 #
 # Safe to re-run. Does NOT touch the kind cluster (rollback anchor).
 set -euo pipefail
-here="$(cd "$(dirname "$0")/.." && pwd)"        # repo root
+here="$(cd "$(dirname "$0")/../.." && pwd)"        # repo root
 KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"; export KUBECONFIG
 log() { echo "[bootstrap-entry-tls] $*"; }
 

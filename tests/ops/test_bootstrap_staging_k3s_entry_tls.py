@@ -14,9 +14,15 @@ def test_bootstrap_restarts_an_already_active_cutover_unit(tmp_path: Path) -> No
     fake_bin.mkdir()
     for command in ("install", "kubectl", "systemctl"):
         executable = fake_bin / command
+        validate_install_source = (
+            'test -f "$3" || { printf "missing source: %s\\n" "$3" >&2; exit 44; }\n'
+            if command == "install"
+            else ""
+        )
         executable.write_text(
             "#!/bin/sh\n"
             f'printf "{command} %s\\n" "$*" >>"$COMMAND_LOG"\n'
+            + validate_install_source
             + ('case "$1" in is-active) printf "active\\n" ;; esac\n' if command == "systemctl" else ""),
             encoding="utf-8",
         )
