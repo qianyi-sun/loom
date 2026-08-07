@@ -60,6 +60,9 @@ NEW_SESSION_BRIEFING.md
 # the IDE source-control panel with phantom "untracked" entries.
 .claude/
 
+# Codex feature worktrees.
+.worktrees/
+
 # Go build artifacts at repo root from `go build ./...` runs
 /loom-llm-gateway-sandbox
 
