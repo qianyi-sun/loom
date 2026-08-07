@@ -1,0 +1,66 @@
+name: classified-ci-retry
+run-name: >-
+  ci-retry-v1 source_run=${{ inputs.source_run_id }}
+  failed_attempt=${{ inputs.failed_attempt }} reason=${{ inputs.reason }}
+  actor=${{ github.actor }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Terminal required-source workflow run ID
+        required: true
+        type: string
+      failed_attempt:
+        description: Current failed/cancelled attempt number
+        required: true
+        type: string
+      reason:
+        description: Root-cause classification
+        required: true
+        type: choice
+        options: [platform_transient, external_dependency, capacity_queue, code_failure]
+      evidence_url:
+        description: Same-repository run, issue, or PR evidence URL
+        required: true
+        type: string
+      mode:
+        description: Retry failed jobs, or all jobs only after capacity/queue loss
+        required: true
+        type: choice
+        options: [failed_jobs, all_jobs]
+
+permissions:
+  contents: read
+
+jobs:
+  retry:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Checkout trusted retry policy
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Record classification and request bounded retry
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          FAILED_ATTEMPT: ${{ inputs.failed_attempt }}
+          RETRY_REASON: ${{ inputs.reason }}
+          EVIDENCE_URL: ${{ inputs.evidence_url }}
+          RETRY_MODE: ${{ inputs.mode }}
+          RETRY_ACTOR: ${{ github.actor }}
+        run: >-
+          python3 scripts/ops/ci_retry_governance.py
+          --repository "$GITHUB_REPOSITORY"
+          --source-run-id "$SOURCE_RUN_ID"
+          --failed-attempt "$FAILED_ATTEMPT"
+          --reason "$RETRY_REASON"
+          --evidence-url "$EVIDENCE_URL"
+          --mode "$RETRY_MODE"
+          --actor "$RETRY_ACTOR"

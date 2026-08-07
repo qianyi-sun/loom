@@ -182,6 +182,15 @@ For Track 4 evidence, provide the same exact image workflow attempt and add
 `by_architecture_and_runner` sections so aggregate image time cannot hide an
 ARM64 queue or execution regression.
 
+Track 6 keeps retry semantics separate from capacity measurement. Operators
+must use the dispatch-only `classified-ci-retry` workflow and attach a
+same-repository evidence URL before rerunning a required source workflow.
+`scripts/ops/ci_reliability_metrics.py` then joins exact attempts with those
+classifications and reports queue time and terminal causes by runner class. A
+queue breach can therefore be classified as `capacity_queue` without turning a
+deterministic job failure into a flake. The acceptance mode requires at least 30
+source runs and one observed governed retry.
+
 The Track 4 hosted before-datum is images run `31050441797`, attempt 1, on head
 `97f22611af455eb27b462353c4a1257334dbc7f4`. Its eleven emulated multi-arch jobs
 had queue p50/p95/max `22/56/57s`, execution p50/p95/max `528/660/1858s`, and
