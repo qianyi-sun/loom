@@ -44,13 +44,16 @@ def _run(
     timeout: float = 30,
     check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(
-        argv,
-        capture_output=True,
-        check=False,
-        text=True,
-        timeout=timeout,
-    )
+    try:
+        result = subprocess.run(
+            argv,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AcceptanceError(f"command timed out safely: {Path(argv[0]).name}") from exc
     if check and result.returncode != 0:
         raise AcceptanceError(f"command failed safely: {Path(argv[0]).name}")
     return result
@@ -209,10 +212,16 @@ def _git_identity(repo: Path, *, uid: int, gid: int, mode: int, sha: str) -> str
     git = ["/usr/bin/git"]
     if uid == SERVICE_UID:
         git = ["runuser", "-u", SERVICE_USER, "--", "/usr/bin/git"]
-    head = _run([*git, "-C", str(repo), "rev-parse", "HEAD"]).stdout.strip()
-    tree = _run([*git, "-C", str(repo), "rev-parse", "HEAD^{tree}"]).stdout.strip()
+    git_timeout = 120 if uid == SERVICE_UID else 30
+    head = _run(
+        [*git, "-C", str(repo), "rev-parse", "HEAD"], timeout=git_timeout
+    ).stdout.strip()
+    tree = _run(
+        [*git, "-C", str(repo), "rev-parse", "HEAD^{tree}"], timeout=git_timeout
+    ).stdout.strip()
     dirty = _run(
-        [*git, "-C", str(repo), "status", "--porcelain", "--untracked-files=no"]
+        [*git, "-C", str(repo), "status", "--porcelain", "--untracked-files=no"],
+        timeout=git_timeout,
     ).stdout
     if head != sha or SHA_RE.fullmatch(tree) is None or dirty:
         raise AcceptanceError("candidate repository identity does not match")

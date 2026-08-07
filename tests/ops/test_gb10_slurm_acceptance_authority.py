@@ -115,6 +115,8 @@ def test_authority_binds_candidate_profile_repo_env_and_short_expiry() -> None:
     assert '"result": "pass"' in source
     assert '"probed_nodes": probed_nodes' in source
     assert '"deferred_busy_nodes": deferred_busy_nodes' in source
+    assert "git_timeout = 120 if uid == SERVICE_UID else 30" in source
+    assert "command timed out safely" in source
     assert "/home/qianyi" not in source
     assert "/shared_work2/qianyi" not in source
 
