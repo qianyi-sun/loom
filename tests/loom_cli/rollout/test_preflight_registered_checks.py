@@ -1810,8 +1810,10 @@ def test_registered_systemd_render_uses_exact_static_unit_verifier() -> None:
     assert set(result.evidence["supervisor-unit-digests"]) == {
         "loom-autoscaler-gb10-staging.service",
         "loom-autoscaler-gb10-staging.timer",
+        "loom-autoscaler-oldlab-staging.service",
+        "loom-autoscaler-oldlab-staging.timer",
     }
-    assert result.evidence["unit-count"] == 5
+    assert result.evidence["unit-count"] == 7
     assert set(result.evidence["supervisor-script-digests"]) == {SCRIPT_PATH}
 
 

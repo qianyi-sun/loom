@@ -1549,14 +1549,13 @@ safe_slots = min(
 )
 ```
 
-The conservative OLDLAB default is `cpu_per_slot=2`,
-`memory_mib_per_slot=8192`, `reserved_cpus=4`,
-`reserved_memory_mib=24576`, `max_concurrency_per_node=8`, and
-`max_cpu_load_ratio=1.0`. Across five allowed OLDLAB nodes this caps the pool
-at `5 * 8 = 40` slots, but only when all five nodes pass the live Slurm safety
-checks. If the nodes are already loaded near their CPU count or a node has only
-single-digit GiB free memory, the autoscaler should keep the warm minimum
-instead of submitting more jobs. When every allowed node is excluded during a
+The accepted staging OLDLAB profile is deliberately narrower: the four fixed
+workers provide 24 slots, and one resource-aware Slurm job on OLDLAB-5 may
+raise the pool to 25. It uses `cpu_per_slot=2`, `memory_mib_per_slot=8192`,
+`reserved_cpus=4`, `reserved_memory_mib=20480`, and
+`max_cpu_load_ratio=1.0`. If OLDLAB-5 is already occupied or lacks that
+headroom, the autoscaler keeps the 24 fixed slots instead of submitting a job.
+When every allowed node is excluded during a
 desired Slurm scale-up, the autoscaler records `last_decision=blocked`,
 `last_blocked_reason=no_safe_slurm_nodes`, and structured
 `last_blocked_details.node_exclusions` entries such as
@@ -1578,35 +1577,31 @@ available only on the OLDLAB submit host, mark the policy as externally run:
 {
   "actuator": "slurm",
   "enabled": true,
-  "min_slots": 1,
-  "max_slots": 40,
+  "min_slots": 24,
+  "max_slots": 25,
   "actuator_config": {
     "external_runner": true,
-    "allowed_nodes": [
-      "TRT-EAI-OLDLAB-1",
-      "trt-EAI-OLDLAB-2",
-      "trt-eai-oldlab-3",
-      "trt-eai-oldlab-4",
-      "trt-eai-oldlab-5"
-    ],
-    "env_file": "/shared_work/qianyi/loom-worker-capacity/staging-oldlab-worker-${IMAGE_TAG}.env",
-    "repo_dir": "/shared_work/qianyi/loom-remote-worker-${IMAGE_TAG}",
+    "allowed_nodes": ["trt-eai-oldlab-5"],
+    "env_file": "/shared_work/loom/staging-rollout/worker-envs/staging-oldlab-worker-staging-<candidate-prefix>.env",
+    "repo_dir": "/shared_work/loom/staging-rollout/worker-repos/loom-remote-worker-staging-<candidate-prefix>",
+    "job_output_dir": "/shared_work/loom/staging-rollout/job-output",
     "requested_cpus": 2,
     "requested_memory_mib": 8192,
     "requested_concurrency": 1,
-    "max_jobs": 5,
-    "pending_job_cap": 2,
+    "max_jobs": 1,
+    "pending_job_cap": 1,
     "resource_aware": true,
     "cpu_per_slot": 2,
     "memory_mib_per_slot": 8192,
     "reserved_cpus": 4,
-    "reserved_memory_mib": 24576,
+    "reserved_memory_mib": 20480,
     "max_concurrency_per_node": 8,
     "max_cpu_load_ratio": 1.0,
     "exclusive": false,
     "container_cpus": 2,
     "container_memory_mib": 4096,
     "container_pids": 512,
+    "job_pids_max": 4096,
     "candidate_sha": "<exact-40-character-candidate-sha>"
   }
 }

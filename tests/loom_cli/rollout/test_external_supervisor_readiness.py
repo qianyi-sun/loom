@@ -64,7 +64,7 @@ def _args(*, port: int = 15451, environment: str = "staging") -> list[str]:
         "--db-local-port",
         str(port),
         "--db-service",
-        "service/loom-postgres",
+        "service/loom-postgres-rw",
         "--db-remote-port",
         "5432",
         "--db-port-forward-ready-timeout-sec",

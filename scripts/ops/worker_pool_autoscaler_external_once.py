@@ -96,14 +96,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--namespace", default="loom-staging")
     parser.add_argument(
         "--kubeconfig",
-        default=os.environ.get("KUBECONFIG", "/home/qianyi/.kube/config"),
+        default=os.environ.get("KUBECONFIG", str(Path.home() / ".kube" / "config")),
     )
     parser.add_argument("--kubectl", default="/usr/local/bin/kubectl")
     parser.add_argument("--db-secret-name", default="loom-secrets")
     parser.add_argument("--db-secret-key", default="cp-db-url")
     parser.add_argument("--db-local-host", default="127.0.0.1")
     parser.add_argument("--db-local-port", type=int, default=15447)
-    parser.add_argument("--db-service", default="service/loom-postgres")
+    parser.add_argument("--db-service", default="service/loom-postgres-rw")
     parser.add_argument("--db-remote-port", type=int, default=5432)
     parser.add_argument("--db-port-forward-ready-timeout-sec", type=float, default=10.0)
     parser.add_argument("--db-port-forward-stop-timeout-sec", type=float, default=5.0)

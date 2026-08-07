@@ -68,7 +68,8 @@ def test_oldlab_docs_require_node_visible_repo_and_idle_exit() -> None:
     readme = _README.read_text(encoding="utf-8")
     controller_env = _CONTROLLER_ENV.read_text(encoding="utf-8")
 
-    assert "shared checkout path" in readme
+    assert "/shared_work/loom/staging-rollout/" in readme
+    assert "/shared_work2/qianyi/" not in readme
     assert "LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS" in readme
     assert "/shared_work/<operator>/loom-remote-worker" in controller_env
 

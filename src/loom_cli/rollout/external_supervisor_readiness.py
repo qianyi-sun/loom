@@ -379,7 +379,10 @@ class ExternalSupervisorIdentity:
             != self.db_local_port
         ):
             raise ValueError("external supervisor DB local port drifted")
-        if arguments["--db-service"] != "service/loom-postgres":
+        # `loom-postgres` is an ExternalName compatibility service and cannot
+        # be used by `kubectl port-forward`; bind the supervisor to CNPG's
+        # concrete read/write service instead.
+        if arguments["--db-service"] != "service/loom-postgres-rw":
             raise ValueError("external supervisor DB service is not canonical")
         if self.db_service != arguments["--db-service"]:
             raise ValueError("external supervisor DB service drifted")

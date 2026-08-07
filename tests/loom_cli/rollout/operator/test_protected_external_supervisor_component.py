@@ -125,6 +125,19 @@ def _bound_artifact(tmp_path: Path):
         "enabled = true\nactive = true",
         1,
     )
+    # These component mechanics tests retain one supervisor so their exact
+    # operation-order assertions stay focused.  The transition suite exercises
+    # the additive legacy-GB10 -> GB10+OLDLAB protected transition.
+    prefix, marker, oldlab_section = profile_text.partition(
+        'name = "oldlab-staging"',
+    )
+    if marker:
+        oldlab_section = oldlab_section.replace(
+            "enabled = true\nactive = true",
+            "enabled = false\nactive = false",
+            1,
+        )
+        profile_text = prefix + marker + oldlab_section
     profile_target.write_text(profile_text, encoding="utf-8")
     shutil.copyfile(
         repository / "scripts/ops/worker_pool_autoscaler_external_once.py",
@@ -209,12 +222,21 @@ def _observation(
     timers: dict[str, TimerRuntimeStatus] = {}
     services: dict[str, ServiceRuntimeStatus] = {}
     for supervisor in artifact.supervisors:
+        legacy_service = legacy.unit_payloads.get(supervisor.service_name)
+        legacy_timer = legacy.unit_payloads.get(supervisor.timer_name)
+        legacy_pair_present = legacy_service is not None and legacy_timer is not None
         if files == "legacy":
-            units[supervisor.service_name] = legacy.unit_payloads[supervisor.service_name].encode()
-            units[supervisor.timer_name] = legacy.unit_payloads[supervisor.timer_name].encode()
+            units[supervisor.service_name] = (
+                None if legacy_service is None else legacy_service.encode()
+            )
+            units[supervisor.timer_name] = (
+                None if legacy_timer is None else legacy_timer.encode()
+            )
         elif files == "partial":
             units[supervisor.service_name] = supervisor.service_unit.encode()
-            units[supervisor.timer_name] = legacy.unit_payloads[supervisor.timer_name].encode()
+            units[supervisor.timer_name] = (
+                None if legacy_timer is None else legacy_timer.encode()
+            )
         else:
             units[supervisor.service_name] = (
                 supervisor.service_unit.encode() if files == "exact" else None
@@ -222,7 +244,7 @@ def _observation(
             units[supervisor.timer_name] = (
                 supervisor.timer_unit.encode() if files == "exact" else None
             )
-        if runtime == "exact":
+        if runtime == "exact" and (files != "legacy" or legacy_pair_present):
             timers[supervisor.timer_name] = _timer_status(
                 supervisor.timer_name, "loaded", "enabled", "active"
             )
@@ -1296,7 +1318,9 @@ def test_compensation_journal_malformed_prefixed_entry_fails_closed(
 ) -> None:
     unit_dir = tmp_path / "units"
     unit_dir.mkdir(mode=0o700)
-    (unit_dir / name).write_bytes(payload)
+    malformed = unit_dir / name
+    malformed.write_bytes(payload)
+    malformed.chmod(0o600)
     store = AtomicUserUnitStore(unit_dir=unit_dir, service_uid=os.geteuid())
 
     with pytest.raises((RuntimeError, ValueError), match="compensation"):

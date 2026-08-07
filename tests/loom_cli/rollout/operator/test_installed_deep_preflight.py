@@ -228,6 +228,35 @@ class _ReadyDisabledExternalSupervisorControl:
         )
 
 
+class _ReadyCanonicalExternalSupervisorControl:
+    def __init__(self, canonical: ExternalSupervisorCanonicalIdentity) -> None:
+        self.canonical = canonical
+
+    def timer_status(self, name: str) -> TimerRuntimeStatus:
+        service_name = f"{name.removesuffix('.timer')}.service"
+        active = transport_module._identity_pair_desired_active(
+            self.canonical,
+            service_name,
+            name,
+        )
+        return TimerRuntimeStatus(
+            load_state="loaded",
+            unit_file_state="enabled" if active else "disabled",
+            active_state="active" if active else "inactive",
+            fragment_path=str(PROTECTED_USER_UNIT_DIR / name),
+            need_daemon_reload="no",
+        )
+
+    def service_status(self, name: str) -> ServiceRuntimeStatus:
+        return ServiceRuntimeStatus(
+            load_state="loaded",
+            result="success",
+            exec_main_status=0,
+            fragment_path=str(PROTECTED_USER_UNIT_DIR / name),
+            need_daemon_reload="no",
+        )
+
+
 class _CanonicalExternalSupervisorStore:
     def __init__(self, canonical: ExternalSupervisorCanonicalIdentity) -> None:
         self.canonical = canonical
@@ -391,7 +420,7 @@ def test_installed_external_supervisor_predecessor_uses_live_schema_after_migrat
     monkeypatch.setattr(
         installed_deep_preflight_factory,
         "FixedUserSystemdControl",
-        lambda **_kwargs: _ReadyDisabledExternalSupervisorControl(),
+        lambda **_kwargs: _ReadyCanonicalExternalSupervisorControl(canonical),
     )
     source = installed_deep_preflight_factory._external_supervisor_predecessor_source(
         candidate_root=candidate_root,

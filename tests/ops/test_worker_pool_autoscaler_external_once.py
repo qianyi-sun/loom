@@ -79,6 +79,21 @@ def test_parser_requires_exact_environment_authority(module: Any) -> None:
         module._scoped_environment(" staging ")
 
 
+def test_parser_defaults_follow_service_home_and_concrete_database_service(
+    module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("KUBECONFIG", raising=False)
+    monkeypatch.setenv("HOME", "/var/lib/loom-staging-rollout")
+
+    args = module._parser().parse_args(
+        ["--environment", "staging", "--pool-name", "oldlab"]
+    )
+
+    assert args.kubeconfig == "/var/lib/loom-staging-rollout/.kube/config"
+    assert args.db_service == "service/loom-postgres-rw"
+
+
 @pytest.mark.parametrize(
     ("extra", "match"),
     [
@@ -245,7 +260,7 @@ def test_database_port_forward_owns_loopback_child_and_cleans_up(
         "port-forward",
         "--address",
         "127.0.0.1",
-        "service/loom-postgres",
+        "service/loom-postgres-rw",
         "15451:5432",
     ]
     assert captured["kwargs"]["stdin"] is subprocess.DEVNULL

@@ -6357,10 +6357,9 @@ activate a reduced profile, substitute TB2.0, or merge incomplete evidence.
   concurrency only after CPU, RAM, Docker cleanup, MinIO throughput,
   Gateway/provider error rate, and Control Plane state-patch health are clean.
   The remote-worker env file and `REPO_DIR` must be readable from every
-  included Slurm node. For OLDLAB staging capacity, use a shared checkout
-  path such as `/shared_work/<operator>/loom-remote-worker-${IMAGE_TAG}`; a
-  control-node `/home` checkout can be incomplete on OLDLAB 4/5 and must not be
-  assumed valid without a Slurm-side check.
+  included Slurm node. OLDLAB staging uses the service-owned roots under
+  `/shared_work/loom/staging-rollout/`; never point the supervisor at a
+  personal `/shared_work*/<user>/...` or control-node `/home` checkout.
   Autoscaler Slurm jobs always use `actuator_config.exclusive=false`; exclusive
   allocation is rejected so GB10/OLDLAB remain available to other Slurm users.
   Keep the policy disabled until it has a reduced, tested CPU, memory, PID,
@@ -6369,45 +6368,40 @@ activate a reduced profile, substitute TB2.0, or merge incomplete evidence.
   normal exits, idle exits, and `scancel` release the compose worker container
   with `docker compose down --remove-orphans` instead of leaving an orphaned
   worker outside Slurm accounting.
-  For normal shared OLDLAB autoscaling, prefer a worker-pool autoscaler policy
-  with `actuator_config.resource_aware=true` instead of raising
-  `REQUESTED_CONCURRENCY` manually. The conservative OLDLAB policy keeps
-  `min_slots=1`, sets `max_slots=40`, allows only OLDLAB-1..5, and computes
-  each submitted worker's concurrency from live `sinfo` data:
+  For shared OLDLAB autoscaling, use the accepted bounded worker-pool policy
+  with `actuator_config.resource_aware=true`. The four fixed workers provide
+  24 slots; staging permits one isolated job on OLDLAB-5 to raise the pool to
+  25 slots and computes admission from live `sinfo` data:
 
   ```json
   {
     "actuator": "slurm",
     "enabled": true,
-    "min_slots": 1,
-    "max_slots": 40,
+    "min_slots": 24,
+    "max_slots": 25,
     "actuator_config": {
       "external_runner": true,
-      "allowed_nodes": [
-        "TRT-EAI-OLDLAB-1",
-        "trt-EAI-OLDLAB-2",
-        "trt-eai-oldlab-3",
-        "trt-eai-oldlab-4",
-        "trt-eai-oldlab-5"
-      ],
-      "env_file": "/shared_work/qianyi/loom-worker-capacity/staging-oldlab-worker-${IMAGE_TAG}.env",
-      "repo_dir": "/shared_work/qianyi/loom-remote-worker-${IMAGE_TAG}",
+      "allowed_nodes": ["trt-eai-oldlab-5"],
+      "env_file": "/shared_work/loom/staging-rollout/worker-envs/staging-oldlab-worker-staging-<candidate-prefix>.env",
+      "repo_dir": "/shared_work/loom/staging-rollout/worker-repos/loom-remote-worker-staging-<candidate-prefix>",
+      "job_output_dir": "/shared_work/loom/staging-rollout/job-output",
       "requested_cpus": 2,
       "requested_memory_mib": 8192,
       "requested_concurrency": 1,
-      "max_jobs": 5,
-      "pending_job_cap": 2,
+      "max_jobs": 1,
+      "pending_job_cap": 1,
       "resource_aware": true,
       "cpu_per_slot": 2,
       "memory_mib_per_slot": 8192,
       "reserved_cpus": 4,
-      "reserved_memory_mib": 24576,
+      "reserved_memory_mib": 20480,
       "max_concurrency_per_node": 8,
       "max_cpu_load_ratio": 1.0,
       "exclusive": false,
       "container_cpus": 2,
       "container_memory_mib": 4096,
       "container_pids": 512,
+      "job_pids_max": 4096,
       "candidate_sha": "<exact-40-character-candidate-sha>"
     }
   }
