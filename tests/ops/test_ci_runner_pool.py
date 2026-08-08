@@ -875,6 +875,8 @@ def test_systemd_unit_uses_credential_and_candidate_sources() -> None:
 
     assert "LoadCredential=github-token:" in service
     assert "${CREDENTIALS_DIRECTORY}/github-token" in service
+    assert "LoadCredential=route-publisher-hmac:" in service
+    assert "${CREDENTIALS_DIRECTORY}/route-publisher-hmac" in service
     assert "${LOOM_CI_RUNNER_CANDIDATE_SHA}" in service
     assert "Environment=GITHUB_TOKEN" not in service
     assert "ProtectSystem=strict" in service

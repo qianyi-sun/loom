@@ -493,7 +493,7 @@ def test_authoritative_gate_workflow_uses_only_trusted_code() -> None:
     )
 
 
-def test_only_authoritative_workflow_can_write_protected_checkruns() -> None:
+def test_only_trusted_publishers_can_write_checkruns() -> None:
     workflow_paths = sorted((REPO_ROOT / ".github/workflows").glob("*.yml"))
     for workflow_file in workflow_paths:
         workflow_path = workflow_file.relative_to(REPO_ROOT).as_posix()
@@ -506,6 +506,10 @@ def test_only_authoritative_workflow_can_write_protected_checkruns() -> None:
         assert "AUTHORITATIVE_CONTEXT" not in workflow_source
         workflow_permissions = workflow.get("permissions", {})
         assert isinstance(workflow_permissions, dict)
+        if workflow_path == ".github/workflows/ci-runner-route-publisher.yml":
+            assert workflow_permissions == {"contents": "read", "checks": "write"}
+            assert "scripts/ops/ci_runner_route_publisher.py" in workflow_source
+            continue
         assert workflow_permissions.get("checks") != "write"
 
         for job_name, job in workflow["jobs"].items():

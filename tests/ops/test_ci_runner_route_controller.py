@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import io
 import json
 import urllib.error
 import zipfile
-from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -15,6 +17,7 @@ from loom_control_plane import ci_runner_route_controller as routes
 HEAD_SHA = "a" * 40
 CANDIDATE_SHA = "c" * 40
 WORKFLOW_BLOB_SHA = "d" * 40
+PUBLISHER_KEY = b"route-publisher-test-key-with-32-bytes"
 
 
 def _config() -> leases.LeaseBrokerConfig:
@@ -95,6 +98,8 @@ class FakeRouteAPI:
         }
         self.checks: dict[tuple[str, str], list[dict[str, object]]] = {}
         self.created_checks: list[dict[str, object]] = []
+        self.dispatches: list[dict[str, str]] = []
+        self.publish_dispatched_check = True
         self.jobs: dict[tuple[int, int], list[dict[str, object]]] = {
             (request.workflow_run_id, request.run_attempt): []
         }
@@ -118,11 +123,27 @@ class FakeRouteAPI:
     def check_runs(self, head_sha: str, name: str) -> list[dict[str, object]]:
         return self.checks.get((head_sha, name), [])
 
-    def create_check_run(self, payload: Mapping[str, object]) -> dict[str, object]:
-        check = dict(payload)
-        self.created_checks.append(check)
-        self.checks.setdefault((str(payload["head_sha"]), str(payload["name"])), []).append(check)
-        return check
+    def dispatch_route_publisher(
+        self, *, candidate_sha: str, payload_b64: str, signature: str
+    ) -> None:
+        raw = base64.b64decode(payload_b64, validate=True)
+        assert candidate_sha == CANDIDATE_SHA
+        assert hmac.compare_digest(
+            signature,
+            hmac.new(PUBLISHER_KEY, raw, hashlib.sha256).hexdigest(),
+        )
+        self.dispatches.append(
+            {
+                "candidate_sha": candidate_sha,
+                "payload_b64": payload_b64,
+                "signature": signature,
+            }
+        )
+        if self.publish_dispatched_check:
+            payload = json.loads(raw)
+            payload["app"] = {"id": routes.GITHUB_ACTIONS_APP_ID}
+            self.created_checks.append(payload)
+            self.checks.setdefault((payload["head_sha"], payload["name"]), []).append(payload)
 
     def workflow_jobs(self, run_id: int, attempt: int) -> list[dict[str, object]]:
         return self.jobs[(run_id, attempt)]
@@ -140,6 +161,8 @@ def _controller(
         broker=broker,
         candidate_sha=CANDIDATE_SHA,
         cursor_file=cursor_file,
+        publisher_key=PUBLISHER_KEY,
+        publisher_poll_seconds=0,
     )
     return controller, api, broker
 
@@ -162,6 +185,7 @@ def test_controller_publishes_exact_oldlab_first_route(tmp_path: Path) -> None:
     assert [item["target"] for item in summary["assignments"]].count("oldlab") == 5
     assert [item["target"] for item in summary["assignments"]].count("github_hosted") == 2
     assert broker.status()["classes"]["normal"]["oldlab_assigned"] == 5
+    assert len(api.dispatches) == 1
 
 
 def test_dynamic_run_name_does_not_replace_workflow_identity(tmp_path: Path) -> None:
@@ -205,6 +229,19 @@ def test_cursor_skips_processed_artifact_and_cursor_loss_replays_safely(
     assert replay.routes_published == 0
     assert replay.routes_replayed == 1
     assert len(api.created_checks) == 1
+
+
+def test_missing_relay_result_fails_before_advancing_cursor(tmp_path: Path) -> None:
+    request = _request(job_count=1)
+    controller, api, _ = _controller(tmp_path, request)
+    api.publish_dispatched_check = False
+    controller.publisher_poll_attempts = 1
+
+    with pytest.raises(routes.RouteControllerError, match="did not create"):
+        controller.reconcile()
+
+    assert routes._read_artifact_cursor(controller.cursor_file) == 0
+    assert len(api.dispatches) == 1
 
 
 def test_missing_cursor_requires_explicit_highwater_initialization(
@@ -273,9 +310,7 @@ def test_route_artifact_identity_and_shape_fail_closed(tmp_path: Path) -> None:
 
 def test_controller_filename_matches_the_pinned_route_action() -> None:
     repo_root = Path(__file__).resolve().parents[2]
-    action = (repo_root / ".github/actions/ci-runner-route/action.yml").read_text(
-        encoding="utf-8"
-    )
+    action = (repo_root / ".github/actions/ci-runner-route/action.yml").read_text(encoding="utf-8")
 
     expected_path = "${{ runner.temp }}/loom-ci-route-request.json"
     assert routes.ROUTE_REQUEST_FILENAME == "loom-ci-route-request.json"
@@ -346,6 +381,15 @@ def test_root_owned_token_and_cursor_files_fail_closed(tmp_path: Path) -> None:
     with pytest.raises(routes.RouteControllerError, match="must not be a symlink"):
         routes._read_artifact_cursor(cursor)
 
+    publisher_key = tmp_path / "route-publisher-hmac"
+    publisher_key.write_text(PUBLISHER_KEY.decode() + "\n", encoding="utf-8")
+    publisher_key.chmod(0o600)
+    assert routes._read_publisher_key(publisher_key) == PUBLISHER_KEY
+
+    publisher_key.chmod(0o640)
+    with pytest.raises(routes.RouteControllerError, match="group or other"):
+        routes._read_publisher_key(publisher_key)
+
 
 def test_pool_timer_runs_the_route_controller_with_systemd_credential() -> None:
     repo_root = Path(__file__).resolve().parents[2]
@@ -355,5 +399,7 @@ def test_pool_timer_runs_the_route_controller_with_systemd_credential() -> None:
 
     assert "ExecStart=/usr/local/libexec/loom-ci-runner-route-controller" in service
     assert "--token-file ${CREDENTIALS_DIRECTORY}/github-token" in service
+    assert "LoadCredential=route-publisher-hmac:" in service
+    assert "--publisher-secret-file ${CREDENTIALS_DIRECTORY}/route-publisher-hmac" in service
     assert "--candidate-sha ${LOOM_CI_RUNNER_CANDIDATE_SHA}" in service
     assert "Environment=GITHUB_TOKEN" not in service

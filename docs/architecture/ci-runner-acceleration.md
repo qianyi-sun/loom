@@ -104,11 +104,18 @@ workflow ID remains the stable workflow-name binding.
 Oldlab eligibility additionally requires the source workflow's Git blob at the
 run head to equal the blob in the installed merged controller candidate. A PR
 that changes its workflow therefore receives a frozen all-hosted route even if
-oldlab has space. A valid assignment is published as one exact-head CheckRun
-whose external ID includes the canonical request digest. Reconciliation
-accepts only an identical replay. The controller then observes the exact
-attempt's job list and releases each matching lease only after the job, or the
-entire run when a job was never created, is terminal.
+oldlab has space. The controller signs the canonical CheckRun request with a
+host-only HMAC key and dispatches the default-branch
+`ci-runner-route-publisher` workflow. That trusted workflow checks out the
+publisher script from the exact installed candidate and uses its GitHub Actions
+workflow token to create the CheckRun. The host PAT never writes CheckRuns
+directly. The publisher accepts only the `loom-ci-route-v1` schema, exact
+repository/workflow/run/head/request-digest identity, and an identical replay;
+an invalid signature, foreign CheckRun, or duplicate identity fails closed.
+The controller polls for that exact GitHub-Actions-app-owned result before
+advancing its artifact cursor. It then observes the exact attempt's job list
+and releases each matching lease only after the job, or the entire run when a
+job was never created, is terminal.
 
 Source workflows must consume `.github/actions/ci-runner-route` by the full
 merge SHA that introduced the reviewed action, never as a local action and
@@ -361,8 +368,14 @@ sudo install -D -m 0644 deploy/ci-runners/loom-ci-runner-pool.slice \
 Do not enable the timer yet. The GitHub administration token must be a
 root-owned mode-0600 file at
 `/etc/loom-ci-runner-pool/github-token`; it needs repository Actions runner
-administration and artifact read, contents read, and CheckRun write access, but
-no workflow, package, deployment, or repository-content write permission.
+administration, artifact and contents read, and workflow-dispatch access, but
+it is not a CheckRun writer and needs no package, deployment, or
+repository-content write permission. Provision one strong opaque HMAC value in
+both the root-owned mode-0600
+`/etc/loom-ci-runner-pool/route-publisher-hmac` file and the repository Actions
+secret `LOOM_CI_ROUTE_PUBLISH_HMAC_KEY`. Transfer it through stdin or another
+secret-safe channel; never print it or place it in shell history. The systemd
+unit exposes both host files only as service credentials.
 `/etc/loom-ci-runner-pool/candidate.env` contains only:
 
 ```text
@@ -379,6 +392,7 @@ sudo env PYTHONPATH=/usr/local/lib/loom-ci-runner-controller \
   --profile /etc/loom-ci-runner-pool/profile.toml \
   --candidate-sha "$CANDIDATE_SHA" \
   --token-file /etc/loom-ci-runner-pool/github-token \
+  --publisher-secret-file /etc/loom-ci-runner-pool/route-publisher-hmac \
   --initialize-cursor
 ```
 
