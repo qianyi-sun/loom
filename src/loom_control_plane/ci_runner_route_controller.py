@@ -34,7 +34,7 @@ from loom_control_plane.ci_runner_lease_broker import (
 
 EXPECTED_REPOSITORY = "qianyi-sun/loom"
 ARTIFACT_PREFIX = "loom-ci-route-request-v1-"
-ROUTE_REQUEST_FILENAME = "route-request.json"
+ROUTE_REQUEST_FILENAME = "loom-ci-route-request.json"
 ROUTE_CHECK_PREFIX = "loom-ci-route-v1"
 MAX_ARTIFACT_BYTES = 64 * 1024
 MAX_JSON_BYTES = 4 * 1024 * 1024
@@ -311,7 +311,9 @@ def _route_request_from_zip(raw: bytes) -> RouteRequest:
         with zipfile.ZipFile(io.BytesIO(raw)) as archive:
             members = archive.infolist()
             if len(members) != 1 or members[0].filename != ROUTE_REQUEST_FILENAME:
-                raise RouteControllerError("route artifact must contain only route-request.json")
+                raise RouteControllerError(
+                    f"route artifact must contain only {ROUTE_REQUEST_FILENAME}"
+                )
             if members[0].file_size > MAX_ARTIFACT_BYTES:
                 raise RouteControllerError("route request exceeds the size limit")
             request_raw = archive.read(members[0])

@@ -47,7 +47,11 @@ def _request(
     )
 
 
-def _zip_request(request: leases.RouteRequest, *, filename: str = "route-request.json") -> bytes:
+def _zip_request(
+    request: leases.RouteRequest,
+    *,
+    filename: str = routes.ROUTE_REQUEST_FILENAME,
+) -> bytes:
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr(filename, json.dumps(request.public_dict()))
@@ -248,8 +252,23 @@ def test_route_artifact_identity_and_shape_fail_closed(tmp_path: Path) -> None:
         f"{request.run_attempt}"
     )
     api.archives[71] = _zip_request(request, filename="wrong.json")
-    with pytest.raises(routes.RouteControllerError, match=r"only route-request\.json"):
+    with pytest.raises(
+        routes.RouteControllerError,
+        match=r"only loom-ci-route-request\.json",
+    ):
         controller.reconcile()
+
+
+def test_controller_filename_matches_the_pinned_route_action() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    action = (repo_root / ".github/actions/ci-runner-route/action.yml").read_text(
+        encoding="utf-8"
+    )
+
+    expected_path = "${{ runner.temp }}/loom-ci-route-request.json"
+    assert routes.ROUTE_REQUEST_FILENAME == "loom-ci-route-request.json"
+    assert f"ROUTE_REQUEST_PATH: {expected_path}" in action
+    assert f"path: {expected_path}" in action
 
 
 def test_artifact_redirect_never_forwards_github_authorization(
