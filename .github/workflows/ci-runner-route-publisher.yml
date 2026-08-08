@@ -1,0 +1,46 @@
+name: ci-runner-route-publisher
+run-name: oldlab route publisher ${{ inputs.candidate_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Exact merged controller candidate
+        required: true
+        type: string
+      payload_b64:
+        description: Canonical signed CheckRun payload
+        required: true
+        type: string
+      signature:
+        description: HMAC-SHA256 authorization signature
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  checks: write
+
+concurrency:
+  group: ci-runner-route-publisher-${{ inputs.signature }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Checkout exact merged route publisher
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          sparse-checkout: scripts/ops/ci_runner_route_publisher.py
+          persist-credentials: false
+
+      - name: Publish exact oldlab route CheckRun
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          LOOM_CI_ROUTE_PUBLISH_HMAC_KEY: ${{ secrets.LOOM_CI_ROUTE_PUBLISH_HMAC_KEY }}
+          ROUTE_PUBLISH_PAYLOAD_B64: ${{ inputs.payload_b64 }}
+          ROUTE_PUBLISH_SIGNATURE: ${{ inputs.signature }}
+        run: python scripts/ops/ci_runner_route_publisher.py
