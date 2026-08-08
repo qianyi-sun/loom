@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
+import hmac
 import io
 import json
 import os
@@ -10,12 +13,13 @@ import re
 import sqlite3
 import stat
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from http.client import HTTPMessage
 from pathlib import Path
@@ -36,10 +40,15 @@ EXPECTED_REPOSITORY = "qianyi-sun/loom"
 ARTIFACT_PREFIX = "loom-ci-route-request-v1-"
 ROUTE_REQUEST_FILENAME = "loom-ci-route-request.json"
 ROUTE_CHECK_PREFIX = "loom-ci-route-v1"
+GITHUB_ACTIONS_APP_ID = 15368
 MAX_ARTIFACT_BYTES = 64 * 1024
 MAX_JSON_BYTES = 4 * 1024 * 1024
 MAX_ROUTE_ARTIFACTS = 100
 MAX_ARTIFACT_PAGES = 5
+MAX_PUBLISHER_PAYLOAD_BYTES = 40 * 1024
+PUBLISHER_POLL_SECONDS = 2.0
+PUBLISHER_POLL_ATTEMPTS = 90
+PUBLISHER_WORKFLOW = "ci-runner-route-publisher.yml"
 ALLOWED_EVENTS = {"pull_request", "merge_group", "workflow_dispatch", "push"}
 WORKFLOW_PATHS = {
     "CI": ".github/workflows/ci.yml",
@@ -66,6 +75,7 @@ JOB_NAMES = {
 }
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 MAX_TOKEN_BYTES = 4096
+MAX_PUBLISHER_KEY_BYTES = 4096
 
 
 class RouteControllerError(RuntimeError):
@@ -98,7 +108,9 @@ class RouteGitHubAPI(Protocol):
 
     def check_runs(self, head_sha: str, name: str) -> Sequence[Mapping[str, object]]: ...
 
-    def create_check_run(self, payload: Mapping[str, object]) -> Mapping[str, object]: ...
+    def dispatch_route_publisher(
+        self, *, candidate_sha: str, payload_b64: str, signature: str
+    ) -> None: ...
 
     def workflow_jobs(self, run_id: int, attempt: int) -> Sequence[Mapping[str, object]]: ...
 
@@ -253,18 +265,31 @@ class GitHubRouteAPI:
     def check_runs(self, head_sha: str, name: str) -> Sequence[Mapping[str, object]]:
         encoded_name = urllib.parse.quote(name, safe="")
         payload = self._request(
-            "GET", f"/commits/{head_sha}/check-runs?check_name={encoded_name}&per_page=100"
+            "GET",
+            f"/commits/{head_sha}/check-runs?check_name={encoded_name}&filter=all&per_page=100",
         )
         checks = payload.get("check_runs") if isinstance(payload, dict) else None
         if not isinstance(checks, list):
             raise RouteControllerError("GitHub check-run inventory is malformed")
         return [item for item in checks if isinstance(item, dict)]
 
-    def create_check_run(self, payload: Mapping[str, object]) -> Mapping[str, object]:
-        result = self._request("POST", "/check-runs", payload=payload)
-        if not isinstance(result, dict):
-            raise RouteControllerError("created GitHub check run is malformed")
-        return result
+    def dispatch_route_publisher(
+        self, *, candidate_sha: str, payload_b64: str, signature: str
+    ) -> None:
+        result = self._request(
+            "POST",
+            f"/actions/workflows/{PUBLISHER_WORKFLOW}/dispatches",
+            payload={
+                "ref": "dev",
+                "inputs": {
+                    "candidate_sha": candidate_sha,
+                    "payload_b64": payload_b64,
+                    "signature": signature,
+                },
+            },
+        )
+        if result is not None:
+            raise RouteControllerError("GitHub route publisher dispatch returned a body")
 
     def workflow_jobs(self, run_id: int, attempt: int) -> Sequence[Mapping[str, object]]:
         payload = self._request(
@@ -354,6 +379,27 @@ def _read_token(path: Path) -> str:
     return token
 
 
+def _read_publisher_key(path: Path) -> bytes:
+    try:
+        metadata = path.lstat()
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise RouteControllerError("could not read route publisher key file") from exc
+    if not stat.S_ISREG(metadata.st_mode):
+        raise RouteControllerError("route publisher key source must be a regular file")
+    if stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise RouteControllerError("route publisher key file grants group or other access")
+    if not raw or len(raw) > MAX_PUBLISHER_KEY_BYTES or b"\x00" in raw:
+        raise RouteControllerError("route publisher key file has an invalid size or encoding")
+    try:
+        key = raw.decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise RouteControllerError("route publisher key file is not UTF-8") from exc
+    if len(key) < 32 or any(character.isspace() for character in key):
+        raise RouteControllerError("route publisher key must contain one strong opaque value")
+    return key.encode()
+
+
 def _read_artifact_cursor(path: Path) -> int:
     if not path.exists():
         raise RouteControllerError("artifact cursor is absent; initialize before routing")
@@ -426,6 +472,10 @@ class CiRunnerRouteController:
         broker: CiRunnerLeaseBroker,
         candidate_sha: str,
         cursor_file: Path,
+        publisher_key: bytes,
+        publisher_poll_attempts: int = PUBLISHER_POLL_ATTEMPTS,
+        publisher_poll_seconds: float = PUBLISHER_POLL_SECONDS,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         if _SHA_RE.fullmatch(candidate_sha) is None:
             raise RouteControllerError("candidate SHA must be a full lowercase commit SHA")
@@ -433,6 +483,14 @@ class CiRunnerRouteController:
         self.broker = broker
         self.candidate_sha = candidate_sha
         self.cursor_file = cursor_file
+        if len(publisher_key) < 32:
+            raise RouteControllerError("route publisher key is too short")
+        if publisher_poll_attempts < 1 or publisher_poll_seconds < 0:
+            raise RouteControllerError("route publisher polling configuration is invalid")
+        self.publisher_key = publisher_key
+        self.publisher_poll_attempts = publisher_poll_attempts
+        self.publisher_poll_seconds = publisher_poll_seconds
+        self.sleep = sleep
 
     def initialize_cursor(self) -> int:
         if self.cursor_file.exists() or self.cursor_file.is_symlink():
@@ -549,32 +607,61 @@ class CiRunnerRouteController:
         result = document.public_dict()
         result["oldlab_eligible"] = allow_oldlab
         summary = json.dumps(result, sort_keys=True, separators=(",", ":"))
+        payload: dict[str, object] = {
+            "name": name,
+            "head_sha": document.head_sha,
+            "external_id": external_id,
+            "status": "completed",
+            "conclusion": "success",
+            "output": {"title": "oldlab-first route assignment", "summary": summary},
+        }
         existing = list(self.api.check_runs(document.head_sha, name))
         if existing:
-            if len(existing) != 1:
-                raise RouteControllerError("route check identity is ambiguous")
-            check = existing[0]
-            output = check.get("output")
-            if (
-                check.get("external_id") != external_id
-                or check.get("status") != "completed"
-                or check.get("conclusion") != "success"
-                or not isinstance(output, dict)
-                or output.get("summary") != summary
-            ):
-                raise RouteControllerError("existing route check does not match assignment")
+            self._validate_published_check(existing, payload)
             return False
-        self.api.create_check_run(
-            {
-                "name": name,
-                "head_sha": document.head_sha,
-                "external_id": external_id,
-                "status": "completed",
-                "conclusion": "success",
-                "output": {"title": "oldlab-first route assignment", "summary": summary},
-            }
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        if len(canonical) > MAX_PUBLISHER_PAYLOAD_BYTES:
+            raise RouteControllerError("route publisher payload exceeds the size limit")
+        payload_b64 = base64.b64encode(canonical).decode("ascii")
+        signature = hmac.new(self.publisher_key, canonical, hashlib.sha256).hexdigest()
+        self.api.dispatch_route_publisher(
+            candidate_sha=self.candidate_sha,
+            payload_b64=payload_b64,
+            signature=signature,
         )
-        return True
+        for attempt in range(self.publisher_poll_attempts):
+            published = list(self.api.check_runs(document.head_sha, name))
+            if published:
+                self._validate_published_check(published, payload)
+                return True
+            if attempt + 1 < self.publisher_poll_attempts:
+                self.sleep(self.publisher_poll_seconds)
+        raise RouteControllerError("route publisher did not create the exact CheckRun in time")
+
+    @staticmethod
+    def _validate_published_check(
+        checks: Sequence[Mapping[str, object]], payload: Mapping[str, object]
+    ) -> None:
+        if len(checks) != 1:
+            raise RouteControllerError("route check identity is ambiguous")
+        check = checks[0]
+        output = check.get("output")
+        expected_output = payload["output"]
+        app = check.get("app")
+        if (
+            check.get("name") != payload["name"]
+            or check.get("head_sha") != payload["head_sha"]
+            or check.get("external_id") != payload["external_id"]
+            or check.get("status") != payload["status"]
+            or check.get("conclusion") != payload["conclusion"]
+            or not isinstance(output, dict)
+            or not isinstance(expected_output, dict)
+            or output.get("title") != expected_output["title"]
+            or output.get("summary") != expected_output["summary"]
+            or not isinstance(app, dict)
+            or app.get("id") != GITHUB_ACTIONS_APP_ID
+        ):
+            raise RouteControllerError("existing route check does not match assignment")
 
     def _reconcile_releases(self) -> int:
         grouped: dict[tuple[int, int], list[PlacementAssignment]] = defaultdict(list)
@@ -643,6 +730,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--token-file", type=Path)
     parser.add_argument("--token-env", default="GH_TOKEN")
+    parser.add_argument("--publisher-secret-file", type=Path, required=True)
     parser.add_argument("--initialize-cursor", action="store_true")
     return parser
 
@@ -657,6 +745,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         if not token:
             raise RouteControllerError("GitHub token environment variable is absent")
+        publisher_key = _read_publisher_key(args.publisher_secret_file)
         config = LeaseBrokerConfig.from_profile(args.profile)
         broker = CiRunnerLeaseBroker(args.state_db, config)
         api = GitHubRouteAPI(repository=args.repository, token=token)
@@ -665,6 +754,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             broker=broker,
             candidate_sha=args.candidate_sha,
             cursor_file=args.cursor_file,
+            publisher_key=publisher_key,
         )
         result: object = (
             {"initialized_cursor": controller.initialize_cursor()}
