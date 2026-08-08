@@ -97,6 +97,9 @@ exactly one bounded `loom-ci-route-request.json`, and verifies the artifact, liv
 workflow run, repository, workflow ID, attempt, event, and head SHA before
 allocating. The GitHub credential is sent only to `api.github.com`; artifact
 redirects are followed in a separate request with no authorization header.
+The REST run `name` is intentionally not an identity field because workflows
+with `run-name` expose that dynamic display title there; the allowlisted
+workflow ID remains the stable workflow-name binding.
 
 Oldlab eligibility additionally requires the source workflow's Git blob at the
 run head to equal the blob in the installed merged controller candidate. A PR
