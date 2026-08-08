@@ -513,7 +513,6 @@ class CiRunnerRouteController:
             "run_attempt": request.run_attempt,
             "workflow_id": request.workflow_id,
             "head_sha": request.head_sha,
-            "name": request.workflow_name,
         }
         if any(run.get(key) != value for key, value in expected.items()):
             raise RouteControllerError("workflow run identity does not match route request")

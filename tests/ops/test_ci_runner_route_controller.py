@@ -164,6 +164,18 @@ def test_controller_publishes_exact_oldlab_first_route(tmp_path: Path) -> None:
     assert broker.status()["classes"]["normal"]["oldlab_assigned"] == 5
 
 
+def test_dynamic_run_name_does_not_replace_workflow_identity(tmp_path: Path) -> None:
+    request = _request(job_count=1)
+    controller, api, _ = _controller(tmp_path, request)
+    api.runs[request.workflow_run_id]["name"] = (
+        "gate=full / head=abc / action=ready_for_review / pull=1245"
+    )
+
+    result = controller.reconcile()
+
+    assert result.routes_published == 1
+
+
 def test_changed_workflow_blob_forces_every_job_to_hosted(tmp_path: Path) -> None:
     request = _request(job_count=3)
     controller, api, broker = _controller(tmp_path, request)
