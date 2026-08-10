@@ -28,6 +28,7 @@ from loom_control_plane.retry_exhausted_sweeper import (
 from loom_control_plane.routes import (
     admin,
     artifacts,
+    execution_attempts,
     health,
     state,
     step_tokens,
@@ -211,6 +212,7 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
     app.include_router(state.router)
     app.include_router(trajectory.router)
     app.include_router(artifacts.router)
+    app.include_router(execution_attempts.router)
     app.include_router(tasks.router)
     app.include_router(admin.router)
     app.include_router(step_tokens.router)

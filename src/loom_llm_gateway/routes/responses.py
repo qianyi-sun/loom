@@ -143,7 +143,7 @@ async def _dispatch_via_chat_translator(
     api_key: str,
     model_name: str,
     team_id: UUID,
-    trial_id: UUID,
+    trial_id: UUID | None,
     step_id: str,
     settings: Any,
     failure_recorder: Callable[[str, str], Awaitable[None]],
@@ -246,10 +246,12 @@ async def responses(
             signing_key,
         )
     assert ctx.team_id is not None
-    assert ctx.trial_id is not None
+    assert ctx.token_subject is not None
     assert ctx.step_id is not None
     team_id = ctx.team_id
     trial_id = ctx.trial_id
+    execution_attempt_id = ctx.execution_attempt_id
+    request.state.execution_attempt_id = execution_attempt_id
     step_id = ctx.step_id
     model_name = payload.get("model")
     if not isinstance(model_name, str) or not model_name:
@@ -463,6 +465,7 @@ async def responses(
             session,
             team_id=team_id,
             trial_id=trial_id,
+            execution_attempt_id=execution_attempt_id,
             step_id=step_id,
             dialect="openai_responses",
             model=model_name,
@@ -668,6 +671,7 @@ async def _record_responses_call(
             session,
             team_id=team_id,
             trial_id=trial_id,
+            execution_attempt_id=getattr(request.state, "execution_attempt_id", None),
             step_id=step_id,
             dialect="openai_responses",
             model=model_name,
@@ -699,6 +703,7 @@ async def _record_failed_responses_call(
             session,
             team_id=team_id,
             trial_id=trial_id,
+            execution_attempt_id=getattr(request.state, "execution_attempt_id", None),
             step_id=step_id,
             dialect="openai_responses",
             model=model_name,

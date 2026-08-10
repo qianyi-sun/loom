@@ -269,6 +269,26 @@ async def test_register_worker_with_retry_does_not_retry_auth_failure() -> None:
     assert attempts == 1
 
 
+async def test_pipeline_registration_advertises_both_work_kinds() -> None:
+    recorded: dict[str, object] = {}
+
+    class _FakeCPClient:
+        async def register(self, **kwargs: object) -> dict[str, object]:
+            recorded.update(kwargs)
+            return {
+                "worker_id": str(uuid4()),
+                "capability_snapshot_digest": "sha256:" + "a" * 64,
+            }
+
+    await ml._register_worker_with_retry(  # type: ignore[attr-defined]
+        cp_client=_FakeCPClient(),
+        settings=_RegistrationSettings(),
+        pipeline_enabled=True,
+    )
+
+    assert recorded["supported_work_kinds"] == ["trial", "execution_attempt"]
+
+
 def test_worker_orphan_cleanup_retries_transient_control_plane_lookup(
     monkeypatch,
 ) -> None:  # type: ignore[no-untyped-def]

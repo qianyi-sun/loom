@@ -8,7 +8,7 @@ from typing import Any
 
 
 class RunnerPool:
-    """`max_concurrent` trials may execute simultaneously.
+    """`max_concurrent` Trial or ExecutionAttempt work items may execute.
 
     spawn() registers a coroutine that will acquire the semaphore before its
     body runs; concurrent spawns past the limit park inside the semaphore

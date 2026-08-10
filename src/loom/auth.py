@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 from uuid import UUID
 
 import jwt
@@ -59,6 +60,12 @@ def is_platform_admin_role(role: str | None) -> bool:
 
 
 @dataclass(frozen=True)
+class TokenSubject:
+    kind: Literal["trial", "execution_attempt"]
+    id: UUID
+
+
+@dataclass(frozen=True)
 class AuthContext:
     token_hash: bytes
     type: str
@@ -68,6 +75,7 @@ class AuthContext:
     # Plan 9 additive optional fields. Populated by the JWT branch;
     # remain None for DB-backed tokens.
     trial_id: UUID | None = None
+    execution_attempt_id: UUID | None = None
     step_id: str | None = None
     # cluster-deploy.md §Authentication / issue #72: per-trial step
     # JWTs additionally scope to a `provider_connection_id` so a
@@ -91,6 +99,14 @@ class AuthContext:
     csrf_hash: bytes | None = None
     auth_kind: str = "bearer"
 
+    @property
+    def token_subject(self) -> TokenSubject | None:
+        if self.trial_id is not None and self.execution_attempt_id is None:
+            return TokenSubject(kind="trial", id=self.trial_id)
+        if self.execution_attempt_id is not None and self.trial_id is None:
+            return TokenSubject(kind="execution_attempt", id=self.execution_attempt_id)
+        return None
+
 
 def is_admin(ctx: AuthContext) -> bool:
     """Return True for a platform-admin caller.
@@ -109,7 +125,9 @@ def is_admin(ctx: AuthContext) -> bool:
 def mint_step_jwt(
     *,
     team_id: UUID,
-    trial_id: UUID,
+    trial_id: UUID | None = None,
+    execution_attempt_id: UUID | None = None,
+    subject: TokenSubject | None = None,
     step_id: str,
     ttl_sec: int,
     signing_key: str,
@@ -124,17 +142,31 @@ def mint_step_jwt(
     Set `provider_connection_id_bound=True` with None to bind it to the
     platform route. Facade routes treat either bound value as authoritative
     over header/body transport and reject mismatches."""
+    if subject is not None:
+        if trial_id is not None or execution_attempt_id is not None:
+            raise ValueError("subject cannot be combined with legacy subject arguments")
+        trial_id = subject.id if subject.kind == "trial" else None
+        execution_attempt_id = subject.id if subject.kind == "execution_attempt" else None
+    if (trial_id is None) == (execution_attempt_id is None):
+        raise ValueError("exactly one token subject is required")
+
     now = datetime.now(UTC)
     payload: dict[str, object] = {
         "iss": "loom-control-plane",
         "sub": "step-session",
         "team_id": str(team_id),
-        "trial_id": str(trial_id),
         "step_id": step_id,
         "exp": int((now + timedelta(seconds=ttl_sec)).timestamp()),
         "iat": int(now.timestamp()),
         "scopes": ["llm:call"],
     }
+    if trial_id is not None:
+        payload["trial_id"] = str(trial_id)
+        payload["subject_kind"] = "trial"
+    else:
+        assert execution_attempt_id is not None
+        payload["execution_attempt_id"] = str(execution_attempt_id)
+        payload["subject_kind"] = "execution_attempt"
     if provider_connection_id is not None or provider_connection_id_bound:
         payload["provider_connection_id"] = (
             str(provider_connection_id) if provider_connection_id is not None else None
@@ -160,13 +192,22 @@ def verify_step_jwt(token: str, *, signing_key: str) -> AuthContext:
     provider_connection_id: UUID | None = (
         UUID(raw_conn_id) if isinstance(raw_conn_id, str) else None
     )
+    raw_trial_id = payload.get("trial_id")
+    raw_execution_attempt_id = payload.get("execution_attempt_id")
+    if (raw_trial_id is None) == (raw_execution_attempt_id is None):
+        raise jwt.InvalidTokenError("step JWT must carry exactly one subject")
     return AuthContext(
         token_hash=b"",  # synthetic — no DB row
         type="step_session",
         scopes=list(payload.get("scopes", [])),
         team_id=UUID(payload["team_id"]),
         expires_at=datetime.fromtimestamp(payload["exp"], tz=UTC),
-        trial_id=UUID(payload["trial_id"]),
+        trial_id=UUID(raw_trial_id) if isinstance(raw_trial_id, str) else None,
+        execution_attempt_id=(
+            UUID(raw_execution_attempt_id)
+            if isinstance(raw_execution_attempt_id, str)
+            else None
+        ),
         step_id=payload["step_id"],
         provider_connection_id=provider_connection_id,
         provider_connection_id_bound=provider_connection_id_bound,

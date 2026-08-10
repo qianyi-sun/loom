@@ -216,7 +216,7 @@ as the pinned Codex CLI provider config
 parses that namespaced query param, sanitizes it again, merges the safe
 controls into the provider request body, and records the resulting
 non-sensitive controls in `llm_calls.request_params`. Do not use
-`codex exec --settings` for this; pinned `@openai/codex@0.141.0` does
+`codex exec --settings` for this; pinned `@openai/codex@0.146.0` does
 not support that flag.
 
 For SkillLearnBench alignment reports, use

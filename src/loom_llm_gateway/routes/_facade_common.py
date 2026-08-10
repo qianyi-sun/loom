@@ -81,7 +81,7 @@ async def verify_facade_auth(
     )
     if ctx is None or "llm:call" not in ctx.scopes:
         raise HTTPException(status_code=401, detail="not authorized")
-    if ctx.trial_id is None or ctx.step_id is None or ctx.team_id is None:
+    if ctx.token_subject is None or ctx.step_id is None or ctx.team_id is None:
         raise HTTPException(
             status_code=403,
             detail="step-scoped token required (loom_step_<jwt>)",

@@ -10,6 +10,7 @@ surface that as `False` from the corresponding methods so callers can log
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.parse import quote
@@ -27,6 +28,46 @@ class StepTokenClient(Protocol):
         step_id: str,
         ttl_sec: int,
     ) -> str: ...
+
+
+@dataclass(frozen=True)
+class ExecutionAttemptClaimHeaders:
+    """The bearer-independent fencing identity for one Attempt claim.
+
+    The raw lease token is deliberately kept out of request bodies.  Mutation
+    callers supply their own stable ``request_id`` so an HTTP retry reuses the
+    server-side idempotency key rather than creating a second operation.
+    """
+
+    claim_id: UUID
+    lease_epoch: int
+    lease_token: str
+
+    def __post_init__(self) -> None:
+        if self.lease_epoch <= 0:
+            raise ValueError("lease_epoch must be positive")
+        if not self.lease_token:
+            raise ValueError("lease_token must be non-empty")
+
+    def as_headers(
+        self,
+        *,
+        request_id: UUID | None = None,
+        include_lease_token: bool = True,
+    ) -> dict[str, str]:
+        headers = {
+            "X-Loom-Claim-Id": str(self.claim_id),
+            "X-Loom-Lease-Epoch": str(self.lease_epoch),
+        }
+        if include_lease_token:
+            headers["X-Loom-Lease-Token"] = self.lease_token
+        if request_id is not None:
+            headers["X-Loom-Request-Id"] = str(request_id)
+        return headers
+
+
+# Short compatibility name for callers that do not need the subject repeated.
+AttemptClaimHeaders = ExecutionAttemptClaimHeaders
 
 
 @dataclass
@@ -61,18 +102,27 @@ class HttpControlPlaneClient:
         capabilities: list[dict[str, Any]],
         max_concurrent: int = 1,
         pool_name: str = "default",
+        supported_work_kinds: Sequence[str] | None = None,
+        capability_snapshot_digest: str | None = None,
     ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "hostname": hostname,
+            "version": version,
+            "capabilities": capabilities,
+            "max_concurrent": max_concurrent,
+            "pool_name": pool_name,
+        }
+        # Omission is intentional rolling-upgrade compatibility: old workers
+        # continue to register as Trial-only with the byte-compatible body.
+        if supported_work_kinds is not None:
+            payload["supported_work_kinds"] = list(supported_work_kinds)
+        if capability_snapshot_digest is not None:
+            payload["capability_snapshot_digest"] = capability_snapshot_digest
         client, owned = self._http()
         try:
             r = await client.post(
                 "/workers/register", headers=self._headers,
-                json={
-                    "hostname": hostname,
-                    "version": version,
-                    "capabilities": capabilities,
-                    "max_concurrent": max_concurrent,
-                    "pool_name": pool_name,
-                },
+                json=payload,
             )
             r.raise_for_status()
             return r.json()  # type: ignore[no-any-return]
@@ -99,6 +149,541 @@ class HttpControlPlaneClient:
         finally:
             if owned:
                 await client.aclose()
+
+    async def claim_work(
+        self,
+        *,
+        worker_id: UUID,
+        capability_snapshot_digest: str,
+        free_slots: int,
+        supported_work_kinds: Sequence[str] = ("trial", "execution_attempt"),
+    ) -> dict[str, Any] | None:
+        """Claim one item from the unified Trial/ExecutionAttempt scheduler.
+
+        ``free_slots`` is only the worker's advisory view.  The Control Plane
+        remains authoritative and may return 204 or reject a stale capability
+        snapshot even when this process believes that it has capacity.
+        """
+
+        if free_slots < 1:
+            raise ValueError("free_slots must be positive")
+        client, owned = self._http()
+        try:
+            r = await client.post(
+                "/work/claim",
+                headers=self._headers,
+                json={
+                    "capability_snapshot_digest": capability_snapshot_digest,
+                    "free_slots": free_slots,
+                    "schema_version": "loom.work-claim-request.v1",
+                    "supported_work_kinds": list(supported_work_kinds),
+                    "worker_id": str(worker_id),
+                },
+            )
+            if r.status_code == 204:
+                return None
+            r.raise_for_status()
+            return r.json()  # type: ignore[no-any-return]
+        finally:
+            if owned:
+                await client.aclose()
+
+    async def heartbeat_execution_attempt(
+        self,
+        *,
+        attempt_id: UUID,
+        claim: ExecutionAttemptClaimHeaders,
+        request_id: UUID,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return await self._post_execution_attempt_report(
+            attempt_id=attempt_id,
+            operation="heartbeats",
+            claim=claim,
+            request_id=request_id,
+            payload=payload,
+        )
+
+    async def get_execution_attempt_control(
+        self,
+        *,
+        attempt_id: UUID,
+        claim: ExecutionAttemptClaimHeaders,
+        after_seq: int,
+    ) -> dict[str, Any]:
+        client, owned = self._http()
+        try:
+            r = await client.get(
+                f"/execution-attempts/{attempt_id}/control",
+                headers={**self._headers, **claim.as_headers()},
+                params={"after_seq": after_seq},
+            )
+            r.raise_for_status()
+            return r.json()  # type: ignore[no-any-return]
+        finally:
+            if owned:
+                await client.aclose()
+
+    async def append_execution_attempt_events(
+        self,
+        *,
+        attempt_id: UUID,
+        claim: ExecutionAttemptClaimHeaders,
+        request_id: UUID,
+        events: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        return await self._post_execution_attempt_report(
+            attempt_id=attempt_id,
+            operation="events",
+            claim=claim,
+            request_id=request_id,
+            payload={"events": [dict(event) for event in events]},
+        )
+
+    async def report_input_materialization_evidence(
+        self,
+        *,
+        attempt_id: UUID,
+        claim: ExecutionAttemptClaimHeaders,
+        request_id: UUID,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return await self._post_execution_attempt_report(
+            attempt_id=attempt_id,
+            operation="input-materialization-evidence",
+            claim=claim,
+            request_id=request_id,
+            payload=payload,
+        )
+
+    async def report_execution_attempt_started(
+        self,
+        *,
+        attempt_id: UUID,
+        claim: ExecutionAttemptClaimHeaders,
+        request_id: UUID,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return await self._post_execution_attempt_report(
+            attempt_id=attempt_id,
+            operation="started",
+            claim=claim,
+            request_id=request_id,
+            payload=payload,
+        )
+
+    async def complete_execution_attempt(
+        self,
+        *,
+        attempt_id: UUID,
+        claim: ExecutionAttemptClaimHeaders,
+        request_id: UUID,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return await self._post_execution_attempt_report(
+            attempt_id=attempt_id,
+            operation="complete",
+            claim=claim,
+            request_id=request_id,
+            payload=payload,
+        )
+
+    async def fail_execution_attempt(
+        self,
+        *,
+        attempt_id: UUID,
+        claim: ExecutionAttemptClaimHeaders,
+        request_id: UUID,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return await self._post_execution_attempt_report(
+            attempt_id=attempt_id,
+            operation="failed",
+            claim=claim,
+            request_id=request_id,
+            payload=payload,
+        )
+
+    async def acknowledge_execution_attempt_cancel(
+        self,
+        *,
+        attempt_id: UUID,
+        claim: ExecutionAttemptClaimHeaders,
+        request_id: UUID,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return await self._post_execution_attempt_report(
+            attempt_id=attempt_id,
+            operation="cancel-ack",
+            claim=claim,
+            request_id=request_id,
+            payload=payload,
+        )
+
+    async def acknowledge_worker_lost_cleanup(
+        self,
+        *,
+        attempt_id: UUID,
+        claim_id: UUID,
+        lease_epoch: int,
+        request_id: UUID,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Report positive cleanup proof after the Attempt lease expired.
+
+        This is the one report that intentionally omits the now-expired raw
+        lease token; the worker/node-reaper bearer plus claim id and epoch are
+        the server-side fencing inputs.
+        """
+
+        if lease_epoch <= 0:
+            raise ValueError("lease_epoch must be positive")
+        client, owned = self._http()
+        try:
+            r = await client.post(
+                f"/execution-attempts/{attempt_id}/worker-lost-cleanup-ack",
+                headers={
+                    **self._headers,
+                    "X-Loom-Claim-Id": str(claim_id),
+                    "X-Loom-Lease-Epoch": str(lease_epoch),
+                    "X-Loom-Request-Id": str(request_id),
+                },
+                json=dict(payload),
+            )
+            r.raise_for_status()
+            return self._response_json(r)
+        finally:
+            if owned:
+                await client.aclose()
+
+    async def read_execution_attempt_input_manifest(
+        self,
+        *,
+        attempt_id: UUID,
+        binding_name: str,
+        item_key: str,
+        manifest_sha256: str,
+        claim: ExecutionAttemptClaimHeaders,
+    ) -> httpx.Response:
+        path = self._execution_attempt_input_path(
+            attempt_id=attempt_id,
+            binding_name=binding_name,
+            item_key=item_key,
+        )
+        return await self._get_claim_bound_input(
+            path=f"{path}/manifest",
+            claim=claim,
+            if_match_sha256=manifest_sha256,
+        )
+
+    async def read_execution_attempt_input_file(
+        self,
+        *,
+        attempt_id: UUID,
+        binding_name: str,
+        item_key: str,
+        file_index: int,
+        manifest_sha256: str,
+        claim: ExecutionAttemptClaimHeaders,
+        range_start: int | None = None,
+    ) -> httpx.Response:
+        if file_index < 0:
+            raise ValueError("file_index must be non-negative")
+        path = self._execution_attempt_input_path(
+            attempt_id=attempt_id,
+            binding_name=binding_name,
+            item_key=item_key,
+        )
+        return await self._get_claim_bound_input(
+            path=f"{path}/files/{file_index}",
+            claim=claim,
+            if_match_sha256=manifest_sha256,
+            range_start=range_start,
+        )
+
+    async def get_acceptance_fault_arm(
+        self,
+        *,
+        attempt_id: UUID,
+        seam: str,
+        claim: ExecutionAttemptClaimHeaders,
+    ) -> dict[str, Any] | None:
+        client, owned = self._http()
+        try:
+            r = await client.get(
+                f"/api/v1/internal/pipeline-acceptance/fault-arms/by-attempt/{attempt_id}",
+                headers={**self._headers, **claim.as_headers()},
+                params={"seam": seam},
+            )
+            if r.status_code == 404:
+                return None
+            r.raise_for_status()
+            return self._response_json(r)
+        finally:
+            if owned:
+                await client.aclose()
+
+    async def fire_acceptance_fault_arm(
+        self,
+        *,
+        arm_id: UUID,
+        claim: ExecutionAttemptClaimHeaders,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return await self._post_internal_claim_bound(
+            path=f"/api/v1/internal/pipeline-acceptance/fault-arms/{arm_id}/fire",
+            claim=claim,
+            payload=payload,
+        )
+
+    async def acknowledge_acceptance_fault_arm(
+        self,
+        *,
+        arm_id: UUID,
+        claim: ExecutionAttemptClaimHeaders,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return await self._post_internal_claim_bound(
+            path=f"/api/v1/internal/pipeline-acceptance/fault-arms/{arm_id}/ack",
+            claim=claim,
+            payload=payload,
+        )
+
+    async def prepare_final_output(
+        self,
+        *,
+        attempt_id: UUID,
+        claim: ExecutionAttemptClaimHeaders,
+        request_id: UUID,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return await self._post_internal_claim_bound(
+            path=(
+                f"/api/v1/internal/execution-attempts/{attempt_id}/"
+                "final-output-sessions"
+            ),
+            claim=claim,
+            request_id=request_id,
+            payload=payload,
+        )
+
+    async def renew_final_output_token(
+        self,
+        *,
+        attempt_id: UUID,
+        session_id: UUID,
+        claim: ExecutionAttemptClaimHeaders,
+    ) -> dict[str, Any]:
+        return await self._post_internal_claim_bound(
+            path=(
+                f"/api/v1/internal/execution-attempts/{attempt_id}/"
+                f"final-output-sessions/{session_id}/renew"
+            ),
+            claim=claim,
+            payload={"schema_version": "loom.upload-token-renew.v1"},
+        )
+
+    async def upload_final_output_part(
+        self,
+        *,
+        attempt_id: UUID,
+        session_id: UUID,
+        file_index: int,
+        part_number: int,
+        claim: ExecutionAttemptClaimHeaders,
+        request_id: UUID,
+        upload_token: str,
+        content_sha256: str,
+        content: bytes,
+    ) -> dict[str, Any]:
+        client, owned = self._http()
+        try:
+            r = await client.put(
+                f"/api/v1/internal/execution-attempts/{attempt_id}/"
+                f"final-output-sessions/{session_id}/files/{file_index}/parts/{part_number}",
+                headers={
+                    **self._headers,
+                    **claim.as_headers(request_id=request_id),
+                    "X-Loom-Upload-Token": upload_token,
+                    "X-Loom-Content-Sha256": content_sha256,
+                    "Content-Length": str(len(content)),
+                },
+                content=content,
+            )
+            r.raise_for_status()
+            return self._response_json(r)
+        finally:
+            if owned:
+                await client.aclose()
+
+    async def complete_final_output_file(
+        self,
+        *,
+        attempt_id: UUID,
+        session_id: UUID,
+        file_index: int,
+        claim: ExecutionAttemptClaimHeaders,
+        request_id: UUID,
+        upload_token: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return await self._post_internal_claim_bound(
+            path=(
+                f"/api/v1/internal/execution-attempts/{attempt_id}/"
+                f"final-output-sessions/{session_id}/files/{file_index}/complete"
+            ),
+            claim=claim,
+            request_id=request_id,
+            payload=payload,
+            extra_headers={"X-Loom-Upload-Token": upload_token},
+        )
+
+    async def commit_final_output_session(
+        self,
+        *,
+        attempt_id: UUID,
+        session_id: UUID,
+        claim: ExecutionAttemptClaimHeaders,
+        request_id: UUID,
+        upload_token: str,
+    ) -> dict[str, Any]:
+        return await self._post_internal_claim_bound(
+            path=(
+                f"/api/v1/internal/execution-attempts/{attempt_id}/"
+                f"final-output-sessions/{session_id}/commit"
+            ),
+            claim=claim,
+            request_id=request_id,
+            payload={"schema_version": "loom.final-output-session-commit.v1"},
+            extra_headers={"X-Loom-Upload-Token": upload_token},
+        )
+
+    async def abort_final_output_session(
+        self,
+        *,
+        attempt_id: UUID,
+        session_id: UUID,
+        claim: ExecutionAttemptClaimHeaders,
+        request_id: UUID,
+        reason: str,
+    ) -> dict[str, Any]:
+        return await self._post_internal_claim_bound(
+            path=(
+                f"/api/v1/internal/execution-attempts/{attempt_id}/"
+                f"final-output-sessions/{session_id}/abort"
+            ),
+            claim=claim,
+            request_id=request_id,
+            payload={"schema_version": "loom.final-output-abort.v1", "reason": reason},
+        )
+
+    async def _post_internal_claim_bound(
+        self,
+        *,
+        path: str,
+        claim: ExecutionAttemptClaimHeaders,
+        payload: Mapping[str, Any],
+        request_id: UUID | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+    ) -> dict[str, Any]:
+        client, owned = self._http()
+        try:
+            r = await client.post(
+                path,
+                headers={
+                    **self._headers,
+                    **claim.as_headers(request_id=request_id),
+                    **dict(extra_headers or {}),
+                },
+                json=dict(payload),
+            )
+            r.raise_for_status()
+            return self._response_json(r)
+        finally:
+            if owned:
+                await client.aclose()
+
+    async def _post_execution_attempt_report(
+        self,
+        *,
+        attempt_id: UUID,
+        operation: str,
+        claim: ExecutionAttemptClaimHeaders,
+        request_id: UUID,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        client, owned = self._http()
+        try:
+            r = await client.post(
+                f"/execution-attempts/{attempt_id}/{operation}",
+                headers={
+                    **self._headers,
+                    **claim.as_headers(request_id=request_id),
+                },
+                json=dict(payload),
+            )
+            r.raise_for_status()
+            return self._response_json(r)
+        finally:
+            if owned:
+                await client.aclose()
+
+    async def _get_claim_bound_input(
+        self,
+        *,
+        path: str,
+        claim: ExecutionAttemptClaimHeaders,
+        if_match_sha256: str,
+        range_start: int | None = None,
+    ) -> httpx.Response:
+        headers = {
+            **self._headers,
+            **claim.as_headers(),
+            "If-Match": self._quoted_etag(if_match_sha256),
+        }
+        if range_start is not None:
+            if range_start < 0:
+                raise ValueError("range_start must be non-negative")
+            headers["Range"] = f"bytes={range_start}-"
+        client, owned = self._http()
+        try:
+            # AsyncClient.get buffers the body before returning.  The Response
+            # therefore remains readable after an owned one-shot client closes.
+            r = await client.get(path, headers=headers)
+            r.raise_for_status()
+            return r
+        finally:
+            if owned:
+                await client.aclose()
+
+    @staticmethod
+    def _execution_attempt_input_path(
+        *,
+        attempt_id: UUID,
+        binding_name: str,
+        item_key: str,
+    ) -> str:
+        binding = quote(binding_name, safe="")
+        item = quote(item_key, safe="")
+        return (
+            f"/api/v1/internal/execution-attempts/{attempt_id}"
+            f"/input-bindings/{binding}/items/{item}"
+        )
+
+    @staticmethod
+    def _quoted_etag(value: str) -> str:
+        if value.startswith('"') and value.endswith('"'):
+            return value
+        return f'"{value}"'
+
+    @staticmethod
+    def _response_json(response: httpx.Response) -> dict[str, Any]:
+        if not response.content:
+            return {}
+        body = response.json()
+        if not isinstance(body, dict):
+            raise ValueError("Control Plane response must be a JSON object")
+        return body
 
     async def heartbeat(self, worker_id: UUID, *, status: str | None = None) -> None:
         client, owned = self._http()
