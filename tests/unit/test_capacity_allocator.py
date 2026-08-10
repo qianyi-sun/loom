@@ -7,7 +7,11 @@ from uuid import UUID
 
 import pytest
 
-from loom_capacity_manager.allocator import ShadowAllocatorError, allocate_shadow
+from loom_capacity_manager.allocator import (
+    AllocatorSearchBounds,
+    ShadowAllocatorError,
+    allocate_shadow,
+)
 from loom_capacity_manager.contracts import (
     FairnessCursorV1,
     FixedClaimV1,
@@ -693,3 +697,32 @@ def test_shadow_output_is_canonical_and_never_executable() -> None:
     assert all(
         item.rate_state == "unavailable_package_1" for item in first.hypothetical_launch_rank
     )
+
+
+def test_explicit_allocator_work_bounds_fail_closed() -> None:
+    subject = allocator_subject(71, account_id="owner-a", pending=_pending("task", 1))
+    value = allocator_input((subject,), gb10_slots=1, oldlab_slots=1)
+
+    with pytest.raises(ShadowAllocatorError, match="decision limit"):
+        allocate_shadow(
+            value,
+            bounds=AllocatorSearchBounds(max_allocation_decisions=0),
+        )
+    with pytest.raises(ShadowAllocatorError, match="topology search state limit"):
+        allocate_shadow(
+            value,
+            bounds=AllocatorSearchBounds(topology_max_states=0),
+        )
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"max_allocation_decisions": True},
+        {"topology_max_states": -1},
+        {"topology_deadline_seconds": float("inf")},
+    ],
+)
+def test_allocator_work_bounds_reject_noncanonical_values(kwargs: dict[str, object]) -> None:
+    with pytest.raises(ValueError):
+        AllocatorSearchBounds(**kwargs)  # type: ignore[arg-type]

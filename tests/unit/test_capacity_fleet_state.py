@@ -113,3 +113,11 @@ def test_checked_in_fleet_files_are_explicitly_synthetic() -> None:
         for domain in pool.resource_domains
         for node in domain.nodes
     )
+
+
+def test_fleet_state_loader_rejects_symlink_input(tmp_path: Path) -> None:
+    linked = tmp_path / "fleet.toml"
+    linked.symlink_to((FIXTURES / "fleet-v1.toml").resolve())
+
+    with pytest.raises(FleetStateError, match="nonsymlink"):
+        load_fleet_manifest(linked)

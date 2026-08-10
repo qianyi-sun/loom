@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from fractions import Fraction
 from hashlib import sha256
 from itertools import combinations_with_replacement
+from math import isfinite
 from typing import Literal
 from uuid import UUID
 
@@ -47,6 +48,7 @@ from loom_capacity_manager.fleet_state import (
     validate_profile_narrowing,
 )
 from loom_capacity_manager.topology import (
+    SearchBudget,
     TopologyInfeasible,
     TopologySearchLimit,
     pack_topology,
@@ -58,6 +60,34 @@ _PENDING_COMMITMENT_STATES = frozenset({"proposed", "accepted", "pending", "subm
 
 class ShadowAllocatorError(RuntimeError):
     """Raised when no complete bounded shadow allocation can be proven."""
+
+
+@dataclass(frozen=True, slots=True)
+class AllocatorSearchBounds:
+    """Explicit deterministic work ceilings for one shadow calculation."""
+
+    max_allocation_decisions: int = MAX_ALLOCATION_DECISIONS
+    topology_max_states: int = 250_000
+    topology_deadline_seconds: float = 0.5
+
+    def __post_init__(self) -> None:
+        if type(self.max_allocation_decisions) is not int or self.max_allocation_decisions < 0:
+            raise ValueError("max_allocation_decisions must be a nonnegative integer")
+        if type(self.topology_max_states) is not int or self.topology_max_states < 0:
+            raise ValueError("topology_max_states must be a nonnegative integer")
+        if (
+            isinstance(self.topology_deadline_seconds, bool)
+            or not isinstance(self.topology_deadline_seconds, (int, float))
+            or not isfinite(self.topology_deadline_seconds)
+            or self.topology_deadline_seconds < 0
+        ):
+            raise ValueError("topology_deadline_seconds must be finite and nonnegative")
+
+    def topology_budget(self) -> SearchBudget:
+        return SearchBudget(
+            max_states=self.topology_max_states,
+            deadline_seconds=self.topology_deadline_seconds,
+        )
 
 
 @dataclass(slots=True)
@@ -130,6 +160,7 @@ class _PoolState:
     fixed_commitments: tuple[ObservedCommitmentV1, ...]
     increase_eligible: bool
     blockers: set[str]
+    topology_budget: SearchBudget
     plans_by_subject: dict[UUID, tuple[_ShapeInstance, ...]] = field(default_factory=dict)
     witness: PackingWitnessV1 | None = None
 
@@ -167,7 +198,7 @@ class _PoolState:
             ),
         )
         try:
-            return pack_topology(request)
+            return pack_topology(request, budget=self.topology_budget)
         except TopologyInfeasible:
             return None
         except TopologySearchLimit as exc:
@@ -502,9 +533,10 @@ def _capacity_binding_is_exact(
 
 
 class _AllocationState:
-    def __init__(self, value: AllocationInputV1) -> None:
+    def __init__(self, value: AllocationInputV1, bounds: AllocatorSearchBounds) -> None:
         self.value = value
-        self.budget = _DecisionBudget()
+        self.bounds = bounds
+        self.budget = _DecisionBudget(bounds.max_allocation_decisions)
         self.global_blockers: set[str] = set()
         self.order = 0
         self._validate_input()
@@ -814,6 +846,7 @@ class _AllocationState:
                 ),
                 increase_eligible=eligible,
                 blockers=blockers,
+                topology_budget=self.bounds.topology_budget(),
             )
             witness = state.try_witness(subject_id=UUID(int=0), replacement=())
             if witness is None:  # fixed-only packing must return a conservative witness
@@ -1880,10 +1913,19 @@ class _AllocationState:
         )
 
 
-def allocate_shadow(value: AllocationInputV1) -> ShadowEpochV1:
+def allocate_shadow(
+    value: AllocationInputV1,
+    *,
+    bounds: AllocatorSearchBounds = AllocatorSearchBounds(),  # noqa: B008
+) -> ShadowEpochV1:
     """Compute one complete non-executable global fleet allocation epoch."""
 
-    return _AllocationState(value).allocate()
+    return _AllocationState(value, bounds).allocate()
 
 
-__all__ = ["MAX_ALLOCATION_DECISIONS", "ShadowAllocatorError", "allocate_shadow"]
+__all__ = [
+    "MAX_ALLOCATION_DECISIONS",
+    "AllocatorSearchBounds",
+    "ShadowAllocatorError",
+    "allocate_shadow",
+]

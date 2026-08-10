@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import stat
 import sys
 import tomllib
 from collections.abc import Sequence
@@ -79,7 +81,37 @@ class TopologyInventoryReport:
 
 def _read_toml(path: Path) -> dict[str, Any]:
     try:
-        payload = path.read_bytes()
+        metadata = path.lstat()
+    except OSError as exc:
+        raise FleetStateError(f"cannot read fleet-state document {path.name!r}") from exc
+    if path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+        raise FleetStateError("fleet-state document must be a regular nonsymlink file")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if (opened.st_dev, opened.st_ino) != (
+                metadata.st_dev,
+                metadata.st_ino,
+            ) or not stat.S_ISREG(opened.st_mode):
+                raise FleetStateError("fleet-state document changed while opening")
+            chunks: list[bytes] = []
+            total = 0
+            while total <= MAX_CONTRACT_BYTES:
+                chunk = os.read(
+                    descriptor,
+                    min(64 * 1024, MAX_CONTRACT_BYTES + 1 - total),
+                )
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+            payload = b"".join(chunks)
+        finally:
+            os.close(descriptor)
+    except FleetStateError:
+        raise
     except OSError as exc:
         raise FleetStateError(f"cannot read fleet-state document {path.name!r}") from exc
     if len(payload) > MAX_CONTRACT_BYTES:

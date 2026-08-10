@@ -113,9 +113,9 @@ def test_capacity_schema_has_independent_revision_table(
     environment_engine = create_engine(postgres_url)
     try:
         with capacity_engine.connect() as connection:
-            assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == (
-                "capacity_0001"
-            )
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == ("capacity_0001")
         with environment_engine.connect() as connection:
             environment_revision = connection.execute(
                 text("SELECT version_num FROM alembic_version")
@@ -134,9 +134,7 @@ async def test_capacity_schema_error_never_names_environment_migrations(
         await assert_capacity_schema_at_head(empty_capacity_engine)
     message = str(caught.value)
     assert "capacity_migrations/alembic.ini" in message
-    assert "migrations/alembic.ini" not in message.replace(
-        "capacity_migrations/alembic.ini", ""
-    )
+    assert "migrations/alembic.ini" not in message.replace("capacity_migrations/alembic.ini", "")
 
 
 async def test_capacity_schema_startup_returns_numeric_head(

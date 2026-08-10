@@ -13,6 +13,7 @@ from loom_capacity_manager.contracts import (
     DemandSnapshotV1,
     FairnessCursorV1,
     FleetManifestV1,
+    InputFreshnessV1,
     ResourceVectorV1,
     ShadowAllocationV1,
     StrictV1Model,
@@ -22,6 +23,7 @@ from loom_capacity_manager.contracts import (
 )
 from tests.capacity_fixtures import (
     DEMAND_REPORTER_ID,
+    FIXED_TIME,
     SUBJECT_ID,
     SUBJECT_INCARNATION,
     demand_snapshot,
@@ -31,6 +33,16 @@ from tests.capacity_fixtures import (
     shape,
     subject_configuration,
 )
+
+
+def test_optional_freshness_timestamp_round_trips_through_strict_json() -> None:
+    value = InputFreshnessV1(
+        state="valid",
+        last_payload_digest="a" * 64,
+        database_received_at=FIXED_TIME,
+    )
+
+    assert InputFreshnessV1.model_validate_json(canonical_bytes(value)) == value
 
 
 def test_unknown_version_extra_field_float_and_bool_fail_closed() -> None:

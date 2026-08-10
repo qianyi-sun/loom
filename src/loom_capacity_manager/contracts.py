@@ -703,6 +703,17 @@ class InputFreshnessV1(StrictV1Model):
     last_payload_digest: Digest | None = None
     database_received_at: datetime | None = None
 
+    @field_validator("database_received_at", mode="before")
+    @classmethod
+    def _parse_time(cls, value: datetime | str | None) -> datetime | str | None:
+        if isinstance(value, str):
+            timestamp = f"{value[:-1]}+00:00" if value.endswith("Z") else value
+            try:
+                return datetime.fromisoformat(timestamp)
+            except ValueError:
+                return value
+        return value
+
     @field_validator("database_received_at")
     @classmethod
     def _time(cls, value: datetime | None) -> datetime | None:
