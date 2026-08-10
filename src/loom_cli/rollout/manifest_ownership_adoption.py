@@ -51,6 +51,17 @@ NETWORK_POLICY_CONVERGENCE_TARGETS = (
     "networking.k8s.io/v1|NetworkPolicy|loom-staging|loom-staging-data-lifecycle",
 )
 _CONTROLLER_ONLY_MANAGERS = frozenset({"kube-controller-manager", "nginx-ingress-controller"})
+_SCOPED_CONTROLLER_ONLY_MANAGERS = frozenset({"k3s", "manager"})
+_K3S_STATUS_RESOURCES = frozenset(
+    {
+        ("apps/v1", "DaemonSet"),
+        ("apps/v1", "Deployment"),
+        ("apps/v1", "StatefulSet"),
+        ("batch/v1", "CronJob"),
+        ("policy/v1", "PodDisruptionBudget"),
+    }
+)
+_CNPG_CLUSTER_IDENTITY = "postgresql.cnpg.io/v1|Cluster|loom-staging|loom-postgres"
 _LEGACY_MANAGERS = _ALLOWED_MANAGERS - _CONTROLLER_ONLY_MANAGERS - {MANIFEST_FIELD_MANAGER}
 
 
@@ -500,6 +511,28 @@ def _project(desired: object, live: object) -> object:
     return copy.deepcopy(live)
 
 
+def _is_scoped_controller_authority(entry: Mapping[str, object], *, identity: str) -> bool:
+    manager = entry.get("manager")
+    fields_v1 = entry.get("fieldsV1")
+    if entry.get("operation") != "Update" or entry.get("subresource") != "status":
+        return False
+    if not isinstance(fields_v1, dict):
+        return False
+    if manager == "k3s":
+        parts = identity.split("|", 3)
+        return (
+            len(parts) == 4
+            and (parts[0], parts[1]) in _K3S_STATUS_RESOURCES
+            and set(fields_v1) <= {"f:metadata", "f:status"}
+            and "f:status" in fields_v1
+        )
+    return (
+        manager == "manager"
+        and identity == _CNPG_CLUSTER_IDENTITY
+        and set(fields_v1) == {"f:status"}
+    )
+
+
 def _validate_managed_fields(fields: list[object], *, identity: str) -> None:
     managers: set[str] = set()
     for entry in fields:
@@ -508,7 +541,10 @@ def _validate_managed_fields(fields: list[object], *, identity: str) -> None:
         manager = entry.get("manager")
         if (
             not isinstance(manager, str)
-            or manager not in _ALLOWED_MANAGERS
+            or (
+                manager not in _ALLOWED_MANAGERS
+                and not _is_scoped_controller_authority(entry, identity=identity)
+            )
             or entry.get("operation") not in {"Apply", "Update"}
             or not isinstance(entry.get("fieldsV1"), dict)
         ):
@@ -519,7 +555,7 @@ def _validate_managed_fields(fields: list[object], *, identity: str) -> None:
         ):
             raise ManifestOwnershipAdoptionError("managed-field authority is unrecognized")
         managers.add(manager)
-    if not managers - _CONTROLLER_ONLY_MANAGERS:
+    if not managers - _CONTROLLER_ONLY_MANAGERS - _SCOPED_CONTROLLER_ONLY_MANAGERS:
         raise ManifestOwnershipAdoptionError("recognized managed-field authority is absent")
 
 

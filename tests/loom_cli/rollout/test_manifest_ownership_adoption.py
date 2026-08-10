@@ -10,6 +10,7 @@ import yaml  # type: ignore[import-untyped]
 from loom_cli.rollout.manifest_ownership_adoption import (
     ManagedFieldsCleanup,
     ManifestOwnershipAdoptionError,
+    _validate_managed_fields,
     build_managed_fields_cleanups,
     build_manifest_ownership_adoption_plan,
     managed_fields_cleanup_argv,
@@ -300,6 +301,46 @@ def test_plan_rejects_unknown_manager_target_and_prestate_drift() -> None:
             candidate_sha=_SHA,
             candidate_tree=_TREE,
             mutation_epoch=2,
+        )
+
+
+def test_live_k3s_and_cnpg_status_managers_are_scoped_controller_authority() -> None:
+    legacy = _managed_fields("kubectl-client-side-apply")
+    k3s_status = {
+        "manager": "k3s",
+        "operation": "Update",
+        "apiVersion": "batch/v1",
+        "subresource": "status",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {"f:status": {}},
+    }
+    cnpg_status = {
+        "manager": "manager",
+        "operation": "Update",
+        "apiVersion": "postgresql.cnpg.io/v1",
+        "subresource": "status",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {"f:status": {}},
+    }
+
+    _validate_managed_fields(
+        [*legacy, k3s_status],
+        identity="batch/v1|CronJob|loom-staging|loom-staging-data-lifecycle",
+    )
+    _validate_managed_fields(
+        [*legacy, cnpg_status],
+        identity="postgresql.cnpg.io/v1|Cluster|loom-staging|loom-postgres",
+    )
+
+    with pytest.raises(ManifestOwnershipAdoptionError, match="unrecognized"):
+        _validate_managed_fields(
+            [*legacy, {**k3s_status, "subresource": ""}],
+            identity="batch/v1|CronJob|loom-staging|loom-staging-data-lifecycle",
+        )
+    with pytest.raises(ManifestOwnershipAdoptionError, match="unrecognized"):
+        _validate_managed_fields(
+            [*legacy, cnpg_status],
+            identity="postgresql.cnpg.io/v1|Cluster|loom-staging|unexpected",
         )
 
 
