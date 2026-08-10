@@ -39,7 +39,7 @@ from loom_cli.rollout.gb10_rehearsal import (
     GB10RehearsalAuthority,
     GB10RehearsalEvidence,
 )
-from loom_cli.rollout.image_readiness import REHEARSAL_POSTGRES_IMAGE
+from loom_cli.rollout.image_readiness import REHEARSAL_POSTGRES_IMAGE, _inspect_registry_manifest
 from loom_cli.rollout.preflight_credential_paths import REHEARSAL_KUBECONFIG_PATH
 from loom_cli.rollout.production_defaults_readiness import ProductionDefaultsArtifact
 from loom_cli.rollout.rehearsal_action_source import (
@@ -1811,35 +1811,19 @@ class IsolatedRehearsalExecutor:
         expected = plan.image_digests.get(name)
         if expected is None:
             return None
-        value = self._text_command(
-            (
-                "docker",
-                "manifest",
-                "inspect",
-                "--insecure",
-                "--verbose",
-                rehearsal_image_push_reference(plan, name),
-            ),
-            timeout=60,
-            max_bytes=_MAX_OUTPUT_BYTES,
+
+        def inspect(argv: Sequence[str], payload: Path | None) -> CommandResult:
+            if payload is not None:
+                raise RuntimeError("registry manifest inspection payload is invalid")
+            return self.run(argv, None, 60)
+
+        observed_manifest = _inspect_registry_manifest(
+            inspect,
+            rehearsal_image_push_reference(plan, name),
+            expected_image_id=expected,
         )
-        try:
-            payload = json.loads(value) if value is not None else None
-        except json.JSONDecodeError:
-            return None
-        if not isinstance(payload, dict):
-            return None
-        manifest = payload.get("SchemaV2Manifest", payload)
-        descriptor = payload.get("Descriptor")
-        config = manifest.get("config") if isinstance(manifest, dict) else None
-        config_digest = config.get("digest") if isinstance(config, dict) else None
-        manifest_digest = descriptor.get("digest") if isinstance(descriptor, dict) else None
         expected_manifest = plan.registry_digests.get(name)
-        if (
-            expected_manifest is None
-            or config_digest != expected
-            or manifest_digest != expected_manifest
-        ):
+        if expected_manifest is None or observed_manifest != expected_manifest:
             return None
         return expected, expected_manifest
 
