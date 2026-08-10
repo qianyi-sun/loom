@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import tomllib
 from pathlib import Path
 
 GUARD_ROOT = Path("src/loom_capacity_guard")
@@ -69,3 +70,12 @@ def test_capacity_guard_migrations_have_no_candidate_database_fallback() -> None
     assert "LOOM_DB_URL" not in source
     assert "LOOM_CP_DB_URL" not in source
     assert "LOOM_CAPACITY_DB_URL" not in source
+
+
+def test_capacity_guard_is_in_default_static_validation() -> None:
+    project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    assert "src/loom_capacity_guard" in project["tool"]["mypy"]["files"]
+
+    workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+    ruff_command = "ruff check src tests packages migrations capacity_guard_migrations"
+    assert ruff_command in workflow

@@ -423,7 +423,7 @@ jobs:
           uv pip check --python .venv/bin/python
 
       - name: Ruff
-        run: uv run --no-sync ruff check src tests packages migrations
+        run: uv run --no-sync ruff check src tests packages migrations capacity_guard_migrations
 
       - name: Mypy (strict)
         run: uv run --no-sync mypy
