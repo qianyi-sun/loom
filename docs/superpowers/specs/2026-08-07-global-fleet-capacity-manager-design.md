@@ -1,6 +1,8 @@
 # Global Fleet Capacity Manager Design
 
-Status: approved in conversation; written specification pending user review
+Status: approved after iterative self-review; implementation planning authorized
+Live activation: not authorized; gated by the Activation Boundary
+Last reviewed: 2026-08-10
 
 Date: 2026-08-07
 
@@ -306,10 +308,18 @@ old-generation commitment has been selected for replacement.
 Priority membership is derived server-side. A dynamic development user cannot
 promote an environment to staging or production.
 
-Static policies are applied through environment-state tooling to the
-management API. Dynamic policies and the dev-instance registry change in the
-same management-database transaction so there is no second capacity source of
-truth.
+Static subject policy and worker-profile references are applied through
+environment-state tooling to the management API. One separately reviewed
+fleet-state manifest owns global pool/resource-domain, tier, account, and
+protocol generations and publishes them once to that API. For dynamic users it
+owns account-policy templates and limits; authenticated-principal account
+instances are created transactionally from those templates rather than listed
+as mutable fleet-state names. After migration, an
+environment-state manifest may reference those immutable fleet generations and
+narrow a profile, but cannot carry an authoritative copy of global controller,
+partition, node, or envelope fields. Dynamic policies and the dev-instance
+registry change in the same management-database transaction so there is no
+second capacity source of truth.
 
 Shared and dynamic development policy requires both `oldlab` and `gb10`
 profiles. A user, candidate update, or ordinary shared-development rollout
@@ -353,6 +363,17 @@ Each physical pool publishes an operator-approved capacity envelope:
 - health and scale-up eligibility; and
 - a monotonically increasing pool-configuration generation.
 
+Controller identity, partition, global node/resource-domain inventory,
+association bounds, and allocatable envelope are declared once per immutable
+physical-pool generation. Environment-state manifests and worker profiles
+reference that generation by identity and digest; they cannot duplicate or
+override its `allowed_nodes`, controller, partition, or capacity totals. An
+environment profile may narrow eligibility to a declared subset of resource
+domains for candidate visibility, capability, or containment reasons, but it
+cannot add a node, reinterpret a domain, or make globally unavailable capacity
+eligible. Foreign reservation or infrastructure headroom is represented in the
+global domain envelope, not as contradictory per-environment topology.
+
 The configured Loom envelope, not momentary Slurm free-node count, is the hard
 global limit. Transient foreign workload can delay a Loom job but cannot cause
 the manager to duplicate grants or flap the configured envelope.
@@ -385,6 +406,11 @@ minimum has no matching task demand.
 
 User-authored task or candidate data cannot change this profile.
 
+An environment/profile placement constraint can only narrow the referenced
+physical-pool generation. Validation rejects an unknown domain, a node outside
+that generation, or any repeated controller/partition/resource field that does
+not exactly match the referenced global record.
+
 Worker-profile generations are also immutable. Replacement profiles govern new
 proposals only. An unaccepted proposal bound to a superseded profile is closed
 and cannot be accepted. Executors retain old bindings strictly for already
@@ -416,7 +442,8 @@ The implementation will add versioned management-plane records equivalent to:
   state;
 - `capacity_worker_profiles`: environment/pool/generation resource cost,
   approved worker-shape catalog, artifact and protocol binding, and readiness;
-- `capacity_demand_snapshots`: versioned compatibility buckets, fixed claims,
+- `capacity_demand_snapshots`: versioned pending-unassigned compatibility
+  buckets, current unclaimed assignments with allowance epochs, fixed claims,
   freshness, reporter incarnation, monotonic sequence, and acknowledgement;
 - `capacity_allocations`: desired slots, accepted reserved slots, unaccepted
   proposed slots, exact desired worker-shape multiset, slot/resource totals,
@@ -445,7 +472,8 @@ The implementation will add versioned management-plane records equivalent to:
   build admission/rate, retained-artifact count/bytes, and live-instance
   limits;
 - `dev_lifecycle_operations`: idempotency and subject/owner binding, expected
-  epoch, requested candidate/policy, state, deadline, and checkpoint manifest;
+  epoch, immutable current attempt identity/high-water mark, requested
+  candidate/policy, state, deadline, and attempt-bound checkpoint manifest;
 - `capacity_artifact_refs`: immutable digest, size, attestation, owner quota
   charge, generation/job references, retention state, and GC manifest; and
 - `capacity_audit_events`: bounded, secret-free configuration, allocation,
@@ -454,7 +482,7 @@ The implementation will add versioned management-plane records equivalent to:
 Environment databases will add protected companion records equivalent to:
 
 - a mirrored capacity-admission grant keyed by physical pool, candidate,
-  deployment generation, and allocation epoch;
+  deployment generation, authority mode, and allocation/legacy-writer epoch;
 - placement-allowance consumption keyed by the same epoch; and
 - worker claim-authorization epoch plus authoritative trial
   execution-generation, sealed normalized capacity-requirement fingerprint,
@@ -779,7 +807,7 @@ do not share a demand bucket unless their complete compatible shape sets are
 identical.
 
 Demand snapshots are bounded aggregates rather than raw task payloads. They
-group runnable work by:
+group pending-unassigned runnable work by:
 
 - normalized requirement fingerprint and compatible physical-pool,
   resource-domain, and worker-shape set;
@@ -787,6 +815,14 @@ group runnable work by:
 - task-priority band;
 - count; and
 - oldest eligible submission time.
+
+Current unclaimed `assigned` attempts are reported separately with their exact
+bucket, pool, assignment/allowance epoch, and stable attempt identity. They
+remain part of total runnable-unclaimed demand but are excluded from the count
+that can receive a new allowance. The manager validates and preserves or clears
+them in the joint matching witness before issuing residual allowance units, so
+one queued workload is counted once even when reports and allocation epochs
+cross in flight.
 
 Every nonterminal protected claim is a fixed commitment to its current pool,
 generation, worker, and protected attempt identity, regardless of whether the
@@ -914,7 +950,7 @@ For one environment, before global constraints are applied:
 ```text
 requested_slots = min(
     max_slots,
-    max(min_slots, fixed_live_protected_claim_slots + runnable_queued_slots),
+    max(min_slots, fixed_live_protected_claim_slots + runnable_unclaimed_slots),
 )
 ```
 
@@ -922,24 +958,31 @@ The allocator's grant may be lower than `requested_slots`. Observed
 commitments may be higher than both during drain or after a limit reduction.
 `requested_slots` is a total concurrent-trial target, not an increment: every
 live protected claim consumes the target first, even when its workload row is
-already terminal, and only the residual is available to runnable queued
-demand. The manager does not add fixed work a second time when producing a
-grant.
+already terminal, and only the residual is available to runnable unclaimed
+demand. `runnable_unclaimed_slots` includes each valid current assignment and
+each pending-unassigned attempt exactly once; already assigned attempts do not
+receive another placement allowance. The manager does not add fixed or
+assigned work a second time when producing a grant.
 
 The normal worker-capacity ceiling is also `max_slots`. During one old/new
 generation rollout, the manager may temporarily hold at most
 `max_slots + rollout_surge_slots` in environment worker-capacity commitments,
 but every slot of capacity above `max_slots` must be backed by slot capacity
 from distinct old-generation shapes already selected for monotonic replacement
-drain. An old shape identity can back surge only once, and its total backing
-cannot exceed its approved concurrency. The tranche records the exact old
-identities and backed slot counts; different old/new shape sizes are allowed
-only when the aggregate matching proves the surge charge is no greater than
-that distinct draining-old capacity. Before a surge intent can consume a launch
-permit, the protected environment transaction must acknowledge every old
-worker identity backing that intent under the paired allocation epoch as
-draining and nonclaimable for replacements. The new worker binds that newer
-admission epoch.
+drain. Across the current set of nonterminal surge pairings, an old shape's
+cumulative backing cannot exceed its approved concurrency. The tranche records
+the exact old identities and backed slot counts; different old/new shape sizes
+are allowed only when the aggregate matching proves the surge charge is no
+greater than that distinct draining-old capacity. Before a surge intent can
+consume a launch permit, the protected environment transaction must
+acknowledge every old worker identity backing that intent under the paired
+allocation epoch as draining and nonclaimable for replacements. The new worker
+binds that newer admission epoch. Backing may move to a replacement intent
+under a newer allocation epoch only after the prior intent completes the
+fenced unused-reservation close protocol and proves it created no physical
+commitment. `submitting-unknown`, bound, observed, or quarantined intent
+backing remains occupied until physical terminality; ambiguity can never back
+two replacement attempts.
 Surge-only slots authorize no extra placement allowance or protected task
 claim: live claims remain bounded by `max_slots` (apart from already-existing
 over-limit claims draining after a limit reduction). When the paired old shape
@@ -1053,6 +1096,47 @@ The guard locks the worker registration and allocates one concurrency lease in
 the same transaction that changes the protected trial claim state, so racing
 worker processes cannot oversubscribe a shape.
 
+The protected attempt/claim lifecycle is:
+
+```text
+pending-unassigned <-> assigned -> live
+pending-unassigned or assigned -> cancelled-terminal
+live -> completion-pending -> terminal
+live -> cancel-pending -> terminal
+live -> retry-pending -> terminal
+```
+
+Only an unclaimed `assigned` attempt may return to `pending-unassigned`, through
+the fenced allowance-withdrawal or authorized requirement-change transaction.
+`live` begins in the atomic worker-claim transition and owns one exact worker
+concurrency lease. The three pending-terminal states are nonclaimable and keep
+that lease charged until the exact cessation/completion rule succeeds. A
+verified infrastructure-lost transaction may advance the old live/pending
+claim directly to `terminal` while recording its reason. `terminal` and
+`cancelled-terminal` are monotonic for that attempt identity. Retry creates a
+new `pending-unassigned` attempt with a fresh identity only after the preceding
+attempt is terminal; it never moves the old identity backward.
+`pending-unassigned` consumes demand but no placement or claim capacity;
+`assigned` consumes one matching placement-allowance slot but no worker
+concurrency lease; `live` and every pending-terminal/unknown claimed state
+consume one fixed protected claim slot; terminal states consume neither.
+
+Before global cutover only, the accepted local admission may use a fenced
+`legacy-compatibility` mode. This mode is not an allocator and creates no
+global grant or extra capacity: the trusted adapter mirrors only the exact
+current legacy policy, pool assignment, worker/job identity, shape/concurrency,
+candidate, generation, and legacy-writer epoch already authorized by the
+single active legacy path. The protected guard applies all normal sealed
+requirement, generation, concurrency, retry, and attempt-identity checks. A
+unique authority-mode constraint permits at most one pre-cutover legacy,
+global, or explicitly prepared legacy-rollback admission incarnation for a
+subject/pool. The fleet-wide freeze expires legacy new-claim authority;
+imported commitments are installed as global admissions while claims remain
+frozen, and final activation changes the mode only after the matching global
+epoch is acknowledged. Legacy compatibility cannot consume a global allowance,
+move neutral work, accept a new worker after its writer is fenced, or survive
+global activation.
+
 An unassigned globally managed trial is not claimable. This removes the
 current neutral-routing bypass. Fleet worker credentials point at the trusted
 claim path; candidate code cannot mint an alternative worker credential or
@@ -1085,6 +1169,12 @@ terminal-job evidence must let the trusted agent close the claim. After claim
 terminality, the concurrency slot may be reused only if that worker remains
 active under the current admission plan; manager capacity stays charged until
 the separate worker/reservation release protocol proves physical terminality.
+The trusted wrapper, rather than candidate code alone, observes an
+authenticated cancel-pending record bound to the exact attempt, worker, and
+sandbox. It may terminate only that claim's contained trial process, perform
+its scoped cleanup, and submit the cessation acknowledgement through the guard.
+It cannot cancel a sibling claim, terminate the outer multi-concurrency worker
+job, or synthesize owner cancellation for capacity reclamation.
 
 Retry, requeue, and worker reassignment use the same rule. A stale heartbeat,
 watchdog deadline, workload `failed`/`cancelled` state, or missing worker
@@ -1159,14 +1249,25 @@ through the pending-cancel path.
 
 The executor never sends a terminating Slurm signal to an active worker job as
 part of scale-down, priority reclamation, rollout, lease expiry, deletion, or
-normal timeout. Active drain is enforced through the protected claim guard and
-worker self-exit after its live claims finish. Infrastructure or explicit
-owner-initiated trial cancellation is reported separately from capacity
-reclamation.
+normal timeout. Active drain is enforced through the protected claim guard.
+The candidate worker receives a graceful drain request, but liveness does not
+depend on its cooperation: after the trusted agent proves every protected claim
+for that exact worker terminal, the trusted host wrapper fences worker
+credentials, stops the contained candidate runtime, performs exact sandbox
+cleanup, and lets the outer Slurm job exit. It cannot take that path while a
+claim is live or the environment proof is unavailable. This zero-claim wrapper
+shutdown is not trial preemption. Infrastructure or explicit owner-initiated
+trial cancellation is reported separately from capacity reclamation.
 
 Normal drain timeouts create a visible blocker and alert. They do not force
 termination. An owner may explicitly cancel their own trial through the normal
 trial API; that is separate from capacity preemption.
+
+The environment's pre-existing task/agent execution deadline remains a
+workload policy: it may stop the exact timed-out trial through the trusted
+attempt-scoped cleanup path and record the protected cessation result. The
+capacity manager cannot add, shorten, or trigger that deadline, and a drain or
+priority timeout cannot masquerade as a workload execution timeout.
 
 Production may therefore wait behind a running staging or development trial.
 The manager must display that commitment as the reason rather than granting
@@ -1366,6 +1467,13 @@ Every contained worker/trial uses project, container, network, cgroup, and
 sandbox identities derived from subject incarnation, submission intent, and
 worker identity; concurrent environments cannot collide. The trusted wrapper,
 not candidate code, owns idempotent terminal cleanup and orphan reconciliation.
+It also enforces drain completion only after an authenticated protected
+zero-live-claim acknowledgement for that worker identity; a candidate that
+ignores its graceful drain request cannot retain an idle reservation forever or
+cause the wrapper to terminate another worker's live claim.
+For explicit owner cancellation, it separately enforces only the authenticated
+attempt-scoped cancellation and cleanup described by the claim protocol; that
+authority cannot be broadened into worker-job or sibling-trial termination.
 Both OLDLAB and GB10 use the measured non-exclusive packing model; whole-node
 exclusivity is not a fallback for missing containment evidence.
 
@@ -1568,30 +1676,77 @@ environment ownership or authorization.
 
 ### Environment operation lifecycle
 
-Create and fixture provisioning use durable states:
+The environment subject lifecycle and the durable operation lifecycle are
+separate. The subject projection is:
 
 ```text
 requested -> provisioning -> ready
-requested or provisioning -> failed -> provisioning (retry) or deleting
-ready -> updating -> ready
+requested or provisioning -> failed
+failed -> provisioning with a fresh attempt, or deleting
+ready -> updating -> ready (success or pre-activation update failure)
 updating -> activating -> ready
 requested, provisioning, failed, ready, or pre-activation updating -> deleting
+activating -> ready -> deleting when a successor destroy is queued
+deleting -> draining -> terminal tombstone
 ```
+
+Each create, update, capacity change, or destroy has its own durable logical
+operation row:
+
+```text
+requested -> running -> succeeded
+requested or running -> failed
+failed -> retrying -> running with a fresh operation-attempt identity
+requested, pre-commit running, failed, or retrying -> cancelling -> cancelled
+running -> activating -> succeeded
+running -> deleting -> succeeded
+```
+
+The operation enters `activating` when a candidate/policy activation intent is
+committed and enters `deleting` when the central deletion fence is committed.
+Both states are irreversible in place: they can only converge to `succeeded`.
+Failure before an irreversible intent records the operation `failed`; for an
+update, the subject returns to `ready` on its unchanged current generation and
+policy. Subject state therefore never has to pretend that a failed update
+removed the still-serving generation.
 
 Every operation has a stable idempotency key, subject UUID/lifecycle
 incarnation, immutable owner, expected environment epoch, requested candidate
 and capacity policy, deadline, and checkpoint manifest. A retry with the same
-key resumes; a different operation compare-and-set fails while one is active.
+key resumes the same logical request. A different create, update, or capacity
+operation compare-and-set fails while one is active. The sole exception is an
+idempotent destroy, which may occupy one fenced successor slot but cannot start
+until the active operation reaches its permitted convergence point. Attempts
+inside a logical operation have immutable, monotonically increasing identities.
+A retry may resume an incomplete checkpoint only while its attempt is still
+`running`. Once an attempt or replacement deployment generation is `failed`,
+retry first fences its late callbacks, cancels and terminalizes that generation
+after proving it has no commitment, and creates a fresh attempt and
+replacement-generation identity. Neither a failed attempt nor a failed
+generation ever returns to `running`/`preparing` or publishes readiness later.
+
 Capacity remains effectively zero until the subject, current candidate,
 required OLDLAB and GB10 profiles, trusted guard, and all mandatory fixtures are
 ready in one management transition.
 
 Every created database, namespace, DNS record, object prefix, credential,
-binding, and builder artifact is tagged by subject and operation identity.
-Compensation deletes only objects proven to belong to that failed operation and
-never a shared or newer-generation fixture. Failed and timed-out operations
-remain visible and charged to applicable provisioning, live-instance, and
-artifact quotas until retry or bounded cleanup reaches a terminal tombstone.
+binding, and builder artifact is tagged by subject, logical operation, and
+operation-attempt identity. Compensation deletes only objects proven to belong
+to that failed attempt and never a shared, retried, or newer-generation
+fixture. Failed and timed-out operations remain visible and charged to
+applicable provisioning, live-instance, and artifact quotas until their failed
+attempt cleanup completes or subject deletion reaches a terminal tombstone.
+
+Before a fresh attempt touches a deterministic subject-scoped singleton, it
+reconciles the predecessor attempt's checkpoint and the external object's
+ownership metadata. It may reuse an exact compatible object only through an
+audited compare-and-set that transfers the object to the new attempt epoch in
+both management state and the external authority. The predecessor's cleanup
+then loses deletion authority. Otherwise the retry waits for proven predecessor
+cleanup and creates a new object; it never overwrites or informally adopts an
+ambiguous fixture. An external system without conditional ownership mutation
+uses the cleanup-and-recreate path.
+
 Destroy racing provisioning records cancellation under a newer environment
 epoch; the old operation can finish only cleanup checkpoints, not publish
 readiness.
@@ -1858,10 +2013,14 @@ The management API and CLI expose, without secrets:
   and protected old-worker drain acknowledgements;
 - candidate, deployment generation, and configuration-generation bindings;
 - candidate/profile readiness, current/old generation state, reporter/executor
-  incarnations, sequence high-water marks, lease state, and lifecycle-operation
-  checkpoint/phase;
+  incarnations, sequence high-water marks, lease state, protected admission
+  authority mode/incarnation, and distinct subject, logical-operation,
+  operation-attempt, and checkpoint/phase state;
 - sealed demand/allocation classes, invalid-snapshot reasons, matching
   witnesses, and placement allowances;
+- protected attempt counts by unassigned, assigned, live, completion-pending,
+  cancel-pending, retry-pending, unknown, and terminal state, including
+  workload-terminal rows that remain capacity-live;
 - launch-ready intents, current permit order/expiry, durable rate-bucket
   availability, and rejection reasons;
 - explicit allocation, block, drain, and release reasons;
@@ -1880,6 +2039,10 @@ Required alerts include:
 - accepted but unapplied grants;
 - stuck launch permits, exhausted submission rates, or bootstrap-registration
   epoch conflicts;
+- conflicting protected admission modes, or legacy compatibility surviving its
+  freeze/activation epoch;
+- stuck completion-pending, cancel-pending, retry-pending, or operation-attempt
+  ownership-transfer state;
 - draining beyond timeout;
 - unreleased or quarantined capacity;
 - rejected stale epochs or authority incarnations;
@@ -1904,10 +2067,16 @@ The migration must not create a dual-writer interval.
 2. Add environment demand reporting and local admission/placement tables with
    enforcement disabled.
 3. Add pool inventory and observation reporting without Slurm mutation.
-4. Register static and dynamic environments with the measured physical pool
+4. Reconcile every repeated legacy environment/pool topology into one measured
+   immutable physical-pool generation. Environment-specific node lists become
+   validated narrowing constraints only where a real profile restriction
+   exists; conflicting controller, partition, replacement-node, or allocatable
+   envelope facts block shadow operation rather than selecting one copy
+   implicitly.
+5. Register static and dynamic environments with the measured physical pool
    envelopes, but set the independent executable new-global-capacity ceiling
    and launch gate to zero.
-5. Run the global manager in shadow mode against those real envelopes and
+6. Run the global manager in shadow mode against those real envelopes and
    compare its hypothetical decisions with live capacity. Shadow rows are
    explicitly nonexecutable and cannot be accepted, converted into intents, or
    used for admission.
@@ -1934,7 +2103,11 @@ The migration must not create a dual-writer interval.
    capacity authority.
 7. Route every legacy fleet worker claim through the trusted guard and
    submission-bound worker identity.
-8. Complete the protected-transition inventory for submission, assignment,
+8. Install the fenced legacy-compatibility admission adapter described above.
+   Prove it mirrors only the one current legacy writer, creates no global
+   capacity, cannot coexist with global admission, and loses new-claim
+   authority at the fleet-wide freeze.
+9. Complete the protected-transition inventory for submission, assignment,
    claim, heartbeat, terminal state, cancellation, crash reclaim, retry,
    batch/family cancellation, and deletion. Prove with database privileges and
    tests that no direct writer can change capacity eligibility or close a live
@@ -2063,12 +2236,32 @@ A legacy writer may be re-enabled only after:
 - current Slurm inventory is captured; and
 - an explicit rollback authority epoch is recorded.
 
+Every affected protected environment gate installs and acknowledges a fresh
+`legacy-rollback` admission incarnation bound to the rollback epoch, exact
+transferred commitments, and the re-enabled writer's identity. It has the same
+non-allocating mirror and claim-guard restrictions as pre-cutover compatibility
+mode. It never reuses a pre-cutover legacy epoch, and the unique authority-mode
+constraint rejects it until global admission for that subject/pool is frozen
+and transferred. An unreachable environment blocks that pool's rollback rather
+than regaining an unprotected legacy claim path.
+
 A one-pool transfer may proceed before the other only while the transferred
 pool is a fixed commitment domain and all flexible cross-pool placement remains
-frozen. The global manager cannot reserve or place into that legacy-controlled
-pool. Cross-pool placement resumes only after both pools again share one
-declared authority mode and a placement protocol that has no mixed writer,
-whether global or the explicitly supported legacy rollback mode.
+frozen. In that mixed mode the legacy writer and prepared legacy-rollback
+admissions are inventory/adoption/drain-only: they cannot submit a worker job,
+authorize a new task claim, or increase any commitment. The global manager
+cannot reserve or place into that legacy-controlled pool. This prevents pinned
+as well as flexible work from escaping aggregate environment, account, tier,
+and fleet constraints while the other pool remains global.
+
+New claims, scale-up, and cross-pool placement resume only after both pools and
+every protected environment gate share one declared authority mode and a
+fleet-wide placement/quota protocol with no mixed writer. A legacy rollback
+mode must prove the same aggregate cross-pool constraints before one rollback
+activation epoch enables it; if the retained legacy release cannot provide
+that protocol, rollback remains safe no-scale and may only drain. A prepared
+one-pool legacy-rollback admission therefore never receives new-claim authority
+by itself.
 
 Emergency rollback prefers a safe no-scale state over running two allocation
 writers.
@@ -2085,8 +2278,9 @@ their prerequisites are proven:
    audit surfaces. They have no executable grant, admission, or Slurm path.
 2. **Protected environment admission** adds sealed requirements, assignment
    and claim records, trusted transition procedures, reporter/agent epochs,
-   and the complete legacy transition inventory. It depends on the versioned
-   management contracts and remains behind a fail-closed enforcement gate.
+   the fenced legacy-compatibility/rollback adapters, and the complete legacy
+   transition inventory. It depends on the versioned management contracts and
+   remains behind a fail-closed enforcement gate.
 3. **Grant and pool-executor protocol** adds reservations, intents, permits,
    rate buckets, bootstrap registration, controller-local journals, ownership
    proof, and OLDLAB/GB10 executor dry runs. It depends on protected admission
@@ -2147,6 +2341,9 @@ Generated scenario tests must establish:
   proves one exact physical commitment;
 - changing a pool or worker-profile generation cannot reinterpret or undercharge
   an existing commitment;
+- environment profiles cannot redefine controller, partition, node inventory,
+  or pool envelope; valid profile constraints only narrow one referenced
+  immutable physical-pool generation;
 - proposed capacity can be reused only when atomic acceptance is impossible;
 - duplicate, delayed, or out-of-order partial release acknowledgements cannot
   reduce an accepted reservation more than once;
@@ -2202,10 +2399,16 @@ Tests must race multiple environment-agent replicas and workers to prove:
   before exact worker acknowledgement or terminal-job evidence;
 - single-trial and batch cancellation may make the workload row terminal while
   the protected claim remains `cancel-pending`, charged, and completion-only;
+- the trusted wrapper enforces an authenticated owner cancellation only against
+  the exact attempt sandbox, and forged, stale, capacity-reclamation, or sibling
+  cancellation cannot terminate a claim;
 - every legacy direct terminal, cancellation, crash-reclaim, and retry/requeue
   writer is denied or routed through the trusted transition surface;
 - draining workers cannot claim replacements;
 - retry/requeue safely clears or renews assignment state;
+- every protected attempt follows the explicit assignment/live/pending-terminal
+  state machine, and no terminal or claimed attempt returns to an unclaimed
+  state;
 - every retry uses a fresh protected attempt identity, and delayed heartbeat,
   cancellation, result, or completion operations for an old attempt cannot
   mutate or close its replacement;
@@ -2262,6 +2465,9 @@ Tests must cover:
   workers when the same feasible reduction is available;
 - pending-to-running transition racing cancellation never terminates a claimed
   trial;
+- a malicious or wedged candidate that ignores drain is stopped by the trusted
+  wrapper only after exact zero-live-claim proof, while unavailable or
+  mismatched proof leaves the worker charged and un-terminated;
 - an unexpectedly terminal authenticated Slurm job closes protected live claims
   only through the trusted infrastructure-loss transaction and remains charged
   while its environment is unavailable;
@@ -2295,8 +2501,17 @@ Tests must cover:
   tombstone permits new-subject reuse;
 - crash/retry at every provisioning checkpoint, destroy racing provisioning,
   and stale cleanup that cannot delete a newer/shared fixture;
+- retry after a failed provisioning or update attempt creates a fresh
+  operation-attempt and replacement-generation identity; delayed readiness or
+  cleanup from the failed attempt cannot revive it or affect the retry;
+- retry either compare-and-set transfers an exact compatible singleton fixture
+  to its fresh attempt epoch or waits for predecessor cleanup; stale cleanup
+  cannot delete a transferred fixture and ambiguous objects are never adopted;
 - crash/replay before and after protected local deletion application cannot
   restore submissions, omit charged capacity, or double-cancel work;
+- once the central candidate-activation or deletion intent commits, operation
+  failure/cancellation is rejected and replay can only converge that exact
+  irreversible operation;
 - the first deletion transaction closes proposals and unsubmitted intents so a
   delayed executor cannot launch against the deleted lifecycle epoch;
 - multiple environments owned by one user without extra fair share;
@@ -2327,9 +2542,12 @@ Tests must cover:
 - rollout surge is paired only with draining old-generation replacement shapes,
   cannot launch before the exact protected old-worker drain acknowledgement,
   never raises claim concurrency or fair share, and converges to `max_slots`;
-- one old worker identity cannot back multiple surge intents, and mismatched
-  old/new shape sizes cannot create more surge slots than the distinct old
-  concurrency selected for replacement;
+- one old worker identity cannot simultaneously back surge beyond its approved
+  concurrency, and mismatched old/new shape sizes cannot create more surge
+  slots than the distinct old concurrency selected for replacement;
+- a conclusively unused closed surge intent may transfer its backing under a
+  newer epoch, while ambiguous or physically nonterminal intent backing cannot
+  be reused;
 - nonzero warm minimum moves from old to current generation without retaining
   old warm workers forever or exceeding zero surge;
 - queued task generation binding and explicit migration;
@@ -2372,6 +2590,9 @@ Tests must exercise the real legacy and global code paths together and prove:
   migration snapshot; queued destroy or capacity updates apply only after
   activation/rollback, and an emergency envelope reduction aborts to a new
   migration epoch;
+- conflicting repeated legacy environment topology, including replacement-node
+  drift, blocks migration until it is reconciled into one physical-pool
+  generation; no environment copy wins implicitly;
 - neutral work cannot move between pools while one executor is global and the
   other is legacy;
 - new submissions wait or receive the documented retryable queue-full result
@@ -2385,13 +2606,23 @@ Tests must exercise the real legacy and global code paths together and prove:
   and no manifest entry can be added past the frozen high-water mark;
 - protocol-incompatible legacy workers drain before activation rather than
   retaining a direct claim path;
+- legacy-compatibility admission mirrors only exact pre-freeze legacy authority,
+  cannot allocate or consume a global allowance, and cannot coexist with or
+  survive global admission activation;
 - a legacy trial made workload-terminal before its worker acknowledges
   cessation is imported as a charged protected/physical commitment rather than
   omitted by a workload-state filter;
 - ambiguous or unsupported legacy task requirements remain unclaimable and
   cannot contribute scale-up demand;
 - failed cutover and rollback never leave a legacy and global mutation
-  authority active for the same pool; and
+  authority active for the same pool;
+- rollback installs a fresh protected legacy-rollback admission incarnation
+  only after global admission is frozen/transferred; it never revives a
+  pre-cutover claim epoch or bypasses an unreachable environment guard;
+- a one-pool mixed rollback remains adoption/drain-only for pinned and flexible
+  work, and a full legacy rollback enables claims/scale-up only with a verified
+  fleet-wide aggregate placement/quota protocol; otherwise it stays no-scale;
+  and
 - rollback after the legacy decommission checkpoint uses a compatible global
   release or safe no-scale state, never an ad hoc restored legacy writer.
 
@@ -2414,9 +2645,13 @@ A bounded test fleet must demonstrate:
 10. environment deletion waits for terminal release;
 11. foreign and forged Loom-looking Slurm jobs remain untouched;
 12. replayed reports and release acknowledgements do not double-allocate;
-13. a two-pool migration cannot admit work during mixed authority; and
+13. a two-pool migration cannot admit work during mixed authority;
 14. one allocation epoch accounts for production, staging, shared development,
-    and dynamic development, with shared development eligible on both pools.
+    and dynamic development, with shared development eligible on both pools;
+    and
+15. a mixed-mode rollback admits no new pinned or flexible work, then either
+    activates one verified fleet-wide rollback protocol or remains safe
+    no-scale.
 
 ## Activation Boundary
 
@@ -2439,6 +2674,9 @@ Repository implementation is not live activation. Activation requires:
   per-owner resource-limit evidence;
 - measured physical resource envelopes and infrastructure/co-tenant headroom
   for both pools;
+- one reviewed fleet-state generation for each pool, with every environment
+  profile referencing or validly narrowing it and no conflicting duplicated
+  controller/partition/node/envelope authority;
 - validated controller-enforced Loom association partition, submit-job,
   running-job, and TRES/QoS bounds on both pools;
 - #896 non-exclusive containment evidence;
@@ -2521,3 +2759,6 @@ The design is implemented when all of the following are true:
     physical terminality are separate; every capacity-relevant transition path
     uses the trusted protected interface and no cancellation or retry path can
     release capacity early.
+25. Each physical pool has one immutable fleet-state topology and envelope;
+    environment profiles may only reference or narrow it, and conflicting
+    legacy environment copies block even shadow allocation until reconciled.
