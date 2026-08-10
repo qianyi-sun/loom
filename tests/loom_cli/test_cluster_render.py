@@ -625,6 +625,19 @@ def _public_ipblock_ports(policy: dict) -> set[int]:
     return out
 
 
+def test_pipeline_orchestrator_pgbouncer_egress_has_matching_ingress() -> None:
+    docs = _load_docs(render_manifests(_DEFAULT_CFG))
+    policy = _network_policy_named(docs, "loom-pgbouncer")
+    source_apps = {
+        peer["podSelector"]["matchLabels"]["app"]
+        for rule in policy["spec"]["ingress"]
+        if {port["port"] for port in rule.get("ports", [])} == {6432}
+        for peer in rule.get("from", [])
+    }
+
+    assert "loom-pipeline-orchestrator" in source_apps
+
+
 def test_render_allows_service_public_https_for_provider_discovery() -> None:
     """Provider validation and model discovery run in loom-service, so
     the service pod needs the same public HTTPS/HTTP egress baseline as

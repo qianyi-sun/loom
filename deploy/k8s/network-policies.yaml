@@ -531,6 +531,9 @@ spec:
           app: loom-family-orchestrator
     - podSelector:
         matchLabels:
+          app: loom-pipeline-orchestrator
+    - podSelector:
+        matchLabels:
           app: loom-egress-xds
     ports:
     - port: 6432
