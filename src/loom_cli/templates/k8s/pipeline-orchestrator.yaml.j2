@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loom-pipeline-orchestrator
+spec:
+  # #1212 lands the controller disabled. Live activation belongs to the fixed
+  # integration/acceptance carrier and is not implied by repository merge.
+  replicas: 0
+  selector:
+    matchLabels: { app: loom-pipeline-orchestrator }
+  template:
+    metadata:
+      labels: { app: loom-pipeline-orchestrator }
+    spec:
+      containers:
+        - name: pipeline-orchestrator
+          image: {% if container_registry %}{{ container_registry }}/{% endif %}loom-pipeline-orchestrator:{{ image_tag }}
+          env:
+            - name: LOOM_PIPELINE_ORCHESTRATOR_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: cp-db-url
+            - name: LOOM_PIPELINE_ORCHESTRATOR_CONTROLLER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: LOOM_PIPELINE_ORCHESTRATOR_POLL_SECONDS
+              value: "2"
+            - name: LOOM_PIPELINE_ORCHESTRATOR_PICKER_BATCH
+              value: "50"
+            - name: LOOM_PIPELINE_ORCHESTRATOR_LEASE_SECONDS
+              value: "60"
+            - name: LOOM_PIPELINE_ORCHESTRATOR_RENEW_SECONDS
+              value: "10"
+          ports:
+            - { name: health, containerPort: 8092 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: health }
+          livenessProbe:
+            httpGet: { path: /healthz, port: health }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 512Mi }

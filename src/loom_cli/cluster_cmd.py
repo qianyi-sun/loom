@@ -1334,6 +1334,8 @@ _TEMPLATE_ORDER: tuple[str, ...] = (
     # block (same LOOM_CP_* prefix) so the deployment is trivially
     # co-configured.
     "family-orchestrator.yaml.j2",
+    # #1212 controller ships disabled (replicas=0); activation is a separate gate.
+    "pipeline-orchestrator.yaml.j2",
     "loom-service.yaml.j2",
     "llm-gateway.yaml.j2",
     # HPA for loom-llm-gateway (#547). Renders only when

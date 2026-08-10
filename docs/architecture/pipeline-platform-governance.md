@@ -10,6 +10,8 @@ Current authority:
   [qianyi-sun/loom#1210](https://github.com/qianyi-sun/loom/issues/1210)
 - Pipeline RunGraph v1 schema and persistence:
   [qianyi-sun/loom#1211](https://github.com/qianyi-sun/loom/issues/1211)
+- Pipeline controller and hard-budget execution semantics:
+  [qianyi-sun/loom#1212](https://github.com/qianyi-sun/loom/issues/1212)
 - Accepted architecture decision:
   [Pipeline Run Graph V1](adr/pipeline-run-graph-v1.md)
 
@@ -186,6 +188,7 @@ carinrc/loom tracker.
 | Issue | Decision area | Blocks |
 |---|---|---|
 | qianyi-sun#1211 | official-Recipe-only Pipeline RunGraph v1, persistence, and state vocabulary | #1212, #8, #1214, #1216 |
+| qianyi-sun#1212 | replay-safe orchestration, lease fencing, fan-out, hard budgets, retry, cancellation, and terminal projection | #8, #1214, #1215, #1216 |
 | carinrc#567 | `SkillMarkdown` artifact and generic trial-time skill injection | carinrc#573, carinrc#579 |
 | carinrc#568 | typed artifact base schema, lineage, sharing, redaction, retention | carinrc#573, carinrc#574, carinrc#576 |
 | carinrc#569 | user TaskSet registration and data-production model | carinrc#575, carinrc#576 |
@@ -239,6 +242,10 @@ Existing Batch/Trial semantics are unchanged.
 The full immutable model, canonical-byte rules, persistence constraints, and
 rejected alternatives are recorded in
 [Pipeline Run Graph V1](adr/pipeline-run-graph-v1.md).
+
+The controller implementation and its disabled deployment boundary are
+documented in [Pipeline Orchestrator V1](pipeline-orchestrator.md). Its merge
+does not enable worker execution or authorize a live deployment.
 
 ## Typed Artifact Direction
 

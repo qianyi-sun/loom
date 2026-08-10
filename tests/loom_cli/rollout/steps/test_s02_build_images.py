@@ -104,11 +104,12 @@ def _write_matrix(
 
 
 class TestBuildImagesCoverage:
-    def test_primary_images_exactly_cover_managed_workloads(self) -> None:
+    def test_primary_images_exclude_only_disabled_pipeline_orchestrator(self) -> None:
         rendered = _locally_tagged_deployment_images()
         primary = {name for name, _, _ in rollout_images_from_worktree(_repo_root())}
 
-        assert primary == rendered
+        assert primary < rendered
+        assert rendered - primary == {"loom-pipeline-orchestrator"}
         assert len(primary) == 7
 
     def test_candidate_roles_form_exact_nine_image_contract(self) -> None:

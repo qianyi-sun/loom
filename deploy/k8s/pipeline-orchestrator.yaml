@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  namespace: loom
+  name: loom-pipeline-orchestrator
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: loom-pipeline-orchestrator
+  template:
+    metadata:
+      labels:
+        app: loom-pipeline-orchestrator
+    spec:
+      containers:
+      - name: pipeline-orchestrator
+        image: loom-pipeline-orchestrator:0.7
+        env:
+        - name: LOOM_PIPELINE_ORCHESTRATOR_DB_URL
+          valueFrom:
+            secretKeyRef:
+              name: loom-secrets
+              key: cp-db-url
+        - name: LOOM_PIPELINE_ORCHESTRATOR_CONTROLLER_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: LOOM_PIPELINE_ORCHESTRATOR_POLL_SECONDS
+          value: "2"
+        - name: LOOM_PIPELINE_ORCHESTRATOR_PICKER_BATCH
+          value: "50"
+        - name: LOOM_PIPELINE_ORCHESTRATOR_LEASE_SECONDS
+          value: "60"
+        - name: LOOM_PIPELINE_ORCHESTRATOR_RENEW_SECONDS
+          value: "10"
+        ports:
+        - name: health
+          containerPort: 8092
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: health
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: health
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi

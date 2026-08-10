@@ -34,6 +34,7 @@ _GOLDEN_FILES = (
     "minio.yaml",
     "control-plane.yaml",
     "family-orchestrator.yaml",
+    "pipeline-orchestrator.yaml",
     "loom-service.yaml",
     "llm-gateway.yaml",
     "worker.yaml",
@@ -371,7 +372,7 @@ def test_load_config_gateway_local_providers_from_toml(tmp_path: Path) -> None:
 
 
 def test_render_produces_valid_yaml_with_expected_kinds() -> None:
-    """Smoke: every document parses, the set covers the 8 Deployments
+    """Smoke: every document parses, the set covers the 9 Deployments
     + 3 DaemonSets + 10 Services + 3 StatefulSets + 1 Ingress
     + 1 PodDisruptionBudget + 14 NetworkPolicies + 2 ConfigMaps
     (Grafana dashboards + egress-proxy bootstrap) expected by
@@ -385,8 +386,8 @@ def test_render_produces_valid_yaml_with_expected_kinds() -> None:
     # don't strand replicas).
     assert kinds.count("StatefulSet") == 3
     # cp, service, gateway, web + egress-xds + egress-proxy +
-    # pgbouncer + family-orchestrator (#672)
-    assert kinds.count("Deployment") == 8
+    # pgbouncer + family-orchestrator (#672) + disabled pipeline orchestrator.
+    assert kinds.count("Deployment") == 9
     # gateway-router + worker-router + minio-router
     assert kinds.count("DaemonSet") == 3
     # postgres + pgbouncer + minio + cp + gateway + service + web
@@ -400,8 +401,8 @@ def test_render_produces_valid_yaml_with_expected_kinds() -> None:
     assert kinds.count("PodDisruptionBudget") == 1
     # NetworkPolicies: postgres + minio + cp + gateway + worker + svc
     # + web + gateway-router + worker-router + minio-router + egress-xds
-    # + egress-proxy + pgbouncer + family-orchestrator = 14.
-    assert kinds.count("NetworkPolicy") == 14
+    # + egress-proxy + pgbouncer + both orchestrators = 15.
+    assert kinds.count("NetworkPolicy") == 15
     assert kinds.count("CronJob") == 0
     # Grafana dashboards ConfigMap + egress-proxy bootstrap ConfigMap.
     assert kinds.count("ConfigMap") == 2
