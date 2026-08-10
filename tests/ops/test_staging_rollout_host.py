@@ -1220,6 +1220,10 @@ def test_install_activates_ownership_maintenance_only_when_opted_in(tmp_path: Pa
     rendered = opted_installer.filesystem.path(host.CONFIG_PATH).read_text(encoding="utf-8")
     assert "schema_version = 1" in rendered
     assert "ownership_maintenance_allowed = true" in rendered
+    opted_record = opted_installer.filesystem.load_install_record()
+    assert opted_record is not None
+    assert opted_record["ownership_maintenance_allowed"] is True
+    assert opted_installer.check() == {"ok": True, "failures": []}
 
 
 def test_sealed_cumulative_install_records_exact_source_and_checks_candidate(

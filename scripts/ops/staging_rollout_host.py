@@ -4883,6 +4883,8 @@ class HostInstaller:
                         "source_base_sha": self.source_base_sha,
                     }
                 )
+            if self.ownership_maintenance_allowed:
+                value["ownership_maintenance_allowed"] = True
             if mask_adjustments:
                 value["acl_mask_adjustments"] = [
                     adjustment.to_dict()
@@ -5377,6 +5379,10 @@ class HostInstaller:
         grants = self._record_grants(record)
         self._validate_acl_ledgers(grants, mask_adjustments, snapshot_adjustments)
         self._bind_existing_source(record)
+        ownership_maintenance_allowed = self._record_flag(
+            record,
+            "ownership_maintenance_allowed",
+        )
         expected = (
             (ROLLOUT_CLIENT_PATH, self._asset("loom-rollout"), 0o755),
             (ROLLOUT_BROKER_PATH, self._asset("loom-rollout-broker"), 0o755),
@@ -5449,6 +5455,7 @@ class HostInstaller:
                     source_base_sha=(
                         record_source_base_sha if isinstance(record_source_base_sha, str) else None
                     ),
+                    ownership_maintenance_allowed=ownership_maintenance_allowed,
                 )
             except InstallError:
                 failures.append("rendered-config")

@@ -10,6 +10,7 @@ import yaml  # type: ignore[import-untyped]
 from loom_cli.rollout.manifest_ownership_adoption import (
     ManagedFieldsCleanup,
     ManifestOwnershipAdoptionError,
+    _validate_managed_fields,
     build_managed_fields_cleanups,
     build_manifest_ownership_adoption_plan,
     managed_fields_cleanup_argv,
@@ -300,6 +301,135 @@ def test_plan_rejects_unknown_manager_target_and_prestate_drift() -> None:
             candidate_sha=_SHA,
             candidate_tree=_TREE,
             mutation_epoch=2,
+        )
+
+
+@pytest.mark.parametrize(
+    ("api_version", "kind"),
+    [
+        ("apps/v1", "DaemonSet"),
+        ("apps/v1", "Deployment"),
+        ("apps/v1", "StatefulSet"),
+        ("batch/v1", "CronJob"),
+        ("policy/v1", "PodDisruptionBudget"),
+    ],
+)
+def test_live_k3s_status_manager_is_exact_scoped_controller_authority(
+    api_version: str,
+    kind: str,
+) -> None:
+    legacy = _managed_fields("kubectl-client-side-apply")
+    fields_v1: dict[str, object] = {"f:status": {}}
+    if kind == "Deployment":
+        fields_v1["f:metadata"] = {
+            "f:annotations": {"f:deployment.kubernetes.io/revision": {}}
+        }
+    k3s_status = {
+        "manager": "k3s",
+        "operation": "Update",
+        "apiVersion": api_version,
+        "subresource": "status",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": fields_v1,
+    }
+
+    _validate_managed_fields(
+        [*legacy, k3s_status],
+        identity=f"{api_version}|{kind}|loom-staging|loom-test",
+    )
+
+
+def test_live_cnpg_status_manager_is_exact_scoped_controller_authority() -> None:
+    legacy = _managed_fields("kubectl-client-side-apply")
+    cnpg_status = {
+        "manager": "manager",
+        "operation": "Update",
+        "apiVersion": "postgresql.cnpg.io/v1",
+        "subresource": "status",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {"f:status": {}},
+    }
+
+    _validate_managed_fields(
+        [*legacy, cnpg_status],
+        identity="postgresql.cnpg.io/v1|Cluster|loom-staging|loom-postgres",
+    )
+
+
+@pytest.mark.parametrize(
+    ("override", "identity"),
+    [
+        ({"subresource": ""}, "batch/v1|CronJob|loom-staging|loom-test"),
+        ({"fieldsType": "Unknown"}, "batch/v1|CronJob|loom-staging|loom-test"),
+        ({"apiVersion": "apps/v1"}, "batch/v1|CronJob|loom-staging|loom-test"),
+        ({"fieldsV1": {"f:status": [], "f:metadata": {}}}, "batch/v1|CronJob|loom-staging|loom-test"),
+        (
+            {"fieldsV1": {"f:status": {}, "f:metadata": {"f:finalizers": {}}}},
+            "batch/v1|CronJob|loom-staging|loom-test",
+        ),
+        (
+            {
+                "fieldsV1": {
+                    "f:status": {},
+                    "f:metadata": {"f:annotations": {"f:unexpected": {}}},
+                }
+            },
+            "apps/v1|Deployment|loom-staging|loom-test",
+        ),
+        ({"fieldsV1": {"f:status": {}, "f:spec": {}}}, "apps/v1|Deployment|loom-staging|loom-test"),
+        ({}, "apps/v1|ReplicaSet|loom-staging|loom-test"),
+    ],
+)
+def test_k3s_status_manager_rejects_expanded_or_malformed_authority(
+    override: dict[str, object],
+    identity: str,
+) -> None:
+    api_version = identity.split("|", 1)[0]
+    k3s_status: dict[str, object] = {
+        "manager": "k3s",
+        "operation": "Update",
+        "apiVersion": api_version,
+        "subresource": "status",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {"f:status": {}},
+        **override,
+    }
+    with pytest.raises(ManifestOwnershipAdoptionError, match="unrecognized"):
+        _validate_managed_fields(
+            [*_managed_fields("kubectl-client-side-apply"), k3s_status],
+            identity=identity,
+        )
+
+
+@pytest.mark.parametrize(
+    ("override", "identity"),
+    [
+        ({"fieldsType": "Unknown"}, "postgresql.cnpg.io/v1|Cluster|loom-staging|loom-postgres"),
+        ({"apiVersion": "v1"}, "postgresql.cnpg.io/v1|Cluster|loom-staging|loom-postgres"),
+        (
+            {"fieldsV1": {"f:status": {}, "f:metadata": {}}},
+            "postgresql.cnpg.io/v1|Cluster|loom-staging|loom-postgres",
+        ),
+        ({}, "postgresql.cnpg.io/v1|Cluster|loom-staging|unexpected"),
+    ],
+)
+def test_cnpg_status_manager_rejects_expanded_or_malformed_authority(
+    override: dict[str, object],
+    identity: str,
+) -> None:
+    cnpg_status: dict[str, object] = {
+        "manager": "manager",
+        "operation": "Update",
+        "apiVersion": "postgresql.cnpg.io/v1",
+        "subresource": "status",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {"f:status": {}},
+        **override,
+    }
+    with pytest.raises(ManifestOwnershipAdoptionError, match="unrecognized"):
+        _validate_managed_fields(
+            [*_managed_fields("kubectl-client-side-apply"), cnpg_status],
+            identity=identity,
         )
 
 
@@ -621,6 +751,67 @@ def test_selective_managed_fields_cleanup_keeps_canonical_and_controller_owners(
             live_resource=live[0],
             observed_resource=changed,
         )
+
+
+def test_selective_cleanup_retains_scoped_k3s_and_cnpg_status_owners() -> None:
+    cronjob = _live()[0]
+    cronjob_metadata = cronjob["metadata"]
+    assert isinstance(cronjob_metadata, dict)
+    cronjob_metadata["managedFields"] = [
+        *_managed_fields("kubectl-patch", "loom-staging-rollout"),
+        {
+            "manager": "k3s",
+            "operation": "Update",
+            "apiVersion": "batch/v1",
+            "subresource": "status",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {"f:status": {}},
+        },
+    ]
+    postgres: dict[str, object] = {
+        "apiVersion": "postgresql.cnpg.io/v1",
+        "kind": "Cluster",
+        "metadata": {
+            "name": "loom-postgres",
+            "namespace": "loom-staging",
+            "managedFields": [
+                *_managed_fields("kubectl-client-side-apply", "loom-staging-rollout"),
+                {
+                    "manager": "manager",
+                    "operation": "Update",
+                    "apiVersion": "postgresql.cnpg.io/v1",
+                    "subresource": "status",
+                    "fieldsType": "FieldsV1",
+                    "fieldsV1": {"f:status": {}},
+                },
+            ],
+        },
+        "spec": {"instances": 3},
+        "status": {"readyInstances": 3},
+    }
+
+    cleanups = build_managed_fields_cleanups([cronjob, postgres])
+
+    assert len(cleanups) == 2
+    for cleanup, live_resource, controller in (
+        (cleanups[0], cronjob, "k3s"),
+        (cleanups[1], postgres, "manager"),
+    ):
+        assert [entry["manager"] for entry in cleanup.retained_fields] == [
+            "loom-staging-rollout",
+            controller,
+        ]
+        observed = copy.deepcopy(live_resource)
+        observed_metadata = observed["metadata"]
+        assert isinstance(observed_metadata, dict)
+        observed_metadata["managedFields"] = list(cleanup.retained_fields)
+        assert len(
+            verify_managed_fields_cleanup(
+                cleanup,
+                live_resource=live_resource,
+                observed_resource=observed,
+            )
+        ) == 64
 
 
 def test_selective_cleanup_requires_canonical_owner_and_rejects_unknown_authority() -> None:
