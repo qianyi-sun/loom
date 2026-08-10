@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from fractions import Fraction
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import Trial, WorkerPoolAutoscalerPolicy
@@ -131,11 +131,23 @@ async def assign_neutral_queued_trials(
         .all()
     )
     states = {row.pool_name: _pool_state(row) for row in policies}
+    worker_pool_json = Trial.requires_caps.op("->")("worker_pool")
+    worker_pool_text = Trial.requires_caps["worker_pool"].astext
     trials = (
         (
             await session.execute(
                 select(Trial)
                 .where(Trial.state == "queued")
+                # Filter before taking row locks.  The claim path also uses
+                # SKIP LOCKED, so locking concrete/pinned demand here can make
+                # an otherwise claimable trial look transiently absent.
+                .where(Trial.requires_caps["cpu_arch"].astext == "any")
+                .where(
+                    or_(
+                        func.jsonb_typeof(worker_pool_json).is_distinct_from("string"),
+                        func.btrim(worker_pool_text) == "",
+                    ),
+                )
                 .order_by(Trial.submitted_at, Trial.id)
                 .with_for_update(skip_locked=True),
             )
