@@ -25,7 +25,9 @@ if not db_url:
     )
 if _ROLE_PATTERN.fullmatch(owner_role) is None:
     raise RuntimeError("LOOM_CAPACITY_GUARD_OWNER_ROLE must name an explicit canonical SQL role")
-config.set_main_option("sqlalchemy.url", db_url)
+# Alembic stores options in ConfigParser, where URL-encoded percent signs in
+# credentials are interpolation markers unless doubled at this one boundary.
+config.set_main_option("sqlalchemy.url", db_url.replace("%", "%%"))
 target_metadata = None
 
 

@@ -64,7 +64,9 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
     database_name = f"loom_guard_test_{suffix}"
     owner_role = f"loom_guard_owner_test_{suffix}"
     migrator_role = f"loom_guard_migrator_test_{suffix}"
-    migrator_password = f"guard-test-{uuid4().hex}"
+    # The literal percent becomes ``%25`` in the URL and exercises Alembic's
+    # ConfigParser interpolation boundary on every protected migration test.
+    migrator_password = f"guard-test-%-{uuid4().hex}"
     admin_url = source_url.set(database="postgres")
     environment_admin_url = source_url.set(database=database_name)
     migrator_url = source_url.set(
@@ -89,7 +91,7 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
                 "NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"
             )
             created_owner = True
-            connection.exec_driver_sql(
+            connection.execution_options(no_parameters=True).exec_driver_sql(
                 f"CREATE ROLE {quoted_migrator} LOGIN NOSUPERUSER "
                 "NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS "
                 f"PASSWORD '{migrator_password}'"
