@@ -62,6 +62,7 @@ CONTRACTS = {
             "control-plane",
             "egress-xds",
             "family-orchestrator",
+            "pipeline-orchestrator",
             "llm-gateway",
             "llm-gateway-sandbox",
             "service",

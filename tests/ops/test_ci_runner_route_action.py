@@ -128,6 +128,12 @@ def test_action_rejects_unknown_jobs_and_tampered_oldlab_slots(tmp_path: Path) -
         action.validate_assignment(request_value, response)
 
 
+def test_images_contract_allows_pipeline_orchestrator() -> None:
+    action = _module()
+
+    assert "pipeline-orchestrator" in action.CONTRACTS["images"]["jobs"]
+
+
 def test_poll_accepts_only_the_exact_digest_check(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
