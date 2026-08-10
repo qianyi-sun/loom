@@ -859,6 +859,61 @@ def test_duplicate_publisher_owned_custom_checks_fail_closed() -> None:
     assert not client.updated
 
 
+def test_valid_duplicate_publisher_checks_reconcile_through_newest_identity() -> None:
+    client = FakeGitHubClient()
+    spec = GATE_SPECS[0]
+    current_generation = generation()
+    seed_invalidation(client, current_generation)
+    original = client.checks[spec.context][0]
+    duplicate = deepcopy(original)
+    duplicate["id"] = 2000
+    client.checks[spec.context].append(duplicate)
+
+    run = workflow_run(
+        run_id=303,
+        generation=current_generation,
+        status="completed",
+        conclusion="success",
+        run_attempt=2,
+    )
+    client.runs[spec.workflow_id] = [run]
+    client.jobs[(303, 2)] = [{"name": spec.attempt_job, "conclusion": "success"}]
+
+    result = process_event(workflow_event(run), client)
+
+    assert result.outcome == "success"
+    assert client.updated[-1][0] == 2000
+    assert client.checks[spec.context][0]["id"] == original["id"]
+    assert_check_is_pending(client.checks[spec.context][0])
+    newest = client.checks[spec.context][1]
+    assert newest["id"] == 2000
+    assert newest["status"] == "completed"
+    assert newest["conclusion"] == "success"
+
+    client.pull["labels"] = [{"name": "ci:coverage-summary"}]
+    client.pull["updated_at"] = "2026-07-22T10:00:01Z"
+    client.issue_events.append(
+        authority_event(
+            2,
+            "labeled",
+            "2026-07-22T10:00:01Z",
+            label="ci:coverage-summary",
+        )
+    )
+    replacement = process_event(
+        pull_event(
+            action="labeled",
+            label="ci:coverage-summary",
+            updated="2026-07-22T10:00:01Z",
+        ),
+        client,
+    )
+
+    assert replacement.outcome == "in_progress"
+    assert any(check_id == 2000 for check_id, _ in client.updated[-4:])
+    assert_check_is_pending(client.checks[spec.context][1])
+
+
 def test_base_without_publisher_keeps_legacy_gate_and_creates_no_custom_check() -> None:
     client = FakeGitHubClient()
     client.publisher_active = False
