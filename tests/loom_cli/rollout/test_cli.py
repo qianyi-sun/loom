@@ -95,7 +95,9 @@ class TestRolloutCLIDryRun:
         assert "namespace: loom-staging" in out
         assert "environment: staging" in out
         assert "cp_url: http://127.0.0.1:18081" in out
-        assert "cluster_config_path: deploy/environments/staging.cluster.toml" in out
+        assert (
+            "cluster_config_path: deploy/environments/staging.multinode.cluster.toml" in out
+        )
         assert "backup_manifest_path: /data/loom-staging/backups/latest/backup-manifest.json" in out
         assert "rollout_root: " + str(tmp_path) in out
         assert "scope: current-gb10" in out

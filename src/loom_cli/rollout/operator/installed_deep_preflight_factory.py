@@ -424,7 +424,7 @@ def build_installed_deep_preflight_composition(
     parsed_route = urlsplit(route)
     canonical_origin = f"{parsed_route.scheme}://{parsed_route.netloc}"
     # `readonly.route` is derived and fully validated from the exact trusted
-    # staging.cluster.toml by derive_staging_route (namespace/runtime_environment
+    # staging.multinode.cluster.toml by derive_staging_route (namespace/runtime_environment
     # match, DNS host, route == api_route, _ROUTE_RE). Pin only that the route is
     # well-formed with no extra URL components. The environment-correct path
     # (e.g. "/staging" after #897 migrated it from "/dev") comes from the trusted

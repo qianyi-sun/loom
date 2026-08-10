@@ -9,6 +9,7 @@ import yaml
 
 from loom_cli.cluster_cmd import render_manifests
 from loom_cli.cluster_config import load_cluster_config
+from loom_cli.rollout.operator.config import STAGING_AUTHORITY
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 STAGING_CONFIG = REPO_ROOT / "deploy/environments/staging.multinode.cluster.toml"
@@ -46,6 +47,9 @@ def test_live_staging_k3s_render_contract() -> None:
     """The checked-in live profile must retain its accepted k3s topology."""
     config, documents = _rendered_documents()
 
+    assert STAGING_AUTHORITY.candidate_cluster_config == Path(
+        "deploy/environments/staging.multinode.cluster.toml"
+    )
     assert config.namespace == "loom-staging"
     assert config.runtime_environment == "staging"
     assert config.frontend_route_path == "/staging"

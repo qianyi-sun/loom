@@ -4270,7 +4270,10 @@ class HostInstaller:
             "rollout_root": "/data/loom-staging",
             "kubeconfig_path": str(KUBECONFIG_PATH),
             "cluster_config_path": (
-                str(_candidate_repo_path(source_sha) / "deploy/environments/staging.cluster.toml")
+                str(
+                    _candidate_repo_path(source_sha)
+                    / "deploy/environments/staging.multinode.cluster.toml"
+                )
                 if source_sha is not None
                 else None
             ),

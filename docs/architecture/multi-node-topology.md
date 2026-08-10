@@ -34,9 +34,9 @@ fields = {
 Profiles pin explicit values so a schema-default flip cannot silently break existing deployments:
 
 - `development.cluster.toml`: pinned `multi_node = false` (shared dev is a lightweight env co-located with staging/prod on the fleet — single-node-shaped backends by choice, not distributed; trial execution runs on the shared external-Slurm workers, arbitrated per-env by the autoscaler)
-- `staging.cluster.toml`: retained single-node profile for historical
-  broker/rollback compatibility; it is not the live staging render authority
-- `staging.multinode.cluster.toml`: live staging profile, pinned
+- `staging.cluster.toml`: retired single-node profile retained only for
+  historical comparison; it is not an acceptance or rollback authority
+- `staging.multinode.cluster.toml`: live staging and protected rollout profile, pinned
   `multi_node = true`, `storage_backend = "longhorn"`, 3 Postgres replicas,
   4 MinIO replicas, and required anti-affinity
 - `production.cluster.toml`: pinned `multi_node = true`, `storage_backend = "longhorn"`, 3 Postgres replicas, 4 MinIO replicas, required anti-affinity

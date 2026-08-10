@@ -1124,7 +1124,6 @@ def test_render_profiles_set_backend_runtime_environment(
     ("filename", "host_root"),
     [
         ("production.cluster.toml", "/data/loom-prod"),
-        ("staging.cluster.toml", "/data/loom-staging"),
     ],
 )
 def test_protected_profiles_declare_static_host_path_storage(
@@ -1138,7 +1137,9 @@ def test_protected_profiles_declare_static_host_path_storage(
 
 
 def test_staging_profile_declares_repo_owned_gb10_ssh_config() -> None:
-    cfg = load_cluster_config(_REPO_ROOT / "deploy" / "environments" / "staging.cluster.toml")
+    cfg = load_cluster_config(
+        _REPO_ROOT / "deploy" / "environments" / "staging.multinode.cluster.toml"
+    )
     ssh_config = (_REPO_ROOT / "deploy" / "worker-pools" / "gb10" / "ssh_config").read_text(
         encoding="utf-8"
     )
@@ -1148,6 +1149,10 @@ def test_staging_profile_declares_repo_owned_gb10_ssh_config() -> None:
     assert [host["ssh_target"] for host in cfg.gb10_pool.hosts] == [
         f"trt-gb10-{index}" for index in range(1, 16)
     ]
+    assert all(
+        set(host) == {"ssh_target", "node_agent_service"}
+        for host in cfg.gb10_pool.hosts
+    )
     assert "IdentityFile /var/lib/loom-staging-rollout/gb10-deploy-ed25519" in ssh_config
     assert "IdentitiesOnly yes" in ssh_config
     expected_private_hosts = {

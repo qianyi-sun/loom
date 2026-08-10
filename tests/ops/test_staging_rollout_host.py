@@ -832,7 +832,8 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
     candidate_venv = host._candidate_venv_path("a" * 40)
     assert f'runner_repo = "{candidate_repo}"' in rendered
     assert (
-        f'cluster_config_path = "{candidate_repo}/deploy/environments/staging.cluster.toml"'
+        f'cluster_config_path = "{candidate_repo}/deploy/environments/'
+        'staging.multinode.cluster.toml"'
         in rendered
     )
     assert system.runtime_venvs == {candidate_venv}

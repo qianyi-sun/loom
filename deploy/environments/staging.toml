@@ -5,7 +5,7 @@ namespace = "loom-staging"
 ingress_host = "yylx.world"
 frontend_route = "https://yylx.world/staging"
 frontend_api_base = "https://yylx.world/staging/api"
-cluster_config = "deploy/environments/staging.cluster.toml"
+cluster_config = "deploy/environments/staging.multinode.cluster.toml"
 allowed_refs = ["refs/heads/dev"]
 allowed_tag_prefixes = []
 
