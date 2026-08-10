@@ -453,6 +453,76 @@ def test_private_path_keystroke_scan_allows_public_app_paths() -> None:
     )
 
 
+def test_private_path_keystroke_scan_ignores_english_and_dict_false_positives() -> None:
+    """Strict regex must not flag prose / dict keys / docstring 'tests'."""
+    trajectory = {
+        "steps": [
+            {
+                "source": "agent",
+                "step_id": "1",
+                "tool_calls": [
+                    {
+                        "tool_call_id": "call_en",
+                        "arguments": {
+                            "keystrokes": "echo All tests passed!\n",
+                        },
+                    },
+                    {
+                        "tool_call_id": "call_dict",
+                        "arguments": {
+                            "keystrokes": (
+                                "python3 -c \"print({'tests': 1, "
+                                "'solution': 'boundary solution'})\""
+                            ),
+                        },
+                    },
+                    {
+                        "tool_call_id": "call_doc",
+                        "arguments": {
+                            "keystrokes": (
+                                "cat > /app/analyze.py << 'EOF'\n"
+                                '"""Reusable analysis for hypothesis tests.\n'
+                                "Fits a normal-normal hierarchical model.\n"
+                                '"""\nEOF\n'
+                            ),
+                        },
+                    },
+                ],
+            },
+        ],
+    }
+    scan_execution_trajectory_for_private_path_keystrokes(
+        trajectory,
+        trial_id=str(uuid4()),
+    )
+
+
+def test_private_path_keystroke_scan_detects_relative_tests_path() -> None:
+    trajectory = {
+        "steps": [
+            {
+                "source": "agent",
+                "step_id": "4",
+                "tool_calls": [
+                    {
+                        "tool_call_id": "call_rel",
+                        "arguments": {
+                            "keystrokes": "pytest tests/test_outputs.py\n",
+                        },
+                    },
+                ],
+            },
+        ],
+    }
+    with pytest.raises(Tb2V2ExportError) as exc_info:
+        scan_execution_trajectory_for_private_path_keystrokes(
+            trajectory,
+            trial_id=str(uuid4()),
+        )
+    assert exc_info.value.code == "forbidden_path_keystrokes"
+    assert exc_info.value.detail["matches"][0]["matched_path"] == "tests"
+
+
 def test_build_per_trial_v2_bundle_rejects_private_path_keystrokes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

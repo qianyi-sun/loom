@@ -36,13 +36,19 @@ SECRET_PATTERNS = (
 
 # #1263: agent tool_calls that touch Harbor private paths (solution/tests/
 # verifier) indicate workspace contamination — fail closed on tb2-v2 pack.
-# Matches `/app/solution/...`, relative `solution/...`, and shell forms from
-# trial 9b6194d5-… step_id 5–6 (`ls /app/solution/`, `cat /app/solution/solve.sh`).
+# Strict path forms only (avoid English/dict FPs like "All tests passed",
+# "'tests': {", "boundary solution"):
+#   - absolute: /app/solution|tests|verifier[/…]
+#   - relative path component: solution/|tests/|verifier/
+# Shell forms from trial 9b6194d5-… step_id 5–6 (`ls /app/solution/`,
+# `cat /app/solution/solve.sh`, `pytest tests/test_outputs.py`).
 PRIVATE_PATH_KEYSTROKE_RE = re.compile(
-    r"(?i)(?:^|[\s;|&`'\"(])"
-    r"(?:/app/)?"
-    r"(?P<path>solution|tests|verifier)"
-    r"(?:/|\s|$|['\"`)])",
+    r"(?i)"
+    r"(?:"
+    r"/app/(?P<abs_path>solution|tests|verifier)(?:/|\s|$|[;'\"`)|&])"
+    r"|"
+    r"(?:^|[\s;|&`'\"(])(?P<rel_path>solution|tests|verifier)/"
+    r")"
 )
 _PRIVATE_PATH_MATCH_CAP = 20
 _KEYSTROKES_EXCERPT_LEN = 160
@@ -1059,6 +1065,9 @@ def scan_execution_trajectory_for_private_path_keystrokes(
             found = PRIVATE_PATH_KEYSTROKE_RE.search(keystrokes)
             if found is None:
                 continue
+            matched_path = (found.group("abs_path") or found.group("rel_path") or "").lower()
+            if not matched_path:
+                continue
             excerpt = keystrokes.strip().replace("\n", "\\n")
             if len(excerpt) > _KEYSTROKES_EXCERPT_LEN:
                 excerpt = excerpt[:_KEYSTROKES_EXCERPT_LEN] + "…"
@@ -1066,7 +1075,7 @@ def scan_execution_trajectory_for_private_path_keystrokes(
                 {
                     "step_id": step_id,
                     "tool_call_id": str(tool_call.get("tool_call_id") or ""),
-                    "matched_path": found.group("path").lower(),
+                    "matched_path": matched_path,
                     "keystrokes_excerpt": excerpt,
                 }
             )
