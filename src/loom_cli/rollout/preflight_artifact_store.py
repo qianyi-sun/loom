@@ -562,15 +562,13 @@ def _descriptor(
 
 
 def _parse_descriptor(value: Mapping[str, object], *, bundle_digest: str) -> _ParsedDescriptor:
-    expected = {
+    historical_expected = {
         "browser_report_schema_sha256",
         "bundle_digest",
         "candidate_sha",
         "candidate_tree",
-        "container_registry",
         "image_artifact_sha256",
         "image_digests",
-        "registry_digests",
         "manifest_artifact_sha256",
         "manifest_image_names",
         "migration_image_id",
@@ -585,19 +583,26 @@ def _parse_descriptor(value: Mapping[str, object], *, bundle_digest: str) -> _Pa
         "resource_set_digest",
         "schema_version",
     }
+    current_expected = historical_expected | {"container_registry", "registry_digests"}
+    schema_version = value.get("schema_version")
     image_digests = value.get("image_digests")
-    registry_digests = value.get("registry_digests")
+    registry_digests = value.get("registry_digests", {})
+    container_registry = value.get("container_registry", "")
     manifest_image_names = value.get("manifest_image_names")
     mutation_epoch = value.get("mutation_epoch")
     if (
-        set(value) != expected
+        (
+            (schema_version == 4 and set(value) != historical_expected)
+            or (schema_version == 6 and set(value) != current_expected)
+            or schema_version not in {4, 6}
+        )
         or value.get("bundle_digest") != bundle_digest
-        or value.get("schema_version") != 6
-        or type(value.get("schema_version")) is not int
+        or type(schema_version) is not int
         or type(mutation_epoch) is not int
         or not isinstance(image_digests, Mapping)
         or not image_digests
         or not isinstance(registry_digests, Mapping)
+        or not isinstance(container_registry, str)
         or not isinstance(manifest_image_names, list)
         or not manifest_image_names
         or manifest_image_names != sorted(set(manifest_image_names))
@@ -616,7 +621,7 @@ def _parse_descriptor(value: Mapping[str, object], *, bundle_digest: str) -> _Pa
             or _IMAGE_ID_RE.fullmatch(item) is None
             for key, item in registry_digests.items()
         )
-        or (bool(value.get("container_registry")) != bool(registry_digests))
+        or (bool(container_registry) != bool(registry_digests))
         or (bool(registry_digests) and set(registry_digests) != set(image_digests))
     ):
         raise PreflightArtifactStoreError("preflight artifact descriptor is invalid")
@@ -624,7 +629,6 @@ def _parse_descriptor(value: Mapping[str, object], *, bundle_digest: str) -> _Pa
         "browser_report_schema_sha256",
         "candidate_sha",
         "candidate_tree",
-        "container_registry",
         "image_artifact_sha256",
         "manifest_artifact_sha256",
         "migration_image_id",
@@ -643,7 +647,7 @@ def _parse_descriptor(value: Mapping[str, object], *, bundle_digest: str) -> _Pa
         browser_report_schema_sha256=str(value["browser_report_schema_sha256"]),
         candidate_sha=str(value["candidate_sha"]),
         candidate_tree=str(value["candidate_tree"]),
-        container_registry=str(value["container_registry"]),
+        container_registry=container_registry,
         image_artifact_sha256=str(value["image_artifact_sha256"]),
         image_digests={str(key): str(item) for key, item in image_digests.items()},
         registry_digests={str(key): str(item) for key, item in registry_digests.items()},
