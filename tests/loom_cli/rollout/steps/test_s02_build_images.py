@@ -164,8 +164,8 @@ class TestBuildImagesCoverage:
         )
 
         assert (
-            "postgres:16@sha256:"
-            "33f923b05f64ca54ac4401c01126a6b92afe839a0aa0a52bc5aeb5cc958e5f20" in dockerfile
+            "postgres:17.4@sha256:"
+            "304ab813518754228f9f792f79d6da36359b82d8ecf418096c636725f8c930ad" in dockerfile
         )
         assert "ARG LOOM_BUILD_SHA" in dockerfile
         assert 'org.opencontainers.image.revision="${LOOM_BUILD_SHA}"' in dockerfile
