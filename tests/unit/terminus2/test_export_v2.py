@@ -29,6 +29,7 @@ from loom_service.delivery_export_tb2_v2 import (
     Tb2V2ExportError,
     build_per_trial_v2_bundle,
     build_terminal_transcript,
+    scan_execution_trajectory_for_private_path_keystrokes,
     parse_trajectory_events,
     resolve_native_artifacts,
     validate_v2_eligibility,
@@ -367,3 +368,140 @@ def test_secret_patterns_ignore_task_id_substrings() -> None:
 def test_secret_patterns_detect_openai_key_shape() -> None:
     leaked = '{"token": "sk-abcdefghijklmnopqrstuvwxyz"}'
     assert any(pattern.search(leaked) for pattern in SECRET_PATTERNS)
+
+
+def test_private_path_keystroke_scan_detects_9b6194d5_pattern() -> None:
+    """#1263: contaminated tool_calls from analyticrayrendererrepair step 5–6."""
+    trajectory = {
+        "schema_version": "harbor-tb2-v2-projection",
+        "steps": [
+            {
+                "source": "agent",
+                "step_id": "5",
+                "tool_calls": [
+                    {
+                        "tool_call_id": "call_3_1",
+                        "function_name": "bash_command",
+                        "arguments": {"keystrokes": "ls /app/tests/\n"},
+                    },
+                    {
+                        "tool_call_id": "call_3_2",
+                        "function_name": "bash_command",
+                        "arguments": {"keystrokes": "ls /app/verifier/\n"},
+                    },
+                    {
+                        "tool_call_id": "call_3_3",
+                        "function_name": "bash_command",
+                        "arguments": {"keystrokes": "ls /app/solution/\n"},
+                    },
+                ],
+            },
+            {
+                "source": "agent",
+                "step_id": "6",
+                "tool_calls": [
+                    {
+                        "tool_call_id": "call_4_4",
+                        "function_name": "bash_command",
+                        "arguments": {
+                            "keystrokes": "cat /app/solution/solve.sh\n",
+                        },
+                    },
+                ],
+            },
+        ],
+    }
+    with pytest.raises(Tb2V2ExportError) as exc_info:
+        scan_execution_trajectory_for_private_path_keystrokes(
+            trajectory,
+            trial_id="9b6194d5-74fe-49da-bea0-fdbc5d5becd6",
+        )
+    assert exc_info.value.code == "forbidden_path_keystrokes"
+    detail = exc_info.value.detail
+    assert detail["trial_id"] == "9b6194d5-74fe-49da-bea0-fdbc5d5becd6"
+    matched = {m["matched_path"] for m in detail["matches"]}
+    assert matched == {"tests", "verifier", "solution"}
+    assert any("solution/solve.sh" in m["keystrokes_excerpt"] for m in detail["matches"])
+
+
+def test_private_path_keystroke_scan_allows_public_app_paths() -> None:
+    trajectory = {
+        "steps": [
+            {
+                "source": "agent",
+                "step_id": "2",
+                "tool_calls": [
+                    {
+                        "tool_call_id": "call_0_1",
+                        "arguments": {"keystrokes": "ls -la /app/\n"},
+                    },
+                    {
+                        "tool_call_id": "call_0_2",
+                        "arguments": {"keystrokes": "cat /app/render_scene.py\n"},
+                    },
+                    {
+                        "tool_call_id": "call_0_3",
+                        "arguments": {"keystrokes": "ls /app/scenes/\n"},
+                    },
+                ],
+            },
+        ],
+    }
+    scan_execution_trajectory_for_private_path_keystrokes(
+        trajectory,
+        trial_id=str(uuid4()),
+    )
+
+
+def test_build_per_trial_v2_bundle_rejects_private_path_keystrokes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trial = _trial()
+    native = b"{}"
+    digest = hashlib.sha256(native).hexdigest()
+    key = trial.trajectory_index["artifacts"][0]["key"]
+    trial.trajectory_index["artifacts"][0]["content_hash"] = f"sha256:{digest}"
+    events = _typed_turn_chain(trial_id=trial.id)
+    events[-1] = Terminus2ArtifactRefEvent(
+        **_base(trial_id=trial.id, seq=6),
+        kind=EventKind.TERMINUS2_ARTIFACT_REF,
+        artifact_kind="terminus_2.pane",
+        sandbox_path="/app/.loom/agent/trajectory.json",
+        content_hash=digest,
+        size_bytes=len(native),
+        share_policy="restricted",
+    )
+    client = _FakeS3({("artifacts", key): native})
+
+    def _contaminated_enrich(trajectory: dict, **kwargs: object) -> dict:
+        steps = list(trajectory.get("steps") or [])
+        steps.append(
+            {
+                "source": "agent",
+                "step_id": "6",
+                "tool_calls": [
+                    {
+                        "tool_call_id": "call_leak",
+                        "arguments": {
+                            "keystrokes": "cat /app/solution/solve.sh\n",
+                        },
+                    },
+                ],
+            },
+        )
+        return {**trajectory, "steps": steps}
+
+    monkeypatch.setattr(
+        "loom_service.delivery_export_tb2_v2.enrich_execution_trajectory",
+        _contaminated_enrich,
+    )
+    with pytest.raises(Tb2V2ExportError) as exc_info:
+        build_per_trial_v2_bundle(
+            trial=trial,
+            events=events,
+            calls=[],
+            client=client,
+            artifacts_bucket="artifacts",
+            messages_from_raw_log=_messages_from_raw_log,
+        )
+    assert exc_info.value.code == "forbidden_path_keystrokes"

@@ -34,6 +34,19 @@ SECRET_PATTERNS = (
     re.compile(r"(?i)bearer\s+[A-Za-z0-9._\-]{8,}"),
 )
 
+# #1263: agent tool_calls that touch Harbor private paths (solution/tests/
+# verifier) indicate workspace contamination — fail closed on tb2-v2 pack.
+# Matches `/app/solution/...`, relative `solution/...`, and shell forms from
+# trial 9b6194d5-… step_id 5–6 (`ls /app/solution/`, `cat /app/solution/solve.sh`).
+PRIVATE_PATH_KEYSTROKE_RE = re.compile(
+    r"(?i)(?:^|[\s;|&`'\"(])"
+    r"(?:/app/)?"
+    r"(?P<path>solution|tests|verifier)"
+    r"(?:/|\s|$|['\"`)])",
+)
+_PRIVATE_PATH_MATCH_CAP = 20
+_KEYSTROKES_EXCERPT_LEN = 160
+
 _event_adapter: TypeAdapter[TrajectoryEvent] = TypeAdapter(TrajectoryEvent)
 
 
@@ -1012,6 +1025,68 @@ def scan_members_for_secrets(members: dict[str, bytes]) -> None:
                 )
 
 
+def scan_execution_trajectory_for_private_path_keystrokes(
+    execution_trajectory: dict[str, Any],
+    *,
+    trial_id: str,
+) -> None:
+    """Fail closed when agent keystrokes reference Harbor private paths (#1263)."""
+    steps = execution_trajectory.get("steps")
+    if not isinstance(steps, list):
+        return
+    matches: list[dict[str, str]] = []
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        source = step.get("source")
+        tool_calls = step.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            continue
+        # Packed ATIF agent turns use source=agent; also scan when source is
+        # absent but tool_calls exist (defensive for older projections).
+        if source not in (None, "agent"):
+            continue
+        step_id = str(step.get("step_id") or "")
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                continue
+            arguments = tool_call.get("arguments")
+            if not isinstance(arguments, dict):
+                continue
+            keystrokes = arguments.get("keystrokes")
+            if not isinstance(keystrokes, str) or not keystrokes:
+                continue
+            found = PRIVATE_PATH_KEYSTROKE_RE.search(keystrokes)
+            if found is None:
+                continue
+            excerpt = keystrokes.strip().replace("\n", "\\n")
+            if len(excerpt) > _KEYSTROKES_EXCERPT_LEN:
+                excerpt = excerpt[:_KEYSTROKES_EXCERPT_LEN] + "…"
+            matches.append(
+                {
+                    "step_id": step_id,
+                    "tool_call_id": str(tool_call.get("tool_call_id") or ""),
+                    "matched_path": found.group("path").lower(),
+                    "keystrokes_excerpt": excerpt,
+                }
+            )
+            if len(matches) >= _PRIVATE_PATH_MATCH_CAP:
+                break
+        if len(matches) >= _PRIVATE_PATH_MATCH_CAP:
+            break
+    if not matches:
+        return
+    raise Tb2V2ExportError(
+        "forbidden_path_keystrokes",
+        {
+            "message": "agent tool_calls keystrokes reference a private Harbor path",
+            "trial_id": trial_id,
+            "forbidden_paths": ["/app/solution", "/app/tests", "/app/verifier"],
+            "matches": matches,
+        },
+    )
+
+
 def build_per_trial_v2_bundle(
     *,
     trial: Trial,
@@ -1066,6 +1141,11 @@ def build_per_trial_v2_bundle(
             calls,
             messages_from_raw_log=messages_from_raw_log,
         ),
+    )
+    # #1263: reject contaminated agent runs before secret scan / tar write.
+    scan_execution_trajectory_for_private_path_keystrokes(
+        execution_trajectory,
+        trial_id=str(trial.id),
     )
 
     artifact_manifest_entries = [

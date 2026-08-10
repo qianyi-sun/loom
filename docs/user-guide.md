@@ -340,6 +340,12 @@ loom eval batch delivery-bundle <batch-id> \
   --output raw-harbor-tb2-v2-delivery.tar.gz
 ```
 
+`raw-harbor-tb2-v2` fails closed (HTTP 409, `forbidden_path_keystrokes`) if any
+selected trial’s packed agent `tool_calls` keystrokes reference private Harbor
+paths (`/app/solution`, `/app/tests`, `/app/verifier`). Use
+`--workspace-staging-policy tb21` at batch create to prevent that leak at
+runtime (#1263).
+
 Live staging validation for `raw-harbor-tb2-v2` is still pending; continue
 using `raw-harbor-tb2-v1` for provider-log-based exports until typed-event
 batches are available.
