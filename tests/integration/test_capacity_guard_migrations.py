@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterator
+from configparser import ConfigParser
 from contextlib import contextmanager
+from logging import INFO, Formatter, LogRecord
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -491,6 +493,17 @@ def test_guard_alembic_environment_has_no_database_fallback() -> None:
     assert "LOOM_DB_URL" not in source
     assert "LOOM_CP_DB_URL" not in source
     assert "LOOM_CAPACITY_DB_URL" not in source
+
+
+def test_guard_alembic_logging_formatter_is_valid() -> None:
+    config = ConfigParser(interpolation=None)
+    assert config.read("capacity_guard_migrations/alembic.ini")
+    formatter = Formatter(
+        config["formatter_generic"]["format"],
+        datefmt=config["formatter_generic"]["datefmt"],
+    )
+    record = LogRecord("alembic", INFO, __file__, 1, "migration ready", (), None)
+    assert "migration ready" in formatter.format(record)
 
 
 def test_guard_migration_requires_explicit_canonical_settings(
