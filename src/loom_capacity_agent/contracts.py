@@ -88,6 +88,18 @@ class ReporterConfigurationV1(AgentRegistrationV1):
         capability_ids = [item.capability_id for item in value]
         if len(capability_ids) != len(set(capability_ids)):
             raise ValueError("duplicate pool capability identity")
+        offers = [
+            (
+                item.pool_id,
+                item.operating_system,
+                item.cpu_architecture,
+                item.gpu_vendor,
+                item.network_policies,
+            )
+            for item in value
+        ]
+        if len(offers) != len(set(offers)):
+            raise ValueError("duplicate semantic pool capability offer")
         return tuple(sorted(value, key=lambda item: item.capability_id))
 
 

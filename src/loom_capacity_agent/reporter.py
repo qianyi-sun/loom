@@ -58,12 +58,11 @@ def _compatible(
 def _required_capabilities(requirements: SealedRequirementsV1) -> tuple[str, ...]:
     values = {
         f"os.{requirements.os}",
-        f"cpu_arch.{requirements.cpu_arch}",
         f"gpu_vendor.{requirements.gpu_vendor}",
         *(f"network.{item}" for item in requirements.network_policies),
     }
-    if requirements.required_pool is not None:
-        values.add(f"required_pool.{requirements.required_pool}")
+    if requirements.cpu_arch != "any":
+        values.add(f"cpu_arch.{requirements.cpu_arch}")
     return tuple(sorted(values))
 
 

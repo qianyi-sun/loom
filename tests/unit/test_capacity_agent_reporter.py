@@ -110,6 +110,28 @@ def test_arch_specific_neutral_and_pinned_demand_get_exact_eligible_pools() -> N
     assert by_attempt[str(attempts[1].protected_attempt_id)] == ("gb10",)
     assert by_attempt[str(attempts[2].protected_attempt_id)] == ("gb10", "oldlab")
     assert by_attempt[str(attempts[3].protected_attempt_id)] == ("gb10",)
+    neutral_bucket = next(
+        bucket
+        for bucket in report.pending_unassigned
+        if bucket.attempt_ids == (str(attempts[2].protected_attempt_id),)
+    )
+    pinned_neutral_bucket = next(
+        bucket
+        for bucket in report.pending_unassigned
+        if bucket.attempt_ids == (str(attempts[3].protected_attempt_id),)
+    )
+    assert "cpu_arch.any" not in neutral_bucket.required_capabilities
+    assert "cpu_arch.any" not in pinned_neutral_bucket.required_capabilities
+    assert not any(
+        capability.startswith("required_pool.")
+        for capability in pinned_neutral_bucket.required_capabilities
+    )
+    x86_bucket = next(
+        bucket
+        for bucket in report.pending_unassigned
+        if bucket.attempt_ids == (str(attempts[0].protected_attempt_id),)
+    )
+    assert "cpu_arch.x86_64" in x86_bucket.required_capabilities
     assert report.current_assignments == ()
     assert report.fixed_claims == ()
 

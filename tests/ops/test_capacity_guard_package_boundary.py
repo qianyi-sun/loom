@@ -7,6 +7,7 @@ import tomllib
 from pathlib import Path
 
 GUARD_ROOT = Path("src/loom_capacity_guard")
+AGENT_ROOT = Path("src/loom_capacity_agent")
 FORBIDDEN_IMPORTS = {
     "subprocess",
     "loom.worker_token",
@@ -63,10 +64,54 @@ def test_capacity_guard_package_has_no_executable_admission_boundary() -> None:
                 ), path
 
 
+def test_capacity_agent_has_no_pool_mutation_or_candidate_runtime_wiring() -> None:
+    sources = sorted(AGENT_ROOT.rglob("*.py"))
+    assert sources
+    for path in sources:
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+        imports = _import_names(tree)
+        assert not {
+            imported
+            for imported in imports
+            if any(
+                imported == forbidden or imported.startswith(f"{forbidden}.")
+                for forbidden in FORBIDDEN_IMPORTS
+            )
+        }, path
+        assert not {token for token in FORBIDDEN_TOKENS if token in source.lower()}, path
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for decorator in node.decorator_list:
+                target = decorator.func if isinstance(decorator, ast.Call) else decorator
+                assert not (
+                    isinstance(target, ast.Attribute) and target.attr.lower() in ROUTE_DECORATORS
+                ), path
+
+    runtime_roots = (
+        Path("deploy"),
+        Path("src/loom"),
+        Path("src/loom_cli"),
+        Path("src/loom_control_plane"),
+        Path("src/loom_service"),
+    )
+    wired = [
+        path
+        for root in runtime_roots
+        if root.exists()
+        for path in root.rglob("*")
+        if path.is_file()
+        and "loom_capacity_agent" in path.read_text(encoding="utf-8", errors="ignore")
+    ]
+    assert wired == []
+
+
 def test_capacity_guard_migrations_have_no_candidate_database_fallback() -> None:
     source = Path("capacity_guard_migrations/env.py").read_text(encoding="utf-8")
     assert "LOOM_CAPACITY_GUARD_DB_URL" in source
     assert "LOOM_CAPACITY_GUARD_OWNER_ROLE" in source
+    assert "LOOM_CAPACITY_GUARD_AGENT_ROLE" in source
     assert "LOOM_DB_URL" not in source
     assert "LOOM_CP_DB_URL" not in source
     assert "LOOM_CAPACITY_DB_URL" not in source
@@ -75,6 +120,7 @@ def test_capacity_guard_migrations_have_no_candidate_database_fallback() -> None
 def test_capacity_guard_is_in_default_static_validation() -> None:
     project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
     assert "src/loom_capacity_guard" in project["tool"]["mypy"]["files"]
+    assert "src/loom_capacity_agent" in project["tool"]["mypy"]["files"]
 
     workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
     ruff_command = "ruff check src tests packages migrations capacity_guard_migrations"

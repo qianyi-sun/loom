@@ -105,6 +105,12 @@ def test_reporter_configuration_allows_multiple_exact_offers_per_pool() -> None:
             **registration.model_dump(mode="python"),
             pool_capabilities=(pool, pool),
         )
+    duplicate_offer = pool.model_copy(update={"capability_id": "gb10-arm-none-copy"})
+    with pytest.raises(ValidationError, match="semantic pool"):
+        ReporterConfigurationV1(
+            **registration.model_dump(mode="python"),
+            pool_capabilities=(pool, duplicate_offer),
+        )
 
 
 def test_attempt_binds_exact_sealed_requirements_and_utc_time() -> None:

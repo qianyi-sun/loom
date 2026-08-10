@@ -8,13 +8,21 @@ from loom_capacity_agent.contracts import (
     ReporterConfigurationV1,
 )
 from loom_capacity_agent.reporter import DemandReportBlockedError, build_demand_snapshot
+from loom_capacity_agent.store import (
+    CapacityAgentStore,
+    CapacityAgentStoreError,
+    capture_demand_observation,
+)
 
 __all__ = [
     "AgentPoolCapabilityV1",
     "AgentRegistrationV1",
+    "CapacityAgentStore",
+    "CapacityAgentStoreError",
     "DemandReportBlockedError",
     "GuardDemandAttemptV1",
     "GuardDemandObservationV1",
     "ReporterConfigurationV1",
     "build_demand_snapshot",
+    "capture_demand_observation",
 ]
