@@ -580,3 +580,31 @@ def test_guard_migration_rejects_superuser_login(
     )
     with pytest.raises(RuntimeError, match="least-privileged"):
         command.current(cfg)
+
+
+def test_guard_migration_rejects_broad_nonlogin_owner(
+    capacity_guard_database: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_engine(_value(capacity_guard_database, "admin_url"))
+    bad_owner = f"guard_broad_owner_test_{uuid4().hex[:12]}"
+    quoted_bad_owner = engine.dialect.identifier_preparer.quote(bad_owner)
+    quoted_migrator = engine.dialect.identifier_preparer.quote(
+        _value(capacity_guard_database, "migrator_role")
+    )
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                f"CREATE ROLE {quoted_bad_owner} NOLOGIN NOSUPERUSER CREATEDB "
+                "NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"
+            )
+            connection.exec_driver_sql(f"GRANT {quoted_bad_owner} TO {quoted_migrator}")
+        cfg = _guard_config(capacity_guard_database)
+        monkeypatch.setenv("LOOM_CAPACITY_GUARD_OWNER_ROLE", bad_owner)
+        with pytest.raises(RuntimeError, match="least-privileged"):
+            command.current(cfg)
+    finally:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(f"REVOKE {quoted_bad_owner} FROM {quoted_migrator}")
+            connection.exec_driver_sql(f"DROP ROLE IF EXISTS {quoted_bad_owner}")
+        engine.dispose()

@@ -75,12 +75,36 @@ def run_migrations_online() -> None:
                     "protected capacity migration login must be a least-privileged role"
                 )
             connection.exec_driver_sql(f"SET ROLE {quoted_owner}")
-            role = connection.execute(
-                text("SELECT current_role, rolcanlogin FROM pg_roles WHERE rolname = current_role")
-            ).one_or_none()
-            if role is None or role.current_role != owner_role or role.rolcanlogin:
+            role = (
+                connection.execute(
+                    text(
+                        "SELECT rolname, rolcanlogin, rolinherit, rolsuper, rolcreatedb, "
+                        "rolcreaterole, rolreplication, rolbypassrls "
+                        "FROM pg_roles WHERE rolname = current_role"
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if (
+                role is None
+                or role["rolname"] != owner_role
+                or role["rolcanlogin"] is True
+                or role["rolinherit"] is True
+                or any(
+                    role[field] is True
+                    for field in (
+                        "rolsuper",
+                        "rolcreatedb",
+                        "rolcreaterole",
+                        "rolreplication",
+                        "rolbypassrls",
+                    )
+                )
+            ):
                 raise RuntimeError(
-                    "protected capacity migrations require the exact non-login owner role"
+                    "protected capacity migrations require the exact least-privileged "
+                    "NOLOGIN NOINHERIT owner role"
                 )
 
             connection.exec_driver_sql(
