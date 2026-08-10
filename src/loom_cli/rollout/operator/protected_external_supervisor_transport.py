@@ -22,6 +22,7 @@ from loom_cli.rollout.external_supervisor_predecessor import (
     ExternalSupervisorCanonicalIdentity,
     ExternalSupervisorCanonicalPointer,
     ExternalSupervisorPredecessorAuthority,
+    ExternalSupervisorPredecessorManifest,
     load_predecessor_manifest,
 )
 from loom_cli.rollout.external_supervisor_readiness import (
@@ -479,6 +480,11 @@ class ExternalSupervisorLiveObservation:
     service_statuses: Mapping[str, ServiceRuntimeStatus]
     canonical_identity: ExternalSupervisorCanonicalIdentity | None = None
     predecessor_authority: ExternalSupervisorPredecessorAuthority | None = None
+    predecessor_manifest: ExternalSupervisorPredecessorManifest | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
     compensation_blockers: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -512,7 +518,7 @@ class ExternalSupervisorLiveObservation:
                     unit_sha256=canonical.unit_sha256,
                 )
             else:
-                legacy = load_predecessor_manifest()
+                legacy = self.predecessor_manifest or load_predecessor_manifest()
                 live_digests = {
                     name: hashlib.sha256(payload).hexdigest()
                     for name, payload in units.items()

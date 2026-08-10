@@ -189,6 +189,27 @@ class _LegacyExternalSupervisorStore:
         return {}
 
 
+class _OldlabLegacyExternalSupervisorStore:
+    """Exact live #1197 OLDLAB predecessor with no canonical pointer yet."""
+
+    def __init__(self) -> None:
+        self.manifest = load_predecessor_manifest(
+            execution_host="TRT-EAI-OLDLAB-1",
+        )
+
+    def list_units(self) -> tuple[str, ...]:
+        return tuple(self.manifest.unit_sha256)
+
+    def read_unit(self, name: str) -> bytes:
+        return self.manifest.unit_payloads[name].encode()
+
+    def read_canonical(self):
+        return None
+
+    def compensation_blockers(self) -> dict[str, str]:
+        return {}
+
+
 class _ReadyLegacyExternalSupervisorControl:
     def timer_status(self, name: str) -> TimerRuntimeStatus:
         return TimerRuntimeStatus(
@@ -383,6 +404,48 @@ def test_installed_external_supervisor_predecessor_source_binds_merged_provenanc
         pool_identity_source=_pool_identity,
     )
     snapshot = source(_installed_predecessor_context(candidate_root))
+
+    assert snapshot.kind == "legacy-manifest"
+    assert snapshot.authority_digest == store.manifest.manifest_digest
+    assert dict(snapshot.unit_sha256) == dict(store.manifest.unit_sha256)
+    assert snapshot.transition_clear is True
+    assert snapshot.runtime_ready is True
+
+
+def test_installed_predecessor_recognizes_exact_oldlab_activation_on_oldlab_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate_root = Path(__file__).resolve().parents[4]
+    store = _OldlabLegacyExternalSupervisorStore()
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "AtomicUserUnitStore",
+        lambda **_kwargs: store,
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "FixedUserSystemdControl",
+        lambda **_kwargs: _ReadyLegacyExternalSupervisorControl(),
+    )
+
+    source = installed_deep_preflight_factory._external_supervisor_predecessor_source(
+        candidate_root=candidate_root,
+        git_run=_git_run,
+        service_uid=501,
+        pool_identity_source=lambda: _pool_identity(
+            "0077",
+            legacy_count=0,
+            target_count=1,
+        ),
+        execution_host="TRT-EAI-OLDLAB-1",
+    )
+    snapshot = source(
+        _installed_predecessor_context(
+            candidate_root,
+            backup_schema_revision="0077",
+            database_schema_revision="0077",
+        )
+    )
 
     assert snapshot.kind == "legacy-manifest"
     assert snapshot.authority_digest == store.manifest.manifest_digest

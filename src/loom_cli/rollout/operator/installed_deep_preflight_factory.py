@@ -171,6 +171,7 @@ def _external_supervisor_predecessor_source(
     git_run: GitRunner,
     service_uid: int,
     pool_identity_source: Callable[[], ExternalSupervisorPoolIdentity],
+    execution_host: str | None = None,
 ) -> ExternalSupervisorPredecessorSource:
     """Return a no-write adapter over the fixed protected user-systemd store."""
 
@@ -193,7 +194,7 @@ def _external_supervisor_predecessor_source(
         return result.stdout
 
     def source(context: CheckContext) -> ExternalSupervisorPredecessorSnapshot:
-        legacy = load_predecessor_manifest()
+        legacy = load_predecessor_manifest(execution_host=execution_host)
         candidate_sha = context.bindings.get("candidate.sha")
         candidate_tree = context.bindings.get("candidate.tree")
         if not isinstance(candidate_sha, str) or not isinstance(candidate_tree, str):
@@ -247,6 +248,7 @@ def _external_supervisor_predecessor_source(
             timer_statuses=timers,
             service_statuses=services,
             canonical_identity=canonical,
+            predecessor_manifest=legacy,
             compensation_blockers=store.compensation_blockers(),
         )
         authority = observation.predecessor_authority
@@ -258,7 +260,11 @@ def _external_supervisor_predecessor_source(
             or bound_schema_revision != pool_identity.schema_revision
         ):
             raise ValueError("external supervisor database schema binding drifted")
-        pool_identity.require_predecessor_kind(authority.kind)
+        pool_identity.require_predecessor_kind(
+            legacy.pool_identity_predecessor_kind
+            if authority.kind == "legacy-manifest"
+            else authority.kind
+        )
         if canonical is not None:
             runtime_ready = canonical_external_supervisor_runtime_ready(
                 canonical,
@@ -530,6 +536,7 @@ def build_installed_deep_preflight_composition(
                 pool_identity_source=lambda: _probe_installed_external_supervisor_pool_identity(
                     service_uid=service_uid
                 ),
+                execution_host=STAGING_ROLLOUT_EXECUTION_HOST,
             )
         ),
         systemd_run=commands.systemd_preflight,
