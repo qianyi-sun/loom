@@ -1,3 +1,4 @@
+from loom_capacity_manager.metrics import CapacityMetrics
 from loom_control_plane.metrics import (
     CLAIM_LATENCY_SEC,
     QUEUE_DEPTH,
@@ -82,4 +83,23 @@ def test_worker_pool_autoscaler_metrics_have_bounded_labels():
         "pool_name",
         "backend",
         "cpu_arch",
+    )
+
+
+def test_capacity_manager_metrics_never_label_subject_or_environment_identity():
+    metrics = CapacityMetrics()
+    assert metrics.ready._labelnames == ()
+    assert metrics.executable_new_capacity_ceiling._labelnames == ()
+    assert metrics.increase_freeze._labelnames == ()
+    assert metrics.report_freshness._labelnames == ("report_kind", "state")
+    assert metrics.pool_slots._labelnames == ("pool_id", "state")
+    assert metrics.shadow_runs._labelnames == ("result", "reason")
+    assert all(
+        "subject" not in label and "environment" not in label
+        for collector in (
+            metrics.report_freshness,
+            metrics.pool_slots,
+            metrics.shadow_runs,
+        )
+        for label in getattr(collector, "_labelnames", ())
     )
