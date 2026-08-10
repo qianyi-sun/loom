@@ -431,6 +431,7 @@ def test_candidate_role_has_no_protected_privileges(
                 "UPDATE loom_capacity_guard.authority_state "
                 "SET reporter_high_water = reporter_high_water",
                 "DELETE FROM loom_capacity_guard.audit_events WHERE false",
+                "CREATE TABLE loom_capacity_guard.candidate_escape (id bigint)",
                 "CREATE SCHEMA candidate_escape",
                 "SELECT loom_capacity_guard.reject_append_only_mutation()",
             ]
