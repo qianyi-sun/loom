@@ -59,6 +59,13 @@ def _close_privileges() -> None:
     op.execute(f"REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA {SCHEMA} FROM PUBLIC")
     op.execute(f"REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA {SCHEMA} FROM PUBLIC")
     op.execute(f"REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA {SCHEMA} FROM PUBLIC")
+    # PostgreSQL's built-in PUBLIC EXECUTE default for functions is global.
+    # A per-schema REVOKE cannot subtract that global default, so close the
+    # dedicated owner's global future-object defaults before also recording
+    # the protected-schema-specific defaults below.
+    op.execute("ALTER DEFAULT PRIVILEGES REVOKE ALL PRIVILEGES ON TABLES FROM PUBLIC")
+    op.execute("ALTER DEFAULT PRIVILEGES REVOKE ALL PRIVILEGES ON SEQUENCES FROM PUBLIC")
+    op.execute("ALTER DEFAULT PRIVILEGES REVOKE ALL PRIVILEGES ON FUNCTIONS FROM PUBLIC")
     op.execute(
         f"ALTER DEFAULT PRIVILEGES IN SCHEMA {SCHEMA} REVOKE ALL PRIVILEGES ON TABLES FROM PUBLIC"
     )

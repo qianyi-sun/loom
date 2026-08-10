@@ -383,6 +383,43 @@ def test_candidate_role_has_no_protected_privileges(
             )
             connection.exec_driver_sql(f"GRANT USAGE ON SCHEMA public TO {quoted_candidate}")
 
+        with _owner_connection(capacity_guard_database) as connection:
+            connection.exec_driver_sql(
+                "CREATE TABLE loom_capacity_guard.future_default_test (id bigint)"
+            )
+            connection.exec_driver_sql(
+                "CREATE SEQUENCE loom_capacity_guard.future_default_sequence"
+            )
+            connection.exec_driver_sql(
+                "CREATE FUNCTION loom_capacity_guard.future_default_function() "
+                "RETURNS integer LANGUAGE sql SET search_path = pg_catalog "
+                "AS 'SELECT 1'"
+            )
+
+        with engine.connect() as connection:
+            future_privileges = (
+                connection.execute(
+                    text(
+                        "SELECT "
+                        "has_table_privilege(:candidate, "
+                        "'loom_capacity_guard.future_default_test', 'SELECT') AS table_select, "
+                        "has_sequence_privilege(:candidate, "
+                        "'loom_capacity_guard.future_default_sequence', 'USAGE') AS sequence_usage, "
+                        "has_function_privilege(:candidate, "
+                        "'loom_capacity_guard.future_default_function()', 'EXECUTE') "
+                        "AS function_execute"
+                    ),
+                    {"candidate": candidate},
+                )
+                .mappings()
+                .one()
+            )
+        assert dict(future_privileges) == {
+            "table_select": False,
+            "sequence_usage": False,
+            "function_execute": False,
+        }
+
         statements = [
             f"SELECT * FROM loom_capacity_guard.{table} LIMIT 1" for table in EXPECTED_GUARD_TABLES
         ]
