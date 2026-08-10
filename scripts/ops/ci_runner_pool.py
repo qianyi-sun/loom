@@ -92,6 +92,7 @@ GUEST_BASE_IMAGES = (
     "node:22-bookworm-slim",
     "postgres:16",
     "postgres:16-alpine",
+    "postgres:17.4",
     "prometheuscommunity/pgbouncer-exporter:v0.12.1",
     "python:3.11-alpine",
     "python:3.11-slim",
