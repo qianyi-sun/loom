@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -46,9 +45,26 @@ def test_installer_pins_non_personal_service_identity_and_shared_roots() -> None
     assert "/shared_work2/qianyi" not in source
 
 
-def test_installer_is_closed_to_the_canonical_fifteen_node_inventory() -> None:
+def test_installer_admits_replacement_node16_and_rejects_debug_node10() -> None:
+    accepted = subprocess.run(
+        [str(INSTALLER), "trt-gb10-16"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert accepted.returncode != 2
+    assert "node must be one of" not in accepted.stderr
+
+    rejected = subprocess.run(
+        [str(INSTALLER), "trt-gb10-10"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert rejected.returncode == 2
+    assert "node must be one of" in rejected.stderr
+
     source = _source()
-    assert re.search(r"trt-gb10-\[1-9\]\|trt-gb10-1\[0-5\]", source)
     assert "scontrol show node" in source
     assert "NodeAddr" in source
     assert "hostname -I" in source
