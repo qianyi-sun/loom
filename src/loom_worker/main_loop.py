@@ -67,7 +67,11 @@ from loom.trajectory.storage import (
     ObjectStore,
     bundle_file_metadata_sha256,
 )
-from loom.trial.workspace import TB21_AGENT_WORKSPACE_POLICY, WorkspaceStagingPolicy
+from loom.trial.workspace import (
+    WorkspaceStagingPolicy,
+    require_tb21_workspace_staging_policy,
+    resolve_trial_workspace_staging_policy,
+)
 from loom.verifier.base import Verifier
 from loom.verifier.pytest_verifier import PytestVerifier
 from loom.verifier.script_verifier import ScriptVerifier
@@ -126,23 +130,8 @@ _VERIFIER_CTORS: dict[str, Callable[..., Verifier]] = {
 def _tb21_workspace_staging_policy_from_provenance(
     raw_policy: object,
 ) -> WorkspaceStagingPolicy:
-    """Parse only the reviewed TB2.1 rev-6 workspace boundary.
-
-    WorkspaceStagingPolicy intentionally supports future benchmark-specific
-    layouts.  The physical TB2.1 profile is stricter: its four private paths
-    are part of the reviewed immutable contract, so a merely valid alternate
-    policy must fail before materialization or driver startup.
-    """
-    if not isinstance(raw_policy, dict):
-        raise ValueError("TB2.1 task is missing canonical private workspace isolation policy")
-    try:
-        policy = WorkspaceStagingPolicy.from_provenance(raw_policy)
-    except ValueError as exc:
-        raise ValueError("TB2.1 task has invalid private workspace isolation policy") from exc
-    canonical = WorkspaceStagingPolicy.from_provenance(TB21_AGENT_WORKSPACE_POLICY)
-    if policy != canonical:
-        raise ValueError("TB2.1 task requires the canonical private workspace isolation policy")
-    return policy
+    """Compat wrapper; prefer ``require_tb21_workspace_staging_policy``."""
+    return require_tb21_workspace_staging_policy(raw_policy)
 
 
 def _host_cpu_arch() -> str:
@@ -876,17 +865,19 @@ async def _spawn_trial(
             raw_provenance = bundle.get("source_provenance")
             provenance = raw_provenance if isinstance(raw_provenance, dict) else {}
             raw_policy = provenance.get("workspace_staging_policy")
-            workspace_staging_policy: WorkspaceStagingPolicy | None
-            if task_config.task.id.startswith("terminal-bench-2@tb2.1-r6/"):
-                workspace_staging_policy = _tb21_workspace_staging_policy_from_provenance(
-                    raw_policy,
-                )
-            else:
-                workspace_staging_policy = (
-                    WorkspaceStagingPolicy.from_provenance(raw_policy)
-                    if isinstance(raw_policy, dict)
-                    else None
-                )
+            # #1263: trial_config.workspace_staging_policy_name (from batch
+            # create CLI) wins over provenance; TB2.1-r6 still fail-closed.
+            workspace_staging_policy = resolve_trial_workspace_staging_policy(
+                policy_name=trial_config.workspace_staging_policy_name,
+                task_id=task_config.task.id,
+                raw_provenance_policy=raw_policy,
+            )
+            logger.info(
+                "trial %s workspace_staging_policy_name=%s applied=%s",
+                trial_id,
+                trial_config.workspace_staging_policy_name,
+                workspace_staging_policy is not None,
+            )
 
             # Plan 13 Task 3: materialize the fixture content from
             # bundle["source"] when it's an s3:// URL (benchmark-imported

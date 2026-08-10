@@ -94,6 +94,13 @@ class TrialConfig(BaseModel):
     # in the classic mode - fully backward compatible.
     family_run: FamilyRunSpec | None = None
 
+    # #1263: optional batch/trial selection of a named workspace staging
+    # policy (e.g. Harbor-shaped packs that need TB21 private-path isolation
+    # without a terminal-bench-2@tb2.1-r6/ task-id prefix).
+    # ``tb21`` → canonical TB21_AGENT_WORKSPACE_POLICY; ``none`` → legacy
+    # full upload; omitted → worker falls back to TB2.1 prefix / provenance.
+    workspace_staging_policy_name: Literal["tb21", "none"] | None = None
+
     @field_validator("request_params", mode="before")
     @classmethod
     def _sanitize_request_params(cls, value: Any) -> dict[str, Any]:

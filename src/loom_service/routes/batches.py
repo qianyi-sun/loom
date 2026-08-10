@@ -232,6 +232,24 @@ def _sanitize_trial_config(config: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _reject_invalid_workspace_staging_policy_name(
+    trial_config: dict[str, Any],
+) -> None:
+    """#1263: early reject unknown named staging policies at batch accept."""
+    policy_name = trial_config.get("workspace_staging_policy_name")
+    if policy_name is None:
+        return
+    if policy_name not in {"tb21", "none"}:
+        _reject_submission(
+            reason="invalid_input",
+            status_code=400,
+            detail=(
+                "trial_config.workspace_staging_policy_name must be "
+                "'tb21' or 'none'"
+            ),
+        )
+
+
 def _extract_family_run_override(
     trial_config: dict[str, Any],
 ) -> FamilyRunSpec | None:
@@ -788,6 +806,7 @@ async def _create_batch_record(
 
     catalog = known_names()
     trial_config = _sanitize_trial_config(payload.trial_config)
+    _reject_invalid_workspace_staging_policy_name(trial_config)
     required_worker_pools = _normalize_required_worker_pools(
         getattr(payload, "required_worker_pools", []) or [],
     )

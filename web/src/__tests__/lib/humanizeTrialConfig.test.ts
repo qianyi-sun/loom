@@ -35,4 +35,13 @@ describe("humanizeTrialConfig", () => {
 
     expect(out.diagnostics).toContain("Unrecognized field: custom_knob");
   });
+
+  it("summarizes workspace staging policy", () => {
+    const out = humanizeTrialConfig({
+      workspace_staging_policy_name: "tb21",
+    });
+
+    expect(out.items).toContain("Workspace staging: tb21");
+    expect(out.diagnostics).toEqual([]);
+  });
 });

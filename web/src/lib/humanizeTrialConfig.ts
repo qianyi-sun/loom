@@ -25,6 +25,7 @@ const KNOWN_TRIAL_CONFIG_KEYS = new Set([
   "submit_priority",
   "verifier_env_mode",
   "verifier_timeout_multiplier",
+  "workspace_staging_policy_name",
 ]);
 
 export function humanizeTrialConfig(
@@ -80,6 +81,12 @@ export function humanizeTrialConfig(
   addCount(items, "Extra skills", c.extra_skills);
   if (c.baseline_network_policy_override) {
     items.push("Network policy: overridden");
+  }
+  if (
+    typeof c.workspace_staging_policy_name === "string" &&
+    c.workspace_staging_policy_name
+  ) {
+    items.push(`Workspace staging: ${c.workspace_staging_policy_name}`);
   }
 
   return {
