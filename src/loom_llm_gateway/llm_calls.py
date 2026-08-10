@@ -6,11 +6,11 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import insert
+from sqlalchemy import insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.data_lifecycle_registry import ensure_trial_event_lifecycle_authority
-from loom.db.schema import LlmCall
+from loom.db.schema import ExecutionAttempt, LlmCall, PipelineRun, PipelineStageRun
 from loom.request_params import coerce_request_params, normalize_request_params
 from loom_llm_gateway.dialect import TokenUsage
 from loom_llm_gateway.metrics import COST_USD_TOTAL, LLM_CALLS_TOTAL
@@ -20,7 +20,8 @@ async def record_call(
     session: AsyncSession,
     *,
     team_id: UUID,
-    trial_id: UUID,
+    trial_id: UUID | None = None,
+    execution_attempt_id: UUID | None = None,
     step_id: str,
     dialect: str,
     model: str,
@@ -48,6 +49,20 @@ async def record_call(
     this successful row (#298 Slice B). Defaults to 1 so callers that
     don't go through the retry helper keep the historical semantics.
     """
+    if (trial_id is None) == (execution_attempt_id is None):
+        raise ValueError("exactly one LLM call subject is required")
+    if execution_attempt_id is not None:
+        attempt_team_id = (
+            await session.execute(
+                select(PipelineRun.team_id)
+                .join(PipelineStageRun, PipelineStageRun.pipeline_run_id == PipelineRun.id)
+                .join(ExecutionAttempt, ExecutionAttempt.stage_run_id == PipelineStageRun.id)
+                .where(ExecutionAttempt.id == execution_attempt_id)
+            )
+        ).scalar_one_or_none()
+        if attempt_team_id != team_id:
+            raise ValueError("ExecutionAttempt attribution does not belong to team")
+
     audit_request_params = (
         normalize_request_params({})
         if request_params is None
@@ -59,22 +74,28 @@ async def record_call(
         provider_extras["_loom_raw_provider_log"] = {
             **raw_provider_log,
             "llm_call_id": str(llm_call_id),
-            "trial_id": str(trial_id),
+            "trial_id": str(trial_id) if trial_id is not None else None,
+            "execution_attempt_id": (
+                str(execution_attempt_id) if execution_attempt_id is not None else None
+            ),
             "step_id": step_id,
             "ref": f"llm_calls/{llm_call_id}/provider_extras/_loom_raw_provider_log",
         }
 
-    lifecycle_authority_id = await ensure_trial_event_lifecycle_authority(
-        session,
-        trial_id=trial_id,
-        expected_team_id=team_id,
-    )
+    lifecycle_authority_id = None
+    if trial_id is not None:
+        lifecycle_authority_id = await ensure_trial_event_lifecycle_authority(
+            session,
+            trial_id=trial_id,
+            expected_team_id=team_id,
+        )
 
     await session.execute(
         insert(LlmCall).values(
             id=llm_call_id,
             team_id=team_id,
             trial_id=trial_id,
+            execution_attempt_id=execution_attempt_id,
             step_id=step_id,
             dialect=dialect,
             model=model,
@@ -106,7 +127,8 @@ async def record_failed_call(
     session: AsyncSession,
     *,
     team_id: UUID,
-    trial_id: UUID,
+    trial_id: UUID | None = None,
+    execution_attempt_id: UUID | None = None,
     step_id: str,
     dialect: str,
     model: str,
@@ -124,6 +146,20 @@ async def record_failed_call(
     request controls so debug surfaces can distinguish "no request attempted"
     from "request attempted and failed upstream".
     """
+    if (trial_id is None) == (execution_attempt_id is None):
+        raise ValueError("exactly one LLM call subject is required")
+    if execution_attempt_id is not None:
+        attempt_team_id = (
+            await session.execute(
+                select(PipelineRun.team_id)
+                .join(PipelineStageRun, PipelineStageRun.pipeline_run_id == PipelineRun.id)
+                .join(ExecutionAttempt, ExecutionAttempt.stage_run_id == PipelineStageRun.id)
+                .where(ExecutionAttempt.id == execution_attempt_id)
+            )
+        ).scalar_one_or_none()
+        if attempt_team_id != team_id:
+            raise ValueError("ExecutionAttempt attribution does not belong to team")
+
     audit_request_params = (
         normalize_request_params({})
         if request_params is None
@@ -139,16 +175,19 @@ async def record_failed_call(
     if failure_error_type:
         provider_extras["_loom_failure_error_type"] = failure_error_type
 
-    lifecycle_authority_id = await ensure_trial_event_lifecycle_authority(
-        session,
-        trial_id=trial_id,
-        expected_team_id=team_id,
-    )
+    lifecycle_authority_id = None
+    if trial_id is not None:
+        lifecycle_authority_id = await ensure_trial_event_lifecycle_authority(
+            session,
+            trial_id=trial_id,
+            expected_team_id=team_id,
+        )
 
     await session.execute(
         insert(LlmCall).values(
             team_id=team_id,
             trial_id=trial_id,
+            execution_attempt_id=execution_attempt_id,
             step_id=step_id,
             dialect=dialect,
             model=model,

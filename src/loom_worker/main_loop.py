@@ -28,7 +28,7 @@ import shutil
 import socket
 import tempfile
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -369,7 +369,11 @@ def _log_docker_registry_auth_summary() -> None:
     )
 
 
-async def run_worker(settings: WorkerSettings) -> None:
+async def run_worker(
+    settings: WorkerSettings,
+    *,
+    pipeline_run: Callable[[dict[str, Any]], Coroutine[Any, Any, None]] | None = None,
+) -> None:
     state = ShutdownState()
     install_signal_handlers(state)
 
@@ -405,8 +409,10 @@ async def run_worker(settings: WorkerSettings) -> None:
         info = await _register_worker_with_retry(
             cp_client=cp_client,
             settings=settings,
+            pipeline_enabled=pipeline_run is not None,
         )
         worker_id = UUID(info["worker_id"])
+        capability_snapshot_digest = info.get("capability_snapshot_digest")
         logger.info("worker_registered worker_id=%s", worker_id)
 
         _run_orphan_cleanup(settings, worker_id)
@@ -477,13 +483,19 @@ async def run_worker(settings: WorkerSettings) -> None:
                     sandbox_singleton = None
 
             while not state.shutting_down:
-                claimed = await _claim_available_trials(
+                claimed = await _claim_available_work(
                     pool=pool,
                     settings=settings,
                     cp_client=cp_client,
                     gateway_client=gateway_client,
                     object_store=object_store,
                     worker_id=worker_id,
+                    capability_snapshot_digest=(
+                        str(capability_snapshot_digest)
+                        if capability_snapshot_digest is not None
+                        else None
+                    ),
+                    pipeline_run=pipeline_run,
                     vllm_registry=vllm_registry,
                     sandbox_allocator=sandbox_allocator,
                     sandbox_singleton=sandbox_singleton,
@@ -537,15 +549,19 @@ async def _register_worker_with_retry(
     settings: WorkerSettings,
     retry_config: StartupRetryConfig = DEFAULT_STARTUP_RETRY_CONFIG,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    pipeline_enabled: bool = False,
 ) -> dict[str, Any]:
+    register_kwargs: dict[str, Any] = {
+        "hostname": _worker_hostname(settings.hostname),
+        "version": "0.0.1",
+        "capabilities": _DEFAULT_CAPS,
+        "max_concurrent": max(1, settings.max_concurrent),
+        "pool_name": settings.pool_name,
+    }
+    if pipeline_enabled:
+        register_kwargs["supported_work_kinds"] = ["trial", "execution_attempt"]
     return await retry_startup_dependency(
-        lambda: cp_client.register(
-            hostname=_worker_hostname(settings.hostname),
-            version="0.0.1",
-            capabilities=_DEFAULT_CAPS,
-            max_concurrent=max(1, settings.max_concurrent),
-            pool_name=settings.pool_name,
-        ),
+        lambda: cp_client.register(**register_kwargs),
         operation_name="worker control-plane registration",
         config=retry_config,
         sleep=sleep,
@@ -728,6 +744,99 @@ async def _claim_available_trials(
             sandbox_allocator=sandbox_allocator,
             sandbox_singleton=sandbox_singleton,
         )
+        claimed += 1
+    return claimed
+
+
+async def _claim_available_work(
+    *,
+    pool: RunnerPool,
+    settings: WorkerSettings,
+    cp_client: HttpControlPlaneClient,
+    gateway_client: HttpLLMGatewayClient,
+    object_store: ObjectStore,
+    worker_id: UUID,
+    capability_snapshot_digest: str | None,
+    pipeline_run: Callable[[dict[str, Any]], Coroutine[Any, Any, None]] | None,
+    vllm_registry: WorkerVLLMRegistry,
+    sandbox_allocator: SandboxNetworkAllocator | None = None,
+    sandbox_singleton: SandboxSingletonManager | None = None,
+    read_setup_health: Callable[[], Any] | None = None,
+) -> int:
+    """Claim from the shared queue when the Pipeline assembly is injected.
+
+    Production Artifact materialization/commit/cancellation are owned by
+    #1240/#1214/#1215.  Until those adapters are assembled, passing no
+    ``pipeline_run`` deliberately retains the old Trial-only endpoint and
+    registration contract.  Focused #8 acceptance injects the strict runner
+    and proves that both work kinds consume this same ``RunnerPool``.
+    """
+
+    if pipeline_run is None or capability_snapshot_digest is None:
+        return await _claim_available_trials(
+            pool=pool,
+            settings=settings,
+            cp_client=cp_client,
+            gateway_client=gateway_client,
+            object_store=object_store,
+            worker_id=worker_id,
+            vllm_registry=vllm_registry,
+            sandbox_allocator=sandbox_allocator,
+            sandbox_singleton=sandbox_singleton,
+            read_setup_health=read_setup_health,
+        )
+
+    from loom_worker.setup_admission import (
+        policy_from_settings,
+        read_node_health_snapshot,
+    )
+
+    claimed = 0
+    setup_health_policy = policy_from_settings(settings)
+    read_health_snapshot = read_setup_health or read_node_health_snapshot
+    while pool.in_flight < settings.max_concurrent:
+        health = setup_health_policy.evaluate(read_health_snapshot())
+        if not health.ok:
+            logger.warning(
+                "work_claim_paused_node_setup_health worker_id=%s reason=%s detail=%s",
+                worker_id,
+                health.reason,
+                health.detail,
+            )
+            break
+        try:
+            envelope = await cp_client.claim_work(
+                worker_id=worker_id,
+                capability_snapshot_digest=capability_snapshot_digest,
+                free_slots=settings.max_concurrent - pool.in_flight,
+            )
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "work_claim_transient_error worker_id=%s err=%s",
+                worker_id,
+                exc,
+            )
+            break
+        if envelope is None:
+            break
+        payload = envelope["payload"]
+        if envelope["work_kind"] == "trial":
+            await _spawn_trial(
+                pool=pool,
+                settings=settings,
+                cp_client=cp_client,
+                gateway_client=gateway_client,
+                object_store=object_store,
+                worker_id=worker_id,
+                payload=payload,
+                vllm_registry=vllm_registry,
+                sandbox_allocator=sandbox_allocator,
+                sandbox_singleton=sandbox_singleton,
+            )
+        elif envelope["work_kind"] == "execution_attempt":
+            await pool.spawn(pipeline_run(payload))
+        else:
+            raise RuntimeError("Control Plane returned an unknown work kind")
         claimed += 1
     return claimed
 

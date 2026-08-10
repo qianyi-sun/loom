@@ -168,3 +168,19 @@ def test_explicit_null_provider_binding_roundtrips() -> None:
     ctx = verify_step_jwt(token, signing_key=_KEY)
     assert ctx.provider_connection_id is None
     assert ctx.provider_connection_id_bound is True
+
+
+def test_execution_attempt_subject_round_trips_without_trial_identity() -> None:
+    attempt_id = uuid4()
+    token = mint_step_jwt(
+        team_id=uuid4(),
+        execution_attempt_id=attempt_id,
+        step_id="offline_judge",
+        ttl_sec=3900,
+        signing_key=_KEY,
+    )
+    ctx = verify_step_jwt(token, signing_key=_KEY)
+    assert ctx.trial_id is None
+    assert ctx.execution_attempt_id == attempt_id
+    assert ctx.token_subject is not None
+    assert ctx.token_subject.kind == "execution_attempt"

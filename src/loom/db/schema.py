@@ -1377,12 +1377,27 @@ class Worker(Base):
             "drain_state IN ('active', 'draining', 'drained')",
             name="workers_drain_state_check",
         ),
+        CheckConstraint(
+            "supported_work_kinds = ARRAY['trial']::text[] OR "
+            "supported_work_kinds = ARRAY['trial','execution_attempt']::text[]",
+            name="workers_supported_work_kinds_check",
+        ),
+        CheckConstraint("lease_epoch > 0", name="workers_lease_epoch_positive_check"),
         Index("idx_workers_drain_state", "drain_state"),
     )
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
     hostname: Mapped[str] = mapped_column(String, nullable=False)
     version: Mapped[str] = mapped_column(String, nullable=False)
     capabilities: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
+    supported_work_kinds: Mapped[list[str]] = mapped_column(
+        ARRAY(Text),
+        nullable=False,
+        server_default=text("ARRAY['trial']::text[]"),
+        default=lambda: ["trial"],
+    )
+    capability_snapshot_digest: Mapped[str | None] = mapped_column(Text)
+    auth_token_hash: Mapped[bytes | None] = mapped_column(LargeBinary)
+    lease_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
     max_concurrent: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     pool_name: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'default'"))
     drain_state: Mapped[str] = mapped_column(
@@ -2483,6 +2498,12 @@ class PipelineStageRun(Base):
     execution_spec_digest: Mapped[str | None] = mapped_column(Text)
     resource_profile_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     resource_profile_digest: Mapped[str | None] = mapped_column(Text)
+    image_runtime_contract_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    image_runtime_contract_digest: Mapped[str | None] = mapped_column(Text)
+    provider_connection_ref: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    secret_refs: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]"), default=list
+    )
     resolved_input_bindings_json: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)
     resolved_input_bindings_digest: Mapped[str | None] = mapped_column(Text)
     fanout_parameters_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
@@ -2654,6 +2675,13 @@ class ExecutionAttempt(Base):
     lease_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
     lease_token_digest: Mapped[str | None] = mapped_column(Text)
     lease_expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    heartbeat_phase: Mapped[str | None] = mapped_column(Text)
+    heartbeat_runtime_seconds: Mapped[float | None] = mapped_column(Float)
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    container_id: Mapped[str | None] = mapped_column(Text)
+    runtime_started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    input_view_digest: Mapped[str | None] = mapped_column(Text)
+    step_jwt_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
     stage_request_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     stage_request_bytes: Mapped[bytes | None] = mapped_column(LargeBinary)
     stage_request_digest: Mapped[str | None] = mapped_column(Text)
@@ -2790,6 +2818,83 @@ class PipelineEvent(Base):
     )
 
 
+class ExecutionAttemptRequest(Base):
+    """Durable idempotency journal for claim-fenced worker mutations."""
+
+    __tablename__ = "execution_attempt_requests"
+    __table_args__ = (
+        UniqueConstraint(
+            "execution_attempt_id",
+            "route",
+            "request_id",
+            name="execution_attempt_requests_route_uidx",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    execution_attempt_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("execution_attempts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    route: Mapped[str] = mapped_column(Text, nullable=False)
+    request_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    request_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    response_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    status_code: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ExecutionAttemptWorkerEvent(Base):
+    __tablename__ = "execution_attempt_worker_events"
+    __table_args__ = (
+        CheckConstraint("local_seq >= 0", name="execution_attempt_events_seq_nonnegative"),
+        UniqueConstraint(
+            "execution_attempt_id", "local_seq", name="execution_attempt_events_seq_uidx"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    execution_attempt_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("execution_attempts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    local_seq: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    stream: Mapped[str] = mapped_column(Text, nullable=False)
+    level: Mapped[str] = mapped_column(Text, nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    message_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ExecutionAttemptControlCommand(Base):
+    __tablename__ = "execution_attempt_control_commands"
+    __table_args__ = (
+        CheckConstraint("seq > 0", name="execution_attempt_commands_seq_positive"),
+        CheckConstraint(
+            "command IN ('cancel_requested','rotate_step_jwt','drain_after_attempt')",
+            name="execution_attempt_commands_command_check",
+        ),
+    )
+
+    execution_attempt_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("execution_attempts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    seq: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    command: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class PipelineAcceptancePreflightPrerequisite(Base):
     __tablename__ = "pipeline_acceptance_preflight_prerequisites"
     __table_args__ = (
@@ -2862,6 +2967,7 @@ class PipelineAcceptancePreflightPrerequisite(Base):
         PgUUID(as_uuid=True), ForeignKey("pipeline_runs.id", ondelete="CASCADE"), primary_key=True
     )
     authorization_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    authorization_snapshot_sha256: Mapped[str | None] = mapped_column(Text)
     candidate_sha256: Mapped[str] = mapped_column(Text, nullable=False)
     preflight_input_set_id: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=text("'S02'")
@@ -3402,9 +3508,21 @@ class LlmCall(Base):
     trajectory JSONL before ATIF projection runs."""
 
     __tablename__ = "llm_calls"
+    __table_args__ = (
+        CheckConstraint(
+            "(trial_id IS NOT NULL)::integer + (execution_attempt_id IS NOT NULL)::integer = 1",
+            name="llm_calls_exactly_one_subject_check",
+        ),
+        Index("llm_calls_execution_attempt_idx", "execution_attempt_id", "captured_at"),
+    )
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
     team_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
-    trial_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    trial_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    execution_attempt_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("execution_attempts.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
     step_id: Mapped[str] = mapped_column(Text, nullable=False)
     model: Mapped[str] = mapped_column(Text, nullable=False)
     dialect: Mapped[str] = mapped_column(Text, nullable=False)

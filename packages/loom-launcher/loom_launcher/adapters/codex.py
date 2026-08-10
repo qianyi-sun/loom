@@ -17,7 +17,7 @@ from loom_launcher.registry import register_adapter
 # #317 Phase 2: install codex CLI into the trial sandbox before
 # invocation. Version pinned to match deploy/agent-sandbox/npm-packages.txt.
 _CODEX_PKG = "@openai/codex"
-_CODEX_VERSION = "0.141.0"
+_CODEX_VERSION = "0.146.0"
 _CODEX_INSTALL_SCRIPT = f"""\
 set -euo pipefail
 if command -v apk >/dev/null 2>&1; then
