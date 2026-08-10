@@ -296,7 +296,16 @@ class CapacityGuardStore:
             {"protected_attempt_id": protected_attempt_id},
             lock=False,
         )
-        return rows[0] if rows else None
+        if not rows:
+            return None
+        attempt = rows[0]
+        await self._verify_single_audit(
+            event_type="trial_registered.v1",
+            trial_id=attempt.trial_id,
+            protected_attempt_id=attempt.protected_attempt_id,
+            model=attempt,
+        )
+        return attempt
 
     async def _read_requirements(
         self,
@@ -447,7 +456,8 @@ class CapacityGuardStore:
                         f"SELECT payload, payload_digest FROM {_SCHEMA}.audit_events "
                         "WHERE event_type = :event_type "
                         "AND trial_id IS NOT DISTINCT FROM :trial_id "
-                        "AND protected_attempt_id IS NOT DISTINCT FROM :protected_attempt_id"
+                        "AND protected_attempt_id IS NOT DISTINCT FROM :protected_attempt_id "
+                        "ORDER BY event_id LIMIT 2"
                     ),
                     {
                         "event_type": event_type,

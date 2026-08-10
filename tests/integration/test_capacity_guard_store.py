@@ -473,3 +473,66 @@ async def test_store_detects_requirement_digest_corruption(
     with pytest.raises(GuardDataIntegrityError, match="digest"):
         async with _store_session(capacity_guard_database) as (store, _):
             await store.register_trial_attempt(attempt, requirements)
+
+
+@pytest.mark.asyncio
+async def test_read_attempt_requires_its_exact_audit_binding(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    trial_id = _seed_trial(capacity_guard_database)
+    await _initialize(capacity_guard_database, _fence())
+    requirements = _requirements()
+    attempt = _attempt(trial_id, requirements)
+    async with _store_session(capacity_guard_database) as (_, session):
+        await session.execute(
+            text(
+                "INSERT INTO loom_capacity_guard.trial_requirements "
+                "(trial_id, schema_version, requirements_digest, requirements) "
+                "VALUES (:trial_id, 1, :digest, CAST(:requirements AS jsonb))"
+            ),
+            {
+                "trial_id": trial_id,
+                "digest": canonical_digest(requirements),
+                "requirements": json.dumps(
+                    requirements.model_dump(mode="json", exclude_none=False)
+                ),
+            },
+        )
+        await session.execute(
+            text(
+                "INSERT INTO loom_capacity_guard.trial_attempts "
+                "(protected_attempt_id, trial_id, execution_generation, "
+                "requirements_digest, claim_state) "
+                "VALUES (:protected_attempt_id, :trial_id, :execution_generation, "
+                ":requirements_digest, :claim_state)"
+            ),
+            attempt.model_dump(mode="python", exclude_none=False),
+        )
+
+    with pytest.raises(GuardDataIntegrityError, match="exactly one trial_registered"):
+        async with _store_session(capacity_guard_database) as (store, _):
+            await store.read_protected_attempt(attempt.protected_attempt_id)
+
+    audit_payload = attempt.model_dump(mode="json", exclude_none=False)
+    audit_parameters = {
+        "trial_id": trial_id,
+        "protected_attempt_id": attempt.protected_attempt_id,
+        "payload": json.dumps(audit_payload),
+        "payload_digest": canonical_digest(attempt),
+    }
+    insert_audit = text(
+        "INSERT INTO loom_capacity_guard.audit_events "
+        "(event_type, trial_id, protected_attempt_id, payload, payload_digest) "
+        "VALUES ('trial_registered.v1', :trial_id, :protected_attempt_id, "
+        "CAST(:payload AS jsonb), :payload_digest)"
+    )
+    async with _store_session(capacity_guard_database) as (_, session):
+        await session.execute(insert_audit, audit_parameters)
+    async with _store_session(capacity_guard_database) as (store, _):
+        assert await store.read_protected_attempt(attempt.protected_attempt_id) == attempt
+
+    async with _store_session(capacity_guard_database) as (_, session):
+        await session.execute(insert_audit, audit_parameters)
+    with pytest.raises(GuardDataIntegrityError, match="exactly one trial_registered"):
+        async with _store_session(capacity_guard_database) as (store, _):
+            await store.read_protected_attempt(attempt.protected_attempt_id)
