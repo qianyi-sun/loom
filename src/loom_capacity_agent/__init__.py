@@ -1,5 +1,12 @@
 """Candidate-independent, zero-executable environment capacity reporter."""
 
+from loom_capacity_agent.client import (
+    DemandPublishError,
+    DemandPublishReceiptV1,
+    DemandReporterClient,
+    DemandReporterConnection,
+    DemandReporterTLSFiles,
+)
 from loom_capacity_agent.contracts import (
     AgentPoolCapabilityV1,
     AgentRegistrationV1,
@@ -19,7 +26,12 @@ __all__ = [
     "AgentRegistrationV1",
     "CapacityAgentStore",
     "CapacityAgentStoreError",
+    "DemandPublishError",
+    "DemandPublishReceiptV1",
     "DemandReportBlockedError",
+    "DemandReporterClient",
+    "DemandReporterConnection",
+    "DemandReporterTLSFiles",
     "GuardDemandAttemptV1",
     "GuardDemandObservationV1",
     "ReporterConfigurationV1",
