@@ -128,6 +128,25 @@ def test_action_rejects_unknown_jobs_and_tampered_oldlab_slots(tmp_path: Path) -
         action.validate_assignment(request_value, response)
 
 
+def test_images_contract_allows_pipeline_orchestrator() -> None:
+    action = _module()
+    request, mode = action.build_request(
+        {
+            "ROUTE_MODE": "disabled",
+            "ROUTE_REPOSITORY": "qianyi-sun/loom",
+            "ROUTE_WORKFLOW_NAME": "images",
+            "ROUTE_WORKFLOW_ID": "302898384",
+            "ROUTE_WORKFLOW_RUN_ID": "40001",
+            "ROUTE_RUN_ATTEMPT": "1",
+            "ROUTE_HEAD_SHA": HEAD_SHA,
+            "ROUTE_JOB_KEYS_JSON": '["pipeline-orchestrator"]',
+        }
+    )
+
+    assert request["job_keys"] == ["pipeline-orchestrator"]
+    assert mode == "disabled"
+
+
 def test_poll_accepts_only_the_exact_digest_check(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
