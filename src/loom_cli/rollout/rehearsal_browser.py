@@ -16,7 +16,11 @@ from loom_cli.rollout.browser_report_contract import (
     browser_report_ready,
 )
 from loom_cli.rollout.image_readiness import BROWSER_IMAGE
-from loom_cli.rollout.rehearsal_action_source import RehearsalPlan
+from loom_cli.rollout.rehearsal_action_source import (
+    RehearsalPlan,
+    rehearsal_image_pull_policy,
+    rehearsal_image_reference,
+)
 
 BROWSER_JOB_NAME = "loom-rehearsal-browser"
 BROWSER_INGRESS_NAME = "loom-rehearsal-browser"
@@ -256,7 +260,7 @@ def _ingress(plan: RehearsalPlan) -> dict[str, object]:
 
 def _browser_job(plan: RehearsalPlan, *, ingress_ip: str) -> dict[str, object]:
     isolation_id = plan.resources.namespace.removeprefix("loom-rehearsal-")
-    image = f"{BROWSER_IMAGE}:{plan.image_tag}"
+    image = rehearsal_image_reference(plan, BROWSER_IMAGE)
     labels = {
         "app": BROWSER_JOB_NAME,
         "loom.openai.dev/candidate-sha": plan.candidate_sha,
@@ -323,7 +327,7 @@ def _browser_job(plan: RehearsalPlan, *, ingress_ip: str) -> dict[str, object]:
                                 {"name": "TMPDIR", "value": "/tmp"},
                             ],
                             "image": image,
-                            "imagePullPolicy": "Never",
+                            "imagePullPolicy": rehearsal_image_pull_policy(plan),
                             "name": "browser",
                             "resources": {
                                 "limits": {"cpu": "2", "memory": "2Gi"},
@@ -354,7 +358,7 @@ def _browser_job(plan: RehearsalPlan, *, ingress_ip: str) -> dict[str, object]:
                             ],
                             "command": ["/bin/sh", "-ceu"],
                             "image": image,
-                            "imagePullPolicy": "Never",
+                            "imagePullPolicy": rehearsal_image_pull_policy(plan),
                             "name": "prepare-token",
                             "resources": {
                                 "limits": {"cpu": "100m", "memory": "64Mi"},

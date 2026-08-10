@@ -12,6 +12,7 @@ from typing import Protocol
 
 import yaml  # type: ignore[import-untyped]
 
+from loom_cli.cluster_config import validate_container_registry_prefix
 from loom_cli.rollout.credential_authority import read_trusted_file
 
 from .final_gate_plan import FinalGatePlan
@@ -32,7 +33,7 @@ _IMPLEMENTATION_DIGEST = hashlib.sha256(
         {
             "apply": ["kubectl", "apply", "--validate=strict", "-f", "-"],
             "read_revision_sql": _READ_REVISION_SQL,
-            "version": "v1",
+            "version": "v2",
             "wait": ["kubectl", "wait", "--for=condition=complete", "--timeout=600s"],
         },
         sort_keys=True,
@@ -67,10 +68,16 @@ class KubernetesProtectedMigrationComponent:
     runner: ProtectedMigrationCommandRunner
     environment: Mapping[str, str]
     service_uid: int
+    container_registry: str = ""
 
     def __post_init__(self) -> None:
         if self.service_uid < 0 or "KUBECONFIG" not in self.environment:
             raise ValueError("protected migration command authority is invalid")
+        if self.container_registry:
+            validate_container_registry_prefix(
+                self.container_registry,
+                name="container_registry",
+            )
 
     def component(self, plan: FinalGatePlan) -> ProtectedApplyComponent:
         return ProtectedApplyComponent(
@@ -85,6 +92,7 @@ class KubernetesProtectedMigrationComponent:
                     "migration_plan_digest": plan.migration_plan_digest,
                     "schema_revision": plan.schema_revision,
                     "target_revision": plan.migration_target_revision,
+                    "container_registry": self.container_registry,
                 }
             ),
             classify=self.classify,
@@ -185,11 +193,16 @@ class KubernetesProtectedMigrationComponent:
         payload = trusted.payload
         if hashlib.sha256(payload).hexdigest() != plan.migration_manifest_sha256:
             raise ValueError("protected migration manifest content drifted")
-        _verify_job(payload, plan)
+        _verify_job(payload, plan, container_registry=self.container_registry)
         return payload
 
 
-def _verify_job(payload: bytes, plan: FinalGatePlan) -> None:
+def _verify_job(
+    payload: bytes,
+    plan: FinalGatePlan,
+    *,
+    container_registry: str = "",
+) -> None:
     try:
         documents = [value for value in yaml.safe_load_all(payload) if value is not None]
     except (UnicodeDecodeError, yaml.YAMLError) as exc:
@@ -219,7 +232,15 @@ def _verify_job(payload: bytes, plan: FinalGatePlan) -> None:
         or container.get("name") != "migrate"
         or container.get("command")
         != ["alembic", "-c", "migrations/alembic.ini", "upgrade", "head"]
-        or container.get("image") != f"loom-control-plane:{image_tag}"
+        or (
+            re.fullmatch(
+                re.escape(f"{container_registry}/loom-control-plane@sha256:") + r"[0-9a-f]{64}",
+                str(container.get("image")),
+            )
+            is None
+            if container_registry
+            else container.get("image") != f"loom-control-plane:{image_tag}"
+        )
     ):
         raise ValueError("protected migration Job identity drifted")
 

@@ -268,7 +268,7 @@ class FakeSystemd:
         self.terminated.append(unit_name)
 
     def show(self, unit_name: str):  # type: ignore[no-untyped-def]
-        return object() if unit_name in self.visible_units else None
+        return SimpleNamespace(is_running=True) if unit_name in self.visible_units else None
 
     def stream_journal(self, unit_name: str, follow: bool):  # type: ignore[no-untyped-def]
         return iter(self.journal)
@@ -1089,6 +1089,61 @@ def test_staged_start_publishes_short_lock_detached_checkpoint_job(tmp_path: Pat
         )
     ]
     assert '"status":"backup_pending"' in deps.stdout.getvalue()
+
+    class StagedCleanupBackup:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str | None]] = []
+
+        def cleanup_incomplete(
+            self,
+            request_id: str,
+            *,
+            bundle_name: str | None = None,
+        ) -> bool:
+            self.calls.append((request_id, bundle_name))
+            return True
+
+    cleanup = StagedCleanupBackup()
+    cleanup_dependencies = replace(staged, backup=cleanup)
+    backup_unit = "loom-staging-backup-req-staged0001.service"
+    deps.systemd.visible_units.add(backup_unit)
+    assert (
+        broker_main(
+            ["cleanup-incomplete-backup", "req-staged0001"],
+            dependencies=cleanup_dependencies,
+        )
+        == 1
+    )
+    assert cleanup.calls == []
+    assert store.read_preflight_backup_job_state("req-staged0001").phase.value == (
+        "backup_pending"
+    )
+
+    deps.systemd.visible_units.remove(backup_unit)
+    assert (
+        broker_main(
+            ["cleanup-incomplete-backup", "req-staged0001"],
+            dependencies=cleanup_dependencies,
+        )
+        == 0
+    )
+    cleaned_job = store.read_preflight_backup_job_state("req-staged0001")
+    assert cleaned_job.phase.value == "backup_failed"
+    assert cleaned_job.failure_code == "backup_cleanup_requested"
+    assert cleanup.calls == [
+        ("req-staged0001", "20260714T120000Z-req-staged0001")
+    ]
+    cleaned_rotation = store.read_backup_rotation()
+    assert cleaned_rotation.candidate is None
+    assert tuple(record.payload_id for record in cleaned_rotation.retirements) == (
+        "payload-failed00",
+        "payload-staged01",
+    )
+    assert [event.event for event in store.read_events("req-staged0001")[-3:]] == [
+        "backup_failed",
+        "backup_cleanup_started",
+        "backup_cleanup_done",
+    ]
 
     failed_store = RequestStore(tmp_path / "failed-staged-state")
     deps.systemd.backup_start_error = RuntimeError("secret-bearing systemd detail")

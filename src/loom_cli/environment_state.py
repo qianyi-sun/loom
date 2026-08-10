@@ -1508,16 +1508,34 @@ def _run_supervisor_command_idempotent(
     """Run a systemctl command that must succeed on a missing unit (#331).
 
     Systemd exit code 5 (LSB EXIT_NOTINSTALLED) means "unit not loaded" —
-    the timer/service was never installed, or was already removed. That
-    is the state we want when stopping/disabling a supervisor the operator
-    has taken out of scope, so treat it as a no-op instead of an error.
-    Non-5 non-zero codes still propagate.
+    the timer/service was never installed, or was already removed. Some
+    systemd releases instead return 1 for the same stop/disable request, so
+    verify ``LoadState=not-found`` before accepting that result. This avoids
+    depending on localized stderr while preserving real rc=1 failures.
     """
     rc, stdout, stderr = runner(command)
     if rc == 0:
         return
     if rc == 5:
         return
+    if (
+        rc == 1
+        and len(command) == 4
+        and command[:2] == ["systemctl", "--user"]
+        and command[2] in {"disable", "stop"}
+    ):
+        probe_rc, probe_stdout, _probe_stderr = runner(
+            [
+                "systemctl",
+                "--user",
+                "show",
+                command[3],
+                "--property=LoadState",
+                "--value",
+            ]
+        )
+        if probe_rc == 0 and probe_stdout.strip() == "not-found":
+            return
     message = (stderr or stdout).strip() or f"command exited {rc}"
     raise EnvironmentStateProfileError(f"{' '.join(command)} failed: {message}")
 

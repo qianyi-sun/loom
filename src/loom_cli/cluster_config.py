@@ -9,6 +9,7 @@ keep dot-access (`cfg.image_tag`, `cfg.replicas.service`).
 
 from __future__ import annotations
 
+import re
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields, make_dataclass
@@ -134,6 +135,15 @@ if TYPE_CHECKING:
         enabled: bool = False
 
     @dataclass(frozen=True)
+    class _TopologyConfig:
+        multi_node: bool = False
+        storage_backend: str = "host_path"
+        postgres_replicas: int = 1
+        minio_replicas: int = 1
+        min_available: int = 1
+        anti_affinity: str = "preferred"
+
+    @dataclass(frozen=True)
     class ClusterConfig:
         image_tag: str = "0.7"
         # Optional container registry prefix applied to every locally-built
@@ -144,6 +154,10 @@ if TYPE_CHECKING:
         # node's `/etc/rancher/k3s/registries.yaml` at the same endpoint so
         # containerd can pull without side-channel image imports.
         container_registry: str = ""
+        # Operator-local publication endpoint for container_registry. This is
+        # explicit because a k3s mirror may pull through a LAN address while
+        # the rollout host pushes through a loopback-bound registry port.
+        container_registry_push: str = ""
         runtime_environment: str = "production"
         env_state_profile: str = ""
         gb10_pool: _Gb10PoolConfig = field(default_factory=_Gb10PoolConfig)
@@ -174,6 +188,7 @@ if TYPE_CHECKING:
         provider_egress_allowlist: tuple[str, ...] = ()
         replicas: _ReplicasConfig = field(default_factory=_ReplicasConfig)
         trajectories_bucket: str = "trajectories"
+        topology: _TopologyConfig = field(default_factory=_TopologyConfig)
         trial_cache_registry_repo: str = ""
         worker_capacity: _WorkerCapacityConfig = field(default_factory=_WorkerCapacityConfig)
         worker_subprocess_gateway_url: str = "http://host.docker.internal:30443/openai/v1"
@@ -244,7 +259,50 @@ def cluster_config_from_mapping(raw: Mapping[str, Any]) -> ClusterConfig:
                 kwargs[name] = tuple(val)
             else:
                 kwargs[name] = val
-    return ClusterConfig(**kwargs)
+    config = ClusterConfig(**kwargs)
+    validate_container_registry_publication(config)
+    return config
+
+
+_REGISTRY_PREFIX_RE = re.compile(
+    r"(?:localhost|(?:[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?)|"
+    r"(?:[0-9]{1,3}[.]){3}[0-9]{1,3})"
+    r"(?::[1-9][0-9]{0,4})?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*\Z"
+)
+
+
+def validate_container_registry_prefixes(pull: str, push: str) -> tuple[str, str] | None:
+    """Return exact pull/push prefixes, rejecting implicit publication authority."""
+    if not pull and not push:
+        return None
+    if not pull or not push:
+        raise ValueError(
+            "container_registry and container_registry_push must be configured together"
+        )
+    validate_container_registry_prefix(pull, name="container_registry")
+    validate_container_registry_prefix(push, name="container_registry_push")
+    return pull, push
+
+
+def validate_container_registry_prefix(value: str, *, name: str) -> str:
+    if (
+        not value
+        or value != value.strip()
+        or value.endswith("/")
+        or "://" in value
+        or "@" in value
+        or _REGISTRY_PREFIX_RE.fullmatch(value) is None
+    ):
+        raise ValueError(f"{name} must be a registry prefix without scheme or trailing slash")
+    return value
+
+
+def validate_container_registry_publication(config: ClusterConfig) -> tuple[str, str] | None:
+    """Return exact pull/push prefixes from one cluster config."""
+    return validate_container_registry_prefixes(
+        str(config.container_registry),
+        str(config.container_registry_push),
+    )
 
 
 def load_cluster_config(path: Path | None) -> ClusterConfig:

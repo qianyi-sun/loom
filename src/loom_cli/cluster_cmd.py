@@ -285,6 +285,10 @@ def _validate_broker_cluster_args(
     if args.config is None or Path(args.config) != expected_config:
         raise ValueError("cluster config path does not match broker rollout")
     _require_real_file(expected_config, label="broker rollout cluster config")
+    expected_rendered = rollout_dir / "07-render" / "rendered.yaml"
+    if args.rendered_manifest is None or Path(args.rendered_manifest) != expected_rendered:
+        raise ValueError("rendered manifest path does not match broker rollout")
+    _require_real_file(expected_rendered, label="broker rendered manifest")
 
     if args.backup_manifest is None or Path(args.backup_manifest) != Path(
         envelope.backup_manifest_path
@@ -308,14 +312,33 @@ def _validate_broker_cluster_snapshot(
 ) -> None:
     rendered = snapshot.config
     envelope = binding.envelope
+    try:
+        authority_path = Path(binding.operator_config.cluster_config_path)
+        _require_real_file(authority_path, label="fixed broker cluster config")
+        authority_raw = tomllib.loads(authority_path.read_text(encoding="utf-8"))
+        authority = cluster_config_from_mapping(authority_raw)
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError, ValueError) as exc:
+        raise ValueError("fixed broker cluster config is invalid") from exc
     expected_root = str(Path(binding.operator_config.rollout_root))
     configured_root = str(rendered.persistent_storage_host_path_root)
     if (
         rendered.namespace != envelope.namespace
         or rendered.runtime_environment != envelope.environment
         or rendered.image_tag != envelope.image_tag
-        or rendered.persistent_storage_backend != "static-host-path"
+        or authority.namespace != envelope.namespace
+        or authority.runtime_environment != envelope.environment
+        or authority.persistent_storage_backend != "dynamic"
+        or authority.topology.multi_node is not True
+        or authority.topology.storage_backend != "longhorn"
+        or not authority.container_registry
+        or not authority.container_registry_push
+        or rendered.persistent_storage_backend != authority.persistent_storage_backend
+        or rendered.topology != authority.topology
+        or rendered.container_registry != authority.container_registry
+        or rendered.container_registry_push != authority.container_registry_push
+        or rendered.k8s_worker.enabled != authority.k8s_worker.enabled
         or configured_root != expected_root
+        or str(authority.persistent_storage_host_path_root) != expected_root
     ):
         raise ValueError("broker rollout cluster config does not match fixed staging fields")
     try:
@@ -3914,6 +3937,7 @@ def _doctor_check_storage_lifecycle(
 # covers cold-start safely. Operators can override via `--timeout`.
 _DEFAULT_UP_TIMEOUT_SEC = 600
 _DEFAULT_UP_POLL_INTERVAL_SEC = 5.0
+_MAX_EXACT_RENDERED_MANIFEST_BYTES = 16 * 1024 * 1024
 
 
 @dataclass
@@ -4705,8 +4729,16 @@ def _up_impl(
     workload_contract_profile = snapshot.workload_contract_profile
 
     try:
-        manifests = render_manifests(config)
-    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        if args.rendered_manifest is None:
+            manifests = render_manifests(config)
+        else:
+            rendered_path = Path(args.rendered_manifest)
+            _require_real_file(rendered_path, label="exact rendered rollout manifest")
+            rendered_size = rendered_path.stat().st_size
+            if not 0 < rendered_size <= _MAX_EXACT_RENDERED_MANIFEST_BYTES:
+                raise ValueError("exact rendered rollout manifest size is invalid")
+            manifests = rendered_path.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError, UnicodeError, ValueError, RuntimeError) as exc:
         sys.stderr.write(f"error: render failed: {exc}\n")
         return 2
 
@@ -5235,6 +5267,7 @@ def _render_migration(args: argparse.Namespace) -> int:
         namespace=args.namespace,
         job_suffix=job_suffix,
         container_registry=args.container_registry,
+        registry_digest=args.registry_digest,
     )
     sys.stdout.write(manifest)
     if not manifest.endswith("\n"):
@@ -5827,6 +5860,15 @@ def dispatch(argv: list[str]) -> int:
         default=None,
         help=(
             "Path to cluster-config.toml. Omit for all defaults (see `loom cluster render --help`)."
+        ),
+    )
+    p_up.add_argument(
+        "--rendered-manifest",
+        type=Path,
+        default=None,
+        help=(
+            "Apply an exact previously rendered manifest instead of rendering "
+            "again. Protected rollouts use this to preserve immutable image digests."
         ),
     )
     p_up.add_argument(
@@ -6495,6 +6537,15 @@ def dispatch(argv: list[str]) -> int:
             "loom-control-plane image reference. Match "
             "cluster.toml's `container_registry` value on multi-node "
             "clusters that pull from an internal registry."
+        ),
+    )
+    p_render_migration.add_argument(
+        "--registry-digest",
+        default="",
+        help=(
+            "Optional immutable sha256 manifest digest for loom-control-plane. "
+            "Protected multi-node rollouts pass the digest published by the "
+            "rollout image step."
         ),
     )
     p_render_migration.set_defaults(handler=_render_migration)

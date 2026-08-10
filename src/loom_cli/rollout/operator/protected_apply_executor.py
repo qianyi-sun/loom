@@ -259,9 +259,11 @@ class MigrationEpochProtectedApplyExecutor:
     environment_state_transport: ProtectedEnvironmentStateTransport
     candidate_root: Path
     external_supervisor_transport: ProtectedExternalSupervisorTransport
+    external_supervisor_execution_host: str | None = None
     production_defaults_request: ProductionDefaultsTransport = field(
         default_factory=HttpxProductionDefaultsTransport
     )
+    container_registry: str = ""
 
     def __post_init__(self) -> None:
         if (
@@ -298,6 +300,7 @@ class MigrationEpochProtectedApplyExecutor:
             runner=self.runner,
             environment=environment,
             service_uid=self.service_uid,
+            container_registry=self.container_registry,
         ).component(plan)
         manifests = KubernetesProtectedManifestComponent(
             runner=self.runner,
@@ -324,6 +327,7 @@ class MigrationEpochProtectedApplyExecutor:
             candidate_root=self.candidate_root,
             transport=self.external_supervisor_transport,
             epoch_guard=epoch.classify,
+            execution_host=self.external_supervisor_execution_host,
         ).component(plan)
         components = (
             (
@@ -377,12 +381,14 @@ class KubernetesProtectedConvergenceExecutor:
     environment_state_transport: ProtectedEnvironmentStateTransport
     candidate_root: Path
     external_supervisor_transport: ProtectedExternalSupervisorTransport
+    external_supervisor_execution_host: str | None = None
     environment_state_attempts: int = 121
     environment_state_interval_seconds: float = 5.0
     sleep: Callable[[float], None] = time.sleep
     production_defaults_request: ProductionDefaultsTransport = field(
         default_factory=HttpxProductionDefaultsTransport
     )
+    container_registry: str = ""
 
     def __post_init__(self) -> None:
         if (
@@ -419,6 +425,7 @@ class KubernetesProtectedConvergenceExecutor:
                 runner=self.runner,
                 environment=environment,
                 service_uid=self.service_uid,
+                container_registry=self.container_registry,
             ).classify(plan),
             "mutation-epoch-claim": epoch.classify(plan),
             "staging-manifests": KubernetesProtectedManifestComponent(
@@ -446,6 +453,7 @@ class KubernetesProtectedConvergenceExecutor:
                 candidate_root=self.candidate_root,
                 transport=self.external_supervisor_transport,
                 epoch_guard=epoch.classify,
+                execution_host=self.external_supervisor_execution_host,
             ).classify(plan),
         }
         expected_epoch = plan.starting_mutation_epoch + 1

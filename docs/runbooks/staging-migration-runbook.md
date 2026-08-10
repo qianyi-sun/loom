@@ -164,7 +164,7 @@ Regenerate the tunnel systemd units targeting the new namespace:
 ```bash
 uv run --no-sync python scripts/ops/worker_service_tunnels.py install-systemd \
   --namespace loom-staging \
-  --context kind-loom-staging \
+  --context loom-staging \
   --output-dir ~/.config/systemd/user/
 
 systemctl --user daemon-reload
@@ -178,8 +178,8 @@ systemctl --user start loom-oldlab-autoscaler.timer
 Reconfigure the OLDLAB autoscaler working directory:
 
 ```bash
-# The existing autoscaler timer points at /home/qianyi/dev/loom-worktrees/public-beta-<sha>
-# Update the systemd unit's ExecStart working dir to a fresh checkout tagged staging-<sha>
+# The broker renders the autoscaler unit from the exact candidate under
+# /opt/loom-staging-runner/candidates/<sha>/repo. Do not hand-edit the unit.
 ```
 
 ### 8. Environment-state apply

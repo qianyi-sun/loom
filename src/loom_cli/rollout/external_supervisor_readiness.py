@@ -30,6 +30,7 @@ STAGING_RUNNER_ROOT = "/opt/loom-staging-runner"
 STAGING_CANDIDATE_RUNTIME_ROOT = f"{STAGING_RUNNER_ROOT}/candidates"
 STAGING_NAMESPACE = "loom-staging"
 STAGING_KUBECONFIG = "/var/lib/loom-staging-rollout/kubeconfig"
+STAGING_ROLLOUT_EXECUTION_HOST = "TRT-EAI-OLDLAB-1"
 REHEARSAL_KUBECONFIG = "/var/lib/loom-staging-rollout/credentials/rehearsal-kubeconfig"
 _REHEARSAL_DB_LOCAL_PORT_OFFSET = 10_000
 _MAX_REHEARSAL_SOURCE_PORT = 65_535 - _REHEARSAL_DB_LOCAL_PORT_OFFSET
@@ -288,6 +289,7 @@ class ExternalSupervisorIdentity:
     control_plane_environment: str
     name: str
     pool_name: str
+    execution_host: str
     service_name: str
     timer_name: str
     runtime_root: str
@@ -320,6 +322,18 @@ class ExternalSupervisorIdentity:
             raise ValueError("external supervisor name is invalid")
         if _IDENTIFIER_RE.fullmatch(_clean_text(self.pool_name, "pool_name", maximum=128)) is None:
             raise ValueError("external supervisor pool name is invalid")
+        expected_slurm_authority = _STAGING_SLURM_AUTHORITIES.get(self.pool_name)
+        execution_host = _clean_text(
+            self.execution_host,
+            "execution_host",
+            maximum=253,
+        )
+        if (
+            expected_slurm_authority is None
+            or execution_host.split(".", 1)[0].casefold()
+            != expected_slurm_authority[1].split(".", 1)[0].casefold()
+        ):
+            raise ValueError("external supervisor execution host drifted")
         service_name = _protected_unit_name(
             self.service_name,
             "service_name",
@@ -360,8 +374,7 @@ class ExternalSupervisorIdentity:
             raise ValueError("external supervisor environment argument drifted")
         if arguments["--pool-name"] != self.pool_name:
             raise ValueError("external supervisor pool argument drifted")
-        expected_slurm_authority = _STAGING_SLURM_AUTHORITIES.get(self.pool_name)
-        if expected_slurm_authority is None or (
+        if (
             arguments["--expected-slurm-cluster-name"],
             arguments["--expected-slurm-controller-host"],
         ) != expected_slurm_authority:
@@ -486,6 +499,7 @@ class ExternalSupervisorIdentity:
             "control_plane_environment": self.control_plane_environment,
             "name": self.name,
             "pool_name": self.pool_name,
+            "execution_host": self.execution_host,
             "service_name": self.service_name,
             "timer_name": self.timer_name,
             "runtime_root": self.runtime_root,
@@ -540,6 +554,7 @@ class ExternalSupervisorIdentity:
             "control_plane_environment": self.control_plane_environment,
             "name": self.name,
             "pool_name": self.pool_name,
+            "execution_host": self.execution_host,
             "service_name": self.service_name,
             "timer_name": self.timer_name,
             "runtime_root": self.runtime_root,
@@ -586,6 +601,7 @@ def _identity_from_dict(raw: object) -> ExternalSupervisorIdentity:
         control_plane_environment=_string(raw, "control_plane_environment"),
         name=_string(raw, "name"),
         pool_name=_string(raw, "pool_name"),
+        execution_host=_string(raw, "execution_host"),
         service_name=_string(raw, "service_name"),
         timer_name=_string(raw, "timer_name"),
         runtime_root=_string(raw, "runtime_root"),
@@ -639,7 +655,7 @@ class ExternalSupervisorArtifact:
         ports = [supervisor.db_local_port for supervisor in self.supervisors]
         rehearsal_ports = [_rehearsal_db_local_port(port) for port in ports]
         if (
-            self.schema_version != 2
+            self.schema_version != 3
             or _SHA_RE.fullmatch(self.candidate_sha) is None
             or _SHA_RE.fullmatch(self.candidate_tree) is None
             or self.environment != "staging"
@@ -895,6 +911,7 @@ def _normalize_supervisor(raw: Mapping[str, object]) -> ExternalSupervisorIdenti
         control_plane_environment=str(raw.get("control_plane_environment", "")),
         name=str(raw.get("name", "")),
         pool_name=str(raw.get("pool_name", "")),
+        execution_host=str(raw.get("execution_host", "")),
         service_name=str(raw.get("service_name", "")),
         timer_name=str(raw.get("timer_name", "")),
         runtime_root=runtime_root,
@@ -945,6 +962,7 @@ def build_external_supervisor_artifact(
     candidate_tree: str,
     image_tag: str,
     environment: str = "staging",
+    execution_host: str | None = None,
 ) -> ExternalSupervisorArtifact:
     """Build an immutable secret-free artifact from exact safe candidate sources."""
     if (
@@ -954,6 +972,10 @@ def build_external_supervisor_artifact(
         or _SHA_RE.fullmatch(candidate_tree) is None
         or _IMAGE_TAG_RE.fullmatch(image_tag) is None
         or environment != "staging"
+        or (
+            execution_host is not None
+            and _IDENTIFIER_RE.fullmatch(execution_host) is None
+        )
     ):
         raise ValueError("external supervisor candidate binding is invalid")
     try:
@@ -986,20 +1008,36 @@ def build_external_supervisor_artifact(
         for pool in profile.external_slurm_runner_prerequisites.get("pools", ())
         if isinstance(pool, str) and pool
     }
+    desired_execution_host = (
+        execution_host.split(".", 1)[0].casefold()
+        if execution_host is not None
+        else None
+    )
     supervisors = tuple(
         sorted(
             (
                 _normalize_supervisor(raw)
                 for raw in profile.external_slurm_autoscaler_supervisors
                 if (
-                    raw.get("enabled") is True
-                    or raw.get("active") is True
-                    or raw.get("pool_name") in protected_pools
+                    (
+                        raw.get("enabled") is True
+                        or raw.get("active") is True
+                        or raw.get("pool_name") in protected_pools
+                    )
+                    and (
+                        desired_execution_host is None
+                        or str(raw.get("execution_host", ""))
+                        .split(".", 1)[0]
+                        .casefold()
+                        == desired_execution_host
+                    )
                 )
             ),
             key=lambda item: item.name,
         )
     )
+    if not supervisors:
+        raise ValueError("external supervisor execution host has no managed supervisors")
 
     profile_second = _trusted_source(profile_path, maximum=_MAX_PROFILE_BYTES)
     script_second = _trusted_source(script_path, maximum=_MAX_SCRIPT_BYTES)
@@ -1009,7 +1047,7 @@ def build_external_supervisor_artifact(
         raise ValueError("external supervisor script changed while artifact was built")
 
     payload = {
-        "schema_version": 2,
+        "schema_version": 3,
         "candidate_sha": candidate_sha,
         "candidate_tree": candidate_tree,
         "environment": environment,
@@ -1021,7 +1059,7 @@ def build_external_supervisor_artifact(
         "supervisors": [supervisor.to_dict() for supervisor in supervisors],
     }
     return ExternalSupervisorArtifact(
-        schema_version=2,
+        schema_version=3,
         candidate_sha=candidate_sha,
         candidate_tree=candidate_tree,
         environment=environment,
@@ -1103,6 +1141,7 @@ __all__ = [
     "STAGING_CANDIDATE_RUNTIME_ROOT",
     "STAGING_KUBECONFIG",
     "STAGING_NAMESPACE",
+    "STAGING_ROLLOUT_EXECUTION_HOST",
     "STAGING_RUNNER_ROOT",
     "ExternalSupervisorArtifact",
     "ExternalSupervisorIdentity",

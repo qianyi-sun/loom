@@ -808,8 +808,11 @@ loom admin gb10-workers status \
   --release-env-config-version "$ENV_CONFIG_VERSION"
 ```
 
-On each GB10 host, the node-agent reads the host-local staging env file
-`/home/qianyi/loom-worker-build-staging/.env`, compares it with Control Plane desired state, writes
+The following node-agent commands document the retired predecessor lane and
+must not be used for normal staging capacity. Its non-personal tombstone root is
+`/shared_work2/loom-staging-rollout/legacy-direct-agent-retired`; protected
+rollout keeps the service and timer disabled. Historically, the agent compared
+its env with Control Plane desired state, wrote
 only non-secret env updates, then runs Docker Compose locally. If desired state
 contains `source_git_commit`, the apply path fetches `origin` and checks out
 that commit before pull/build/restart, so local-build fallback cannot silently
@@ -827,18 +830,18 @@ loom worker gb10-agent plan \
   --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
   --environment staging \
   --pool-name gb10 \
-  --env-file /home/qianyi/loom-worker-build-staging/.env \
-  --source-dir /home/qianyi/loom-worker-build-staging
+  --env-file /shared_work2/loom-staging-rollout/legacy-direct-agent-retired/.env \
+  --source-dir /shared_work2/loom-staging-rollout/legacy-direct-agent-retired
 
 loom worker gb10-agent apply \
   --cp-url http://127.0.0.1:18081 \
   --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
   --environment staging \
   --pool-name gb10 \
-  --env-file /home/qianyi/loom-worker-build-staging/.env \
+  --env-file /shared_work2/loom-staging-rollout/legacy-direct-agent-retired/.env \
   --compose-file deploy/docker-compose.remote-worker.yml \
   --compose-file deploy/worker-pools/gb10/docker-compose.gb10-hostnet.yml \
-  --source-dir /home/qianyi/loom-worker-build-staging
+  --source-dir /shared_work2/loom-staging-rollout/legacy-direct-agent-retired
 ```
 
 For worker-token rotation, run the same host-local plan/apply with the active
@@ -853,8 +856,8 @@ loom worker gb10-agent plan \
   --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
   --environment staging \
   --pool-name gb10 \
-  --env-file /home/qianyi/loom-worker-build-staging/.env \
-  --source-dir /home/qianyi/loom-worker-build-staging \
+  --env-file /shared_work2/loom-staging-rollout/legacy-direct-agent-retired/.env \
+  --source-dir /shared_work2/loom-staging-rollout/legacy-direct-agent-retired \
   --worker-token file:/secure/path/current-worker-token
 
 loom worker gb10-agent apply \
@@ -862,10 +865,10 @@ loom worker gb10-agent apply \
   --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN \
   --environment staging \
   --pool-name gb10 \
-  --env-file /home/qianyi/loom-worker-build-staging/.env \
+  --env-file /shared_work2/loom-staging-rollout/legacy-direct-agent-retired/.env \
   --compose-file deploy/docker-compose.remote-worker.yml \
   --compose-file deploy/worker-pools/gb10/docker-compose.gb10-hostnet.yml \
-  --source-dir /home/qianyi/loom-worker-build-staging \
+  --source-dir /shared_work2/loom-staging-rollout/legacy-direct-agent-retired \
   --worker-token file:/secure/path/current-worker-token
 ```
 
@@ -877,32 +880,21 @@ state.
 
 For systemd service/timer templates and GB10-specific paths, see
 `deploy/worker-pools/gb10/`. Manual Docker Compose remains the break-glass
-fallback when the node-agent timer, token, or CP desired-state API is
-unavailable.
+fallback is not authorized for staging; use the external Slurm autoscaler.
 
 The protected rollout requires `loginctl show-user "$USER" -p Linger --value`
-to return `yes` before it changes either unit. It installs the candidate's
-service and timer into `~/.config/systemd/user`, starts the oneshot once for
-immediate convergence, enables/restarts the timer, and verifies both installed
-bytes and live systemd properties. Bootstrap linger once with the host's normal
+to return `yes` before it changes either unit. It disables the predecessor
+service/timer, verifies they remain inactive, and separately verifies the exact
+service-owned shared candidate. Bootstrap linger once with the host's normal
 user/admin path:
 
 ```bash
 loginctl enable-linger "$USER"
 ```
 
-An active host is reconciled every timer period. If its current or normally
-idle-exited container already uses the desired image, the node-agent reuses it
-and runs Compose reconciliation without a new pull/build. Missing containers or
-runtime-image drift still trigger the candidate-bound pull/build. `draining`
-and `stopped` hosts do not pull, build, or start a worker.
-
-After installation, disconnect the operator SSH session, wait longer than one
-timer period, stop one active canary worker, and require the timer to restore a
-fresh linked worker within the next period. Confirm excluded/stopped hosts stay
-absent. A legacy node-agent for another environment must be stopped or fully
-isolated from this environment's tunnel ports and Compose root before tunnel
-connectivity is restored.
+The GB10-controller autoscaler, not these host timers, reconciles queue demand.
+A scale canary must prove zero-to-one-to-zero through a Slurm allocation while
+the retired per-host units remain disabled on all 15 hosts.
 
 ## Start A Remote Worker
 

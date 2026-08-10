@@ -6,11 +6,12 @@ import hashlib
 import json
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Protocol
 
+from loom_cli.cluster_config import validate_container_registry_prefixes
 from loom_cli.rollout.admin_smoke_contract import (
     AdminSmokeAuthority as RehearsalSmokeAuthority,
 )
@@ -122,9 +123,17 @@ class RehearsalPlan:
     resources: RehearsalResources
     smoke_authority: RehearsalSmokeAuthority
     gb10_authority: GB10RehearsalAuthority
+    container_registry: str = ""
+    container_registry_push: str = ""
+    registry_digests: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        validate_container_registry_prefixes(
+            self.container_registry,
+            self.container_registry_push,
+        )
         image_digests = dict(self.image_digests)
+        registry_digests = dict(self.registry_digests)
         supervisor_script_sha256 = dict(self.external_supervisor_script_sha256)
         supervisor_unit_sha256 = dict(self.external_supervisor_unit_sha256)
         if (
@@ -181,6 +190,12 @@ class RehearsalPlan:
                 not name or not digest.startswith("sha256:")
                 for name, digest in image_digests.items()
             )
+            or bool(registry_digests) != bool(self.container_registry)
+            or (bool(registry_digests) and set(registry_digests) != set(image_digests))
+            or any(
+                not name or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
+                for name, digest in registry_digests.items()
+            )
             or set(supervisor_script_sha256) != {EXTERNAL_SUPERVISOR_SCRIPT_PATH}
             or not supervisor_unit_sha256
             or any(
@@ -194,6 +209,7 @@ class RehearsalPlan:
             raise ValueError("rehearsal plan identity is invalid")
         self.resources.require_isolated()
         object.__setattr__(self, "image_digests", MappingProxyType(image_digests))
+        object.__setattr__(self, "registry_digests", MappingProxyType(registry_digests))
         object.__setattr__(
             self,
             "external_supervisor_script_sha256",
@@ -220,6 +236,8 @@ class RehearsalPlan:
             "candidate_sha": self.candidate_sha,
             "candidate_tree": self.candidate_tree,
             "cluster_name": self.cluster_name,
+            "container_registry": self.container_registry,
+            "container_registry_push": self.container_registry_push,
             "checkpoint_request_id": self.checkpoint_request_id,
             "checkpoint_evidence_sha256": self.checkpoint_evidence_sha256,
             "checkpoint_manifest_path": str(self.checkpoint_manifest_path),
@@ -228,6 +246,7 @@ class RehearsalPlan:
             "gb10_authority": self.gb10_authority.to_record(),
             "image_artifact_sha256": self.image_artifact_sha256,
             "image_digests": dict(self.image_digests),
+            "registry_digests": dict(self.registry_digests),
             "image_tag": self.image_tag,
             "external_supervisor_artifact_sha256": self.external_supervisor_artifact_sha256,
             "external_supervisor_profile_sha256": self.external_supervisor_profile_sha256,
@@ -250,7 +269,7 @@ class RehearsalPlan:
             "production_defaults_path": str(self.production_defaults_path),
             "production_defaults_sha256": self.production_defaults_sha256,
             "schema_revision": self.schema_revision,
-            "schema_version": 6,
+            "schema_version": 8,
             "smoke_authority": self.smoke_authority.to_record(),
         }
 
@@ -264,6 +283,8 @@ class RehearsalPlan:
             "candidate_sha",
             "candidate_tree",
             "cluster_name",
+            "container_registry",
+            "container_registry_push",
             "checkpoint_request_id",
             "checkpoint_evidence_sha256",
             "checkpoint_manifest_path",
@@ -276,6 +297,7 @@ class RehearsalPlan:
             "gb10_authority",
             "image_artifact_sha256",
             "image_digests",
+            "registry_digests",
             "image_tag",
             "manifest_artifact_sha256",
             "migration_plan_sha256",
@@ -294,17 +316,19 @@ class RehearsalPlan:
         resources = value.get("resources")
         smoke_authority = value.get("smoke_authority")
         image_digests = value.get("image_digests")
+        registry_digests = value.get("registry_digests")
         supervisor_script_sha256 = value.get("external_supervisor_script_sha256")
         supervisor_unit_sha256 = value.get("external_supervisor_unit_sha256")
         mutation_epoch = value.get("mutation_epoch")
         if (
             set(value) != expected
             or type(value.get("schema_version")) is not int
-            or value.get("schema_version") != 6
+            or value.get("schema_version") != 8
             or type(mutation_epoch) is not int
             or not isinstance(resources, Mapping)
             or set(resources) != {"database", "namespace", "object_prefix", "route", "systemd_unit"}
             or not isinstance(image_digests, Mapping)
+            or not isinstance(registry_digests, Mapping)
             or not isinstance(supervisor_script_sha256, Mapping)
             or not isinstance(supervisor_unit_sha256, Mapping)
             or not isinstance(smoke_authority, Mapping)
@@ -313,6 +337,7 @@ class RehearsalPlan:
                 not isinstance(key, str) or not isinstance(item, str)
                 for values in (
                     image_digests,
+                    registry_digests,
                     supervisor_script_sha256,
                     supervisor_unit_sha256,
                 )
@@ -327,6 +352,8 @@ class RehearsalPlan:
             "candidate_sha",
             "candidate_tree",
             "cluster_name",
+            "container_registry",
+            "container_registry_push",
             "checkpoint_request_id",
             "checkpoint_evidence_sha256",
             "checkpoint_manifest_path",
@@ -355,6 +382,8 @@ class RehearsalPlan:
             candidate_sha=str(value["candidate_sha"]),
             candidate_tree=str(value["candidate_tree"]),
             cluster_name=str(value["cluster_name"]),
+            container_registry=str(value["container_registry"]),
+            container_registry_push=str(value["container_registry_push"]),
             checkpoint_request_id=str(value["checkpoint_request_id"]),
             checkpoint_evidence_sha256=str(value["checkpoint_evidence_sha256"]),
             checkpoint_manifest_path=Path(str(value["checkpoint_manifest_path"])),
@@ -364,6 +393,7 @@ class RehearsalPlan:
             object_inventory_root=str(value["object_inventory_root"]),
             schema_revision=str(value["schema_revision"]),
             image_digests={str(key): str(item) for key, item in image_digests.items()},
+            registry_digests={str(key): str(item) for key, item in registry_digests.items()},
             image_tag=str(value["image_tag"]),
             image_artifact_sha256=str(value["image_artifact_sha256"]),
             artifact_bundle_sha256=str(value["artifact_bundle_sha256"]),
@@ -400,6 +430,24 @@ class RehearsalPlan:
         )
 
 
+def rehearsal_image_reference(plan: RehearsalPlan, name: str) -> str:
+    """Return the exact pod-facing image reference for one rehearsal image."""
+    if plan.container_registry:
+        return f"{plan.container_registry}/{name}@{plan.registry_digests[name]}"
+    prefix = f"{plan.container_registry}/" if plan.container_registry else ""
+    return f"{prefix}{name}:{plan.image_tag}"
+
+
+def rehearsal_image_push_reference(plan: RehearsalPlan, name: str) -> str:
+    """Return the exact operator-facing publication reference."""
+    prefix = f"{plan.container_registry_push}/" if plan.container_registry_push else ""
+    return f"{prefix}{name}:{plan.image_tag}"
+
+
+def rehearsal_image_pull_policy(plan: RehearsalPlan) -> str:
+    return "IfNotPresent" if plan.container_registry else "Never"
+
+
 @dataclass(frozen=True, slots=True)
 class RehearsalObservation:
     """Secret-free terminal observation returned by the isolated backend."""
@@ -434,8 +482,14 @@ class RehearsalActionSource:
     smoke_authority: RehearsalSmokeAuthority
     gb10_authority: GB10RehearsalAuthority
     backend: RehearsalBackend
+    container_registry: str = ""
+    container_registry_push: str = ""
 
     def __post_init__(self) -> None:
+        validate_container_registry_prefixes(
+            self.container_registry,
+            self.container_registry_push,
+        )
         if (
             _SHA256_RE.fullmatch(self.migration_plan_sha256) is None
             or _REVISION_RE.fullmatch(self.migration_target_revision) is None
@@ -540,6 +594,13 @@ class RehearsalActionSource:
             or external_supervisor.candidate_tree != candidate.resolved_tree
             or external_supervisor.image_tag != candidate.image_tag
             or external_supervisor.environment != checkpoint.environment
+            or migration.container_registry != self.container_registry
+            or bool(artifacts.registry_digests) != bool(self.container_registry)
+            or (
+                bool(artifacts.registry_digests)
+                and migration.registry_digest
+                != artifacts.registry_digests["loom-control-plane"]
+            )
         ):
             raise ValueError("rehearsal candidate or checkpoint authority is invalid")
         resources = RehearsalResources.derive(isolation_id, route_origin=self.route_origin)
@@ -559,6 +620,8 @@ class RehearsalActionSource:
             candidate_sha=candidate.resolved_sha,
             candidate_tree=candidate.resolved_tree,
             cluster_name=self.cluster_name,
+            container_registry=self.container_registry,
+            container_registry_push=self.container_registry_push,
             checkpoint_request_id=checkpoint.request_id,
             checkpoint_evidence_sha256=checkpoint.evidence_digest,
             checkpoint_manifest_path=checkpoint.manifest_path,
@@ -568,6 +631,7 @@ class RehearsalActionSource:
             object_inventory_root=checkpoint.object_inventory_root,
             schema_revision=checkpoint.schema_revision,
             image_digests=artifacts.image_digests,
+            registry_digests=artifacts.registry_digests,
             image_tag=candidate.image_tag,
             image_artifact_sha256=artifacts.artifact_digest,
             artifact_bundle_sha256=publication.bundle_digest,
@@ -604,9 +668,12 @@ class RehearsalActionSource:
             "candidate_sha": candidate.resolved_sha,
             "candidate_tree": candidate.resolved_tree,
             "cluster_name": self.cluster_name,
+            "container_registry": self.container_registry,
+            "container_registry_push": self.container_registry_push,
             "checkpoint_evidence_sha256": checkpoint.evidence_digest,
             "checkpoint_manifest_sha256": checkpoint.manifest_sha256,
             "image_artifact_sha256": artifacts.artifact_digest,
+            "registry_digests": dict(artifacts.registry_digests),
             "image_tag": candidate.image_tag,
             "manifest_artifact_sha256": manifests.artifact_digest,
             "rendered_manifest_sha256": manifests.rendered_sha256,
@@ -622,7 +689,7 @@ class RehearsalActionSource:
             "route_origin": self.route_origin,
             "gb10_authority": self.gb10_authority.to_record(),
             "smoke_authority": self.smoke_authority.to_record(),
-            "schema_version": 6,
+            "schema_version": 8,
         }
         digest = hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -637,6 +704,9 @@ __all__ = [
     "RehearsalPlan",
     "RehearsalResources",
     "RehearsalSmokeAuthority",
+    "rehearsal_image_pull_policy",
+    "rehearsal_image_push_reference",
+    "rehearsal_image_reference",
 ]
 
 

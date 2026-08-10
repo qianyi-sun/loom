@@ -86,6 +86,8 @@ class InstalledDeepPreflightComposition:
     importer: ModuleImporter = importlib.import_module
     max_concurrency: int = 8
     gb10_candidate_source_run: SystemdCommandRunner | None = None
+    container_registry: str = ""
+    container_registry_push: str = ""
 
     def __post_init__(self) -> None:
         if (
@@ -120,6 +122,7 @@ class InstalledDeepPreflightComposition:
                 image_tag=candidate.image_tag,
                 namespace=self.config.namespace,
                 image_run=self.image_run,
+                container_registry_push=self.container_registry_push,
             )
         rehearsal_actions, rehearsal_identity = self.rehearsal_factory(
             candidate, mutation_epoch, purpose, loaded
@@ -176,6 +179,8 @@ class InstalledDeepPreflightComposition:
                 purpose is RuntimePurpose.DETACHED_REHEARSAL
             ),
             gb10_candidate_source_run=self.gb10_candidate_source_run,
+            container_registry=self.container_registry,
+            container_registry_push=self.container_registry_push,
         )
 
     def authority(self) -> DeepPreflightAuthority:

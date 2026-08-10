@@ -8,8 +8,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from loom_cli.cluster_config import (
+    load_cluster_config,
+    validate_container_registry_publication,
+)
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import StepDir
+from loom_cli.rollout.manifest_readiness import (
+    inspect_rendered_manifests,
+    pin_rendered_manifest_images,
+)
 from loom_cli.rollout.steps.base import BaseStep, RunResult, VerifyOutcome
 from loom_cli.rollout.steps.candidate_source import (
     CandidateToolingError,
@@ -18,11 +26,37 @@ from loom_cli.rollout.steps.candidate_source import (
     candidate_loom_env,
     rollout_cluster_config,
 )
+from loom_cli.rollout.steps.s02_build_images import rollout_all_image_bindings
+from loom_cli.rollout.steps.s03_kind_load_images import registry_image_digests
 from loom_cli.rollout.steps.subprocess_util import run_captured
 
 
 def rendered_yaml_path(step_dir: StepDir) -> Path:
     return step_dir.artifact_path("rendered.yaml")
+
+
+def _registry_publication(ctx: RolloutContext) -> tuple[str, str] | None:
+    return validate_container_registry_publication(load_cluster_config(ctx.cluster_config_path))
+
+
+def _validate_registry_render(
+    ctx: RolloutContext,
+    step_dir: StepDir,
+    rendered_yaml: str,
+    *,
+    container_registry: str,
+    registry_digests: dict[str, str],
+) -> None:
+    _plan, image_ids = rollout_all_image_bindings(ctx, step_dir)
+    inspect_rendered_manifests(
+        rendered_yaml,
+        image_tag=ctx.image_tag,
+        namespace=ctx.namespace,
+        image_digests=image_ids,
+        expected_image_names=registry_digests,
+        container_registry=container_registry,
+        registry_digests=registry_digests,
+    )
 
 
 class RenderStep(BaseStep):
@@ -41,11 +75,30 @@ class RenderStep(BaseStep):
         ctx: RolloutContext,
         step_dir: StepDir,
     ) -> VerifyOutcome:
-        # Rendered yaml exists and is non-empty → treat as complete.
         rendered = rendered_yaml_path(step_dir)
-        if rendered.is_file() and rendered.stat().st_size > 0:
-            return VerifyOutcome.MATCH
-        return VerifyOutcome.MISMATCH
+        if not rendered.is_file() or rendered.stat().st_size <= 0:
+            return VerifyOutcome.MISMATCH
+        try:
+            publication = _registry_publication(ctx)
+            if publication is not None:
+                digests = registry_image_digests(ctx, step_dir)
+                _validate_registry_render(
+                    ctx,
+                    step_dir,
+                    rendered.read_text(encoding="utf-8"),
+                    container_registry=publication[0],
+                    registry_digests=digests,
+                )
+        except (OSError, RuntimeError, ValueError):
+            return VerifyOutcome.MISMATCH
+        return VerifyOutcome.MATCH
+
+    def verify_done(
+        self,
+        ctx: RolloutContext,
+        step_dir: StepDir,
+    ) -> VerifyOutcome | None:
+        return self._verify_impl(ctx, step_dir)
 
     def _run_impl(self, ctx: RolloutContext, step_dir: StepDir) -> RunResult:
         rendered = rendered_yaml_path(step_dir)
@@ -76,7 +129,28 @@ class RenderStep(BaseStep):
                     else f"loom cluster render exited {result.returncode}"
                 ),
             )
-        rendered.write_text(result.stdout)
+        rendered_yaml = result.stdout
+        try:
+            publication = _registry_publication(ctx)
+            if publication is not None:
+                digests = registry_image_digests(ctx, step_dir)
+                rendered_yaml = pin_rendered_manifest_images(
+                    rendered_yaml,
+                    image_tag=ctx.image_tag,
+                    container_registry=publication[0],
+                    registry_digests=digests,
+                )
+                _validate_registry_render(
+                    ctx,
+                    step_dir,
+                    rendered_yaml,
+                    container_registry=publication[0],
+                    registry_digests=digests,
+                )
+        except (OSError, RuntimeError, ValueError) as exc:
+            self.write_stderr(step_dir, str(exc) + "\n")
+            return RunResult(exit_code=2, error=str(exc))
+        rendered.write_text(rendered_yaml, encoding="utf-8")
         self.write_stdout(
             step_dir,
             f"rendered {rendered.stat().st_size} bytes to {rendered.name}\n",

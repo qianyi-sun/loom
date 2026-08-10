@@ -10,6 +10,7 @@ from typing import cast
 
 import yaml  # type: ignore[import-untyped]
 
+from loom_cli.cluster_config import load_cluster_config
 from loom_cli.rollout.manifest_ownership_adoption import (
     managed_fields_cleanup_argv,
     ownership_adoption_argv,
@@ -105,6 +106,11 @@ class InstalledManifestOwnershipService:
             image_tag=candidate.image_tag,
             namespace=self.config.namespace,
             image_run=commands.image,
+            container_registry_push=str(
+                load_cluster_config(self.config.cluster_config_path).container_registry_push
+                if self.config.cluster_config_path.is_file()
+                else ""
+            ),
         )
         runner = SubprocessProtectedApplyCommandRunner(max_output_bytes=_MAX_YAML_BYTES)
         environment = runner.environment

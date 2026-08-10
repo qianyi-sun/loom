@@ -13,6 +13,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from loom_cli.cluster_config import load_cluster_config
+from loom_cli.rollout.external_supervisor_readiness import (
+    STAGING_ROLLOUT_EXECUTION_HOST,
+)
 from loom_cli.rollout.final_gate_readiness import FinalGateResult
 from loom_cli.rollout.install_attestation import VerifiedRunnerInstall, verify_runner_install
 from loom_cli.rollout.preflight_contract import CheckOperation
@@ -151,6 +155,9 @@ class InstalledFinalGateExecutor:
     ) -> FinalGateResult:
         self._validate_plan(plan)
         if check_id in {"final.protected-apply", "final.convergence"}:
+            container_registry = str(
+                load_cluster_config(self.config.cluster_config_path).container_registry
+            )
             protected_runner = SubprocessProtectedApplyCommandRunner(
                 kubeconfig=self.config.kubeconfig_path
             )
@@ -178,6 +185,8 @@ class InstalledFinalGateExecutor:
                 environment_state_transport=environment_state,
                 candidate_root=self.config.runner_repo,
                 external_supervisor_transport=external_supervisors,
+                external_supervisor_execution_host=STAGING_ROLLOUT_EXECUTION_HOST,
+                container_registry=container_registry,
             )(check_id, operation, plan)
         if check_id == "final.convergence":
             return KubernetesProtectedConvergenceExecutor(
@@ -187,6 +196,8 @@ class InstalledFinalGateExecutor:
                 environment_state_transport=environment_state,
                 candidate_root=self.config.runner_repo,
                 external_supervisor_transport=external_supervisors,
+                external_supervisor_execution_host=STAGING_ROLLOUT_EXECUTION_HOST,
+                container_registry=container_registry,
             )(check_id, operation, plan)
         if check_id == "final.smoke":
             return FinalSmokeExecutor(

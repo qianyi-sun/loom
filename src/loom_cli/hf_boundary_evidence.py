@@ -29,7 +29,7 @@ import subprocess
 import sys
 
 repo = pathlib.Path(sys.argv[1])
-env_file = repo / ".env"
+env_file = pathlib.Path(sys.argv[2])
 env_keys = []
 if env_file.exists():
     for raw in env_file.read_text(errors="replace").splitlines():
@@ -691,7 +691,27 @@ def collect_worker_boundary_from_gb10(
         target = str(host.get("ssh_target") or "")
         if not target:
             continue
-        repo_path = str(host.get("repo_path") or "/home/qianyi/loom-worker-build")
+        repo_path = str(host.get("repo_path") or "").strip()
+        env_file_path = str(host.get("env_file_path") or "").strip()
+        if not repo_path:
+            image_tag = str(getattr(cfg, "image_tag", ""))
+            if (
+                getattr(cfg, "runtime_environment", None) != "staging"
+                or re.fullmatch(r"staging-[a-z0-9][a-z0-9-]{5,63}", image_tag) is None
+            ):
+                raise HfBoundaryEvidenceError(
+                    "GB10 worker boundary has no service-owned candidate binding"
+                )
+            repo_path = (
+                "/shared_work2/loom-staging-rollout/worker-repos/"
+                f"loom-remote-worker-{image_tag}"
+            )
+            env_file_path = (
+                "/shared_work2/loom-staging-rollout/worker-envs/"
+                f"staging-gb10-worker-{image_tag}.env"
+            )
+        elif not env_file_path:
+            env_file_path = str(Path(repo_path) / ".env")
         argv = ["ssh", "-F", str(ssh_config)]
         if ssh_identity is not None:
             argv.extend(["-i", str(ssh_identity), "-o", "IdentitiesOnly=yes"])
@@ -703,6 +723,7 @@ def collect_worker_boundary_from_gb10(
                 "python3",
                 "-",
                 repo_path,
+                env_file_path,
             ]
         )
         proc = subprocess.run(

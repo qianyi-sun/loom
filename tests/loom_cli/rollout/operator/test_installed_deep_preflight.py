@@ -165,6 +165,7 @@ def test_composition_uses_one_source_graph_and_loads_outputs_only_for_detached(
             "image_tag": candidate.image_tag,
             "namespace": "loom-staging",
             "image_run": command,
+            "container_registry_push": "",
         }
     ]
     assert composition.authority().current_mutation_epoch() == 9

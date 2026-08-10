@@ -60,7 +60,10 @@ def _require_job_template(
     rendered_yaml: str,
     *,
     image_tag: str,
+    container_registry: str,
+    registry_digest: str,
     expected_buckets: tuple[str, ...],
+    capacity_source: str,
     expected_filesystem_paths: tuple[str, ...],
 ) -> dict[str, Any]:
     if not rendered_yaml or len(rendered_yaml.encode()) > 16 * 1024 * 1024:
@@ -123,7 +126,11 @@ def _require_job_template(
     if len(containers) != 1:
         raise LifecycleCapacityJobError("lifecycle container authority is ambiguous")
     container = _mapping(containers[0], "lifecycle container")
-    expected_image = f"loom-control-plane:{image_tag}"
+    expected_image = (
+        f"{container_registry}/loom-control-plane@{registry_digest}"
+        if container_registry and registry_digest
+        else f"loom-control-plane:{image_tag}"
+    )
     if (
         container.get("name") != "lifecycle"
         or container.get("image") != expected_image
@@ -139,12 +146,10 @@ def _require_job_template(
     expected_args = ["--action", "auto", "--namespace", _NAMESPACE]
     for bucket in expected_buckets:
         expected_args.extend(("--bucket", bucket))
-    # The sealed broker only manages the single-node kind staging runner, whose
-    # hostPath MinIO drives are stat'd locally (the distributed MinIO admin-API
-    # source, #1113, is not on this path).
-    expected_args.extend(("--capacity-source", "filesystem"))
-    for filesystem_path in expected_filesystem_paths:
-        expected_args.extend(("--filesystem-path", filesystem_path))
+    expected_args.extend(("--capacity-source", capacity_source))
+    if capacity_source == "filesystem":
+        for filesystem_path in expected_filesystem_paths:
+            expected_args.extend(("--filesystem-path", filesystem_path))
     args = _sequence(container.get("args"), "lifecycle arguments")
     if args != expected_args:
         raise LifecycleCapacityJobError("lifecycle capacity input authority drifted")
@@ -174,26 +179,34 @@ def _require_job_template(
         or observed_environment != expected_environment
     ):
         raise LifecycleCapacityJobError("lifecycle environment authority drifted")
-    volume_mounts = _sequence(container.get("volumeMounts"), "lifecycle volume mounts")
-    volumes = _sequence(pod_spec.get("volumes"), "lifecycle volumes")
-    expected_volume_mounts = [
-        {
-            "mountPath": filesystem_path,
-            "name": f"minio-capacity-{index}",
-            "readOnly": True,
-        }
-        for index, filesystem_path in enumerate(expected_filesystem_paths)
-    ]
-    expected_volumes = [
-        {
-            "name": f"minio-capacity-{index}",
-            "persistentVolumeClaim": {
-                "claimName": f"data-loom-minio-{index}",
+    volume_mounts = _sequence(container.get("volumeMounts", []), "lifecycle volume mounts")
+    volumes = _sequence(pod_spec.get("volumes", []), "lifecycle volumes")
+    expected_volume_mounts = (
+        [
+            {
+                "mountPath": filesystem_path,
+                "name": f"minio-capacity-{index}",
                 "readOnly": True,
-            },
-        }
-        for index in range(len(expected_filesystem_paths))
-    ]
+            }
+            for index, filesystem_path in enumerate(expected_filesystem_paths)
+        ]
+        if capacity_source == "filesystem"
+        else []
+    )
+    expected_volumes = (
+        [
+            {
+                "name": f"minio-capacity-{index}",
+                "persistentVolumeClaim": {
+                    "claimName": f"data-loom-minio-{index}",
+                    "readOnly": True,
+                },
+            }
+            for index in range(len(expected_filesystem_paths))
+        ]
+        if capacity_source == "filesystem"
+        else []
+    )
     if volume_mounts != expected_volume_mounts or volumes != expected_volumes:
         raise LifecycleCapacityJobError("lifecycle capacity volume authority drifted")
     return copy.deepcopy(job_spec)
@@ -213,6 +226,7 @@ class LifecycleCapacityJobPlan:
     job_manifest: str
     job_manifest_sha256: str
     plan_digest: str
+    control_plane_registry_digest: str = ""
     schema_version: int = 1
 
     def __post_init__(self) -> None:
@@ -224,6 +238,10 @@ class LifecycleCapacityJobPlan:
             or _SHA256_RE.fullmatch(self.artifact_bundle_sha256) is None
             or _SHA256_RE.fullmatch(self.rendered_manifest_sha256) is None
             or _IMAGE_ID_RE.fullmatch(self.control_plane_image_id) is None
+            or (
+                self.control_plane_registry_digest
+                and _IMAGE_ID_RE.fullmatch(self.control_plane_registry_digest) is None
+            )
             or _IMAGE_TAG_RE.fullmatch(self.image_tag) is None
             or self.namespace != _NAMESPACE
             or _DNS_RE.fullmatch(self.job_name) is None
@@ -251,6 +269,8 @@ class LifecycleCapacityJobPlan:
         }
         if include_digest:
             value["plan_digest"] = self.plan_digest
+        if self.control_plane_registry_digest:
+            value["control_plane_registry_digest"] = self.control_plane_registry_digest
         return value
 
     def to_dict(self) -> dict[str, object]:
@@ -273,7 +293,7 @@ class LifecycleCapacityJobPlan:
             "rendered_manifest_sha256",
             "schema_version",
         }
-        if set(value) != expected:
+        if set(value) not in {frozenset(expected), frozenset((*expected, "control_plane_registry_digest"))}:
             raise LifecycleCapacityJobError("lifecycle capacity Job plan keys are invalid")
         try:
             return cls(**cast(Any, value))
@@ -293,12 +313,19 @@ def build_lifecycle_capacity_job_plan(
     rendered_yaml: str,
     expected_buckets: tuple[str, ...],
     expected_filesystem_paths: tuple[str, ...],
+    capacity_source: str = "filesystem",
+    container_registry: str = "",
+    registry_digest: str = "",
 ) -> LifecycleCapacityJobPlan:
     if (
         len(expected_buckets) != 2
         or len(set(expected_buckets)) != 2
-        or not expected_filesystem_paths
+        or capacity_source not in {"filesystem", "minio-admin"}
+        or (capacity_source == "filesystem" and not expected_filesystem_paths)
+        or (capacity_source == "minio-admin" and bool(expected_filesystem_paths))
         or len(set(expected_filesystem_paths)) != len(expected_filesystem_paths)
+        or bool(container_registry) != bool(registry_digest)
+        or (registry_digest and _IMAGE_ID_RE.fullmatch(registry_digest) is None)
         or any(
             not value or "\x00" in value
             for value in (*expected_buckets, *expected_filesystem_paths)
@@ -308,7 +335,10 @@ def build_lifecycle_capacity_job_plan(
     job_spec = _require_job_template(
         rendered_yaml,
         image_tag=image_tag,
+        container_registry=container_registry,
+        registry_digest=registry_digest,
         expected_buckets=expected_buckets,
+        capacity_source=capacity_source,
         expected_filesystem_paths=expected_filesystem_paths,
     )
     job_name = f"loom-staging-capacity-{candidate_sha[:8]}-{artifact_bundle_sha256[:8]}"
@@ -355,6 +385,8 @@ def build_lifecycle_capacity_job_plan(
         "rendered_manifest_sha256": rendered_manifest_sha256,
         "schema_version": 1,
     }
+    if registry_digest:
+        raw["control_plane_registry_digest"] = registry_digest
     return LifecycleCapacityJobPlan(
         **raw,
         plan_digest=_digest(raw),

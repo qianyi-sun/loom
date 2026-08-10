@@ -13,11 +13,13 @@ from pathlib import Path
 from typing import TypedDict
 from uuid import uuid4
 
+from loom_cli.cluster_config import validate_container_registry_prefix
 from loom_cli.rollout.credential_authority import read_trusted_file
 from loom_cli.rollout.image_readiness import (
     DockerRunner,
     ImageArtifactSet,
     verify_image_contract,
+    verify_published_images,
 )
 from loom_cli.rollout.manifest_readiness import (
     ManifestArtifact,
@@ -48,8 +50,10 @@ class _ParsedDescriptor(TypedDict):
     browser_report_schema_sha256: str
     candidate_sha: str
     candidate_tree: str
+    container_registry: str
     image_artifact_sha256: str
     image_digests: dict[str, str]
+    registry_digests: dict[str, str]
     manifest_artifact_sha256: str
     manifest_image_names: tuple[str, ...]
     migration_image_id: str
@@ -87,6 +91,7 @@ class PreflightArtifactPublication:
     migration_target_revision: str
     browser_report_schema_sha256: str
     production_defaults_sha256: str
+    container_registry: str = ""
 
     def __post_init__(self) -> None:
         if (
@@ -124,6 +129,11 @@ class PreflightArtifactPublication:
             or _IMAGE_ID_RE.fullmatch(self.migration_image_id) is None
         ):
             raise ValueError("preflight artifact publication identity is invalid")
+        if self.container_registry:
+            validate_container_registry_prefix(
+                self.container_registry,
+                name="container_registry",
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +151,7 @@ class LoadedPreflightArtifacts:
             or self.publication.rendered_manifest_sha256 != self.manifests.rendered_sha256
             or self.publication.migration_manifest_artifact_sha256 != self.migration.artifact_digest
             or self.publication.migration_manifest_sha256 != self.migration.rendered_sha256
+            or self.publication.container_registry != self.migration.container_registry
             or self.publication.production_defaults_sha256
             != self.production_defaults.artifact_digest
         ):
@@ -213,6 +224,7 @@ class PreflightArtifactStore:
             migration_target_revision=migration_target_revision,
             browser_report_schema_sha256=browser_report_schema_sha256,
             production_defaults_sha256=production_defaults.artifact_digest,
+            container_registry=migration.container_registry,
         )
         self._ensure_roots()
         _ensure_private_directory(directory, service_uid=self.service_uid)
@@ -331,6 +343,7 @@ class PreflightArtifactStore:
             migration_target_revision=descriptor["migration_target_revision"],
             browser_report_schema_sha256=descriptor["browser_report_schema_sha256"],
             production_defaults_sha256=descriptor["production_defaults_sha256"],
+            container_registry=descriptor["container_registry"],
         )
 
     def load_exact(
@@ -342,6 +355,7 @@ class PreflightArtifactStore:
         image_tag: str,
         namespace: str,
         image_run: DockerRunner,
+        container_registry_push: str = "",
     ) -> LoadedPreflightArtifacts:
         """Load one exact publication without rebuilding or rerendering outputs."""
         if (
@@ -416,6 +430,14 @@ class PreflightArtifactStore:
                 resolved_sha=candidate_sha,
                 expected_digests=descriptor["image_digests"],
             )
+            if descriptor["registry_digests"]:
+                images = verify_published_images(
+                    image_run,
+                    artifact=images,
+                    image_tag=image_tag,
+                    container_registry_push=container_registry_push,
+                    expected_registry_digests=descriptor["registry_digests"],
+                )
             rendered = rendered_read.payload.decode("utf-8")
             manifests = inspect_rendered_manifests(
                 rendered,
@@ -423,6 +445,8 @@ class PreflightArtifactStore:
                 namespace=namespace,
                 image_digests=images.image_digests,
                 expected_image_names=descriptor["manifest_image_names"],
+                container_registry=descriptor["container_registry"],
+                registry_digests=images.registry_digests,
             )
             migration = inspect_migration_manifest_artifact(
                 migration_read.payload.decode("utf-8"),
@@ -433,6 +457,12 @@ class PreflightArtifactStore:
                 namespace=namespace,
                 migration_plan_sha256=publication.migration_plan_sha256,
                 migration_target_revision=publication.migration_target_revision,
+                container_registry=descriptor["container_registry"],
+                registry_digest=(
+                    images.registry_digests["loom-control-plane"]
+                    if descriptor["container_registry"]
+                    else ""
+                ),
             )
             production_defaults = ProductionDefaultsArtifact.from_bytes(
                 production_defaults_read.payload
@@ -490,6 +520,11 @@ def _descriptor(
         or migration.candidate_sha != candidate_sha
         or migration.candidate_tree != candidate_tree
         or migration.image_id != images.image_digests["loom-control-plane"]
+        or bool(migration.container_registry) != bool(images.registry_digests)
+        or (
+            bool(images.registry_digests)
+            and migration.registry_digest != images.registry_digests["loom-control-plane"]
+        )
         or migration.migration_plan_sha256 != migration_plan_sha256
         or migration.migration_target_revision != migration_target_revision
         or production_defaults.candidate_sha != candidate_sha
@@ -506,8 +541,10 @@ def _descriptor(
         "browser_report_schema_sha256": browser_report_schema_sha256,
         "candidate_sha": candidate_sha,
         "candidate_tree": candidate_tree,
+        "container_registry": migration.container_registry,
         "image_artifact_sha256": images.artifact_digest,
         "image_digests": dict(images.image_digests),
+        "registry_digests": dict(images.registry_digests),
         "manifest_artifact_sha256": manifests.artifact_digest,
         "manifest_image_names": sorted(manifests.image_identities),
         "migration_image_id": migration.image_id,
@@ -520,7 +557,7 @@ def _descriptor(
         "production_defaults_sha256": production_defaults.artifact_digest,
         "rendered_manifest_sha256": manifests.rendered_sha256,
         "resource_set_digest": manifests.resource_set_digest,
-        "schema_version": 4,
+        "schema_version": 6,
     }
 
 
@@ -530,8 +567,10 @@ def _parse_descriptor(value: Mapping[str, object], *, bundle_digest: str) -> _Pa
         "bundle_digest",
         "candidate_sha",
         "candidate_tree",
+        "container_registry",
         "image_artifact_sha256",
         "image_digests",
+        "registry_digests",
         "manifest_artifact_sha256",
         "manifest_image_names",
         "migration_image_id",
@@ -547,16 +586,18 @@ def _parse_descriptor(value: Mapping[str, object], *, bundle_digest: str) -> _Pa
         "schema_version",
     }
     image_digests = value.get("image_digests")
+    registry_digests = value.get("registry_digests")
     manifest_image_names = value.get("manifest_image_names")
     mutation_epoch = value.get("mutation_epoch")
     if (
         set(value) != expected
         or value.get("bundle_digest") != bundle_digest
-        or value.get("schema_version") != 4
+        or value.get("schema_version") != 6
         or type(value.get("schema_version")) is not int
         or type(mutation_epoch) is not int
         or not isinstance(image_digests, Mapping)
         or not image_digests
+        or not isinstance(registry_digests, Mapping)
         or not isinstance(manifest_image_names, list)
         or not manifest_image_names
         or manifest_image_names != sorted(set(manifest_image_names))
@@ -568,12 +609,22 @@ def _parse_descriptor(value: Mapping[str, object], *, bundle_digest: str) -> _Pa
             not isinstance(key, str) or not isinstance(item, str) or not item.startswith("sha256:")
             for key, item in image_digests.items()
         )
+        or any(
+            not isinstance(key, str)
+            or key not in image_digests
+            or not isinstance(item, str)
+            or _IMAGE_ID_RE.fullmatch(item) is None
+            for key, item in registry_digests.items()
+        )
+        or (bool(value.get("container_registry")) != bool(registry_digests))
+        or (bool(registry_digests) and set(registry_digests) != set(image_digests))
     ):
         raise PreflightArtifactStoreError("preflight artifact descriptor is invalid")
     string_fields = (
         "browser_report_schema_sha256",
         "candidate_sha",
         "candidate_tree",
+        "container_registry",
         "image_artifact_sha256",
         "manifest_artifact_sha256",
         "migration_image_id",
@@ -592,8 +643,10 @@ def _parse_descriptor(value: Mapping[str, object], *, bundle_digest: str) -> _Pa
         browser_report_schema_sha256=str(value["browser_report_schema_sha256"]),
         candidate_sha=str(value["candidate_sha"]),
         candidate_tree=str(value["candidate_tree"]),
+        container_registry=str(value["container_registry"]),
         image_artifact_sha256=str(value["image_artifact_sha256"]),
         image_digests={str(key): str(item) for key, item in image_digests.items()},
+        registry_digests={str(key): str(item) for key, item in registry_digests.items()},
         manifest_artifact_sha256=str(value["manifest_artifact_sha256"]),
         manifest_image_names=tuple(str(name) for name in manifest_image_names),
         migration_image_id=str(value["migration_image_id"]),

@@ -41,7 +41,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: migrate
-          image: {% if container_registry %}{{ container_registry }}/{% endif %}loom-control-plane:{{ image_tag }}
+          image: {{ image_reference }}
           imagePullPolicy: IfNotPresent
           command:
             - alembic

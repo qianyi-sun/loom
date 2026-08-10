@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from loom_cli.rollout.external_supervisor_readiness import STAGING_ROLLOUT_EXECUTION_HOST
 from loom_cli.rollout.rehearsal_action_source import (
     RehearsalPlan,
     RehearsalResources,
@@ -298,6 +299,7 @@ def test_helper_rebuilds_and_binds_external_supervisor_before_action(
         "candidate_tree": plan.candidate_tree,
         "image_tag": plan.image_tag,
         "environment": "staging",
+        "execution_host": STAGING_ROLLOUT_EXECUTION_HOST,
     }
     _verify_external_supervisor_binding(plan)
     assert builds == [expected_build]

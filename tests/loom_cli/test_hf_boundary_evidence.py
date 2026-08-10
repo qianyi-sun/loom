@@ -524,7 +524,7 @@ hosts = [
     assert evidence["summary"]["docker_ps_failed_hosts"] == []
     assert evidence["summary"]["hosts_without_containers"] == ["trt-gb10-1"]
     argv = calls[0]
-    assert argv[-1] == "/srv/loom-prod-worker"
+    assert argv[-2:] == ["/srv/loom-prod-worker", "/srv/loom-prod-worker/.env"]
     assert argv[0:3] == ["ssh", "-F", str(ssh_config)]
     assert ["-i", str(ssh_identity)] == argv[3:5]
     assert ["-o", "IdentitiesOnly=yes"] == argv[5:7]
@@ -577,11 +577,69 @@ hosts = [
     assert evidence["summary"]["checked_hosts"] == 1
     argv, kwargs = calls[0]
     assert "-c" not in argv
-    assert argv[-4:] == ["trt-gb10-1", "python3", "-", "/srv/loom-staging-worker"]
+    assert argv[-5:] == [
+        "trt-gb10-1",
+        "python3",
+        "-",
+        "/srv/loom-staging-worker",
+        "/srv/loom-staging-worker/.env",
+    ]
     assert kwargs["input"] == hf_boundary_evidence._REMOTE_WORKER_ENV_SCRIPT
     assert '["docker", "ps", "-a"' not in str(kwargs["input"])
     assert '["docker", "ps", "--filter", "name=worker"' in str(kwargs["input"])
     assert "\n" not in " ".join(argv)
+
+
+def test_worker_boundary_derives_service_owned_paths_for_retirement_inventory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ssh_config = tmp_path / "ssh_config"
+    ssh_config.write_text("Host trt-gb10-1\n  HostName 127.0.0.1\n", encoding="utf-8")
+    cluster_config = tmp_path / "cluster.toml"
+    cluster_config.write_text(
+        f"""
+runtime_environment = "staging"
+image_tag = "staging-abcdef0"
+[gb10_pool]
+ssh_config = "{ssh_config.name}"
+hosts = [
+  {{ ssh_target = "trt-gb10-1", node_agent_service = "loom-gb10-node-agent.service" }},
+]
+""",
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_kwargs: object):
+        calls.append(list(argv))
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "env_file_exists": True,
+                    "env_file_hf_token_present": False,
+                    "env_file_key_count": 4,
+                    "docker_ps_ok": True,
+                    "containers": [],
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("loom_cli.hf_boundary_evidence.subprocess.run", fake_run)
+
+    collect_worker_boundary_from_gb10(
+        cluster_config_path=cluster_config,
+        timeout_sec=1,
+    )
+
+    assert calls[0][-2:] == [
+        "/shared_work2/loom-staging-rollout/worker-repos/"
+        "loom-remote-worker-staging-abcdef0",
+        "/shared_work2/loom-staging-rollout/worker-envs/"
+        "staging-gb10-worker-staging-abcdef0.env",
+    ]
 
 
 def test_worker_boundary_summary_tracks_exact_hosts_and_container_failures(
@@ -630,7 +688,7 @@ hosts = [
             )
 
     def fake_run(argv: list[str], **_kwargs: object) -> FakeProc:
-        return FakeProc(argv[-4])
+        return FakeProc(argv[-5])
 
     monkeypatch.setattr("loom_cli.hf_boundary_evidence.subprocess.run", fake_run)
 

@@ -5,8 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=/home/qianyi/loom-worker-build-staging
-EnvironmentFile=/home/qianyi/loom-worker-build-staging/gb10-node-agent.env
-Environment=PATH=/home/qianyi/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/bin/env uv run loom worker gb10-agent apply --cp-url ${LOOM_GB10_CP_URL} --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN --environment ${LOOM_GB10_ENVIRONMENT} --pool-name ${LOOM_GB10_POOL_NAME} --env-file /home/qianyi/loom-worker-build-staging/.env --compose-file deploy/docker-compose.remote-worker.yml --compose-file deploy/worker-pools/gb10/docker-compose.gb10-hostnet.yml --source-dir /home/qianyi/loom-worker-build-staging --drain-timeout-sec ${LOOM_GB10_DRAIN_TIMEOUT_SEC}
+WorkingDirectory=/shared_work2/loom-staging-rollout/legacy-direct-agent-retired
+EnvironmentFile=/shared_work2/loom-staging-rollout/legacy-direct-agent-retired/gb10-node-agent.env
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env uv run loom worker gb10-agent apply --cp-url ${LOOM_GB10_CP_URL} --admin-token env:LOOM_GB10_NODE_AGENT_TOKEN --environment ${LOOM_GB10_ENVIRONMENT} --pool-name ${LOOM_GB10_POOL_NAME} --env-file /shared_work2/loom-staging-rollout/legacy-direct-agent-retired/.env --compose-file deploy/docker-compose.remote-worker.yml --compose-file deploy/worker-pools/gb10/docker-compose.gb10-hostnet.yml --source-dir /shared_work2/loom-staging-rollout/legacy-direct-agent-retired --drain-timeout-sec ${LOOM_GB10_DRAIN_TIMEOUT_SEC}
 TimeoutStartSec=0

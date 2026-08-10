@@ -76,6 +76,73 @@ def test_build_exact_images_reuses_matching_and_rebuilds_drifted(tmp_path: Path)
     assert len(result.artifact_digest) == 64
 
 
+def test_registry_image_session_publishes_and_binds_every_manifest_digest(
+    tmp_path: Path,
+) -> None:
+    revision = "a" * 40
+    tag = "staging-aaaaaaaa"
+    calls: list[tuple[str, ...]] = []
+    image_ids = {
+        name: f"sha256:{hashlib.sha256(name.encode()).hexdigest()}"
+        for name, _path in ALL_BUILD_IMAGES
+    }
+    manifest_digests = {
+        name: f"sha256:{hashlib.sha256((name + '-manifest').encode()).hexdigest()}"
+        for name, _path in ALL_BUILD_IMAGES
+    }
+
+    def run(argv, cwd):
+        command = tuple(argv)
+        calls.append(command)
+        if command[:3] == ("docker", "image", "inspect"):
+            name = command[-1].rsplit("/", 1)[-1].split(":", 1)[0]
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                _inspect_payload(name, revision, image_id=image_ids[name]),
+                "",
+            )
+        if command[:3] == ("docker", "manifest", "inspect"):
+            name = command[-1].rsplit("/", 1)[-1].split(":", 1)[0]
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                json.dumps(
+                    {
+                        "Descriptor": {"digest": manifest_digests[name]},
+                        "SchemaV2Manifest": {"config": {"digest": image_ids[name]}},
+                    }
+                ),
+                "",
+            )
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    session = ImageBuildSession(
+        run,
+        candidate_root=tmp_path,
+        image_tag=tag,
+        resolved_sha=revision,
+        container_registry="192.168.50.13:5000",
+        container_registry_push="localhost:5000",
+    )
+
+    artifact = session.build()
+
+    assert dict(artifact.registry_digests) == manifest_digests
+    assert {
+        command[-1]
+        for command in calls
+        if command[:2] == ("docker", "push")
+    } == {f"localhost:5000/{name}:{tag}" for name, _path in ALL_BUILD_IMAGES}
+
+    calls.clear()
+    assert session.verify() == artifact
+    assert not any(command[:2] == ("docker", "push") for command in calls)
+    assert len(
+        [command for command in calls if command[:3] == ("docker", "manifest", "inspect")]
+    ) == len(ALL_BUILD_IMAGES)
+
+
 def test_verify_image_contract_rejects_digest_drift_without_build() -> None:
     revision = "a" * 40
     expected = {

@@ -6476,8 +6476,8 @@ activate a reduced profile, substitute TB2.0, or merge incomplete evidence.
   that change to `dev`, and start a broker rollout. It must not be performed as
   a per-host interactive apply against shared staging.
 
-  Treat `/home/qianyi/loom-worker-build-staging/gb10-node-agent.env` and
-  node-agent transient compose env files as host-local runtime material, not
+  Treat `/shared_work2/loom-staging-rollout/legacy-direct-agent-retired/gb10-node-agent.env`
+  and node-agent transient compose env files as retired host-local material, not
   release source. Current node-agent apply writes transient env files under the
   user runtime/tmp directory and removes legacy repo-root `..env.*.tmp` files on
   rerun; these files must not be the reason a GB10 node reports

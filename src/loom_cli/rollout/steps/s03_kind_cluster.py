@@ -15,7 +15,10 @@ from pathlib import Path
 
 import yaml  # type: ignore[import-untyped]
 
-from loom_cli.cluster_config import load_cluster_config
+from loom_cli.cluster_config import (
+    load_cluster_config,
+    validate_container_registry_publication,
+)
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import StepDir
 from loom_cli.rollout.steps.base import BaseStep, RunResult, VerifyOutcome
@@ -219,6 +222,10 @@ def _cluster_names(stdout: str) -> set[str]:
     return {line.strip() for line in stdout.splitlines() if line.strip()}
 
 
+def _registry_publication(ctx: RolloutContext) -> tuple[str, str] | None:
+    return validate_container_registry_publication(load_cluster_config(ctx.cluster_config_path))
+
+
 def _control_plane_node_name(ctx: RolloutContext) -> str:
     return f"{ctx.cluster_name}-control-plane"
 
@@ -388,6 +395,20 @@ class KindClusterStep(BaseStep):
     name = "kind-cluster"
 
     def _inputs_fingerprint(self, ctx: RolloutContext) -> dict[str, object]:
+        publication = _registry_publication(ctx)
+        if publication is not None:
+            return {
+                "resolved_sha": ctx.resolved_sha,
+                "cluster_name": ctx.cluster_name,
+                "namespace": ctx.namespace,
+                "rollout_root": str(ctx.rollout_root),
+                "cluster_config_path": str(ctx.cluster_config_path),
+                "cluster_config_sha256": ctx.cluster_config_sha256,
+                "container_registry": publication[0],
+                "container_registry_push": publication[1],
+                "cluster_recovery_contract": "existing-multinode-k3s-readonly-v1",
+                "backup_manifest_path": str(ctx.backup_manifest_path),
+            }
         ingress_blob = _materialize_candidate_ingress_manifest(ctx)
         return {
             "resolved_sha": ctx.resolved_sha,
@@ -426,6 +447,30 @@ class KindClusterStep(BaseStep):
         """Bind strict DONE evidence to this candidate and step contract."""
         if set(artifacts) != _DONE_ARTIFACT_KEYS:
             return False
+        try:
+            publication = _registry_publication(ctx)
+        except (OSError, ValueError):
+            return False
+        if publication is not None:
+            try:
+                secrets_dir = _backup_secrets_dir(ctx)
+                secret_count = int(artifacts["secret_count"])
+            except (OSError, RuntimeError, ValueError):
+                return False
+            return (
+                artifacts["cluster_name"] == ctx.cluster_name
+                and artifacts["namespace"] == ctx.namespace
+                and artifacts["candidate_sha"] == ctx.resolved_sha
+                and artifacts["ingress_nginx"] == "verified"
+                and artifacts["ingress_nginx_manifest_path"] == "existing-cluster"
+                and artifacts["ingress_nginx_manifest_source"] == "k3s"
+                and artifacts["ingress_nginx_manifest_sha256"] == ctx.cluster_config_sha256
+                and artifacts["worker_trajectories_storage"] == "skipped"
+                and artifacts["worker_trajectories_storage_manifest"]
+                == str(step_dir.artifact_path("worker-trajectories-storage.yaml"))
+                and secret_count == 2
+                and artifacts["secrets_dir"] == str(secrets_dir)
+            )
         try:
             ingress_blob = _materialize_candidate_ingress_manifest(ctx, step_dir)
             ingress_manifest_sha256 = hashlib.sha256(ingress_blob.data).hexdigest()
@@ -467,6 +512,11 @@ class KindClusterStep(BaseStep):
         ctx: RolloutContext,
         step_dir: StepDir,
     ) -> VerifyOutcome:
+        try:
+            if _registry_publication(ctx) is not None:
+                return self._verify_k3s(ctx)
+        except (OSError, ValueError):
+            return VerifyOutcome.UNKNOWN
         try:
             ingress_blob = _materialize_candidate_ingress_manifest(ctx, step_dir)
             ingress_manifest_text = _candidate_ingress_manifest_text(ingress_blob)
@@ -566,6 +616,74 @@ class KindClusterStep(BaseStep):
             if pvc.returncode != 0:
                 return VerifyOutcome.MISMATCH
         return VerifyOutcome.MATCH
+
+    def _verify_k3s(self, ctx: RolloutContext) -> VerifyOutcome:
+        context = run_captured(["kubectl", "config", "current-context"])
+        if context.returncode != 0:
+            return VerifyOutcome.UNKNOWN
+        if context.stdout.strip() != ctx.cluster_name:
+            return VerifyOutcome.MISMATCH
+        nodes = run_captured(["kubectl", "get", "nodes", "-o", "json"])
+        if nodes.returncode != 0:
+            return VerifyOutcome.UNKNOWN
+        try:
+            node_items = json.loads(nodes.stdout).get("items")
+        except (AttributeError, json.JSONDecodeError):
+            return VerifyOutcome.UNKNOWN
+        if not isinstance(node_items, list) or len(node_items) < 2:
+            return VerifyOutcome.MISMATCH
+        for node in node_items:
+            status = node.get("status") if isinstance(node, dict) else None
+            conditions = status.get("conditions") if isinstance(status, dict) else None
+            if not isinstance(conditions, list) or not any(
+                isinstance(condition, dict)
+                and condition.get("type") == "Ready"
+                and condition.get("status") == "True"
+                for condition in conditions
+            ):
+                return VerifyOutcome.MISMATCH
+        checks = (
+            ["kubectl", "get", "namespace", ctx.namespace],
+            [
+                "kubectl",
+                "-n",
+                ctx.namespace,
+                "get",
+                "secret",
+                "loom-secrets",
+                "loom-admin-secret",
+            ],
+            ["kubectl", "get", "ingressclass", "nginx"],
+            [
+                "kubectl",
+                "-n",
+                "ingress-nginx",
+                "wait",
+                "--for=condition=Ready",
+                "pod",
+                f"--selector={INGRESS_NGINX_CONTROLLER_SELECTOR}",
+                "--timeout=5s",
+            ],
+        )
+        if any(run_captured(command).returncode != 0 for command in checks):
+            return VerifyOutcome.MISMATCH
+        endpoint = run_captured(
+            [
+                "kubectl",
+                "-n",
+                "ingress-nginx",
+                "get",
+                "endpoints",
+                "ingress-nginx-controller-admission",
+                "-o",
+                "jsonpath={.subsets[0].addresses[0].ip}",
+            ]
+        )
+        return (
+            VerifyOutcome.MATCH
+            if endpoint.returncode == 0 and endpoint.stdout.strip()
+            else VerifyOutcome.MISMATCH
+        )
 
     def _ensure_ingress_ready_node(
         self,
@@ -704,6 +822,13 @@ class KindClusterStep(BaseStep):
         return None, "reconciled" if controller_existed else "installed"
 
     def _run_impl(self, ctx: RolloutContext, step_dir: StepDir) -> RunResult:
+        try:
+            publication = _registry_publication(ctx)
+        except (OSError, ValueError) as exc:
+            step_dir.stderr_path().write_text(str(exc) + "\n", encoding="utf-8")
+            return RunResult(exit_code=2, error=str(exc))
+        if publication is not None:
+            return self._run_k3s(ctx, step_dir, publication=publication)
         try:
             ingress_blob = _materialize_candidate_ingress_manifest(ctx, step_dir)
             ingress_manifest_text = _candidate_ingress_manifest_text(ingress_blob)
@@ -891,6 +1016,50 @@ class KindClusterStep(BaseStep):
                 "worker_trajectories_storage": storage_state,
                 "worker_trajectories_storage_manifest": str(storage_manifest),
                 "secret_count": str(secret_count),
+                "secrets_dir": str(secrets_dir),
+            },
+        )
+
+    def _run_k3s(
+        self,
+        ctx: RolloutContext,
+        step_dir: StepDir,
+        *,
+        publication: tuple[str, str],
+    ) -> RunResult:
+        try:
+            secrets_dir = _backup_secrets_dir(ctx)
+        except RuntimeError as exc:
+            step_dir.stderr_path().write_text(str(exc) + "\n", encoding="utf-8")
+            return RunResult(exit_code=2, error=str(exc))
+        outcome = self._verify_k3s(ctx)
+        if outcome is not VerifyOutcome.MATCH:
+            return RunResult(
+                exit_code=1,
+                error="configured multi-node k3s cluster contract is not ready",
+            )
+        summary = (
+            f"verified existing multi-node k3s context {ctx.cluster_name}; "
+            f"registry publication {publication[1]} -> {publication[0]}; "
+            f"reused namespace {ctx.namespace} and two protected secrets"
+        )
+        step_dir.stdout_path().write_text(summary + "\n", encoding="utf-8")
+        return RunResult(
+            exit_code=0,
+            summary=summary,
+            artifacts={
+                "cluster_name": ctx.cluster_name,
+                "namespace": ctx.namespace,
+                "candidate_sha": ctx.resolved_sha,
+                "ingress_nginx": "verified",
+                "ingress_nginx_manifest_path": "existing-cluster",
+                "ingress_nginx_manifest_source": "k3s",
+                "ingress_nginx_manifest_sha256": ctx.cluster_config_sha256,
+                "worker_trajectories_storage": "skipped",
+                "worker_trajectories_storage_manifest": str(
+                    step_dir.artifact_path("worker-trajectories-storage.yaml")
+                ),
+                "secret_count": "2",
                 "secrets_dir": str(secrets_dir),
             },
         )

@@ -13,6 +13,7 @@ from typing import Protocol
 
 import yaml  # type: ignore[import-untyped]
 
+from loom_cli.cluster_config import validate_container_registry_prefix
 from loom_cli.rollout.image_readiness import ALL_BUILD_IMAGES, ROLLOUT_IMAGES
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -71,6 +72,8 @@ class ManifestRenderSession:
         image_digests: Mapping[str, str],
         expected_image_names: Collection[str] | None = None,
         artifact: ManifestArtifact | None = None,
+        container_registry: str = "",
+        registry_digests: Mapping[str, str] | None = None,
     ) -> None:
         self._render = render
         self._server_dry_run = server_dry_run
@@ -80,6 +83,8 @@ class ManifestRenderSession:
         self._image_tag = image_tag
         self._namespace = namespace
         self._image_digests = dict(image_digests)
+        self._container_registry = container_registry
+        self._registry_digests = dict(registry_digests or {})
         self._expected_image_names = frozenset(
             {name for name, _path in ROLLOUT_IMAGES}
             if expected_image_names is None
@@ -91,6 +96,8 @@ class ManifestRenderSession:
             namespace=namespace,
             image_digests=image_digests,
             expected_image_names=self._expected_image_names,
+            container_registry=container_registry,
+            registry_digests=self._registry_digests,
         ):
             raise ValueError("seeded manifest artifact identity is invalid")
         self._artifact: ManifestArtifact | None = artifact
@@ -99,12 +106,22 @@ class ManifestRenderSession:
     def render(self) -> ManifestArtifact:
         with self._lock:
             if self._artifact is None:
+                rendered = self._render()
+                if self._container_registry:
+                    rendered = pin_rendered_manifest_images(
+                        rendered,
+                        image_tag=self._image_tag,
+                        container_registry=self._container_registry,
+                        registry_digests=self._registry_digests,
+                    )
                 self._artifact = inspect_rendered_manifests(
-                    self._render(),
+                    rendered,
                     image_tag=self._image_tag,
                     namespace=self._namespace,
                     image_digests=self._image_digests,
                     expected_image_names=self._expected_image_names,
+                    container_registry=self._container_registry,
+                    registry_digests=self._registry_digests,
                 )
             return self._artifact
 
@@ -136,6 +153,8 @@ def inspect_rendered_manifests(
     namespace: str,
     image_digests: Mapping[str, str],
     expected_image_names: Collection[str] | None = None,
+    container_registry: str = "",
+    registry_digests: Mapping[str, str] | None = None,
 ) -> ManifestArtifact:
     """Validate one bounded render and bind local image refs to exact IDs."""
     encoded = rendered_yaml.encode("utf-8")
@@ -143,6 +162,7 @@ def inspect_rendered_manifests(
     expected_images = set(
         all_rollout_images if expected_image_names is None else expected_image_names
     )
+    exact_registry_digests = dict(registry_digests or {})
     if (
         not rendered_yaml.strip()
         or len(encoded) > _MAX_RENDERED_BYTES
@@ -152,8 +172,20 @@ def inspect_rendered_manifests(
         or not expected_images
         or not expected_images <= all_rollout_images
         or any(_IMAGE_ID_RE.fullmatch(value) is None for value in image_digests.values())
+        or bool(container_registry) != bool(exact_registry_digests)
+        or (
+            bool(exact_registry_digests)
+            and frozenset(exact_registry_digests)
+            not in {
+                frozenset(expected_images),
+                frozenset(name for name, _path in ALL_BUILD_IMAGES),
+            }
+        )
+        or any(_IMAGE_ID_RE.fullmatch(value) is None for value in exact_registry_digests.values())
     ):
         raise ValueError("rendered manifest binding is invalid")
+    if container_registry:
+        validate_container_registry_prefix(container_registry, name="container_registry")
     try:
         documents = list(yaml.safe_load_all(rendered_yaml))
     except yaml.YAMLError as exc:
@@ -189,13 +221,20 @@ def inspect_rendered_manifests(
         identities.append(identity)
         _validate_nonroot_identities(resource)
         for image in _container_images(resource):
-            name = image.rsplit("/", 1)[-1].split(":", 1)[0]
+            leaf = image.rsplit("/", 1)[-1]
+            name = leaf.split("@", 1)[0].split(":", 1)[0]
             if name in all_rollout_images and name not in expected_images:
                 raise ValueError(f"rendered manifest contains disabled rollout image {name}")
             if name not in expected_images:
                 continue
-            if image.rsplit(":", 1)[-1] != image_tag:
-                raise ValueError(f"rendered manifest image tag drifted for {name}")
+            expected_reference = (
+                f"{container_registry}/{name}@{exact_registry_digests[name]}"
+                if container_registry
+                else f"{name}:{image_tag}"
+            )
+            if image != expected_reference:
+                label = "reference" if container_registry else "tag"
+                raise ValueError(f"rendered manifest image {label} drifted for {name}")
             observed_images.add(name)
     if observed_images != expected_images:
         raise ValueError("rendered manifest rollout image set is incomplete")
@@ -204,15 +243,16 @@ def inspect_rendered_manifests(
     rendered_sha = hashlib.sha256(encoded).hexdigest()
     resource_set_digest = _hash_json(sorted(identities))
     bound_images = {name: image_digests[name] for name in sorted(expected_images)}
-    artifact_digest = _hash_json(
-        {
-            "image_identities": bound_images,
-            "image_tag": image_tag,
-            "namespace": namespace,
-            "rendered_sha256": rendered_sha,
-            "resource_set_digest": resource_set_digest,
-        }
-    )
+    artifact_payload: dict[str, object] = {
+        "image_identities": bound_images,
+        "image_tag": image_tag,
+        "namespace": namespace,
+        "rendered_sha256": rendered_sha,
+        "resource_set_digest": resource_set_digest,
+    }
+    if exact_registry_digests:
+        artifact_payload["registry_digests"] = exact_registry_digests
+    artifact_digest = _hash_json(artifact_payload)
     return ManifestArtifact(
         rendered_yaml=rendered_yaml,
         rendered_sha256=rendered_sha,
@@ -221,6 +261,53 @@ def inspect_rendered_manifests(
         image_identities=bound_images,
         artifact_digest=artifact_digest,
     )
+
+
+def pin_rendered_manifest_images(
+    rendered_yaml: str,
+    *,
+    image_tag: str,
+    container_registry: str,
+    registry_digests: Mapping[str, str],
+) -> str:
+    """Replace every rollout tag with its immutable registry manifest digest."""
+    validate_container_registry_prefix(container_registry, name="container_registry")
+    exact_digests = dict(registry_digests)
+    standing_images = {name for name, _path in ROLLOUT_IMAGES}
+    all_images = {name for name, _path in ALL_BUILD_IMAGES}
+    if (
+        frozenset(exact_digests) not in {frozenset(standing_images), frozenset(all_images)}
+        or any(_IMAGE_ID_RE.fullmatch(value) is None for value in exact_digests.values())
+    ):
+        raise ValueError("registry manifest digest set is incomplete")
+    try:
+        documents = [value for value in yaml.safe_load_all(rendered_yaml) if value is not None]
+    except yaml.YAMLError as exc:
+        raise ValueError("rendered manifest YAML is invalid") from exc
+    for resource in documents:
+        if not isinstance(resource, dict):
+            raise ValueError("rendered manifest resource set is invalid")
+        for pod_spec in _pod_specs(resource):
+            for container_key in ("containers", "initContainers", "ephemeralContainers"):
+                containers = pod_spec.get(container_key)
+                if not isinstance(containers, list):
+                    continue
+                for container in containers:
+                    if not isinstance(container, dict) or not isinstance(
+                        (image := container.get("image")), str
+                    ):
+                        continue
+                    leaf = image.rsplit("/", 1)[-1]
+                    name = leaf.split("@", 1)[0].split(":", 1)[0]
+                    if name not in exact_digests:
+                        continue
+                    if image not in {
+                        f"{name}:{image_tag}",
+                        f"{container_registry}/{name}:{image_tag}",
+                    }:
+                        raise ValueError(f"rendered manifest image reference drifted for {name}")
+                    container["image"] = f"{container_registry}/{name}@{exact_digests[name]}"
+    return str(yaml.safe_dump_all(documents, sort_keys=False))
 
 
 def _validate_nonroot_identities(resource: Mapping[str, object]) -> None:
@@ -512,4 +599,5 @@ __all__ = [
     "RenderManifest",
     "ServerDryRun",
     "inspect_rendered_manifests",
+    "pin_rendered_manifest_images",
 ]

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 import yaml  # type: ignore[import-untyped]
 
+from loom_cli.cluster_config import validate_container_registry_prefix
 from loom_cli.cluster_migration import render_migration_manifest
 
 from .manifest_readiness import ServerDryRun
@@ -37,6 +38,8 @@ class MigrationManifestArtifact:
     migration_plan_sha256: str
     migration_target_revision: str
     artifact_digest: str
+    container_registry: str = ""
+    registry_digest: str = ""
 
     def __post_init__(self) -> None:
         if (
@@ -54,6 +57,13 @@ class MigrationManifestArtifact:
             or _SHA256_RE.fullmatch(self.artifact_digest) is None
         ):
             raise ValueError("migration manifest artifact identity is invalid")
+        if self.container_registry:
+            validate_container_registry_prefix(
+                self.container_registry,
+                name="container_registry",
+            )
+        if self.registry_digest and _IMAGE_ID_RE.fullmatch(self.registry_digest) is None:
+            raise ValueError("migration registry digest is invalid")
 
 
 def build_migration_manifest_artifact(
@@ -66,6 +76,8 @@ def build_migration_manifest_artifact(
     namespace: str,
     migration_plan_sha256: str,
     migration_target_revision: str,
+    container_registry: str = "",
+    registry_digest: str = "",
 ) -> MigrationManifestArtifact:
     """Render and server-validate the only migration Job used downstream."""
     binding = {
@@ -77,18 +89,26 @@ def build_migration_manifest_artifact(
         "migration_target_revision": migration_target_revision,
         "namespace": namespace,
     }
+    if container_registry:
+        binding["container_registry"] = container_registry
+    if registry_digest:
+        binding["registry_digest"] = registry_digest
     _validate_binding(binding)
     suffix = hashlib.sha256(_json_bytes(binding)).hexdigest()[:12]
     rendered = render_migration_manifest(
         image_tag=image_tag,
         namespace=namespace,
         job_suffix=f"pf-{suffix}",
+        container_registry=container_registry,
+        registry_digest=registry_digest,
     )
     job_name = _validate_rendered_job(
         rendered,
         image_tag=image_tag,
         namespace=namespace,
         suffix=suffix,
+        container_registry=container_registry,
+        registry_digest=registry_digest,
     )
     result = server_dry_run(rendered)
     if result.returncode != 0:
@@ -111,6 +131,8 @@ def build_migration_manifest_artifact(
         migration_plan_sha256=migration_plan_sha256,
         migration_target_revision=migration_target_revision,
         artifact_digest=hashlib.sha256(_json_bytes(artifact_payload)).hexdigest(),
+        container_registry=container_registry,
+        registry_digest=registry_digest,
     )
 
 
@@ -124,6 +146,8 @@ def inspect_migration_manifest_artifact(
     namespace: str,
     migration_plan_sha256: str,
     migration_target_revision: str,
+    container_registry: str = "",
+    registry_digest: str = "",
 ) -> MigrationManifestArtifact:
     """Reconstruct one publication without rerendering or server mutation."""
     binding = {
@@ -135,6 +159,10 @@ def inspect_migration_manifest_artifact(
         "migration_target_revision": migration_target_revision,
         "namespace": namespace,
     }
+    if container_registry:
+        binding["container_registry"] = container_registry
+    if registry_digest:
+        binding["registry_digest"] = registry_digest
     _validate_binding(binding)
     suffix = hashlib.sha256(_json_bytes(binding)).hexdigest()[:12]
     job_name = _validate_rendered_job(
@@ -142,6 +170,8 @@ def inspect_migration_manifest_artifact(
         image_tag=image_tag,
         namespace=namespace,
         suffix=suffix,
+        container_registry=container_registry,
+        registry_digest=registry_digest,
     )
     rendered_sha256 = hashlib.sha256(rendered.encode()).hexdigest()
     artifact_payload = {
@@ -161,6 +191,8 @@ def inspect_migration_manifest_artifact(
         migration_plan_sha256=migration_plan_sha256,
         migration_target_revision=migration_target_revision,
         artifact_digest=hashlib.sha256(_json_bytes(artifact_payload)).hexdigest(),
+        container_registry=container_registry,
+        registry_digest=registry_digest,
     )
 
 
@@ -175,6 +207,13 @@ def _validate_binding(binding: dict[str, str]) -> None:
         or _DNS_RE.fullmatch(binding["namespace"]) is None
     ):
         raise ValueError("migration manifest binding is invalid")
+    if binding.get("container_registry"):
+        validate_container_registry_prefix(
+            binding["container_registry"],
+            name="container_registry",
+        )
+    if binding.get("registry_digest") and _IMAGE_ID_RE.fullmatch(binding["registry_digest"]) is None:
+        raise ValueError("migration manifest registry digest is invalid")
 
 
 def _validate_rendered_job(
@@ -183,6 +222,8 @@ def _validate_rendered_job(
     image_tag: str,
     namespace: str,
     suffix: str,
+    container_registry: str,
+    registry_digest: str,
 ) -> str:
     if not rendered or len(rendered.encode()) > _MAX_MANIFEST_BYTES:
         raise ValueError("migration manifest is empty or unbounded")
@@ -214,7 +255,16 @@ def _validate_rendered_job(
         or len(containers) != 1
         or not isinstance(containers[0], dict)
         or containers[0].get("name") != "migrate"
-        or containers[0].get("image") != f"loom-control-plane:{image_tag}"
+        or containers[0].get("image")
+        != (
+            f"{container_registry}/loom-control-plane@{registry_digest}"
+            if container_registry and registry_digest
+            else (
+                f"{container_registry}/loom-control-plane:{image_tag}"
+                if container_registry
+                else f"loom-control-plane:{image_tag}"
+            )
+        )
         or containers[0].get("command")
         != ["alembic", "-c", "migrations/alembic.ini", "upgrade", "head"]
     ):

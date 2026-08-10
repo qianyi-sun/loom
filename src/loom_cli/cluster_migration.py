@@ -55,6 +55,7 @@ def render_migration_manifest(
     namespace: str = "loom",
     job_suffix: str = _DEFAULT_JOB_SUFFIX,
     container_registry: str = "",
+    registry_digest: str = "",
 ) -> str:
     """Render the migration Job manifest to a YAML string.
 
@@ -92,6 +93,8 @@ def render_migration_manifest(
         lstrip_blocks=True,
     )
     template = env.get_template("migration-job.yaml.j2")
+    prefix = f"{container_registry}/" if container_registry else ""
+    suffix = f"@{registry_digest}" if registry_digest else f":{image_tag}"
     return template.render(
         # The image reference and the `loom.image-tag` label must carry the
         # *literal* release tag — that names a real pushed image. Dotted or
@@ -104,4 +107,6 @@ def render_migration_manifest(
         namespace=namespace,
         job_suffix=_normalise_dns_component(job_suffix),
         container_registry=container_registry,
+        registry_digest=registry_digest,
+        image_reference=f"{prefix}loom-control-plane{suffix}",
     )

@@ -4,11 +4,13 @@ import hashlib
 import subprocess
 
 import pytest
+import yaml
 
 from loom_cli.rollout.image_readiness import ALL_BUILD_IMAGES, ROLLOUT_IMAGES
 from loom_cli.rollout.manifest_readiness import (
     ManifestRenderSession,
     inspect_rendered_manifests,
+    pin_rendered_manifest_images,
 )
 
 
@@ -48,6 +50,57 @@ def test_manifest_render_binds_every_local_image_to_exact_id() -> None:
     assert artifact.resource_count == 1
     assert artifact.image_identities == {name: _digests()[name] for name, _path in ROLLOUT_IMAGES}
     assert len(artifact.artifact_digest) == 64
+
+
+def test_registry_manifest_pinning_replaces_every_mutable_rollout_tag() -> None:
+    registry_digests = {
+        name: f"sha256:{hashlib.sha256((name + '-manifest').encode()).hexdigest()}"
+        for name, _path in ALL_BUILD_IMAGES
+    }
+
+    pinned = pin_rendered_manifest_images(
+        _rendered(),
+        image_tag="staging-1111111",
+        container_registry="192.168.50.13:5000",
+        registry_digests=registry_digests,
+    )
+    document = yaml.safe_load(pinned)
+    images = {
+        container["name"]: container["image"]
+        for container in document["spec"]["template"]["spec"]["containers"]
+    }
+
+    assert images == {
+        name: f"192.168.50.13:5000/{name}@{registry_digests[name]}"
+        for name, _path in ROLLOUT_IMAGES
+    }
+    artifact = inspect_rendered_manifests(
+        pinned,
+        image_tag="staging-1111111",
+        namespace="loom-staging",
+        image_digests=_digests(),
+        container_registry="192.168.50.13:5000",
+        registry_digests=registry_digests,
+    )
+    assert set(artifact.image_identities) == {name for name, _path in ROLLOUT_IMAGES}
+
+
+def test_registry_manifest_pinning_accepts_exact_standing_image_digest_set() -> None:
+    registry_digests = {
+        name: f"sha256:{hashlib.sha256((name + '-manifest').encode()).hexdigest()}"
+        for name, _path in ROLLOUT_IMAGES
+    }
+
+    pinned = pin_rendered_manifest_images(
+        _rendered(),
+        image_tag="staging-1111111",
+        container_registry="192.168.50.13:5000",
+        registry_digests=registry_digests,
+    )
+
+    assert "loom-family-orchestrator@sha256:" in pinned
+    assert "loom-egress-xds@sha256:" in pinned
+    assert ":staging-1111111" not in pinned
 
 
 def test_manifest_render_ignores_only_empty_yaml_documents() -> None:

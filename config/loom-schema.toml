@@ -1170,6 +1170,11 @@ python_type = "str"
 default     = ""
 description = "Optional container registry prefix applied to every locally-built loom-* image reference in the rendered manifest (no trailing slash). Empty (default) keeps the historical unprefixed shape that kind's in-cluster load-images path depends on. For multi-node k3s / production, set to the registry host+port (e.g. 192.168.50.13:5000) and point each node's /etc/rancher/k3s/registries.yaml at the same endpoint so containerd can pull without side-channel image imports."
 
+[render_config.container_registry_push]
+python_type = "str"
+default     = ""
+description = "Operator-local publication prefix for container_registry (no scheme or trailing slash). It must be set together with container_registry. This may differ from the pull prefix when k3s registry mirrors expose the same registry through a node-local endpoint, for example localhost:5000 -> 192.168.50.13:5000."
+
 [render_config.runtime_environment]
 python_type = "str"
 default     = "production"
@@ -1319,7 +1324,7 @@ fields      = { enabled = false }
 
 [render_config.gb10_pool]
 python_type = "table"
-description = "GB10 hosts managed by protected rollout steps 11-12. ssh_config optionally points at an operator SSH config file used for every host; ssh_identity_file and ssh_certificate_file point at platform-dev-local deploy auth material for detached rollout runners; each host entry is an inline TOML table with ssh_target, repo_path, env_file_path, optional repo_url, and optional node_agent_service. node_agent_service must be a simple .service basename; step 12 derives the matching .timer, requires Linger=yes, installs both candidate units, starts the oneshot, enables the timer, and verifies both units fail closed."
+description = "GB10 hosts managed by protected rollout retirement checks. ssh_config optionally points at an operator SSH config file used for every host; ssh_identity_file and ssh_certificate_file point at platform-dev-local deploy auth material for detached rollout runners. Each host entry contains only ssh_target and node_agent_service. Protected apply verifies the service-owned shared candidate and keeps predecessor direct worker/node-agent services and timers disabled; external Slurm owns on-demand capacity."
 fields      = { ssh_config = "", ssh_identity_file = "", ssh_certificate_file = "", hosts = [] }
 
 [render_config.trial_cache_registry_repo]
