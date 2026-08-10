@@ -1,0 +1,23 @@
+"""Stable BEHAVIOR adapter errors and process exit codes."""
+
+from __future__ import annotations
+
+from enum import IntEnum
+
+
+class BehaviorExitCode(IntEnum):
+    SUCCESS = 0
+    CONTRACT_ERROR = 20
+    PROVIDER_TRANSIENT = 21
+    INFRASTRUCTURE_TRANSIENT = 22
+    INTERNAL_DEFECT = 23
+    SIGINT = 130
+    SIGTERM = 143
+
+
+class BehaviorContractError(ValueError):
+    """The persisted document violates the closed BEHAVIOR wire contract."""
+
+
+class CanonicalDocumentError(BehaviorContractError):
+    """The input is not the one canonical JCS+LF representation."""
