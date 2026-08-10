@@ -49,12 +49,8 @@ class CapacityAuthorityState(Base):
 
     singleton_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     authority_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
-    writer_epoch: Mapped[int] = mapped_column(
-        BigInteger, nullable=False, server_default=text("0")
-    )
-    schema_version: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("1")
-    )
+    writer_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     recovery_state: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=text("'shadow'")
     )
@@ -85,9 +81,7 @@ class CapacityAuthorityState(Base):
 class CapacityConfigGeneration(Base):
     __tablename__ = "capacity_config_generations"
     __table_args__ = (
-        CheckConstraint(
-            "scope IN ('fleet','subject')", name="capacity_config_scope_check"
-        ),
+        CheckConstraint("scope IN ('fleet','subject')", name="capacity_config_scope_check"),
         CheckConstraint(
             "(scope = 'fleet' AND subject_id IS NULL AND subject_incarnation IS NULL) OR "
             "(scope = 'subject' AND subject_id IS NOT NULL "
@@ -95,9 +89,7 @@ class CapacityConfigGeneration(Base):
             name="capacity_config_binding_check",
         ),
         CheckConstraint("scope_generation > 0", name="capacity_config_generation_check"),
-        CheckConstraint(
-            "digest ~ '^[0-9a-f]{64}$'", name="capacity_config_digest_check"
-        ),
+        CheckConstraint("digest ~ '^[0-9a-f]{64}$'", name="capacity_config_digest_check"),
         CheckConstraint(
             "state IN ('proposed','active','retired')",
             name="capacity_config_state_check",
@@ -113,18 +105,14 @@ class CapacityConfigGeneration(Base):
         UniqueConstraint("idempotency_key", name="capacity_config_idempotency_key"),
     )
 
-    id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), primary_key=True, default=uuid4
-    )
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
     scope: Mapped[str] = mapped_column(Text, nullable=False)
     subject_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
     subject_incarnation: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
     scope_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
     digest: Mapped[str] = mapped_column(Text, nullable=False)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    state: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default=text("'proposed'")
-    )
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'proposed'"))
     actor: Mapped[str] = mapped_column(Text, nullable=False)
     idempotency_key: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -135,15 +123,14 @@ class CapacityConfigGeneration(Base):
 class CapacityConfigurationEpoch(Base):
     __tablename__ = "capacity_configuration_epochs"
     __table_args__ = (
-        CheckConstraint(
-            "configuration_epoch > 0", name="capacity_configuration_epoch_check"
-        ),
+        CheckConstraint("configuration_epoch > 0", name="capacity_configuration_epoch_check"),
         CheckConstraint(
             "fleet_generation > 0", name="capacity_configuration_fleet_generation_check"
         ),
         CheckConstraint(
             "fleet_digest ~ '^[0-9a-f]{64}$' "
-            "AND canonical_digest ~ '^[0-9a-f]{64}$'",
+            "AND canonical_digest ~ '^[0-9a-f]{64}$' "
+            "AND activation_request_digest ~ '^[0-9a-f]{64}$'",
             name="capacity_configuration_digest_check",
         ),
     )
@@ -151,10 +138,13 @@ class CapacityConfigurationEpoch(Base):
     configuration_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     fleet_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
     fleet_digest: Mapped[str] = mapped_column(Text, nullable=False)
-    subject_generation_manifest: Mapped[list[dict[str, Any]]] = mapped_column(
-        JSONB, nullable=False
-    )
+    subject_generation_manifest: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
     canonical_digest: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    activation_idempotency_key: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), nullable=False, unique=True
+    )
+    activation_actor: Mapped[str] = mapped_column(Text, nullable=False)
+    activation_request_digest: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
     )
@@ -172,9 +162,7 @@ class CapacityTier(Base):
             "max_slots >= 0 AND max_pending_slots >= 0 AND max_pending_jobs >= 0",
             name="capacity_tier_limits_check",
         ),
-        UniqueConstraint(
-            "configuration_epoch", "tier_id", name="capacity_tier_epoch_id_key"
-        ),
+        UniqueConstraint("configuration_epoch", "tier_id", name="capacity_tier_epoch_id_key"),
         UniqueConstraint(
             "configuration_epoch",
             "priority",
@@ -182,9 +170,7 @@ class CapacityTier(Base):
         ),
     )
 
-    id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), primary_key=True, default=uuid4
-    )
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
     configuration_epoch: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("capacity_configuration_epochs.configuration_epoch", ondelete="RESTRICT"),
@@ -219,9 +205,7 @@ class CapacityAccountPolicy(Base):
         ),
     )
 
-    id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), primary_key=True, default=uuid4
-    )
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
     configuration_epoch: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("capacity_configuration_epochs.configuration_epoch", ondelete="RESTRICT"),
@@ -236,9 +220,7 @@ class CapacityAccountPolicy(Base):
     max_pending_slots: Mapped[int] = mapped_column(BigInteger, nullable=False)
     max_pending_jobs: Mapped[int] = mapped_column(BigInteger, nullable=False)
     max_live_subjects: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    max_builds: Mapped[int] = mapped_column(
-        BigInteger, nullable=False, server_default=text("0")
-    )
+    max_builds: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
     max_artifact_bytes: Mapped[int] = mapped_column(
         BigInteger, nullable=False, server_default=text("0")
     )
@@ -248,19 +230,13 @@ class CapacityAccountPolicy(Base):
 class CapacityFairnessState(Base):
     __tablename__ = "capacity_fairness_state"
     __table_args__ = (
-        CheckConstraint(
-            "mode = 'shadow'", name="capacity_fairness_state_shadow_only_check"
-        ),
+        CheckConstraint("mode = 'shadow'", name="capacity_fairness_state_shadow_only_check"),
         CheckConstraint(
             "scope IN ('tier_account','account_subject')",
             name="capacity_fairness_scope_check",
         ),
-        CheckConstraint(
-            "phase IN ('minimum','demand')", name="capacity_fairness_phase_check"
-        ),
-        CheckConstraint(
-            "last_shadow_epoch >= 0", name="capacity_fairness_epoch_check"
-        ),
+        CheckConstraint("phase IN ('minimum','demand')", name="capacity_fairness_phase_check"),
+        CheckConstraint("last_shadow_epoch >= 0", name="capacity_fairness_epoch_check"),
         UniqueConstraint(
             "configuration_epoch",
             "scope",
@@ -272,13 +248,9 @@ class CapacityFairnessState(Base):
         ),
     )
 
-    id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), primary_key=True, default=uuid4
-    )
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
     configuration_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    mode: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default=text("'shadow'")
-    )
+    mode: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'shadow'"))
     scope: Mapped[str] = mapped_column(Text, nullable=False)
     phase: Mapped[str] = mapped_column(Text, nullable=False)
     tier_id: Mapped[str] = mapped_column(Text, nullable=False)
@@ -295,8 +267,7 @@ class CapacityPool(Base):
     __table_args__ = (
         CheckConstraint("pool_generation > 0", name="capacity_pool_generation_check"),
         CheckConstraint(
-            "pool_digest ~ '^[0-9a-f]{64}$' "
-            "AND protocol_digest ~ '^[0-9a-f]{64}$'",
+            "pool_digest ~ '^[0-9a-f]{64}$' AND protocol_digest ~ '^[0-9a-f]{64}$'",
             name="capacity_pool_digest_check",
         ),
         CheckConstraint(
@@ -312,9 +283,7 @@ class CapacityPool(Base):
         ),
     )
 
-    id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), primary_key=True, default=uuid4
-    )
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
     configuration_epoch: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("capacity_configuration_epochs.configuration_epoch", ondelete="RESTRICT"),
@@ -362,9 +331,7 @@ class CapacitySubject(Base):
         ),
     )
 
-    id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), primary_key=True, default=uuid4
-    )
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
     configuration_epoch: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("capacity_configuration_epochs.configuration_epoch", ondelete="RESTRICT"),
@@ -375,9 +342,7 @@ class CapacitySubject(Base):
     display_name: Mapped[str] = mapped_column(Text, nullable=False)
     account_id: Mapped[str] = mapped_column(Text, nullable=False)
     tier_id: Mapped[str] = mapped_column(Text, nullable=False)
-    min_slots: Mapped[int] = mapped_column(
-        BigInteger, nullable=False, server_default=text("0")
-    )
+    min_slots: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
     max_slots: Mapped[int] = mapped_column(BigInteger, nullable=False)
     rollout_surge_slots: Mapped[int] = mapped_column(
         BigInteger, nullable=False, server_default=text("0")
@@ -388,9 +353,7 @@ class CapacitySubject(Base):
     candidate_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
     deployment_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
     configuration_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    demand_reporter_incarnation: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), nullable=False
-    )
+    demand_reporter_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
 
 
@@ -409,9 +372,7 @@ class CapacityCandidate(Base):
         ),
     )
 
-    id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), primary_key=True, default=uuid4
-    )
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
     subject_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
     subject_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
     candidate_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -427,9 +388,7 @@ class CapacityCandidate(Base):
 class CapacityDeploymentGeneration(Base):
     __tablename__ = "capacity_deployment_generations"
     __table_args__ = (
-        CheckConstraint(
-            "deployment_generation > 0", name="capacity_deployment_generation_check"
-        ),
+        CheckConstraint("deployment_generation > 0", name="capacity_deployment_generation_check"),
         CheckConstraint(
             "candidate_digest ~ '^[0-9a-f]{64}$'",
             name="capacity_deployment_candidate_digest_check",
@@ -442,9 +401,7 @@ class CapacityDeploymentGeneration(Base):
         ),
     )
 
-    id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), primary_key=True, default=uuid4
-    )
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
     subject_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
     subject_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
     deployment_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -459,8 +416,7 @@ class CapacityWorkerProfile(Base):
     __tablename__ = "capacity_worker_profiles"
     __table_args__ = (
         CheckConstraint(
-            "deployment_generation > 0 AND pool_generation > 0 "
-            "AND profile_generation > 0",
+            "deployment_generation > 0 AND pool_generation > 0 AND profile_generation > 0",
             name="capacity_worker_profile_generations_check",
         ),
         CheckConstraint(
@@ -477,9 +433,7 @@ class CapacityWorkerProfile(Base):
         ),
     )
 
-    id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), primary_key=True, default=uuid4
-    )
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
     subject_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
     subject_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
     deployment_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -507,20 +461,14 @@ class CapacityDemandReporter(Base):
         ),
     )
 
-    id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), primary_key=True, default=uuid4
-    )
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
     subject_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
     subject_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
     reporter_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
     configuration_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
     deployment_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    high_water: Mapped[int] = mapped_column(
-        BigInteger, nullable=False, server_default=text("0")
-    )
-    state: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default=text("'current'")
-    )
+    high_water: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'current'"))
     last_receipt_time: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     last_digest: Mapped[str | None] = mapped_column(Text)
 
@@ -529,9 +477,7 @@ class CapacityDemandSnapshot(Base):
     __tablename__ = "capacity_demand_snapshots"
     __table_args__ = (
         CheckConstraint("sequence > 0", name="capacity_demand_snapshot_sequence_check"),
-        CheckConstraint(
-            "digest ~ '^[0-9a-f]{64}$'", name="capacity_demand_snapshot_digest_check"
-        ),
+        CheckConstraint("digest ~ '^[0-9a-f]{64}$'", name="capacity_demand_snapshot_digest_check"),
         UniqueConstraint(
             "reporter_incarnation",
             "sequence",
@@ -539,9 +485,7 @@ class CapacityDemandSnapshot(Base):
         ),
     )
 
-    id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), primary_key=True, default=uuid4
-    )
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
     subject_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
     subject_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
     reporter_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
@@ -572,18 +516,12 @@ class CapacityPoolReporter(Base):
         ),
     )
 
-    id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), primary_key=True, default=uuid4
-    )
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
     pool_id: Mapped[str] = mapped_column(Text, nullable=False)
     reporter_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
     pool_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    high_water: Mapped[int] = mapped_column(
-        BigInteger, nullable=False, server_default=text("0")
-    )
-    state: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default=text("'current'")
-    )
+    high_water: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'current'"))
     last_receipt_time: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     last_digest: Mapped[str | None] = mapped_column(Text)
 
@@ -603,9 +541,7 @@ class CapacityPoolObservation(Base):
         ),
     )
 
-    id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), primary_key=True, default=uuid4
-    )
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
     pool_id: Mapped[str] = mapped_column(Text, nullable=False)
     reporter_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
     sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -620,12 +556,20 @@ class CapacityPoolObservation(Base):
 class CapacityObservedCommitment(Base):
     __tablename__ = "capacity_observed_commitments"
     __table_args__ = (
+        CheckConstraint("kind IN ('claim','physical')", name="capacity_commitment_kind_check"),
         CheckConstraint(
-            "kind IN ('claim','physical')", name="capacity_commitment_kind_check"
+            "state IN ('proposed','accepted','pending','live','draining',"
+            "'cancel-pending','submitting-unknown','observed','unknown','quarantined')",
+            name="capacity_commitment_state_check",
         ),
         CheckConstraint(
-            "state IN ('observed','unknown','quarantined')",
-            name="capacity_commitment_state_check",
+            "profile_generation > 0 AND profile_digest ~ '^[0-9a-f]{64}$'",
+            name="capacity_commitment_profile_binding_check",
+        ),
+        CheckConstraint(
+            "(kind = 'claim' AND attempt_id IS NOT NULL AND concurrency_slots > 0) "
+            "OR (kind = 'physical' AND attempt_id IS NULL AND concurrency_slots IS NULL)",
+            name="capacity_commitment_kind_fields_check",
         ),
         UniqueConstraint(
             "kind",
@@ -635,9 +579,7 @@ class CapacityObservedCommitment(Base):
         ),
     )
 
-    id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), primary_key=True, default=uuid4
-    )
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
     kind: Mapped[str] = mapped_column(Text, nullable=False)
     commitment_identity: Mapped[str] = mapped_column(Text, nullable=False)
     source_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
@@ -647,18 +589,18 @@ class CapacityObservedCommitment(Base):
     pool_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
     deployment_generation: Mapped[int | None] = mapped_column(BigInteger)
     profile_id: Mapped[str | None] = mapped_column(Text)
+    profile_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    profile_digest: Mapped[str] = mapped_column(Text, nullable=False)
     shape_id: Mapped[str | None] = mapped_column(Text)
+    attempt_id: Mapped[str | None] = mapped_column(Text)
+    concurrency_slots: Mapped[int | None] = mapped_column(BigInteger)
     binding_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     resource_vector: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     state: Mapped[str] = mapped_column(Text, nullable=False)
     first_reporter_high_water: Mapped[int] = mapped_column(BigInteger, nullable=False)
     last_reporter_high_water: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    first_receipt_time: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False
-    )
-    last_receipt_time: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False
-    )
+    first_receipt_time: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    last_receipt_time: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
 
 
 class CapacityAllocationEpoch(Base):
@@ -673,26 +615,18 @@ class CapacityAllocationEpoch(Base):
             "input_digest ~ '^[0-9a-f]{64}$'",
             name="capacity_allocation_input_digest_check",
         ),
-        CheckConstraint(
-            "status IN ('shadow','failed')", name="capacity_allocation_status_check"
-        ),
-        CheckConstraint(
-            "executable = false", name="capacity_allocation_epoch_shadow_only_check"
-        ),
+        CheckConstraint("status IN ('shadow','failed')", name="capacity_allocation_status_check"),
+        CheckConstraint("executable = false", name="capacity_allocation_epoch_shadow_only_check"),
     )
 
-    allocation_epoch: Mapped[int] = mapped_column(
-        BigInteger, primary_key=True, autoincrement=True
-    )
+    allocation_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     writer_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
     configuration_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
     input_digest: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False)
     failure_reason: Mapped[str | None] = mapped_column(Text)
     complete_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    executable: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false")
-    )
+    executable: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
     )
@@ -714,9 +648,7 @@ class CapacityAllocation(Base):
         ),
     )
 
-    id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), primary_key=True, default=uuid4
-    )
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
     allocation_epoch: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("capacity_allocation_epochs.allocation_epoch", ondelete="RESTRICT"),
@@ -732,12 +664,8 @@ class CapacityAllocation(Base):
     drains: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
     allowances: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
     witness: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    mode: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default=text("'shadow'")
-    )
-    executable: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false")
-    )
+    mode: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'shadow'"))
+    executable: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
 
 
 class CapacityAuditEvent(Base):

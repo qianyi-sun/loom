@@ -11,6 +11,7 @@ from loom_capacity_manager.contracts import (
     MAX_QUANTITY,
     CapacityContractError,
     DemandSnapshotV1,
+    FairnessCursorV1,
     FleetManifestV1,
     ResourceVectorV1,
     ShadowAllocationV1,
@@ -23,6 +24,7 @@ from tests.capacity_fixtures import (
     DEMAND_REPORTER_ID,
     SUBJECT_ID,
     SUBJECT_INCARNATION,
+    demand_snapshot,
     fleet_payload,
     resource_vector,
     resource_vector_payload,
@@ -101,6 +103,32 @@ def test_user_weight_fields_are_not_part_of_any_contract() -> None:
         ShadowAllocationV1.model_validate(allocation | {"account_weight": 3})
 
 
+def test_shadow_allocation_rejects_inconsistent_allowance_count() -> None:
+    allocation = {
+        "schema_version": 1,
+        "subject_id": SUBJECT_ID,
+        "subject_incarnation": SUBJECT_INCARNATION,
+        "deployment_generation": 1,
+        "pool_id": "gb10",
+        "desired_slots": 1,
+        "requested_slots": 1,
+        "new_allowance_slots": 1,
+        "retained_commitment_slots": 0,
+        "desired_shapes": (),
+        "protected_claim_slots": 0,
+        "physical_committed_shape_slots": 0,
+        "draining_shape_ids": (),
+        "placement_allowances": (),
+        "claim_slot_matches": (),
+        "matching_witness": None,
+        "blockers": (),
+        "executable": False,
+    }
+
+    with pytest.raises(ValidationError, match="allowance count"):
+        ShadowAllocationV1.model_validate(allocation)
+
+
 def test_semantically_unordered_collections_have_canonical_order() -> None:
     forward = FleetManifestV1.model_validate(fleet_payload())
     reverse = FleetManifestV1.model_validate(
@@ -160,10 +188,37 @@ def test_demand_source_time_normalizes_to_utc_but_is_diagnostic() -> None:
     assert report.source_observed_at.hour == 12
 
 
+def test_fixed_claim_attempts_are_unique_and_never_pending_unassigned() -> None:
+    report = demand_snapshot(fixed_claim_ids=("claim-a",), pending_attempt_ids=())
+    duplicate = report.fixed_claims[0].model_copy(update={"claim_id": "claim-b"})
+    with pytest.raises(ValidationError, match="fixed claim attempt_id"):
+        DemandSnapshotV1.model_validate(
+            report.model_dump(mode="python") | {"fixed_claims": (*report.fixed_claims, duplicate)}
+        )
+
+    pending = demand_snapshot(fixed_claim_ids=("claim-a",))
+    overlapping = pending.fixed_claims[0].model_copy(update={"attempt_id": "attempt-pending"})
+    with pytest.raises(ValidationError, match="pending-unassigned and claimed"):
+        DemandSnapshotV1.model_validate(
+            pending.model_dump(mode="python") | {"fixed_claims": (overlapping,)}
+        )
+
+
 def test_generic_resource_names_are_canonical() -> None:
     for key in ("GPU", "bad key", "", "a" * 64):
         with pytest.raises(ValidationError, match="generic"):
             ResourceVectorV1.model_validate(resource_vector_payload(generic={key: 1}))
+
+
+def test_fairness_cursor_always_identifies_its_account_scope() -> None:
+    with pytest.raises(ValidationError, match="account_id"):
+        FairnessCursorV1(tier_id="development", phase="demand")
+    with pytest.raises(ValidationError, match="account_id"):
+        FairnessCursorV1(
+            tier_id="development",
+            phase="demand",
+            subject_id=SUBJECT_ID,
+        )
 
 
 def test_strict_base_model_is_frozen() -> None:

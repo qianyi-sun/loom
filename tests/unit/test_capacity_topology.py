@@ -56,6 +56,7 @@ def test_old_commitment_above_new_envelope_is_charged_over_limit() -> None:
 
 def test_commitment_without_unique_node_identity_reserves_entire_pool() -> None:
     commitment = ObservedCommitmentV1(
+        kind="physical",
         commitment_id="unknown-node-worker",
         physical_identity="worker-unknown",
         subject_id=SUBJECT_ID,
@@ -64,6 +65,8 @@ def test_commitment_without_unique_node_identity_reserves_entire_pool() -> None:
         pool_id="gb10",
         pool_generation=1,
         profile_id="one-slot",
+        profile_generation=1,
+        profile_digest="a" * 64,
         shape_id="one-slot",
         resources=resource_vector(),
         state="unknown",

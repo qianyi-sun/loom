@@ -127,6 +127,27 @@ def canonical_digest(model: StrictV1Model) -> str:
     return hashlib.sha256(canonical_bytes(model)).hexdigest()
 
 
+def canonical_digest_excluding(
+    model: StrictV1Model,
+    *fields: str,
+) -> str:
+    """Digest a generation document while excluding its self-declared digest."""
+
+    payload = _canonical_payload(model)
+    for field in fields:
+        payload.pop(field, None)
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("ascii")
+    if len(encoded) > MAX_CONTRACT_BYTES:
+        raise CapacityContractError("canonical contract exceeds maximum byte size")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _ensure_unique(values: tuple[Any, ...], attribute: str, label: str) -> None:
     identities = [getattr(value, attribute) for value in values]
     if len(identities) != len(set(identities)):
@@ -279,6 +300,7 @@ class AccountPolicyV1(StrictV1Model):
     def _limits(self) -> AccountPolicyV1:
         if self.min_reservation_slots > self.max_slots:
             raise ValueError("min reservation exceeds account max_slots")
+        checked_add(self.max_slots, self.max_surge_slots)
         return self
 
 
@@ -359,6 +381,8 @@ class ProfileReferenceV1(StrictV1Model):
     pool_id: Identifier
     pool_generation: PositiveQuantity
     pool_digest: Digest
+    profile_generation: PositiveQuantity
+    profile_digest: Digest
     protocol_generation: PositiveQuantity
     protocol_digest: Digest
     eligible_resource_domains: Annotated[tuple[Identifier, ...], Field(min_length=1)]
@@ -386,6 +410,8 @@ class ProfileReferenceV1(StrictV1Model):
         for item in self.worker_shapes:
             if not set(item.compatible_domain_ids) <= eligible:
                 raise ValueError("shape references a domain outside the profile narrowing")
+        if not any(item.concurrency_slots == 1 for item in self.worker_shapes):
+            raise ValueError("worker profile requires a mandatory one-slot shape")
         return self
 
 
@@ -417,6 +443,7 @@ class SubjectConfigurationV1(StrictV1Model):
     def _finite_limits(self) -> SubjectConfigurationV1:
         if self.min_slots > self.max_slots:
             raise ValueError("min_slots must not exceed max_slots")
+        checked_add(self.max_slots, self.rollout_surge_slots)
         if self.tier_id == "development" and {item.pool_id for item in self.profiles} != {
             "gb10",
             "oldlab",
@@ -511,7 +538,11 @@ class DemandBucketV1(StrictV1Model):
 class CurrentAssignmentV1(StrictV1Model):
     attempt_id: Identifier
     pool_id: Identifier
+    pool_generation: PositiveQuantity
     profile_id: Identifier
+    profile_generation: PositiveQuantity
+    profile_digest: Digest
+    shape_id: Identifier
     allowance_epoch: PositiveQuantity
     local_priority: Quantity
     submitted_at: datetime
@@ -527,7 +558,10 @@ class FixedClaimV1(StrictV1Model):
     attempt_id: Identifier
     worker_identity: Identifier
     pool_id: Identifier
+    pool_generation: PositiveQuantity
     profile_id: Identifier
+    profile_generation: PositiveQuantity
+    profile_digest: Digest
     shape_id: Identifier
     deployment_generation: PositiveQuantity
     concurrency_slots: PositiveQuantity
@@ -574,29 +608,49 @@ class DemandSnapshotV1(StrictV1Model):
     @classmethod
     def _claims(cls, value: tuple[FixedClaimV1, ...]) -> tuple[FixedClaimV1, ...]:
         _ensure_unique(value, "claim_id", "fixed claim_id")
+        _ensure_unique(value, "attempt_id", "fixed claim attempt_id")
         return tuple(sorted(value, key=lambda item: item.claim_id))
 
     @model_validator(mode="after")
     def _attempts_do_not_overlap(self) -> DemandSnapshotV1:
         pending = {attempt for bucket in self.pending_unassigned for attempt in bucket.attempt_ids}
         assigned = {item.attempt_id for item in self.current_assignments}
+        claimed = {item.attempt_id for item in self.fixed_claims}
         if pending & assigned:
             raise ValueError("an attempt cannot be pending-unassigned and assigned")
+        if pending & claimed:
+            raise ValueError("an attempt cannot be pending-unassigned and claimed")
         return self
 
 
 class ObservedCommitmentV1(StrictV1Model):
+    kind: Literal["claim", "physical", "reserve"]
     commitment_id: Identifier
     physical_identity: Identifier
+    attempt_id: Identifier | None = None
+    concurrency_slots: PositiveQuantity | None = None
     subject_id: UUID
     subject_incarnation: UUID
     deployment_generation: PositiveQuantity
     pool_id: Identifier
     pool_generation: PositiveQuantity
     profile_id: Identifier
+    profile_generation: PositiveQuantity
+    profile_digest: Digest
     shape_id: Identifier | None = None
     resources: ResourceVectorV1
-    state: Literal["observed", "unknown", "quarantined"]
+    state: Literal[
+        "proposed",
+        "accepted",
+        "pending",
+        "live",
+        "draining",
+        "cancel-pending",
+        "submitting-unknown",
+        "observed",
+        "unknown",
+        "quarantined",
+    ]
     node_ids: tuple[Identifier, ...] = ()
 
     @field_validator("node_ids")
@@ -605,6 +659,16 @@ class ObservedCommitmentV1(StrictV1Model):
         if len(value) != len(set(value)):
             raise ValueError("duplicate commitment node_id")
         return tuple(sorted(value))
+
+    @model_validator(mode="after")
+    def _kind_fields(self) -> ObservedCommitmentV1:
+        if self.kind == "claim" and (self.attempt_id is None or self.concurrency_slots is None):
+            raise ValueError("claim commitment requires attempt and concurrency slots")
+        if self.kind != "claim" and (
+            self.attempt_id is not None or self.concurrency_slots is not None
+        ):
+            raise ValueError("physical commitment cannot carry claim-only fields")
+        return self
 
 
 class PoolObservationV1(StrictV1Model):
@@ -629,6 +693,8 @@ class PoolObservationV1(StrictV1Model):
         cls, value: tuple[ObservedCommitmentV1, ...]
     ) -> tuple[ObservedCommitmentV1, ...]:
         _ensure_unique(value, "commitment_id", "commitment_id")
+        if any(item.kind != "physical" for item in value):
+            raise ValueError("pool reporter commitments must be physical")
         return tuple(sorted(value, key=lambda item: item.commitment_id))
 
 
@@ -648,6 +714,12 @@ class FairnessCursorV1(StrictV1Model):
     phase: Literal["minimum", "demand"]
     account_id: Identifier | None = None
     subject_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def _complete_scope(self) -> FairnessCursorV1:
+        if self.account_id is None:
+            raise ValueError("fairness cursor requires account_id")
+        return self
 
 
 class SubjectAllocationInputV1(StrictV1Model):
@@ -683,6 +755,8 @@ class PackingRequestV1(StrictV1Model):
     @classmethod
     def _fixed(cls, value: tuple[ObservedCommitmentV1, ...]) -> tuple[ObservedCommitmentV1, ...]:
         _ensure_unique(value, "commitment_id", "packing commitment_id")
+        if any(item.kind == "claim" for item in value):
+            raise ValueError("topology packing accepts only physical capacity")
         return tuple(sorted(value, key=lambda item: item.commitment_id))
 
     @field_validator("desired_shapes")
@@ -721,6 +795,16 @@ class PackingWitnessV1(StrictV1Model):
     new_placement_allowed: bool = True
     blockers: tuple[Identifier, ...] = ()
 
+    @model_validator(mode="after")
+    def _complete_witness(self) -> PackingWitnessV1:
+        _ensure_unique(self.placements, "instance_id", "packing placement instance")
+        _ensure_unique(self.residuals, "node_id", "packing residual node")
+        if len(self.charged_commitment_ids) != len(set(self.charged_commitment_ids)):
+            raise ValueError("duplicate charged commitment")
+        if len(self.blockers) != len(set(self.blockers)):
+            raise ValueError("duplicate packing blocker")
+        return self
+
 
 class PlacementAllowanceV1(StrictV1Model):
     attempt_id: Identifier
@@ -739,10 +823,30 @@ class JointMatchingWitnessV1(StrictV1Model):
     attempt_ids: tuple[Identifier, ...]
     shape_instance_ids: tuple[Identifier, ...]
 
+    @model_validator(mode="after")
+    def _exact_matching(self) -> JointMatchingWitnessV1:
+        if self.matched_slots != len(self.attempt_ids) or self.matched_slots != len(
+            self.shape_instance_ids
+        ):
+            raise ValueError("matching witness count is inconsistent")
+        if len(self.attempt_ids) != len(set(self.attempt_ids)):
+            raise ValueError("matching witness duplicates an attempt")
+        if len(self.shape_instance_ids) != len(set(self.shape_instance_ids)):
+            raise ValueError("matching witness duplicates a physical slot")
+        if self.attempt_ids != tuple(sorted(self.attempt_ids)):
+            raise ValueError("matching witness attempts are not canonical")
+        return self
+
 
 class DesiredShapeCountV1(StrictV1Model):
     shape_id: Identifier
     count: Quantity
+
+
+class RolloutSurgePairingV1(StrictV1Model):
+    old_commitment_id: Identifier
+    new_shape_instance_id: Identifier
+    backed_slots: PositiveQuantity
 
 
 class ShadowAllocationV1(StrictV1Model):
@@ -757,12 +861,62 @@ class ShadowAllocationV1(StrictV1Model):
     desired_shapes: tuple[DesiredShapeCountV1, ...]
     protected_claim_slots: Quantity
     physical_committed_shape_slots: Quantity
+    surge_pairings: tuple[RolloutSurgePairingV1, ...] = ()
     draining_shape_ids: tuple[Identifier, ...]
     placement_allowances: tuple[PlacementAllowanceV1, ...]
     claim_slot_matches: tuple[ClaimSlotMatchV1, ...]
     matching_witness: JointMatchingWitnessV1 | None
     blockers: tuple[Identifier, ...]
     executable: Literal[False] = False
+
+    @model_validator(mode="after")
+    def _internally_consistent(self) -> ShadowAllocationV1:
+        if self.new_allowance_slots != len(self.placement_allowances):
+            raise ValueError("new allowance count is inconsistent")
+        _ensure_unique(self.desired_shapes, "shape_id", "desired shape_id")
+        _ensure_unique(
+            self.placement_allowances,
+            "attempt_id",
+            "placement allowance attempt_id",
+        )
+        if any(allowance.pool_id != self.pool_id for allowance in self.placement_allowances):
+            raise ValueError("placement allowance is bound to a different pool")
+        _ensure_unique(self.claim_slot_matches, "claim_id", "claim slot match")
+        claim_slots = {
+            (item.physical_identity, item.slot_index) for item in self.claim_slot_matches
+        }
+        if len(claim_slots) != len(self.claim_slot_matches):
+            raise ValueError("claim matches duplicate one physical slot")
+        _ensure_unique(
+            self.surge_pairings,
+            "new_shape_instance_id",
+            "rollout surge new shape",
+        )
+        if len(self.draining_shape_ids) != len(set(self.draining_shape_ids)):
+            raise ValueError("duplicate draining shape")
+        if len(self.blockers) != len(set(self.blockers)):
+            raise ValueError("duplicate allocation blocker")
+        if self.matching_witness is not None:
+            allowance_attempts = {item.attempt_id for item in self.placement_allowances}
+            if not allowance_attempts <= set(self.matching_witness.attempt_ids):
+                raise ValueError("allowance is absent from the joint matching witness")
+            slot_by_attempt = dict(
+                zip(
+                    self.matching_witness.attempt_ids,
+                    self.matching_witness.shape_instance_ids,
+                    strict=True,
+                )
+            )
+            if any(
+                not slot_by_attempt[allowance.attempt_id].startswith(
+                    f"{allowance.shape_instance_id}-slot-"
+                )
+                for allowance in self.placement_allowances
+            ):
+                raise ValueError("allowance shape disagrees with matching witness")
+        elif self.placement_allowances:
+            raise ValueError("placement allowances require a joint matching witness")
+        return self
 
 
 class RankedHypotheticalLaunchV1(StrictV1Model):
@@ -779,9 +933,43 @@ class ShadowEpochV1(StrictV1Model):
     allocations: tuple[ShadowAllocationV1, ...]
     next_fairness_cursors: tuple[FairnessCursorV1, ...]
     hypothetical_launch_rank: tuple[RankedHypotheticalLaunchV1, ...]
+    pool_witnesses: tuple[PackingWitnessV1, ...]
     blockers: tuple[Identifier, ...]
     executable_new_capacity_ceiling: Literal[0] = 0
     executable: Literal[False] = False
+
+    @field_validator("pool_witnesses")
+    @classmethod
+    def _witnesses(cls, value: tuple[PackingWitnessV1, ...]) -> tuple[PackingWitnessV1, ...]:
+        _ensure_unique(value, "pool_id", "packing witness pool_id")
+        return tuple(sorted(value, key=lambda item: item.pool_id))
+
+    @model_validator(mode="after")
+    def _complete_epoch(self) -> ShadowEpochV1:
+        allocation_keys = [
+            (item.subject_id, item.subject_incarnation, item.pool_id) for item in self.allocations
+        ]
+        if len(allocation_keys) != len(set(allocation_keys)):
+            raise ValueError("duplicate subject-pool shadow allocation")
+        ranks = tuple(item.rank for item in self.hypothetical_launch_rank)
+        if ranks != tuple(range(1, len(ranks) + 1)):
+            raise ValueError("hypothetical launch ranks must be contiguous")
+        launch_shapes = [item.shape_instance_id for item in self.hypothetical_launch_rank]
+        if len(launch_shapes) != len(set(launch_shapes)):
+            raise ValueError("duplicate hypothetical launch shape")
+        cursor_keys = [
+            (
+                item.tier_id,
+                item.phase,
+                item.account_id if item.subject_id is not None else None,
+            )
+            for item in self.next_fairness_cursors
+        ]
+        if len(cursor_keys) != len(set(cursor_keys)):
+            raise ValueError("duplicate fairness cursor scope")
+        if len(self.blockers) != len(set(self.blockers)):
+            raise ValueError("duplicate epoch blocker")
+        return self
 
 
 class AllocationInputV1(StrictV1Model):
@@ -815,6 +1003,41 @@ class AllocationInputV1(StrictV1Model):
         if len(identities) != len(set(identities)):
             raise ValueError("duplicate allocation pool_id")
         return tuple(sorted(value, key=lambda item: item.configuration.pool_id))
+
+    @field_validator("observed_commitments")
+    @classmethod
+    def _commitments(
+        cls, value: tuple[ObservedCommitmentV1, ...]
+    ) -> tuple[ObservedCommitmentV1, ...]:
+        keys = [(item.kind, item.commitment_id) for item in value]
+        if len(keys) != len(set(keys)):
+            raise ValueError("duplicate allocation commitment identity")
+        return tuple(sorted(value, key=lambda item: (item.kind, item.commitment_id)))
+
+    @field_validator("fairness_cursors")
+    @classmethod
+    def _cursors(cls, value: tuple[FairnessCursorV1, ...]) -> tuple[FairnessCursorV1, ...]:
+        keys = [
+            (
+                item.tier_id,
+                item.phase,
+                item.account_id if item.subject_id is not None else None,
+            )
+            for item in value
+        ]
+        if len(keys) != len(set(keys)):
+            raise ValueError("duplicate allocation fairness cursor scope")
+        return tuple(
+            sorted(
+                value,
+                key=lambda item: (
+                    item.tier_id,
+                    item.phase,
+                    item.account_id or "",
+                    item.subject_id.hex if item.subject_id else "",
+                ),
+            )
+        )
 
 
 __all__ = [
@@ -860,6 +1083,7 @@ __all__ = [
     "RankedHypotheticalLaunchV1",
     "ResourceDomainV1",
     "ResourceVectorV1",
+    "RolloutSurgePairingV1",
     "ShadowAllocationV1",
     "ShadowEpochV1",
     "StrictV1Model",
@@ -869,6 +1093,7 @@ __all__ = [
     "WorkerShapeV1",
     "canonical_bytes",
     "canonical_digest",
+    "canonical_digest_excluding",
     "checked_add",
     "checked_add_vectors",
     "checked_sum_vectors",

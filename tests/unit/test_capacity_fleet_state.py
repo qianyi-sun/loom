@@ -46,9 +46,7 @@ def test_profile_cannot_add_domain_or_change_generation() -> None:
             profile_reference(
                 manifest,
                 eligible_resource_domains=("not-a-domain",),
-                worker_shapes=(
-                    shape(compatible_domain_ids=("not-a-domain",)),
-                ),
+                worker_shapes=(shape(compatible_domain_ids=("not-a-domain",)),),
             ),
         )
     with pytest.raises(FleetStateError, match="pool generation"):
@@ -92,10 +90,13 @@ def test_fleet_loader_rejects_supplied_digest_mismatch(tmp_path: Path) -> None:
 
 
 def test_subject_file_has_dual_pool_profiles_and_default_zero_minimum() -> None:
+    manifest = load_fleet_manifest(FIXTURES / "fleet-v1.toml")
     subjects = load_subject_configuration(FIXTURES / "subjects-v1.toml")
     assert len(subjects) == 1
     assert subjects[0].min_slots == 0
     assert tuple(profile.pool_id for profile in subjects[0].profiles) == ("gb10", "oldlab")
+    for profile in subjects[0].profiles:
+        validate_profile_narrowing(manifest, profile)
 
 
 def test_checked_in_fleet_files_are_explicitly_synthetic() -> None:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import sys
 import tomllib
@@ -22,6 +21,7 @@ from loom_capacity_manager.contracts import (
     ProfileReferenceV1,
     StrictV1Model,
     SubjectConfigurationV1,
+    canonical_digest_excluding,
 )
 
 _DIGEST_LENGTH = 64
@@ -94,16 +94,19 @@ def _read_toml(path: Path) -> dict[str, Any]:
 
 
 def _digest_without(model: StrictV1Model, field: str) -> str:
-    payload = model.model_dump(mode="json", exclude_none=False)
-    payload.pop(field, None)
-    encoded = json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-        allow_nan=False,
-    ).encode("ascii")
-    return hashlib.sha256(encoded).hexdigest()
+    return canonical_digest_excluding(model, field)
+
+
+def validate_fleet_manifest_digests(manifest: FleetManifestV1) -> None:
+    """Validate self-declared immutable pool and fleet generation digests."""
+
+    for pool in manifest.pools:
+        computed = _digest_without(pool, "pool_digest")
+        if pool.pool_digest != computed:
+            raise FleetStateError(f"pool digest mismatch for {pool.pool_id}: expected {computed}")
+    computed_fleet = _digest_without(manifest, "fleet_digest")
+    if manifest.fleet_digest != computed_fleet:
+        raise FleetStateError(f"fleet digest mismatch: expected {computed_fleet}")
 
 
 def _require_digest(value: Any, *, label: str) -> str:
@@ -118,9 +121,7 @@ def _require_digest(value: Any, *, label: str) -> str:
 
 def _model_from_toml(model: type[StrictV1Model], payload: dict[str, Any]) -> StrictV1Model:
     try:
-        return model.model_validate_json(
-            json.dumps(payload, sort_keys=True, separators=(",", ":"))
-        )
+        return model.model_validate_json(json.dumps(payload, sort_keys=True, separators=(",", ":")))
     except (TypeError, ValueError, ValidationError) as exc:
         raise FleetStateError(f"invalid {model.__name__}: {exc}") from exc
 
@@ -143,17 +144,7 @@ def load_fleet_manifest(path: Path) -> FleetManifestV1:
     if {pool.pool_id for pool in parsed.pools} != {"gb10", "oldlab"}:
         raise FleetStateError("fleet generation must contain exactly gb10 and oldlab")
 
-    for pool in parsed.pools:
-        supplied = pool.pool_digest
-        computed = _digest_without(pool, "pool_digest")
-        if supplied != computed:
-            raise FleetStateError(
-                f"pool digest mismatch for {pool.pool_id}: expected {computed}"
-            )
-
-    computed_fleet = _digest_without(parsed, "fleet_digest")
-    if parsed.fleet_digest != computed_fleet:
-        raise FleetStateError(f"fleet digest mismatch: expected {computed_fleet}")
+    validate_fleet_manifest_digests(parsed)
     return parsed
 
 
@@ -191,6 +182,12 @@ def validate_profile_narrowing(
 ) -> None:
     """Prove that an environment profile only narrows fleet-owned topology."""
 
+    computed_profile = _digest_without(profile, "profile_digest")
+    if profile.profile_digest != computed_profile:
+        raise FleetStateError(
+            f"profile digest mismatch for {profile.pool_id}: expected {computed_profile}"
+        )
+
     pool = next((item for item in manifest.pools if item.pool_id == profile.pool_id), None)
     if pool is None:
         raise FleetStateError(f"unknown fleet pool {profile.pool_id!r}")
@@ -206,7 +203,9 @@ def validate_profile_narrowing(
     declared_domains = {domain.domain_id for domain in pool.resource_domains}
     unknown_domains = set(profile.eligible_resource_domains) - declared_domains
     if unknown_domains:
-        raise FleetStateError(f"profile references unknown resource domain {min(unknown_domains)!r}")
+        raise FleetStateError(
+            f"profile references unknown resource domain {min(unknown_domains)!r}"
+        )
     for shape in profile.worker_shapes:
         unknown_shape_domains = set(shape.compatible_domain_ids) - declared_domains
         if unknown_shape_domains:
@@ -264,9 +263,7 @@ def inventory_legacy_topology(paths: Sequence[Path]) -> TopologyInventoryReport:
         by_environment[environment] = pool_rows
 
     environments = tuple(sorted(by_environment))
-    pool_ids = tuple(
-        sorted({pool_id for pools in by_environment.values() for pool_id in pools})
-    )
+    pool_ids = tuple(sorted({pool_id for pools in by_environment.values() for pool_id in pools}))
     if len(pool_ids) > MAX_POOLS:
         raise FleetStateError("legacy inventory exceeds maximum pool count")
 

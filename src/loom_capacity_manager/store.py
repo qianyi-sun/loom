@@ -25,13 +25,19 @@ from loom_capacity_manager.contracts import (
     ObservedCommitmentV1,
     PoolAllocationInputV1,
     PoolObservationV1,
+    ProfileReferenceV1,
     ShadowEpochV1,
     StrictV1Model,
     SubjectAllocationInputV1,
     SubjectConfigurationV1,
     canonical_digest,
+    canonical_digest_excluding,
 )
-from loom_capacity_manager.fleet_state import FleetStateError, validate_profile_narrowing
+from loom_capacity_manager.fleet_state import (
+    FleetStateError,
+    validate_fleet_manifest_digests,
+    validate_profile_narrowing,
+)
 from loom_capacity_manager.models import (
     CapacityAccountPolicy,
     CapacityAllocation,
@@ -49,6 +55,7 @@ from loom_capacity_manager.models import (
     CapacityPoolReporter,
     CapacitySubject,
     CapacityTier,
+    CapacityWorkerProfile,
 )
 
 
@@ -142,9 +149,7 @@ _ContractT = TypeVar("_ContractT", bound=StrictV1Model)
 
 
 def _parse_contract(model: type[_ContractT], payload: dict[str, Any]) -> _ContractT:
-    return model.model_validate_json(
-        json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    )
+    return model.model_validate_json(json.dumps(payload, sort_keys=True, separators=(",", ":")))
 
 
 @asynccontextmanager
@@ -154,9 +159,7 @@ async def _write_transaction(session: AsyncSession) -> AsyncIterator[None]:
         connection = await session.connection()
         isolation_level = await connection.get_isolation_level()
         if isolation_level.upper() != "SERIALIZABLE":
-            raise CapacityStoreError(
-                "capacity mutations require a SERIALIZABLE database session"
-            )
+            raise CapacityStoreError("capacity mutations require a SERIALIZABLE database session")
         yield
 
 
@@ -288,6 +291,12 @@ class CapacityManagementStore:
                     )
                 return self._proposal_result(replay)
 
+            if isinstance(value, FleetManifestV1):
+                try:
+                    validate_fleet_manifest_digests(value)
+                except FleetStateError as exc:
+                    raise ConfigurationConflictError(str(exc)) from exc
+
             generation_row = (
                 await session.execute(
                     select(CapacityConfigGeneration).where(
@@ -297,8 +306,7 @@ class CapacityManagementStore:
                         else CapacityConfigGeneration.subject_id == subject_id,
                         CapacityConfigGeneration.subject_incarnation.is_(subject_incarnation)
                         if subject_incarnation is None
-                        else CapacityConfigGeneration.subject_incarnation
-                        == subject_incarnation,
+                        else CapacityConfigGeneration.subject_incarnation == subject_incarnation,
                         CapacityConfigGeneration.scope_generation == generation,
                     )
                 )
@@ -355,37 +363,69 @@ class CapacityManagementStore:
         actor: str,
         idempotency_key: UUID,
     ) -> ActivatedConfiguration:
+        request_digest = canonical_digest(proposal)
         async with _write_transaction(session):
             await _lock_authority(session)
-            latest = (
+            replay = (
                 await session.execute(
-                    select(CapacityConfigurationEpoch).order_by(
-                        CapacityConfigurationEpoch.configuration_epoch.desc()
+                    select(CapacityConfigurationEpoch).where(
+                        CapacityConfigurationEpoch.activation_idempotency_key == idempotency_key
                     )
                 )
-            ).scalars().first()
+            ).scalar_one_or_none()
+            if replay is not None:
+                if (
+                    replay.activation_actor != actor
+                    or replay.activation_request_digest != request_digest
+                ):
+                    raise IdempotencyConflictError(
+                        "configuration activation idempotency key was reused with different input"
+                    )
+                snapshot = ConfigurationSnapshotV1(
+                    configuration_epoch=replay.configuration_epoch,
+                    fleet=ConfigurationGenerationRefV1(
+                        scope="fleet",
+                        generation=replay.fleet_generation,
+                        digest=replay.fleet_digest,
+                    ),
+                    subjects=tuple(
+                        _parse_contract(ConfigurationGenerationRefV1, item)
+                        for item in replay.subject_generation_manifest
+                    ),
+                )
+                return ActivatedConfiguration(
+                    configuration_epoch=replay.configuration_epoch,
+                    digest=replay.canonical_digest,
+                    snapshot=snapshot,
+                )
+            latest = (
+                (
+                    await session.execute(
+                        select(CapacityConfigurationEpoch).order_by(
+                            CapacityConfigurationEpoch.configuration_epoch.desc()
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
             current_epoch = 0 if latest is None else latest.configuration_epoch
             if current_epoch != proposal.expected_configuration_epoch:
-                raise ConfigurationConflictError(
-                    "expected active configuration epoch is stale"
-                )
+                raise ConfigurationConflictError("expected active configuration epoch is stale")
 
             fleet_row = await self._load_proposal_row(session, proposal.fleet)
             fleet = _parse_contract(FleetManifestV1, fleet_row.payload)
             subject_rows = [
-                await self._load_proposal_row(session, reference)
-                for reference in proposal.subjects
+                await self._load_proposal_row(session, reference) for reference in proposal.subjects
             ]
             subjects = tuple(
-                _parse_contract(SubjectConfigurationV1, row.payload)
-                for row in subject_rows
+                _parse_contract(SubjectConfigurationV1, row.payload) for row in subject_rows
             )
             self._validate_activation(fleet, subjects)
 
             if latest is not None:
                 previous_ids = {
-                    UUID(item["subject_id"])
-                    for item in latest.subject_generation_manifest
+                    UUID(item["subject_id"]) for item in latest.subject_generation_manifest
                 }
                 new_ids = {subject.subject_id for subject in subjects}
                 if new_ids != previous_ids:
@@ -423,6 +463,9 @@ class CapacityManagementStore:
                         for reference in snapshot.subjects
                     ],
                     canonical_digest=snapshot_digest,
+                    activation_idempotency_key=idempotency_key,
+                    activation_actor=actor,
+                    activation_request_digest=request_digest,
                 )
             )
             await session.flush()
@@ -479,15 +522,12 @@ class CapacityManagementStore:
             conditions.extend(
                 [
                     CapacityConfigGeneration.subject_id == reference.subject_id,
-                    CapacityConfigGeneration.subject_incarnation
-                    == reference.subject_incarnation,
+                    CapacityConfigGeneration.subject_incarnation == reference.subject_incarnation,
                 ]
             )
         row = (
             await session.execute(
-                select(CapacityConfigGeneration)
-                .where(*conditions)
-                .with_for_update()
+                select(CapacityConfigGeneration).where(*conditions).with_for_update()
             )
         ).scalar_one_or_none()
         if row is None or row.state not in {"proposed", "active"}:
@@ -610,8 +650,56 @@ class CapacityManagementStore:
                     payload=subject.model_dump(mode="json", exclude_none=False),
                 )
             )
+            for profile in subject.profiles:
+                await self._persist_worker_profile(session, subject, profile)
             await self._register_demand_reporter(session, subject)
         await session.flush()
+
+    async def _persist_worker_profile(
+        self,
+        session: AsyncSession,
+        subject: SubjectConfigurationV1,
+        profile: ProfileReferenceV1,
+    ) -> None:
+        existing = (
+            await session.execute(
+                select(CapacityWorkerProfile).where(
+                    CapacityWorkerProfile.subject_id == subject.subject_id,
+                    CapacityWorkerProfile.subject_incarnation == subject.subject_incarnation,
+                    CapacityWorkerProfile.deployment_generation == subject.deployment_generation,
+                    CapacityWorkerProfile.pool_id == profile.pool_id,
+                    CapacityWorkerProfile.profile_generation == profile.profile_generation,
+                )
+            )
+        ).scalar_one_or_none()
+        shape_catalog = [
+            shape.model_dump(mode="json", exclude_none=False) for shape in profile.worker_shapes
+        ]
+        narrowing = {"eligible_resource_domains": list(profile.eligible_resource_domains)}
+        if existing is None:
+            session.add(
+                CapacityWorkerProfile(
+                    subject_id=subject.subject_id,
+                    subject_incarnation=subject.subject_incarnation,
+                    deployment_generation=subject.deployment_generation,
+                    pool_id=profile.pool_id,
+                    pool_generation=profile.pool_generation,
+                    profile_generation=profile.profile_generation,
+                    profile_digest=profile.profile_digest,
+                    shape_catalog=shape_catalog,
+                    narrowing_constraints=narrowing,
+                )
+            )
+            return
+        if (
+            existing.pool_generation != profile.pool_generation
+            or existing.profile_digest != profile.profile_digest
+            or existing.shape_catalog != shape_catalog
+            or existing.narrowing_constraints != narrowing
+        ):
+            raise ConfigurationConflictError(
+                "immutable worker profile generation conflicts with active configuration"
+            )
 
     async def _register_demand_reporter(
         self, session: AsyncSession, subject: SubjectConfigurationV1
@@ -620,8 +708,7 @@ class CapacityManagementStore:
             await session.execute(
                 select(CapacityDemandReporter).where(
                     CapacityDemandReporter.subject_id == subject.subject_id,
-                    CapacityDemandReporter.subject_incarnation
-                    == subject.subject_incarnation,
+                    CapacityDemandReporter.subject_incarnation == subject.subject_incarnation,
                     CapacityDemandReporter.reporter_incarnation
                     == subject.demand_reporter_incarnation,
                 )
@@ -632,8 +719,7 @@ class CapacityManagementStore:
             .where(
                 CapacityDemandReporter.subject_id == subject.subject_id,
                 CapacityDemandReporter.state == "current",
-                CapacityDemandReporter.reporter_incarnation
-                != subject.demand_reporter_incarnation,
+                CapacityDemandReporter.reporter_incarnation != subject.demand_reporter_incarnation,
             )
             .values(state="fenced")
         )
@@ -657,8 +743,7 @@ class CapacityManagementStore:
             await session.execute(
                 select(CapacityPoolReporter).where(
                     CapacityPoolReporter.pool_id == pool.pool_id,
-                    CapacityPoolReporter.reporter_incarnation
-                    == pool.pool_reporter_incarnation,
+                    CapacityPoolReporter.reporter_incarnation == pool.pool_reporter_incarnation,
                 )
             )
         ).scalar_one_or_none()
@@ -667,8 +752,7 @@ class CapacityManagementStore:
             .where(
                 CapacityPoolReporter.pool_id == pool.pool_id,
                 CapacityPoolReporter.state == "current",
-                CapacityPoolReporter.reporter_incarnation
-                != pool.pool_reporter_incarnation,
+                CapacityPoolReporter.reporter_incarnation != pool.pool_reporter_incarnation,
             )
             .values(state="fenced")
         )
@@ -731,10 +815,8 @@ class CapacityManagementStore:
                     select(CapacityDemandReporter)
                     .where(
                         CapacityDemandReporter.subject_id == report.subject_id,
-                        CapacityDemandReporter.subject_incarnation
-                        == report.subject_incarnation,
-                        CapacityDemandReporter.reporter_incarnation
-                        == report.reporter_incarnation,
+                        CapacityDemandReporter.subject_incarnation == report.subject_incarnation,
+                        CapacityDemandReporter.reporter_incarnation == report.reporter_incarnation,
                     )
                     .with_for_update()
                 )
@@ -815,14 +897,19 @@ class CapacityManagementStore:
             else:
                 observed_state = "observed"
             observed = ObservedCommitmentV1(
+                kind="claim",
                 commitment_id=claim.claim_id,
                 physical_identity=claim.worker_identity,
+                attempt_id=claim.attempt_id,
+                concurrency_slots=claim.concurrency_slots,
                 subject_id=report.subject_id,
                 subject_incarnation=report.subject_incarnation,
                 deployment_generation=claim.deployment_generation,
                 pool_id=claim.pool_id,
-                pool_generation=1,
+                pool_generation=claim.pool_generation,
                 profile_id=claim.profile_id,
+                profile_generation=claim.profile_generation,
+                profile_digest=claim.profile_digest,
                 shape_id=claim.shape_id,
                 resources=claim.resources,
                 state=observed_state,
@@ -853,8 +940,7 @@ class CapacityManagementStore:
                     select(CapacityPoolReporter)
                     .where(
                         CapacityPoolReporter.pool_id == report.pool_id,
-                        CapacityPoolReporter.reporter_incarnation
-                        == report.reporter_incarnation,
+                        CapacityPoolReporter.reporter_incarnation == report.reporter_incarnation,
                     )
                     .with_for_update()
                 )
@@ -933,13 +1019,16 @@ class CapacityManagementStore:
         observed: ObservedCommitmentV1,
         now: datetime,
     ) -> None:
+        if observed.kind != kind:
+            raise ConfigurationConflictError(
+                "commitment contract kind does not match reporter authority"
+            )
         existing = (
             await session.execute(
                 select(CapacityObservedCommitment)
                 .where(
                     CapacityObservedCommitment.kind == kind,
-                    CapacityObservedCommitment.commitment_identity
-                    == observed.commitment_id,
+                    CapacityObservedCommitment.commitment_identity == observed.commitment_id,
                     CapacityObservedCommitment.source_incarnation == source_incarnation,
                 )
                 .with_for_update()
@@ -958,11 +1047,13 @@ class CapacityManagementStore:
                     pool_generation=observed.pool_generation,
                     deployment_generation=observed.deployment_generation,
                     profile_id=observed.profile_id,
+                    profile_generation=observed.profile_generation,
+                    profile_digest=observed.profile_digest,
                     shape_id=observed.shape_id,
+                    attempt_id=observed.attempt_id,
+                    concurrency_slots=observed.concurrency_slots,
                     binding_payload={"observed_contract": payload},
-                    resource_vector=observed.resources.model_dump(
-                        mode="json", exclude_none=False
-                    ),
+                    resource_vector=observed.resources.model_dump(mode="json", exclude_none=False),
                     state=observed.state,
                     first_reporter_high_water=sequence,
                     last_reporter_high_water=sequence,
@@ -972,7 +1063,17 @@ class CapacityManagementStore:
             )
             return
         prior = existing.binding_payload.get("observed_contract")
-        if prior != payload:
+        prior_binding = dict(prior) if isinstance(prior, dict) else None
+        observed_binding = dict(payload)
+        if prior_binding is not None:
+            prior_binding.pop("state", None)
+        observed_binding.pop("state", None)
+        binding_conflict = prior_binding != observed_binding
+        already_conflicted = "conflicting_contract" in existing.binding_payload
+        if not binding_conflict and not already_conflicted:
+            existing.state = observed.state
+            existing.binding_payload = {"observed_contract": payload}
+        elif binding_conflict:
             existing.state = "quarantined"
             existing.binding_payload = {
                 "observed_contract": prior,
@@ -980,16 +1081,14 @@ class CapacityManagementStore:
             }
             conflict_identity = (
                 f"{observed.commitment_id}-conflict-"
-                f"{canonical_digest(observed)[:12]}"
+                f"{canonical_digest_excluding(observed, 'state')[:12]}"
             )
             conflict = (
                 await session.execute(
                     select(CapacityObservedCommitment).where(
                         CapacityObservedCommitment.kind == kind,
-                        CapacityObservedCommitment.commitment_identity
-                        == conflict_identity,
-                        CapacityObservedCommitment.source_incarnation
-                        == source_incarnation,
+                        CapacityObservedCommitment.commitment_identity == conflict_identity,
+                        CapacityObservedCommitment.source_incarnation == source_incarnation,
                     )
                 )
             ).scalar_one_or_none()
@@ -1011,7 +1110,11 @@ class CapacityManagementStore:
                         pool_generation=observed.pool_generation,
                         deployment_generation=observed.deployment_generation,
                         profile_id=observed.profile_id,
+                        profile_generation=observed.profile_generation,
+                        profile_digest=observed.profile_digest,
                         shape_id=observed.shape_id,
+                        attempt_id=observed.attempt_id,
+                        concurrency_slots=observed.concurrency_slots,
                         binding_payload={
                             "observed_contract": conflict_contract.model_dump(
                                 mode="json", exclude_none=False
@@ -1028,9 +1131,7 @@ class CapacityManagementStore:
                         last_receipt_time=now,
                     )
                 )
-        existing.last_reporter_high_water = max(
-            existing.last_reporter_high_water, sequence
-        )
+        existing.last_reporter_high_water = max(existing.last_reporter_high_water, sequence)
         existing.last_receipt_time = now
 
     async def load_allocation_input(
@@ -1040,9 +1141,7 @@ class CapacityManagementStore:
     ) -> AllocationInputV1:
         authority = (
             await session.execute(
-                select(CapacityAuthorityState).where(
-                    CapacityAuthorityState.singleton_id == 1
-                )
+                select(CapacityAuthorityState).where(CapacityAuthorityState.singleton_id == 1)
             )
         ).scalar_one()
         if (
@@ -1051,12 +1150,16 @@ class CapacityManagementStore:
         ):
             raise StaleWriterError("writer is no longer current")
         active = (
-            await session.execute(
-                select(CapacityConfigurationEpoch).order_by(
-                    CapacityConfigurationEpoch.configuration_epoch.desc()
+            (
+                await session.execute(
+                    select(CapacityConfigurationEpoch).order_by(
+                        CapacityConfigurationEpoch.configuration_epoch.desc()
+                    )
                 )
             )
-        ).scalars().first()
+            .scalars()
+            .first()
+        )
         if active is None:
             raise ConfigurationConflictError("no active configuration")
         fleet_row = (
@@ -1070,49 +1173,62 @@ class CapacityManagementStore:
         ).scalar_one()
         fleet = _parse_contract(FleetManifestV1, fleet_row.payload)
         subject_rows = (
-            await session.execute(
-                select(CapacityConfigGeneration).where(
-                    CapacityConfigGeneration.scope == "subject",
-                    CapacityConfigGeneration.state == "active",
+            (
+                await session.execute(
+                    select(CapacityConfigGeneration).where(
+                        CapacityConfigGeneration.scope == "subject",
+                        CapacityConfigGeneration.state == "active",
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         subjects = tuple(
-            _parse_contract(SubjectConfigurationV1, row.payload)
-            for row in subject_rows
+            _parse_contract(SubjectConfigurationV1, row.payload) for row in subject_rows
         )
         now = await _db_now(session)
         subject_inputs = tuple(
             [await self._subject_input(session, subject, now) for subject in subjects]
         )
-        pool_inputs = tuple(
-            [await self._pool_input(session, pool, now) for pool in fleet.pools]
-        )
+        pool_inputs = tuple([await self._pool_input(session, pool, now) for pool in fleet.pools])
         observed_rows = (
-            await session.execute(
-                select(CapacityObservedCommitment).order_by(
-                    CapacityObservedCommitment.commitment_identity
+            (
+                await session.execute(
+                    select(CapacityObservedCommitment).order_by(
+                        CapacityObservedCommitment.commitment_identity
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         observed: list[ObservedCommitmentV1] = []
         for row in observed_rows:
             payload = row.binding_payload.get("observed_contract")
             if not isinstance(payload, dict):
                 continue
             contract = _parse_contract(ObservedCommitmentV1, payload)
+            if row.kind != contract.kind:
+                raise ConfigurationConflictError(
+                    "stored commitment kind does not match its contract"
+                )
             if row.state != contract.state:
                 contract = contract.model_copy(update={"state": row.state})
             observed.append(contract)
         fairness_rows = (
-            await session.execute(
-                select(CapacityFairnessState).order_by(
-                    CapacityFairnessState.tier_id,
-                    CapacityFairnessState.phase,
-                    CapacityFairnessState.account_id,
+            (
+                await session.execute(
+                    select(CapacityFairnessState).order_by(
+                        CapacityFairnessState.tier_id,
+                        CapacityFairnessState.phase,
+                        CapacityFairnessState.account_id,
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         fairness = tuple(
             FairnessCursorV1(
                 tier_id=row.tier_id,  # type: ignore[arg-type]
@@ -1203,8 +1319,7 @@ class CapacityManagementStore:
             await session.execute(
                 select(CapacityPoolReporter).where(
                     CapacityPoolReporter.pool_id == pool.pool_id,
-                    CapacityPoolReporter.reporter_incarnation
-                    == pool.pool_reporter_incarnation,
+                    CapacityPoolReporter.reporter_incarnation == pool.pool_reporter_incarnation,
                 )
             )
         ).scalar_one_or_none()
@@ -1242,9 +1357,7 @@ class CapacityManagementStore:
         now: datetime,
     ) -> InputFreshnessV1:
         if state == "equivocal":
-            status: Literal["valid", "stale", "missing", "invalid", "equivocal"] = (
-                "equivocal"
-            )
+            status: Literal["valid", "stale", "missing", "invalid", "equivocal"] = "equivocal"
         elif state != "current" or received is None:
             status = "missing"
         elif now - received > self._freshness:
@@ -1309,8 +1422,7 @@ class CapacityManagementStore:
                             for match in allocation.claim_slot_matches
                         ],
                         drains=[
-                            {"shape_id": shape_id}
-                            for shape_id in allocation.draining_shape_ids
+                            {"shape_id": shape_id} for shape_id in allocation.draining_shape_ids
                         ],
                         allowances=[
                             allowance.model_dump(mode="json", exclude_none=False)
@@ -1331,9 +1443,7 @@ class CapacityManagementStore:
                     CapacityFairnessState(
                         configuration_epoch=epoch.configuration.configuration_epoch,
                         mode="shadow",
-                        scope="tier_account"
-                        if cursor.subject_id is None
-                        else "account_subject",
+                        scope="tier_account" if cursor.subject_id is None else "account_subject",
                         phase=cursor.phase,
                         tier_id=cursor.tier_id,
                         account_id=cursor.account_id,
@@ -1378,18 +1488,20 @@ class CapacityManagementStore:
             raise ValueError("cursor must be a nonnegative integer")
         authority = (
             await session.execute(
-                select(CapacityAuthorityState).where(
-                    CapacityAuthorityState.singleton_id == 1
-                )
+                select(CapacityAuthorityState).where(CapacityAuthorityState.singleton_id == 1)
             )
         ).scalar_one()
         configuration = (
-            await session.execute(
-                select(CapacityConfigurationEpoch).order_by(
-                    CapacityConfigurationEpoch.configuration_epoch.desc()
+            (
+                await session.execute(
+                    select(CapacityConfigurationEpoch).order_by(
+                        CapacityConfigurationEpoch.configuration_epoch.desc()
+                    )
                 )
             )
-        ).scalars().first()
+            .scalars()
+            .first()
+        )
         latest_allocation = (
             await session.execute(select(func.max(CapacityAllocationEpoch.allocation_epoch)))
         ).scalar_one()
@@ -1402,12 +1514,8 @@ class CapacityManagementStore:
         return CapacityStatusPageV1(
             authority_incarnation=authority.authority_incarnation,
             writer_epoch=authority.writer_epoch,
-            configuration_epoch=0
-            if configuration is None
-            else configuration.configuration_epoch,
-            configuration_digest=None
-            if configuration is None
-            else configuration.canonical_digest,
+            configuration_epoch=0 if configuration is None else configuration.configuration_epoch,
+            configuration_digest=None if configuration is None else configuration.canonical_digest,
             latest_allocation_epoch=latest_allocation,
             executable_new_capacity_ceiling=authority.executable_new_capacity_ceiling,
             increase_freeze=authority.increase_freeze,

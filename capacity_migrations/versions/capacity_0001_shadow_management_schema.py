@@ -235,6 +235,9 @@ def upgrade() -> None:
             "subject_generation_manifest", postgresql.JSONB(astext_type=sa.Text()), nullable=False
         ),
         sa.Column("canonical_digest", sa.Text(), nullable=False),
+        sa.Column("activation_idempotency_key", sa.UUID(), nullable=False),
+        sa.Column("activation_actor", sa.Text(), nullable=False),
+        sa.Column("activation_request_digest", sa.Text(), nullable=False),
         sa.Column(
             "created_at",
             postgresql.TIMESTAMP(timezone=True),
@@ -242,7 +245,9 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.CheckConstraint(
-            "fleet_digest ~ '^[0-9a-f]{64}$' AND canonical_digest ~ '^[0-9a-f]{64}$'",
+            "fleet_digest ~ '^[0-9a-f]{64}$' "
+            "AND canonical_digest ~ '^[0-9a-f]{64}$' "
+            "AND activation_request_digest ~ '^[0-9a-f]{64}$'",
             name="capacity_configuration_digest_check",
         ),
         sa.CheckConstraint("configuration_epoch > 0", name="capacity_configuration_epoch_check"),
@@ -250,6 +255,7 @@ def upgrade() -> None:
             "fleet_generation > 0", name="capacity_configuration_fleet_generation_check"
         ),
         sa.PrimaryKeyConstraint("configuration_epoch"),
+        sa.UniqueConstraint("activation_idempotency_key"),
         sa.UniqueConstraint("canonical_digest"),
     )
     op.create_table(
@@ -370,7 +376,11 @@ def upgrade() -> None:
         sa.Column("pool_generation", sa.BigInteger(), nullable=False),
         sa.Column("deployment_generation", sa.BigInteger(), nullable=True),
         sa.Column("profile_id", sa.Text(), nullable=True),
+        sa.Column("profile_generation", sa.BigInteger(), nullable=False),
+        sa.Column("profile_digest", sa.Text(), nullable=False),
         sa.Column("shape_id", sa.Text(), nullable=True),
+        sa.Column("attempt_id", sa.Text(), nullable=True),
+        sa.Column("concurrency_slots", sa.BigInteger(), nullable=True),
         sa.Column("binding_payload", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.Column("resource_vector", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.Column("state", sa.Text(), nullable=False),
@@ -380,7 +390,18 @@ def upgrade() -> None:
         sa.Column("last_receipt_time", postgresql.TIMESTAMP(timezone=True), nullable=False),
         sa.CheckConstraint("kind IN ('claim','physical')", name="capacity_commitment_kind_check"),
         sa.CheckConstraint(
-            "state IN ('observed','unknown','quarantined')", name="capacity_commitment_state_check"
+            "state IN ('proposed','accepted','pending','live','draining',"
+            "'cancel-pending','submitting-unknown','observed','unknown','quarantined')",
+            name="capacity_commitment_state_check",
+        ),
+        sa.CheckConstraint(
+            "profile_generation > 0 AND profile_digest ~ '^[0-9a-f]{64}$'",
+            name="capacity_commitment_profile_binding_check",
+        ),
+        sa.CheckConstraint(
+            "(kind = 'claim' AND attempt_id IS NOT NULL AND concurrency_slots > 0) "
+            "OR (kind = 'physical' AND attempt_id IS NULL AND concurrency_slots IS NULL)",
+            name="capacity_commitment_kind_fields_check",
         ),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint(

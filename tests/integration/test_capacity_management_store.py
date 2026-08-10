@@ -14,6 +14,7 @@ from loom_capacity_manager.models import (
     CapacityConfigurationEpoch,
     CapacityDemandReporter,
     CapacityObservedCommitment,
+    CapacityWorkerProfile,
 )
 from loom_capacity_manager.store import (
     CapacityManagementStore,
@@ -164,9 +165,7 @@ async def test_incompatible_configuration_proposals_never_become_partly_active(
             idempotency_key=ACTIVATION_KEY,
         )
     assert (
-        await capacity_session.execute(
-            select(func.count()).select_from(CapacityConfigurationEpoch)
-        )
+        await capacity_session.execute(select(func.count()).select_from(CapacityConfigurationEpoch))
     ).scalar_one() == 0
 
 
@@ -175,12 +174,71 @@ async def test_activation_registers_exact_reporter_incarnations(
 ) -> None:
     _, active = await _activate_default(capacity_session)
     assert active.configuration_epoch == 1
-    reporters = (
-        await capacity_session.execute(select(CapacityDemandReporter))
-    ).scalars().all()
+    reporters = (await capacity_session.execute(select(CapacityDemandReporter))).scalars().all()
     assert len(reporters) == 1
     assert reporters[0].state == "current"
     assert reporters[0].high_water == 0
+
+
+async def test_activation_idempotency_replays_before_epoch_conflict(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityManagementStore()
+    fleet = await store.propose_fleet_configuration(
+        capacity_session,
+        fleet_manifest(),
+        actor="fleet-operator",
+        idempotency_key=CONFIG_KEY_A,
+    )
+    subject = await store.propose_subject_configuration(
+        capacity_session,
+        subject_configuration(),
+        actor="environment-state",
+        idempotency_key=CONFIG_KEY_B,
+    )
+    proposal = configuration_activation(fleet=fleet, subjects=(subject,))
+    first = await store.activate_configuration(
+        capacity_session,
+        proposal,
+        actor="fleet-operator",
+        idempotency_key=ACTIVATION_KEY,
+    )
+    replay = await store.activate_configuration(
+        capacity_session,
+        proposal,
+        actor="fleet-operator",
+        idempotency_key=ACTIVATION_KEY,
+    )
+
+    assert replay == first
+    with pytest.raises(IdempotencyConflictError):
+        await store.activate_configuration(
+            capacity_session,
+            proposal,
+            actor="different-operator",
+            idempotency_key=ACTIVATION_KEY,
+        )
+
+
+async def test_activation_materializes_exact_worker_profile_bindings(
+    capacity_session: AsyncSession,
+) -> None:
+    await _activate_default(capacity_session)
+
+    profiles = (
+        (
+            await capacity_session.execute(
+                select(CapacityWorkerProfile).order_by(CapacityWorkerProfile.pool_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    assert [item.pool_id for item in profiles] == ["gb10", "oldlab"]
+    assert all(item.pool_generation == 1 for item in profiles)
+    assert all(item.profile_generation == 1 for item in profiles)
+    assert all(len(item.shape_catalog) == 1 for item in profiles)
 
 
 async def test_exact_report_replay_is_idempotent_but_equivocation_fences(
@@ -199,8 +257,7 @@ async def test_exact_report_replay_is_idempotent_but_equivocation_fences(
     state = (
         await capacity_session.execute(
             select(CapacityDemandReporter.state).where(
-                CapacityDemandReporter.reporter_incarnation
-                == report.reporter_incarnation
+                CapacityDemandReporter.reporter_incarnation == report.reporter_incarnation
             )
         )
     ).scalar_one()
@@ -211,9 +268,7 @@ async def test_lower_report_sequence_is_rejected_without_changing_high_water(
     capacity_session: AsyncSession,
 ) -> None:
     store, _ = await _activate_default(capacity_session)
-    await store.ingest_demand_snapshot(
-        capacity_session, demand_snapshot(sequence=2), actor="dev-a"
-    )
+    await store.ingest_demand_snapshot(capacity_session, demand_snapshot(sequence=2), actor="dev-a")
     with pytest.raises(StaleReportError):
         await store.ingest_demand_snapshot(
             capacity_session, demand_snapshot(sequence=1), actor="dev-a"
@@ -244,8 +299,8 @@ async def test_newer_report_omission_cannot_release_observed_commitment(
     allocation = await store.load_allocation_input(capacity_session, writer)
     assert allocation.observed_commitment_ids == ("claim-a",)
     states = (
-        await capacity_session.execute(select(CapacityObservedCommitment.state))
-    ).scalars().all()
+        (await capacity_session.execute(select(CapacityObservedCommitment.state))).scalars().all()
+    )
     assert states == ["observed"]
 
 
@@ -264,6 +319,24 @@ async def test_pool_observation_replay_is_idempotent(
     assert replay.replayed
 
 
+async def test_newer_pool_report_can_advance_commitment_lifecycle_state(
+    capacity_session: AsyncSession,
+) -> None:
+    store, _ = await _activate_default(capacity_session)
+    first = pool_observation(sequence=1, commitment_ids=("worker-a",))
+    second = pool_observation(sequence=2).model_copy(
+        update={"commitments": (first.commitments[0].model_copy(update={"state": "live"}),)}
+    )
+
+    await store.ingest_pool_observation(capacity_session, first, actor="gb10-reporter")
+    await store.ingest_pool_observation(capacity_session, second, actor="gb10-reporter")
+
+    rows = (await capacity_session.execute(select(CapacityObservedCommitment))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].state == "live"
+    assert rows[0].binding_payload["observed_contract"]["state"] == "live"
+
+
 async def test_conflicting_commitment_evidence_is_charged_separately(
     capacity_session: AsyncSession,
 ) -> None:
@@ -278,12 +351,16 @@ async def test_conflicting_commitment_evidence_is_charged_separately(
     await store.ingest_demand_snapshot(capacity_session, first, actor="dev-a")
     await store.ingest_demand_snapshot(capacity_session, second, actor="dev-a")
     rows = (
-        await capacity_session.execute(
-            select(CapacityObservedCommitment).order_by(
-                CapacityObservedCommitment.commitment_identity
+        (
+            await capacity_session.execute(
+                select(CapacityObservedCommitment).order_by(
+                    CapacityObservedCommitment.commitment_identity
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     assert len(rows) == 2
     assert {row.state for row in rows} == {"quarantined"}
 
@@ -295,13 +372,9 @@ async def test_stale_writer_cannot_commit_complete_shadow_epoch(
     authority = await _authority_uuid(capacity_session)
     old = await store.register_writer(capacity_session, authority, expected_epoch=0)
     allocation_input = await store.load_allocation_input(capacity_session, old)
-    new = await store.register_writer(
-        capacity_session, authority, expected_epoch=old.writer_epoch
-    )
+    new = await store.register_writer(capacity_session, authority, expected_epoch=old.writer_epoch)
     with pytest.raises(StaleWriterError):
-        await store.commit_shadow_epoch(
-            capacity_session, old, shadow_epoch(allocation_input)
-        )
+        await store.commit_shadow_epoch(capacity_session, old, shadow_epoch(allocation_input))
     assert await _allocation_epoch_count(capacity_session) == 0
     assert new.writer_epoch == old.writer_epoch + 1
 
