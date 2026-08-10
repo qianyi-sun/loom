@@ -184,6 +184,27 @@ runtime_policy = "start"
 rollout_role = "primary"
 
 [[components]]
+id = "pipeline-orchestrator"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.pipeline-orchestrator"
+build_context = "."
+source_paths = [
+  ".dockerignore",
+  "README.md",
+  "deploy/Dockerfile.pipeline-orchestrator",
+  "migrations/**",
+  "pyproject.toml",
+  "src/loom/pipeline/**",
+  "src/loom_pipeline_orchestrator/**",
+]
+smoke_owner = "family-orchestrator-conformance"
+scan_owner = "images"
+attestation_owner = "release-provenance"
+release_digest = "loom-pipeline-orchestrator"
+runtime_policy = "conformance"
+rollout_role = "none"
+
+[[components]]
 id = "llm-gateway"
 kind = "release-image"
 dockerfile = "deploy/Dockerfile.gateway"

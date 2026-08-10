@@ -37,6 +37,9 @@ spec:
     - podSelector:
         matchLabels:
           app: loom-family-orchestrator
+    - podSelector:
+        matchLabels:
+          app: loom-pipeline-orchestrator
     ports:
     - port: 5432
       protocol: TCP
@@ -547,6 +550,55 @@ spec:
           cnpg.io/cluster: loom-postgres
     ports:
     - port: 5432
+      protocol: TCP
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  namespace: loom
+  name: loom-pipeline-orchestrator
+spec:
+  podSelector:
+    matchLabels:
+      app: loom-pipeline-orchestrator
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector: {}
+    ports:
+    - port: 8092
+      protocol: TCP
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: loom-postgres
+    - podSelector:
+        matchLabels:
+          cnpg.io/cluster: loom-postgres
+    ports:
+    - port: 5432
+      protocol: TCP
+  - to:
+    - podSelector:
+        matchLabels:
+          app: loom-pgbouncer
+    ports:
+    - port: 6432
       protocol: TCP
   - to:
     - namespaceSelector:

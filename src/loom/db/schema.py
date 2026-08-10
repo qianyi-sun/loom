@@ -2274,6 +2274,12 @@ class PipelineRun(Base):
             name="pipeline_runs_official_not_retry_check",
         ),
         CheckConstraint("next_event_seq > 0", name="pipeline_runs_next_event_seq_positive"),
+        CheckConstraint("lease_epoch >= 0", name="pipeline_runs_lease_epoch_nonnegative"),
+        CheckConstraint(
+            "(claimed_by IS NULL AND lease_expires_at IS NULL) OR "
+            "(claimed_by IS NOT NULL AND lease_expires_at IS NOT NULL)",
+            name="pipeline_runs_controller_lease_group_check",
+        ),
         CheckConstraint("version >= 0", name="pipeline_runs_version_nonnegative"),
         UniqueConstraint("team_id", "idempotency_key", name="pipeline_runs_team_idempotency_uidx"),
         Index(
@@ -2339,6 +2345,9 @@ class PipelineRun(Base):
     started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     next_event_seq: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    claimed_by: Mapped[str | None] = mapped_column(Text)
+    lease_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
 
 
@@ -2795,6 +2804,10 @@ class PipelineAcceptancePreflightPrerequisite(Base):
             "policy_activation_epoch IS NULL OR policy_activation_epoch > 0",
             name="pipeline_preflight_activation_epoch_positive",
         ),
+        CheckConstraint(
+            "worker_lease_epoch IS NULL OR worker_lease_epoch > 0",
+            name="pipeline_preflight_worker_lease_epoch_positive",
+        ),
         CheckConstraint("version >= 0", name="pipeline_preflight_version_nonnegative"),
         CheckConstraint(
             "(eviction_result_json IS NULL AND eviction_result_bytes IS NULL "
@@ -2816,16 +2829,22 @@ class PipelineAcceptancePreflightPrerequisite(Base):
             "(fence_state = 'pending' AND worker_id IS NULL "
             "AND worker_capability_snapshot_digest IS NULL AND policy_id IS NULL "
             "AND policy_config_sha256 IS NULL AND policy_activation_epoch IS NULL "
+            "AND worker_lease_epoch IS NULL AND slurm_cluster_id IS NULL "
+            "AND slurm_cluster_config_sha256 IS NULL AND slurm_allocation_id IS NULL "
             "AND exclusive_fence_id IS NULL AND fence_acquired_at IS NULL "
             "AND fence_released_at IS NULL AND fence_release_reason IS NULL) OR "
             "(fence_state = 'active' AND worker_id IS NOT NULL "
             "AND worker_capability_snapshot_digest IS NOT NULL AND policy_id IS NOT NULL "
             "AND policy_config_sha256 IS NOT NULL AND policy_activation_epoch IS NOT NULL "
+            "AND worker_lease_epoch IS NOT NULL AND slurm_cluster_id IS NOT NULL "
+            "AND slurm_cluster_config_sha256 IS NOT NULL AND slurm_allocation_id IS NOT NULL "
             "AND exclusive_fence_id IS NOT NULL AND fence_acquired_at IS NOT NULL "
             "AND fence_released_at IS NULL AND fence_release_reason IS NULL) OR "
             "(fence_state = 'released' AND worker_id IS NOT NULL "
             "AND worker_capability_snapshot_digest IS NOT NULL AND policy_id IS NOT NULL "
             "AND policy_config_sha256 IS NOT NULL AND policy_activation_epoch IS NOT NULL "
+            "AND worker_lease_epoch IS NOT NULL AND slurm_cluster_id IS NOT NULL "
+            "AND slurm_cluster_config_sha256 IS NOT NULL AND slurm_allocation_id IS NOT NULL "
             "AND exclusive_fence_id IS NOT NULL "
             "AND fence_acquired_at IS NOT NULL AND fence_released_at IS NOT NULL "
             "AND fence_release_reason IS NOT NULL)",
@@ -2855,6 +2874,10 @@ class PipelineAcceptancePreflightPrerequisite(Base):
     policy_id: Mapped[str | None] = mapped_column(Text)
     policy_config_sha256: Mapped[str | None] = mapped_column(Text)
     policy_activation_epoch: Mapped[int | None] = mapped_column(BigInteger)
+    worker_lease_epoch: Mapped[int | None] = mapped_column(BigInteger)
+    slurm_cluster_id: Mapped[str | None] = mapped_column(Text)
+    slurm_cluster_config_sha256: Mapped[str | None] = mapped_column(Text)
+    slurm_allocation_id: Mapped[str | None] = mapped_column(Text)
     state: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'pending'"))
     eviction_result_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     eviction_result_bytes: Mapped[bytes | None] = mapped_column(LargeBinary)
@@ -2872,6 +2895,226 @@ class PipelineAcceptancePreflightPrerequisite(Base):
     fence_acquired_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     fence_released_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     fence_release_reason: Mapped[str | None] = mapped_column(Text)
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+
+
+class PipelineBudgetLedger(Base):
+    """One locked hard-budget counter row per PipelineRun (#1212)."""
+
+    __tablename__ = "pipeline_budget_ledgers"
+    __table_args__ = (
+        CheckConstraint(
+            "provider_limit_microusd >= 0 AND provider_reserved_microusd >= 0 "
+            "AND provider_settled_microusd >= 0 AND gpu_limit_seconds >= 0 "
+            "AND gpu_reserved_seconds >= 0 AND gpu_settled_seconds >= 0 "
+            "AND artifact_limit_bytes >= 0 AND artifact_reserved_bytes >= 0 "
+            "AND artifact_settled_bytes >= 0 AND stage_run_limit >= 0 "
+            "AND stage_runs_created >= 0 AND attempt_limit >= 0 AND attempts_created >= 0",
+            name="pipeline_budget_ledgers_nonnegative_check",
+        ),
+        CheckConstraint(
+            "artifact_reserved_bytes + artifact_settled_bytes <= artifact_limit_bytes "
+            "AND stage_runs_created <= stage_run_limit AND attempts_created <= attempt_limit",
+            name="pipeline_budget_ledgers_hard_limits_check",
+        ),
+        CheckConstraint(
+            "terminal_cause = 'accounting_violation' OR "
+            "(provider_reserved_microusd + provider_settled_microusd <= provider_limit_microusd "
+            "AND gpu_reserved_seconds + gpu_settled_seconds <= gpu_limit_seconds)",
+            name="pipeline_budget_ledgers_metered_limits_check",
+        ),
+        CheckConstraint(
+            "terminal_cause IS NULL OR terminal_cause IN "
+            "('user_cancel','provider_budget','gpu_budget','artifact_budget','stage_run_budget',"
+            "'attempt_budget','wall_budget','accounting_violation')",
+            name="pipeline_budget_ledgers_terminal_cause_check",
+        ),
+        CheckConstraint(
+            "(terminal_cause IS NULL) = (terminal_cause_at IS NULL)",
+            name="pipeline_budget_ledgers_terminal_cause_group_check",
+        ),
+        CheckConstraint("version >= 0", name="pipeline_budget_ledgers_version_nonnegative"),
+        Index("pipeline_budget_ledgers_deadline_idx", "wall_deadline_at", "pipeline_run_id"),
+    )
+
+    pipeline_run_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("pipeline_runs.id", ondelete="CASCADE"), primary_key=True
+    )
+    provider_limit_microusd: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    provider_reserved_microusd: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    provider_settled_microusd: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    gpu_limit_seconds: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    gpu_reserved_seconds: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    gpu_settled_seconds: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    artifact_limit_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    artifact_reserved_bytes: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    artifact_settled_bytes: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    stage_run_limit: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    stage_runs_created: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    attempt_limit: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    attempts_created: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    wall_deadline_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    terminal_cause: Mapped[str | None] = mapped_column(Text)
+    terminal_cause_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class PipelineBudgetReservation(Base):
+    __tablename__ = "pipeline_budget_reservations"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('provider','gpu','artifact')",
+            name="pipeline_budget_reservations_kind_check",
+        ),
+        CheckConstraint(
+            "state IN ('active','settled','released')",
+            name="pipeline_budget_reservations_state_check",
+        ),
+        CheckConstraint(
+            "reserved_amount >= 0 AND (settled_amount IS NULL OR settled_amount >= 0)",
+            name="pipeline_budget_reservations_amount_check",
+        ),
+        CheckConstraint(
+            "(state = 'active' AND settled_amount IS NULL AND settled_at IS NULL) OR "
+            "(state = 'settled' AND settled_amount IS NOT NULL AND settled_at IS NOT NULL) OR "
+            "(state = 'released' AND settled_amount IS NULL AND settled_at IS NOT NULL)",
+            name="pipeline_budget_reservations_terminal_fields_check",
+        ),
+        CheckConstraint(
+            "(kind = 'provider' AND reservation_key ~ "
+            "'^provider:[0-9a-f-]{36}:[0-9a-f-]{36}$') OR "
+            "(kind = 'gpu' AND reservation_key ~ '^gpu:[0-9a-f-]{36}$') OR "
+            "(kind = 'artifact' AND reservation_key ~ "
+            "'^artifact:(final:[0-9a-f-]{36}|checkpoint:[0-9a-f-]{36}:[0-9]{12}|"
+            "control:[a-z][a-z0-9_]{0,62}:[0-9a-f-]{36})$')",
+            name="pipeline_budget_reservations_key_namespace_check",
+        ),
+        UniqueConstraint(
+            "pipeline_run_id", "kind", "reservation_key", name="pipeline_budget_reservations_key_uidx"
+        ),
+        Index("pipeline_budget_reservations_run_state_idx", "pipeline_run_id", "state", "id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    pipeline_run_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("pipeline_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    execution_attempt_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("execution_attempts.id", ondelete="RESTRICT")
+    )
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    reservation_key: Mapped[str] = mapped_column(Text, nullable=False)
+    request_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    reserved_amount: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    settled_amount: Mapped[int | None] = mapped_column(BigInteger)
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'active'"))
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+    settled_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+
+
+class ExecutionAttemptProviderBudget(Base):
+    __tablename__ = "execution_attempt_provider_budgets"
+    __table_args__ = (
+        CheckConstraint(
+            "request_limit > 0 AND requests_reserved >= 0 AND requests_settled >= 0 "
+            "AND requests_reserved + requests_settled <= request_limit "
+            "AND cost_limit_microusd > 0 AND cost_reserved_microusd >= 0 "
+            "AND cost_settled_microusd >= 0 AND per_call_timeout_seconds > 0",
+            name="execution_attempt_provider_budgets_counter_check",
+        ),
+        CheckConstraint(
+            "version >= 0", name="execution_attempt_provider_budgets_version_nonnegative"
+        ),
+    )
+
+    attempt_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("execution_attempts.id", ondelete="CASCADE"), primary_key=True
+    )
+    binding_snapshot_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    request_limit: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    requests_reserved: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    requests_settled: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    cost_limit_microusd: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    cost_reserved_microusd: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    cost_settled_microusd: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    per_call_timeout_seconds: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+
+
+class PipelineCancellationOutbox(Base):
+    """Idempotent cancellation command and runtime acknowledgement interface."""
+
+    __tablename__ = "pipeline_cancellation_outbox"
+    __table_args__ = (
+        CheckConstraint(
+            "terminal_cause IN ('user_cancel','provider_budget','gpu_budget','artifact_budget',"
+            "'stage_run_budget','attempt_budget','wall_budget','accounting_violation')",
+            name="pipeline_cancellation_outbox_cause_check",
+        ),
+        CheckConstraint(
+            "state IN ('pending','acked')", name="pipeline_cancellation_outbox_state_check"
+        ),
+        CheckConstraint(
+            "(state = 'pending' AND ack_json IS NULL AND ack_digest IS NULL AND acked_at IS NULL) OR "
+            "(state = 'acked' AND ack_json IS NOT NULL AND ack_digest IS NOT NULL "
+            "AND acked_at IS NOT NULL)",
+            name="pipeline_cancellation_outbox_ack_group_check",
+        ),
+        CheckConstraint("version >= 0", name="pipeline_cancellation_outbox_version_nonnegative"),
+        UniqueConstraint("execution_attempt_id", name="pipeline_cancellation_outbox_attempt_uidx"),
+        UniqueConstraint("idempotency_key", name="pipeline_cancellation_outbox_key_uidx"),
+        Index("pipeline_cancellation_outbox_state_idx", "state", "created_at", "id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    pipeline_run_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("pipeline_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    execution_attempt_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("execution_attempts.id", ondelete="CASCADE"), nullable=False
+    )
+    terminal_cause: Mapped[str] = mapped_column(Text, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(Text, nullable=False)
+    request_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    request_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'pending'"))
+    ack_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    ack_digest: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+    acked_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
 
 
