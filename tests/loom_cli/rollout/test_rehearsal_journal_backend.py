@@ -34,6 +34,7 @@ def _plan(*, candidate_sha: str = "a" * 40) -> RehearsalPlan:
             "loom-control-plane": "sha256:" + "8" * 64,
             "loom-egress-xds": "sha256:" + "3" * 64,
             "loom-family-orchestrator": "sha256:" + "4" * 64,
+            "loom-pipeline-orchestrator": "sha256:" + "a" * 64,
             "loom-llm-gateway": "sha256:" + "5" * 64,
             "loom-rehearsal-postgres": "sha256:" + "9" * 64,
             "loom-service": "sha256:" + "1" * 64,

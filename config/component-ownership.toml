@@ -201,8 +201,8 @@ smoke_owner = "family-orchestrator-conformance"
 scan_owner = "images"
 attestation_owner = "release-provenance"
 release_digest = "loom-pipeline-orchestrator"
-runtime_policy = "conformance"
-rollout_role = "none"
+runtime_policy = "start"
+rollout_role = "primary"
 
 [[components]]
 id = "llm-gateway"

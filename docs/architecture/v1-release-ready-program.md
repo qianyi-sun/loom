@@ -289,8 +289,8 @@ inputs from the same source. Runtime payloads execute one file per read-only, ne
 resource-limited container, using a digest-pinned image and a per-file minimal
 synthetic passing-workspace fixture case;
 that result is verifier-conformance evidence, not real task or trial success.
-Rollout build/load and expected-image evidence reuse a nine-image matrix generated
-from the fixed candidate worktree's explicitly tagged seven primary and two
+Rollout build/load and expected-image evidence reuse a ten-image matrix generated
+from the fixed candidate worktree's explicitly tagged eight primary and two
 auxiliary components. The two sandbox conformance images remain outside the
 rollout matrix.
 

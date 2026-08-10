@@ -867,7 +867,7 @@ def test_rollout_release_images_have_exact_manifest_owner() -> None:
         )
         == []
     )
-    assert len(rollout_images) == 7
+    assert len(rollout_images) == 8
 
 
 def test_rollout_roles_define_exact_primary_and_auxiliary_sets() -> None:
@@ -884,7 +884,7 @@ def test_rollout_roles_define_exact_primary_and_auxiliary_sets() -> None:
     primary_names = {entry["image_name"] for entry in primary}
     auxiliary_names = {entry["image_name"] for entry in auxiliary}
 
-    assert len(primary) == 7
+    assert len(primary) == 8
     assert len(auxiliary) == 2
     assert not primary_names & auxiliary_names
     assert auxiliary_names == {

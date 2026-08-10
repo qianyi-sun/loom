@@ -17,6 +17,7 @@ from loom_cli.cluster_config import validate_container_registry_prefixes
 ROLLOUT_IMAGES: tuple[tuple[str, str], ...] = (
     ("loom-control-plane", "deploy/Dockerfile.control-plane"),
     ("loom-family-orchestrator", "deploy/Dockerfile.family-orchestrator"),
+    ("loom-pipeline-orchestrator", "deploy/Dockerfile.pipeline-orchestrator"),
     ("loom-llm-gateway", "deploy/Dockerfile.gateway"),
     ("loom-service", "deploy/Dockerfile.service"),
     ("loom-web", "deploy/Dockerfile.web"),
@@ -197,7 +198,7 @@ class ImageBuildSession:
 
 def _validate_image_plan(plan: RolloutImagePlan) -> None:
     if len(plan) != len(DEFAULT_ROLLOUT_IMAGE_PLAN) or set(plan) != set(DEFAULT_ROLLOUT_IMAGE_PLAN):
-        raise ValueError("rollout image plan differs from the exact nine-image contract")
+        raise ValueError("rollout image plan differs from the exact ten-image contract")
 
 
 def image_plan_digest(
