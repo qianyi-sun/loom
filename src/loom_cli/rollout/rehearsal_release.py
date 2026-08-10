@@ -340,6 +340,14 @@ def _isolate_service(
     value = copy.deepcopy(source)
     metadata = _mapping(value.get("metadata"), label="service metadata")
     spec = _mapping(value.get("spec"), label="service spec")
+    source_namespace = metadata.get("namespace")
+    if name == "loom-postgres" and ("externalName" in spec or spec.get("type") == "ExternalName"):
+        if not isinstance(source_namespace, str):
+            raise ValueError("rehearsal postgres service external authority drifted")
+        expected_external_name = f"loom-postgres-rw.{source_namespace}.svc.cluster.local"
+        if spec.get("type") != "ExternalName" or spec.get("externalName") != expected_external_name:
+            raise ValueError("rehearsal postgres service external authority drifted")
+        spec.pop("externalName")
     metadata["namespace"] = plan.resources.namespace
     _bind_metadata(metadata, plan=plan)
     spec.pop("clusterIP", None)

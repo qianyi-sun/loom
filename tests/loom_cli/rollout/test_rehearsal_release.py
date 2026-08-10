@@ -265,11 +265,20 @@ def test_release_artifact_isolates_exact_candidate_subset(tmp_path: Path) -> Non
     }
 
 
-def test_release_artifact_accepts_real_staging_render(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "config_name",
+    ("staging.cluster.toml", "staging.multinode.cluster.toml"),
+)
+def test_release_artifact_accepts_real_staging_render(
+    tmp_path: Path,
+    config_name: str,
+) -> None:
     plan = _plan(tmp_path)
     config = replace(
-        load_cluster_config(Path("deploy/environments/staging.cluster.toml")),
+        load_cluster_config(Path("deploy/environments") / config_name),
         image_tag=plan.image_tag,
+        container_registry="",
+        container_registry_push="",
     )
     payload = render_manifests(config)
     plan.rendered_manifest_path.write_text(payload)
@@ -353,6 +362,29 @@ def test_release_artifact_rejects_host_authority_or_image_drift(tmp_path: Path) 
     plan = RehearsalPlan.from_record(record)
     with pytest.raises(ValueError, match="image binding drifted"):
         build_rehearsal_release_artifact(plan)
+
+
+def test_release_artifact_rejects_unexpected_postgres_external_name(tmp_path: Path) -> None:
+    plan = _plan(tmp_path)
+    resources = list(yaml.safe_load_all(plan.rendered_manifest_path.read_text()))
+    postgres = next(
+        resource
+        for resource in resources
+        if resource["kind"] == "Service" and resource["metadata"]["name"] == "loom-postgres"
+    )
+    postgres["spec"] = {
+        "type": "ExternalName",
+        "externalName": "database.example.invalid",
+        "ports": [{"port": 5432}],
+    }
+    payload = yaml.safe_dump_all(resources, sort_keys=True)
+    plan.rendered_manifest_path.write_text(payload)
+    plan.rendered_manifest_path.chmod(0o600)
+    record = plan.to_record()
+    record["rendered_manifest_sha256"] = hashlib.sha256(payload.encode()).hexdigest()
+
+    with pytest.raises(ValueError, match="postgres service external authority drifted"):
+        build_rehearsal_release_artifact(RehearsalPlan.from_record(record))
 
 
 @pytest.mark.parametrize(
