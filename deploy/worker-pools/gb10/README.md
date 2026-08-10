@@ -3,13 +3,15 @@
 This directory records the staging GB10 worker-pool policy validated for issue
 #518. The pool attaches ARM64 GB10 hosts to the OLDLAB-1 staging control plane
 as Slurm-managed Docker workers. Slurm owns normal capacity request/release;
-the node-agent remains the host-local convergence mechanism.
+the external autoscaler on the GB10 Slurm controller is the only active
+capacity actuator. The predecessor per-host node agent remains retired.
 
 ## Topology
 
 - Control plane host: OLDLAB-1, reached as `platform-dev`, `oldlab-1`, or
   `oldlab1`.
-- Kubernetes namespace: `loom-staging` in `kind-loom-staging`.
+- Kubernetes namespace: `loom-staging` in the multi-node k3s context
+  `loom-staging`.
 - Worker hosts: `trt-gb10-1` through `trt-gb10-15`.
 - Membership is always all 15 hosts. Every host remains heartbeat-managed.
   Health and current resource availability determine placement; a healthy busy
@@ -21,9 +23,11 @@ the node-agent remains the host-local convergence mechanism.
   `deploy/worker-pools/gb10/ssh_config`. `trt-gb10-1` is the only public
   entrypoint on port `2221`; `trt-gb10-2` through `trt-gb10-15` use their
   private addresses on port `22` through `ProxyJump trt-gb10-1`.
-- Host checkout and Compose root:
-  `/home/qianyi/loom-worker-build-staging`.
-- Host runtime env: `/home/qianyi/loom-worker-build-staging/.env`, mode 0600.
+- Candidate checkout root:
+  `/shared_work2/loom-staging-rollout/worker-repos/loom-remote-worker-${IMAGE_TAG}`.
+- Generated worker env root:
+  `/shared_work2/loom-staging-rollout/worker-envs`, with private files owned by
+  the rollout service identity.
 
 The worker-facing OLDLAB-1 services stay private. Public internet traffic must
 continue to reach only Web/API over TLS. Remote workers use the existing local
@@ -43,8 +47,8 @@ explicit `/anthropic` facade is invalid.
 
 ## Protected Rollout Ownership
 
-Normal checkout, env, desired-state, service, and release convergence belongs
-to the root-installed `loom-staging-rollout` broker on `platform-dev`. The
+Normal candidate, desired-state, service, and release convergence belongs to
+the root-installed `loom-staging-rollout` broker on `platform-dev`. The
 detached unit runs as the non-login `loom-rollout` service account. Every new
 request fresh-fetches and pins the current merged `refs/heads/dev`; an operator
 cannot select a commit, ref, image tag, host subset, env file, credential,
@@ -55,19 +59,17 @@ Before the driver may mutate a host unit, the deploy identity must report
 normal user/admin path with `loginctl enable-linger "$USER"`; a missing linger
 grant fails rollout step 12 closed.
 
-The driver preserves this order for every active host:
+The driver preserves this order:
 
 1. apply the candidate-owned environment-state profile;
 2. validate the exact desired image, env version, and source SHA;
-3. prepare the host checkout and generated private env;
-4. retire the legacy direct-worker service;
-5. install the candidate's node-agent service and timer, start the oneshot once,
-   then enable and restart the periodic timer with bounded host concurrency;
-6. verify the installed unit bytes, linger grant, successful oneshot result,
-   and enabled/active/waiting timer;
-7. require health/heartbeat reports for all 15 inventory hosts and fresh linked
+3. materialize the service-owned shared checkout and generated private env;
+4. keep the legacy direct-worker and node-agent service/timer disabled on every
+   host;
+5. verify the GB10-controller autoscaler timer and exact shared candidate;
+6. require health/heartbeat reports for all 15 inventory hosts and fresh linked
    worker registrations for currently allocated Loom capacity;
-8. pass environment-state, release-gate, and smoke.
+7. pass environment-state, release-gate, and smoke.
 
 Use only the public broker interface:
 
@@ -181,46 +183,22 @@ request terminal, repair the durable installed units from clean merged `dev`,
 restore admission, and resume the original request. Do not substitute an
 untracked port-forward or an operator-owned tunnel as rollout evidence.
 
-## Node-Agent Lifecycle Contract
+## External Autoscaler Lifecycle Contract
 
-Each GB10 host periodically compares Control Plane desired image, pool,
-concurrency, env version, source SHA, and host intent with its local state. The
-Control Plane does not SSH into GB10 and does not store worker tokens or MinIO
-credentials. The broker materializes protected env sources and the node-agent
-reads them locally.
+The GB10-controller timer runs one bounded autoscaler reconcile against the
+`gb10` Slurm partition. Queue demand determines the desired allocation count;
+with no demand and `min_slots = 0`, it keeps zero Loom workers. For an allocated
+Slurm job it launches the exact service-owned candidate and private generated
+env, waits for the linked worker heartbeat, and releases the allocation after
+idle/drain completion.
 
-Apply is restartable. When metadata already matches and host intent is active,
-the node-agent still reconciles the worker service. On source or env drift it
-fetches the approved repository, checks out the candidate SHA, prepares the
-image, drains the old worker, and starts the target worker. Temporary Compose
-env files are private and remain outside the checkout. A missing registry image
-may trigger a candidate-bound local build; it may not fall back to a different
-tree. The periodic active/no-drift path reuses a container whose runtime image
-already matches the desired tag, including a worker that exited normally after
-its idle window; it does not pull or rebuild that image on every timer tick.
-No-container or runtime-image drift still performs the candidate-bound
-pull/build before Compose reconciliation. `draining` and `stopped` intents
-never pull, build, or start the worker.
-
-The node-agent user service is `Type=oneshot`; successful convergence may end
-as `ActiveState=inactive` / `SubState=dead` with `Result=success`. Release
-evidence therefore uses the Control Plane report and linked worker heartbeat,
-not `is-active` alone. Every active host must report:
-
-- the requested staging image, env version, source SHA, and clean checkout;
-- applied active intent and expected capacity;
-- `worker_id` present, `worker_status=active`, and a fresh heartbeat;
-- `docker` in `worker_backend_names`.
-
-The legacy `loom-gb10-worker.service` direct Compose path must remain disabled
-during release-managed operation. It can otherwise race the node-agent and
-recreate a worker outside desired-state control.
-
-Do not run a second environment's node-agent identity against the same local
-tunnel ports and Compose root. In particular, a legacy production timer must
-remain stopped or use an isolated tunnel/runtime while the staging compatibility
-pool is active; restoring shared connectivity can otherwise make both desired
-states reconcile the same host concurrently.
+Protected rollout verifies the shared candidate on all 15 hosts and keeps both
+`loom-gb10-worker.service` and `loom-gb10-node-agent.{service,timer}` disabled.
+Those predecessor units must never start capacity or write a personal checkout.
+Every active allocation must report the requested candidate SHA and env version,
+an active linked worker heartbeat, and the expected Docker backend. Slurm job
+identity is the allocation authority; host membership alone is not a fixed
+worker slot.
 
 ## Current Validated State
 

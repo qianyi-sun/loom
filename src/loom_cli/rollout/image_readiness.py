@@ -6,11 +6,13 @@ import hashlib
 import json
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
 from types import MappingProxyType
 from typing import Protocol
+
+from loom_cli.cluster_config import validate_container_registry_prefixes
 
 ROLLOUT_IMAGES: tuple[tuple[str, str], ...] = (
     ("loom-control-plane", "deploy/Dockerfile.control-plane"),
@@ -89,18 +91,26 @@ class ImageArtifactSet:
     descriptors: Mapping[str, ImageDescriptor]
     plan_digest: str
     artifact_digest: str
+    registry_digests: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         descriptors = dict(self.descriptors)
+        registry_digests = dict(self.registry_digests)
         if set(descriptors) != {name for name, _path in ALL_BUILD_IMAGES}:
             raise ValueError("rollout image artifact set is incomplete")
         if (
             _SHA256_RE.fullmatch(self.plan_digest) is None
             or _SHA256_RE.fullmatch(self.artifact_digest) is None
             or any(not isinstance(value, ImageDescriptor) for value in descriptors.values())
+            or (
+                bool(registry_digests)
+                and set(registry_digests) != {name for name, _path in ALL_BUILD_IMAGES}
+            )
+            or any(_IMAGE_ID_RE.fullmatch(value) is None for value in registry_digests.values())
         ):
             raise ValueError("rollout image artifact identity is invalid")
         object.__setattr__(self, "descriptors", MappingProxyType(descriptors))
+        object.__setattr__(self, "registry_digests", MappingProxyType(registry_digests))
 
     @property
     def image_digests(self) -> Mapping[str, str]:
@@ -120,16 +130,23 @@ class ImageBuildSession:
         image_tag: str,
         resolved_sha: str,
         artifact: ImageArtifactSet | None = None,
+        container_registry: str = "",
+        container_registry_push: str = "",
     ) -> None:
         self._run = run
         self._candidate_root = candidate_root
         self._image_tag = image_tag
         self._resolved_sha = resolved_sha
+        self._registry_publication = validate_container_registry_prefixes(
+            container_registry,
+            container_registry_push,
+        )
         if artifact is not None and (
             artifact.plan_digest != image_plan_digest()
             or any(
                 descriptor.revision != resolved_sha for descriptor in artifact.descriptors.values()
             )
+            or bool(artifact.registry_digests) != bool(self._registry_publication)
         ):
             raise ValueError("seeded rollout image artifact identity is invalid")
         self._artifact: ImageArtifactSet | None = artifact
@@ -138,11 +155,21 @@ class ImageBuildSession:
     def build(self) -> ImageArtifactSet:
         with self._lock:
             if self._artifact is None:
-                self._artifact = build_exact_images(
+                artifact = build_exact_images(
                     self._run,
                     candidate_root=self._candidate_root,
                     image_tag=self._image_tag,
                     resolved_sha=self._resolved_sha,
+                )
+                self._artifact = (
+                    publish_exact_images(
+                        self._run,
+                        artifact=artifact,
+                        image_tag=self._image_tag,
+                        container_registry_push=self._registry_publication[1],
+                    )
+                    if self._registry_publication is not None
+                    else artifact
                 )
             return self._artifact
 
@@ -151,11 +178,20 @@ class ImageBuildSession:
             artifact = self._artifact
             if artifact is None:
                 raise ValueError("rollout images were not built by this preflight session")
-            return verify_image_contract(
+            verified = verify_image_contract(
                 self._run,
                 image_tag=self._image_tag,
                 resolved_sha=self._resolved_sha,
                 expected_digests=artifact.image_digests,
+            )
+            if self._registry_publication is None:
+                return verified
+            return verify_published_images(
+                self._run,
+                artifact=verified,
+                image_tag=self._image_tag,
+                container_registry_push=self._registry_publication[1],
+                expected_registry_digests=artifact.registry_digests,
             )
 
 
@@ -322,6 +358,89 @@ def verify_image_contract(
     return _artifact_set(descriptors, plan=plan)
 
 
+def _inspect_registry_manifest(
+    run: DockerRunner,
+    reference: str,
+    *,
+    expected_image_id: str,
+) -> str | None:
+    try:
+        result = run(
+            ("docker", "manifest", "inspect", "--insecure", "--verbose", reference),
+            None,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0 or not isinstance(result.stdout, str) or len(result.stdout) > 1024**2:
+        return None
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    manifest = payload.get("SchemaV2Manifest", payload)
+    descriptor = payload.get("Descriptor")
+    config = manifest.get("config") if isinstance(manifest, dict) else None
+    config_digest = config.get("digest") if isinstance(config, dict) else None
+    manifest_digest = descriptor.get("digest") if isinstance(descriptor, dict) else None
+    if config_digest != expected_image_id or not isinstance(manifest_digest, str):
+        return None
+    return manifest_digest if _IMAGE_ID_RE.fullmatch(manifest_digest) is not None else None
+
+
+def publish_exact_images(
+    run: DockerRunner,
+    *,
+    artifact: ImageArtifactSet,
+    image_tag: str,
+    container_registry_push: str,
+) -> ImageArtifactSet:
+    """Publish every exact local image and bind its immutable registry manifest."""
+    registry_digests: dict[str, str] = {}
+    for name, _dockerfile, _context in DEFAULT_ROLLOUT_IMAGE_PLAN:
+        source = f"{name}:{image_tag}"
+        target = f"{container_registry_push}/{source}"
+        if run(("docker", "tag", source, target), None).returncode != 0:
+            raise ValueError(f"rollout image registry tag failed for {name}")
+        if run(("docker", "push", target), None).returncode != 0:
+            raise ValueError(f"rollout image registry publication failed for {name}")
+        digest = _inspect_registry_manifest(
+            run,
+            target,
+            expected_image_id=artifact.image_digests[name],
+        )
+        if digest is None:
+            raise ValueError(f"rollout image registry contract failed for {name}")
+        registry_digests[name] = digest
+    return _artifact_set(artifact.descriptors, registry_digests=registry_digests)
+
+
+def verify_published_images(
+    run: DockerRunner,
+    *,
+    artifact: ImageArtifactSet,
+    image_tag: str,
+    container_registry_push: str,
+    expected_registry_digests: Mapping[str, str],
+) -> ImageArtifactSet:
+    """Re-read every published tag and require the attested manifest digest."""
+    if set(expected_registry_digests) != {name for name, _path in ALL_BUILD_IMAGES}:
+        raise ValueError("rollout registry image digest set is incomplete")
+    observed: dict[str, str] = {}
+    for name, _dockerfile, _context in DEFAULT_ROLLOUT_IMAGE_PLAN:
+        target = f"{container_registry_push}/{name}:{image_tag}"
+        digest = _inspect_registry_manifest(
+            run,
+            target,
+            expected_image_id=artifact.image_digests[name],
+        )
+        if digest != expected_registry_digests[name]:
+            raise ValueError(f"rollout registry image contract drifted for {name}")
+        observed[name] = digest
+    return _artifact_set(artifact.descriptors, registry_digests=observed)
+
+
 def _verify_nonroot_runtime_contract(run: DockerRunner, *, image_tag: str) -> None:
     """Launch bounded no-network imports under every declared non-root identity."""
     for name, (uid, command) in NONROOT_RUNTIME_PROBES.items():
@@ -351,7 +470,9 @@ def _artifact_set(
     descriptors: Mapping[str, ImageDescriptor],
     *,
     plan: RolloutImagePlan = DEFAULT_ROLLOUT_IMAGE_PLAN,
+    registry_digests: Mapping[str, str] | None = None,
 ) -> ImageArtifactSet:
+    exact_registry_digests = dict(registry_digests or {})
     payload = {
         "images": {
             name: {
@@ -365,12 +486,15 @@ def _artifact_set(
         },
         "plan_digest": image_plan_digest(plan),
     }
+    if exact_registry_digests:
+        payload["registry_digests"] = exact_registry_digests
     return ImageArtifactSet(
         descriptors=descriptors,
         plan_digest=image_plan_digest(plan),
         artifact_digest=hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest(),
+        registry_digests=exact_registry_digests,
     )
 
 
@@ -394,5 +518,7 @@ __all__ = [
     "build_exact_images",
     "image_plan_digest",
     "inspect_exact_images",
+    "publish_exact_images",
     "verify_image_contract",
+    "verify_published_images",
 ]

@@ -106,6 +106,7 @@ def _supervisor(
     service_name: str = "loom-autoscaler-gb10-staging.service",
     timer_name: str = "loom-autoscaler-gb10-staging.timer",
     pool_name: str = "gb10",
+    execution_host: str | None = None,
     port: int = 15451,
     enabled: bool = True,
     active: bool = True,
@@ -114,6 +115,11 @@ def _supervisor(
     python_path: str = _PYTHON_PATH,
     script_path: str = _SCRIPT_PATH,
 ) -> str:
+    if execution_host is None:
+        execution_host = {
+            "gb10": "gx10-01c7",
+            "oldlab": "TRT-EAI-OLDLAB-1",
+        }[pool_name]
     rendered_args = ", ".join(
         _toml_string(item) for item in (args or _args(port=port, pool_name=pool_name))
     )
@@ -121,6 +127,7 @@ def _supervisor(
 [[external_slurm_autoscaler_supervisors]]
 name = {_toml_string(name)}
 pool_name = {_toml_string(pool_name)}
+execution_host = {_toml_string(execution_host)}
 service_name = {_toml_string(service_name)}
 timer_name = {_toml_string(timer_name)}
 working_directory = {_toml_string(working_directory)}
@@ -172,6 +179,34 @@ def _build(root: Path) -> ExternalSupervisorArtifact:
     )
 
 
+def test_artifact_can_bind_one_physical_controller(tmp_path: Path) -> None:
+    root = _candidate(
+        tmp_path,
+        supervisors=[
+            _supervisor(),
+            _supervisor(
+                name="oldlab-staging",
+                service_name="loom-autoscaler-oldlab-staging.service",
+                timer_name="loom-autoscaler-oldlab-staging.timer",
+                pool_name="oldlab",
+                port=15448,
+            ),
+        ],
+    )
+
+    artifact = build_external_supervisor_artifact(
+        root,
+        candidate_sha=_SHA,
+        candidate_tree=_TREE,
+        image_tag=_TAG,
+        environment="staging",
+        execution_host="TRT-EAI-OLDLAB-1",
+    )
+
+    assert [item.pool_name for item in artifact.supervisors] == ["oldlab"]
+    assert ExternalSupervisorArtifact.from_bytes(artifact.to_bytes()) == artifact
+
+
 def _canonical_bytes(raw: dict[str, Any]) -> bytes:
     return (
         json.dumps(raw, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode() + b"\n"
@@ -194,6 +229,7 @@ def test_artifact_binds_sources_exact_units_and_round_trips(tmp_path: Path) -> N
     }
     assert len(artifact.supervisors) == 1
     supervisor = artifact.supervisors[0]
+    assert supervisor.execution_host == "gx10-01c7"
     assert supervisor.control_plane_environment == "staging"
     assert supervisor.db_local_host == "127.0.0.1"
     assert supervisor.db_local_port == 15451
@@ -206,6 +242,16 @@ def test_artifact_binds_sources_exact_units_and_round_trips(tmp_path: Path) -> N
         supervisor.timer_name: hashlib.sha256(supervisor.timer_unit.encode()).hexdigest(),
     }
     assert ExternalSupervisorArtifact.from_bytes(artifact.to_bytes()) == artifact
+
+
+def test_builder_rejects_supervisor_on_foreign_execution_host(tmp_path: Path) -> None:
+    root = _candidate(
+        tmp_path,
+        supervisors=[_supervisor(execution_host="TRT-EAI-OLDLAB-1")],
+    )
+
+    with pytest.raises(ValueError, match="execution host"):
+        _build(root)
 
 
 def test_artifact_binds_control_plane_environment_alias_in_exact_unit_args(
@@ -414,8 +460,8 @@ def test_artifact_parser_rejects_tamper_duplicates_types_and_noncanonical_json(
         ExternalSupervisorArtifact.from_bytes(_canonical_bytes(raw))
 
     duplicate = artifact.to_bytes().replace(
-        b'"schema_version":2',
-        b'"schema_version":2,"schema_version":2',
+        b'"schema_version":3',
+        b'"schema_version":3,"schema_version":3',
         1,
     )
     with pytest.raises(ValueError, match="invalid"):

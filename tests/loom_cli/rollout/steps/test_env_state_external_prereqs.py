@@ -203,6 +203,7 @@ def _consumer_verification_fixture(
     monkeypatch.setattr(s04_gb10_prep, "_ssh", ssh)
     records = [
         {
+            "pool_name": "gb10",
             "repo_dir": str(target),
             "repo_head": ctx.resolved_sha,
             "repo_group_id": shared_gid,
@@ -239,6 +240,28 @@ def test_post_publish_consumer_verification_streams_trusted_verifier_to_exact_15
     )
     assert persisted == evidence
     assert len({node["root_device"] for node in persisted["nodes"]}) == 15
+
+
+def test_post_publish_consumer_verification_ignores_local_oldlab_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx, step_dir, records, calls = _consumer_verification_fixture(tmp_path, monkeypatch)
+    records.append(
+        {
+            "pool_name": "oldlab",
+            "repo_dir": "/shared_work/loom/staging-rollout/worker-repos/local-only",
+            "repo_head": ctx.resolved_sha,
+            "repo_group_id": os.getegid(),
+        }
+    )
+
+    evidence = _verify_external_slurm_runner_consumers(ctx, step_dir, records)
+
+    assert evidence is not None
+    assert evidence["passed"] is True
+    assert evidence["host_count"] == 15
+    assert len(calls) == 15
 
 
 def test_post_publish_consumer_verification_rejects_divergent_host_content_identity(

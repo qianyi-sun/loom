@@ -14,6 +14,7 @@ from pathlib import Path
 
 from loom_cli.rollout.credential_authority import read_trusted_file
 from loom_cli.rollout.external_supervisor_readiness import (
+    STAGING_ROLLOUT_EXECUTION_HOST,
     build_external_supervisor_artifact,
     staging_working_directory,
 )
@@ -127,6 +128,7 @@ def _verify_external_supervisor_binding(plan: RehearsalPlan) -> None:
         candidate_tree=plan.candidate_tree,
         image_tag=plan.image_tag,
         environment="staging",
+        execution_host=STAGING_ROLLOUT_EXECUTION_HOST,
     )
     if (
         artifact.candidate_sha != plan.candidate_sha

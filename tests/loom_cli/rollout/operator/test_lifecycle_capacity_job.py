@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 import yaml
 
 from loom_cli.cluster_cmd import render_manifests
-from loom_cli.cluster_config import ClusterConfig
+from loom_cli.cluster_config import ClusterConfig, load_cluster_config
+from loom_cli.rollout.image_readiness import ALL_BUILD_IMAGES
+from loom_cli.rollout.manifest_readiness import pin_rendered_manifest_images
 from loom_cli.rollout.operator.lifecycle_capacity_job import (
     LifecycleCapacityJobError,
     LifecycleCapacityJobPlan,
@@ -59,6 +62,43 @@ def test_plan_clones_only_exact_capacity_action_and_binds_identity() -> None:
     assert document["spec"]["backoffLimit"] == 0
     assert document["spec"]["template"]["spec"]["automountServiceAccountToken"] is False
     assert plan == LifecycleCapacityJobPlan.from_dict(plan.to_dict())
+
+
+def test_plan_accepts_multinode_staging_minio_admin_capacity_contract() -> None:
+    config = load_cluster_config(Path("deploy/environments/staging.multinode.cluster.toml"))
+    registry_digests = {
+        name: "sha256:" + f"{index + 1:064x}"
+        for index, (name, _path) in enumerate(ALL_BUILD_IMAGES)
+    }
+    rendered = pin_rendered_manifest_images(
+        render_manifests(config),
+        image_tag=config.image_tag,
+        container_registry=config.container_registry,
+        registry_digests=registry_digests,
+    )
+
+    plan = build_lifecycle_capacity_job_plan(
+        candidate_sha=_SHA,
+        candidate_tree=_TREE,
+        mutation_epoch=8,
+        artifact_bundle_sha256=_ARTIFACT,
+        rendered_manifest_sha256=_RENDERED,
+        control_plane_image_id=_IMAGE_ID,
+        image_tag=config.image_tag,
+        rendered_yaml=rendered,
+        expected_buckets=(config.trajectories_bucket, config.artifacts_bucket),
+        capacity_source="minio-admin",
+        expected_filesystem_paths=(),
+        container_registry=config.container_registry,
+        registry_digest=registry_digests["loom-control-plane"],
+    )
+
+    document = yaml.safe_load(plan.job_manifest)
+    pod_spec = document["spec"]["template"]["spec"]
+    container = pod_spec["containers"][0]
+    assert container["args"][-2:] == ["--capacity-source", "minio-admin"]
+    assert "volumeMounts" not in container
+    assert "volumes" not in pod_spec
 
 
 @pytest.mark.parametrize(

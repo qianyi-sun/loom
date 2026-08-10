@@ -35,6 +35,9 @@ class TestClusterUpStepArgv:
         ]
         assert config_path != ctx.cluster_config_path
         assert tomllib.loads(config_path.read_text())["image_tag"] == ctx.image_tag
+        assert argv[argv.index("--rendered-manifest") + 1] == str(
+            step_dir.path.parent / "07-render" / "rendered.yaml"
+        )
 
     def test_does_not_pass_unsupported_wait_flag(self, tmp_path: Path) -> None:
         ctx = make_ctx(tmp_path)

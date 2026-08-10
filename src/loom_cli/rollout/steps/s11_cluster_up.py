@@ -32,6 +32,8 @@ class ClusterUpStep(SubcommandStep):
             ctx.namespace,
             "--config",
             str(rollout_cluster_config(ctx, step_dir)),
+            "--rendered-manifest",
+            str(step_dir.path.parent / "07-render" / "rendered.yaml"),
             "--backup-manifest",
             str(ctx.backup_manifest_path),
             "--recover-sandbox-deadlines",

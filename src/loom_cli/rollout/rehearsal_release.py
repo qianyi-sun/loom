@@ -13,7 +13,7 @@ from types import MappingProxyType
 import yaml  # type: ignore[import-untyped]
 
 from loom_cli.rollout.credential_authority import read_trusted_file
-from loom_cli.rollout.rehearsal_action_source import RehearsalPlan
+from loom_cli.rollout.rehearsal_action_source import RehearsalPlan, rehearsal_image_reference
 
 _MAX_RENDERED_BYTES = 16 * 1024 * 1024
 _LABEL_KEY_RE = re.compile(
@@ -183,7 +183,7 @@ def _isolate_deployment(
         raise ValueError("rehearsal deployment container set is invalid")
     container = containers[0]
     image = container.get("image")
-    expected_image = f"{image_name}:{plan.image_tag}"
+    expected_image = rehearsal_image_reference(plan, image_name)
     if image != expected_image or plan.image_digests.get(image_name) is None:
         raise ValueError("rehearsal deployment image binding drifted")
     run_as_user = 101 if name == "loom-web" else 10001

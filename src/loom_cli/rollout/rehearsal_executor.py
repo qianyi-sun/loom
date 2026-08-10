@@ -28,6 +28,7 @@ from loom_cli.rollout.external_supervisor_readiness import (
     REHEARSAL_KUBECONFIG as EXTERNAL_SUPERVISOR_REHEARSAL_KUBECONFIG,
 )
 from loom_cli.rollout.external_supervisor_readiness import (
+    STAGING_ROLLOUT_EXECUTION_HOST,
     ExternalSupervisorArtifact,
     ExternalSupervisorIdentity,
     build_external_supervisor_artifact,
@@ -41,7 +42,12 @@ from loom_cli.rollout.gb10_rehearsal import (
 from loom_cli.rollout.image_readiness import REHEARSAL_POSTGRES_IMAGE
 from loom_cli.rollout.preflight_credential_paths import REHEARSAL_KUBECONFIG_PATH
 from loom_cli.rollout.production_defaults_readiness import ProductionDefaultsArtifact
-from loom_cli.rollout.rehearsal_action_source import RehearsalPlan
+from loom_cli.rollout.rehearsal_action_source import (
+    RehearsalPlan,
+    rehearsal_image_pull_policy,
+    rehearsal_image_push_reference,
+    rehearsal_image_reference,
+)
 from loom_cli.rollout.rehearsal_browser import (
     BROWSER_INGRESS_NAME,
     BROWSER_JOB_NAME,
@@ -283,6 +289,7 @@ def _default_external_supervisor_artifact(plan: RehearsalPlan) -> ExternalSuperv
         candidate_tree=plan.candidate_tree,
         image_tag=plan.image_tag,
         environment="staging",
+        execution_host=STAGING_ROLLOUT_EXECUTION_HOST,
     )
 
 
@@ -1720,12 +1727,23 @@ class IsolatedRehearsalExecutor:
         tags = tuple(f"{name}:{plan.image_tag}" for name in names)
         if not tags or not self._local_images_match(plan, names):
             return False
+        if plan.container_registry:
+            return all(self._registry_runtime_image_ids(plan, name) is not None for name in names)
         if not self._status(
             ("kind", "load", "docker-image", *tags, "--name", plan.cluster_name),
             timeout=900,
         ):
             return False
         return self._local_images_match(plan, names)
+
+    def _publish_registry_image(self, plan: RehearsalPlan, name: str) -> bool:
+        source = f"{name}:{plan.image_tag}"
+        target = rehearsal_image_push_reference(plan, name)
+        if not self._status(("docker", "tag", source, target), timeout=30):
+            return False
+        if not self._status(("docker", "push", target), timeout=900):
+            return False
+        return self._registry_runtime_image_ids(plan, name) is not None
 
     def _local_images_match(self, plan: RehearsalPlan, names: Sequence[str]) -> bool:
         expected = tuple(plan.image_digests.get(name) for name in names)
@@ -1775,11 +1793,55 @@ class IsolatedRehearsalExecutor:
             return {name: tuple(values[name]) for name in names}
         result: dict[str, tuple[str, ...]] = {}
         for name in names:
-            image_ids = self._kind_runtime_image_ids(plan, name)
+            image_ids = (
+                self._registry_runtime_image_ids(plan, name)
+                if plan.container_registry
+                else self._kind_runtime_image_ids(plan, name)
+            )
             if image_ids is None:
                 return None
             result[name] = image_ids
         return result
+
+    def _registry_runtime_image_ids(
+        self,
+        plan: RehearsalPlan,
+        name: str,
+    ) -> tuple[str, ...] | None:
+        expected = plan.image_digests.get(name)
+        if expected is None:
+            return None
+        value = self._text_command(
+            (
+                "docker",
+                "manifest",
+                "inspect",
+                "--insecure",
+                "--verbose",
+                rehearsal_image_push_reference(plan, name),
+            ),
+            timeout=60,
+            max_bytes=_MAX_OUTPUT_BYTES,
+        )
+        try:
+            payload = json.loads(value) if value is not None else None
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        manifest = payload.get("SchemaV2Manifest", payload)
+        descriptor = payload.get("Descriptor")
+        config = manifest.get("config") if isinstance(manifest, dict) else None
+        config_digest = config.get("digest") if isinstance(config, dict) else None
+        manifest_digest = descriptor.get("digest") if isinstance(descriptor, dict) else None
+        expected_manifest = plan.registry_digests.get(name)
+        if (
+            expected_manifest is None
+            or config_digest != expected
+            or manifest_digest != expected_manifest
+        ):
+            return None
+        return expected, expected_manifest
 
     def _kind_runtime_image_ids(
         self,
@@ -2488,8 +2550,8 @@ def _supervisor_database_service_manifest(plan: RehearsalPlan) -> dict[str, obje
 
 
 def _database_pod_manifest(plan: RehearsalPlan) -> dict[str, object]:
-    image = f"{REHEARSAL_POSTGRES_IMAGE}:{plan.image_tag}"
-    migration_image = f"loom-control-plane:{plan.image_tag}"
+    image = rehearsal_image_reference(plan, REHEARSAL_POSTGRES_IMAGE)
+    migration_image = rehearsal_image_reference(plan, "loom-control-plane")
     return {
         "apiVersion": "v1",
         "kind": "Pod",
@@ -2514,7 +2576,7 @@ def _database_pod_manifest(plan: RehearsalPlan) -> dict[str, object]:
                         {"name": "POSTGRES_USER", "value": "loom_rehearsal"},
                     ],
                     "image": image,
-                    "imagePullPolicy": "Never",
+                    "imagePullPolicy": rehearsal_image_pull_policy(plan),
                     "name": "postgres",
                     "readinessProbe": {
                         "exec": {
@@ -2560,7 +2622,7 @@ def _database_pod_manifest(plan: RehearsalPlan) -> dict[str, object]:
                         {"name": "PYTHONDONTWRITEBYTECODE", "value": "1"},
                     ],
                     "image": migration_image,
-                    "imagePullPolicy": "Never",
+                    "imagePullPolicy": rehearsal_image_pull_policy(plan),
                     "name": "migration",
                     "resources": {
                         "limits": {"cpu": "1", "ephemeral-storage": "1Gi", "memory": "1Gi"},

@@ -15,6 +15,10 @@ from typing import Any
 
 import yaml  # type: ignore[import-untyped]
 
+from loom_cli.cluster_config import (
+    load_cluster_config,
+    validate_container_registry_publication,
+)
 from loom_cli.rollout.context import RolloutContext
 from loom_cli.rollout.evidence import StepDir
 from loom_cli.rollout.operator.redaction import redact_rollout_text
@@ -24,7 +28,9 @@ from loom_cli.rollout.steps.candidate_source import (
     candidate_loom_argv,
     candidate_loom_cwd,
     candidate_loom_env,
+    rollout_cluster_config,
 )
+from loom_cli.rollout.steps.s03_kind_load_images import registry_image_digests
 from loom_cli.rollout.steps.subprocess_util import run_captured
 
 
@@ -163,18 +169,45 @@ class MigrateStep(BaseStep):
             self.write_stderr(step_dir, str(exc) + "\n")
             return RunResult(exit_code=2, error=str(exc))
 
+        try:
+            cluster_config = load_cluster_config(rollout_cluster_config(ctx, step_dir))
+            publication = validate_container_registry_publication(cluster_config)
+        except (OSError, RuntimeError, ValueError) as exc:
+            self.write_stderr(step_dir, str(exc) + "\n")
+            return RunResult(exit_code=2, error=str(exc))
+
         # Render the migration manifest.
+        render_argv = candidate_loom_argv(
+            "cluster",
+            "render-migration",
+            "--image-tag",
+            ctx.image_tag,
+            "--namespace",
+            ctx.namespace,
+            "--job-suffix",
+            suffix,
+        )
+        if publication is not None:
+            try:
+                control_plane_digest = registry_image_digests(ctx, step_dir)[
+                    "loom-control-plane"
+                ]
+            except (KeyError, RuntimeError, ValueError) as exc:
+                self.write_stderr(step_dir, str(exc) + "\n")
+                return RunResult(
+                    exit_code=2,
+                    error="published control-plane manifest digest is unavailable",
+                )
+            render_argv.extend(
+                [
+                    "--container-registry",
+                    publication[0],
+                    "--registry-digest",
+                    control_plane_digest,
+                ]
+            )
         render = run_captured(
-            candidate_loom_argv(
-                "cluster",
-                "render-migration",
-                "--image-tag",
-                ctx.image_tag,
-                "--namespace",
-                ctx.namespace,
-                "--job-suffix",
-                suffix,
-            ),
+            render_argv,
             cwd=cwd,
             env=env,
         )

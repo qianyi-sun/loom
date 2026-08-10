@@ -20,6 +20,7 @@ from loom_cli.rollout.image_readiness import (
 from loom_cli.rollout.steps import s02_build_images
 from loom_cli.rollout.steps.s02_build_images import (
     BuildImagesStep,
+    rollout_all_image_bindings,
     rollout_auxiliary_images_from_worktree,
     rollout_images,
     rollout_images_from_candidate,
@@ -290,6 +291,25 @@ def test_persisted_v2_matrix_returns_only_primary_images(
     )
 
     assert rollout_images(ctx, step_dir) == PRIMARY_PLAN  # type: ignore[arg-type]
+
+
+def test_persisted_v2_matrix_exposes_exact_union_for_registry_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = SimpleNamespace(resolved_sha="a" * 40)
+    step_path = _write_matrix(tmp_path, ctx=ctx)
+    step_dir = StepDir(number=7, name="render", path=step_path)
+    monkeypatch.setattr(
+        s02_build_images,
+        "_rollout_matrix_from_candidate",
+        lambda _ctx: (PRIMARY_PLAN, AUXILIARY_PLAN, "e" * 64),
+    )
+
+    plan, image_ids = rollout_all_image_bindings(ctx, step_dir)  # type: ignore[arg-type]
+
+    assert plan == DEFAULT_ROLLOUT_IMAGE_PLAN
+    assert set(image_ids) == {name for name, _dockerfile, _context in plan}
 
 
 def test_persisted_v2_matrix_must_match_candidate_manifest(

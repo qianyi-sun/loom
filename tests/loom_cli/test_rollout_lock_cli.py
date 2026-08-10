@@ -54,6 +54,7 @@ class _BrokerAttemptFixture:
 def _broker_attempt_fixture(tmp_path: Path) -> _BrokerAttemptFixture:
     rollout_root = tmp_path / "data" / "loom-staging"
     rollout_dir = rollout_root / "rollouts" / _ROLLOUT_ID
+    (rollout_dir / "07-render").mkdir(parents=True)
     (rollout_dir / "10-cluster-up").mkdir(parents=True)
     (rollout_dir / "11-env-state").mkdir()
 
@@ -64,7 +65,18 @@ def _broker_attempt_fixture(tmp_path: Path) -> _BrokerAttemptFixture:
     cluster_config.write_text(
         'namespace = "loom-staging"\n'
         'runtime_environment = "staging"\n'
-        'env_state_profile = "../environment-state/staging.toml"\n',
+        'env_state_profile = "../environment-state/staging.toml"\n'
+        'container_registry = "192.168.50.13:5000"\n'
+        'container_registry_push = "localhost:5000"\n'
+        'persistent_storage_backend = "dynamic"\n'
+        f'persistent_storage_host_path_root = "{rollout_root}"\n'
+        '[topology]\n'
+        'multi_node = true\n'
+        'storage_backend = "longhorn"\n'
+        'postgres_replicas = 3\n'
+        'minio_replicas = 4\n'
+        'anti_affinity = "required"\n'
+        'min_available = 3\n',
         encoding="utf-8",
     )
 
@@ -81,7 +93,9 @@ def _broker_attempt_fixture(tmp_path: Path) -> _BrokerAttemptFixture:
         f'image_tag = "staging-{_SHA[:7]}"\n'
         'namespace = "loom-staging"\n'
         'runtime_environment = "staging"\n'
-        'persistent_storage_backend = "static-host-path"\n'
+        'container_registry = "192.168.50.13:5000"\n'
+        'container_registry_push = "localhost:5000"\n'
+        'persistent_storage_backend = "dynamic"\n'
         f'persistent_storage_host_path_root = "{rollout_root}"\n'
         "[workload_contract]\n"
         'workload_trust_mode = "internal_trusted"\n'
@@ -89,7 +103,18 @@ def _broker_attempt_fixture(tmp_path: Path) -> _BrokerAttemptFixture:
         "taskset_transform_network_isolated = false\n"
         "untrusted_workload_isolation = false\n"
         "[k8s_worker]\n"
-        "enabled = true\n",
+        "enabled = false\n"
+        "[topology]\n"
+        "multi_node = true\n"
+        'storage_backend = "longhorn"\n'
+        "postgres_replicas = 3\n"
+        "minio_replicas = 4\n"
+        'anti_affinity = "required"\n'
+        "min_available = 3\n",
+        encoding="utf-8",
+    )
+    (rollout_dir / "07-render" / "rendered.yaml").write_text(
+        "apiVersion: v1\nkind: List\nitems: []\n",
         encoding="utf-8",
     )
 
@@ -201,6 +226,8 @@ def _cluster_broker_argv(fixture: _BrokerAttemptFixture) -> list[str]:
         "loom-staging",
         "--config",
         str(fixture.rollout_config),
+        "--rendered-manifest",
+        str(fixture.rollout_dir / "07-render" / "rendered.yaml"),
         "--backup-manifest",
         str(fixture.backup_manifest),
         "--recover-sandbox-deadlines",
@@ -319,6 +346,17 @@ def _patch_cluster_up_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
         "loom_cli.cluster_cmd.wait_for_ready", lambda *_args, **_kwargs: _ready_status()
     )
     monkeypatch.setattr("loom_cli.cluster_cmd.rendered_image_checks", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd.prune_disabled_profile_resources",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            has_evidence=False,
+            ok=True,
+            deleted=[],
+            retained=[],
+            not_found=[],
+            failed=[],
+        ),
+    )
 
 
 def _empty_environment_profile(
@@ -1157,6 +1195,29 @@ def test_broker_cluster_up_rejects_traversal_limit_policy_drift_before_io(
     assert calls == {"network": 0}
 
 
+def test_broker_cluster_up_requires_exact_rendered_artifact_before_io(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fixture = _broker_attempt_fixture(tmp_path)
+    _patch_broker_attempt(monkeypatch, fixture)
+    argv = _cluster_broker_argv(fixture)
+    index = argv.index("--rendered-manifest")
+    del argv[index : index + 2]
+    calls = {"network": 0}
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd._load_clients",
+        lambda _context: calls.__setitem__("network", calls["network"] + 1),
+    )
+
+    rc = _main_without_parser_exit(argv)
+
+    assert rc == 1
+    assert "rendered manifest path does not match broker rollout" in capsys.readouterr().err
+    assert calls == {"network": 0}
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -1186,7 +1247,7 @@ def test_broker_cluster_up_rejects_non_exact_protected_config_before_lock_or_net
         "namespace": fixture.envelope.namespace,
         "runtime": fixture.envelope.environment,
         "image": fixture.envelope.image_tag,
-        "backend": "static-host-path",
+        "backend": "dynamic",
         "root": str(fixture.config.rollout_root),
     }
     if mutation == "namespace":
@@ -1196,7 +1257,7 @@ def test_broker_cluster_up_rejects_non_exact_protected_config_before_lock_or_net
     elif mutation == "image":
         values["image"] = "staging-deadbee"
     elif mutation == "backend":
-        values["backend"] = "dynamic"
+        values["backend"] = "static-host-path"
     elif mutation == "descendant-root":
         values["root"] = str(fixture.config.rollout_root / "custom")
     elif mutation == "lexical-root-alias":
@@ -1211,13 +1272,22 @@ def test_broker_cluster_up_rejects_non_exact_protected_config_before_lock_or_net
         f'image_tag = "{values["image"]}"\n'
         f'namespace = "{values["namespace"]}"\n'
         f'runtime_environment = "{values["runtime"]}"\n'
+        'container_registry = "192.168.50.13:5000"\n'
+        'container_registry_push = "localhost:5000"\n'
         f'persistent_storage_backend = "{values["backend"]}"\n'
         f'persistent_storage_host_path_root = "{values["root"]}"\n'
         "[workload_contract]\n"
         'workload_trust_mode = "internal_trusted"\n'
         "taskset_transforms_enabled = false\n"
         "taskset_transform_network_isolated = false\n"
-        "untrusted_workload_isolation = false\n",
+        "untrusted_workload_isolation = false\n"
+        "[topology]\n"
+        "multi_node = true\n"
+        'storage_backend = "longhorn"\n'
+        "postgres_replicas = 3\n"
+        "minio_replicas = 4\n"
+        'anti_affinity = "required"\n'
+        "min_available = 3\n",
         encoding="utf-8",
     )
     calls = {"lock": 0, "network": 0}

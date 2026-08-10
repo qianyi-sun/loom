@@ -20,7 +20,7 @@ from uuid import uuid4
 from loom_cli.cluster_config import load_cluster_config
 from loom_cli.rollout.evidence import new_rollout_id
 from loom_cli.rollout.final_gate_readiness import FINAL_CHECK_IDS
-from loom_cli.rollout.lifecycle_protocol import LifecycleAction
+from loom_cli.rollout.lifecycle_protocol import LifecycleAction, LifecyclePhase
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
 from loom_cli.rollout.preflight_pipeline import PreflightAssessment, PreflightPipelineResult
 
@@ -1341,6 +1341,14 @@ def _cleanup_backup(
         try:
             request = dependencies.store.read_request(request_id)
             events = dependencies.store.read_events(request_id)
+        except RequestStoreError as exc:
+            if str(exc) != "rollout request is not promoted":
+                return _safe_error(dependencies, "request does not exist")
+            return _cleanup_preflight_backup(
+                dependencies,
+                caller,
+                request_id,
+            )
         except Exception:
             return _safe_error(dependencies, "request does not exist")
         if request.status != "pending":
@@ -1426,6 +1434,170 @@ def _cleanup_backup(
                 reason=failure_reason,
             )
         )
+    _write_json(
+        dependencies.stdout,
+        {
+            "request_id": request_id,
+            "status": "failed",
+            "reason": failure_reason,
+            "cleanup": "removed" if removed else "already_absent",
+        },
+    )
+    return 0
+
+
+def _cleanup_preflight_backup(
+    dependencies: BrokerDependencies,
+    caller: CallerIdentity,
+    request_id: str,
+) -> int:
+    """Seal and clean one stopped Tier 0-2 backup before request promotion."""
+    try:
+        request = dependencies.store.read_preflight_request(request_id)
+        job = dependencies.store.read_preflight_backup_job(request_id)
+        job_state = dependencies.store.read_preflight_backup_job_state(request_id)
+        events = dependencies.store.read_events(request_id)
+        rotation = dependencies.store.read_backup_rotation()
+        unit = dependencies.systemd.show(f"loom-staging-backup-{request_id}.service")
+    except Exception:
+        return _safe_error(dependencies, "request does not exist")
+    if request.status != "pending" or (unit is not None and unit.is_running):
+        return _safe_error(dependencies, "request has no cleanable backup")
+    forbidden_events = {
+        "envelope_published",
+        "launch_pending",
+        "launch_failed",
+        "attempt_pending",
+        "attempt_running",
+        "attempt_done",
+        "attempt_failed",
+        "cancel_requested",
+        "cancel_failed",
+        "cancelled",
+    }
+    backup_starts = [event for event in events if event.event == "backup_started"]
+    if any(event.event in forbidden_events for event in events) or len(backup_starts) != 1:
+        return _safe_error(dependencies, "request has no cleanable backup")
+    bundle_name = backup_starts[0].current_step
+    if bundle_name != job.bundle_name:
+        return _safe_error(dependencies, "request has no cleanable backup")
+    if job_state.phase not in {
+        LifecyclePhase.BACKUP_PENDING,
+        LifecyclePhase.BACKUP_RUNNING,
+        LifecyclePhase.BACKUP_CANCEL_REQUESTED,
+        LifecyclePhase.BACKUP_FAILED,
+    }:
+        return _safe_error(dependencies, "request has no cleanable backup")
+    candidate = rotation.candidate
+    matching_retirements = tuple(
+        record
+        for record in rotation.retirements
+        if record.payload_id == job.payload_id
+        and record.request_id == request_id
+        and record.bundle_name == job.bundle_name
+        and record.reason == "failed"
+    )
+    if candidate is not None:
+        if (
+            candidate.payload_id != job.payload_id
+            or candidate.request_id != request_id
+            or candidate.bundle_name != job.bundle_name
+        ):
+            return _safe_error(dependencies, "request has no cleanable backup")
+        failed_rotation = fail_candidate(
+            rotation,
+            payload_id=job.payload_id,
+            failure_code="backup_cleanup_requested",
+        ).state
+    elif len(matching_retirements) == 1:
+        failed_rotation = None
+    else:
+        return _safe_error(dependencies, "request has no cleanable backup")
+
+    if job_state.phase is not LifecyclePhase.BACKUP_FAILED:
+        action = (
+            LifecycleAction.SEAL_CANCELLED
+            if job_state.phase is LifecyclePhase.BACKUP_CANCEL_REQUESTED
+            else LifecycleAction.FAIL_BACKUP
+        )
+        failed_job = transition_backup_job(
+            job_state,
+            action,
+            updated_at=dependencies.now(),
+            failure_code="backup_cleanup_requested",
+        )
+        try:
+            dependencies.store.replace_preflight_backup_job_state(
+                failed_job,
+                expected_sequence=job_state.sequence,
+            )
+        except Exception:
+            return _safe_error(dependencies, "request has no cleanable backup")
+    if failed_rotation is not None:
+        try:
+            dependencies.store.replace_backup_rotation(
+                failed_rotation,
+                expected_generation=rotation.generation,
+            )
+        except Exception:
+            return _safe_error(dependencies, "request has no cleanable backup")
+
+    backup_failures = [event for event in events if event.event == "backup_failed"]
+    failure_reason = (
+        normalize_backup_public_reason(backup_failures[-1].reason)
+        if backup_failures
+        else "backup_failed"
+    )
+    if not backup_failures:
+        dependencies.store.append_event(
+            _event(
+                request_id,
+                caller,
+                now=dependencies.now,
+                event="backup_failed",
+                status="failed",
+                reason=failure_reason,
+            )
+        )
+    dependencies.store.append_event(
+        _event(
+            request_id,
+            caller,
+            now=dependencies.now,
+            event="backup_cleanup_started",
+            status="failed",
+            reason=failure_reason,
+        )
+    )
+    try:
+        removed = bool(
+            dependencies.backup.cleanup_incomplete(
+                request_id,
+                bundle_name=job.bundle_name,
+            )
+        )
+    except Exception:
+        dependencies.store.append_event(
+            _event(
+                request_id,
+                caller,
+                now=dependencies.now,
+                event="backup_cleanup_failed",
+                status="failed",
+                reason=failure_reason,
+            )
+        )
+        return _safe_error(dependencies, "incomplete backup cleanup failed safely")
+    dependencies.store.append_event(
+        _event(
+            request_id,
+            caller,
+            now=dependencies.now,
+            event="backup_cleanup_done",
+            status="failed",
+            reason=failure_reason,
+        )
+    )
     _write_json(
         dependencies.stdout,
         {
@@ -1714,6 +1886,9 @@ def _default_dependencies(config: OperatorConfig) -> BrokerDependencies:
             image_tag=candidate.image_tag,
             namespace=config.namespace,
             image_run=preflight_commands.image,
+            container_registry_push=str(
+                load_cluster_config(config.cluster_config_path).container_registry_push
+            ),
         )
 
     lifecycle_capacity = (
@@ -1735,12 +1910,19 @@ def _default_dependencies(config: OperatorConfig) -> BrokerDependencies:
                 ).trajectories_bucket,
                 cluster_config.artifacts_bucket,
             ),
-            expected_filesystem_paths=tuple(
-                f"/var/lib/loom-minio-capacity/{index}"
-                for index in range(
-                    int(cluster_config.to_render_context()["topology"]["minio_replicas"])
+            capacity_source=(
+                "minio-admin" if bool(cluster_config.topology.multi_node) else "filesystem"
+            ),
+            expected_filesystem_paths=(
+                ()
+                if bool(cluster_config.topology.multi_node)
+                else tuple(
+                    f"/var/lib/loom-minio-capacity/{index}"
+                    for index in range(int(cluster_config.topology.minio_replicas))
                 )
             ),
+            container_registry=str(cluster_config.container_registry),
+            container_registry_push=str(cluster_config.container_registry_push),
         )
         if config.source_mode == "sealed-cumulative"
         else None

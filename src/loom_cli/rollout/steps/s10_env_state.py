@@ -2811,7 +2811,12 @@ def _verify_external_slurm_runner_consumers(
     """Verify the immutable target as the fixed service user on every GB10 node."""
     if not records:
         return None
-    if len(records) != 1 or ctx.scope != "current-gb10":
+    gb10_records = [
+        record
+        for record in records
+        if record.get("pool_name") in {None, "gb10"}
+    ]
+    if len(gb10_records) != 1 or ctx.scope != "current-gb10":
         raise ExternalSlurmPrereqMaterializationError(
             "external runner consumer verification requires one current-GB10 target",
         )
@@ -2823,7 +2828,7 @@ def _verify_external_slurm_runner_consumers(
         gb10_hosts_for,
     )
 
-    record = records[0]
+    record = gb10_records[0]
     repo_value = record.get("repo_dir")
     if (
         not isinstance(repo_value, str)

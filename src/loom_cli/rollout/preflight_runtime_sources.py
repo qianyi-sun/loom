@@ -265,6 +265,8 @@ class PreflightRuntimeSources:
     permit_reserved_rotation_candidate: bool = False
     loaded_artifacts: LoadedPreflightArtifacts | None = None
     gb10_candidate_source_run: SystemdCommandRunner | None = None
+    container_registry: str = ""
+    container_registry_push: str = ""
 
     def __post_init__(self) -> None:
         if (
@@ -297,6 +299,8 @@ class PreflightRuntimeSources:
             image_tag=self.candidate.image_tag,
             resolved_sha=self.candidate.resolved_sha,
             artifact=(None if self.loaded_artifacts is None else self.loaded_artifacts.images),
+            container_registry=self.container_registry,
+            container_registry_push=self.container_registry_push,
         )
         manifest_artifacts: dict[str, ManifestArtifact] = {}
         migration_artifacts: dict[str, MigrationPlanEvidence] = {}
@@ -316,6 +320,8 @@ class PreflightRuntimeSources:
                 image_digests=self.loaded_artifacts.images.image_digests,
                 expected_image_names=self.manifest_image_names,
                 artifact=self.loaded_artifacts.manifests,
+                container_registry=self.container_registry,
+                registry_digests=self.loaded_artifacts.images.registry_digests,
             )
 
         def capture_manifest(artifact: ManifestArtifact) -> None:
@@ -547,6 +553,7 @@ class PreflightRuntimeSources:
             expected_image_names=self.manifest_image_names,
             session=manifest_session,
             artifact_sink=capture_manifest,
+            container_registry=self.container_registry,
         )
         return (
             build_migration_plan_check(
@@ -582,6 +589,7 @@ class PreflightRuntimeSources:
                 candidate_tree=self.candidate.resolved_tree or "",
                 image_tag=self.candidate.image_tag,
                 namespace=self.config.namespace,
+                container_registry=self.container_registry,
                 artifact_sink=capture_migration_manifest,
             ),
             build_browser_runtime_check(

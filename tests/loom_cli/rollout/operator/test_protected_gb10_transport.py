@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 from dataclasses import replace
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 import pytest
 
@@ -28,8 +28,6 @@ from tests.loom_cli.rollout.operator.test_protected_migration_component import _
 def _target(host: str = "trt-gb10-1") -> GB10TransportTarget:
     return GB10TransportTarget(
         ssh_target=host,
-        repo_path=PurePosixPath("/home/qianyi/loom-worker-build-staging"),
-        env_file_path=PurePosixPath("/home/qianyi/loom-worker-build-staging/.env"),
         node_agent_service="loom-gb10-node-agent.service",
     )
 
@@ -99,7 +97,7 @@ def test_fixed_transport_applies_only_typed_operations_to_planned_host(tmp_path)
         mutations=(
             GB10HostMutation(
                 "trt-gb10-2",
-                (GB10MutationKind.ENVIRONMENT, GB10MutationKind.UNITS),
+                (GB10MutationKind.LEGACY_RETIRE, GB10MutationKind.SERVICE_TIMER),
             ),
         ),
         blockers={},
@@ -109,10 +107,13 @@ def test_fixed_transport_applies_only_typed_operations_to_planned_host(tmp_path)
 
     assert len(calls) == 1
     assert calls[0][-2] == "trt-gb10-2"
-    assert "environment" in calls[0][-1]
-    assert "units" in calls[0][-1]
+    assert "legacy-retire" in calls[0][-1]
+    assert "service-timer" in calls[0][-1]
     assert plan.candidate_sha in calls[0][-1]
     assert "loom-gb10-worker.service" in calls[0][-1]
+    assert "disable" in calls[0][-1]
+    assert "enable" not in calls[0][-1]
+    assert "git fetch" not in calls[0][-1]
     assert "curl" not in calls[0][-1]
 
 
@@ -292,7 +293,7 @@ def test_fixed_transport_apply_retries_transient_failure(tmp_path) -> None:
 
     convergence = GB10ConvergencePlan(
         state=GB10ConvergenceState.READY,
-        mutations=(GB10HostMutation("trt-gb10-2", (GB10MutationKind.ENVIRONMENT,)),),
+        mutations=(GB10HostMutation("trt-gb10-2", (GB10MutationKind.SERVICE_TIMER,)),),
         blockers={},
         evidence_digest="1" * 64,
     )
@@ -320,8 +321,8 @@ def test_fixed_transport_reports_only_validated_failed_hosts(tmp_path) -> None:
     convergence = GB10ConvergencePlan(
         state=GB10ConvergenceState.READY,
         mutations=(
-            GB10HostMutation("trt-gb10-1", (GB10MutationKind.ENVIRONMENT,)),
-            GB10HostMutation("trt-gb10-2", (GB10MutationKind.ENVIRONMENT,)),
+            GB10HostMutation("trt-gb10-1", (GB10MutationKind.SERVICE_TIMER,)),
+            GB10HostMutation("trt-gb10-2", (GB10MutationKind.SERVICE_TIMER,)),
         ),
         blockers={},
         evidence_digest="1" * 64,
@@ -342,7 +343,7 @@ def test_fixed_remote_programs_compile_and_apply_rejects_noncanonical_order(tmp_
         _remote_apply_source(
             target,
             plan,
-            (GB10MutationKind.CHECKOUT, GB10MutationKind.SERVICE_TIMER),
+            (GB10MutationKind.LEGACY_RETIRE, GB10MutationKind.SERVICE_TIMER),
         ),
         "<gb10-apply>",
         "exec",
@@ -356,7 +357,7 @@ def test_fixed_remote_programs_compile_and_apply_rejects_noncanonical_order(tmp_
         mutations=(
             GB10HostMutation(
                 "trt-gb10-1",
-                (GB10MutationKind.UNITS, GB10MutationKind.ENVIRONMENT),
+                (GB10MutationKind.SERVICE_TIMER, GB10MutationKind.LEGACY_RETIRE),
             ),
         ),
         blockers={},
@@ -372,7 +373,7 @@ def test_remote_shared_candidate_git_uses_live_nfs_timeout_budget(tmp_path) -> N
     apply = _remote_apply_source(
         _target(),
         plan,
-        (GB10MutationKind.CHECKOUT, GB10MutationKind.SERVICE_TIMER),
+        (GB10MutationKind.LEGACY_RETIRE, GB10MutationKind.SERVICE_TIMER),
     )
 
     assert _REMOTE_SHARED_GIT_TIMEOUT_SECONDS == 30
@@ -384,21 +385,27 @@ def test_remote_shared_candidate_git_uses_live_nfs_timeout_budget(tmp_path) -> N
     assert f"timeout_seconds={_REMOTE_SHARED_GIT_TIMEOUT_SECONDS}" in apply
 
 
-def test_remote_checkout_trusts_only_exact_shared_candidate_upload_pack(tmp_path) -> None:
+def test_remote_retirement_uses_only_service_owned_candidate_and_disables_agents(
+    tmp_path,
+) -> None:
     plan = _plan(tmp_path, "trt-gb10-1")
     apply = _remote_apply_source(
         _target(),
         plan,
-        (GB10MutationKind.CHECKOUT,),
+        (GB10MutationKind.LEGACY_RETIRE, GB10MutationKind.SERVICE_TIMER),
     )
     shared = (
         "/shared_work2/loom-staging-rollout/worker-repos/"
         f"loom-remote-worker-staging-{plan.candidate_sha[:7]}"
     )
-    upload_pack = f"/usr/bin/git -c safe.directory={shared}/.git upload-pack"
-
-    assert f"upload_pack = {upload_pack!r}" in apply
-    assert '"--no-write-fetch-head", f"--upload-pack={upload_pack}"' in apply
+    assert f"shared = pathlib.Path({shared!r})" in apply
+    assert "/home/qianyi" not in apply
+    assert "git fetch" not in apply
+    assert (
+        'run(["systemctl", "--user", "disable", "--now", unit], accept_missing=True)'
+        in apply
+    )
+    assert 'run(["systemctl", "--user", "reset-failed", unit], accept_missing=True)' in apply
     assert "safe.directory=*" not in apply
     assert "config --global" not in apply
     assert "config --system" not in apply
@@ -422,34 +429,32 @@ def test_fixed_transport_aggregates_unavailable_hosts_and_rejects_inventory_drif
         transport.observe(replace(plan, gb10_boot_ids={"trt-gb10-1": "boot-1"}))
 
 
-@pytest.mark.parametrize(
-    ("repo", "env_file"),
-    (
-        ("relative", "/home/qianyi/loom-worker-build-staging/.env"),
-        ("/home/qianyi/repo/../escape", "/home/qianyi/escape/.env"),
-        ("/home/qianyi/repo", "/tmp/.env"),
-    ),
-)
-def test_fixed_transport_target_rejects_path_authority_drift(repo, env_file) -> None:
+@pytest.mark.parametrize("service", ("relative", "other.service", "../escape.service"))
+def test_fixed_transport_target_rejects_service_authority_drift(service) -> None:
     with pytest.raises(ValueError, match="outside fixed authority"):
         GB10TransportTarget(
             ssh_target="trt-gb10-1",
-            repo_path=PurePosixPath(repo),
-            env_file_path=PurePosixPath(env_file),
-            node_agent_service="loom-gb10-node-agent.service",
+            node_agent_service=service,
         )
 
 
-def test_fixed_transport_factory_binds_checked_in_staging_inventory() -> None:
+@pytest.mark.parametrize(
+    "profile",
+    ("staging.cluster.toml", "staging.multinode.cluster.toml"),
+)
+def test_fixed_transport_factory_binds_checked_in_staging_inventory(profile: str) -> None:
     repo_root = Path(__file__).resolve().parents[4]
     hosts = tuple(f"trt-gb10-{index}" for index in range(1, 16))
     transport = build_fixed_gb10_ssh_transport(
-        repo_root / "deploy/environments/staging.cluster.toml",
+        repo_root / "deploy/environments" / profile,
         expected_hosts=hosts,
         run=lambda argv: subprocess.CompletedProcess(argv, 0, "", ""),
         max_concurrency=4,
     )
 
     assert tuple(target.ssh_target for target in transport.targets) == hosts
+    assert {target.node_agent_service for target in transport.targets} == {
+        "loom-gb10-node-agent.service"
+    }
     assert transport.identity == Path("/var/lib/loom-staging-rollout/gb10-deploy-ed25519")
     assert transport.ssh_config == (repo_root / "deploy/worker-pools/gb10/ssh_config").resolve()

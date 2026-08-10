@@ -414,6 +414,35 @@ def test_live_target_parser_accepts_distinct_release_repo_digest_and_image_id() 
     assert target.service_image_digest == "sha256:" + "1" * 64
 
 
+def test_live_target_parser_accepts_immutable_registry_manifest_reference() -> None:
+    from loom_cli.cluster_taskset_fence_canary import _select_live_target
+
+    digest = "sha256:" + "1" * 64
+    exact_image = f"192.168.50.13:5000/loom-service@{digest}"
+    manifest = _release_manifest(digest=digest)
+    identity = manifest["rendered_manifest"]["deployment_image_identities"]["loom-service"][
+        "loom-service"
+    ]
+    assert isinstance(identity, dict)
+    identity["image"] = exact_image
+    identity["repo_digest"] = exact_image
+    deployment = _live_deployment()
+    deployment["spec"]["template"]["spec"]["containers"][0]["image"] = exact_image
+    pod = _live_pod(digest=digest)
+    pod["spec"]["containers"][0]["image"] = exact_image
+    pod["status"]["containerStatuses"][0]["image"] = exact_image
+
+    target = _select_live_target(
+        manifest,
+        candidate_sha="a" * 40,
+        image_tag="staging-aaaaaaa",
+        deployment=deployment,
+        pods={"items": [pod]},
+    )
+
+    assert target.service_image_digest == digest
+
+
 def test_live_target_parser_uses_exact_image_id_only_without_a_repo_digest() -> None:
     """The image-ID fallback does not weaken a missing-repo-digest check."""
     from loom_cli.cluster_taskset_fence_canary import (
@@ -490,7 +519,7 @@ def test_deployment_runner_creates_its_own_canary_and_uses_rollout_owned_evidenc
         [
             "kubectl",
             "--context",
-            "kind-loom-staging",
+            "loom-staging",
             "-n",
             "loom-staging",
             "exec",
@@ -508,7 +537,7 @@ def test_deployment_runner_creates_its_own_canary_and_uses_rollout_owned_evidenc
         [
             "kubectl",
             "--context",
-            "kind-loom-staging",
+            "loom-staging",
             "-n",
             "loom-staging",
             "exec",

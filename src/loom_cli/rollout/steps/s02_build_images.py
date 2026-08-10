@@ -313,6 +313,31 @@ def rollout_images(
     return primary
 
 
+def rollout_image_bindings(
+    ctx: RolloutContext,
+    step_dir: StepDir,
+) -> tuple[RolloutImagePlan, dict[str, str]]:
+    """Return the exact primary plan and candidate-verified local image IDs."""
+    primary, _auxiliary, image_ids, _artifact_digest = _persisted_rollout_matrix(
+        ctx,
+        step_dir,
+    )
+    return primary, {name: image_ids[name] for name, _dockerfile, _context in primary}
+
+
+def rollout_all_image_bindings(
+    ctx: RolloutContext,
+    step_dir: StepDir,
+) -> tuple[RolloutImagePlan, dict[str, str]]:
+    """Return the exact nine-image plan and candidate-verified local IDs."""
+    primary, auxiliary, image_ids, _artifact_digest = _persisted_rollout_matrix(
+        ctx,
+        step_dir,
+    )
+    plan = primary + auxiliary
+    return plan, {name: image_ids[name] for name, _dockerfile, _context in plan}
+
+
 def image_tag(image_name: str, ctx: RolloutContext) -> str:
     return f"{image_name}:{ctx.image_tag}"
 
@@ -454,6 +479,8 @@ __all__ = [
     "ROLLOUT_IMAGES",
     "BuildImagesStep",
     "image_tag",
+    "rollout_all_image_bindings",
+    "rollout_image_bindings",
     "rollout_images",
     "rollout_images_from_candidate",
     "rollout_images_from_worktree",

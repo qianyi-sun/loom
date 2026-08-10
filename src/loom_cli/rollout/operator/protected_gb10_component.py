@@ -22,7 +22,7 @@ from .protected_apply_journal import (
     ProtectedApplyComponent,
 )
 
-_IMPLEMENTATION_DIGEST = hashlib.sha256(b"loom-protected-gb10-candidate-convergence-v2").hexdigest()
+_IMPLEMENTATION_DIGEST = hashlib.sha256(b"loom-protected-gb10-candidate-convergence-v3").hexdigest()
 
 
 class ProtectedGB10FleetTransport(Protocol):

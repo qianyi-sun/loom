@@ -20,6 +20,7 @@ from loom_cli.rollout.external_supervisor_readiness import (
     REHEARSAL_KUBECONFIG as EXTERNAL_SUPERVISOR_REHEARSAL_KUBECONFIG,
 )
 from loom_cli.rollout.external_supervisor_readiness import (
+    STAGING_ROLLOUT_EXECUTION_HOST,
     ExternalSupervisorArtifact,
     staging_working_directory,
 )
@@ -40,6 +41,7 @@ from loom_cli.rollout.rehearsal_browser import (
 from loom_cli.rollout.rehearsal_executor import (
     IsolatedRehearsalExecutor,
     _api_smoke_failure,
+    _database_pod_manifest,
     _default_external_supervisor_artifact,
     _default_stream_run,
     _external_supervisor_validation_expected_properties,
@@ -730,6 +732,51 @@ def test_runtime_image_binding_rejects_kind_tag_drift() -> None:
     assert IsolatedRehearsalExecutor(run=run)._runtime_image_ids(plan, (name,)) is None
 
 
+def test_registry_rehearsal_uses_preflight_published_digest_without_kind() -> None:
+    manifest_digests = {
+        name: f"sha256:{hashlib.sha256((name + '-manifest').encode()).hexdigest()}"
+        for name in _plan().image_digests
+    }
+    plan = replace(
+        _plan(),
+        container_registry="192.168.50.13:5000",
+        container_registry_push="localhost:5000",
+        registry_digests=manifest_digests,
+    )
+    name = "loom-control-plane"
+    expected = plan.image_digests[name]
+    manifest_digest = manifest_digests[name]
+    calls: list[tuple[str, ...]] = []
+
+    def run(argv, _payload, _timeout):
+        command = tuple(argv)
+        calls.append(command)
+        if command[:3] == ("docker", "image", "inspect"):
+            return subprocess.CompletedProcess(argv, 0, expected + "\n", "")
+        if command[:3] == ("docker", "manifest", "inspect"):
+            value = {
+                "Descriptor": {"digest": manifest_digest},
+                "SchemaV2Manifest": {"config": {"digest": expected}},
+            }
+            return subprocess.CompletedProcess(argv, 0, json.dumps(value), "")
+        raise AssertionError(command)
+
+    executor = IsolatedRehearsalExecutor(run=run)
+    assert executor._load_images(plan, (name,)) is True
+    assert executor._runtime_image_ids(plan, (name,)) == {
+        name: (expected, manifest_digest)
+    }
+    assert not any(command and command[0] == "kind" for command in calls)
+    assert not any(command[:2] in {("docker", "tag"), ("docker", "push")} for command in calls)
+    manifest = _database_pod_manifest(plan)
+    containers = manifest["spec"]["containers"]
+    assert containers[0]["image"] == (
+        "192.168.50.13:5000/loom-rehearsal-postgres@"
+        + manifest_digests["loom-rehearsal-postgres"]
+    )
+    assert all(container["imagePullPolicy"] == "IfNotPresent" for container in containers)
+
+
 def _runtime_binding_run(
     *,
     plan,
@@ -1114,6 +1161,7 @@ def test_external_supervisor_default_rebuilds_only_from_fixed_staging_root(
         "candidate_tree": plan.candidate_tree,
         "environment": "staging",
         "image_tag": plan.image_tag,
+        "execution_host": STAGING_ROLLOUT_EXECUTION_HOST,
     }
 
 

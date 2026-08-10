@@ -97,8 +97,8 @@ def test_sealed_gb10_prep_fetches_exact_shared_candidate(
     )
     host = GB10Host(
         ssh_target="trt-gb10-1",
-        repo_path="/home/qianyi/loom-worker-build-staging",
-        env_file_path="/home/qianyi/loom-worker-staging.env",
+        repo_path="/srv/loom/worker-build-staging",
+        env_file_path="/srv/loom/worker-staging.env",
     )
     commands: list[str] = []
 
@@ -216,8 +216,8 @@ def test_gb10_prep_rejects_unknown_dropin_before_unit_or_systemd_mutation(
     ctx = make_ctx(tmp_path)
     host = GB10Host(
         ssh_target="trt-gb10-1",
-        repo_path="/home/qianyi/loom-worker-build-staging",
-        env_file_path="/home/qianyi/loom-worker-staging.env",
+        repo_path="/srv/loom/worker-build-staging",
+        env_file_path="/srv/loom/worker-staging.env",
         node_agent_service="loom-gb10-node-agent.service",
     )
     commands: list[str] = []
@@ -256,8 +256,8 @@ def test_merged_dev_gb10_prep_keeps_origin_fetch(
     ctx = make_ctx(tmp_path)
     host = GB10Host(
         ssh_target="trt-gb10-1",
-        repo_path="/home/qianyi/loom-worker-build-staging",
-        env_file_path="/home/qianyi/loom-worker-staging.env",
+        repo_path="/srv/loom/worker-build-staging",
+        env_file_path="/srv/loom/worker-staging.env",
     )
     commands: list[str] = []
 
@@ -966,6 +966,56 @@ def test_migrate_render_migration_resolves_loom_cli_without_global_executable(
     assert result.exit_code == 0
     _assert_candidate_invocation(calls[0], worktree=worktree)
     assert _candidate_args(calls[0]["argv"])[:2] == ["cluster", "render-migration"]
+
+
+def test_migrate_registry_profile_uses_published_control_plane_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(tmp_path)
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    _prepare_candidate_worktree(ev)
+    _write_rendered_stateful_substrate(ev)
+    step_dir = ev.step_dir(9, "migrate")
+    digest = "sha256:" + "d" * 64
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s09_migrate.load_cluster_config",
+        lambda _path: object(),
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s09_migrate.validate_container_registry_publication",
+        lambda _config: ("192.168.50.13:5000", "localhost:5000"),
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s09_migrate.registry_image_digests",
+        lambda _ctx, _step_dir: {"loom-control-plane": digest},
+    )
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(argv))
+        return SubprocessResult(
+            argv=list(argv),
+            returncode=0,
+            stdout=(
+                "apiVersion: batch/v1\nkind: Job\n"
+                if _is_candidate_invocation(list(argv))
+                else "ok\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s09_migrate.run_captured", fake_run)
+
+    result = MigrateStep().run(ctx, step_dir)
+
+    assert result.exit_code == 0
+    candidate_args = _candidate_args(calls[0])
+    assert candidate_args[candidate_args.index("--container-registry") + 1] == (
+        "192.168.50.13:5000"
+    )
+    assert candidate_args[candidate_args.index("--registry-digest") + 1] == digest
 
 
 def test_env_state_resolves_loom_cli_without_global_executable(
@@ -2685,6 +2735,23 @@ trt-gb10-1 = "active"
     assert "no [gb10_pool] hosts" in result.error
 
 
+def test_gb10_prep_skips_direct_host_delivery_for_external_slurm_pool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from loom_cli.rollout.steps import s04_gb10_prep
+
+    ctx = make_ctx(tmp_path, image_tag="staging-abc123")
+    monkeypatch.setattr(s04_gb10_prep, "_gb10_desired_state_declared", lambda *a, **k: True)
+    monkeypatch.setattr(
+        s04_gb10_prep,
+        "_gb10_external_autoscaler_declared",
+        lambda *a, **k: True,
+    )
+
+    assert s04_gb10_prep._no_gb10_hosts_error(ctx) is None
+
+
 def test_gb10_prep_requires_platform_dev_identity_file(
     tmp_path: Path,
     _runner_backed_gb10_config: None,
@@ -3814,6 +3881,79 @@ spec:
     result = ReleaseGateStep().run(ctx, step_dir)
 
     assert result.exit_code == 0
+
+
+def test_release_gate_binds_pinned_registry_reference_to_local_candidate_image(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = make_ctx(tmp_path, image_tag="staging-abc123")
+    ev = EvidenceDirectory(tmp_path, "test-rid")
+    ev.ensure()
+    _prepare_candidate_worktree(ev)
+    digest = "sha256:" + "2" * 64
+    rendered = ev.step_dir(7, "render").artifact_path("rendered.yaml")
+    rendered.write_text(
+        f"""apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loom-service
+spec:
+  template:
+    spec:
+      containers:
+        - name: loom-service
+          image: 192.168.50.13:5000/loom-service@{digest}
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s12_release_gate.rollout_images",
+        lambda _ctx, _step_dir: (("loom-service", "Dockerfile.service", "."),),
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s12_release_gate._registry_publication",
+        lambda _ctx: ("192.168.50.13:5000", "localhost:5000"),
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s12_release_gate.registry_image_digests",
+        lambda _ctx, _step_dir: {"loom-service": digest},
+    )
+    inspected: list[str] = []
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        inspected.extend(argv[3:])
+        return SubprocessResult(
+            argv=list(argv),
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "Id": "sha256:" + "1" * 64,
+                        "RepoTags": ["loom-service:staging-abc123"],
+                        "RepoDigests": [],
+                    }
+                ]
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("loom_cli.rollout.steps.s12_release_gate.run_captured", fake_run)
+
+    output = ReleaseGateStep()._write_expected_image_identities(
+        ctx,
+        ev.step_dir(14, "release-gate"),
+    )
+
+    assert inspected == ["loom-service:staging-abc123"]
+    identity = json.loads(output.read_text(encoding="utf-8"))["loom-service"][
+        "loom-service"
+    ]
+    assert identity == {
+        "image": f"192.168.50.13:5000/loom-service@{digest}",
+        "image_id": "sha256:" + "1" * 64,
+        "repo_digest": f"192.168.50.13:5000/loom-service@{digest}",
+    }
 
 
 def test_release_gate_rejects_rendered_image_absent_from_candidate_matrix(

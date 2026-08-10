@@ -1150,9 +1150,16 @@ def test_staging_profile_declares_repo_owned_gb10_ssh_config() -> None:
         f"trt-gb10-{index}" for index in range(1, 16)
     ]
     assert all(
-        set(host) == {"ssh_target", "node_agent_service"}
+        set(host)
+        == {
+            "ssh_target",
+            "node_agent_service",
+        }
         for host in cfg.gb10_pool.hosts
     )
+    assert "/home/qianyi" not in (
+        _REPO_ROOT / "deploy" / "environments" / "staging.multinode.cluster.toml"
+    ).read_text(encoding="utf-8")
     assert "IdentityFile /var/lib/loom-staging-rollout/gb10-deploy-ed25519" in ssh_config
     assert "IdentitiesOnly yes" in ssh_config
     expected_private_hosts = {
@@ -1851,15 +1858,70 @@ def test_container_registry_prefixes_migration_job() -> None:
     assert img == "192.168.50.13:5000/loom-control-plane:staging-abc123"
 
 
+def test_render_migration_cli_pins_registry_manifest_digest(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    digest = "sha256:" + "d" * 64
+
+    rc = main(
+        [
+            "cluster",
+            "render-migration",
+            "--image-tag",
+            "staging-abc123",
+            "--namespace",
+            "loom-staging",
+            "--job-suffix",
+            "test",
+            "--container-registry",
+            "192.168.50.13:5000",
+            "--registry-digest",
+            digest,
+        ]
+    )
+
+    assert rc == 0
+    doc = yaml.safe_load(capsys.readouterr().out)
+    assert (
+        doc["spec"]["template"]["spec"]["containers"][0]["image"]
+        == f"192.168.50.13:5000/loom-control-plane@{digest}"
+    )
+
+
 def test_container_registry_load_from_toml(tmp_path: Path) -> None:
     """cluster.toml load path accepts container_registry as a top-level
     string field."""
     from loom_cli.cluster_config import load_cluster_config
 
     cfg_path = tmp_path / "cluster.toml"
-    cfg_path.write_text('container_registry = "192.168.50.13:5000"\n')
+    cfg_path.write_text(
+        'container_registry = "192.168.50.13:5000"\n'
+        'container_registry_push = "localhost:5000"\n'
+    )
     cfg = load_cluster_config(cfg_path)
     assert cfg.container_registry == "192.168.50.13:5000"
+    assert cfg.container_registry_push == "localhost:5000"
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        'container_registry = "192.168.50.13:5000"\n',
+        'container_registry_push = "localhost:5000"\n',
+        (
+            'container_registry = "http://192.168.50.13:5000"\n'
+            'container_registry_push = "localhost:5000"\n'
+        ),
+    ],
+)
+def test_container_registry_publication_requires_explicit_safe_pair(
+    tmp_path: Path,
+    contents: str,
+) -> None:
+    cfg_path = tmp_path / "cluster.toml"
+    cfg_path.write_text(contents)
+    with pytest.raises(ValueError, match="container_registry"):
+        load_cluster_config(cfg_path)
 
 
 def test_local_example_template_renders() -> None:

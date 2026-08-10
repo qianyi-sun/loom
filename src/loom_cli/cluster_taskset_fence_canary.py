@@ -44,7 +44,7 @@ _FORBIDDEN_EVIDENCE_TEXT = (
     "authorization",
 )
 _STAGING_NAMESPACE = "loom-staging"
-_STAGING_KUBE_CONTEXT = "kind-loom-staging"
+_STAGING_KUBE_CONTEXT = "loom-staging"
 _SERVICE_DEPLOYMENT = "loom-service"
 _SERVICE_CONTAINER = "loom-service"
 _STAGING_ROLLOUT_ROOT = Path("/data/loom-staging")
@@ -326,11 +326,24 @@ def _release_service_identity(
     ):
         raise _invalid_live_target()
     expected_image = identity.get("image")
-    if not isinstance(expected_image, str) or not expected_image.endswith(f":{image_tag}"):
+    if not isinstance(expected_image, str):
+        raise _invalid_live_target()
+    tagged_candidate = expected_image.endswith(f":{image_tag}")
+    pinned_candidate_digest = (
+        _digest_from_value(expected_image)
+        if re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", expected_image)
+        else None
+    )
+    if not tagged_candidate and pinned_candidate_digest is None:
         raise _invalid_live_target()
     expected_repo_digest = _digest_from_value(identity.get("repo_digest"))
     expected_image_id = identity.get("image_id")
     if expected_repo_digest is not None:
+        if (
+            pinned_candidate_digest is not None
+            and expected_repo_digest != pinned_candidate_digest
+        ):
+            raise _invalid_live_target()
         return expected_image, expected_repo_digest, None
     if not isinstance(expected_image_id, str) or not expected_image_id:
         raise _invalid_live_target()

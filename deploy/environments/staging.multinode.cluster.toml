@@ -11,6 +11,7 @@
 # /etc/rancher/k3s/registries.yaml.
 namespace = "loom-staging"
 container_registry = "192.168.50.13:5000"
+container_registry_push = "localhost:5000"
 image_tag = "staging-ce759bff"
 runtime_environment = "staging"
 ingress_host = "yylx.world"
@@ -54,10 +55,9 @@ taskset_transform_network_isolated = false
 untrusted_workload_isolation = false
 
 # Bounded inventory for retiring the predecessor direct node agents during the
-# first protected external-supervisor transition. It intentionally carries no
-# personal checkout or environment paths; canonical GB10 workers use the
-# service-owned shared candidate and environment roots under
-# /shared_work2/loom-staging-rollout.
+# protected external-supervisor transition. The retirement inventory carries
+# only host and unit identity; canonical GB10 capacity uses service-owned shared
+# candidate and environment roots under /shared_work2/loom-staging-rollout.
 [gb10_pool]
 ssh_config = "../worker-pools/gb10/ssh_config"
 ssh_identity_file = "/var/lib/loom-staging-rollout/gb10-deploy-ed25519"

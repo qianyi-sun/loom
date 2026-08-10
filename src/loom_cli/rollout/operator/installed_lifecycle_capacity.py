@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
+from loom_cli.cluster_config import validate_container_registry_prefixes
 from loom_cli.rollout.credential_authority import read_trusted_file
 from loom_cli.rollout.preflight_artifact_store import LoadedPreflightArtifacts
 from loom_cli.rollout.readonly_database_authority import ReadonlyDatabaseEvidence
@@ -264,6 +265,9 @@ class InstalledLifecycleCapacityService:
         now: Clock,
         expected_buckets: tuple[str, ...],
         expected_filesystem_paths: tuple[str, ...],
+        capacity_source: str = "filesystem",
+        container_registry: str = "",
+        container_registry_push: str = "",
     ) -> None:
         if (
             service_uid < 1
@@ -273,7 +277,9 @@ class InstalledLifecycleCapacityService:
             or config.source_base_sha is None
             or len(expected_buckets) != 2
             or len(set(expected_buckets)) != 2
-            or not expected_filesystem_paths
+            or capacity_source not in {"filesystem", "minio-admin"}
+            or (capacity_source == "filesystem" and not expected_filesystem_paths)
+            or (capacity_source == "minio-admin" and bool(expected_filesystem_paths))
             or len(set(expected_filesystem_paths)) != len(expected_filesystem_paths)
         ):
             raise InstalledLifecycleCapacityError("sealed lifecycle capacity authority is absent")
@@ -287,7 +293,17 @@ class InstalledLifecycleCapacityService:
         self.read_database = read_database
         self.now = now
         self.expected_buckets = expected_buckets
+        self.capacity_source = capacity_source
         self.expected_filesystem_paths = expected_filesystem_paths
+        try:
+            self.registry_publication = validate_container_registry_prefixes(
+                container_registry,
+                container_registry_push,
+            )
+        except ValueError as exc:
+            raise InstalledLifecycleCapacityError(
+                "lifecycle capacity registry authority is invalid"
+            ) from exc
         self.evidence_root = config.state_root / "lifecycle-capacity-jobs"
 
     def inventory(self) -> LifecycleCapacityJobPlan:
@@ -313,6 +329,15 @@ class InstalledLifecycleCapacityService:
             rendered_yaml=loaded.manifests.rendered_yaml,
             expected_buckets=self.expected_buckets,
             expected_filesystem_paths=self.expected_filesystem_paths,
+            capacity_source=self.capacity_source,
+            container_registry=(
+                self.registry_publication[0] if self.registry_publication is not None else ""
+            ),
+            registry_digest=(
+                loaded.images.registry_digests["loom-control-plane"]
+                if self.registry_publication is not None
+                else ""
+            ),
         )
 
     def prepare_apply(self, *, approved_plan_digest: str) -> LifecycleCapacityJobPlan:
@@ -348,12 +373,39 @@ class InstalledLifecycleCapacityService:
         if self.inventory() != plan:
             raise InstalledLifecycleCapacityError("capacity plan drifted before image load")
         image = f"loom-control-plane:{plan.image_tag}"
-        _safe_command(
-            self.commands.simple(
-                ("kind", "load", "docker-image", "--name", self.config.cluster_name, image)
-            ),
-            "exact capacity image load",
-        )
+        if self.registry_publication is None:
+            _safe_command(
+                self.commands.simple(
+                    ("kind", "load", "docker-image", "--name", self.config.cluster_name, image)
+                ),
+                "exact capacity image load",
+            )
+        else:
+            pull, push = self.registry_publication
+            target = f"{push}/{image}"
+            manifest = _object(
+                _safe_command(
+                    self.commands.simple(
+                        ("docker", "manifest", "inspect", "--insecure", "--verbose", target)
+                    ),
+                    "exact capacity image publication readback",
+                ),
+                "exact capacity image publication readback",
+            )
+            schema = manifest.get("SchemaV2Manifest", manifest)
+            descriptor = manifest.get("Descriptor")
+            config = schema.get("config") if isinstance(schema, dict) else None
+            if (
+                not isinstance(config, dict)
+                or config.get("digest") != plan.control_plane_image_id
+                or not isinstance(descriptor, dict)
+                or descriptor.get("digest") != plan.control_plane_registry_digest
+                or f"{pull}/loom-control-plane@{plan.control_plane_registry_digest}"
+                not in plan.job_manifest
+            ):
+                raise InstalledLifecycleCapacityError(
+                    "exact capacity image publication identity drifted"
+                )
         if self.inventory() != plan:
             raise InstalledLifecycleCapacityError("capacity plan drifted during image load")
         apply_record = _object(

@@ -105,9 +105,9 @@ allowed_nodes = [
   "trt-eai-oldlab-4",
   "trt-eai-oldlab-5",
 ]
-env_file = "/shared_work/loom/staging-rollout/worker-envs/staging-oldlab-worker-staging-4742696.env"
-repo_dir = "/shared_work/loom/staging-rollout/worker-repos/loom-remote-worker-staging-4742696"
-candidate_sha = "47426964e55b436bc9edc8ef7d66aec6db7ed8f0"
+env_file = "/shared_work/loom/staging-rollout/worker-envs/staging-oldlab-worker-${IMAGE_TAG}.env"
+repo_dir = "/shared_work/loom/staging-rollout/worker-repos/loom-remote-worker-${IMAGE_TAG}"
+candidate_sha = "${GIT_SHA}"
 job_output_dir = "/shared_work/loom/staging-rollout/job-output"
 requested_cpus = 12
 requested_memory_mib = 49152
@@ -197,7 +197,7 @@ rate_card_provider = "yibuapi"
 required = true
 
 [external_slurm_runner_prerequisites]
-pools = ["gb10"]
+pools = ["gb10", "oldlab"]
 expected_repo_ref = "${IMAGE_TAG}"
 require_clean_repo = true
 require_worker_token_parity = true

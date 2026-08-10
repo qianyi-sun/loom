@@ -681,6 +681,26 @@ def test_cli_up_happy_path(
     assert "loom-service configured" in out
 
 
+def test_cli_up_applies_the_exact_rendered_rollout_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    captures = _patch_full_up_path(monkeypatch)
+    rendered = tmp_path / "rendered.yaml"
+    exact = "apiVersion: v1\nkind: ConfigMap\nmetadata: {name: exact-rollout}\n"
+    rendered.write_text(exact, encoding="utf-8")
+    monkeypatch.setattr(
+        "loom_cli.cluster_cmd.render_manifests",
+        lambda _config: pytest.fail("cluster up must not re-render the rollout artifact"),
+    )
+
+    rc = main(["cluster", "up", "--rendered-manifest", str(rendered)])
+
+    assert rc == 0
+    assert captures["apply_yaml_text"] == exact
+    assert captures["preflight_kwargs"].get("rendered_manifests") in (None, exact)
+
+
 def test_cli_up_migrate_flag_runs_migration_before_wait(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

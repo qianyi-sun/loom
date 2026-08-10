@@ -30,6 +30,10 @@ from loom_cli.rollout.steps.s02_build_images import (
     rollout_images,
     rollout_images_from_candidate,
 )
+from loom_cli.rollout.steps.s03_kind_load_images import (
+    _registry_publication,
+    registry_image_digests,
+)
 from loom_cli.rollout.steps.s10_env_state import (
     _is_gb10_node_status_drift_only,
     _profile_path_for,
@@ -202,7 +206,7 @@ def _image_identities_from_inspect(
     *,
     rendered_images: dict[str, dict[str, str]],
     inspect_docs: list[dict[str, Any]],
-    managed_images: set[str],
+    local_image_by_rendered_reference: dict[str, str],
 ) -> dict[str, dict[str, dict[str, str]]]:
     docs_by_tag: dict[str, dict[str, Any]] = {}
     for doc in inspect_docs:
@@ -212,18 +216,23 @@ def _image_identities_from_inspect(
     identities: dict[str, dict[str, dict[str, str]]] = {}
     for deployment_name, by_container in rendered_images.items():
         for container_name, image in by_container.items():
-            if image not in managed_images:
+            local_image = local_image_by_rendered_reference.get(image)
+            if local_image is None:
                 continue
-            inspect_doc = docs_by_tag.get(image)
+            inspect_doc = docs_by_tag.get(local_image)
             if inspect_doc is None:
-                raise ValueError(f"Docker inspect output missing managed image {image}")
+                raise ValueError(f"Docker inspect output missing managed image {local_image}")
             identity: dict[str, str] = {"image": image}
             image_id = inspect_doc.get("Id")
             if isinstance(image_id, str) and image_id:
                 identity["image_id"] = image_id
-            repo_digest = _matching_repo_digest(
-                image,
-                _string_list(inspect_doc.get("RepoDigests")),
+            repo_digest = (
+                image
+                if "@sha256:" in image
+                else _matching_repo_digest(
+                    local_image,
+                    _string_list(inspect_doc.get("RepoDigests")),
+                )
             )
             if repo_digest:
                 identity["repo_digest"] = repo_digest
@@ -514,22 +523,38 @@ class ReleaseGateStep(SubcommandStep):
         rendered_images = _rendered_deployment_images(
             rendered_path.read_text(encoding="utf-8"),
         )
-        managed_images = {
-            image_tag(image, ctx) for image, _, _ in rollout_images(ctx, step_dir)
+        images = rollout_images(ctx, step_dir)
+        local_image_by_name = {
+            image: image_tag(image, ctx) for image, _dockerfile, _context in images
         }
+        publication = _registry_publication(ctx)
+        if publication is None:
+            local_image_by_rendered_reference = {
+                local: local for local in local_image_by_name.values()
+            }
+        else:
+            digests = registry_image_digests(ctx, step_dir)
+            if set(digests) != set(local_image_by_name):
+                raise ValueError("published registry image set differs from candidate matrix")
+            local_image_by_rendered_reference = {
+                f"{publication[0]}/{name}@{digests[name]}": local
+                for name, local in local_image_by_name.items()
+            }
         rendered_release_images = {
             image
             for by_container in rendered_images.values()
             for image in by_container.values()
             if _repo_part(image).split("/")[-1].startswith("loom-")
         }
-        unexpected = rendered_release_images - managed_images
+        unexpected = rendered_release_images - set(local_image_by_rendered_reference)
         if unexpected:
             raise ValueError(
                 "rendered release image set contains images absent from the "
                 f"candidate rollout matrix: {sorted(unexpected)}"
             )
-        rendered_managed_images = sorted(rendered_release_images)
+        rendered_managed_images = sorted(
+            local_image_by_rendered_reference[image] for image in rendered_release_images
+        )
         if not rendered_managed_images:
             raise ValueError(
                 "rendered manifest does not reference any release-managed "
@@ -550,7 +575,7 @@ class ReleaseGateStep(SubcommandStep):
         identities = _image_identities_from_inspect(
             rendered_images=rendered_images,
             inspect_docs=raw,
-            managed_images=managed_images,
+            local_image_by_rendered_reference=local_image_by_rendered_reference,
         )
         output_path = self.expected_image_identities_path(ctx, step_dir)
         output_path.write_text(

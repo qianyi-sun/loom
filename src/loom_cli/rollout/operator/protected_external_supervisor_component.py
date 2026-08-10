@@ -44,6 +44,7 @@ class ProtectedExternalSupervisorComponent:
     candidate_root: Path
     transport: ProtectedExternalSupervisorTransport
     epoch_guard: EpochGuard
+    execution_host: str | None = None
     artifact_builder: Callable[..., ExternalSupervisorArtifact] = build_external_supervisor_artifact
 
     def __post_init__(self) -> None:
@@ -52,6 +53,10 @@ class ProtectedExternalSupervisorComponent:
             or ".." in self.candidate_root.parts
             or not callable(self.epoch_guard)
             or not callable(self.artifact_builder)
+            or (
+                self.execution_host is not None
+                and not self.execution_host
+            )
         ):
             raise ValueError("protected external supervisor authority is invalid")
 
@@ -259,12 +264,17 @@ class ProtectedExternalSupervisorComponent:
             raise RuntimeError("protected external supervisor transition binding drifted")
 
     def _artifact(self, plan: FinalGatePlan) -> ExternalSupervisorArtifact:
+        builder_kwargs: dict[str, object] = {
+            "candidate_sha": plan.candidate_sha,
+            "candidate_tree": plan.candidate_tree,
+            "image_tag": f"staging-{plan.candidate_sha[:7]}",
+            "environment": plan.environment,
+        }
+        if self.execution_host is not None:
+            builder_kwargs["execution_host"] = self.execution_host
         artifact = self.artifact_builder(
             self.candidate_root,
-            candidate_sha=plan.candidate_sha,
-            candidate_tree=plan.candidate_tree,
-            image_tag=f"staging-{plan.candidate_sha[:7]}",
-            environment=plan.environment,
+            **builder_kwargs,
         )
         # Round-trip through the canonical parser so an injected or changed
         # builder cannot smuggle a partially validated object into final apply.

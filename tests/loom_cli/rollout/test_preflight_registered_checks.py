@@ -1808,12 +1808,10 @@ def test_registered_systemd_render_uses_exact_static_unit_verifier() -> None:
     assert result.evidence["supervisor-artifact-digest"] != "0" * 64
     assert result.evidence["supervisor-profile-sha256"] != "0" * 64
     assert set(result.evidence["supervisor-unit-digests"]) == {
-        "loom-autoscaler-gb10-staging.service",
-        "loom-autoscaler-gb10-staging.timer",
         "loom-autoscaler-oldlab-staging.service",
         "loom-autoscaler-oldlab-staging.timer",
     }
-    assert result.evidence["unit-count"] == 7
+    assert result.evidence["unit-count"] == 5
     assert set(result.evidence["supervisor-script-digests"]) == {SCRIPT_PATH}
 
 
@@ -2060,7 +2058,7 @@ def test_registered_manifest_checks_render_once_then_server_validate() -> None:
         name: f"sha256:{hashlib.sha256(name.encode()).hexdigest()}"
         for name, _path in ALL_BUILD_IMAGES
     }
-    image_artifact = SimpleNamespace(image_digests=digests)
+    image_artifact = SimpleNamespace(image_digests=digests, registry_digests={})
     render_calls: list[object] = []
     server_payloads: list[str] = []
     rendered, server_schema, field_ownership = build_manifest_preflight_checks(

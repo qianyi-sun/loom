@@ -12,6 +12,8 @@ import pytest
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
 from loom_cli.cluster_cmd import render_manifests
 from loom_cli.cluster_config import ClusterConfig
+from loom_cli.rollout.image_readiness import ALL_BUILD_IMAGES
+from loom_cli.rollout.manifest_readiness import pin_rendered_manifest_images
 from loom_cli.rollout.operator.installed_lifecycle_capacity import (
     InstalledLifecycleCapacityError,
     InstalledLifecycleCapacityService,
@@ -26,6 +28,7 @@ _BASE = "c" * 40
 _BUNDLE = "d" * 64
 _RENDERED = "e" * 64
 _IMAGE_ID = "sha256:" + "f" * 64
+_MANIFEST_DIGEST = "sha256:" + "1" * 64
 _TAG = "staging-aaaaaaa"
 _UID = "12345678-1234-1234-1234-123456789abc"
 
@@ -57,6 +60,13 @@ class _Commands:
                 },
                 sort_keys=True,
                 separators=(",", ":"),
+            )
+        elif command[:3] == ("docker", "manifest", "inspect"):
+            stdout = json.dumps(
+                {
+                    "Descriptor": {"digest": _MANIFEST_DIGEST},
+                    "SchemaV2Manifest": {"config": {"digest": _IMAGE_ID}},
+                }
             )
         elif "get" in command:
             stdout = json.dumps(
@@ -151,6 +161,7 @@ def _service(
     tmp_path: Path,
     *,
     store: _Store | None = None,
+    registry: bool = False,
 ) -> tuple[InstalledLifecycleCapacityService, _Commands]:
     config = replace(
         _config(tmp_path),
@@ -167,8 +178,29 @@ def _service(
             runtime_environment="staging",
             namespace="loom-staging",
             image_tag=_TAG,
+            container_registry="192.168.50.13:5000" if registry else "",
+            container_registry_push="localhost:5000" if registry else "",
         )
     )
+    registry_digests = (
+        {
+            name: (
+                _MANIFEST_DIGEST
+                if name == "loom-control-plane"
+                else "sha256:" + f"{index + 2:064x}"
+            )
+            for index, (name, _path) in enumerate(ALL_BUILD_IMAGES)
+        }
+        if registry
+        else {}
+    )
+    if registry:
+        rendered = pin_rendered_manifest_images(
+            rendered,
+            image_tag=_TAG,
+            container_registry="192.168.50.13:5000",
+            registry_digests=registry_digests,
+        )
     loaded = SimpleNamespace(
         publication=SimpleNamespace(
             candidate_sha=_SHA,
@@ -176,7 +208,10 @@ def _service(
             mutation_epoch=8,
             bundle_digest=_BUNDLE,
         ),
-        images=SimpleNamespace(image_digests={"loom-control-plane": _IMAGE_ID}),
+        images=SimpleNamespace(
+            image_digests={"loom-control-plane": _IMAGE_ID},
+            registry_digests=registry_digests,
+        ),
         manifests=SimpleNamespace(
             rendered_sha256=_RENDERED,
             rendered_yaml=rendered,
@@ -194,6 +229,8 @@ def _service(
         now=lambda: datetime(2026, 7, 20, 0, 0, 1, tzinfo=UTC),
         expected_buckets=("trajectories", "artifacts"),
         expected_filesystem_paths=("/var/lib/loom-minio-capacity/0",),
+        container_registry="192.168.50.13:5000" if registry else "",
+        container_registry_push="localhost:5000" if registry else "",
     )
     return service, commands
 
@@ -228,6 +265,20 @@ def test_prepare_rejects_active_rollout_or_digest_drift_without_claim(tmp_path: 
     with pytest.raises(InstalledLifecycleCapacityError, match="active rollout"):
         service.prepare_apply(approved_plan_digest=plan.plan_digest)
     assert not service.evidence_root.exists()
+
+
+def test_registry_capacity_uses_preflight_digest_without_kind_or_republish(tmp_path: Path) -> None:
+    service, commands = _service(tmp_path, registry=True)
+    plan = service.inventory()
+    service.prepare_apply(approved_plan_digest=plan.plan_digest)
+
+    service.execute_claimed(plan)
+
+    assert not any(command[:2] in {("docker", "tag"), ("docker", "push")} for command in commands.calls)
+    assert (
+        f"192.168.50.13:5000/loom-control-plane@{_MANIFEST_DIGEST}" in plan.job_manifest
+    )
+    assert not any(command and command[0] == "kind" for command in commands.calls)
 
     inactive, _commands = _service(tmp_path / "other")
     with pytest.raises(InstalledLifecycleCapacityError, match="digest drifted"):

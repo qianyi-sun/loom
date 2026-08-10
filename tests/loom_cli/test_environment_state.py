@@ -2124,8 +2124,10 @@ active = false
     ]
 
 
+@pytest.mark.parametrize("missing_rc", [1, 5])
 def test_external_slurm_autoscaler_supervisor_apply_idempotent_when_unit_missing(
     tmp_path: Path,
+    missing_rc: int,
 ) -> None:
     """#331 acceptance: keep idempotency when the unit is already
     disabled/inactive or missing.
@@ -2162,11 +2164,15 @@ active = false
     unit_dir = tmp_path / "systemd-user"
 
     def _runner(command: list[str]) -> tuple[int, str, str]:
-        # daemon-reload succeeds; stop/disable return 5 (not loaded).
+        # systemd versions disagree on whether a missing stop/disable is rc=1
+        # or the LSB rc=5.  A LoadState probe distinguishes absence from a
+        # real failure without relying on localized stderr text.
         if command[-1] == "daemon-reload":
             return 0, "", ""
+        if "--property=LoadState" in command:
+            return 0, "not-found\n", ""
         return (
-            5,
+            missing_rc,
             "",
             "Failed to disable unit: Unit file loom-oldlab-autoscaler.timer does not exist.",
         )
@@ -2285,7 +2291,10 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
         "LOOM_CATALOG_SOURCE_MINIO_ACCESS_KEY",
         "LOOM_CATALOG_SOURCE_MINIO_SECRET_KEY",
     } & set(profile.catalog_provisioning["required_env"])
-    assert set(profile.external_slurm_runner_prerequisites["pools"]) == {"gb10"}
+    assert set(profile.external_slurm_runner_prerequisites["pools"]) == {
+        "gb10",
+        "oldlab",
+    }
     assert profile.external_slurm_runner_prerequisites["require_worker_token_parity"] is True
     assert profile.external_slurm_runner_prerequisites["materialize"] is True
     assert (
@@ -2670,9 +2679,15 @@ def test_staging_profile_scales_both_slurm_pools_from_zero() -> None:
     assert oldlab["actuator_config"]["env_file"].startswith(
         "/shared_work/loom/staging-rollout/worker-envs/"
     )
-    assert oldlab["actuator_config"]["candidate_sha"] == (
-        "47426964e55b436bc9edc8ef7d66aec6db7ed8f0"
+    assert oldlab["actuator_config"]["env_file"] == (
+        "/shared_work/loom/staging-rollout/worker-envs/"
+        "staging-oldlab-worker-staging-test.env"
     )
+    assert oldlab["actuator_config"]["repo_dir"] == (
+        "/shared_work/loom/staging-rollout/worker-repos/"
+        "loom-remote-worker-staging-test"
+    )
+    assert oldlab["actuator_config"]["candidate_sha"] == "a" * 40
     assert oldlab["actuator_config"]["job_output_dir"] == (
         "/shared_work/loom/staging-rollout/job-output"
     )

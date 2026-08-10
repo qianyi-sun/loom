@@ -323,6 +323,50 @@ def _gb10_desired_state_declared(
     return bool(profile.gb10_desired_states)
 
 
+def _gb10_external_autoscaler_declared(
+    ctx: RolloutContext,
+    *,
+    config_path: Path | None = None,
+) -> bool:
+    """Return whether candidate state delegates GB10 capacity to external Slurm."""
+    from loom_cli.environment_state import load_environment_state_profile
+
+    profile_path = _env_state_profile_path_for(ctx, config_path=config_path)
+    if profile_path is None:
+        return False
+    try:
+        profile = load_environment_state_profile(
+            profile_path,
+            variables={
+                "IMAGE_TAG": ctx.image_tag,
+                "ENV_CONFIG_VERSION": ctx.image_tag,
+                "GIT_SHA": ctx.resolved_sha,
+            },
+            expected_environment=ctx.environment,
+        )
+    except Exception as exc:
+        if config_path is not None:
+            raise CandidateToolingError(
+                f"candidate environment-state profile is invalid: {exc}"
+            ) from exc
+        return False
+    policy_active = any(
+        policy.get("pool_name") == "gb10"
+        and policy.get("actuator") == "slurm"
+        and policy.get("enabled") is True
+        and isinstance(policy.get("actuator_config"), dict)
+        and policy["actuator_config"].get("external_runner") is True
+        for policy in profile.autoscaler_policies
+    )
+    supervisor_active = any(
+        supervisor.get("pool_name") == "gb10"
+        and supervisor.get("enabled") is True
+        and supervisor.get("active") is True
+        for supervisor in profile.external_slurm_autoscaler_supervisors
+    )
+    return policy_active and supervisor_active
+
+
 def _no_gb10_hosts_error(
     ctx: RolloutContext,
     *,
@@ -331,6 +375,8 @@ def _no_gb10_hosts_error(
     if ctx.scope != "current-gb10":
         return None
     if not _gb10_desired_state_declared(ctx, config_path=config_path):
+        return None
+    if _gb10_external_autoscaler_declared(ctx, config_path=config_path):
         return None
     return (
         "current-gb10 rollout declares GB10 desired state, but the cluster "

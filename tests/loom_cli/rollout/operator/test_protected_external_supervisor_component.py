@@ -138,6 +138,11 @@ def _bound_artifact(tmp_path: Path):
             1,
         )
         profile_text = prefix + marker + oldlab_section
+    profile_text = profile_text.replace(
+        'pools = ["gb10", "oldlab"]',
+        'pools = ["gb10"]',
+        1,
+    )
     profile_target.write_text(profile_text, encoding="utf-8")
     shutil.copyfile(
         repository / "scripts/ops/worker_pool_autoscaler_external_once.py",

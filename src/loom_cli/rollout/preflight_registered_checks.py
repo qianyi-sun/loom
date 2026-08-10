@@ -27,6 +27,7 @@ from loom_cli.rollout.credential_authority import (
 from loom_cli.rollout.docker_readiness import CommandRunner as DockerCommandRunner
 from loom_cli.rollout.docker_readiness import probe_docker_runtime
 from loom_cli.rollout.external_supervisor_readiness import (
+    STAGING_ROLLOUT_EXECUTION_HOST,
     build_external_supervisor_artifact,
     verify_external_supervisor_artifact,
 )
@@ -2047,6 +2048,7 @@ def build_migration_manifest_check(
     candidate_tree: str,
     image_tag: str,
     namespace: str,
+    container_registry: str = "",
     artifact_sink: Callable[[MigrationManifestArtifact], None] | None = None,
 ) -> RegisteredCheck:
     """Render and server-validate the exact migration Job once in Tier 1."""
@@ -2069,6 +2071,12 @@ def build_migration_manifest_check(
                 namespace=namespace,
                 migration_plan_sha256=plan_digest,
                 migration_target_revision=target_revision,
+                container_registry=container_registry,
+                registry_digest=(
+                    images.registry_digests["loom-control-plane"]
+                    if container_registry
+                    else ""
+                ),
             )
         except (OSError, RuntimeError, ValueError):
             return _empty_migration_manifest_probe()
@@ -2108,7 +2116,7 @@ def build_migration_manifest_check(
             remediation="restore exact image, migration graph and readonly schema validation",
             secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
         ),
-        implementation_version="v1",
+        implementation_version="v2",
         operations={CheckOperation.PROBE: probe},
     )
 
@@ -2171,6 +2179,7 @@ def build_systemd_render_check(
                 candidate_tree=expected_candidate_tree,
                 image_tag=expected_image_tag,
                 environment=expected_environment,
+                execution_host=STAGING_ROLLOUT_EXECUTION_HOST,
             )
             supervisor = verify_external_supervisor_artifact(supervisor_artifact, run)
         except (OSError, RuntimeError, ValueError):
@@ -2393,6 +2402,7 @@ def build_manifest_preflight_checks(
     expected_image_names: frozenset[str] | None = None,
     session: ManifestRenderSession | None = None,
     artifact_sink: Callable[[ManifestArtifact], None] | None = None,
+    container_registry: str = "",
 ) -> tuple[RegisteredCheck, RegisteredCheck, RegisteredCheck]:
     """Build independent Tier 1 render, schema and field-owner checks."""
     manifest_session: ManifestRenderSession | None = session
@@ -2400,14 +2410,17 @@ def build_manifest_preflight_checks(
     def get_session() -> ManifestRenderSession:
         nonlocal manifest_session
         if manifest_session is None:
+            images = image_artifact()
             manifest_session = ManifestRenderSession(
                 render,
                 server_dry_run,
                 field_ownership_dry_run=field_ownership_dry_run,
                 image_tag=image_tag,
                 namespace=namespace,
-                image_digests=image_artifact().image_digests,
+                image_digests=images.image_digests,
                 expected_image_names=expected_image_names,
+                container_registry=container_registry,
+                registry_digests=images.registry_digests,
             )
         return manifest_session
 

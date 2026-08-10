@@ -20,7 +20,10 @@ from loom_cli.rollout.external_supervisor_predecessor import (
     ExternalSupervisorPoolIdentity,
     load_predecessor_manifest,
 )
-from loom_cli.rollout.external_supervisor_readiness import build_external_supervisor_artifact
+from loom_cli.rollout.external_supervisor_readiness import (
+    STAGING_ROLLOUT_EXECUTION_HOST,
+    build_external_supervisor_artifact,
+)
 from loom_cli.rollout.gb10_readiness import GB10SharedMountReadiness
 from loom_cli.rollout.gb10_rehearsal import GB10RehearsalAuthority
 from loom_cli.rollout.image_readiness import ROLLOUT_IMAGES
@@ -468,12 +471,15 @@ def build_installed_deep_preflight_composition(
                     candidate_tree=candidate.resolved_tree or "",
                     image_tag=candidate.image_tag,
                     environment=config.environment,
+                    execution_host=STAGING_ROLLOUT_EXECUTION_HOST,
                 ),
                 artifact_store=artifact_store,
                 migration_plan_sha256=loaded.publication.migration_plan_sha256,
                 migration_target_revision=loaded.publication.migration_target_revision,
                 browser_report_schema_sha256=loaded.publication.browser_report_schema_sha256,
                 cluster_name=config.cluster_name,
+                container_registry=str(cluster.container_registry),
+                container_registry_push=str(cluster.container_registry_push),
                 route_origin=route_origin,
                 smoke_authority=smoke_authority,
                 gb10_authority=GB10RehearsalAuthority(
@@ -544,6 +550,8 @@ def build_installed_deep_preflight_composition(
         final_gate_run=commands.final_gate_helper,
         read_mutation_epoch=readonly.mutation_epoch,
         read_database_schema_revision=lambda: mutation_epoch_evidence().schema_revision,
+        container_registry=str(cluster.container_registry),
+        container_registry_push=str(cluster.container_registry_push),
         now=now,
     )
 

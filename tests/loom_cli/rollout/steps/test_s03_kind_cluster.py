@@ -173,6 +173,51 @@ def _backup_manifest(tmp_path: Path) -> Path:
     return manifest
 
 
+def test_registry_profile_verifies_existing_k3s_without_kind_or_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backup_manifest = _backup_manifest(tmp_path)
+    ctx = make_ctx(tmp_path, backup_manifest_path=backup_manifest)
+    ctx.cluster_config_path.write_text(
+        'namespace = "loom-staging"\n'
+        'container_registry = "192.168.50.13:5000"\n'
+        'container_registry_push = "localhost:5000"\n'
+        'persistent_storage_backend = "dynamic"\n'
+    )
+    step_dir = StepDir(3, "kind-cluster", tmp_path / "03-kind-cluster")
+    step_dir.path.mkdir()
+    calls: list[tuple[str, ...]] = []
+
+    def run(argv, **_kwargs):  # type: ignore[no-untyped-def]
+        command = tuple(argv)
+        calls.append(command)
+        stdout = "ok\n"
+        if command == ("kubectl", "config", "current-context"):
+            stdout = "loom-staging\n"
+        elif command == ("kubectl", "get", "nodes", "-o", "json"):
+            stdout = json.dumps(
+                {
+                    "items": [
+                        {"status": {"conditions": [{"type": "Ready", "status": "True"}]}},
+                        {"status": {"conditions": [{"type": "Ready", "status": "True"}]}},
+                    ]
+                }
+            )
+        elif "jsonpath={.subsets[0].addresses[0].ip}" in command:
+            stdout = "10.42.0.10"
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(s03_kind_cluster, "run_captured", run)
+
+    result = KindClusterStep().run(ctx, step_dir)
+
+    assert result.exit_code == 0
+    assert result.artifacts["ingress_nginx_manifest_source"] == "k3s"
+    assert not any(command and command[0] == "kind" for command in calls)
+    assert not any("apply" in command or "label" in command for command in calls)
+
+
 def _write_kind_done_evidence(
     ctx: RolloutContext,
     step_dir: StepDir,
