@@ -107,6 +107,37 @@ states `mode: shadow`, `executable: false`, and
 allocations, never grants or launch permits. It accepts no database, Slurm, or
 live-environment argument.
 
+## Package 2A protected admission foundation
+
+Package 2A adds an independently migrated `loom_capacity_guard` schema inside
+each environment database. Its migration login must explicitly assume a
+pre-provisioned non-login owner role before creating the protected revision
+table or any protected object. Candidate roles and `PUBLIC` receive no schema,
+table, sequence, function, or future-object default privileges.
+
+The protected foundation stores only an exact disabled authority fence,
+canonical sealed trial requirements, immutable queued attempt identities, and
+bounded append-only audit records. Composite foreign keys bind an attempt to
+the exact trial and requirements digest and bind attempt audit records back to
+that same trial. Database checks permit only `authority_mode=disabled`,
+`allocation_epoch=0`, and unassigned `claim_state=queued` rows; database
+triggers reject update, delete, and truncate operations.
+
+The Python store requires a SERIALIZABLE session already operating as the
+exact non-login owner. Exact replays converge without duplicate rows or audit
+events, identity conflicts roll back without fragments, and persisted JSON and
+digests are revalidated on read. A separate startup gate checks only the
+protected schema's qualified revision table and never falls back to an
+application or management database URL.
+
+Package 2A changes no running route or environment behavior. It cannot assign
+or claim an attempt, mint a worker credential, start or cancel a worker, call a
+Slurm controller, or release physical capacity. Its migrations are not
+deployed by this implementation slice. Package 2B adds the trusted environment
+agent and protected admission transitions; Package 2C closes every legacy
+capacity mutation path and supplies rollback compatibility before enforcement
+can be considered.
+
 ## Current activation blockers
 
 There is intentionally no live global fleet manifest. The checked-in
