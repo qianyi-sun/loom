@@ -502,11 +502,58 @@ def _existing_custom_check(
         repository=client.repository,
         head_sha=head_sha,
     )
-    if len(matches) > 1:
-        raise DuplicateCustomCheckError(
-            f"duplicate custom CheckRuns for {spec.context} on {head_sha}"
+    if len(matches) <= 1:
+        return matches[0] if matches else None
+
+    # Rerunning a source workflow can make GitHub retain the completed custom
+    # CheckRun from the prior Actions attempt while exposing a second CheckRun
+    # created by the publisher for the same external id.  The required-context
+    # rollup uses the newest CheckRun identity.  Recover only when every
+    # retained object is recognisably publisher state for this exact head, then
+    # continue through that same newest identity.  Invalid publisher-state
+    # duplicates still fail closed.
+    recoverable: list[tuple[int, Mapping[str, Any]]] = []
+    for check in matches:
+        check_id = check.get("id")
+        state = _read_state(check)
+        check_generation = _state_generation(check)
+        authority_epoch = state.get("authority_epoch") if state is not None else None
+        authority_history_count = (
+            state.get("authority_history_count") if state is not None else None
         )
-    return matches[0] if matches else None
+        run_id = state.get("run_id") if state is not None else None
+        run_attempt = state.get("run_attempt") if state is not None else None
+        pending = state.get("pending") if state is not None else None
+        status = check.get("status")
+        conclusion = check.get("conclusion")
+        run_identity_is_valid = (run_id is None and run_attempt is None) or (
+            type(run_id) is int
+            and run_id > 0
+            and type(run_attempt) is int
+            and run_attempt > 0
+        )
+        result_is_valid = (
+            (status == "in_progress" and conclusion is None)
+            or (status == "completed" and conclusion in {"success", "failure"})
+        )
+        if not (
+            type(check_id) is int
+            and check_id > 0
+            and check_generation is not None
+            and check_generation.head == head_sha
+            and type(authority_epoch) is int
+            and authority_epoch >= 0
+            and type(authority_history_count) is int
+            and authority_history_count >= 0
+            and (pending is None or pending is True)
+            and run_identity_is_valid
+            and result_is_valid
+        ):
+            raise DuplicateCustomCheckError(
+                f"duplicate custom CheckRuns for {spec.context} on {head_sha}"
+            )
+        recoverable.append((check_id, check))
+    return max(recoverable, key=lambda item: item[0])[1]
 
 
 def _state_summary(
