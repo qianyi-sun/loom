@@ -601,6 +601,7 @@ spec:
         - podSelector: { matchLabels: { app: loom-llm-gateway } }
         - podSelector: { matchLabels: { app: loom-service } }
         - podSelector: { matchLabels: { app: loom-family-orchestrator } }
+        - podSelector: { matchLabels: { app: loom-pipeline-orchestrator } }
         - podSelector: { matchLabels: { app: loom-egress-xds } }
       ports:
         - { port: 6432, protocol: TCP }
