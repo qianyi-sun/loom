@@ -47,6 +47,11 @@ def test_all_tables_exist(postgres_url: str) -> None:
                 "worker_pool_autoscaler_policies",
                 "dev_instances",
                 "artifacts", "artifact_lineage_edges",
+                "pipeline_runs", "pipeline_stage_runs",
+                "pipeline_stage_dependencies", "pipeline_fanout_expansions",
+                "execution_attempts", "pipeline_events",
+                "pipeline_terminal_snapshots",
+                "pipeline_acceptance_preflight_prerequisites",
                 "alembic_version"}
     assert expected.issubset(names)
 

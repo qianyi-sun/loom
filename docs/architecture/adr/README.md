@@ -7,6 +7,11 @@ they don't get rewritten; supersede with a new ADR if needed.
 
 ## Records
 
+- **[pipeline-run-graph-v1.md](pipeline-run-graph-v1.md)** — accepted
+  official-Recipe-only Pipeline RunGraph v1 contract: immutable graph
+  snapshots, container plus automatic outcome-gate nodes, manifest fan-out,
+  PipelineRun/StageRun/ExecutionAttempt separation from Trial, and explicit
+  merge-versus-deployment authority.
 - **[env-domain-topology.md](env-domain-topology.md)** — accepted single-origin
   environment routing: `/dev`, `/staging`, and `/prod`, with explicit
   path-prefix isolation requirements and no environment subdomains.
