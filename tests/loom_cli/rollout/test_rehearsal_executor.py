@@ -763,18 +763,76 @@ def test_registry_rehearsal_uses_preflight_published_digest_without_kind() -> No
 
     executor = IsolatedRehearsalExecutor(run=run)
     assert executor._load_images(plan, (name,)) is True
-    assert executor._runtime_image_ids(plan, (name,)) == {
-        name: (expected, manifest_digest)
-    }
+    assert executor._runtime_image_ids(plan, (name,)) == {name: (expected, manifest_digest)}
     assert not any(command and command[0] == "kind" for command in calls)
     assert not any(command[:2] in {("docker", "tag"), ("docker", "push")} for command in calls)
     manifest = _database_pod_manifest(plan)
     containers = manifest["spec"]["containers"]
     assert containers[0]["image"] == (
-        "192.168.50.13:5000/loom-rehearsal-postgres@"
-        + manifest_digests["loom-rehearsal-postgres"]
+        "192.168.50.13:5000/loom-rehearsal-postgres@" + manifest_digests["loom-rehearsal-postgres"]
     )
     assert all(container["imagePullPolicy"] == "IfNotPresent" for container in containers)
+
+
+def test_registry_rehearsal_accepts_provenance_index_without_kind() -> None:
+    plan = replace(
+        _plan(),
+        container_registry="192.168.50.13:5000",
+        container_registry_push="localhost:5000",
+        registry_digests=_plan().image_digests,
+    )
+    name = "loom-control-plane"
+    expected = plan.image_digests[name]
+    workload_digest = "sha256:" + "a" * 64
+    attestation_digest = "sha256:" + "b" * 64
+    workload = {
+        "digest": workload_digest,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "platform": {"architecture": "amd64", "os": "linux"},
+    }
+    attestation = {
+        "annotations": {
+            "vnd.docker.reference.digest": workload_digest,
+            "vnd.docker.reference.type": "attestation-manifest",
+        },
+        "digest": attestation_digest,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "platform": {"architecture": "unknown", "os": "unknown"},
+    }
+    calls: list[tuple[str, ...]] = []
+
+    def run(argv, _payload, _timeout):
+        command = tuple(argv)
+        calls.append(command)
+        if command[:3] == ("docker", "image", "inspect"):
+            return subprocess.CompletedProcess(argv, 0, expected + "\n", "")
+        if command[:3] == ("docker", "manifest", "inspect"):
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                json.dumps([{"Descriptor": workload}, {"Descriptor": attestation}]),
+                "",
+            )
+        if command[:3] == ("docker", "buildx", "imagetools"):
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                json.dumps(
+                    {
+                        "digest": expected,
+                        "manifests": [workload, attestation],
+                        "mediaType": "application/vnd.oci.image.index.v1+json",
+                        "schemaVersion": 2,
+                    }
+                ),
+                "",
+            )
+        raise AssertionError(command)
+
+    executor = IsolatedRehearsalExecutor(run=run)
+    assert executor._load_images(plan, (name,)) is True
+    assert executor._runtime_image_ids(plan, (name,)) == {name: (expected, expected)}
+    assert not any(command and command[0] == "kind" for command in calls)
 
 
 def _runtime_binding_run(
