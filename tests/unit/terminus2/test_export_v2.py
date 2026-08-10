@@ -29,9 +29,9 @@ from loom_service.delivery_export_tb2_v2 import (
     Tb2V2ExportError,
     build_per_trial_v2_bundle,
     build_terminal_transcript,
-    scan_execution_trajectory_for_private_path_keystrokes,
     parse_trajectory_events,
     resolve_native_artifacts,
+    scan_execution_trajectory_for_private_path_keystrokes,
     validate_v2_eligibility,
     validate_v2_joins,
 )

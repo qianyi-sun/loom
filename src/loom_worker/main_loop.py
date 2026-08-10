@@ -68,7 +68,6 @@ from loom.trajectory.storage import (
     bundle_file_metadata_sha256,
 )
 from loom.trial.workspace import (
-    TB21_AGENT_WORKSPACE_POLICY,
     WorkspaceStagingPolicy,
     require_tb21_workspace_staging_policy,
     resolve_trial_workspace_staging_policy,
