@@ -16,8 +16,10 @@ from psycopg.errors import InsufficientPrivilege
 from sqlalchemy import Engine, create_engine, inspect, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError, ProgrammingError
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from loom.db.schema import Task, Team, TeamQuota, Trial
+from loom_capacity_guard.schema_startup import assert_capacity_guard_schema_at_head
 
 EXPECTED_GUARD_TABLES = {
     "capacity_guard_alembic_version",
@@ -32,6 +34,17 @@ def _value(database: dict[str, object], key: str) -> str:
     value = database[key]
     assert isinstance(value, str)
     return value
+
+
+@pytest.mark.asyncio
+async def test_guard_schema_startup_returns_numeric_head(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    engine = create_async_engine(_value(capacity_guard_database, "migrator_url"))
+    try:
+        assert await assert_capacity_guard_schema_at_head(engine) == 1
+    finally:
+        await engine.dispose()
 
 
 @contextmanager

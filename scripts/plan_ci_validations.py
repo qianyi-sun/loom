@@ -249,6 +249,7 @@ def plan_validations(
         "config/loom-schema.toml",
     }
     integration_prefixes = (
+        "capacity_guard_migrations/",
         "src/",
         "packages/",
         "migrations/",

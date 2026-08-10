@@ -9,6 +9,10 @@ from loom_capacity_guard.contracts import (
     canonical_digest,
     seal_requirements,
 )
+from loom_capacity_guard.schema_startup import (
+    CapacityGuardSchemaNotAtHeadError,
+    assert_capacity_guard_schema_at_head,
+)
 from loom_capacity_guard.store import (
     CapacityGuardStore,
     CapacityGuardStoreError,
@@ -20,6 +24,7 @@ from loom_capacity_guard.store import (
 
 __all__ = [
     "CapacityGuardContractError",
+    "CapacityGuardSchemaNotAtHeadError",
     "CapacityGuardStore",
     "CapacityGuardStoreError",
     "GuardDataIntegrityError",
@@ -29,6 +34,7 @@ __all__ = [
     "GuardReplayConflictError",
     "ProtectedAttemptV1",
     "SealedRequirementsV1",
+    "assert_capacity_guard_schema_at_head",
     "canonical_bytes",
     "canonical_digest",
     "seal_requirements",
