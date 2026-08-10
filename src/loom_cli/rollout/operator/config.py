@@ -128,7 +128,7 @@ _ENVIRONMENT_AUTHORITIES: dict[EnvironmentShortName, RolloutEnvironmentAuthority
         cp_url="http://127.0.0.1:18081",
         config_path=Path("/etc/loom/staging-rollout.toml"),
         candidate_runtime_root=Path("/opt/loom-staging-runner/candidates"),
-        candidate_cluster_config=Path("deploy/environments/staging.cluster.toml"),
+        candidate_cluster_config=Path("deploy/environments/staging.multinode.cluster.toml"),
         state_root=Path("/var/lib/loom-staging-rollout"),
         runtime_root=Path("/run/loom-staging-rollout"),
         rollout_root=Path("/data/loom-staging"),

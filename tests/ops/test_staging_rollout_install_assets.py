@@ -86,7 +86,7 @@ def test_config_template_is_non_secret_and_fixed_to_merged_dev() -> None:
     assert config["runner_repo"] == ("/opt/loom-staging-runner/candidates/__SOURCE_SHA__/repo")
     assert config["cluster_config_path"] == (
         "/opt/loom-staging-runner/candidates/__SOURCE_SHA__/repo/"
-        "deploy/environments/staging.cluster.toml"
+        "deploy/environments/staging.multinode.cluster.toml"
     )
     assert config["expect_admin_token_fingerprint"] == "__ADMIN_TOKEN_FINGERPRINT__"
     assert config["smoke_on_behalf_team_id"] == "__SMOKE_ON_BEHALF_TEAM_ID__"
@@ -97,7 +97,7 @@ def test_config_template_is_non_secret_and_fixed_to_merged_dev() -> None:
 
 def test_repo_configs_no_longer_reference_qianyi_private_deploy_key() -> None:
     files = [
-        REPO_ROOT / "deploy/environments/staging.cluster.toml",
+        REPO_ROOT / "deploy/environments/staging.multinode.cluster.toml",
         REPO_ROOT / "deploy/worker-pools/gb10/ssh_config",
     ]
     for path in files:

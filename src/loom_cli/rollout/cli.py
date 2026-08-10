@@ -175,7 +175,7 @@ _ROLLOUT_PRESETS: dict[str, RolloutPreset] = {
         namespace=_STAGING_NAMESPACE,
         environment="staging",
         cp_url="http://127.0.0.1:18081",
-        cluster_config_path=Path("deploy/environments/staging.cluster.toml"),
+        cluster_config_path=Path("deploy/environments/staging.multinode.cluster.toml"),
         backup_manifest_path=Path(
             "/data/loom-staging/backups/latest/backup-manifest.json",
         ),
@@ -660,7 +660,9 @@ def _read_bounded_nofollow_text(
 
 
 def _cluster_config_is_protected_or_unsafe(path: str) -> bool:
-    known_staging_config = _REPO_ROOT / "deploy" / "environments" / "staging.cluster.toml"
+    known_staging_config = (
+        _REPO_ROOT / "deploy" / "environments" / "staging.multinode.cluster.toml"
+    )
     try:
         if _lexical_absolute_path(path) == str(known_staging_config):
             return True

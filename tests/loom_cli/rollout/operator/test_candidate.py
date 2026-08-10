@@ -39,7 +39,9 @@ def make_config(runner_repo: Path) -> OperatorConfig:
         runtime_root=Path("/run/loom-staging-rollout"),
         rollout_root=Path("/data/loom-staging"),
         kubeconfig_path=Path("/var/lib/loom-staging-rollout/kubeconfig"),
-        cluster_config_path=runner_repo / "deploy/environments/staging.cluster.toml",
+        cluster_config_path=(
+            runner_repo / "deploy/environments/staging.multinode.cluster.toml"
+        ),
         admin_token_source="file:/var/lib/loom-staging-rollout/credentials/admin-token",
         worker_token_source="file:/var/lib/loom-staging-rollout/credentials/worker-token",
         service_token_source="file:/var/lib/loom-staging-rollout/credentials/service-token",
