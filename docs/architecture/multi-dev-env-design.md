@@ -1,17 +1,29 @@
 # Multiple per-developer development environments
 
-Status: repository implementation complete; live activation remains an
-operator change. See `deploy/dev-fleet/README.md` and
-`docs/architecture/global-dev-fleet-autoscaler.md`.
+Status: target contract approved. The earlier lifecycle implementation is
+inert and requires convergence onto Packages 2–5 of
+`docs/architecture/global-fleet-capacity-manager-design.md`; live activation
+is not authorized.
 
 Refs: #1178, #1192, #1193, #906.
 
 ## User contract
 
-`loom service up` is the local Docker Compose workflow. It intentionally has
-no `dev`, `staging`, or `production` selector.
+`loom service up` always requires an explicit target. Local Compose remains
+source-fresh, while a personal shared-fleet target seals and submits the
+current allowed source contexts to the trusted personal-dev candidate
+pipeline:
 
-Shared-fleet environments use an explicit, authenticated lifecycle:
+```text
+loom service up --environment local
+loom service up --environment dev-<name> [--candidate <digest>]
+```
+
+Staging and production selectors route only to their existing protected
+rollout authorities. They never accept local or personal-dev-only source.
+
+The existing `loom dev` commands remain lower-level authenticated lifecycle
+interfaces:
 
 ```text
 loom dev create <name> [--min-slots N] [--max-slots N] [--no-wait]
@@ -50,12 +62,19 @@ admin. Cross-owner detail and deletion return 404. Mutations require a real
 submitting user; legacy shared team credentials and internal workers cannot
 create an environment.
 
-## Shared data plane with per-instance authority
+## Shared infrastructure with per-instance authority
 
-One operator-owned `loom-dev-shared` namespace runs the development Postgres
-and MinIO servers. Per-instance manifests contain only a migration Job plus
-control-plane, gateway, service, Services, and Ingress. They never render
-Postgres, MinIO, persistent volumes, or inline secrets.
+One operator-owned `loom-dev` namespace runs the trusted development lifecycle
+service, global capacity manager, candidate-builder coordinator, management
+PostgreSQL, shared application PostgreSQL, and shared MinIO. It is
+infrastructure, not a static shared application or capacity subject. There is
+no `loom-dev-shared` namespace.
+
+Per-instance manifests use `loom-dev-<name>` and contain the candidate
+frontend, migration Job, Control Plane, Gateway, Loom Service, Services, and
+Ingress, plus a trusted capacity agent and claim guard installed independently
+from the candidate. They never render PostgreSQL, MinIO, persistent volumes,
+shared-root credentials, or inline secrets.
 
 Logical isolation is enforced by separate authorities, not naming alone:
 
@@ -72,6 +91,13 @@ Logical isolation is enforced by separate authorities, not naming alone:
   disable service-account token mounting, run as non-root, drop capabilities,
   disallow privilege escalation, and use the runtime-default seccomp profile.
 
+Arbitrary committed, uncommitted, and permitted untracked feature source is
+sealed by content digest and built only in an attempt-scoped restricted
+sandbox. The trusted pipeline validates infrastructure safety and publishes an
+immutable `personal-dev-only` source/image/profile attestation; it does not
+assert feature correctness. Personal candidates cannot be promoted to staging
+or production.
+
 After migration, the service copies only the requesting user, current team,
 quota policy, membership, and the hash of the credential used for creation
 into the isolated database. It does not copy raw credentials or unrelated
@@ -80,35 +106,34 @@ endpoint, and normal password login remains possible.
 
 ## Capacity model
 
-Each environment has a local external-Slurm autoscaler policy. Its
-`max_slots` is a demand ceiling, not a reservation. A fourth developer does
-not need a code or configuration allow-list change, and all environments may
-request the full development burst ceiling.
+Each personal environment is a subject of the one global capacity manager
+shared with staging and production. Its `max_slots` is a demand ceiling, not a
+reservation. A fourth developer needs no code or configuration allow-list
+change, and all personal environments share the development tier and owner
+quotas.
 
-Exactly one submit-host supervisor reads the complete registry cohort and
-each instance database's pool-scoped demand/capacity observation. It updates
-the transactional global lease authority and passes the resulting
-candidate/generation-bound grant to each existing Slurm reconciler. The grant
-is the only development scale-up authority:
+Trusted environment agents publish demand and enforce protected claim
+admission. The manager performs one allocation across `oldlab` and `gb10` and
+publishes candidate/generation-bound grants. One pool-local executor per Slurm
+controller applies only its pool's fenced intents:
 
 ```text
 registry + per-instance demand + lease observations
                          |
                          v
-          one global dev capacity transaction
+          one global fleet allocation transaction
                          |
-             exact, expiring grants
+             exact grants and launch permits
                          |
                          v
-          existing per-environment Slurm actuators
+             pool-local Slurm executors
 ```
 
 Missing, expired, or mismatched grants clamp desired capacity to zero even
-when work is queued. Pending Slurm jobs are cancelled immediately; active
-workers are fenced to drain and remain charged until terminal observation.
-This is why the global authority exists: the per-environment autoscaler owns
-worker mechanics but cannot make an atomic decision across every developer's
-simultaneous request.
+when work is queued. Pending Loom submissions are cancelled only with complete
+ownership proof; active workers are fenced to drain and remain charged until
+terminal observation. No per-environment allocator or autoscaler may raise
+capacity beside the global writer.
 
 Worker env files are owner-only, use a path derived from the environment, and
 are reusable only when operation epoch, generation, full candidate SHA, and
@@ -150,9 +175,10 @@ race; the caller waits or resumes creation first.
 
 ## Activation boundary
 
-Repository completeness is not live readiness. Activation still requires an
-approved candidate, explicit global and pending budgets, wildcard DNS/TLS,
-fixture credentials and storage, namespace/pod-exec RBAC, submit-host Slurm
-access, a manual zero/dry-run, rollback evidence, and the owning operations
-gate in #906. Developer commands never install units, edit DNS, or raise the
-global budget.
+Repository completeness is not live readiness. Activation still requires all
+Packages 2–5, explicit global and pending budgets, wildcard DNS/TLS, fixture
+credentials and storage, protected database roles, isolated-builder and
+namespace RBAC, both pool-local executors, a fleet-wide legacy-writer freeze
+and adoption proof, zero-capacity dry runs, rollback evidence, #896, and the
+re-scoped operations gate in #906. Developer commands never install units,
+edit DNS, disable a legacy writer, or raise the executable global ceiling.

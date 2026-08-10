@@ -1,9 +1,11 @@
 # Global Fleet Capacity Manager
 
 The global fleet capacity manager is the single allocation authority for every
-Loom environment. It receives demand from production, staging, shared
-development, and every per-person development deployment, then calculates one
-fleet-wide result across the physical `gb10` and `oldlab` pools.
+Loom application environment. It receives demand from production, staging,
+and every per-person development deployment, then calculates one fleet-wide
+result across the physical `gb10` and `oldlab` pools. The shared `loom-dev`
+namespace hosts trusted infrastructure and is not itself an application or
+capacity subject.
 
 The detailed approved design is
 [Global Fleet Capacity Manager Design](global-fleet-capacity-manager-design.md).

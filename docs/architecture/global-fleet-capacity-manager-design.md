@@ -13,8 +13,15 @@ consumes Loom-managed OLDLAB or GB10 worker capacity:
 
 - `production`;
 - `staging`;
-- the shared `development` environment; and
-- every dynamic `dev-<name>` environment.
+- every personal `dev-<name>` environment.
+
+The Kubernetes namespace `loom-dev` is the trusted shared development
+infrastructure plane, not another application environment. It contains the
+development lifecycle service, global manager, candidate-builder coordinator,
+management PostgreSQL, shared application PostgreSQL, and shared MinIO. A
+personal application deployment runs in `loom-dev-<name>`. There is no
+`loom-dev-shared` namespace and no static shared `development` application
+subject.
 
 The manager is the only allocation writer. It makes one resource-aware,
 priority-aware decision across both physical pools and publishes fenced,
@@ -42,8 +49,8 @@ and controller-specific supervision.
 
 Those mechanics do not yet constitute a correct global allocation system:
 
-- production, staging, shared development, and dynamic development still have
-  independent allocation paths;
+- production, staging, and personal development still have independent
+  allocation paths;
 - the current global development authority covers only development identities
   and uses a submit-host SQLite ledger;
 - dynamic development currently registers one logical `dev-<name>` pool
@@ -101,7 +108,8 @@ Slurm installations.
 ## Terminology
 
 - **Environment**: a control-plane identity such as `production`, `staging`,
-  `development`, or `dev-alice`.
+  or `dev-alice`. The shared `loom-dev` infrastructure namespace is not an
+  environment subject.
 - **Subject identity**: the immutable UUID and lifecycle incarnation behind an
   environment display name. Names are never fencing keys by themselves.
 - **Capacity account**: the fairness and quota identity. A dynamic development
@@ -321,13 +329,12 @@ partition, node, or envelope fields. Dynamic policies and the dev-instance
 registry change in the same management-database transaction so there is no
 second capacity source of truth.
 
-Shared and dynamic development policy requires both `oldlab` and `gb10`
-profiles. A user, candidate update, or ordinary shared-development rollout
-cannot disable either pool; task requirements choose or pin where work is
-eligible. An operator may mark a physical pool globally ineligible for
-maintenance through a new audited pool-configuration generation, which makes
-compatible work wait or use the other pool without rewriting each
-environment's required profile set.
+Every personal development policy requires both `oldlab` and `gb10` profiles.
+A user or candidate update cannot disable either pool; task requirements
+choose or pin where work is eligible. An operator may mark a physical pool
+globally ineligible for maintenance through a new audited pool-configuration
+generation, which makes compatible work wait or use the other pool without
+rewriting each environment's required profile set.
 
 ### Priority-tier policy
 
@@ -918,7 +925,7 @@ development tier -> immutable owner account -> owner's environments
 ```
 
 Creating more environment names therefore cannot create more top-level fair
-shares. Static shared development has one operator-defined service account.
+shares.
 
 Progressive filling compares delivered concurrent-trial slots, first across
 accounts and then across their environments. During the minimum phase it fills
@@ -1344,6 +1351,46 @@ cases.
 
 ## Development Environment and Candidate Lifecycle
 
+### Namespace and shared-service topology
+
+`loom-dev` is the only persistent shared development namespace. It contains
+trusted infrastructure installed from the fleet release:
+
+- the authenticated development lifecycle API;
+- the global capacity manager and management PostgreSQL authority;
+- the personal-candidate builder coordinator;
+- one shared application PostgreSQL service that provisions a distinct login
+  role and database for each personal environment; and
+- one shared MinIO service that provisions distinct bucket-scoped credentials
+  and task, trajectory, and artifact buckets for each personal environment.
+
+The management PostgreSQL database is a separate authority from every
+candidate application database even when both services occupy the same
+namespace. Management and shared-root storage credentials are never mounted
+into a personal namespace or an untrusted build.
+
+Each personal environment runs in exactly `loom-dev-<name>`. That namespace
+contains the candidate frontend, Loom Service, Control Plane, LLM Gateway,
+candidate-scoped migration job, Services, Ingress, and a trusted capacity
+agent/claim guard installed independently from the candidate. It contains no
+PostgreSQL or MinIO server. Its namespace-local credentials can reach only its
+derived database and buckets. Deleting a personal environment cannot delete,
+replace, or mutate an object in `loom-dev`.
+
+Untrusted build execution does not run in `loom-dev`. The coordinator creates
+an attempt-scoped restricted builder sandbox with no service-account token,
+host namespace, host path, Docker socket, management network, Slurm network,
+shared-root credential, or sibling-environment route. The sandbox receives
+only the sealed source input and an attempt-scoped artifact-upload capability,
+and it is deleted after terminal publication or bounded cleanup. Build
+execution may use a transient system-generated namespace, but no second
+persistent shared namespace exists.
+
+There is no static shared `development` application. The historical
+`development` environment is a legacy allocation and rollout input that must
+be frozen, drained, and retired during migration. Feature testing happens in
+personal environments; `loom-dev` remains trusted infrastructure.
+
 ### Physical-pool identity
 
 A dynamic environment's logical identity remains `dev-<name>`. Its worker
@@ -1367,7 +1414,6 @@ target from the current checkout:
 ```text
 loom service up --environment local
 loom service up --environment dev-alice
-loom service up --environment development
 loom service up --environment staging --candidate <immutable-id>
 loom service up --environment production --candidate <immutable-id>
 ```
@@ -1381,22 +1427,35 @@ The selector routes to the correct authority:
 
 - `local` runs the existing local Compose workflow and retains its source-fresh
   `--build` behavior for mutable local `:dev` images;
-- `dev-<name>` snapshots the current allowed build context by default,
-  publishes content-addressed source and image artifacts, then submits their
-  immutable candidate digest to the guarded create-or-update lifecycle;
-- shared development uses its authenticated environment deployment path; and
+- `dev-<name>` seals the current allowed build contexts, submits the immutable
+  source digest to the trusted personal-dev candidate pipeline, and deploys
+  only the exact safety-attested output through the guarded create-or-update
+  lifecycle; and
 - staging and production use their existing protected rollout authorities and
   cannot bypass gates through a Compose or direct-Kubernetes shortcut.
 
 For a personal development environment, `--candidate <digest>` reuses an
-already published immutable candidate and skips a build. Without that option,
+already published immutable personal-dev candidate and skips a build only when
+the caller owns or is explicitly authorized to use it and its attestation,
+protocols, artifacts, and retention state are current. Without that option,
 the CLI stages an immutable source manifest and verifies it before and after
 copying so a concurrently changing checkout fails rather than producing a
 mislabelled artifact. The manifest includes allowed tracked and untracked build
 inputs, records Git commit and dirty state for provenance, and excludes Git
 metadata, ignored outputs, credentials, and paths outside the declared build
-contexts. Dirty source is allowed for personal development and is reported
-prominently; content digest, never a mutable tag or Git label, is authoritative.
+contexts. Committed, uncommitted, and permitted untracked source is allowed for
+personal development; the content digest, never a mutable tag, branch, Git
+label, or base-commit check result, is authoritative.
+
+The trusted personal-dev pipeline attests infrastructure safety, not feature
+correctness. Mandatory gates validate the sealed input, build policy, builder
+isolation, base-image and dependency constraints, secret exclusion, artifact
+and image scanning, protocol compatibility, immutable publication, and exact
+source/image/profile digests. Ordinary feature tests may fail because testing
+unfinished behavior is the purpose of the environment. The resulting
+attestation is explicitly `personal-dev-only`; no staging or production
+authority accepts it. A base commit's CI status never approves additional
+working-tree content.
 
 Snapshotting never follows a symlink outside an allowed context, rejects path
 traversal and unsupported special files, enforces per-owner file-count and byte
@@ -1417,14 +1476,14 @@ update another owner's personal environment merely by spelling its name, and a
 lost ownership/operation-epoch race does not mutate the environment. Any
 unreferenced content-addressed result enters normal bounded garbage collection.
 
-Shared development, staging, and production accept only the exact candidate
-forms allowed by their existing authenticated rollout policy. In particular,
-this command does not turn a dirty local checkout into a staging or production
-candidate. Candidate, `min_slots`, `max_slots`, and the expected environment
-operation epoch are submitted in one lifecycle request, so concurrent users
-cannot apply the image from one invocation and the capacity from another.
-Repeating the same content and policy is idempotent and does not create a new
-deployment generation.
+Staging and production accept only the exact candidate forms allowed by their
+existing authenticated rollout policy. In particular, this command does not
+turn a personal-dev-only candidate or dirty local checkout into a staging or
+production candidate. Candidate, `min_slots`, `max_slots`, and the expected
+environment operation epoch are submitted in one lifecycle request, so
+concurrent users cannot apply the image from one invocation and the capacity
+from another. Repeating the same content and policy is idempotent and does not
+create a new deployment generation.
 
 Existing `loom dev create`, `status`, `list`, and `destroy` commands remain
 lower-level lifecycle interfaces. A capacity/update operation is added so a
@@ -1529,8 +1588,8 @@ attestation, control-plane and database compatibility, trusted capacity-agent
 and claim-guard protocol compatibility, scoped token/binding material, and
 every physical-pool worker profile required by the environment policy. An
 operator environment-policy migration that changes a non-development static
-environment's enabled pool set does so in the same reviewed operation. Shared
-and dynamic development always require OLDLAB and GB10; missing artifacts for
+environment's enabled pool set does so in the same reviewed operation.
+Personal development always requires OLDLAB and GB10; missing artifacts for
 either cannot be hidden by a rollout or user candidate silently dropping the
 pool.
 
@@ -2285,12 +2344,15 @@ their prerequisites are proven:
    rate buckets, bootstrap registration, controller-local journals, ownership
    proof, and OLDLAB/GB10 executor dry runs. It depends on protected admission
    contracts and runs with the executable new-capacity ceiling fixed at zero.
-4. **Development lifecycle and candidate isolation** adds per-instance
-   immutable candidates, source snapshot/build isolation, physical dual-pool
-   profiles, update/delete state machines, quotas, and the explicit
-   `loom service up --environment` contract. It may be developed alongside
-   executor internals only after their shared candidate/profile and protected
-   binding contracts are fixed; it cannot activate capacity.
+4. **Development lifecycle and candidate isolation** converges the persistent
+   shared infrastructure into `loom-dev`, removes `loom-dev-shared` and the
+   static shared `development` application, and adds per-instance immutable
+   personal-dev-only candidates, source snapshot/build isolation, complete
+   `loom-dev-<name>` runtimes, physical dual-pool profiles, update/delete state
+   machines, quotas, and the explicit `loom service up --environment`
+   contract. It may be developed alongside executor internals only after their
+   shared candidate/profile and protected binding contracts are fixed; it
+   cannot activate capacity.
 5. **Fleet migration and activation** removes the legacy mutation authorities
    only through the Phase 3 freeze/adoption protocol, then performs bounded
    activation. It depends on all earlier packages, their cross-version tests,
@@ -2646,9 +2708,8 @@ A bounded test fleet must demonstrate:
 11. foreign and forged Loom-looking Slurm jobs remain untouched;
 12. replayed reports and release acknowledgements do not double-allocate;
 13. a two-pool migration cannot admit work during mixed authority;
-14. one allocation epoch accounts for production, staging, shared development,
-    and dynamic development, with shared development eligible on both pools;
-    and
+14. one allocation epoch accounts for production, staging, and every dynamic
+    development environment across both pools; and
 15. a mixed-mode rollback admits no new pinned or flexible work, then either
     activates one verified fleet-wide rollback protocol or remains safe
     no-scale.
@@ -2708,10 +2769,11 @@ remains the non-exclusive worker-containment evidence gate.
 The design is implemented when all of the following are true:
 
 1. One fenced manager is the only allocation writer for production, staging,
-   shared development, and dynamic development.
+   and dynamic development.
 2. Exactly one executor per physical pool applies grants locally.
-3. Shared and dynamic development have physical OLDLAB and GB10 policies and no
-   synthetic pool allocation authority.
+3. Dynamic development has physical OLDLAB and GB10 policies and no synthetic
+   pool allocation authority; `loom-dev` is infrastructure, not a capacity
+   subject.
 4. `min_slots` is configurable, defaults to zero, and is aggregate across pools
    and generations.
 5. No pool weights are present in user or operator allocation configuration.
@@ -2762,3 +2824,11 @@ The design is implemented when all of the following are true:
 25. Each physical pool has one immutable fleet-state topology and envelope;
     environment profiles may only reference or narrow it, and conflicting
     legacy environment copies block even shadow allocation until reconciled.
+26. `loom-dev` is the only persistent shared development namespace;
+    `loom-dev-shared` is absent, every personal runtime is isolated in
+    `loom-dev-<name>`, and personal deletion cannot mutate shared
+    infrastructure.
+27. Arbitrary personal source is deployed only after the exact sealed content
+    and produced artifacts receive a `personal-dev-only` safety attestation;
+    no base-commit CI result or personal attestation can authorize staging or
+    production.
