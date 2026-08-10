@@ -16,6 +16,8 @@ from loom_capacity_manager.contracts import (
     FleetManifestV1,
     NodeEnvelopeV1,
     ObservedCommitmentV1,
+    PackingRequestV1,
+    PackingShapeRequestV1,
     PoolObservationV1,
     ProfileReferenceV1,
     ResourceVectorV1,
@@ -90,6 +92,7 @@ def shape(
     per_node: tuple[ResourceVectorV1, ...] | None = None,
     compatible_domain_ids: tuple[str, ...] = ("gb10-arm", "oldlab-x86"),
     capabilities: tuple[str, ...] = ("cpu",),
+    placement_constraints: dict[str, str] | None = None,
     warm_approved: bool = True,
 ) -> WorkerShapeV1:
     resolved_total = total or resource_vector(slots=concurrency_slots)
@@ -101,6 +104,7 @@ def shape(
         node_resources=resolved_per_node,
         compatible_domain_ids=compatible_domain_ids,
         capabilities=capabilities,
+        placement_constraints=placement_constraints or {},
         warm_approved=warm_approved,
     )
 
@@ -218,14 +222,10 @@ def valid_profile_payload(
         "pool_digest": pool.pool_digest,
         "protocol_generation": pool.protocol_generation,
         "protocol_digest": pool.protocol_digest,
-        "eligible_resource_domains": tuple(
-            domain.domain_id for domain in pool.resource_domains
-        ),
+        "eligible_resource_domains": tuple(domain.domain_id for domain in pool.resource_domains),
         "worker_shapes": (
             shape(
-                compatible_domain_ids=tuple(
-                    domain.domain_id for domain in pool.resource_domains
-                )
+                compatible_domain_ids=tuple(domain.domain_id for domain in pool.resource_domains)
             ).model_dump(mode="python"),
         ),
     }
@@ -365,9 +365,7 @@ def pool_observation(
     pool_id: str = "gb10",
     commitment_ids: tuple[str, ...] = (),
 ) -> PoolObservationV1:
-    reporter = (
-        POOL_REPORTER_GB10_ID if pool_id == "gb10" else POOL_REPORTER_OLDLAB_ID
-    )
+    reporter = POOL_REPORTER_GB10_ID if pool_id == "gb10" else POOL_REPORTER_OLDLAB_ID
     return PoolObservationV1(
         pool_id=pool_id,
         pool_generation=1,
@@ -402,4 +400,83 @@ def shadow_epoch(allocation_input: Any) -> ShadowEpochV1:
         next_fairness_cursors=allocation_input.fairness_cursors,
         hypothetical_launch_rank=(),
         blockers=(),
+    )
+
+
+def packing_request(
+    *,
+    nodes: tuple[NodeEnvelopeV1, ...] | None = None,
+    shapes: tuple[WorkerShapeV1, ...] = (),
+    fixed_commitments: tuple[ObservedCommitmentV1, ...] = (),
+    reverse: bool = False,
+) -> PackingRequestV1:
+    resolved_nodes = nodes or (node("node-a"), node("node-b"))
+    desired = tuple(
+        PackingShapeRequestV1(
+            instance_id=f"{item.shape_id}-{index:04d}",
+            shape=item,
+        )
+        for index, item in enumerate(shapes)
+    )
+    if reverse:
+        resolved_nodes = tuple(reversed(resolved_nodes))
+        desired = tuple(reversed(desired))
+    return PackingRequestV1(
+        pool_id="gb10",
+        domains=(
+            {
+                "schema_version": 1,
+                "domain_id": "gb10-arm",
+                "architecture": "arm64",
+                "partition": "loom",
+                "nodes": resolved_nodes,
+                "topology_constraints": {},
+            },
+        ),
+        fixed_commitments=fixed_commitments,
+        desired_shapes=desired,
+    )
+
+
+def fragmented_request(*, reverse: bool = False) -> PackingRequestV1:
+    first = shape(
+        "large",
+        total=resource_vector(slots=1, cpu_millicores=8, memory_bytes=4),
+        per_node=(resource_vector(slots=1, cpu_millicores=8, memory_bytes=4),),
+        compatible_domain_ids=("gb10-arm",),
+    )
+    second = shape(
+        "balanced",
+        total=resource_vector(slots=1, cpu_millicores=4, memory_bytes=4),
+        per_node=(resource_vector(slots=1, cpu_millicores=4, memory_bytes=4),),
+        compatible_domain_ids=("gb10-arm",),
+    )
+    return packing_request(
+        nodes=(
+            node("node-a", cpu=8, memory=4, slots=2),
+            node("node-b", cpu=4, memory=8, slots=2),
+        ),
+        shapes=(first, second),
+        reverse=reverse,
+    )
+
+
+def request_with_old_generation_commitment_over_limit() -> PackingRequestV1:
+    commitment = ObservedCommitmentV1(
+        commitment_id="old-worker-a",
+        physical_identity="old-worker-a",
+        subject_id=SUBJECT_ID,
+        subject_incarnation=SUBJECT_INCARNATION,
+        deployment_generation=1,
+        pool_id="gb10",
+        pool_generation=1,
+        profile_id="old-profile",
+        shape_id="old-shape",
+        resources=resource_vector(slots=2, cpu_millicores=16, memory_bytes=16),
+        state="observed",
+        node_ids=("node-a",),
+    )
+    return packing_request(
+        nodes=(node("node-a", cpu=8, memory=8, slots=1),),
+        fixed_commitments=(commitment,),
     )

@@ -163,8 +163,7 @@ def checked_add_vectors(left: ResourceVectorV1, right: ResourceVectorV1) -> Reso
         memory_bytes=checked_add(left.memory_bytes, right.memory_bytes),
         gpu_count=checked_add(left.gpu_count, right.gpu_count),
         generic={
-            key: checked_add(left.generic.get(key, 0), right.generic.get(key, 0))
-            for key in keys
+            key: checked_add(left.generic.get(key, 0), right.generic.get(key, 0)) for key in keys
         },
     )
 
@@ -182,7 +181,10 @@ def vector_fits(required: ResourceVectorV1, available: ResourceVectorV1) -> bool
         and required.cpu_millicores <= available.cpu_millicores
         and required.memory_bytes <= available.memory_bytes
         and required.gpu_count <= available.gpu_count
-        and all(required.generic.get(key, 0) <= available.generic.get(key, 0) for key in required.generic)
+        and all(
+            required.generic.get(key, 0) <= available.generic.get(key, 0)
+            for key in required.generic
+        )
     )
 
 
@@ -203,7 +205,9 @@ class ResourceDomainV1(StrictV1Model):
     domain_id: Identifier
     architecture: Literal["x86_64", "arm64"]
     partition: Identifier
-    nodes: Annotated[tuple[NodeEnvelopeV1, ...], Field(min_length=1, max_length=MAX_NODES_PER_DOMAIN)]
+    nodes: Annotated[
+        tuple[NodeEnvelopeV1, ...], Field(min_length=1, max_length=MAX_NODES_PER_DOMAIN)
+    ]
     topology_constraints: dict[Identifier, Identifier] = Field(default_factory=dict)
 
     @field_validator("nodes")
@@ -303,6 +307,13 @@ class PoolManifestV1(StrictV1Model):
     def _domains(cls, value: tuple[ResourceDomainV1, ...]) -> tuple[ResourceDomainV1, ...]:
         _ensure_unique(value, "domain_id", "domain_id")
         return tuple(sorted(value, key=lambda item: item.domain_id))
+
+    @model_validator(mode="after")
+    def _physical_nodes_are_unique(self) -> PoolManifestV1:
+        node_ids = tuple(node.node_id for domain in self.resource_domains for node in domain.nodes)
+        if len(node_ids) != len(set(node_ids)):
+            raise ValueError("duplicate physical node_id across pool resource domains")
+        return self
 
 
 class FleetManifestV1(StrictV1Model):
@@ -538,9 +549,7 @@ class DemandSnapshotV1(StrictV1Model):
     current_assignments: Annotated[
         tuple[CurrentAssignmentV1, ...], Field(max_length=MAX_ASSIGNMENTS_PER_REPORT)
     ]
-    fixed_claims: Annotated[
-        tuple[FixedClaimV1, ...], Field(max_length=MAX_FIXED_CLAIMS_PER_REPORT)
-    ]
+    fixed_claims: Annotated[tuple[FixedClaimV1, ...], Field(max_length=MAX_FIXED_CLAIMS_PER_REPORT)]
 
     @field_validator("source_observed_at")
     @classmethod
@@ -672,9 +681,7 @@ class PackingRequestV1(StrictV1Model):
 
     @field_validator("fixed_commitments")
     @classmethod
-    def _fixed(
-        cls, value: tuple[ObservedCommitmentV1, ...]
-    ) -> tuple[ObservedCommitmentV1, ...]:
+    def _fixed(cls, value: tuple[ObservedCommitmentV1, ...]) -> tuple[ObservedCommitmentV1, ...]:
         _ensure_unique(value, "commitment_id", "packing commitment_id")
         return tuple(sorted(value, key=lambda item: item.commitment_id))
 
@@ -685,6 +692,13 @@ class PackingRequestV1(StrictV1Model):
     ) -> tuple[PackingShapeRequestV1, ...]:
         _ensure_unique(value, "instance_id", "shape instance_id")
         return tuple(sorted(value, key=lambda item: item.instance_id))
+
+    @model_validator(mode="after")
+    def _physical_nodes_are_unique(self) -> PackingRequestV1:
+        node_ids = tuple(node.node_id for domain in self.domains for node in domain.nodes)
+        if len(node_ids) != len(set(node_ids)):
+            raise ValueError("duplicate physical node_id across packing domains")
+        return self
 
 
 class PackingPlacementV1(StrictV1Model):
@@ -782,9 +796,7 @@ class AllocationInputV1(StrictV1Model):
 
     @property
     def observed_commitment_ids(self) -> tuple[str, ...]:
-        return tuple(
-            sorted(commitment.commitment_id for commitment in self.observed_commitments)
-        )
+        return tuple(sorted(commitment.commitment_id for commitment in self.observed_commitments))
 
     @field_validator("subjects")
     @classmethod

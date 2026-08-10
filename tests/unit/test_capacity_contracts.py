@@ -120,6 +120,17 @@ def test_duplicate_stable_id_is_rejected() -> None:
         FleetManifestV1.model_validate(payload)
 
 
+def test_physical_node_cannot_be_counted_in_multiple_pool_domains() -> None:
+    payload = fleet_payload()
+    gb10 = payload["pools"][0]
+    duplicate_domain = dict(gb10["resource_domains"][0])
+    duplicate_domain["domain_id"] = "gb10-arm-duplicate"
+    gb10["resource_domains"].append(duplicate_domain)
+
+    with pytest.raises(ValidationError, match="duplicate physical node_id"):
+        FleetManifestV1.model_validate(payload)
+
+
 def test_subject_min_slots_defaults_to_zero_and_limits_are_finite() -> None:
     subject = subject_configuration().model_dump(mode="python")
     subject.pop("min_slots")
