@@ -333,6 +333,77 @@ def test_store_loads_one_exact_publication_without_rebuild_or_render(tmp_path: P
     assert loaded.manifests == manifests
 
 
+def test_store_loads_current_publication_beside_historical_schema_four(
+    tmp_path: Path,
+) -> None:
+    store = PreflightArtifactStore(tmp_path / "state")
+    image_tag, images, manifests = _loadable_artifacts()
+    historical = store.publish(
+        candidate_sha="a" * 40,
+        candidate_tree="f" * 40,
+        mutation_epoch=8,
+        images=images,
+        manifests=manifests,
+        migration=_migration(
+            images,
+            image_tag=image_tag,
+            migration_target_revision="0066",
+        ),
+        production_defaults=_production_defaults(),
+        migration_plan_sha256="1" * 64,
+        migration_target_revision="0066",
+        browser_report_schema_sha256="2" * 64,
+    )
+    raw = json.loads(historical.descriptor_path.read_bytes())
+    raw["candidate_sha"] = "d" * 40
+    raw["candidate_tree"] = "e" * 40
+    raw["mutation_epoch"] = 7
+    raw["schema_version"] = 4
+    del raw["container_registry"]
+    del raw["registry_digests"]
+    raw_without_digest = {key: value for key, value in raw.items() if key != "bundle_digest"}
+    historical_digest = (
+        __import__("hashlib")
+        .sha256(
+            json.dumps(raw_without_digest, sort_keys=True, separators=(",", ":")).encode()
+        )
+        .hexdigest()
+    )
+    raw["bundle_digest"] = historical_digest
+    historical.descriptor_path.write_bytes(
+        (json.dumps(raw, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    )
+    historical.descriptor_path.parent.rename(store.root / historical_digest)
+
+    current = store.publish(
+        candidate_sha="a" * 40,
+        candidate_tree="f" * 40,
+        mutation_epoch=8,
+        images=images,
+        manifests=manifests,
+        migration=_migration(
+            images,
+            image_tag=image_tag,
+            migration_target_revision="0066",
+        ),
+        production_defaults=_production_defaults(),
+        migration_plan_sha256="1" * 64,
+        migration_target_revision="0066",
+        browser_report_schema_sha256="2" * 64,
+    )
+
+    loaded = store.load_exact(
+        candidate_sha="a" * 40,
+        candidate_tree="f" * 40,
+        mutation_epoch=8,
+        image_tag=image_tag,
+        namespace="loom-staging",
+        image_run=_docker,
+    )
+
+    assert loaded.publication == current
+
+
 def test_store_rejects_ambiguous_exact_publications(tmp_path: Path) -> None:
     store = PreflightArtifactStore(tmp_path / "state")
     image_tag, images, manifests = _loadable_artifacts()
