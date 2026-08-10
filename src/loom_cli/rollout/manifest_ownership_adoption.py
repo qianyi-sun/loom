@@ -514,22 +514,40 @@ def _project(desired: object, live: object) -> object:
 def _is_scoped_controller_authority(entry: Mapping[str, object], *, identity: str) -> bool:
     manager = entry.get("manager")
     fields_v1 = entry.get("fieldsV1")
-    if entry.get("operation") != "Update" or entry.get("subresource") != "status":
+    if (
+        entry.get("operation") != "Update"
+        or entry.get("subresource") != "status"
+        or entry.get("fieldsType") != "FieldsV1"
+    ):
         return False
     if not isinstance(fields_v1, dict):
         return False
     if manager == "k3s":
         parts = identity.split("|", 3)
+        metadata_fields = fields_v1.get("f:metadata")
+        deployment_revision_fields = {
+            "f:annotations": {"f:deployment.kubernetes.io/revision": {}}
+        }
         return (
             len(parts) == 4
             and (parts[0], parts[1]) in _K3S_STATUS_RESOURCES
+            and entry.get("apiVersion") == parts[0]
             and set(fields_v1) <= {"f:metadata", "f:status"}
-            and "f:status" in fields_v1
+            and isinstance(fields_v1.get("f:status"), dict)
+            and (
+                metadata_fields is None
+                or (
+                    (parts[0], parts[1]) == ("apps/v1", "Deployment")
+                    and metadata_fields == deployment_revision_fields
+                )
+            )
         )
     return (
         manager == "manager"
         and identity == _CNPG_CLUSTER_IDENTITY
+        and entry.get("apiVersion") == "postgresql.cnpg.io/v1"
         and set(fields_v1) == {"f:status"}
+        and isinstance(fields_v1.get("f:status"), dict)
     )
 
 
