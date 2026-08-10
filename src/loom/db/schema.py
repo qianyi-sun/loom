@@ -19,6 +19,7 @@ from sqlalchemy import (
     CheckConstraint,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     LargeBinary,
@@ -2217,6 +2218,663 @@ class Trial(Base):
     )
 
 
+class PipelineRun(Base):
+    """One immutable official-Recipe graph submission (#1211)."""
+
+    __tablename__ = "pipeline_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "submission_policy IN ('ordinary', 'acceptance_authorization_only')",
+            name="pipeline_runs_submission_policy_check",
+        ),
+        CheckConstraint(
+            "state IN ('submitted', 'running', 'cancelling', 'finished')",
+            name="pipeline_runs_state_check",
+        ),
+        CheckConstraint(
+            "result IS NULL OR result IN "
+            "('succeeded', 'partial_failed', 'failed', 'cancelled', 'budget_exhausted')",
+            name="pipeline_runs_result_check",
+        ),
+        CheckConstraint(
+            "(state = 'finished') = (result IS NOT NULL AND finished_at IS NOT NULL)",
+            name="pipeline_runs_terminal_result_check",
+        ),
+        CheckConstraint(
+            "state = 'finished' OR result_reason IS NULL",
+            name="pipeline_runs_result_reason_state_check",
+        ),
+        CheckConstraint(
+            "(official_submission_kind IS NULL AND official_submission_authority_id IS NULL "
+            "AND official_submission_authority_snapshot_digest IS NULL "
+            "AND official_submission_identity_digest IS NULL) OR "
+            "(official_submission_kind IS NOT NULL AND official_submission_authority_id IS NOT NULL "
+            "AND official_submission_authority_snapshot_digest IS NOT NULL "
+            "AND official_submission_identity_digest IS NOT NULL)",
+            name="pipeline_runs_official_origin_group_check",
+        ),
+        CheckConstraint(
+            "(submission_policy = 'acceptance_authorization_only' AND "
+            "acceptance_authorization_id IS NOT NULL AND acceptance_candidate_sha256 IS NOT NULL "
+            "AND recipe_name = 'behavior-recovery-acceptance-preflight' AND recipe_version = 1 "
+            "AND retry_of_pipeline_run_id IS NULL AND retry_from_stage_run_id IS NULL "
+            "AND official_submission_kind IS NULL) OR "
+            "(submission_policy = 'ordinary' AND acceptance_authorization_id IS NULL "
+            "AND acceptance_candidate_sha256 IS NULL)",
+            name="pipeline_runs_submission_origin_check",
+        ),
+        CheckConstraint(
+            "(retry_of_pipeline_run_id IS NULL) = (retry_from_stage_run_id IS NULL)",
+            name="pipeline_runs_retry_group_check",
+        ),
+        CheckConstraint(
+            "official_submission_kind IS NULL OR "
+            "(submission_policy = 'ordinary' AND retry_of_pipeline_run_id IS NULL "
+            "AND retry_from_stage_run_id IS NULL)",
+            name="pipeline_runs_official_not_retry_check",
+        ),
+        CheckConstraint("next_event_seq > 0", name="pipeline_runs_next_event_seq_positive"),
+        CheckConstraint("version >= 0", name="pipeline_runs_version_nonnegative"),
+        UniqueConstraint("team_id", "idempotency_key", name="pipeline_runs_team_idempotency_uidx"),
+        Index(
+            "pipeline_runs_official_identity_uidx",
+            "team_id",
+            "official_submission_kind",
+            "official_submission_identity_digest",
+            unique=True,
+            postgresql_where=text("official_submission_identity_digest IS NOT NULL"),
+        ),
+        Index("pipeline_runs_team_created_idx", "team_id", text("created_at DESC"), "id"),
+        Index("pipeline_runs_state_created_idx", "state", "created_at", "id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    team_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("teams.id"), nullable=False
+    )
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    submission_policy: Mapped[str] = mapped_column(Text, nullable=False)
+    acceptance_authorization_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    acceptance_candidate_sha256: Mapped[str | None] = mapped_column(Text)
+    official_submission_kind: Mapped[str | None] = mapped_column(Text)
+    official_submission_authority_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    official_submission_authority_snapshot_digest: Mapped[str | None] = mapped_column(Text)
+    official_submission_identity_digest: Mapped[str | None] = mapped_column(Text)
+    recipe_name: Mapped[str] = mapped_column(Text, nullable=False)
+    recipe_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    recipe_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    graph_spec_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    graph_spec_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    parameters_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    parameters_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    resolved_inputs_json: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
+    budget_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    request_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'submitted'"))
+    result: Mapped[str | None] = mapped_column(Text)
+    result_reason: Mapped[str | None] = mapped_column(Text)
+    retry_of_pipeline_run_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("pipeline_runs.id", ondelete="RESTRICT"), nullable=True
+    )
+    retry_from_stage_run_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey(
+            "pipeline_stage_runs.id",
+            ondelete="RESTRICT",
+            use_alter=True,
+            name="pipeline_runs_retry_from_stage_fk",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        nullable=True,
+    )
+    cancellation_requested_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    budget_exhausted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+    started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    next_event_seq: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+
+
+class PipelineStageRun(Base):
+    __tablename__ = "pipeline_stage_runs"
+    __table_args__ = (
+        CheckConstraint("node_kind IN ('container', 'gate')", name="pipeline_stage_runs_kind_check"),
+        CheckConstraint(
+            "state IN ('blocked','ready','queued','claimed','running','retry_wait',"
+            "'succeeded','failed','cancelled','skipped')",
+            name="pipeline_stage_runs_state_check",
+        ),
+        CheckConstraint(
+            "(resolved_execution_spec_json IS NULL AND resolved_execution_spec_bytes IS NULL "
+            "AND execution_spec_digest IS NULL) OR "
+            "(resolved_execution_spec_json IS NOT NULL AND resolved_execution_spec_bytes IS NOT NULL "
+            "AND execution_spec_digest IS NOT NULL)",
+            name="pipeline_stage_runs_execution_spec_group_check",
+        ),
+        CheckConstraint(
+            "(resolved_input_bindings_json IS NULL AND resolved_input_bindings_digest IS NULL) OR "
+            "(resolved_input_bindings_json IS NOT NULL AND resolved_input_bindings_digest IS NOT NULL)",
+            name="pipeline_stage_runs_bindings_group_check",
+        ),
+        CheckConstraint(
+            "(resolved_execution_spec_json IS NULL) = (resolved_input_bindings_json IS NULL)",
+            name="pipeline_stage_runs_frozen_groups_together_check",
+        ),
+        CheckConstraint(
+            "(resource_profile_json IS NULL) = (resource_profile_digest IS NULL)",
+            name="pipeline_stage_runs_resource_group_check",
+        ),
+        CheckConstraint(
+            "(request_renderer_json IS NULL) = (request_renderer_digest IS NULL)",
+            name="pipeline_stage_runs_renderer_group_check",
+        ),
+        CheckConstraint(
+            "(fanout_expansion_id IS NULL AND fanout_parameters_json IS NULL "
+            "AND fanout_item_digest IS NULL) OR "
+            "(fanout_expansion_id IS NOT NULL AND fanout_parameters_json IS NOT NULL "
+            "AND fanout_item_digest IS NOT NULL)",
+            name="pipeline_stage_runs_fanout_group_check",
+        ),
+        CheckConstraint(
+            "(node_kind = 'gate' AND gate_subject_stage_run_id IS NOT NULL "
+            "AND resolved_execution_spec_json IS NULL AND resource_profile_json IS NULL "
+            "AND resolved_input_bindings_json IS NULL AND fanout_expansion_id IS NULL "
+            "AND request_renderer_json IS NULL AND failure_policy IS NULL "
+            "AND latest_checkpoint_artifact_id IS NULL AND next_attempt_at IS NULL "
+            "AND claimed_at IS NULL AND started_at IS NULL AND attempt_count = 0) OR "
+            "(node_kind = 'container' AND gate_subject_stage_run_id IS NULL "
+            "AND resource_profile_json IS NOT NULL AND failure_policy IN ('fail_run','continue'))",
+            name="pipeline_stage_runs_kind_fields_check",
+        ),
+        CheckConstraint(
+            "node_kind != 'container' OR NOT (state IN "
+            "('ready','queued','claimed','running','retry_wait','succeeded') OR attempt_count > 0) OR "
+            "(resolved_execution_spec_json IS NOT NULL AND resolved_input_bindings_json IS NOT NULL)",
+            name="pipeline_stage_runs_ready_frozen_check",
+        ),
+        CheckConstraint(
+            "node_kind != 'gate' OR state IN ('blocked','succeeded','skipped')",
+            name="pipeline_stage_runs_gate_state_check",
+        ),
+        CheckConstraint(
+            "node_kind != 'container' OR "
+            "((shard_key = 'singleton') = (fanout_expansion_id IS NULL))",
+            name="pipeline_stage_runs_shard_expansion_check",
+        ),
+        CheckConstraint(
+            "attempt_count BETWEEN 0 AND 3", name="pipeline_stage_runs_attempt_count_range"
+        ),
+        CheckConstraint(
+            "state IN ('succeeded','failed','cancelled','skipped') "
+            "OR (domain_outcome IS NULL AND reason_code IS NULL)",
+            name="pipeline_stage_runs_terminal_fields_check",
+        ),
+        CheckConstraint(
+            "domain_outcome IS NULL OR state = 'succeeded'",
+            name="pipeline_stage_runs_outcome_state_check",
+        ),
+        CheckConstraint("version >= 0", name="pipeline_stage_runs_version_nonnegative"),
+        CheckConstraint(
+            "(state IN ('succeeded','failed','cancelled','skipped')) = (finished_at IS NOT NULL)",
+            name="pipeline_stage_runs_terminal_timestamp_check",
+        ),
+        UniqueConstraint(
+            "pipeline_run_id", "node_key", "shard_key", name="pipeline_stage_runs_identity_uidx"
+        ),
+        UniqueConstraint("pipeline_run_id", "id", name="pipeline_stage_runs_run_id_uidx"),
+        UniqueConstraint(
+            "pipeline_run_id", "id", "shard_key", name="pipeline_stage_runs_run_id_shard_uidx"
+        ),
+        Index(
+            "pipeline_stage_runs_state_retry_idx", "state", "next_attempt_at", "created_at", "id"
+        ),
+        Index("pipeline_stage_runs_run_node_state_idx", "pipeline_run_id", "node_key", "state"),
+        Index("pipeline_stage_runs_expansion_shard_idx", "fanout_expansion_id", "shard_key"),
+        ForeignKeyConstraint(
+            ["pipeline_run_id", "gate_subject_stage_run_id", "shard_key"],
+            [
+                "pipeline_stage_runs.pipeline_run_id",
+                "pipeline_stage_runs.id",
+                "pipeline_stage_runs.shard_key",
+            ],
+            name="pipeline_stage_runs_gate_subject_same_shard_fk",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        ForeignKeyConstraint(
+            ["pipeline_run_id", "fanout_expansion_id"],
+            ["pipeline_fanout_expansions.pipeline_run_id", "pipeline_fanout_expansions.id"],
+            name="pipeline_stage_runs_fanout_expansion_fk",
+            ondelete="RESTRICT",
+            use_alter=True,
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    pipeline_run_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("pipeline_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    node_key: Mapped[str] = mapped_column(Text, nullable=False)
+    shard_key: Mapped[str] = mapped_column(Text, nullable=False)
+    node_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'blocked'"))
+    domain_outcome: Mapped[str | None] = mapped_column(Text)
+    reason_code: Mapped[str | None] = mapped_column(Text)
+    resolved_execution_spec_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    resolved_execution_spec_bytes: Mapped[bytes | None] = mapped_column(LargeBinary)
+    execution_spec_digest: Mapped[str | None] = mapped_column(Text)
+    resource_profile_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    resource_profile_digest: Mapped[str | None] = mapped_column(Text)
+    resolved_input_bindings_json: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)
+    resolved_input_bindings_digest: Mapped[str | None] = mapped_column(Text)
+    fanout_parameters_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    fanout_item_digest: Mapped[str | None] = mapped_column(Text)
+    fanout_expansion_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+    )
+    gate_subject_stage_run_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    request_renderer_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    request_renderer_digest: Mapped[str | None] = mapped_column(Text)
+    failure_policy: Mapped[str | None] = mapped_column(Text)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    next_attempt_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    latest_checkpoint_artifact_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey(
+            "artifacts.id",
+            ondelete="RESTRICT",
+            use_alter=True,
+            name="pipeline_stage_runs_latest_checkpoint_fk",
+        ),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+    ready_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    claimed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+
+
+class PipelineStageDependency(Base):
+    __tablename__ = "pipeline_stage_dependencies"
+    __table_args__ = (
+        CheckConstraint(
+            "dependency_kind IN ('required','terminal_barrier','gate_matched','gate_unmatched',"
+            "'gate_approved','gate_rejected_or_expired')",
+            name="pipeline_stage_dependencies_kind_check",
+        ),
+        CheckConstraint(
+            "upstream_stage_run_id <> downstream_stage_run_id",
+            name="pipeline_stage_dependencies_distinct_check",
+        ),
+        ForeignKeyConstraint(
+            ["pipeline_run_id", "upstream_stage_run_id"],
+            ["pipeline_stage_runs.pipeline_run_id", "pipeline_stage_runs.id"],
+            ondelete="CASCADE",
+            name="pipeline_stage_dependencies_upstream_run_fk",
+        ),
+        ForeignKeyConstraint(
+            ["pipeline_run_id", "downstream_stage_run_id"],
+            ["pipeline_stage_runs.pipeline_run_id", "pipeline_stage_runs.id"],
+            ondelete="CASCADE",
+            name="pipeline_stage_dependencies_downstream_run_fk",
+        ),
+    )
+
+    pipeline_run_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("pipeline_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    upstream_stage_run_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    downstream_stage_run_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    dependency_kind: Mapped[str] = mapped_column(Text, primary_key=True)
+    selected: Mapped[bool | None] = mapped_column(Boolean)
+    satisfied_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ExecutionAttempt(Base):
+    __tablename__ = "execution_attempts"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('fault_pending','queued','claimed','running','succeeded','failed','cancelled','lost')",
+            name="execution_attempts_state_check",
+        ),
+        CheckConstraint(
+            "retry_class IS NULL OR retry_class IN "
+            "('none','contract_error','provider_transient','infrastructure_transient',"
+            "'internal_defect','cancelled')",
+            name="execution_attempts_retry_class_check",
+        ),
+        CheckConstraint("attempt_number BETWEEN 1 AND 3", name="execution_attempts_number_check"),
+        CheckConstraint("lease_epoch >= 0", name="execution_attempts_lease_epoch_nonnegative"),
+        CheckConstraint("version >= 0", name="execution_attempts_version_nonnegative"),
+        CheckConstraint(
+            "(stage_request_json IS NULL AND stage_request_bytes IS NULL AND stage_request_digest IS NULL) "
+            "OR (stage_request_json IS NOT NULL AND stage_request_bytes IS NOT NULL "
+            "AND stage_request_digest IS NOT NULL)",
+            name="execution_attempts_stage_request_group_check",
+        ),
+        CheckConstraint(
+            "(result_manifest_json IS NULL) = (result_manifest_digest IS NULL)",
+            name="execution_attempts_result_group_check",
+        ),
+        CheckConstraint(
+            "state != 'fault_pending' OR (worker_id IS NULL AND claim_id IS NULL "
+            "AND lease_token_digest IS NULL AND lease_expires_at IS NULL "
+            "AND queued_at IS NULL AND claimed_at IS NULL AND started_at IS NULL)",
+            name="execution_attempts_fault_pending_check",
+        ),
+        CheckConstraint(
+            "state NOT IN ('queued','claimed','running','succeeded','failed','lost') "
+            "OR queued_at IS NOT NULL",
+            name="execution_attempts_queued_timestamp_check",
+        ),
+        CheckConstraint(
+            "(worker_id IS NULL AND claim_id IS NULL AND lease_token_digest IS NULL "
+            "AND lease_expires_at IS NULL) OR "
+            "(worker_id IS NOT NULL AND claim_id IS NOT NULL AND lease_token_digest IS NOT NULL "
+            "AND lease_expires_at IS NOT NULL)",
+            name="execution_attempts_claim_group_check",
+        ),
+        CheckConstraint(
+            "state NOT IN ('claimed','running','succeeded','failed','lost') OR claim_id IS NOT NULL",
+            name="execution_attempts_claimed_state_check",
+        ),
+        CheckConstraint(
+            "state NOT IN ('fault_pending','queued') OR claim_id IS NULL",
+            name="execution_attempts_unclaimed_state_check",
+        ),
+        CheckConstraint(
+            "(cancellation_observed_at IS NULL) = (cancellation_outcome IS NULL)",
+            name="execution_attempts_cancellation_group_check",
+        ),
+        CheckConstraint(
+            "state != 'succeeded' OR (exit_code = 0 AND result_manifest_json IS NOT NULL)",
+            name="execution_attempts_succeeded_result_check",
+        ),
+        CheckConstraint(
+            "state IN ('succeeded','failed','cancelled','lost') OR "
+            "(exit_code IS NULL AND retry_class IS NULL AND reason_code IS NULL "
+            "AND result_manifest_json IS NULL)",
+            name="execution_attempts_terminal_fields_check",
+        ),
+        CheckConstraint(
+            "(state IN ('succeeded','failed','cancelled','lost')) = (finished_at IS NOT NULL)",
+            name="execution_attempts_terminal_timestamp_check",
+        ),
+        UniqueConstraint("stage_run_id", "attempt_number", name="execution_attempts_stage_number_uidx"),
+        Index(
+            "execution_attempts_claim_uidx",
+            "claim_id",
+            unique=True,
+            postgresql_where=text("claim_id IS NOT NULL"),
+        ),
+        Index(
+            "execution_attempts_state_lease_queue_idx",
+            "state",
+            "lease_expires_at",
+            "queued_at",
+            "id",
+        ),
+        Index("execution_attempts_worker_state_idx", "worker_id", "state"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    stage_run_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("pipeline_stage_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False)
+    worker_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("workers.id", ondelete="RESTRICT")
+    )
+    claim_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    lease_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    lease_token_digest: Mapped[str | None] = mapped_column(Text)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    stage_request_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    stage_request_bytes: Mapped[bytes | None] = mapped_column(LargeBinary)
+    stage_request_digest: Mapped[str | None] = mapped_column(Text)
+    exit_code: Mapped[int | None] = mapped_column(Integer)
+    retry_class: Mapped[str | None] = mapped_column(Text)
+    reason_code: Mapped[str | None] = mapped_column(Text)
+    result_manifest_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    result_manifest_digest: Mapped[str | None] = mapped_column(Text)
+    resumed_checkpoint_artifact_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey(
+            "artifacts.id",
+            ondelete="RESTRICT",
+            use_alter=True,
+            name="execution_attempts_resumed_checkpoint_fk",
+        ),
+        nullable=True,
+    )
+    cancellation_requested_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    cancellation_observed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    cancellation_outcome: Mapped[str | None] = mapped_column(Text)
+    queued_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+
+
+class PipelineTerminalSnapshot(Base):
+    __tablename__ = "pipeline_terminal_snapshots"
+    __table_args__ = (
+        CheckConstraint(
+            "octet_length(snapshot_bytes) <= 16777216",
+            name="pipeline_terminal_snapshots_size_check",
+        ),
+        ForeignKeyConstraint(
+            ["pipeline_run_id", "consumer_stage_run_id"],
+            ["pipeline_stage_runs.pipeline_run_id", "pipeline_stage_runs.id"],
+            ondelete="CASCADE",
+            name="pipeline_terminal_snapshots_consumer_run_fk",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    pipeline_run_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("pipeline_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    consumer_stage_run_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), nullable=False, unique=True
+    )
+    renderer_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    run_graph_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    terminal_stage_keys_json: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    stages_json: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
+    snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    snapshot_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    snapshot_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class PipelineFanoutExpansion(Base):
+    __tablename__ = "pipeline_fanout_expansions"
+    __table_args__ = (
+        CheckConstraint("source_kind IN ('run_input','stage_output')", name="pipeline_fanout_source_check"),
+        CheckConstraint(
+            "(source_kind = 'run_input' AND source_stage_run_id IS NULL) OR "
+            "(source_kind = 'stage_output' AND source_stage_run_id IS NOT NULL)",
+            name="pipeline_fanout_source_stage_check",
+        ),
+        CheckConstraint(
+            "item_count BETWEEN 0 AND 5000", name="pipeline_fanout_item_count_range"
+        ),
+        UniqueConstraint(
+            "pipeline_run_id",
+            "node_key",
+            "source_artifact_id",
+            name="pipeline_fanout_expansions_identity_uidx",
+        ),
+        UniqueConstraint(
+            "pipeline_run_id", "id", name="pipeline_fanout_expansions_run_id_uidx"
+        ),
+        ForeignKeyConstraint(
+            ["pipeline_run_id", "source_stage_run_id"],
+            ["pipeline_stage_runs.pipeline_run_id", "pipeline_stage_runs.id"],
+            name="pipeline_fanout_expansions_source_run_fk",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    pipeline_run_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("pipeline_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    node_key: Mapped[str] = mapped_column(Text, nullable=False)
+    source_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    source_stage_run_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    source_artifact_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("artifacts.id", ondelete="RESTRICT"), nullable=False
+    )
+    source_manifest_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    fanout_spec_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    item_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class PipelineEvent(Base):
+    __tablename__ = "pipeline_events"
+    __table_args__ = (CheckConstraint("seq > 0", name="pipeline_events_seq_positive"),)
+
+    pipeline_run_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("pipeline_runs.id", ondelete="CASCADE"), primary_key=True
+    )
+    seq: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    stage_run_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("pipeline_stage_runs.id", ondelete="CASCADE")
+    )
+    execution_attempt_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("execution_attempts.id", ondelete="CASCADE")
+    )
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    actor_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    actor_id: Mapped[str | None] = mapped_column(Text)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class PipelineAcceptancePreflightPrerequisite(Base):
+    __tablename__ = "pipeline_acceptance_preflight_prerequisites"
+    __table_args__ = (
+        CheckConstraint("state IN ('pending','satisfied','consumed')", name="pipeline_preflight_state_check"),
+        CheckConstraint(
+            "preflight_input_set_id = 'S02'", name="pipeline_preflight_input_set_check"
+        ),
+        CheckConstraint(
+            "fence_state IN ('pending','active','released')", name="pipeline_preflight_fence_state_check"
+        ),
+        CheckConstraint(
+            "policy_activation_epoch IS NULL OR policy_activation_epoch > 0",
+            name="pipeline_preflight_activation_epoch_positive",
+        ),
+        CheckConstraint("version >= 0", name="pipeline_preflight_version_nonnegative"),
+        CheckConstraint(
+            "(eviction_result_json IS NULL AND eviction_result_bytes IS NULL "
+            "AND eviction_result_sha256 IS NULL) OR "
+            "(eviction_result_json IS NOT NULL AND eviction_result_bytes IS NOT NULL "
+            "AND eviction_result_sha256 IS NOT NULL)",
+            name="pipeline_preflight_result_group_check",
+        ),
+        CheckConstraint(
+            "(state = 'pending' AND eviction_result_json IS NULL AND consumed_attempt_id IS NULL "
+            "AND satisfied_at IS NULL AND consumed_at IS NULL) OR "
+            "(state = 'satisfied' AND eviction_result_json IS NOT NULL "
+            "AND consumed_attempt_id IS NULL AND satisfied_at IS NOT NULL AND consumed_at IS NULL) OR "
+            "(state = 'consumed' AND eviction_result_json IS NOT NULL "
+            "AND consumed_attempt_id IS NOT NULL AND satisfied_at IS NOT NULL AND consumed_at IS NOT NULL)",
+            name="pipeline_preflight_state_fields_check",
+        ),
+        CheckConstraint(
+            "(fence_state = 'pending' AND worker_id IS NULL "
+            "AND worker_capability_snapshot_digest IS NULL AND policy_id IS NULL "
+            "AND policy_config_sha256 IS NULL AND policy_activation_epoch IS NULL "
+            "AND exclusive_fence_id IS NULL AND fence_acquired_at IS NULL "
+            "AND fence_released_at IS NULL AND fence_release_reason IS NULL) OR "
+            "(fence_state = 'active' AND worker_id IS NOT NULL "
+            "AND worker_capability_snapshot_digest IS NOT NULL AND policy_id IS NOT NULL "
+            "AND policy_config_sha256 IS NOT NULL AND policy_activation_epoch IS NOT NULL "
+            "AND exclusive_fence_id IS NOT NULL AND fence_acquired_at IS NOT NULL "
+            "AND fence_released_at IS NULL AND fence_release_reason IS NULL) OR "
+            "(fence_state = 'released' AND worker_id IS NOT NULL "
+            "AND worker_capability_snapshot_digest IS NOT NULL AND policy_id IS NOT NULL "
+            "AND policy_config_sha256 IS NOT NULL AND policy_activation_epoch IS NOT NULL "
+            "AND exclusive_fence_id IS NOT NULL "
+            "AND fence_acquired_at IS NOT NULL AND fence_released_at IS NOT NULL "
+            "AND fence_release_reason IS NOT NULL)",
+            name="pipeline_preflight_fence_fields_check",
+        ),
+        Index(
+            "pipeline_preflight_active_worker_uidx",
+            "worker_id",
+            unique=True,
+            postgresql_where=text("fence_state = 'active'"),
+        ),
+    )
+
+    pipeline_run_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("pipeline_runs.id", ondelete="CASCADE"), primary_key=True
+    )
+    authorization_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    candidate_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    preflight_input_set_id: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'S02'")
+    )
+    sealed_input_descriptor_set_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    worker_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("workers.id", ondelete="RESTRICT")
+    )
+    worker_capability_snapshot_digest: Mapped[str | None] = mapped_column(Text)
+    policy_id: Mapped[str | None] = mapped_column(Text)
+    policy_config_sha256: Mapped[str | None] = mapped_column(Text)
+    policy_activation_epoch: Mapped[int | None] = mapped_column(BigInteger)
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'pending'"))
+    eviction_result_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    eviction_result_bytes: Mapped[bytes | None] = mapped_column(LargeBinary)
+    eviction_result_sha256: Mapped[str | None] = mapped_column(Text)
+    exclusive_fence_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    fence_state: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'pending'"))
+    consumed_attempt_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("execution_attempts.id", ondelete="RESTRICT"), unique=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+    satisfied_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    consumed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    fence_acquired_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    fence_released_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    fence_release_reason: Mapped[str | None] = mapped_column(Text)
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+
+
 class BatchFamilyState(Base):
     """Per-family progression state for family-run batches (#672).
 
@@ -2267,10 +2925,35 @@ class Artifact(Base):
 
     __tablename__ = "artifacts"
     __table_args__ = (
+        CheckConstraint(
+            "producer_kind IS NULL OR producer_kind IN ('container','platform','checkpoint')",
+            name="artifacts_pipeline_producer_kind_check",
+        ),
+        CheckConstraint(
+            "(pipeline_run_id IS NULL AND pipeline_stage_run_id IS NULL "
+            "AND execution_attempt_id IS NULL AND producer_kind IS NULL) OR "
+            "(pipeline_run_id IS NOT NULL AND pipeline_stage_run_id IS NOT NULL "
+            "AND execution_attempt_id IS NOT NULL AND producer_kind IS NOT NULL)",
+            name="artifacts_pipeline_identity_group_check",
+        ),
+        CheckConstraint(
+            "(producer_kind IS NOT NULL AND control_producer_kind IS NULL "
+            "AND control_producer_id IS NULL) OR "
+            "(producer_kind IS NULL AND "
+            "((control_producer_kind IS NULL) = (control_producer_id IS NULL)))",
+            name="artifacts_control_producer_group_check",
+        ),
         Index("artifacts_team_type_idx", "team_id", "artifact_type"),
         Index("artifacts_batch_idx", "batch_id"),
         Index("artifacts_trial_idx", "trial_id"),
         Index("artifacts_policy_idx", "visibility", "share_status", "safety_state"),
+        Index(
+            "artifacts_pipeline_stage_output_uidx",
+            "pipeline_stage_run_id",
+            "name",
+            unique=True,
+            postgresql_where=text("producer_kind IN ('container','platform')"),
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(
@@ -2302,6 +2985,29 @@ class Artifact(Base):
         ForeignKey("trials.id", ondelete="SET NULL"),
         nullable=True,
     )
+    pipeline_run_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("pipeline_runs.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    pipeline_stage_run_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("pipeline_stage_runs.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    execution_attempt_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey(
+            "execution_attempts.id",
+            ondelete="CASCADE",
+            use_alter=True,
+            name="artifacts_execution_attempt_fk",
+        ),
+        nullable=True,
+    )
+    producer_kind: Mapped[str | None] = mapped_column(Text, nullable=True)
+    control_producer_kind: Mapped[str | None] = mapped_column(Text, nullable=True)
+    control_producer_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
     created_by: Mapped[dict[str, Any]] = mapped_column(
         JSONB,
         nullable=False,

@@ -156,9 +156,8 @@ there.
   design. The self-service GB10/vLLM product is not planned under closed #144;
   this document is not a supported-feature contract.
 - **[pipeline-platform-governance.md](pipeline-platform-governance.md)** —
-  post-v1 governance baseline for pipeline extensibility, typed artifacts,
-  RunGraph, recipes, plugins, SkillMarkdown injection, and data-production
-  planning.
+  active governance baseline for Pipeline extensibility, typed Artifacts,
+  official Recipes, plugins, SkillMarkdown injection, and data production.
 
 ## ADRs
 
@@ -168,3 +167,6 @@ choices that shape post-v1 architecture. See [`adr/`](adr/README.md).
 - **[adr/env-domain-topology.md](adr/env-domain-topology.md)** — accepted
   single-origin public routes for development (`/dev`), staging (`/staging`),
   and production (`/prod`), including path-prefix isolation requirements.
+- **[adr/pipeline-run-graph-v1.md](adr/pipeline-run-graph-v1.md)** — accepted
+  official-Recipe-only Pipeline RunGraph v1, including the closed node
+  vocabulary, manifest fan-out, and separation from Trial semantics.
