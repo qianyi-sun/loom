@@ -133,6 +133,12 @@ class CommittedShadowEpoch:
 
 
 @dataclass(frozen=True, slots=True)
+class RecordedShadowFailure:
+    allocation_epoch: int | None
+    input_digest: str
+
+
+@dataclass(frozen=True, slots=True)
 class CapacityStatusPageV1:
     authority_incarnation: UUID
     writer_epoch: int
@@ -783,6 +789,8 @@ class CapacityManagementStore:
             if authority.writer_epoch != expected_epoch:
                 raise StaleWriterError("writer epoch compare-and-set failed")
             authority.writer_epoch += 1
+            authority.increase_freeze = True
+            authority.increase_freeze_reason = "writer_epoch_changed"
             authority.updated_at = await _db_now(session)
             session.add(
                 _audit(
@@ -1475,6 +1483,92 @@ class CapacityManagementStore:
             )
             return CommittedShadowEpoch(row.allocation_epoch, epoch.input_digest)
 
+    async def record_shadow_failure(
+        self,
+        session: AsyncSession,
+        writer: WriterFence,
+        *,
+        event_kind: Literal[
+            "shadow_allocation_timeout",
+            "shadow_allocation_invalid",
+            "shadow_allocation_failure",
+            "shadow_allocation_input_contention",
+        ],
+        reason: str,
+        expected_input_digest: str | None,
+        persist_failed_epoch: bool = True,
+    ) -> RecordedShadowFailure:
+        """Persist one fenced fail-closed diagnostic without allocation rows."""
+
+        if not reason or len(reason.encode("utf-8")) > 1024:
+            raise ValueError("shadow failure reason must be between 1 and 1024 bytes")
+        if expected_input_digest is not None and (
+            len(expected_input_digest) != 64
+            or any(character not in "0123456789abcdef" for character in expected_input_digest)
+        ):
+            raise ValueError("expected input digest must be lowercase SHA-256")
+        async with _write_transaction(session):
+            authority = await _lock_authority(session)
+            if (
+                authority.authority_incarnation != writer.authority_incarnation
+                or authority.writer_epoch != writer.writer_epoch
+            ):
+                raise StaleWriterError("writer is no longer current")
+            current_input: AllocationInputV1 | None = None
+            if expected_input_digest is not None:
+                current_input = await self.load_allocation_input(session, writer)
+                if canonical_digest(current_input) != expected_input_digest:
+                    raise StaleAllocationInputError(
+                        "allocation input changed before failure record"
+                    )
+            configuration_epoch = (
+                current_input.configuration.configuration_epoch
+                if current_input is not None
+                else (
+                    await session.execute(
+                        select(func.max(CapacityConfigurationEpoch.configuration_epoch))
+                    )
+                ).scalar_one()
+            )
+            input_digest = expected_input_digest or ("0" * 64)
+            allocation_epoch: int | None = None
+            if persist_failed_epoch and configuration_epoch is not None:
+                row = CapacityAllocationEpoch(
+                    writer_epoch=writer.writer_epoch,
+                    configuration_epoch=configuration_epoch,
+                    input_digest=input_digest,
+                    status="failed",
+                    failure_reason=reason,
+                    complete_payload={
+                        "schema_version": 1,
+                        "input_digest": input_digest,
+                        "reason": reason,
+                        "executable": False,
+                    },
+                    executable=False,
+                    committed_at=await _db_now(session),
+                )
+                session.add(row)
+                await session.flush()
+                allocation_epoch = row.allocation_epoch
+            now = await _db_now(session)
+            authority.increase_freeze = True
+            authority.increase_freeze_reason = event_kind
+            authority.updated_at = now
+            session.add(
+                _audit(
+                    actor_kind="manager",
+                    actor_id=str(writer.authority_incarnation),
+                    event_kind=event_kind,
+                    object_binding={
+                        "allocation_epoch": allocation_epoch,
+                        "writer_epoch": writer.writer_epoch,
+                    },
+                    detail={"input_digest": input_digest, "reason": reason},
+                )
+            )
+            return RecordedShadowFailure(allocation_epoch, input_digest)
+
     async def status(
         self,
         session: AsyncSession,
@@ -1542,6 +1636,7 @@ __all__ = [
     "IdempotencyConflictError",
     "IngestResult",
     "ProposedConfiguration",
+    "RecordedShadowFailure",
     "ReportEquivocationError",
     "StaleAllocationInputError",
     "StaleReportError",

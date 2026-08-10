@@ -2,20 +2,32 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
+from threading import Event
 from uuid import UUID
 
 import pytest
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy import delete, func, select, update
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
+from loom_capacity_manager.allocator import ShadowAllocatorError, allocate_shadow
 from loom_capacity_manager.models import (
+    Base,
+    CapacityAllocation,
     CapacityAllocationEpoch,
+    CapacityAuditEvent,
     CapacityAuthorityState,
     CapacityConfigurationEpoch,
     CapacityDemandReporter,
     CapacityObservedCommitment,
     CapacityWorkerProfile,
 )
+from loom_capacity_manager.reconciler import reconcile_shadow_once
 from loom_capacity_manager.store import (
     CapacityManagementStore,
     CapacityStoreError,
@@ -85,6 +97,62 @@ async def _allocation_epoch_count(session: AsyncSession) -> int:
             await session.execute(select(func.count()).select_from(CapacityAllocationEpoch))
         ).scalar_one()
     )
+
+
+async def _reset_committed_capacity_state(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session, session.begin():
+        for table in reversed(Base.metadata.sorted_tables):
+            if table.name != CapacityAuthorityState.__tablename__:
+                await session.execute(delete(table))
+        await session.execute(
+            update(CapacityAuthorityState)
+            .where(CapacityAuthorityState.singleton_id == 1)
+            .values(
+                writer_epoch=0,
+                recovery_state="shadow",
+                increase_freeze=True,
+                increase_freeze_reason="initial_shadow_freeze",
+                executable_new_capacity_ceiling=0,
+                global_pending_slot_ceiling=0,
+                global_pending_job_ceiling=0,
+            )
+        )
+
+
+@pytest.fixture
+async def registered_writer(
+    capacity_session_factory: async_sessionmaker[AsyncSession],
+) -> AsyncIterator[WriterFence]:
+    await _reset_committed_capacity_state(capacity_session_factory)
+    async with capacity_session_factory() as session:
+        store, _ = await _activate_default(session)
+        writer = await store.register_writer(
+            session,
+            await _authority_uuid(session),
+            expected_epoch=0,
+        )
+        await store.ingest_demand_snapshot(
+            session,
+            demand_snapshot(sequence=1),
+            actor="dev-a",
+        )
+        await store.ingest_pool_observation(
+            session,
+            pool_observation(sequence=1, pool_id="gb10"),
+            actor="gb10-reporter",
+        )
+        await store.ingest_pool_observation(
+            session,
+            pool_observation(sequence=1, pool_id="oldlab"),
+            actor="oldlab-reporter",
+        )
+        await session.commit()
+    try:
+        yield writer
+    finally:
+        await _reset_committed_capacity_state(capacity_session_factory)
 
 
 async def test_configuration_proposal_replay_is_idempotent_but_payload_reuse_fails(
@@ -379,6 +447,35 @@ async def test_stale_writer_cannot_commit_complete_shadow_epoch(
     assert new.writer_epoch == old.writer_epoch + 1
 
 
+async def test_replacement_writer_restores_increase_freeze_until_fresh_epoch(
+    capacity_session: AsyncSession,
+) -> None:
+    store, _ = await _activate_default(capacity_session)
+    authority = await _authority_uuid(capacity_session)
+    old = await store.register_writer(capacity_session, authority, expected_epoch=0)
+    allocation_input = await store.load_allocation_input(capacity_session, old)
+    await store.commit_shadow_epoch(capacity_session, old, shadow_epoch(allocation_input))
+    assert (
+        await capacity_session.execute(select(CapacityAuthorityState.increase_freeze))
+    ).scalar_one() is False
+
+    await store.register_writer(
+        capacity_session,
+        authority,
+        expected_epoch=old.writer_epoch,
+    )
+
+    state = (
+        await capacity_session.execute(
+            select(
+                CapacityAuthorityState.increase_freeze,
+                CapacityAuthorityState.increase_freeze_reason,
+            )
+        )
+    ).one()
+    assert state == (True, "writer_epoch_changed")
+
+
 async def test_status_page_rejects_unbounded_limit(capacity_session: AsyncSession) -> None:
     store, _ = await _activate_default(capacity_session)
     with pytest.raises(ValueError, match="limit"):
@@ -389,3 +486,281 @@ def test_writer_fence_is_immutable() -> None:
     fence = WriterFence(authority_incarnation=AUTHORITY_ID, writer_epoch=1)
     with pytest.raises(AttributeError):
         fence.writer_epoch = 2
+
+
+class BlockingAllocator:
+    def __init__(self) -> None:
+        self.started = Event()
+        self.release = Event()
+
+    def __call__(self, value):  # type: ignore[no-untyped-def]
+        self.started.set()
+        if not self.release.wait(timeout=5):
+            raise TimeoutError("test allocator was not released")
+        return allocate_shadow(value)
+
+
+class TimeoutAllocator:
+    async def __call__(self, value):  # type: ignore[no-untyped-def]
+        del value
+        await asyncio.sleep(5)
+
+
+class InvalidAllocator:
+    def __call__(self, value):  # type: ignore[no-untyped-def]
+        del value
+        raise ShadowAllocatorError("invalid synthetic topology")
+
+
+class IncompleteAllocator:
+    def __call__(self, value):  # type: ignore[no-untyped-def]
+        return shadow_epoch(value)
+
+
+class CommitFailureStore(CapacityManagementStore):
+    async def commit_shadow_epoch(self, session, writer, epoch):  # type: ignore[no-untyped-def]
+        del session, writer, epoch
+        raise RuntimeError("synthetic database write failure")
+
+
+class ChangingInputAllocator:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        self._session_factory = session_factory
+        self._sequence = 1
+
+    async def __call__(self, value):  # type: ignore[no-untyped-def]
+        self._sequence += 1
+        async with self._session_factory() as session:
+            await CapacityManagementStore().ingest_demand_snapshot(
+                session,
+                demand_snapshot(sequence=self._sequence),
+                actor="dev-a",
+            )
+            await session.commit()
+        return allocate_shadow(value)
+
+
+async def publish_newer_report(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        await CapacityManagementStore().ingest_demand_snapshot(
+            session,
+            demand_snapshot(sequence=2),
+            actor="dev-a",
+        )
+        await session.commit()
+
+
+async def committed_shadow_epoch_count(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> int:
+    async with session_factory() as session:
+        return int(
+            (
+                await session.execute(
+                    select(func.count())
+                    .select_from(CapacityAllocationEpoch)
+                    .where(CapacityAllocationEpoch.status == "shadow")
+                )
+            ).scalar_one()
+        )
+
+
+async def allocation_row_count(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> int:
+    async with session_factory() as session:
+        return int(
+            (
+                await session.execute(select(func.count()).select_from(CapacityAllocation))
+            ).scalar_one()
+        )
+
+
+async def latest_audit_kind(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> str | None:
+    async with session_factory() as session:
+        return (
+            (
+                await session.execute(
+                    select(CapacityAuditEvent.event_kind).order_by(CapacityAuditEvent.id.desc())
+                )
+            )
+            .scalars()
+            .first()
+        )
+
+
+async def test_input_change_during_allocation_rejects_whole_epoch(
+    capacity_session_factory: async_sessionmaker[AsyncSession],
+    registered_writer: WriterFence,
+) -> None:
+    allocator = BlockingAllocator()
+    task = asyncio.create_task(
+        reconcile_shadow_once(
+            capacity_session_factory,
+            registered_writer,
+            allocator=allocator,
+        )
+    )
+    assert await asyncio.to_thread(allocator.started.wait, 2)
+    await publish_newer_report(capacity_session_factory)
+    allocator.release.set()
+    result = await task
+
+    assert result.status == "committed"
+    assert result.attempt_count == 2
+    assert await committed_shadow_epoch_count(capacity_session_factory) == 1
+
+
+async def test_successful_reconciliation_commits_one_complete_shadow_epoch(
+    capacity_session_factory: async_sessionmaker[AsyncSession],
+    registered_writer: WriterFence,
+) -> None:
+    result = await reconcile_shadow_once(
+        capacity_session_factory,
+        registered_writer,
+    )
+
+    async with capacity_session_factory() as session:
+        epoch = (await session.execute(select(CapacityAllocationEpoch))).scalar_one()
+        allocations = (
+            (await session.execute(select(CapacityAllocation).order_by(CapacityAllocation.pool_id)))
+            .scalars()
+            .all()
+        )
+        authority = (await session.execute(select(CapacityAuthorityState))).scalar_one()
+    assert result.status == "committed"
+    assert epoch.status == "shadow"
+    assert epoch.executable is False
+    assert epoch.complete_payload["executable"] is False
+    assert len(allocations) == 2
+    assert all(allocation.executable is False for allocation in allocations)
+    assert authority.executable_new_capacity_ceiling == 0
+    assert authority.increase_freeze is False
+
+
+async def test_allocator_timeout_records_failure_without_partial_allocations(
+    capacity_session_factory: async_sessionmaker[AsyncSession],
+    registered_writer: WriterFence,
+) -> None:
+    result = await reconcile_shadow_once(
+        capacity_session_factory,
+        registered_writer,
+        allocator=TimeoutAllocator(),
+        allocation_timeout_seconds=0.01,
+    )
+
+    assert result.status == "failed"
+    assert await allocation_row_count(capacity_session_factory) == 0
+    assert await latest_audit_kind(capacity_session_factory) == "shadow_allocation_timeout"
+
+
+async def test_invalid_allocator_input_sets_freeze_and_records_failed_epoch(
+    capacity_session_factory: async_sessionmaker[AsyncSession],
+    registered_writer: WriterFence,
+) -> None:
+    result = await reconcile_shadow_once(
+        capacity_session_factory,
+        registered_writer,
+        allocator=InvalidAllocator(),
+    )
+
+    async with capacity_session_factory() as session:
+        failed_epochs = (
+            await session.execute(
+                select(func.count())
+                .select_from(CapacityAllocationEpoch)
+                .where(CapacityAllocationEpoch.status == "failed")
+            )
+        ).scalar_one()
+        freeze = (
+            await session.execute(select(CapacityAuthorityState.increase_freeze))
+        ).scalar_one()
+    assert result.status == "failed"
+    assert failed_epochs == 1
+    assert freeze is True
+    assert await allocation_row_count(capacity_session_factory) == 0
+    assert await latest_audit_kind(capacity_session_factory) == "shadow_allocation_invalid"
+
+
+async def test_incomplete_allocator_epoch_is_rejected_before_persistence(
+    capacity_session_factory: async_sessionmaker[AsyncSession],
+    registered_writer: WriterFence,
+) -> None:
+    result = await reconcile_shadow_once(
+        capacity_session_factory,
+        registered_writer,
+        allocator=IncompleteAllocator(),
+    )
+
+    assert result.status == "failed"
+    assert await committed_shadow_epoch_count(capacity_session_factory) == 0
+    assert await allocation_row_count(capacity_session_factory) == 0
+    assert await latest_audit_kind(capacity_session_factory) == "shadow_allocation_invalid"
+
+
+async def test_epoch_commit_failure_leaves_no_partial_allocations(
+    capacity_session_factory: async_sessionmaker[AsyncSession],
+    registered_writer: WriterFence,
+) -> None:
+    result = await reconcile_shadow_once(
+        capacity_session_factory,
+        registered_writer,
+        store=CommitFailureStore(),
+    )
+
+    assert result.status == "failed"
+    assert await committed_shadow_epoch_count(capacity_session_factory) == 0
+    assert await allocation_row_count(capacity_session_factory) == 0
+    assert await latest_audit_kind(capacity_session_factory) == "shadow_allocation_failure"
+
+
+async def test_writer_change_during_allocation_fences_old_result(
+    capacity_session_factory: async_sessionmaker[AsyncSession],
+    registered_writer: WriterFence,
+) -> None:
+    allocator = BlockingAllocator()
+    task = asyncio.create_task(
+        reconcile_shadow_once(
+            capacity_session_factory,
+            registered_writer,
+            allocator=allocator,
+        )
+    )
+    assert await asyncio.to_thread(allocator.started.wait, 2)
+    async with capacity_session_factory() as session:
+        await CapacityManagementStore().register_writer(
+            session,
+            registered_writer.authority_incarnation,
+            expected_epoch=registered_writer.writer_epoch,
+        )
+        await session.commit()
+    allocator.release.set()
+    result = await task
+
+    assert result.status == "failed"
+    assert result.reason == "capacity writer fence changed"
+    assert await committed_shadow_epoch_count(capacity_session_factory) == 0
+    assert await allocation_row_count(capacity_session_factory) == 0
+
+
+async def test_continuous_input_churn_preserves_prior_epoch(
+    capacity_session_factory: async_sessionmaker[AsyncSession],
+    registered_writer: WriterFence,
+) -> None:
+    result = await reconcile_shadow_once(
+        capacity_session_factory,
+        registered_writer,
+        allocator=ChangingInputAllocator(capacity_session_factory),
+        max_attempts=3,
+    )
+
+    assert result.status == "input-contention"
+    assert result.attempt_count == 3
+    assert await committed_shadow_epoch_count(capacity_session_factory) == 0
