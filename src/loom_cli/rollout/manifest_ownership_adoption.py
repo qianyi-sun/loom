@@ -525,7 +525,7 @@ def _is_scoped_controller_authority(entry: Mapping[str, object], *, identity: st
     if manager == "k3s":
         parts = identity.split("|", 3)
         metadata_fields = fields_v1.get("f:metadata")
-        deployment_revision_fields = {
+        deployment_revision_fields: dict[str, object] = {
             "f:annotations": {"f:deployment.kubernetes.io/revision": {}}
         }
         return (
