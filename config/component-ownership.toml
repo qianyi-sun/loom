@@ -503,7 +503,10 @@ include_paths = [
 id = "python-integration-fast"
 language = "python"
 lane = "integration"
-include_paths = ["tests/integration/**/*.py"]
+include_paths = [
+  "tests/integration/**/*.py",
+  "tests/integrations/**/*.py",
+]
 exclude_paths = [
   "tests/integration/test_docker_driver_exec.py",
   "tests/integration/test_docker_driver_exec_streaming.py",
