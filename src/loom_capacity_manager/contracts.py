@@ -56,8 +56,8 @@ class StrictV1Model(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _json_arrays_to_tuples(cls, value: Any) -> Any:
-        """Accept JSON/TOML arrays without enabling numeric coercion."""
+    def _json_values_to_strict_types(cls, value: Any) -> Any:
+        """Decode canonical JSON containers/times without numeric coercion."""
 
         if not isinstance(value, dict):
             return value
@@ -65,6 +65,14 @@ class StrictV1Model(BaseModel):
         for name, field in cls.model_fields.items():
             if get_origin(field.annotation) is tuple and isinstance(normalized.get(name), list):
                 normalized[name] = tuple(normalized[name])
+            if field.annotation is datetime and isinstance(normalized.get(name), str):
+                timestamp = normalized[name]
+                if timestamp.endswith("Z"):
+                    timestamp = f"{timestamp[:-1]}+00:00"
+                try:
+                    normalized[name] = datetime.fromisoformat(timestamp)
+                except ValueError:
+                    pass
         return normalized
 
 
@@ -771,6 +779,12 @@ class AllocationInputV1(StrictV1Model):
     fairness_cursors: tuple[FairnessCursorV1, ...] = ()
     existing_pending_slots: Quantity = 0
     existing_pending_jobs: Quantity = 0
+
+    @property
+    def observed_commitment_ids(self) -> tuple[str, ...]:
+        return tuple(
+            sorted(commitment.commitment_id for commitment in self.observed_commitments)
+        )
 
     @field_validator("subjects")
     @classmethod

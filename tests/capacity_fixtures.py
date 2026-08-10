@@ -7,12 +7,22 @@ from typing import Any
 from uuid import UUID
 
 from loom_capacity_manager.contracts import (
+    ConfigurationActivationV1,
+    ConfigurationGenerationRefV1,
+    CurrentAssignmentV1,
+    DemandBucketV1,
+    DemandSnapshotV1,
+    FixedClaimV1,
     FleetManifestV1,
     NodeEnvelopeV1,
+    ObservedCommitmentV1,
+    PoolObservationV1,
     ProfileReferenceV1,
     ResourceVectorV1,
+    ShadowEpochV1,
     SubjectConfigurationV1,
     WorkerShapeV1,
+    canonical_digest,
 )
 
 AUTHORITY_ID = UUID("00000000-0000-4000-8000-000000000001")
@@ -186,7 +196,12 @@ def fleet_payload(**overrides: Any) -> dict[str, Any]:
 
 
 def fleet_manifest(**overrides: Any) -> FleetManifestV1:
-    return FleetManifestV1.model_validate(fleet_payload(**overrides))
+    pool_generation = overrides.pop("pool_generation", None)
+    payload = fleet_payload(**overrides)
+    if pool_generation is not None:
+        for pool in payload["pools"]:
+            pool["pool_generation"] = pool_generation
+    return FleetManifestV1.model_validate(payload)
 
 
 def valid_profile_payload(
@@ -254,3 +269,137 @@ def subject_configuration(
     }
     payload.update(overrides)
     return SubjectConfigurationV1.model_validate(payload)
+
+
+def configuration_activation(
+    *,
+    fleet: Any,
+    subjects: tuple[Any, ...],
+    expected_configuration_epoch: int = 0,
+) -> ConfigurationActivationV1:
+    return ConfigurationActivationV1(
+        expected_configuration_epoch=expected_configuration_epoch,
+        fleet=ConfigurationGenerationRefV1(
+            scope="fleet",
+            generation=fleet.generation,
+            digest=fleet.digest,
+        ),
+        subjects=tuple(
+            ConfigurationGenerationRefV1(
+                scope="subject",
+                generation=subject.generation,
+                digest=subject.digest,
+                subject_id=subject.subject_id,
+                subject_incarnation=subject.subject_incarnation,
+            )
+            for subject in subjects
+        ),
+    )
+
+
+def demand_snapshot(
+    *,
+    sequence: int = 1,
+    fixed_claim_ids: tuple[str, ...] = (),
+    pending_attempt_ids: tuple[str, ...] = ("attempt-pending",),
+    assigned_attempt_ids: tuple[str, ...] = (),
+) -> DemandSnapshotV1:
+    pending = (
+        (
+            DemandBucketV1(
+                bucket_id="cpu-default",
+                requested_slots=len(pending_attempt_ids),
+                local_priority=0,
+                oldest_submitted_at=FIXED_TIME,
+                eligible_pool_ids=("gb10", "oldlab"),
+                required_capabilities=("cpu",),
+                attempt_ids=pending_attempt_ids,
+            ),
+        )
+        if pending_attempt_ids
+        else ()
+    )
+    assignments = tuple(
+        CurrentAssignmentV1(
+            attempt_id=attempt_id,
+            pool_id="gb10",
+            profile_id="one-slot",
+            allowance_epoch=1,
+            local_priority=0,
+            submitted_at=FIXED_TIME,
+        )
+        for attempt_id in assigned_attempt_ids
+    )
+    claims = tuple(
+        FixedClaimV1(
+            claim_id=claim_id,
+            attempt_id=f"attempt-{claim_id}",
+            worker_identity=f"worker-{claim_id}",
+            pool_id="gb10",
+            profile_id="one-slot",
+            shape_id="one-slot",
+            deployment_generation=1,
+            concurrency_slots=1,
+            resources=resource_vector(),
+            state="live",
+        )
+        for claim_id in fixed_claim_ids
+    )
+    return DemandSnapshotV1(
+        subject_id=SUBJECT_ID,
+        subject_incarnation=SUBJECT_INCARNATION,
+        configuration_generation=1,
+        deployment_generation=1,
+        reporter_incarnation=DEMAND_REPORTER_ID,
+        sequence=sequence,
+        source_observed_at=FIXED_TIME,
+        pending_unassigned=pending,
+        current_assignments=assignments,
+        fixed_claims=claims,
+    )
+
+
+def pool_observation(
+    *,
+    sequence: int = 1,
+    pool_id: str = "gb10",
+    commitment_ids: tuple[str, ...] = (),
+) -> PoolObservationV1:
+    reporter = (
+        POOL_REPORTER_GB10_ID if pool_id == "gb10" else POOL_REPORTER_OLDLAB_ID
+    )
+    return PoolObservationV1(
+        pool_id=pool_id,
+        pool_generation=1,
+        reporter_incarnation=reporter,
+        sequence=sequence,
+        source_observed_at=FIXED_TIME,
+        health="eligible",
+        commitments=tuple(
+            ObservedCommitmentV1(
+                commitment_id=commitment_id,
+                physical_identity=f"worker-{commitment_id}",
+                subject_id=SUBJECT_ID,
+                subject_incarnation=SUBJECT_INCARNATION,
+                deployment_generation=1,
+                pool_id=pool_id,
+                pool_generation=1,
+                profile_id="one-slot",
+                shape_id="one-slot",
+                resources=resource_vector(),
+                state="observed",
+            )
+            for commitment_id in commitment_ids
+        ),
+    )
+
+
+def shadow_epoch(allocation_input: Any) -> ShadowEpochV1:
+    return ShadowEpochV1(
+        configuration=allocation_input.configuration,
+        input_digest=canonical_digest(allocation_input),
+        allocations=(),
+        next_fairness_cursors=allocation_input.fairness_cursors,
+        hypothetical_launch_rank=(),
+        blockers=(),
+    )

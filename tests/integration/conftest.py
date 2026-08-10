@@ -128,7 +128,7 @@ def empty_capacity_postgres_url(capacity_database_urls: tuple[str, str]) -> str:
 
 @pytest.fixture(scope="session")
 async def capacity_engine(capacity_postgres_url: str) -> AsyncIterator[AsyncEngine]:
-    engine = create_async_engine(capacity_postgres_url)
+    engine = create_async_engine(capacity_postgres_url, isolation_level="SERIALIZABLE")
     try:
         yield engine
     finally:
@@ -155,13 +155,21 @@ def capacity_session_factory(
 
 @pytest.fixture
 async def capacity_session(
-    capacity_session_factory: async_sessionmaker[AsyncSession],
+    capacity_engine: AsyncEngine,
 ) -> AsyncIterator[AsyncSession]:
-    async with capacity_session_factory() as session:
+    async with capacity_engine.connect() as connection:
+        outer = await connection.begin()
+        session = AsyncSession(
+            bind=connection,
+            expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        )
         try:
             yield session
         finally:
             await session.rollback()
+            await session.close()
+            await outer.rollback()
 
 
 @pytest.fixture
