@@ -424,6 +424,19 @@ jobs:
       - name: Mypy (strict)
         run: uv run --no-sync mypy
 
+      - name: Global capacity Package 1 no-execution audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          if matches=$(rg -n \
+            -e 'SharedCapacityBroker|capacity_grants_from_report' \
+            -e 'sbatch|scancel|worker:claim|launch_permit' \
+            src/loom_capacity_manager \
+            scripts/ops/global_fleet_capacity_shadow_once.py); then
+            echo "$matches" >&2
+            exit 1
+          fi
+
       - name: Verify codegen up-to-date
         run: uv run --no-sync loom config codegen --check
 
@@ -494,6 +507,30 @@ jobs:
           uv run --no-sync pytest "${test_paths[@]}" \
             --cov=src --cov=packages \
             --cov-report=term --cov-report=xml
+
+      - name: Produce synthetic global capacity shadow evidence
+        if: matrix.shard_index == 0
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="${RUNNER_TEMP}/global-capacity-shadow.json"
+          uv run --no-sync python scripts/ops/global_fleet_capacity_shadow_once.py \
+            --fleet tests/fixtures/capacity/fleet-v1.toml \
+            --subjects tests/fixtures/capacity/subjects-v1.toml \
+            --snapshot tests/fixtures/capacity/snapshot-v1.json \
+            --output "$output"
+          OUTPUT="$output" uv run --no-sync python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          document = json.loads(Path(os.environ["OUTPUT"]).read_text(encoding="utf-8"))
+          assert document["mode"] == "shadow"
+          assert document["executable"] is False
+          assert document["executable_new_capacity_ceiling"] == 0
+          assert "grants" not in document
+          assert "launch_permits" not in document
+          PY
 
       - name: Build and exercise non-editable runtime wheel
         if: matrix.shard_index == 0

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,7 +27,12 @@ from botocore.config import Config
 from fastapi import FastAPI
 from sqlalchemy import create_engine, delete, insert, text
 from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.orm import sessionmaker
 from testcontainers.core.container import DockerContainer
 from testcontainers.core.network import Network
@@ -46,6 +52,124 @@ from loom.db.schema import (
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 from tests.integration.taskset_fixtures import tasksets_minio, tasksets_setup  # noqa: F401
+
+
+@pytest.fixture(scope="session")
+def capacity_database_urls(postgres_url: str) -> Iterator[tuple[str, str]]:
+    """Create management and empty databases distinct from the environment DB."""
+
+    source_url = make_url(postgres_url)
+    capacity_name = f"loom_capacity_test_{os.getpid()}"
+    empty_name = f"loom_capacity_empty_{os.getpid()}"
+    admin_url = source_url.set(database="postgres")
+    admin_engine = create_engine(admin_url, isolation_level="AUTOCOMMIT")
+    preparer = admin_engine.dialect.identifier_preparer
+    quoted_capacity = preparer.quote(capacity_name)
+    quoted_empty = preparer.quote(empty_name)
+    repo_root = Path(__file__).resolve().parents[2]
+
+    try:
+        with admin_engine.connect() as connection:
+            connection.exec_driver_sql(f"DROP DATABASE IF EXISTS {quoted_capacity}")
+            connection.exec_driver_sql(f"DROP DATABASE IF EXISTS {quoted_empty}")
+            connection.exec_driver_sql(
+                f"CREATE DATABASE {quoted_capacity} TEMPLATE template0"
+            )
+            connection.exec_driver_sql(f"CREATE DATABASE {quoted_empty} TEMPLATE template0")
+
+        capacity_url = source_url.set(database=capacity_name).render_as_string(
+            hide_password=False
+        )
+        empty_url = source_url.set(database=empty_name).render_as_string(hide_password=False)
+        cfg = AlembicConfig(str(repo_root / "capacity_migrations" / "alembic.ini"))
+        cfg.set_main_option(
+            "script_location", str(repo_root / "capacity_migrations")
+        )
+        previous = os.environ.get("LOOM_CAPACITY_DB_URL")
+        os.environ["LOOM_CAPACITY_DB_URL"] = capacity_url
+        try:
+            command.upgrade(cfg, "head")
+        finally:
+            if previous is None:
+                os.environ.pop("LOOM_CAPACITY_DB_URL", None)
+            else:
+                os.environ["LOOM_CAPACITY_DB_URL"] = previous
+        yield capacity_url, empty_url
+    finally:
+        try:
+            with admin_engine.connect() as connection:
+                for name, quoted in (
+                    (capacity_name, quoted_capacity),
+                    (empty_name, quoted_empty),
+                ):
+                    connection.execute(
+                        text(
+                            "SELECT pg_terminate_backend(pid) "
+                            "FROM pg_stat_activity "
+                            "WHERE datname = :database_name "
+                            "AND pid <> pg_backend_pid()"
+                        ),
+                        {"database_name": name},
+                    )
+                    connection.exec_driver_sql(f"DROP DATABASE IF EXISTS {quoted}")
+        finally:
+            admin_engine.dispose()
+
+
+@pytest.fixture(scope="session")
+def capacity_postgres_url(capacity_database_urls: tuple[str, str]) -> str:
+    return capacity_database_urls[0]
+
+
+@pytest.fixture(scope="session")
+def empty_capacity_postgres_url(capacity_database_urls: tuple[str, str]) -> str:
+    return capacity_database_urls[1]
+
+
+@pytest.fixture(scope="session")
+async def capacity_engine(capacity_postgres_url: str) -> AsyncIterator[AsyncEngine]:
+    engine = create_async_engine(capacity_postgres_url, isolation_level="SERIALIZABLE")
+    try:
+        yield engine
+    finally:
+        await engine.dispose()
+
+
+@pytest.fixture(scope="session")
+async def empty_capacity_engine(
+    empty_capacity_postgres_url: str,
+) -> AsyncIterator[AsyncEngine]:
+    engine = create_async_engine(empty_capacity_postgres_url)
+    try:
+        yield engine
+    finally:
+        await engine.dispose()
+
+
+@pytest.fixture(scope="session")
+def capacity_session_factory(
+    capacity_engine: AsyncEngine,
+) -> async_sessionmaker[AsyncSession]:
+    return async_sessionmaker(capacity_engine, expire_on_commit=False)
+
+
+@pytest.fixture
+async def capacity_session(
+    capacity_engine: AsyncEngine,
+) -> AsyncIterator[AsyncSession]:
+    async with capacity_engine.connect() as connection:
+        outer = await connection.begin()
+        session = AsyncSession(
+            bind=connection,
+            expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        )
+        try:
+            yield session
+        finally:
+            await session.rollback()
+            await session.close()
+            await outer.rollback()
 
 
 @pytest.fixture

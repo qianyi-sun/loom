@@ -1,0 +1,62 @@
+schema_version = 1
+
+[[subjects]]
+schema_version = 1
+subject_id = "00000000-0000-4000-8000-000000000005"
+subject_incarnation = "00000000-0000-4000-8000-000000000006"
+display_name = "development"
+account_id = "shared-development"
+tier_id = "development"
+max_slots = 8
+rollout_surge_slots = 1
+max_pending_slots = 8
+max_pending_jobs = 8
+lifecycle_state = "active"
+candidate_generation = 1
+deployment_generation = 1
+configuration_generation = 1
+demand_reporter_incarnation = "00000000-0000-4000-8000-000000000002"
+
+[[subjects.profiles]]
+schema_version = 1
+pool_id = "gb10"
+pool_generation = 1
+pool_digest = "de41e44f7648841ece3861fa91f3f3c92fb1152c1cb6b30218e7a5e8d0ac0804"
+profile_generation = 1
+profile_digest = "e487af4177c617decec46586a276fb50798edeb90556a7a38b78c5e21505268d"
+protocol_generation = 1
+protocol_digest = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+eligible_resource_domains = ["gb10-arm"]
+
+[[subjects.profiles.worker_shapes]]
+schema_version = 1
+shape_id = "gb10-one-slot"
+concurrency_slots = 1
+total_resources = { schema_version = 1, slots = 1, cpu_millicores = 1000, memory_bytes = 1073741824, gpu_count = 0, generic = {} }
+node_resources = [{ schema_version = 1, slots = 1, cpu_millicores = 1000, memory_bytes = 1073741824, gpu_count = 0, generic = {} }]
+compatible_domain_ids = ["gb10-arm"]
+capabilities = ["cpu"]
+placement_constraints = {}
+warm_approved = true
+
+[[subjects.profiles]]
+schema_version = 1
+pool_id = "oldlab"
+pool_generation = 1
+pool_digest = "d9b97682f70e318d7dc4be317c84854fa385950bf7f74e457194c34244d2a36a"
+profile_generation = 1
+profile_digest = "bfd1d2cd4618c63ac8bc002a14fb146a52d03f782e1cb28adf173b4c425232d0"
+protocol_generation = 1
+protocol_digest = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+eligible_resource_domains = ["oldlab-x86"]
+
+[[subjects.profiles.worker_shapes]]
+schema_version = 1
+shape_id = "oldlab-one-slot"
+concurrency_slots = 1
+total_resources = { schema_version = 1, slots = 1, cpu_millicores = 1000, memory_bytes = 1073741824, gpu_count = 0, generic = {} }
+node_resources = [{ schema_version = 1, slots = 1, cpu_millicores = 1000, memory_bytes = 1073741824, gpu_count = 0, generic = {} }]
+compatible_domain_ids = ["oldlab-x86"]
+capabilities = ["cpu"]
+placement_constraints = {}
+warm_approved = true

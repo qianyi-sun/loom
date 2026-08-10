@@ -1,0 +1,94 @@
+{
+  "configuration_epoch": 1,
+  "existing_pending_jobs": 0,
+  "existing_pending_slots": 0,
+  "fairness_cursors": [],
+  "observed_commitments": [],
+  "pools": [
+    {
+      "freshness": {
+        "database_received_at": "2026-08-10T12:00:00Z",
+        "last_payload_digest": "b693ed094641ff5f9dc1d45532f482181088ce07606b3c6ab3346544d4d32cd8",
+        "schema_version": 1,
+        "state": "valid"
+      },
+      "last_observation": {
+        "commitments": [],
+        "health": "eligible",
+        "pool_generation": 1,
+        "pool_id": "gb10",
+        "reporter_incarnation": "00000000-0000-4000-8000-000000000003",
+        "schema_version": 1,
+        "sequence": 1,
+        "source_observed_at": "2026-08-10T12:00:00Z"
+      },
+      "pool_id": "gb10",
+      "schema_version": 1
+    },
+    {
+      "freshness": {
+        "database_received_at": "2026-08-10T12:00:00Z",
+        "last_payload_digest": "1bed9c136ebef1def011b74571ca9b6d7ed9b8d822312784c948e62b9ae658b3",
+        "schema_version": 1,
+        "state": "valid"
+      },
+      "last_observation": {
+        "commitments": [],
+        "health": "eligible",
+        "pool_generation": 1,
+        "pool_id": "oldlab",
+        "reporter_incarnation": "00000000-0000-4000-8000-000000000004",
+        "schema_version": 1,
+        "sequence": 1,
+        "source_observed_at": "2026-08-10T12:00:00Z"
+      },
+      "pool_id": "oldlab",
+      "schema_version": 1
+    }
+  ],
+  "schema_version": 1,
+  "subjects": [
+    {
+      "freshness": {
+        "database_received_at": "2026-08-10T12:00:00Z",
+        "last_payload_digest": "3cd4c74e109a8a8c5b21c3eeba383872c7d0580b7ff2d1aa90fc0833d4571cc7",
+        "schema_version": 1,
+        "state": "valid"
+      },
+      "last_demand": {
+        "configuration_generation": 1,
+        "current_assignments": [],
+        "deployment_generation": 1,
+        "fixed_claims": [],
+        "pending_unassigned": [
+          {
+            "attempt_ids": [
+              "attempt-pending"
+            ],
+            "bucket_id": "cpu-default",
+            "eligible_pool_ids": [
+              "gb10",
+              "oldlab"
+            ],
+            "local_priority": 0,
+            "oldest_submitted_at": "2026-08-10T12:00:00Z",
+            "requested_slots": 1,
+            "required_capabilities": [
+              "cpu"
+            ],
+            "schema_version": 1
+          }
+        ],
+        "reporter_incarnation": "00000000-0000-4000-8000-000000000002",
+        "schema_version": 1,
+        "sequence": 1,
+        "source_observed_at": "2026-08-10T12:00:00Z",
+        "subject_id": "00000000-0000-4000-8000-000000000005",
+        "subject_incarnation": "00000000-0000-4000-8000-000000000006"
+      },
+      "schema_version": 1,
+      "subject_id": "00000000-0000-4000-8000-000000000005",
+      "subject_incarnation": "00000000-0000-4000-8000-000000000006"
+    }
+  ]
+}
