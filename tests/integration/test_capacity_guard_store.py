@@ -13,7 +13,7 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from loom.db.schema import Task, Team, TeamQuota, Trial
@@ -324,15 +324,6 @@ async def test_registration_identity_conflicts_leave_no_partial_rows(
             attempt.model_copy(update={"execution_generation": 2}),
             requirements,
         ),
-        (
-            attempt.model_copy(
-                update={
-                    "trial_id": other_trial_id,
-                    "execution_generation": 1,
-                }
-            ),
-            requirements,
-        ),
     )
     for conflicting_attempt, conflicting_requirements in conflicts:
         with pytest.raises(GuardReplayConflictError):
@@ -341,6 +332,26 @@ async def test_registration_identity_conflicts_leave_no_partial_rows(
                     conflicting_attempt,
                     conflicting_requirements,
                 )
+
+    conflicting_trial_attempt = attempt.model_copy(
+        update={
+            "trial_id": other_trial_id,
+            "execution_generation": 1,
+        }
+    )
+    async with _store_session(capacity_guard_database) as (store, session):
+        with pytest.raises(GuardReplayConflictError):
+            await store.register_trial_attempt(conflicting_trial_attempt, requirements)
+        partial_count = (
+            await session.execute(
+                text(
+                    "SELECT count(*) FROM loom_capacity_guard.trial_requirements "
+                    "WHERE trial_id = :trial_id"
+                ),
+                {"trial_id": other_trial_id},
+            )
+        ).scalar_one()
+        assert partial_count == 0
 
     async with _store_session(capacity_guard_database) as (_, session):
         counts = (
@@ -406,7 +417,7 @@ async def test_concurrent_exact_registration_converges_after_serialization_retry
             try:
                 async with _store_session(capacity_guard_database) as (store, _):
                     return await store.register_trial_attempt(attempt, requirements)
-            except Exception as exc:
+            except DBAPIError as exc:
                 sqlstate = getattr(getattr(exc, "orig", None), "sqlstate", None)
                 if sqlstate != "40001" or retry == 2:
                     raise
