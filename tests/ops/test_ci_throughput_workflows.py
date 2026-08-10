@@ -164,6 +164,9 @@ def test_planners_gates_publish_and_aggregation_stay_github_hosted() -> None:
 def test_native_image_publish_jobs_stay_on_architecture_matched_github_hosts() -> None:
     jobs = _workflow(".github/workflows/images.yml")["jobs"]
 
+    build_runs_on = jobs["build"]["runs-on"]
+    assert "matrix.image == 'pipeline-orchestrator'" in build_runs_on
+    assert "ubuntu-24.04" in build_runs_on
     publish_runs_on = jobs["publish"]["runs-on"]
     assert "matrix.architecture == 'arm64'" in publish_runs_on
     assert "ubuntu-24.04-arm" in publish_runs_on
