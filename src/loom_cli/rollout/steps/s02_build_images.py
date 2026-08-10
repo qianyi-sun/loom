@@ -67,14 +67,14 @@ def _canonical_exact_plans(
     auxiliary: RolloutImagePlan,
 ) -> tuple[RolloutImagePlan, RolloutImagePlan]:
     if len(primary) != len(_PRIMARY_PLAN) or set(primary) != set(_PRIMARY_PLAN):
-        raise RuntimeError("candidate primary image role differs from the exact seven-image plan")
+        raise RuntimeError("candidate primary image role differs from the exact eight-image plan")
     if len(auxiliary) != len(_AUXILIARY_PLAN) or set(auxiliary) != set(_AUXILIARY_PLAN):
         raise RuntimeError("candidate auxiliary image role differs from the exact two-image plan")
     if set(primary) & set(auxiliary):
         raise RuntimeError("candidate rollout image roles overlap")
     plan = _PRIMARY_PLAN + _AUXILIARY_PLAN
     if plan != DEFAULT_ROLLOUT_IMAGE_PLAN:
-        raise RuntimeError("candidate rollout image union differs from the exact nine-image plan")
+        raise RuntimeError("candidate rollout image union differs from the exact ten-image plan")
     return _PRIMARY_PLAN, _AUXILIARY_PLAN
 
 
@@ -210,7 +210,7 @@ def _rollout_matrix_from_candidate(
 
 
 def rollout_images_from_candidate(ctx: RolloutContext) -> RolloutImagePlan:
-    """Return only the seven primary images consumed by S03 and S12."""
+    """Return only the eight primary images consumed by S03 and S12."""
 
     primary, _auxiliary, _manifest_sha256 = _rollout_matrix_from_candidate(ctx)
     return primary
@@ -329,7 +329,7 @@ def rollout_all_image_bindings(
     ctx: RolloutContext,
     step_dir: StepDir,
 ) -> tuple[RolloutImagePlan, dict[str, str]]:
-    """Return the exact nine-image plan and candidate-verified local IDs."""
+    """Return the exact ten-image plan and candidate-verified local IDs."""
     primary, auxiliary, image_ids, _artifact_digest = _persisted_rollout_matrix(
         ctx,
         step_dir,

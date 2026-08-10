@@ -104,15 +104,14 @@ def _write_matrix(
 
 
 class TestBuildImagesCoverage:
-    def test_primary_images_exclude_only_disabled_pipeline_orchestrator(self) -> None:
+    def test_primary_images_exactly_cover_managed_workloads(self) -> None:
         rendered = _locally_tagged_deployment_images()
         primary = {name for name, _, _ in rollout_images_from_worktree(_repo_root())}
 
-        assert primary < rendered
-        assert rendered - primary == {"loom-pipeline-orchestrator"}
-        assert len(primary) == 7
+        assert primary == rendered
+        assert len(primary) == 8
 
-    def test_candidate_roles_form_exact_nine_image_contract(self) -> None:
+    def test_candidate_roles_form_exact_ten_image_contract(self) -> None:
         primary = rollout_images_from_worktree(_repo_root())
         auxiliary = rollout_auxiliary_images_from_worktree(_repo_root())
 
@@ -250,7 +249,7 @@ def test_rollout_image_query_uses_commit_bound_script_manifest_and_roles(
 def test_candidate_role_drift_fails_closed() -> None:
     sandbox = ("loom-agent-sandbox", "deploy/Dockerfile.agent-sandbox", ".")
 
-    with pytest.raises(RuntimeError, match="exact seven-image"):
+    with pytest.raises(RuntimeError, match="exact eight-image"):
         s02_build_images._canonical_exact_plans(
             (*PRIMARY_PLAN[:-1], sandbox),
             AUXILIARY_PLAN,
@@ -442,7 +441,7 @@ def test_run_builds_exact_candidate_plan_and_persists_v2_identities(
     envelope = json.loads(step_dir.artifact_path("image-matrix.json").read_text())
     assert envelope["schema_version"] == 2
     assert envelope["image_ids"] == _image_ids()
-    assert len(envelope["primary_images"]) == 7
+    assert len(envelope["primary_images"]) == 8
     assert len(envelope["auxiliary_images"]) == 2
 
 

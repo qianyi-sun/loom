@@ -302,8 +302,8 @@ the payload case's minimal synthetic passing-workspace fixtures. The immutable
 image is pulled once, then every case runs with further pulls disabled. This
 proves verifier conformance only; it is not proof that a real task or trial
 succeeded. Planner, staging-start, and release consumers use manifest-derived
-inputs. Rollout build, kind-load, and expected-image evidence use one nine-image
-matrix generated from the fixed candidate worktree's seven
+inputs. Rollout build, kind-load, and expected-image evidence use one ten-image
+matrix generated from the fixed candidate worktree's eight
 `rollout_role = "primary"` and two `rollout_role = "auxiliary"` components, then
 persisted by the build step. The two sandbox conformance images are intentionally
 excluded. Every change under `tests/integration/`
