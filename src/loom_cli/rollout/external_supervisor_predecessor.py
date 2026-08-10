@@ -17,6 +17,9 @@ from loom_cli.rollout.external_supervisor_readiness import ExternalSupervisorArt
 DEFAULT_PREDECESSOR_MANIFEST = resources.files("loom_cli.data").joinpath(
     "staging-external-supervisor-predecessor.json"
 )
+OLDLAB_PREDECESSOR_MANIFEST = resources.files("loom_cli.data").joinpath(
+    "staging-oldlab-external-supervisor-predecessor.json"
+)
 
 _SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -41,6 +44,17 @@ PR907_PREDECESSOR_MANIFEST_DIGEST = (
 PR907_PREDECESSOR_UNIT_SET_DIGEST = (
     "1b4435095ddb8b4da3cb2673ddf1c3e78ed5b562dd0c9c259d3c26dcaa1d6696"
 )
+PR1197_PREDECESSOR_BYTES_SHA256 = "2539d6d8f7bb3a8ef1e68dd915ddaeca8eb86fdd2e28673a5277f280305115bf"
+PR1197_PREDECESSOR_SOURCE_COMMIT = "78fbcbacb6dcdebb577692c1257f6e2226b73de6"
+PR1197_PREDECESSOR_SOURCE_TREE = "bfabdac8be9c7e4b187addf3e6fa099ced0a7122"
+PR1197_PREDECESSOR_MANIFEST_DIGEST = (
+    "f36284e8220ee514e6c057e767bc01b296212bd7894dcfccd9e277234adaf253"
+)
+PR1197_PREDECESSOR_UNIT_SET_DIGEST = (
+    "9b7f83352ebbe7e4af996094462c9241cb71b642c3c64ee6dbc7de8086c750a9"
+)
+
+_OLDLAB_EXECUTION_HOST = "trt-eai-oldlab-1"
 
 _POOL_IDENTITY_TABLES = (
     "gb10_worker_node_statuses",
@@ -160,7 +174,7 @@ class ExternalSupervisorPredecessorManifest:
         if (
             self.schema_version != 1
             or type(self.authority_id) is not str
-            or self.authority_id != "merged-pr-907"
+            or self.authority_id not in {"merged-pr-907", "merged-pr-1197"}
             or type(self.source_commit) is not str
             or _SHA_RE.fullmatch(self.source_commit) is None
             or type(self.source_tree) is not str
@@ -217,6 +231,16 @@ class ExternalSupervisorPredecessorManifest:
             ).encode()
             + b"\n"
         )
+
+    @property
+    def pool_identity_predecessor_kind(self) -> str:
+        """Return the GB10 rename authority expected for this supervisor snapshot."""
+
+        if self.authority_id == "merged-pr-907":
+            return "legacy-manifest"
+        if self.authority_id == "merged-pr-1197":
+            return "canonical"
+        raise ValueError("external supervisor predecessor authority is invalid")
 
     @classmethod
     def from_bytes(cls, payload: bytes) -> ExternalSupervisorPredecessorManifest:
@@ -623,18 +647,41 @@ class ExternalSupervisorPredecessorAuthority:
         )
 
 
-def load_predecessor_manifest() -> ExternalSupervisorPredecessorManifest:
-    payload = DEFAULT_PREDECESSOR_MANIFEST.read_bytes()
-    if hashlib.sha256(payload).hexdigest() != PR907_PREDECESSOR_BYTES_SHA256:
-        raise ValueError("external supervisor PR #907 predecessor byte identity drifted")
+def load_predecessor_manifest(
+    *,
+    execution_host: str | None = None,
+) -> ExternalSupervisorPredecessorManifest:
+    normalized_host = None if execution_host is None else execution_host.split(".", 1)[0].casefold()
+    if normalized_host in {None, "gx10-01c7"}:
+        path = DEFAULT_PREDECESSOR_MANIFEST
+        expected_bytes = PR907_PREDECESSOR_BYTES_SHA256
+        expected_commit = PR907_PREDECESSOR_SOURCE_COMMIT
+        expected_tree = PR907_PREDECESSOR_SOURCE_TREE
+        expected_manifest = PR907_PREDECESSOR_MANIFEST_DIGEST
+        expected_units = PR907_PREDECESSOR_UNIT_SET_DIGEST
+        label = "PR #907"
+    elif normalized_host == _OLDLAB_EXECUTION_HOST:
+        path = OLDLAB_PREDECESSOR_MANIFEST
+        expected_bytes = PR1197_PREDECESSOR_BYTES_SHA256
+        expected_commit = PR1197_PREDECESSOR_SOURCE_COMMIT
+        expected_tree = PR1197_PREDECESSOR_SOURCE_TREE
+        expected_manifest = PR1197_PREDECESSOR_MANIFEST_DIGEST
+        expected_units = PR1197_PREDECESSOR_UNIT_SET_DIGEST
+        label = "PR #1197"
+    else:
+        raise ValueError("external supervisor predecessor execution host is unknown")
+
+    payload = path.read_bytes()
+    if hashlib.sha256(payload).hexdigest() != expected_bytes:
+        raise ValueError(f"external supervisor {label} predecessor byte identity drifted")
     manifest = ExternalSupervisorPredecessorManifest.from_bytes(payload)
     if (
-        manifest.source_commit != PR907_PREDECESSOR_SOURCE_COMMIT
-        or manifest.source_tree != PR907_PREDECESSOR_SOURCE_TREE
-        or manifest.manifest_digest != PR907_PREDECESSOR_MANIFEST_DIGEST
-        or manifest.unit_set_digest != PR907_PREDECESSOR_UNIT_SET_DIGEST
+        manifest.source_commit != expected_commit
+        or manifest.source_tree != expected_tree
+        or manifest.manifest_digest != expected_manifest
+        or manifest.unit_set_digest != expected_units
     ):
-        raise ValueError("external supervisor PR #907 predecessor identity drifted")
+        raise ValueError(f"external supervisor {label} predecessor identity drifted")
     return manifest
 
 
@@ -642,11 +689,17 @@ __all__ = [
     "ABSENT_PREDECESSOR_DIGEST",
     "DEFAULT_PREDECESSOR_MANIFEST",
     "NO_TRANSITION_GROUP_ID",
+    "OLDLAB_PREDECESSOR_MANIFEST",
     "PR907_PREDECESSOR_BYTES_SHA256",
     "PR907_PREDECESSOR_MANIFEST_DIGEST",
     "PR907_PREDECESSOR_SOURCE_COMMIT",
     "PR907_PREDECESSOR_SOURCE_TREE",
     "PR907_PREDECESSOR_UNIT_SET_DIGEST",
+    "PR1197_PREDECESSOR_BYTES_SHA256",
+    "PR1197_PREDECESSOR_MANIFEST_DIGEST",
+    "PR1197_PREDECESSOR_SOURCE_COMMIT",
+    "PR1197_PREDECESSOR_SOURCE_TREE",
+    "PR1197_PREDECESSOR_UNIT_SET_DIGEST",
     "PROTECTED_CANONICAL_UNIT_DIR",
     "ExternalSupervisorCanonicalIdentity",
     "ExternalSupervisorCanonicalPointer",

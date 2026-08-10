@@ -9,7 +9,9 @@ import pytest
 
 from loom_cli.rollout.external_supervisor_predecessor import (
     DEFAULT_PREDECESSOR_MANIFEST,
+    OLDLAB_PREDECESSOR_MANIFEST,
     PR907_PREDECESSOR_BYTES_SHA256,
+    PR1197_PREDECESSOR_BYTES_SHA256,
     ExternalSupervisorCanonicalIdentity,
     ExternalSupervisorPoolIdentity,
     ExternalSupervisorPredecessorAuthority,
@@ -56,6 +58,32 @@ def test_checked_in_pr907_predecessor_is_canonical_and_source_reproducible() -> 
         name: hashlib.sha256(payload.encode()).hexdigest()
         for name, payload in manifest.unit_payloads.items()
     } == dict(manifest.unit_sha256)
+
+    repository = Path(__file__).resolve().parents[3]
+    for source_path, expected_digest in manifest.source_file_sha256.items():
+        source = subprocess.run(
+            ("git", "show", f"{manifest.source_commit}:{source_path}"),
+            cwd=repository,
+            check=True,
+            capture_output=True,
+        ).stdout
+        assert hashlib.sha256(source).hexdigest() == expected_digest
+
+
+def test_checked_in_pr1197_oldlab_predecessor_is_source_reproducible() -> None:
+    manifest = load_predecessor_manifest(execution_host="TRT-EAI-OLDLAB-1")
+
+    assert hashlib.sha256(OLDLAB_PREDECESSOR_MANIFEST.read_bytes()).hexdigest() == (
+        PR1197_PREDECESSOR_BYTES_SHA256
+    )
+    assert manifest.authority_id == "merged-pr-1197"
+    assert manifest.source_commit == "78fbcbacb6dcdebb577692c1257f6e2226b73de6"
+    assert manifest.source_tree == "bfabdac8be9c7e4b187addf3e6fa099ced0a7122"
+    assert set(manifest.unit_sha256) == {
+        "loom-autoscaler-oldlab-staging.service",
+        "loom-autoscaler-oldlab-staging.timer",
+    }
+    assert OLDLAB_PREDECESSOR_MANIFEST.read_bytes() == manifest.to_bytes()
 
     repository = Path(__file__).resolve().parents[3]
     for source_path, expected_digest in manifest.source_file_sha256.items():
