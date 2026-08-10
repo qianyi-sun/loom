@@ -563,3 +563,20 @@ def test_guard_migration_login_must_be_owner_member(
         with engine.begin() as connection:
             connection.exec_driver_sql(f"DROP ROLE IF EXISTS {quoted_outsider}")
         engine.dispose()
+
+
+def test_guard_migration_rejects_superuser_login(
+    capacity_guard_database: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path(__file__).resolve().parents[2]
+    cfg = AlembicConfig(str(root / "capacity_guard_migrations" / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "capacity_guard_migrations"))
+    monkeypatch.setenv(
+        "LOOM_CAPACITY_GUARD_DB_URL", _value(capacity_guard_database, "admin_url")
+    )
+    monkeypatch.setenv(
+        "LOOM_CAPACITY_GUARD_OWNER_ROLE", _value(capacity_guard_database, "owner_role")
+    )
+    with pytest.raises(RuntimeError, match="least-privileged"):
+        command.current(cfg)

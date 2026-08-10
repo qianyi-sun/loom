@@ -44,6 +44,34 @@ def run_migrations_online() -> None:
             preparer = connection.dialect.identifier_preparer
             quoted_owner = preparer.quote(owner_role)
             quoted_schema = preparer.quote(PROTECTED_SCHEMA)
+            login = (
+                connection.execute(
+                    text(
+                        "SELECT rolname, rolcanlogin, rolsuper, rolcreatedb, "
+                        "rolcreaterole, rolreplication, rolbypassrls "
+                        "FROM pg_roles WHERE rolname = session_user"
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if (
+                login is None
+                or login["rolcanlogin"] is not True
+                or any(
+                    login[field] is True
+                    for field in (
+                        "rolsuper",
+                        "rolcreatedb",
+                        "rolcreaterole",
+                        "rolreplication",
+                        "rolbypassrls",
+                    )
+                )
+            ):
+                raise RuntimeError(
+                    "protected capacity migration login must be a least-privileged role"
+                )
             connection.exec_driver_sql(f"SET ROLE {quoted_owner}")
             role = connection.execute(
                 text("SELECT current_role, rolcanlogin FROM pg_roles WHERE rolname = current_role")

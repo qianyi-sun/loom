@@ -112,7 +112,8 @@ live-environment argument.
 Package 2A adds an independently migrated `loom_capacity_guard` schema inside
 each environment database. Its migration login must explicitly assume a
 pre-provisioned non-login owner role before creating the protected revision
-table or any protected object. Candidate roles and `PUBLIC` receive no schema,
+table or any protected object. The entrypoint rejects superuser and other
+broad cluster-level migration credentials. Candidate roles and `PUBLIC` receive no schema,
 table, sequence, function, or future-object default privileges.
 
 The protected foundation stores only an exact disabled authority fence,
