@@ -377,16 +377,123 @@ def _inspect_registry_manifest(
         payload = json.loads(result.stdout)
     except json.JSONDecodeError:
         return None
-    if not isinstance(payload, dict):
+    if isinstance(payload, dict):
+        manifest = payload.get("SchemaV2Manifest", payload)
+        descriptor = payload.get("Descriptor")
+        config = manifest.get("config") if isinstance(manifest, dict) else None
+        config_digest = config.get("digest") if isinstance(config, dict) else None
+        manifest_digest = descriptor.get("digest") if isinstance(descriptor, dict) else None
+        if config_digest != expected_image_id or not isinstance(manifest_digest, str):
+            return None
+        return manifest_digest if _IMAGE_ID_RE.fullmatch(manifest_digest) is not None else None
+    if not isinstance(payload, list) or not payload:
         return None
-    manifest = payload.get("SchemaV2Manifest", payload)
-    descriptor = payload.get("Descriptor")
-    config = manifest.get("config") if isinstance(manifest, dict) else None
-    config_digest = config.get("digest") if isinstance(config, dict) else None
-    manifest_digest = descriptor.get("digest") if isinstance(descriptor, dict) else None
-    if config_digest != expected_image_id or not isinstance(manifest_digest, str):
+
+    # Docker's containerd image store publishes a provenance-bearing OCI index.
+    # ``docker manifest inspect --verbose`` expands that index into a JSON list
+    # and omits the index digest, so bind it with buildx's descriptor view and
+    # cross-check the complete child set from both independent views.
+    try:
+        index_result = run(
+            (
+                "docker",
+                "buildx",
+                "imagetools",
+                "inspect",
+                reference,
+                "--format",
+                "{{json .Manifest}}",
+            ),
+            None,
+        )
+    except Exception:
         return None
-    return manifest_digest if _IMAGE_ID_RE.fullmatch(manifest_digest) is not None else None
+    if (
+        index_result.returncode != 0
+        or not isinstance(index_result.stdout, str)
+        or len(index_result.stdout) > 1024**2
+    ):
+        return None
+    try:
+        index = json.loads(index_result.stdout)
+    except json.JSONDecodeError:
+        return None
+    if (
+        not isinstance(index, dict)
+        or index.get("schemaVersion") != 2
+        or index.get("mediaType")
+        not in {
+            "application/vnd.docker.distribution.manifest.list.v2+json",
+            "application/vnd.oci.image.index.v1+json",
+        }
+        or index.get("digest") != expected_image_id
+        or _IMAGE_ID_RE.fullmatch(expected_image_id) is None
+    ):
+        return None
+    manifests = index.get("manifests")
+    if not isinstance(manifests, list) or not manifests:
+        return None
+
+    def descriptor_identity(value: object) -> tuple[str, str, str] | None:
+        if not isinstance(value, dict):
+            return None
+        digest = value.get("digest")
+        platform = value.get("platform")
+        if (
+            not isinstance(digest, str)
+            or _IMAGE_ID_RE.fullmatch(digest) is None
+            or not isinstance(platform, dict)
+            or not isinstance(platform.get("os"), str)
+            or not isinstance(platform.get("architecture"), str)
+        ):
+            return None
+        return digest, platform["os"], platform["architecture"]
+
+    verbose_identities: list[tuple[str, str, str]] = []
+    for item in payload:
+        descriptor = item.get("Descriptor") if isinstance(item, dict) else None
+        identity = descriptor_identity(descriptor)
+        if identity is None:
+            return None
+        verbose_identities.append(identity)
+    index_identities = [descriptor_identity(item) for item in manifests]
+    if (
+        any(identity is None for identity in index_identities)
+        or len(set(verbose_identities)) != len(verbose_identities)
+        or len(set(index_identities)) != len(index_identities)
+        or set(verbose_identities) != set(index_identities)
+    ):
+        return None
+
+    workload: list[dict[str, object]] = []
+    attestations: list[dict[str, object]] = []
+    for item in manifests:
+        if not isinstance(item, dict):  # narrowed by descriptor_identity above
+            return None
+        annotations = item.get("annotations")
+        if (
+            isinstance(annotations, dict)
+            and annotations.get("vnd.docker.reference.type") == "attestation-manifest"
+        ):
+            attestations.append(item)
+        else:
+            workload.append(item)
+    if len(workload) != 1:
+        return None
+    workload_identity = descriptor_identity(workload[0])
+    if workload_identity is None or workload_identity[1:] != ("linux", "amd64"):
+        return None
+    for attestation in attestations:
+        identity = descriptor_identity(attestation)
+        annotations = attestation.get("annotations")
+        if (
+            identity is None
+            or identity[1:] != ("unknown", "unknown")
+            or not isinstance(annotations, dict)
+            or annotations.get("vnd.docker.reference.digest") != workload_identity[0]
+        ):
+            return None
+    return expected_image_id
 
 
 def publish_exact_images(

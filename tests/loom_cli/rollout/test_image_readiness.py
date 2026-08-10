@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from loom_cli.rollout import image_readiness
 from loom_cli.rollout.image_readiness import (
     ALL_BUILD_IMAGES,
     BROWSER_ENTRYPOINT,
@@ -141,6 +142,75 @@ def test_registry_image_session_publishes_and_binds_every_manifest_digest(
     assert len(
         [command for command in calls if command[:3] == ("docker", "manifest", "inspect")]
     ) == len(ALL_BUILD_IMAGES)
+
+
+def test_registry_manifest_accepts_exact_docker_provenance_index() -> None:
+    reference = "localhost:5000/loom-control-plane:staging-aaaaaaaa"
+    index_digest = "sha256:" + "a" * 64
+    platform_digest = "sha256:" + "b" * 64
+    attestation_digest = "sha256:" + "c" * 64
+    verbose = [
+        {
+            "Descriptor": {
+                "digest": platform_digest,
+                "platform": {"architecture": "amd64", "os": "linux"},
+            }
+        },
+        {
+            "Descriptor": {
+                "digest": attestation_digest,
+                "platform": {"architecture": "unknown", "os": "unknown"},
+            }
+        },
+    ]
+    index = {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "digest": index_digest,
+        "manifests": [
+            {
+                "digest": platform_digest,
+                "platform": {"architecture": "amd64", "os": "linux"},
+            },
+            {
+                "digest": attestation_digest,
+                "annotations": {
+                    "vnd.docker.reference.digest": platform_digest,
+                    "vnd.docker.reference.type": "attestation-manifest",
+                },
+                "platform": {"architecture": "unknown", "os": "unknown"},
+            },
+        ],
+    }
+    calls: list[tuple[str, ...]] = []
+
+    def run(argv, cwd):
+        assert cwd is None
+        command = tuple(argv)
+        calls.append(command)
+        payload = index if command[:3] == ("docker", "buildx", "imagetools") else verbose
+        return subprocess.CompletedProcess(argv, 0, json.dumps(payload), "")
+
+    assert (
+        image_readiness._inspect_registry_manifest(
+            run,
+            reference,
+            expected_image_id=index_digest,
+        )
+        == index_digest
+    )
+    assert calls == [
+        ("docker", "manifest", "inspect", "--insecure", "--verbose", reference),
+        (
+            "docker",
+            "buildx",
+            "imagetools",
+            "inspect",
+            reference,
+            "--format",
+            "{{json .Manifest}}",
+        ),
+    ]
 
 
 def test_verify_image_contract_rejects_digest_drift_without_build() -> None:
