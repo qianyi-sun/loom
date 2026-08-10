@@ -61,6 +61,9 @@ _SKIP_SUFFIXES = frozenset({".pyc", ".pyo"})
 _MAX_PARALLEL_UPLOADS = 16
 
 WorkspacePhase = Literal["agent", "verifier"]
+WorkspaceStagingPolicyName = Literal["tb21", "none"]
+
+TB21_TASK_ID_PREFIX = "terminal-bench-2@tb2.1-r6/"
 
 # This exact schema is persisted in the TB2.1 rev-6 manifest and task
 # provenance.  Keep it as plain JSON-compatible data so publication, audit,
@@ -146,6 +149,71 @@ class WorkspaceStagingPolicy:
     def is_private(self, relative_path: PurePosixPath) -> bool:
         candidate = relative_path.as_posix()
         return any(fnmatchcase(candidate, pattern) for pattern in self.agent_excluded_paths)
+
+
+def resolve_workspace_staging_policy_name(
+    name: str,
+) -> WorkspaceStagingPolicy | None:
+    """Map a CLI/TrialConfig policy name to a concrete staging policy (#1263)."""
+    if name == "tb21":
+        return WorkspaceStagingPolicy.from_provenance(TB21_AGENT_WORKSPACE_POLICY)
+    if name == "none":
+        return None
+    raise ValueError(
+        f"unknown workspace_staging_policy_name {name!r}; expected 'tb21' or 'none'",
+    )
+
+
+def require_tb21_workspace_staging_policy(
+    raw_policy: object,
+) -> WorkspaceStagingPolicy:
+    """Parse only the reviewed TB2.1 rev-6 workspace boundary.
+
+    WorkspaceStagingPolicy intentionally supports future benchmark-specific
+    layouts.  The physical TB2.1 profile is stricter: its four private paths
+    are part of the reviewed immutable contract, so a merely valid alternate
+    policy must fail before materialization or driver startup.
+    """
+    if not isinstance(raw_policy, dict):
+        raise ValueError("TB2.1 task is missing canonical private workspace isolation policy")
+    try:
+        policy = WorkspaceStagingPolicy.from_provenance(raw_policy)
+    except ValueError as exc:
+        raise ValueError("TB2.1 task has invalid private workspace isolation policy") from exc
+    canonical = WorkspaceStagingPolicy.from_provenance(TB21_AGENT_WORKSPACE_POLICY)
+    if policy != canonical:
+        raise ValueError("TB2.1 task requires the canonical private workspace isolation policy")
+    return policy
+
+
+def resolve_trial_workspace_staging_policy(
+    *,
+    policy_name: WorkspaceStagingPolicyName | None,
+    task_id: str,
+    raw_provenance_policy: object,
+) -> WorkspaceStagingPolicy | None:
+    """Resolve the effective agent-workspace staging policy for a trial (#1263).
+
+    Order:
+    1. Explicit ``trial_config.workspace_staging_policy_name``
+    2. TB2.1-r6 task-id prefix → required canonical policy (``none`` rejected)
+    3. Task provenance dict, else no filter
+    """
+    is_tb21 = task_id.startswith(TB21_TASK_ID_PREFIX)
+    if policy_name == "tb21":
+        return resolve_workspace_staging_policy_name("tb21")
+    if policy_name == "none":
+        if is_tb21:
+            raise ValueError(
+                "TB2.1 task cannot use workspace_staging_policy_name=none; "
+                "private workspace isolation is required",
+            )
+        return None
+    if is_tb21:
+        return require_tb21_workspace_staging_policy(raw_provenance_policy)
+    if isinstance(raw_provenance_policy, dict):
+        return WorkspaceStagingPolicy.from_provenance(raw_provenance_policy)
+    return None
 
 
 async def materialize_workspace(

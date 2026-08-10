@@ -6,6 +6,8 @@ Wraps the server-side routes:
 - GET  /api/v1/trials[/{id}]           → `loom eval trial {list, show}`
 - POST /api/v1/trials/{id}/cancel      → `loom eval trial cancel`
 - POST /api/v1/batches                 → `loom eval batch create`
+  (optional ``trial_config.workspace_staging_policy_name`` via
+  ``--workspace-staging-policy``; #1263)
 - GET  /api/v1/batches[/{id}]          → `loom eval batch {list, show}`
 - POST /api/v1/batches/{id}/cancel     → `loom eval batch cancel`
 
@@ -589,6 +591,11 @@ def _batch_create(args: argparse.Namespace) -> int:
                         args.model,
                         agent_provider_override=args.agent_provider,
                     )
+            if args.workspace_staging_policy is not None:
+                # #1263: shared batch knob (also applies with --combinations-json).
+                trial_config["workspace_staging_policy_name"] = (
+                    args.workspace_staging_policy
+                )
             # --benchmark / --task-set are shortcuts for common task_filter
             # shapes. Operators wanting richer filters use --task-filter JSON
             # instead. Multiple selector forms are rejected so precedence stays
@@ -1434,6 +1441,20 @@ def dispatch(argv: list[str]) -> int:
         dest="agent_provider",
         default=None,
         help="See `loom eval run --agent-provider`.",
+    )
+    p_bc.add_argument(
+        "--workspace-staging-policy",
+        dest="workspace_staging_policy",
+        choices=["tb21", "none"],
+        default=None,
+        help=(
+            "Named agent-workspace staging policy for every trial in the batch "
+            "(#1263). `tb21` excludes solution/, tests/, verifier/, and "
+            "upstream-task.toml from the agent sandbox (Harbor-shaped packs). "
+            "`none` is legacy full-bundle upload. Omit to keep current "
+            "defaults (TB2.1-r6 tasks always enforce tb21). "
+            "terminal-bench-2@tb2.1-r6/* cannot select `none`."
+        ),
     )
     p_bc.set_defaults(handler=_batch_create)
 

@@ -229,6 +229,17 @@ loom eval batch create \
   --benchmark humaneval \
   --n-per-task 1
 
+# Harbor-shaped packs that ship solution/tests/verifier (e.g. strict-pass /
+# path-tracing) should select the TB21 private-path staging policy so the
+# agent cannot read the oracle (#1263):
+loom eval batch create \
+  --workspace-staging-policy tb21 \
+  --agent terminus-2 \
+  --provider smoke-openai \
+  --model gpt-4o-mini \
+  --task-set <harbor-task-set-id> \
+  --n-per-task 1
+
 loom eval batch show <batch-id>
 loom eval diagnose batch <batch-id>
 loom eval batch debug <batch-id> --format json
@@ -1358,6 +1369,11 @@ agent driver exits. Every result records Hub/profile/verifier provenance and
 agent runtime/image provenance independently. Numeric reward `0` is a valid
 scored outcome; missing, malformed, non-finite, or timed-out reward evidence is
 a platform/verifier failure.
+
+Harbor-shaped tasks outside the `terminal-bench-2@tb2.1-r6/` prefix do not get
+that isolation automatically. Select it at batch create with
+`--workspace-staging-policy tb21` (#1263) so model agents cannot read
+`solution/` / `tests/` / `verifier/` from the sandbox.
 
 Full-cluster rollout smoke must use an explicit audited physical task ID via
 `--smoke-task-id terminal-bench-2@tb2.1-r6/<task>`. Loom never guesses a TB2

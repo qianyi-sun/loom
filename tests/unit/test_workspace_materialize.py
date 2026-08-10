@@ -6,7 +6,11 @@ from __future__ import annotations
 from pathlib import Path, PurePosixPath
 
 from loom.driver.fake import FakeDriver
-from loom.trial.workspace import materialize_workspace
+from loom.trial.workspace import (
+    TB21_AGENT_WORKSPACE_POLICY,
+    WorkspaceStagingPolicy,
+    materialize_workspace,
+)
 
 
 async def test_uploads_nested_files_preserving_layout(tmp_path: Path) -> None:
@@ -92,6 +96,38 @@ async def test_skips_build_only_contexts(tmp_path: Path) -> None:
     assert PurePosixPath(
         "/workspace/.loom-build/client/protected/answer.txt",
     ) not in fs
+
+
+async def test_tb21_policy_excludes_private_paths_in_agent_phase(tmp_path: Path) -> None:
+    """#1263: named tb21 policy must hide solution/tests/verifier from agents."""
+    (tmp_path / "instruction.md").write_text("do the thing\n")
+    (tmp_path / "render_scene.py").write_text("print('hi')\n")
+    (tmp_path / "solution").mkdir()
+    (tmp_path / "solution" / "solve.sh").write_text("#!/bin/bash\necho secret\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_outputs.py").write_text("def test_ok(): pass\n")
+    (tmp_path / "verifier").mkdir()
+    (tmp_path / "verifier" / "run.sh").write_text("#!/bin/bash\n")
+    (tmp_path / "upstream-task.toml").write_text("[task]\n")
+
+    d = FakeDriver()
+    await d.start()
+    policy = WorkspaceStagingPolicy.from_provenance(TB21_AGENT_WORKSPACE_POLICY)
+    count = await materialize_workspace(
+        driver=d,
+        task_dir=tmp_path,
+        dst=PurePosixPath("/app"),
+        policy=policy,
+        phase="agent",
+    )
+    assert count == 2
+    fs = d.filesystem
+    assert PurePosixPath("/app/instruction.md") in fs
+    assert PurePosixPath("/app/render_scene.py") in fs
+    assert PurePosixPath("/app/solution/solve.sh") not in fs
+    assert PurePosixPath("/app/tests/test_outputs.py") not in fs
+    assert PurePosixPath("/app/verifier/run.sh") not in fs
+    assert PurePosixPath("/app/upstream-task.toml") not in fs
 
 
 async def test_empty_task_dir_uploads_nothing(tmp_path: Path) -> None:
