@@ -4,6 +4,11 @@ Design docs, protocol specs, and ADRs for how Loom is built. Start with
 [`overview.md`](overview.md); drill into the area you care about from
 there.
 
+Durable design documents belong in this directory. Agent-generated execution
+plans and working drafts stay in ignored local state such as `.claude/plans/`;
+`docs/superpowers/` is not part of the repository documentation tree and is
+rejected by repository checks.
+
 ## Reading order for new contributors
 
 1. **[overview.md](overview.md)** — one-pager: component map, modes, data
@@ -49,6 +54,9 @@ there.
 - **[issue45-worker-autoscaler-design.md](issue45-worker-autoscaler-design.md)**
   — resource-aware OLDLAB Slurm autoscaling and GB10 desired-state
   reconciliation.
+- **[global-fleet-capacity-manager.md](global-fleet-capacity-manager.md)** —
+  approved design for one fenced allocation writer spanning every Loom
+  environment and the OLDLAB and GB10 physical pools.
 
 ## Auth, isolation, sandboxing
 

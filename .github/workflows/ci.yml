@@ -169,6 +169,10 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Enforce repository path policy
+        if: steps.event.outputs.checkout_required == 'true'
+        run: python3 scripts/check_repository_paths.py
+
       - name: Plan required validations
         id: plan
         if: steps.event.outputs.checkout_required == 'true'

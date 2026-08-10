@@ -60,6 +60,10 @@ NEW_SESSION_BRIEFING.md
 # the IDE source-control panel with phantom "untracked" entries.
 .claude/
 
+# Agent planning plugins may default to this path. Loom keeps durable designs
+# under docs/architecture/ and keeps execution plans in local ignored state.
+/docs/superpowers/
+
 # Codex feature worktrees.
 .worktrees/
 

@@ -23,6 +23,19 @@ def test_local_python_version_is_pinned_to_ci_interpreter() -> None:
     assert (REPO_ROOT / ".python-version").read_text(encoding="utf-8").strip() == "3.11"
 
 
+def test_workflow_plan_enforces_repository_paths_before_docs_only_fast_path() -> None:
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/ci.yml").read_text())
+    steps = workflow["jobs"]["workflow-plan"]["steps"]
+    step_names = [step.get("name") for step in steps]
+
+    policy_index = step_names.index("Enforce repository path policy")
+    planner_index = step_names.index("Plan required validations")
+    docs_only_index = step_names.index("Docs-only fast path")
+
+    assert policy_index < planner_index < docs_only_index
+    assert steps[policy_index]["run"] == "python3 scripts/check_repository_paths.py"
+
+
 def test_contributor_quickstart_uses_ci_python_for_local_verification() -> None:
     text = (REPO_ROOT / "docs/contributing/contributor-quickstart.md").read_text(encoding="utf-8")
 

@@ -5,10 +5,10 @@ Loom environment. It receives demand from production, staging, shared
 development, and every per-person development deployment, then calculates one
 fleet-wide result across the physical `gb10` and `oldlab` pools.
 
-The approved design is
-[Global Fleet Capacity Manager Design](../superpowers/specs/2026-08-07-global-fleet-capacity-manager-design.md).
-The implemented first package follows the
-[Package 1 implementation plan](../superpowers/plans/2026-08-10-global-fleet-capacity-manager-package-1.md).
+The detailed approved design is
+[Global Fleet Capacity Manager Design](global-fleet-capacity-manager-design.md).
+Package 1 was implemented in PR #1268; its execution plan remains available in
+Git history rather than in the repository documentation tree.
 
 ## Authority and data flow
 
