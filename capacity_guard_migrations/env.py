@@ -1,0 +1,83 @@
+"""Alembic environment for the protected per-environment capacity schema."""
+
+from __future__ import annotations
+
+import os
+import re
+from logging.config import fileConfig
+
+from alembic import context
+from sqlalchemy import engine_from_config, pool, text
+
+PROTECTED_SCHEMA = "loom_capacity_guard"
+VERSION_TABLE = "capacity_guard_alembic_version"
+_ROLE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
+
+config = context.config
+if config.config_file_name is not None:
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
+
+db_url = os.environ.get("LOOM_CAPACITY_GUARD_DB_URL", "").strip()
+owner_role = os.environ.get("LOOM_CAPACITY_GUARD_OWNER_ROLE", "").strip()
+if not db_url:
+    raise RuntimeError(
+        "LOOM_CAPACITY_GUARD_DB_URL must be set to run protected capacity migrations"
+    )
+if _ROLE_PATTERN.fullmatch(owner_role) is None:
+    raise RuntimeError("LOOM_CAPACITY_GUARD_OWNER_ROLE must name an explicit canonical SQL role")
+config.set_main_option("sqlalchemy.url", db_url)
+target_metadata = None
+
+
+def run_migrations_offline() -> None:
+    raise RuntimeError("protected capacity migrations require an online owner-role verification")
+
+
+def run_migrations_online() -> None:
+    connectable = engine_from_config(
+        config.get_section(config.config_ini_section, {}),
+        prefix="sqlalchemy.",
+        poolclass=pool.NullPool,
+    )
+    try:
+        with connectable.connect() as connection:
+            preparer = connection.dialect.identifier_preparer
+            quoted_owner = preparer.quote(owner_role)
+            quoted_schema = preparer.quote(PROTECTED_SCHEMA)
+            connection.exec_driver_sql(f"SET ROLE {quoted_owner}")
+            role = connection.execute(
+                text("SELECT current_role, rolcanlogin FROM pg_roles WHERE rolname = current_role")
+            ).one_or_none()
+            if role is None or role.current_role != owner_role or role.rolcanlogin:
+                raise RuntimeError(
+                    "protected capacity migrations require the exact non-login owner role"
+                )
+
+            connection.exec_driver_sql(
+                f"CREATE SCHEMA IF NOT EXISTS {quoted_schema} AUTHORIZATION {quoted_owner}"
+            )
+            actual_owner = connection.execute(
+                text("SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = :schema"),
+                {"schema": PROTECTED_SCHEMA},
+            ).scalar_one()
+            if actual_owner != owner_role:
+                raise RuntimeError("protected capacity schema has the wrong owner")
+            connection.commit()
+
+            context.configure(
+                connection=connection,
+                target_metadata=target_metadata,
+                include_schemas=True,
+                version_table=VERSION_TABLE,
+                version_table_schema=PROTECTED_SCHEMA,
+            )
+            with context.begin_transaction():
+                context.run_migrations()
+    finally:
+        connectable.dispose()
+
+
+if context.is_offline_mode():
+    run_migrations_offline()
+else:
+    run_migrations_online()
