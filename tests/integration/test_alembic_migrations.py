@@ -52,6 +52,8 @@ def test_all_tables_exist(postgres_url: str) -> None:
                 "execution_attempts", "pipeline_events",
                 "pipeline_terminal_snapshots",
                 "pipeline_acceptance_preflight_prerequisites",
+                "pipeline_budget_ledgers", "pipeline_budget_reservations",
+                "execution_attempt_provider_budgets", "pipeline_cancellation_outbox",
                 "alembic_version"}
     assert expected.issubset(names)
 

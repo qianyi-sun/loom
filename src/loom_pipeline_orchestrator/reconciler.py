@@ -1,0 +1,144 @@
+"""Small convergent projections used by the database-backed main loop."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Protocol
+from uuid import UUID
+
+from loom.pipeline.budget import TerminalCause
+from loom.pipeline.gates import GateSelection, project_outcome_gate, strict_and_gate_target
+from loom.pipeline.projection import StageTerminalProjection, project_pipeline_result
+from loom.pipeline.retry import RetryDecision, retry_decision
+from loom.pipeline.state import PipelineRunResult, PipelineStageRunState, RetryClass
+from loom_pipeline_orchestrator.repository import (
+    AttemptProviderBudgetSpec,
+    AttemptReservationSpec,
+    FrozenReadiness,
+    PipelineRepository,
+    ReadinessCandidate,
+    RunLease,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class GateProjection:
+    selection: GateSelection
+    target_selection: GateSelection
+
+
+@dataclass(frozen=True, slots=True)
+class RenderedAttempt:
+    attempt_id: UUID
+    stage_request_json: dict[str, object]
+    stage_request_bytes: bytes
+    stage_request_digest: str
+    reservations: tuple[AttemptReservationSpec, ...]
+    provider_budget: AttemptProviderBudgetSpec | None = None
+    fault_pending: bool = False
+
+
+class ReadinessResolverV1(Protocol):
+    async def resolve(self, candidate: ReadinessCandidate) -> FrozenReadiness: ...
+
+
+class StageRequestRendererV1(Protocol):
+    def render(
+        self, candidate: ReadinessCandidate, frozen: FrozenReadiness
+    ) -> RenderedAttempt: ...
+
+
+class PipelineReconciler:
+    """Coordinates transaction phases while injected boundary work stays outside them."""
+
+    def __init__(
+        self,
+        repository: PipelineRepository,
+        *,
+        readiness_resolver: ReadinessResolverV1 | None = None,
+        request_renderer: StageRequestRendererV1 | None = None,
+    ) -> None:
+        if (readiness_resolver is None) != (request_renderer is None):
+            raise ValueError("readiness resolver and renderer must be injected together")
+        self._repository = repository
+        self._readiness_resolver = readiness_resolver
+        self._request_renderer = request_renderer
+
+    async def reconcile(self, lease: RunLease) -> None:
+        await self._repository.initialize_run(lease)
+        if await self._repository.enforce_wall_deadline(lease):
+            await self._repository.project_run_result(lease)
+            return
+        await self._repository.reconcile_dependencies_and_gates(lease)
+        if self._readiness_resolver is not None and self._request_renderer is not None:
+            candidates = await self._repository.readiness_candidates(lease)
+            for candidate in candidates:
+                frozen = await self._readiness_resolver.resolve(candidate)
+                await self._repository.freeze_readiness(
+                    lease,
+                    stage_run_id=candidate.stage_run_id,
+                    frozen=frozen,
+                )
+                try:
+                    rendered = self._request_renderer.render(candidate, frozen)
+                except (TypeError, ValueError):
+                    await self._repository.fail_renderer(
+                        lease,
+                        stage_run_id=candidate.stage_run_id,
+                    )
+                    continue
+                await self._repository.create_attempt(
+                    lease,
+                    stage_run_id=candidate.stage_run_id,
+                    attempt_id=rendered.attempt_id,
+                    stage_request_json=rendered.stage_request_json,
+                    stage_request_bytes=rendered.stage_request_bytes,
+                    stage_request_digest=rendered.stage_request_digest,
+                    reservations=rendered.reservations,
+                    provider_budget=rendered.provider_budget,
+                    fault_pending=rendered.fault_pending,
+                )
+        await self._repository.project_run_result(lease)
+
+
+def reconcile_gate(
+    *,
+    subject_state: PipelineStageRunState,
+    subject_outcome: str | None,
+    match_outcomes: list[str],
+    other_target_gates: tuple[GateSelection, ...] = (),
+) -> GateProjection:
+    own = project_outcome_gate(
+        subject_state=subject_state,
+        domain_outcome=subject_outcome,
+        match_outcomes=match_outcomes,
+    )
+    return GateProjection(own, strict_and_gate_target([own, *other_target_gates]))
+
+
+def reconcile_retry(
+    *,
+    attempt_number: int,
+    max_attempts: int,
+    retry_class: RetryClass,
+    reason_code: str,
+    terminal_cause: str | None,
+    cleanup_acknowledged: bool = True,
+    next_budget_fits: bool = True,
+) -> RetryDecision:
+    return retry_decision(
+        completed_attempt_number=attempt_number,
+        max_attempts=max_attempts,
+        retry_class=retry_class,
+        reason_code=reason_code,
+        terminal_cause=terminal_cause,
+        cleanup_acknowledged=cleanup_acknowledged,
+        next_budget_fits=next_budget_fits,
+    )
+
+
+def reconcile_result(
+    stages: list[StageTerminalProjection], *, terminal_cause: str | TerminalCause | None
+) -> tuple[PipelineRunResult, str | None]:
+    cause = TerminalCause(terminal_cause) if terminal_cause is not None else None
+    return project_pipeline_result(stages, terminal_cause=cause)

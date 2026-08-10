@@ -145,6 +145,9 @@ def test_images_contract_allows_pipeline_orchestrator() -> None:
 
     assert request["job_keys"] == ["pipeline-orchestrator"]
     assert mode == "disabled"
+    assert leases.RouteRequest.from_mapping(request).job_keys == (
+        "pipeline-orchestrator",
+    )
 
 
 def test_poll_accepts_only_the_exact_digest_check(

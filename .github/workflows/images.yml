@@ -275,7 +275,7 @@ jobs:
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           repository: qianyi-sun/loom
-          ref: 0d336557f0a3570490bd21bf85485c3e4c4a2d73
+          ref: 119d9ffb20ef6ef9df8a224e384ca5e91721416b
           sparse-checkout: .github/actions/ci-runner-route
           path: .loom-ci-route-action
           persist-credentials: false
@@ -291,7 +291,15 @@ jobs:
           import os
 
           builds = json.loads(os.environ["NATIVE_BUILDS"])
-          keys = [item["image"] for item in builds if item["architecture"] == "amd64"]
+          # The live lease broker may still run the preceding merged contract.
+          # Keep this new image on a hosted runner until that separately-owned
+          # control-plane rollout has occurred.
+          keys = [
+              item["image"]
+              for item in builds
+              if item["architecture"] == "amd64"
+              and item["image"] != "pipeline-orchestrator"
+          ]
           if not keys or len(keys) != len(set(keys)):
               raise SystemExit("native AMD64 route keys are empty or duplicated")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
@@ -322,6 +330,7 @@ jobs:
       needs.plan.outputs.images != '[]'
     runs-on: >-
       ${{ matrix.architecture == 'arm64' && fromJSON('["ubuntu-24.04-arm"]') ||
+          matrix.image == 'pipeline-orchestrator' && fromJSON('["ubuntu-24.04"]') ||
           fromJSON(needs.image-route.outputs.routes)[matrix.image] }}
     timeout-minutes: 45
     permissions:

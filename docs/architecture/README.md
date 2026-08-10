@@ -166,6 +166,9 @@ rejected by repository checks.
 - **[pipeline-platform-governance.md](pipeline-platform-governance.md)** —
   active governance baseline for Pipeline extensibility, typed Artifacts,
   official Recipes, plugins, SkillMarkdown injection, and data production.
+- **[pipeline-orchestrator.md](pipeline-orchestrator.md)** — durable v1 graph
+  reconciliation, fencing, hard budgets, cancellation, and the disabled
+  standalone controller deployment boundary.
 
 ## ADRs
 

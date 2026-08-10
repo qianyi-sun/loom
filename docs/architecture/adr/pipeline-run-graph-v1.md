@@ -9,6 +9,8 @@ Tracking:
 - Epic: [qianyi-sun/loom#1210](https://github.com/qianyi-sun/loom/issues/1210)
 - Normative schema and persistence contract:
   [qianyi-sun/loom#1211](https://github.com/qianyi-sun/loom/issues/1211)
+- Orchestration, fencing, budget, retry, and terminal projection:
+  [qianyi-sun/loom#1212](https://github.com/qianyi-sun/loom/issues/1212)
 
 ## Context
 
@@ -103,10 +105,12 @@ delimiter concatenation, or a second canonicalizer.
 ### Merge and deployment remain separate authorities
 
 #1211 owns schema models, state machines, identifiers, official Recipe
-registration, persistence, and migration compatibility. It does not implement
-the controller, worker execution, public API, browser, live environment
-mutation, or production activation. Those capabilities remain with their
-explicit dependent issues and rollout gates.
+registration, persistence, and migration compatibility. #1212 owns the
+standalone replay-safe controller, lease fencing, readiness freeze, fan-out,
+hard budgets, retry, cancellation, and final projection. Neither issue owns
+worker execution, public API, browser, live environment mutation, or production
+activation. Those capabilities remain with their explicit dependent issues and
+rollout gates.
 
 A merged PR and green CI prove only the repository slice that they exercised.
 They do not prove deployment, candidate installation, live data-path health,

@@ -164,6 +164,9 @@ def test_planners_gates_publish_and_aggregation_stay_github_hosted() -> None:
 def test_native_image_publish_jobs_stay_on_architecture_matched_github_hosts() -> None:
     jobs = _workflow(".github/workflows/images.yml")["jobs"]
 
+    build_runs_on = jobs["build"]["runs-on"]
+    assert "matrix.image == 'pipeline-orchestrator'" in build_runs_on
+    assert "ubuntu-24.04" in build_runs_on
     publish_runs_on = jobs["publish"]["runs-on"]
     assert "matrix.architecture == 'arm64'" in publish_runs_on
     assert "ubuntu-24.04-arm" in publish_runs_on
@@ -618,12 +621,13 @@ def test_images_required_unowned_runtime_path_selects_all_images(tmp_path: Path)
     matrix = json.loads(_github_output_value(output, "images"))
     native_matrix = json.loads(_github_output_value(output, "native_builds"))
     assert _github_output_value(output, "required") == "true"
-    assert len(matrix) == 11
+    assert len(matrix) == 12
     assert {entry["image"] for entry in matrix} == {
         "agent-sandbox",
         "control-plane",
         "egress-xds",
         "family-orchestrator",
+        "pipeline-orchestrator",
         "llm-gateway",
         "llm-gateway-sandbox",
         "rehearsal-postgres",
@@ -633,7 +637,7 @@ def test_images_required_unowned_runtime_path_selects_all_images(tmp_path: Path)
         "worker",
     }
     assert all(set(entry) == {"image", "image_name", "dockerfile", "context"} for entry in matrix)
-    assert len(native_matrix) == 22
+    assert len(native_matrix) == 24
     assert {(entry["architecture"], entry["platform"]) for entry in native_matrix} == {
         ("amd64", "linux/amd64"),
         ("arm64", "linux/arm64"),
@@ -657,6 +661,7 @@ def test_images_mixed_known_and_unowned_paths_select_all_images(tmp_path: Path) 
         "control-plane",
         "egress-xds",
         "family-orchestrator",
+        "pipeline-orchestrator",
         "llm-gateway",
         "staging-admin-browser-smoke",
         "web",
@@ -698,6 +703,7 @@ def test_manifest_owned_markdown_build_input_requires_images(tmp_path: Path) -> 
     assert {entry["image"] for entry in matrix} == {
         "control-plane",
         "family-orchestrator",
+        "pipeline-orchestrator",
         "llm-gateway",
         "service",
         "worker",
