@@ -14,7 +14,16 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 
 from loom.admin_secret import AdminSecretVerifier, load_optional_admin_secret_verifier
 from loom.db.schema_startup import assert_schema_at_head
+from loom.pipeline.artifact_commit import ArtifactCommitService
 from loom.storage_credentials import build_s3_client
+from loom.trajectory.storage import MinioObjectStore
+from loom_control_plane.artifact_commit_runtime import (
+    ExecutionAttemptCompletionService,
+    FinalOutputRouteService,
+    SqlArtifactCommitRepository,
+    SqlArtifactInputResolver,
+)
+from loom_control_plane.artifact_read_service import ArtifactReadService
 from loom_control_plane.config import ControlPlaneSettings
 from loom_control_plane.elastic_slurm_worker_controller import (
     SubprocessSlurmCommandRunner,
@@ -86,6 +95,37 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
         app.state.session_factory = session_factory
         app.state.admin_secret_verifier = admin_secret_verifier
         app.state.minio_client = minio_client
+
+        artifact_store = MinioObjectStore(
+            endpoint_url=settings.minio_endpoint,
+            access_key=settings.minio_access_key.get_secret_value(),
+            secret_key=settings.minio_secret_key.get_secret_value(),
+            region=settings.minio_region,
+        )
+        artifact_repository = SqlArtifactCommitRepository(
+            session_factory=session_factory,
+            store=artifact_store,
+            bucket=settings.artifacts_bucket,
+        )
+        artifact_commit_service = ArtifactCommitService(
+            store=artifact_store,
+            bucket=settings.artifacts_bucket,
+            repository=artifact_repository,
+        )
+        app.state.final_output_service = FinalOutputRouteService(
+            service=artifact_commit_service,
+            session_factory=session_factory,
+        )
+        app.state.execution_attempt_completion_service = ExecutionAttemptCompletionService()
+        app.state.artifact_read_service = ArtifactReadService(
+            resolver=SqlArtifactInputResolver(
+                session_factory=session_factory,
+                store=artifact_store,
+                bucket=settings.artifacts_bucket,
+            ),
+            store=artifact_store,
+            bucket=settings.artifacts_bucket,
+        )
 
         slurm_controller_config = build_controller_config(
             enabled=settings.slurm_worker_controller_enabled,
