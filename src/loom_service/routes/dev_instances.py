@@ -33,6 +33,7 @@ from loom.personal_dev_activation import (
 from loom.personal_dev_environment import (
     PersonalDevApplyReservation,
     PersonalDevEnvironmentApplyRequest,
+    PersonalDevEnvironmentDestroyRequest,
     PersonalDevEnvironmentRecord,
     PersonalDevLifecycleLimits,
     PersonalDevLifecycleOperationRecord,
@@ -199,6 +200,7 @@ class DevInstanceResponse(BaseModel):
     subject_id: UUID | None = None
     subject_incarnation: UUID | None = None
     operation_epoch: int
+    operation_id: UUID
     operation_step: str
     keep_data: bool
     failure_reason: str | None
@@ -241,6 +243,7 @@ class PersonalDevEnvironmentResponse(BaseModel):
     operation_epoch: int
     operation_id: UUID
     operation_step: str
+    keep_data: bool
     failure_reason: str | None
     created_at: datetime
     updated_at: datetime
@@ -259,7 +262,7 @@ class PersonalDevLifecycleOperationResponse(BaseModel):
     subject_incarnation: UUID
     operation_epoch: int
     expected_operation_epoch: int
-    kind: Literal["create", "update", "capacity", "noop"]
+    kind: Literal["create", "update", "capacity", "destroy", "noop"]
     state: Literal[
         "requested",
         "running",
@@ -277,6 +280,7 @@ class PersonalDevLifecycleOperationResponse(BaseModel):
     max_slots: int
     deployment_generation: int
     checkpoint: str
+    keep_data: bool
     failure_reason: str | None
     readiness_evidence_sha256: str | None
     activation_acknowledgement_sha256: str | None
@@ -311,7 +315,9 @@ def _identity_response(identity: DevInstanceIdentity) -> DevInstanceIdentityResp
     )
 
 
-def _response(record: DevInstanceRecord) -> DevInstanceResponse:
+def _response(
+    record: DevInstanceRecord | PersonalDevEnvironmentRecord,
+) -> DevInstanceResponse:
     return DevInstanceResponse(
         name=record.name,
         owner_user_id=record.owner_user_id,
@@ -325,6 +331,7 @@ def _response(record: DevInstanceRecord) -> DevInstanceResponse:
         subject_id=record.subject_id,
         subject_incarnation=record.subject_incarnation,
         operation_epoch=record.operation_epoch,
+        operation_id=record.operation_id,
         operation_step=record.operation_step,
         keep_data=record.keep_data,
         failure_reason=record.failure_reason,
@@ -354,6 +361,7 @@ def _personal_environment_response(
         operation_epoch=record.operation_epoch,
         operation_id=record.operation_id,
         operation_step=record.operation_step,
+        keep_data=record.keep_data,
         failure_reason=record.failure_reason,
         created_at=record.created_at,
         updated_at=record.updated_at,
@@ -408,6 +416,7 @@ def _personal_operation_response(
         max_slots=record.max_slots,
         deployment_generation=record.deployment_generation,
         checkpoint=record.checkpoint,
+        keep_data=record.keep_data,
         failure_reason=record.failure_reason,
         readiness_evidence_sha256=record.readiness_evidence_sha256,
         activation_acknowledgement_sha256=(record.activation_acknowledgement_sha256),
@@ -808,6 +817,8 @@ async def delete_dev_instance(
     sc: SessionAndCtx,
     response: Response,
     keep_data: bool = Query(default=False),
+    expected_operation_epoch: int | None = Query(default=None, ge=1),
+    idempotency_key: Annotated[UUID | None, Query()] = None,
 ) -> DevInstanceResponse:
     session, ctx = sc
     if not is_admin(ctx):
@@ -816,18 +827,57 @@ async def delete_dev_instance(
     store = _store(request, session)
     visible = _visible(await store.get(name), ctx)
     if visible.candidate_id is not None:
-        raise HTTPException(
-            status_code=409,
-            detail="guarded personal-dev destroy is not available until drain authority is ready",
+        if expected_operation_epoch is None or idempotency_key is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "personal-dev destroy requires expected_operation_epoch "
+                    "and idempotency_key"
+                ),
+            )
+        try:
+            personal_reservation = await _personal_authority(request, session).destroy(
+                PersonalDevEnvironmentDestroyRequest(
+                    name=name,
+                    owner_user_id=visible.owner_user_id,
+                    owner_team_id=visible.owner_team_id,
+                    expected_operation_epoch=expected_operation_epoch,
+                    idempotency_key=idempotency_key,
+                    keep_data=keep_data,
+                ),
+                access_binding=access_binding_from_context(ctx),
+            )
+        except PersonalDevEnvironmentNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="personal-dev resource not found") from exc
+        except (
+            PersonalDevEnvironmentConflictError,
+            PersonalDevEnvironmentEpochFencedError,
+            PersonalDevEnvironmentOperationFencedError,
+        ) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (DevInstanceAccessError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception:
+            logger.exception(
+                "personal_dev_environment_destroy_failed",
+                extra={"dev_instance_name": name},
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="personal-dev destroy failed before manager retirement",
+            ) from None
+        response.status_code = (
+            200 if personal_reservation.operation.state == "succeeded" else 202
         )
+        return _response(personal_reservation.environment)
     provisioner = _factory(request)(store)
     try:
         runner = _runner(request)
         if runner is None:
             record = await provisioner.destroy(name, keep_data=keep_data)
         else:
-            reservation = await provisioner.claim_destroy(name, keep_data=keep_data)
-            record = reservation.record if reservation is not None else None
+            legacy_reservation = await provisioner.claim_destroy(name, keep_data=keep_data)
+            record = legacy_reservation.record if legacy_reservation is not None else None
             if record is not None and record.status == "deleting":
                 runner.submit_destroy(record)
     except DevInstanceConflictError as exc:

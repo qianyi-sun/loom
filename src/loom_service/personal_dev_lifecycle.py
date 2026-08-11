@@ -192,6 +192,9 @@ class SessionPersonalDevReconciliationAuthority:
     async def record_capacity_projection(self, **kwargs: Any) -> Any:
         return await self._call("record_capacity_projection", **kwargs)
 
+    async def advance_destroy_checkpoint(self, **kwargs: Any) -> Any:
+        return await self._call("advance_destroy_checkpoint", **kwargs)
+
 
 def personal_dev_access_loader(
     session_factory: async_sessionmaker[AsyncSession],

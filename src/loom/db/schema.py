@@ -568,14 +568,20 @@ class DevInstance(Base):
             "AND capacity_reporter_token_sha256 IS NULL "
             "AND local_activation_sha256 IS NULL "
             "AND protected_admission_sha256 IS NULL "
-            "AND capacity_agent_installation_sha256 IS NULL) OR ("
+            "AND capacity_agent_installation_sha256 IS NULL "
+            "AND capacity_supported_pool_ids IS NULL "
+            "AND capacity_supported_architectures IS NULL) OR ("
             "capacity_configuration_epoch > 0 "
             "AND capacity_configuration_sha256 ~ '^[0-9a-f]{64}$' "
             "AND capacity_reporter_incarnation IS NOT NULL "
             "AND capacity_reporter_token_sha256 ~ '^[0-9a-f]{64}$' "
             "AND local_activation_sha256 ~ '^[0-9a-f]{64}$' "
             "AND protected_admission_sha256 ~ '^[0-9a-f]{64}$' "
-            "AND capacity_agent_installation_sha256 ~ '^[0-9a-f]{64}$')",
+            "AND capacity_agent_installation_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND jsonb_typeof(capacity_supported_pool_ids) = 'array' "
+            "AND jsonb_array_length(capacity_supported_pool_ids) > 0 "
+            "AND jsonb_typeof(capacity_supported_architectures) = 'array' "
+            "AND jsonb_array_length(capacity_supported_architectures) > 0)",
             name="dev_instances_capacity_projection_check",
         ),
         CheckConstraint(
@@ -654,6 +660,14 @@ class DevInstance(Base):
     protected_admission_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     capacity_agent_installation_sha256: Mapped[str | None] = mapped_column(
         String(64),
+        nullable=True,
+    )
+    capacity_supported_pool_ids: Mapped[list[str] | None] = mapped_column(
+        JSONB(none_as_null=True),
+        nullable=True,
+    )
+    capacity_supported_architectures: Mapped[list[str] | None] = mapped_column(
+        JSONB(none_as_null=True),
         nullable=True,
     )
     secret_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -882,7 +896,7 @@ class DevLifecycleOperation(Base):
             name="dev_lifecycle_operations_epochs_check",
         ),
         CheckConstraint(
-            "kind IN ('create', 'update', 'capacity', 'noop')",
+            "kind IN ('create', 'update', 'capacity', 'destroy', 'noop')",
             name="dev_lifecycle_operations_kind_check",
         ),
         CheckConstraint(
@@ -919,7 +933,23 @@ class DevLifecycleOperation(Base):
             "AND capacity_reporter_incarnation IS NULL "
             "AND capacity_reporter_token_sha256 IS NULL "
             "AND protected_admission_sha256 IS NULL "
-            "AND capacity_agent_installation_sha256 IS NULL) OR ("
+            "AND capacity_agent_installation_sha256 IS NULL "
+            "AND capacity_supported_pool_ids IS NULL "
+            "AND capacity_supported_architectures IS NULL) OR (("
+            "kind = 'destroy' "
+            "AND capacity_expected_configuration_epoch IS NULL "
+            "AND capacity_projection_request_sha256 IS NULL "
+            "AND capacity_configuration_epoch IS NULL "
+            "AND capacity_configuration_sha256 IS NULL "
+            "AND local_activation_sha256 IS NOT NULL "
+            "AND capacity_reporter_incarnation IS NOT NULL "
+            "AND capacity_reporter_token_sha256 IS NOT NULL "
+            "AND protected_admission_sha256 IS NOT NULL "
+            "AND capacity_agent_installation_sha256 IS NOT NULL "
+            "AND jsonb_typeof(capacity_supported_pool_ids) = 'array' "
+            "AND jsonb_array_length(capacity_supported_pool_ids) > 0 "
+            "AND jsonb_typeof(capacity_supported_architectures) = 'array' "
+            "AND jsonb_array_length(capacity_supported_architectures) > 0) OR ("
             "capacity_expected_configuration_epoch > 0 "
             "AND local_activation_sha256 IS NOT NULL "
             "AND capacity_projection_request_sha256 IS NOT NULL "
@@ -927,10 +957,14 @@ class DevLifecycleOperation(Base):
             "AND capacity_reporter_token_sha256 IS NOT NULL "
             "AND protected_admission_sha256 IS NOT NULL "
             "AND capacity_agent_installation_sha256 IS NOT NULL "
+            "AND jsonb_typeof(capacity_supported_pool_ids) = 'array' "
+            "AND jsonb_array_length(capacity_supported_pool_ids) > 0 "
+            "AND jsonb_typeof(capacity_supported_architectures) = 'array' "
+            "AND jsonb_array_length(capacity_supported_architectures) > 0 "
             "AND ((capacity_configuration_epoch IS NULL "
             "AND capacity_configuration_sha256 IS NULL) OR ("
             "capacity_configuration_epoch = capacity_expected_configuration_epoch + 1 "
-            "AND capacity_configuration_sha256 IS NOT NULL)))",
+            "AND capacity_configuration_sha256 IS NOT NULL))))",
             name="dev_lifecycle_operations_capacity_projection_check",
         ),
         CheckConstraint(
@@ -958,7 +992,7 @@ class DevLifecycleOperation(Base):
             name="dev_lifecycle_operations_terminal_fields_check",
         ),
         CheckConstraint(
-            "(kind IN ('capacity', 'noop') "
+            "(kind IN ('capacity', 'destroy', 'noop') "
             "AND readiness_evidence_sha256 IS NULL "
             "AND activation_acknowledgement_sha256 IS NULL) OR "
             "(kind IN ('create', 'update') AND ("
@@ -1075,6 +1109,19 @@ class DevLifecycleOperation(Base):
     capacity_agent_installation_sha256: Mapped[str | None] = mapped_column(
         String(64),
         nullable=True,
+    )
+    capacity_supported_pool_ids: Mapped[list[str] | None] = mapped_column(
+        JSONB(none_as_null=True),
+        nullable=True,
+    )
+    capacity_supported_architectures: Mapped[list[str] | None] = mapped_column(
+        JSONB(none_as_null=True),
+        nullable=True,
+    )
+    keep_data: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
     )
     checkpoint: Mapped[str] = mapped_column(
         String(32),

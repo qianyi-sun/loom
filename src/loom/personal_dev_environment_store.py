@@ -33,6 +33,7 @@ from loom.personal_dev_environment import (
     PersonalDevAccessBinding,
     PersonalDevApplyReservation,
     PersonalDevEnvironmentApplyRequest,
+    PersonalDevEnvironmentDestroyRequest,
     PersonalDevEnvironmentRecord,
     PersonalDevEnvironmentStatus,
     PersonalDevLifecycleAttemptRecord,
@@ -198,6 +199,25 @@ def _lock_keys(name: str) -> tuple[int, int]:
     )
 
 
+def _capacity_capabilities(
+    raw: object,
+    *,
+    allowed: frozenset[str],
+) -> tuple[str, ...] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, list) or any(not isinstance(item, str) for item in raw):
+        raise PersonalDevEnvironmentOperationFencedError(
+            "personal-dev capacity capability evidence is invalid"
+        )
+    values = tuple(raw)
+    if not values or values != tuple(sorted(set(values))) or not set(values) <= allowed:
+        raise PersonalDevEnvironmentOperationFencedError(
+            "personal-dev capacity capability evidence is invalid"
+        )
+    return values
+
+
 def _environment_record(row: DevInstance) -> PersonalDevEnvironmentRecord:
     return PersonalDevEnvironmentRecord(
         name=row.name,
@@ -217,6 +237,7 @@ def _environment_record(row: DevInstance) -> PersonalDevEnvironmentRecord:
         failure_reason=row.failure_reason,
         created_at=row.created_at,
         updated_at=row.updated_at,
+        keep_data=row.keep_data,
         ready_at=row.ready_at,
         deleted_at=row.deleted_at,
         capacity_configuration_epoch=row.capacity_configuration_epoch,
@@ -226,6 +247,20 @@ def _environment_record(row: DevInstance) -> PersonalDevEnvironmentRecord:
         local_activation_sha256=row.local_activation_sha256,
         protected_admission_sha256=row.protected_admission_sha256,
         capacity_agent_installation_sha256=(row.capacity_agent_installation_sha256),
+        capacity_supported_pool_ids=cast(
+            tuple[Literal["oldlab", "gb10"], ...] | None,
+            _capacity_capabilities(
+                row.capacity_supported_pool_ids,
+                allowed=frozenset({"oldlab", "gb10"}),
+            ),
+        ),
+        capacity_supported_architectures=cast(
+            tuple[Literal["x86_64", "arm64"], ...] | None,
+            _capacity_capabilities(
+                row.capacity_supported_architectures,
+                allowed=frozenset({"x86_64", "arm64"}),
+            ),
+        ),
     )
 
 
@@ -263,8 +298,23 @@ def _operation_record(row: DevLifecycleOperation) -> PersonalDevLifecycleOperati
         capacity_reporter_token_sha256=row.capacity_reporter_token_sha256,
         protected_admission_sha256=row.protected_admission_sha256,
         capacity_agent_installation_sha256=(row.capacity_agent_installation_sha256),
+        capacity_supported_pool_ids=cast(
+            tuple[Literal["oldlab", "gb10"], ...] | None,
+            _capacity_capabilities(
+                row.capacity_supported_pool_ids,
+                allowed=frozenset({"oldlab", "gb10"}),
+            ),
+        ),
+        capacity_supported_architectures=cast(
+            tuple[Literal["x86_64", "arm64"], ...] | None,
+            _capacity_capabilities(
+                row.capacity_supported_architectures,
+                allowed=frozenset({"x86_64", "arm64"}),
+            ),
+        ),
         created_at=row.created_at,
         updated_at=row.updated_at,
+        keep_data=row.keep_data,
         started_at=row.started_at,
         finished_at=row.finished_at,
     )
@@ -376,6 +426,226 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                 await self.session.rollback()
             raise
 
+    async def destroy(
+        self,
+        requested: PersonalDevEnvironmentDestroyRequest,
+        *,
+        access_binding: PersonalDevAccessBinding,
+        now: datetime | None = None,
+    ) -> PersonalDevApplyReservation:
+        """Durably retire manager authority before any local resource deletion."""
+
+        now = now or datetime.now(UTC)
+        try:
+            reservation = await self._claim_destroy(
+                requested,
+                access_binding=access_binding,
+                now=now,
+            )
+            await self.session.commit()
+            return reservation
+        except Exception:
+            if self.session.in_transaction():
+                await self.session.rollback()
+            raise
+
+    async def _claim_destroy(
+        self,
+        requested: PersonalDevEnvironmentDestroyRequest,
+        *,
+        access_binding: PersonalDevAccessBinding,
+        now: datetime,
+    ) -> PersonalDevApplyReservation:
+        global_lock_a, global_lock_b = _lock_keys("\0global-admission")
+        await self.session.execute(
+            select(func.pg_advisory_xact_lock(global_lock_a, global_lock_b)),
+        )
+        lock_a, lock_b = _lock_keys(requested.name)
+        await self.session.execute(select(func.pg_advisory_xact_lock(lock_a, lock_b)))
+
+        prior = (
+            await self.session.execute(
+                select(DevLifecycleOperation).where(
+                    DevLifecycleOperation.owner_user_id == requested.owner_user_id,
+                    DevLifecycleOperation.idempotency_key == requested.idempotency_key,
+                )
+            )
+        ).scalar_one_or_none()
+        if prior is not None:
+            if (
+                prior.kind != "destroy"
+                or prior.environment_name != requested.name
+                or prior.owner_team_id != requested.owner_team_id
+                or prior.request_sha256 != requested.request_sha256
+                or prior.keep_data != requested.keep_data
+            ):
+                raise PersonalDevEnvironmentConflictError(
+                    "idempotency key is already bound to a different request"
+                )
+            environment = await self._locked_environment(requested.name)
+            if (
+                environment is None
+                or environment.owner_user_id != requested.owner_user_id
+                or environment.subject_id != prior.subject_id
+                or environment.subject_incarnation != prior.subject_incarnation
+                or environment.operation_id != prior.id
+                or environment.operation_epoch != prior.operation_epoch
+            ):
+                raise PersonalDevEnvironmentOperationFencedError(
+                    "personal-dev destroy operation was superseded"
+                )
+            return PersonalDevApplyReservation(
+                environment=_environment_record(environment),
+                operation=_operation_record(prior),
+                acquired=False,
+                requires_build_binding=False,
+            )
+
+        environment = await self._locked_environment(requested.name)
+        if (
+            environment is None
+            or environment.owner_user_id != requested.owner_user_id
+            or environment.owner_team_id != requested.owner_team_id
+        ):
+            raise PersonalDevEnvironmentNotFoundError(
+                "personal-dev environment not found"
+            )
+        if environment.operation_epoch != requested.expected_operation_epoch:
+            raise PersonalDevEnvironmentEpochFencedError(
+                "personal-dev environment operation epoch changed"
+            )
+        if environment.status != "ready" or environment.candidate_id is None:
+            raise PersonalDevEnvironmentConflictError(
+                f"personal-dev environment cannot be destroyed while {environment.status}"
+            )
+        active = (
+            await self.session.execute(
+                select(DevLifecycleOperation.id).where(
+                    DevLifecycleOperation.environment_name == requested.name,
+                    DevLifecycleOperation.state.in_(_ACTIVE_OPERATION_STATES),
+                )
+            )
+        ).scalar_one_or_none()
+        if active is not None:
+            raise PersonalDevEnvironmentConflictError(
+                "another personal-dev lifecycle operation is active"
+            )
+        supported_pool_ids = _capacity_capabilities(
+            environment.capacity_supported_pool_ids,
+            allowed=frozenset({"oldlab", "gb10"}),
+        )
+        supported_architectures = _capacity_capabilities(
+            environment.capacity_supported_architectures,
+            allowed=frozenset({"x86_64", "arm64"}),
+        )
+        evidence = (
+            environment.capacity_configuration_epoch,
+            environment.capacity_configuration_sha256,
+            environment.capacity_reporter_incarnation,
+            environment.capacity_reporter_token_sha256,
+            environment.local_activation_sha256,
+            environment.protected_admission_sha256,
+            environment.capacity_agent_installation_sha256,
+            supported_pool_ids,
+            supported_architectures,
+        )
+        if any(value is None for value in evidence):
+            raise PersonalDevEnvironmentConflictError(
+                "personal-dev environment has no complete capacity retirement evidence"
+            )
+        assert supported_pool_ids is not None
+        assert supported_architectures is not None
+        candidate = (
+            await self.session.execute(
+                select(PersonalDevCandidate)
+                .where(
+                    PersonalDevCandidate.id == environment.candidate_id,
+                    PersonalDevCandidate.owner_user_id == requested.owner_user_id,
+                    PersonalDevCandidate.owner_team_id == requested.owner_team_id,
+                    PersonalDevCandidate.candidate_sha == environment.candidate_sha,
+                    PersonalDevCandidate.status == "ready",
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if candidate is None or candidate.publication_sha256 is None:
+            raise PersonalDevEnvironmentConflictError(
+                "personal-dev destroy candidate evidence is unavailable"
+            )
+
+        operation_id = uuid4()
+        attempt_id = uuid4()
+        operation_epoch = environment.operation_epoch + 1
+        operation = DevLifecycleOperation(
+            id=operation_id,
+            idempotency_key=requested.idempotency_key,
+            environment_name=environment.name,
+            subject_id=environment.subject_id,
+            subject_incarnation=environment.subject_incarnation,
+            owner_user_id=environment.owner_user_id,
+            owner_team_id=environment.owner_team_id,
+            operation_epoch=operation_epoch,
+            expected_operation_epoch=requested.expected_operation_epoch,
+            kind="destroy",
+            state="running",
+            attempt_id=attempt_id,
+            attempt_sequence=0,
+            request_sha256=requested.request_sha256,
+            candidate_id=environment.candidate_id,
+            candidate_sha=environment.candidate_sha,
+            min_slots=environment.min_slots,
+            max_slots=environment.max_slots,
+            deployment_generation=environment.deployment_generation,
+            local_activation_sha256=environment.local_activation_sha256,
+            capacity_reporter_incarnation=environment.capacity_reporter_incarnation,
+            capacity_reporter_token_sha256=(environment.capacity_reporter_token_sha256),
+            protected_admission_sha256=environment.protected_admission_sha256,
+            capacity_agent_installation_sha256=(
+                environment.capacity_agent_installation_sha256
+            ),
+            capacity_supported_pool_ids=list(supported_pool_ids),
+            capacity_supported_architectures=list(supported_architectures),
+            keep_data=requested.keep_data,
+            checkpoint="capacity_retirement_requested",
+            created_at=now,
+            updated_at=now,
+            started_at=now,
+        )
+        self.session.add(operation)
+        environment.status = "deleting"
+        environment.operation_epoch = operation_epoch
+        environment.operation_id = operation_id
+        environment.operation_step = "capacity_retirement_requested"
+        environment.keep_data = requested.keep_data
+        environment.failure_reason = None
+        environment.updated_at = now
+        await self.session.flush()
+        self.session.add(
+            DevLifecycleOperationAttempt(
+                id=attempt_id,
+                operation_id=operation_id,
+                subject_id=environment.subject_id,
+                subject_incarnation=environment.subject_incarnation,
+                operation_epoch=operation_epoch,
+                attempt_sequence=0,
+                state="running",
+                checkpoint="capacity_retirement_requested",
+                credential_binding_version=1,
+                bootstrap_auth_kind=access_binding.auth_kind,
+                bootstrap_credential_hash=access_binding.credential_hash,
+                created_at=now,
+                updated_at=now,
+                started_at=now,
+            )
+        )
+        await self.session.flush()
+        return PersonalDevApplyReservation(
+            environment=_environment_record(environment),
+            operation=_operation_record(operation),
+            acquired=True,
+            requires_build_binding=False,
+        )
+
     async def _claim_apply(
         self,
         requested: PersonalDevEnvironmentApplyRequest,
@@ -466,6 +736,8 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         capacity_reporter_token_sha256: str | None = None
         protected_admission_sha256: str | None = None
         capacity_agent_installation_sha256: str | None = None
+        capacity_supported_pool_ids: list[str] | None = None
+        capacity_supported_architectures: list[str] | None = None
         if environment is None:
             if requested.expected_operation_epoch != 0:
                 raise PersonalDevEnvironmentEpochFencedError(
@@ -591,6 +863,15 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                 environment.failure_reason = None
                 environment.ready_at = None
                 environment.deleted_at = None
+                environment.capacity_configuration_epoch = None
+                environment.capacity_configuration_sha256 = None
+                environment.capacity_reporter_incarnation = None
+                environment.capacity_reporter_token_sha256 = None
+                environment.local_activation_sha256 = None
+                environment.protected_admission_sha256 = None
+                environment.capacity_agent_installation_sha256 = None
+                environment.capacity_supported_pool_ids = None
+                environment.capacity_supported_architectures = None
                 environment.updated_at = now
             elif environment.status == "ready":
                 same_candidate = (
@@ -700,6 +981,9 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             capacity_reporter_token_sha256=capacity_reporter_token_sha256,
             protected_admission_sha256=protected_admission_sha256,
             capacity_agent_installation_sha256=(capacity_agent_installation_sha256),
+            capacity_supported_pool_ids=capacity_supported_pool_ids,
+            capacity_supported_architectures=capacity_supported_architectures,
+            keep_data=False,
             checkpoint=checkpoint,
             created_at=now,
             updated_at=now,
@@ -773,6 +1057,21 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                 DevLifecycleOperation.state == "activating",
                 DevLifecycleOperation.checkpoint == "capacity_projected",
                 DevLifecycleOperation.capacity_configuration_epoch.is_not(None),
+            ),
+            and_(
+                DevLifecycleOperation.kind == "destroy",
+                DevLifecycleOperation.state == "running",
+                DevLifecycleOperation.checkpoint.in_(
+                    (
+                        "capacity_retirement_requested",
+                        "capacity_retired",
+                        "local_authority_sealed",
+                        "namespace_deleted",
+                        "database_deleted",
+                        "buckets_deleted",
+                        "tenant_deleted",
+                    )
+                ),
             ),
         )
         statement = (
@@ -1055,6 +1354,8 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         reporter_token_sha256: str,
         protected_admission_sha256: str,
         capacity_agent_installation_sha256: str,
+        supported_pool_ids: tuple[str, ...],
+        supported_architectures: tuple[str, ...],
         now: datetime | None = None,
     ) -> PersonalDevApplyReservation:
         """Persist the exact outbound manager request before network mutation."""
@@ -1069,6 +1370,15 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         )
         if any(_DIGEST_RE.fullmatch(value) is None for value in digests):
             raise ValueError("capacity projection evidence must use SHA-256 digests")
+        if (
+            supported_pool_ids != tuple(sorted(set(supported_pool_ids)))
+            or not supported_pool_ids
+            or not set(supported_pool_ids) <= {"oldlab", "gb10"}
+            or supported_architectures != tuple(sorted(set(supported_architectures)))
+            or not supported_architectures
+            or not set(supported_architectures) <= {"x86_64", "arm64"}
+        ):
+            raise ValueError("capacity projection capabilities are invalid")
         now = now or datetime.now(UTC)
         operation, environment = await self._locked_current_operation(
             operation_id,
@@ -1082,6 +1392,9 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             and operation.capacity_reporter_token_sha256 == reporter_token_sha256
             and operation.protected_admission_sha256 == protected_admission_sha256
             and operation.capacity_agent_installation_sha256 == capacity_agent_installation_sha256
+            and tuple(operation.capacity_supported_pool_ids or ()) == supported_pool_ids
+            and tuple(operation.capacity_supported_architectures or ())
+            == supported_architectures
         )
         if exact:
             result = self._reservation(environment, operation, acquired=False)
@@ -1098,13 +1411,20 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             and operation.state == "running"
             and operation.checkpoint == "capacity_projection_requested"
             and operation.local_activation_sha256 is not None
+        ) or (
+            operation.kind == "destroy"
+            and operation.state == "running"
+            and operation.checkpoint == "capacity_retirement_requested"
+            and operation.local_activation_sha256 is not None
         )
         if not allowed:
             await self.session.rollback()
             raise PersonalDevEnvironmentOperationFencedError(
                 "personal-dev operation cannot prepare capacity projection"
             )
-        if operation.kind == "capacity" and environment.capacity_configuration_epoch is not None:
+        if operation.kind in {"capacity", "destroy"} and (
+            environment.capacity_configuration_epoch is not None
+        ):
             if (
                 environment.capacity_reporter_incarnation != reporter_incarnation
                 or environment.capacity_reporter_token_sha256 != reporter_token_sha256
@@ -1112,6 +1432,10 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                 or environment.protected_admission_sha256 != protected_admission_sha256
                 or environment.capacity_agent_installation_sha256
                 != capacity_agent_installation_sha256
+                or tuple(environment.capacity_supported_pool_ids or ())
+                != supported_pool_ids
+                or tuple(environment.capacity_supported_architectures or ())
+                != supported_architectures
             ):
                 await self.session.rollback()
                 raise PersonalDevEnvironmentConflictError(
@@ -1138,6 +1462,8 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         operation.capacity_reporter_token_sha256 = reporter_token_sha256
         operation.protected_admission_sha256 = protected_admission_sha256
         operation.capacity_agent_installation_sha256 = capacity_agent_installation_sha256
+        operation.capacity_supported_pool_ids = list(supported_pool_ids)
+        operation.capacity_supported_architectures = list(supported_architectures)
         operation.checkpoint = "capacity_projection_pending"
         operation.updated_at = now
         attempt.checkpoint = "capacity_projection_pending"
@@ -1239,7 +1565,11 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             and operation.capacity_configuration_sha256 == result.configuration_digest
             and binding_matches
         )
-        if exact and operation.checkpoint in {"capacity_projected", "complete"}:
+        if exact and operation.checkpoint in {
+            "capacity_projected",
+            "capacity_retired",
+            "complete",
+        }:
             reservation = self._reservation(environment, operation, acquired=False)
             await self.session.commit()
             return reservation
@@ -1251,6 +1581,8 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             or operation.capacity_reporter_token_sha256 is None
             or operation.protected_admission_sha256 is None
             or operation.capacity_agent_installation_sha256 is None
+            or operation.capacity_supported_pool_ids is None
+            or operation.capacity_supported_architectures is None
             or result.configuration_epoch != operation.capacity_expected_configuration_epoch + 1
             or not binding_matches
         ):
@@ -1281,6 +1613,11 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             attempt.state = "succeeded"
             attempt.checkpoint = "complete"
             attempt.finished_at = now
+        elif operation.kind == "destroy":
+            operation.checkpoint = "capacity_retired"
+            attempt.checkpoint = "capacity_retired"
+            environment.status = "deleting"
+            environment.operation_step = "capacity_retired"
         else:
             operation.checkpoint = "capacity_projected"
             attempt.checkpoint = "capacity_projected"
@@ -1293,6 +1630,10 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         environment.protected_admission_sha256 = operation.protected_admission_sha256
         environment.capacity_agent_installation_sha256 = (
             operation.capacity_agent_installation_sha256
+        )
+        environment.capacity_supported_pool_ids = operation.capacity_supported_pool_ids
+        environment.capacity_supported_architectures = (
+            operation.capacity_supported_architectures
         )
         environment.updated_at = now
         attempt.claimed_by = None
@@ -1335,6 +1676,8 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                 or operation.local_activation_sha256 is None
                 or operation.protected_admission_sha256 is None
                 or operation.capacity_agent_installation_sha256 is None
+                or operation.capacity_supported_pool_ids is None
+                or operation.capacity_supported_architectures is None
                 or environment.capacity_configuration_epoch
                 != operation.capacity_configuration_epoch
                 or environment.capacity_configuration_sha256
@@ -1348,6 +1691,10 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                 != operation.protected_admission_sha256
                 or environment.capacity_agent_installation_sha256
                 != operation.capacity_agent_installation_sha256
+                or environment.capacity_supported_pool_ids
+                != operation.capacity_supported_pool_ids
+                or environment.capacity_supported_architectures
+                != operation.capacity_supported_architectures
             ):
                 await self.session.rollback()
                 raise PersonalDevEnvironmentOperationFencedError(
@@ -1368,6 +1715,8 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             or operation.capacity_reporter_token_sha256 is None
             or operation.protected_admission_sha256 is None
             or operation.capacity_agent_installation_sha256 is None
+            or operation.capacity_supported_pool_ids is None
+            or operation.capacity_supported_architectures is None
         ):
             await self.session.rollback()
             raise PersonalDevEnvironmentOperationFencedError(
@@ -1410,6 +1759,10 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         environment.capacity_agent_installation_sha256 = (
             operation.capacity_agent_installation_sha256
         )
+        environment.capacity_supported_pool_ids = operation.capacity_supported_pool_ids
+        environment.capacity_supported_architectures = (
+            operation.capacity_supported_architectures
+        )
         environment.status = "ready"
         environment.operation_step = "complete"
         environment.failure_reason = None
@@ -1425,6 +1778,81 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         attempt.lease_expires_at = None
         attempt.finished_at = now
         attempt.updated_at = now
+        await self.session.flush()
+        result = self._reservation(environment, operation, acquired=True)
+        await self.session.commit()
+        return result
+
+    async def advance_destroy_checkpoint(
+        self,
+        *,
+        operation_id: UUID,
+        operation_epoch: int,
+        attempt_id: UUID,
+        reconciler_id: str,
+        lease_epoch: int,
+        expected_checkpoint: str,
+        checkpoint: str,
+        now: datetime | None = None,
+    ) -> PersonalDevApplyReservation:
+        """Commit exactly one completed, idempotent teardown side effect."""
+
+        now = now or datetime.now(UTC)
+        operation, environment = await self._locked_current_operation(
+            operation_id,
+            operation_epoch,
+        )
+        transitions = {
+            "capacity_retired": "local_authority_sealed",
+            "local_authority_sealed": "namespace_deleted",
+            "database_deleted": "buckets_deleted",
+            "buckets_deleted": "tenant_deleted",
+            "tenant_deleted": "complete",
+        }
+        transitions["namespace_deleted"] = (
+            "tenant_deleted" if operation.keep_data else "database_deleted"
+        )
+        if (
+            operation.kind != "destroy"
+            or operation.state != "running"
+            or operation.checkpoint != expected_checkpoint
+            or transitions.get(expected_checkpoint) != checkpoint
+            or environment.status != "deleting"
+            or environment.keep_data != operation.keep_data
+        ):
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError(
+                "personal-dev destroy checkpoint was superseded"
+            )
+        attempt = await self._locked_current_attempt_lease(
+            operation,
+            attempt_id=attempt_id,
+            reconciler_id=reconciler_id,
+            lease_epoch=lease_epoch,
+            now=now,
+        )
+        if attempt.state != "running" or attempt.checkpoint != expected_checkpoint:
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError(
+                "personal-dev destroy attempt was superseded"
+            )
+        operation.checkpoint = checkpoint
+        operation.updated_at = now
+        attempt.checkpoint = checkpoint
+        attempt.claimed_by = None
+        attempt.lease_expires_at = None
+        attempt.updated_at = now
+        environment.operation_step = checkpoint
+        environment.updated_at = now
+        if checkpoint == "complete":
+            operation.state = "succeeded"
+            operation.finished_at = now
+            attempt.state = "succeeded"
+            attempt.finished_at = now
+            environment.status = "deleted"
+            environment.deleted_at = now
+            environment.ready_at = None
+            environment.failure_reason = None
         await self.session.flush()
         result = self._reservation(environment, operation, acquired=True)
         await self.session.commit()

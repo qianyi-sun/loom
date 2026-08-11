@@ -28,7 +28,7 @@ PersonalDevEnvironmentStatus = Literal[
     "failed",
     "deleted",
 ]
-PersonalDevOperationKind = Literal["create", "update", "capacity", "noop"]
+PersonalDevOperationKind = Literal["create", "update", "capacity", "destroy", "noop"]
 PersonalDevOperationState = Literal[
     "requested",
     "running",
@@ -133,6 +133,44 @@ class PersonalDevEnvironmentApplyRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class PersonalDevEnvironmentDestroyRequest:
+    """One owner-bound, compare-and-set personal teardown request."""
+
+    name: str
+    owner_user_id: UUID
+    owner_team_id: UUID
+    expected_operation_epoch: int
+    idempotency_key: UUID
+    keep_data: bool = False
+    request_sha256: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        try:
+            validate_name(self.name)
+        except InvalidDevInstanceNameError as exc:
+            raise ValueError("personal-dev environment name is invalid") from exc
+        if type(self.expected_operation_epoch) is not int or self.expected_operation_epoch <= 0:
+            raise ValueError("expected_operation_epoch must be a positive integer")
+        if type(self.keep_data) is not bool:
+            raise ValueError("keep_data must be a boolean")
+        payload = {
+            "expected_operation_epoch": self.expected_operation_epoch,
+            "keep_data": self.keep_data,
+            "name": self.name,
+            "owner_team_id": str(self.owner_team_id),
+            "owner_user_id": str(self.owner_user_id),
+            "schema_version": 1,
+        }
+        canonical = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("ascii")
+        object.__setattr__(self, "request_sha256", hashlib.sha256(canonical).hexdigest())
+
+
+@dataclass(frozen=True, slots=True)
 class PersonalDevEnvironmentRecord:
     """Current committed projection for one personal environment subject."""
 
@@ -152,6 +190,7 @@ class PersonalDevEnvironmentRecord:
     operation_step: str
     created_at: datetime
     updated_at: datetime
+    keep_data: bool = False
     ready_at: datetime | None = None
     deleted_at: datetime | None = None
     failure_reason: str | None = None
@@ -162,6 +201,8 @@ class PersonalDevEnvironmentRecord:
     local_activation_sha256: str | None = None
     protected_admission_sha256: str | None = None
     capacity_agent_installation_sha256: str | None = None
+    capacity_supported_pool_ids: tuple[Literal["oldlab", "gb10"], ...] | None = None
+    capacity_supported_architectures: tuple[Literal["x86_64", "arm64"], ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,6 +231,7 @@ class PersonalDevLifecycleOperationRecord:
     checkpoint: str
     created_at: datetime
     updated_at: datetime
+    keep_data: bool = False
     started_at: datetime | None = None
     finished_at: datetime | None = None
     failure_reason: str | None = None
@@ -204,6 +246,8 @@ class PersonalDevLifecycleOperationRecord:
     capacity_reporter_token_sha256: str | None = None
     protected_admission_sha256: str | None = None
     capacity_agent_installation_sha256: str | None = None
+    capacity_supported_pool_ids: tuple[Literal["oldlab", "gb10"], ...] | None = None
+    capacity_supported_architectures: tuple[Literal["x86_64", "arm64"], ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,6 +296,7 @@ __all__ = [
     "PersonalDevAccessKind",
     "PersonalDevApplyReservation",
     "PersonalDevEnvironmentApplyRequest",
+    "PersonalDevEnvironmentDestroyRequest",
     "PersonalDevEnvironmentRecord",
     "PersonalDevEnvironmentStatus",
     "PersonalDevLifecycleAttemptRecord",

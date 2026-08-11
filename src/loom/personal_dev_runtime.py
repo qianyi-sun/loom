@@ -33,6 +33,8 @@ class ReusablePersonalDevSecretVault(Protocol):
 
     async def store(self, identity: DevInstanceIdentity, password: str) -> str: ...
 
+    async def delete(self, identity: DevInstanceIdentity) -> None: ...
+
 
 class CandidateGenerationProvisioner(Protocol):
     async def prepare(
@@ -40,6 +42,8 @@ class CandidateGenerationProvisioner(Protocol):
         identity: DevInstanceIdentity,
         config: DevInstanceManifestConfig,
     ) -> PersonalDevReadinessObservation: ...
+
+    async def destroy(self, identity: DevInstanceIdentity) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +139,25 @@ class PersonalDevPreparationRuntime:
         if password is None:
             raise RuntimeError("personal-dev fixture credential disappeared before bootstrap")
         await self.access.bootstrap(identity, password=password, access=access)
+
+    @staticmethod
+    def _destroy_identity(claim: PersonalDevReconciliationClaim) -> DevInstanceIdentity:
+        if claim.operation.kind != "destroy":
+            raise ValueError("personal-dev cleanup requires a destroy operation")
+        return derive_identity(claim.operation.environment_name)
+
+    async def delete_namespace(self, claim: PersonalDevReconciliationClaim) -> None:
+        await self.cluster.destroy(self._destroy_identity(claim))
+
+    async def delete_buckets(self, claim: PersonalDevReconciliationClaim) -> None:
+        identity = self._destroy_identity(claim)
+        await self.buckets.remove_buckets(identity, dev_buckets(identity))
+
+    async def delete_tenant(self, claim: PersonalDevReconciliationClaim) -> None:
+        await self.object_store_tenant.delete(self._destroy_identity(claim))
+
+    async def delete_credentials(self, claim: PersonalDevReconciliationClaim) -> None:
+        await self.vault.delete(self._destroy_identity(claim))
 
 
 __all__ = [

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
 import httpx
 import pytest
@@ -164,10 +165,82 @@ def test_list_sends_filters_and_prints_rows(
 def test_destroy_preserves_data_only_when_explicit(
     server: _Server,
 ) -> None:
-    server.replies.append(httpx.Response(202, json=_instance(status="deleted")))
-    assert main(["dev", "destroy", "alice", "--keep-data", "--no-wait"]) == 0
-    assert server.requests[0].method == "DELETE"
-    assert server.requests[0].url.params["keep_data"] == "true"
+    key = "00000000-0000-0000-0000-000000000099"
+    server.replies.extend(
+        (
+            httpx.Response(200, json=_instance()),
+            httpx.Response(202, json=_instance(status="deleted")),
+        )
+    )
+    assert (
+        main(
+            [
+                "dev",
+                "destroy",
+                "alice",
+                "--keep-data",
+                "--idempotency-key",
+                key,
+                "--no-wait",
+            ]
+        )
+        == 0
+    )
+    assert [request.method for request in server.requests] == ["GET", "DELETE"]
+    params = server.requests[1].url.params
+    assert params["keep_data"] == "true"
+    assert params["expected_operation_epoch"] == "1"
+    assert params["idempotency_key"] == key
+
+
+def test_destroy_retry_reuses_the_original_compare_and_set_epoch(
+    server: _Server,
+) -> None:
+    key = "00000000-0000-0000-0000-000000000099"
+    current = _instance(status="deleting")
+    current["operation_epoch"] = 2
+    server.replies.extend(
+        (
+            httpx.Response(200, json=current),
+            httpx.Response(202, json=current),
+        )
+    )
+
+    assert (
+        main(
+            [
+                "dev",
+                "destroy",
+                "alice",
+                "--idempotency-key",
+                key,
+                "--no-wait",
+            ]
+        )
+        == 0
+    )
+
+    params = server.requests[1].url.params
+    assert params["expected_operation_epoch"] == "1"
+    assert params["idempotency_key"] == key
+
+
+def test_destroy_uses_a_reproducible_default_idempotency_key(server: _Server) -> None:
+    server.replies.extend(
+        (
+            httpx.Response(200, json=_instance()),
+            httpx.Response(202, json=_instance(status="deleting")),
+        )
+    )
+
+    assert main(["dev", "destroy", "alice", "--no-wait"]) == 0
+
+    assert server.requests[1].url.params["idempotency_key"] == str(
+        uuid5(
+            NAMESPACE_URL,
+            "loom-personal-dev-destroy-v1\0alice\0" "1\0false",
+        )
+    )
 
 
 def test_server_failure_is_redacted_and_nonzero(

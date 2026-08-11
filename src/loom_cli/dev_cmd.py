@@ -13,6 +13,7 @@ import sys
 import time
 from collections.abc import Callable
 from typing import Any, cast
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 import httpx
 
@@ -198,10 +199,39 @@ def _status(args: argparse.Namespace) -> int:
 
 def _destroy(args: argparse.Namespace) -> int:
     def action(client: httpx.Client) -> int:
+        current = assert_2xx(
+            client.get(f"/api/v1/dev-instances/{args.name}"),
+            action=f"fetch development environment {args.name!r} before destroy",
+        )
+        expected_epoch = current.get("operation_epoch")
+        if type(expected_epoch) is not int or expected_epoch <= 0:
+            raise HttpStatusError(
+                f"development environment {args.name!r} has no valid operation epoch"
+            )
+        if args.idempotency_key is not None and current.get("status") in {
+            "deleting",
+            "deleted",
+        }:
+            expected_epoch -= 1
+            if expected_epoch <= 0:
+                raise HttpStatusError(
+                    f"development environment {args.name!r} has no retryable destroy epoch"
+                )
+        idempotency_key = args.idempotency_key or uuid5(
+            NAMESPACE_URL,
+            (
+                "loom-personal-dev-destroy-v1\0"
+                f"{args.name}\0{expected_epoch}\0{str(args.keep_data).lower()}"
+            ),
+        )
         body = assert_2xx(
             client.delete(
                 f"/api/v1/dev-instances/{args.name}",
-                params={"keep_data": str(args.keep_data).lower()},
+                params={
+                    "keep_data": str(args.keep_data).lower(),
+                    "expected_operation_epoch": str(expected_epoch),
+                    "idempotency_key": str(idempotency_key),
+                },
             ),
             action=f"destroy development environment {args.name!r}",
         )
@@ -290,7 +320,12 @@ def dispatch(argv: list[str]) -> int:
     destroy.add_argument(
         "--keep-data",
         action="store_true",
-        help="Keep the dedicated database, buckets, and credentials for later recovery.",
+        help="Keep the dedicated database and buckets; access is rotated on recovery.",
+    )
+    destroy.add_argument(
+        "--idempotency-key",
+        type=UUID,
+        help="Use a stable UUID so an accepted destroy can be retried exactly.",
     )
     _add_wait(destroy)
     _add_format(destroy)

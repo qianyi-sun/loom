@@ -190,6 +190,10 @@ class PersonalDevCapacityDatabase(Protocol):
         configuration: ReporterConfigurationV1,
     ) -> CapacityDatabaseInstallation: ...
 
+    async def seal(self, identity: DevInstanceIdentity) -> None: ...
+
+    async def destroy(self, identity: DevInstanceIdentity) -> None: ...
+
 
 class PsycopgPersonalDevCapacityDatabase:
     """Provision least-privilege roles, migrate the guard, and bind the agent."""
@@ -394,6 +398,101 @@ class PsycopgPersonalDevCapacityDatabase:
         except Exception:
             raise PersonalDevCapacityInstallationError(
                 "protected capacity migration authority could not be sealed"
+            ) from None
+
+    async def seal(self, identity: DevInstanceIdentity) -> None:
+        """Disable every protected login before retained data can outlive its pod."""
+
+        owner, migrator, agent = _role_names(identity)
+        protected = (owner, migrator, agent, identity.db_role)
+        try:
+            async with await psycopg.AsyncConnection.connect(
+                self._connect_url,
+                autocommit=True,
+            ) as connection:
+                roles_result = await connection.execute(
+                    "SELECT rolname FROM pg_roles WHERE rolname = ANY(%s)",
+                    (list(protected),),
+                )
+                existing = {row[0] for row in await roles_result.fetchall()}
+                await connection.execute(
+                    "SELECT pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity "
+                    "WHERE usename = ANY(%s) AND pid <> pg_backend_pid()",
+                    (list(protected),),
+                )
+                if owner in existing and migrator in existing:
+                    await connection.execute(
+                        sql.SQL("REVOKE {} FROM {}").format(
+                            sql.Identifier(owner),
+                            sql.Identifier(migrator),
+                        )
+                    )
+                for role in protected:
+                    if role in existing:
+                        await connection.execute(
+                            sql.SQL("ALTER ROLE {} NOLOGIN PASSWORD NULL").format(
+                                sql.Identifier(role)
+                            )
+                        )
+                database_exists = (
+                    await connection.execute(
+                        "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = %s)",
+                        (identity.database,),
+                    )
+                )
+                database_row = await database_exists.fetchone()
+                if database_row is None:
+                    raise PersonalDevCapacityInstallationError(
+                        "protected capacity database lookup returned no row"
+                    )
+                if database_row[0]:
+                    for role in protected:
+                        if role in existing:
+                            await connection.execute(
+                                sql.SQL("REVOKE ALL PRIVILEGES ON DATABASE {} FROM {}").format(
+                                    sql.Identifier(identity.database),
+                                    sql.Identifier(role),
+                                )
+                            )
+        except Exception:
+            raise PersonalDevCapacityInstallationError(
+                "protected capacity authority could not be sealed for destroy"
+            ) from None
+
+    async def destroy(self, identity: DevInstanceIdentity) -> None:
+        """Drop the isolated database and every role after namespace termination."""
+
+        await self.seal(identity)
+        owner, migrator, agent = _role_names(identity)
+        roles = (agent, migrator, owner, identity.db_role)
+        try:
+            async with await psycopg.AsyncConnection.connect(
+                self._connect_url,
+                autocommit=True,
+            ) as connection:
+                await connection.execute(
+                    "SELECT pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity "
+                    "WHERE datname = %s AND pid <> pg_backend_pid()",
+                    (identity.database,),
+                )
+                await connection.execute(
+                    sql.SQL("DROP DATABASE IF EXISTS {}").format(
+                        sql.Identifier(identity.database)
+                    )
+                )
+                existing_result = await connection.execute(
+                    "SELECT rolname FROM pg_roles WHERE rolname = ANY(%s)",
+                    (list(roles),),
+                )
+                existing = {row[0] for row in await existing_result.fetchall()}
+                for role in roles:
+                    if role in existing:
+                        await connection.execute(
+                            sql.SQL("DROP ROLE {}").format(sql.Identifier(role))
+                        )
+        except Exception:
+            raise PersonalDevCapacityInstallationError(
+                "personal-dev protected database cleanup failed"
             ) from None
 
     async def _migrate(self, *, migrator_url: str, owner: str, agent: str) -> None:
@@ -1202,6 +1301,16 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
         await self._assert_installed_credentials(claim, installation, identity)
         await self._kubectl.wait_deployment(identity.namespace, _DEPLOYMENT_NAME)
         await self._assert_installed_credentials(claim, installation, identity)
+
+    async def seal(self, claim: PersonalDevReconciliationClaim) -> None:
+        if claim.operation.kind != "destroy":
+            raise ValueError("capacity sealing requires a destroy operation")
+        await self._database.seal(derive_identity(claim.operation.environment_name))
+
+    async def destroy(self, claim: PersonalDevReconciliationClaim) -> None:
+        if claim.operation.kind != "destroy":
+            raise ValueError("capacity cleanup requires a destroy operation")
+        await self._database.destroy(derive_identity(claim.operation.environment_name))
 
 
 def parse_pool_capabilities(raw: str) -> tuple[AgentPoolCapabilityV1, ...]:

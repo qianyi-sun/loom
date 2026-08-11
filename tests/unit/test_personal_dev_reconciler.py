@@ -188,6 +188,66 @@ def _claim(
     )
 
 
+def _destroy_claim(
+    checkpoint: str,
+    *,
+    keep_data: bool = False,
+    expected_capacity_epoch: int | None = None,
+) -> PersonalDevReconciliationClaim:
+    base = _claim()
+    operation = replace(
+        base.operation,
+        operation_epoch=2,
+        expected_operation_epoch=1,
+        kind="destroy",
+        state="running",
+        checkpoint=checkpoint,
+        keep_data=keep_data,
+        local_activation_sha256="5" * 64,
+        capacity_expected_configuration_epoch=expected_capacity_epoch,
+        capacity_reporter_incarnation=UUID(
+            "00000000-0000-0000-0000-000000000031"
+        ),
+        capacity_reporter_token_sha256=(
+            "9620a6302cf6bd606b15d74072424d9c70135ba56a686618dbba4dfa2d554476"
+        ),
+        protected_admission_sha256="8" * 64,
+        capacity_agent_installation_sha256="9" * 64,
+        capacity_supported_pool_ids=("gb10", "oldlab"),
+        capacity_supported_architectures=("arm64", "x86_64"),
+    )
+    return replace(
+        base,
+        environment=replace(
+            base.environment,
+            status="deleting",
+            operation_epoch=2,
+            operation_step=checkpoint,
+            keep_data=keep_data,
+            capacity_configuration_epoch=7,
+            capacity_configuration_sha256="7" * 64,
+            capacity_reporter_incarnation=operation.capacity_reporter_incarnation,
+            capacity_reporter_token_sha256=operation.capacity_reporter_token_sha256,
+            local_activation_sha256=operation.local_activation_sha256,
+            protected_admission_sha256=operation.protected_admission_sha256,
+            capacity_agent_installation_sha256=(
+                operation.capacity_agent_installation_sha256
+            ),
+            capacity_supported_pool_ids=operation.capacity_supported_pool_ids,
+            capacity_supported_architectures=(
+                operation.capacity_supported_architectures
+            ),
+        ),
+        operation=operation,
+        attempt=replace(
+            base.attempt,
+            operation_epoch=2,
+            checkpoint=checkpoint,
+            state="running",
+        ),
+    )
+
+
 def _observation() -> PersonalDevReadinessObservation:
     images = _images()
     return PersonalDevReadinessObservation(
@@ -222,6 +282,7 @@ class _Authority:
         self.prepared_capacity: list[dict[str, object]] = []
         self.refreshed_capacity: list[int] = []
         self.projected_capacity: list[PersonalDevCapacityProjectionResult] = []
+        self.destroy_checkpoints: list[tuple[str, str]] = []
 
     async def claim_next_reconciliation(self, **_kwargs):
         return self.claim
@@ -244,6 +305,11 @@ class _Authority:
     async def record_capacity_projection(self, *, result, **_kwargs):
         self.projected_capacity.append(result)
 
+    async def advance_destroy_checkpoint(
+        self, *, expected_checkpoint, checkpoint, **_kwargs
+    ):
+        self.destroy_checkpoints.append((expected_checkpoint, checkpoint))
+
 
 def _installation() -> PersonalDevCapacityInstallation:
     return PersonalDevCapacityInstallation(
@@ -260,6 +326,8 @@ class _Installer:
     def __init__(self) -> None:
         self.calls = 0
         self.publishing_checks = 0
+        self.sealed = 0
+        self.destroyed = 0
 
     async def converge(self, _claim):
         self.calls += 1
@@ -268,6 +336,12 @@ class _Installer:
     async def verify_publishing(self, _claim, installation):
         assert installation == _installation()
         self.publishing_checks += 1
+
+    async def seal(self, _claim):
+        self.sealed += 1
+
+    async def destroy(self, _claim):
+        self.destroyed += 1
 
 
 class _Projector:
@@ -300,6 +374,7 @@ class _Executor:
     def __init__(self) -> None:
         self.prepared = 0
         self.bootstrapped = 0
+        self.cleanup: list[str] = []
 
     async def prepare(self, claim, *, access):
         assert claim.attempt.access_binding.credential_hash == b"h" * 32
@@ -311,6 +386,18 @@ class _Executor:
         assert claim.attempt.access_binding.credential_hash == b"h" * 32
         assert access == "owner-access-current"
         self.bootstrapped += 1
+
+    async def delete_namespace(self, _claim):
+        self.cleanup.append("namespace")
+
+    async def delete_buckets(self, _claim):
+        self.cleanup.append("buckets")
+
+    async def delete_tenant(self, _claim):
+        self.cleanup.append("tenant")
+
+    async def delete_credentials(self, _claim):
+        self.cleanup.append("credentials")
 
 
 async def test_reconciler_prepares_ready_candidate_but_waits_for_trusted_ack() -> None:
@@ -474,6 +561,85 @@ async def test_reconciler_finalizes_only_a_capacity_projected_activation() -> No
     ).reconcile_once(now=_NOW)
 
     assert authority.completed == 1
+
+
+async def test_destroy_reconciler_prepares_and_projects_retirement_without_reinstalling() -> None:
+    requested_authority = _Authority(_destroy_claim("capacity_retirement_requested"))
+    installer = _Installer()
+    projector = _Projector()
+    await PersonalDevEnvironmentReconciler(
+        authority=requested_authority,  # type: ignore[arg-type]
+        executor=_Executor(),  # type: ignore[arg-type]
+        capacity_installer=installer,
+        capacity_projector=projector,
+        access_loader=lambda _claim: _async_value("unused"),
+        reconciler_id="reconciler-a",
+        lease_seconds=60,
+    ).reconcile_once(now=_NOW)
+
+    assert installer.calls == 0
+    assert len(requested_authority.prepared_capacity) == 1
+    assert requested_authority.prepared_capacity[0]["expected_configuration_epoch"] == 11
+
+    pending_authority = _Authority(
+        _destroy_claim("capacity_projection_pending", expected_capacity_epoch=11)
+    )
+    await PersonalDevEnvironmentReconciler(
+        authority=pending_authority,  # type: ignore[arg-type]
+        executor=_Executor(),  # type: ignore[arg-type]
+        capacity_installer=installer,
+        capacity_projector=projector,
+        access_loader=lambda _claim: _async_value("unused"),
+        reconciler_id="reconciler-a",
+        lease_seconds=60,
+    ).reconcile_once(now=_NOW)
+
+    request, _key = projector.requests[-1]
+    assert request.operation_kind == "destroy"
+    assert request.demand_reporter_token_sha256 == (
+        pending_authority.claim.operation.capacity_reporter_token_sha256
+    )
+    assert installer.publishing_checks == 0
+    assert len(pending_authority.projected_capacity) == 1
+
+
+@pytest.mark.parametrize(
+    ("checkpoint", "keep_data", "expected_installer", "expected_executor", "next_checkpoint"),
+    [
+        ("capacity_retired", False, "seal", None, "local_authority_sealed"),
+        ("local_authority_sealed", False, None, "namespace", "namespace_deleted"),
+        ("namespace_deleted", False, "destroy", None, "database_deleted"),
+        ("database_deleted", False, None, "buckets", "buckets_deleted"),
+        ("buckets_deleted", False, None, "tenant", "tenant_deleted"),
+        ("tenant_deleted", False, None, "credentials", "complete"),
+        ("namespace_deleted", True, None, "tenant", "tenant_deleted"),
+        ("tenant_deleted", True, None, "credentials", "complete"),
+    ],
+)
+async def test_destroy_reconciler_advances_one_idempotent_cleanup_checkpoint(
+    checkpoint: str,
+    keep_data: bool,
+    expected_installer: str | None,
+    expected_executor: str | None,
+    next_checkpoint: str,
+) -> None:
+    authority = _Authority(_destroy_claim(checkpoint, keep_data=keep_data))
+    installer = _Installer()
+    executor = _Executor()
+    await PersonalDevEnvironmentReconciler(
+        authority=authority,  # type: ignore[arg-type]
+        executor=executor,  # type: ignore[arg-type]
+        capacity_installer=installer,
+        capacity_projector=_Projector(),
+        access_loader=lambda _claim: _async_value("unused"),
+        reconciler_id="reconciler-a",
+        lease_seconds=60,
+    ).reconcile_once(now=_NOW)
+
+    assert installer.sealed == int(expected_installer == "seal")
+    assert installer.destroyed == int(expected_installer == "destroy")
+    assert executor.cleanup == ([] if expected_executor is None else [expected_executor])
+    assert authority.destroy_checkpoints == [(checkpoint, next_checkpoint)]
 
 
 async def _async_value(value):
