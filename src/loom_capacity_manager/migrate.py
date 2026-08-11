@@ -147,6 +147,14 @@ def bind_fresh_authority(engine: Engine, expected: UUID) -> None:
             markers = _validated_reserved_markers(reserved_rows)
             seed_marker = markers.get(_AUTHORITY_SEED_EVENT)
             bound_marker = markers.get(_AUTHORITY_BOUND_EVENT)
+            if (
+                seed_marker is not None
+                and bound_marker is not None
+                and seed_marker[1] >= bound_marker[1]
+            ):
+                raise CapacityAuthorityBootstrapError(
+                    "capacity authority seed marker must precede binding marker"
+                )
             current = authority["authority_incarnation"]
             if bound_marker is not None and bound_marker[0] != current:
                 raise CapacityAuthorityBootstrapError(

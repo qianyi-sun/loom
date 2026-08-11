@@ -422,6 +422,39 @@ def test_contradictory_seed_and_bound_evidence_fails_closed(
     assert _authority(capacity_postgres_url)["authority_incarnation"] == _REVIEWED_AUTHORITY
 
 
+def test_seed_event_after_binding_event_fails_closed(
+    capacity_postgres_url: str,
+) -> None:
+    _reset_empty_shadow(capacity_postgres_url)
+    engine = create_engine(capacity_postgres_url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(delete(CapacityAuditEvent))
+            connection.execute(
+                update(CapacityAuthorityState)
+                .where(CapacityAuthorityState.singleton_id == 1)
+                .values(authority_incarnation=_REVIEWED_AUTHORITY)
+            )
+            connection.execute(
+                CapacityAuditEvent.__table__.insert().values(
+                    actor_kind="migration",
+                    actor_id="capacity-authority-bootstrap",
+                    event_kind="authority_incarnation_bound",
+                    object_binding={"authority_incarnation": str(_REVIEWED_AUTHORITY)},
+                    detail={"state": "reviewed-bootstrap-bound"},
+                )
+            )
+            connection.execute(
+                CapacityAuditEvent.__table__.insert().values(
+                    **_seed_marker(_MIGRATION_AUTHORITY)
+                )
+            )
+        with pytest.raises(CapacityAuthorityBootstrapError):
+            bind_fresh_authority(engine, _REVIEWED_AUTHORITY)
+    finally:
+        engine.dispose()
+
+
 def test_nil_authority_is_rejected_without_mutating_the_database(
     capacity_postgres_url: str,
 ) -> None:
