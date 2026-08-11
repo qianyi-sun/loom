@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
+
+from loom_capacity_agent.legacy_fence import (
+    LEGACY_MUTATION_INVENTORY_DIGEST,
+    LEGACY_MUTATION_PATH_IDS,
+)
 
 INVENTORY = Path("docs/architecture/capacity-mutation-path-inventory.json")
 
 
 def test_capacity_mutation_inventory_is_complete_and_activation_blocking() -> None:
-    document = json.loads(INVENTORY.read_text(encoding="utf-8"))
+    inventory_bytes = INVENTORY.read_bytes()
+    document = json.loads(inventory_bytes)
     assert document["schema_version"] == 1
     assert document["activation_blocking"] is True
     entries = document["entries"]
@@ -43,3 +50,6 @@ def test_capacity_mutation_inventory_is_complete_and_activation_blocking() -> No
             assert path.is_file(), source
             if separator:
                 assert symbol.rsplit(".", 1)[-1] in path.read_text(encoding="utf-8"), source
+
+    assert tuple(sorted(identities)) == LEGACY_MUTATION_PATH_IDS
+    assert hashlib.sha256(inventory_bytes).hexdigest() == LEGACY_MUTATION_INVENTORY_DIGEST

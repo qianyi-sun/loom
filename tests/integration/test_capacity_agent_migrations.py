@@ -116,7 +116,16 @@ def test_agent_can_execute_only_the_bounded_agent_functions(
                         "AS lifecycle_initializer_execute, "
                         "has_function_privilege(:agent, "
                         "'loom_capacity_guard.inspect_inert_claim_proposal"
-                        "(uuid,jsonb,bytea,text)', 'EXECUTE') AS claim_inspect_execute"
+                        "(uuid,jsonb,bytea,text)', 'EXECUTE') AS claim_inspect_execute, "
+                        "has_function_privilege(:agent, "
+                        "'loom_capacity_guard.prepare_inert_legacy_compatibility"
+                        "(uuid,jsonb,bytea,text)', 'EXECUTE') AS legacy_prepare_execute, "
+                        "has_function_privilege(:agent, "
+                        "'loom_capacity_guard.freeze_inert_legacy_compatibility"
+                        "(uuid,jsonb,bytea,text)', 'EXECUTE') AS legacy_freeze_execute, "
+                        "has_function_privilege(:agent, "
+                        "'loom_capacity_guard.reject_global_preparation_with_legacy()', "
+                        "'EXECUTE') AS cross_mode_guard_execute"
                     ),
                     {"agent": agent_role},
                 )
@@ -137,6 +146,9 @@ def test_agent_can_execute_only_the_bounded_agent_functions(
             "lifecycle_execute": True,
             "lifecycle_initializer_execute": False,
             "claim_inspect_execute": True,
+            "legacy_prepare_execute": True,
+            "legacy_freeze_execute": True,
+            "cross_mode_guard_execute": False,
         }
     finally:
         admin.dispose()
@@ -145,9 +157,7 @@ def test_agent_can_execute_only_the_bounded_agent_functions(
     try:
         with agent.connect() as connection:
             with pytest.raises(DBAPIError) as denied:
-                connection.execute(
-                    text("SELECT * FROM loom_capacity_guard.agent_registrations")
-                )
+                connection.execute(text("SELECT * FROM loom_capacity_guard.agent_registrations"))
             assert isinstance(denied.value.orig, InsufficientPrivilege)
 
         with agent.connect() as connection:
@@ -182,7 +192,10 @@ def test_agent_functions_have_fixed_search_paths_and_exact_definer_status(
                         "'register_inert_bootstrap', 'record_inert_worker', "
                         "'apply_inert_attempt_transition', "
                         "'initialize_attempt_lifecycle', "
-                        "'inspect_inert_claim_proposal')"
+                        "'inspect_inert_claim_proposal', "
+                        "'prepare_inert_legacy_compatibility', "
+                        "'freeze_inert_legacy_compatibility', "
+                        "'reject_global_preparation_with_legacy')"
                     )
                 )
                 .mappings()
@@ -198,6 +211,9 @@ def test_agent_functions_have_fixed_search_paths_and_exact_definer_status(
             "apply_inert_attempt_transition",
             "initialize_attempt_lifecycle",
             "inspect_inert_claim_proposal",
+            "prepare_inert_legacy_compatibility",
+            "freeze_inert_legacy_compatibility",
+            "reject_global_preparation_with_legacy",
         }
         for name, row in functions.items():
             assert row["proconfig"] == ["search_path=pg_catalog"]
@@ -207,6 +223,7 @@ def test_agent_functions_have_fixed_search_paths_and_exact_definer_status(
                 not in {
                     "assert_inert_agent_binding",
                     "initialize_attempt_lifecycle",
+                    "reject_global_preparation_with_legacy",
                 }
             )
     finally:

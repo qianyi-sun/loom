@@ -41,6 +41,9 @@ EXPECTED_GUARD_TABLES = {
     "claim_guard_activation",
     "attempt_lifecycle_events",
     "protected_claim_leases",
+    "legacy_compatibility_preparations",
+    "legacy_writer_cursors",
+    "legacy_compatibility_freezes",
 }
 
 
@@ -56,7 +59,7 @@ async def test_guard_schema_startup_returns_numeric_head(
 ) -> None:
     engine = create_async_engine(_value(capacity_guard_database, "migrator_url"))
     try:
-        assert await assert_capacity_guard_schema_at_head(engine) == 4
+        assert await assert_capacity_guard_schema_at_head(engine) == 5
     finally:
         await engine.dispose()
 
@@ -183,7 +186,7 @@ def test_guard_schema_has_exact_owner_and_preserves_public_application_tables(
             revision = connection.execute(
                 text("SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version")
             ).scalar_one()
-            assert revision == "guard_0004"
+            assert revision == "guard_0005"
             public_before = capacity_guard_database["public_tables_before"]
             assert isinstance(public_before, frozenset)
             assert frozenset(inspect(connection).get_table_names(schema="public")) == public_before
@@ -626,9 +629,7 @@ def test_guard_migration_rejects_superuser_login(
     root = Path(__file__).resolve().parents[2]
     cfg = AlembicConfig(str(root / "capacity_guard_migrations" / "alembic.ini"))
     cfg.set_main_option("script_location", str(root / "capacity_guard_migrations"))
-    monkeypatch.setenv(
-        "LOOM_CAPACITY_GUARD_DB_URL", _value(capacity_guard_database, "admin_url")
-    )
+    monkeypatch.setenv("LOOM_CAPACITY_GUARD_DB_URL", _value(capacity_guard_database, "admin_url"))
     monkeypatch.setenv(
         "LOOM_CAPACITY_GUARD_OWNER_ROLE", _value(capacity_guard_database, "owner_role")
     )
