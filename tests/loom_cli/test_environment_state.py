@@ -256,6 +256,13 @@ def test_committed_slurm_pools_carry_containment_contract() -> None:
             # cannot exceed the allocation.
             assert conc * cpus <= cfg["requested_cpus"]
             assert conc * mem <= cfg["requested_memory_mib"]
+            if policy["pool_name"] == "gb10":
+                # The physical GB10 partition is capped at MaxTime=1-00:00:00;
+                # a larger request is rejected by sbatch before any worker can
+                # register, so every environment must stay within that bound.
+                assert cfg["time_limit"] == "1-00:00:00"
+            if policy["pool_name"] == "oldlab":
+                assert cfg["time_limit"] == "2-00:00:00"
             if env == "staging" and policy["pool_name"] == "gb10":
                 assert cfg["qos_normal"] == "loom-staging"
             else:

@@ -65,7 +65,10 @@ container_pids = 512
 job_pids_max = 5120
 max_jobs = 15
 pending_job_cap = 2
-time_limit = "2-00:00:00"
+# The physical gb10 partition advertises MaxTime=1-00:00:00. Slurm rejects
+# longer requests before allocation, so keep every autoscaled worker lease at
+# that exact ceiling.
+time_limit = "1-00:00:00"
 # Resource-aware admission keeps Loom within each node's currently free Slurm
 # CPU/memory envelope while sharing the institution's GB10 partition.
 resource_aware = true
