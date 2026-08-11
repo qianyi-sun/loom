@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -14,7 +15,15 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from loom.db.schema import Task, Team, TeamQuota, Trial
+from loom_capacity_agent.admission import (
+    PreparedAdmissionPlanV1,
+    PreparedBootstrapBindingV1,
+    PreparedPlacementAllowanceV1,
+    PreparedWorkerBindingV1,
+    PreparedWorkerShapeV1,
+)
 from loom_capacity_agent.contracts import AgentRegistrationV1
+from loom_capacity_agent.prepared_store import CapacityPreparedAdmissionStore
 from loom_capacity_agent.store import (
     CapacityAgentStore,
     CapacityAgentStoreError,
@@ -24,9 +33,17 @@ from loom_capacity_guard.contracts import (
     GuardFenceV1,
     ProtectedAttemptV1,
     SealedRequirementsV1,
+    canonical_bytes,
     canonical_digest,
 )
 from loom_capacity_guard.store import CapacityGuardStore
+from loom_capacity_manager.contracts import (
+    ResourceVectorV1,
+    WorkerShapeV1,
+)
+from loom_capacity_manager.contracts import (
+    canonical_digest as manager_canonical_digest,
+)
 
 
 def _value(database: dict[str, object], key: str) -> str:
@@ -487,3 +504,452 @@ async def test_oversize_capture_is_rejected_before_aggregation_and_rolls_back(
             .one()
         )
     assert dict(row) == {"high_water": 0, "observations": 0}
+
+
+def _prepared_plan(
+    registration: AgentRegistrationV1,
+    attempt: ProtectedAttemptV1,
+) -> PreparedAdmissionPlanV1:
+    worker_shape = WorkerShapeV1(
+        shape_id="oldlab-x86-none-2",
+        concurrency_slots=2,
+        total_resources=ResourceVectorV1(
+            slots=2,
+            cpu_millicores=4000,
+            memory_bytes=8_000_000_000,
+        ),
+        node_resources=(
+            ResourceVectorV1(
+                slots=2,
+                cpu_millicores=4000,
+                memory_bytes=8_000_000_000,
+            ),
+        ),
+        compatible_domain_ids=("oldlab-x86",),
+        capabilities=(
+            "cpu_arch.x86_64",
+            "gpu_vendor.none",
+            "network.public",
+            "os.linux",
+        ),
+    )
+    prepared_shape = PreparedWorkerShapeV1(
+        shape_instance_id="shape-oldlab-0001",
+        submission_intent_id=uuid4(),
+        pool_id="oldlab",
+        pool_generation=3,
+        profile_id="dev-oldlab",
+        profile_generation=5,
+        profile_digest="b" * 64,
+        protocol_generation=2,
+        protocol_digest="c" * 64,
+        worker_shape=worker_shape,
+        worker_shape_digest=manager_canonical_digest(worker_shape),
+        bootstrap_registration_epoch=1,
+    )
+    allowance = PreparedPlacementAllowanceV1(
+        allowance_id=uuid4(),
+        protected_attempt_id=attempt.protected_attempt_id,
+        execution_generation=attempt.execution_generation,
+        requirements_digest=attempt.requirements_digest,
+        pool_id="oldlab",
+        shape_instance_id=prepared_shape.shape_instance_id,
+        shape_slot_index=0,
+        submission_intent_id=prepared_shape.submission_intent_id,
+    )
+    return PreparedAdmissionPlanV1(
+        **registration.model_dump(mode="python"),
+        plan_id=uuid4(),
+        admission_incarnation=uuid4(),
+        manager_authority_incarnation=uuid4(),
+        manager_writer_epoch=0,
+        manager_allocation_epoch=1,
+        manager_input_digest="e" * 64,
+        manager_allocation_digest="f" * 64,
+        pool_id="oldlab",
+        pool_generation=prepared_shape.pool_generation,
+        profile_id=prepared_shape.profile_id,
+        profile_generation=prepared_shape.profile_generation,
+        profile_digest=prepared_shape.profile_digest,
+        protocol_generation=prepared_shape.protocol_generation,
+        protocol_digest=prepared_shape.protocol_digest,
+        lease_not_after=datetime.now(UTC) + timedelta(hours=1),
+        worker_shapes=(prepared_shape,),
+        placement_allowances=(allowance,),
+    )
+
+
+async def _initialize_prepared_plan(
+    database: dict[str, object],
+) -> tuple[AgentRegistrationV1, ProtectedAttemptV1, PreparedAdmissionPlanV1]:
+    _, registration = await _initialize_and_register(database)
+    trial_id = _seed_trial(database)
+    requirements = SealedRequirementsV1(
+        os="linux",
+        cpu_arch="x86_64",
+        gpu_vendor="none",
+        network_policies=("public",),
+    )
+    attempt = ProtectedAttemptV1(
+        trial_id=trial_id,
+        protected_attempt_id=uuid4(),
+        execution_generation=1,
+        requirements_digest=canonical_digest(requirements),
+    )
+    async with _owner_session(database) as (_, guard_store, _):
+        await guard_store.register_trial_attempt(attempt, requirements)
+    return registration, attempt, _prepared_plan(registration, attempt)
+
+
+def _prepared_worker_bindings(
+    registration: AgentRegistrationV1,
+    plan: PreparedAdmissionPlanV1,
+) -> tuple[PreparedBootstrapBindingV1, PreparedWorkerBindingV1]:
+    shape = plan.worker_shapes[0]
+    registration_fields = {
+        field: getattr(registration, field) for field in AgentRegistrationV1.model_fields
+    }
+    bootstrap = PreparedBootstrapBindingV1(
+        **registration_fields,
+        bootstrap_id=uuid4(),
+        plan_id=plan.plan_id,
+        admission_incarnation=plan.admission_incarnation,
+        manager_allocation_epoch=plan.manager_allocation_epoch,
+        pool_id=plan.pool_id,
+        shape_instance_id=shape.shape_instance_id,
+        submission_intent_id=shape.submission_intent_id,
+        bootstrap_registration_epoch=shape.bootstrap_registration_epoch,
+        bootstrap_digest="1" * 64,
+        expires_at=plan.lease_not_after,
+    )
+    worker = PreparedWorkerBindingV1(
+        **registration_fields,
+        worker_id=uuid4(),
+        worker_incarnation=uuid4(),
+        bootstrap_id=bootstrap.bootstrap_id,
+        plan_id=plan.plan_id,
+        admission_incarnation=plan.admission_incarnation,
+        manager_allocation_epoch=plan.manager_allocation_epoch,
+        pool_id=plan.pool_id,
+        shape_instance_id=shape.shape_instance_id,
+        submission_intent_id=shape.submission_intent_id,
+        bootstrap_registration_epoch=shape.bootstrap_registration_epoch,
+        slurm_job_id="oldlab-12345",
+        ownership_evidence_digest="2" * 64,
+        worker_credential_digest="3" * 64,
+    )
+    return bootstrap, worker
+
+
+@pytest.mark.asyncio
+async def test_prepared_plan_is_exact_replay_and_persists_normalized_bindings(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    registration, _attempt, plan = await _initialize_prepared_plan(capacity_guard_database)
+    for _ in range(2):
+        async with _agent_session(capacity_guard_database) as session:
+            store = CapacityPreparedAdmissionStore(session, registration=registration)
+            assert await store.prepare_plan(plan) == plan
+
+    async with _owner_session(capacity_guard_database) as (_, _, session):
+        counts = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT "
+                        "(SELECT count(*) FROM loom_capacity_guard.prepared_admission_plans) "
+                        "AS plans, "
+                        "(SELECT count(*) FROM loom_capacity_guard.prepared_worker_shapes) "
+                        "AS shapes, "
+                        "(SELECT count(*) FROM loom_capacity_guard.prepared_placement_allowances) "
+                        "AS allowances, "
+                        "(SELECT count(*) FROM loom_capacity_guard.audit_events "
+                        "WHERE event_type = 'admission_plan_prepared.v1') AS audits"
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+    assert dict(counts) == {"plans": 1, "shapes": 1, "allowances": 1, "audits": 1}
+
+    conflicting = plan.model_copy(update={"manager_allocation_digest": "0" * 64})
+    with pytest.raises(DBAPIError, match="conflicting prepared admission"):
+        async with _agent_session(capacity_guard_database) as session:
+            await CapacityPreparedAdmissionStore(
+                session, registration=registration
+            ).prepare_plan(conflicting)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_prepared_plan_replay_converges(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    registration, _attempt, plan = await _initialize_prepared_plan(capacity_guard_database)
+
+    async def prepare_once() -> PreparedAdmissionPlanV1:
+        async with _agent_session(capacity_guard_database) as session:
+            return await CapacityPreparedAdmissionStore(
+                session, registration=registration
+            ).prepare_plan(plan)
+
+    assert await asyncio.gather(prepare_once(), prepare_once()) == [plan, plan]
+
+    async with _owner_session(capacity_guard_database) as (_, _, session):
+        counts = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT "
+                        "(SELECT count(*) FROM loom_capacity_guard.prepared_admission_plans) "
+                        "AS plans, "
+                        "(SELECT count(*) FROM loom_capacity_guard.audit_events "
+                        "WHERE event_type = 'admission_plan_prepared.v1') AS audits"
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+    assert dict(counts) == {"plans": 1, "audits": 1}
+
+
+@pytest.mark.asyncio
+async def test_concurrent_shape_rebinding_allows_only_one_plan(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    registration, _attempt, first = await _initialize_prepared_plan(
+        capacity_guard_database
+    )
+    original_shape = first.worker_shapes[0]
+    changed_contract = original_shape.worker_shape.model_copy(
+        update={"warm_approved": not original_shape.worker_shape.warm_approved}
+    )
+    changed_shape = PreparedWorkerShapeV1.model_validate(
+        {
+            **original_shape.model_dump(mode="python"),
+            "worker_shape": changed_contract,
+            "worker_shape_digest": manager_canonical_digest(changed_contract),
+        }
+    )
+    second = PreparedAdmissionPlanV1.model_validate(
+        {
+            **first.model_dump(mode="python"),
+            "plan_id": uuid4(),
+            "admission_incarnation": uuid4(),
+            "manager_allocation_epoch": 2,
+            "manager_input_digest": "4" * 64,
+            "manager_allocation_digest": "5" * 64,
+            "worker_shapes": (changed_shape,),
+            "placement_allowances": (),
+        }
+    )
+
+    async def prepare(plan: PreparedAdmissionPlanV1) -> PreparedAdmissionPlanV1:
+        async with _agent_session(capacity_guard_database) as session:
+            return await CapacityPreparedAdmissionStore(
+                session, registration=registration
+            ).prepare_plan(plan)
+
+    results = await asyncio.gather(prepare(first), prepare(second), return_exceptions=True)
+    assert sum(isinstance(result, PreparedAdmissionPlanV1) for result in results) == 1
+    assert sum(isinstance(result, DBAPIError) for result in results) == 1
+
+    async with _owner_session(capacity_guard_database) as (_, _, session):
+        assert (
+            await session.execute(
+                text("SELECT count(*) FROM loom_capacity_guard.prepared_admission_plans")
+            )
+        ).scalar_one() == 1
+
+
+@pytest.mark.asyncio
+async def test_prepared_plan_rejects_unregistered_or_mismatched_attempt(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    registration, attempt, plan = await _initialize_prepared_plan(capacity_guard_database)
+    allowance = plan.placement_allowances[0]
+    missing = allowance.model_copy(update={"protected_attempt_id": uuid4()})
+    missing_plan = plan.model_copy(update={"placement_allowances": (missing,)})
+    with pytest.raises(DBAPIError, match="allowance binding"):
+        async with _agent_session(capacity_guard_database) as session:
+            await CapacityPreparedAdmissionStore(
+                session, registration=registration
+            ).prepare_plan(missing_plan)
+
+    mismatched = allowance.model_copy(
+        update={"execution_generation": attempt.execution_generation + 1}
+    )
+    mismatch_plan = plan.model_copy(update={"placement_allowances": (mismatched,)})
+    with pytest.raises(DBAPIError, match="allowance binding"):
+        async with _agent_session(capacity_guard_database) as session:
+            await CapacityPreparedAdmissionStore(
+                session, registration=registration
+            ).prepare_plan(mismatch_plan)
+
+
+@pytest.mark.asyncio
+async def test_later_epoch_can_retain_but_not_rebind_a_shape_identity(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    registration, _attempt, first = await _initialize_prepared_plan(
+        capacity_guard_database
+    )
+    second = PreparedAdmissionPlanV1.model_validate(
+        {
+            **first.model_dump(mode="python"),
+            "plan_id": uuid4(),
+            "admission_incarnation": uuid4(),
+            "manager_allocation_epoch": 2,
+            "manager_input_digest": "4" * 64,
+            "manager_allocation_digest": "5" * 64,
+            "placement_allowances": (),
+        }
+    )
+    async with _agent_session(capacity_guard_database) as session:
+        store = CapacityPreparedAdmissionStore(session, registration=registration)
+        await store.prepare_plan(first)
+        await store.prepare_plan(second)
+
+    async with _owner_session(capacity_guard_database) as (_, _, session):
+        assert (
+            await session.execute(
+                text("SELECT count(*) FROM loom_capacity_guard.prepared_worker_shapes")
+            )
+        ).scalar_one() == 2
+
+    old_shape = first.worker_shapes[0]
+    changed_shape_contract = old_shape.worker_shape.model_copy(
+        update={"warm_approved": not old_shape.worker_shape.warm_approved}
+    )
+    rebound_shape = PreparedWorkerShapeV1.model_validate(
+        {
+            **old_shape.model_dump(mode="python"),
+            "worker_shape": changed_shape_contract,
+            "worker_shape_digest": manager_canonical_digest(changed_shape_contract),
+        }
+    )
+    rebound = PreparedAdmissionPlanV1.model_validate(
+        {
+            **first.model_dump(mode="python"),
+            "plan_id": uuid4(),
+            "admission_incarnation": uuid4(),
+            "manager_allocation_epoch": 3,
+            "manager_input_digest": "6" * 64,
+            "manager_allocation_digest": "7" * 64,
+            "worker_shapes": (rebound_shape,),
+            "placement_allowances": (),
+        }
+    )
+    with pytest.raises(DBAPIError, match="shape identity was rebound"):
+        async with _agent_session(capacity_guard_database) as session:
+            await CapacityPreparedAdmissionStore(
+                session, registration=registration
+            ).prepare_plan(rebound)
+
+
+@pytest.mark.asyncio
+async def test_database_recomputes_prepared_payload_digest_before_insert(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    registration, _attempt, plan = await _initialize_prepared_plan(capacity_guard_database)
+    payload = canonical_bytes(plan)
+    with pytest.raises(DBAPIError, match="payload is invalid"):
+        async with _agent_session(capacity_guard_database) as session:
+            await session.execute(
+                text(
+                    "SELECT loom_capacity_guard.prepare_inert_admission_plan("
+                    ":agent_incarnation, CAST(:payload AS jsonb), "
+                    "CAST(:canonical_payload AS bytea), :payload_digest)"
+                ),
+                {
+                    "agent_incarnation": registration.agent_incarnation,
+                    "payload": payload.decode("ascii"),
+                    "canonical_payload": payload,
+                    "payload_digest": "0" * 64,
+                },
+            )
+
+    async with _agent_session(capacity_guard_database) as session:
+        assert (
+            await CapacityPreparedAdmissionStore(
+                session, registration=registration
+            ).prepare_plan(plan)
+            == plan
+        )
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_and_worker_are_hash_only_exact_replays(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    registration, _attempt, plan = await _initialize_prepared_plan(capacity_guard_database)
+    bootstrap, worker = _prepared_worker_bindings(registration, plan)
+    async with _agent_session(capacity_guard_database) as session:
+        store = CapacityPreparedAdmissionStore(session, registration=registration)
+        await store.prepare_plan(plan)
+
+    async def register_bootstrap() -> PreparedBootstrapBindingV1:
+        async with _agent_session(capacity_guard_database) as session:
+            return await CapacityPreparedAdmissionStore(
+                session, registration=registration
+            ).register_bootstrap(bootstrap)
+
+    assert await asyncio.gather(register_bootstrap(), register_bootstrap()) == [
+        bootstrap,
+        bootstrap,
+    ]
+
+    async def record_worker() -> PreparedWorkerBindingV1:
+        async with _agent_session(capacity_guard_database) as session:
+            return await CapacityPreparedAdmissionStore(
+                session, registration=registration
+            ).record_prepared_worker(worker)
+
+    assert await asyncio.gather(record_worker(), record_worker()) == [worker, worker]
+
+    async with _owner_session(capacity_guard_database) as (_, _, session):
+        counts = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT "
+                        "(SELECT count(*) FROM loom_capacity_guard.prepared_bootstrap_bindings) "
+                        "AS bootstraps, "
+                        "(SELECT count(*) FROM loom_capacity_guard.prepared_worker_bindings) "
+                        "AS workers, "
+                        "(SELECT count(*) FROM loom_capacity_guard.audit_events WHERE "
+                        "event_type IN ('bootstrap_prepared.v1', 'worker_prepared.v1')) AS audits"
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+    assert dict(counts) == {"bootstraps": 1, "workers": 1, "audits": 2}
+
+
+@pytest.mark.asyncio
+async def test_owner_cannot_turn_prepared_records_executable_or_mutate_them(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    registration, _attempt, plan = await _initialize_prepared_plan(capacity_guard_database)
+    bootstrap, worker = _prepared_worker_bindings(registration, plan)
+    async with _agent_session(capacity_guard_database) as session:
+        store = CapacityPreparedAdmissionStore(session, registration=registration)
+        await store.prepare_plan(plan)
+        await store.register_bootstrap(bootstrap)
+        await store.record_prepared_worker(worker)
+
+    statements = (
+        "UPDATE loom_capacity_guard.prepared_admission_plans SET executable = true",
+        "UPDATE loom_capacity_guard.prepared_worker_shapes SET shape_state = 'accepted'",
+        "DELETE FROM loom_capacity_guard.prepared_placement_allowances",
+        "DELETE FROM loom_capacity_guard.prepared_bootstrap_bindings",
+        "UPDATE loom_capacity_guard.prepared_worker_bindings SET executable = true",
+        "TRUNCATE loom_capacity_guard.prepared_admission_plans CASCADE",
+    )
+    for statement in statements:
+        with pytest.raises(DBAPIError, match=r"append-only|check constraint"):
+            async with _owner_session(capacity_guard_database) as (_, _, session):
+                await session.execute(text(statement))

@@ -70,7 +70,7 @@ def test_agent_role_is_least_privileged_and_not_an_owner_member(
         engine.dispose()
 
 
-def test_agent_can_execute_only_the_bounded_capture_function(
+def test_agent_can_execute_only_the_bounded_agent_functions(
     capacity_guard_database: dict[str, object],
 ) -> None:
     admin = create_engine(_value(capacity_guard_database, "admin_url"))
@@ -95,7 +95,19 @@ def test_agent_can_execute_only_the_bounded_capture_function(
                         "'EXECUTE') AS capture_execute, "
                         "has_function_privilege(:agent, "
                         "'loom_capacity_guard.reject_append_only_mutation()', 'EXECUTE') "
-                        "AS trigger_execute"
+                        "AS trigger_execute, "
+                        "has_function_privilege(:agent, "
+                        "'loom_capacity_guard.prepare_inert_admission_plan"
+                        "(uuid,jsonb,bytea,text)', 'EXECUTE') AS plan_execute, "
+                        "has_function_privilege(:agent, "
+                        "'loom_capacity_guard.register_inert_bootstrap"
+                        "(uuid,jsonb,bytea,text)', 'EXECUTE') AS bootstrap_execute, "
+                        "has_function_privilege(:agent, "
+                        "'loom_capacity_guard.record_inert_worker"
+                        "(uuid,jsonb,bytea,text)', 'EXECUTE') AS worker_execute, "
+                        "has_function_privilege(:agent, "
+                        "'loom_capacity_guard.assert_inert_agent_binding"
+                        "(uuid,jsonb,bytea,text)', 'EXECUTE') AS binding_guard_execute"
                     ),
                     {"agent": agent_role},
                 )
@@ -109,6 +121,10 @@ def test_agent_can_execute_only_the_bounded_capture_function(
             "sequence_usage": False,
             "capture_execute": True,
             "trigger_execute": False,
+            "plan_execute": True,
+            "bootstrap_execute": True,
+            "worker_execute": True,
+            "binding_guard_execute": False,
         }
     finally:
         admin.dispose()
@@ -136,27 +152,39 @@ def test_agent_can_execute_only_the_bounded_capture_function(
         agent.dispose()
 
 
-def test_capture_function_is_fixed_search_path_security_definer(
+def test_agent_functions_have_fixed_search_paths_and_exact_definer_status(
     capacity_guard_database: dict[str, object],
 ) -> None:
     engine = create_engine(_value(capacity_guard_database, "admin_url"))
     try:
         with engine.connect() as connection:
-            row = (
+            rows = (
                 connection.execute(
                     text(
-                        "SELECT p.prosecdef, p.proconfig, pg_get_userbyid(p.proowner) AS owner "
+                        "SELECT p.proname, p.prosecdef, p.proconfig, "
+                        "pg_get_userbyid(p.proowner) AS owner "
                         "FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
                         "WHERE n.nspname = 'loom_capacity_guard' "
-                        "AND p.proname = 'capture_demand_observation'"
+                        "AND p.proname IN ('capture_demand_observation', "
+                        "'assert_inert_agent_binding', 'prepare_inert_admission_plan', "
+                        "'register_inert_bootstrap', 'record_inert_worker')"
                     )
                 )
                 .mappings()
-                .one()
+                .all()
             )
-        assert row["prosecdef"] is True
-        assert row["proconfig"] == ["search_path=pg_catalog"]
-        assert row["owner"] == _value(capacity_guard_database, "owner_role")
+        functions = {row["proname"]: dict(row) for row in rows}
+        assert set(functions) == {
+            "capture_demand_observation",
+            "assert_inert_agent_binding",
+            "prepare_inert_admission_plan",
+            "register_inert_bootstrap",
+            "record_inert_worker",
+        }
+        for name, row in functions.items():
+            assert row["proconfig"] == ["search_path=pg_catalog"]
+            assert row["owner"] == _value(capacity_guard_database, "owner_role")
+            assert row["prosecdef"] is (name != "assert_inert_agent_binding")
     finally:
         engine.dispose()
 
