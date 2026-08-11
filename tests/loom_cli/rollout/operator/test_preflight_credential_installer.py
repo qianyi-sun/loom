@@ -315,6 +315,21 @@ def test_install_creates_exact_root_probe_authority_without_exposing_token(
     assert raw.decode() not in json.dumps(result, sort_keys=True)
 
 
+def test_readonly_probe_sql_rebinds_only_the_exact_deployment_owned_token() -> None:
+    sql = render_readonly_probe_sql(token_hash="0" * 64, team_id=TEAM_ID)
+
+    assert "ON CONFLICT (token_hash) DO UPDATE" in sql
+    assert "SET team_id = EXCLUDED.team_id" in sql
+    assert "tokens.team_id IS DISTINCT FROM EXCLUDED.team_id" in sql
+    assert "tokens.name = EXCLUDED.name" in sql
+    assert "tokens.type = EXCLUDED.type" in sql
+    assert "tokens.scopes = EXCLUDED.scopes" in sql
+    assert "tokens.created_by_user_id IS NULL" in sql
+    assert "tokens.created_by_actor = EXCLUDED.created_by_actor" in sql
+    assert "tokens.expires_at IS NULL" in sql
+    assert "tokens.revoked_at IS NULL" in sql
+
+
 def test_install_rotates_tokens_with_a_non_authoritative_cluster_audience(
     tmp_path: Path,
 ) -> None:
@@ -507,6 +522,54 @@ def test_check_retries_one_stale_minio_authority_read(tmp_path: Path) -> None:
 
     assert installer.check()["ok"] is True
     assert stale_reads == 1
+
+
+def test_check_accepts_minio_policy_set_members_in_any_order(tmp_path: Path) -> None:
+    installer, runner = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    original_run = runner.__call__
+    reordered = json.loads(json.dumps(readonly_minio_policy()))
+    reordered["Statement"].reverse()
+    for statement in reordered["Statement"]:
+        statement["Action"].reverse()
+        statement["Resource"].reverse()
+
+    def reordered_policy(
+        argv: Sequence[str],
+        *,
+        input: str | None,
+        timeout: int,
+    ) -> Result:
+        command = tuple(argv)
+        if "pod/loom-minio-0" in command and "admin user info" in command[-1]:
+            return Result(
+                stdout="\n".join(
+                    (
+                        json.dumps(
+                            {
+                                "status": "success",
+                                "policyName": READONLY_MINIO_POLICY_NAME,
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "status": "success",
+                                "policy": READONLY_MINIO_POLICY_NAME,
+                                "policyInfo": {
+                                    "PolicyName": READONLY_MINIO_POLICY_NAME,
+                                    "Policy": reordered,
+                                },
+                            }
+                        ),
+                    )
+                )
+                + "\n"
+            )
+        return original_run(argv, input=input, timeout=timeout)
+
+    installer.run = reordered_policy
+
+    assert installer.check()["ok"] is True
 
 
 def test_install_converges_minio_only_after_exact_authority_check_fails(
