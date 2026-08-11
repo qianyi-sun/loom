@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 from uuid import UUID, uuid4
 
 import pytest
@@ -31,6 +32,7 @@ from loom_capacity_agent.store import (
     CapacityAgentStore,
     CapacityAgentStoreError,
     capture_demand_observation,
+    capture_lifecycle_demand_observation,
 )
 from loom_capacity_guard.contracts import (
     GuardFenceV1,
@@ -599,12 +601,14 @@ def _prepared_plan(
 
 async def _initialize_prepared_plan(
     database: dict[str, object],
+    *,
+    cpu_arch: Literal["x86_64", "arm64", "any"] = "x86_64",
 ) -> tuple[AgentRegistrationV1, ProtectedAttemptV1, PreparedAdmissionPlanV1]:
     _, registration = await _initialize_and_register(database)
     trial_id = _seed_trial(database)
     requirements = SealedRequirementsV1(
         os="linux",
-        cpu_arch="x86_64",
+        cpu_arch=cpu_arch,
         gpu_vendor="none",
         network_policies=("public",),
     )
@@ -1139,6 +1143,282 @@ async def test_concurrent_inert_assignment_allows_one_transition(
     results = await asyncio.gather(assign(first), assign(second), return_exceptions=True)
     assert sum(isinstance(result, InertAttemptTransitionV1) for result in results) == 1
     assert sum(isinstance(result, DBAPIError) for result in results) == 1
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_capture_reports_pending_then_assigned_and_fences_v1(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    registration, attempt, plan = await _initialize_prepared_plan(capacity_guard_database)
+    async with _agent_session(capacity_guard_database) as session:
+        pending = await capture_lifecycle_demand_observation(
+            session,
+            registration=registration,
+            expected_high_water=0,
+            max_attempts=100,
+        )
+    assert pending.sequence == 1
+    assert len(pending.attempts) == 1
+    assert pending.attempts[0].protected_attempt_id == attempt.protected_attempt_id
+    assert pending.attempts[0].lifecycle_state == "pending-unassigned"
+    assert pending.attempts[0].allowance_id is None
+
+    assignment = _attempt_transition(
+        registration,
+        attempt,
+        plan,
+        operation="assign",
+        expected_sequence=0,
+    )
+    async with _agent_session(capacity_guard_database) as session:
+        await CapacityPreparedAdmissionStore(
+            session, registration=registration
+        ).prepare_plan(plan)
+        await CapacityAttemptLifecycleStore(
+            session, registration=registration
+        ).apply_transition(assignment)
+
+    with pytest.raises(DBAPIError, match="cannot represent the protected lifecycle"):
+        async with _agent_session(capacity_guard_database) as session:
+            await capture_demand_observation(
+                session,
+                registration=registration,
+                expected_high_water=1,
+                max_attempts=100,
+            )
+
+    async with _agent_session(capacity_guard_database) as session:
+        assigned = await capture_lifecycle_demand_observation(
+            session,
+            registration=registration,
+            expected_high_water=1,
+            max_attempts=100,
+        )
+    assert assigned.sequence == 2
+    assert len(assigned.attempts) == 1
+    observed = assigned.attempts[0]
+    assert observed.lifecycle_state == "assigned"
+    assert observed.lifecycle_sequence == 1
+    assert observed.allowance_id == plan.placement_allowances[0].allowance_id
+    assert observed.plan_id == plan.plan_id
+    assert observed.pool_id == plan.pool_id
+    assert observed.pool_generation == plan.pool_generation
+    assert observed.profile_id == plan.profile_id
+    assert observed.profile_generation == plan.profile_generation
+    assert observed.profile_digest == plan.profile_digest
+    assert observed.shape_id == plan.worker_shapes[0].worker_shape.shape_id
+    assert observed.shape_instance_id == plan.worker_shapes[0].shape_instance_id
+    assert observed.executable is False
+
+    async with _owner_session(capacity_guard_database) as (_, _, session):
+        state = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT s.high_water, count(o.observation_id) AS observations "
+                        "FROM loom_capacity_guard.agent_reporter_state AS s "
+                        "JOIN loom_capacity_guard.demand_observations AS o "
+                        "ON o.agent_incarnation = s.agent_incarnation "
+                        "GROUP BY s.high_water"
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+    assert dict(state) == {"high_water": 2, "observations": 2}
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_capture_rejects_terminal_public_contradiction_without_advancing(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    registration, attempt, plan = await _initialize_prepared_plan(capacity_guard_database)
+    assignment = _attempt_transition(
+        registration,
+        attempt,
+        plan,
+        operation="assign",
+        expected_sequence=0,
+    )
+    cancellation = _attempt_transition(
+        registration,
+        attempt,
+        plan,
+        operation="cancel",
+        expected_sequence=1,
+        expected_state="assigned",
+    )
+    async with _agent_session(capacity_guard_database) as session:
+        await CapacityPreparedAdmissionStore(
+            session, registration=registration
+        ).prepare_plan(plan)
+        lifecycle = CapacityAttemptLifecycleStore(session, registration=registration)
+        await lifecycle.apply_transition(assignment)
+        await lifecycle.apply_transition(cancellation)
+
+    with pytest.raises(DBAPIError, match="terminal protected lifecycle contradicts"):
+        async with _agent_session(capacity_guard_database) as session:
+            await capture_lifecycle_demand_observation(
+                session,
+                registration=registration,
+                expected_high_water=0,
+                max_attempts=100,
+            )
+
+    async with _owner_session(capacity_guard_database) as (_, _, session):
+        state = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT s.high_water, "
+                        "(SELECT count(*) FROM loom_capacity_guard.demand_observations) "
+                        "AS observations "
+                        "FROM loom_capacity_guard.agent_reporter_state AS s"
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+    assert dict(state) == {"high_water": 0, "observations": 0}
+
+
+@pytest.mark.asyncio
+async def test_concurrent_lifecycle_capture_advances_exactly_once(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    _, registration = await _initialize_and_register(capacity_guard_database)
+
+    async def capture_once() -> object:
+        async with _agent_session(capacity_guard_database) as session:
+            return await capture_lifecycle_demand_observation(
+                session,
+                registration=registration,
+                expected_high_water=0,
+                max_attempts=100,
+            )
+
+    results = await asyncio.gather(capture_once(), capture_once(), return_exceptions=True)
+    assert sum(not isinstance(result, Exception) for result in results) == 1
+    assert sum(isinstance(result, DBAPIError) for result in results) == 1
+
+    async with _owner_session(capacity_guard_database) as (_, _, session):
+        state = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT s.high_water, "
+                        "(SELECT count(*) FROM loom_capacity_guard.demand_observations) "
+                        "AS observations "
+                        "FROM loom_capacity_guard.agent_reporter_state AS s"
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+    assert dict(state) == {"high_water": 1, "observations": 1}
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_capture_rejects_incompatible_assigned_shape_without_advancing(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    registration, attempt, plan = await _initialize_prepared_plan(
+        capacity_guard_database,
+        cpu_arch="arm64",
+    )
+    assignment = _attempt_transition(
+        registration,
+        attempt,
+        plan,
+        operation="assign",
+        expected_sequence=0,
+    )
+    async with _agent_session(capacity_guard_database) as session:
+        await CapacityPreparedAdmissionStore(
+            session, registration=registration
+        ).prepare_plan(plan)
+        await CapacityAttemptLifecycleStore(
+            session, registration=registration
+        ).apply_transition(assignment)
+
+    with pytest.raises(DBAPIError, match="invalid prepared binding"):
+        async with _agent_session(capacity_guard_database) as session:
+            await capture_lifecycle_demand_observation(
+                session,
+                registration=registration,
+                expected_high_water=0,
+                max_attempts=100,
+            )
+
+    async with _owner_session(capacity_guard_database) as (_, _, session):
+        state = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT s.high_water, "
+                        "(SELECT count(*) FROM loom_capacity_guard.demand_observations) "
+                        "AS observations "
+                        "FROM loom_capacity_guard.agent_reporter_state AS s"
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+    assert dict(state) == {"high_water": 0, "observations": 0}
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_capture_omits_only_deferred_pending_demand(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    registration, attempt, _plan = await _initialize_prepared_plan(capacity_guard_database)
+    admin = create_engine(_value(capacity_guard_database, "admin_url"))
+    try:
+        with admin.begin() as connection:
+            connection.execute(
+                Trial.__table__.update()
+                .where(Trial.id == attempt.trial_id)
+                .values(next_attempt_at=datetime.now(UTC) + timedelta(hours=1))
+            )
+    finally:
+        admin.dispose()
+
+    async with _agent_session(capacity_guard_database) as session:
+        deferred = await capture_lifecycle_demand_observation(
+            session,
+            registration=registration,
+            expected_high_water=0,
+            max_attempts=100,
+        )
+    assert deferred.sequence == 1
+    assert deferred.attempts == ()
+
+    admin = create_engine(_value(capacity_guard_database, "admin_url"))
+    try:
+        with admin.begin() as connection:
+            connection.execute(
+                Trial.__table__.update()
+                .where(Trial.id == attempt.trial_id)
+                .values(next_attempt_at=datetime.now(UTC) - timedelta(seconds=1))
+            )
+    finally:
+        admin.dispose()
+
+    async with _agent_session(capacity_guard_database) as session:
+        ready = await capture_lifecycle_demand_observation(
+            session,
+            registration=registration,
+            expected_high_water=1,
+            max_attempts=100,
+        )
+    assert ready.sequence == 2
+    assert tuple(item.protected_attempt_id for item in ready.attempts) == (
+        attempt.protected_attempt_id,
+    )
 
 
 @pytest.mark.asyncio

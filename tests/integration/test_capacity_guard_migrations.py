@@ -59,7 +59,7 @@ async def test_guard_schema_startup_returns_numeric_head(
 ) -> None:
     engine = create_async_engine(_value(capacity_guard_database, "migrator_url"))
     try:
-        assert await assert_capacity_guard_schema_at_head(engine) == 5
+        assert await assert_capacity_guard_schema_at_head(engine) == 6
     finally:
         await engine.dispose()
 
@@ -186,7 +186,7 @@ def test_guard_schema_has_exact_owner_and_preserves_public_application_tables(
             revision = connection.execute(
                 text("SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version")
             ).scalar_one()
-            assert revision == "guard_0005"
+            assert revision == "guard_0006"
             public_before = capacity_guard_database["public_tables_before"]
             assert isinstance(public_before, frozenset)
             assert frozenset(inspect(connection).get_table_names(schema="public")) == public_before
@@ -471,6 +471,10 @@ def test_candidate_role_has_no_protected_privileges(
                 "CREATE SCHEMA candidate_escape",
                 "SELECT loom_capacity_guard.reject_append_only_mutation()",
                 "SELECT loom_capacity_guard.capture_demand_observation("
+                "'00000000-0000-0000-0000-000000000001'::uuid, 0, 100)",
+                "SELECT loom_capacity_guard.capture_lifecycle_demand_observation("
+                "'00000000-0000-0000-0000-000000000001'::uuid, 0, 100)",
+                "SELECT loom_capacity_guard.capture_demand_observation_v1_legacy("
                 "'00000000-0000-0000-0000-000000000001'::uuid, 0, 100)",
                 "SELECT loom_capacity_guard.prepare_inert_admission_plan("
                 "'00000000-0000-0000-0000-000000000001'::uuid, '{}'::jsonb, "

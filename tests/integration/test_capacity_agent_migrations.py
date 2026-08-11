@@ -94,6 +94,12 @@ def test_agent_can_execute_only_the_bounded_agent_functions(
                         "'loom_capacity_guard.capture_demand_observation(uuid,bigint,integer)', "
                         "'EXECUTE') AS capture_execute, "
                         "has_function_privilege(:agent, "
+                        "'loom_capacity_guard.capture_lifecycle_demand_observation"
+                        "(uuid,bigint,integer)', 'EXECUTE') AS lifecycle_capture_execute, "
+                        "has_function_privilege(:agent, "
+                        "'loom_capacity_guard.capture_demand_observation_v1_legacy"
+                        "(uuid,bigint,integer)', 'EXECUTE') AS legacy_capture_execute, "
+                        "has_function_privilege(:agent, "
                         "'loom_capacity_guard.reject_append_only_mutation()', 'EXECUTE') "
                         "AS trigger_execute, "
                         "has_function_privilege(:agent, "
@@ -138,6 +144,8 @@ def test_agent_can_execute_only_the_bounded_agent_functions(
             "table_update": False,
             "sequence_usage": False,
             "capture_execute": True,
+            "lifecycle_capture_execute": True,
+            "legacy_capture_execute": False,
             "trigger_execute": False,
             "plan_execute": True,
             "bootstrap_execute": True,
@@ -188,6 +196,8 @@ def test_agent_functions_have_fixed_search_paths_and_exact_definer_status(
                         "FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
                         "WHERE n.nspname = 'loom_capacity_guard' "
                         "AND p.proname IN ('capture_demand_observation', "
+                        "'capture_lifecycle_demand_observation', "
+                        "'capture_demand_observation_v1_legacy', "
                         "'assert_inert_agent_binding', 'prepare_inert_admission_plan', "
                         "'register_inert_bootstrap', 'record_inert_worker', "
                         "'apply_inert_attempt_transition', "
@@ -204,6 +214,8 @@ def test_agent_functions_have_fixed_search_paths_and_exact_definer_status(
         functions = {row["proname"]: dict(row) for row in rows}
         assert set(functions) == {
             "capture_demand_observation",
+            "capture_lifecycle_demand_observation",
+            "capture_demand_observation_v1_legacy",
             "assert_inert_agent_binding",
             "prepare_inert_admission_plan",
             "register_inert_bootstrap",

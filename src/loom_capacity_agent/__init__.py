@@ -27,6 +27,8 @@ from loom_capacity_agent.contracts import (
     AgentRegistrationV1,
     GuardDemandAttemptV1,
     GuardDemandObservationV1,
+    GuardLifecycleDemandAttemptV2,
+    GuardLifecycleDemandObservationV2,
     ReporterConfigurationV1,
 )
 from loom_capacity_agent.legacy_fence import (
@@ -50,11 +52,16 @@ from loom_capacity_agent.prepared_store import (
     CapacityPreparedAdmissionError,
     CapacityPreparedAdmissionStore,
 )
-from loom_capacity_agent.reporter import DemandReportBlockedError, build_demand_snapshot
+from loom_capacity_agent.reporter import (
+    DemandReportBlockedError,
+    build_demand_snapshot,
+    build_lifecycle_demand_snapshot,
+)
 from loom_capacity_agent.store import (
     CapacityAgentStore,
     CapacityAgentStoreError,
     capture_demand_observation,
+    capture_lifecycle_demand_observation,
 )
 
 __all__ = [
@@ -83,6 +90,8 @@ __all__ = [
     "DisabledClaimGuard",
     "GuardDemandAttemptV1",
     "GuardDemandObservationV1",
+    "GuardLifecycleDemandAttemptV2",
+    "GuardLifecycleDemandObservationV2",
     "InertAttemptTransitionV1",
     "LegacyCompatibilityFenceError",
     "LegacyCompatibilityFenceStore",
@@ -97,5 +106,7 @@ __all__ = [
     "PreparedWorkerShapeV1",
     "ReporterConfigurationV1",
     "build_demand_snapshot",
+    "build_lifecycle_demand_snapshot",
     "capture_demand_observation",
+    "capture_lifecycle_demand_observation",
 ]

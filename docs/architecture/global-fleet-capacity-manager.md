@@ -168,6 +168,30 @@ public trial, create a claim, mint a credential, or touch Slurm.  Inventory
 entries remain activation-blocking and `open` until later Package 2C slices
 instrument and fence the corresponding live writers.
 
+## Package 2C2 lifecycle-aware demand projection
+
+The second Package 2C slice closes the ambiguity between the immutable
+Package 2A queued-attempt row and the current append-only Package 2B lifecycle.
+The legacy v1 capture remains available for rollback only while every protected
+attempt is currently pending-unassigned; it rejects the complete capture after
+an assignment or terminal transition instead of misreporting that attempt as
+new demand.
+
+The lifecycle-aware v2 capture reads one stable protected projection under the
+same writer mutex used by plan and lifecycle mutations. Pending attempts carry
+no assignment fields. Assigned attempts carry their exact allowance, plan,
+admission incarnation, allocation epoch, pool and profile generations, profile
+digest, semantic shape, shape instance, and submission intent, and become
+manager `CurrentAssignmentV1` records rather than pending slots. A missing or
+incompatible prepared binding, a legacy pool projection, or disagreement with
+the public trial state rejects the whole observation before reporter high-water
+advances. Deferred pending attempts are the only nonterminal rows omitted from
+an otherwise complete view.
+
+This remains a disconnected and non-executable projection. It adds no route,
+runtime reporter loop, public mutation, credential, live claim, worker launch,
+Slurm operation, or activation authority. The protected ceiling remains zero.
+
 ## Current activation blockers
 
 There is intentionally no live global fleet manifest. The checked-in
