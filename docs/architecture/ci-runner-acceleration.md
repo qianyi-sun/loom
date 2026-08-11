@@ -68,3 +68,25 @@ The current runner version floor and Node runtime compatibility are recorded
 in `config/ci-upgrade-policy.json`. Workflow routing is implemented in
 `.github/workflows/ci.yml`, `images.yml`, `cluster-smoke.yml`, and
 `staging-smoke.yml`.
+
+## Release image evidence
+
+Image routing remains separate from release authority. The untrusted build and
+trusted publication scans both use the pinned Trivy action with `scan-type:
+image`, `vuln-type: os,library`, `timeout: 10m0s`, `severity: CRITICAL`,
+`exit-code: '1'`, `ignore-unfixed: 'false'`, `scanners: vuln`, and `cache:
+'false'`. The signed release predicate binds every one of those fields, the
+pinned action identity, and the resulting report digest.
+
+The publisher captures the single digest emitted by each architecture push.
+Its `trusted-rebuild` evidence binds the release head/tree/current run, while
+`verified-pr-candidate` also binds the exact resolver head/tree/run/attempt.
+After immutable-digest attestation verification, each architecture uploads one
+uniquely named canonical record. The manifest job downloads and accepts exactly
+the current image's AMD64 and ARM64 records, verifies their recorded registry
+subjects, and joins only their immutable digests.
+
+Manifest creation writes only the temporary `manifest-${HEAD_SHA}` tag and
+captures the creation digest directly. Registry validation and final
+attestation verification use that digest, never a mutable-tag rediscovery. The
+official SHA and branch tags are promoted only after that verification.

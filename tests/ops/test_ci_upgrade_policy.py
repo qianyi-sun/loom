@@ -45,6 +45,26 @@ def test_setup_go_node24_upgrade_is_exact_and_rollbackable() -> None:
     ]
 
 
+def test_image_supply_chain_upgrade_has_real_previous_release_rollbacks() -> None:
+    policy = json.loads(
+        (REPO_ROOT / "config/ci-upgrade-policy.json").read_text(encoding="utf-8"),
+    )
+    image_batch = next(
+        batch for batch in policy["batches"] if batch["name"] == "image-supply-chain"
+    )
+
+    assert image_batch["rollback"] == {
+        "actions/attest-build-provenance": {
+            "sha": "0f67c3f4856b2e3261c31976d6725780e5e4c373",
+            "version": "v4.1.1",
+        },
+        "aquasecurity/trivy-action": {
+            "sha": "57a97c7e7821a5776cebc9bb87c984fa69cba8f1",
+            "version": "v0.35.0",
+        },
+    }
+
+
 def test_batch_larger_than_two_fails_closed(tmp_path: Path) -> None:
     lock = {
         "actions": {

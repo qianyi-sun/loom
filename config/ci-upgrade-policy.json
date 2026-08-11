@@ -85,12 +85,12 @@
       ],
       "rollback": {
         "actions/attest-build-provenance": {
-          "sha": "4d101475d8b20a2381f78447822ac1eab6504dd8",
-          "version": "v4.2.2"
+          "sha": "0f67c3f4856b2e3261c31976d6725780e5e4c373",
+          "version": "v4.1.1"
         },
         "aquasecurity/trivy-action": {
-          "sha": "ed142fd0673e97e23eac54620cfb913e5ce36c25",
-          "version": "v0.36.0"
+          "sha": "57a97c7e7821a5776cebc9bb87c984fa69cba8f1",
+          "version": "v0.35.0"
         }
       }
     }

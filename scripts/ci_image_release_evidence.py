@@ -9,7 +9,7 @@ import re
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 SLSA_PREDICATE_TYPE = "https://slsa.dev/provenance/v1"
 _STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
@@ -23,6 +23,10 @@ _SUBJECT_NAME = re.compile(
     r"ghcr\.io/[a-z0-9](?:[a-z0-9-]{0,38})/[a-z0-9]+(?:[._-][a-z0-9]+)*"
 )
 _PLATFORMS = {"amd64": "linux/amd64", "arm64": "linux/arm64"}
+_BUILD_MODES = {"trusted-rebuild", "verified-pr-candidate"}
+TRIVY_ACTION = (
+    "aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25"
+)
 
 
 class EvidenceError(ValueError):
@@ -99,6 +103,17 @@ def _source(common: Mapping[str, object]) -> dict[str, str]:
     }
 
 
+def _require_release_subject(
+    *, repository: str, image_name: str, subject_name: str
+) -> None:
+    repository = _exact(_REPOSITORY, repository, "repository")
+    image_name = _exact(_IMAGE_NAME, image_name, "image name")
+    subject_name = _exact(_SUBJECT_NAME, subject_name, "attestation subject name")
+    owner = repository.partition("/")[0].lower()
+    if subject_name != f"ghcr.io/{owner}/{image_name}":
+        raise EvidenceError("subject name does not identify the expected release image")
+
+
 def _run_details(
     common: Mapping[str, object],
     byproducts: Sequence[dict[str, object]],
@@ -121,12 +136,85 @@ def _run_details(
 def _scan_policy(report_sha256: str) -> dict[str, object]:
     report_sha256 = _exact(_HEX64, report_sha256, "scan report digest")
     return {
-        "scanner": "trivy",
+        "action": TRIVY_ACTION,
+        "scan_type": "image",
+        "vuln_type": ["os", "library"],
+        "timeout": "10m0s",
         "report_sha256": report_sha256,
-        "severity": ["HIGH", "CRITICAL"],
+        "severity": ["CRITICAL"],
+        "exit_code": 1,
         "ignore_unfixed": False,
         "scanners": ["vuln"],
+        "cache": False,
     }
+
+
+def _build(
+    *,
+    build_mode: str,
+    candidate_head_sha: str | None = None,
+    candidate_tree_sha: str | None = None,
+    candidate_run_id: int | None = None,
+    candidate_run_attempt: int | None = None,
+) -> dict[str, object]:
+    if build_mode not in _BUILD_MODES:
+        raise EvidenceError("build mode is invalid")
+    candidate_values = (
+        candidate_head_sha,
+        candidate_tree_sha,
+        candidate_run_id,
+        candidate_run_attempt,
+    )
+    if build_mode == "trusted-rebuild":
+        if any(value is not None for value in candidate_values):
+            raise EvidenceError("candidate source is forbidden for trusted rebuild")
+        return {"mode": build_mode}
+    if any(value is None for value in candidate_values):
+        raise EvidenceError("candidate source is incomplete")
+    assert candidate_head_sha is not None
+    assert candidate_tree_sha is not None
+    assert candidate_run_id is not None
+    assert candidate_run_attempt is not None
+    return {
+        "mode": build_mode,
+        "candidate_source": {
+            "commit": _exact(_HEX40, candidate_head_sha, "candidate source commit"),
+            "tree": _exact(_HEX40, candidate_tree_sha, "candidate source tree"),
+            "run_id": _positive_integer(candidate_run_id, "candidate source run id"),
+            "run_attempt": _positive_integer(
+                candidate_run_attempt, "candidate source run attempt"
+            ),
+        },
+    }
+
+
+def _validated_build(value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping) or "mode" not in value:
+        raise EvidenceError("architecture build is invalid")
+    mode = value["mode"]
+    if mode == "trusted-rebuild":
+        if set(value) != {"mode"}:
+            raise EvidenceError("architecture build is invalid")
+        return _build(build_mode="trusted-rebuild")
+    if mode == "verified-pr-candidate":
+        if set(value) != {"mode", "candidate_source"}:
+            raise EvidenceError("architecture build is invalid")
+        candidate = value["candidate_source"]
+        if not isinstance(candidate, Mapping) or set(candidate) != {
+            "commit",
+            "tree",
+            "run_id",
+            "run_attempt",
+        }:
+            raise EvidenceError("architecture build is invalid")
+        return _build(
+            build_mode=mode,
+            candidate_head_sha=candidate["commit"],
+            candidate_tree_sha=candidate["tree"],
+            candidate_run_id=candidate["run_id"],
+            candidate_run_attempt=candidate["run_attempt"],
+        )
+    raise EvidenceError("build mode is invalid")
 
 
 def architecture_predicate(
@@ -144,6 +232,11 @@ def architecture_predicate(
     platform: str,
     architecture: str,
     scan_report_sha256: str,
+    build_mode: str,
+    candidate_head_sha: str | None = None,
+    candidate_tree_sha: str | None = None,
+    candidate_run_id: int | None = None,
+    candidate_run_attempt: int | None = None,
 ) -> dict[str, object]:
     """Return the canonical SLSA predicate for one published architecture."""
 
@@ -162,6 +255,13 @@ def architecture_predicate(
     if architecture not in _PLATFORMS or _PLATFORMS[architecture] != platform:
         raise EvidenceError("image platform is invalid")
     scan = _scan_policy(scan_report_sha256)
+    build = _build(
+        build_mode=build_mode,
+        candidate_head_sha=candidate_head_sha,
+        candidate_tree_sha=candidate_tree_sha,
+        candidate_run_id=candidate_run_id,
+        candidate_run_attempt=candidate_run_attempt,
+    )
     return {
         "buildDefinition": {
             "buildType": common["workflow_identity"],
@@ -175,6 +275,7 @@ def architecture_predicate(
                     "platform": platform,
                     "architecture": architecture,
                 },
+                "build": build,
                 "scan": scan,
             },
             "internalParameters": {
@@ -211,6 +312,16 @@ def _exact_platform_map(values: Mapping[str, str], label: str) -> dict[str, str]
     return {platform: str(values[platform]) for platform in sorted(values)}
 
 
+def _exact_build_map(
+    values: Mapping[str, object], label: str
+) -> dict[str, dict[str, object]]:
+    if not isinstance(values, Mapping) or set(values) != set(_PLATFORMS.values()):
+        raise EvidenceError(f"{label} must cover exactly both native platforms")
+    return {
+        platform: _validated_build(values[platform]) for platform in sorted(values)
+    }
+
+
 def manifest_predicate(
     *,
     repository: str,
@@ -225,6 +336,7 @@ def manifest_predicate(
     build_context: str,
     architecture_digests: Mapping[str, str],
     scan_report_digests: Mapping[str, str],
+    architecture_builds: Mapping[str, object],
 ) -> dict[str, object]:
     """Return the canonical SLSA predicate for the joined native manifest."""
 
@@ -246,6 +358,9 @@ def manifest_predicate(
     scan_report_digests = _exact_platform_map(
         scan_report_digests, "scan report digests"
     )
+    architecture_builds = _exact_build_map(
+        architecture_builds, "architecture builds"
+    )
     for digest in architecture_digests.values():
         if not digest.startswith("sha256:") or _HEX64.fullmatch(digest[7:]) is None:
             raise EvidenceError("architecture digest is invalid")
@@ -264,12 +379,18 @@ def manifest_predicate(
                     "platforms": sorted(_PLATFORMS.values()),
                 },
                 "architecture_subjects": architecture_digests,
+                "architecture_builds": architecture_builds,
                 "scan": {
-                    "scanner": "trivy",
+                    "action": TRIVY_ACTION,
+                    "scan_type": "image",
+                    "vuln_type": ["os", "library"],
+                    "timeout": "10m0s",
                     "report_sha256": scan_report_digests,
-                    "severity": ["HIGH", "CRITICAL"],
+                    "severity": ["CRITICAL"],
+                    "exit_code": 1,
                     "ignore_unfixed": False,
                     "scanners": ["vuln"],
+                    "cache": False,
                 },
             },
             "internalParameters": {
@@ -359,10 +480,18 @@ def verify_architecture_attestation(
     architecture: str,
     subject_name: str,
     subject_digest: str,
+    build_mode: str,
     scan_report_sha256: str | None = None,
+    candidate_head_sha: str | None = None,
+    candidate_tree_sha: str | None = None,
+    candidate_run_id: int | None = None,
+    candidate_run_attempt: int | None = None,
 ) -> str:
     """Require exactly one canonical verified architecture attestation."""
 
+    _require_release_subject(
+        repository=repository, image_name=image_name, subject_name=subject_name
+    )
     predicates = _matching_predicates(
         payload, subject_name=subject_name, subject_digest=subject_digest
     )
@@ -385,6 +514,11 @@ def verify_architecture_attestation(
                 platform=platform,
                 architecture=architecture,
                 scan_report_sha256=observed_scan,
+                build_mode=build_mode,
+                candidate_head_sha=candidate_head_sha,
+                candidate_tree_sha=candidate_tree_sha,
+                candidate_run_id=candidate_run_id,
+                candidate_run_attempt=candidate_run_attempt,
             )
         except (EvidenceError, KeyError, TypeError):
             continue
@@ -416,9 +550,13 @@ def verify_manifest_attestation(
     subject_digest: str,
     architecture_digests: Mapping[str, str],
     scan_report_digests: Mapping[str, str],
+    architecture_builds: Mapping[str, object],
 ) -> None:
     """Require exactly one canonical verified multi-architecture attestation."""
 
+    _require_release_subject(
+        repository=repository, image_name=image_name, subject_name=subject_name
+    )
     expected = manifest_predicate(
         repository=repository,
         ref_name=ref_name,
@@ -432,6 +570,7 @@ def verify_manifest_attestation(
         build_context=build_context,
         architecture_digests=architecture_digests,
         scan_report_digests=scan_report_digests,
+        architecture_builds=architecture_builds,
     )
     matches = [
         predicate
@@ -444,6 +583,209 @@ def verify_manifest_attestation(
         raise EvidenceError(
             "verified manifest evidence must contain exactly one canonical attestation"
         )
+
+
+def architecture_record(
+    *,
+    repository: str,
+    ref_name: str,
+    head_sha: str,
+    tree_sha: str,
+    run_id: int,
+    run_attempt: int,
+    image: str,
+    image_name: str,
+    dockerfile: str,
+    build_context: str,
+    platform: str,
+    architecture: str,
+    subject_name: str,
+    subject_digest: str,
+    scan_report_sha256: str,
+    build_mode: str,
+    candidate_head_sha: str | None = None,
+    candidate_tree_sha: str | None = None,
+    candidate_run_id: int | None = None,
+    candidate_run_attempt: int | None = None,
+) -> dict[str, object]:
+    """Return the canonical immutable handoff record for one architecture."""
+
+    common = _common_values(
+        repository=repository,
+        ref_name=ref_name,
+        head_sha=head_sha,
+        tree_sha=tree_sha,
+        run_id=run_id,
+        run_attempt=run_attempt,
+        image=image,
+        image_name=image_name,
+        dockerfile=dockerfile,
+        build_context=build_context,
+    )
+    if architecture not in _PLATFORMS or _PLATFORMS[architecture] != platform:
+        raise EvidenceError("image platform is invalid")
+    subject_name = _exact(_SUBJECT_NAME, subject_name, "record subject name")
+    _require_release_subject(
+        repository=repository, image_name=image_name, subject_name=subject_name
+    )
+    if not subject_digest.startswith("sha256:") or _HEX64.fullmatch(subject_digest[7:]) is None:
+        raise EvidenceError("record subject digest is invalid")
+    scan = _scan_policy(scan_report_sha256)
+    build = _build(
+        build_mode=build_mode,
+        candidate_head_sha=candidate_head_sha,
+        candidate_tree_sha=candidate_tree_sha,
+        candidate_run_id=candidate_run_id,
+        candidate_run_attempt=candidate_run_attempt,
+    )
+    return {
+        "schema_version": 1,
+        "subject": {"name": subject_name, "digest": subject_digest},
+        "release": {
+            "repository": common["repository"],
+            "ref": f"refs/heads/{common['ref_name']}",
+            "commit": common["head_sha"],
+            "tree": common["tree_sha"],
+            "run_id": common["run_id"],
+            "run_attempt": common["run_attempt"],
+        },
+        "image": {
+            "component": common["image"],
+            "repository": common["image_name"],
+            "dockerfile": common["dockerfile"],
+            "context": common["build_context"],
+            "platform": platform,
+            "architecture": architecture,
+        },
+        "scan": scan,
+        "build": build,
+    }
+
+
+def validate_architecture_record(
+    payload: object,
+    *,
+    repository: str,
+    ref_name: str,
+    head_sha: str,
+    tree_sha: str,
+    run_id: int,
+    run_attempt: int,
+    image: str,
+    image_name: str,
+    dockerfile: str,
+    build_context: str,
+    platform: str,
+    architecture: str,
+) -> dict[str, object]:
+    """Validate one record against the release and image expected by the caller."""
+
+    if not isinstance(payload, Mapping):
+        raise EvidenceError("canonical architecture record is invalid")
+    try:
+        subject = payload["subject"]
+        scan = payload["scan"]
+        build = _validated_build(payload["build"])
+        if not isinstance(subject, Mapping) or not isinstance(scan, Mapping):
+            raise EvidenceError("canonical architecture record is invalid")
+        candidate = build.get("candidate_source")
+        candidate_head_sha: str | None = None
+        candidate_tree_sha: str | None = None
+        candidate_run_id: int | None = None
+        candidate_run_attempt: int | None = None
+        if isinstance(candidate, Mapping):
+            candidate_head_sha = cast(str, candidate["commit"])
+            candidate_tree_sha = cast(str, candidate["tree"])
+            candidate_run_id = cast(int, candidate["run_id"])
+            candidate_run_attempt = cast(int, candidate["run_attempt"])
+        expected = architecture_record(
+            repository=repository,
+            ref_name=ref_name,
+            head_sha=head_sha,
+            tree_sha=tree_sha,
+            run_id=run_id,
+            run_attempt=run_attempt,
+            image=image,
+            image_name=image_name,
+            dockerfile=dockerfile,
+            build_context=build_context,
+            platform=platform,
+            architecture=architecture,
+            subject_name=subject["name"],
+            subject_digest=subject["digest"],
+            scan_report_sha256=scan["report_sha256"],
+            build_mode=cast(str, build["mode"]),
+            candidate_head_sha=candidate_head_sha,
+            candidate_tree_sha=candidate_tree_sha,
+            candidate_run_id=candidate_run_id,
+            candidate_run_attempt=candidate_run_attempt,
+        )
+    except (KeyError, TypeError):
+        raise EvidenceError("canonical architecture record is invalid") from None
+    if payload != expected:
+        raise EvidenceError("canonical architecture record is invalid")
+    return expected
+
+
+def validate_architecture_records(
+    records_dir: Path,
+    *,
+    repository: str,
+    ref_name: str,
+    head_sha: str,
+    tree_sha: str,
+    run_id: int,
+    run_attempt: int,
+    image: str,
+    image_name: str,
+    dockerfile: str,
+    build_context: str,
+) -> dict[str, object]:
+    """Validate the exact AMD64/ARM64 handoff set for one release image."""
+
+    expected_names = {f"{image}-{architecture}.json" for architecture in _PLATFORMS}
+    entries = list(records_dir.iterdir())
+    if (
+        {entry.name for entry in entries} != expected_names
+        or any(not entry.is_file() or entry.is_symlink() for entry in entries)
+    ):
+        raise EvidenceError(
+            "record directory must contain exactly the expected architecture files"
+        )
+    architectures: dict[str, object] = {}
+    subject_names: set[str] = set()
+    for architecture, platform in sorted(_PLATFORMS.items()):
+        path = records_dir / f"{image}-{architecture}.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        record = validate_architecture_record(
+            payload,
+            repository=repository,
+            ref_name=ref_name,
+            head_sha=head_sha,
+            tree_sha=tree_sha,
+            run_id=run_id,
+            run_attempt=run_attempt,
+            image=image,
+            image_name=image_name,
+            dockerfile=dockerfile,
+            build_context=build_context,
+            platform=platform,
+            architecture=architecture,
+        )
+        subject = record["subject"]
+        scan = record["scan"]
+        if not isinstance(subject, Mapping) or not isinstance(scan, Mapping):
+            raise EvidenceError("canonical architecture record is invalid")
+        subject_names.add(str(subject["name"]))
+        architectures[architecture] = {
+            "platform": platform,
+            "subject_digest": subject["digest"],
+            "scan_report_sha256": scan["report_sha256"],
+            "build": record["build"],
+        }
+    if len(subject_names) != 1:
+        raise EvidenceError("architecture record subjects are inconsistent")
+    return {"subject_name": subject_names.pop(), "architectures": architectures}
 
 
 def _common_arguments(parser: argparse.ArgumentParser) -> None:
@@ -487,6 +829,40 @@ def _platform_map(values: Sequence[str], label: str) -> dict[str, str]:
     return parsed
 
 
+def _platform_build_map(values: Sequence[str]) -> dict[str, object]:
+    parsed: dict[str, object] = {}
+    for value in values:
+        platform, separator, raw_build = value.partition("=")
+        if not separator or platform in parsed:
+            raise EvidenceError("architecture build is invalid")
+        try:
+            parsed[platform] = json.loads(raw_build)
+        except json.JSONDecodeError:
+            raise EvidenceError("architecture build is invalid") from None
+    return parsed
+
+
+def _build_mode_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--build-mode", required=True)
+    parser.add_argument("--candidate-head-sha")
+    parser.add_argument("--candidate-tree-sha")
+    parser.add_argument("--candidate-run-id", type=int)
+    parser.add_argument("--candidate-run-attempt", type=int)
+
+
+def _build_namespace(arguments: argparse.Namespace) -> dict[str, Any]:
+    return {
+        key: getattr(arguments, key)
+        for key in (
+            "build_mode",
+            "candidate_head_sha",
+            "candidate_tree_sha",
+            "candidate_run_id",
+            "candidate_run_attempt",
+        )
+    }
+
+
 def _write_json(path: Path, payload: object) -> None:
     path.write_text(
         json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
@@ -497,14 +873,22 @@ def _write_json(path: Path, payload: object) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     operations = parser.add_subparsers(dest="operation", required=True)
-    for name in ("predicate-architecture", "verify-architecture"):
+    for name in (
+        "predicate-architecture",
+        "verify-architecture",
+        "record-architecture",
+    ):
         operation = operations.add_parser(name)
         _common_arguments(operation)
         operation.add_argument("--platform", required=True)
         operation.add_argument("--architecture", required=True)
         operation.add_argument("--scan-report-sha256")
-        if name.startswith("verify"):
+        _build_mode_arguments(operation)
+        if name == "verify-architecture":
             operation.add_argument("--verification", type=Path, required=True)
+            operation.add_argument("--subject-name", required=True)
+            operation.add_argument("--subject-digest", required=True)
+        elif name == "record-architecture":
             operation.add_argument("--subject-name", required=True)
             operation.add_argument("--subject-digest", required=True)
         operation.add_argument("--output", type=Path, required=True)
@@ -513,11 +897,22 @@ def main() -> None:
         _common_arguments(operation)
         operation.add_argument("--architecture-digest", action="append", required=True)
         operation.add_argument("--scan-report-digest", action="append", required=True)
+        operation.add_argument("--architecture-build", action="append", required=True)
         if name.startswith("verify"):
             operation.add_argument("--verification", type=Path, required=True)
             operation.add_argument("--subject-name", required=True)
             operation.add_argument("--subject-digest", required=True)
         operation.add_argument("--output", type=Path)
+    validate_records = operations.add_parser("validate-architecture-records")
+    _common_arguments(validate_records)
+    validate_records.add_argument("--records-dir", type=Path, required=True)
+    validate_records.add_argument("--output", type=Path)
+    validate_record = operations.add_parser("validate-architecture-record")
+    _common_arguments(validate_record)
+    validate_record.add_argument("--platform", required=True)
+    validate_record.add_argument("--architecture", required=True)
+    validate_record.add_argument("--record", type=Path, required=True)
+    validate_record.add_argument("--output", type=Path)
     arguments = parser.parse_args()
     common = _common_namespace(arguments)
     try:
@@ -529,6 +924,7 @@ def main() -> None:
                 platform=arguments.platform,
                 architecture=arguments.architecture,
                 scan_report_sha256=arguments.scan_report_sha256,
+                **_build_namespace(arguments),
             )
             _write_json(arguments.output, predicate)
         elif arguments.operation == "verify-architecture":
@@ -541,8 +937,39 @@ def main() -> None:
                 subject_name=arguments.subject_name,
                 subject_digest=arguments.subject_digest,
                 scan_report_sha256=arguments.scan_report_sha256,
+                **_build_namespace(arguments),
             )
             _write_json(arguments.output, {"scan_report_sha256": scan_digest})
+        elif arguments.operation == "record-architecture":
+            if arguments.scan_report_sha256 is None:
+                raise EvidenceError("scan report digest is required")
+            record = architecture_record(
+                **common,
+                platform=arguments.platform,
+                architecture=arguments.architecture,
+                subject_name=arguments.subject_name,
+                subject_digest=arguments.subject_digest,
+                scan_report_sha256=arguments.scan_report_sha256,
+                **_build_namespace(arguments),
+            )
+            _write_json(arguments.output, record)
+        elif arguments.operation == "validate-architecture-records":
+            validated = validate_architecture_records(
+                arguments.records_dir,
+                **common,
+            )
+            if arguments.output is not None:
+                _write_json(arguments.output, validated)
+        elif arguments.operation == "validate-architecture-record":
+            payload = json.loads(arguments.record.read_text(encoding="utf-8"))
+            validated = validate_architecture_record(
+                payload,
+                **common,
+                platform=arguments.platform,
+                architecture=arguments.architecture,
+            )
+            if arguments.output is not None:
+                _write_json(arguments.output, validated)
         else:
             architecture_digests = _platform_map(
                 arguments.architecture_digest, "architecture digest"
@@ -550,6 +977,7 @@ def main() -> None:
             scan_report_digests = _platform_map(
                 arguments.scan_report_digest, "scan report digest"
             )
+            architecture_builds = _platform_build_map(arguments.architecture_build)
             if arguments.operation == "predicate-manifest":
                 if arguments.output is None:
                     raise EvidenceError("predicate output is required")
@@ -557,6 +985,7 @@ def main() -> None:
                     **common,
                     architecture_digests=architecture_digests,
                     scan_report_digests=scan_report_digests,
+                    architecture_builds=architecture_builds,
                 )
                 _write_json(arguments.output, predicate)
             else:
@@ -568,6 +997,7 @@ def main() -> None:
                     subject_digest=arguments.subject_digest,
                     architecture_digests=architecture_digests,
                     scan_report_digests=scan_report_digests,
+                    architecture_builds=architecture_builds,
                 )
                 if arguments.output is not None:
                     _write_json(arguments.output, {"status": "verified"})
@@ -582,9 +1012,13 @@ if __name__ == "__main__":
 
 __all__ = [
     "SLSA_PREDICATE_TYPE",
+    "TRIVY_ACTION",
     "EvidenceError",
     "architecture_predicate",
+    "architecture_record",
     "manifest_predicate",
+    "validate_architecture_record",
+    "validate_architecture_records",
     "verify_architecture_attestation",
     "verify_manifest_attestation",
 ]

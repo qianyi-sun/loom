@@ -248,14 +248,27 @@ registered as the `loom-capacity-manager` release image in the typed component
 ownership manifest. Existing image planning, native AMD64/ARM64 builds,
 candidate preservation, and trusted push publication are therefore inherited
 without a new workflow-owned image allowlist. Every native build produces a
-Docker archive and passes a pinned Trivy HIGH/CRITICAL vulnerability gate. The
-trusted publisher rescans that exact archive before loading and pushing it,
-then signs and strictly verifies a SLSA v1 predicate for the resolved registry
-digest. The predicate binds the source commit/tree, Dockerfile, context,
-platform, scan-report digest, workflow run/attempt, and branch ref. The manifest
-publisher verifies both architecture attestations, joins only their immutable
-digests, signs and verifies the resulting manifest digest, and only then moves
-the release SHA and branch tags. Until the
+Docker archive and passes the pinned Trivy action with scan type `image`, OS and
+library vulnerability types, a `10m0s` timeout, `CRITICAL` severity, exit code
+1, unfixed findings included, the `vuln` scanner only, and caching disabled. The
+trusted publisher rescans that exact archive under the same policy before
+loading and pushing it. It captures the one digest emitted by that push and
+uses the immutable subject only for registry validation, SLSA v1 attestation,
+and strict verification; it never resolves the mutable architecture build tag.
+
+The predicate binds the complete Trivy policy and pinned action identity,
+scan-report digest, release commit/tree/ref/run/attempt, Dockerfile, context,
+and platform. `trusted-rebuild` binds the archive built in the release run;
+`verified-pr-candidate` additionally binds the resolver-provided candidate
+head/tree/run/attempt. Only after architecture attestation verification does
+the publisher upload one canonical immutable record containing those source
+identities, mode, subject name/digest, and scan digest. The manifest publisher
+downloads exactly the AMD64 and ARM64 records for the current image and run,
+validates the two-record set fail-closed, re-verifies each recorded immutable
+subject, and joins only those two digests. It creates only a temporary
+`manifest-${HEAD_SHA}` tag, captures the creation digest once, validates,
+attests, and verifies by that digest, and only then promotes the release SHA and
+branch tags. Until the
 live lease broker recognizes this new image key, its AMD64 build uses a hosted
 runner like the other newly introduced trusted control-plane images.
 

@@ -921,9 +921,12 @@ def test_release_images_are_scanned_attested_and_verified_before_manifest_join()
         "input": "/tmp/${{ matrix.image }}-${{ matrix.architecture }}.docker.tar",
         "format": "json",
         "output": "/tmp/${{ matrix.image }}-${{ matrix.architecture }}.trivy.json",
+        "scan-type": "image",
+        "vuln-type": "os,library",
+        "timeout": "10m0s",
         "exit-code": "1",
         "ignore-unfixed": "false",
-        "severity": "HIGH,CRITICAL",
+        "severity": "CRITICAL",
         "scanners": "vuln",
         "cache": "false",
     }
@@ -935,13 +938,45 @@ def test_release_images_are_scanned_attested_and_verified_before_manifest_join()
     trusted_scan = next(
         step for step in publish["steps"] if step.get("name") == "Scan trusted image archive"
     )
+    architecture_publish = next(
+        step
+        for step in publish["steps"]
+        if step.get("name") == "Publish scanned architecture image"
+    )
     architecture_attestation = next(
         step
         for step in publish["steps"]
         if step.get("name") == "Attest published architecture digest"
     )
-    assert trusted_scan["uses"].startswith("aquasecurity/trivy-action@")
-    assert trusted_scan["with"]["cache"] == "false"
+    assert trusted_scan["uses"] == (
+        f"aquasecurity/trivy-action@{_locked_action_sha('aquasecurity/trivy-action')}"
+    )
+    assert trusted_scan["with"] == {
+        "input": (
+            "/tmp/${{ matrix.image }}-${{ matrix.architecture }}.release.docker.tar"
+        ),
+        "format": "json",
+        "output": (
+            "/tmp/${{ matrix.image }}-${{ matrix.architecture }}.release.trivy.json"
+        ),
+        "scan-type": "image",
+        "vuln-type": "os,library",
+        "timeout": "10m0s",
+        "exit-code": "1",
+        "ignore-unfixed": "false",
+        "severity": "CRITICAL",
+        "scanners": "vuln",
+        "cache": "false",
+    }
+    assert architecture_publish["id"] == "architecture-publish"
+    assert 'push_output=$(docker push "$target" 2>&1)' in architecture_publish["run"]
+    assert "subject_name=$image" in architecture_publish["run"]
+    assert "subject_digest=$digest" in architecture_publish["run"]
+    push_tail = architecture_publish["run"].split(
+        'push_output=$(docker push "$target" 2>&1)', maxsplit=1
+    )[1]
+    assert 'imagetools inspect --raw "${image}@${digest}"' in push_tail
+    assert 'imagetools inspect "$target"' not in push_tail
     assert architecture_attestation["uses"].startswith(
         "actions/attest-build-provenance@"
     )
@@ -993,6 +1028,160 @@ def test_release_images_are_scanned_attested_and_verified_before_manifest_join()
     assert manifest_names.index("Verify published manifest attestation") < (
         manifest_names.index("Publish verified manifest tags")
     )
+
+
+def test_release_architecture_records_are_exact_and_source_mode_aware() -> None:
+    jobs = _workflow(".github/workflows/images.yml")["jobs"]
+    publish = jobs["publish"]
+    manifest = jobs["publish-manifest"]
+    publish_names = [step.get("name") for step in publish["steps"]]
+
+    predicate = next(
+        step
+        for step in publish["steps"]
+        if step.get("name") == "Prepare architecture release predicate"
+    )
+    verify = next(
+        step
+        for step in publish["steps"]
+        if step.get("name") == "Verify published architecture attestation"
+    )
+    record = next(
+        step
+        for step in publish["steps"]
+        if step.get("name") == "Record verified architecture evidence"
+    )
+    validate_record = next(
+        step
+        for step in publish["steps"]
+        if step.get("name") == "Validate verified architecture evidence"
+    )
+    upload = next(
+        step
+        for step in publish["steps"]
+        if step.get("name") == "Upload verified architecture evidence"
+    )
+    for step in (predicate, verify, record):
+        assert "--build-mode" in step["run"]
+        assert "--candidate-head-sha" in step["run"]
+        assert "--candidate-tree-sha" in step["run"]
+        assert "--candidate-run-id" in step["run"]
+        assert "--candidate-run-attempt" in step["run"]
+        assert "trusted-rebuild" in step["run"]
+        assert "verified-pr-candidate" in step["run"]
+    assert publish_names.index("Verify published architecture attestation") < (
+        publish_names.index("Record verified architecture evidence")
+    )
+    assert publish_names.index("Record verified architecture evidence") < (
+        publish_names.index("Validate verified architecture evidence")
+    )
+    assert publish_names.index("Validate verified architecture evidence") < (
+        publish_names.index("Upload verified architecture evidence")
+    )
+    assert "validate-architecture-record" in validate_record["run"]
+    assert upload["uses"] == (
+        f"actions/upload-artifact@{_locked_action_sha('actions/upload-artifact')}"
+    )
+    assert upload["with"] == {
+        "name": (
+            "image-release-record-${{ matrix.image }}-${{ matrix.architecture }}-"
+            "run-${{ github.run_id }}-attempt-${{ github.run_attempt }}"
+        ),
+        "path": (
+            "/tmp/loom-image-release-records/"
+            "${{ matrix.image }}-${{ matrix.architecture }}.json"
+        ),
+        "if-no-files-found": "error",
+        "retention-days": 1,
+    }
+
+    download = next(
+        step
+        for step in manifest["steps"]
+        if step.get("name") == "Download exact architecture evidence"
+    )
+    validate = next(
+        step
+        for step in manifest["steps"]
+        if step.get("name") == "Validate exact architecture evidence"
+    )
+    assert download["uses"] == (
+        f"actions/download-artifact@{_locked_action_sha('actions/download-artifact')}"
+    )
+    assert download["with"] == {
+        "pattern": (
+            "image-release-record-${{ matrix.image }}-*-run-${{ github.run_id }}-"
+            "attempt-${{ github.run_attempt }}"
+        ),
+        "path": "/tmp/loom-image-release-records",
+        "merge-multiple": True,
+    }
+    assert "validate-architecture-records" in validate["run"]
+    assert "--records-dir /tmp/loom-image-release-records" in validate["run"]
+    assert set(manifest["permissions"]) >= {"actions", "attestations", "contents"}
+
+
+def test_manifest_digest_is_captured_once_and_tags_follow_verification() -> None:
+    manifest = _workflow(".github/workflows/images.yml")["jobs"]["publish-manifest"]
+    names = [step.get("name") for step in manifest["steps"]]
+    join = next(
+        step
+        for step in manifest["steps"]
+        if step.get("name") == "Join verified native image manifest"
+    )
+    script = join["run"]
+
+    assert '--tag "${image}:manifest-${HEAD_SHA}"' in script
+    assert "create_output=$(docker buildx imagetools create" in script
+    assert "--progress plain" in script
+    assert "pushing manifest for .*@(sha256:[0-9a-f]{64})" in script
+    assert 'imagetools inspect --raw "${image}@${manifest_digest}"' in script
+    assert 'imagetools inspect --raw "${image}:manifest-${HEAD_SHA}"' not in script
+    assert 'imagetools inspect "${image}:manifest-${HEAD_SHA}"' not in script
+    assert names.index("Verify published manifest attestation") < names.index(
+        "Publish verified manifest tags"
+    )
+
+
+def test_release_record_helper_rejects_incomplete_workflow_handoff(tmp_path: Path) -> None:
+    records = tmp_path / "records"
+    records.mkdir()
+    (records / "capacity-manager-amd64.json").write_text("{}\n", encoding="utf-8")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts/ci_image_release_evidence.py"),
+            "validate-architecture-records",
+            "--repository",
+            "qianyi-sun/loom",
+            "--ref-name",
+            "dev",
+            "--head-sha",
+            "a" * 40,
+            "--tree-sha",
+            "b" * 40,
+            "--run-id",
+            "123",
+            "--run-attempt",
+            "2",
+            "--image",
+            "capacity-manager",
+            "--image-name",
+            "loom-capacity-manager",
+            "--dockerfile",
+            "deploy/Dockerfile.capacity-manager",
+            "--build-context",
+            ".",
+            "--records-dir",
+            str(records),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "exactly the expected architecture files" in result.stderr
 
 
 def test_image_candidate_index_and_merge_resolver_are_exact_and_fail_closed() -> None:
