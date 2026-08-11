@@ -37,6 +37,11 @@ def readonly_minio_policy() -> dict[str, object]:
                 "Action": ["s3:GetObjectVersion"],
                 "Resource": [f"arn:aws:s3:::{bucket}/*" for bucket in READONLY_MINIO_BUCKETS],
             },
+            {
+                "Effect": "Allow",
+                "Action": ["admin:ServerInfo"],
+                "Resource": ["arn:aws:s3:::*"],
+            },
         ],
     }
 

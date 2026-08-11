@@ -13,13 +13,18 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 
 import boto3
 from botocore.config import Config
 
 from loom.data_lifecycle import StagingCapacity
-from loom.data_lifecycle_capacity import collect_staging_capacity
+from loom.data_lifecycle_capacity import (
+    DriveHeadroom,
+    collect_staging_capacity,
+    collect_staging_capacity_from_drives,
+)
+from loom.data_lifecycle_capacity_minio import probe_minio_admin_drives
 from loom.data_lifecycle_inventory_s3 import S3ObservedObjectInventory
 from loom_cli.rollout.credential_authority import read_trusted_file
 from loom_cli.rollout.preflight_credential_paths import (
@@ -73,6 +78,8 @@ ClientFactory = Callable[[str, ReadonlyMinioCredential], S3Client]
 PortAllocator = Callable[[], int]
 WaitReady = Callable[[TunnelProcess, int], None]
 Now = Callable[[], datetime]
+CapacitySource = Literal["filesystem", "minio-admin"]
+AdminDriveProbe = Callable[..., Sequence[DriveHeadroom]]
 
 
 def _spawn(argv: Sequence[str], environment: Mapping[str, str]) -> TunnelProcess:
@@ -146,17 +153,16 @@ def _stop_exact(process: TunnelProcess) -> None:
 
 
 @contextmanager
-def open_readonly_minio_client(
+def _open_readonly_minio_tunnel(
     *,
     service_uid: int,
     kubeconfig_path: Path = READONLY_KUBECONFIG_PATH,
     credential_path: Path = READONLY_MINIO_CREDENTIAL_PATH,
     spawn: Spawn = _spawn,
-    client_factory: ClientFactory = _client,
     allocate_port: PortAllocator = _allocate_port,
     wait_ready: WaitReady = _wait_ready,
-) -> Iterator[S3Client]:
-    """Yield one non-mutating client over one exact localhost transport."""
+) -> Iterator[tuple[str, ReadonlyMinioCredential]]:
+    """Yield one exact localhost transport and its bounded read credential."""
     if (
         service_uid < 1
         or not kubeconfig_path.is_absolute()
@@ -197,37 +203,97 @@ def open_readonly_minio_client(
         ),
         _CHILD_ENVIRONMENT,
     )
-    client: S3Client | None = None
     try:
         wait_ready(process, port)
-        client = client_factory(f"http://127.0.0.1:{port}", credential)
-        yield client
+        yield f"http://127.0.0.1:{port}", credential
     finally:
-        if client is not None:
-            client.close()
         _stop_exact(process)
+
+
+@contextmanager
+def open_readonly_minio_client(
+    *,
+    service_uid: int,
+    kubeconfig_path: Path = READONLY_KUBECONFIG_PATH,
+    credential_path: Path = READONLY_MINIO_CREDENTIAL_PATH,
+    spawn: Spawn = _spawn,
+    client_factory: ClientFactory = _client,
+    allocate_port: PortAllocator = _allocate_port,
+    wait_ready: WaitReady = _wait_ready,
+) -> Iterator[S3Client]:
+    """Yield one non-mutating client over one exact localhost transport."""
+    with _open_readonly_minio_tunnel(
+        service_uid=service_uid,
+        kubeconfig_path=kubeconfig_path,
+        credential_path=credential_path,
+        spawn=spawn,
+        allocate_port=allocate_port,
+        wait_ready=wait_ready,
+    ) as (endpoint, credential):
+        client = client_factory(endpoint, credential)
+        try:
+            yield client
+        finally:
+            client.close()
+
+
+def probe_installed_minio_admin_drives(
+    *,
+    service_uid: int,
+    tunnel_context: Callable[..., Any] = _open_readonly_minio_tunnel,
+    drive_probe: Callable[..., Sequence[DriveHeadroom]] = probe_minio_admin_drives,
+) -> tuple[DriveHeadroom, ...]:
+    """Read distributed MinIO drive headroom through the bounded admin action."""
+    with tunnel_context(service_uid=service_uid) as (endpoint, credential):
+        return tuple(
+            drive_probe(
+                endpoint_url=endpoint,
+                access_key=credential.access_key,
+                secret_key=credential.secret_key,
+                region=credential.region,
+            )
+        )
 
 
 def probe_installed_staging_capacity(
     *,
     service_uid: int,
     filesystem_paths: Sequence[Path],
+    capacity_source: CapacitySource = "filesystem",
     buckets: Sequence[str] = READONLY_MINIO_BUCKETS,
     client_context: Callable[..., Any] = open_readonly_minio_client,
+    admin_drive_probe: AdminDriveProbe = probe_installed_minio_admin_drives,
     now: Now = lambda: datetime.now(UTC),
 ) -> StagingCapacity:
     """Return a fresh exact capacity snapshot without database mutation."""
     exact_buckets = tuple(buckets)
+    exact_paths = tuple(filesystem_paths)
     if exact_buckets != READONLY_MINIO_BUCKETS:
         raise ValueError("readonly capacity bucket authority drifted")
+    if capacity_source == "filesystem":
+        if not exact_paths:
+            raise ValueError("readonly filesystem capacity authority is unavailable")
+    elif capacity_source == "minio-admin":
+        if exact_paths:
+            raise ValueError("readonly MinIO admin capacity cannot use filesystem paths")
+    else:
+        raise ValueError("readonly capacity source is invalid")
     with client_context(service_uid=service_uid) as client:
         objects = S3ObservedObjectInventory(client).load(buckets=exact_buckets)
-        evidence = collect_staging_capacity(
-            namespace=_NAMESPACE,
-            objects=objects,
-            filesystem_paths=filesystem_paths,
-            observed_at=now(),
-        )
+        if capacity_source == "minio-admin":
+            evidence = collect_staging_capacity_from_drives(
+                namespace=_NAMESPACE,
+                objects=objects,
+                drives=admin_drive_probe(service_uid=service_uid),
+                observed_at=now(),
+            )
+        else:
+            evidence = collect_staging_capacity(
+                namespace=_NAMESPACE,
+                objects=objects,
+                filesystem_paths=exact_paths,
+                observed_at=now(),
+            )
     return evidence.capacity
 
 
@@ -335,20 +401,24 @@ class InstalledReadonlyCapacitySource:
         *,
         service_uid: int,
         filesystem_paths: Sequence[Path],
+        capacity_source: CapacitySource = "filesystem",
         buckets: Sequence[str] = READONLY_MINIO_BUCKETS,
         probe: Callable[..., StagingCapacity] = probe_installed_staging_capacity,
     ) -> None:
         exact_paths = tuple(filesystem_paths)
         if (
             service_uid < 1
-            or not exact_paths
             or any(not path.is_absolute() or ".." in path.parts for path in exact_paths)
+            or (capacity_source == "filesystem" and not exact_paths)
+            or (capacity_source == "minio-admin" and bool(exact_paths))
+            or capacity_source not in {"filesystem", "minio-admin"}
         ):
             raise ValueError("readonly capacity source authority is invalid")
         if tuple(buckets) != READONLY_MINIO_BUCKETS:
             raise ValueError("readonly capacity source buckets drifted")
         self._service_uid = service_uid
         self._filesystem_paths = exact_paths
+        self._capacity_source = capacity_source
         self._buckets = tuple(buckets)
         self._probe = probe
         self._lock = Lock()
@@ -359,6 +429,7 @@ class InstalledReadonlyCapacitySource:
             if self._capacity is None:
                 self._capacity = self._probe(
                     service_uid=self._service_uid,
+                    capacity_source=self._capacity_source,
                     filesystem_paths=self._filesystem_paths,
                     buckets=self._buckets,
                 )
@@ -374,6 +445,7 @@ __all__ = [
     "TunnelProcess",
     "WaitReady",
     "open_readonly_minio_client",
+    "probe_installed_minio_admin_drives",
     "probe_installed_readonly_object_store_health",
     "probe_installed_staging_capacity",
     "verify_installed_immutable_objects",

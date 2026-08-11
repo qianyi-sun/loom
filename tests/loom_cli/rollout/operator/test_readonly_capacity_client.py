@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from loom.data_lifecycle import StagingCapacity
+from loom.data_lifecycle_capacity import DriveHeadroom
 from loom_cli.rollout.operator.readonly_capacity_client import (
     InstalledReadonlyCapacitySource,
     open_readonly_minio_client,
@@ -161,6 +162,45 @@ def test_probe_counts_exact_execution_buckets_and_host_capacity(tmp_path: Path) 
     assert 0 <= capacity.inode_free_percent <= 100
 
 
+def test_probe_uses_minio_admin_drive_headroom_for_multinode() -> None:
+    client = S3()
+
+    @contextmanager
+    def context(*, service_uid: int) -> Iterator[S3]:
+        assert service_uid == os.getuid()
+        yield client
+
+    def admin_drives(*, service_uid: int) -> tuple[DriveHeadroom, ...]:
+        assert service_uid == os.getuid()
+        return (
+            DriveHeadroom(
+                total_bytes=1000,
+                free_bytes=990,
+                total_inodes=1000,
+                free_inodes=980,
+            ),
+            DriveHeadroom(
+                total_bytes=1000,
+                free_bytes=970,
+                total_inodes=1000,
+                free_inodes=960,
+            ),
+        )
+
+    capacity = probe_installed_staging_capacity(
+        service_uid=os.getuid(),
+        capacity_source="minio-admin",
+        filesystem_paths=(),
+        client_context=context,
+        admin_drive_probe=admin_drives,
+    )
+
+    assert capacity.object_count == 4
+    assert capacity.bytes_used == 60
+    assert capacity.disk_free_percent == 97
+    assert capacity.inode_free_percent == 96
+
+
 def test_object_store_health_uses_only_fixed_list_authority() -> None:
     class HealthS3(S3):
         def get_bucket_versioning(self, **kwargs: str) -> dict[str, object]:
@@ -281,13 +321,19 @@ def test_checkpoint_verifier_rejects_unversioned_or_drifted_object() -> None:
 
 def test_source_is_single_flight_under_concurrent_dag(tmp_path: Path) -> None:
     capacity = StagingCapacity(10, 20, 80, 90)
-    calls: list[tuple[int, tuple[Path, ...], tuple[str, ...]]] = []
+    calls: list[tuple[int, str, tuple[Path, ...], tuple[str, ...]]] = []
     entered = threading.Barrier(4)
 
     def probe(
-        *, service_uid: int, filesystem_paths: Sequence[Path], buckets: Sequence[str]
+        *,
+        service_uid: int,
+        capacity_source: str,
+        filesystem_paths: Sequence[Path],
+        buckets: Sequence[str],
     ) -> StagingCapacity:
-        calls.append((service_uid, tuple(filesystem_paths), tuple(buckets)))
+        calls.append(
+            (service_uid, capacity_source, tuple(filesystem_paths), tuple(buckets))
+        )
         return capacity
 
     source = InstalledReadonlyCapacitySource(
@@ -308,7 +354,39 @@ def test_source_is_single_flight_under_concurrent_dag(tmp_path: Path) -> None:
         thread.join()
 
     assert results == [capacity] * 4
-    assert calls == [(os.getuid(), (tmp_path,), READONLY_MINIO_BUCKETS)]
+    assert calls == [
+        (os.getuid(), "filesystem", (tmp_path,), READONLY_MINIO_BUCKETS)
+    ]
+
+
+def test_multinode_source_is_single_flight_without_retired_host_path() -> None:
+    capacity = StagingCapacity(10, 20, 99, 98)
+    calls: list[tuple[int, str, tuple[Path, ...], tuple[str, ...]]] = []
+
+    def probe(
+        *,
+        service_uid: int,
+        capacity_source: str,
+        filesystem_paths: Sequence[Path],
+        buckets: Sequence[str],
+    ) -> StagingCapacity:
+        calls.append(
+            (service_uid, capacity_source, tuple(filesystem_paths), tuple(buckets))
+        )
+        return capacity
+
+    source = InstalledReadonlyCapacitySource(
+        service_uid=os.getuid(),
+        capacity_source="minio-admin",
+        filesystem_paths=(),
+        probe=probe,
+    )
+
+    assert source() == capacity
+    assert source() == capacity
+    assert calls == [
+        (os.getuid(), "minio-admin", (), READONLY_MINIO_BUCKETS),
+    ]
 
 
 def test_source_rejects_noncanonical_buckets(tmp_path: Path) -> None:

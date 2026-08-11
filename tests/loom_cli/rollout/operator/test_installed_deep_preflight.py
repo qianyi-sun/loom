@@ -49,6 +49,30 @@ def _candidate() -> CandidateBinding:
     )
 
 
+def test_multinode_capacity_inputs_select_live_minio_admin_authority() -> None:
+    cluster = SimpleNamespace(
+        persistent_storage_host_path_root="/data/loom-staging",
+        topology=SimpleNamespace(multi_node=True),
+    )
+
+    assert installed_deep_preflight_factory._readonly_capacity_probe_inputs(cluster) == (
+        "minio-admin",
+        (),
+    )
+
+
+def test_single_node_capacity_inputs_keep_exact_host_path_authority() -> None:
+    cluster = SimpleNamespace(
+        persistent_storage_host_path_root="/data/loom-staging",
+        topology=SimpleNamespace(multi_node=False),
+    )
+
+    assert installed_deep_preflight_factory._readonly_capacity_probe_inputs(cluster) == (
+        "filesystem",
+        (Path("/data/loom-staging/minio"),),
+    )
+
+
 class _Artifacts:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
