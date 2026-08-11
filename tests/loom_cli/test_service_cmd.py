@@ -10,12 +10,15 @@ shapes flow into our subprocess wrappers.
 from __future__ import annotations
 
 import io
+import json
 import stat
 import subprocess
 import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import httpx
 import pytest
 
 from loom_cli.__main__ import main
@@ -37,11 +40,214 @@ def test_help_lists_subcommands(
     assert "up" in out and "down" in out and "status" in out
 
 
+def test_service_up_requires_explicit_environment(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["service", "up"])
+
+    assert exc.value.code == 2
+    assert "--environment" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("environment", ["staging", "production"])
+def test_protected_service_up_fails_before_mutation_without_candidate(
+    environment: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = main(["service", "up", "--environment", environment])
+
+    assert rc == 2
+    assert "--candidate is required" in capsys.readouterr().err
+
+
+def test_personal_service_up_requires_a_content_digest_candidate(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = main(
+        [
+            "service",
+            "up",
+            "--environment",
+            "dev-alice",
+            "--candidate",
+            "a" * 40,
+        ]
+    )
+
+    assert rc == 2
+    assert "personal candidate must be a lowercase SHA-256 digest" in capsys.readouterr().err
+
+
+def test_protected_service_up_requires_a_full_git_commit_candidate(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = main(
+        [
+            "service",
+            "up",
+            "--environment",
+            "staging",
+            "--candidate",
+            "a" * 64,
+        ]
+    )
+
+    assert rc == 2
+    assert "protected candidate must be a full lowercase Git commit" in capsys.readouterr().err
+
+
+def test_local_service_up_rejects_personal_only_options_before_docker(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with patch(
+        "loom_cli.service_cmd._up_local",
+        side_effect=AssertionError("invalid target options must fail before Docker"),
+    ):
+        rc = main(
+            [
+                "service",
+                "up",
+                "--environment",
+                "local",
+                "--min-slots",
+                "1",
+            ]
+        )
+
+    assert rc == 2
+    assert "personal-dev options are not valid" in capsys.readouterr().err
+
+
+def test_personal_service_up_rejects_local_only_options_before_auth(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with patch(
+        "loom_cli.server_client.require_logged_in",
+        side_effect=AssertionError("invalid target options must fail before auth"),
+    ):
+        rc = main(
+            [
+                "service",
+                "up",
+                "--environment",
+                "dev-alice",
+                "--compose-file",
+                str(tmp_path / "compose.yml"),
+            ]
+        )
+
+    assert rc == 2
+    assert "local Compose options are not valid" in capsys.readouterr().err
+
+
+def test_personal_service_up_routes_to_authenticated_lifecycle_without_docker(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    candidate_sha = "c" * 64
+    candidate_id = "00000000-0000-0000-0000-000000000001"
+    operation_id = "00000000-0000-0000-0000-000000000002"
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/api/v1/personal-dev-candidates":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "id": candidate_id,
+                            "candidate_sha": candidate_sha,
+                            "attestation_scope": "personal-dev-only",
+                            "promotable": False,
+                            "status": "ready",
+                        }
+                    ]
+                },
+            )
+        if request.url.path == "/api/v1/dev-instances/alice" and request.method == "GET":
+            return httpx.Response(404, json={"detail": "not found"})
+        if request.url.path == "/api/v1/dev-instances/alice" and request.method == "PUT":
+            payload = json.loads(request.content)
+            assert payload["candidate_id"] == candidate_id
+            assert payload["candidate_sha"] == candidate_sha
+            assert payload["min_slots"] == 0
+            assert payload["max_slots"] == 2
+            assert payload["expected_operation_epoch"] == 0
+            return httpx.Response(
+                202,
+                json={
+                    "environment": {
+                        "name": "alice",
+                        "status": "provisioning",
+                        "operation_epoch": 1,
+                        "candidate_sha": candidate_sha,
+                        "min_slots": 0,
+                        "max_slots": 2,
+                        "identity": {"route_host": "alice.dev.example"},
+                    },
+                    "operation": {
+                        "id": operation_id,
+                        "environment_name": "alice",
+                        "candidate_sha": candidate_sha,
+                        "min_slots": 0,
+                        "max_slots": 2,
+                        "expected_operation_epoch": 0,
+                        "operation_epoch": 1,
+                        "state": "running",
+                    },
+                },
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    http_client = httpx.Client(
+        base_url="https://loom.example",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with (
+            patch(
+                "loom_cli.server_client.require_logged_in",
+                return_value=SimpleNamespace(server_url="https://loom.example"),
+            ),
+            patch("loom_cli.server_client.authed_client", return_value=http_client),
+            patch(
+                "loom_cli.service_cmd._up_local",
+                side_effect=AssertionError("personal deployment must not touch Docker"),
+            ),
+        ):
+            rc = main(
+                [
+                    "service",
+                    "up",
+                    "--environment",
+                    "dev-alice",
+                    "--candidate",
+                    candidate_sha,
+                    "--no-wait",
+                ]
+            )
+    finally:
+        http_client.close()
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "Development environment: dev-alice" in output
+    assert "Status: provisioning" in output
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("GET", "/api/v1/dev-instances/alice"),
+        ("GET", "/api/v1/personal-dev-candidates"),
+        ("PUT", "/api/v1/dev-instances/alice"),
+    ]
+
+
 def test_up_errors_when_compose_file_missing(
     tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
     rc = main([
-        "service", "up",
+        "service", "up", "--environment", "local",
         "--compose-file", str(tmp_path / "nonexistent.yml"),
     ])
     assert rc == 1
@@ -86,11 +292,14 @@ def test_service_commands_error_without_docker_cli(
     )
 
     with patch("loom_cli.service_cmd._run", side_effect=AssertionError("compose should not run")):
-        rc = main([
+        argv = [
             "service", service_cmd,
             "--compose-file", str(compose),
             "--env-file", str(tmp_path / "absent.env"),
-        ])
+        ]
+        if service_cmd == "up":
+            argv.extend(["--environment", "local"])
+        rc = main(argv)
 
     captured = capsys.readouterr()
     assert rc == 2
@@ -215,7 +424,7 @@ def test_up_invokes_docker_compose_up(
         from subprocess import CompletedProcess
         mock_run.return_value = CompletedProcess([], 0, "", "")
         rc = main([
-            "service", "up",
+            "service", "up", "--environment", "local",
             "--compose-file", str(compose),
             "--env-file", str(tmp_path / "absent.env"),
         ])
@@ -269,6 +478,8 @@ def test_up_builds_mutable_dev_images_before_start_and_migrations(
             [
                 "service",
                 "up",
+                "--environment",
+                "local",
                 "--compose-file",
                 str(compose),
                 "--env-file",
@@ -299,6 +510,8 @@ def test_up_does_not_force_build_for_immutable_images(tmp_path: Path) -> None:
             [
                 "service",
                 "up",
+                "--environment",
+                "local",
                 "--compose-file",
                 str(compose),
                 "--env-file",
@@ -527,7 +740,7 @@ def test_up_recreates_worker_after_seeding_fresh_tokens(
          patch("loom_cli.service_cmd._mint_batch_runner_cp_token",
                return_value=None):
         rc = main([
-            "service", "up",
+            "service", "up", "--environment", "local",
             "--compose-file", str(compose),
             "--env-file", str(env_file),
         ])
@@ -607,7 +820,7 @@ def test_up_skips_worker_recreate_when_no_env_file(
         # branch reachable only via the API, not the CLI flag set.
         import argparse
 
-        from loom_cli.service_cmd import _DEFAULT_CP_URL, _up
+        from loom_cli.service_cmd import _DEFAULT_CP_URL, _up_local
         args = argparse.Namespace(
             compose_file=compose,
             env_file=None,
@@ -615,7 +828,7 @@ def test_up_skips_worker_recreate_when_no_env_file(
             admin_secret_file=tmp_path / ".loom" / "admin" / "secrets.toml",
             cp_url=_DEFAULT_CP_URL,
         )
-        rc = _up(args)
+        rc = _up_local(args)
 
     assert rc == 0
     # No recreate should have happened (env_file is None → nothing to write).
@@ -814,7 +1027,7 @@ def test_up_mints_batch_runner_token_and_writes_to_env(
          patch("loom_cli.service_cmd._mint_batch_runner_cp_token",
                return_value=batch_runner_token) as mock_mint:
         rc = main([
-            "service", "up",
+            "service", "up", "--environment", "local",
             "--compose-file", str(compose),
             "--env-file", str(env_file),
         ])
@@ -870,7 +1083,7 @@ def test_up_recreates_loom_service_after_writing_batch_runner_token(
          patch("loom_cli.service_cmd._mint_batch_runner_cp_token",
                return_value=batch_runner_token):
         rc = main([
-            "service", "up",
+            "service", "up", "--environment", "local",
             "--compose-file", str(compose),
             "--env-file", str(env_file),
         ])
@@ -940,7 +1153,7 @@ def test_up_skips_loom_service_recreate_when_mint_fails(
          patch("loom_cli.service_cmd._mint_batch_runner_cp_token",
                return_value=None):
         rc = main([
-            "service", "up",
+            "service", "up", "--environment", "local",
             "--compose-file", str(compose),
             "--env-file", str(env_file),
         ])
@@ -1047,7 +1260,7 @@ def test_up_generates_secret_store_master_key_if_absent(
          patch("loom_cli.service_cmd._mint_batch_runner_cp_token",
                return_value=None):
         rc = main([
-            "service", "up",
+            "service", "up", "--environment", "local",
             "--compose-file", str(compose),
             "--env-file", str(env_file),
         ])
@@ -1099,7 +1312,7 @@ def test_up_preserves_existing_secret_store_master_key(
          patch("loom_cli.service_cmd._mint_batch_runner_cp_token",
                return_value=None):
         rc = main([
-            "service", "up",
+            "service", "up", "--environment", "local",
             "--compose-file", str(compose),
             "--env-file", str(env_file),
         ])

@@ -667,7 +667,7 @@ diagnostic` marker instead of preserving only the prefix.
 
 Sync (UPSERT into the `benchmarks` + `tasks` tables) runs:
 
-- Automatically on `loom service up` after seed, when
+- Automatically on `loom service up --environment local` after seed, when
   `config/benchmarks.toml` is present AND `LOOM_WORKER_FIXTURES_ROOT`
   is set.
 - Manually via `loom datasets sync-config [--dry-run]`.

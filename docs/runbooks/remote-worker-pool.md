@@ -1011,7 +1011,7 @@ registered via `config/benchmarks.toml`, the worker host needs:
 2. The same data populated on disk (host bind-mount in compose; PV
    or hostPath in k8s).
 
-Sync from the control-plane side runs on `loom service up` (dev) or
+Sync from the control-plane side runs on `loom service up --environment local` or
 via `loom datasets sync-config` (operator-driven on k8s). Without
 the fixtures-root data, the worker can claim trials for that
 benchmark but `FixtureMaterializer` will log a warning and leave

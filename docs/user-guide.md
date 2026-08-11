@@ -47,8 +47,8 @@ Pick the path that matches what you have:
 | The same account and want clicks | [Submit from the web app](#quickstart-submit-from-the-web-app) |
 
 The web and CLI paths submit into a running service and persist
-trajectories/ATIF/usage server-side. `loom service up` runs that same service
-stack against local Docker + Postgres + MinIO. `loom run` is a one-shot
+trajectories/ATIF/usage server-side. `loom service up --environment local` runs
+that same service stack against local Docker + Postgres + MinIO. `loom run` is a one-shot
 in-process trial that writes `events.jsonl` + `atif.json` to a local directory
 and exits — no DB, no team, no provider registration.
 
@@ -138,11 +138,11 @@ Install (see [Install](#install) above), then start the service stack:
 ```bash
 cp .env.example .env
 # Edit .env if you want default provider keys for local testing.
-loom service up
+loom service up --environment local
 ```
 
-`loom service up` starts Postgres, MinIO, LLM Gateway, Control Plane,
-`loom_service`, Worker, and the React SPA. It runs migrations, seeds local
+`loom service up --environment local` starts Postgres, MinIO, LLM Gateway,
+Control Plane, `loom_service`, Worker, and the React SPA. It runs migrations, seeds local
 tokens, and prints endpoint URLs.
 
 Default local URLs:
@@ -169,7 +169,7 @@ environment secrets, and release-promotion evidence. See
 
 Running the local service stack requires Docker CLI with the Compose
 plugin; on macOS, install and start Docker Desktop, then verify
-`docker compose version` before `loom service up`.
+`docker compose version` before `loom service up --environment local`.
 
 ## Quickstart: Submit from the CLI to a Loom Server
 
@@ -1243,7 +1243,7 @@ writing Python:
 The file lives at `<repo>/config/benchmarks.toml` in dev or
 `/etc/loom/benchmarks.toml` in production (override with
 `$LOOM_BENCHMARKS_CONFIG_PATH`). Both shapes flow through
-`loom datasets sync-config` (manual) and `loom service up`
+`loom datasets sync-config` (manual) and `loom service up --environment local`
 (automatic, dev compose only). See
 [`architecture/benchmark-adapter.md`](architecture/benchmark-adapter.md)
 under "Operator-facing TOML registry" for the schema and worked

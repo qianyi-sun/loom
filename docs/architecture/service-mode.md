@@ -11,8 +11,9 @@ uses the file-backed singleton secret specified in
 Postgres + MinIO are the only stateful services.
 
 Local service-mode development uses `docker compose`, so operators need Docker
-CLI with the Compose plugin before running `loom service up`, `down`, or
-`status`. On macOS, install and start Docker Desktop first and confirm
+CLI with the Compose plugin before running
+`loom service up --environment local`, `down`, or `status`. On macOS, install
+and start Docker Desktop first and confirm
 `docker compose version` succeeds.
 
 ## Service-prefix convention
@@ -553,8 +554,9 @@ state before propagating:
 | `cloud_compute_records` | Cloud drivers | Per-sandbox lifetime + cost; `cloud_provider` column |
 
 Migrations live in `migrations/versions/` and are applied with
-`alembic -c migrations/alembic.ini upgrade head`. Local `loom service up`
-runs this automatically after Postgres is healthy. Direct service startup does
+`alembic -c migrations/alembic.ini upgrade head`.
+`loom service up --environment local` runs this automatically after Postgres is
+healthy. Direct service startup does
 not auto-migrate: `loom-service`, the Control Plane, and the LLM Gateway refuse
 to start when the database Alembic revision is behind repository code, so
 production deploys must run migrations before rolling DB-facing services. Their

@@ -114,7 +114,7 @@ visibility/share-state checks pass.
 ### File Location
 
 - Operator command default: `~/.config/loom/secrets.toml`.
-- Local dev stack default: `loom service up` creates
+- Local dev stack default: `loom service up --environment local` creates
   `.loom/admin/secrets.toml` and dev compose mounts it read-only into each
   admin-aware service.
 - Production: `LOOM_SVC_ADMIN_SECRET_FILE`, `LOOM_CP_ADMIN_SECRET_FILE`, and
@@ -153,8 +153,9 @@ loud warning only when `LOOM_ENV != production`.
 
 If `LOOM_ENV=production`, startup fails when the file is missing, unreadable,
 malformed, empty, low entropy, or has unsafe permissions. Development stacks use
-the same singleton-admin path by default through `loom service up`; DB-backed
-admin rows are not accepted as a fallback.
+the same singleton-admin path by default through
+`loom service up --environment local`; DB-backed admin rows are not accepted as
+a fallback.
 
 ## Database Changes
 
