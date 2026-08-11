@@ -20,7 +20,11 @@ from loom.integrations.behavior.contracts import (
     validate_stage_request,
     validate_stage_result_document,
 )
-from loom.integrations.behavior.errors import BehaviorContractError, BehaviorExitCode
+from loom.integrations.behavior.errors import (
+    BehaviorContractError,
+    BehaviorExitCode,
+    BehaviorInterruptedError,
+)
 from loom.pipeline.spec import ContainerNodeV1
 from loom.pipeline.state import StageResultInputV1, StageResultV1
 from loom_worker.pipeline_attempt_workspace import (
@@ -92,9 +96,13 @@ def _run(request_path: Path, output_dir: Path) -> int:
     return int(BehaviorExitCode.SUCCESS)
 
 
-def _resolve_stage_adapter(_request: StageRequestV1) -> StageAdapterBinding | None:
-    """Child stage issues replace this fail-closed resolver with owned registrations."""
+def _resolve_stage_adapter(request: StageRequestV1) -> StageAdapterBinding | None:
+    """Resolve only adapters that are implemented and owned in this package."""
 
+    if request.stage.value == "rollout":
+        from loom.integrations.behavior.stages.rollout import rollout_stage_binding
+
+        return rollout_stage_binding()
     return None
 
 
@@ -130,6 +138,8 @@ def dispatch_stage(
         recipe_digest=request.provenance.recipe_digest,
         image_digest=request.provenance.image_digest,
     )
+    if output_dir.joinpath("COMPLETE.json").is_file():
+        return workspace.validate_committed()
     result = validate_behavior_stage_result(
         adapter(request, workspace).model_dump(mode="json", exclude_none=False),
         stage=request.stage,
@@ -177,6 +187,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"valid {args.kind}: {schema_version}")
             return int(BehaviorExitCode.SUCCESS)
         return _run(args.request, args.output_dir)
+    except BehaviorInterruptedError as exc:
+        return 128 + exc.signum
     except (BehaviorContractError, OSError, ValidationError, ValueError) as exc:
         print(f"contract error: {exc}", file=sys.stderr)
         return int(BehaviorExitCode.CONTRACT_ERROR)
