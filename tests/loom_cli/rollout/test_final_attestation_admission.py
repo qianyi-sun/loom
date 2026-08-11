@@ -332,6 +332,12 @@ def _attestation(plan: CandidatePreflightPlan) -> PreflightAttestation:
     )
 
 
+def _at_epoch(plan: CandidatePreflightPlan, mutation_epoch: int) -> CandidatePreflightPlan:
+    bindings = dict(plan.context.bindings)
+    bindings["staging.mutation-epoch"] = mutation_epoch
+    return replace(plan, context=CheckContext(bindings))
+
+
 def test_final_admission_rechecks_exact_drift_sensitive_tier0() -> None:
     plan = _plan(_checks())
     admission = validate_final_attestation(
@@ -425,14 +431,17 @@ def test_final_and_post_apply_admission_tolerate_tokenrequest_kubeconfig_rotatio
         current_mutation_epoch=7,
         now=NOW,
     )
-    post_apply_plan = _plan(
-        _checks(
-            credential_metadata={
-                **attested_metadata,
-                "readonly-kubeconfig": "5" * 64,
-                "rehearsal-kubeconfig": "6" * 64,
-            }
-        )
+    post_apply_plan = _at_epoch(
+        _plan(
+            _checks(
+                credential_metadata={
+                    **attested_metadata,
+                    "readonly-kubeconfig": "5" * 64,
+                    "rehearsal-kubeconfig": "6" * 64,
+                }
+            )
+        ),
+        8,
     )
 
     evidence = validate_post_apply_attestation_drift(
@@ -553,7 +562,7 @@ def test_final_admission_rejects_predecessor_drift_before_apply() -> None:
         )
 
 
-def test_post_apply_drift_reuses_exact_admission_without_baseline_replay() -> None:
+def test_post_apply_drift_uses_fresh_epoch_plan_without_baseline_replay() -> None:
     plan = _plan(_checks())
     admission = validate_final_attestation(
         attestation=_attestation(plan),
@@ -563,7 +572,10 @@ def test_post_apply_drift_reuses_exact_admission_without_baseline_replay() -> No
         now=NOW,
     )
 
-    post_apply_plan = _plan(_checks(predecessor_live_digest="0" * 64))
+    post_apply_plan = _at_epoch(
+        _plan(_checks(predecessor_live_digest="0" * 64)),
+        8,
+    )
     evidence = validate_post_apply_attestation_drift(
         admission=admission,
         plan=post_apply_plan,
@@ -618,7 +630,7 @@ def test_post_apply_drift_classifies_changed_host_identity_as_transient() -> Non
         current_mutation_epoch=7,
         now=NOW,
     )
-    drifted_plan = _plan(_checks(boot_id="boot-2"))
+    drifted_plan = _at_epoch(_plan(_checks(boot_id="boot-2")), 8)
 
     with pytest.raises(
         PostApplyDriftTransientError,
@@ -643,6 +655,7 @@ def test_post_apply_drift_rejects_route_or_config_context_drift() -> None:
     )
     drifted_bindings = dict(plan.context.bindings)
     drifted_bindings["route"] = "https://yylx.world/other"
+    drifted_bindings["staging.mutation-epoch"] = 8
     drifted_plan = replace(plan, context=CheckContext(drifted_bindings))
 
     with pytest.raises(ValueError, match="context binding drifted"):
