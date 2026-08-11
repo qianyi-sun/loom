@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from typing import Protocol
 
 from loom.dev_instance_provisioner import OwnerAccessSnapshot
+from loom.personal_dev_activation import PersonalDevActivationIntent
 from loom.personal_dev_environment import PersonalDevReconciliationClaim
 
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
@@ -126,6 +127,10 @@ def personal_dev_readiness_sha256(
         "subject_id": str(operation.subject_id),
         "subject_incarnation": str(operation.subject_incarnation),
     }
+    return _readiness_payload_sha256(payload)
+
+
+def _readiness_payload_sha256(payload: Mapping[str, object]) -> str:
     canonical = json.dumps(
         payload,
         sort_keys=True,
@@ -133,6 +138,40 @@ def personal_dev_readiness_sha256(
         ensure_ascii=True,
     ).encode("ascii")
     return hashlib.sha256(canonical).hexdigest()
+
+
+def personal_dev_intent_readiness_sha256(
+    intent: PersonalDevActivationIntent,
+    observation: PersonalDevReadinessObservation,
+) -> str:
+    """Recompute central readiness from a secret-free activation intent."""
+    expected_images = {
+        component: intent.images[component]
+        for component in _DEPLOYED_COMPONENTS
+    }
+    observed_images = dict(observation.deployed_images)
+    if observed_images != expected_images:
+        raise ValueError("deployed image does not match the activation intent")
+    return _readiness_payload_sha256(
+        {
+            "attempt_id": str(intent.attempt_id),
+            "attempt_sequence": intent.attempt_sequence,
+            "candidate_id": str(intent.candidate_id),
+            "candidate_publication_sha256": intent.candidate_publication_sha256,
+            "candidate_sha": intent.candidate_sha,
+            "deployed_images": observed_images,
+            "deployment_generation": intent.deployment_generation,
+            "environment_name": intent.environment_name,
+            "max_slots": intent.max_slots,
+            "min_slots": intent.min_slots,
+            "operation_epoch": intent.operation_epoch,
+            "operation_id": str(intent.operation_id),
+            "resource_evidence_sha256": observation.resource_evidence_sha256,
+            "schema_version": 1,
+            "subject_id": str(intent.subject_id),
+            "subject_incarnation": str(intent.subject_incarnation),
+        }
+    )
 
 
 class PersonalDevReconciliationAuthority(Protocol):
@@ -303,5 +342,6 @@ __all__ = [
     "PersonalDevReadinessObservation",
     "PersonalDevReconciliationAuthority",
     "personal_dev_candidate_images",
+    "personal_dev_intent_readiness_sha256",
     "personal_dev_readiness_sha256",
 ]

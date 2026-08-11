@@ -1,0 +1,19 @@
+FROM registry.k8s.io/kubectl:v1.36.2@sha256:b0d792e0d8dfb9bb1b922b78b23137e2a34bb6f9667640353a9d2aadd1fd7761 AS kubectl
+
+FROM python:3.11-slim
+ENV PIP_RETRIES=10 PIP_DEFAULT_TIMEOUT=60
+WORKDIR /app
+COPY --from=kubectl /bin/kubectl /usr/local/bin/kubectl
+COPY pyproject.toml README.md ./
+COPY src ./src
+COPY packages ./packages
+RUN chmod -R a+rX ./src ./packages /usr/local/bin/kubectl && \
+    pip install --no-cache-dir -e . && \
+    pip install --no-cache-dir -e ./packages/loom-launcher
+ARG LOOM_BUILD_SHA=unknown
+LABEL org.opencontainers.image.revision="${LOOM_BUILD_SHA}"
+RUN install -d -m 0755 /opt/loom && \
+    printf '%s\n' "${LOOM_BUILD_SHA}" > /opt/loom/build-sha && \
+    chmod 0444 /opt/loom/build-sha
+USER 65532:65532
+ENTRYPOINT ["python", "-m", "loom_personal_dev_activation_agent"]

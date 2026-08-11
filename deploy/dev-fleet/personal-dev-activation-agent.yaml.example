@@ -1,0 +1,94 @@
+# Render the two example values before applying. The image must be the reviewed
+# trusted-fleet digest; the Secret must contain the matching raw 32-byte
+# Ed25519 private key. The management service receives only the public key.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: loom-personal-dev-activation-agent
+  namespace: loom-dev
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: loom-personal-dev-activation-agent
+rules:
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [services]
+    verbs: [get, create, patch]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses]
+    verbs: [get, create, patch]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loom-personal-dev-activation-agent
+  namespace: loom-dev
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: loom-personal-dev-activation-agent }
+  template:
+    metadata:
+      labels: { app: loom-personal-dev-activation-agent }
+    spec:
+      serviceAccountName: loom-personal-dev-activation-agent
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      initContainers:
+        - name: install-signing-key
+          image: PERSONAL_DEV_ACTIVATION_AGENT_IMAGE_AT_REVIEWED_SHA256
+          command:
+            - /bin/sh
+            - -ec
+            - umask 077; cp /source/private-key /key/private-key
+          volumeMounts:
+            - name: projected-signing-key
+              mountPath: /source
+              readOnly: true
+            - name: signing-key
+              mountPath: /key
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+            readOnlyRootFilesystem: true
+      containers:
+        - name: agent
+          image: PERSONAL_DEV_ACTIVATION_AGENT_IMAGE_AT_REVIEWED_SHA256
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: LOOM_PERSONAL_DEV_ACTIVATION_SERVICE_URL
+              value: https://loom-service.dev.yylx.world
+            - name: LOOM_PERSONAL_DEV_ACTIVATION_KEY_ID
+              value: personal-dev-agent-v1
+            - name: LOOM_PERSONAL_DEV_ACTIVATION_PRIVATE_KEY_FILE
+              value: /var/run/loom-personal-dev-activation/private-key
+            - name: LOOM_PERSONAL_DEV_ACTIVATION_MINIO_ENDPOINT
+              value: https://minio.dev.yylx.world
+          volumeMounts:
+            - name: signing-key
+              mountPath: /var/run/loom-personal-dev-activation
+              readOnly: true
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+            readOnlyRootFilesystem: true
+      volumes:
+        - name: projected-signing-key
+          secret:
+            secretName: loom-personal-dev-activation-agent
+            defaultMode: 288
+        - name: signing-key
+          emptyDir: { medium: Memory, sizeLimit: 64Ki }

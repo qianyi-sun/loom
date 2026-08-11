@@ -168,6 +168,26 @@ runtime_policy = "conformance"
 rollout_role = "none"
 
 [[components]]
+id = "personal-dev-activation-agent"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.personal-dev-activation-agent"
+build_context = "."
+source_paths = [
+  ".dockerignore",
+  "README.md",
+  "deploy/Dockerfile.personal-dev-activation-agent",
+  "packages/**",
+  "pyproject.toml",
+  "src/**",
+]
+smoke_owner = "sandbox-network-conformance"
+scan_owner = "images"
+attestation_owner = "release-provenance"
+release_digest = "loom-personal-dev-activation-agent"
+runtime_policy = "conformance"
+rollout_role = "none"
+
+[[components]]
 id = "egress-xds"
 kind = "release-image"
 dockerfile = "deploy/Dockerfile.egress-xds"

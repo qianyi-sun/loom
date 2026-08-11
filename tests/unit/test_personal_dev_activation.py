@@ -6,14 +6,29 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from loom.personal_dev_activation import (
     PersonalDevActivationAcknowledgement,
+    PersonalDevActivationSigner,
     PersonalDevActivationVerifier,
+    load_personal_dev_activation_signer,
     load_personal_dev_activation_verifier,
 )
 
 _NOW = datetime(2026, 8, 11, 12, 0, tzinfo=UTC)
+
+
+def _keys() -> tuple[bytes, bytes]:
+    private = Ed25519PrivateKey.generate()
+    return (
+        private.private_bytes_raw(),
+        private.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        ),
+    )
 
 
 def _ack() -> PersonalDevActivationAcknowledgement:
@@ -35,12 +50,16 @@ def _ack() -> PersonalDevActivationAcknowledgement:
 
 
 def test_activation_acknowledgement_is_canonical_signed_and_tamper_evident() -> None:
+    private_key, public_key = _keys()
+    signer = PersonalDevActivationSigner(
+        keys={"personal-dev-agent-v1": private_key},
+    )
     verifier = PersonalDevActivationVerifier(
-        keys={"personal-dev-agent-v1": b"k" * 32},
+        keys={"personal-dev-agent-v1": public_key},
         max_age_seconds=300,
     )
     acknowledgement = _ack()
-    signature = verifier.sign(acknowledgement)
+    signature = signer.sign(acknowledgement)
 
     verified = verifier.verify(acknowledgement, signature=signature, now=_NOW)
 
@@ -56,11 +75,15 @@ def test_activation_acknowledgement_is_canonical_signed_and_tamper_evident() -> 
 
 
 def test_activation_acknowledgement_rejects_stale_or_unknown_agent_evidence() -> None:
+    private_key, public_key = _keys()
+    signer = PersonalDevActivationSigner(
+        keys={"personal-dev-agent-v1": private_key},
+    )
     verifier = PersonalDevActivationVerifier(
-        keys={"personal-dev-agent-v1": b"k" * 32},
+        keys={"personal-dev-agent-v1": public_key},
         max_age_seconds=300,
     )
-    signature = verifier.sign(_ack())
+    signature = signer.sign(_ack())
     with pytest.raises(ValueError, match="freshness"):
         verifier.verify(_ack(), signature=signature, now=_NOW + timedelta(seconds=301))
     with pytest.raises(ValueError, match="key"):
@@ -71,33 +94,44 @@ def test_activation_acknowledgement_rejects_stale_or_unknown_agent_evidence() ->
         )
 
 
-def test_activation_key_loader_requires_owner_only_bounded_material(tmp_path) -> None:
-    key_file = tmp_path / "activation.key"
-    key_file.write_bytes(b"k" * 32 + b"\n")
-    key_file.chmod(0o600)
+def test_activation_key_loaders_separate_public_verification_from_private_signing(
+    tmp_path,
+) -> None:
+    private_key, public_key = _keys()
+    public_file = tmp_path / "activation.pub"
+    public_file.write_bytes(public_key)
+    public_file.chmod(0o644)
     verifier = load_personal_dev_activation_verifier(
-        key_file,
+        public_file,
         key_id="personal-dev-agent-v1",
         max_age_seconds=300,
     )
-    assert verifier.sign(_ack())
+    private_file = tmp_path / "activation.key"
+    private_file.write_bytes(private_key)
+    private_file.chmod(0o600)
+    signer = load_personal_dev_activation_signer(
+        private_file,
+        key_id="personal-dev-agent-v1",
+    )
+    signature = signer.sign(_ack())
+    assert verifier.verify(_ack(), signature=signature, now=_NOW)
 
-    key_file.chmod(0o644)
+    private_file.chmod(0o640)
     with pytest.raises(RuntimeError, match="owner-only"):
-        load_personal_dev_activation_verifier(
-            key_file,
+        load_personal_dev_activation_signer(
+            private_file,
             key_id="personal-dev-agent-v1",
-            max_age_seconds=300,
         )
 
 
 def test_activation_key_loader_rejects_linked_or_executable_authority(tmp_path) -> None:
-    key_file = tmp_path / "activation.key"
-    key_file.write_bytes(b"k" * 32)
+    _private_key, public_key = _keys()
+    key_file = tmp_path / "activation.pub"
+    key_file.write_bytes(public_key)
     key_file.chmod(0o600)
     symlink = tmp_path / "activation-link.key"
     symlink.symlink_to(key_file)
-    with pytest.raises(RuntimeError, match="regular owner-only file"):
+    with pytest.raises(RuntimeError, match="available regular file"):
         load_personal_dev_activation_verifier(
             symlink,
             key_id="personal-dev-agent-v1",
@@ -107,7 +141,7 @@ def test_activation_key_loader_rejects_linked_or_executable_authority(tmp_path) 
     symlink.unlink()
     hardlink = tmp_path / "activation-hardlink.key"
     os.link(key_file, hardlink)
-    with pytest.raises(RuntimeError, match="regular owner-only file"):
+    with pytest.raises(RuntimeError, match="regular read-only file"):
         load_personal_dev_activation_verifier(
             key_file,
             key_id="personal-dev-agent-v1",
@@ -115,8 +149,8 @@ def test_activation_key_loader_rejects_linked_or_executable_authority(tmp_path) 
         )
 
     hardlink.unlink()
-    key_file.chmod(0o700)
-    with pytest.raises(RuntimeError, match="regular owner-only file"):
+    key_file.chmod(0o755)
+    with pytest.raises(RuntimeError, match="regular read-only file"):
         load_personal_dev_activation_verifier(
             key_file,
             key_id="personal-dev-agent-v1",

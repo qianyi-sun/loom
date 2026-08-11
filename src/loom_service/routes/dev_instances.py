@@ -26,6 +26,8 @@ from loom.dev_instance_provisioner import (
 from loom.dev_instance_store import SqlAlchemyDevInstanceStore
 from loom.personal_dev_activation import (
     PersonalDevActivationAcknowledgement,
+    PersonalDevActivationIntent,
+    PersonalDevActivationIntentRequest,
     PersonalDevActivationVerifier,
 )
 from loom.personal_dev_environment import (
@@ -40,6 +42,7 @@ from loom.personal_dev_environment_store import (
     PersonalDevEnvironmentEpochFencedError,
     PersonalDevEnvironmentNotFoundError,
     PersonalDevEnvironmentOperationFencedError,
+    SqlAlchemyPersonalDevActivationIntentReader,
     SqlAlchemyPersonalDevEnvironmentAuthority,
 )
 from loom_service.auth_guards import is_admin, require_scope, require_submitting_user
@@ -122,6 +125,38 @@ class PersonalDevActivationAcknowledgementPayload(BaseModel):
     local_activation_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     agent_key_id: str = Field(pattern=r"^[a-z][a-z0-9._-]{0,63}$")
     observed_at: datetime
+
+
+class PersonalDevActivationIntentRequestPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    agent_key_id: str = Field(pattern=r"^[a-z][a-z0-9._-]{0,63}$")
+    request_nonce: UUID
+    requested_at: datetime
+    operation_id: UUID | None = None
+    exclude_operation_ids: list[UUID] = Field(default_factory=list, max_length=16)
+
+
+class PersonalDevActivationIntentPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    environment_name: str
+    subject_id: UUID
+    subject_incarnation: UUID
+    operation_id: UUID
+    operation_epoch: int
+    attempt_id: UUID
+    attempt_sequence: int
+    candidate_id: UUID
+    candidate_sha: str
+    candidate_publication_sha256: str
+    deployment_generation: int
+    readiness_evidence_sha256: str
+    min_slots: int
+    max_slots: int
+    images: dict[str, str]
+    intent_created_at: datetime
+    intent_sha256: str
 
 
 class DevInstanceIdentityResponse(BaseModel):
@@ -328,6 +363,30 @@ def _personal_environment_response(
     )
 
 
+def _personal_activation_intent_response(
+    intent: PersonalDevActivationIntent,
+) -> PersonalDevActivationIntentPayload:
+    return PersonalDevActivationIntentPayload(
+        environment_name=intent.environment_name,
+        subject_id=intent.subject_id,
+        subject_incarnation=intent.subject_incarnation,
+        operation_id=intent.operation_id,
+        operation_epoch=intent.operation_epoch,
+        attempt_id=intent.attempt_id,
+        attempt_sequence=intent.attempt_sequence,
+        candidate_id=intent.candidate_id,
+        candidate_sha=intent.candidate_sha,
+        candidate_publication_sha256=intent.candidate_publication_sha256,
+        deployment_generation=intent.deployment_generation,
+        readiness_evidence_sha256=intent.readiness_evidence_sha256,
+        min_slots=intent.min_slots,
+        max_slots=intent.max_slots,
+        images=dict(intent.images),
+        intent_created_at=intent.intent_created_at,
+        intent_sha256=intent.intent_sha256,
+    )
+
+
 def _personal_operation_response(
     record: PersonalDevLifecycleOperationRecord,
 ) -> PersonalDevLifecycleOperationResponse:
@@ -512,6 +571,58 @@ async def apply_personal_dev_environment(
         ) from None
     response.status_code = 200 if reservation.operation.state == "succeeded" else 202
     return _personal_apply_response(reservation)
+
+
+@internal_router.post(
+    "/personal-dev/activation-intents/next",
+    response_model=PersonalDevActivationIntentPayload,
+    responses={204: {"description": "No current activation intent"}},
+)
+async def next_personal_dev_activation_intent(
+    payload: PersonalDevActivationIntentRequestPayload,
+    request: Request,
+    signature: Annotated[str, Header(alias="X-Loom-Activation-Signature")],
+) -> PersonalDevActivationIntentPayload | Response:
+    """Return one current intent only to an agent proving signing-key possession."""
+    verifier = getattr(request.app.state, "personal_dev_activation_verifier", None)
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if not isinstance(verifier, PersonalDevActivationVerifier) or session_factory is None:
+        raise HTTPException(status_code=503, detail="personal-dev activation authority unavailable")
+    try:
+        intent_request = PersonalDevActivationIntentRequest(
+            agent_key_id=payload.agent_key_id,
+            request_nonce=payload.request_nonce,
+            requested_at=payload.requested_at,
+            operation_id=payload.operation_id,
+            exclude_operation_ids=tuple(payload.exclude_operation_ids),
+        )
+        verifier.verify_intent_request(
+            intent_request,
+            signature=signature,
+            now=datetime.now(payload.requested_at.tzinfo),
+        )
+    except ValueError:
+        raise HTTPException(
+            status_code=403,
+            detail="personal-dev activation intent request is invalid",
+        ) from None
+    try:
+        async with session_factory() as session:
+            intent = await SqlAlchemyPersonalDevActivationIntentReader(session).next_intent(
+                operation_id=intent_request.operation_id,
+                exclude_operation_ids=intent_request.exclude_operation_ids,
+            )
+    except PersonalDevEnvironmentOperationFencedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception:
+        logger.exception("personal_dev_activation_intent_read_failed")
+        raise HTTPException(
+            status_code=503,
+            detail="personal-dev activation intent could not be read",
+        ) from None
+    if intent is None:
+        return Response(status_code=204)
+    return _personal_activation_intent_response(intent)
 
 
 @internal_router.post(

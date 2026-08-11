@@ -18,8 +18,15 @@ from loom.db.schema import (
     DevLifecycleOperationAttempt,
     PersonalDevCandidate,
 )
-from loom.personal_dev_activation import VerifiedPersonalDevActivationAcknowledgement
-from loom.personal_dev_candidate import CandidateStatus, PersonalDevCandidateRecord
+from loom.personal_dev_activation import (
+    PersonalDevActivationIntent,
+    VerifiedPersonalDevActivationAcknowledgement,
+)
+from loom.personal_dev_candidate import (
+    CandidateStatus,
+    PersonalDevCandidateRecord,
+    validate_personal_dev_candidate_publication,
+)
 from loom.personal_dev_candidate_store import SqlAlchemyPersonalDevCandidateStore
 from loom.personal_dev_environment import (
     PersonalDevAccessBinding,
@@ -62,6 +69,124 @@ class PersonalDevEnvironmentEpochFencedError(RuntimeError):
 
 class PersonalDevEnvironmentOperationFencedError(RuntimeError):
     """A trusted lifecycle callback no longer names the current operation."""
+
+
+class SqlAlchemyPersonalDevActivationIntentReader:
+    """Read current irreversible intents without acquiring mutation authority."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def next_intent(
+        self,
+        *,
+        operation_id: UUID | None = None,
+        exclude_operation_ids: tuple[UUID, ...] = (),
+    ) -> PersonalDevActivationIntent | None:
+        if len(exclude_operation_ids) > 16:
+            raise ValueError("activation exclusion set exceeds the bounded limit")
+        statement = (
+            select(
+                DevLifecycleOperation,
+                DevInstance,
+                DevLifecycleOperationAttempt,
+                PersonalDevCandidate,
+            )
+            .join(
+                DevInstance,
+                and_(
+                    DevInstance.name == DevLifecycleOperation.environment_name,
+                    DevInstance.operation_id == DevLifecycleOperation.id,
+                    DevInstance.operation_epoch == DevLifecycleOperation.operation_epoch,
+                ),
+            )
+            .join(
+                DevLifecycleOperationAttempt,
+                and_(
+                    DevLifecycleOperationAttempt.id == DevLifecycleOperation.attempt_id,
+                    DevLifecycleOperationAttempt.operation_id == DevLifecycleOperation.id,
+                    DevLifecycleOperationAttempt.operation_epoch
+                    == DevLifecycleOperation.operation_epoch,
+                ),
+            )
+            .join(
+                PersonalDevCandidate,
+                PersonalDevCandidate.id == DevLifecycleOperation.candidate_id,
+            )
+            .where(
+                DevLifecycleOperation.kind.in_(("create", "update")),
+                DevLifecycleOperation.state == "activating",
+                DevLifecycleOperation.checkpoint == "activation_intent",
+                DevLifecycleOperation.activation_acknowledgement_sha256.is_(None),
+                DevLifecycleOperation.readiness_evidence_sha256.is_not(None),
+                DevLifecycleOperationAttempt.state == "activating",
+                DevLifecycleOperationAttempt.checkpoint == "activation_intent",
+                DevInstance.status == "activating",
+                DevInstance.operation_step == "activation_intent",
+                PersonalDevCandidate.status == "ready",
+            )
+            .order_by(DevLifecycleOperation.updated_at, DevLifecycleOperation.id)
+            .limit(1)
+        )
+        if operation_id is not None:
+            statement = statement.where(DevLifecycleOperation.id == operation_id)
+        elif exclude_operation_ids:
+            statement = statement.where(
+                DevLifecycleOperation.id.not_in(exclude_operation_ids),
+            )
+        row = (await self.session.execute(statement)).one_or_none()
+        if row is None:
+            return None
+        operation, environment, attempt, candidate = row
+        if (
+            operation.subject_id != environment.subject_id
+            or operation.subject_incarnation != environment.subject_incarnation
+            or operation.subject_id != attempt.subject_id
+            or operation.subject_incarnation != attempt.subject_incarnation
+            or operation.attempt_sequence != attempt.attempt_sequence
+            or operation.candidate_sha != candidate.candidate_sha
+            or candidate.publication_json is None
+            or candidate.publication_sha256 is None
+            or operation.readiness_evidence_sha256 is None
+        ):
+            raise PersonalDevEnvironmentOperationFencedError(
+                "personal-dev activation intent bindings are inconsistent",
+            )
+        candidate_record = _candidate_record(candidate)
+        publication, publication_sha256, _image_set_digest = (
+            validate_personal_dev_candidate_publication(
+                candidate_record,
+                candidate.publication_json,
+            )
+        )
+        if publication_sha256 != candidate.publication_sha256:
+            raise PersonalDevEnvironmentOperationFencedError(
+                "personal-dev activation publication digest is inconsistent",
+            )
+        raw_images = publication["images"]
+        if not isinstance(raw_images, dict):  # pragma: no cover - validator proves this
+            raise PersonalDevEnvironmentOperationFencedError(
+                "personal-dev activation image publication is inconsistent",
+            )
+        images = {component: str(value["index"]) for component, value in raw_images.items()}
+        return PersonalDevActivationIntent(
+            environment_name=operation.environment_name,
+            subject_id=operation.subject_id,
+            subject_incarnation=operation.subject_incarnation,
+            operation_id=operation.id,
+            operation_epoch=operation.operation_epoch,
+            attempt_id=operation.attempt_id,
+            attempt_sequence=operation.attempt_sequence,
+            candidate_id=operation.candidate_id,
+            candidate_sha=operation.candidate_sha,
+            candidate_publication_sha256=candidate.publication_sha256,
+            deployment_generation=operation.deployment_generation,
+            readiness_evidence_sha256=operation.readiness_evidence_sha256,
+            min_slots=operation.min_slots,
+            max_slots=operation.max_slots,
+            images=images,
+            intent_created_at=operation.updated_at,
+        )
 
 
 def _lock_keys(name: str) -> tuple[int, int]:
@@ -1228,5 +1353,6 @@ __all__ = [
     "PersonalDevEnvironmentEpochFencedError",
     "PersonalDevEnvironmentNotFoundError",
     "PersonalDevEnvironmentOperationFencedError",
+    "SqlAlchemyPersonalDevActivationIntentReader",
     "SqlAlchemyPersonalDevEnvironmentAuthority",
 ]

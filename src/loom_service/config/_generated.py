@@ -65,8 +65,8 @@ class LoomServiceSettings(BaseSettings):
     minio_region: str = "us-east-1"
     minio_secret_key: SecretStr
     personal_dev_activation_ack_max_age_sec: int = 300
-    personal_dev_activation_hmac_key_file: Path | None = None
-    personal_dev_activation_hmac_key_id: str = "personal-dev-agent-v1"
+    personal_dev_activation_key_id: str = "personal-dev-agent-v1"
+    personal_dev_activation_public_key_file: Path | None = None
     personal_dev_builder_docker_path: Path = Path("/usr/bin/docker")
     personal_dev_builder_enabled: bool = False
     personal_dev_builder_global_concurrency: int = 4

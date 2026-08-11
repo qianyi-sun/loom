@@ -951,7 +951,15 @@ class KubectlCandidateGenerationProvisioner:
         config: DevInstanceManifestConfig,
     ) -> PersonalDevReadinessObservation:
         documents = personal_dev_preparation_manifest_documents(identity, config)
-        namespace, migration, *runtime = documents
+        namespace = documents[0]
+        try:
+            migration_index = next(
+                index for index, document in enumerate(documents) if document["kind"] == "Job"
+            )
+        except StopIteration:
+            raise DevInstanceRuntimeError("candidate migration manifest is unavailable") from None
+        migration = documents[migration_index]
+        runtime = (*documents[1:migration_index], *documents[migration_index + 1 :])
         await self.kubectl.apply(yaml.safe_dump(namespace, sort_keys=False))
         await self.kubectl.apply(yaml.safe_dump(migration, sort_keys=False))
         migration_name = str(migration["metadata"]["name"])
@@ -966,64 +974,103 @@ class KubectlCandidateGenerationProvisioner:
         await asyncio.gather(
             *(self.kubectl.wait_deployment(identity.namespace, name) for name in names.values()),
         )
-        evidence: list[dict[str, object]] = []
-        deployed_images: dict[str, str] = {}
-        for component, name in names.items():
-            resource = await self.kubectl.read_resource_json(
-                namespace=identity.namespace,
-                kind="deployment",
-                name=name,
-            )
-            try:
-                metadata = resource["metadata"]
-                spec = resource["spec"]
-                status = resource["status"]
-                generation = int(metadata["generation"])
-                containers = spec["template"]["spec"]["containers"]
-                replicas = int(spec.get("replicas", 1))
-                image = str(containers[0]["image"])
-                observed_generation = int(status["observedGeneration"])
-                available = int(status.get("availableReplicas", 0))
-                updated = int(status.get("updatedReplicas", 0))
-                uid = str(metadata["uid"])
-                resource_version = str(metadata["resourceVersion"])
-            except (KeyError, IndexError, TypeError, ValueError):
-                raise DevInstanceRuntimeError(
-                    "candidate deployment readiness response was invalid",
-                ) from None
-            expected_image = config.image(component)
-            if (
-                len(containers) != 1
-                or image != expected_image
-                or observed_generation < generation
-                or available != replicas
-                or updated != replicas
-                or not uid
-                or not resource_version
-            ):
-                raise DevInstanceRuntimeError(
-                    "candidate deployment did not converge to the exact generation",
-                )
-            deployed_images[component] = image
-            evidence.append(
-                {
-                    "component": component,
-                    "generation": generation,
-                    "name": name,
-                    "resource_version": resource_version,
-                    "uid": uid,
-                },
-            )
-        canonical = json.dumps(
-            evidence,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=True,
-        ).encode("ascii")
-        return PersonalDevReadinessObservation(
-            deployed_images=deployed_images,
-            resource_evidence_sha256=hashlib.sha256(canonical).hexdigest(),
+        return await observe_personal_dev_candidate_generation(
+            self.kubectl,
+            identity,
+            config,
         )
+
+
+async def observe_personal_dev_candidate_generation(
+    kubectl: KubectlClient,
+    identity: DevInstanceIdentity,
+    config: DevInstanceManifestConfig,
+) -> PersonalDevReadinessObservation:
+    """Recompute stable readiness evidence for one exact immutable generation."""
+    if config.lifecycle_binding is None or config.image_references is None:
+        raise ValueError("personal-dev readiness observation requires lifecycle bindings")
+    binding = config.lifecycle_binding
+    expected_labels = {
+        "loom.dev/subject": str(binding.subject_id),
+        "loom.dev/incarnation": str(binding.subject_incarnation),
+        "loom.dev/operation": str(binding.operation_id),
+        "loom.dev/attempt": str(binding.attempt_id),
+        "loom.dev/operation-epoch": str(binding.operation_epoch),
+        "loom.dev/generation": str(config.deployment_generation),
+    }
+    names = {
+        component: f"loom-{component}-g{config.deployment_generation}"
+        for component in ("control-plane", "llm-gateway", "service", "web")
+    }
+    evidence: list[dict[str, object]] = []
+    deployed_images: dict[str, str] = {}
+    for component, name in names.items():
+        resource = await kubectl.read_resource_json(
+            namespace=identity.namespace,
+            kind="deployment",
+            name=name,
+        )
+        try:
+            metadata = resource["metadata"]
+            spec = resource["spec"]
+            status = resource["status"]
+            generation = int(metadata["generation"])
+            labels = metadata["labels"]
+            template_labels = spec["template"]["metadata"]["labels"]
+            containers = spec["template"]["spec"]["containers"]
+            replicas = int(spec.get("replicas", 1))
+            image = str(containers[0]["image"])
+            observed_generation = int(status["observedGeneration"])
+            available = int(status.get("availableReplicas", 0))
+            updated = int(status.get("updatedReplicas", 0))
+            uid = str(metadata["uid"])
+            spec_bytes = json.dumps(
+                spec,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            ).encode("ascii")
+        except (KeyError, IndexError, TypeError, ValueError, UnicodeEncodeError):
+            raise DevInstanceRuntimeError(
+                "candidate deployment readiness response was invalid",
+            ) from None
+        expected_image = config.image(component)
+        if (
+            len(containers) != 1
+            or image != expected_image
+            or not isinstance(labels, dict)
+            or not isinstance(template_labels, dict)
+            or any(labels.get(key) != value for key, value in expected_labels.items())
+            or any(template_labels.get(key) != value for key, value in expected_labels.items())
+            or observed_generation < generation
+            or available != replicas
+            or updated != replicas
+            or not uid
+        ):
+            raise DevInstanceRuntimeError(
+                "candidate deployment did not converge to the exact generation",
+            )
+        deployed_images[component] = image
+        evidence.append(
+            {
+                "component": component,
+                "generation": generation,
+                "name": name,
+                "spec_sha256": hashlib.sha256(spec_bytes).hexdigest(),
+                "uid": uid,
+            },
+        )
+    canonical = json.dumps(
+        evidence,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("ascii")
+    return PersonalDevReadinessObservation(
+        deployed_images=deployed_images,
+        resource_evidence_sha256=hashlib.sha256(canonical).hexdigest(),
+    )
 
 
 @dataclass(slots=True)
@@ -1187,4 +1234,5 @@ __all__ = [
     "S3BucketEnsurer",
     "fixture_database_url",
     "instance_database_url",
+    "observe_personal_dev_candidate_generation",
 ]

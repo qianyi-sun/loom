@@ -20,6 +20,7 @@ from testcontainers.postgres import PostgresContainer
 from loom.db.schema import Team, User
 from loom.personal_dev_activation import (
     PersonalDevActivationAcknowledgement,
+    PersonalDevActivationSigner,
     PersonalDevActivationVerifier,
 )
 from loom.personal_dev_candidate import (
@@ -45,6 +46,7 @@ from loom.personal_dev_environment_store import (
     PersonalDevEnvironmentEpochFencedError,
     PersonalDevEnvironmentNotFoundError,
     PersonalDevEnvironmentOperationFencedError,
+    SqlAlchemyPersonalDevActivationIntentReader,
     SqlAlchemyPersonalDevEnvironmentAuthority,
 )
 
@@ -973,8 +975,24 @@ async def test_personal_dev_environment_capacity_and_candidate_updates_are_atomi
             )
             assert activation.acquired is True
             assert activation_retry.acquired is False
-            activation_verifier = PersonalDevActivationVerifier(
+            activation_intent = await SqlAlchemyPersonalDevActivationIntentReader(
+                session,
+            ).next_intent()
+            assert activation_intent is not None
+            assert activation_intent.operation_id == activation.operation.id
+            assert activation_intent.candidate_publication_sha256 == (
+                reconcile_claim.candidate.publication_sha256
+            )
+            assert set(activation_intent.images) == set(PERSONAL_DEV_COMPONENTS)
+            activation_signer = PersonalDevActivationSigner(
                 keys={"personal-dev-agent-v1": b"k" * 32},
+            )
+            activation_verifier = PersonalDevActivationVerifier(
+                keys={
+                    "personal-dev-agent-v1": activation_signer.public_key_bytes(
+                        "personal-dev-agent-v1",
+                    ),
+                },
             )
             activation_acknowledgement = PersonalDevActivationAcknowledgement(
                 environment_name=activation.operation.environment_name,
@@ -993,7 +1011,7 @@ async def test_personal_dev_environment_capacity_and_candidate_updates_are_atomi
             )
             verified_acknowledgement = activation_verifier.verify(
                 activation_acknowledgement,
-                signature=activation_verifier.sign(activation_acknowledgement),
+                signature=activation_signer.sign(activation_acknowledgement),
                 now=now + timedelta(seconds=70),
             )
             acknowledgement = await authority.acknowledge_activation(

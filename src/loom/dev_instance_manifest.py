@@ -125,6 +125,30 @@ def _lifecycle_labels(config: DevInstanceManifestConfig) -> dict[str, str]:
     }
 
 
+def _activation_agent_role_binding(
+    identity: DevInstanceIdentity,
+    config: DevInstanceManifestConfig,
+) -> dict[str, Any]:
+    """Delegate only this namespace to the independently installed activator."""
+    return {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "RoleBinding",
+        "metadata": _metadata("loom-personal-dev-activation-agent", identity, config),
+        "roleRef": {
+            "apiGroup": "rbac.authorization.k8s.io",
+            "kind": "ClusterRole",
+            "name": "loom-personal-dev-activation-agent",
+        },
+        "subjects": [
+            {
+                "kind": "ServiceAccount",
+                "name": "loom-personal-dev-activation-agent",
+                "namespace": "loom-dev",
+            }
+        ],
+    }
+
+
 def _metadata(
     name: str,
     identity: DevInstanceIdentity,
@@ -734,6 +758,11 @@ def dev_instance_manifest_documents(
     }
     preparation: tuple[dict[str, Any], ...] = (
         namespace,
+        *(
+            (_activation_agent_role_binding(identity, config),)
+            if personal_candidate
+            else ()
+        ),
         migration,
         cp,
         _service(

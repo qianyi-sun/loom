@@ -164,6 +164,22 @@ def test_personal_generation_prepares_without_switching_stable_routes() -> None:
         "loom-service-g8",
         "loom-web-g8",
     }
+    role_bindings = [
+        document for document in preparation if document["kind"] == "RoleBinding"
+    ]
+    assert len(role_bindings) == 1
+    assert role_bindings[0]["roleRef"] == {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "ClusterRole",
+        "name": "loom-personal-dev-activation-agent",
+    }
+    assert role_bindings[0]["subjects"] == [
+        {
+            "kind": "ServiceAccount",
+            "name": "loom-personal-dev-activation-agent",
+            "namespace": "loom-dev",
+        }
+    ]
     assert {
         document["metadata"]["name"] for document in preparation if document["kind"] == "Service"
     } == {

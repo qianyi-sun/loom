@@ -1,4 +1,5 @@
 FROM aquasec/trivy@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c AS trivy
+FROM registry.k8s.io/kubectl:v1.36.2@sha256:b0d792e0d8dfb9bb1b922b78b23137e2a34bb6f9667640353a9d2aadd1fd7761 AS kubectl
 
 FROM python:3.11-slim
 # #199: transient PyPI ReadTimeouts during staging rollout builds
@@ -14,6 +15,7 @@ RUN apt-get update -qq && \
       skopeo && \
     rm -rf /var/lib/apt/lists/*
 COPY --from=trivy /usr/local/bin/trivy /usr/local/bin/trivy
+COPY --from=kubectl /bin/kubectl /usr/local/bin/kubectl
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
