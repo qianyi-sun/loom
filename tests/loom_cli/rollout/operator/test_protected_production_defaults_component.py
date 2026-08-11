@@ -255,6 +255,106 @@ def test_defaults_component_rejects_epoch_artifact_and_token_drift(tmp_path: Pat
         authority._read_token(plan)
 
 
+def test_defaults_component_retries_only_retryable_http_rejections(tmp_path: Path) -> None:
+    plan = _plan(tmp_path)
+    responses = iter(
+        (
+            (502, b'{"detail":"upstream unavailable"}'),
+            (503, b'{"detail":"gateway starting"}'),
+            (201, b'{"id":"yibuapi-v1"}'),
+        )
+    )
+    requests: list[str] = []
+    delays: list[float] = []
+
+    def request(**kwargs):
+        requests.append(kwargs["method"])
+        return next(responses)
+
+    authority = KubernetesProtectedProductionDefaultsComponent(
+        runner=Runner({"providers": [], "rate_cards": []}),
+        environment={"KUBECONFIG": "/exact"},
+        service_uid=os.geteuid(),
+        epoch_guard=_epoch(),
+        request=request,
+        sleep=delays.append,
+    )
+
+    assert authority._expect_json(
+        plan,
+        "service-secret",
+        method="POST",
+        path="/api/v1/rate-cards/sync/yibuapi",
+        payload={"group": "default", "source_url": "https://rates.example.invalid"},
+    ) == {"id": "yibuapi-v1"}
+    assert requests == ["POST", "POST", "POST"]
+    assert delays == [1.0, 2.0]
+
+
+def test_defaults_component_rejects_permanent_http_status_without_retry(
+    tmp_path: Path,
+) -> None:
+    plan = _plan(tmp_path)
+    requests = 0
+    delays: list[float] = []
+
+    def request(**_kwargs):
+        nonlocal requests
+        requests += 1
+        return 403, b'{"detail":"forbidden"}'
+
+    authority = KubernetesProtectedProductionDefaultsComponent(
+        runner=Runner({"providers": [], "rate_cards": []}),
+        environment={"KUBECONFIG": "/exact"},
+        service_uid=os.geteuid(),
+        epoch_guard=_epoch(),
+        request=request,
+        sleep=delays.append,
+    )
+
+    with pytest.raises(RuntimeError, match="HTTP 403"):
+        authority._expect_json(
+            plan,
+            "service-secret",
+            method="POST",
+            path="/api/v1/rate-cards/sync/yibuapi",
+            payload={"group": "default", "source_url": "https://rates.example.invalid"},
+        )
+    assert requests == 1
+    assert delays == []
+
+
+def test_defaults_component_bounds_retryable_http_rejections(tmp_path: Path) -> None:
+    plan = _plan(tmp_path)
+    requests = 0
+    delays: list[float] = []
+
+    def request(**_kwargs):
+        nonlocal requests
+        requests += 1
+        return 502, b'{"detail":"upstream unavailable"}'
+
+    authority = KubernetesProtectedProductionDefaultsComponent(
+        runner=Runner({"providers": [], "rate_cards": []}),
+        environment={"KUBECONFIG": "/exact"},
+        service_uid=os.geteuid(),
+        epoch_guard=_epoch(),
+        request=request,
+        sleep=delays.append,
+    )
+
+    with pytest.raises(RuntimeError, match="HTTP 502"):
+        authority._expect_json(
+            plan,
+            "service-secret",
+            method="POST",
+            path="/api/v1/rate-cards/sync/yibuapi",
+            payload={"group": "default", "source_url": "https://rates.example.invalid"},
+        )
+    assert requests == 4
+    assert delays == [1.0, 2.0, 4.0]
+
+
 def test_empty_defaults_are_exact_without_token_or_live_inventory(tmp_path: Path) -> None:
     plan = _published_plan(tmp_path)
     runner = Runner({"providers": [], "rate_cards": []})
