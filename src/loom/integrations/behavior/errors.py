@@ -19,5 +19,13 @@ class BehaviorContractError(ValueError):
     """The persisted document violates the closed BEHAVIOR wire contract."""
 
 
+class BehaviorInterruptedError(Exception):
+    """A supervised adapter received SIGINT or SIGTERM."""
+
+    def __init__(self, signum: int) -> None:
+        self.signum = signum
+        super().__init__(f"BEHAVIOR adapter interrupted by signal {signum}")
+
+
 class CanonicalDocumentError(BehaviorContractError):
     """The input is not the one canonical JCS+LF representation."""

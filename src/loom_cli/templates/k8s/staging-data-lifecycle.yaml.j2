@@ -46,6 +46,8 @@ spec:
                 # headroom from the MinIO admin API over the network instead.
                 - --capacity-source
                 - minio-admin
+                - --expected-drive-count
+                - "{{ topology.minio_replicas }}"
 {% else %}
                 - --capacity-source
                 - filesystem

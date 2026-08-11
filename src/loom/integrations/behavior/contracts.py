@@ -1476,6 +1476,44 @@ class BehaviorRolloutBundlePayloadV1(PipelineModel):
             raise ValueError("rollout required descriptors are not in fixed role order")
         if self.optional_audit_files and self.optional_audit_files[0].role != "predicate_catalog":
             raise ValueError("predicate_catalog is the only optional audit descriptor")
+        task_tag = f"task-{self.behavior_task_id:04d}"
+        expected_paths = [
+            f"payload/trajectories/{task_tag}/{self.demo_stem}.hdf5",
+            f"payload/meta/episodes/{task_tag}/{self.demo_stem}_bddl_transitions.json",
+            f"payload/meta/episodes/{task_tag}/{self.demo_stem}_scene.json",
+            f"payload/videos/{task_tag}/observation.images.rgb.head/{self.demo_stem}.mp4",
+            (
+                f"payload/videos/{task_tag}/observation.images.rgb.left_wrist/"
+                f"{self.demo_stem}.mp4"
+            ),
+            (
+                f"payload/videos/{task_tag}/observation.images.rgb.right_wrist/"
+                f"{self.demo_stem}.mp4"
+            ),
+            "payload/rgb_composite.mp4",
+        ]
+        if [item.relative_path for item in self.required_file_descriptors] != expected_paths:
+            raise ValueError("rollout required descriptor paths drift from the packed identity")
+        expected_media = [
+            "application/x-hdf5",
+            "application/json",
+            "application/json",
+            "video/mp4",
+            "video/mp4",
+            "video/mp4",
+            "video/mp4",
+        ]
+        if [item.media_type for item in self.required_file_descriptors] != expected_media:
+            raise ValueError("rollout required descriptor media types drift")
+        if self.optional_audit_files:
+            expected_optional = (
+                f"payload/meta/episodes/{task_tag}/{self.demo_stem}_predicate_catalog.json"
+            )
+            if (
+                self.optional_audit_files[0].relative_path != expected_optional
+                or self.optional_audit_files[0].media_type != "application/json"
+            ):
+                raise ValueError("predicate_catalog path or media type drift")
         return self
 
 
@@ -1489,6 +1527,8 @@ class BehaviorRolloutBundleArtifactV1(PipelineModel):
     def validate_inventory(self) -> BehaviorRolloutBundleArtifactV1:
         _validate_artifact_files(self.files, label="rollout")
         descriptors = [*self.payload.required_file_descriptors, *self.payload.optional_audit_files]
+        if len({item.relative_path for item in descriptors}) != len(descriptors):
+            raise ValueError("rollout descriptor paths must be unique")
         by_path = {item.relative_path: item for item in self.files}
         if set(by_path) != {item.relative_path for item in descriptors}:
             raise ValueError("rollout descriptors and outer file inventory disagree")
@@ -1500,6 +1540,9 @@ class BehaviorRolloutBundleArtifactV1(PipelineModel):
                 descriptor.media_type,
             ):
                 raise ValueError("rollout descriptor metadata disagrees with outer inventory")
+            expected_required = descriptor.role != "predicate_catalog"
+            if outer.required is not expected_required or outer.name != descriptor.role:
+                raise ValueError("rollout outer file role/required authority drift")
         return self
 
 
