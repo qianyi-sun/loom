@@ -155,9 +155,7 @@ def test_http_transport_binds_profile_token_and_fixed_cp_paths(
     candidate = tmp_path / "candidate"
     profile_path = candidate / "deploy/environment-state/staging.toml"
     profile_path.parent.mkdir(parents=True)
-    profile_path.write_bytes(
-        Path("deploy/environment-state/staging.toml").read_bytes()
-    )
+    profile_path.write_bytes(Path("deploy/environment-state/staging.toml").read_bytes())
     token_path = tmp_path / "admin-token"
     token_path.write_text("admin-secret\n", encoding="ascii")
     token_path.chmod(0o600)
@@ -305,6 +303,20 @@ require_clean_repo = true
 require_worker_token_parity = true
 materialize = true
 env_template = "{template}"
+
+[external_slurm_runner_prerequisites.worker_service_env.gb10]
+LOOM_WORKER_CONTROL_PLANE_URL = "http://192.168.50.103:18081"
+LOOM_WORKER_GATEWAY_URL = "http://192.168.50.103:19100"
+LOOM_WORKER_SUBPROCESS_GATEWAY_URL = "http://192.168.50.103:19100"
+LOOM_WORKER_MINIO_ENDPOINT = "http://192.168.50.103:19000"
+LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO = "192.168.50.103:5443/loom-trial-cache"
+
+[external_slurm_runner_prerequisites.worker_service_env.oldlab]
+LOOM_WORKER_CONTROL_PLANE_URL = "http://192.168.50.103:18081"
+LOOM_WORKER_GATEWAY_URL = "http://192.168.50.103:19100"
+LOOM_WORKER_SUBPROCESS_GATEWAY_URL = "http://192.168.50.103:19100"
+LOOM_WORKER_MINIO_ENDPOINT = "http://192.168.50.103:19000"
+LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO = "192.168.50.103:5443/loom-trial-cache"
 """.strip(),
             )
         )
@@ -399,9 +411,18 @@ env_template = "{template}"
                 env_text = Path(config["env_file"]).read_text(encoding="utf-8")
                 assert "LOOM_WORKER_TOKEN=worker-secret\n" in env_text
                 assert f"LOOM_WORKER_POOL_NAME={policy['pool_name']}\n" in env_text
+                assert "LOOM_WORKER_CONTROL_PLANE_URL=http://192.168.50.103:18081\n" in env_text
+                assert "LOOM_WORKER_GATEWAY_URL=http://192.168.50.103:19100\n" in env_text
                 assert (
-                    "LOOM_WORKER_MAX_CONCURRENT="
-                    f"{config['requested_concurrency']}\n"
+                    "LOOM_WORKER_SUBPROCESS_GATEWAY_URL=http://192.168.50.103:19100\n" in env_text
+                )
+                assert "LOOM_WORKER_MINIO_ENDPOINT=http://192.168.50.103:19000\n" in env_text
+                assert (
+                    "LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO="
+                    "192.168.50.103:5443/loom-trial-cache\n" in env_text
+                )
+                assert (
+                    f"LOOM_WORKER_MAX_CONCURRENT={config['requested_concurrency']}\n"
                 ) in env_text
                 assert (
                     subprocess.run(
@@ -455,7 +476,7 @@ env_template = "{template}"
         env_file = Path(policy["actuator_config"]["env_file"])
         env_file.write_text(
             env_file.read_text(encoding="utf-8").replace(
-                "LOOM_WORKER_MINIO_ENDPOINT=http://control.example:9000",
+                "LOOM_WORKER_MINIO_ENDPOINT=http://192.168.50.103:19000",
                 "LOOM_WORKER_MINIO_ENDPOINT=http://coordinated-drift.example:9000",
             ),
             encoding="utf-8",
@@ -483,7 +504,7 @@ env_template = "{template}"
     gb10_env = Path(profile.autoscaler_policies[0]["actuator_config"]["env_file"])
     gb10_env.write_text(
         gb10_env.read_text(encoding="utf-8").replace(
-            "LOOM_WORKER_MINIO_ENDPOINT=http://control.example:9000",
+            "LOOM_WORKER_MINIO_ENDPOINT=http://192.168.50.103:19000",
             "LOOM_WORKER_MINIO_ENDPOINT=http://hostile.example:9000",
         ),
         encoding="utf-8",
@@ -502,6 +523,8 @@ env_template = "{template}"
         "alternate-token-key",
         "alternate-template",
         "template-glob",
+        "missing-worker-service-env",
+        "drifted-worker-service-env",
     ),
 )
 def test_external_runner_policy_authority_rejects_incomplete_or_static_contracts(
@@ -518,8 +541,17 @@ def test_external_runner_policy_authority_rejects_incomplete_or_static_contracts
         },
         expected_environment="staging",
     )
-    policies = {
-        policy["pool_name"]: policy for policy in profile.autoscaler_policies
+    policies = {policy["pool_name"]: policy for policy in profile.autoscaler_policies}
+    private_service_env = {
+        "LOOM_WORKER_CONTROL_PLANE_URL": "http://192.168.50.103:18081",
+        "LOOM_WORKER_GATEWAY_URL": "http://192.168.50.103:19100",
+        "LOOM_WORKER_SUBPROCESS_GATEWAY_URL": "http://192.168.50.103:19100",
+        "LOOM_WORKER_MINIO_ENDPOINT": "http://192.168.50.103:19000",
+        "LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO": ("192.168.50.103:5443/loom-trial-cache"),
+    }
+    profile.external_slurm_runner_prerequisites["worker_service_env"] = {
+        "gb10": dict(private_service_env),
+        "oldlab": dict(private_service_env),
     }
     if mutation == "missing-oldlab":
         profile.autoscaler_policies.remove(policies["oldlab"])
@@ -542,6 +574,12 @@ def test_external_runner_policy_authority_rejects_incomplete_or_static_contracts
         profile.external_slurm_runner_prerequisites["env_template_glob"] = (
             "/var/lib/loom-staging-rollout/generated/*.env"
         )
+    elif mutation == "missing-worker-service-env":
+        profile.external_slurm_runner_prerequisites.pop("worker_service_env")
+    elif mutation == "drifted-worker-service-env":
+        profile.external_slurm_runner_prerequisites["worker_service_env"]["gb10"][
+            "LOOM_WORKER_CONTROL_PLANE_URL"
+        ] = "http://192.168.50.13:18081"
     else:  # pragma: no cover - closed parametrization
         raise AssertionError(mutation)
 

@@ -180,10 +180,14 @@ _ROLLOUT_PRESETS: dict[str, RolloutPreset] = {
             "/data/loom-staging/backups/latest/backup-manifest.json",
         ),
         rollout_root=Path(_STAGING_DATA_ROOT),
-        admin_token_source=("file:/shared_work/qianyi/loom-worker-capacity/staging-admin-token"),
-        worker_token_source=("file:/shared_work/qianyi/loom-worker-capacity/staging-worker-token"),
+        admin_token_source=(
+            "file:/shared_work/loom/staging-rollout/credentials/staging-admin-token"
+        ),
+        worker_token_source=(
+            "file:/shared_work/loom/staging-rollout/credentials/staging-worker-token"
+        ),
         service_token_source=(
-            "file:/shared_work/qianyi/loom-worker-capacity/staging-service-token"
+            "file:/shared_work/loom/staging-rollout/credentials/staging-service-token"
         ),
         smoke_submit_mode="admin-on-behalf",
         smoke_task_id="loom-smoke/gb10-oracle-hello-world",
@@ -660,9 +664,7 @@ def _read_bounded_nofollow_text(
 
 
 def _cluster_config_is_protected_or_unsafe(path: str) -> bool:
-    known_staging_config = (
-        _REPO_ROOT / "deploy" / "environments" / "staging.multinode.cluster.toml"
-    )
+    known_staging_config = _REPO_ROOT / "deploy" / "environments" / "staging.multinode.cluster.toml"
     try:
         if _lexical_absolute_path(path) == str(known_staging_config):
             return True

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -77,9 +78,7 @@ def test_authority_is_fixed_to_service_identity_and_real_slurm_partition() -> No
         "trt-gb10-15",
         "trt-gb10-16",
     )
-    assert authority.LEGACY_AGENT_NODES == tuple(
-        f"trt-gb10-{number}" for number in range(1, 16)
-    )
+    assert authority.LEGACY_AGENT_NODES == tuple(f"trt-gb10-{number}" for number in range(1, 16))
 
 
 def test_candidate_contract_separates_slurm_nodes_from_retired_agent_nodes(
@@ -88,11 +87,7 @@ def test_candidate_contract_separates_slurm_nodes_from_retired_agent_nodes(
 ) -> None:
     authority = _load_authority()
     candidate_sha = "a" * 40
-    profile = (
-        tmp_path
-        / candidate_sha
-        / "repo/deploy/environment-state/staging.toml"
-    )
+    profile = tmp_path / candidate_sha / "repo/deploy/environment-state/staging.toml"
     profile.parent.mkdir(parents=True)
     profile.write_text(
         """
@@ -148,6 +143,20 @@ materialize = true
 require_external_allocation_authority = true
 pools = ["gb10"]
 
+[external_slurm_runner_prerequisites.worker_service_env.gb10]
+LOOM_WORKER_CONTROL_PLANE_URL = "http://192.168.50.103:18081"
+LOOM_WORKER_GATEWAY_URL = "http://192.168.50.103:19100"
+LOOM_WORKER_SUBPROCESS_GATEWAY_URL = "http://192.168.50.103:19100"
+LOOM_WORKER_MINIO_ENDPOINT = "http://192.168.50.103:19000"
+LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO = "192.168.50.103:5443/loom-trial-cache"
+
+[external_slurm_runner_prerequisites.worker_service_env.oldlab]
+LOOM_WORKER_CONTROL_PLANE_URL = "http://192.168.50.103:18081"
+LOOM_WORKER_GATEWAY_URL = "http://192.168.50.103:19100"
+LOOM_WORKER_SUBPROCESS_GATEWAY_URL = "http://192.168.50.103:19100"
+LOOM_WORKER_MINIO_ENDPOINT = "http://192.168.50.103:19000"
+LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO = "192.168.50.103:5443/loom-trial-cache"
+
 [[external_slurm_autoscaler_supervisors]]
 pool_name = "gb10"
 execution_host = "gx10-01c7"
@@ -161,12 +170,31 @@ active = true
 
     contract = authority._load_contract(candidate_sha, "staging-aaaaaaa")
 
-    assert contract["repo_dir"] == Path(
-        "/shared_work2/loom-staging-rollout/worker-repos/exact"
+    assert contract["repo_dir"] == Path("/shared_work2/loom-staging-rollout/worker-repos/exact")
+    assert contract["env_file"] == Path("/shared_work2/loom-staging-rollout/worker-envs/exact.env")
+
+
+def test_candidate_contract_rejects_retired_worker_service_endpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _load_authority()
+    candidate_sha = "a" * 40
+    profile = tmp_path / candidate_sha / "repo/deploy/environment-state/staging.toml"
+    profile.parent.mkdir(parents=True)
+    payload = Path("deploy/environment-state/staging.toml").read_text(encoding="utf-8")
+    profile.write_text(
+        payload.replace(
+            "http://192.168.50.103:18081",
+            "http://192.168.50.13:18081",
+            1,
+        ),
+        encoding="utf-8",
     )
-    assert contract["env_file"] == Path(
-        "/shared_work2/loom-staging-rollout/worker-envs/exact.env"
-    )
+    monkeypatch.setattr(authority, "CANDIDATE_ROOT", tmp_path)
+
+    with pytest.raises(authority.AcceptanceError, match="prerequisites are incomplete"):
+        authority._load_contract(candidate_sha, "staging-aaaaaaa")
 
 
 def test_authority_runs_real_service_user_allocations_on_each_exact_node() -> None:
@@ -207,6 +235,77 @@ def test_busy_deferral_requires_a_real_busy_node_and_scheduler_error() -> None:
         node_config="NodeName=trt-gb10-1 CPUAlloc=20 AllocMem=115000 State=ALLOCATED ",
         result=unrelated,
     )
+
+
+def test_allocation_probe_requires_candidate_registry_pull_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _load_authority()
+    candidate_sha = "a" * 40
+    repo = Path("/shared_work2/loom-staging-rollout/worker-repos/exact")
+    env_file = Path("/shared_work2/loom-staging-rollout/worker-envs/exact.env")
+    monkeypatch.setattr(authority, "SLURM_NODES", ("trt-gb10-1",))
+    commands: list[list[str]] = []
+
+    def _run(
+        argv: list[str],
+        *,
+        timeout: float = 30,
+        check: bool = True,
+    ) -> subprocess.CompletedProcess[str]:
+        del timeout, check
+        commands.append(argv)
+        if argv[:4] == ["/usr/bin/scontrol", "show", "node", "trt-gb10-1"]:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=("NodeName=trt-gb10-1 CPUAlloc=0 AllocMem=0 State=IDLE Partitions=gb10 "),
+                stderr="",
+            )
+        if "/usr/bin/squeue" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if "srun" in argv:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=json.dumps(
+                    {
+                        "candidate_sha": candidate_sha,
+                        "node": "trt-gb10-1",
+                        "trial_cache_registry": {
+                            "ca_sha256": authority.TRIAL_CACHE_CA_SHA256,
+                            "registry_image": (
+                                f"{authority.TRIAL_CACHE_REGISTRY_REPO}:"
+                                f"{authority.TRIAL_CACHE_CANARY_TAG}"
+                            ),
+                            "repo_digest": (
+                                f"{authority.TRIAL_CACHE_REGISTRY_REPO}@"
+                                f"{authority.TRIAL_CACHE_CANARY_DIGEST}"
+                            ),
+                        },
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                stderr="",
+            )
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(authority, "_run", _run)
+
+    passed, deferred = authority._probe_nodes(
+        candidate_sha,
+        {"repo_dir": repo, "env_file": env_file},
+    )
+
+    assert passed == ["trt-gb10-1"]
+    assert deferred == []
+    srun = next(command for command in commands if "srun" in command)
+    assert str(repo / "scripts/ops/staging_trial_cache_registry_node_probe.py") in srun
+    assert str(repo / "deploy/worker-pools/trial-cache/staging-ca.crt") in srun
+    assert authority.TRIAL_CACHE_REGISTRY_REPO in srun
+    assert authority.TRIAL_CACHE_CA_SHA256 in srun
+    assert authority.TRIAL_CACHE_CANARY_DIGEST in srun
 
 
 def test_authority_binds_candidate_profile_repo_env_and_short_expiry() -> None:

@@ -28,6 +28,7 @@ from loom_cli.rollout.steps.s10_env_state import (
     _control_plane_health_url,
     _materialize_external_slurm_runner_prerequisites,
     _materialize_repo_dir,
+    _pool_worker_service_env,
     _verify_external_slurm_runner_consumers,
     _wait_for_control_plane,
 )
@@ -53,7 +54,14 @@ def _write_external_prereq_profile(
     env_file: Path,
     repo_dir: Path,
     template_glob: str,
+    worker_service_env: dict[str, str] | None = None,
 ) -> Path:
+    worker_service_env_section = ""
+    if worker_service_env is not None:
+        rendered = "\n".join(f'{key} = "{value}"' for key, value in worker_service_env.items())
+        worker_service_env_section = (
+            f"\n[external_slurm_runner_prerequisites.worker_service_env.gb10]\n{rendered}\n"
+        )
     profile = tmp_path / "staging.toml"
     profile.write_text(
         f"""
@@ -79,6 +87,7 @@ require_clean_repo = true
 require_worker_token_parity = true
 materialize = true
 env_template_glob = "{template_glob}"
+{worker_service_env_section}
 """,
         encoding="utf-8",
     )
@@ -139,6 +148,7 @@ def _consumer_verification_fixture(
     malicious.write_text("print('forged')\n", encoding="utf-8")
     shared_gid = os.getegid()
     monkeypatch.setattr(env_state_module, "_SHARED_WORKER_REPO_ROOT", shared_root)
+
     def service_identity(name: str) -> SimpleNamespace:
         if name != "loom-rollout":
             raise KeyError(name)
@@ -558,6 +568,207 @@ def test_materializes_external_slurm_env_file_without_secret_evidence(
     assert "old-worker-token" not in evidence
     assert "keep-secret" not in evidence
     assert json.loads(evidence)["records"][0]["worker_token"] == "[REDACTED]"
+
+
+def test_materialization_applies_pool_service_endpoints_without_changing_secrets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEST_WORKER_TOKEN", "current-worker-token")
+    template = tmp_path / "capacity" / "staging-gb10-worker-staging-old.env"
+    template.parent.mkdir()
+    template.write_text(_complete_worker_env_text(), encoding="utf-8")
+    template.chmod(0o600)
+    target_env = template.parent / "staging-gb10-worker-staging-current.env"
+    profile = _write_external_prereq_profile(
+        tmp_path,
+        env_file=target_env,
+        repo_dir=tmp_path / "repo",
+        template_glob=str(template.parent / "staging-gb10-worker-staging-*.env"),
+        worker_service_env={
+            "LOOM_WORKER_CONTROL_PLANE_URL": "http://192.168.50.103:18081",
+            "LOOM_WORKER_GATEWAY_URL": "http://192.168.50.103:19100",
+            "LOOM_WORKER_SUBPROCESS_GATEWAY_URL": "http://192.168.50.103:19100",
+            "LOOM_WORKER_MINIO_ENDPOINT": "http://192.168.50.103:19000",
+            "LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO": ("192.168.50.103:5443/loom-trial-cache"),
+        },
+    )
+    ctx = make_ctx(
+        tmp_path,
+        image_tag="staging-current",
+        worker_token_source="env:TEST_WORKER_TOKEN",
+    )
+    evidence = EvidenceDirectory(tmp_path, "test-rid")
+    evidence.ensure()
+    step_dir = evidence.step_dir(11, "env-state")
+
+    def fake_repo_materializer(*, repo_dir: Path, **_: Any) -> dict[str, Any]:
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        return {
+            "repo_dir": str(repo_dir),
+            "repo_action": "created",
+            "repo_head": ctx.resolved_sha,
+            "repo_status": "clean",
+        }
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.steps.s10_env_state._materialize_repo_dir",
+        fake_repo_materializer,
+    )
+
+    _materialize_external_slurm_runner_prerequisites(ctx, profile, step_dir)
+
+    rendered = target_env.read_text(encoding="utf-8")
+    assert "LOOM_WORKER_CONTROL_PLANE_URL=http://192.168.50.103:18081\n" in rendered
+    assert "LOOM_WORKER_GATEWAY_URL=http://192.168.50.103:19100\n" in rendered
+    assert "LOOM_WORKER_SUBPROCESS_GATEWAY_URL=http://192.168.50.103:19100\n" in rendered
+    assert "LOOM_WORKER_MINIO_ENDPOINT=http://192.168.50.103:19000\n" in rendered
+    assert (
+        "LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO=192.168.50.103:5443/loom-trial-cache\n" in rendered
+    )
+    assert "LOOM_WORKER_TOKEN=current-worker-token\n" in rendered
+    assert "LOOM_WORKER_MINIO_ACCESS_KEY=keep-access\n" in rendered
+    assert "LOOM_WORKER_MINIO_SECRET_KEY=keep-secret\n" in rendered
+
+
+@pytest.mark.parametrize(
+    ("settings", "match"),
+    (
+        ({"worker_service_env": []}, "must be a table"),
+        ({"worker_service_env": {"gb10": []}}, "gb10 must be a table"),
+        (
+            {
+                "worker_service_env": {
+                    "gb10": {
+                        "LOOM_WORKER_CONTROL_PLANE_URL": "http://192.168.50.103:18081",
+                    }
+                }
+            },
+            "invalid keys",
+        ),
+        (
+            {
+                "worker_service_env": {
+                    "gb10": {
+                        "LOOM_WORKER_CONTROL_PLANE_URL": "http://192.168.50.103:18081",
+                        "LOOM_WORKER_GATEWAY_URL": "http://192.168.50.103:19100",
+                        "LOOM_WORKER_MINIO_ENDPOINT": "http://192.168.50.103:19000",
+                        "UNREVIEWED_ENDPOINT": "http://192.168.50.103:1",
+                    }
+                }
+            },
+            "invalid keys",
+        ),
+        (
+            {
+                "worker_service_env": {
+                    "gb10": {
+                        "LOOM_WORKER_CONTROL_PLANE_URL": 18081,
+                        "LOOM_WORKER_GATEWAY_URL": "http://192.168.50.103:19100",
+                        "LOOM_WORKER_MINIO_ENDPOINT": "http://192.168.50.103:19000",
+                    }
+                }
+            },
+            "values must be URLs",
+        ),
+        (
+            {
+                "worker_service_env": {
+                    "gb10": {
+                        "LOOM_WORKER_CONTROL_PLANE_URL": "ftp://192.168.50.103:18081",
+                        "LOOM_WORKER_GATEWAY_URL": "http://192.168.50.103:19100",
+                        "LOOM_WORKER_MINIO_ENDPOINT": "http://192.168.50.103:19000",
+                    }
+                }
+            },
+            "private HTTP URLs",
+        ),
+        (
+            {
+                "worker_service_env": {
+                    "gb10": {
+                        "LOOM_WORKER_CONTROL_PLANE_URL": "http://user@192.168.50.103:18081",
+                        "LOOM_WORKER_GATEWAY_URL": "http://192.168.50.103:19100",
+                        "LOOM_WORKER_MINIO_ENDPOINT": "http://192.168.50.103:19000",
+                    }
+                }
+            },
+            "private HTTP URLs",
+        ),
+        (
+            {
+                "worker_service_env": {
+                    "gb10": {
+                        "LOOM_WORKER_CONTROL_PLANE_URL": "http://192.168.50.103:18081?token=unsafe",
+                        "LOOM_WORKER_GATEWAY_URL": "http://192.168.50.103:19100",
+                        "LOOM_WORKER_MINIO_ENDPOINT": "http://192.168.50.103:19000",
+                    }
+                }
+            },
+            "private HTTP URLs",
+        ),
+        (
+            {
+                "worker_service_env": {
+                    "gb10": {
+                        "LOOM_WORKER_CONTROL_PLANE_URL": "http://192.168.50.103:18081\nINJECTED=1",
+                        "LOOM_WORKER_GATEWAY_URL": "http://192.168.50.103:19100",
+                        "LOOM_WORKER_MINIO_ENDPOINT": "http://192.168.50.103:19000",
+                    }
+                }
+            },
+            "single-line",
+        ),
+        (
+            {
+                "worker_service_env": {
+                    "gb10": {
+                        "LOOM_WORKER_CONTROL_PLANE_URL": "http://192.168.50.103:18081",
+                        "LOOM_WORKER_GATEWAY_URL": "http://192.168.50.103:19100",
+                        "LOOM_WORKER_MINIO_ENDPOINT": "http://192.168.50.103:19000",
+                        "LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO": (
+                            "http://192.168.50.103:5000/loom-trial-cache"
+                        ),
+                    }
+                }
+            },
+            "registry repository",
+        ),
+        (
+            {
+                "worker_service_env": {
+                    "gb10": {
+                        "LOOM_WORKER_CONTROL_PLANE_URL": "http://192.168.50.103:18081",
+                        "LOOM_WORKER_GATEWAY_URL": "http://192.168.50.103:19100",
+                        "LOOM_WORKER_MINIO_ENDPOINT": "http://192.168.50.103:19000",
+                        "LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO": (
+                            "192.168.50.103:99999/loom-trial-cache"
+                        ),
+                    }
+                }
+            },
+            "registry repository",
+        ),
+        (
+            {
+                "worker_service_env": {
+                    "gb10": {
+                        "LOOM_WORKER_CONTROL_PLANE_URL": "http://192.168.50.103:99999",
+                        "LOOM_WORKER_GATEWAY_URL": "http://192.168.50.103:19100",
+                        "LOOM_WORKER_MINIO_ENDPOINT": "http://192.168.50.103:19000",
+                    }
+                }
+            },
+            "private HTTP URLs",
+        ),
+    ),
+)
+def test_pool_worker_service_env_rejects_malformed_contracts(
+    settings: dict[str, Any],
+    match: str,
+) -> None:
+    with pytest.raises(ExternalSlurmPrereqMaterializationError, match=match):
+        _pool_worker_service_env(settings, pool_name="gb10")
 
 
 def test_materialization_rejects_symlinked_private_env_template(

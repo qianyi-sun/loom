@@ -54,9 +54,21 @@ candidate material and controlled evidence transfer.
 
 Workers reach the staging Control Plane, Gateway, and MinIO through private
 managed endpoints. Public ingress remains limited to the SPA and service API.
-The generated worker environment carries the exact URLs; subprocess agents
-receive the adapter-specific Gateway facade derived from the configured
-sandbox-facing base URL.
+The candidate-owned generated worker environment pins both worker processes
+and Docker bridge containers to OLDLAB-1's private fleet forwards and TLS
+trial-cache registry:
+
+```text
+LOOM_WORKER_CONTROL_PLANE_URL=http://192.168.50.103:18081
+LOOM_WORKER_GATEWAY_URL=http://192.168.50.103:19100
+LOOM_WORKER_SUBPROCESS_GATEWAY_URL=http://192.168.50.103:19100
+LOOM_WORKER_MINIO_ENDPOINT=http://192.168.50.103:19000
+LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO=192.168.50.103:5443/loom-trial-cache
+```
+
+Subprocess agents receive the adapter-specific Gateway facade derived from
+that sandbox-facing base URL. Node-local loopback tunnels, host networking,
+and `host.docker.internal` are not part of the staging GB10 contract.
 
 Do not install ad hoc tunnels or place `HF_TOKEN` on nodes. The protected
 rollout checks durable tunnel units, candidate/source identity, token parity,
@@ -101,8 +113,9 @@ loom-staging-rollout --env staging status REQUEST_ID
 Acceptance requires the full declared inventory, current host health/resource
 observations, linked worker registrations for active Slurm allocations,
 candidate SHA and environment version parity, Docker backend identity, tunnel
-health, and a representative ARM64 trial. A missing or unhealthy host remains
-visible in evidence; resource pressure alone is not a trust revocation.
+health, an exact TLS registry canary pull from every allocatable node, and a
+representative ARM64 trial. A missing or unhealthy host remains visible in
+evidence; resource pressure alone is not a trust revocation.
 
 ## Maintenance
 

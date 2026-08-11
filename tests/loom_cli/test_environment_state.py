@@ -2272,7 +2272,7 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
     assert "LOOM_CATALOG_SOURCE_" not in command
     assert (
         profile.catalog_provisioning["env_file"]
-        == "/shared_work/qianyi/loom-worker-capacity/staging-catalog-provisioning.env"
+        == "/shared_work/loom/staging-rollout/credentials/staging-catalog-provisioning.env"
     )
     assert profile.catalog_provisioning["env"] == {
         "PUBLISHED_SHA": "79087002d62bb22169a704bc941c8d614082d880",

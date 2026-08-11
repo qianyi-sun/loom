@@ -1,0 +1,19 @@
+[Unit]
+Description=Loom staging TLS trial-cache registry
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=-/usr/bin/docker rm --force loom-trial-cache-registry-tls
+ExecStartPre=-/usr/bin/docker rm --force loom-staging-trial-cache-registry
+ExecStart=/usr/bin/docker run --rm --name loom-staging-trial-cache-registry --publish 192.168.50.103:5443:5000 --mount type=bind,source=/data/loom-staging/registry,target=/var/lib/registry --mount type=bind,source=/etc/loom/staging-trial-cache-registry,target=/run/loom-registry-tls,readonly --env REGISTRY_HTTP_TLS_CERTIFICATE=/run/loom-registry-tls/server.crt --env REGISTRY_HTTP_TLS_KEY=/run/loom-registry-tls/server.key registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+ExecStop=-/usr/bin/docker stop --time 20 loom-staging-trial-cache-registry
+Restart=always
+RestartSec=5
+TimeoutStartSec=0
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

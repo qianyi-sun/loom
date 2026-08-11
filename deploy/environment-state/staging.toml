@@ -123,7 +123,7 @@ max_jobs = 3
 pending_job_cap = 1
 time_limit = "2-00:00:00"
 # Resource-aware admission preserves headroom for k3s, MinIO, Longhorn, and the
-# isolated CI runner pool before it asks Slurm for the single dynamic lease.
+# isolated CI runner pool before it asks Slurm for up to three dynamic leases.
 resource_aware = true
 cpu_per_slot = 2
 memory_mib_per_slot = 8192
@@ -169,7 +169,7 @@ LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS = "7200"
 [catalog_provisioning]
 required = true
 command = "loom datasets register skilllearnbench --hf-org PRHW --revision \"$PUBLISHED_SHA\" --mirror-to-object-store --bucket loom-benchmarks --registered-by catalog-provision && loom datasets publish-local deploy/catalog/gb10-smoke --bucket loom-benchmarks --imported-by catalog-provision && loom datasets audit --all --verify-bundles"
-env_file = "/shared_work/qianyi/loom-worker-capacity/staging-catalog-provisioning.env"
+env_file = "/shared_work/loom/staging-rollout/credentials/staging-catalog-provisioning.env"
 required_env = [
   "PUBLISHED_SHA",
   "HF_TOKEN",
@@ -207,6 +207,23 @@ require_worker_token_parity = true
 materialize = true
 require_external_allocation_authority = true
 env_template = "/var/lib/loom-staging-rollout/generated/staging-gb10-worker-staging-bootstrap.env"
+
+# Worker containers in both Slurm pools reach the OLDLAB-1 private fleet
+# forwards directly. Keep these non-secret endpoints candidate-owned so a
+# retired address in the protected credential template cannot be republished.
+[external_slurm_runner_prerequisites.worker_service_env.gb10]
+LOOM_WORKER_CONTROL_PLANE_URL = "http://192.168.50.103:18081"
+LOOM_WORKER_GATEWAY_URL = "http://192.168.50.103:19100"
+LOOM_WORKER_SUBPROCESS_GATEWAY_URL = "http://192.168.50.103:19100"
+LOOM_WORKER_MINIO_ENDPOINT = "http://192.168.50.103:19000"
+LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO = "192.168.50.103:5443/loom-trial-cache"
+
+[external_slurm_runner_prerequisites.worker_service_env.oldlab]
+LOOM_WORKER_CONTROL_PLANE_URL = "http://192.168.50.103:18081"
+LOOM_WORKER_GATEWAY_URL = "http://192.168.50.103:19100"
+LOOM_WORKER_SUBPROCESS_GATEWAY_URL = "http://192.168.50.103:19100"
+LOOM_WORKER_MINIO_ENDPOINT = "http://192.168.50.103:19000"
+LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO = "192.168.50.103:5443/loom-trial-cache"
 
 # --- External autoscaler supervisor (systemd --user timer) -------------------
 # Renders a `systemctl --user` service+timer that periodically runs

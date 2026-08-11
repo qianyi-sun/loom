@@ -60,6 +60,15 @@ class _OrphanCleanupSettings:
     token = _Secret()
 
 
+def _healthy_setup_node() -> NodeHealthSnapshot:
+    return NodeHealthSnapshot(
+        io_full_avg10=0.0,
+        swap_total_mb=0,
+        swap_free_mb=0,
+        d_state_processes=0,
+    )
+
+
 def test_blocking_io_worker_count_defaults_from_trial_concurrency() -> None:
     assert (
         ml._resolve_blocking_io_max_workers(  # type: ignore[attr-defined]
@@ -428,6 +437,7 @@ async def test_claim_cycle_fills_available_pool_capacity(monkeypatch) -> None:  
         vllm_registry=WorkerVLLMRegistry(enabled=False),
         sandbox_allocator=None,
         sandbox_singleton=None,
+        read_setup_health=_healthy_setup_node,
     )
 
     assert claimed == 3
@@ -450,6 +460,7 @@ async def test_claim_cycle_treats_control_plane_transport_error_as_no_claim() ->
         vllm_registry=WorkerVLLMRegistry(enabled=False),
         sandbox_allocator=None,
         sandbox_singleton=None,
+        read_setup_health=_healthy_setup_node,
     )
 
     assert claimed == 0

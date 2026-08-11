@@ -733,29 +733,24 @@ def _write_protected_inputs(filesystem: host.LocalFilesystem) -> None:
     for index, path in enumerate(host.PROTECTED_INPUTS):
         mapped = filesystem.path(path)
         mapped.parent.mkdir(parents=True, exist_ok=True)
-        mapped.write_bytes(b"admin-token-fixture\n" if index == 0 else f"value-{index}\n".encode())
+        if path == host.PROTECTED_GB10_ENV_TEMPLATE:
+            payload = "\n".join(
+                [
+                    "LOOM_WORKER_CONTROL_PLANE_URL=http://control.example:8080",
+                    "LOOM_WORKER_GATEWAY_URL=http://control.example:9100",
+                    "LOOM_WORKER_TOKEN=legacy-worker-token",
+                    "LOOM_WORKER_MINIO_ENDPOINT=http://control.example:9000",
+                    "LOOM_WORKER_MINIO_ACCESS_KEY=minio-access",
+                    "LOOM_WORKER_MINIO_SECRET_KEY=minio-secret",
+                    "",
+                ]
+            ).encode()
+        else:
+            payload = b"admin-token-fixture\n" if index == 0 else f"value-{index}\n".encode()
+        mapped.write_bytes(payload)
         mapped.chmod(0o640)
     for path in host.DATA_DIRECTORIES:
         filesystem.ensure_directory(path, 0o770)
-    legacy_template = filesystem.path(
-        host.LEGACY_GB10_ENV_ROOT / "staging-gb10-worker-staging-previous.env"
-    )
-    legacy_template.parent.mkdir(parents=True, exist_ok=True)
-    legacy_template.write_text(
-        "\n".join(
-            [
-                "LOOM_WORKER_CONTROL_PLANE_URL=http://control.example:8080",
-                "LOOM_WORKER_GATEWAY_URL=http://control.example:9100",
-                "LOOM_WORKER_TOKEN=legacy-worker-token",
-                "LOOM_WORKER_MINIO_ENDPOINT=http://control.example:9000",
-                "LOOM_WORKER_MINIO_ACCESS_KEY=minio-access",
-                "LOOM_WORKER_MINIO_SECRET_KEY=minio-secret",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    legacy_template.chmod(0o600)
 
 
 def _installer(tmp_path: Path) -> tuple[host.HostInstaller, FakeSystem]:
@@ -763,6 +758,45 @@ def _installer(tmp_path: Path) -> tuple[host.HostInstaller, FakeSystem]:
     _write_protected_inputs(filesystem)
     system = FakeSystem(filesystem)
     return host.HostInstaller(filesystem, system, 0), system  # type: ignore[arg-type]
+
+
+def test_plan_publishes_only_service_owned_protected_inputs(tmp_path: Path) -> None:
+    installer, _ = _installer(tmp_path)
+
+    plan = installer.plan()
+
+    protected_root = Path("/shared_work/loom/staging-rollout/credentials")
+    assert plan["protected_inputs"] == [
+        str(protected_root / "staging-admin-token"),
+        str(protected_root / "staging-service-token"),
+        str(protected_root / "staging-worker-token"),
+        str(protected_root / "staging-taskset-fence-canary-token"),
+        str(protected_root / "staging-catalog-provisioning.env"),
+        str(protected_root / "staging-gb10-worker-staging-bootstrap.env"),
+    ]
+
+
+def test_first_install_bootstraps_worker_env_from_fixed_protected_input(
+    tmp_path: Path,
+) -> None:
+    installer, _ = _installer(tmp_path)
+    protected_source = installer.filesystem.path(
+        Path(
+            "/shared_work/loom/staging-rollout/credentials/"
+            "staging-gb10-worker-staging-bootstrap.env"
+        )
+    )
+    protected_source.parent.mkdir(parents=True, exist_ok=True)
+    protected_payload = installer.filesystem.read_bytes(host.PROTECTED_GB10_ENV_TEMPLATE).replace(
+        b"LOOM_WORKER_MINIO_ENDPOINT=http://control.example:9000",
+        b"LOOM_WORKER_MINIO_ENDPOINT=http://service-owned.example:9000",
+    )
+    protected_source.write_bytes(protected_payload)
+    protected_source.chmod(0o640)
+
+    installer.install(TEAM_ID)
+
+    assert installer.filesystem.read_bytes(host.GENERATED_GB10_ENV_SEED) == protected_payload
 
 
 def test_atomic_write_retries_parent_fsync_after_replace_was_not_durable(
@@ -833,8 +867,7 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
     assert f'runner_repo = "{candidate_repo}"' in rendered
     assert (
         f'cluster_config_path = "{candidate_repo}/deploy/environments/'
-        'staging.multinode.cluster.toml"'
-        in rendered
+        'staging.multinode.cluster.toml"' in rendered
     )
     assert system.runtime_venvs == {candidate_venv}
     for path in (
@@ -1372,9 +1405,7 @@ class SharedWorkerRepoRunner:
                         "authority_inode": 3,
                         "repository_device": 1,
                         "repository_inode": 4,
-                        "service_capability": (
-                            "parent-writable;repository-writable-searchable"
-                        ),
+                        "service_capability": ("parent-writable;repository-writable-searchable"),
                         "consumer_capability": ("repository-readable-searchable-not-writable"),
                         "publication_capability": "private-mkdir-publish-verified",
                         "mount": mount_report,
@@ -1579,45 +1610,33 @@ def test_worker_env_validation_allows_literal_dollar_value() -> None:
     host._validate_gb10_env_payload(payload)
 
 
-def test_install_fails_closed_when_no_legacy_or_generated_worker_env_exists(
+def test_install_fails_closed_when_no_protected_or_generated_worker_env_exists(
     tmp_path: Path,
 ) -> None:
     installer, _ = _installer(tmp_path)
-    installer.filesystem.path(
-        host.LEGACY_GB10_ENV_ROOT / "staging-gb10-worker-staging-previous.env"
-    ).unlink()
+    installer.filesystem.path(host.PROTECTED_GB10_ENV_TEMPLATE).unlink()
 
-    with pytest.raises(host.InstallError, match="legacy GB10 worker env template"):
+    with pytest.raises(host.InstallError, match="required protected file"):
         installer.install(TEAM_ID)
 
-    record = installer.filesystem.load_install_record()
-    assert record is not None
-    assert record["installation_state"] == "installing"
-    assert record["admission_enabled"] is False
+    assert installer.filesystem.load_install_record() is None
     assert not installer.filesystem.exists(host.SUDOERS_PATH)
 
 
-def test_reinstall_preserves_private_template_without_legacy_source(tmp_path: Path) -> None:
+def test_reinstall_requires_protected_worker_env_source(tmp_path: Path) -> None:
     installer, _ = _installer(tmp_path)
     installer.install(TEAM_ID)
-    private_before = installer.filesystem.read_bytes(host.GENERATED_GB10_ENV_SEED)
-    installer.filesystem.path(
-        host.LEGACY_GB10_ENV_ROOT / "staging-gb10-worker-staging-previous.env"
-    ).unlink()
+    installer.filesystem.path(host.PROTECTED_GB10_ENV_TEMPLATE).unlink()
 
-    result = installer.install(TEAM_ID)
-
-    assert result["changed"] == []
-    assert installer.filesystem.read_bytes(host.GENERATED_GB10_ENV_SEED) == private_before
+    with pytest.raises(host.InstallError, match="required protected file"):
+        installer.install(TEAM_ID)
 
 
-def test_install_rejects_unsafe_legacy_worker_env_without_copying_secrets(
+def test_install_rejects_unsafe_protected_worker_env_without_copying_secrets(
     tmp_path: Path,
 ) -> None:
     installer, _ = _installer(tmp_path)
-    source = installer.filesystem.path(
-        host.LEGACY_GB10_ENV_ROOT / "staging-gb10-worker-staging-previous.env"
-    )
+    source = installer.filesystem.path(host.PROTECTED_GB10_ENV_TEMPLATE)
     source.chmod(0o622)
 
     with pytest.raises(host.InstallError, match="metadata is unsafe"):
@@ -1699,9 +1718,9 @@ def test_reinstall_never_promotes_unattested_generated_worker_env(
         host.GENERATED_ROOT / "staging-gb10-worker-staging-unattested.env"
     )
     alternate.write_text(
-        installer.filesystem.read_bytes(
-            host.LEGACY_GB10_ENV_ROOT / "staging-gb10-worker-staging-previous.env"
-        ).decode("utf-8").replace(
+        installer.filesystem.read_bytes(host.PROTECTED_GB10_ENV_TEMPLATE)
+        .decode("utf-8")
+        .replace(
             "LOOM_WORKER_MINIO_ENDPOINT=http://control.example:9000",
             "LOOM_WORKER_MINIO_ENDPOINT=http://unattested-minio:9000",
         ),
@@ -1717,7 +1736,7 @@ def test_reinstall_never_promotes_unattested_generated_worker_env(
     assert system.maintenance is True
 
 
-def test_upgrade_from_legacy_attestation_reimports_only_legacy_worker_env(
+def test_upgrade_from_legacy_attestation_reimports_only_protected_worker_env(
     tmp_path: Path,
 ) -> None:
     installer, _ = _installer(tmp_path)
@@ -1739,18 +1758,14 @@ def test_upgrade_from_legacy_attestation_reimports_only_legacy_worker_env(
         encoding="utf-8",
     )
     template.chmod(0o600)
-    legacy = installer.filesystem.read_bytes(
-        host.LEGACY_GB10_ENV_ROOT / "staging-gb10-worker-staging-previous.env"
-    )
+    protected = installer.filesystem.read_bytes(host.PROTECTED_GB10_ENV_TEMPLATE)
 
     result = installer.install(TEAM_ID)
 
     assert result["ok"] is True
-    assert installer.filesystem.read_bytes(host.GENERATED_GB10_ENV_SEED) == legacy
+    assert installer.filesystem.read_bytes(host.GENERATED_GB10_ENV_SEED) == protected
     upgraded = json.loads(installer.filesystem.read_bytes(host.INSTALL_ATTESTATION))
-    assert upgraded["asset_sha256"]["worker-env-template"] == hashlib.sha256(
-        legacy
-    ).hexdigest()
+    assert upgraded["asset_sha256"]["worker-env-template"] == hashlib.sha256(protected).hexdigest()
 
 
 def test_reinstall_rejects_worker_env_drift_before_attestation_publication(
@@ -5236,6 +5251,173 @@ def _fake_snapshot_plan(path: Path, *, service_preexisting: bool = False) -> hos
         after_acl=adjustment.after_acl,
         snapshot_adjustment=adjustment,
     )
+
+
+_RETIRED_PROTECTED_LEAF_NAMES = (
+    "staging-admin-token",
+    "staging-service-token",
+    "staging-worker-token",
+    "staging-taskset-fence-canary-token",
+    "staging-catalog-provisioning.env",
+)
+
+
+def _retired_protected_acl_scope(root: Path) -> set[host.AclGrant]:
+    return {
+        host.AclGrant(path)
+        for path in (
+            *root.parents[:-1],
+            root,
+            *(root / name for name in _RETIRED_PROTECTED_LEAF_NAMES),
+        )
+    }
+
+
+def test_retired_protected_acl_scope_requires_exact_leaves_and_ancestor_chain() -> None:
+    retired_root = Path("/shared_work") / "retired-operator" / "loom-worker-capacity"
+    retired_scope = _retired_protected_acl_scope(retired_root)
+    raw_grants = [grant.to_dict() for grant in retired_scope]
+    record: dict[str, object] = {
+        "schema_version": 3,
+        "added_acls": raw_grants,
+    }
+    nested_current_scope = _retired_protected_acl_scope(
+        Path("/shared_work/loom/staging-rollout/credentials/retired")
+    )
+
+    assert host.HostInstaller._record_grants(record) == retired_scope
+
+    invalid_ledgers = (
+        raw_grants[:-1],
+        [value for value in raw_grants if value["path"] != str(retired_root.parent)],
+        [*raw_grants, {"path": str(retired_root / "unexpected-token"), "default": False}],
+        [grant.to_dict() for grant in nested_current_scope],
+        [
+            *raw_grants,
+            {
+                "path": str(
+                    Path("/shared_work")
+                    / "another-retired-operator"
+                    / "loom-worker-capacity"
+                    / _RETIRED_PROTECTED_LEAF_NAMES[0]
+                ),
+                "default": False,
+            },
+        ],
+    )
+    for invalid in invalid_ledgers:
+        with pytest.raises(host.InstallError, match="ACL ledger"):
+            host.HostInstaller._record_grants({"schema_version": 3, "added_acls": invalid})
+
+
+def test_install_migrates_interrupted_retired_protected_acl_ledger_only_after_current_acls(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    previous = installer.filesystem.load_install_record()
+    assert previous is not None
+
+    retired_root = Path("/shared_work") / "retired-operator" / "loom-worker-capacity"
+    retired_leaves = tuple(retired_root / name for name in _RETIRED_PROTECTED_LEAF_NAMES)
+    retired_scope = _retired_protected_acl_scope(retired_root)
+    current_scope = host.HostInstaller._managed_acl_scope()
+    retired_only_scope = retired_scope - current_scope
+    data_grants = {
+        grant
+        for grant in host.HostInstaller._record_grants(previous)
+        if grant.path in host.DATA_DIRECTORIES
+    }
+    retired_snapshots = tuple(_fake_snapshot_plan(path) for path in retired_leaves[:3])
+    previous["added_acls"] = [
+        grant.to_dict()
+        for grant in sorted(
+            data_grants | retired_scope,
+            key=lambda item: (str(item.path), item.default),
+        )
+    ]
+    previous["acl_snapshot_adjustments"] = [
+        plan.snapshot_adjustment.to_dict()
+        for plan in retired_snapshots
+        if plan.snapshot_adjustment is not None
+    ]
+    installer.filesystem.atomic_write(
+        host.INSTALL_RECORD,
+        (json.dumps(previous, sort_keys=True) + "\n").encode(),
+        0o600,
+    )
+    system.input_acls = {grant.path for grant in retired_scope}
+    system.acl_adjustment_states = {plan.grant: "after" for plan in retired_snapshots}
+
+    events: list[tuple[str, host.AclGrant]] = []
+    original_apply = system.apply_acl
+    original_remove = system.remove_acl
+    interrupted = False
+
+    def record_apply(plan: host.AclPlan) -> host.AclGrant:
+        provisional = installer.filesystem.load_install_record()
+        assert provisional is not None
+        assert provisional["installation_state"] == "installing"
+        provisional_grants = {host.AclGrant.from_dict(value) for value in provisional["added_acls"]}
+        assert retired_only_scope <= provisional_grants
+        assert {host.AclGrant(path) for path in host.PROTECTED_INPUTS} <= provisional_grants
+        events.append(("apply", plan.grant))
+        return original_apply(plan)
+
+    def interrupt_after_retired_snapshot_restoration(
+        grant: host.AclGrant,
+        adjustment: host.AclMaskAdjustment | host.AclSnapshotAdjustment | None = None,
+        *,
+        remove_service_entry: bool = True,
+    ) -> None:
+        nonlocal interrupted
+        if not any(event == "remove" for event, _ in events):
+            assert events and all(event == "apply" for event, _ in events)
+        events.append(("remove", grant))
+        original_remove(
+            grant,
+            adjustment,
+            remove_service_entry=remove_service_entry,
+        )
+        if adjustment is not None and not interrupted:
+            interrupted = True
+            raise host.InstallError("injected retired ACL restoration interruption")
+
+    system.apply_acl = record_apply  # type: ignore[method-assign]
+    system.remove_acl = interrupt_after_retired_snapshot_restoration  # type: ignore[method-assign]
+    with pytest.raises(host.InstallError, match="restoration interruption"):
+        installer.install(TEAM_ID)
+
+    provisional = installer.filesystem.load_install_record()
+    assert provisional is not None
+    assert provisional["installation_state"] == "installing"
+    assert retired_only_scope <= {
+        host.AclGrant.from_dict(value) for value in provisional["added_acls"]
+    }
+    assert {host.AclGrant(path) for path in host.PROTECTED_INPUTS} <= {
+        host.AclGrant.from_dict(value) for value in provisional["added_acls"]
+    }
+    assert any(state == "before" for state in system.acl_adjustment_states.values())
+
+    system.apply_acl = original_apply  # type: ignore[method-assign]
+    system.remove_acl = original_remove  # type: ignore[method-assign]
+    result = installer.install(TEAM_ID)
+
+    assert result["ok"] is True
+    ready = installer.filesystem.load_install_record()
+    assert ready is not None
+    assert ready["installation_state"] == "ready"
+    ready_grants = host.HostInstaller._record_grants(ready)
+    assert retired_only_scope.isdisjoint(ready_grants)
+    assert current_scope <= ready_grants
+    assert all(
+        adjustment.path not in retired_leaves
+        for adjustment in host.HostInstaller._record_snapshot_adjustments(ready).values()
+    )
+    assert retired_only_scope.isdisjoint(host.HostInstaller._record_mask_adjustments(ready))
+    assert all(system.acl_adjustment_states[plan.grant] == "before" for plan in retired_snapshots)
+    assert all(grant.path not in system.input_acls for grant in retired_only_scope)
+    assert all(path in system.input_acls for path in host.PROTECTED_INPUTS)
 
 
 def test_install_persists_snapshot_preimage_before_acl_sanitation_and_uninstall_restores_it(
