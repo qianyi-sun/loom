@@ -555,7 +555,11 @@ def build_installed_deep_preflight_composition(
         baseline_probe_route=readonly.baseline_probe_route,
         rehearsal_factory=rehearsal_factory,
         final_gate_run=commands.final_gate_helper,
-        read_mutation_epoch=readonly.mutation_epoch,
+        # The worker composition survives the protected apply.  The ordinary
+        # source is deliberately single-flight for one concurrent preflight
+        # DAG, so explicitly refresh it at each phase boundary; otherwise the
+        # final drift gate keeps observing the pre-apply epoch forever.
+        read_mutation_epoch=lambda: mutation_epoch_evidence.refresh().mutation_epoch,
         read_database_schema_revision=lambda: mutation_epoch_evidence().schema_revision,
         container_registry=str(cluster.container_registry),
         container_registry_push=str(cluster.container_registry_push),
