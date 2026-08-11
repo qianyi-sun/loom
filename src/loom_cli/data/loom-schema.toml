@@ -228,6 +228,30 @@ python_type = "int"
 default     = 402653184
 description = "Maximum personal-dev source tar accepted by the management service. The default bounds the canonical 256 MiB source payload plus manifest and tar overhead."
 
+[service_config.personal_dev_global_live_instance_limit]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 16
+description = "Finite global count of non-deleted personal environments admitted to shared Kubernetes, PostgreSQL, MinIO, DNS, and lifecycle capacity."
+
+[service_config.personal_dev_per_owner_live_instance_limit]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 2
+description = "Finite count of non-deleted personal environments admitted for one immutable owner."
+
+[service_config.personal_dev_per_owner_aggregate_min_slots]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 8
+description = "Maximum sum of requested min_slots across one owner's non-deleted personal environments."
+
+[service_config.personal_dev_per_owner_aggregate_max_slots]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 16
+description = "Maximum sum of max_slots demand ceilings across one owner's non-deleted personal environments; this is not reserved physical capacity."
+
 [service_config.bind_host]
 used_by     = ["control-plane", "llm-gateway", "loom-service"]
 python_type = "str"

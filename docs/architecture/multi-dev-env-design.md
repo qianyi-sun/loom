@@ -27,6 +27,8 @@ interfaces:
 
 ```text
 loom dev create <name> [--min-slots N] [--max-slots N] [--no-wait]
+loom dev apply <name> --candidate <digest> --expected-operation-epoch N \
+  [--min-slots N] [--max-slots N] [--no-wait]
 loom dev list [--mine]
 loom dev status <name>
 loom dev destroy <name> [--keep-data] [--no-wait]
@@ -114,7 +116,7 @@ artifact digest before parsing, enforces canonical metadata, exact tar size,
 zero-filled trailer, and limits without extracting paths, revalidates every
 member against the manifest, and checks the expected source digest.
 
-The next Package 4 slice supplies authenticated intake. The management service
+The authenticated-intake Package 4 slice makes the management service
 streams the upload into a bounded no-follow temporary file, verifies both
 digests and the canonical archive independently, publishes the verified bytes
 under an owner-scoped content-addressed object key, and idempotently records an
@@ -126,6 +128,34 @@ and reject stale start, heartbeat, and completion calls. This keeps candidate
 publication reusable while preventing an upload or stale build from mutating
 an environment. The restricted builder runtime, safety attestation, image
 publication, and create-or-update cutover remain activation-blocking work.
+
+The following lifecycle-authority slice adds immutable subject UUID/lifecycle
+incarnation identity and a durable `dev_lifecycle_operations` row for every
+apply. `PUT /api/v1/dev-instances/{name}` atomically binds the authenticated
+owner, expected operation epoch, candidate, min/max policy, idempotency key,
+deployment generation, and a fresh immutable operation-attempt identity before
+enqueueing the candidate build in the same transaction. A retry with the same
+key or exact request returns the existing logical operation. A failed
+pre-activation attempt is preserved and may resume the same logical operation
+only with a fresh attempt identity; database triggers make request and attempt
+bindings immutable and validate the current-attempt pointer at commit.
+
+Capacity-only changes to a ready environment update policy atomically without
+creating a generation. Candidate changes retain the old candidate and capacity
+projection while the replacement is prepared. Central activation cannot
+commit until separate readiness evidence and an environment acknowledgement
+are present. Finite configurable global, per-owner, and aggregate slot limits
+serialize only lifecycle admission, so unrelated environments can perform
+their external provisioning concurrently. The candidate-aware restricted
+builder, deployment reconciler, protected environment acknowledgement, and
+global-capacity projection remain activation-blocking work.
+
+When this authority is enabled, the earlier candidate-less `POST
+/dev-instances` mutation path is retired and the service no longer constructs
+its service-wide-candidate runner. Personal rows also fail closed on the old
+delete path until the durable drain/delete operation lands. This prevents the
+legacy provisioner from becoming a second lifecycle writer while the remaining
+reconciler and destroy slices are implemented.
 
 After migration, the service copies only the requesting user, current team,
 quota policy, membership, and the hash of the credential used for creation
@@ -170,14 +200,15 @@ image tag all match. Credentials can be minted only while the instance has a
 non-zero external policy; drain serializes that policy to zero before bulk
 revocation. Recreate also revokes credentials preserved in a keep-data
 database before readiness. Files for registry-removed environments are
-narrowly pruned on the next supervisor tick. A candidate/shape change to a
-ready environment is rejected until the owner performs a drain-first destroy
-(optionally preserving data), preventing old and new grants or credentials
-from overlapping.
+narrowly pruned on the next supervisor tick. A candidate change prepares a
+new generation while the old generation remains current, then uses the
+acknowledged two-phase cutover and drain rules in the global fleet design;
+capacity-only changes do not redeploy.
 
 ## Lifecycle and recovery
 
-Create validates before mutation, claims a monotonic operation, and converges:
+Create validates before mutation, claims a monotonic logical operation and
+attempt, and then converges:
 
 1. database role/database and isolation grants;
 2. buckets;
@@ -198,7 +229,10 @@ later approved recovery/recreate.
 
 Unexpected failures expose only `provisioning_failed` or `deletion_failed`.
 Detailed protected logs may contain bounded executor diagnostics but not
-credentials. Concurrent operations are owner-safe and fenced by operation ID.
+credentials. Pre-activation create/update failures preserve their failed
+attempt and may retry only through a fresh attempt identity. Concurrent
+operations are owner-safe and fenced by subject incarnation, operation epoch,
+logical operation ID, and attempt ID.
 Deletion is rejected while creation is active to prevent a policy/deployment
 race; the caller waits or resumes creation first.
 

@@ -126,6 +126,14 @@ spec:
             secretKeyRef:
               name: loom-secrets
               key: minio-secret-key
+        - name: LOOM_SVC_PERSONAL_DEV_GLOBAL_LIVE_INSTANCE_LIMIT
+          value: '16'
+        - name: LOOM_SVC_PERSONAL_DEV_PER_OWNER_AGGREGATE_MAX_SLOTS
+          value: '16'
+        - name: LOOM_SVC_PERSONAL_DEV_PER_OWNER_AGGREGATE_MIN_SLOTS
+          value: '8'
+        - name: LOOM_SVC_PERSONAL_DEV_PER_OWNER_LIVE_INSTANCE_LIMIT
+          value: '2'
         - name: LOOM_SVC_PERSONAL_DEV_SOURCE_MAX_ARCHIVE_BYTES
           value: '402653184'
         - name: LOOM_SVC_PUBLIC_BASE_URL

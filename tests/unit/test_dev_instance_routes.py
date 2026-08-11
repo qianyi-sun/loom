@@ -14,8 +14,15 @@ from loom.dev_instance_provisioner import (
     InstanceReservation,
     OwnerAccessSnapshot,
 )
+from loom.personal_dev_environment import (
+    PersonalDevApplyReservation,
+    PersonalDevEnvironmentRecord,
+    PersonalDevLifecycleOperationRecord,
+)
 from loom_service.routes.dev_instances import (
     DevInstanceCreateRequest,
+    PersonalDevEnvironmentApplyPayload,
+    apply_personal_dev_environment,
     create_dev_instance,
     delete_dev_instance,
     get_dev_instance,
@@ -384,3 +391,106 @@ async def test_admin_can_list_all_but_owner_list_is_scoped() -> None:
     )
     assert [row.name for row in mine.items] == ["alice"]
     assert [row.name for row in all_rows.items] == ["alice", "bob"]
+
+
+async def test_personal_apply_binds_authenticated_owner_and_returns_operation() -> None:
+    candidate_id = UUID("00000000-0000-0000-0000-000000000010")
+    idempotency_key = UUID("00000000-0000-0000-0000-000000000011")
+    subject_id = UUID("00000000-0000-0000-0000-000000000012")
+    incarnation = UUID("00000000-0000-0000-0000-000000000013")
+    operation_id = UUID("00000000-0000-0000-0000-000000000014")
+    captured = []
+
+    class _Authority:
+        async def apply(self, requested, *, now=None):
+            captured.append(requested)
+            environment = PersonalDevEnvironmentRecord(
+                name=requested.name,
+                subject_id=subject_id,
+                subject_incarnation=incarnation,
+                owner_user_id=requested.owner_user_id,
+                owner_team_id=requested.owner_team_id,
+                min_slots=requested.min_slots,
+                max_slots=requested.max_slots,
+                status="provisioning",
+                deployment_generation=1,
+                candidate_id=requested.candidate_id,
+                candidate_sha=requested.candidate_sha,
+                operation_epoch=1,
+                operation_id=operation_id,
+                operation_step="candidate_build",
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+            operation = PersonalDevLifecycleOperationRecord(
+                id=operation_id,
+                idempotency_key=requested.idempotency_key,
+                environment_name=requested.name,
+                subject_id=subject_id,
+                subject_incarnation=incarnation,
+                owner_user_id=requested.owner_user_id,
+                owner_team_id=requested.owner_team_id,
+                operation_epoch=1,
+                expected_operation_epoch=0,
+                kind="create",
+                state="running",
+                attempt_id=UUID("00000000-0000-0000-0000-000000000015"),
+                attempt_sequence=0,
+                request_sha256=requested.request_sha256,
+                candidate_id=requested.candidate_id,
+                candidate_sha=requested.candidate_sha,
+                min_slots=requested.min_slots,
+                max_slots=requested.max_slots,
+                deployment_generation=1,
+                checkpoint="candidate_build",
+                created_at=_NOW,
+                updated_at=_NOW,
+                started_at=_NOW,
+            )
+            return PersonalDevApplyReservation(
+                environment=environment,
+                operation=operation,
+                acquired=True,
+                requires_build_binding=True,
+            )
+
+    request = _request(_Store(), configured=False)
+    request.app.state.settings = type("Settings", (), {"dev_instances_enabled": True})()
+    authority = _Authority()
+    request.app.state.personal_dev_environment_authority_factory = lambda _session: authority
+    response = Response()
+    result = await apply_personal_dev_environment(
+        "alice",
+        PersonalDevEnvironmentApplyPayload(
+            candidate_id=candidate_id,
+            candidate_sha="a" * 64,
+            min_slots=0,
+            max_slots=2,
+            expected_operation_epoch=0,
+            idempotency_key=idempotency_key,
+        ),
+        request,
+        (object(), _ctx(_OWNER)),  # type: ignore[arg-type]
+        response,
+    )
+
+    assert response.status_code == 202
+    assert result.environment.subject_id == subject_id
+    assert result.operation.id == operation_id
+    assert result.operation.promotable is False
+    assert captured[0].owner_user_id == _OWNER
+    assert captured[0].owner_team_id == _TEAM
+
+
+async def test_candidate_less_create_is_retired_when_personal_lifecycle_is_enabled() -> None:
+    store = _Store()
+    request = _request(store)
+    request.app.state.settings = type("Settings", (), {"dev_instances_enabled": True})()
+    with pytest.raises(HTTPException) as exc:
+        await create_dev_instance(
+            DevInstanceCreateRequest(name="alice"),
+            request,
+            (object(), _ctx(_OWNER)),  # type: ignore[arg-type]
+        )
+    assert exc.value.status_code == 410
+    assert store.rows == {}
