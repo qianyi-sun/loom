@@ -57,6 +57,55 @@ preflight fence. The process does not provide production acceptance adapters
 or execute a fixed-candidate acceptance run. It never reads secret values from
 graph or result documents.
 
+## BEHAVIOR rollout stage
+
+The repository includes one executable BEHAVIOR stage adapter under
+`src/loom/integrations/behavior/stages/rollout.py`. It implements only the
+`rollout` stage; the other BEHAVIOR stage values remain contract types rather
+than installed adapters. This stage process is separate from the graph
+controller above and does not change the controller's disabled deployment
+state or its Attempt-handoff boundary.
+
+Invoke the adapter inside its pinned runtime image with:
+
+```bash
+python -m loom.integrations.behavior.cli run \
+  --request /inputs/stage-request.json \
+  --output-dir /outputs
+```
+
+The request must contain exactly three singleton bindings in order:
+`task_instance` (`behavior_task_instance.v1`), `dataset`
+(`behavior_dataset_snapshot.v1`), and `policy`
+(`behavior_policy_checkpoint.v1`). Recording is fixed at 30 frames per second
+with depth recording disabled. Request, input, recipe, image, execution-spec,
+and compatibility digests are revalidated before the attempt workspace can
+commit output.
+
+The runtime contract accepts either two RTX 5080 devices on `oldlab`, split
+between simulator and VLA roles, or one GB10 device shared by both roles. The
+adapter applies the request's uint32 seed in a fixed Python, NumPy, PyTorch,
+CUDA, and OmniGibson order. It starts the VLA server first, allows 180
+one-second TCP readiness probes, then starts the one-episode simulator in the
+same process group. The simulator deadline is 8,100 seconds. Interrupt and
+failure cleanup sends `SIGINT`, waits up to 120 seconds, and uses `SIGKILL` only
+for children that remain live.
+
+A successful attempt atomically commits one
+`behavior_rollout_bundle.v1` artifact and one `loom.stage-result.v1`. The
+bundle contains the HDF5 trajectory, BDDL transitions, validated scene projection,
+three H.264 camera streams, a fixed H.264 composite, and an optional predicate
+catalog. Identity, seed, step count, frame count, media format, byte budget,
+and provenance must agree across those files. Partial adapter output and
+scratch data are removed on every failure.
+
+`scripts/behavior/run_rollout.sbatch` is a two-argument compatibility shim for
+the command above. It does not submit a Slurm job or own fan-out, retries,
+input fetching, or upload; those remain surrounding Loom Pipeline authorities.
+The adapter itself owns VLA and simulator child-process supervision.
+`python -m loom.integrations.behavior.cli validate` provides read-only
+canonical request, result, and artifact validation.
+
 ## Process and deployment
 
 Run locally against an already migrated database:

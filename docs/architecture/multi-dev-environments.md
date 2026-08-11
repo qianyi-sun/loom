@@ -27,6 +27,7 @@ library and HTTP interfaces.
 | `POST /api/v1/personal-dev-candidates` | Accepts a multipart `source` archive plus `source_sha256` and `archive_sha256`. Upload creates or returns an owner-scoped immutable candidate but does not start a build. |
 | `GET /api/v1/personal-dev-candidates[/{id}]` | Lists or reads visible candidates and their build state. |
 | `PUT /api/v1/dev-instances/{name}` | Compare-and-set apply for a candidate, capacity policy, expected operation epoch, and idempotency key. It queues the candidate build when required. |
+| `DELETE /api/v1/dev-instances/{name}` | Compare-and-set manager-first teardown for a ready personal environment. It binds `keep_data`, the expected operation epoch, and an idempotency key before queuing durable cleanup. |
 | `GET /api/v1/dev-instances/{name}/operations/{id}` | Reads the owner-scoped durable lifecycle operation. |
 | internal activation endpoints | Let the independently keyed activation agent poll exact intents and publish signed acknowledgements. |
 
@@ -87,7 +88,7 @@ The installed CLI also exposes a candidate-less compatibility client:
 loom dev create <name> [--min-slots N] [--max-slots N] [--no-wait]
 loom dev list [--mine] [--include-deleted]
 loom dev status <name>
-loom dev destroy <name> [--keep-data] [--no-wait]
+loom dev destroy <name> [--keep-data] [--idempotency-key UUID] [--no-wait]
 ```
 
 These commands call `/api/v1/dev-instances`; they never shell out to
@@ -97,11 +98,12 @@ These commands call `/api/v1/dev-instances`; they never shell out to
 These compatibility commands do not expose candidate upload or candidate-aware
 apply themselves; use `loom service up --environment dev-<name>` for that
 workflow. When the current personal-development controller is enabled,
-candidate-less `POST /dev-instances` returns `410`. Deletion of a
-candidate-backed environment returns `409` because the guarded drain/delete
-authority is not present. Ordinary deployments leave the controller disabled,
-so the high-level command succeeds only against an explicitly enabled and
-fully configured personal-development service.
+candidate-less `POST /dev-instances` returns `410`. Destroy is supported for a
+ready, owner-bound candidate environment with complete activation and capacity
+evidence; other lifecycle states fail closed. Ordinary deployments leave the
+controller disabled, so candidate-aware deployment and teardown succeed only
+against an explicitly enabled and fully configured personal-development
+service.
 
 ## Identity and visibility
 
@@ -186,6 +188,28 @@ The agent is packaged separately and has an operator-edited example at
 `deploy/dev-fleet/personal-dev-activation-agent.yaml.example`; Loom does not
 apply that example automatically.
 
+## Manager-first destruction
+
+`loom dev destroy <name>` first reads the current owner-scoped environment and
+submits its exact operation epoch. The default idempotency key is derived from
+the name, epoch, and `keep_data` choice; `--idempotency-key` supplies a stable
+key for an explicit retry. Unless `--no-wait` is set, the command polls until
+the environment reaches `deleted`.
+
+Teardown retires authority before deleting local resources. The reconciler
+publishes a `destroy` projection that makes the global-manager subject
+`disabled` with zero minimum and maximum demand. It then seals every protected
+database login, deletes the namespace, and advances restart-safe cleanup
+checkpoints. Without `--keep-data`, it drops the dedicated database, deletes
+the three buckets and bucket tenant, and removes stored credentials. With
+`--keep-data`, the database and buckets remain, but the tenant and credentials
+are removed so retained data has no live runtime authority.
+
+A later candidate-aware deployment of the same name starts a new subject
+incarnation through the normal build, activation, and capacity-publication
+path. Reusing retained data therefore rotates the personal authority rather
+than reviving the deleted subject or its reporter credentials.
+
 ## Isolation and limits
 
 Each environment uses its own database login/database, three buckets,
@@ -212,8 +236,6 @@ ceiling is fixed at zero. It does not receive or execute a worker-capacity
 grant. Consequently, `ready` confirms the immutable application generation,
 stable-route acknowledgement, capacity-agent installation, subject projection,
 and initial demand publication; it does not mean worker slots are live.
-Candidate-backed drain, destruction, and `--keep-data` recovery are also
-unavailable through the guarded API. The separate global development-fleet
-supervisor consumes 40-character Git candidate identities and existing
-per-instance external Slurm policies, so it cannot consume these 64-character
-personal-candidate bindings directly.
+The separate global development-fleet supervisor consumes 40-character Git
+candidate identities and existing per-instance external Slurm policies, so it
+cannot consume these 64-character personal-candidate bindings directly.

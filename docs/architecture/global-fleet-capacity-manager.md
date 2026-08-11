@@ -92,6 +92,13 @@ remains unavailable until a report succeeds. Personal lifecycle readiness is
 therefore gated on both the subject projection and the agent's initial demand
 publication, but neither event grants or launches physical capacity.
 
+Personal teardown uses the same projection route with `operation_kind` set to
+`destroy`. The manager first records the subject as `disabled` with zero
+minimum and maximum demand. Only after that acknowledgement does the lifecycle
+seal the personal database authorities and begin namespace, database, bucket,
+tenant, and credential cleanup. Epoch contention is retried against a newer
+configuration; incomplete retirement evidence fails before local deletion.
+
 ## Service surface
 
 The HTTP service exposes configuration proposal/activation, dynamic personal

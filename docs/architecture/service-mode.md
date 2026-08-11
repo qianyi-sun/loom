@@ -27,6 +27,8 @@ promise live worker slots. The `staging` and `production` targets require a
 full Git candidate but deliberately refuse direct deployment and point to
 `loom cluster rollout`, which owns their approval and evidence workflow.
 `loom service down` and `status` remain local Compose commands.
+`loom dev destroy <name>` is the authenticated manager-first teardown client
+for a ready personal environment; it is not a local Compose operation.
 
 ## Service-prefix convention
 

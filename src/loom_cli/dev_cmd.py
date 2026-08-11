@@ -283,9 +283,10 @@ def dispatch(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="loom dev",
         description=(
-            "Compatibility client for the candidate-less shared-fleet API. "
-            "Use `loom service up --environment dev-<name>` for candidate-aware "
-            "personal deployment, or `--environment local` for Docker Compose."
+            "Compatibility client for candidate-less create, candidate-backed "
+            "destroy, and environment list/status. Use `loom service up "
+            "--environment dev-<name>` for candidate-aware personal deployment, "
+            "or `--environment local` for Docker Compose."
         ),
     )
     sub = parser.add_subparsers(dest="dev_cmd", required=True)
@@ -320,7 +321,8 @@ def dispatch(argv: list[str]) -> int:
 
     destroy = sub.add_parser(
         "destroy",
-        help="Request destroy; candidate-backed environments are rejected.",
+        help="Destroy a ready candidate-backed personal environment.",
+        description="Destroy a ready candidate-backed personal environment.",
     )
     destroy.add_argument("name", type=_dev_instance_name)
     destroy.add_argument(

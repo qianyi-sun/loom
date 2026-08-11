@@ -199,17 +199,22 @@ content digest:
 loom service up --environment dev-<name> --candidate <candidate-sha256>
 ```
 
-The `loom dev` compatibility commands provide environment listing and status:
+The `loom dev` compatibility commands provide environment listing, status,
+and manager-first teardown:
 
 ```bash
 loom dev list
 loom dev status <name>
+loom dev destroy <name>
 ```
 
 `loom dev create` is candidate-less and is rejected by the current enabled
-controller. Candidate-backed destruction and `--keep-data` recovery are
-unavailable through the guarded API; `loom dev destroy` returns a conflict for
-these environments.
+controller. Destroy accepts only a ready, owner-bound candidate environment
+with complete capacity evidence. It retires the subject from the global
+manager before deleting local resources and waits for `deleted` by default.
+Add `--keep-data` to preserve the dedicated database and buckets while still
+removing runtime access; a later deployment of the same name rotates authority
+before reusing them. Add `--no-wait` to return after durable acceptance.
 
 Application `ready` confirms stable-route activation, capacity-agent
 installation, the shadow-only personal-subject projection, and an initial
