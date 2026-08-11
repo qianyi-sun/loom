@@ -5,6 +5,7 @@ from stat import S_IMODE
 
 import pytest
 
+import loom_capacity_manager.secret_init as secret_init
 from loom_capacity_manager.secret_init import copy_projected_credentials
 
 _MANAGER_FILES = {
@@ -140,3 +141,58 @@ def test_failed_copy_leaves_no_partial_or_staging_directory(tmp_path: Path) -> N
 
     assert not destination.exists()
     assert not tuple(destination.parent.glob(".credentials-*"))
+
+
+def test_projection_rotation_during_copy_fails_without_mixing_generations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _projected_source(tmp_path, _MANAGER_FILES)
+    replacement = source / "..2026_08_11_120100"
+    replacement.mkdir()
+    for filename in _MANAGER_FILES:
+        (replacement / filename).write_text(
+            f"replacement:{filename}",
+            encoding="utf-8",
+        )
+    destination = tmp_path / "runtime" / "credentials"
+    destination.parent.mkdir()
+    original_read = secret_init._read_bounded_descriptor
+    reads = 0
+
+    def rotate_after_first_read(descriptor: int, *, expected_size: int) -> bytes:
+        nonlocal reads
+        payload = original_read(descriptor, expected_size=expected_size)
+        reads += 1
+        if reads == 1:
+            next_link = source / "..data-next"
+            next_link.symlink_to(replacement.name)
+            next_link.replace(source / "..data")
+        return payload
+
+    monkeypatch.setattr(
+        secret_init,
+        "_read_bounded_descriptor",
+        rotate_after_first_read,
+    )
+
+    with pytest.raises(ValueError, match="generation changed"):
+        copy_projected_credentials(source, destination, profile="manager")
+
+    assert not destination.exists()
+    assert not tuple(destination.parent.glob(".credentials-*"))
+
+
+def test_projection_requires_standard_data_key_symlinks(tmp_path: Path) -> None:
+    source = _projected_source(tmp_path, {"database-url"})
+    (source / "database-url").unlink()
+    (source / "database-url").symlink_to(
+        Path("..2026_08_11_120000") / "database-url"
+    )
+    destination = tmp_path / "runtime" / "credentials"
+    destination.parent.mkdir()
+
+    with pytest.raises(ValueError, match="symlink layout"):
+        copy_projected_credentials(source, destination, profile="migration")
+
+    assert not destination.exists()
