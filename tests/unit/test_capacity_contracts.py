@@ -182,6 +182,25 @@ def test_subject_min_slots_defaults_to_zero_and_limits_are_finite() -> None:
         type(parsed).model_validate(subject)
 
 
+def test_account_and_subject_submission_rates_are_configurable_and_default_closed() -> None:
+    fleet = fleet_payload()
+    account = dict(fleet["account_policies"][0])
+    account.pop("submission_rate_per_minute", None)
+    fleet["account_policies"] = [account]
+    assert FleetManifestV1.model_validate(fleet).account_policies[0].submission_rate_per_minute == 0
+
+    subject = subject_configuration().model_dump(mode="python")
+    subject.pop("submission_rate_per_minute", None)
+    subject_type = type(subject_configuration())
+    assert subject_type.model_validate(subject).submission_rate_per_minute == 0
+    assert (
+        subject_type.model_validate(
+            subject | {"submission_rate_per_minute": 7}
+        ).submission_rate_per_minute
+        == 7
+    )
+
+
 def test_demand_source_time_normalizes_to_utc_but_is_diagnostic() -> None:
     source_time = datetime(2026, 8, 10, 8, 0, tzinfo=timezone(timedelta(hours=-4)))
     report = DemandSnapshotV1(

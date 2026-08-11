@@ -643,6 +643,12 @@ class _AllocationState:
                 raise ShadowAllocatorError(
                     f"observed commitment references unknown pool {commitment.pool_id!r}"
                 )
+            if commitment.subject_id is None:
+                if commitment.subject_incarnation is not None:
+                    raise ShadowAllocatorError(
+                        "unattributed commitment has a partial subject binding"
+                    )
+                continue
             if subject_incarnations.get(commitment.subject_id) != commitment.subject_incarnation:
                 raise ShadowAllocatorError(
                     "observed commitment references an inactive subject incarnation"
@@ -675,6 +681,10 @@ class _AllocationState:
                 or evidence.subject_incarnation != item.configuration.subject_incarnation
                 or evidence.attempt_id is None
                 or evidence.concurrency_slots is None
+                or evidence.profile_id is None
+                or evidence.profile_generation is None
+                or evidence.profile_digest is None
+                or evidence.deployment_generation is None
             ):
                 continue
             state = evidence.state if evidence.state in allowed_states else "unknown"
@@ -775,6 +785,38 @@ class _AllocationState:
         observed = [
             item for item in self.value.observed_commitments if item.kind in {"physical", "reserve"}
         ]
+        authenticated_by_reservation: defaultdict[str, list[ObservedCommitmentV1]] = defaultdict(
+            list
+        )
+        for item in observed:
+            if (
+                item.kind == "physical"
+                and item.ownership_state == "authenticated"
+                and item.reservation_identity is not None
+            ):
+                authenticated_by_reservation[item.reservation_identity].append(item)
+        deduplicated: list[ObservedCommitmentV1] = []
+        for item in observed:
+            if item.kind != "reserve" or item.reservation_identity is None:
+                deduplicated.append(item)
+                continue
+            matches = tuple(
+                candidate
+                for candidate in authenticated_by_reservation.get(item.reservation_identity, ())
+                if candidate.subject_id == item.subject_id
+                and candidate.subject_incarnation == item.subject_incarnation
+                and candidate.deployment_generation == item.deployment_generation
+                and candidate.pool_id == item.pool_id
+                and candidate.pool_generation == item.pool_generation
+                and candidate.profile_id == item.profile_id
+                and candidate.profile_generation == item.profile_generation
+                and candidate.profile_digest == item.profile_digest
+                and candidate.shape_id == item.shape_id
+                and candidate.resources == item.resources
+            )
+            if len(matches) != 1:
+                deduplicated.append(item)
+        observed = deduplicated
         by_physical: defaultdict[str, list[ObservedCommitmentV1]] = defaultdict(list)
         for commitment in observed:
             by_physical[commitment.physical_identity].append(commitment)
@@ -959,11 +1001,20 @@ class _AllocationState:
     def _build_retained_tokens(self) -> None:
         tokens: defaultdict[tuple[UUID, str], list[_SlotToken]] = defaultdict(list)
         for commitment in self.fixed_commitments:
+            if commitment.subject_id is None:
+                continue
             subject = self.subject_by_id.get(commitment.subject_id)
             if (
                 subject is None
-                or commitment.kind != "physical"
-                or commitment.state not in {"accepted", "pending", "live", "observed"}
+                or (
+                    commitment.kind == "physical"
+                    and commitment.state not in {"accepted", "pending", "live", "observed"}
+                )
+                or (
+                    commitment.kind == "reserve"
+                    and commitment.state not in {"proposed", "accepted"}
+                )
+                or commitment.kind not in {"physical", "reserve"}
             ):
                 continue
             shape = _shape_lookup(subject, commitment.pool_id).get(commitment.shape_id or "")
@@ -993,7 +1044,9 @@ class _AllocationState:
                         shape_id=shape.shape_id,
                         capabilities=frozenset(shape.capabilities),
                         warm_approved=shape.warm_approved,
-                        physical_identity=commitment.physical_identity,
+                        physical_identity=(
+                            commitment.physical_identity if commitment.kind == "physical" else None
+                        ),
                     )
                 )
         self.retained_tokens = {
@@ -1475,6 +1528,7 @@ class _AllocationState:
                             if item.kind == "physical"
                             and item.subject_id == subject.subject_id
                             and item.pool_id == pool_id
+                            and item.deployment_generation is not None
                             and item.deployment_generation
                             == subject.configuration.deployment_generation
                         )
@@ -1498,6 +1552,7 @@ class _AllocationState:
                             if item.kind == "physical"
                             and item.subject_id == subject.subject_id
                             and item.pool_id == pool_id
+                            and item.deployment_generation is not None
                             and item.deployment_generation
                             < subject.configuration.deployment_generation
                             and item.state in {"accepted", "pending", "live", "observed"}
@@ -1631,8 +1686,9 @@ class _AllocationState:
                 continue
             pool_slots[commitment.pool_id] += commitment.resources.slots
             pool_jobs[commitment.pool_id] += 1
-            subject_slots[commitment.subject_id] += commitment.resources.slots
-            subject_jobs[commitment.subject_id] += 1
+            if commitment.subject_id is not None:
+                subject_slots[commitment.subject_id] += commitment.resources.slots
+                subject_jobs[commitment.subject_id] += 1
         return pool_slots, pool_jobs, subject_slots, subject_jobs
 
     def _launch_order(self) -> tuple[tuple[_SubjectState, str, _ShapeInstance, int], ...]:
@@ -1681,6 +1737,8 @@ class _AllocationState:
             len(represented_pending),
         )
         for commitment in represented_pending:
+            if commitment.subject_id is None:
+                continue
             subject = self.subject_by_id.get(commitment.subject_id)
             if subject is None:
                 continue
@@ -1794,8 +1852,9 @@ class _AllocationState:
             for item in self.fixed_commitments
             if item.subject_id == subject.subject_id and item.pool_id == pool_id
         )
+        commitment_ids = {item.commitment_id for item in commitments}
         retained_instance_ids = {
-            token.instance_id for token in matching.values() if token.physical_identity
+            token.instance_id for token in matching.values() if token.instance_id in commitment_ids
         }
         claimed_physical = {
             item.physical_identity for item in subject.claim_matches_by_pool[pool_id]

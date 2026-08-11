@@ -18,6 +18,7 @@ from loom_capacity_manager.auth import (
 SUBJECT_ID = UUID("00000000-0000-4000-8000-000000000101")
 SUBJECT_INCARNATION = UUID("00000000-0000-4000-8000-000000000102")
 REPORTER_INCARNATION = UUID("00000000-0000-4000-8000-000000000103")
+EXECUTOR_INCARNATION = UUID("00000000-0000-4000-8000-000000000104")
 
 
 def _digest(token: str) -> str:
@@ -65,6 +66,21 @@ def _write_registry(path: Path, principals: list[dict[str, object]]) -> Path:
     return path
 
 
+def _pool_executor(token: str = "executor-secret") -> dict[str, object]:
+    return {
+        "principal_id": "oldlab-executor",
+        "token_sha256": _digest(token),
+        "scopes": ["capacity:execute:pool"],
+        "subject_id": None,
+        "subject_incarnation": None,
+        "demand_reporter_incarnation": None,
+        "pool_id": "oldlab",
+        "pool_reporter_incarnation": None,
+        "executor_id": "oldlab-executor",
+        "executor_incarnation": str(EXECUTOR_INCARNATION),
+    }
+
+
 def test_registry_verifies_hash_without_storing_raw_token(tmp_path: Path) -> None:
     path = _write_registry(tmp_path / "principals.json", [_operator(), _demand_reporter()])
     verifier = CapacityPrincipalVerifier.from_file(path)
@@ -78,6 +94,36 @@ def test_registry_verifies_hash_without_storing_raw_token(tmp_path: Path) -> Non
     assert reporter.subject_incarnation == SUBJECT_INCARNATION
     assert reporter.demand_reporter_incarnation == REPORTER_INCARNATION
     assert "operator-secret" not in path.read_text(encoding="utf-8")
+
+
+def test_registry_accepts_only_a_complete_pool_executor_binding(tmp_path: Path) -> None:
+    verifier = CapacityPrincipalVerifier.from_file(
+        _write_registry(tmp_path / "principals.json", [_operator(), _pool_executor()])
+    )
+
+    executor = verifier.verify_bearer("Bearer executor-secret")
+
+    assert executor.pool_id == "oldlab"
+    assert executor.executor_id == "oldlab-executor"
+    assert executor.executor_incarnation == EXECUTOR_INCARNATION
+    incomplete = _pool_executor()
+    incomplete["executor_incarnation"] = None
+    with pytest.raises(PrincipalRegistryError, match="executor binding"):
+        CapacityPrincipalVerifier.from_file(
+            _write_registry(tmp_path / "invalid.json", [_operator(), incomplete])
+        )
+    overprivileged = _pool_executor()
+    overprivileged["scopes"] = [
+        "capacity:execute:pool",
+        "capacity:grant:manage",
+    ]
+    with pytest.raises(PrincipalRegistryError, match="single-purpose"):
+        CapacityPrincipalVerifier.from_file(
+            _write_registry(
+                tmp_path / "overprivileged.json",
+                [_operator(), overprivileged],
+            )
+        )
 
 
 @pytest.mark.parametrize(

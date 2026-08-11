@@ -44,6 +44,32 @@ from loom_capacity_manager.contracts import (
     SubjectConfigurationV1,
     canonical_digest,
 )
+from loom_capacity_manager.grant_contracts import (
+    DryRunBootstrapRegistrationV1,
+    DryRunExecutorHeartbeatV1,
+    DryRunExecutorInventoryV1,
+    DryRunExecutorRegistrationV1,
+    DryRunIntentCloseV1,
+    DryRunLaunchPermitV1,
+    DryRunPartialReleaseV1,
+    DryRunPermitConsumptionV1,
+    DryRunProtectedReleaseAcknowledgementV1,
+    DryRunReservationAcceptanceV1,
+    DryRunReservationProposalV1,
+)
+from loom_capacity_manager.grant_store import (
+    CapacityGrantStore,
+    ExecutorEquivocationError,
+    ExecutorJournalError,
+    GrantConflictError,
+    LaunchOrderError,
+    PermitExpiredError,
+    ProposalExpiredError,
+    ProposalSupersededError,
+    RateLimitError,
+    StaleCommandError,
+    StaleExecutorError,
+)
 from loom_capacity_manager.metrics import (
     FRESHNESS_STATES,
     POOL_SLOT_STATES,
@@ -55,9 +81,14 @@ from loom_capacity_manager.models import (
     CapacityAllocationEpoch,
     CapacityAuditEvent,
     CapacityAuthorityState,
+    CapacityExecutor,
     CapacityPool,
+    CapacityReservationShape,
+    CapacityReservationTranche,
     CapacitySubject,
+    CapacitySubmissionIntent,
 )
+from loom_capacity_manager.ownership import OwnershipKeyring
 from loom_capacity_manager.reconciler import (
     ShadowAllocator,
     ShadowRunResult,
@@ -171,6 +202,23 @@ def _store_error(exc: CapacityStoreError) -> HTTPException:
         return HTTPException(status_code=409, detail="capacity state conflict")
     if isinstance(exc, StaleWriterError):
         return HTTPException(status_code=503, detail="capacity writer is not ready")
+    if isinstance(exc, RateLimitError):
+        return HTTPException(status_code=429, detail="capacity launch rate is exhausted")
+    if isinstance(
+        exc,
+        (
+            ExecutorEquivocationError,
+            ExecutorJournalError,
+            GrantConflictError,
+            LaunchOrderError,
+            PermitExpiredError,
+            ProposalExpiredError,
+            ProposalSupersededError,
+            StaleCommandError,
+            StaleExecutorError,
+        ),
+    ):
+        return HTTPException(status_code=409, detail="capacity state conflict")
     return HTTPException(status_code=503, detail="capacity manager unavailable")
 
 
@@ -196,11 +244,27 @@ def create_app(
     *,
     verifier: CapacityPrincipalVerifier | None = None,
     allocator: ShadowAllocator = allocate_shadow,
+    grant_store: CapacityGrantStore | None = None,
 ) -> FastAPI:
     """Build one process-local API; DB fencing remains the cross-process boundary."""
 
     resolved_verifier = verifier or CapacityPrincipalVerifier.from_file(settings.principals_file)
     metrics = CapacityMetrics()
+    if grant_store is None:
+        ownership_keyring = OwnershipKeyring()
+        if settings.ownership_public_keys_file is not None:
+            ownership_keyring = OwnershipKeyring.from_json(
+                read_owner_only_secret(
+                    settings.ownership_public_keys_file,
+                    max_bytes=1024 * 1024,
+                )
+            )
+        resolved_grant_store = CapacityGrantStore(
+            ownership_keyring=ownership_keyring,
+            pool_observation_freshness_seconds=settings.freshness_seconds,
+        )
+    else:
+        resolved_grant_store = grant_store
     reconciliation_lock = asyncio.Lock()
 
     @asynccontextmanager
@@ -234,6 +298,7 @@ def create_app(
             app.state.engine = engine
             app.state.session_factory = session_factory
             app.state.store = store
+            app.state.grant_store = resolved_grant_store
             app.state.writer = writer
             app.state.ready = True
             app.state.initialization_error = False
@@ -294,6 +359,17 @@ def create_app(
     development_projection_body = contract_body(DynamicDevelopmentSubjectProjectionV1)
     demand_body = contract_body(DemandSnapshotV1)
     pool_body = contract_body(PoolObservationV1)
+    executor_registration_body = contract_body(DryRunExecutorRegistrationV1)
+    executor_heartbeat_body = contract_body(DryRunExecutorHeartbeatV1)
+    executor_inventory_body = contract_body(DryRunExecutorInventoryV1)
+    reservation_proposal_body = contract_body(DryRunReservationProposalV1)
+    reservation_acceptance_body = contract_body(DryRunReservationAcceptanceV1)
+    bootstrap_registration_body = contract_body(DryRunBootstrapRegistrationV1)
+    launch_permit_body = contract_body(DryRunLaunchPermitV1)
+    permit_consumption_body = contract_body(DryRunPermitConsumptionV1)
+    intent_close_body = contract_body(DryRunIntentCloseV1)
+    partial_release_body = contract_body(DryRunPartialReleaseV1)
+    protected_release_acknowledgement_body = contract_body(DryRunProtectedReleaseAcknowledgementV1)
 
     def runtime(
         request: Request,
@@ -307,6 +383,17 @@ def create_app(
         return (
             request.app.state.session_factory,
             request.app.state.store,
+            request.app.state.writer,
+        )
+
+    def grant_runtime(
+        request: Request,
+    ) -> tuple[async_sessionmaker[AsyncSession], CapacityGrantStore, WriterFence]:
+        if not getattr(request.app.state, "ready", False):
+            raise HTTPException(status_code=503, detail="capacity manager not ready")
+        return (
+            request.app.state.session_factory,
+            request.app.state.grant_store,
             request.app.state.writer,
         )
 
@@ -516,6 +603,315 @@ def create_app(
         except CapacityStoreError as exc:
             raise _store_error(exc) from exc
 
+    @app.put("/v1/reports/protected-releases/{subject_id}/{shape_instance_id}")
+    async def acknowledge_protected_release(
+        subject_id: UUID,
+        shape_instance_id: str,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:report:demand")),
+        value: DryRunProtectedReleaseAcknowledgementV1 = Depends(
+            protected_release_acknowledgement_body
+        ),
+        idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    ) -> Any:
+        if (
+            value.subject_id != subject_id
+            or value.shape_instance_id != shape_instance_id
+            or actor.subject_id != subject_id
+            or actor.subject_incarnation != value.subject_incarnation
+            or actor.demand_reporter_incarnation != value.reporter_incarnation
+        ):
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, grants, _writer = grant_runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await grants.acknowledge_protected_release(
+                    session,
+                    value,
+                    actor=actor.principal_id,
+                    idempotency_key=idempotency_key,
+                )
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    def assert_executor_actor(
+        actor: CapacityPrincipal,
+        *,
+        pool_id: str,
+        executor_id: str,
+        executor_incarnation: UUID,
+    ) -> None:
+        if (
+            actor.pool_id != pool_id
+            or actor.executor_id != executor_id
+            or actor.executor_incarnation != executor_incarnation
+        ):
+            raise HTTPException(status_code=403, detail="forbidden")
+
+    @app.put("/v1/executors/{pool_id}/registration")
+    async def register_executor(
+        pool_id: str,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:grant:manage")),
+        value: DryRunExecutorRegistrationV1 = Depends(executor_registration_body),
+        idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    ) -> Any:
+        if value.pool_id != pool_id:
+            raise HTTPException(status_code=409, detail="capacity state conflict")
+        session_factory, grants, writer = grant_runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await grants.register_executor(
+                    session,
+                    writer,
+                    value,
+                    actor=actor.principal_id,
+                    idempotency_key=idempotency_key,
+                )
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.put("/v1/executors/{pool_id}/heartbeat")
+    async def heartbeat_executor(
+        pool_id: str,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:execute:pool")),
+        value: DryRunExecutorHeartbeatV1 = Depends(executor_heartbeat_body),
+    ) -> Any:
+        assert_executor_actor(
+            actor,
+            pool_id=pool_id,
+            executor_id=value.executor_id,
+            executor_incarnation=value.executor_incarnation,
+        )
+        if value.pool_id != pool_id:
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, grants, _writer = grant_runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await grants.heartbeat_executor(session, value)
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.get("/v1/executors/{pool_id}/checkpoint")
+    async def executor_checkpoint(
+        pool_id: str,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:execute:pool")),
+    ) -> Any:
+        if (
+            actor.pool_id != pool_id
+            or actor.executor_id is None
+            or actor.executor_incarnation is None
+        ):
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, grants, writer = grant_runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await grants.executor_checkpoint(
+                    session,
+                    authority_incarnation=writer.authority_incarnation,
+                    writer_epoch=writer.writer_epoch,
+                    executor_id=actor.executor_id,
+                    executor_incarnation=actor.executor_incarnation,
+                    pool_id=pool_id,
+                )
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.put("/v1/executors/{pool_id}/inventory")
+    async def ingest_executor_inventory(
+        pool_id: str,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:execute:pool")),
+        value: DryRunExecutorInventoryV1 = Depends(executor_inventory_body),
+    ) -> Any:
+        assert_executor_actor(
+            actor,
+            pool_id=pool_id,
+            executor_id=value.executor_id,
+            executor_incarnation=value.executor_incarnation,
+        )
+        if value.pool_id != pool_id:
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, grants, _writer = grant_runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await grants.ingest_executor_inventory(session, value)
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.put("/v1/grants/reservations/{tranche_id}")
+    async def propose_reservation(
+        tranche_id: UUID,
+        request: Request,
+        _actor: CapacityPrincipal = Depends(require("capacity:grant:manage")),
+        value: DryRunReservationProposalV1 = Depends(reservation_proposal_body),
+        idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    ) -> Any:
+        if value.tranche_id != tranche_id:
+            raise HTTPException(status_code=409, detail="capacity state conflict")
+        session_factory, grants, writer = grant_runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await grants.propose_reservation(
+                    session,
+                    writer,
+                    value,
+                    idempotency_key=idempotency_key,
+                )
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.post("/v1/executors/{pool_id}/reservations/{tranche_id}/accept")
+    async def accept_reservation(
+        pool_id: str,
+        tranche_id: UUID,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:execute:pool")),
+        value: DryRunReservationAcceptanceV1 = Depends(reservation_acceptance_body),
+    ) -> Any:
+        assert_executor_actor(
+            actor,
+            pool_id=pool_id,
+            executor_id=value.executor_id,
+            executor_incarnation=value.executor_incarnation,
+        )
+        if value.tranche_id != tranche_id:
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, grants, _writer = grant_runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await grants.accept_reservation(session, value)
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.post("/v1/executors/{pool_id}/intents/{intent_id}/bootstrap")
+    async def register_bootstrap(
+        pool_id: str,
+        intent_id: UUID,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:execute:pool")),
+        value: DryRunBootstrapRegistrationV1 = Depends(bootstrap_registration_body),
+    ) -> Any:
+        assert_executor_actor(
+            actor,
+            pool_id=pool_id,
+            executor_id=value.executor_id,
+            executor_incarnation=value.executor_incarnation,
+        )
+        if value.intent_id != intent_id:
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, grants, _writer = grant_runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await grants.register_bootstrap(session, value)
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.put("/v1/grants/launch-permits/{permit_id}")
+    async def issue_launch_permit(
+        permit_id: UUID,
+        request: Request,
+        _actor: CapacityPrincipal = Depends(require("capacity:grant:manage")),
+        value: DryRunLaunchPermitV1 = Depends(launch_permit_body),
+        idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    ) -> Any:
+        if value.permit_id != permit_id:
+            raise HTTPException(status_code=409, detail="capacity state conflict")
+        session_factory, grants, writer = grant_runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await grants.issue_launch_permit(
+                    session,
+                    writer,
+                    value,
+                    idempotency_key=idempotency_key,
+                )
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.post("/v1/executors/{pool_id}/permits/{permit_id}/consume")
+    async def consume_launch_permit(
+        pool_id: str,
+        permit_id: UUID,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:execute:pool")),
+        value: DryRunPermitConsumptionV1 = Depends(permit_consumption_body),
+    ) -> Any:
+        assert_executor_actor(
+            actor,
+            pool_id=pool_id,
+            executor_id=value.executor_id,
+            executor_incarnation=value.executor_incarnation,
+        )
+        if value.permit_id != permit_id:
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, grants, _writer = grant_runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await grants.consume_launch_permit(session, value)
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.post("/v1/executors/{pool_id}/intents/{intent_id}/close")
+    async def begin_intent_close(
+        pool_id: str,
+        intent_id: UUID,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:execute:pool")),
+        value: DryRunIntentCloseV1 = Depends(intent_close_body),
+    ) -> Any:
+        assert_executor_actor(
+            actor,
+            pool_id=pool_id,
+            executor_id=value.executor_id,
+            executor_incarnation=value.executor_incarnation,
+        )
+        if value.intent_id != intent_id:
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, grants, _writer = grant_runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await grants.begin_intent_close(session, value)
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.post("/v1/executors/{pool_id}/reservations/{tranche_id}/release")
+    async def release_shapes(
+        pool_id: str,
+        tranche_id: UUID,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:execute:pool")),
+        value: DryRunPartialReleaseV1 = Depends(partial_release_body),
+    ) -> Any:
+        assert_executor_actor(
+            actor,
+            pool_id=pool_id,
+            executor_id=value.executor_id,
+            executor_incarnation=value.executor_incarnation,
+        )
+        if value.tranche_id != tranche_id:
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, grants, _writer = grant_runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await grants.release_shapes(session, value)
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
     @app.post("/v1/shadow-reconciliations")
     async def reconcile(
         request: Request,
@@ -690,6 +1086,120 @@ def create_app(
                 }
                 for row in rows
             ]
+        }
+
+    @app.get("/v1/status/executors")
+    async def executor_status(
+        request: Request,
+        _actor: CapacityPrincipal = Depends(require("capacity:read")),
+    ) -> Any:
+        session_factory, _store, _writer = runtime(request)
+        async with session_factory() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(CapacityExecutor)
+                        .order_by(CapacityExecutor.pool_id, CapacityExecutor.created_at)
+                        .limit(MAX_POOLS * 16)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        return {
+            "items": [
+                {
+                    "executor_id": row.executor_id,
+                    "executor_incarnation": row.executor_incarnation,
+                    "pool_id": row.pool_id,
+                    "pool_generation": row.pool_generation,
+                    "state": row.state,
+                    "command_high_water": row.command_high_water,
+                    "heartbeat_high_water": row.heartbeat_high_water,
+                    "inventory_high_water": row.inventory_high_water,
+                    "journal_high_water": row.journal_high_water,
+                    "lease_expires_at": row.lease_expires_at,
+                    "executable": False,
+                }
+                for row in rows
+            ]
+        }
+
+    @app.get("/v1/status/reservations")
+    async def reservation_status(
+        request: Request,
+        cursor: UUID | None = None,
+        limit: int = Query(default=100),
+        _actor: CapacityPrincipal = Depends(require("capacity:read")),
+    ) -> Any:
+        limit = _bounded_limit(limit)
+        session_factory, _store, _writer = runtime(request)
+        query = select(CapacityReservationTranche)
+        if cursor is not None:
+            query = query.where(CapacityReservationTranche.id > cursor)
+        async with session_factory() as session:
+            rows = (
+                (
+                    await session.execute(
+                        query.order_by(CapacityReservationTranche.id).limit(limit + 1)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            page = rows[:limit]
+            tranche_ids = [row.id for row in page]
+            shape_counts = (
+                await session.execute(
+                    select(
+                        CapacityReservationShape.tranche_id,
+                        CapacityReservationShape.state,
+                        func.count(),
+                    )
+                    .where(CapacityReservationShape.tranche_id.in_(tranche_ids))
+                    .group_by(
+                        CapacityReservationShape.tranche_id,
+                        CapacityReservationShape.state,
+                    )
+                )
+            ).all()
+            intent_counts = (
+                await session.execute(
+                    select(
+                        CapacitySubmissionIntent.tranche_id,
+                        CapacitySubmissionIntent.state,
+                        func.count(),
+                    )
+                    .where(CapacitySubmissionIntent.tranche_id.in_(tranche_ids))
+                    .group_by(
+                        CapacitySubmissionIntent.tranche_id,
+                        CapacitySubmissionIntent.state,
+                    )
+                )
+            ).all()
+        shapes: defaultdict[UUID, dict[str, int]] = defaultdict(dict)
+        intents: defaultdict[UUID, dict[str, int]] = defaultdict(dict)
+        for tranche_id, state_name, count in shape_counts:
+            shapes[tranche_id][state_name] = count
+        for tranche_id, state_name, count in intent_counts:
+            intents[tranche_id][state_name] = count
+        return {
+            "items": [
+                {
+                    "tranche_id": row.id,
+                    "subject_id": row.subject_id,
+                    "pool_id": row.pool_id,
+                    "pool_generation": row.pool_generation,
+                    "allocation_epoch": row.allocation_epoch,
+                    "state": row.state,
+                    "closure_reason": row.closure_reason,
+                    "shape_counts": dict(sorted(shapes[row.id].items())),
+                    "intent_counts": dict(sorted(intents[row.id].items())),
+                    "executable": False,
+                }
+                for row in page
+            ],
+            "next_cursor": str(page[-1].id) if len(rows) > limit and page else None,
         }
 
     @app.get("/v1/shadow-epochs/{allocation_epoch}")

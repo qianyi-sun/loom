@@ -25,6 +25,7 @@ class CapacityManagerSettings(BaseSettings):
     tls_cert_file: Path
     tls_key_file: Path
     tls_client_ca_file: Path
+    ownership_public_keys_file: Path | None = None
     host: str = "127.0.0.1"
     port: int = Field(default=8443, ge=1, le=65535)
     freshness_seconds: int = Field(default=120, ge=1, le=3600)

@@ -2,7 +2,7 @@
 schema_version = 1
 authority_incarnation = "00000000-0000-4000-8000-000000000001"
 fleet_generation = 1
-fleet_digest = "3db53a0180eff8cc86611b56f3ebf908dd9b05c447b6c4f50ad0454d6cacbd84"
+fleet_digest = "bed57c4a869963958c23f29a3fef6f7a736b5e795b4c436f484eab268d2f63fa"
 executable_new_capacity_ceiling = 0
 global_max_pending_slots = 32
 global_max_pending_jobs = 32
@@ -41,6 +41,7 @@ max_slots = 16
 max_surge_slots = 2
 max_pending_slots = 16
 max_pending_jobs = 16
+submission_rate_per_minute = 8
 max_live_subjects = 16
 
 [[pools]]

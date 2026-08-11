@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import ssl
@@ -12,6 +13,8 @@ from threading import Event, Thread
 from uuid import UUID, uuid4
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, update
@@ -23,9 +26,11 @@ from loom_capacity_manager.auth import CapacityPrincipalVerifier
 from loom_capacity_manager.config import CapacityManagerSettings, build_uvicorn_kwargs
 from loom_capacity_manager.contracts import MAX_CONTRACT_BYTES
 from loom_capacity_manager.models import Base, CapacityAuthorityState
+from loom_capacity_manager.ownership import public_key_fingerprint
 from loom_capacity_manager.store import CapacityManagementStore
 from tests.capacity_fixtures import (
     AUTHORITY_ID,
+    DEMAND_REPORTER_ID,
     DEVELOPMENT_REPORTER_INCARNATION,
     DEVELOPMENT_SUBJECT_ID,
     DEVELOPMENT_SUBJECT_INCARNATION,
@@ -46,6 +51,9 @@ DEMAND_TOKEN = "demand-api-secret"
 GB10_TOKEN = "gb10-api-secret"
 OLDLAB_TOKEN = "oldlab-api-secret"
 DYNAMIC_DEMAND_TOKEN = "dynamic-demand-api-secret"
+OLDLAB_EXECUTOR_TOKEN = "oldlab-executor-secret"
+OLDLAB_EXECUTOR_INCARNATION = UUID("00000000-0000-4000-8000-000000000601")
+OLDLAB_OWNERSHIP_PRIVATE_KEY = Ed25519PrivateKey.from_private_bytes(b"\x03" * 32)
 
 
 def _hash(token: str) -> str:
@@ -62,6 +70,8 @@ def _principal(
     demand_reporter_incarnation: UUID | None = None,
     pool_id: str | None = None,
     pool_reporter_incarnation: UUID | None = None,
+    executor_id: str | None = None,
+    executor_incarnation: UUID | None = None,
 ) -> dict[str, object]:
     return {
         "principal_id": principal_id,
@@ -75,6 +85,10 @@ def _principal(
         "pool_id": pool_id,
         "pool_reporter_incarnation": (
             None if pool_reporter_incarnation is None else str(pool_reporter_incarnation)
+        ),
+        "executor_id": executor_id,
+        "executor_incarnation": (
+            None if executor_incarnation is None else str(executor_incarnation)
         ),
     }
 
@@ -154,6 +168,7 @@ async def api_context(
                             "capacity:project:development",
                             "capacity:reconcile",
                             "capacity:read",
+                            "capacity:grant:manage",
                         ],
                     ),
                     _principal(
@@ -178,6 +193,14 @@ async def api_context(
                         pool_id="oldlab",
                         pool_reporter_incarnation=POOL_REPORTER_OLDLAB_ID,
                     ),
+                    _principal(
+                        "oldlab-executor",
+                        OLDLAB_EXECUTOR_TOKEN,
+                        ["capacity:execute:pool"],
+                        pool_id="oldlab",
+                        executor_id="oldlab-executor",
+                        executor_incarnation=OLDLAB_EXECUTOR_INCARNATION,
+                    ),
                 ],
             }
         ),
@@ -186,6 +209,25 @@ async def api_context(
     dummy_cert = _owner_file(tmp_path / "server.crt", "test")
     dummy_key = _owner_file(tmp_path / "server.key", "test")
     dummy_ca = _owner_file(tmp_path / "client-ca.crt", "test")
+    ownership_keys = _owner_file(
+        tmp_path / "ownership-public-keys.json",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "keys": [
+                    {
+                        "signing_key_id": "oldlab-key-1",
+                        "public_key_base64": base64.b64encode(
+                            OLDLAB_OWNERSHIP_PRIVATE_KEY.public_key().public_bytes(
+                                encoding=serialization.Encoding.Raw,
+                                format=serialization.PublicFormat.Raw,
+                            )
+                        ).decode("ascii"),
+                    }
+                ],
+            }
+        ),
+    )
     settings = CapacityManagerSettings(
         principals_file=registry_path,
         db_url_file=db_url_path,
@@ -193,6 +235,7 @@ async def api_context(
         tls_cert_file=dummy_cert,
         tls_key_file=dummy_key,
         tls_client_ca_file=dummy_ca,
+        ownership_public_keys_file=ownership_keys,
         allocation_timeout_seconds=5,
     )
     allocator = BlockingAllocator()
@@ -319,11 +362,34 @@ def test_shadow_api_exposes_exactly_the_approved_routes(
         ("/v1/config-activations", ("POST",)),
         ("/v1/development-projections/{subject_id}", ("PUT",)),
         ("/v1/reports/demand/{subject_id}", ("PUT",)),
+        (
+            "/v1/reports/protected-releases/{subject_id}/{shape_instance_id}",
+            ("PUT",),
+        ),
         ("/v1/reports/pools/{pool_id}", ("PUT",)),
+        ("/v1/executors/{pool_id}/registration", ("PUT",)),
+        ("/v1/executors/{pool_id}/heartbeat", ("PUT",)),
+        ("/v1/executors/{pool_id}/checkpoint", ("GET",)),
+        ("/v1/executors/{pool_id}/inventory", ("PUT",)),
+        ("/v1/grants/reservations/{tranche_id}", ("PUT",)),
+        (
+            "/v1/executors/{pool_id}/reservations/{tranche_id}/accept",
+            ("POST",),
+        ),
+        ("/v1/executors/{pool_id}/intents/{intent_id}/bootstrap", ("POST",)),
+        ("/v1/grants/launch-permits/{permit_id}", ("PUT",)),
+        ("/v1/executors/{pool_id}/permits/{permit_id}/consume", ("POST",)),
+        ("/v1/executors/{pool_id}/intents/{intent_id}/close", ("POST",)),
+        (
+            "/v1/executors/{pool_id}/reservations/{tranche_id}/release",
+            ("POST",),
+        ),
         ("/v1/shadow-reconciliations", ("POST",)),
         ("/v1/status", ("GET",)),
         ("/v1/status/subjects", ("GET",)),
         ("/v1/status/pools", ("GET",)),
+        ("/v1/status/executors", ("GET",)),
+        ("/v1/status/reservations", ("GET",)),
         ("/v1/shadow-epochs/{allocation_epoch}", ("GET",)),
         ("/v1/shadow-epochs/{allocation_epoch}/allocations", ("GET",)),
         ("/v1/audit-events", ("GET",)),
@@ -523,6 +589,105 @@ def test_reporter_cannot_publish_config_or_impersonate_subject(
     )
     assert response.status_code == 403
     assert response.json() == {"detail": "forbidden"}
+
+    protected_release = {
+        "schema_version": 1,
+        "authority_incarnation": str(AUTHORITY_ID),
+        "writer_epoch": 1,
+        "configuration_epoch": 1,
+        "allocation_epoch": 1,
+        "tranche_id": str(uuid4()),
+        "shape_instance_id": "shape-0001",
+        "intent_id": str(uuid4()),
+        "subject_id": str(other),
+        "subject_incarnation": str(SUBJECT_INCARNATION),
+        "reporter_incarnation": str(DEMAND_REPORTER_ID),
+        "deployment_generation": 1,
+        "pool_id": "gb10",
+        "pool_generation": 1,
+        "bootstrap_registration_epoch": 0,
+        "protected_registration_epoch": 1,
+        "bootstrap_revoked": True,
+        "protected_release_sha256": "a" * 64,
+        "executable": False,
+    }
+    response = client.put(
+        f"/v1/reports/protected-releases/{other}/shape-0001",
+        headers=reporter_headers | {"Idempotency-Key": str(uuid4())},
+        json=protected_release,
+    )
+    assert response.status_code == 403
+    assert response.json() == {"detail": "forbidden"}
+
+
+def test_pool_executor_registration_heartbeat_and_cross_pool_rbac(
+    api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
+    operator_headers: dict[str, str],
+) -> None:
+    client, app, _settings, _allocator = api_context
+    registration = {
+        "schema_version": 1,
+        "executor_id": "oldlab-executor",
+        "executor_incarnation": str(OLDLAB_EXECUTOR_INCARNATION),
+        "pool_id": "oldlab",
+        "pool_generation": 1,
+        "signing_key_id": "oldlab-key-1",
+        "signing_key_sha256": public_key_fingerprint(OLDLAB_OWNERSHIP_PRIVATE_KEY.public_key()),
+        "local_authority_sha256": "b" * 64,
+        "executable": False,
+    }
+    registered = client.put(
+        "/v1/executors/oldlab/registration",
+        headers=operator_headers | {"Idempotency-Key": str(uuid4())},
+        json=registration,
+    )
+    assert registered.status_code == 200, registered.text
+    heartbeat = {
+        "schema_version": 1,
+        "authority_incarnation": str(AUTHORITY_ID),
+        "writer_epoch": app.state.writer.writer_epoch,
+        "executor_id": "oldlab-executor",
+        "executor_incarnation": str(OLDLAB_EXECUTOR_INCARNATION),
+        "pool_id": "oldlab",
+        "pool_generation": 1,
+        "heartbeat_sequence": 1,
+        "journal_sequence": 0,
+        "journal_digest": "0" * 64,
+        "executable": False,
+    }
+    executor_headers = {"Authorization": f"Bearer {OLDLAB_EXECUTOR_TOKEN}"}
+
+    checkpoint = client.get(
+        "/v1/executors/oldlab/checkpoint",
+        headers=executor_headers,
+    )
+    assert checkpoint.status_code == 200, checkpoint.text
+    assert checkpoint.json()["journal_sequence"] == 0
+    assert checkpoint.json()["journal_digest"] == "0" * 64
+    assert checkpoint.json()["executable"] is False
+    assert (
+        client.get(
+            "/v1/executors/gb10/checkpoint",
+            headers=executor_headers,
+        ).status_code
+        == 403
+    )
+
+    response = client.put(
+        "/v1/executors/oldlab/heartbeat",
+        headers=executor_headers,
+        json=heartbeat,
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["heartbeat_sequence"] == 1
+    assert (
+        client.put(
+            "/v1/executors/gb10/heartbeat",
+            headers=executor_headers,
+            json=heartbeat | {"pool_id": "gb10"},
+        ).status_code
+        == 403
+    )
 
 
 def test_real_server_requires_mutual_tls(

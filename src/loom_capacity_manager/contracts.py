@@ -32,6 +32,8 @@ MAX_DEMAND_BUCKETS_PER_REPORT = 2_048
 MAX_ASSIGNMENTS_PER_REPORT = 10_000
 MAX_FIXED_CLAIMS_PER_REPORT = 10_000
 MAX_CONTRACT_BYTES = 8 * 1024 * 1024
+MICROTOKENS_PER_LAUNCH = 1_000_000
+MAX_LAUNCH_RATE_PER_MINUTE = MAX_QUANTITY // MICROTOKENS_PER_LAUNCH
 
 _IDENTIFIER_PATTERN = r"^[a-z0-9][a-z0-9_.-]{0,127}$"
 _RESOURCE_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{0,62}$")
@@ -45,6 +47,7 @@ Identifier = Annotated[str, Field(min_length=1, max_length=128, pattern=_IDENTIF
 Digest = Annotated[str, Field(pattern=_DIGEST_PATTERN)]
 Quantity = Annotated[int, Field(ge=0, le=MAX_QUANTITY)]
 PositiveQuantity = Annotated[int, Field(gt=0, le=MAX_QUANTITY)]
+LaunchRate = Annotated[int, Field(ge=0, le=MAX_LAUNCH_RATE_PER_MINUTE)]
 
 
 class CapacityContractError(ValueError):
@@ -312,6 +315,7 @@ class AccountPolicyV1(StrictV1Model):
     max_surge_slots: Quantity = 0
     max_pending_slots: Quantity
     max_pending_jobs: Quantity
+    submission_rate_per_minute: LaunchRate = 0
     max_live_subjects: PositiveQuantity
 
     @model_validator(mode="after")
@@ -339,7 +343,7 @@ class PoolManifestV1(StrictV1Model):
     max_slots: Quantity
     max_pending_slots: Quantity
     max_pending_jobs: Quantity
-    submission_rate_per_minute: Quantity
+    submission_rate_per_minute: LaunchRate
     health: Literal["eligible", "maintenance", "unhealthy"]
 
     @field_validator("resource_domains")
@@ -398,7 +402,7 @@ class FleetManifestV1(StrictV1Model):
     development_subject_template: DevelopmentSubjectTemplateV1 | None = None
     global_max_pending_slots: Quantity
     global_max_pending_jobs: Quantity
-    global_submission_rate_per_minute: Quantity
+    global_submission_rate_per_minute: LaunchRate
 
     @field_validator("tiers")
     @classmethod
@@ -504,6 +508,7 @@ class SubjectConfigurationV1(StrictV1Model):
     rollout_surge_slots: Quantity = 0
     max_pending_slots: Quantity
     max_pending_jobs: Quantity
+    submission_rate_per_minute: LaunchRate = 0
     lifecycle_state: Literal["provisioning", "active", "draining", "disabled"]
     candidate_generation: PositiveQuantity
     deployment_generation: PositiveQuantity
@@ -781,16 +786,18 @@ class ObservedCommitmentV1(StrictV1Model):
     kind: Literal["claim", "physical", "reserve"]
     commitment_id: Identifier
     physical_identity: Identifier
+    reservation_identity: Identifier | None = None
+    ownership_state: Literal["unverified", "authenticated"] = "unverified"
     attempt_id: Identifier | None = None
     concurrency_slots: PositiveQuantity | None = None
-    subject_id: UUID
-    subject_incarnation: UUID
-    deployment_generation: PositiveQuantity
+    subject_id: UUID | None = None
+    subject_incarnation: UUID | None = None
+    deployment_generation: PositiveQuantity | None = None
     pool_id: Identifier
     pool_generation: PositiveQuantity
-    profile_id: Identifier
-    profile_generation: PositiveQuantity
-    profile_digest: Digest
+    profile_id: Identifier | None = None
+    profile_generation: PositiveQuantity | None = None
+    profile_digest: Digest | None = None
     shape_id: Identifier | None = None
     resources: ResourceVectorV1
     state: Literal[
@@ -816,6 +823,28 @@ class ObservedCommitmentV1(StrictV1Model):
 
     @model_validator(mode="after")
     def _kind_fields(self) -> ObservedCommitmentV1:
+        attributed = self.subject_id is not None
+        if attributed != (self.subject_incarnation is not None):
+            raise ValueError("commitment subject identity must be complete")
+        profile_fields = (
+            self.deployment_generation,
+            self.profile_id,
+            self.profile_generation,
+            self.profile_digest,
+        )
+        if attributed and any(item is None for item in profile_fields):
+            raise ValueError("attributed commitment profile binding must be complete")
+        if not attributed and (
+            self.kind != "physical"
+            or self.state not in {"unknown", "quarantined"}
+            or any(item is not None for item in profile_fields)
+            or self.shape_id is not None
+        ):
+            raise ValueError("unattributed commitment must be physical quarantine")
+        if self.ownership_state == "authenticated" and (
+            self.kind != "physical" or not attributed or self.reservation_identity is None
+        ):
+            raise ValueError("authenticated commitment requires reservation binding")
         if self.kind == "claim" and (self.attempt_id is None or self.concurrency_slots is None):
             raise ValueError("claim commitment requires attempt and concurrency slots")
         if self.kind != "claim" and (
@@ -1223,11 +1252,13 @@ __all__ = [
     "MAX_DEMAND_BUCKETS_PER_REPORT",
     "MAX_DOMAINS_PER_POOL",
     "MAX_FIXED_CLAIMS_PER_REPORT",
+    "MAX_LAUNCH_RATE_PER_MINUTE",
     "MAX_NODES_PER_DOMAIN",
     "MAX_POOLS",
     "MAX_QUANTITY",
     "MAX_SHAPES_PER_PROFILE",
     "MAX_SUBJECTS",
+    "MICROTOKENS_PER_LAUNCH",
     "SCHEMA_VERSION",
     "AccountPolicyV1",
     "AllocationInputV1",

@@ -126,6 +126,9 @@ def test_agent_can_execute_only_the_bounded_agent_functions(
                         "'loom_capacity_guard.record_inert_worker"
                         "(uuid,jsonb,bytea,text)', 'EXECUTE') AS worker_execute, "
                         "has_function_privilege(:agent, "
+                        "'loom_capacity_guard.acknowledge_inert_protected_release"
+                        "(uuid,jsonb,bytea,text)', 'EXECUTE') AS protected_release_execute, "
+                        "has_function_privilege(:agent, "
                         "'loom_capacity_guard.assert_inert_agent_binding"
                         "(uuid,jsonb,bytea,text)', 'EXECUTE') AS binding_guard_execute, "
                         "has_function_privilege(:agent, "
@@ -172,6 +175,7 @@ def test_agent_can_execute_only_the_bounded_agent_functions(
             "plan_execute": True,
             "bootstrap_execute": True,
             "worker_execute": True,
+            "protected_release_execute": True,
             "binding_guard_execute": False,
             "lifecycle_execute": True,
             "lifecycle_initializer_execute": False,
@@ -227,6 +231,8 @@ def test_agent_functions_have_fixed_search_paths_and_exact_definer_status(
                         "'project_attempt_lifecycle_projection_resolution', "
                         "'assert_inert_agent_binding', 'prepare_inert_admission_plan', "
                         "'register_inert_bootstrap', 'record_inert_worker', "
+                        "'reject_released_shape_registration', "
+                        "'acknowledge_inert_protected_release', "
                         "'apply_inert_attempt_transition', "
                         "'initialize_attempt_lifecycle', "
                         "'inspect_inert_claim_proposal', "
@@ -252,6 +258,8 @@ def test_agent_functions_have_fixed_search_paths_and_exact_definer_status(
             "prepare_inert_admission_plan",
             "register_inert_bootstrap",
             "record_inert_worker",
+            "reject_released_shape_registration",
+            "acknowledge_inert_protected_release",
             "apply_inert_attempt_transition",
             "initialize_attempt_lifecycle",
             "inspect_inert_claim_proposal",
@@ -273,6 +281,7 @@ def test_agent_functions_have_fixed_search_paths_and_exact_definer_status(
                     "project_attempt_lifecycle_head",
                     "project_attempt_lifecycle_projection_resolution",
                     "reject_global_preparation_with_legacy",
+                    "reject_released_shape_registration",
                 }
             )
     finally:

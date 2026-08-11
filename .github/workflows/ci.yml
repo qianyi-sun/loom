@@ -428,14 +428,16 @@ jobs:
       - name: Mypy (strict)
         run: uv run --no-sync mypy
 
-      - name: Global capacity Package 1 no-execution audit
+      - name: Global capacity Package 3 no-scheduler-mutation audit
         shell: bash
         run: |
           set -euo pipefail
           if matches=$(rg -n \
             -e 'SharedCapacityBroker|capacity_grants_from_report' \
-            -e 'sbatch|scancel|worker:claim|launch_permit' \
+            -e 'worker:claim|\b(sbatch|scancel|scontrol|srun)\b' \
+            -e '(^|[[:space:]])(import|from)[[:space:]]+(docker|pyslurm|slurm|subprocess)([[:space:].]|$)' \
             src/loom_capacity_manager \
+            src/loom_capacity_executor \
             scripts/ops/global_fleet_capacity_shadow_once.py); then
             echo "$matches" >&2
             exit 1
