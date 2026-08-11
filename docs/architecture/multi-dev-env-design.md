@@ -98,6 +98,24 @@ immutable `personal-dev-only` source/image/profile attestation; it does not
 assert feature correctness. Personal candidates cannot be promoted to staging
 or production.
 
+The first Package 4 implementation slice supplies the producer and consumer
+side of that source boundary. It inventories tracked plus non-ignored
+untracked files from the exact Git worktree, omits deleted files and records
+their provenance, excludes sensitive and ignored paths, and rejects links,
+special files, hard-linked files, unsafe contexts, invalid paths, and bounded
+size/count overflow. Every file is read through no-follow directory
+descriptors with before/after identity checks. A second full scan after archive
+creation rejects checkout races. The deterministic USTAR archive and canonical
+manifest receive independent SHA-256 digests and carry the immutable
+`personal-dev-only` scope.
+
+The isolated-builder verifier opens the archive no-follow, checks its expected
+artifact digest before parsing, enforces canonical metadata and limits without
+extracting paths, revalidates every member against the manifest, and checks the
+expected source digest. This slice does not yet upload the archive, run a
+builder, publish an image, or alter a personal environment; those remain
+activation-blocking integration work.
+
 After migration, the service copies only the requesting user, current team,
 quota policy, membership, and the hash of the credential used for creation
 into the isolated database. It does not copy raw credentials or unrelated
