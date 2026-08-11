@@ -14,10 +14,13 @@ from loom_cli.rollout.rehearsal_action_source import (
 )
 from loom_cli.rollout.rehearsal_browser import (
     BROWSER_INGRESS_NAME,
+    BROWSER_INGRESS_NETWORK_POLICY_NAME,
     BROWSER_JOB_NAME,
     BROWSER_NETWORK_POLICY_NAME,
     build_rehearsal_browser_artifact,
     ingress_controller_ip,
+    rehearsal_backend_endpoints,
+    rehearsal_backend_node_gateway_source_ip,
     rehearsal_browser_job_complete,
     rehearsal_browser_pod_complete,
     rehearsal_browser_report_ready,
@@ -102,13 +105,18 @@ def _resources(artifact) -> dict[tuple[str, str], dict[str, object]]:
 
 def test_browser_artifact_is_exact_restricted_and_candidate_bound(tmp_path: Path) -> None:
     plan = _plan(tmp_path)
-    artifact = build_rehearsal_browser_artifact(plan, ingress_ip="10.96.12.34")
+    artifact = build_rehearsal_browser_artifact(
+        plan,
+        ingress_ip="10.96.12.34",
+        ingress_source_ips=("10.42.0.1", "10.42.1.1"),
+    )
     resources = _resources(artifact)
 
     assert set(resources) == {
         ("Ingress", BROWSER_INGRESS_NAME),
         ("Job", BROWSER_JOB_NAME),
         ("NetworkPolicy", BROWSER_NETWORK_POLICY_NAME),
+        ("NetworkPolicy", BROWSER_INGRESS_NETWORK_POLICY_NAME),
     }
     ingress = resources[("Ingress", BROWSER_INGRESS_NAME)]
     assert ingress["spec"]["rules"][0]["host"] == "yylx.world"
@@ -171,6 +179,27 @@ def test_browser_artifact_is_exact_restricted_and_candidate_bound(tmp_path: Path
             ],
         }
     ]
+    ingress_policy = resources[("NetworkPolicy", BROWSER_INGRESS_NETWORK_POLICY_NAME)]
+    assert ingress_policy["spec"] == {
+        "ingress": [
+            {
+                "from": [
+                    {"ipBlock": {"cidr": "10.42.0.1/32"}},
+                    {"ipBlock": {"cidr": "10.42.1.1/32"}},
+                ],
+                "ports": [
+                    {"port": 8080, "protocol": "TCP"},
+                    {"port": 8090, "protocol": "TCP"},
+                ],
+            }
+        ],
+        "podSelector": {
+            "matchExpressions": [
+                {"key": "app", "operator": "In", "values": ["loom-service", "loom-web"]}
+            ]
+        },
+        "policyTypes": ["Ingress"],
+    }
 
 
 def test_ingress_controller_service_requires_exact_ipv4_cluster_identity() -> None:
@@ -196,9 +225,98 @@ def test_ingress_controller_service_requires_exact_ipv4_cluster_identity() -> No
         assert ingress_controller_ip(changed) is None
 
 
+def test_rehearsal_backend_endpoints_require_exact_bounded_ipv4_identity() -> None:
+    value = {
+        "apiVersion": "v1",
+        "kind": "Endpoints",
+        "metadata": {"name": "loom-web", "namespace": "loom-rehearsal-exact"},
+        "subsets": [
+            {
+                "addresses": [
+                    {"ip": "10.42.0.7", "nodeName": "trt-eai-oldlab-1"},
+                    {"ip": "10.42.1.8", "nodeName": "trt-eai-oldlab-2"},
+                ],
+                "ports": [{"name": "http", "port": 8080, "protocol": "TCP"}],
+            }
+        ],
+    }
+    assert rehearsal_backend_endpoints(
+        value,
+        namespace="loom-rehearsal-exact",
+        name="loom-web",
+        port=8080,
+    ) == (
+        ("trt-eai-oldlab-1", "10.42.0.7"),
+        ("trt-eai-oldlab-2", "10.42.1.8"),
+    )
+    for drift in (
+        {"metadata": {"name": "other", "namespace": "loom-rehearsal-exact"}},
+        {"metadata": {"name": "loom-web", "namespace": "loom-staging"}},
+        {"subsets": []},
+        {"subsets": [{"addresses": [{"ip": "2001:db8::1"}], "ports": value["subsets"][0]["ports"]}]},
+        {"subsets": [{"addresses": value["subsets"][0]["addresses"], "ports": []}]},
+    ):
+        changed = deepcopy(value)
+        for key, item in drift.items():
+            changed[key] = item
+        assert (
+            rehearsal_backend_endpoints(
+                changed,
+                namespace="loom-rehearsal-exact",
+                name="loom-web",
+                port=8080,
+            )
+            is None
+        )
+
+
+def test_backend_node_gateway_requires_exact_pod_and_pod_cidr_identity() -> None:
+    value = {
+        "apiVersion": "v1",
+        "kind": "Node",
+        "metadata": {"name": "trt-eai-oldlab-3"},
+        "spec": {"podCIDR": "10.42.2.0/24", "podCIDRs": ["10.42.2.0/24"]},
+        "status": {
+            "addresses": [
+                {"address": "192.168.50.15", "type": "InternalIP"},
+                {"address": "trt-eai-oldlab-3", "type": "Hostname"},
+            ]
+        },
+    }
+    assert (
+        rehearsal_backend_node_gateway_source_ip(
+            value,
+            expected_name="trt-eai-oldlab-3",
+            expected_pod_ips=("10.42.2.7",),
+        )
+        == "10.42.2.1"
+    )
+    for drift in (
+        {"metadata": {"name": "trt-eai-oldlab-2"}},
+        {"spec": {"podCIDR": "10.42.2.0/24", "podCIDRs": ["10.42.3.0/24"]}},
+        {"spec": {"podCIDR": "2001:db8::/64", "podCIDRs": ["2001:db8::/64"]}},
+        {"spec": {"podCIDR": "10.42.3.0/24", "podCIDRs": ["10.42.3.0/24"]}},
+    ):
+        changed = deepcopy(value)
+        for key, item in drift.items():
+            changed[key] = item
+        assert (
+            rehearsal_backend_node_gateway_source_ip(
+                changed,
+                expected_name="trt-eai-oldlab-3",
+                expected_pod_ips=("10.42.2.7",),
+            )
+            is None
+        )
+
+
 def test_browser_resource_job_and_pod_readback_are_exact(tmp_path: Path) -> None:
     plan = _plan(tmp_path)
-    artifact = build_rehearsal_browser_artifact(plan, ingress_ip="10.96.12.34")
+    artifact = build_rehearsal_browser_artifact(
+        plan,
+        ingress_ip="10.96.12.34",
+        ingress_source_ips=("10.42.2.1",),
+    )
     resources = _resources(artifact)
     job = deepcopy(resources[("Job", BROWSER_JOB_NAME)])
     job["status"] = {
@@ -313,7 +431,22 @@ def test_browser_report_requires_complete_exact_rehearsal_binding(tmp_path: Path
 @pytest.mark.parametrize("value", ["", "not-an-ip", "2001:db8::1"])
 def test_browser_artifact_rejects_invalid_ingress_identity(tmp_path: Path, value: str) -> None:
     with pytest.raises(ValueError, match="ingress identity"):
-        build_rehearsal_browser_artifact(_plan(tmp_path), ingress_ip=value)
+        build_rehearsal_browser_artifact(
+            _plan(tmp_path), ingress_ip=value, ingress_source_ips=("10.42.2.1",)
+        )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [(), ("not-an-ip",), ("2001:db8::1",), ("10.42.2.1", "10.42.2.1")],
+)
+def test_browser_artifact_rejects_invalid_ingress_source_identity(
+    tmp_path: Path, value: tuple[str, ...]
+) -> None:
+    with pytest.raises(ValueError, match="ingress source identity"):
+        build_rehearsal_browser_artifact(
+            _plan(tmp_path), ingress_ip="10.96.12.34", ingress_source_ips=value
+        )
 
 
 def test_browser_artifact_rejects_noncanonical_rehearsal_route(tmp_path: Path) -> None:
@@ -328,4 +461,5 @@ def test_browser_artifact_rejects_noncanonical_rehearsal_route(tmp_path: Path) -
         build_rehearsal_browser_artifact(
             RehearsalPlan.from_record(record),
             ingress_ip="10.96.12.34",
+            ingress_source_ips=("10.42.2.1",),
         )
