@@ -217,3 +217,29 @@ def test_snapshot_verifier_rejects_digest_drift_and_archive_path_traversal(
             expected_source_digest=hashlib.sha256(manifest_payload).hexdigest(),
             expected_archive_sha256=hashlib.sha256(malicious_bytes).hexdigest(),
         )
+
+
+def test_snapshot_verifier_rejects_noncanonical_trailer_bytes(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    output = tmp_path / "source.tar"
+    snapshot = create_personal_dev_source_snapshot(repo, output)
+
+    appended = tmp_path / "appended.tar"
+    appended.write_bytes(output.read_bytes() + b"\0" * tarfile.RECORDSIZE)
+    with pytest.raises(PersonalDevSourceError, match="canonical tar size"):
+        verify_personal_dev_source_snapshot(
+            appended,
+            expected_source_digest=snapshot.source_digest,
+            expected_archive_sha256=hashlib.sha256(appended.read_bytes()).hexdigest(),
+        )
+
+    nonzero = tmp_path / "nonzero-padding.tar"
+    payload = bytearray(output.read_bytes())
+    payload[-1] = 1
+    nonzero.write_bytes(payload)
+    with pytest.raises(PersonalDevSourceError, match="trailer"):
+        verify_personal_dev_source_snapshot(
+            nonzero,
+            expected_source_digest=snapshot.source_digest,
+            expected_archive_sha256=hashlib.sha256(payload).hexdigest(),
+        )

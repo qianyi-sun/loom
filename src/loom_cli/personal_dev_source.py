@@ -787,6 +787,11 @@ def verify_personal_dev_source_snapshot(
                 raise PersonalDevSourceError("personal-dev source archive manifest is unreadable")
             manifest_payload = manifest_file.read(16 * 1024 * 1024 + 1)
             manifest = _parse_manifest(manifest_payload)
+            logical_end = (
+                manifest_member.offset_data
+                + ((manifest_member.size + tarfile.BLOCKSIZE - 1) // tarfile.BLOCKSIZE)
+                * tarfile.BLOCKSIZE
+            )
             if hashlib.sha256(manifest_payload).hexdigest() != expected_source_digest:
                 raise PersonalDevSourceError("personal-dev source manifest digest does not match")
             if manifest.file_count > max_files or manifest.total_bytes > max_total_bytes:
@@ -829,10 +834,34 @@ def verify_personal_dev_source_snapshot(
                     raise PersonalDevSourceError(
                         "personal-dev source archive content differs from the manifest"
                     )
+                logical_end = (
+                    member.offset_data
+                    + ((member.size + tarfile.BLOCKSIZE - 1) // tarfile.BLOCKSIZE)
+                    * tarfile.BLOCKSIZE
+                )
             if archive.next() is not None:
                 raise PersonalDevSourceError(
                     "personal-dev source archive members differ from the manifest"
                 )
+            expected_archive_size = (
+                (logical_end + 2 * tarfile.BLOCKSIZE + tarfile.RECORDSIZE - 1) // tarfile.RECORDSIZE
+            ) * tarfile.RECORDSIZE
+            if before.st_size != expected_archive_size:
+                raise PersonalDevSourceError(
+                    "personal-dev source archive has a noncanonical tar size"
+                )
+            trailer_offset = logical_end
+            while trailer_offset < before.st_size:
+                trailer = os.pread(
+                    descriptor,
+                    min(1024 * 1024, before.st_size - trailer_offset),
+                    trailer_offset,
+                )
+                if not trailer or any(trailer):
+                    raise PersonalDevSourceError(
+                        "personal-dev source archive trailer is not zero-filled"
+                    )
+                trailer_offset += len(trailer)
         after_parse = os.fstat(descriptor)
         if (after_hash.st_size, after_hash.st_mtime_ns, after_hash.st_ctime_ns) != (
             after_parse.st_size,
