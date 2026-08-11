@@ -69,6 +69,34 @@ def _external_supervisor_artifact() -> ExternalSupervisorArtifact:
     )
 
 
+def _external_supervisor_profile() -> bytes:
+    profile = (REPO_ROOT / "deploy/environment-state/staging.toml").read_text(encoding="utf-8")
+    profile = profile.replace("enabled = false", "enabled = true", 1)
+    profile = profile.replace("materialize = false", "materialize = true", 1)
+    profile = profile.replace(
+        "enabled = false\nactive = false",
+        "enabled = true\nactive = true",
+        1,
+    )
+    payload = profile.encode()
+    assert hashlib.sha256(payload).hexdigest() == _external_supervisor_artifact().profile_sha256
+    return payload
+
+
+def _external_policy_seed_result(plan: RehearsalPlan) -> dict[str, object]:
+    return {
+        "candidate_sha": plan.candidate_sha,
+        "candidate_tree": plan.candidate_tree,
+        "evidence_sha256": "e" * 64,
+        "image_tag": plan.image_tag,
+        "plan_sha256": plan.plan_digest,
+        "policy_count": 2,
+        "profile_sha256": plan.external_supervisor_profile_sha256,
+        "schema_version": 1,
+        "status": "ready",
+    }
+
+
 def _plan() -> RehearsalPlan:
     supervisor = _external_supervisor_artifact()
     return RehearsalPlan(
@@ -1079,6 +1107,14 @@ def test_release_loads_exact_images_and_verifies_all_scoped_resources() -> None:
             return subprocess.CompletedProcess(argv, 0, "not-found\n", "")
         if command[:4] == ("systemd-run", "--user", "--wait", "--collect"):
             return subprocess.CompletedProcess(argv, 0, "", "")
+        if "loom_cli.rollout.rehearsal_environment_state_probe" in command:
+            assert payload == _external_supervisor_profile()
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                json.dumps(_external_policy_seed_result(plan)),
+                "",
+            )
         if "apply" in command:
             return subprocess.CompletedProcess(argv, 0, "applied\n", "")
         if "secret" in command and "get" in command:
@@ -1136,6 +1172,7 @@ def test_release_loads_exact_images_and_verifies_all_scoped_resources() -> None:
         release_artifacts=lambda _plan: release,
         secret_artifacts=lambda _plan: secrets,
         external_supervisor_artifacts=lambda _plan: supervisor_artifact,
+        external_supervisor_profiles=lambda _plan: _external_supervisor_profile(),
         runtime_image_resolver=_runtime_images,
     ).execute("rehearsal.release", plan)
 
@@ -1173,7 +1210,17 @@ def test_release_loads_exact_images_and_verifies_all_scoped_resources() -> None:
     )
     assert len(secret_readback_indexes) == len(secrets.secret_names)
     assert secret_apply_index < min(secret_readback_indexes)
-    assert max(secret_readback_indexes) < validation_index < release_apply_index
+    policy_seed_index, policy_seed_argv = next(
+        (index, command)
+        for index, (command, payload) in enumerate(calls)
+        if payload == _external_supervisor_profile()
+    )
+    assert max(secret_readback_indexes) < policy_seed_index < validation_index < release_apply_index
+    assert policy_seed_argv[policy_seed_argv.index("--container") + 1] == "migration"
+    assert (
+        f"LOOM_DB_URL=postgresql+psycopg://loom_rehearsal@127.0.0.1:5432/{plan.resources.database}"
+        in policy_seed_argv
+    )
 
     supervisor = supervisor_artifact.supervisors[0]
     working_directory = staging_working_directory(plan.candidate_sha)
@@ -1288,6 +1335,14 @@ def test_release_external_supervisor_failure_is_secret_free_and_blocks_manifest(
             return subprocess.CompletedProcess(argv, 0, "not-found\n", "")
         if command[:4] == ("systemd-run", "--user", "--wait", "--collect"):
             return subprocess.CompletedProcess(argv, 1, "", "token=must-not-leak")
+        if "loom_cli.rollout.rehearsal_environment_state_probe" in command:
+            assert payload == _external_supervisor_profile()
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                json.dumps(_external_policy_seed_result(plan)),
+                "",
+            )
         if payload == secrets.payload:
             return subprocess.CompletedProcess(argv, 0, "applied\n", "")
         if (
@@ -1308,6 +1363,7 @@ def test_release_external_supervisor_failure_is_secret_free_and_blocks_manifest(
         release_artifacts=lambda _plan: release,
         secret_artifacts=lambda _plan: secrets,
         external_supervisor_artifacts=lambda _plan: _external_supervisor_artifact(),
+        external_supervisor_profiles=lambda _plan: _external_supervisor_profile(),
         runtime_image_resolver=_runtime_images,
     ).execute("rehearsal.release", plan)
 
@@ -1337,7 +1393,12 @@ def test_release_external_supervisor_failure_is_secret_free_and_blocks_manifest(
         and b'"kind":"Service"' in payload
         and b'"name":"loom-postgres-rw"' in payload
     )
-    assert service_apply_index < validation_index
+    policy_seed_index = next(
+        index
+        for index, (_command, payload) in enumerate(calls)
+        if payload == _external_supervisor_profile()
+    )
+    assert policy_seed_index < service_apply_index < validation_index
 
 
 def test_release_refuses_local_image_drift_before_kubernetes_mutation() -> None:
