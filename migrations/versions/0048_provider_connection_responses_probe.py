@@ -1,6 +1,6 @@
 """Cache per-connection Responses-API support so the gateway can dispatch
 straight into `responses_chat_compat` for providers that don't implement
-`POST /v1/responses` (yibuapi et al.). See #277 and
+`POST /v1/responses` (yibuapi et al.). See
 docs/architecture/responses-api.md.
 
 Three nullable columns; no data migration; downgrade drops them.

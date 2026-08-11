@@ -16,6 +16,15 @@ CLI with the Compose plugin before running
 and start Docker Desktop first and confirm
 `docker compose version` succeeds.
 
+`loom service up` always requires `--environment`. The `local` target is the
+Compose path above. A `dev-<name>` target authenticates to the configured Loom
+server, seals or reuses a personal candidate, and applies it through the
+candidate-aware environment API; it does not invoke local Compose or direct
+`kubectl`. The `staging` and `production` targets require a full Git candidate
+but deliberately refuse direct deployment and point to `loom cluster rollout`,
+which owns their approval and evidence workflow. `loom service down` and
+`status` remain local Compose commands.
+
 ## Service-prefix convention
 
 | Service | Routes mounted at | Audience |

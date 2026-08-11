@@ -1,6 +1,6 @@
 """Candidate-less shared-fleet development compatibility client.
 
-This remains a thin client over the earlier loom-service lifecycle API. It
+This is a thin client over the candidate-less loom-service lifecycle API. It
 never shells out to kubectl, writes autoscaler policy directly, or reuses the
 local Docker Compose ``loom service`` path. Candidate-aware deployment is
 exposed separately through ``loom service up --environment dev-<name>``.
@@ -320,7 +320,7 @@ def dispatch(argv: list[str]) -> int:
 
     destroy = sub.add_parser(
         "destroy",
-        help="Request legacy destroy; candidate-backed environments are rejected.",
+        help="Request destroy; candidate-backed environments are rejected.",
     )
     destroy.add_argument("name", type=_dev_instance_name)
     destroy.add_argument(

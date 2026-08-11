@@ -199,7 +199,7 @@ Start with the user guide rather than copying commands from this README:
 | Upload and run user TaskSets | [`docs/architecture/user-brought-tasksets.md`](docs/architecture/user-brought-tasksets.md) |
 | Inspect usage and cost | [`docs/architecture/cost-and-rate-cards.md`](docs/architecture/cost-and-rate-cards.md) |
 
-Current shared staging login should use:
+For shared staging login, use:
 
 ```bash
 loom auth login --server https://yylx.world/staging --username <user> --password env:LOOM_PASSWORD

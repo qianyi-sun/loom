@@ -191,7 +191,7 @@ process or select another localhost port so Playwright can build and serve its
 own browser-test bundle.
 
 Vitest enforces statements, lines, and functions at 80% and branches at 75%;
-only the generated `src/api/schema.d.ts` production source is excluded. The
+only the generated `web/src/api/schema.d.ts` production source is excluded. The
 Playwright gate serves the production build at `/dev` by default and supports
 the same local contract at `/prod`. It exercises logged-out, user, and admin
 routes at 1440x900 and 390x844, reloads deep links, and rejects empty roots,

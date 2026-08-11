@@ -14,6 +14,18 @@ from a `loom eval batch create` submission via the public-beta service.
 | `terminal-bench-2/security-vulhub-minio` | `f72be417-39be-45fa-9275-eb9aae0bf83e` | succeeded | 1.0 | ~40 s | G4 sidecar |
 | `terminal-bench-2/simple-sheets-put` | `d474765a-cd71-427d-a2c0-d08fddb1bf65` | succeeded | 1.0 | ~60 s | G4 sidecar |
 
+Each task row has a paired `<task>-atif.json` and
+`<task>-trajectory.jsonl` file in this directory:
+
+- [`hello-world-atif.json`](hello-world-atif.json) and
+  [`hello-world-trajectory.jsonl`](hello-world-trajectory.jsonl)
+- [`simple-web-scraper-atif.json`](simple-web-scraper-atif.json) and
+  [`simple-web-scraper-trajectory.jsonl`](simple-web-scraper-trajectory.jsonl)
+- [`security-vulhub-minio-atif.json`](security-vulhub-minio-atif.json) and
+  [`security-vulhub-minio-trajectory.jsonl`](security-vulhub-minio-trajectory.jsonl)
+- [`simple-sheets-put-atif.json`](simple-sheets-put-atif.json) and
+  [`simple-sheets-put-trajectory.jsonl`](simple-sheets-put-trajectory.jsonl)
+
 All four trials exercise the full chain:
 `task bundle → resolve_task_image → image build → workspace materialize
 → OracleAgent runs solve.sh → verifier_shim.sh → run-tests.sh →

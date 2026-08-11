@@ -98,8 +98,8 @@ The operator credential is a TOML file containing an `[admin]` table and a
 high-entropy `loom_admin_...` token. Production services read it from the
 component-specific admin-secret file settings and fail closed when it is
 missing, malformed, low-entropy, or unsafe. POSIX deployments require mode
-`0600`. Local `loom service up` manages a development copy under
-`.loom/admin/secrets.toml`.
+`0600`. Local `loom service up --environment local` manages a development copy
+under `.loom/admin/secrets.toml`.
 
 Manage the local secret without printing it by default:
 

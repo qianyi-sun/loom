@@ -6,18 +6,21 @@ environments on the shared fixture. It is disabled by default:
 database authority, Kubernetes access, MinIO authority, an activation public
 key, and the restricted candidate-builder configuration.
 
-This controller is separate from `loom service`. The `loom service` commands
-manage only the local Docker Compose stack and do not accept a
-development/staging/production selector.
+`loom service up` requires an explicit target. `--environment local` manages
+the Docker Compose stack; `--environment dev-<name>` drives the authenticated
+personal-candidate lifecycle described here. Staging and production remain
+protected rollout targets: the command validates their full Git candidate and
+then directs the operator to `loom cluster rollout` rather than mutating them.
 
 ## Checked-in interfaces
 
-The candidate-aware lifecycle is currently an API and library surface, not a
-complete `loom dev` CLI workflow.
+The candidate-aware lifecycle has a high-level CLI entry point as well as
+library and HTTP interfaces.
 
 | Interface | Current behavior |
 | --- | --- |
-| `create_personal_dev_source_snapshot()` | Seals a Git worktree into a deterministic source archive. It is a Python library API; no top-level CLI command wraps it. |
+| `loom service up --environment dev-<name>` | Seals and uploads the selected source, or resolves an owned ready candidate supplied with `--candidate`; resolves the expected operation epoch, applies the exact candidate and capacity policy, and waits for the bound operation and environment unless `--no-wait` is set. |
+| `create_personal_dev_source_snapshot()` | Library API used by the CLI to seal a Git worktree into a deterministic source archive. |
 | `POST /api/v1/personal-dev-candidates` | Accepts a multipart `source` archive plus `source_sha256` and `archive_sha256`. Upload creates or returns an owner-scoped immutable candidate but does not start a build. |
 | `GET /api/v1/personal-dev-candidates[/{id}]` | Lists or reads visible candidates and their build state. |
 | `PUT /api/v1/dev-instances/{name}` | Compare-and-set apply for a candidate, capacity policy, expected operation epoch, and idempotency key. It queues the candidate build when required. |
@@ -43,9 +46,39 @@ public failure reason. New or in-progress operations return `202`; an already
 succeeded operation returns `200`. Reusing an idempotency key for different
 inputs, using a stale epoch, or racing another operation returns `409`.
 
+## Command-line deployment
+
+From the Git worktree to deploy, authenticate to the target server and run:
+
+```text
+loom service up --environment dev-<name>
+```
+
+The current directory is the default `--source-root`, and `.` is the default
+source context. Repeat `--source-context` to restrict sealing to explicit
+relative subtrees. `--min-slots` defaults to `0`, `--max-slots` defaults to
+`2`, the readiness timeout defaults to 7200 seconds, and the command resolves
+the current operation epoch before it mutates the environment. An existing
+environment in a non-ready lifecycle state blocks a new apply rather than
+being overwritten.
+
+To redeploy one retained, owned candidate that is already `ready`, use its
+64-character content digest:
+
+```text
+loom service up --environment dev-<name> --candidate <candidate-sha256>
+```
+
+The client rejects ambiguous, non-ready, non-personal, or promotable candidate
+bindings. It also revalidates the operation identity and the final candidate,
+capacity, epoch, and environment projection while waiting. The command cannot
+make a disabled server usable: the controller, restricted builder, activation
+agent, storage, database, and Kubernetes authorities must be configured by the
+operator.
+
 ## `loom dev` compatibility commands
 
-The installed CLI still exposes the earlier candidate-less client:
+The installed CLI also exposes a candidate-less compatibility client:
 
 ```text
 loom dev create <name> [--min-slots N] [--max-slots N] [--no-wait]
@@ -58,12 +91,14 @@ These commands call `/api/v1/dev-instances`; they never shell out to
 `kubectl` or edit capacity policy directly. Create and destroy poll unless
 `--no-wait` is supplied, and every command supports `--format json`.
 
-They do not expose candidate upload or candidate-aware apply. When the current
-personal-development controller is enabled, candidate-less `POST
-/dev-instances` returns `410`. Deletion of a candidate-backed environment
-returns `409` because the guarded drain/delete authority is not present.
-Ordinary deployments leave the controller disabled, so they do not provide an
-end-to-end shared-fleet environment command by default.
+These compatibility commands do not expose candidate upload or candidate-aware
+apply themselves; use `loom service up --environment dev-<name>` for that
+workflow. When the current personal-development controller is enabled,
+candidate-less `POST /dev-instances` returns `410`. Deletion of a
+candidate-backed environment returns `409` because the guarded drain/delete
+authority is not present. Ordinary deployments leave the controller disabled,
+so the high-level command succeeds only against an explicitly enabled and
+fully configured personal-development service.
 
 ## Identity and visibility
 
@@ -80,7 +115,7 @@ is derived server-side and cannot be overridden:
 | Public host | `<name>.dev.yylx.world` |
 | Control Plane host | `cp-<name>.dev.yylx.world` |
 | Gateway host | `gw-<name>.dev.yylx.world` |
-| Interim route path | `/dev-<name>` |
+| Path route | `/dev-<name>` |
 
 Candidate and environment reads are owner-scoped unless the caller is a
 platform admin. Cross-owner detail reads and mutations return `404`. Mutations
@@ -131,11 +166,11 @@ and Ingress are not part of preparation.
 The reconciler records a readiness digest and publishes an activation intent.
 The independent activation agent proves possession of its Ed25519 private key,
 rechecks the current intent immediately before mutation, re-observes the exact
-generation, and requires both candidate legacy-capacity paths to remain
-disabled. It alone applies the stable Services and Ingress and returns a signed
-local-activation digest. The management service has only the public key. After
-the acknowledgement, the reconciler marks the operation succeeded and the
-environment `ready`.
+generation, and requires both the Control Plane Slurm controller and in-cluster
+worker capacity path to remain disabled. It alone applies the stable Services
+and Ingress and returns a signed local-activation digest. The management service
+has only the public key. After the acknowledgement, the reconciler marks the
+operation succeeded and the environment `ready`.
 
 The agent is packaged separately and has an operator-edited example at
 `deploy/dev-fleet/personal-dev-activation-agent.yaml.example`; Loom does not
@@ -159,8 +194,8 @@ builder concurrency defaults to 4 globally and 1 per owner. All values are
 operator-configurable through the schema-backed service settings.
 
 `min_slots` and `max_slots` are stored demand policy, not reserved physical
-capacity. Candidate activation deliberately verifies that the legacy Control
-Plane Slurm controller and in-cluster worker path are disabled. The current
+capacity. Candidate activation deliberately verifies that the Control Plane
+Slurm controller and in-cluster worker path are disabled. The current
 candidate-aware path does not publish or execute an external worker-capacity
 grant, so `ready` means the immutable application generation and stable routes
 were acknowledged, not that worker slots are live. Candidate-backed drain,

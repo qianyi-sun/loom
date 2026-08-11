@@ -13,6 +13,13 @@ build → trial → `verifier_shim.sh` → `VerifierResult`).
 | `tb2-hello-world-atif.json` | ATIF v1.7 metadata for trial `7e1659af-91de-47b7-876d-345e56189fc0`. `final_state: succeeded`, `reward: {"resolved": 1.0}`. |
 | `tb2-hello-world-trajectory.jsonl` | Event log including the oracle agent's `env_exec` (rc=0) and the verifier's `step_end` emitting `{'resolved': 1.0}`. |
 
+Additional archived batches:
+
+- [`g3-public-beta/`](g3-public-beta/) — four public-beta task runs with paired
+  ATIF and trajectory artifacts.
+- [`g6-provider-matrix/`](g6-provider-matrix/) — three provider-matrix runs
+  with paired ATIF and trajectory artifacts.
+
 Trial fingerprint:
 
 - Task: `terminal-bench-2/hello-world`

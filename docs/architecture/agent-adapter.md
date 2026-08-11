@@ -11,7 +11,7 @@ Loom drives three kinds of agents:
    subprocess inside the sandbox. The included CLI adapters live
    in `packages/loom-launcher/`.
 
-This doc focuses on #3 — the extensible surface.
+This doc focuses on the third category: the extensible surface.
 
 ## `loom-launcher` framework
 

@@ -82,7 +82,7 @@ than mixed with current behavior.
 - **[Protected staging rollout](staging-rollout.md)** —
   candidate binding, locking, backup, evidence, and operator authority.
 - **[Personal development environments](multi-dev-environments.md)** —
-  opt-in candidate APIs, identity, activation, limits, and current CLI gaps.
+  opt-in source-fresh CLI/API lifecycle, identity, activation, and limits.
 - **[Multi-node topology](multi-node-topology.md)** — Postgres, MinIO,
   storage, anti-affinity, and disruption budgets.
 - **[PgBouncer transaction mode](pgbouncer.md)** —

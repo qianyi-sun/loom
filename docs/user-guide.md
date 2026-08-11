@@ -1,7 +1,7 @@
 # User Guide
 
 Everything a researcher needs to run agents against benchmarks with Loom, from
-the CLI or the web app. This guide covers install, quickstarts for the four
+the CLI or the web app. This guide covers install, quickstarts for the five
 common workflows, sandbox backends, model sources (hosted APIs + local LLMs),
 web platform workflows, benchmark and dataset management, CLI reference, and
 troubleshooting.
@@ -38,6 +38,7 @@ Pick the path that matches what you have:
 |---|---|
 | No stack at all, just a task + a model key, throwaway run | [Laptop-only `loom run`](#quickstart-laptop-only-loom-run) |
 | No account; you want to run the full stack on your own machine | [Run Loom locally](#quickstart-run-loom-locally) |
+| An account on an operator-enabled personal-development service; deploy your checkout | [Deploy a personal development environment](#quickstart-deploy-a-personal-development-environment) |
 | An account on a running Loom and prefer a terminal | [Submit from the CLI to a Loom server](#quickstart-submit-from-the-cli-to-a-loom-server) |
 | The same account and want clicks | [Submit from the web app](#quickstart-submit-from-the-web-app) |
 
@@ -124,7 +125,7 @@ demo preparation.
 
 Prerequisites:
 
-- Python 3.12;
+- Python 3.11;
 - [`uv`](https://docs.astral.sh/uv/getting-started/installation/);
 - Docker CLI with the Compose plugin;
 - Docker Desktop running on macOS.
@@ -166,6 +167,51 @@ environment secrets, and release-promotion evidence. See
 Running the local service stack requires Docker CLI with the Compose
 plugin; on macOS, install and start Docker Desktop, then verify
 `docker compose version` before `loom service up --environment local`.
+
+## Quickstart: Deploy a Personal Development Environment
+
+Use this path only when the target Loom service has its personal-development
+controller, restricted builder, storage/database authorities, and independent
+activation agent enabled. The checked-in service configuration leaves this
+feature disabled by default.
+
+Authenticate to the target server, change to the Git worktree you want to
+deploy, and run:
+
+```bash
+loom auth login --server <server-url>
+loom service up --environment dev-<name>
+```
+
+The command seals tracked and non-ignored untracked source from the current
+worktree, uploads an immutable personal candidate, applies it with the current
+operation epoch and the default `min_slots=0` / `max_slots=2` demand policy,
+then waits for the exact operation and environment binding to become `ready`.
+Use `--source-root` and repeatable `--source-context` options to select a
+different bounded source tree, or `--no-wait` to return after durable
+acceptance.
+
+Reuse one retained, owned candidate that is already ready by its 64-character
+content digest:
+
+```bash
+loom service up --environment dev-<name> --candidate <candidate-sha256>
+```
+
+The `loom dev` compatibility commands provide environment listing and status:
+
+```bash
+loom dev list
+loom dev status <name>
+```
+
+`loom dev create` is candidate-less and is rejected by the current enabled
+controller. Candidate-backed destruction and `--keep-data` recovery are
+unavailable through the guarded API; `loom dev destroy` returns a conflict for
+these environments.
+Application `ready` also does not imply external worker slots are live. See
+[`Personal development environments`](architecture/multi-dev-environments.md)
+for the identity, source, build, activation, capacity, and limit contracts.
 
 ## Quickstart: Submit from the CLI to a Loom Server
 
