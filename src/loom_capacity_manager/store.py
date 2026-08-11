@@ -10,15 +10,18 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, TypeVar, cast
 from uuid import UUID
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom_capacity_manager.contracts import (
+    AccountPolicyV1,
     AllocationInputV1,
     ConfigurationActivationV1,
     ConfigurationGenerationRefV1,
     ConfigurationSnapshotV1,
     DemandSnapshotV1,
+    DynamicDevelopmentSubjectProjectionV1,
     FairnessCursorV1,
     FleetManifestV1,
     InputFreshnessV1,
@@ -44,10 +47,13 @@ from loom_capacity_manager.models import (
     CapacityAllocationEpoch,
     CapacityAuditEvent,
     CapacityAuthorityState,
+    CapacityCandidate,
     CapacityConfigGeneration,
     CapacityConfigurationEpoch,
     CapacityDemandReporter,
     CapacityDemandSnapshot,
+    CapacityDeploymentGeneration,
+    CapacityDevelopmentProjection,
     CapacityFairnessState,
     CapacityObservedCommitment,
     CapacityPool,
@@ -113,6 +119,15 @@ class ActivatedConfiguration:
 
 
 @dataclass(frozen=True, slots=True)
+class ProjectedDevelopmentSubject:
+    configuration_epoch: int
+    configuration_digest: str
+    subject: SubjectConfigurationV1
+    account: AccountPolicyV1
+    replayed: bool
+
+
+@dataclass(frozen=True, slots=True)
 class WriterFence:
     authority_incarnation: UUID
     writer_epoch: int
@@ -161,12 +176,20 @@ def _parse_contract(model: type[_ContractT], payload: dict[str, Any]) -> _Contra
 @asynccontextmanager
 async def _write_transaction(session: AsyncSession) -> AsyncIterator[None]:
     transaction = session.begin_nested() if session.in_transaction() else session.begin()
-    async with transaction:
-        connection = await session.connection()
-        isolation_level = await connection.get_isolation_level()
-        if isolation_level.upper() != "SERIALIZABLE":
-            raise CapacityStoreError("capacity mutations require a SERIALIZABLE database session")
-        yield
+    try:
+        async with transaction:
+            connection = await session.connection()
+            isolation_level = await connection.get_isolation_level()
+            if isolation_level.upper() != "SERIALIZABLE":
+                raise CapacityStoreError(
+                    "capacity mutations require a SERIALIZABLE database session"
+                )
+            yield
+    except DBAPIError as exc:
+        sqlstate = getattr(exc.orig, "sqlstate", None)
+        if sqlstate in {"40001", "40P01"}:
+            raise CapacityStoreError("serializable capacity transaction must be retried") from exc
+        raise
 
 
 async def _db_now(session: AsyncSession) -> datetime:
@@ -213,6 +236,39 @@ def _audit(
         event_kind=event_kind,
         object_binding=_bounded_detail(object_binding),
         detail=_bounded_detail(detail),
+    )
+
+
+def _owner_account_id(owner_id: UUID) -> str:
+    return f"dev-owner-{owner_id.hex}"
+
+
+def _derive_owner_account(
+    fleet: FleetManifestV1,
+    owner_id: UUID,
+) -> AccountPolicyV1:
+    template = fleet.development_subject_template
+    if template is None:
+        raise ConfigurationConflictError(
+            "active fleet does not permit dynamic development subjects"
+        )
+    source = next(
+        (
+            account
+            for account in fleet.account_policies
+            if account.account_id == template.owner_account_template_id
+            and account.kind == "owner_template"
+        ),
+        None,
+    )
+    if source is None:  # FleetManifestV1 already proves this binding.
+        raise ConfigurationConflictError("development owner template is unavailable")
+    return source.model_copy(
+        update={
+            "account_id": _owner_account_id(owner_id),
+            "kind": "owner",
+            "owner_id": owner_id,
+        }
     )
 
 
@@ -427,7 +483,27 @@ class CapacityManagementStore:
             subjects = tuple(
                 _parse_contract(SubjectConfigurationV1, row.payload) for row in subject_rows
             )
-            self._validate_activation(fleet, subjects)
+            derived_accounts: tuple[AccountPolicyV1, ...] = ()
+            if latest is not None:
+                previous_accounts = (
+                    (
+                        await session.execute(
+                            select(CapacityAccountPolicy).where(
+                                CapacityAccountPolicy.configuration_epoch
+                                == latest.configuration_epoch,
+                                CapacityAccountPolicy.kind == "owner",
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                derived_accounts = tuple(
+                    _derive_owner_account(fleet, account.owner_id)
+                    for account in previous_accounts
+                    if account.owner_id is not None
+                )
+            self._validate_activation(fleet, subjects, derived_accounts)
 
             if latest is not None:
                 previous_ids = {
@@ -480,6 +556,7 @@ class CapacityManagementStore:
                 configuration_epoch=configuration_epoch,
                 fleet=fleet,
                 subjects=subjects,
+                derived_accounts=derived_accounts,
             )
             await session.execute(
                 update(CapacityConfigGeneration)
@@ -514,6 +591,522 @@ class CapacityManagementStore:
                 snapshot=snapshot,
             )
 
+    async def project_development_subject(
+        self,
+        session: AsyncSession,
+        request: DynamicDevelopmentSubjectProjectionV1,
+        *,
+        actor: str,
+        idempotency_key: UUID,
+    ) -> ProjectedDevelopmentSubject:
+        """Atomically derive one personal subject from active operator policy."""
+
+        request_digest = canonical_digest(request)
+        request_payload = request.model_dump(mode="json", exclude_none=False)
+        async with _write_transaction(session):
+            await _lock_authority(session)
+            replays = (
+                (
+                    await session.execute(
+                        select(CapacityDevelopmentProjection)
+                        .where(
+                            or_(
+                                CapacityDevelopmentProjection.operation_id == request.operation_id,
+                                CapacityDevelopmentProjection.idempotency_key == idempotency_key,
+                            )
+                        )
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if len(replays) > 1:
+                raise IdempotencyConflictError(
+                    "development projection identities belong to different requests"
+                )
+            replay = replays[0] if replays else None
+            if replay is not None:
+                if (
+                    replay.operation_id != request.operation_id
+                    or replay.idempotency_key != idempotency_key
+                    or replay.request_digest != request_digest
+                    or replay.request_payload != request_payload
+                    or replay.actor != actor
+                ):
+                    raise IdempotencyConflictError(
+                        "development projection identity was reused with different input"
+                    )
+                return ProjectedDevelopmentSubject(
+                    configuration_epoch=replay.configuration_epoch,
+                    configuration_digest=replay.result_digest,
+                    subject=_parse_contract(
+                        SubjectConfigurationV1,
+                        replay.result_payload["subject"],
+                    ),
+                    account=_parse_contract(
+                        AccountPolicyV1,
+                        replay.result_payload["account"],
+                    ),
+                    replayed=True,
+                )
+
+            latest = (
+                (
+                    await session.execute(
+                        select(CapacityConfigurationEpoch)
+                        .order_by(CapacityConfigurationEpoch.configuration_epoch.desc())
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if latest is None:
+                raise ConfigurationConflictError(
+                    "dynamic development projection requires an active fleet"
+                )
+            if latest.configuration_epoch != request.expected_configuration_epoch:
+                raise ConfigurationConflictError("expected active configuration epoch is stale")
+
+            fleet_row = (
+                await session.execute(
+                    select(CapacityConfigGeneration).where(
+                        CapacityConfigGeneration.scope == "fleet",
+                        CapacityConfigGeneration.state == "active",
+                        CapacityConfigGeneration.digest == latest.fleet_digest,
+                    )
+                )
+            ).scalar_one()
+            fleet = _parse_contract(FleetManifestV1, fleet_row.payload)
+            template = fleet.development_subject_template
+            if template is None:
+                raise ConfigurationConflictError(
+                    "active fleet does not permit dynamic development subjects"
+                )
+            if request.max_slots > template.max_slots_per_subject:
+                raise ConfigurationConflictError(
+                    "development subject max_slots exceeds the operator template"
+                )
+
+            active_rows = (
+                (
+                    await session.execute(
+                        select(CapacityConfigGeneration).where(
+                            CapacityConfigGeneration.scope == "subject",
+                            CapacityConfigGeneration.state == "active",
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            active_subjects = {
+                subject.subject_id: (row, subject)
+                for row in active_rows
+                for subject in (_parse_contract(SubjectConfigurationV1, row.payload),)
+            }
+            existing_pair = active_subjects.get(request.subject_id)
+            existing = None if existing_pair is None else existing_pair[1]
+            display_name = f"dev-{request.environment_name}"
+            if any(
+                subject.display_name == display_name and subject.subject_id != request.subject_id
+                for _, subject in active_subjects.values()
+            ):
+                raise ConfigurationConflictError(
+                    "dynamic development environment name is already active"
+                )
+            if existing is not None and (
+                existing.subject_incarnation != request.subject_incarnation
+                or existing.display_name != display_name
+            ):
+                raise ConfigurationConflictError(
+                    "dynamic development subject identity conflicts with active state"
+                )
+            if existing is None and request.operation_kind != "create":
+                raise ConfigurationConflictError(
+                    "dynamic development subject must be created before it can be changed"
+                )
+            if existing is not None and request.operation_kind == "create":
+                raise ConfigurationConflictError("dynamic development subject is already active")
+
+            account = _derive_owner_account(fleet, request.owner_id)
+            if existing is not None and existing.account_id != account.account_id:
+                raise ConfigurationConflictError(
+                    "dynamic development subject owner cannot be changed"
+                )
+            if existing is not None and (
+                request.configuration_generation <= existing.configuration_generation
+            ):
+                raise ConfigurationConflictError(
+                    "dynamic development configuration generation is not monotonic"
+                )
+            if request.operation_kind == "update" and (
+                existing is None or request.deployment_generation <= existing.deployment_generation
+            ):
+                raise ConfigurationConflictError(
+                    "dynamic development deployment generation is not monotonic"
+                )
+            if request.operation_kind == "capacity" and (
+                existing is None
+                or request.deployment_generation != existing.deployment_generation
+                or request.candidate_generation != existing.candidate_generation
+                or request.demand_reporter_incarnation != existing.demand_reporter_incarnation
+            ):
+                raise ConfigurationConflictError(
+                    "capacity-only projection must retain its deployment and reporter binding"
+                )
+            if (
+                request.operation_kind == "update"
+                and existing is not None
+                and (existing.demand_reporter_incarnation == request.demand_reporter_incarnation)
+            ):
+                raise ConfigurationConflictError(
+                    "a new deployment must rotate the demand reporter incarnation"
+                )
+            current_candidate: CapacityCandidate | None = None
+            current_deployment: CapacityDeploymentGeneration | None = None
+            current_reporter: CapacityDemandReporter | None = None
+            if existing is not None:
+                current_candidate = (
+                    await session.execute(
+                        select(CapacityCandidate).where(
+                            CapacityCandidate.subject_id == request.subject_id,
+                            CapacityCandidate.subject_incarnation == request.subject_incarnation,
+                            CapacityCandidate.candidate_generation == existing.candidate_generation,
+                        )
+                    )
+                ).scalar_one_or_none()
+                current_deployment = (
+                    await session.execute(
+                        select(CapacityDeploymentGeneration).where(
+                            CapacityDeploymentGeneration.subject_id == request.subject_id,
+                            CapacityDeploymentGeneration.subject_incarnation
+                            == request.subject_incarnation,
+                            CapacityDeploymentGeneration.deployment_generation
+                            == existing.deployment_generation,
+                        )
+                    )
+                ).scalar_one_or_none()
+                current_reporter = (
+                    await session.execute(
+                        select(CapacityDemandReporter).where(
+                            CapacityDemandReporter.subject_id == request.subject_id,
+                            CapacityDemandReporter.subject_incarnation
+                            == request.subject_incarnation,
+                            CapacityDemandReporter.reporter_incarnation
+                            == existing.demand_reporter_incarnation,
+                            CapacityDemandReporter.state == "current",
+                        )
+                    )
+                ).scalar_one_or_none()
+            if request.operation_kind == "capacity":
+                expected_architecture = {
+                    "supported_architectures": list(request.supported_architectures),
+                    "supported_pool_ids": list(request.supported_pool_ids),
+                }
+                expected_cutover = {
+                    "local_activation_sha256": request.local_activation_sha256,
+                    "candidate_publication_sha256": request.candidate_publication_sha256,
+                    "protected_admission_sha256": request.protected_admission_sha256,
+                    "capacity_agent_installation_sha256": (
+                        request.capacity_agent_installation_sha256
+                    ),
+                }
+                if (
+                    current_candidate is None
+                    or current_deployment is None
+                    or current_reporter is None
+                    or current_candidate.candidate_digest != request.candidate_sha256
+                    or current_candidate.source_payload
+                    != {"publication_sha256": request.candidate_publication_sha256}
+                    or current_candidate.architecture_payload != expected_architecture
+                    or current_candidate.protocol_payload != request.protocol_versions
+                    or current_deployment.candidate_digest != request.candidate_sha256
+                    or current_deployment.cutover_payload != expected_cutover
+                    or current_reporter.token_sha256 != request.demand_reporter_token_sha256
+                ):
+                    raise ConfigurationConflictError(
+                        "capacity-only projection cannot change candidate or reporter evidence"
+                    )
+            else:
+                reporter_identity_conflict = (
+                    await session.execute(
+                        select(CapacityDemandReporter)
+                        .where(
+                            or_(
+                                CapacityDemandReporter.token_sha256
+                                == request.demand_reporter_token_sha256,
+                                CapacityDemandReporter.reporter_incarnation
+                                == request.demand_reporter_incarnation,
+                            )
+                        )
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if reporter_identity_conflict is not None:
+                    raise ConfigurationConflictError(
+                        "dynamic development demand reporter identity was already used"
+                    )
+
+            owner_subjects = [
+                subject
+                for _, subject in active_subjects.values()
+                if subject.account_id == account.account_id
+                and subject.subject_id != request.subject_id
+                and subject.lifecycle_state != "disabled"
+            ]
+            if len(owner_subjects) + 1 > account.max_live_subjects:
+                raise ConfigurationConflictError("development owner exceeds max_live_subjects")
+            if sum(subject.min_slots for subject in owner_subjects) + request.min_slots > (
+                account.min_reservation_slots
+            ):
+                raise ConfigurationConflictError(
+                    "development owner minimum aggregate exceeds its reservation"
+                )
+
+            subject = SubjectConfigurationV1(
+                subject_id=request.subject_id,
+                subject_incarnation=request.subject_incarnation,
+                display_name=display_name,
+                account_id=account.account_id,
+                tier_id="development",
+                min_slots=request.min_slots,
+                max_slots=request.max_slots,
+                rollout_surge_slots=template.rollout_surge_slots,
+                max_pending_slots=template.max_pending_slots_per_subject,
+                max_pending_jobs=template.max_pending_jobs_per_subject,
+                lifecycle_state="active",
+                candidate_generation=request.candidate_generation,
+                deployment_generation=request.deployment_generation,
+                configuration_generation=request.configuration_generation,
+                demand_reporter_incarnation=request.demand_reporter_incarnation,
+                profiles=template.profiles,
+            )
+            next_subjects = tuple(
+                sorted(
+                    [
+                        *(
+                            value
+                            for _, value in active_subjects.values()
+                            if value.subject_id != subject.subject_id
+                        ),
+                        subject,
+                    ],
+                    key=lambda value: value.subject_id.hex,
+                )
+            )
+            existing_owners = (
+                (
+                    await session.execute(
+                        select(CapacityAccountPolicy).where(
+                            CapacityAccountPolicy.configuration_epoch == latest.configuration_epoch,
+                            CapacityAccountPolicy.kind == "owner",
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            owner_accounts = {
+                value.account_id: value
+                for value in (
+                    _derive_owner_account(fleet, row.owner_id)
+                    for row in existing_owners
+                    if row.owner_id is not None
+                )
+            }
+            owner_accounts[account.account_id] = account
+            derived_accounts = tuple(owner_accounts.values())
+            self._validate_activation(fleet, next_subjects, derived_accounts)
+
+            subject_digest = canonical_digest(subject)
+            subject_row = CapacityConfigGeneration(
+                scope="subject",
+                subject_id=subject.subject_id,
+                subject_incarnation=subject.subject_incarnation,
+                scope_generation=subject.configuration_generation,
+                digest=subject_digest,
+                payload=subject.model_dump(mode="json", exclude_none=False),
+                state="proposed",
+                actor=actor,
+                idempotency_key=request.operation_id,
+            )
+            session.add(subject_row)
+            if request.operation_kind != "capacity":
+                session.add(
+                    CapacityCandidate(
+                        subject_id=request.subject_id,
+                        subject_incarnation=request.subject_incarnation,
+                        candidate_generation=request.candidate_generation,
+                        candidate_digest=request.candidate_sha256,
+                        source_payload={"publication_sha256": request.candidate_publication_sha256},
+                        artifact_payload={"candidate_sha256": request.candidate_sha256},
+                        architecture_payload={
+                            "supported_architectures": list(request.supported_architectures),
+                            "supported_pool_ids": list(request.supported_pool_ids),
+                        },
+                        launcher_payload={
+                            "local_activation_sha256": request.local_activation_sha256
+                        },
+                        attestation_payload={
+                            "operation_id": str(request.operation_id),
+                            "operation_epoch": request.operation_epoch,
+                            "protected_admission_sha256": request.protected_admission_sha256,
+                            "capacity_agent_installation_sha256": (
+                                request.capacity_agent_installation_sha256
+                            ),
+                        },
+                        protocol_payload=request.protocol_versions,
+                    )
+                )
+                session.add(
+                    CapacityDeploymentGeneration(
+                        subject_id=request.subject_id,
+                        subject_incarnation=request.subject_incarnation,
+                        deployment_generation=request.deployment_generation,
+                        candidate_digest=request.candidate_sha256,
+                        required_profiles=[
+                            profile.model_dump(mode="json", exclude_none=False)
+                            for profile in subject.profiles
+                        ],
+                        readiness_state="ready",
+                        lifecycle_state="active",
+                        cutover_payload={
+                            "local_activation_sha256": request.local_activation_sha256,
+                            "candidate_publication_sha256": (request.candidate_publication_sha256),
+                            "protected_admission_sha256": request.protected_admission_sha256,
+                            "capacity_agent_installation_sha256": (
+                                request.capacity_agent_installation_sha256
+                            ),
+                        },
+                    )
+                )
+            await session.flush()
+
+            configuration_epoch = latest.configuration_epoch + 1
+            references = tuple(
+                ConfigurationGenerationRefV1(
+                    scope="subject",
+                    generation=(
+                        subject.configuration_generation
+                        if value.subject_id == subject.subject_id
+                        else row.scope_generation
+                    ),
+                    digest=(
+                        subject_digest if value.subject_id == subject.subject_id else row.digest
+                    ),
+                    subject_id=value.subject_id,
+                    subject_incarnation=value.subject_incarnation,
+                )
+                for row, value in sorted(
+                    [
+                        *(
+                            pair
+                            for subject_id, pair in active_subjects.items()
+                            if subject_id != subject.subject_id
+                        ),
+                        (subject_row, subject),
+                    ],
+                    key=lambda pair: pair[1].subject_id.hex,
+                )
+            )
+            snapshot = ConfigurationSnapshotV1(
+                configuration_epoch=configuration_epoch,
+                fleet=ConfigurationGenerationRefV1(
+                    scope="fleet",
+                    generation=fleet_row.scope_generation,
+                    digest=fleet_row.digest,
+                ),
+                subjects=references,
+            )
+            snapshot_digest = canonical_digest(snapshot)
+            session.add(
+                CapacityConfigurationEpoch(
+                    configuration_epoch=configuration_epoch,
+                    fleet_generation=fleet.fleet_generation,
+                    fleet_digest=fleet_row.digest,
+                    subject_generation_manifest=[
+                        reference.model_dump(mode="json", exclude_none=False)
+                        for reference in references
+                    ],
+                    canonical_digest=snapshot_digest,
+                    activation_idempotency_key=idempotency_key,
+                    activation_actor=actor,
+                    activation_request_digest=request_digest,
+                )
+            )
+            await session.flush()
+            await self._persist_active_configuration(
+                session,
+                configuration_epoch=configuration_epoch,
+                fleet=fleet,
+                subjects=next_subjects,
+                derived_accounts=derived_accounts,
+                reporter_tokens={
+                    request.demand_reporter_incarnation: request.demand_reporter_token_sha256
+                },
+            )
+            await session.execute(
+                update(CapacityConfigGeneration)
+                .where(CapacityConfigGeneration.state == "active")
+                .values(state="retired")
+            )
+            active_ids = [fleet_row.id, subject_row.id]
+            active_ids.extend(
+                row.id
+                for subject_id, (row, _) in active_subjects.items()
+                if subject_id != subject.subject_id
+            )
+            await session.execute(
+                update(CapacityConfigGeneration)
+                .where(CapacityConfigGeneration.id.in_(active_ids))
+                .values(state="active")
+            )
+            result_payload = {
+                "subject": subject.model_dump(mode="json", exclude_none=False),
+                "account": account.model_dump(mode="json", exclude_none=False),
+            }
+            session.add(
+                CapacityDevelopmentProjection(
+                    operation_id=request.operation_id,
+                    idempotency_key=idempotency_key,
+                    request_digest=request_digest,
+                    request_payload=request_payload,
+                    subject_id=request.subject_id,
+                    subject_incarnation=request.subject_incarnation,
+                    configuration_generation=request.configuration_generation,
+                    configuration_epoch=configuration_epoch,
+                    result_digest=snapshot_digest,
+                    result_payload=result_payload,
+                    actor=actor,
+                )
+            )
+            session.add(
+                _audit(
+                    actor_kind="environment-lifecycle",
+                    actor_id=actor,
+                    event_kind="capacity_development_subject_projected",
+                    object_binding={
+                        "configuration_epoch": configuration_epoch,
+                        "subject_id": str(subject.subject_id),
+                        "subject_incarnation": str(subject.subject_incarnation),
+                    },
+                    detail={
+                        "account_id": account.account_id,
+                        "configuration_digest": snapshot_digest,
+                        "executable_new_capacity_ceiling": 0,
+                    },
+                )
+            )
+            return ProjectedDevelopmentSubject(
+                configuration_epoch=configuration_epoch,
+                configuration_digest=snapshot_digest,
+                subject=subject,
+                account=account,
+                replayed=False,
+            )
+
     async def _load_proposal_row(
         self,
         session: AsyncSession,
@@ -546,8 +1139,12 @@ class CapacityManagementStore:
     def _validate_activation(
         fleet: FleetManifestV1,
         subjects: tuple[SubjectConfigurationV1, ...],
+        derived_accounts: tuple[AccountPolicyV1, ...] = (),
     ) -> None:
-        account_ids = {account.account_id for account in fleet.account_policies}
+        accounts = (*fleet.account_policies, *derived_accounts)
+        if len({account.account_id for account in accounts}) != len(accounts):
+            raise ConfigurationConflictError("capacity account identity collision")
+        account_ids = {account.account_id for account in accounts}
         tier_ids = {tier.tier_id for tier in fleet.tiers}
         minimum_by_account: dict[str, int] = {}
         for subject in subjects:
@@ -563,7 +1160,7 @@ class CapacityManagementStore:
             minimum_by_account[subject.account_id] = (
                 minimum_by_account.get(subject.account_id, 0) + subject.min_slots
             )
-        for account in fleet.account_policies:
+        for account in accounts:
             if minimum_by_account.get(account.account_id, 0) > account.min_reservation_slots:
                 raise ConfigurationConflictError(
                     "subject minimum aggregate exceeds account reservation"
@@ -576,6 +1173,8 @@ class CapacityManagementStore:
         configuration_epoch: int,
         fleet: FleetManifestV1,
         subjects: tuple[SubjectConfigurationV1, ...],
+        derived_accounts: tuple[AccountPolicyV1, ...] = (),
+        reporter_tokens: dict[UUID, str] | None = None,
     ) -> None:
         for tier in fleet.tiers:
             session.add(
@@ -589,7 +1188,7 @@ class CapacityManagementStore:
                     max_pending_jobs=tier.max_pending_jobs,
                 )
             )
-        for account in fleet.account_policies:
+        for account in (*fleet.account_policies, *derived_accounts):
             session.add(
                 CapacityAccountPolicy(
                     configuration_epoch=configuration_epoch,
@@ -658,7 +1257,11 @@ class CapacityManagementStore:
             )
             for profile in subject.profiles:
                 await self._persist_worker_profile(session, subject, profile)
-            await self._register_demand_reporter(session, subject)
+            await self._register_demand_reporter(
+                session,
+                subject,
+                token_sha256=(reporter_tokens or {}).get(subject.demand_reporter_incarnation),
+            )
         await session.flush()
 
     async def _persist_worker_profile(
@@ -708,7 +1311,11 @@ class CapacityManagementStore:
             )
 
     async def _register_demand_reporter(
-        self, session: AsyncSession, subject: SubjectConfigurationV1
+        self,
+        session: AsyncSession,
+        subject: SubjectConfigurationV1,
+        *,
+        token_sha256: str | None = None,
     ) -> None:
         existing = (
             await session.execute(
@@ -739,10 +1346,21 @@ class CapacityManagementStore:
                     deployment_generation=subject.deployment_generation,
                     high_water=0,
                     state="current",
+                    token_sha256=token_sha256,
                 )
             )
         elif existing.state != "current":
             raise ConfigurationConflictError("retired demand reporter cannot be reactivated")
+        elif token_sha256 is not None and existing.token_sha256 != token_sha256:
+            raise ConfigurationConflictError("demand reporter token binding conflicts")
+        elif existing.deployment_generation != subject.deployment_generation:
+            raise ConfigurationConflictError("demand reporter deployment binding conflicts")
+        elif existing.configuration_generation > subject.configuration_generation:
+            raise ConfigurationConflictError("demand reporter configuration binding regressed")
+        else:
+            # Capacity-only policy changes retain the protected reporter and
+            # high-water, but advance the generation accepted by the manager.
+            existing.configuration_generation = subject.configuration_generation
 
     async def _register_pool_reporter(self, session: AsyncSession, pool: Any) -> None:
         existing = (
@@ -889,6 +1507,33 @@ class CapacityManagementStore:
             raise ReportEquivocationError("demand reporter equivocated at high-water")
         assert result is not None
         return result
+
+    async def authenticate_dynamic_demand_reporter(
+        self,
+        session: AsyncSession,
+        report: DemandSnapshotV1,
+        *,
+        token_sha256: str,
+    ) -> str:
+        """Resolve a lifecycle-projected reporter without exposing its token hash."""
+
+        reporter = (
+            await session.execute(
+                select(CapacityDemandReporter).where(
+                    CapacityDemandReporter.token_sha256 == token_sha256,
+                    CapacityDemandReporter.state == "current",
+                )
+            )
+        ).scalar_one_or_none()
+        if reporter is None or (
+            reporter.subject_id != report.subject_id
+            or reporter.subject_incarnation != report.subject_incarnation
+            or reporter.reporter_incarnation != report.reporter_incarnation
+            or reporter.configuration_generation != report.configuration_generation
+            or reporter.deployment_generation != report.deployment_generation
+        ):
+            raise UnknownReporterError("unknown demand reporter")
+        return f"dynamic-demand-{report.subject_id}"
 
     async def _retain_demand_commitments(
         self,
@@ -1248,6 +1893,20 @@ class CapacityManagementStore:
             )
             for row in fairness_rows
         )
+        account_rows = (
+            (
+                await session.execute(
+                    select(CapacityAccountPolicy)
+                    .where(CapacityAccountPolicy.configuration_epoch == active.configuration_epoch)
+                    .order_by(CapacityAccountPolicy.account_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        effective_accounts = tuple(
+            _parse_contract(AccountPolicyV1, row.payload) for row in account_rows
+        )
         snapshot = ConfigurationSnapshotV1(
             configuration_epoch=active.configuration_epoch,
             fleet=ConfigurationGenerationRefV1(
@@ -1269,6 +1928,7 @@ class CapacityManagementStore:
         return AllocationInputV1(
             configuration=snapshot,
             fleet=fleet,
+            effective_account_policies=effective_accounts,
             subjects=subject_inputs,
             pools=pool_inputs,
             observed_commitments=tuple(observed),

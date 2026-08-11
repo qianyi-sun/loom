@@ -542,7 +542,8 @@ class _AllocationState:
         self._validate_input()
         self.subjects = self._build_subjects()
         self.subject_by_id = {item.subject_id: item for item in self.subjects}
-        self.account_policies = {item.account_id: item for item in value.fleet.account_policies}
+        accounts = value.effective_account_policies or value.fleet.account_policies
+        self.account_policies = {item.account_id: item for item in accounts}
         self.tier_policies = {item.tier_id: item for item in value.fleet.tiers}
         self.fixed_commitments = self._fixed_commitments()
         self.pools = self._build_pools()
@@ -566,6 +567,49 @@ class _AllocationState:
         input_subjects = {item.configuration.subject_id: item for item in self.value.subjects}
         if set(manifest_refs) != set(input_subjects):
             raise ShadowAllocatorError("active subject manifest is incomplete")
+        accounts = self.value.effective_account_policies or fleet.account_policies
+        if self.value.effective_account_policies:
+            effective = {account.account_id: account for account in accounts}
+            for policy in fleet.account_policies:
+                if effective.get(policy.account_id) != policy:
+                    raise ShadowAllocatorError(
+                        "effective capacity accounts do not preserve fleet policy"
+                    )
+            template = fleet.development_subject_template
+            template_policy = (
+                None
+                if template is None
+                else next(
+                    (
+                        policy
+                        for policy in fleet.account_policies
+                        if policy.account_id == template.owner_account_template_id
+                    ),
+                    None,
+                )
+            )
+            static_ids = {policy.account_id for policy in fleet.account_policies}
+            for policy in accounts:
+                if policy.account_id in static_ids:
+                    continue
+                if (
+                    template_policy is None
+                    or policy.kind != "owner"
+                    or policy.owner_id is None
+                    or policy.account_id != f"dev-owner-{policy.owner_id.hex}"
+                    or policy
+                    != template_policy.model_copy(
+                        update={
+                            "account_id": f"dev-owner-{policy.owner_id.hex}",
+                            "kind": "owner",
+                            "owner_id": policy.owner_id,
+                        }
+                    )
+                ):
+                    raise ShadowAllocatorError(
+                        "effective capacity account is not derived from fleet policy"
+                    )
+        account_ids = {account.account_id for account in accounts}
         for subject_id, item in input_subjects.items():
             config = item.configuration
             binding = manifest_refs[subject_id]
@@ -580,7 +624,7 @@ class _AllocationState:
                     validate_profile_narrowing(fleet, profile)
                 except FleetStateError as exc:
                     raise ShadowAllocatorError(str(exc)) from exc
-            if config.account_id not in {account.account_id for account in fleet.account_policies}:
+            if config.account_id not in account_ids:
                 raise ShadowAllocatorError("subject references an unknown capacity account")
 
         fleet_pools = {pool.pool_id: pool for pool in fleet.pools}

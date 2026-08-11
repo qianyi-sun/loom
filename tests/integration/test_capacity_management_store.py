@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from threading import Event
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import delete, func, select, update
@@ -16,14 +16,24 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from loom_capacity_manager.allocator import ShadowAllocatorError, allocate_shadow
+from loom_capacity_manager.contracts import (
+    ConfigurationActivationV1,
+    ConfigurationGenerationRefV1,
+    canonical_digest_excluding,
+)
 from loom_capacity_manager.models import (
     Base,
+    CapacityAccountPolicy,
     CapacityAllocation,
     CapacityAllocationEpoch,
     CapacityAuditEvent,
     CapacityAuthorityState,
+    CapacityCandidate,
+    CapacityConfigGeneration,
     CapacityConfigurationEpoch,
     CapacityDemandReporter,
+    CapacityDeploymentGeneration,
+    CapacityDevelopmentProjection,
     CapacityObservedCommitment,
     CapacityWorkerProfile,
 )
@@ -45,7 +55,9 @@ from tests.capacity_fixtures import (
     CONFIG_KEY_B,
     configuration_activation,
     demand_snapshot,
+    development_projection,
     fleet_manifest,
+    fleet_with_development_template,
     pool_observation,
     resource_vector,
     shadow_epoch,
@@ -307,6 +319,363 @@ async def test_activation_materializes_exact_worker_profile_bindings(
     assert all(item.pool_generation == 1 for item in profiles)
     assert all(item.profile_generation == 1 for item in profiles)
     assert all(len(item.shape_catalog) == 1 for item in profiles)
+
+
+async def test_dynamic_development_projection_is_atomic_idempotent_and_shadow_only(
+    capacity_session: AsyncSession,
+) -> None:
+    fleet = fleet_with_development_template()
+    store, active = await _activate_default(
+        capacity_session,
+        fleet=fleet,
+        subject=subject_configuration(fleet),
+    )
+    key = uuid4()
+    request = development_projection(expected_configuration_epoch=active.configuration_epoch)
+
+    result = await store.project_development_subject(
+        capacity_session,
+        request,
+        actor="personal-lifecycle",
+        idempotency_key=key,
+    )
+    replay = await store.project_development_subject(
+        capacity_session,
+        request,
+        actor="personal-lifecycle",
+        idempotency_key=key,
+    )
+
+    assert result.configuration_epoch == 2
+    assert result.subject.display_name == "dev-alice"
+    assert result.subject.min_slots == 0
+    assert result.subject.account_id.startswith("dev-owner-")
+    assert {profile.pool_id for profile in result.subject.profiles} == {"gb10", "oldlab"}
+    assert not result.replayed
+    assert replay.replayed
+    assert replay.configuration_digest == result.configuration_digest
+    assert (
+        await capacity_session.execute(select(func.count()).select_from(CapacityCandidate))
+    ).scalar_one() == 1
+    assert (
+        await capacity_session.execute(
+            select(func.count()).select_from(CapacityDeploymentGeneration)
+        )
+    ).scalar_one() == 1
+    assert (
+        await capacity_session.execute(
+            select(func.count()).select_from(CapacityDevelopmentProjection)
+        )
+    ).scalar_one() == 1
+    reporter = (
+        await capacity_session.execute(
+            select(CapacityDemandReporter).where(
+                CapacityDemandReporter.reporter_incarnation == request.demand_reporter_incarnation
+            )
+        )
+    ).scalar_one()
+    assert reporter.token_sha256 == request.demand_reporter_token_sha256
+    authority = (
+        await capacity_session.execute(
+            select(CapacityAuthorityState).where(CapacityAuthorityState.singleton_id == 1)
+        )
+    ).scalar_one()
+    assert authority.executable_new_capacity_ceiling == 0
+    writer = await store.register_writer(
+        capacity_session,
+        authority.authority_incarnation,
+        expected_epoch=authority.writer_epoch,
+    )
+    allocation_input = await store.load_allocation_input(capacity_session, writer)
+    projected_account_ids = {
+        account.account_id for account in allocation_input.effective_account_policies
+    }
+    assert result.account.account_id in projected_account_ids
+    assert allocate_shadow(allocation_input).executable is False
+
+
+async def test_dynamic_projection_accepts_consumed_local_generations_and_capacity_only_update(
+    capacity_session: AsyncSession,
+) -> None:
+    fleet = fleet_with_development_template()
+    store, active = await _activate_default(
+        capacity_session,
+        fleet=fleet,
+        subject=subject_configuration(fleet),
+    )
+    created_request = development_projection(
+        expected_configuration_epoch=active.configuration_epoch,
+        operation_epoch=4,
+        candidate_generation=3,
+        deployment_generation=3,
+        configuration_generation=4,
+    )
+    created = await store.project_development_subject(
+        capacity_session,
+        created_request,
+        actor="personal-lifecycle",
+        idempotency_key=uuid4(),
+    )
+
+    capacity_request = created_request.model_copy(
+        update={
+            "expected_configuration_epoch": created.configuration_epoch,
+            "operation_kind": "capacity",
+            "operation_id": uuid4(),
+            "operation_epoch": 6,
+            "configuration_generation": 6,
+            "min_slots": 1,
+            "max_slots": 3,
+        }
+    )
+    resized = await store.project_development_subject(
+        capacity_session,
+        capacity_request,
+        actor="personal-lifecycle",
+        idempotency_key=uuid4(),
+    )
+
+    assert resized.subject.configuration_generation == 6
+    assert resized.subject.deployment_generation == 3
+    assert resized.subject.min_slots == 1
+    assert resized.subject.max_slots == 3
+    assert (
+        await capacity_session.execute(select(func.count()).select_from(CapacityCandidate))
+    ).scalar_one() == 1
+    assert (
+        await capacity_session.execute(
+            select(func.count()).select_from(CapacityDeploymentGeneration)
+        )
+    ).scalar_one() == 1
+
+
+async def test_capacity_only_projection_cannot_change_candidate_or_reporter_binding(
+    capacity_session: AsyncSession,
+) -> None:
+    fleet = fleet_with_development_template()
+    store, active = await _activate_default(
+        capacity_session,
+        fleet=fleet,
+        subject=subject_configuration(fleet),
+    )
+    initial = development_projection(expected_configuration_epoch=active.configuration_epoch)
+    created = await store.project_development_subject(
+        capacity_session,
+        initial,
+        actor="personal-lifecycle",
+        idempotency_key=uuid4(),
+    )
+    base_capacity = initial.model_copy(
+        update={
+            "expected_configuration_epoch": created.configuration_epoch,
+            "operation_kind": "capacity",
+            "operation_id": uuid4(),
+            "operation_epoch": 2,
+            "configuration_generation": 2,
+        }
+    )
+
+    for change in (
+        {"candidate_sha256": "9" * 64},
+        {
+            "demand_reporter_incarnation": uuid4(),
+            "demand_reporter_token_sha256": "8" * 64,
+        },
+    ):
+        with pytest.raises(ConfigurationConflictError, match="capacity-only"):
+            await store.project_development_subject(
+                capacity_session,
+                base_capacity.model_copy(update=change),
+                actor="personal-lifecycle",
+                idempotency_key=uuid4(),
+            )
+        await capacity_session.rollback()
+
+
+async def test_dynamic_projection_identity_reuse_and_owner_limits_fail_closed(
+    capacity_session: AsyncSession,
+) -> None:
+    fleet = fleet_with_development_template(owner_max_live_subjects=1)
+    store, active = await _activate_default(
+        capacity_session,
+        fleet=fleet,
+        subject=subject_configuration(fleet),
+    )
+    first = development_projection(expected_configuration_epoch=active.configuration_epoch)
+    key = uuid4()
+    await store.project_development_subject(
+        capacity_session,
+        first,
+        actor="personal-lifecycle",
+        idempotency_key=key,
+    )
+
+    with pytest.raises(IdempotencyConflictError):
+        await store.project_development_subject(
+            capacity_session,
+            first.model_copy(update={"max_slots": 3}),
+            actor="personal-lifecycle",
+            idempotency_key=key,
+        )
+
+    second = development_projection(
+        expected_configuration_epoch=2,
+        operation_id=uuid4(),
+        environment_name="bob",
+        subject_id=uuid4(),
+        subject_incarnation=uuid4(),
+        demand_reporter_incarnation=uuid4(),
+    ).model_copy(update={"demand_reporter_token_sha256": "e" * 64})
+    with pytest.raises(ConfigurationConflictError, match="max_live_subjects"):
+        await store.project_development_subject(
+            capacity_session,
+            second,
+            actor="personal-lifecycle",
+            idempotency_key=uuid4(),
+        )
+    assert (
+        await capacity_session.execute(
+            select(func.count()).select_from(CapacityDevelopmentProjection)
+        )
+    ).scalar_one() == 1
+
+
+async def test_static_fleet_activation_rederives_existing_personal_owner_accounts(
+    capacity_session: AsyncSession,
+) -> None:
+    fleet = fleet_with_development_template()
+    store, active = await _activate_default(
+        capacity_session,
+        fleet=fleet,
+        subject=subject_configuration(fleet),
+    )
+    projected = await store.project_development_subject(
+        capacity_session,
+        development_projection(expected_configuration_epoch=active.configuration_epoch),
+        actor="personal-lifecycle",
+        idempotency_key=uuid4(),
+    )
+    changed = fleet.model_copy(update={"fleet_generation": 2, "fleet_digest": "f" * 64})
+    changed = changed.model_copy(
+        update={"fleet_digest": canonical_digest_excluding(changed, "fleet_digest")}
+    )
+    fleet_proposal = await store.propose_fleet_configuration(
+        capacity_session,
+        changed,
+        actor="fleet-operator",
+        idempotency_key=uuid4(),
+    )
+    subject_rows = (
+        (
+            await capacity_session.execute(
+                select(CapacityConfigGeneration).where(
+                    CapacityConfigGeneration.scope == "subject",
+                    CapacityConfigGeneration.state == "active",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    activated = await store.activate_configuration(
+        capacity_session,
+        ConfigurationActivationV1(
+            expected_configuration_epoch=projected.configuration_epoch,
+            fleet=ConfigurationGenerationRefV1(
+                scope="fleet",
+                generation=fleet_proposal.generation,
+                digest=fleet_proposal.digest,
+            ),
+            subjects=tuple(
+                ConfigurationGenerationRefV1(
+                    scope="subject",
+                    generation=row.scope_generation,
+                    digest=row.digest,
+                    subject_id=row.subject_id,
+                    subject_incarnation=row.subject_incarnation,
+                )
+                for row in subject_rows
+            ),
+        ),
+        actor="fleet-operator",
+        idempotency_key=uuid4(),
+    )
+
+    derived = (
+        await capacity_session.execute(
+            select(CapacityAccountPolicy).where(
+                CapacityAccountPolicy.configuration_epoch == activated.configuration_epoch,
+                CapacityAccountPolicy.kind == "owner",
+            )
+        )
+    ).scalar_one()
+    assert derived.account_id == projected.account.account_id
+    assert derived.payload == projected.account.model_dump(mode="json", exclude_none=False)
+
+
+async def test_concurrent_personal_projections_serialize_and_both_converge_after_retry(
+    capacity_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _reset_committed_capacity_state(capacity_session_factory)
+    try:
+        fleet = fleet_with_development_template()
+        async with capacity_session_factory() as session:
+            await _activate_default(
+                session,
+                fleet=fleet,
+                subject=subject_configuration(fleet),
+            )
+            await session.commit()
+
+        requests = (
+            development_projection(environment_name="alice"),
+            development_projection(
+                operation_id=uuid4(),
+                environment_name="bob",
+                subject_id=uuid4(),
+                subject_incarnation=uuid4(),
+                owner_id=uuid4(),
+                demand_reporter_incarnation=uuid4(),
+            ).model_copy(update={"demand_reporter_token_sha256": "e" * 64}),
+        )
+        keys = (uuid4(), uuid4())
+
+        async def project(index: int, expected_epoch: int):
+            async with capacity_session_factory() as session:
+                return await CapacityManagementStore().project_development_subject(
+                    session,
+                    requests[index].model_copy(
+                        update={"expected_configuration_epoch": expected_epoch}
+                    ),
+                    actor=f"personal-lifecycle-{index}",
+                    idempotency_key=keys[index],
+                )
+
+        first_round = await asyncio.gather(
+            project(0, 1),
+            project(1, 1),
+            return_exceptions=True,
+        )
+        winners = [
+            index for index, result in enumerate(first_round) if not isinstance(result, Exception)
+        ]
+        losers = [
+            index for index, result in enumerate(first_round) if isinstance(result, Exception)
+        ]
+        assert len(winners) == 1
+        assert len(losers) == 1
+        assert isinstance(first_round[losers[0]], CapacityStoreError)
+
+        retried = await project(losers[0], 2)
+        assert retried.configuration_epoch == 3
+        async with capacity_session_factory() as session:
+            assert (
+                await session.execute(
+                    select(func.count()).select_from(CapacityDevelopmentProjection)
+                )
+            ).scalar_one() == 2
+    finally:
+        await _reset_committed_capacity_state(capacity_session_factory)
 
 
 async def test_exact_report_replay_is_idempotent_but_equivocation_fences(

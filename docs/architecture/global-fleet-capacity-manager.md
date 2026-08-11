@@ -28,7 +28,7 @@ pool reports (gb10/oldlab) ─┘                  │ one fenced writer
                      and evidence         and epochs           (no env IDs)
 ```
 
-The management database uses its own `capacity_0001` migration tree and must
+The management database uses its own `capacity_*` migration tree and must
 not be an environment's application database. One authority incarnation and a
 monotonic writer epoch fence calculations and commits. A calculation runs
 outside its serializable commit transaction; the commit succeeds only if the
@@ -72,6 +72,30 @@ Missing, stale, invalid, or equivocal reports never free capacity. Existing
 claims and physical commitments remain charged, uncertain scope is frozen, and
 old/new rollout overlap is limited by the subject and account surge ceilings.
 
+## Dynamic personal subject projection
+
+The lifecycle service registers a ready personal deployment through
+`PUT /v1/development-projections/{subject_id}`. The manager derives the
+`dev-<name>` subject, its immutable owner account, and both physical-pool
+profiles from the active operator-owned fleet template in one serializable
+configuration epoch. The request binds the candidate publication, local
+activation acknowledgement, deployment/configuration generations, reporter
+incarnation, protected-admission evidence, trusted capacity-agent installation,
+supported architectures, and required protocols. The lifecycle
+cannot supply a priority tier, pool weight, worker shape, account ceiling, or
+an executable override.
+
+Projection is unavailable until an active fleet generation explicitly
+contains a development-subject template and an owner-account template. Exact
+operation and idempotency replays converge; identity reuse, stale epochs,
+quota violations, or incomplete pool/architecture bindings fail closed.
+Derived reporter credentials are hash-only and bound to the exact subject,
+incarnation, configuration generation, deployment generation, and reporter
+incarnation. Retrying a deployment rotates the reporter incarnation and
+fences the predecessor. The projection response and audit log never expose
+the token or its hash. All resulting allocations remain shadow-only while the
+global executable ceiling is zero.
+
 ## Package 1 service boundary
 
 Package 1 provides strict versioned contracts, fleet drift diagnostics, the
@@ -79,8 +103,9 @@ independent database, reporter fencing, deterministic topology and allocation,
 one fenced shadow reconciler, an authenticated mTLS API, bounded status and
 metrics, and an offline evidence driver.
 
-The HTTP service exposes only configuration proposal/activation, report
-ingestion, shadow reconciliation, status, audit, health, and metrics routes.
+The HTTP service exposes configuration proposal/activation, dynamic personal
+subject projection, report ingestion, shadow reconciliation, status, audit,
+health, and metrics routes.
 There is no grant, launch-permit, execution, Slurm, claim-admission, or release
 route. Mutual TLS authenticates the transport, hashed bearer principals bind
 the exact operator or reporter authority, and metric labels never contain

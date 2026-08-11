@@ -29,6 +29,7 @@ EXPECTED_TABLES = {
     "capacity_configuration_epochs",
     "capacity_demand_reporters",
     "capacity_demand_snapshots",
+    "capacity_development_projections",
     "capacity_deployment_generations",
     "capacity_fairness_state",
     "capacity_observed_commitments",
@@ -115,12 +116,12 @@ def test_capacity_schema_has_independent_revision_table(
         with capacity_engine.connect() as connection:
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == ("capacity_0001")
+            ).scalar_one() == ("capacity_0002")
         with environment_engine.connect() as connection:
             environment_revision = connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-            assert environment_revision != "capacity_0001"
+            assert environment_revision != "capacity_0002"
             assert not (EXPECTED_TABLES & set(inspect(connection).get_table_names()))
     finally:
         capacity_engine.dispose()
@@ -140,7 +141,7 @@ async def test_capacity_schema_error_never_names_environment_migrations(
 async def test_capacity_schema_startup_returns_numeric_head(
     capacity_engine: AsyncEngine,
 ) -> None:
-    assert await assert_capacity_schema_at_head(capacity_engine) == 1
+    assert await assert_capacity_schema_at_head(capacity_engine) == 2
 
 
 def test_capacity_migration_downgrades_and_reupgrades(

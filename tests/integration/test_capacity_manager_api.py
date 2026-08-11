@@ -26,12 +26,17 @@ from loom_capacity_manager.models import Base, CapacityAuthorityState
 from loom_capacity_manager.store import CapacityManagementStore
 from tests.capacity_fixtures import (
     AUTHORITY_ID,
+    DEVELOPMENT_REPORTER_INCARNATION,
+    DEVELOPMENT_SUBJECT_ID,
+    DEVELOPMENT_SUBJECT_INCARNATION,
     POOL_REPORTER_GB10_ID,
     POOL_REPORTER_OLDLAB_ID,
     SUBJECT_ID,
     SUBJECT_INCARNATION,
     demand_snapshot,
+    development_projection,
     fleet_manifest,
+    fleet_with_development_template,
     pool_observation,
     subject_configuration,
 )
@@ -40,6 +45,7 @@ OPERATOR_TOKEN = "operator-api-secret"
 DEMAND_TOKEN = "demand-api-secret"
 GB10_TOKEN = "gb10-api-secret"
 OLDLAB_TOKEN = "oldlab-api-secret"
+DYNAMIC_DEMAND_TOKEN = "dynamic-demand-api-secret"
 
 
 def _hash(token: str) -> str:
@@ -145,6 +151,7 @@ async def api_context(
                             "capacity:configure:fleet",
                             "capacity:configure:subject",
                             "capacity:configure:activate",
+                            "capacity:project:development",
                             "capacity:reconcile",
                             "capacity:read",
                         ],
@@ -196,7 +203,7 @@ async def api_context(
     )
     with TestClient(app) as client:
         assert client.get("/healthz").status_code == 200
-        fleet = fleet_manifest()
+        fleet = fleet_with_development_template()
         subject = subject_configuration(fleet)
         fleet_response = client.put(
             "/v1/config-proposals/fleet",
@@ -310,6 +317,7 @@ def test_shadow_api_exposes_exactly_the_approved_routes(
         ("/v1/config-proposals/fleet", ("PUT",)),
         ("/v1/config-proposals/subjects/{subject_id}", ("PUT",)),
         ("/v1/config-activations", ("POST",)),
+        ("/v1/development-projections/{subject_id}", ("PUT",)),
         ("/v1/reports/demand/{subject_id}", ("PUT",)),
         ("/v1/reports/pools/{pool_id}", ("PUT",)),
         ("/v1/shadow-reconciliations", ("POST",)),
@@ -321,6 +329,43 @@ def test_shadow_api_exposes_exactly_the_approved_routes(
         ("/v1/audit-events", ("GET",)),
         ("/metrics", ("GET",)),
     }
+
+
+def test_lifecycle_can_project_and_authenticate_a_personal_demand_reporter(
+    api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
+    operator_headers: dict[str, str],
+) -> None:
+    client, _app, _settings, _allocator = api_context
+    projection = development_projection().model_copy(
+        update={"demand_reporter_token_sha256": _hash(DYNAMIC_DEMAND_TOKEN)}
+    )
+    response = client.put(
+        f"/v1/development-projections/{DEVELOPMENT_SUBJECT_ID}",
+        headers=operator_headers | {"Idempotency-Key": str(uuid4())},
+        json=projection.model_dump(mode="json"),
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["subject"]["display_name"] == "dev-alice"
+    assert response.json()["subject"]["min_slots"] == 0
+
+    report = demand_snapshot(
+        subject_id=DEVELOPMENT_SUBJECT_ID,
+        subject_incarnation=DEVELOPMENT_SUBJECT_INCARNATION,
+        reporter_incarnation=DEVELOPMENT_REPORTER_INCARNATION,
+    )
+    accepted = client.put(
+        f"/v1/reports/demand/{DEVELOPMENT_SUBJECT_ID}",
+        headers={"Authorization": f"Bearer {DYNAMIC_DEMAND_TOKEN}"},
+        json=report.model_dump(mode="json"),
+    )
+    assert accepted.status_code == 200, accepted.text
+
+    rejected = client.put(
+        f"/v1/reports/demand/{DEVELOPMENT_SUBJECT_ID}",
+        headers={"Authorization": "Bearer wrong-dynamic-token"},
+        json=report.model_copy(update={"sequence": 2}).model_dump(mode="json"),
+    )
+    assert rejected.status_code == 401
 
 
 async def test_streaming_body_limit_rejects_oversized_body_without_content_length() -> None:
