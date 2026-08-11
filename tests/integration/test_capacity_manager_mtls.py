@@ -25,6 +25,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom_capacity_manager.api import create_app
 from loom_capacity_manager.config import CapacityManagerSettings, build_uvicorn_kwargs
+from loom_capacity_manager.health_probe import (
+    CapacityHealthProbeError,
+    probe_capacity_manager,
+)
 from loom_capacity_manager.models import Base, CapacityAuthorityState
 from tests.capacity_fixtures import AUTHORITY_ID
 
@@ -239,6 +243,24 @@ async def test_real_server_rejects_missing_and_untrusted_client_certificates(
             response = client.get(url)
         assert response.status_code == 200
         assert response.json()["executable_new_capacity_ceiling"] == 0
+        assert probe_capacity_manager(
+            url=url,
+            ca_file=ca_path,
+            certificate_file=client_cert_path,
+            private_key_file=client_key_path,
+            timeout_seconds=2,
+        ) == {
+            "status": "ready",
+            "executable_new_capacity_ceiling": 0,
+        }
+        with pytest.raises(CapacityHealthProbeError, match="transport"):
+            probe_capacity_manager(
+                url=url,
+                ca_file=ca_path,
+                certificate_file=unrelated_cert_path,
+                private_key_file=unrelated_key_path,
+                timeout_seconds=2,
+            )
     finally:
         server.should_exit = True
         thread.join(timeout=5)
