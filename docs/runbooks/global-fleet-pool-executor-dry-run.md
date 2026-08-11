@@ -7,9 +7,60 @@ quarantine, and release dry-run records; it has no scheduler client, subprocess
 entry point, or Slurm mutation surface.
 
 Do not install a second global manager or one executor per development
-environment. The single manager accounts for production, staging, `loom-dev`,
-and every `loom-dev-<name>` subject together. OLDLAB and GB10 each have exactly
-one controller-local executor incarnation and journal.
+environment. The single manager runs in the shared `loom-dev` infrastructure
+namespace and accounts for production, staging, and every personal
+`loom-dev-<name>` application subject together. OLDLAB and GB10 each have
+exactly one controller-local executor incarnation and journal.
+
+## Render and status evidence
+
+The checked-in `deploy/dev-fleet/capacity-control-plane.toml` packages only the
+global management authority. `deploy/dev-fleet/shared-fixture.yaml` and the
+`loom-global-dev-fleet-autoscaler.*` SQLite timer remain legacy-inert; never
+install either beside the global writer.
+
+Render a reviewed candidate to an owner-only evidence file. Replace the
+shape-valid example digest and UUID with the reviewed release values:
+
+```bash
+install -d -m 0700 artifacts/capacity
+render_path="$(mktemp artifacts/capacity/control-plane.XXXXXX.yaml)"
+uv run --no-sync loom admin capacity-control-plane render \
+  --file deploy/dev-fleet/capacity-control-plane.toml \
+  --manager-image ghcr.io/qianyi-sun/loom-capacity-manager@sha256:1111111111111111111111111111111111111111111111111111111111111111 \
+  --authority-incarnation 11111111-1111-4111-8111-111111111111 \
+  > "$render_path"
+printf 'rendered evidence: %s\n' "$render_path" >&2
+```
+
+Do not apply that file during this repository slice. A Kubernetes apply is a
+live #906 operator-change-window action and requires all freeze, adoption,
+executor, and rollback evidence first.
+
+Only after such an authorized deployment, capture the read-only mTLS status:
+
+```bash
+set -o pipefail
+install -d -m 0700 artifacts/capacity
+status_path="$(mktemp artifacts/capacity/status.XXXXXX.json)"
+uv run --no-sync loom admin capacity-control-plane status \
+  --namespace loom-dev \
+  --kubeconfig /absolute/path/to/kubeconfig \
+  | tee "$status_path"
+```
+
+The sole successful response is
+`{"executable_new_capacity_ceiling":0,"status":"ready"}` followed by a newline.
+A nonzero command exit or any other response fails the rehearsal gate.
+
+The existing `loom-capacity-manager` Kubernetes Secret must provide these exact
+keys; neither command accepts their plaintext values:
+
+- `postgres-user`, `postgres-password`, `postgres-database`, `database-url`;
+- `principals.json`, `ownership-public-keys.json`;
+- `server-ca.pem`, `server-certificate.pem`, `server-private-key.pem`,
+  `client-ca.pem`; and
+- `health-certificate.pem`, `health-private-key.pem`.
 
 ## Manager trust roots
 
@@ -17,13 +68,13 @@ The manager service requires its existing database, principal registry, and
 mTLS files plus an ownership verification-key registry:
 
 ```text
-LOOM_CAPACITY_PRINCIPALS_FILE=/run/loom-capacity/principals.json
-LOOM_CAPACITY_DB_URL_FILE=/run/loom-capacity/database-url
-LOOM_CAPACITY_EXPECTED_AUTHORITY_INCARNATION=<uuid>
-LOOM_CAPACITY_TLS_CERT_FILE=/run/loom-capacity/tls.crt
-LOOM_CAPACITY_TLS_KEY_FILE=/run/loom-capacity/tls.key
-LOOM_CAPACITY_TLS_CLIENT_CA_FILE=/run/loom-capacity/client-ca.crt
-LOOM_CAPACITY_OWNERSHIP_PUBLIC_KEYS_FILE=/run/loom-capacity/ownership-keys.json
+LOOM_CAPACITY_PRINCIPALS_FILE=/var/run/loom-capacity-manager/runtime/credentials/principals.json
+LOOM_CAPACITY_DB_URL_FILE=/var/run/loom-capacity-manager/runtime/credentials/database-url
+LOOM_CAPACITY_EXPECTED_AUTHORITY_INCARNATION=11111111-1111-4111-8111-111111111111
+LOOM_CAPACITY_TLS_CERT_FILE=/var/run/loom-capacity-manager/runtime/credentials/server-certificate.pem
+LOOM_CAPACITY_TLS_KEY_FILE=/var/run/loom-capacity-manager/runtime/credentials/server-private-key.pem
+LOOM_CAPACITY_TLS_CLIENT_CA_FILE=/var/run/loom-capacity-manager/runtime/credentials/client-ca.pem
+LOOM_CAPACITY_OWNERSHIP_PUBLIC_KEYS_FILE=/var/run/loom-capacity-manager/runtime/credentials/ownership-public-keys.json
 ```
 
 Every referenced secret file must be a regular nonsymlink file owned by the
