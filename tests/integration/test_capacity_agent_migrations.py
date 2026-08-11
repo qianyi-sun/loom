@@ -107,7 +107,16 @@ def test_agent_can_execute_only_the_bounded_agent_functions(
                         "(uuid,jsonb,bytea,text)', 'EXECUTE') AS worker_execute, "
                         "has_function_privilege(:agent, "
                         "'loom_capacity_guard.assert_inert_agent_binding"
-                        "(uuid,jsonb,bytea,text)', 'EXECUTE') AS binding_guard_execute"
+                        "(uuid,jsonb,bytea,text)', 'EXECUTE') AS binding_guard_execute, "
+                        "has_function_privilege(:agent, "
+                        "'loom_capacity_guard.apply_inert_attempt_transition"
+                        "(uuid,jsonb,bytea,text)', 'EXECUTE') AS lifecycle_execute, "
+                        "has_function_privilege(:agent, "
+                        "'loom_capacity_guard.initialize_attempt_lifecycle()', 'EXECUTE') "
+                        "AS lifecycle_initializer_execute, "
+                        "has_function_privilege(:agent, "
+                        "'loom_capacity_guard.inspect_inert_claim_proposal"
+                        "(uuid,jsonb,bytea,text)', 'EXECUTE') AS claim_inspect_execute"
                     ),
                     {"agent": agent_role},
                 )
@@ -125,6 +134,9 @@ def test_agent_can_execute_only_the_bounded_agent_functions(
             "bootstrap_execute": True,
             "worker_execute": True,
             "binding_guard_execute": False,
+            "lifecycle_execute": True,
+            "lifecycle_initializer_execute": False,
+            "claim_inspect_execute": True,
         }
     finally:
         admin.dispose()
@@ -167,7 +179,10 @@ def test_agent_functions_have_fixed_search_paths_and_exact_definer_status(
                         "WHERE n.nspname = 'loom_capacity_guard' "
                         "AND p.proname IN ('capture_demand_observation', "
                         "'assert_inert_agent_binding', 'prepare_inert_admission_plan', "
-                        "'register_inert_bootstrap', 'record_inert_worker')"
+                        "'register_inert_bootstrap', 'record_inert_worker', "
+                        "'apply_inert_attempt_transition', "
+                        "'initialize_attempt_lifecycle', "
+                        "'inspect_inert_claim_proposal')"
                     )
                 )
                 .mappings()
@@ -180,11 +195,20 @@ def test_agent_functions_have_fixed_search_paths_and_exact_definer_status(
             "prepare_inert_admission_plan",
             "register_inert_bootstrap",
             "record_inert_worker",
+            "apply_inert_attempt_transition",
+            "initialize_attempt_lifecycle",
+            "inspect_inert_claim_proposal",
         }
         for name, row in functions.items():
             assert row["proconfig"] == ["search_path=pg_catalog"]
             assert row["owner"] == _value(capacity_guard_database, "owner_role")
-            assert row["prosecdef"] is (name != "assert_inert_agent_binding")
+            assert row["prosecdef"] is (
+                name
+                not in {
+                    "assert_inert_agent_binding",
+                    "initialize_attempt_lifecycle",
+                }
+            )
     finally:
         engine.dispose()
 

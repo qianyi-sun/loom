@@ -1,0 +1,248 @@
+{
+  "schema_version": 1,
+  "generated_from_commit": "stacked-package-2b3",
+  "scope": "capacity eligibility, assignment, claim ownership, worker authority, retry, cancellation, recovery, and physical release",
+  "activation_blocking": true,
+  "closure_rule": "Every entry must be protected, disabled, or deleted before global activation.",
+  "entries": [
+    {
+      "id": "trial-submission",
+      "category": "submission",
+      "sources": [
+        "src/loom_control_plane/routes/trials.py:submit_trial",
+        "src/loom_service/batch_runner.py:_submit_one"
+      ],
+      "current_mutation": "Creates a queued public trial and derives mutable requires_caps; batch fan-out reaches the same route.",
+      "current_authority": "candidate control-plane submit role",
+      "required_replacement": "One trusted submission procedure must atomically create the public projection, seal normalized requirements, and create a fresh pending-unassigned protected attempt identity.",
+      "closure_status": "open"
+    },
+    {
+      "id": "trial-requirement-and-lifecycle-binding",
+      "category": "requirement-change",
+      "sources": [
+        "src/loom_control_plane/routes/trials.py:submit_trial",
+        "src/loom/data_lifecycle_registry.py:bind_existing_trial_lifecycle_authority"
+      ],
+      "current_mutation": "Writes requires_caps and later backfills lifecycle_authority_id directly on the public trial row.",
+      "current_authority": "candidate control-plane and trusted migration utilities",
+      "required_replacement": "Requirements become immutable protected input; an authorized unclaimed requirement migration must fence the old assignment and create a new digest/attempt generation.",
+      "closure_status": "open"
+    },
+    {
+      "id": "neutral-pool-assignment",
+      "category": "assignment",
+      "sources": [
+        "src/loom_control_plane/autoscaler_demand_router.py:assign_neutral_queued_trials"
+      ],
+      "current_mutation": "Sets or clears trials.autoscaler_pool_name for flexible queued work.",
+      "current_authority": "candidate control-plane background loop",
+      "required_replacement": "Disable this writer and project only the current protected assignment created by an accepted placement allowance CAS.",
+      "closure_status": "open"
+    },
+    {
+      "id": "worker-token-issuance",
+      "category": "credential",
+      "sources": [
+        "src/loom_control_plane/routes/admin.py:issue_worker_token",
+        "src/loom_control_plane/routes/admin.py:revoke_token",
+        "src/loom_control_plane/routes/admin.py:revoke_all_worker_tokens",
+        "src/loom/worker_token.py"
+      ],
+      "current_mutation": "Creates and revokes broad worker bearer tokens not bound to protected subject, shape, intent, job, worker incarnation, or admission epoch.",
+      "current_authority": "candidate control-plane admin API",
+      "required_replacement": "Fence legacy issuance; only the trusted bootstrap exchange may issue a hash-bound, expiry-bounded worker credential for an active protected authorization.",
+      "closure_status": "open"
+    },
+    {
+      "id": "worker-registration",
+      "category": "worker-identity",
+      "sources": [
+        "src/loom_control_plane/routes/workers.py:register_worker"
+      ],
+      "current_mutation": "Creates an active worker from a broad worker:report token and caller-provided capabilities/concurrency/pool.",
+      "current_authority": "candidate control-plane worker API",
+      "required_replacement": "Route fleet workers through the protected bootstrap/job/shape exchange; retain legacy registration only behind an expiring compatibility writer.",
+      "closure_status": "open"
+    },
+    {
+      "id": "worker-heartbeat-status",
+      "category": "worker-lifecycle",
+      "sources": [
+        "src/loom_control_plane/routes/workers.py:heartbeat"
+      ],
+      "current_mutation": "Updates worker last_seen_at and status directly.",
+      "current_authority": "candidate control-plane worker API",
+      "required_replacement": "Authenticate the exact protected worker incarnation; heartbeat may refresh liveness but cannot restore claimability or clear drain/revocation.",
+      "closure_status": "open"
+    },
+    {
+      "id": "queued-to-claimed",
+      "category": "claim",
+      "sources": [
+        "src/loom_control_plane/routes/workers.py:claim_trial",
+        "src/loom_control_plane/scheduler/claim.py:claim_one"
+      ],
+      "current_mutation": "Selects an eligible queued public trial, flips family state, and writes claimed worker ownership without protected allowance or concurrency-lease authority.",
+      "current_authority": "candidate scheduler and worker API",
+      "required_replacement": "Candidate code may propose only; the trusted SERIALIZABLE claim procedure must validate the current protected assignment, worker authorization, sealed requirements, family/retry/team gates, and atomically allocate one concurrency lease.",
+      "closure_status": "open"
+    },
+    {
+      "id": "pre-start-heartbeat",
+      "category": "claim-heartbeat",
+      "sources": [
+        "src/loom_control_plane/routes/workers.py:pre_start_heartbeat"
+      ],
+      "current_mutation": "Refreshes a claimed trial pre-start heartbeat by public worker_id.",
+      "current_authority": "candidate control-plane worker API",
+      "required_replacement": "Require exact protected claim, worker incarnation, completion capability, and claim epoch; retain the public timestamp as projection only.",
+      "closure_status": "open"
+    },
+    {
+      "id": "pre-start-retry-requeue",
+      "category": "retry-requeue",
+      "sources": [
+        "src/loom_control_plane/routes/workers.py:requeue_trial_retry"
+      ],
+      "current_mutation": "Moves claimed to queued, clears worker_id, adjusts attempts, and sets retry time before protected cessation proof.",
+      "current_authority": "candidate control-plane worker API",
+      "required_replacement": "Move the protected claim to retry-pending, retain the charged lease, and create a fresh attempt only after scoped cessation or ownership-verified infrastructure loss.",
+      "closure_status": "open"
+    },
+    {
+      "id": "worker-result-state",
+      "category": "start-heartbeat-completion-failure",
+      "sources": [
+        "src/loom_control_plane/routes/state.py:patch_state",
+        "src/loom_control_plane/routes/state.py:_finalize_family"
+      ],
+      "current_mutation": "Writes running/succeeded/failed/cancelled, result, timestamps, and family progression using only public worker_id fencing.",
+      "current_authority": "candidate control-plane worker API",
+      "required_replacement": "Use claim-scoped start/heartbeat/result/terminal procedures; terminal workload projection must not release concurrency until the exact protected completion transition closes it.",
+      "closure_status": "open"
+    },
+    {
+      "id": "single-trial-cancel",
+      "category": "cancellation",
+      "sources": [
+        "src/loom_control_plane/routes/trials.py:cancel_trial"
+      ],
+      "current_mutation": "Immediately marks queued, claimed, or running public trials cancelled and finished.",
+      "current_authority": "candidate control-plane submit/admin API",
+      "required_replacement": "Cancel unclaimed protected attempts terminally; move live claims to cancel-pending and retain their concurrency lease until scoped cessation evidence arrives.",
+      "closure_status": "open"
+    },
+    {
+      "id": "family-finalize-cascade",
+      "category": "family-cancellation",
+      "sources": [
+        "src/loom_control_plane/routes/state.py:_FAMILY_CANCEL_REMAINING_SQL",
+        "src/loom_family_orchestrator/main_loop.py:_CANCEL_REMAINING_SQL"
+      ],
+      "current_mutation": "Cancels remaining queued family trials directly after skip or abort decisions.",
+      "current_authority": "candidate control-plane and family orchestrator",
+      "required_replacement": "Invoke a protected family cancellation transaction for every current unclaimed attempt; any live member follows cancel-pending semantics.",
+      "closure_status": "open"
+    },
+    {
+      "id": "batch-user-cancel",
+      "category": "batch-cancellation",
+      "sources": [
+        "src/loom_service/routes/batches.py:cancel_batch"
+      ],
+      "current_mutation": "Marks a batch and all queued/claimed/running public trials cancelled in one candidate-schema transaction.",
+      "current_authority": "candidate service API",
+      "required_replacement": "Coordinate a protected batch cancellation for each attempt and project results only after protected unclaimed-terminal or live cancel-pending transitions commit.",
+      "closure_status": "open"
+    },
+    {
+      "id": "batch-hard-budget-cancel",
+      "category": "budget-cancellation",
+      "sources": [
+        "src/loom_service/batch_runner.py:_cancel_batch_for_hard_budget"
+      ],
+      "current_mutation": "Directly cancels all in-flight trials when recorded provider cost exceeds a hard batch budget.",
+      "current_authority": "candidate batch-runner background loop",
+      "required_replacement": "Use the same protected batch cancellation surface; budget authority may request cancellation but cannot release or reassign protected claims.",
+      "closure_status": "open"
+    },
+    {
+      "id": "dead-worker-reclaim",
+      "category": "crash-recovery",
+      "sources": [
+        "src/loom_control_plane/scheduler/crash_detector.py:reclaim_expired_workers"
+      ],
+      "current_mutation": "Moves claimed/running trials back to queued and clears worker ownership based on heartbeat age or pre-start timeout.",
+      "current_authority": "candidate control-plane background loop",
+      "required_replacement": "Fence the exact worker, move claims to retry-pending/unknown, and keep leases charged until trusted cessation or ownership-verified terminal-job evidence closes them.",
+      "closure_status": "open"
+    },
+    {
+      "id": "stale-running-failure",
+      "category": "timeout-failure",
+      "sources": [
+        "src/loom_control_plane/scheduler/crash_detector.py:reclaim_stale_running_trials"
+      ],
+      "current_mutation": "ORM-mutates stale running trials to failed and terminal based on activity heuristics.",
+      "current_authority": "candidate control-plane background loop",
+      "required_replacement": "Request a protected completion/retry transition; heuristics alone cannot release the claim or authorize replacement.",
+      "closure_status": "open"
+    },
+    {
+      "id": "worker-drain-and-release",
+      "category": "worker-drain",
+      "sources": [
+        "src/loom_control_plane/worker_pool_autoscaler.py",
+        "src/loom_control_plane/prod_pressure_control.py",
+        "src/loom_control_plane/gb10_worker_lifecycle.py"
+      ],
+      "current_mutation": "Multiple controllers set worker drain_state/status and infer release from public in-flight trials and local pool policy.",
+      "current_authority": "candidate control-plane autoscaler and GB10 lifecycle loops",
+      "required_replacement": "One protected admission epoch fences replacement claims first; physical release requires zero protected live leases plus executor-owned terminal evidence.",
+      "closure_status": "open"
+    },
+    {
+      "id": "slurm-job-launch-registry-release",
+      "category": "physical-capacity",
+      "sources": [
+        "src/loom_control_plane/elastic_slurm_worker_controller.py",
+        "src/loom_control_plane/slurm_worker_jobs.py",
+        "src/loom_control_plane/routes/admin.py:create_slurm_worker_job",
+        "src/loom_control_plane/routes/admin.py:reconcile_slurm_worker_job_records",
+        "scripts/ops/worker_pool_autoscaler_external_once.py"
+      ],
+      "current_mutation": "Submits/cancels Slurm jobs, records job-to-worker identity, reconciles terminal state, and uses broad worker-token fingerprints.",
+      "current_authority": "pool-local controller and candidate control-plane admin API",
+      "required_replacement": "Pool executors accept only manager offers, register the bootstrap hash before submission, bind the returned job exactly, and publish terminal evidence; the environment guard alone fences credentials and claims.",
+      "closure_status": "open"
+    },
+    {
+      "id": "dev-environment-destroy",
+      "category": "environment-deletion",
+      "sources": [
+        "src/loom_service/routes/dev_instances.py:delete_dev_instance",
+        "src/loom_service/dev_instance_lifecycle.py:DevInstanceLifecycleRunner._run_destroy",
+        "src/loom/dev_instance_provisioner.py:DevInstanceProvisioner.converge_destroy",
+        "src/loom/dev_instance_store.py:SqlAlchemyDevInstanceStore"
+      ],
+      "current_mutation": "Claims a dev-instance destroy operation and tears down namespace/data without a protected capacity drain checkpoint.",
+      "current_authority": "shared service lifecycle runner",
+      "required_replacement": "Reject new submissions, fence admission, terminalize unclaimed attempts, drain live claims, revoke generation credentials, and delete capacity resources only after protected claim and physical-release checkpoints complete.",
+      "closure_status": "open"
+    },
+    {
+      "id": "legacy-compatibility-writer",
+      "category": "cutover-rollback",
+      "sources": [
+        "src/loom_control_plane/scheduler/claim.py",
+        "src/loom_control_plane/autoscaler_demand_router.py",
+        "src/loom_control_plane/routes/workers.py"
+      ],
+      "current_mutation": "The active legacy claim/assignment/token paths collectively form the current single writer but have no explicit epoch or expiry.",
+      "current_authority": "candidate deployment",
+      "required_replacement": "Mirror only exact pre-freeze authority into a unique expiring legacy-compatibility epoch; prohibit neutral moves, new workers after freeze, global allowance consumption, and survival past global activation.",
+      "closure_status": "open"
+    }
+  ]
+}
