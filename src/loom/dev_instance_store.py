@@ -40,6 +40,9 @@ def _record(row: DevInstance) -> DevInstanceRecord:
         failure_reason=row.failure_reason,
         ready_at=row.ready_at,
         deleted_at=row.deleted_at,
+        subject_id=row.subject_id,
+        subject_incarnation=row.subject_incarnation,
+        candidate_id=row.candidate_id,
     )
 
 

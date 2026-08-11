@@ -8,10 +8,11 @@ import sys
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from testcontainers.postgres import PostgresContainer
 
@@ -19,11 +20,22 @@ from loom.db.schema import Team, User
 from loom.personal_dev_candidate import (
     PERSONAL_DEV_COMPONENTS,
     PERSONAL_DEV_PLATFORMS,
+    CandidateRegistration,
     PersonalDevCandidateRecord,
 )
 from loom.personal_dev_candidate_store import (
     PersonalDevBuildLeaseFencedError,
     SqlAlchemyPersonalDevCandidateStore,
+)
+from loom.personal_dev_environment import (
+    PersonalDevEnvironmentApplyRequest,
+    PersonalDevLifecycleLimits,
+)
+from loom.personal_dev_environment_store import (
+    PersonalDevEnvironmentConflictError,
+    PersonalDevEnvironmentEpochFencedError,
+    PersonalDevEnvironmentNotFoundError,
+    SqlAlchemyPersonalDevEnvironmentAuthority,
 )
 
 
@@ -37,6 +49,16 @@ def postgres_url():
         os.environ["LOOM_DB_URL"] = url
         repo_root = Path(__file__).resolve().parents[2]
         # Use the venv's alembic via `python -m alembic` so PATH doesn't matter.
+        subprocess.run(
+            [sys.executable, "-m", "alembic", "-c", "migrations/alembic.ini", "upgrade", "head"],
+            cwd=repo_root,
+            check=True,
+        )
+        subprocess.run(
+            [sys.executable, "-m", "alembic", "-c", "migrations/alembic.ini", "downgrade", "0081"],
+            cwd=repo_root,
+            check=True,
+        )
         subprocess.run(
             [sys.executable, "-m", "alembic", "-c", "migrations/alembic.ini", "upgrade", "head"],
             cwd=repo_root,
@@ -73,6 +95,8 @@ def test_all_tables_exist(postgres_url: str) -> None:
         "gb10_worker_node_statuses",
         "worker_pool_autoscaler_policies",
         "dev_instances",
+        "dev_lifecycle_operations",
+        "dev_lifecycle_operation_attempts",
         "personal_dev_candidates",
         "personal_dev_candidate_build_attempts",
         "artifacts",
@@ -128,6 +152,39 @@ def _publication(
         "publisher_identity": "system:serviceaccount:loom-dev:candidate-builder",
         "published_at": now.astimezone(UTC).isoformat().replace("+00:00", "Z"),
     }
+
+
+async def _claim_candidate_build(
+    store: SqlAlchemyPersonalDevCandidateStore,
+    *,
+    candidate_id: UUID,
+    builder_id: str,
+    now: datetime,
+) -> CandidateRegistration:
+    """Claim the requested candidate while terminalizing older test queue rows."""
+    for _ in range(20):
+        claimed = await store.claim_next_build(
+            builder_id=builder_id,
+            now=now,
+            lease_seconds=60,
+        )
+        assert claimed is not None and claimed.build_attempt is not None
+        if claimed.candidate.id == candidate_id:
+            return claimed
+        running = await store.start_build(
+            attempt_id=claimed.build_attempt.id,
+            builder_id=builder_id,
+            lease_epoch=claimed.build_attempt.lease_epoch,
+            now=now,
+        )
+        await store.finish_build(
+            attempt_id=running.id,
+            builder_id=builder_id,
+            lease_epoch=running.lease_epoch,
+            now=now,
+            failure_reason="test_cleanup",
+        )
+    raise AssertionError("target personal-dev candidate was not in the bounded build queue")
 
 
 async def test_personal_dev_candidate_registration_and_build_lease(
@@ -297,6 +354,392 @@ async def test_personal_dev_candidate_registration_and_build_lease(
             assert retried.created is True
             assert retried.build_attempt is not None
             assert retried.build_attempt.attempt_sequence == 1
+    finally:
+        await engine.dispose()
+
+
+async def test_personal_dev_environment_apply_is_owner_bound_and_epoch_fenced(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    owner_id = uuid4()
+    team_id = uuid4()
+    now = datetime.now(UTC)
+    candidate = PersonalDevCandidateRecord(
+        id=uuid4(),
+        owner_user_id=owner_id,
+        owner_team_id=team_id,
+        candidate_sha="a" * 64,
+        source_sha256="b" * 64,
+        archive_sha256="c" * 64,
+        build_contract_sha256="d" * 64,
+        source_commit="e" * 40,
+        dirty=True,
+        manifest_json={"schema_version": 1, "attestation_scope": "personal-dev-only"},
+        object_bucket="artifacts",
+        object_key=f"personal-dev/sources/{team_id}/{owner_id}/environment.tar",
+        archive_size_bytes=10240,
+        status="uploaded",
+        created_at=now,
+        updated_at=now,
+    )
+    try:
+        async with sessions() as session:
+            session.add(Team(id=team_id, name=f"environment-{team_id}"))
+            session.add(
+                User(
+                    id=owner_id,
+                    email=f"{owner_id}@example.test",
+                    username=f"user-{owner_id}",
+                    username_normalized=f"user-{owner_id}",
+                    status="active",
+                ),
+            )
+            await session.commit()
+            registered = await SqlAlchemyPersonalDevCandidateStore(session).register(candidate)
+            candidate = registered.candidate
+
+        idempotency_key = uuid4()
+        request = PersonalDevEnvironmentApplyRequest(
+            name="alice",
+            owner_user_id=owner_id,
+            owner_team_id=team_id,
+            candidate_id=candidate.id,
+            candidate_sha=candidate.candidate_sha,
+            min_slots=0,
+            max_slots=2,
+            expected_operation_epoch=0,
+            idempotency_key=idempotency_key,
+        )
+        async with sessions() as session:
+            authority = SqlAlchemyPersonalDevEnvironmentAuthority(session)
+            created = await authority.apply(request, now=now)
+            assert created.acquired is True
+            assert created.requires_build_binding is True
+            assert created.environment.status == "provisioning"
+            assert created.environment.subject_id == created.operation.subject_id
+            assert created.environment.subject_incarnation == created.operation.subject_incarnation
+            assert created.operation.operation_epoch == 1
+            assert created.operation.kind == "create"
+            retry = await authority.apply(request, now=now)
+            assert retry.acquired is False
+            assert retry.operation.id == created.operation.id
+
+            with pytest.raises(PersonalDevEnvironmentConflictError):
+                await authority.apply(
+                    replace(request, max_slots=3),
+                    now=now,
+                )
+            content_retry = await authority.apply(
+                replace(request, idempotency_key=uuid4()),
+                now=now,
+            )
+            assert content_retry.acquired is False
+            assert content_retry.operation.id == created.operation.id
+            with pytest.raises(PersonalDevEnvironmentEpochFencedError):
+                await authority.apply(
+                    replace(request, max_slots=3, idempotency_key=uuid4()),
+                    now=now,
+                )
+            constrained = SqlAlchemyPersonalDevEnvironmentAuthority(
+                session,
+                limits=PersonalDevLifecycleLimits(
+                    global_live_instances=16,
+                    per_owner_live_instances=1,
+                    per_owner_aggregate_min_slots=8,
+                    per_owner_aggregate_max_slots=16,
+                ),
+            )
+            with pytest.raises(PersonalDevEnvironmentConflictError):
+                await constrained.apply(
+                    replace(
+                        request,
+                        name="charlie",
+                        idempotency_key=uuid4(),
+                    ),
+                    now=now,
+                )
+
+        async with sessions() as session:
+            with pytest.raises(DBAPIError):
+                await session.execute(
+                    text(
+                        "UPDATE dev_lifecycle_operations SET candidate_sha = :candidate_sha "
+                        "WHERE id = :operation_id",
+                    ),
+                    {
+                        "candidate_sha": "9" * 64,
+                        "operation_id": created.operation.id,
+                    },
+                )
+            await session.rollback()
+
+        async with sessions() as session:
+            candidate_store = SqlAlchemyPersonalDevCandidateStore(session)
+            candidate_state = await candidate_store.get(candidate.id)
+            assert candidate_state is not None
+            assert candidate_state.build_attempt is not None
+            assert candidate_state.build_attempt.subject_id == created.environment.subject_id
+            assert candidate_state.build_attempt.operation_id == created.operation.id
+            assert candidate_state.build_attempt.operation_epoch == 1
+            claimed = await _claim_candidate_build(
+                candidate_store,
+                candidate_id=candidate.id,
+                builder_id="environment-test-cleanup",
+                now=now,
+            )
+            assert claimed.build_attempt is not None
+            await candidate_store.start_build(
+                attempt_id=claimed.build_attempt.id,
+                builder_id="environment-test-cleanup",
+                lease_epoch=claimed.build_attempt.lease_epoch,
+                now=now,
+            )
+            await candidate_store.finish_build(
+                attempt_id=claimed.build_attempt.id,
+                builder_id="environment-test-cleanup",
+                lease_epoch=claimed.build_attempt.lease_epoch,
+                now=now,
+                failure_reason="test_cleanup",
+            )
+
+        async with sessions() as session:
+            authority = SqlAlchemyPersonalDevEnvironmentAuthority(session)
+            failed = await authority.fail_pre_activation(
+                operation_id=created.operation.id,
+                operation_epoch=1,
+                failure_reason="candidate_build_failed",
+                now=now,
+            )
+            assert failed.operation.state == "failed"
+            assert failed.environment.status == "failed"
+            retried = await authority.apply(request, now=now)
+            assert retried.acquired is True
+            assert retried.operation.id == created.operation.id
+            assert retried.operation.attempt_sequence == 1
+            assert retried.operation.attempt_id != created.operation.attempt_id
+            assert retried.environment.status == "provisioning"
+
+        other_owner = uuid4()
+        async with sessions() as session:
+            session.add(
+                User(
+                    id=other_owner,
+                    email=f"{other_owner}@example.test",
+                    username=f"user-{other_owner}",
+                    username_normalized=f"user-{other_owner}",
+                    status="active",
+                ),
+            )
+            await session.commit()
+            with pytest.raises(PersonalDevEnvironmentNotFoundError):
+                await SqlAlchemyPersonalDevEnvironmentAuthority(session).apply(
+                    replace(
+                        request,
+                        owner_user_id=other_owner,
+                        idempotency_key=uuid4(),
+                    ),
+                    now=now,
+                )
+    finally:
+        await engine.dispose()
+
+
+async def test_personal_dev_environment_capacity_and_candidate_updates_are_atomic(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    owner_id = uuid4()
+    team_id = uuid4()
+    now = datetime.now(UTC)
+
+    def candidate_record(digit: str) -> PersonalDevCandidateRecord:
+        source_digit, archive_digit = {"2": ("4", "5"), "3": ("6", "7")}[digit]
+        return PersonalDevCandidateRecord(
+            id=uuid4(),
+            owner_user_id=owner_id,
+            owner_team_id=team_id,
+            candidate_sha=digit * 64,
+            source_sha256=source_digit * 64,
+            archive_sha256=archive_digit * 64,
+            build_contract_sha256="f" * 64,
+            source_commit="1" * 40,
+            dirty=False,
+            manifest_json={"schema_version": 1, "attestation_scope": "personal-dev-only"},
+            object_bucket="artifacts",
+            object_key=f"personal-dev/sources/{team_id}/{owner_id}/{digit}.tar",
+            archive_size_bytes=10240,
+            status="uploaded",
+            created_at=now,
+            updated_at=now,
+        )
+
+    try:
+        async with sessions() as session:
+            session.add(Team(id=team_id, name=f"updates-{team_id}"))
+            session.add(
+                User(
+                    id=owner_id,
+                    email=f"{owner_id}@example.test",
+                    username=f"user-{owner_id}",
+                    username_normalized=f"user-{owner_id}",
+                    status="active",
+                ),
+            )
+            await session.commit()
+            candidates = SqlAlchemyPersonalDevCandidateStore(session)
+            first = (await candidates.register(candidate_record("2"))).candidate
+            second = (await candidates.register(candidate_record("3"))).candidate
+
+        async with sessions() as session:
+            authority = SqlAlchemyPersonalDevEnvironmentAuthority(session)
+            create = await authority.apply(
+                PersonalDevEnvironmentApplyRequest(
+                    name="bob",
+                    owner_user_id=owner_id,
+                    owner_team_id=team_id,
+                    candidate_id=first.id,
+                    candidate_sha=first.candidate_sha,
+                    min_slots=0,
+                    max_slots=2,
+                    expected_operation_epoch=0,
+                    idempotency_key=uuid4(),
+                ),
+                now=now,
+            )
+
+        async with sessions() as session:
+            candidate_store = SqlAlchemyPersonalDevCandidateStore(session)
+            claimed = await _claim_candidate_build(
+                candidate_store,
+                candidate_id=first.id,
+                builder_id="environment-test-builder",
+                now=now,
+            )
+            assert claimed.build_attempt is not None
+            running = await candidate_store.start_build(
+                attempt_id=claimed.build_attempt.id,
+                builder_id="environment-test-builder",
+                lease_epoch=claimed.build_attempt.lease_epoch,
+                now=now,
+            )
+            await candidate_store.finish_build(
+                attempt_id=running.id,
+                builder_id="environment-test-builder",
+                lease_epoch=running.lease_epoch,
+                now=now,
+                publication=_publication(claimed.candidate, now),
+            )
+
+        async with sessions() as session:
+            authority = SqlAlchemyPersonalDevEnvironmentAuthority(session)
+            activation = await authority.begin_activation(
+                operation_id=create.operation.id,
+                operation_epoch=1,
+                readiness_evidence_sha256="4" * 64,
+                now=now,
+            )
+            activation_retry = await authority.begin_activation(
+                operation_id=create.operation.id,
+                operation_epoch=1,
+                readiness_evidence_sha256="4" * 64,
+                now=now,
+            )
+            assert activation.acquired is True
+            assert activation_retry.acquired is False
+            acknowledgement = await authority.acknowledge_activation(
+                operation_id=create.operation.id,
+                operation_epoch=1,
+                acknowledgement_sha256="5" * 64,
+                now=now,
+            )
+            acknowledgement_retry = await authority.acknowledge_activation(
+                operation_id=create.operation.id,
+                operation_epoch=1,
+                acknowledgement_sha256="5" * 64,
+                now=now,
+            )
+            assert acknowledgement.acquired is True
+            assert acknowledgement_retry.acquired is False
+            ready = await authority.complete_activation(
+                operation_id=create.operation.id,
+                operation_epoch=1,
+                now=now,
+            )
+            ready_retry = await authority.complete_activation(
+                operation_id=create.operation.id,
+                operation_epoch=1,
+                now=now,
+            )
+            assert ready.environment.status == "ready"
+            assert ready.environment.candidate_id == first.id
+            assert ready_retry.acquired is False
+
+        async with sessions() as session:
+            authority = SqlAlchemyPersonalDevEnvironmentAuthority(session)
+            capacity = await authority.apply(
+                PersonalDevEnvironmentApplyRequest(
+                    name="bob",
+                    owner_user_id=owner_id,
+                    owner_team_id=team_id,
+                    candidate_id=first.id,
+                    candidate_sha=first.candidate_sha,
+                    min_slots=1,
+                    max_slots=4,
+                    expected_operation_epoch=1,
+                    idempotency_key=uuid4(),
+                ),
+                now=now,
+            )
+            assert capacity.operation.kind == "capacity"
+            assert capacity.operation.state == "succeeded"
+            assert capacity.environment.operation_epoch == 2
+            assert capacity.environment.deployment_generation == 1
+            assert (capacity.environment.min_slots, capacity.environment.max_slots) == (1, 4)
+            assert capacity.requires_build_binding is False
+
+            noop_request = PersonalDevEnvironmentApplyRequest(
+                name="bob",
+                owner_user_id=owner_id,
+                owner_team_id=team_id,
+                candidate_id=first.id,
+                candidate_sha=first.candidate_sha,
+                min_slots=1,
+                max_slots=4,
+                expected_operation_epoch=2,
+                idempotency_key=uuid4(),
+            )
+            noop = await authority.apply(noop_request, now=now)
+            repeated_noop = await authority.apply(
+                replace(noop_request, idempotency_key=uuid4()),
+                now=now,
+            )
+            assert noop.operation.kind == "noop"
+            assert repeated_noop.acquired is False
+            assert repeated_noop.operation.id == noop.operation.id
+
+            update = await authority.apply(
+                PersonalDevEnvironmentApplyRequest(
+                    name="bob",
+                    owner_user_id=owner_id,
+                    owner_team_id=team_id,
+                    candidate_id=second.id,
+                    candidate_sha=second.candidate_sha,
+                    min_slots=0,
+                    max_slots=3,
+                    expected_operation_epoch=2,
+                    idempotency_key=uuid4(),
+                ),
+                now=now,
+            )
+            assert update.operation.kind == "update"
+            assert update.operation.deployment_generation == 2
+            assert update.environment.status == "updating"
+            assert update.environment.candidate_id == first.id
+            assert update.environment.candidate_sha == first.candidate_sha
+            assert (update.environment.min_slots, update.environment.max_slots) == (1, 4)
     finally:
         await engine.dispose()
 

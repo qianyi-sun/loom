@@ -34,7 +34,16 @@ from loom.dev_instance_provision import provisioning_plan
 #: autoscaler admission also enforces). Fixed here so a caller cannot request a
 #: different actuator through the guarded path.
 DEV_ACTUATOR = "slurm"
-DevInstanceStatus = Literal["provisioning", "ready", "deleting", "failed", "deleted"]
+DevInstanceStatus = Literal[
+    "provisioning",
+    "ready",
+    "updating",
+    "activating",
+    "deleting",
+    "draining",
+    "failed",
+    "deleted",
+]
 _DESTROY_STEP_RANK = {
     "claimed": 0,
     "drained": 1,
@@ -87,6 +96,9 @@ class DevInstanceRecord:
     failure_reason: str | None = None
     ready_at: datetime | None = None
     deleted_at: datetime | None = None
+    subject_id: UUID | None = None
+    subject_incarnation: UUID | None = None
+    candidate_id: UUID | None = None
 
 
 @dataclass(frozen=True)

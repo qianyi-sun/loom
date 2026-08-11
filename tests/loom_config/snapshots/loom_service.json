@@ -219,6 +219,26 @@
     "default": "PydanticUndefined",
     "required": true
   },
+  "personal_dev_global_live_instance_limit": {
+    "annotation": "<class 'int'>",
+    "default": "16",
+    "required": false
+  },
+  "personal_dev_per_owner_aggregate_max_slots": {
+    "annotation": "<class 'int'>",
+    "default": "16",
+    "required": false
+  },
+  "personal_dev_per_owner_aggregate_min_slots": {
+    "annotation": "<class 'int'>",
+    "default": "8",
+    "required": false
+  },
+  "personal_dev_per_owner_live_instance_limit": {
+    "annotation": "<class 'int'>",
+    "default": "2",
+    "required": false
+  },
   "personal_dev_source_max_archive_bytes": {
     "annotation": "<class 'int'>",
     "default": "402653184",

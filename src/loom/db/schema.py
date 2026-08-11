@@ -540,7 +540,8 @@ class DevInstance(Base):
             name="dev_instances_name_check",
         ),
         CheckConstraint(
-            "status IN ('provisioning', 'ready', 'deleting', 'failed', 'deleted')",
+            "status IN ('provisioning', 'ready', 'updating', 'activating', "
+            "'deleting', 'draining', 'failed', 'deleted')",
             name="dev_instances_status_check",
         ),
         CheckConstraint(
@@ -552,18 +553,30 @@ class DevInstance(Base):
             name="dev_instances_deployment_generation_check",
         ),
         CheckConstraint(
-            "candidate_sha ~ '^[0-9a-f]{40}$'",
+            "(candidate_id IS NULL AND candidate_sha ~ '^[0-9a-f]{40}$') OR "
+            "(candidate_id IS NOT NULL AND candidate_sha ~ '^[0-9a-f]{64}$')",
             name="dev_instances_candidate_sha_check",
         ),
         CheckConstraint(
             "operation_epoch > 0",
             name="dev_instances_operation_epoch_check",
         ),
+        UniqueConstraint("subject_id", name="dev_instances_subject_id_uidx"),
         Index("dev_instances_owner_status_idx", "owner_user_id", "status"),
         Index("dev_instances_team_status_idx", "owner_team_id", "status"),
     )
 
     name: Mapped[str] = mapped_column(Text, primary_key=True)
+    subject_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        nullable=False,
+        server_default=text("gen_random_uuid()"),
+    )
+    subject_incarnation: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        nullable=False,
+        server_default=text("gen_random_uuid()"),
+    )
     owner_user_id: Mapped[UUID] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("users.id", ondelete="RESTRICT"),
@@ -582,7 +595,12 @@ class DevInstance(Base):
         server_default=text("'provisioning'"),
     )
     deployment_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    candidate_sha: Mapped[str] = mapped_column(String(40), nullable=False)
+    candidate_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("personal_dev_candidates.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    candidate_sha: Mapped[str] = mapped_column(String(64), nullable=False)
     operation_epoch: Mapped[int] = mapped_column(
         BigInteger,
         nullable=False,
@@ -805,6 +823,224 @@ class PersonalDevCandidateBuildAttempt(Base):
         server_default=func.now(),
     )
     started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
+class DevLifecycleOperation(Base):
+    """Owner-bound, epoch-fenced apply request for one personal environment."""
+
+    __tablename__ = "dev_lifecycle_operations"
+    __table_args__ = (
+        CheckConstraint(
+            "operation_epoch >= expected_operation_epoch "
+            "AND operation_epoch <= expected_operation_epoch + 1 "
+            "AND expected_operation_epoch >= 0 AND attempt_sequence >= 0",
+            name="dev_lifecycle_operations_epochs_check",
+        ),
+        CheckConstraint(
+            "kind IN ('create', 'update', 'capacity', 'noop')",
+            name="dev_lifecycle_operations_kind_check",
+        ),
+        CheckConstraint(
+            "state IN ('requested', 'running', 'activating', 'succeeded', "
+            "'failed', 'cancelling', 'cancelled')",
+            name="dev_lifecycle_operations_state_check",
+        ),
+        CheckConstraint(
+            "request_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND candidate_sha ~ '^[0-9a-f]{64}$' "
+            "AND (readiness_evidence_sha256 IS NULL OR "
+            "readiness_evidence_sha256 ~ '^[0-9a-f]{64}$') "
+            "AND (activation_acknowledgement_sha256 IS NULL OR "
+            "activation_acknowledgement_sha256 ~ '^[0-9a-f]{64}$')",
+            name="dev_lifecycle_operations_digests_check",
+        ),
+        CheckConstraint(
+            "min_slots >= 0 AND max_slots >= min_slots AND max_slots <= 8 "
+            "AND deployment_generation > 0",
+            name="dev_lifecycle_operations_target_check",
+        ),
+        CheckConstraint(
+            "(kind = 'noop' AND operation_epoch = expected_operation_epoch "
+            "AND state = 'succeeded') OR "
+            "(kind <> 'noop' AND operation_epoch = expected_operation_epoch + 1)",
+            name="dev_lifecycle_operations_transition_check",
+        ),
+        CheckConstraint(
+            "(state IN ('requested', 'running', 'activating', 'cancelling') "
+            "AND finished_at IS NULL AND failure_reason IS NULL) OR "
+            "(state = 'succeeded' AND finished_at IS NOT NULL "
+            "AND failure_reason IS NULL) OR "
+            "(state IN ('failed', 'cancelled') AND finished_at IS NOT NULL)",
+            name="dev_lifecycle_operations_terminal_fields_check",
+        ),
+        CheckConstraint(
+            "(kind IN ('capacity', 'noop') "
+            "AND readiness_evidence_sha256 IS NULL "
+            "AND activation_acknowledgement_sha256 IS NULL) OR "
+            "(kind IN ('create', 'update') AND ("
+            "(state IN ('requested', 'running', 'failed', 'cancelling', 'cancelled') "
+            "AND readiness_evidence_sha256 IS NULL "
+            "AND activation_acknowledgement_sha256 IS NULL) OR "
+            "(state = 'activating' AND readiness_evidence_sha256 IS NOT NULL) OR "
+            "(state = 'succeeded' AND readiness_evidence_sha256 IS NOT NULL "
+            "AND activation_acknowledgement_sha256 IS NOT NULL)))",
+            name="dev_lifecycle_operations_activation_evidence_check",
+        ),
+        UniqueConstraint(
+            "owner_user_id",
+            "idempotency_key",
+            name="dev_lifecycle_operations_owner_idempotency_uidx",
+        ),
+        UniqueConstraint(
+            "subject_id",
+            "subject_incarnation",
+            "expected_operation_epoch",
+            "request_sha256",
+            name="dev_lifecycle_operations_request_uidx",
+        ),
+        UniqueConstraint(
+            "attempt_id",
+            name="dev_lifecycle_operations_attempt_id_uidx",
+        ),
+        Index(
+            "dev_lifecycle_operations_environment_created_idx",
+            "environment_name",
+            "created_at",
+            "id",
+        ),
+        Index(
+            "dev_lifecycle_operations_active_environment_uidx",
+            "environment_name",
+            unique=True,
+            postgresql_where=text(
+                "state IN ('requested', 'running', 'activating', 'cancelling')",
+            ),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    idempotency_key: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    environment_name: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("dev_instances.name", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    subject_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    subject_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    owner_user_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    owner_team_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("teams.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    operation_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    expected_operation_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    attempt_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    attempt_sequence: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("0"),
+    )
+    request_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    candidate_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("personal_dev_candidates.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    candidate_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    min_slots: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_slots: Mapped[int] = mapped_column(Integer, nullable=False)
+    deployment_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    readiness_evidence_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    activation_acknowledgement_sha256: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    checkpoint: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        server_default=text("'claimed'"),
+    )
+    failure_reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
+class DevLifecycleOperationAttempt(Base):
+    """Immutable attempt identity and checkpoint history for a logical operation."""
+
+    __tablename__ = "dev_lifecycle_operation_attempts"
+    __table_args__ = (
+        CheckConstraint(
+            "operation_epoch > 0 AND attempt_sequence >= 0",
+            name="dev_lifecycle_operation_attempts_counters_check",
+        ),
+        CheckConstraint(
+            "state IN ('running', 'activating', 'succeeded', 'failed', 'cancelled')",
+            name="dev_lifecycle_operation_attempts_state_check",
+        ),
+        CheckConstraint(
+            "(state IN ('running', 'activating') AND finished_at IS NULL "
+            "AND failure_reason IS NULL) OR "
+            "(state = 'succeeded' AND finished_at IS NOT NULL "
+            "AND failure_reason IS NULL) OR "
+            "(state IN ('failed', 'cancelled') AND finished_at IS NOT NULL)",
+            name="dev_lifecycle_operation_attempts_terminal_fields_check",
+        ),
+        UniqueConstraint(
+            "operation_id",
+            "attempt_sequence",
+            name="dev_lifecycle_operation_attempts_sequence_uidx",
+        ),
+        Index(
+            "dev_lifecycle_operation_attempts_active_operation_uidx",
+            "operation_id",
+            unique=True,
+            postgresql_where=text("state IN ('running', 'activating')"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    operation_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("dev_lifecycle_operations.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    subject_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    subject_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    operation_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    attempt_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    checkpoint: Mapped[str] = mapped_column(String(32), nullable=False)
+    failure_reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    started_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
 
 
