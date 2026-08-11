@@ -8,18 +8,21 @@ open reader either observes the old complete token or the new complete token.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import stat
 import threading
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 STEP_JWT_NAME = "step-jwt"
 VISIBLE_DIRECTORY_MODE = 0o500
 PRIVATE_DIRECTORY_MODE = 0o700
 STEP_JWT_MODE = 0o400
 MAX_STEP_JWT_BYTES = 1_048_576
+PIPELINE_PROVIDER_STEP_IDS = frozenset({"offline_judge", "recovery_primitive"})
 
 
 class RuntimeSecretError(RuntimeError):
@@ -36,6 +39,84 @@ class RuntimeSecretFileIdentity:
     uid: int
     gid: int
     mode: int
+
+
+PipelineTokenMint = Callable[[UUID, str, int], Awaitable[str]]
+
+
+@dataclass
+class PipelineStepJwtRotator:
+    """Keep one Attempt-private secret mount current for a Provider node.
+
+    ``mint`` receives only the Attempt UUID, fixed node identity, and exact TTL;
+    claim headers and worker authentication stay closed inside the callback.
+    Every successful mint is installed with :meth:`RuntimeSecretMount.rotate`,
+    preserving the 0400 owner and atomic-inode contract.
+    """
+
+    attempt_id: UUID
+    step_id: str
+    ttl_seconds: int
+    secret_mount: RuntimeSecretMount
+    mint: PipelineTokenMint
+    _task: asyncio.Task[None] | None = None
+    _failure: BaseException | None = None
+
+    def __post_init__(self) -> None:
+        if self.step_id not in PIPELINE_PROVIDER_STEP_IDS:
+            raise RuntimeSecretError(
+                "Pipeline JWT rotation is limited to registered Provider nodes"
+            )
+        if (
+            isinstance(self.ttl_seconds, bool)
+            or not isinstance(self.ttl_seconds, int)
+            or not 1 <= self.ttl_seconds <= 30_000
+        ):
+            raise RuntimeSecretError("Pipeline JWT TTL must be in 1..30000 seconds")
+
+    async def start(self) -> None:
+        if self._task is not None:
+            raise RuntimeSecretError("Pipeline JWT rotator is already started")
+        token = await self.mint(self.attempt_id, self.step_id, self.ttl_seconds)
+        self.secret_mount.rotate(token)
+        self._failure = None
+        self._task = asyncio.create_task(self._run())
+
+    async def stop(self) -> None:
+        task = self._task
+        self._task = None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        failure = self._failure
+        self._failure = None
+        if failure is not None:
+            raise RuntimeSecretError("Pipeline JWT rotation failed") from failure
+
+    async def _run(self) -> None:
+        interval = max(1.0, self.ttl_seconds / 2.0)
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                token = await self.mint(self.attempt_id, self.step_id, self.ttl_seconds)
+                self.secret_mount.rotate(token)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            # Stop rotating after the first failure.  The worker observes the
+            # failure on ``stop`` and must fail the Attempt; it must not log or
+            # retry with a potentially expired bearer indefinitely.
+            self._failure = exc
+
+    async def __aenter__(self) -> PipelineStepJwtRotator:
+        await self.start()
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        await self.stop()
 
 
 class RuntimeSecretMount:

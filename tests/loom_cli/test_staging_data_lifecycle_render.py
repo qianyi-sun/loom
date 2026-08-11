@@ -115,6 +115,7 @@ def test_multi_node_lifecycle_reads_capacity_via_minio_admin_not_pvc_mounts() ->
     pod = document["spec"]["jobTemplate"]["spec"]["template"]["spec"]  # type: ignore[index]
     args = pod["containers"][0]["args"]
     assert args[args.index("--capacity-source") + 1] == "minio-admin"
+    assert args[args.index("--expected-drive-count") + 1] == "4"
     assert "--filesystem-path" not in args
     # No drive PVC mounts/volumes at all — that is the Multi-Attach fix.
     assert "volumes" not in pod

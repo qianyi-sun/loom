@@ -1680,8 +1680,16 @@ def _open_bound_directory(path: Path) -> _BoundDirectory:
         raise ExternalSlurmPrereqMaterializationError(
             "external runner repository authority path is unsafe",
         )
+    # Ancestors may intentionally grant the rollout account search permission
+    # without directory read permission.  O_PATH binds their inode identity
+    # without requiring enumeration access; every later mutation still runs
+    # through the exact bound descriptor and the managed root's owner/mode
+    # checks below.
     flags = (
-        os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        getattr(os, "O_PATH", os.O_RDONLY)
+        | os.O_DIRECTORY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
     )
     fd = os.open("/", flags)
     try:
