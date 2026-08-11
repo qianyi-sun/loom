@@ -81,6 +81,8 @@ def _status(args: argparse.Namespace) -> int:
             f"{_CREDENTIALS}/health-certificate.pem",
             "--private-key-file",
             f"{_CREDENTIALS}/health-private-key.pem",
+            "--server-certificate-file",
+            f"{_CREDENTIALS}/server-certificate.pem",
         ]
     )
     try:

@@ -14,7 +14,7 @@ from alembic.config import Config as AlembicConfig
 from sqlalchemy import Engine, MetaData, Table, create_engine, inspect, select, update
 
 from loom_capacity_manager.config import read_owner_only_secret
-from loom_capacity_manager.models import CapacityAuthorityState
+from loom_capacity_manager.models import CapacityAuditEvent, CapacityAuthorityState
 
 
 class CapacityAuthorityBootstrapError(RuntimeError):
@@ -49,6 +49,7 @@ def bind_fresh_authority(engine: Engine, expected: UUID) -> None:
         raise TypeError("capacity authority bootstrap requires a synchronous engine")
     _validate_expected_authority(expected)
     authority_table = cast(Table, CapacityAuthorityState.__table__)
+    audit_table = cast(Table, CapacityAuditEvent.__table__)
     try:
         with engine.begin() as connection:
             authority = (
@@ -60,7 +61,37 @@ def bind_fresh_authority(engine: Engine, expected: UUID) -> None:
                 .mappings()
                 .one()
             )
+            binding_marker = {
+                "actor_kind": "migration",
+                "actor_id": "capacity-authority-bootstrap",
+                "event_kind": "authority_incarnation_bound",
+                "object_binding": {"authority_incarnation": str(expected)},
+                "detail": {"state": "reviewed-bootstrap-bound"},
+            }
             if authority["authority_incarnation"] == expected:
+                binding_markers = (
+                    connection.execute(
+                        select(
+                            audit_table.c.object_binding,
+                            audit_table.c.detail,
+                        ).where(
+                            audit_table.c.actor_kind == binding_marker["actor_kind"],
+                            audit_table.c.actor_id == binding_marker["actor_id"],
+                            audit_table.c.event_kind == binding_marker["event_kind"],
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
+                if not binding_markers:
+                    connection.execute(audit_table.insert().values(**binding_marker))
+                elif len(binding_markers) != 1 or dict(binding_markers[0]) != {
+                    "object_binding": binding_marker["object_binding"],
+                    "detail": binding_marker["detail"],
+                }:
+                    raise CapacityAuthorityBootstrapError(
+                        "capacity authority binding marker conflicts with its state"
+                    )
                 return
             if (
                 authority["writer_epoch"] != 0
@@ -90,6 +121,7 @@ def bind_fresh_authority(engine: Engine, expected: UUID) -> None:
                 .where(authority_table.c.singleton_id == 1)
                 .values(authority_incarnation=expected)
             )
+            connection.execute(audit_table.insert().values(**binding_marker))
     except CapacityAuthorityBootstrapError:
         raise
     except Exception as exc:

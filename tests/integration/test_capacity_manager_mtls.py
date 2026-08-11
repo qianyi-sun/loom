@@ -63,6 +63,8 @@ def _signed_certificate(
     ca_certificate: x509.Certificate,
     *,
     server: bool,
+    include_service_dns: bool = True,
+    include_loopback_ip: bool = True,
 ) -> tuple[rsa.RSAPrivateKey, x509.Certificate]:
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     now = datetime.now(UTC)
@@ -82,13 +84,15 @@ def _signed_certificate(
         )
     )
     if server:
+        identities: list[x509.GeneralName] = [x509.DNSName("localhost")]
+        if include_service_dns:
+            identities.append(
+                x509.DNSName("loom-capacity-manager.loom-dev.svc.cluster.local")
+            )
+        if include_loopback_ip:
+            identities.append(x509.IPAddress(ipaddress.ip_address("127.0.0.1")))
         builder = builder.add_extension(
-            x509.SubjectAlternativeName(
-                [
-                    x509.DNSName("localhost"),
-                    x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
-                ]
-            ),
+            x509.SubjectAlternativeName(identities),
             critical=False,
         )
     return key, builder.sign(ca_key, hashes.SHA256())
@@ -157,6 +161,13 @@ async def test_real_server_rejects_missing_and_untrusted_client_certificates(
         unrelated_ca_certificate,
         server=False,
     )
+    _, incomplete_server_certificate = _signed_certificate(
+        "localhost",
+        ca_key,
+        ca_certificate,
+        server=True,
+        include_service_dns=False,
+    )
     ca_path = _write(tmp_path / "ca.pem", ca_certificate.public_bytes(serialization.Encoding.PEM))
     server_cert_path = _write(
         tmp_path / "server.pem",
@@ -176,6 +187,12 @@ async def test_real_server_rejects_missing_and_untrusted_client_certificates(
         tmp_path / "unrelated-key.pem",
         _private_key_bytes(unrelated_key),
     )
+    incomplete_server_cert_path = _write(
+        tmp_path / "incomplete-server.pem",
+        incomplete_server_certificate.public_bytes(serialization.Encoding.PEM),
+    )
+    linked_server_cert_path = tmp_path / "linked-server.pem"
+    linked_server_cert_path.symlink_to(server_cert_path)
     db_url_path = _write(tmp_path / "database-url", capacity_postgres_url.encode())
     token = "mtls-operator-secret"
     principals_path = _write(
@@ -253,6 +270,7 @@ async def test_real_server_rejects_missing_and_untrusted_client_certificates(
             ca_file=ca_path,
             certificate_file=client_cert_path,
             private_key_file=client_key_path,
+            server_certificate_file=server_cert_path,
             timeout_seconds=2,
         ) == {
             "status": "ready",
@@ -264,6 +282,25 @@ async def test_real_server_rejects_missing_and_untrusted_client_certificates(
                 ca_file=ca_path,
                 certificate_file=unrelated_cert_path,
                 private_key_file=unrelated_key_path,
+                server_certificate_file=server_cert_path,
+                timeout_seconds=2,
+            )
+        with pytest.raises(CapacityHealthProbeError, match="identities"):
+            probe_capacity_manager(
+                url=url,
+                ca_file=ca_path,
+                certificate_file=client_cert_path,
+                private_key_file=client_key_path,
+                server_certificate_file=incomplete_server_cert_path,
+                timeout_seconds=2,
+            )
+        with pytest.raises(CapacityHealthProbeError, match="identities"):
+            probe_capacity_manager(
+                url=url,
+                ca_file=ca_path,
+                certificate_file=client_cert_path,
+                private_key_file=client_key_path,
+                server_certificate_file=linked_server_cert_path,
                 timeout_seconds=2,
             )
     finally:

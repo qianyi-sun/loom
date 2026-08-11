@@ -214,10 +214,28 @@ authority UUID. It references, but never creates or prints, the existing
 server/client trust, and the dedicated health client certificate and key. The
 exact key contract and evidence commands are documented in the
 [`deploy/dev-fleet` operator notes](../../deploy/dev-fleet/README.md).
+Only credential-preparation init containers mount that projected Secret. They
+copy the bounded, exact key set to mode-0600 UID-owned files on a memory-backed
+volume; the migration and manager application containers mount only that
+prepared runtime directory, read-only.
+
+The first reviewed replacement of the schema's bootstrap authority UUID writes
+an append-only binding audit marker in the same locked transaction. Exact
+replay backfills a missing marker from an earlier bootstrap implementation and
+is otherwise idempotent. Duplicate, contradictory, or different later binding
+evidence fails closed even before a writer registers. Percent-encoded database
+URLs retain their SQLAlchemy meaning: percent escaping occurs only at the
+Alembic ConfigParser boundary.
+The DNS-label-safe, length-bounded migration Job name incorporates the
+migration head and manager image digest plus a digest of the canonical complete
+Job spec and exact head. Any immutable spec change therefore renders a new Job
+instead of colliding with an old template.
 
 The only operator commands are deterministic `render` and read-only `status`.
-The status path performs a real in-Pod mTLS probe and succeeds only for the
-exact canonical response
+The status path performs a real in-Pod mTLS probe. The probe first verifies
+that the mounted server certificate contains both the `127.0.0.1` IP SAN and
+the `loom-capacity-manager.loom-dev.svc.cluster.local` DNS SAN, then succeeds
+only for the exact canonical response
 `{"executable_new_capacity_ceiling":0,"status":"ready"}`. There is no apply,
 activate, external exposure, executor-daemon, Slurm, or ceiling-changing
 surface. Merging Package 5A does not authorize a live deployment; apply remains

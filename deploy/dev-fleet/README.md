@@ -68,6 +68,23 @@ created. It must already contain exactly the keys consumed by this release:
 - dedicated in-pod probe identity: `health-certificate.pem`,
   `health-private-key.pem`.
 
+Only the credential-preparation init containers mount the projected Secret.
+They copy this exact bounded file set to UID-owned mode-0600 regular files on a
+memory-backed volume. The migration and manager application containers mount
+only that prepared runtime directory, read-only. A percent-encoded
+`database-url` keeps its original SQLAlchemy meaning; migration escapes percent
+signs only while passing the URL through Alembic's ConfigParser.
+
+The first reviewed bootstrap-authority replacement is recorded by an
+append-only audit marker in the same database transaction. Replaying the same
+UUID backfills a marker missing from an earlier bootstrap implementation and is
+otherwise idempotent; duplicate, contradictory, or later different binding
+evidence fails closed. The DNS-label-safe, length-bounded migration Job name
+combines its migration head
+and manager-image digest with a digest of the canonical complete Job spec and
+exact head. Any immutable spec change creates a new Job rather than attempting
+to patch an existing Job.
+
 After a separately authorized #906 deployment, the read-only status check is:
 
 ```bash
@@ -83,8 +100,10 @@ Success is exactly one canonical line:
 ```
 
 Any other output or nonzero exit status is a failed readiness/evidence check.
-The command performs an mTLS probe inside the manager Pod; it does not expose
-the manager or copy Secret contents through command arguments.
+The command performs an mTLS probe inside the manager Pod. Readiness also
+requires the mounted server certificate to contain the `127.0.0.1` IP SAN and
+the `loom-capacity-manager.loom-dev.svc.cluster.local` DNS SAN. The command does
+not expose the manager or copy Secret contents through command arguments.
 
 ## Activation
 

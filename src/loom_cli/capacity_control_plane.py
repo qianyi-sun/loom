@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import tomllib
 from pathlib import Path
@@ -29,6 +31,15 @@ _MAX_POSTGRES_STORAGE_BYTES = 64 * 1024**4
 
 class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+
+def _is_immutable_oci_reference(value: str) -> bool:
+    if _OCI_DIGEST_RE.fullmatch(value) is None or value.endswith(
+        "@sha256:" + "0" * 64
+    ):
+        return False
+    name = value.rsplit("@sha256:", 1)[0]
+    return len(name) <= 255 and ("/" in name or name.count(":") <= 1)
 
 
 def _validate_dns_label(value: str, *, label: str) -> str:
@@ -146,7 +157,7 @@ class CapacityControlPlaneProfile(_StrictModel):
     @field_validator("postgres_image")
     @classmethod
     def _postgres_image(cls, value: str) -> str:
-        if _OCI_DIGEST_RE.fullmatch(value) is None or value.endswith("@sha256:" + "0" * 64):
+        if not _is_immutable_oci_reference(value):
             raise ValueError("capacity PostgreSQL image must be an immutable OCI reference")
         return value
 
@@ -240,13 +251,20 @@ def _credential_parts(
     resources: ResourceEnvelope,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     files = _MANAGER_CREDENTIAL_FILES if profile == "manager" else ("database-url",)
-    mounts: list[dict[str, Any]] = [
+    init_mounts: list[dict[str, Any]] = [
         {
             "name": "projected",
             "mountPath": f"{_RUNTIME_ROOT}/projected",
             "readOnly": True,
         },
         {"name": "runtime", "mountPath": f"{_RUNTIME_ROOT}/runtime"},
+    ]
+    application_mounts: list[dict[str, Any]] = [
+        {
+            "name": "runtime",
+            "mountPath": f"{_RUNTIME_ROOT}/runtime",
+            "readOnly": True,
+        }
     ]
     init: dict[str, Any] = {
         "name": "prepare-credentials",
@@ -263,7 +281,7 @@ def _credential_parts(
         ],
         "securityContext": _container_security(read_only_root=True),
         "resources": resources.kubernetes(),
-        "volumeMounts": mounts,
+        "volumeMounts": init_mounts,
     }
     volumes: list[dict[str, Any]] = [
         {
@@ -279,7 +297,7 @@ def _credential_parts(
             "emptyDir": {"medium": "Memory", "sizeLimit": "16Mi"},
         },
     ]
-    return [init], mounts, volumes
+    return [init], application_mounts, volumes
 
 
 def _postgres_service() -> dict[str, Any]:
@@ -407,7 +425,6 @@ def _migration_job(
     migration_head: str,
     image_digest: str,
 ) -> dict[str, Any]:
-    name = f"loom-capacity-migrate-{migration_head.replace('_', '-')}-{image_digest[:12]}"
     labels = _pod_labels("loom-capacity-migrate", "migration")
     init, mounts, volumes = _credential_parts(
         manager_image=manager_image,
@@ -415,40 +432,58 @@ def _migration_job(
         profile="migration",
         resources=profile.migration_resources,
     )
+    job_spec: dict[str, Any] = {
+        "backoffLimit": 6,
+        "template": {
+            "metadata": {"labels": labels},
+            "spec": {
+                "automountServiceAccountToken": False,
+                "restartPolicy": "Never",
+                "securityContext": _pod_security(65532),
+                "initContainers": init,
+                "containers": [
+                    {
+                        "name": "migration",
+                        "image": manager_image,
+                        "imagePullPolicy": "IfNotPresent",
+                        "command": ["python", "-m", "loom_capacity_manager.migrate"],
+                        "args": [
+                            "--db-url-file",
+                            f"{_CREDENTIALS}/database-url",
+                            "--expected-authority-incarnation",
+                            str(authority_incarnation),
+                        ],
+                        "securityContext": _container_security(read_only_root=True),
+                        "resources": profile.migration_resources.kubernetes(),
+                        "volumeMounts": mounts,
+                    }
+                ],
+                "volumes": volumes,
+            },
+        },
+    }
+    template_identity = hashlib.sha256(
+        json.dumps(
+            {"migration_head": migration_head, "spec": job_spec},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    head_slug = re.sub(
+        r"[^a-z0-9-]+",
+        "-",
+        migration_head.lower().replace("_", "-"),
+    ).strip("-")
+    head_prefix = head_slug[:19].rstrip("-") or "migration"
+    name = (
+        f"loom-capacity-migrate-{head_prefix}-"
+        f"{image_digest[:10]}-{template_identity[:10]}"
+    )
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
         "metadata": _metadata(name),
-        "spec": {
-            "backoffLimit": 6,
-            "template": {
-                "metadata": {"labels": labels},
-                "spec": {
-                    "automountServiceAccountToken": False,
-                    "restartPolicy": "Never",
-                    "securityContext": _pod_security(65532),
-                    "initContainers": init,
-                    "containers": [
-                        {
-                            "name": "migration",
-                            "image": manager_image,
-                            "imagePullPolicy": "IfNotPresent",
-                            "command": ["python", "-m", "loom_capacity_manager.migrate"],
-                            "args": [
-                                "--db-url-file",
-                                f"{_CREDENTIALS}/database-url",
-                                "--expected-authority-incarnation",
-                                str(authority_incarnation),
-                            ],
-                            "securityContext": _container_security(read_only_root=True),
-                            "resources": profile.migration_resources.kubernetes(),
-                            "volumeMounts": mounts,
-                        }
-                    ],
-                    "volumes": volumes,
-                },
-            },
-        },
+        "spec": job_spec,
     }
 
 
@@ -497,6 +532,8 @@ def _manager_deployment(
         f"{_CREDENTIALS}/health-certificate.pem",
         "--private-key-file",
         f"{_CREDENTIALS}/health-private-key.pem",
+        "--server-certificate-file",
+        f"{_CREDENTIALS}/server-certificate.pem",
     ]
     environment = [
         {"name": name, "value": value}
@@ -717,9 +754,7 @@ def render_capacity_control_plane_manifests(
 
     if not isinstance(profile, CapacityControlPlaneProfile):
         raise TypeError("capacity control-plane profile is invalid")
-    if _OCI_DIGEST_RE.fullmatch(manager_image) is None or manager_image.endswith(
-        "@sha256:" + "0" * 64
-    ):
+    if not _is_immutable_oci_reference(manager_image):
         raise ValueError("capacity manager image must be an immutable OCI reference")
     if not isinstance(authority_incarnation, UUID):
         raise TypeError("capacity authority incarnation must be a UUID")

@@ -3,16 +3,23 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
+import os
 import ssl
+import stat
 import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
+from cryptography import x509
 
 _MAX_HEALTH_BYTES = 1024
+_MAX_SERVER_CERTIFICATE_BYTES = 64 * 1024
 _HEALTH_FIELDS = {"status", "executable_new_capacity_ceiling"}
+_MANAGER_SERVICE_DNS = "loom-capacity-manager.loom-dev.svc.cluster.local"
+_LOOPBACK_IP = ipaddress.ip_address("127.0.0.1")
 
 
 class CapacityHealthProbeError(RuntimeError):
@@ -53,12 +60,65 @@ def parse_capacity_health_response(
     return document
 
 
+def _validate_server_certificate_identities(path: Path) -> None:
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or not 0 < opened.st_size <= _MAX_SERVER_CERTIFICATE_BYTES
+            ):
+                raise ValueError("capacity manager server certificate is not bounded")
+            payload = bytearray()
+            while len(payload) <= _MAX_SERVER_CERTIFICATE_BYTES:
+                chunk = os.read(
+                    descriptor,
+                    min(
+                        16 * 1024,
+                        _MAX_SERVER_CERTIFICATE_BYTES + 1 - len(payload),
+                    ),
+                )
+                if not chunk:
+                    break
+                payload.extend(chunk)
+            closed = os.fstat(descriptor)
+            if (
+                (closed.st_dev, closed.st_ino, closed.st_size)
+                != (opened.st_dev, opened.st_ino, opened.st_size)
+                or len(payload) != opened.st_size
+            ):
+                raise ValueError(
+                    "capacity manager server certificate changed while reading"
+                )
+        finally:
+            os.close(descriptor)
+        certificate = x509.load_pem_x509_certificate(bytes(payload))
+        identities = certificate.extensions.get_extension_for_class(
+            x509.SubjectAlternativeName
+        ).value
+    except (OSError, ValueError, x509.ExtensionNotFound) as exc:
+        raise CapacityHealthProbeError(
+            "capacity manager server certificate identities are invalid"
+        ) from exc
+    dns_names = set(identities.get_values_for_type(x509.DNSName))
+    ip_addresses = set(identities.get_values_for_type(x509.IPAddress))
+    if _MANAGER_SERVICE_DNS not in dns_names or _LOOPBACK_IP not in ip_addresses:
+        raise CapacityHealthProbeError(
+            "capacity manager server certificate identities are invalid"
+        )
+
+
 def probe_capacity_manager(
     *,
     url: str,
     ca_file: Path,
     certificate_file: Path,
     private_key_file: Path,
+    server_certificate_file: Path,
     timeout_seconds: float = 3.0,
 ) -> dict[str, object]:
     """Perform one bounded, server-verified, client-authenticated health request."""
@@ -80,6 +140,7 @@ def probe_capacity_manager(
         or not 0 < timeout_seconds <= 30
     ):
         raise CapacityHealthProbeError("capacity health timeout is invalid")
+    _validate_server_certificate_identities(server_certificate_file)
     try:
         context = ssl.create_default_context(cafile=str(ca_file))
         context.load_cert_chain(
@@ -113,6 +174,7 @@ def main() -> None:
     parser.add_argument("--ca-file", type=Path, required=True)
     parser.add_argument("--certificate-file", type=Path, required=True)
     parser.add_argument("--private-key-file", type=Path, required=True)
+    parser.add_argument("--server-certificate-file", type=Path, required=True)
     parser.add_argument("--timeout-seconds", type=float, default=3.0)
     arguments = parser.parse_args()
     try:
@@ -121,6 +183,7 @@ def main() -> None:
             ca_file=arguments.ca_file,
             certificate_file=arguments.certificate_file,
             private_key_file=arguments.private_key_file,
+            server_certificate_file=arguments.server_certificate_file,
             timeout_seconds=arguments.timeout_seconds,
         )
     except CapacityHealthProbeError as exc:

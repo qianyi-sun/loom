@@ -182,6 +182,8 @@ def test_admin_status_executes_the_fixed_in_pod_zero_ceiling_probe(
             "/var/run/loom-capacity-manager/runtime/credentials/health-certificate.pem",
             "--private-key-file",
             "/var/run/loom-capacity-manager/runtime/credentials/health-private-key.pem",
+            "--server-certificate-file",
+            "/var/run/loom-capacity-manager/runtime/credentials/server-certificate.pem",
         ]
     ]
 

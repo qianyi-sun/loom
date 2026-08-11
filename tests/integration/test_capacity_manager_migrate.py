@@ -99,6 +99,100 @@ def test_matching_authority_is_idempotent_after_writer_registration(
     assert authority["writer_epoch"] == 4
 
 
+def test_different_authority_cannot_replace_reviewed_bootstrap(
+    capacity_postgres_url: str,
+) -> None:
+    _reset_empty_shadow(capacity_postgres_url)
+    replacement = UUID("00000000-0000-4000-8000-000000000902")
+    engine = create_engine(capacity_postgres_url)
+    try:
+        bind_fresh_authority(engine, _REVIEWED_AUTHORITY)
+        with pytest.raises(CapacityAuthorityBootstrapError):
+            bind_fresh_authority(engine, replacement)
+    finally:
+        engine.dispose()
+
+    assert _authority(capacity_postgres_url)["authority_incarnation"] == _REVIEWED_AUTHORITY
+
+
+def test_binding_marker_is_exact_and_idempotent(capacity_postgres_url: str) -> None:
+    _reset_empty_shadow(capacity_postgres_url)
+    engine = create_engine(capacity_postgres_url)
+    try:
+        bind_fresh_authority(engine, _REVIEWED_AUTHORITY)
+        bind_fresh_authority(engine, _REVIEWED_AUTHORITY)
+        with engine.connect() as connection:
+            markers = (
+                connection.execute(
+                    select(CapacityAuditEvent).where(
+                        CapacityAuditEvent.event_kind == "authority_incarnation_bound"
+                    )
+                )
+                .mappings()
+                .all()
+            )
+    finally:
+        engine.dispose()
+
+    assert len(markers) == 1
+    assert markers[0]["actor_kind"] == "migration"
+    assert markers[0]["actor_id"] == "capacity-authority-bootstrap"
+    assert markers[0]["object_binding"] == {
+        "authority_incarnation": str(_REVIEWED_AUTHORITY)
+    }
+    assert markers[0]["detail"] == {"state": "reviewed-bootstrap-bound"}
+
+
+def test_matching_authority_backfills_a_missing_binding_fence(
+    capacity_postgres_url: str,
+) -> None:
+    _reset_empty_shadow(capacity_postgres_url)
+    replacement = UUID("00000000-0000-4000-8000-000000000902")
+    engine = create_engine(capacity_postgres_url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                update(CapacityAuthorityState)
+                .where(CapacityAuthorityState.singleton_id == 1)
+                .values(authority_incarnation=_REVIEWED_AUTHORITY)
+            )
+        bind_fresh_authority(engine, _REVIEWED_AUTHORITY)
+        with pytest.raises(CapacityAuthorityBootstrapError):
+            bind_fresh_authority(engine, replacement)
+    finally:
+        engine.dispose()
+
+    assert _authority(capacity_postgres_url)["authority_incarnation"] == _REVIEWED_AUTHORITY
+
+
+def test_matching_authority_rejects_a_conflicting_binding_marker(
+    capacity_postgres_url: str,
+) -> None:
+    _reset_empty_shadow(capacity_postgres_url)
+    conflicting = UUID("00000000-0000-4000-8000-000000000902")
+    engine = create_engine(capacity_postgres_url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                update(CapacityAuthorityState)
+                .where(CapacityAuthorityState.singleton_id == 1)
+                .values(authority_incarnation=_REVIEWED_AUTHORITY)
+            )
+            connection.execute(
+                CapacityAuditEvent.__table__.insert().values(
+                    actor_kind="migration",
+                    actor_id="capacity-authority-bootstrap",
+                    event_kind="authority_incarnation_bound",
+                    object_binding={"authority_incarnation": str(conflicting)},
+                    detail={"state": "reviewed-bootstrap-bound"},
+                )
+            )
+        with pytest.raises(CapacityAuthorityBootstrapError):
+            bind_fresh_authority(engine, _REVIEWED_AUTHORITY)
+    finally:
+        engine.dispose()
+
+
 def test_nil_authority_is_rejected_without_mutating_the_database(
     capacity_postgres_url: str,
 ) -> None:
@@ -238,6 +332,25 @@ def test_migration_entrypoint_reads_owner_only_url_and_binds_authority(
     _reset_empty_shadow(capacity_postgres_url)
     database_url_file = tmp_path / "database-url"
     database_url_file.write_text(capacity_postgres_url, encoding="utf-8")
+    database_url_file.chmod(0o600)
+
+    migrate_capacity_database(database_url_file, _REVIEWED_AUTHORITY)
+
+    assert _authority(capacity_postgres_url)["authority_incarnation"] == _REVIEWED_AUTHORITY
+
+
+def test_migration_entrypoint_accepts_percent_encoded_database_url(
+    capacity_postgres_url: str,
+    tmp_path: Path,
+) -> None:
+    _reset_empty_shadow(capacity_postgres_url)
+    separator = "&" if "?" in capacity_postgres_url else "?"
+    encoded_url = (
+        f"{capacity_postgres_url}{separator}"
+        "application_name=capacity%40bootstrap"
+    )
+    database_url_file = tmp_path / "database-url"
+    database_url_file.write_text(encoded_url, encoding="utf-8")
     database_url_file.chmod(0o600)
 
     migrate_capacity_database(database_url_file, _REVIEWED_AUTHORITY)

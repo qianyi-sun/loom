@@ -109,7 +109,7 @@ Objects are emitted in dependency order:
 1. `Namespace/loom-dev`, enforcing the latest Restricted Pod Security profile;
 2. `Service/loom-capacity-postgres`;
 3. `StatefulSet/loom-capacity-postgres` with one persistent volume;
-4. `Job/loom-capacity-migrate-<migration-head>-<image-digest-prefix>`;
+4. `Job/loom-capacity-migrate-<migration-head>-<image-prefix>-<template-prefix>`;
 5. `Service/loom-capacity-manager` on TCP 8443;
 6. `Deployment/loom-capacity-manager` with one replica and `Recreate` strategy;
 7. one default-deny policy and explicit DNS, database, and manager access
@@ -121,8 +121,9 @@ root filesystem where the upstream PostgreSQL image permits it, and declares
 requests and limits. The manager and migration containers run as UID/GID 65532.
 Their init containers run the same immutable manager image and copy the exact
 projected Secret file set into a memory-backed volume as UID-owned mode-0600
-regular files. The application containers never consume Kubernetes Secret
-symlinks directly.
+regular files. Only the init containers mount the projected Secret. The
+application containers mount the prepared memory-backed runtime directory
+read-only and never consume Kubernetes Secret symlinks directly.
 
 The manager Service is ClusterIP-only. Manager ingress permits TCP 8443 from
 pods bearing the trusted capacity-agent label in any namespace and from the
@@ -152,14 +153,23 @@ when all of these facts hold in one locked transaction:
 Any other state fails closed without changing the UUID. This permits a new
 database to receive a reviewed stable identity but prevents a delayed or
 misconfigured Job from reincarnating an authority that has already been used.
+The first replacement also writes an append-only authority-binding audit marker
+in the same transaction. A different later UUID therefore cannot replace the
+reviewed identity even before writer registration. An exact replay converges by
+backfilling a missing marker from an earlier bootstrap implementation and is
+otherwise idempotent; duplicate or contradictory binding markers fail closed.
+Percent-encoded database URLs are escaped only at Alembic's ConfigParser
+boundary and retain their original SQLAlchemy meaning.
 The database constraints continue to prohibit a nonzero executable ceiling.
 Nil authority UUIDs are rejected before the migration command reads its
 database URL or changes schema state, and command failures emit no database
 diagnostic or URL.
 
-The Job name includes the Alembic head and manager image digest prefix. A new
-migration or exact image release creates a new immutable Job rather than
-attempting to patch an existing Job template.
+The DNS-label-safe, length-bounded Job name includes the Alembic head and
+manager image digest prefix, plus a digest of the canonical complete Job spec
+and exact migration head. Any immutable spec change—including the authority
+UUID, Secret name, or migration resources—therefore creates a new Job rather
+than attempting to patch an existing Job template.
 
 ## Manager startup and health
 
@@ -169,7 +179,10 @@ head, the expected authority incarnation, and the current database writer
 fence. It listens only on HTTPS with mandatory client certificates.
 
 A new health-probe module performs a real HTTPS request with the dedicated
-health client certificate. Success requires all of the following exact facts:
+health client certificate. Before the request, it also parses the exact server
+certificate used by the Deployment and requires both the loopback IP SAN and
+`loom-capacity-manager.loom-dev.svc.cluster.local` DNS SAN. Success requires all
+of the following exact facts:
 
 - HTTP status 200;
 - canonical JSON object fields `status` and

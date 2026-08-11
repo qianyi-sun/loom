@@ -62,6 +62,21 @@ keys; neither command accepts their plaintext values:
   `client-ca.pem`; and
 - `health-certificate.pem`, `health-private-key.pem`.
 
+Only the credential-preparation init containers mount the projected Secret.
+The manager and migration application containers mount only the prepared
+memory-backed credential directory, read-only; every prepared file is a
+UID-owned mode-0600 regular nonsymlink file. Percent-encoded database URLs are
+supported without changing their SQLAlchemy meaning because percent escaping
+is confined to Alembic's ConfigParser boundary.
+
+The first reviewed bootstrap-authority replacement atomically appends an audit
+marker. Exact replay backfills a marker missing from an earlier bootstrap
+implementation and is otherwise idempotent. Duplicate, contradictory, or later
+different binding evidence fails closed. The DNS-label-safe, length-bounded
+migration Job name combines the migration head and manager-image digest with a
+digest of the canonical complete Job spec and exact head, so any immutable spec
+change produces a new Job.
+
 ## Manager trust roots
 
 The manager service requires its existing database, principal registry, and
@@ -88,6 +103,12 @@ one line. Each raw Ed25519 public key appears under exactly one key ID:
 Executor registration fails unless its key ID and SHA-256 fingerprint match
 that registry exactly. Rotation retains old verification keys until all jobs
 and reservations signed by them are terminal.
+
+The manager server certificate must contain both the `127.0.0.1` IP SAN used by
+the in-Pod health request and the
+`loom-capacity-manager.loom-dev.svc.cluster.local` DNS SAN used by trusted
+capacity agents. The health probe parses the mounted server certificate and
+fails unless both exact identities are present before attempting HTTPS.
 
 ## Controller binding
 
