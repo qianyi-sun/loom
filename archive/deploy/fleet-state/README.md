@@ -2,6 +2,8 @@
 
 > Archived predecessor. Current fleet-state behavior is documented in
 > `deploy/fleet-state/README.md` and `docs/architecture/global-fleet-capacity-manager.md`.
+> Only this predecessor README is archived; the `schema-v1.example.toml` it
+> describes remains in the active `deploy/fleet-state/` directory.
 
 This directory defines the future single source for fleet-owned physical-pool,
 resource-domain, tier, account-template, and protocol generations.

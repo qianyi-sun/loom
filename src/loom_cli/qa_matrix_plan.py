@@ -1,4 +1,4 @@
-"""Offline pre-submit planning for #35 agent x benchmark QA matrix runs."""
+"""Fixed offline pre-submit planning for the agent x benchmark QA matrix."""
 
 from __future__ import annotations
 

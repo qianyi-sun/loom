@@ -26,4 +26,3 @@ Current machine-readable evidence schemas live in
   with ATIF projections.
 - [`issue-222/`](issue-222/) — task-level result evidence for the associated
   validation work.
-

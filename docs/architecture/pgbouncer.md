@@ -61,4 +61,3 @@ URL instead of the direct URL.
 Set `pgbouncer.enabled=false`, re-render, and apply the manifests. PgBouncer
 resources and pool secrets are omitted; services use their direct `db_url`.
 Disabling the pool does not require a data migration or credential rotation.
-

@@ -14,4 +14,3 @@ benchmark semantics and validation commands.
 - [`layer-3.md`](layer-3.md) — frozen live-run alignment report.
 - [`manifest-with-live-run-history.json`](manifest-with-live-run-history.json)
   — manifest snapshot containing dated execution evidence.
-

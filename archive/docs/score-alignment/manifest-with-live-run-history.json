@@ -7,7 +7,7 @@
     "url": "https://github.com/harbor-framework/harbor",
     "pinned_commit": "2ead3f1f2462f6f7260aca5ef2377cd7e309ff06",
     "pinned_date": "2026-06-25",
-    "adapter_snapshot_doc": "docs/research/harbor-adapter-snapshot-2026-06-25.md",
+    "adapter_snapshot_doc": "archive/docs/research/harbor-adapter-snapshot-2026-06-25.md",
     "note": "All harbor_support.decision and harbor_support.parity_target fields below reference this repo at this commit. Earlier merged Layer 2 batches (PRs #499 #513 #514 #517) mistakenly referenced coder-harbor-cloud (Huawei platform). Canonical score-credibility tracking is qianyi-sun/loom#32; historical archive issue carinrc/loom#538 preserves the original correction context."
   },
   "benchmarks": [
@@ -87,7 +87,7 @@
                 "trials_succeeded": 30,
                 "n_correct": 6,
                 "aggregate_reward": 0.2,
-                "per_trial_evidence": "docs/evidence/2026-06-26-aime-24-loom-full-30.json"
+                "per_trial_evidence": "archive/docs/evidence/2026-06-26-aime-24-loom-full-30.json"
               },
               {
                 "id": "0fc16ea6-7368-414a-a7ff-f80b03d17eaa",
@@ -95,7 +95,7 @@
                 "trials_succeeded": 30,
                 "n_correct": 8,
                 "aggregate_reward": 0.2667,
-                "per_trial_evidence": "docs/evidence/2026-06-26-aime-25-loom-full-30.json"
+                "per_trial_evidence": "archive/docs/evidence/2026-06-26-aime-25-loom-full-30.json"
               }
             ],
             "combined_aggregate_reward": 0.2333,
@@ -112,7 +112,7 @@
             "n_correct": 32,
             "n_incorrect": 28,
             "aggregate_reward": 0.5333,
-            "per_trial_evidence": "docs/evidence/2026-06-26-aime-harbor-full-60.json"
+            "per_trial_evidence": "archive/docs/evidence/2026-06-26-aime-harbor-full-60.json"
           },
           "delta": {
             "harbor_minus_loom_pp": 30.0,
@@ -121,7 +121,7 @@
           "harbor_published_baseline_at_pin": {
             "note": "No parity_experiment.json published for adapters/aime at the pinned commit (gh api returns 404). This paired run is the only known terminus-2 + claude-haiku-4-5 reference at this Harbor commit."
           },
-          "layer3_doc_section": "docs/score-alignment/layer-3.md#aime--paired-loom-aime-24--aime-25-vs-harbor-aime-on-claude-haiku-4-5"
+          "layer3_doc_section": "archive/docs/score-alignment/layer-3.md#aime--paired-loom-aime-24--aime-25-vs-harbor-aime-on-claude-haiku-4-5"
         },
         "stage_b_archive_issue": "https://github.com/carinrc/loom/issues/540"
       }
@@ -197,7 +197,7 @@
                 "trials_succeeded": 30,
                 "n_correct": 6,
                 "aggregate_reward": 0.2,
-                "per_trial_evidence": "docs/evidence/2026-06-26-aime-24-loom-full-30.json"
+                "per_trial_evidence": "archive/docs/evidence/2026-06-26-aime-24-loom-full-30.json"
               },
               {
                 "id": "0fc16ea6-7368-414a-a7ff-f80b03d17eaa",
@@ -205,7 +205,7 @@
                 "trials_succeeded": 30,
                 "n_correct": 8,
                 "aggregate_reward": 0.2667,
-                "per_trial_evidence": "docs/evidence/2026-06-26-aime-25-loom-full-30.json"
+                "per_trial_evidence": "archive/docs/evidence/2026-06-26-aime-25-loom-full-30.json"
               }
             ],
             "combined_aggregate_reward": 0.2333,
@@ -222,7 +222,7 @@
             "n_correct": 32,
             "n_incorrect": 28,
             "aggregate_reward": 0.5333,
-            "per_trial_evidence": "docs/evidence/2026-06-26-aime-harbor-full-60.json"
+            "per_trial_evidence": "archive/docs/evidence/2026-06-26-aime-harbor-full-60.json"
           },
           "delta": {
             "harbor_minus_loom_pp": 30.0,
@@ -231,7 +231,7 @@
           "harbor_published_baseline_at_pin": {
             "note": "No parity_experiment.json published for adapters/aime at the pinned commit (gh api returns 404). This paired run is the only known terminus-2 + claude-haiku-4-5 reference at this Harbor commit."
           },
-          "layer3_doc_section": "docs/score-alignment/layer-3.md#aime--paired-loom-aime-24--aime-25-vs-harbor-aime-on-claude-haiku-4-5"
+          "layer3_doc_section": "archive/docs/score-alignment/layer-3.md#aime--paired-loom-aime-24--aime-25-vs-harbor-aime-on-claude-haiku-4-5"
         },
         "stage_b_archive_issue": "https://github.com/carinrc/loom/issues/540"
       }
@@ -302,7 +302,7 @@
             "n_correct": 101,
             "n_incorrect": 97,
             "aggregate_reward": 0.5101,
-            "per_trial_evidence": "docs/evidence/2026-06-26-gpqa-diamond-loom-full-198.json"
+            "per_trial_evidence": "archive/docs/evidence/2026-06-26-gpqa-diamond-loom-full-198.json"
           },
           "harbor": {
             "agent": "terminus-2",
@@ -315,7 +315,7 @@
             "n_correct": 115,
             "n_incorrect": 83,
             "aggregate_reward": 0.5808,
-            "per_trial_evidence": "docs/evidence/2026-06-26-gpqa-diamond-harbor-full-198.json"
+            "per_trial_evidence": "archive/docs/evidence/2026-06-26-gpqa-diamond-harbor-full-198.json"
           },
           "delta": {
             "harbor_minus_loom_pp": 7.07,
@@ -328,7 +328,7 @@
             "aggregate": 0.8721,
             "note": "Not the matched config for this paired run; reproducing it would require codex/gpt-5.2 access (yibuapi only serves anthropic dialect). Documented for reference."
           },
-          "layer3_doc_section": "docs/score-alignment/layer-3.md#gpqa-diamond--paired-loom-vs-harbor-on-claude-haiku-4-5"
+          "layer3_doc_section": "archive/docs/score-alignment/layer-3.md#gpqa-diamond--paired-loom-vs-harbor-on-claude-haiku-4-5"
         },
         "stage_b_archive_issue": "https://github.com/carinrc/loom/issues/541"
       }
@@ -709,7 +709,7 @@
             "fail_count": 16,
             "aggregate_reward": 0.7808219178082192,
             "reference": "by construction — oracle on solve.sh-equipped tasks is expected to score reward=1.0",
-            "per_task_table": "docs/evidence/slb-phase3-oracle-73.json",
+            "per_task_table": "archive/docs/evidence/slb-phase3-oracle-73.json",
             "verdict": "Loom verifier shim matches upstream tests/test.sh semantics for the 57 passing tasks. The 16 outliers (4 families) all hit a single OracleAgent invocation issue tracked at #548 — not a Loom × SLB integration regression.",
             "follow_ups": [
               "#548"
@@ -723,8 +723,8 @@
             "upstream_revision": "2d714f28b4f14bcaf93bccd5d11fbd3bd524fc46",
             "trial_count": 100,
             "reference": "runtime-clean upstream baseline compared with one historical Loom ARM run and one historical local-dev x86 run",
-            "per_task_table": "docs/evidence/2026-06-30-slb-three-way-codex-qwen36.csv",
-            "report": "docs/evidence/2026-06-30-slb-three-way-codex-qwen36.md",
+            "per_task_table": "archive/docs/evidence/2026-06-30-slb-three-way-codex-qwen36.csv",
+            "report": "archive/docs/evidence/2026-06-30-slb-three-way-codex-qwen36.md",
             "verdict": "Frozen historical statistical evidence: upstream 18/100, Loom ARM 11/100, Loom local-dev x86 18/100; 74/100 three-way task matches. This is not strict full100 parity or current release architecture acceptance.",
             "follow_ups": [
               "#32"
@@ -952,7 +952,7 @@
             "upstream_reference": "Anthropic-published Claude Haiku 4.5 Terminal-Bench 2 non-thinking Terminus-2 reference, 11-run average",
             "upstream_reference_rate_display": "~40.2%",
             "delta_pp": 0.50,
-            "per_task_table": "docs/evidence/issue-222/per-task-results.json",
+            "per_task_table": "archive/docs/evidence/issue-222/per-task-results.json",
             "verdict": "Preliminary, caveated evidence only; not canonical acceptance. The 35/86 reward-positive rate is close to the upstream ~40.2% reference, but the clean platform-successful succeeded+reward=1.0 count is 33/86 because two reward-positive trials ended as trajectory_flush_failed, and 12 total trials are state=failed system failures. Canonical #222 acceptance still requires a Terminus-2 rerun/live validation.",
             "follow_ups": [
               "#222",

@@ -49,4 +49,3 @@ For direct OpenAI calls, a successful response without token usage is rejected
 with `502` because cost cannot be attributed. Provider-connection calls attach
 the connection's current cost-status metadata when exact pricing is
 unavailable.
-

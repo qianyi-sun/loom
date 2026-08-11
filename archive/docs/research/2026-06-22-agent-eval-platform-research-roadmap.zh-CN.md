@@ -4,8 +4,8 @@
 
 截至日期：2026-06-22
 
-本文是 `2026-06-22-agent-eval-platform-research-roadmap.md` 的中文内部讨论版，配套论文语料表见：
-`docs/research/2026-06-22-agent-eval-platform-paper-corpus.md`。
+本文是 `2026-06-22-agent-eval-platform-research-roadmap.md` 的中文内部讨论版，配套论文语料表见
+[`2026-06-22-agent-eval-platform-paper-corpus.md`](2026-06-22-agent-eval-platform-paper-corpus.md)。
 
 核心判断：
 

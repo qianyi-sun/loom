@@ -2,6 +2,9 @@
 
 > Archived predecessor. Current development-fleet behavior is documented in
 > `deploy/dev-fleet/README.md` and `docs/architecture/global-dev-fleet-autoscaler.md`.
+> Only this predecessor README is archived. The YAML, environment example, and
+> service/timer files named below remain in the active `deploy/dev-fleet/`
+> directory and are not archive-local assets.
 
 This directory contains legacy-inert assets from the first `loom dev`
 implementation. Packages 2–4 of the global fleet design must replace or

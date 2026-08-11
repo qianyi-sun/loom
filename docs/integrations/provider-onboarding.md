@@ -100,8 +100,8 @@ Common failures:
 
 ### Harness Compatibility Matrix
 
-Before submitting an agent/provider smoke matrix, generate the repo-known
-harness/provider matrix:
+Before submitting an agent/provider smoke matrix, generate the fixed repository
+harness/provider acceptance matrix:
 
 ```bash
 loom qa matrix \
@@ -110,8 +110,11 @@ loom qa matrix \
   --json-output provider-harness-compatibility.json
 ```
 
-This command does not log in, contact a provider, or submit batches. It covers
-every repo-known default displayed `service_mode_ready=true` agent, including
+This command does not log in, contact a provider, or submit batches. Its
+endpoint taxonomy, output schema, and provenance fields are fixed in the CLI;
+it does not discover arbitrary provider endpoint types or establish general
+provider support. It covers every repository-known default displayed
+`service_mode_ready=true` agent, including
 builtins and launcher adapters such as `litellm`, `opencode`, `aider`, Codex,
 Claude Code, and Gemini CLI. The JSON schema records each agent harness x
 provider endpoint cell as `supported`, `skipped`, or `blocked`, with protocol
@@ -136,8 +139,8 @@ evidence URL. The CLI rejects raw-looking bearer tokens, provider API keys,
 or signed URLs in evidence, notes, URLs, and serialized output; keep credentials
 as safe references such as `env:PROVIDER_API_KEY`.
 
-Combine that compatibility JSON with an offline catalog snapshot to screen an
-agent/benchmark matrix before spending live provider calls:
+Combine that compatibility JSON with an offline catalog snapshot to run the
+fixed agent/benchmark pre-submit planner before spending live provider calls:
 
 ```bash
 loom qa matrix \
@@ -157,9 +160,11 @@ from the compatibility matrix, no-model agents are emitted once per
 benchmark as provider endpoint `no-model`, and supported-but-unsmoked provider
 cells stay blocked as `pending_live_evidence`.
 
-This offline output does not prove live compatibility. The command does not log
-in, call `/api/v1/*`, call a model provider, submit a batch, read artifact
-storage, or require live secrets.
+The planner consumes the CLI's fixed compatibility schema and endpoint
+taxonomy; it is not a general compatibility detector. Its offline output does
+not prove live compatibility. The command does not log in, call `/api/v1/*`,
+call a model provider, submit a batch, read artifact storage, or require live
+secrets.
 
 ## GPU Cluster Checkpoint
 

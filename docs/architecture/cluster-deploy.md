@@ -1,9 +1,13 @@
 # Cluster Deployment
 
-`loom cluster` renders and operates Loom on Kubernetes. It is the shared and
-production deployment path; `loom service` is the local Docker Compose path.
-Cluster behavior is driven by a TOML profile validated against the
-[configuration schema](configuration.md).
+`loom cluster` renders and operates Loom on Kubernetes. It is the direct
+cluster interface for unprotected shared deployments and the underlying
+rollout surface for protected staging and production. Within `loom service`,
+the `local` target manages Docker Compose, while a `dev-<name>` target submits a
+sealed personal candidate through the remote environment API; protected
+targets redirect operators to the cluster rollout workflow. Cluster behavior
+is driven by a TOML profile validated against the [configuration
+schema](configuration.md).
 
 ## Components
 

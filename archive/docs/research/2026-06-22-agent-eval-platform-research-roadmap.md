@@ -4,8 +4,8 @@
 
 As of: 2026-06-22
 
-This note plans the next research-and-engineering directions for Loom. It uses the paper corpus in
-`docs/research/2026-06-22-agent-eval-platform-paper-corpus.md`.
+This note plans the next research-and-engineering directions for Loom. It uses
+the archived [paper corpus](2026-06-22-agent-eval-platform-paper-corpus.md).
 
 The paper direction should not be "yet another benchmark". The stronger framing is:
 

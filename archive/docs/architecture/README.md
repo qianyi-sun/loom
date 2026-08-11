@@ -52,4 +52,3 @@ contracts.
 - [`multi-node-topology-history.md`](multi-node-topology-history.md)
 - [`pr-ci-assessment-2026-08-04.md`](pr-ci-assessment-2026-08-04.md)
 - [`staging-data-lifecycle-history.md`](staging-data-lifecycle-history.md)
-

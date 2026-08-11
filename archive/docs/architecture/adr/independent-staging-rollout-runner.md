@@ -1,7 +1,7 @@
 # ADR: Independent Staging Rollout Runner
 
 > Archived decision record. Current behavior is documented in
-> `docs/architecture/independent-staging-rollout-design.md` and active runbooks.
+> `docs/architecture/staging-rollout.md` and active runbooks.
 
 Status: accepted
 

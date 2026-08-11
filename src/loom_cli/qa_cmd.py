@@ -1,4 +1,4 @@
-"""`loom qa matrix` — end-to-end agent × benchmark validation.
+"""`loom qa matrix` — fixed acceptance helpers and live matrix validation.
 
 The command queries live catalogs, picks one representative task per ready
 benchmark, submits per-provider-family batches, polls until terminal,
@@ -1345,7 +1345,7 @@ def dispatch(argv: list[str]) -> int:
     p_matrix.add_argument(
         "--compatibility-plan", action="store_true",
         help=(
-            "Emit the repository agent harness x provider endpoint "
+            "Emit the fixed repository agent harness x provider endpoint "
             "compatibility matrix without login, provider calls, or batch submit."
         ),
     )
@@ -1354,7 +1354,7 @@ def dispatch(argv: list[str]) -> int:
         dest="preflight_plan",
         action="store_true",
         help=(
-            "Emit an offline agent x benchmark pre-submit validation matrix "
+            "Emit the fixed offline agent x benchmark pre-submit validation matrix "
             "from catalog snapshots and compatibility-plan JSON. Does not "
             "log in, contact /api/v1/*, call providers, or submit batches."
         ),

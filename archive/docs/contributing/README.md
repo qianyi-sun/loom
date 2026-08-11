@@ -8,4 +8,3 @@ non-current process records. Current contributor documentation starts at
 
 - [`repo-migration.md`](repo-migration.md) — completed repository migration
   notes.
-

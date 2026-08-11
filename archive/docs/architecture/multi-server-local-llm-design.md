@@ -87,9 +87,9 @@ Multi-model (N ≥ 2) semantics:
 - **Output**: with N>1, trials land in
   `<output-dir>/<model-slug>/<trial-id>/`. With N=1, layout is
   unchanged (`<output-dir>/<trial-id>/`).
-- **Output-dir identity**: trials land under `<output-dir>/<model-slug>/<trial-id>/` 
-  so downstream tools can group by directory name. ATIF JSON itself does not 
-  carry a `model_slug` field today — filed as a follow-up if/when downstream 
+- **Output-dir identity**: trials land under `<output-dir>/<model-slug>/<trial-id>/`
+  so downstream tools can group by directory name. ATIF JSON itself does not
+  carry a `model_slug` field today — filed as a follow-up if/when downstream
   consumers need it as a structured tag.
 
 Mutual exclusions:
@@ -247,7 +247,7 @@ trial gather → outputs to runs/compare/llama-3-1-70b-instruct/<trial>/
 stop_one(70B proc); unregister _auto_vllm
 ```
 
-Peak GPU = `max(8B_mem, 70B_mem)`. Downstream tools can identify which 
+Peak GPU = `max(8B_mem, 70B_mem)`. Downstream tools can identify which
 model produced each trial by inspecting the output directory name.
 
 ### Serve + share
@@ -360,12 +360,12 @@ Two micro-decisions resolved during design, honored in the
 implementation:
 
 1. **`model_slug` collision** — two models that produce the same
-   slug (e.g. two different paths both ending in `weights/`) currently 
-   write to the same output bucket; the second iteration's outputs overwrite 
-   the first's. Detected by inspection but not blocked. If real users hit this, 
+   slug (e.g. two different paths both ending in `weights/`) currently
+   write to the same output bucket; the second iteration's outputs overwrite
+   the first's. Detected by inspection but not blocked. If real users hit this,
    an index-suffix (`weights-1`, `weights-2`) is the planned fix.
-2. **`loom serve --name` collision** — if `local/<X>` is already 
-   registered in config, `loom serve` rejects with exit 2 and a clear message. 
+2. **`loom serve --name` collision** — if `local/<X>` is already
+   registered in config, `loom serve` rejects with exit 2 and a clear message.
    Implemented in `serve_cmd.py`.
 
 ## See also

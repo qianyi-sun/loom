@@ -10,7 +10,7 @@ connections, usage attribution, members, and API-token administration.
 | Identity | Credential | Scope |
 | --- | --- | --- |
 | Browser or CLI user | Username/password followed by a `loom_session` cookie | Current team and membership role |
-| User-owned API token | `loom_team_...` bearer token linked to a user | Its user and team |
+| User-owned API token | `loom_api_...` bearer token linked to a user | Its user and team |
 | Legacy team token | Unowned `loom_team_...` bearer token | Its team, with compatibility restrictions |
 | Platform administrator | User with `is_platform_admin=true` | Cross-team administrative access |
 | Singleton operator | File-backed `loom_admin_...` bearer token | Operator and service administration |
@@ -89,8 +89,12 @@ loom auth reset-password
 loom auth logout
 ```
 
-Use `loom auth teams --switch <team-id>` to change the current team. See the
-[user guide](../user-guide.md#web-sessions-and-teams) for command examples.
+`loom auth teams --server URL` lists teams that currently accept public
+registration requests; it does not list a signed-in user's memberships or
+switch the active team. Signed-in browser users change teams with the Settings
+team switcher. The service also exposes the session-authenticated
+`POST /api/v1/auth/team` route for clients that implement the session and CSRF
+flow. See the [user guide](../user-guide.md#web-sessions-and-teams).
 
 ## Singleton operator secret
 
