@@ -534,7 +534,7 @@ class DynamicDevelopmentSubjectProjectionV1(StrictV1Model):
     """Trusted lifecycle request for one dynamic, zero-executable subject."""
 
     expected_configuration_epoch: PositiveQuantity
-    operation_kind: Literal["create", "update", "capacity"]
+    operation_kind: Literal["create", "update", "capacity", "destroy"]
     operation_id: UUID
     operation_epoch: PositiveQuantity
     environment_name: Annotated[str, Field(min_length=1, max_length=20)]

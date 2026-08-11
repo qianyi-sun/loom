@@ -684,7 +684,10 @@ class CapacityManagementStore:
                 raise ConfigurationConflictError(
                     "active fleet does not permit dynamic development subjects"
                 )
-            if request.max_slots > template.max_slots_per_subject:
+            if (
+                request.operation_kind != "destroy"
+                and request.max_slots > template.max_slots_per_subject
+            ):
                 raise ConfigurationConflictError(
                     "development subject max_slots exceeds the operator template"
                 )
@@ -708,6 +711,10 @@ class CapacityManagementStore:
             }
             existing_pair = active_subjects.get(request.subject_id)
             existing = None if existing_pair is None else existing_pair[1]
+            if request.operation_kind == "destroy" and existing is None:
+                raise ConfigurationConflictError(
+                    "dynamic development subject is not active"
+                )
             display_name = f"dev-{request.environment_name}"
             if any(
                 subject.display_name == display_name and subject.subject_id != request.subject_id
@@ -745,13 +752,13 @@ class CapacityManagementStore:
                 raise ConfigurationConflictError(
                     "dynamic development deployment generation is not monotonic"
                 )
-            if request.operation_kind == "capacity" and existing is not None and (
+            if request.operation_kind in {"capacity", "destroy"} and existing is not None and (
                 request.deployment_generation != existing.deployment_generation
                 or request.candidate_generation != existing.candidate_generation
                 or request.demand_reporter_incarnation != existing.demand_reporter_incarnation
             ):
                 raise ConfigurationConflictError(
-                    "capacity-only projection must retain its deployment and reporter binding"
+                    "non-deployment projection must retain its deployment and reporter binding"
                 )
             if (
                 request.operation_kind == "update"
@@ -797,7 +804,7 @@ class CapacityManagementStore:
                         )
                     )
                 ).scalar_one_or_none()
-            if request.operation_kind == "capacity" and existing is not None:
+            if request.operation_kind in {"capacity", "destroy"} and existing is not None:
                 expected_architecture = {
                     "supported_architectures": list(request.supported_architectures),
                     "supported_pool_ids": list(request.supported_pool_ids),
@@ -824,7 +831,7 @@ class CapacityManagementStore:
                     or current_reporter.token_sha256 != request.demand_reporter_token_sha256
                 ):
                     raise ConfigurationConflictError(
-                        "capacity-only projection cannot change candidate or reporter evidence"
+                        "non-deployment projection cannot change candidate or reporter evidence"
                     )
             else:
                 reporter_identity_conflict = (
@@ -853,9 +860,12 @@ class CapacityManagementStore:
                 and subject.subject_id != request.subject_id
                 and subject.lifecycle_state != "disabled"
             ]
-            if len(owner_subjects) + 1 > account.max_live_subjects:
+            retiring = request.operation_kind == "destroy"
+            if not retiring and len(owner_subjects) + 1 > account.max_live_subjects:
                 raise ConfigurationConflictError("development owner exceeds max_live_subjects")
-            if sum(subject.min_slots for subject in owner_subjects) + request.min_slots > (
+            if not retiring and sum(
+                subject.min_slots for subject in owner_subjects
+            ) + request.min_slots > (
                 account.min_reservation_slots
             ):
                 raise ConfigurationConflictError(
@@ -868,28 +878,28 @@ class CapacityManagementStore:
                 display_name=display_name,
                 account_id=account.account_id,
                 tier_id="development",
-                min_slots=request.min_slots,
-                max_slots=request.max_slots,
+                min_slots=0 if retiring else request.min_slots,
+                max_slots=0 if retiring else request.max_slots,
                 rollout_surge_slots=template.rollout_surge_slots,
                 max_pending_slots=template.max_pending_slots_per_subject,
                 max_pending_jobs=template.max_pending_jobs_per_subject,
-                lifecycle_state="active",
+                lifecycle_state="disabled" if retiring else "active",
                 candidate_generation=request.candidate_generation,
                 deployment_generation=request.deployment_generation,
                 configuration_generation=request.configuration_generation,
                 demand_reporter_incarnation=request.demand_reporter_incarnation,
                 profiles=template.profiles,
             )
+            next_subject_values = [
+                value
+                for _, value in active_subjects.values()
+                if value.subject_id != subject.subject_id
+            ]
+            if not retiring:
+                next_subject_values.append(subject)
             next_subjects = tuple(
                 sorted(
-                    [
-                        *(
-                            value
-                            for _, value in active_subjects.values()
-                            if value.subject_id != subject.subject_id
-                        ),
-                        subject,
-                    ],
+                    next_subject_values,
                     key=lambda value: value.subject_id.hex,
                 )
             )
@@ -914,7 +924,14 @@ class CapacityManagementStore:
                 )
             }
             owner_accounts[account.account_id] = account
-            derived_accounts = tuple(owner_accounts.values())
+            active_owner_account_ids = {
+                value.account_id for value in next_subjects
+            }
+            derived_accounts = tuple(
+                value
+                for account_id, value in owner_accounts.items()
+                if account_id in active_owner_account_ids
+            )
             self._validate_activation(fleet, next_subjects, derived_accounts)
 
             subject_digest = canonical_digest(subject)
@@ -925,12 +942,14 @@ class CapacityManagementStore:
                 scope_generation=subject.configuration_generation,
                 digest=subject_digest,
                 payload=subject.model_dump(mode="json", exclude_none=False),
-                state="proposed",
+                state="retired" if retiring else "proposed",
                 actor=actor,
                 idempotency_key=request.operation_id,
             )
             session.add(subject_row)
-            if request.operation_kind != "capacity" or existing is None:
+            if request.operation_kind in {"create", "update"} or (
+                request.operation_kind == "capacity" and existing is None
+            ):
                 session.add(
                     CapacityCandidate(
                         subject_id=request.subject_id,
@@ -982,6 +1001,13 @@ class CapacityManagementStore:
             await session.flush()
 
             configuration_epoch = latest.configuration_epoch + 1
+            reference_pairs = [
+                pair
+                for subject_id, pair in active_subjects.items()
+                if subject_id != subject.subject_id
+            ]
+            if not retiring:
+                reference_pairs.append((subject_row, subject))
             references = tuple(
                 ConfigurationGenerationRefV1(
                     scope="subject",
@@ -997,14 +1023,7 @@ class CapacityManagementStore:
                     subject_incarnation=value.subject_incarnation,
                 )
                 for row, value in sorted(
-                    [
-                        *(
-                            pair
-                            for subject_id, pair in active_subjects.items()
-                            if subject_id != subject.subject_id
-                        ),
-                        (subject_row, subject),
-                    ],
+                    reference_pairs,
                     key=lambda pair: pair[1].subject_id.hex,
                 )
             )
@@ -1040,16 +1059,37 @@ class CapacityManagementStore:
                 fleet=fleet,
                 subjects=next_subjects,
                 derived_accounts=derived_accounts,
-                reporter_tokens={
-                    request.demand_reporter_incarnation: request.demand_reporter_token_sha256
-                },
+                reporter_tokens=(
+                    {}
+                    if retiring
+                    else {
+                        request.demand_reporter_incarnation: (
+                            request.demand_reporter_token_sha256
+                        )
+                    }
+                ),
             )
+            if retiring:
+                await session.execute(
+                    update(CapacityDemandReporter)
+                    .where(
+                        CapacityDemandReporter.subject_id == request.subject_id,
+                        CapacityDemandReporter.subject_incarnation
+                        == request.subject_incarnation,
+                        CapacityDemandReporter.reporter_incarnation
+                        == request.demand_reporter_incarnation,
+                        CapacityDemandReporter.state == "current",
+                    )
+                    .values(state="fenced")
+                )
             await session.execute(
                 update(CapacityConfigGeneration)
                 .where(CapacityConfigGeneration.state == "active")
                 .values(state="retired")
             )
-            active_ids = [fleet_row.id, subject_row.id]
+            active_ids = [fleet_row.id]
+            if not retiring:
+                active_ids.append(subject_row.id)
             active_ids.extend(
                 row.id
                 for subject_id, (row, _) in active_subjects.items()
@@ -1083,7 +1123,11 @@ class CapacityManagementStore:
                 _audit(
                     actor_kind="environment-lifecycle",
                     actor_id=actor,
-                    event_kind="capacity_development_subject_projected",
+                    event_kind=(
+                        "capacity_development_subject_retired"
+                        if retiring
+                        else "capacity_development_subject_projected"
+                    ),
                     object_binding={
                         "configuration_epoch": configuration_epoch,
                         "subject_id": str(subject.subject_id),
