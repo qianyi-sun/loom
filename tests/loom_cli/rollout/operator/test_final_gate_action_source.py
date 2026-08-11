@@ -372,7 +372,7 @@ def test_final_gate_action_source_retries_transient_post_apply_drift(
     assert calls == []
 
 
-def test_final_gate_action_source_fails_after_bounded_persistent_exact_drift(
+def test_final_gate_action_source_fails_after_bounded_validator_drift(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -393,13 +393,11 @@ def test_final_gate_action_source_fails_after_bounded_persistent_exact_drift(
     def validate(**_kwargs):
         nonlocal attempts
         attempts += 1
-        raise PostApplyDriftTransientError(
-            "post-apply drift-sensitive evidence changed"
-        )
+        raise ValueError("post-apply context binding drifted")
 
     monkeypatch.setattr(action_source_module, "validate_post_apply_attestation_drift", validate)
 
-    with pytest.raises(ValueError, match="drift-sensitive evidence changed"):
+    with pytest.raises(ValueError, match="context binding drifted"):
         source(_envelope(attestation), attestation, 7, admission)["final.drift"](
             CheckOperation.VERIFY
         )
