@@ -4980,6 +4980,321 @@ def test_acl_removal_state_recognizes_restored_preimage_without_service_entry() 
     )
 
 
+def test_acl_removal_state_recognizes_restored_uid_after_nss_resolves_name() -> None:
+    path = host.PROTECTED_INPUTS[0]
+    adjustment = host.AclSnapshotAdjustment.from_dict(
+        {
+            "path": str(path),
+            "before_acl": [
+                "user::rw-",
+                "user:2012:r--",
+                "user:loom-rollout:r--",
+                "group::r--",
+                "mask::r--",
+                "other::---",
+            ],
+            "after_acl": [
+                "user::rw-",
+                "user:loom-rollout:r--",
+                "group::r--",
+                "mask::r--",
+                "other::---",
+            ],
+        }
+    )
+    runner = StatefulAclRunner()
+    runner.passwd["jinbang"] = "jinbang:x:2012:2012::/home/jinbang:/bin/bash\n"
+    runner.seed(
+        path,
+        access=(
+            "user::rw-",
+            "user:jinbang:r--",
+            "group::r--",
+            "mask::r--",
+            "other::---",
+        ),
+    )
+    system = host.HostSystem(runner)
+
+    assert (
+        system.acl_removal_state(
+            host.AclGrant(path),
+            adjustment,
+            remove_service_entry=True,
+        )
+        == "removed"
+    )
+
+
+def test_acl_removal_state_recognizes_before_uid_after_nss_resolves_name() -> None:
+    path = host.PROTECTED_INPUTS[0]
+    adjustment = host.AclSnapshotAdjustment.from_dict(
+        {
+            "path": str(path),
+            "before_acl": [
+                "user::rw-",
+                "user:2012:r--",
+                "user:loom-rollout:r--",
+                "group::r--",
+                "mask::r--",
+                "other::---",
+            ],
+            "after_acl": [
+                "user::rw-",
+                "user:loom-rollout:r--",
+                "group::r--",
+                "mask::r--",
+                "other::---",
+            ],
+        }
+    )
+    runner = StatefulAclRunner()
+    runner.passwd["jinbang"] = "jinbang:x:2012:2012::/home/jinbang:/bin/bash\n"
+    runner.seed(
+        path,
+        access=(
+            "user::rw-",
+            "user:jinbang:r--",
+            "user:loom-rollout:r--",
+            "group::r--",
+            "mask::r--",
+            "other::---",
+        ),
+    )
+
+    assert (
+        host.HostSystem(runner).acl_removal_state(
+            host.AclGrant(path),
+            adjustment,
+            remove_service_entry=True,
+        )
+        == "before"
+    )
+
+
+def test_acl_removal_state_rejects_different_uid_behind_resolved_name() -> None:
+    path = host.PROTECTED_INPUTS[0]
+    adjustment = host.AclSnapshotAdjustment.from_dict(
+        {
+            "path": str(path),
+            "before_acl": [
+                "user::rw-",
+                "user:2012:r--",
+                "user:loom-rollout:r--",
+                "group::r--",
+                "mask::r--",
+                "other::---",
+            ],
+            "after_acl": [
+                "user::rw-",
+                "user:loom-rollout:r--",
+                "group::r--",
+                "mask::r--",
+                "other::---",
+            ],
+        }
+    )
+    runner = StatefulAclRunner()
+    runner.passwd["jinbang"] = "jinbang:x:2013:2013::/home/jinbang:/bin/bash\n"
+    runner.seed(
+        path,
+        access=(
+            "user::rw-",
+            "user:jinbang:r--",
+            "group::r--",
+            "mask::r--",
+            "other::---",
+        ),
+    )
+
+    assert (
+        host.HostSystem(runner).acl_removal_state(
+            host.AclGrant(path),
+            adjustment,
+            remove_service_entry=True,
+        )
+        == "drift"
+    )
+
+
+def test_acl_removal_state_rejects_permission_drift_for_equivalent_uid() -> None:
+    path = host.PROTECTED_INPUTS[0]
+    adjustment = host.AclSnapshotAdjustment.from_dict(
+        {
+            "path": str(path),
+            "before_acl": [
+                "user::rw-",
+                "user:2012:r--",
+                "user:loom-rollout:r--",
+                "group::r--",
+                "mask::r--",
+                "other::---",
+            ],
+            "after_acl": [
+                "user::rw-",
+                "user:loom-rollout:r--",
+                "group::r--",
+                "mask::r--",
+                "other::---",
+            ],
+        }
+    )
+    runner = StatefulAclRunner()
+    runner.passwd["jinbang"] = "jinbang:x:2012:2012::/home/jinbang:/bin/bash\n"
+    runner.seed(
+        path,
+        access=(
+            "user::rw-",
+            "user:jinbang:rw-",
+            "group::r--",
+            "mask::r--",
+            "other::---",
+        ),
+    )
+
+    assert (
+        host.HostSystem(runner).acl_removal_state(
+            host.AclGrant(path),
+            adjustment,
+            remove_service_entry=True,
+        )
+        == "drift"
+    )
+
+
+def test_remove_acl_is_idempotent_after_nss_resolves_restored_uid_name() -> None:
+    path = host.PROTECTED_INPUTS[0]
+    adjustment = host.AclSnapshotAdjustment.from_dict(
+        {
+            "path": str(path),
+            "before_acl": [
+                "user::rw-",
+                "user:2012:r--",
+                "user:loom-rollout:r--",
+                "group::r--",
+                "mask::r--",
+                "other::---",
+            ],
+            "after_acl": [
+                "user::rw-",
+                "user:loom-rollout:r--",
+                "group::r--",
+                "mask::r--",
+                "other::---",
+            ],
+        }
+    )
+    runner = StatefulAclRunner()
+    runner.passwd["jinbang"] = "jinbang:x:2012:2012::/home/jinbang:/bin/bash\n"
+    runner.seed(
+        path,
+        access=(
+            "user::rw-",
+            "user:jinbang:r--",
+            "group::r--",
+            "mask::r--",
+            "other::---",
+        ),
+    )
+
+    host.HostSystem(runner).remove_acl(
+        host.AclGrant(path),
+        adjustment,
+        remove_service_entry=True,
+    )
+
+    assert all(call[0] != "setfacl" for call in runner.calls)
+
+
+def test_remove_acl_accepts_nss_name_rendering_after_uid_restore() -> None:
+    class NssRenderingAclRunner(StatefulAclRunner):
+        def _render(self, path: str) -> str:
+            return super()._render(path).replace("user:2012:", "user:jinbang:")
+
+    path = host.PROTECTED_INPUTS[0]
+    adjustment = host.AclSnapshotAdjustment.from_dict(
+        {
+            "path": str(path),
+            "before_acl": [
+                "user::rw-",
+                "user:2012:r--",
+                "user:loom-rollout:r--",
+                "group::r--",
+                "mask::r--",
+                "other::---",
+            ],
+            "after_acl": [
+                "user::rw-",
+                "user:loom-rollout:r--",
+                "group::r--",
+                "mask::r--",
+                "other::---",
+            ],
+        }
+    )
+    runner = NssRenderingAclRunner()
+    runner.passwd["jinbang"] = "jinbang:x:2012:2012::/home/jinbang:/bin/bash\n"
+    runner.seed(path, access=adjustment.after_acl)
+    system = host.HostSystem(runner)
+
+    system.remove_acl(
+        host.AclGrant(path),
+        adjustment,
+        remove_service_entry=True,
+    )
+
+    assert any(call[0] == "setfacl" for call in runner.calls)
+    assert (
+        system.acl_removal_state(
+            host.AclGrant(path),
+            adjustment,
+            remove_service_entry=True,
+        )
+        == "removed"
+    )
+
+
+def test_remove_acl_preserves_uid_rendered_name_from_before_state() -> None:
+    class NssRenderingAclRunner(StatefulAclRunner):
+        def _render(self, path: str) -> str:
+            return super()._render(path).replace("user:2012:", "user:jinbang:")
+
+    path = host.PROTECTED_INPUTS[0]
+    adjustment = host.AclSnapshotAdjustment.from_dict(
+        {
+            "path": str(path),
+            "before_acl": [
+                "user::rw-",
+                "user:2012:r--",
+                "user:loom-rollout:r--",
+                "group::r--",
+                "mask::r--",
+                "other::---",
+            ],
+            "after_acl": [
+                "user::rw-",
+                "user:loom-rollout:r--",
+                "group::r--",
+                "mask::r--",
+                "other::---",
+            ],
+        }
+    )
+    runner = NssRenderingAclRunner()
+    runner.passwd["jinbang"] = "jinbang:x:2012:2012::/home/jinbang:/bin/bash\n"
+    runner.seed(path, access=adjustment.before_acl)
+
+    host.HostSystem(runner).remove_acl(
+        host.AclGrant(path),
+        adjustment,
+        remove_service_entry=True,
+    )
+
+    assert [call for call in runner.calls if call[0] == "setfacl"] == [
+        ["setfacl", "-n", "-x", "u:loom-rollout", str(path)]
+    ]
+
+
 def test_acl_converges_masked_preexisting_service_and_restores_without_removing_it() -> None:
     path = host.PROTECTED_INPUTS[3]
     before = (
@@ -5343,7 +5658,11 @@ def test_retired_protected_acl_scope_requires_exact_leaves_and_ancestor_chain() 
     assert host.HostInstaller._record_grants(record) == retired_scope
 
     invalid_ledgers = (
-        raw_grants[:-1],
+        [
+            value
+            for value in raw_grants
+            if value["path"] != str(retired_root / _RETIRED_PROTECTED_LEAF_NAMES[0])
+        ],
         [value for value in raw_grants if value["path"] != str(retired_root.parent)],
         [*raw_grants, {"path": str(retired_root / "unexpected-token"), "default": False}],
         [grant.to_dict() for grant in nested_current_scope],
