@@ -1,0 +1,135 @@
+"""Migrate and safely bind a new global capacity-management authority."""
+
+from __future__ import annotations
+
+import argparse
+import os
+from pathlib import Path
+from typing import cast
+from uuid import UUID
+
+from alembic import command
+from alembic.config import Config as AlembicConfig
+from sqlalchemy import Engine, MetaData, Table, create_engine, inspect, select, update
+
+from loom_capacity_manager.config import read_owner_only_secret
+from loom_capacity_manager.models import CapacityAuthorityState
+
+
+class CapacityAuthorityBootstrapError(RuntimeError):
+    """The management database is not safe to bind to a new authority."""
+
+
+def bind_fresh_authority(engine: Engine, expected: UUID) -> None:
+    """Bind one reviewed UUID only while the migrated authority is unused."""
+
+    if not isinstance(engine, Engine):
+        raise TypeError("capacity authority bootstrap requires a synchronous engine")
+    if not isinstance(expected, UUID):
+        raise TypeError("expected capacity authority incarnation must be a UUID")
+    authority_table = cast(Table, CapacityAuthorityState.__table__)
+    try:
+        with engine.begin() as connection:
+            authority = (
+                connection.execute(
+                    select(authority_table)
+                    .where(authority_table.c.singleton_id == 1)
+                    .with_for_update()
+                )
+                .mappings()
+                .one()
+            )
+            if authority["authority_incarnation"] == expected:
+                return
+            if (
+                authority["writer_epoch"] != 0
+                or authority["recovery_state"] != "shadow"
+                or authority["increase_freeze"] is not True
+                or authority["executable_new_capacity_ceiling"] != 0
+                or authority["global_pending_slot_ceiling"] != 0
+                or authority["global_pending_job_ceiling"] != 0
+                or authority["global_submission_rate_ceiling"] != 0
+            ):
+                raise CapacityAuthorityBootstrapError(
+                    "capacity authority database is not an unused frozen shadow"
+                )
+            table_names = sorted(
+                name
+                for name in inspect(connection).get_table_names()
+                if name.startswith("capacity_") and name != authority_table.name
+            )
+            for table_name in table_names:
+                table = Table(table_name, MetaData(), autoload_with=connection)
+                if connection.execute(select(1).select_from(table).limit(1)).first() is not None:
+                    raise CapacityAuthorityBootstrapError(
+                        "capacity authority database is not empty"
+                    )
+            connection.execute(
+                update(authority_table)
+                .where(authority_table.c.singleton_id == 1)
+                .values(authority_incarnation=expected)
+            )
+    except CapacityAuthorityBootstrapError:
+        raise
+    except Exception as exc:
+        raise CapacityAuthorityBootstrapError(
+            "capacity authority bootstrap could not verify the management database"
+        ) from exc
+
+
+def migrate_capacity_database(
+    db_url_file: Path,
+    expected: UUID,
+    *,
+    alembic_ini: Path | None = None,
+) -> None:
+    """Upgrade the independent schema, then bind its reviewed incarnation."""
+
+    database_url = read_owner_only_secret(db_url_file)
+    config_path = alembic_ini or Path(__file__).resolve().parents[2] / "capacity_migrations/alembic.ini"
+    if not config_path.is_file():
+        raise CapacityAuthorityBootstrapError("capacity migration configuration is missing")
+    previous_url = os.environ.get("LOOM_CAPACITY_DB_URL")
+    try:
+        os.environ["LOOM_CAPACITY_DB_URL"] = database_url
+        config = AlembicConfig(str(config_path))
+        config.set_main_option("script_location", str(config_path.parent))
+        command.upgrade(config, "head")
+    except Exception as exc:
+        raise CapacityAuthorityBootstrapError("capacity schema migration failed") from exc
+    finally:
+        if previous_url is None:
+            os.environ.pop("LOOM_CAPACITY_DB_URL", None)
+        else:
+            os.environ["LOOM_CAPACITY_DB_URL"] = previous_url
+
+    engine = create_engine(database_url, isolation_level="SERIALIZABLE")
+    try:
+        bind_fresh_authority(engine, expected)
+    finally:
+        engine.dispose()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Migrate a new frozen global capacity authority"
+    )
+    parser.add_argument("--db-url-file", type=Path, required=True)
+    parser.add_argument("--expected-authority-incarnation", type=UUID, required=True)
+    arguments = parser.parse_args()
+    migrate_capacity_database(
+        arguments.db_url_file,
+        arguments.expected_authority_incarnation,
+    )
+
+
+if __name__ == "__main__":  # pragma: no cover - module entry point
+    main()
+
+
+__all__ = [
+    "CapacityAuthorityBootstrapError",
+    "bind_fresh_authority",
+    "main",
+    "migrate_capacity_database",
+]
