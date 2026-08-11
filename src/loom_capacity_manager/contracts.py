@@ -550,6 +550,8 @@ class DynamicDevelopmentSubjectProjectionV1(StrictV1Model):
     demand_reporter_incarnation: UUID
     demand_reporter_token_sha256: Digest
     local_activation_sha256: Digest
+    protected_admission_sha256: Digest
+    capacity_agent_installation_sha256: Digest
     supported_pool_ids: Annotated[tuple[Identifier, ...], Field(max_length=2)]
     supported_architectures: Annotated[
         tuple[Literal["arm64", "x86_64"], ...],

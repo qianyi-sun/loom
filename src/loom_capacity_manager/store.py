@@ -867,6 +867,10 @@ class CapacityManagementStore:
                     attestation_payload={
                         "operation_id": str(request.operation_id),
                         "operation_epoch": request.operation_epoch,
+                        "protected_admission_sha256": request.protected_admission_sha256,
+                        "capacity_agent_installation_sha256": (
+                            request.capacity_agent_installation_sha256
+                        ),
                     },
                     protocol_payload=request.protocol_versions,
                 )
@@ -886,6 +890,10 @@ class CapacityManagementStore:
                     cutover_payload={
                         "local_activation_sha256": request.local_activation_sha256,
                         "candidate_publication_sha256": request.candidate_publication_sha256,
+                        "protected_admission_sha256": request.protected_admission_sha256,
+                        "capacity_agent_installation_sha256": (
+                            request.capacity_agent_installation_sha256
+                        ),
                     },
                 )
             )

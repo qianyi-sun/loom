@@ -80,7 +80,8 @@ The lifecycle service registers a ready personal deployment through
 profiles from the active operator-owned fleet template in one serializable
 configuration epoch. The request binds the candidate publication, local
 activation acknowledgement, deployment/configuration generations, reporter
-incarnation, supported architectures, and required protocols. The lifecycle
+incarnation, protected-admission evidence, trusted capacity-agent installation,
+supported architectures, and required protocols. The lifecycle
 cannot supply a priority tier, pool weight, worker shape, account ceiling, or
 an executable override.
 

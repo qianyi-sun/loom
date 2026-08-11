@@ -92,6 +92,8 @@ def projection_request(**changes: object) -> DynamicDevelopmentSubjectProjection
         "demand_reporter_incarnation": _REPORTER_INCARNATION,
         "demand_reporter_token_sha256": "c" * 64,
         "local_activation_sha256": "d" * 64,
+        "protected_admission_sha256": "e" * 64,
+        "capacity_agent_installation_sha256": "f" * 64,
         "supported_pool_ids": ("gb10", "oldlab"),
         "supported_architectures": ("arm64", "x86_64"),
         "protocol_versions": {
