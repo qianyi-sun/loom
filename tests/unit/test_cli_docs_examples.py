@@ -14,105 +14,60 @@ def test_operator_runbook_uses_current_provider_model_syntax() -> None:
 
     assert "loom providers models refresh" not in runbook
     assert "loom providers models list" not in runbook
-    assert "loom providers models mz_tn_canada_qianyi --refresh" in runbook
-    assert "loom providers models mz_tn_canada_qianyi --preflight glm-5.1-thinking" in runbook
+    assert "loom providers models CONNECTION --refresh" in runbook
+    assert "loom providers models CONNECTION --preflight MODEL" in runbook
 
 
-def test_operator_runbook_staging_batch_smoke_matches_cli_contract() -> None:
-    runbook = _read("docs/runbooks/operator-runbook.md")
+def test_staging_validation_smoke_matches_current_gate_contract() -> None:
+    runbook = _read("docs/runbooks/staging-launch.md")
 
-    assert "--benchmark hello-world" not in runbook
-    assert "--provider smoke-openai --model gpt-4o-mini --agent oracle" not in runbook
-    assert '--task-filter \'{"task_ids":["loom-smoke/gb10-oracle-hello-world"]}\'' in runbook
-    assert "--provider mz_tn_canada_qianyi" in runbook
-    assert "--model glm-5.1-thinking" in runbook
-    assert "--agent opencode" in runbook
-    # #1109: coverage stays on admin on-behalf, not user eval create.
-    assert "loom admin batches submit-on-behalf" in runbook
+    assert "scripts/staging_smoke_gate.py" in runbook
+    assert "--provider-connection-name CONNECTION" in runbook
+    assert "--provider-model-provider PROVIDER" in runbook
+    assert "--provider-model-name MODEL" in runbook
     assert "--required-worker-pool gb10" in runbook
-    assert (
-        "loom eval batch create \\\n"
-        "     --name-suffix oracle-smoke \\\n"
-        "     --task-filter '{\"task_ids\":[\"loom-smoke/gb10-oracle-hello-world\"]}' \\\n"
-        "     --agent oracle \\\n"
-        "     --n-per-task 1 \\\n"
-        "     --required-worker-pool gb10"
-    ) not in runbook
+    assert "--fail-on-skip" in runbook
+    assert "--team-a-token file:/secure/path/team-a-token" in runbook
+    assert "--team-b-token file:/secure/path/team-b-token" in runbook
 
 
 def test_operator_runbook_staging_gate_matches_current_launch_scope() -> None:
-    runbook = _read("docs/runbooks/operator-runbook.md")
-    gate_section = runbook.split("## Staging smoke gate", maxsplit=1)[1].split(
-        "## Capacity planning",
+    runbook = _read("docs/runbooks/staging-launch.md")
+    gate_section = runbook.split("## Public route and authentication checks", maxsplit=1)[1].split(
+        "## Promotion manifest",
         maxsplit=1,
     )[0]
+    normalized_gate_section = " ".join(gate_section.split())
 
-    assert "scripts/staging_smoke_gate.py" in gate_section
-    assert "SPA Tasks page" not in gate_section
-    assert "quota rejection" not in gate_section.lower()
-    assert "rate-limit rejection" not in gate_section.lower()
-    assert "My team" in gate_section
-    assert "All teams" in gate_section
-    assert "owner-team label" in gate_section
-    assert "clone config" in gate_section
-    assert "reuse artifact" in gate_section
-    assert "provenance" in gate_section
-    assert "blocked artifact" in gate_section
+    assert "scripts/staging_smoke_gate.py" in normalized_gate_section
+    assert "My team" in normalized_gate_section
+    assert "All teams" in normalized_gate_section
+    assert "owner-team labels" in normalized_gate_section
+    assert "clone config" in normalized_gate_section
+    assert "artifact reuse" in normalized_gate_section
+    assert "provenance" in normalized_gate_section
+    assert "cross-team denial" in normalized_gate_section
 
 
-def test_taskset_fence_canary_uses_task_7_deployment_runner() -> None:
-    runbook = _read("docs/runbooks/operator-runbook.md")
-    canary_section = runbook.split(
-        "### Disposable TaskSet lease-fencing canary (#756)",
-        maxsplit=1,
-    )[1].split("### Protected workload-trust contract (#755)", maxsplit=1)[0]
-    normalized_canary_section = " ".join(canary_section.split())
+def test_cluster_deploy_lists_taskset_fence_canary_as_operator_maintenance() -> None:
+    cluster_deploy = _read("docs/architecture/cluster-deploy.md")
 
-    assert "Task 6 tests are not staging proof" in normalized_canary_section
-    assert (
-        "Task 7 supplies the deployment-side, authorization-restricted cooperative "
-        "runner. It runs only through `loom cluster taskset-fence-canary`"
-    ) in normalized_canary_section
-    assert "taskset-fence-canary-token" in canary_section
-    assert "evidence.json" in canary_section
-    assert '--rollout-dir "$ROLLOUT_DIR"' in canary_section
-    assert "--task-set-id" not in canary_section
-    assert "--expected-task-checksum" not in canary_section
-    assert "candidate-bound JSON" in normalized_canary_section
-    assert "durable one-use authorization" in normalized_canary_section
-    assert "fixed `loom-system-taskset-fence-canary`" in canary_section
-    assert "Migration `0065` reserves this Team" in canary_section
-    assert "never accepts a TaskSet id or checksum" in normalized_canary_section
-    assert "fixed staging Kubernetes context" in normalized_canary_section
-    assert "atomically published without replacement" in normalized_canary_section
-
-    for prohibited_action in [
-        "killing a driver or pod",
-        "SIGSTOP",
-        "manual SQL",
-        "mutating the object store",
-        "injecting a failure",
-        "deleting a prefix",
-    ]:
-        assert prohibited_action in canary_section
+    assert "loom cluster taskset-fence-canary" in cluster_deploy
+    assert "Use each subcommand's `--help` for its exact required arguments" in cluster_deploy
 
 
 def test_cluster_deploy_docs_do_not_advertise_missing_trial_download_commands() -> None:
     cluster_deploy = _read("docs/architecture/cluster-deploy.md")
 
-    assert "loom eval run --provider N --model M --agent A --benchmark B" not in cluster_deploy
-    assert "loom eval run --provider N --model M --agent A --task ID" in cluster_deploy
+    assert "loom eval run" not in cluster_deploy
     assert "loom eval trial {list,show} | trajectory ID | atif ID" not in cluster_deploy
-    assert "loom eval trial {list,show}" in cluster_deploy
-    assert "loom eval trial show TRIAL_ID" in cluster_deploy
+    assert "loom eval trial" not in cluster_deploy
 
 
-def test_cluster_deploy_eval_run_example_matches_supported_options() -> None:
-    cluster_deploy = _read("docs/architecture/cluster-deploy.md")
+def test_user_guide_documents_current_batch_create_command() -> None:
+    user_guide = _read("docs/user-guide.md")
 
-    assert (
-        "loom eval run --provider N --model M --agent A --task ID\n    [--backend B] [--name N]"
-    ) not in cluster_deploy
-    assert "loom eval batch create" in cluster_deploy
-    assert "[--name N | --name-suffix S] [--benchmark B | --task-filter JSON]" in cluster_deploy
-    assert "[--n-per-task N] [--backend B]" in cluster_deploy
+    assert "loom eval batch create" in user_guide
+    assert "--provider smoke-openai" in user_guide
+    assert "--model gpt-4o-mini" in user_guide
+    assert "--agent litellm" in user_guide

@@ -1,9 +1,9 @@
-# Staging on the multi-node OLDLAB k3s cluster (the live staging as of the
-# 2026-07 cutover). This is the version-controlled desired state for the
-# sanctioned k3s deploy path — see docs/runbooks/deploy-staging-k3s.md.
+# Shared staging on the multi-node OLDLAB k3s cluster. This is the
+# version-controlled desired state for the sanctioned k3s deploy path; see
+# docs/runbooks/deploy-staging-k3s.md.
 #
-# This is also the protected rollout-broker render authority. The former
-# single-node kind profile is not a live acceptance or rollback lane.
+# This is also the protected rollout-broker render authority. The single-node
+# profile is used for local/rehearsal renders, not live acceptance or rollback.
 #
 # `image_tag` is a default; the deploy script overrides it with the freshly
 # built candidate sha (staging-<shortsha>). `container_registry` is the on-host
@@ -28,7 +28,7 @@ env_state_profile = "../environment-state/staging.toml"
 persistent_storage_backend = "dynamic"
 persistent_storage_host_path_root = "/data/loom-staging"
 
-# Shared trial-image cache (#547 item #2): workers on any node pull a layered
+# Shared trial-image cache: workers on any node pull a layered
 # image built on any other node. Falls back to local build without push creds.
 trial_cache_registry_repo = "ghcr.io/qianyi-sun/loom-trial-cache"
 
@@ -54,10 +54,9 @@ taskset_transforms_enabled = false
 taskset_transform_network_isolated = false
 untrusted_workload_isolation = false
 
-# Bounded inventory for retiring the predecessor direct node agents during the
-# protected external-supervisor transition. The retirement inventory carries
-# only host and unit identity; canonical GB10 capacity uses service-owned shared
-# candidate and environment roots under /shared_work2/loom-staging-rollout.
+# Bounded inventory for protected checks that keep direct per-node worker-agent
+# units stopped. It carries only host and unit identity; current GB10 Slurm
+# capacity comes from deploy/environment-state/staging.toml.
 [gb10_pool]
 ssh_config = "../worker-pools/gb10/ssh_config"
 ssh_identity_file = "/var/lib/loom-staging-rollout/gb10-deploy-ed25519"

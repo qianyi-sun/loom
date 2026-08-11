@@ -1,5 +1,5 @@
 FROM python:3.11-slim
-# Mirrors Dockerfile.control-plane's pattern (#199 PyPI-timeout guard).
+# Matches the Control Plane image's package-index retry policy.
 ENV PIP_RETRIES=10 PIP_DEFAULT_TIMEOUT=60
 WORKDIR /app
 COPY pyproject.toml README.md ./

@@ -1,10 +1,10 @@
-# Shared Sandbox Capacity Ledger (legacy interface)
+# Shared sandbox capacity ledger compatibility interface
 
-> This is now the internal ledger of the single global dev fleet autoscaler,
-> not a separately deployed service. New operations use
+> This is the internal ledger of the single global development fleet
+> autoscaler, not a separately deployed service. Normal operations use
 > `scripts/ops/global_dev_fleet_autoscaler_once.py` and
-> `docs/architecture/global-dev-fleet-autoscaler.md`; the commands below remain
-> for inspection, migration, and incident recovery.
+> `docs/architecture/global-dev-fleet-autoscaler.md`; the commands below are
+> compatibility tools for inspection and incident recovery.
 
 The shared capacity broker is the single slot authority for the disposable
 `sandbox-qianyi`, `sandbox-hongjian`, and `sandbox-devansh` Control Planes. It
@@ -12,9 +12,9 @@ does not run inside any sandbox and does not read a sandbox database. One
 submit-host service owns its SQLite state and publishes candidate-bound,
 secret-free grant handoffs for sandbox-specific adapters.
 
-This repository slice is a broker and handoff contract. It does not authorize
-Slurm policy changes, non-exclusive worker activation, shared-host mutation, or
-production/staging reclaim. Those remain gated by their owning issues.
+This broker and handoff contract has no authority to change Slurm policy,
+activate non-exclusive workers, mutate shared hosts, or reclaim production or
+staging capacity.
 
 ## Safety contract
 
@@ -115,7 +115,7 @@ Each `handoffs` item is an `AutoscalerGrantHandoff`:
   "enabled": true,
   "min_slots": 0,
   "max_slots": 47,
-  "expires_at": "2026-07-27T22:00:00Z",
+  "expires_at": "2030-01-01T00:00:00Z",
   "preemptible": true
 }
 ```
@@ -132,8 +132,8 @@ The sandbox adapter must:
 5. return an observation for the same request and epoch.
 
 This interface intentionally does not call the existing Control Plane
-autoscaler API. A later environment-specific adapter owns authentication and
-delivery, while this broker remains transport- and token-agnostic.
+autoscaler API. Authentication and delivery are outside this interface; the
+broker remains transport- and token-agnostic.
 
 ## Report observed capacity
 

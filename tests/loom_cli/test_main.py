@@ -25,7 +25,14 @@ def test_no_args_prints_help_to_stderr_and_exits_2() -> None:
 def test_help_lists_top_level_subcommands() -> None:
     res = _run("--help")
     assert res.returncode == 0
-    for cmd in ("run", "config", "datasets", "agents"):
+    for cmd in (
+        "run",
+        "config",
+        "datasets",
+        "agents",
+        "worker",
+        "qa",
+    ):
         assert cmd in res.stdout
 
 

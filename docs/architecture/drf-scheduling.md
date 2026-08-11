@@ -110,13 +110,11 @@ rows were created before architecture gating existed. Task authors can set
 `environment.cpu_arch = "any"` only after proving the task image and verifier
 are credible on both x86_64 and ARM64.
 
-`gpu_types` (specific SKUs like `A100`, `H100`) was added with the
-Modal driver. It's populated on the worker side, but the scheduler's
-predicate doesn't include it yet — that's a follow-up when the
-first GPU-typed task lands.
+`gpu_types` (specific SKUs like `A100`, `H100`) is reported by workers but is
+not an eligibility predicate. Tasks can currently constrain GPU vendor, not a
+specific GPU SKU.
 
-`mounted_fs` is intentionally absent at v1; spec §3.1.1 documents
-the omission. Add a join + predicate here when it lands.
+`mounted_fs` is not an eligibility predicate.
 
 ## Crash recovery
 
@@ -192,7 +190,7 @@ capacity manifest never bypasses this registry fence.
   same share as one submitting 100 OpenAI trials; provider RPM
   throttling lives at the Gateway, not here.
 - **Not GPU-aware beyond vendor.** `gpu_vendor` matches; `gpu_types`
-  is populated but not yet in the predicate (see above).
+  is metadata and is not part of the predicate (see above).
 - **Not CLI-mode-relevant.** `loom run` runs locally without a
   Control Plane; concurrency is `asyncio.Semaphore(N)`, ordering is
   whatever your task list passes in.
@@ -203,5 +201,3 @@ capacity manifest never bypasses this registry fence.
   in the service stack
 - [`driver-protocol.md`](driver-protocol.md) — what `requires_caps`
   is matched against on the worker side
-- Spec §2.6 (claim algorithm) and §3.1.1 (derive_requires_caps) for
-  the original design notes

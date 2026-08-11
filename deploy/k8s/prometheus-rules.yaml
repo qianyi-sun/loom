@@ -1,4 +1,4 @@
-# Prometheus alert rules for Loom (#81 slice A).
+# Prometheus alert rules for Loom.
 #
 # Targets the metrics emitted by loom_control_plane, loom_llm_gateway,
 # loom_service, and loom_worker. Keep docs/runbooks/operator-runbook.md's
@@ -584,7 +584,7 @@ spec:
               Postgres `max_connections` (currently 150) has headroom
               for `pgbouncer.replicas × default_pool_size + LISTEN
               watchers + admin slack`.
-            runbook_url: "https://github.com/qianyi-sun/loom/blob/dev/docs/architecture/pgbouncer-transaction-mode-design.md"
+            runbook_url: "https://github.com/qianyi-sun/loom/blob/dev/docs/architecture/pgbouncer.md"
 
         # pgbouncer pod is unreachable. Under normal operation, kind's
         # Service should route between the 2 replicas; both being
@@ -649,7 +649,7 @@ spec:
                 loom cluster doctor
               which enforces the direct/pool DSN invariants when
               pgbouncer.enabled=true.
-            runbook_url: "https://github.com/qianyi-sun/loom/blob/dev/docs/architecture/pgbouncer-transaction-mode-design.md"
+            runbook_url: "https://github.com/qianyi-sun/loom/blob/dev/docs/architecture/pgbouncer.md"
 
     - name: loom.minio.health
       interval: 30s
@@ -687,9 +687,10 @@ spec:
                   mc admin info local
                 kubectl top pod -n loom -l app=loom-minio
 
-              Fix: if single-node, plan cutover to distributed mode
-              (#610). If distributed, check `mc admin heal --scan` for
-              in-progress heal operations and let them finish.
+              Fix: if single-node, restore write headroom or move through the
+              supported multi-node deployment procedure. If distributed,
+              check `mc admin heal --scan` for in-progress heal operations and
+              let them finish.
             runbook_url: "https://github.com/qianyi-sun/loom/blob/dev/docs/architecture/multi-node-topology.md"
 
         # MinIO server-side errors. 5xx from PutObject/GetObject means
@@ -723,10 +724,9 @@ spec:
                 kubectl exec -it deploy/loom-service -- \
                   mc admin info local
 
-              Rollback path if the distributed pool is misbehaving and
-              the pre-#610 single-node MinIO was kept online for 24h
-              after cutover: flip `MINIO_ENDPOINT` back to the
-              single-node service; write path recovers immediately.
+              If the distributed pool cannot recover safely, pause new
+              submissions and use the verified backup-and-restore procedure;
+              do not redirect writes to an unverified object-store instance.
             runbook_url: "https://github.com/qianyi-sun/loom/blob/dev/docs/architecture/multi-node-topology.md"
 
         # Distributed MinIO cluster health. `minio_cluster_nodes_online_total`

@@ -7,30 +7,22 @@ frontend_environment = "staging"
 frontend_environment_label = "Staging"
 frontend_route_path = "/staging"
 frontend_api_base_path = "/staging"
-# The /dev->/staging route migration (#936/#937) is complete: the live env now
-# serves /staging cleanly (readonly baseline probe and /api/v1/health confirm
-# it), so the predecessor route declaration is dropped as its own comment
-# instructed. Absent frontend_route_path_from the rollout treats /staging as the
-# stable current route (no route transition pending).
+# This profile serves staging at its canonical `/staging` route.
 trajectories_bucket = "loom-staging-trajectories"
 artifacts_bucket = "loom-staging-artifacts"
 env_state_profile = "../environment-state/staging.toml"
 persistent_storage_backend = "static-host-path"
 persistent_storage_host_path_root = "/data/loom-staging"
 
-# #547 item #2: shared trial-image cache. Workers on any node can pull
-# a layered image built on any other node, unlocking OLDLAB's paper
-# 40-slot capacity in practice (without this, cold-cache misses queue
-# behind the per-daemon build slot from #275). Workers need GHCR
-# push credentials mounted for the cache to actually populate; without
-# them the pull-fail path falls back to local build (harmless — same
-# behavior as today).
+# Shared trial-image cache. Workers can pull a layered image built on another
+# node. Workers need GHCR push credentials to populate the cache; failed pulls
+# fall back to a local build.
 trial_cache_registry_repo = "ghcr.io/qianyi-sun/loom-trial-cache"
 
 # Trial execution capacity comes from the release-managed external worker pools,
 # not an in-cluster loom-worker Deployment (omitted here). The GB10 pool is
-# active; an OLDLAB pool is defined but gated off (enabled=false) until #896
-# container isolation lands, so live capacity is GB10 until that flip.
+# configured through the environment-state profile rather than this render
+# profile.
 [replicas]
 web = 1
 
@@ -64,10 +56,8 @@ hosts = [
   { ssh_target = "trt-gb10-15", node_agent_service = "loom-gb10-node-agent.service" },
 ]
 
-# Staging is running a single-node kind cluster on bb8-1 today (#637).
-# Pinned to single-node until the k3s multi-node cluster is
-# provisioned; flip to `multi_node = true` in the same PR that lands
-# the k3s cutover so manifests match reality.
+# Single-node staging profile used by local and rehearsal renders. Shared
+# staging uses `staging.multinode.cluster.toml`.
 [topology]
 multi_node = false
 storage_backend = "host_path"

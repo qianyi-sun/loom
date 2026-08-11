@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# Sanctioned, repeatable deploy of the loom-staging stack to the multi-node
-# OLDLAB k3s cluster. This codifies the hand cutover into one reproducible path
-# so staging no longer depends on ad-hoc operator commands (the interim deploy
-# engine — option "B" — until the #1097 reconciler takes over).
+# Host-local deployment helper for the loom-staging stack on the multi-node
+# OLDLAB k3s cluster. Normal shared-staging operation uses the installed
+# protected rollout authority; this script is its implementation and authorized
+# repair surface.
 #
 #   Usage:  scripts/ops/deploy_staging_k3s.sh <git-sha> [--skip-build]
 #
@@ -153,7 +153,7 @@ fi
 #        Retention/GC needs a staging_mutation_epochs row, which must exist
 #        BEFORE any lifecycle-bearing rows (trials/artifacts). On a fresh DB the
 #        guarded tool applies it; on an already-bootstrapped or already-dirty DB
-#        it reports not-applicable and this is a no-op (see #1137). Non-serving,
+#        it reports not-applicable and this is a no-op. Non-serving,
 #        non-fatal. Runs inside loom-service (has the loom package + DB + MinIO).
 log "bootstrap data-lifecycle mutation-epoch"
 if [ -n "${svc_pod}" ] \
@@ -180,7 +180,7 @@ if [ -n "${svc_pod}" ] \
       && log "data-lifecycle mutation-epoch bootstrapped" \
       || echo "WARN: data-lifecycle bootstrap apply failed" >&2
   else
-    log "data-lifecycle bootstrap not applicable (already bootstrapped/dirty) — skipping (#1137)"
+    log "data-lifecycle bootstrap not applicable (already bootstrapped/dirty) — skipping"
   fi
 fi
 

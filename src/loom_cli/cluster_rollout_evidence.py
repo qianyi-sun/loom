@@ -30,7 +30,7 @@ def normalize_cluster_status_format(
         return "table", [
             _diagnostic(
                 "cluster_status_format_alias",
-                "`loom cluster status --format text` is a legacy spelling; using `table`.",
+                "`loom cluster status --format text` is a compatibility spelling; using `table`.",
                 requested_format=requested_format,
                 normalized_format="table",
             ),
@@ -40,7 +40,7 @@ def normalize_cluster_status_format(
     if value == "json":
         return "json", []
     raise ValueError(
-        "cluster status format must be one of table, json, or legacy alias text; "
+        "cluster status format must be one of table, json, or compatibility alias text; "
         f"got {requested_format!r}"
     )
 

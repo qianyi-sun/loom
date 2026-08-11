@@ -1,7 +1,5 @@
 # Environment naming convention
 
-Status: accepted
-
 Loom has three formal deploy environments. Each is referred to by two names, used
 in different contexts. Mixing them is a bug; this document pins which name goes
 where.
@@ -51,12 +49,3 @@ resolves the other by scanning `deploy/environments/*.toml`:
 `scripts/validate_environment_isolation.py` enforces the per-environment
 identity (namespace, route, buckets, secret refs, allowed refs) and that the
 three route surfaces (`/dev`, `/staging`, `/prod`) are distinct.
-
-## Rationale
-
-Filenames use the long form because it is unambiguous and matches the existing
-`deploy/environments/` layout. Surfaces use the short form because it is terse
-and is what operators type and what appears in URLs and namespaces. Keeping the
-boundary explicit prevents the recurring `development` vs `dev` and
-`production` vs `prod` drift (for example a route or namespace accidentally
-built from the long form, or an env-state file named with the short form).

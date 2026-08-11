@@ -17,13 +17,11 @@ from loom_launcher.adapters._openhands_runtime import (
 from loom_launcher.capture import stream_stdout_jsonl
 from loom_launcher.registry import register_adapter
 
-# #317 Phase 1: this "openhands" name is the legacy adapter slug, but
-# its build_invocation runs `python -m loom_launcher.openhands_sdk_runner`
-# which imports `openhands.sdk` from the `openhands-sdk` package (NOT
-# the older `openhands-ai` package, which provides `openhands.server`
-# and is unused by the SDK-style one-shot runner). The install script
-# creates a dedicated Python 3.12 venv because openhands-sdk 1.27.0 no
-# longer resolves against Python 3.11 task images.
+# The "openhands" compatibility slug invokes
+# `python -m loom_launcher.openhands_sdk_runner`, which uses `openhands.sdk`
+# from the `openhands-sdk` package. The install script creates
+# a dedicated Python 3.12 venv because openhands-sdk 1.27.0 does not resolve
+# against Python 3.11 task images.
 
 
 @dataclass(frozen=True)

@@ -58,10 +58,11 @@ in the structured verifier result, and the runnable Loom step appends
 `logs/verifier/**` to the native artifact patterns so CTRF and verifier
 evidence are collected even when a source task declares `artifacts = []`.
 
-TB2 reports keep legacy task-id stripping for read-only historical reports.
-For rev-6 trials they additionally record the physical profile, Hub package
-digest and metadata version, source-reference snapshot/divergence, Loom bundle
-checksum, verifier identity, and separately supplied runtime provenance.
+TB2 report conversion normalizes both `terminal-bench-2/<task>` and
+`terminal-bench-2@tb2.1-r6/<task>` to the short task ID. Physical revision-6
+trial reports also record the profile, Hub package digest and metadata version,
+source-reference snapshot/divergence, Loom bundle checksum, verifier identity,
+and separately supplied runtime provenance.
 
 ## Publication and activation
 
@@ -104,8 +105,8 @@ rejects stale/forged evidence, provenance/config/checksum drift, incompatible
 task images, missing or non-executable verifier assets, and any missing
 private-workspace isolation.
 
-Release rollouts must never infer a smoke task from the public selector or a
-legacy TB2 task name. For `--scope full-cluster`, pass an audited physical ID
+Release rollouts must never infer a smoke task from the public selector or an
+unversioned TB2 task name. For `--scope full-cluster`, pass an audited physical ID
 explicitly with
 `--smoke-task-id terminal-bench-2@tb2.1-r6/<task-name>`. The
 `current-gb10` scope keeps its separate Loom-owned smoke task. A failed rev-6

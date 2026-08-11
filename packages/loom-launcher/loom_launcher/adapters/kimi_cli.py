@@ -13,7 +13,7 @@ from loom_launcher.adapter import ExecHandle, ModelSpec, TrajectoryEventLike
 from loom_launcher.capture import tail_pty
 from loom_launcher.registry import register_adapter
 
-# #317 Phase 2: install kimi CLI. Version pinned to
+# Install the Kimi CLI. Version pinned to
 # deploy/agent-sandbox/npm-packages.txt.
 _KIMI_PKG = "@moonshot-ai/kimi-code"
 _KIMI_VERSION = "0.18.0"

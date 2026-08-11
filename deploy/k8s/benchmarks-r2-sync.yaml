@@ -15,8 +15,6 @@
 #        --from-literal=secret-key='<r2 secret>' \
 #        --from-literal=bucket='loom-benchmarks-public'`
 #   3. `kubectl apply -f deploy/k8s/benchmarks-r2-sync.yaml`
-#
-# Refs #804.
 apiVersion: batch/v1
 kind: CronJob
 metadata:

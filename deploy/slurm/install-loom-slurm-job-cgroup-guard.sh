@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install the Loom Slurm job cgroup guard (#896) on a non-exclusive worker node.
+# Install the Loom Slurm job cgroup guard on a non-exclusive worker node.
 #
 # The guard delegates the pids controller into each opted-in job cgroup and
 # registers an allocation-capped loom-job-<id>.slice so Docker's systemd cgroup

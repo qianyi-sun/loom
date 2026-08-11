@@ -64,15 +64,9 @@ run-name: >-
 # built on matching CPUs; trusted push jobs publish per-architecture tags and a
 # separate job joins and verifies the manifest list.
 #
-# Implementation note: we don't use docker/setup-qemu-action +
-# docker/setup-buildx-action + docker/build-push-action because the
-# repo's GitHub Actions allowed-actions policy blocks the docker/*
-# marketplace actions (confirmed via startup_failure when any of
-# them is `uses:`-d — originally observed on the pre-2026-06-26
-# carinrc/loom org, kept as a precaution on qianyi-sun/loom until
-# the policy is re-audited). Instead we drive `docker buildx`
-# directly via the CLI (built into the supported hosted images since Docker
-# 23). Native scheduling removes the binfmt/QEMU setup entirely.
+# Implementation note: the workflow drives `docker buildx` directly through
+# the CLI instead of depending on docker/* marketplace actions. Supported
+# hosted images include the CLI; native scheduling removes binfmt/QEMU setup.
 
 on:
   pull_request:

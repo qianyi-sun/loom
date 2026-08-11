@@ -11,7 +11,7 @@ from loom_capacity_agent.legacy_fence import (
     LEGACY_MUTATION_PATH_IDS,
 )
 
-INVENTORY = Path("docs/architecture/capacity-mutation-path-inventory.json")
+INVENTORY = Path("config/capacity-mutation-path-inventory.json")
 
 EXECUTION_ATTEMPT_MUTATION_SOURCE_FLOOR = {
     "src/loom_control_plane/routes/execution_attempts.py:heartbeat_attempt",

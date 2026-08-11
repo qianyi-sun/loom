@@ -1,7 +1,5 @@
 # Frontend Error Recovery And Safe Browser Diagnostics
 
-Status: implementation contract for #783.
-
 This document defines how the Loom SPA contains startup, session, and render
 failures without returning a blank document or exposing raw browser and API
 diagnostics. It also defines the deliberately small support-report contract
@@ -18,9 +16,9 @@ behind the `WEB-*` references shown in recovery screens.
 - Keep raw errors, response bodies, credentials, URLs, and stack traces out of
   rendered copy and the bounded reporter payload.
 
-This design does not add a telemetry backend. The browser reporter is a local
-integration hook; deployments that need durable correlation must provide and
-validate a separate safe transport.
+Loom does not include a telemetry backend for these reports. The browser
+reporter is a local integration hook; deployments that need durable correlation
+must provide and validate a separate safe transport.
 
 ## Failure containment layers
 
@@ -169,7 +167,7 @@ bounded report. The error-event and console bridges sanitize the throwable
 surface before React or the browser can serialize it; boundary state retains
 only the reference ID.
 
-Future reporter transports must preserve this schema exactly or define a new,
+Reporter transports must preserve this schema exactly or define a new,
 reviewed version. They must not attach the original throwable for convenience.
 
 ## Validation expectations
@@ -194,10 +192,10 @@ runs under both `/dev` and `/prod` prefixes in desktop and mobile Chromium.
 Candidate-bound browser evidence remains required for rollout acceptance; unit
 tests alone do not prove production browser event behavior.
 
-## Browser-gate and rollout dependency interface
+## Browser-gate and rollout interface
 
-Issue #773 owns the single required frontend quality gate and its generic
-production-build Playwright server, projects, closed API router, response
+The frontend quality gate provides the shared production-build Playwright
+server, projects, closed API router, response
 ledger, accessibility checks, and fail-closed console/page-error/network
 guards. This recovery work must consume that harness rather than add another
 workflow, Playwright configuration, coverage gate, or aggregate status.
@@ -217,6 +215,5 @@ The staging admin browser flow remains a broker-owned, candidate-bound healthy
 acceptance check. Ephemeral kind remains a non-protected development cluster
 with only the credential-free deny probe. Neither path may inject recovery
 faults, mint or read an admin session for local tests, relax its console guard,
-or substitute for the local browser matrix. Recovery rollout evidence remains
-unmet until the next explicitly authorized brokered rollout validates the fixed
-candidate without fault injection.
+or substitute for the local browser matrix. Protected rollout acceptance
+validates the fixed candidate without fault injection.

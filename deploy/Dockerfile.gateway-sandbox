@@ -1,5 +1,5 @@
 # loom-llm-gateway-sandbox — per-node TLS-terminating HTTP CONNECT
-# proxy (#78 Phase B). Sandbox containers reach LLM gateways
+# proxy. Sandbox containers reach LLM gateways
 # through this binary instead of having direct host network access.
 #
 # Multi-stage: golang-alpine builder, distroless static runtime. The

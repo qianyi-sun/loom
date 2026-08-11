@@ -49,8 +49,7 @@ def get_adapter(name: str) -> AgentAdapter | None:
 
 
 def all_adapters() -> list[AgentAdapter]:
-    """Snapshot of every registered adapter — used by conformance tests
-    and the `loom-launcher list` CLI (future)."""
+    """Snapshot of every registered adapter for catalogs and conformance tests."""
     return list(_REGISTRY.values())
 
 

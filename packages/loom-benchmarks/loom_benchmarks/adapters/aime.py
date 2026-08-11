@@ -7,12 +7,9 @@ Implemented as a standalone python verifier (`verifier/check.py`)
 invoked by `verifier/run.sh` so we don't have to thread quotes through
 a shell here-doc.
 
-PR-2 (per-year split): the AI-MO `aimo-validation-aime` dataset covers
-2022/2023/2024. We ship one adapter per year so users can pick AIME-22
-vs AIME-24 vs both with a single click on the NewBatch picker, rather
-than going through the tag-filter card every time. AIME-25 has its own
-adapter (`aime_25.py`) because it lives in a different upstream
-(MathArena, released after AI-MO froze the validation set).
+The AI-MO `aimo-validation-aime` dataset supplies the 2022, 2023, and 2024
+rows through one adapter per year. AIME 2025 uses its own adapter and the
+MathArena upstream.
 """
 
 from __future__ import annotations

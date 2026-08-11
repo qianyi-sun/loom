@@ -184,10 +184,9 @@ redacted full request/response bodies into `provider_logs/`.
 Versioned training handoff profiles such as
 `--mode raw-harbor-tb2-v1` reconstruct SFT rows from those provider logs
 plus reward/metrics joins; the Loom event stream remains an audit spine rather
-than the SFT source of truth for that profile. For `terminus-2` trials, typed
-`terminus2_*` events and Harbor checkpoint artifacts are the intended source
-for a future `raw-harbor-tb2-v2` export; until that mode ships in the delivery
-API, use `raw-harbor-tb2-v1` or the typed trajectory download for debugging.
+than the SFT source of truth for that profile. For `terminus-2` trials,
+`--mode raw-harbor-tb2-v2` projects execution from typed `terminus2_*` events
+and embeds hash-verified native Harbor checkpoint artifacts.
 See [`terminus2-runtime.md`](terminus2-runtime.md).
 
 Codex subprocess alignment runs use a separate adapter-specific path
@@ -286,7 +285,7 @@ with generic `internal_error` or agent logic failures.
 | `input_tokens`   | from DialectAdapter                                      |
 | `output_tokens`  | from DialectAdapter                                      |
 | `provider_extras`| JSONB — cache + reasoning counters verbatim on success; `_loom_call_status=failed` plus failure metadata on failed upstream attempts |
-| `request_params` | JSONB — redacted normalized generation controls. NULL means pre-#85 legacy/unavailable data |
+| `request_params` | JSONB — redacted normalized generation controls; `NULL` means the data is unavailable |
 | `cost_usd`       | computed at insert; cached for usage metrics/audits     |
 | `rate_card_hash` | rate-card table hash or sentinel such as `failed-upstream` |
 | `attempt`        | gateway-internal attempt number that produced the success or final failed response |

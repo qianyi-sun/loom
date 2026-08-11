@@ -1,7 +1,8 @@
-"""Legacy Terminus-2 subprocess runner — removed (#744).
+"""Compatibility entry point for the built-in Terminus2 runtime.
 
 The Harbor-embedded worker runtime lives at ``loom.agent.terminus2.runtime``.
-This module remains only so import paths fail with a clear migration message.
+This module makes the unsupported launcher invocation fail with a clear usage
+message.
 """
 
 from __future__ import annotations
@@ -12,9 +13,9 @@ import sys
 def main(argv: list[str] | None = None) -> int:
     del argv
     print(
-        "terminus-2 no longer runs via loom_launcher.terminus_2_runner. "
-        "Use the Harbor-embedded LoomTerminus2Runtime (worker routes agent.name "
-        "'terminus-2' automatically). See #744.",
+        "terminus-2 is not a loom-launcher subprocess runtime. "
+        "Use the Harbor-embedded LoomTerminus2Runtime; the worker routes agent.name "
+        "'terminus-2' automatically).",
         file=sys.stderr,
     )
     return 2

@@ -1,12 +1,8 @@
-# Pipeline Orchestrator V1
+# Pipeline orchestrator
 
-Status: repository implementation; disabled by default
-
-Tracking: [qianyi-sun/loom#1212](https://github.com/qianyi-sun/loom/issues/1212)
-
-The standalone `loom-pipeline-orchestrator` controller advances durable
-`PipelineRun` graphs defined by the accepted
-[Pipeline Run Graph V1](adr/pipeline-run-graph-v1.md). It owns graph projection,
+The standalone `loom-pipeline-orchestrator` controller is disabled by default.
+When enabled, it advances durable `PipelineRun` graphs from immutable
+`RunGraphSpecV1` records and owns graph projection,
 readiness freezing, bounded fan-out, retry decisions, hard-budget accounting,
 terminal-cause latching, and final result projection. It does not execute
 containers, commit Artifact objects, expose a public API, or create `Batch` or
@@ -33,9 +29,9 @@ Reconciliation is replay-safe:
 6. Settle or release reservations, apply the closed retry allowlist, and
    project the run result after the terminal barrier closes.
 
-Attempt creation and downstream execution remain separate. The worker and
-Artifact commit boundaries are delivered by their owning issues; this
-controller only writes the durable fenced handoff.
+Attempt creation and downstream execution are separate. This controller stops
+at the durable fenced handoff; it does not dispatch the Attempt to a worker or
+commit its Artifact objects.
 
 ## Hard budgets and cancellation
 
@@ -57,9 +53,9 @@ terminal cause is present.
 Acceptance preflight and fault-hold behavior is expressed through strict,
 injected protocols. The controller persists authorization, candidate, worker,
 Slurm allocation, capability, policy, and epoch snapshots before advancing a
-preflight fence. Production adapters and the fixed-candidate acceptance run
-remain owned by their downstream acceptance issues. The controller never
-reads secret values from graph or result documents.
+preflight fence. The process does not provide production acceptance adapters
+or execute a fixed-candidate acceptance run. It never reads secret values from
+graph or result documents.
 
 ## Process and deployment
 

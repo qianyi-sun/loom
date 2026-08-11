@@ -1,7 +1,5 @@
-# Native Let's Encrypt issuance for yylx.world on the k3s staging cluster
-# (#1114). cert-manager self-issues + auto-renews the real cert into the
-# ingress TLS secret — replacing the retired kind->k3s sync bridge, so k3s no
-# longer depends on the kind cluster for TLS.
+# Native Let's Encrypt issuance for yylx.world on the k3s staging cluster.
+# cert-manager issues and renews the certificate in the ingress TLS secret.
 #
 # PREREQUISITE — clean egress to the ACME API: the CNI pod network MITMs
 # outbound HTTPS (cert-manager sees a fake `ingress.local` cert), but the host

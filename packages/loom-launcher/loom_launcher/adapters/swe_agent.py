@@ -14,7 +14,7 @@ from loom_launcher.adapter import ExecHandle, ModelSpec, TrajectoryEventLike
 from loom_launcher.capture import tail_log_file
 from loom_launcher.registry import register_adapter
 
-# #317 Phase 2: SWE-agent ships as a git-installable editable Python
+# SWE-agent is a git-installable editable Python
 # package (matches deploy/agent-sandbox/python-requirements.txt). Tag
 # pinning is the version-pin equivalent for git+https installs; CI
 # lint accepts the `@<tag>` portion via _looks_pinned_pip.

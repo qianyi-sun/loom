@@ -12,7 +12,7 @@ owners create it, Loom encrypts the API key at rest, the LLM Gateway uses it
 server-side, and users select the connection plus model id when creating a
 batch.
 
-Loom v1.0 does not host model inference for teams. The deployed platform runs
+Loom does not host model inference for teams. The deployed platform runs
 the evaluation, gateway, scheduling, storage, and monitoring surfaces; the
 model-serving endpoint is supplied and operated by the team, whether it is a
 third-party API or a self-hosted OpenAI-compatible service such as vLLM.
@@ -98,10 +98,10 @@ Common failures:
   or another model is selected.
 - Noisy model list: hide non-agent models in the Models tab.
 
-### Harness Compatibility Plan
+### Harness Compatibility Matrix
 
 Before submitting an agent/provider smoke matrix, generate the repo-known
-harness/provider plan:
+harness/provider matrix:
 
 ```bash
 loom qa matrix \
@@ -117,9 +117,9 @@ Claude Code, and Gemini CLI. The JSON schema records each agent harness x
 provider endpoint cell as `supported`, `skipped`, or `blocked`, with protocol
 surface (`chat`, `responses`, `messages`, or `gemini`), streaming, tool-use,
 request-param, max-token, usage, diagnostic, and redaction status. Generic
-`supported_providers=["*"]` agents are still emitted as per-agent rows so #35
-can consume the matrix directly. Use it as pre-submit input for the live
-low-cost smokes tracked by #114 and for the agent x benchmark planning in #35.
+`supported_providers=["*"]` agents are still emitted as per-agent rows. Use the
+matrix to reject unsupported harness/provider combinations before spending
+live provider calls.
 
 If live-smoke evidence is available, merge it from a local JSON file:
 
@@ -132,12 +132,12 @@ loom qa matrix \
 
 Evidence files may include sanitized `live_smoke` fields such as status,
 checked time, `llm_calls_count`, usage, diagnostics, redaction status, and an
-issue-comment URL. The CLI rejects raw-looking bearer tokens, provider API keys,
+evidence URL. The CLI rejects raw-looking bearer tokens, provider API keys,
 or signed URLs in evidence, notes, URLs, and serialized output; keep credentials
 as safe references such as `env:PROVIDER_API_KEY`.
 
-For #35 pre-submit planning, combine that compatibility JSON with an offline
-catalog snapshot before spending live provider calls:
+Combine that compatibility JSON with an offline catalog snapshot to screen an
+agent/benchmark matrix before spending live provider calls:
 
 ```bash
 loom qa matrix \
@@ -153,13 +153,13 @@ The catalog snapshot is a local JSON object with `agents.items[]` and
 representative task and avoid doomed submissions: license evidence,
 capability evidence, and worker architecture evidence. The preflight output
 uses `planned_submit`, `blocked`, and `skipped` rows. Provider mismatches come
-from the #114 compatibility plan, no-model agents are emitted once per
+from the compatibility matrix, no-model agents are emitted once per
 benchmark as provider endpoint `no-model`, and supported-but-unsmoked provider
 cells stay blocked as `pending_live_evidence`.
 
-This is planning evidence only. It does not satisfy live #35 acceptance and it
-does not log in, call `/api/v1/*`, call a model provider, submit a batch, read
-artifact storage, or require live secrets.
+This offline output does not prove live compatibility. The command does not log
+in, call `/api/v1/*`, call a model provider, submit a batch, read artifact
+storage, or require live secrets.
 
 ## GPU Cluster Checkpoint
 
@@ -240,8 +240,10 @@ If the final URL uses a non-standard port, such as
 `http://202.78.161.51:18001/v1`, the Loom Kubernetes deployment also needs an
 operator-approved egress rule before provider validation and Gateway calls can
 reach it. Send the operator the non-secret endpoint IP/CIDR and TCP port, not
-the provider API key. The operator flow is documented in
-[`operator-runbook.md`](../runbooks/operator-runbook.md#byo-provider-egress-allowlist).
+the provider API key. The enforcement boundary is documented under
+[provider egress controls](../architecture/sandbox-isolation.md#provider-egress-controls);
+operators declare the narrow IP-or-CIDR and TCP port pair in the target cluster
+profile.
 
 When you generated the bundle with `--expose bastion-forward`, run the forward
 helper on the bastion after Slurm assigns a compute node:

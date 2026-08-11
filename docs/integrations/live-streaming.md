@@ -15,7 +15,7 @@ team tokens only see their own team's trials.
 
 Seq-cursor paginated event replay. Reads from the Postgres
 `trial_events` table with a MinIO trajectory-JSONL fallback for
-trials whose worker shipped before the dual-write cutover.
+trials that have no rows in `trial_events` but do have a stored trajectory.
 
 | Query param  | Default | Meaning                                                      |
 |--------------|---------|--------------------------------------------------------------|
@@ -54,7 +54,7 @@ seen seq).
 The route sets `Cache-Control: no-cache` and `X-Accel-Buffering: no`
 so proxies do not buffer chunks.
 
-**SSE contract (Slice 3e):**
+**SSE contract:**
 
 | Event kind      | Emitted when                    | Data body                                        |
 |-----------------|---------------------------------|--------------------------------------------------|
@@ -76,9 +76,9 @@ curl -N -H "Authorization: Bearer $LOOM_API_TOKEN" \
 
 ### `GET /api/v1/trials/{trial_id}/trajectory?cursor=N&limit=M`
 
-Legacy MinIO-backed pagination. Kept for callers that pre-date the
-seq cursor. Retains a line-cursor semantic (`cursor` counts non-blank
-JSONL lines). Prefer `/events?after_seq=N` for new code.
+Compatibility pagination backed by the stored MinIO trajectory. Its line cursor
+counts non-blank JSONL lines. Prefer `/events?after_seq=N` for seq-cursor
+pagination.
 
 ## SPA integration
 
@@ -110,8 +110,5 @@ awaits with a fixed poll-interval fallback.
 The MinIO trajectory JSONL is still written for every trial by the
 worker (`TrajectoryWriter`); the `trial_events` table receives the
 same events via the worker's `CpEventSink` batched dual-write. In
-Slice 3c and later MinIO functions as an archive/audit-log copy;
-the SSE reader path is Postgres-first.
-
-Full slice history + architectural rationale live in the
-`fix-5-slice3*` commit series on `dev`.
+the current path MinIO is the archive/audit-log copy and the SSE reader is
+Postgres-first.

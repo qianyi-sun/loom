@@ -20,7 +20,7 @@ first live request hits an upstream timeout. A sentinel model name
 that isn't a real provider model forces the proxy to try to route,
 which is what actually matters.
 
-Spec: docs/architecture/responses-api-support-probe.md
+Reference: docs/architecture/responses-api.md
 """
 from __future__ import annotations
 

@@ -11,7 +11,7 @@ spec:
     metadata:
       labels: { app: loom-llm-gateway }
     spec:
-      # #547: bumped from k8s default 30s to 300s so long-running
+      # A 300-second grace period lets long-running
       # LLM calls (Claude Opus with thinking, o1) have time to
       # complete before SIGKILL. The preStop hook calls /drain
       # which marks the pod not-ready and waits for in-flight
@@ -113,7 +113,7 @@ spec:
           readinessProbe:
             httpGet: { path: /healthz, port: 9100 }
             periodSeconds: 5
-          # #547: preStop runs BEFORE SIGTERM. It POSTs to /drain,
+          # preStop runs before SIGTERM. It POSTs to /drain,
           # which flips /healthz to 503 (Service stops routing new
           # requests) and blocks until in-flight requests finish or
           # the drain timeout (270s) fires. This prevents rolling

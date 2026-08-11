@@ -1,77 +1,32 @@
-# GB10 Dynamic Capacity and Membership Contract
+# GB10 Capacity and Membership
 
-Status: accepted design contract
+The GB10 inventory is the exact set `trt-gb10-1` through `trt-gb10-15`.
+Inventory membership is stable; health, workload safety, and allocatable
+resources vary independently.
 
-Decision date: 2026-07-31
+Each node heartbeat reports bounded health and resource observations. A
+healthy node may advertise zero capacity while foreign or Loom work consumes
+its resources. A stale or unhealthy node is ineligible for new work but
+remains visible in fleet status and release evidence.
 
-Tracking: [#822](https://github.com/qianyi-sun/loom/issues/822)
+The scheduler uses currently allocatable CPU, memory, GPU, and slot values
+rather than assuming a fixed slot count per host. Explicit architecture or
+pool requirements remain hard eligibility constraints. Resource-neutral work
+can be placed only where the current worker and scheduler contracts report a
+compatible shape.
 
-## Membership
+Protected rollouts, environment-state checks, trust preparation, node-agent
+convergence, and release gates all use the same 15-host inventory. Missing
+hosts, duplicate identities, stale heartbeats, invalid observations, or
+candidate/generation drift fail the relevant readiness check; they are not
+hidden by shrinking the inventory.
 
-The GB10 worker inventory is always the exact set `trt-gb10-1..15`. Every
-machine remains in the worker-health model and reports a heartbeat plus bounded
-resource observations. Resource contention does not change inventory
-membership.
+Node-agent and worker status are separate. A host can have a fresh node-agent
+heartbeat but no active worker registration, or an active worker whose
+reported capacity is zero. Release checks that require runnable capacity must
+verify both layers.
 
-The former active-14/140-slot policy and static `trt-gb10-7` exclusion are
-superseded. The checked-in inventory, worker-pool configuration, trust
-topology, readiness gates, tests, and runbooks now use the complete 15-host
-membership. Historical runtime evidence that expresses the former policy is
-dated evidence only, not the target contract. #822 continues to own dynamic
-resource observation and placement acceptance across that fixed membership.
-
-## Health and capacity are separate
-
-Each inventory node has independent health and capacity state:
-
-- **healthy with capacity**: eligible for compatible Loom placement;
-- **healthy but busy**: remains heartbeat-managed and visible, advertises zero
-  or reduced free CPU, memory, PID, GPU/TRES, and trial slots, and receives no
-  new Loom work until resources are available;
-- **temporarily unhealthy**: network, heartbeat, service, or resource-
-  observation failure blocks placement while the node remains visible in the
-  inventory and self-heal state;
-- **recovered**: fresh health and resource observations restore placement
-  eligibility automatically without an inventory edit or re-admission change.
-
-The physical maximum may be 150 trial slots when all 15 nodes each safely
-provide 10 slots. This is not a guaranteed or fixed allocatable value. Current
-capacity is derived from fresh resource observations and may be lower without
-changing membership.
-
-## Scheduling
-
-When a node cannot satisfy a job's requested resources, the scheduler keeps the
-job pending or places it on another compatible node with sufficient capacity.
-It must not mark the busy node stopped, remove it from `allowed_nodes`, or
-require operator re-admission after resources are released.
-
-No Loom controller, rollout, acceptance test, or recovery path may cancel,
-preempt, stop, or kill a foreign job to make room. A disruptive Loom-owned
-convergence step waits for a safe window while heartbeat and non-invasive
-health/resource observation continue.
-
-## Evidence and release gates
-
-Candidate-bound evidence must:
-
-1. expect exactly `trt-gb10-1..15` with `excluded_nodes=[]`;
-2. record heartbeat and health state for all 15 nodes;
-3. report theoretical maximum, currently allocatable, busy, unhealthy, and
-   pending capacity separately;
-4. prove a healthy busy node receives no new Loom placement and another
-   eligible node can receive the work;
-5. prove resource release restores eligibility within the reviewed reconcile
-   bound;
-6. prove a health failure remains visible and recovers through the supported
-   self-heal path.
-
-Historical 14-host rollout artifacts remain dated evidence of those runs. They
-must be labelled historical and cannot define current topology or acceptance.
-
-## Implementation boundary
-
-This document records the target contract only. It does not authorize live
-Slurm, node-agent, systemd, environment-state, rollout, or staging mutation.
-Code, configuration, tests, and live activation converge separately through
-#822 and their existing authority gates.
+The checked-in inventory and pool configuration under `deploy/worker-pools/`
+are the operator authority for host identities and transport. Current runtime
+health and capacity come from service observations, not from archived rollout
+reports.

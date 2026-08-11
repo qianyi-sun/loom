@@ -1,56 +1,29 @@
 # Runbooks
 
-Operator-facing procedures for running Loom in production or shared-dev
-environments. `docs/index.md` at the repo docs root is the task-router.
+Current procedures for Loom operators and developers. Start with the master
+operator runbook; use the narrower runbooks for the named environment or
+capacity workflow.
 
-## Reading order
+## Cluster and release operations
 
-1. **[operator-runbook.md](operator-runbook.md)** — the master runbook.
-   Deployment, upgrade/rollback, rate-card management, token rotation, alarm
-   response, backup/restore, capacity planning. Everything else here is
-   scoped by phase or scenario; the master runbook covers the steady state.
+- **[Operator runbook](operator-runbook.md)** — deployment, upgrades,
+  rollback, credentials, storage, capacity, monitoring, and incident response.
+- **[Staging release validation](staging-launch.md)** — candidate-bound checks
+  required before production promotion.
+- **[Multi-node staging on k3s](deploy-staging-k3s.md)** — topology,
+  prerequisites, authorized host helper, verification, and recovery.
 
-2. **[first-prod-release-runbook.md](first-prod-release-runbook.md)** — the
-   single operator path for the first `main`-based production release.
-   First-prod bootstrap, temporary staging capacity leases, frontend route
-   checks, production release gate, rollback preparation, emergency staging
-   drain. Read this before doing the first production cut; retire it for
-   normal production ops.
+## Capacity and development environments
 
-3. **[staging-launch.md](staging-launch.md)** — release-owner checklist for
-   promoting `dev` to `main`. Deployment, onboarding, Run Library, security,
-   and smoke evidence gates.
+- **[Remote worker pool](remote-worker-pool.md)** — external Docker workers,
+  Slurm-backed capacity, tunnels, and recovery.
+- **[Developer sandboxes](developer-sandboxes.md)** — candidate-bound shared
+  development sandboxes.
+- **[Shared sandbox capacity](shared-sandbox-capacity-broker.md)** — request,
+  lease, drain, observation, and evidence interface for shared capacity.
+- **[Local development](local-dev-workflow.md)** — local kind deployment and
+  pre-push checks.
 
-4. **[staging-migration-runbook.md](staging-migration-runbook.md)** — live
-   migration from the legacy `public-beta` name to `staging`. Run this when
-   the pilot cluster is drained.
-
-5. **[staging-dev-tip-cutover.md](staging-dev-tip-cutover.md)** — flip live
-   staging from the sealed candidate to the tip of `dev` in one coordinated
-   window: un-seal to merged-dev, provision, then `start` (backup → build →
-   migrate `0073` → deploy `/staging` + pool rename), with abort/rollback.
-
-6. **[full-max-slot-canary-runbook.md](full-max-slot-canary-runbook.md)** —
-   preparation artifact for the unified staging canary. Wait for coordinating
-   thread `GO` before actually submitting.
-
-7. **[remote-worker-pool.md](remote-worker-pool.md)** — join extra
-   Docker-capable hosts to an existing Loom control node for shared-dev or
-   staging capacity before moving to full Kubernetes cluster mode.
-
-8. **[local-dev-workflow.md](local-dev-workflow.md)** — developer-facing
-   setup for pre-push testing on a laptop. Single-node kind, in-cluster
-   `k8s_worker` by default with external Slurm as an advanced option. Local is
-   not a formal environment; it is not in the identity contract or on
-   `yylx.world`.
-
-9. **[shared-sandbox-capacity-broker.md](shared-sandbox-capacity-broker.md)** —
-   submit-host request/lease, fair-share, drain, observation, and evidence
-   contract for the three disposable developer sandboxes sharing GB10/OLDLAB.
-
-## When to open a new runbook
-
-For a repeated procedure that spans more than a few commands, has hazards
-(rollback / drain / dual-write), or coordinates multiple operators. Ad-hoc
-troubleshooting stays inside the master `operator-runbook.md` under the
-matching section.
+Create a separate runbook only for a repeatable procedure with distinct safety,
+rollback, or coordination requirements. Put component behavior in architecture
+docs and one-off migration records in `archive/docs/runbooks/`.

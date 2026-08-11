@@ -75,7 +75,8 @@ def test_governance_docs_define_path_inferred_validation_gates() -> None:
     for document in (contributing, quickstart):
         normalized_document = " ".join(document.split())
         assert "visible and successful on the current head SHA" in normalized_document
-        assert "main` accepts only" in normalized_document.lower()
+        assert "no active `main` branch ruleset" in normalized_document.lower()
+        assert "same-repository `dev`" in normalized_document
         assert "manual squash merge" not in normalized_document.lower()
         assert "never enable auto-merge" not in normalized_document.lower()
 
@@ -89,7 +90,6 @@ def test_main_promotion_is_ci_auto_merged_and_separates_release_approval() -> No
     contributing = _read("CONTRIBUTING.md")
     quickstart = _read("docs/contributing/contributor-quickstart.md")
     operator_runbook = _read("docs/runbooks/operator-runbook.md")
-    first_prod_runbook = _read("docs/runbooks/first-prod-release-runbook.md")
     pr_template = _read(".github/PULL_REQUEST_TEMPLATE.md")
     release_template = _read(".github/ISSUE_TEMPLATE/release.yml")
 
@@ -97,7 +97,6 @@ def test_main_promotion_is_ci_auto_merged_and_separates_release_approval() -> No
         contributing,
         quickstart,
         operator_runbook,
-        first_prod_runbook,
         pr_template,
         release_template,
     ):
@@ -106,7 +105,7 @@ def test_main_promotion_is_ci_auto_merged_and_separates_release_approval() -> No
         assert "never enable auto-merge" not in normalized_document
         assert "auto-merge" in normalized_document
 
-    for document in (contributing, operator_runbook, first_prod_runbook, pr_template):
+    for document in (contributing, operator_runbook, pr_template):
         normalized_document = " ".join(document.split()).lower()
         assert "release_owner_approval" in normalized_document
         assert "production environment approval" in normalized_document
@@ -119,6 +118,7 @@ def test_main_promotion_is_ci_auto_merged_and_separates_release_approval() -> No
 def test_release_promotion_template_requires_first_prod_evidence() -> None:
     contributing = _read("CONTRIBUTING.md")
     operator_runbook = _read("docs/runbooks/operator-runbook.md")
+    staging_validation = _read("docs/runbooks/staging-launch.md")
     pr_template = _read(".github/PULL_REQUEST_TEMPLATE.md")
 
     for required_text in (
@@ -132,12 +132,12 @@ def test_release_promotion_template_requires_first_prod_evidence() -> None:
 
     assert "immutable `vX.Y.Z` production release tags" in contributing
     assert "Never force-move or reuse a published prod tag" in contributing
-    assert "Production tags are immutable SemVer Git tags on `main`" in operator_runbook
-    assert "Production deployment dispatches use `main` only" in operator_runbook
+    assert "immutable SemVer `prod_tag`" in operator_runbook
+    assert "deploy-environment.yml` from `main`" in operator_runbook
     assert "`prod_tag`" in operator_runbook
-    assert "`frontend_route_evidence`" in operator_runbook
-    assert "`prod_staging_isolation`" in operator_runbook
-    assert "`raw_delivery_export_status`" in operator_runbook
+    assert "`frontend_route_evidence`" in staging_validation
+    assert "`prod_staging_isolation`" in staging_validation
+    assert "`raw_delivery_export_status`" in staging_validation
 
 
 def test_issue_templates_use_current_loom_language() -> None:

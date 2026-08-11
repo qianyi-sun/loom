@@ -1,6 +1,6 @@
 """ClaudeCodeAdapter — Anthropic claude-code CLI in --print mode.
 
-Per Amendment A12.1: instruction is passed via ``--print <text>``; there
+The instruction is passed via ``--print <text>``; there
 is no ``--workdir`` flag, so we wrap in ``sh -c "cd <workdir> && claude ..."``.
 Auto-update + telemetry are disabled via env vars, NOT CLI flags
 (``CLAUDE_CODE_AUTO_UPDATE=false`` and ``DISABLE_TELEMETRY=1``).
@@ -20,8 +20,8 @@ from loom_launcher.adapter import ExecHandle, ModelSpec, TrajectoryEventLike
 from loom_launcher.capture import stream_stdout_jsonl
 from loom_launcher.registry import register_adapter
 
-# #317 Phase 1: install_script run inside the trial sandbox before
-# the claude-code CLI is invoked. Version pinned to match
+# The install script runs inside the trial sandbox before the claude-code CLI
+# is invoked. Its version matches
 # deploy/agent-sandbox/npm-packages.txt so smoke + production agree.
 # Multi-distro: detect apk vs apt-get for installing node + npm + procps
 # (claude-code's node-tree-kill dep shells out to ps/pgrep).

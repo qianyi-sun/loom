@@ -1,11 +1,7 @@
-"""`loom providers {create,list,show,update,delete,share,unshare}` — manage
-per-team LLM provider connections on the deployed Loom server.
+"""`loom providers` — manage per-team provider connections and model catalogs.
 
 Wraps the routes shipped in `src/loom_service/routes/provider_connections.py`.
 Requires `loom auth login` to have been run first.
-
-The `test` and `models` subcommands land in a follow-up PR after the
-server routes for those exist.
 
 Per cluster-deploy.md §CLI surface argv-hygiene rule, `--api-key`
 accepts only the same `env:VAR | file:PATH | -` indirection forms as
@@ -544,8 +540,8 @@ def _rotate_key(args: argparse.Namespace) -> int:
          under a fresh ref.
       2. `provider_connections.encrypted_api_key_ref` is swapped to
          the new ref; the row's `updated_at` advances.
-      3. The OLD secret stays decryptable but is no longer pointed
-         at by any connection. Phase 5 ships a cleanup job.
+      3. The old secret stays decryptable but is no longer referenced
+         by a connection.
 
     Gateway-side: there is no in-memory cache for provider connection
     rows (the gateway looks up by id per-request — see

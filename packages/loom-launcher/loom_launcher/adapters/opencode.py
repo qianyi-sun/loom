@@ -15,7 +15,7 @@ from loom_launcher.adapter import ExecHandle, ModelSpec, TrajectoryEventLike
 from loom_launcher.capture import stream_stdout_jsonl
 from loom_launcher.registry import register_adapter
 
-# #317 Phase 2: install opencode CLI. Version pinned to
+# Install the OpenCode CLI. Version pinned to
 # deploy/agent-sandbox/npm-packages.txt.
 _OPENCODE_PKG = "opencode-ai"
 _OPENCODE_VERSION = "1.17.8"

@@ -1,100 +1,58 @@
-# Loom vs. Harbor
+# Loom and Harbor
 
-Loom was built ground-up as an alternative to
-[Harbor](https://github.com/harbor-framework/harbor). After a three-round
-audit of Harbor's source (2026-06-05), we concluded "replace, not fork."
-This doc captures the concrete tradeoffs so contributors can judge when
-Loom is the right choice and what gaps remain.
+Loom and [Harbor](https://github.com/harbor-framework/harbor) both execute
+agents against benchmark tasks in isolated environments. They are separate
+projects with different service boundaries; neither is a drop-in replacement
+for the other.
 
-## Where Loom is better
+This page compares the interfaces present in the current Loom tree with
+Harbor's public upstream tree. Harbor evolves independently, so use its own
+documentation for its exact adapter, agent, and environment catalog.
 
-Each bullet cites the design decision behind it; "evidence" points
-into Harbor's tree where the contrast lives.
+## Current architecture
 
 | Area | Loom | Harbor |
 |---|---|---|
-| Trial model | One `Trial` class — every task has `steps`; single-step is a one-element list (`src/loom/trial/trial.py`). | Two classes (`SingleStepTrial` + `MultiStepTrial`) with `Trial.create()` dispatching on `task.has_steps`; ~300 LOC of duplicated lifecycle code. |
-| Trajectory model | **Event-sourced JSONL** appended as the trial runs (`src/loom/trajectory/writer.py`); ATIF v1.7 projected at finalize. Partial trajectories survive worker crashes; events stream to subscribers. | Mutable `AgentContext` struct + `Trajectory` validated as a complete array at end. Can't be built incrementally without violating the model; crashed runs lose partial state. |
-| Backend abstraction | Six-method `Driver` Protocol + declarative `Capabilities` (`src/loom/driver/base.py`). New cloud backends are ~150–300 LOC adapters — proven with Daytona (`src/loom_drivers/daytona/`) and Modal (`src/loom_drivers/modal/`). | `BaseEnvironment` subclasses are 500–1100 LOC each. Modal alone is 1100 LOC; ~75–80% of Docker's 640 LOC is backend-specific. Strategy patterns reimplemented per backend. |
-| Cost accounting | Raw token usage frozen per call in `llm_calls`; trial/batch read APIs expose token totals, projected cost, and cost status, while usage views add admin totals and per-batch drilldown. Per-call `cost_usd` snapshots remain audit data for gateway metrics and missing-rate-card diagnostics. | `cost_usd` computed at emit and frozen forever in the trajectory. RFC0001 acknowledges "pricing can change, making historical trajectories inaccurate." Provider-specific charges hide in `metrics.extra` with no schema. |
-| Verifier surface | Typed `VerifierResult { rewards, checks: list[CheckResult], confidence, structured, error: VerifierError }` (`src/loom/verifier/base.py`); five concrete verifiers (Pytest, Script, Structured, LLMJudge, Composite). | Single concrete verifier; `VerifierResult.rewards: dict[str, float|int] | None` only. Failures leak as exceptions (`MissingTestDirError`, `ParsingError`, `VerifierOutputNotFound`). |
-| MCP integration | Typed `mcp: Sequence[MCPConnection]` channel passed to `AgentRuntime.run()`. | MCP server descriptions appended into the instruction string as prose. |
-| `TrialResult` schema | `steps: list[StepResult]` is the single source of truth; trajectory pointers (`trajectory_uri`, `atif_uri`, `atif_schema_version`) are first-class fields. | `agent_result` + `verifier_result` duplicated at trial level AND in `step_results[0]`. Trajectory orphaned — referenced only by `trial_uri`. Timing fields duplicated at trial + step levels. |
-| LLM Gateway | Centralized FastAPI service with multi-dialect routing (Anthropic native, OpenAI Chat + Responses, Google Gemini), bearer auth, per-(team, trial, step) attribution, rate-card lookup. | No equivalent — agents call providers directly; cost is opportunistic. |
-| Scheduling | DRF (Dominant Resource Fairness) across teams via Postgres `FOR UPDATE SKIP LOCKED` claim SQL (`src/loom_control_plane/scheduler/claim.py`). Multi-worker, fair, no double-claiming. | Single `asyncio.Semaphore(n_concurrent)` gates all trials; no per-team, per-backend, or per-provider quota. |
-| Adapter packaging | Out-of-tree PyPI packages discovered via `loom.benchmarks` entry-points; pluggable without forking the runtime (`packages/loom-benchmarks/`, `packages/loom-benchmark-terminal-bench-2/`). Plus `config/benchmarks.toml` for no-Python operator registration: `[[local]]` registers a folder of `task.toml` bundles as a benchmark; `[[remap]]` reuses an existing adapter against a fork of its upstream. | 80 in-tree adapters under `adapters/`; coupled to repo commits via `registry_commit_sha`. No no-code path for operator-owned task folders. |
-| Per-trial agent installation | `AgentAdapter.install_script` runs inside a layered image built on top of the benchmark's `task_image` at trial spawn (`src/loom_worker/trial_cache.py`). Cache key is `sha256(task_image_digest + install_script_text)` — content-addressed, so the same `(image, adapter)` pair across teams and workers hits the same cache entry. An optional shared registry (`trial_cache_registry_repo`) makes the cache cluster-wide; cluster-wide builder slots (CP `active_trial_cache_builds` table + 60s heartbeat) prevent duplicate rebuilds, and daemon-wide build slots (`trial_cache_build_max_concurrent`) cap different cold cache keys on shared Docker daemons. CI lint (`scripts/check_install_scripts_pinned.py`) refuses unpinned versions. | Per-trial install via env class methods (`apt_packages`, `pip_packages`); cache is per-worker only, no cross-worker sharing, no slot coordination. Version pinning is convention, not enforced. |
-| Worker fencing + cleanup | Fenced state PATCH (`worker_id` match in UPDATE WHERE) — two workers can never both own a trial. `LiveSandboxRegistry` + atexit drain cloud sandboxes within a bounded budget. | `asyncio.shield` on env stop prevents leaks, but no fencing across workers — single-worker assumption baked in. |
-| Two-mode design | Same `Trial.run()` runs in service mode (full cluster) AND CLI mode (`loom run` on a laptop with no server stack). Trajectories are bit-identical. | Cluster-only; no equivalent of `loom run` for one-shot laptop use. |
+| Primary operating model | Local `loom run` plus a persistent, multi-team service with a Control Plane, Workers, LLM Gateway, REST API, and React application. | Local and cloud-backed evaluation jobs through the `harbor` CLI, with its viewer and registry surfaces. |
+| Trial lifecycle | One `Trial` implementation runs a list of steps; a single-step task has a one-element step list. | A shared `Trial` base dispatches to `SingleStepTrial` or `MultiStepTrial`. |
+| Sandbox abstraction | The `Driver` protocol exposes lifecycle, execution, transfer, network-policy, and health-check operations. Loom ships Docker, Daytona, and Modal drivers; `FakeDriver` is test-only. | `BaseEnvironment` implementations cover a broader set of local, cloud, Kubernetes, and HPC environments. |
+| Scheduling | Service-mode work is persisted in Postgres and claimed atomically with worker fencing, capability checks, priority, FIFO ordering, and dominant-resource fairness across teams. | A job-local `TrialQueue` applies total concurrency and optional per-agent concurrency pools. |
+| LLM routing | Service mode routes OpenAI Chat, OpenAI Responses, Anthropic, and Gemini dialects through a central gateway that attributes calls to team, trial, and step. | Agents normally configure and call their model clients within the Harbor job process. |
+| Usage and cost | Gateway calls store raw token usage and rate-card-derived cost snapshots; APIs expose trial, batch, and administrative usage views. | Agent contexts record token and cost totals, which `TrialResult` can aggregate. |
+| Trajectories | Trial events are appended to JSONL while execution is in progress and projected to ATIF at finalization. Trial results carry trajectory and ATIF object references. | Agents produce contexts and ATIF-compatible trajectories, including copied-context and embedded subagent trajectory fields. |
+| Verifier result | `VerifierResult` contains rewards, typed checks, confidence, structured data, and a structured error. Loom ships pytest, script, structured-output, LLM-judge, and composite verifiers. | `VerifierResult` contains an optional reward mapping; verifier failures are represented through the surrounding trial error model. |
+| Verifier isolation | General tasks currently run their verifier in the agent sandbox even though `TrialConfig` accepts `verifier_env_mode`. The Terminal-Bench 2.1 revision-6 profile uses a dedicated verifier driver and private-path staging policy. | Tasks can select shared or separate verifier environments. |
+| MCP | `MCPConnection` values are passed through the `AgentRuntime` interface. Support depends on the selected Loom agent runtime. | `MCPServerConfig` values are merged from task and agent configuration and passed to supported Harbor agents. |
+| Skills | Loom models skill references and supports benchmark-bundled skills plus family-run shared skill state. Generic `TrialConfig.extra_skills` resolution is not wired into trial execution. | Harbor resolves and injects configured skill directories for supported agents. |
+| Benchmark packaging | Python benchmark adapters are discovered through `loom.benchmarks` entry points. Operators can also register local task folders or remap an adapter through `config/benchmarks.toml`. | Benchmark adapters are distributed in Harbor's repository and registry ecosystem. Harbor's built-in catalog is broader. |
+| Agent packaging | `loom-launcher` discovers packaged agent adapters and Workers can build a content-addressed trial image from an adapter install script. | Harbor ships a broad in-tree agent catalog and supports custom and installed agents. |
+| Web and tenancy | The Loom service includes accounts, teams, provider connections, batch/trial views, usage, Run Library, and operator surfaces. | Harbor includes viewer and registry applications centered on Harbor jobs and datasets rather than Loom's multi-team service model. |
 
-## Where Loom is worse (current gaps)
+## Shared formats and integration points
 
-These are real gaps that contributors should know about. Issues are
-filed where they're tracked; other items are future work that needs a
-plan written.
+- Both projects use task bundles, containerized environments, agent runtimes,
+  verifiers, and ATIF trajectories.
+- Loom's `terminus-2` runtime embeds Harbor components behind Loom's
+  `AgentRuntime` and `Driver` interfaces. See
+  [`../architecture/terminus2-runtime.md`](../architecture/terminus2-runtime.md).
+- Loom's Terminal-Bench package converts the supported Harbor Hub profile into
+  Loom task and verifier contracts. See
+  [`../../packages/loom-benchmark-terminal-bench-2/README.md`](../../packages/loom-benchmark-terminal-bench-2/README.md).
+- Configuration files, result schemas, lifecycle hooks, and environment APIs
+  are project-specific. Moving a task or agent between the projects requires an
+  adapter; ATIF compatibility alone does not make the runtimes interchangeable.
 
-| Gap | Status | Harbor has it via |
-|---|---|---|
-| **Cloud backend coverage** — Loom ships 3 backends (Docker, Daytona, Modal). Harbor ships ~15: apple_container, cwsandbox, e2b, gke, islo, modal, novita, runloop, singularity, tensorlake, wandb, daytona, docker. | Each remaining backend is ~150–300 LOC against the `Driver` Protocol — the architecture work is done, only the per-provider plumbing remains. | Plenty of incumbent `BaseEnvironment` subclasses. |
-| **Adapter slate** — Loom ships 23 catalog benchmark entries (HumanEval, SWE-Bench family, MBPP, LiveCodeBench, BFCL, BrowseComp, GPQA Extended, GPQA Diamond, MATH-500, full Hendrycks MATH, MMLU-Pro, tau2-bench, GAIA, AIME 2022–2025, OSWorld, WebArena, SkillFlow, SkillLearnBench) plus Terminal-Bench-2 as a sibling package. Native v1.0 release support is limited to SkillLearnBench and the immutable Terminal-Bench 2.1 Harbor Hub revision-6 profile; other rows remain visible under their catalog readiness policy. Harbor ships ~80. | Adding adapters is mechanical against the `BenchmarkAdapter` Protocol; ~200-400 LOC each. We add as research demand arrives. Runtime/data support is a separate contract from catalog conversion. | 80 in-tree adapters under `adapters/`. |
-| **Skills system** — Loom doesn't model "skills" (local `SKILL.md` directories resolved by sha256 digest). | Punted at v1; `skills.py` had minimal usage sites in Harbor itself, so this is research infrastructure that hasn't fully landed there either. Revisit when an agent runtime needs it. | `skills.py`. |
-| **Leaderboard + viewer UI** — Loom's SPA shows trials + batches + usage; no public leaderboard. | Build as a standalone tool against the ATIF JSONL format when there's demand. | Two separate apps (`leaderboard/`, `viewer/`). |
-| **`Capabilities.gpu_types`** — Loom's `Capabilities` now carries a `frozenset[str]` of supported GPU SKUs from the Modal driver. Workers match on `gpu_vendor` + `gpu_types`. Scheduler's `requires_caps` filter doesn't yet include `gpu_types`; that's a follow-up when the first GPU-typed `Task` lands. | `Capabilities.gpu_types` populated by `ModalDriver` (13 SKUs); Docker / Daytona leave it empty. Scheduler integration: TBD. | Modal driver passes GPU type via SDK; no scheduler integration. |
-| **Generic `verifier_env_mode = "separate"`** — Loom still lacks a user-selectable separate verifier environment for arbitrary tasks, so ordinary v0.7 verifiers share the agent container. The provenance-gated Terminal-Bench 2.1 rev-6 profile is the deliberate security exception: it starts a fresh verifier driver and never uploads private verifier paths to the agent driver. Harbor supports SEPARATE for trustworthy grading + SHARED for cheap dev loops. | Generic task-level support remains a v1.5 design item; the TB2.1 boundary is intentionally profile-scoped and audited. | `SEPARATE` mode in `BaseEnvironment`. |
-| **`/admin/tasks` ingestion endpoint** — Operators currently insert into the `tasks` table via SQL (see `scripts/seed_test_data.py`). | Tracked for v1.5 (no issue yet). Should accept a tarball + validate against `TaskConfig`. | `harbor task upload` CLI. |
-| **ATIF schema migration tool** — When ATIF schema bumps (currently v1.7), we have no `loom traj migrate --from v1 --to v2` tool. | File when the first schema-bump deprecation hits. Discipline gap, not architectural. | RFC0001 admits Harbor's v1.7 broke `SubagentTrajectoryRef` with no automated migration — we wouldn't be worse than them today, just better in the future. |
-| **`is_copied_context` flag on trajectory steps** — Harbor tags steps copied from prior trajectories so SFT pipelines exclude them. Loom doesn't model copied-context. | Adopt when first SFT pipeline needs it. Adding the flag to `_EventBase` + threading through trajectory writer is ~50 LOC. | First-class field on Harbor trajectory steps per RFC0001. |
-| **Subagent trajectory embedding** — Loom's trajectory model is flat; Harbor's ATIF v1.7 supports `subagent_trajectories[]` with separate `trajectory_id` (document-scoped) and `session_id` (run-scoped). | Adopt when first multi-agent flow needs it. The split is well-specified in RFC0001 — copy the idea. | `session_id` / `trajectory_id` split per ATIF v1.7. |
+## Choosing between them
 
-## Design rationale (why replace, not fork)
+Use Loom when the required boundary is the persistent service: multi-team
+tenancy, database-backed scheduling, a centralized provider gateway, usage and
+cost attribution, cluster operations, and the Loom web application.
 
-Three reasons Loom is a rebuild rather than a Harbor fork:
+Use Harbor when its larger built-in catalog, official Terminal-Bench workflow,
+or one of its environment or agent integrations is the primary requirement and
+a Harbor job is the desired execution unit.
 
-1. **State model.** Harbor's mutable `AgentContext` + post-hoc
-   `Trajectory` validation makes mid-trial crashes lose data and
-   makes streaming/replay structurally impossible. Switching to an
-   event log is a foundational change; doing it in-tree would have
-   touched almost every file in `harbor/trial/`, `harbor/agents/`,
-   and `harbor/models/trajectories/`.
-
-2. **Backend coupling.** Harbor's 500–1100 LOC per-backend
-   subclasses are an artifact of `BaseEnvironment` being abstract
-   over too much. Pulling backend-specific code out behind a
-   six-method Driver Protocol means rewriting the orchestrator core
-   — again, a foundational change, not a refactor.
-
-3. **Cost accounting.** Snapshot-cost-at-emit is encoded into the
-   trajectory schema and every consumer of it. Splitting raw usage
-   from derived cost means changing the schema, the writer, the
-   reader, the ATIF projection, the rate-card store, and the
-   `llm_calls` table — none of those exist in Harbor today.
-
-The three changes interact: the Driver Protocol assumes event-sourced
-trajectories (drivers emit `EnvStart`/`EnvReady`/`EnvExec` events
-inline); the cost model assumes a centralized Gateway that owns rate
-cards (which assumes a service-mode shape); the service-mode shape
-assumes fenced multi-worker scheduling. After three audit rounds, the
-team concluded these couldn't be retrofitted into Harbor without
-effectively rewriting it, so we built Loom directly.
-
-What we kept from Harbor (because it's right):
-- Multi-phase network policy with per-phase context manager
-- SHARED vs SEPARATE verifier environment modes (Loom v0.7 only has
-  SHARED — see gap above)
-- `asyncio.shield` on env stop
-- Hooks (`TrialEvent` enum + async callbacks)
-- `force_build`, timeout multipliers, override timeouts
-- `is_copied_context` and `session_id`/`trajectory_id` split (still
-  to adopt — see gaps above)
-
-## See also
-
-- [architecture/overview.md](../architecture/overview.md) — how Loom is
-  put together
-- [architecture/driver-protocol.md](../architecture/driver-protocol.md)
-  — the six-method Driver Protocol that replaces Harbor's
-  `BaseEnvironment`
-- [architecture/trajectory-and-atif.md](../architecture/trajectory-and-atif.md)
-  — event-sourced trajectories + ATIF v1.7 projection
-- [architecture/service-mode.md](../architecture/service-mode.md) —
-  Control Plane, Worker, Gateway, DRF scheduling
+For the exact Loom interfaces, continue with the
+[`architecture`](../architecture/README.md) and
+[`user guide`](../user-guide.md). For Harbor behavior, use the
+[Harbor documentation](https://harborframework.com/docs).

@@ -23,7 +23,7 @@ The gate uses a frozen `npm ci` install and requires:
    console, unhandled-error, same-origin network, asset status, and MIME
    ledgers.
 
-The Vite default remains the shipped relative-asset build. The Playwright
+The Vite default is the relative-asset build. The Playwright
 server reads one validated `BrowserHarnessConfig` from `LOOM_E2E_ORIGIN` and
 `LOOM_E2E_ROUTE_PREFIX`; the origin must be credential-free local HTTP and the
 prefix must be exactly `/dev` or `/prod`. The default is
@@ -86,8 +86,8 @@ already loaded module changed in place.
 
 ## Candidate and broker acceptance
 
-Passing repository CI is necessary but is not staging acceptance. A later
-rollout may use this gate only after the change has merged to `dev`, the
+Passing repository CI is necessary but is not staging acceptance. A protected
+rollout uses this gate only after the change has merged to `dev`, the
 candidate has been fixed to that merged SHA, and the rollout coordinator has
 authorized the broker-owned rollout. Candidate-bound browser evidence then
 extends—not replaces—the repository gate. Local or Draft-PR work must never be

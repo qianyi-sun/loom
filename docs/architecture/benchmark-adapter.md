@@ -64,7 +64,7 @@ JSON entry + a 2-line subclass.
 `CatalogBackedAdapter` is optional. External adapter packages that
 declare metadata as plain class attributes still work — the mixin
 falls back silently when the catalog has no entry for `cls.name`. The
-declarative pattern is for first-party benchmarks shipped inside
+declarative pattern is for first-party benchmarks included inside
 `loom_benchmarks/`; external plugins keep using the legacy shape:
 
 ```python
@@ -246,12 +246,15 @@ returns `DatasetEntry` records. The union with the registry JSON +
 remote service surface is described in
 [../user-guide.md](../user-guide.md).
 
-## Shipped adapters
+## Included adapters
 
-### `packages/loom-benchmarks/` — 19 adapter files / 23 catalog entries across 10 series
+### `packages/loom-benchmarks/`
 
-Source of truth: `packages/loom-benchmarks/loom_benchmarks/benchmarks.json`.
-Use `loom datasets list` to enumerate at runtime.
+The package declares one `loom.benchmarks` entry point for every bundled row in
+`packages/loom-benchmarks/loom_benchmarks/benchmarks.json`. Use
+`loom datasets list` to enumerate the installed runtime catalog; the table
+below summarizes the base adapter families rather than every SkillLearnBench
+method row.
 
 | Series | Adapters |
 |---|---|
@@ -264,17 +267,16 @@ Use `loom datasets list` to enumerate at runtime.
 | `reasoning` | gpqa, gpqa-diamond, math-500, hendrycks-math |
 | `ui-agent` | osworld, webarena |
 | `research-agent` | gaia |
-| `skill` | skillflow, skilllearnbench |
+| `skill` | skillflow, skillflow-iterative, skilllearnbench, and the bundled SkillLearnBench baseline/online method rows |
 
 Adapter presence means Loom can catalog and convert upstream tasks. It does
 not by itself prove the service runtime can execute the benchmark end to end.
-OSWorld and WebArena are intentionally visible but marked `Not supported yet`
-until Loom has the required UI benchmark runtime and agent/evaluator contract.
-GAIA is intentionally visible but marked `Deferred` until operators can publish
-the gated dataset through a GAIA-authorized Hugging Face access path.
-Built-in benchmarks outside the v1.0 allowlist are intentionally visible but
-marked `Not in v1.0`; they are not selectable or countable until a support
-issue promotes them into the supported set.
+OSWorld and WebArena are visible but non-selectable with the label
+`Not supported yet`: Loom does not provide their required desktop/browser
+runtime and evaluator services. GAIA is visible but non-selectable with the
+label `Deferred` because its gated dataset is not part of the published
+catalog. Built-in benchmarks outside the current allowlist are visible with
+the label `Not in v1.0` and are excluded from selection and aggregate counts.
 
 Adapter-surface regressions across the whole registry are caught by
 `tests/system/test_benchmark_all_smoke.py`, an opt-in unified end-to-end
@@ -358,28 +360,27 @@ upstream bundle plus two additional filters: a hardcoded ignore-list
 of upstream instances whose `solve.sh` is broken or non-deterministic,
 and a docker-compose external-env check (e.g. `GH_TOKEN`) for tasks
 that need credentials the platform doesn't supply to oracle runs.
-Today's slate is 58 oracle_eligible=true / 42 false. The tag is
+The bundled slate is 58 `oracle_eligible=true` / 42 `false`. The tag is
 consumed by the batch-create preflight in `loom_service.task_compat`
 (`task_provides_capability`); operators select with
 `tag_filters={"oracle_eligible": ["true"]}` when assembling oracle
 batches.
 
-For #49 dual-architecture dispatch, portable benchmark compatibility must be
-declared explicitly. The SkillLearnBench `human_authored` catalog row carries
+Portable benchmark compatibility must be declared explicitly. The
+SkillLearnBench `human_authored` catalog row carries
 `params.cpu_arch = "any"`, so its generated task configs are claimable by both
 x86_64 and ARM64 workers without operator DB patches. Unmarked bundle-backed
 benchmarks, including SkillFlow today, keep the `TaskConfig` default
 `environment.cpu_arch = "x86_64"` until dual-architecture reward/artifact
 evidence exists.
 
-For v1.0 release acceptance, #49/#715 additionally require the same reviewed
-portable Terminal-Bench-like canary task to run end to end in separate
-operator-only x86_64 and arm64 batches. This is a worker/runtime portability
-gate, not a claim that every canonical Terminal-Bench 2.1 task image is
-multi-architecture. Tasks without real portability evidence retain their
-explicit architecture constraint and fail preflight on incompatible workers.
+The portability gate runs the same reviewed Terminal-Bench-like canary task in
+separate operator-only x86_64 and arm64 batches. This checks the worker/runtime
+path; it does not make every canonical Terminal-Bench 2.1 task image
+multi-architecture. Tasks without portability evidence retain their explicit
+architecture constraint and fail preflight on incompatible workers.
 
-The #307 reasoning/browsing wave pins and publishes complete selected official
+The reasoning and browsing adapters pin and publish complete selected official
 sets: GPQA Extended (546), MATH-500 (500), Hendrycks MATH test (5000),
 MMLU-Pro test (12032), tau2-bench default leaderboard domains (278), and
 BrowseComp (1266). GPQA, MATH-500, full MATH, and MMLU-Pro are static answer
@@ -538,9 +539,8 @@ get cleaned up via `rmtree` on the next call.
 
 ## Operator-facing TOML registry: `config/benchmarks.toml`
 
-Most adapter work goes through Python (entry-points). Two operator
-scenarios don't need new Python and live in `config/benchmarks.toml`
-instead (issue #234):
+Most adapter work goes through Python entry points. Two operator scenarios do
+not need new Python and live in `config/benchmarks.toml` instead:
 
 ### Local task collections (`[[local]]`)
 
@@ -609,7 +609,7 @@ The resolved `task_image` is then layered with the chosen adapter's
 `install_script` at trial spawn — see
 [`agent-adapter.md#per-trial-agent-installation`](agent-adapter.md#per-trial-agent-installation).
 
-### Task Dockerfile build contract (#319)
+### Task Dockerfile build contract
 
 When a task declares `environment.dockerfile`, the worker runs
 `docker build` against the materialized bundle directory. Authors of
@@ -628,7 +628,8 @@ benchmark Dockerfiles should know:
   does not patch Dockerfiles, flatten `environment/`, restore DNS files, or
   run hidden bridges to make a bad bundle pass. The only catalog exception is
   an explicit operator `publish-local --compat-flatten-environment` bridge for
-  legacy Source Useful-style bundles; its command output includes
+  Source Useful-style bundles that keep runtime files under `environment/`; its
+  command output includes
   `compat_flattened_files=<N>` so rollout evidence records the override.
 - **Network access during build is not guaranteed.** Some worker
   deployments build behind a restrictive egress policy; benchmark

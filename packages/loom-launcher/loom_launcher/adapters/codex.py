@@ -14,7 +14,7 @@ from loom_launcher.adapter import ExecHandle, ModelSpec, TrajectoryEventLike
 from loom_launcher.capture import stream_stdout_jsonl
 from loom_launcher.registry import register_adapter
 
-# #317 Phase 2: install codex CLI into the trial sandbox before
+# Install the Codex CLI into the trial sandbox before
 # invocation. Version pinned to match deploy/agent-sandbox/npm-packages.txt.
 _CODEX_PKG = "@openai/codex"
 _CODEX_VERSION = "0.146.0"

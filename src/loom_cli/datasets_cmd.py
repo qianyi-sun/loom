@@ -16,11 +16,8 @@ Subcommands:
 - hf-boundary-evidence <slug> --environment staging --output PATH
 - sync-mirror [--source-* ...] [--dest-* ...] [--prefix ...] [--dry-run]
 
-The {import, publish, register, verify} subcommands were previously
-shipped as `python -m loom_benchmark_tool <cmd>`. Folded into
-`loom datasets` here so operators have one CLI to learn instead of
-guessing which tool owns which verb. The old `loom_benchmark_tool`
-entry-point stays as a deprecation shim — see its module docstring.
+The command group is the supported operator surface for benchmark discovery,
+publication, registration, verification, mirroring, and activation.
 """
 
 from __future__ import annotations
@@ -107,8 +104,7 @@ def _add_publish_args(p: argparse.ArgumentParser) -> None:
         default="hf",
         help=(
             "Where to publish: 'hf' (default, HuggingFace dataset repo) "
-            "or 'object-store' (direct to MinIO/R2/S3, skipping HF entirely). "
-            "See #804."
+            "or 'object-store' (direct to MinIO/R2/S3, skipping HF entirely)."
         ),
     )
     p.add_argument(
@@ -176,8 +172,7 @@ def _add_register_args(p: argparse.ArgumentParser) -> None:
             "Where to read the manifest from: 'hf' (default, HuggingFace "
             "dataset repo) or 'object-store' (direct read from MinIO/R2/S3, "
             "no HF hop). With 'object-store' the operator must pass the "
-            "explicit --revision emitted by `publish --target=object-store`. "
-            "See #804."
+            "explicit --revision emitted by `publish --target=object-store`."
         ),
     )
     p.add_argument(
@@ -245,7 +240,7 @@ def _add_register_args(p: argparse.ArgumentParser) -> None:
             "Split the HF snapshot download into batches of N task bundles "
             "with `--chunk-sleep-secs` between each batch. Use for benchmarks "
             "large enough to trip HF's 5000 resolves/5min free-tier rate "
-            "limit (see #764). Omit or 0 to keep the single-shot behaviour."
+            "limit. Omit or 0 to keep the single-shot behaviour."
         ),
     )
     p.add_argument(
@@ -532,8 +527,9 @@ def _add_publish_local_args(p: argparse.ArgumentParser) -> None:
         help=(
             "Explicit operator compatibility override: stage-copy files from "
             "environment/ to the bundle root before compatibility preflight. "
-            "Use only with retained evidence for legacy Source Useful-style "
-            "bundles; the default is diagnostic fail-fast."
+            "Use only with retained evidence for Source Useful-style bundles "
+            "that keep runtime files under environment/; the default is "
+            "diagnostic fail-fast."
         ),
     )
 
@@ -725,14 +721,14 @@ def _build_parser() -> argparse.ArgumentParser:
                 "One-way sync every object from a source object-store bucket "
                 "(e.g. in-cluster MinIO) to a destination bucket (e.g. Cloudflare R2). "
                 "Idempotent: skips objects already present at the destination with "
-                "matching size. See #804."
+                "matching size."
             ),
         )
     )
 
     p_sync = sub.add_parser(
         "sync-config",
-        help="Sync config/benchmarks.toml into the benchmarks + tasks tables (issue #234).",
+        help="Sync config/benchmarks.toml into the benchmarks and tasks tables.",
     )
     p_sync.add_argument(
         "--config",

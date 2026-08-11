@@ -14,7 +14,7 @@ The current product boundary is:
 - **Users bring inference.** A team connects a hosted API such as OpenAI,
   Anthropic, Google, Together, Fireworks, YibuAPI, or any OpenAI-compatible
   endpoint, including a user-operated vLLM/Ollama/llama.cpp/LM Studio service.
-- **v1.0 does not host model checkpoints for users.** The platform routes model
+- **Loom does not host model checkpoints for users.** The platform routes model
   calls through the Loom LLM Gateway, but model serving capacity remains owned
   by the provider or user team.
 
@@ -38,39 +38,12 @@ Canonical hosted routes:
 - Staging: [https://yylx.world/staging](https://yylx.world/staging)
 - Production: [https://yylx.world/prod](https://yylx.world/prod)
 
-The `/prod` route is the target for the first `main`-based production release.
-Until the v1.0.0 release gates are complete, use `/staging` for shared staging
-validation and do not treat `/prod` as the production-ready entrypoint.
+Each route has its own namespace, database, object storage, credentials,
+provider connections, and desired worker state.
 
-## Current Release Posture
+## Supported task sources
 
-v1.0.0 is the first formal production release promoted from `dev` to `main`.
-It is not another staging smoke run. The active release work is proving that a
-normal scoped user can submit, monitor, debug, and download results through the
-public web/CLI/API surfaces without database access, SSH access, operator-only
-artifact links, or raw secret handling.
-
-The current staging baseline has already proven the user-brought TaskSet path:
-users can upload their own task bundles, submit runs, produce trajectories,
-observe gateway call evidence, run task-specific verification, and download
-artifacts through user-facing surfaces. Treat that as platform E2E evidence for
-private TaskSets, not as a broad official benchmark score-alignment claim.
-
-Before first prod, the remaining release gates are centered on:
-
-- production/staging environment isolation;
-- `/prod` and `/dev` frontend route plus API-base separation;
-- prod-first worker capacity behavior, including temporary staging leases and
-  staging drain under production pressure;
-- operator-free user E2E on the v1.0 native benchmark lanes;
-- provider sharing, audit, usage, and on-behalf visibility semantics;
-- rollout restartability and stale-running-state handling.
-
-## v1.0 Scope
-
-First-prod native benchmark support is intentionally narrow:
-
-| Surface | v1.0 commitment |
+| Surface | Current behavior |
 |---|---|
 | Native benchmark: Terminal-Bench 2.1 rev 6 | The public `terminal-bench-2` selector activates only the audited immutable `terminal-bench-2@tb2.1-r6` profile. |
 | Native benchmark: SkillLearnBench | Supported through `skilllearnbench` tasks, catalog provisioning, and artifact-preserving validation. |
@@ -78,11 +51,10 @@ First-prod native benchmark support is intentionally narrow:
 | Provider-backed model calls | Supported through team-owned or shared provider connections and the LLM Gateway. |
 | Usage/cost audit | Supported through gateway call rows, token accounting, rate-card diagnostics, and usage APIs. |
 
-Other benchmark adapters and local examples may exist in the repository, but
-they are not first-prod support commitments unless a v1.0 release gate names
-them explicitly. Official score parity for broader benchmark suites, full-scale
-stress coverage, self-service runtime serving, mixed OLDLAB/GB10 coverage, and
-expanded user surfaces are v1.1+ work.
+The catalog also includes additional pinned benchmark adapters. Use
+`loom datasets list` for the installed catalog and
+[`docs/score-alignment/`](docs/score-alignment/README.md) for the current
+model-independent reward semantics.
 
 ## Product Flow
 
@@ -100,7 +72,7 @@ Every service-mode run follows the same shape:
    CLI, or direct API calls, then download ATIF, trajectory, and artifact files
    through the service API.
 
-The CLI-only `loom run` path still exists for local one-off experiments. It
+The CLI-only `loom run` path handles local one-off experiments. It
 does not use team ownership, provider registration, Postgres, or MinIO/S3.
 
 ## Architecture
@@ -201,10 +173,12 @@ checks, but common families include:
 - `litellm`, for provider-backed tool-loop runs;
 - coding-agent CLI adapters from `loom-launcher`, including Codex, Claude Code,
   Gemini CLI, OpenHands, OpenHands SDK, OpenCode, Aider, SWE-agent,
-  mini-SWE-agent, and Terminus-2.
+  mini-SWE-agent, Qwen CLI, and Kimi CLI;
+- `terminus-2`, a built-in Harbor-embedded runtime that does not use
+  `loom-launcher`.
 
 Provider/model/agent compatibility is enforced at submission time. Invalid
-combinations should fail as API validation errors instead of becoming worker
+combinations fail as API validation errors instead of becoming worker
 surprises.
 
 Sources of truth:
@@ -231,13 +205,13 @@ Current shared staging login should use:
 loom auth login --server https://yylx.world/staging --username <user> --password env:LOOM_PASSWORD
 ```
 
-First production will use the same CLI shape with `https://yylx.world/prod`
-after the production release is promoted and validated.
+Use the same command shape with the route for the environment you are
+authorized to access.
 
 ## Operations and Release
 
 Normal development targets `dev`. The `main` branch is reserved for production
-release promotion through an explicit release PR after v1.0 validation passes.
+release promotion through the current release gate.
 
 Operationally, staging and production are separate environments with distinct
 routes, API bases, durable state, object storage, secrets, and desired worker
@@ -248,15 +222,12 @@ capacity.
 
 Primary runbooks:
 
-- First-prod release:
-  [`docs/runbooks/first-prod-release-runbook.md`](docs/runbooks/first-prod-release-runbook.md)
 - General operator path:
   [`docs/runbooks/operator-runbook.md`](docs/runbooks/operator-runbook.md)
+- Staging release validation:
+  [`docs/runbooks/staging-launch.md`](docs/runbooks/staging-launch.md)
 - Remote worker capacity:
   [`docs/runbooks/remote-worker-pool.md`](docs/runbooks/remote-worker-pool.md)
-  (including the repo-only, fail-closed
-  [non-exclusive Slurm containment acceptance](docs/runbooks/remote-worker-pool.md#non-exclusive-slurm-containment-acceptance)
-  workflow)
 
 ## Where to Read More
 
@@ -281,7 +252,4 @@ Primary runbooks:
 ## License and Contributing
 
 Loom is licensed under Apache-2.0. The canonical development repository is
-[`qianyi-sun/loom`](https://github.com/qianyi-sun/loom). Historical issue and
-PR references from before the public repo migration may still point at the
-archive repository; active development, issues, PRs, and release work use
-`qianyi-sun/loom`.
+[`qianyi-sun/loom`](https://github.com/qianyi-sun/loom).

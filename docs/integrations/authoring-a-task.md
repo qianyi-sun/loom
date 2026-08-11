@@ -59,7 +59,7 @@ required_artifacts = ["result.txt"]
 |---|---|---|
 | `oracle` | Baseline + dev fixtures | Runs `solution/solve.sh` inside the sandbox. Tasks that set `[agent].name = "oracle"` must include it. |
 | `litellm` | Out-of-box LLM agent | Tool-loop over Gateway calls; requires `[agent.model]`. |
-| `claude-code` | In-box CLI agent | Runs `claude` inside the container; requires the image to ship the CLI. |
+| `claude-code` | Launcher CLI agent | Runs `claude` inside the container; workers resolve its pinned install contract into a content-addressed task image. |
 
 ### The `oracle_eligible` task tag
 
@@ -453,10 +453,6 @@ curl -X POST https://loom.example.com/trials \
   -H "Authorization: Bearer $TEAM_TOKEN" \
   -d '{"task_id": "my-task", "config": {}}'
 ```
-
-`POST /admin/tasks` is planned for v1.5 — it'll accept a tarball of the
-fixture dir, validate the TaskConfig, and stash the source for the
-worker to pull via `bundle["source"]`.
 
 ## Gotchas
 

@@ -240,9 +240,9 @@ Internals:
 ## Common pitfalls
 
 - **License is metadata, not an execution gate**. CLI mode, service mode, and
-  the Control Plane all allow tasks regardless of SPDX value. The legacy
-  `team_quotas.license_allowlist` field is retained only as historical
-  metadata.
+  the Control Plane all allow tasks regardless of SPDX value.
+  `team_quotas.license_allowlist` is retained as compatibility metadata and is
+  not consulted by execution.
 - **No cross-trial coordination**. Each `loom run` invocation is
   independent. If you need rate limiting across many parallel
   invocations, run them inside one `loom run --concurrency N`

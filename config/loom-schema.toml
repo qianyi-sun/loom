@@ -22,7 +22,7 @@ python_type = "PostgresDsn"
 required    = false
 default     = ""
 secret      = { key_per_service = { control-plane = "cp-db-url-pool", llm-gateway = "gw-db-url-pool", loom-service = "svc-db-url-pool" } }
-description = "PgBouncer pool DSN (transaction-mode multiplexer, #609). When non-empty, SQLAlchemy engines use this instead of db_url. Empty (default) = direct-to-Postgres, no pooler. LISTEN/NOTIFY watchers and Alembic migrations always use db_url regardless."
+description = "PgBouncer transaction-mode pool DSN. When non-empty, SQLAlchemy engines use this instead of db_url. Empty means direct-to-Postgres. LISTEN/NOTIFY watchers and Alembic migrations always use db_url."
 
 [service_config.db_pool_size]
 used_by     = ["control-plane"]
@@ -53,13 +53,13 @@ description = "HS256 step-JWT key. CP mints, gateway verifies; mismatch → 401 
 used_by     = ["control-plane", "loom-service", "worker"]
 python_type = "str"
 default     = "minio"
-description = "Object-store backend. S3-compatible: minio (default), s3, r2, b2, wasabi. Non-S3 (renderers TBD): gcs (#254). Drives `bootstrap-storage-lifecycle` renderer selection and informs the credentials provider chain."
+description = "Object-store backend. S3-compatible values are minio (default), s3, r2, b2, and wasabi. The renderer library also supports gcs, but `bootstrap-storage-lifecycle` applies only S3-compatible backends. This value selects the renderer and credential chain."
 
 [service_config.storage_auth_kind]
 used_by     = ["control-plane", "loom-service", "worker"]
 python_type = "str"
 default     = "static_keys"
-description = "Credentials resolution strategy. static_keys (default): read minio-access-key + minio-secret-key from loom-secrets — works for MinIO + every S3-compatible provider. irsa: boto3 discovers the AWS IAM role from the pod's projected serviceAccountToken (EKS); no static keys needed. workload_identity / sa_json: GCS analogues, available once #254 lands."
+description = "Credentials strategy. static_keys reads minio-access-key and minio-secret-key from loom-secrets for MinIO and other S3-compatible stores. irsa lets boto3 use an AWS IAM role from the projected service-account token. workload_identity and sa_json describe GCS credentials for renderer-library consumers; the lifecycle CLI does not apply GCS policies."
 
 [service_config.minio_endpoint]
 used_by     = ["control-plane", "loom-service", "worker"]
@@ -591,25 +591,25 @@ description = "Seconds before the crash detector reclaims a trial stuck in claim
 used_by     = ["control-plane", "loom-service"]
 python_type = "bool"
 default     = true
-description = "Enable the conservative #378 stale-running reclaim sweep. The sweep only fails running trials whose worker heartbeat is still fresh, runtime exceeds the effective agent timeout backstop, and trial events/LLM calls have been silent beyond the configured silence window."
+description = "Enable the conservative stale-running reclaim sweep. It fails a running trial only when the worker heartbeat is fresh, runtime exceeds the effective agent-timeout backstop, and trial events and LLM calls have been silent beyond the configured window."
 
 [service_config.stale_running_trial_timeout_multiplier]
 used_by     = ["control-plane", "loom-service"]
 python_type = "float"
 default     = 3.0
-description = "Multiplier applied to the effective agent timeout for the control-plane stale-running reclaim decision (#378). The CP uses this with stale_running_trial_grace_sec and only reclaims when the worker heartbeat is fresh."
+description = "Multiplier applied to the effective agent timeout for the Control Plane stale-running reclaim decision. Used with stale_running_trial_grace_sec; reclaim also requires a fresh worker heartbeat."
 
 [service_config.stale_running_trial_grace_sec]
 used_by     = ["control-plane", "loom-service"]
 python_type = "float"
 default     = 900.0
-description = "Additive grace for the control-plane stale-running reclaim deadline (#378). Default is intentionally larger than the worker hard-deadline grace so the worker normally records the terminal diagnostic first."
+description = "Additive grace for the Control Plane stale-running reclaim deadline. The default is larger than the worker hard-deadline grace so the worker normally records the terminal diagnostic first."
 
 [service_config.stale_running_trial_silence_sec]
 used_by     = ["control-plane", "loom-service"]
 python_type = "float"
 default     = 900.0
-description = "Required silence window for stale-running reclaim (#378). A running trial is not failed while it has recent trial_events or llm_calls activity inside this window, even if runtime already exceeds the timeout backstop."
+description = "Required silence window for stale-running reclaim. A running trial is not failed while it has recent trial_events or llm_calls activity inside this window, even if runtime exceeds the timeout backstop."
 
 [service_config.signed_url_expiry_sec]
 used_by     = ["control-plane", "loom-service"]
@@ -775,10 +775,10 @@ used_by     = ["llm-gateway"]
 python_type = "float"
 default     = 200.0
 
-# ─── Per-request retry on transient upstream failures (#298 Slice A) ───
+# ─── Per-request retry on transient upstream failures ───
 # Retry classification + budget live in `loom_llm_gateway/retry.py`.
 # Defaults are sized to ride out a rolling LLM-gateway / upstream
-# restart window (#416 Slice 3): 5 attempts with up to 8s backoff each,
+# restart window: 5 attempts with up to 8s backoff each,
 # capped at a 60s wall-clock budget. Agent timeouts on TaskConfig are
 # 30min default; keeping the budget at 60s leaves ample headroom for
 # the rest of the agent run.
@@ -787,7 +787,7 @@ default     = 200.0
 used_by     = ["llm-gateway"]
 python_type = "int"
 default     = 5
-description = "Max attempts per upstream LLM request including the initial call. 1 disables retry (#298 Slice A). Bumped to 5 in #416 Slice 3 so a request hitting the middle of a rolling-restart window (k8s `maxUnavailable=1` on a 2-replica gateway is ~10-30s of transient 502s) gets enough chances to land on a healthy replica."
+description = "Maximum attempts per upstream LLM request, including the initial call. A value of 1 disables retries. The default covers transient failures during a typical Kubernetes Gateway rolling restart."
 
 [service_config.llm_retry_base_backoff_sec]
 used_by     = ["llm-gateway"]
@@ -805,18 +805,17 @@ description = "Uniform jitter ±this many seconds added to each backoff wait. Re
 used_by     = ["llm-gateway"]
 python_type = "float"
 default     = 8.0
-description = "Per-attempt backoff ceiling. Stops exponential growth before subprocess agent timeouts kick in. Bumped from 4s to 8s in #416 Slice 3 to give the rolling-restart window time to settle without burning all 5 attempts in <10s."
+description = "Per-attempt backoff ceiling. It bounds exponential growth while leaving time for a rolling-restart window to settle before subprocess agent timeouts."
 
 [service_config.llm_retry_budget_sec]
 used_by     = ["llm-gateway"]
 python_type = "float"
 default     = 60.0
-description = "Total wall-clock retry budget per request. We stop retrying once cumulative wait + elapsed exceeds this, even if attempts remain. Bumped from 30s to 60s in #416 Slice 3 to cover a full k8s rolling-restart window; well below TaskConfig.agent.timeout_sec (default 1800s)."
+description = "Total wall-clock retry budget per request. Retries stop when cumulative wait plus elapsed time exceeds this value, even if attempts remain. The default is below TaskConfig.agent.timeout_sec."
 
-# ─── Deployment-wide RetryPolicy defaults snapshotted at trial submit (#401) ───
-# Loom's trial retry defaults used to be Pydantic-model defaults, a Plan 3
-# artifact from before this schema existed. Moved here so operators can retune
-# per environment without a code change; the submit route snapshots the values
+# ─── Deployment-wide RetryPolicy defaults snapshotted at trial submit ───
+# Operators can tune these per environment without a code change. The submit
+# route snapshots the values
 # into TrialConfig.retry when the submitter didn't set an explicit policy, so
 # a saved trial is reproducible on any cluster regardless of subsequent retunes.
 
@@ -856,7 +855,7 @@ python_type = "float"
 default     = 0.2
 description = "Default BackoffSpec.jitter snapshotted at submit time when unset. Fractional jitter in [0, 1]: actual wait = curve * Uniform(1-jitter, 1+jitter) to spread thundering-herd across restarts."
 
-# ─── family-run orchestrator (#672) ───
+# ─── family-run orchestrator ───
 # Shared across control-plane + worker: CP owns the finalize hook,
 # orchestrator (deployed as a CP-siblings service that loads
 # ControlPlaneSettings) owns the adapting -> pending transition, and
@@ -896,7 +895,7 @@ description = "Default value written to TeamQuota.max_attempts_ceiling at team c
 used_by     = ["llm-gateway"]
 python_type = "str"
 default     = ""
-description = "Envoy egress-proxy URL (#190 PR-C2). Empty disables proxy mode → upstream HTTP goes direct. Set to e.g. `http://loom-egress-proxy:30443` to route every facade/native passthrough through the Envoy egress chain."
+description = "Envoy egress-proxy URL. Empty disables proxy mode and sends upstream HTTP directly. Set this to the proxy service URL to route facade and native passthrough traffic through the Envoy egress chain."
 
 # ─── loom-service only ───
 
@@ -914,37 +913,37 @@ description = "Canonical public Web/API origin used for one-time setup, reset, a
 used_by     = ["loom-service"]
 python_type = "str"
 default     = "loom_session"
-description = "Browser auth HttpOnly session cookie name for invite-only public Loom (#326)."
+description = "HttpOnly browser-session cookie name."
 
 [service_config.auth_csrf_header_name]
 used_by     = ["loom-service"]
 python_type = "str"
 default     = "X-Loom-CSRF"
-description = "Header required on unsafe browser session requests. The SPA gets this token from auth JSON responses and keeps it in memory; bearer-token service/CLI requests are not CSRF-gated (#326)."
+description = "Header required on unsafe browser-session requests. The SPA receives the token in auth JSON and keeps it in memory; bearer-token service and CLI requests are not CSRF-gated."
 
 [service_config.auth_csrf_cookie_name]
 used_by     = ["loom-service"]
 python_type = "str"
 default     = "loom_csrf"
-description = "Legacy CSRF cookie name to clear during logout; current SPA keeps CSRF tokens in memory."
+description = "Compatibility CSRF cookie name cleared during logout; the SPA keeps current CSRF tokens in memory."
 
 [service_config.auth_session_ttl_sec]
 used_by     = ["loom-service"]
 python_type = "int"
 default     = 604800
-description = "Browser session lifetime in seconds. Default is 7 days (#326)."
+description = "Browser-session lifetime in seconds. The default is 7 days."
 
 [service_config.auth_login_challenge_ttl_sec]
 used_by     = ["loom-service"]
 python_type = "int"
 default     = 900
-description = "Existing-user login challenge lifetime in seconds. Default is 15 minutes (#326)."
+description = "Existing-user login-challenge lifetime in seconds. The default is 15 minutes."
 
 [service_config.auth_return_login_token]
 used_by     = ["loom-service"]
 python_type = "bool"
 default     = false
-description = "When true, POST /auth/login/start includes the raw login token for local/dev/testing. Keep false in production (#326)."
+description = "When true, POST /auth/login/start includes the raw login token for local development and tests. Keep false in production."
 
 [service_config.trajectories_bucket]
 used_by     = ["control-plane", "loom-service", "worker"]
@@ -1108,7 +1107,7 @@ used_by     = ["loom-service"]
 python_type = "str"
 default     = "{}"
 
-# Secret-store master-key rotation (closes #80).
+# Secret-store master-key rotation.
 # LOOM_SECRET_STORE_MASTER_KEYS (plural): comma-separated base64 AES-256 keys.
 #   First key = PRIMARY (new encrypts + rewrap target).
 #   Remaining keys = FALLBACKS (decrypt-only for rows encrypted under an older key).
@@ -1125,7 +1124,7 @@ default     = "{}"
 # required    = true
 # secret      = { key = "secret-store-master-keys" }
 # description = "Comma-separated base64 AES-256 keys. First=PRIMARY; rest=FALLBACKS."
-# NOTE: not yet emitted by codegen (env-only field, see secret_store.py).
+# Environment-only field; codegen does not emit it (see secret_store.py).
 
 # ─── worker only ───
 
@@ -1175,13 +1174,13 @@ description  = "Maximum byte size allowed in a task-bundle Dockerfile build cont
 used_by     = ["worker"]
 python_type = "bool"
 default     = false
-description = "Enable #78 Phase B sandbox isolation: per-trial --internal docker bridge + per-node loom-llm-gateway-sandbox singleton. Default off → pre-Phase-B behavior. When true, the worker needs a writable singleton-secrets dir + the loom-llm-gateway-sandbox image pulled."
+description = "Enable sandbox isolation with a per-trial internal Docker bridge and per-node loom-llm-gateway-sandbox singleton. The default is off. When enabled, the worker needs a writable singleton-secrets directory and the singleton image."
 
 [service_config.sandbox_singleton_image]
 used_by     = ["worker"]
 python_type = "str"
 default     = "loom-llm-gateway-sandbox:dev"
-description = "Container image for the per-node CONNECT proxy singleton (Phase B PR-B1)."
+description = "Container image for the per-node CONNECT proxy singleton."
 
 [service_config.sandbox_singleton_secrets_dir]
 used_by     = ["worker"]
@@ -1193,13 +1192,13 @@ description = "Host directory mounted into the singleton container at /run/loom.
 used_by     = ["worker"]
 python_type = "int"
 default     = 0
-description = "Partitions the per-trial subnet pool when multiple workers run on the same host (see #189). 0..15."
+description = "Partitions the per-trial subnet pool when multiple workers run on the same host. Valid values are 0 through 15."
 
 [service_config.sandbox_step_jwt_ttl_sec]
 used_by     = ["worker"]
 python_type = "int"
 default     = 600
-description = "Step-JWT TTL the worker requests when minting tokens for rotation (Phase D PR-D1). Rotation cadence is TTL/2 — so a 600s TTL rotates every 5 minutes."
+description = "Step-JWT TTL requested by the worker. Rotation cadence is half the TTL, so a 600-second TTL rotates every 5 minutes."
 
 [service_config.drain_timeout_sec]
 used_by     = ["worker"]
@@ -1249,19 +1248,19 @@ description = "Docker SDK API timeout in seconds for worker-created clients. Kee
 used_by     = ["worker"]
 python_type = "float"
 default     = 0.0
-description = "#896 per-container hard CPU cap (in cores) for the trial and setup-sidecar containers this worker creates. Maps to Docker nano_cpus. Loom Slurm policies use exclusive=false and require a positive ceiling; keep the policy disabled when containment is incomplete."
+description = "Per-container hard CPU cap in cores for trial and setup-sidecar containers. Maps to Docker nano_cpus. Non-exclusive Slurm policies require a positive ceiling and stay disabled when containment is incomplete."
 
 [service_config.container_memory_mib]
 used_by     = ["worker"]
 python_type = "int"
 default     = 0
-description = "#896 per-container hard memory cap in MiB for the trial and setup-sidecar containers this worker creates. Maps to Docker mem_limit. Loom Slurm policies use exclusive=false and require a positive ceiling; keep the policy disabled when containment is incomplete."
+description = "Per-container hard memory cap in MiB for trial and setup-sidecar containers. Maps to Docker mem_limit. Non-exclusive Slurm policies require a positive ceiling and stay disabled when containment is incomplete."
 
 [service_config.container_pids]
 used_by     = ["worker"]
 python_type = "int"
 default     = 0
-description = "#896 per-container hard PID cap for the trial and setup-sidecar containers this worker creates. Maps to Docker pids_limit. Loom Slurm policies use exclusive=false and require a positive ceiling; keep the policy disabled when containment is incomplete."
+description = "Per-container hard PID cap for trial and setup-sidecar containers. Maps to Docker pids_limit. Non-exclusive Slurm policies require a positive ceiling and stay disabled when containment is incomplete."
 
 [service_config.require_cgroup_parent]
 used_by     = ["worker"]
@@ -1331,19 +1330,19 @@ description = "Wall-clock timeout for pre-start task bundle materialization, inc
 used_by     = ["worker"]
 python_type = "float"
 default     = 30.0
-description = "Cancellation watchdog poll cadence (#360). The worker polls the CP for each in-flight trial's state every N seconds; if the CP reports `cancelled`, the worker cancels the running asyncio task so the in-container agent process stops instead of continuing to spend budget."
+description = "Cancellation-watchdog poll cadence. The worker checks each in-flight trial and cancels its running task when the Control Plane reports `cancelled`, stopping the in-container agent process."
 
 [service_config.trial_hard_deadline_multiplier]
 used_by     = ["worker"]
 python_type = "float"
 default     = 3.0
-description = "Multiplier applied to the resolved effective agent timeout to derive the worker-side hard-deadline backstop (#378). Resolution includes the task default, per-step override, trial override, and agent-timeout multiplier. If a trial exceeds `effective_agent_timeout_sec * multiplier + trial_hard_deadline_grace_sec`, the cancellation watchdog force-cancels the runner so a stuck subprocess agent does not keep the trial `running` for hours past its declared timeout. Set to 0 to disable the backstop (not recommended for production)."
+description = "Multiplier applied to the resolved effective agent timeout for the worker hard-deadline backstop. Resolution includes task, step, and trial overrides. Exceeding the multiplied timeout plus grace force-cancels the runner. Set 0 to disable the backstop; this is not recommended for production."
 
 [service_config.trial_hard_deadline_grace_sec]
 used_by     = ["worker"]
 python_type = "float"
 default     = 600.0
-description = "Additive grace on top of `effective_agent_timeout_sec * trial_hard_deadline_multiplier` for the hard-deadline backstop (#378). Covers task setup, verifier, and artifact-collection budget so a legitimate long run doesn't trip the watchdog."
+description = "Additive grace on top of `effective_agent_timeout_sec * trial_hard_deadline_multiplier`. It covers task setup, verification, and artifact collection."
 
 [service_config.enable_worker_vllm]
 used_by     = ["worker"]
@@ -1360,7 +1359,7 @@ used_by     = ["worker"]
 python_type = "int"
 default     = 1
 
-# ─── Per-trial agent install + cache (#317 Phase 1) ────────────────
+# ─── Per-trial agent install and cache ────────────────
 # Worker builds a content-addressed image per (task_image_digest,
 # install_script) combo the first time it's encountered. Cluster-wide
 # coordination via the active_trial_cache_builds table (CP-owned;
@@ -1371,7 +1370,7 @@ default     = 1
 used_by     = ["worker"]
 python_type = "str"
 default     = ""
-description = "Full repo path for the shared trial-image cache (#317). Works with any registry the worker can authenticate to: Docker Hub (`docker.io/<org>/<repo>`), GHCR (`ghcr.io/<org>/<repo>`), ECR (`<acct>.dkr.ecr.<region>.amazonaws.com/<repo>`), or self-hosted (`registry.cluster.local:5000/<repo>`). Empty = per-worker local cache only. Workers need pull+push perms via mounted docker-config Secret. Cached images are tagged as `<this>:<cache_key>`."
+description = "Repository path for the shared trial-image cache. It may use any registry the worker can authenticate to. Empty uses only each worker's local cache. Cross-worker sharing requires pull and push credentials through the mounted Docker-config Secret. Cached images use `<repository>:<cache_key>`."
 
 [service_config.trial_cache_registry_pull_timeout_sec]
 used_by     = ["worker"]
@@ -1419,7 +1418,7 @@ description = "Enable worker-side node-health admission before claiming work and
 used_by     = ["worker"]
 python_type = "float"
 default     = 50.0
-description = "Maximum Linux /proc/pressure/io full avg10 value allowed before a worker admits new Docker setup/build work. Values above this indicate sustained host I/O stalls; shared OLDLAB incident evidence saw avg10 around 76 during SSH/login symptoms."
+description = "Maximum Linux /proc/pressure/io full avg10 value allowed before a worker admits new Docker setup/build work. Values above this indicate sustained host I/O stalls."
 
 [service_config.setup_health_min_mem_available_mb]
 used_by     = ["worker"]
@@ -1455,13 +1454,13 @@ description = "Polling interval while a claimed trial waits for setup-health rec
 used_by     = ["loom-service"]
 python_type = "bool"
 default     = true
-description = "Whether the k8s loom-worker Deployment is rendered on this cluster (#383). When false, POST /api/v1/batches rejects submissions whose required_worker_pools list contains 'k8s-worker' because that pool cannot exist on this cluster. Rendered by cluster-render from k8s_worker.enabled in the profile config."
+description = "Whether the Kubernetes loom-worker Deployment is rendered. When false, batch submission rejects `required_worker_pools` containing `k8s-worker`. Derived from k8s_worker.enabled in the cluster profile."
 
 [service_config.gateway_drain_timeout_sec]
 used_by     = ["llm-gateway"]
 python_type = "float"
 default     = 270.0
-description = "Maximum wall-clock seconds `POST /drain` will wait for in-flight requests to reach zero before returning a 503 diagnostic (#547). Set ~30s under `terminationGracePeriodSeconds` (currently 300s in llm-gateway.yaml.j2) so the drain response arrives before kubelet SIGKILLs the pod."
+description = "Maximum seconds `POST /drain` waits for in-flight requests to reach zero before returning 503. Keep it below the Gateway pod termination grace so the response arrives before kubelet stops the pod."
 
 # ─── non-codegen secrets: keys mounted from loom-secrets without Settings fields ───
 # Not Pydantic fields — bootstrap-secrets covers them, doctor verifies them,
@@ -1500,7 +1499,7 @@ description = "Image tag applied to every loom-* image."
 [render_config.container_registry]
 python_type = "str"
 default     = ""
-description = "Optional container registry prefix applied to every locally-built loom-* image reference in the rendered manifest (no trailing slash). Empty (default) keeps the historical unprefixed shape that kind's in-cluster load-images path depends on. For multi-node k3s / production, set to the registry host+port (e.g. 192.168.50.13:5000) and point each node's /etc/rancher/k3s/registries.yaml at the same endpoint so containerd can pull without side-channel image imports."
+description = "Optional registry prefix for every locally built loom-* image in the rendered manifest, without a trailing slash. Empty keeps unprefixed images for kind load-images. Multi-node clusters set a registry host and configure every node's container runtime to pull it."
 
 [render_config.container_registry_push]
 python_type = "str"
@@ -1633,22 +1632,17 @@ description = "Sandbox-facing OpenAI-compatible gateway URL injected into k8s wo
 
 [render_config.replicas]
 python_type = "table"
-# egress_xds + egress_proxy default 0 — Phase C is not yet wired
-# into gateway-router (PR-C2), so by default the components stay
-# scaled to zero. Operators flip both to 1+ when enabling sandbox-
-# isolated egress.
+# egress_xds and egress_proxy default to zero, which disables the optional
+# sandbox egress chain. Set both to positive replica counts when enabling it.
 fields      = { service = 2, control_plane = 2, gateway = 2, web = 0, worker = 3, egress_xds = 0, egress_proxy = 0, pgbouncer = 2 }
 
 [render_config.k8s_worker]
 python_type = "table"
-# enabled=false is the safe default so profiles that share OLDLAB
-# hosts with Slurm do not double-schedule the host Docker daemon
-# (#383). The `development` profile explicitly flips this back to
-# true because local kind clusters have no external Slurm capacity;
-# k8s workers ARE the trial execution path there. `staging`,
-# `production`, and staging ship with the default and rely on
-# Slurm-managed pools for x86 trial execution. Toggling this to
-# false omits the loom-worker Deployment YAML entirely from the
+# enabled=false is the safe default for profiles that share host Docker
+# capacity with Slurm. The project-local example enables it for a laptop kind
+# cluster. Shared development, staging, and production keep it disabled and
+# rely on Slurm-managed pools for trial execution. Setting this to false omits
+# the loom-worker Deployment YAML entirely from the
 # rendered manifest and causes `POST /api/v1/batches` to reject
 # submissions whose `required_worker_pools` list contains
 # `k8s-worker`.
@@ -1656,19 +1650,18 @@ fields      = { enabled = false }
 
 [render_config.gb10_pool]
 python_type = "table"
-description = "GB10 hosts managed by protected rollout retirement checks. ssh_config optionally points at an operator SSH config file used for every host; ssh_identity_file and ssh_certificate_file point at platform-dev-local deploy auth material for detached rollout runners. Each host entry contains only ssh_target and node_agent_service. Protected apply verifies the service-owned shared candidate and keeps predecessor direct worker/node-agent services and timers disabled; external Slurm owns on-demand capacity."
+description = "GB10 hosts whose direct worker and node-agent units are checked and held disabled by protected rollout. ssh_config optionally points at the operator SSH configuration used for every host; ssh_identity_file and ssh_certificate_file point at deployment authentication material for detached rollout runners. Each host entry contains only ssh_target and node_agent_service. External Slurm policy owns on-demand capacity."
 fields      = { ssh_config = "", ssh_identity_file = "", ssh_certificate_file = "", hosts = [] }
 
 [render_config.trial_cache_registry_repo]
 python_type = "str"
 default     = ""
-description = "Registry repo path for the shared trial-image cache (#547 item #2). Enables cross-node build sharing so workers on node B can pull layered images built on node A instead of rebuilding. Empty (default) = per-worker local cache only. Set to e.g. `ghcr.io/qianyi-sun/loom-trial-cache` on staging/production to activate. Workers need push+pull credentials via a mounted docker-config secret; without them the pull-fail case falls back cleanly to a local build (harmless)."
+description = "Registry repository for the shared trial-image cache. Empty uses only per-worker caches. A configured repository lets workers pull layered images built elsewhere; workers need mounted pull and push credentials. A failed shared pull falls back to a local build."
 
 [render_config.gateway_hpa]
 python_type = "table"
-# Off by default so the schema-default render is identical to the
-# pre-#547 behaviour (fixed `replicas.gateway` pods, no HorizontalPod-
-# Autoscaler object). Profiles that expect variable trial-batch load
+# Off by default: fixed `replicas.gateway` pods are rendered without a
+# HorizontalPodAutoscaler. Profiles that expect variable trial-batch load
 # flip `enabled = true` and tune `min_replicas` / `max_replicas` /
 # `cpu_target_pct`. Requires a metrics-server or equivalent CPU-metric
 # provider in the cluster; kind + development don't have one by
@@ -1686,21 +1679,21 @@ python_type = "table"
 # When enabled, the DaemonSet places one loom-llm-gateway-sandbox
 # pod per node (hostPort 8443) that terminates TLS + verifies the
 # HS256 step-JWT before tunneling bytes to loom-llm-gateway.
-# Closes #78 Phase B — per-node edge auth instead of destination-
-# only.
+# This provides per-node edge authentication rather than destination-only
+# routing.
 fields      = { enabled = false }
 
 [render_config.pgbouncer]
 python_type = "table"
-description = "PgBouncer connection multiplexer (#609). When enabled, renders a Deployment (2 replicas), Service (loom-pgbouncer:6432), PodDisruptionBudget, and NetworkPolicy; bootstrap populates *-db-url-pool secrets by deriving from the direct DSN. Rollback: enabled=false, re-render, redeploy — services fall back to db_url (direct). See docs/architecture/pgbouncer-transaction-mode-design.md."
+description = "PgBouncer transaction-mode connection multiplexer. When enabled, renders a Deployment (2 replicas), Service (loom-pgbouncer:6432), PodDisruptionBudget, and NetworkPolicy; bootstrap populates *-db-url-pool secrets by deriving from the direct DSN. Disable it, re-render, and redeploy to make services fall back to db_url (direct). See docs/architecture/pgbouncer.md."
 fields      = { enabled = true, default_pool_size = 25, max_client_conn = 500, min_pool_size = 5 }
 
 [render_config.postgres]
 python_type = "table"
-description = "Postgres runtime tuning knobs. max_connections bumped from Postgres default 100 to leave room for pgbouncer backend pool (default_pool_size × pgbouncer.replicas) + LISTEN watchers + Alembic + admin slack."
+description = "Postgres runtime tuning. max_connections leaves room for PgBouncer backend pools, LISTEN watchers, Alembic, and administrative connections."
 fields      = { max_connections = 150 }
 
 [render_config.topology]
 python_type = "table"
-description = "Cluster topology (#637). `multi_node=true` opts into HA-shaped resources: Postgres replicas via CloudNativePG, distributed MinIO, cross-node anti-affinity, PDBs with minAvailable≥1, and Longhorn-backed persistent storage. `multi_node=false` renders single-pod stateful services with hostPath storage — the current pilot-cluster shape. Currently schema-default `false`; production will flip to `true` once the k3s multi-node cluster is provisioned. Profile overrides pin explicit values so a schema-default flip cannot silently break existing deployments. Storage backend `host_path` matches today; `longhorn` is the target for the multi-node production cluster; `nfs`/`csi` are unimplemented placeholders."
+description = "Cluster topology. `multi_node=true` renders Postgres through CloudNativePG, distributed MinIO, cross-node anti-affinity, and disruption budgets; `storage_backend=longhorn` requests the Longhorn StorageClass. `multi_node=false` renders single-pod Postgres and MinIO. Profiles must pin values that match the target cluster and its installed operators and storage classes. Supported storage backends are `host_path` and `longhorn`."
 fields      = { multi_node = false, storage_backend = "host_path", postgres_replicas = 1, minio_replicas = 1, min_available = 1, anti_affinity = "preferred" }

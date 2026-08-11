@@ -4,21 +4,12 @@ Verifiers grade what an agent produced. Loom's verifier surface is a
 single Protocol plus five concrete implementations; the result shape
 is typed all the way down.
 
-## Why a typed result
+## Typed result contract
 
-Harbor returned `dict[str, float|int] | None` and surfaced failures
-as exceptions (`MissingTestDirError`, `ParsingError`,
-`VerifierOutputNotFound`). Two problems:
-
-1. **Failures looked like crashes**. A missing `tests/` dir aborted
-   the trial instead of producing inspectable "no tests" data.
-2. **Result fields were unstructured**. Per-check scores, confidence,
-   structured outputs, and aggregation hints all lived in
-   provider-specific dict keys.
-
-Loom returns `VerifierResult` always — failures fill the `error`
-field rather than raise. ATIF projection trusts the shape and never
-has to catch verifier exceptions.
+Loom verifiers return `VerifierResult`. Failures fill its `error` field rather
+than escaping as verifier-specific exceptions, and per-check scores,
+confidence, structured output, and aggregation data stay typed through ATIF
+projection.
 
 ## The Protocol
 
@@ -85,7 +76,7 @@ Notes:
   invalidate `rewards` / `checks`; a verifier can both report a
   partial score AND flag what went wrong.
 - **Trial final-state promotion follows scored verifier output, with
-  platform-setup exclusions (#1186).**
+  platform-setup exclusions.**
   Agent-phase `StepError` data is not terminal when the same step has
   explicit verifier rewards **and** the agent actually attempted a scored
   run: coding benchmark agents can exit non-zero after producing code, and
@@ -261,14 +252,14 @@ A verifier is **stateless across calls**. Per-call state goes into
 the `VerifierResult.structured` field so downstream consumers can
 inspect it without re-running.
 
-## What about `verifier_env_mode`?
+## Verifier environment mode
 
-Harbor supports `SEPARATE` (verifier runs in its own container with
-trusted deps) and `SHARED` (verifier runs in the agent's container,
-cheap loop). Loom v0.7 ships SHARED only — agent images must ship
-verifier deps (`pytest`). SEPARATE is tracked for v1.5; the
-architectural lift is modest because the `Driver` Protocol already
-supports multiple containers per trial.
+General Loom tasks run the verifier in the agent sandbox, so the sandbox image
+must contain dependencies such as `pytest`. `TrialConfig` accepts
+`verifier_env_mode`, but general trial execution does not use it to select a
+second driver. The Terminal-Bench 2.1 revision-6 profile is the dedicated
+exception: its private-path staging policy runs agent execution and verification
+through separate drivers.
 
 ## Adding a new verifier
 
@@ -287,7 +278,7 @@ supports multiple containers per trial.
    produces. Mock `Driver.exec` rather than spawning real
    subprocesses.
 
-A verifier should be ~100–300 LOC including tests. The five shipped
+A verifier should be ~100–300 LOC including tests. The five included
 ones live under `src/loom/verifier/` and are good shape references.
 
 ## What this is NOT

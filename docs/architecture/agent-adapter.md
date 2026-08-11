@@ -8,7 +8,7 @@ Loom drives three kinds of agents:
    dialect routing through the Loom Gateway.
 3. **SubprocessAgent + a launcher adapter** — wraps an external CLI
    agent (claude-code, codex, openhands, ...) launched as a
-   subprocess inside the sandbox. The 12 shipped CLI adapters live
+   subprocess inside the sandbox. The included CLI adapters live
    in `packages/loom-launcher/`.
 
 This doc focuses on #3 — the extensible surface.
@@ -36,7 +36,7 @@ class AgentAdapter(Protocol):
                                                # "ANTHROPIC_AUTH_TOKEN"
     base_url_env: str
     model_name_template: str                   # Agent-facing model id template
-    supports_multi_turn: bool                  # metadata only in v1
+    supports_multi_turn: bool                  # metadata only
     additional_egress: frozenset[str]          # extra hostnames beyond Gateway
     install_script: str | None                 # shell script that installs the
                                                # CLI into the trial sandbox; see
@@ -107,7 +107,7 @@ under `_BUILTIN`:
 `install_script`. See [`terminus2-runtime.md`](terminus2-runtime.md) for the
 bridge, gateway ledger, staging smoke, and export status.
 
-## Shipped adapters
+## Launcher adapters
 
 `packages/loom-launcher/loom_launcher/adapters/` (11 production +
 `hello` test reference):
@@ -125,7 +125,7 @@ bridge, gateway ledger, staging smoke, and export status.
 | openhands-sdk | stdout_jsonl | SDK variant |
 | qwen-cli | tail_pty | Alibaba Qwen CLI |
 | swe-agent | tail_log_file | |
-| _hello_ | _stdout_jsonl_ | _Reference adapter shipped with the framework — used as a test fixture / minimal example. Not for production use._ |
+| _hello_ | _stdout_jsonl_ | _Reference adapter included with the framework — used as a test fixture / minimal example. Not for production use._ |
 
 All adapters self-register via `register_adapter(...)` at module
 import time. `loom_cli/__init__.py` eager-imports
@@ -242,8 +242,8 @@ env-var API key the CLI puts in the sandbox.
 
 ## Per-trial agent installation
 
-(See `src/loom_worker/trial_cache.py` and `docs/runbooks/operator-runbook.md`
-for the operator-facing knobs.)
+The implementation is in `src/loom_worker/trial_cache.py`; operator settings
+are the `trial_cache_*` entries in `config/loom-schema.toml`.
 
 `AgentAdapter.install_script` is a multi-line shell script that
 installs the adapter's CLI into the trial sandbox. The worker runs it
@@ -383,9 +383,9 @@ Python 3.12, installs `loom-launcher` from a pinned repository subdirectory ref,
 then invokes that venv's interpreter so Python 3.11 task images do not block
 `openhands-sdk` resolution. SWE-agent is installed editable from its tagged
 source tree so its upstream `config/` layout is present at runtime.
-The legacy `openhands` adapter name is SDK-backed as well; the historical
-`python -m openhands.server` contract is not used for non-interactive
-service-mode trials.
+The compatibility name `openhands` is SDK-backed as well;
+`python -m openhands.server` is not used for non-interactive service-mode
+trials.
 
 The audit runs dependency probes inside the named Docker image and
 reports one row per displayed agent. `blocked` means an executable or

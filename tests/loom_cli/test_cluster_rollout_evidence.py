@@ -103,7 +103,7 @@ def test_cluster_status_format_accepts_legacy_text_alias() -> None:
         {
             "code": "cluster_status_format_alias",
             "message": (
-                "`loom cluster status --format text` is a legacy spelling; "
+                "`loom cluster status --format text` is a compatibility spelling; "
                 "using `table`."
             ),
             "requested_format": "text",

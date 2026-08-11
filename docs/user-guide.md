@@ -10,11 +10,6 @@ Loom's product boundary and architecture are in the
 [repo README](../README.md). Provider setup for hosted APIs and self-hosted
 GPU-cluster vLLM lives in [`provider-onboarding.md`](integrations/provider-onboarding.md).
 
-> **Cross-repo issue/PR refs:** bare `#N` in this guide may point to the
-> pre-2026-06-26 `carinrc/loom` archive tracker (numbering was reset on
-> the new canonical repo `qianyi-sun/loom`). See
-> [`repo-migration.md`](contributing/repo-migration.md).
-
 ## Install
 
 ```bash
@@ -71,7 +66,8 @@ That wires through every layer (config → adapter → task loader →
 trial → object store → ATIF projection) without spending any cloud
 budget. **Note**: `--backend fake` no-ops every sandbox `exec` — the
 trial completes successfully but no real solver runs. Use it to
-verify your install; use `--backend docker` or `--backend daytona`
+verify your install; use `--backend docker`, `--backend daytona`, or
+`--backend modal`
 for actual evaluation.
 
 After the smoke succeeds:
@@ -231,7 +227,7 @@ loom eval batch create \
 
 # Harbor-shaped packs that ship solution/tests/verifier (e.g. strict-pass /
 # path-tracing) should select the TB21 private-path staging policy so the
-# agent cannot read the oracle (#1263):
+# agent cannot read the oracle:
 loom eval batch create \
   --workspace-staging-policy tb21 \
   --agent terminus-2 \
@@ -320,7 +316,7 @@ loom eval batch delivery-bundle <batch-id> \
 ```
 
 Use `--mode raw-harbor-tb2-v1` when the downstream consumer expects the
-versioned TB2/Phase 1 delivery profile:
+provider-log-derived TB2 v1 delivery profile:
 
 ```bash
 loom eval batch delivery-bundle <batch-id> \
@@ -344,11 +340,11 @@ loom eval batch delivery-bundle <batch-id> \
 selected trial’s packed agent `tool_calls` keystrokes reference private Harbor
 paths (`/app/solution`, `/app/tests`, `/app/verifier`). Use
 `--workspace-staging-policy tb21` at batch create to prevent that leak at
-runtime (#1263).
+runtime.
 
-Live staging validation for `raw-harbor-tb2-v2` is still pending; continue
-using `raw-harbor-tb2-v1` for provider-log-based exports until typed-event
-batches are available.
+Use `raw-harbor-tb2-v2` only when selected trials contain typed checkpoint
+events and hash-verified native artifacts. Use `raw-harbor-tb2-v1` when the
+source trial has only provider-log-based execution data.
 
 `delivery-bundle` asks the service to choose the final trial for each
 task/sample/combination coordinate across the main batch and any explicit
@@ -613,8 +609,12 @@ diagnostic panels work, see [Web platform workflows](#web-platform-workflows).
   Verifies the trial pipeline end-to-end without a container.
 - **`daytona`** — cloud sandbox for elastic capacity or when Docker isn't
   available on the submit host.
+- **`modal`** — Modal Sandbox backend with CPU and GPU selection; requires the
+  `loom[modal]` extra and Modal credentials.
 
-### Cloud sandboxes (Daytona)
+### Cloud sandboxes
+
+#### Daytona
 
 ```bash
 export DAYTONA_API_KEY=...
@@ -628,8 +628,8 @@ write `agent_output.json` with a `calls` list, or a `turns` list for
 multi-turn tasks; it does not use the `oracle` baseline because there is no
 preseeded `solution/solve.sh`.
 
-The reasoning and browsing benchmark adapters added for #307 use the same
-catalog lifecycle but have different runtime assumptions:
+The reasoning and browsing benchmark adapters use the same catalog lifecycle
+but have different runtime assumptions:
 
 - `gpqa` publishes the full official GPQA Extended set (546 rows) from the
   pinned `idavidrein/gpqa` repository and grades a final A-D answer letter.
@@ -637,14 +637,14 @@ catalog lifecycle but have different runtime assumptions:
   `HuggingFaceH4/MATH-500` and grades the final boxed/exact answer.
 - `hendrycks-math` remains available as a full 5000-row MATH test-split adapter
   from the pinned `HuggingFaceTB/MATH` `all` config, but it is outside the
-  current v1.0 supported set.
+  current support allowlist.
 - `mmlu-pro` publishes the full 12032-row MMLU-Pro test split and grades a
   final A-J option letter.
 - `tau2-bench` publishes the default leaderboard task sets for airline,
   retail, and telecom (278 tasks). The task bundle includes domain assets and
   expects `agent_output.json` containing planned tool actions and user-facing
-  messages; the verifier is deterministic, so operators should document any
-  future switch to the upstream interactive simulator separately.
+  messages; its current verifier is deterministic rather than the upstream
+  interactive simulator.
 - `browsecomp` publishes the full 1266-question BrowseComp release from
   OpenAI simple-evals. It requires network/browsing capability at execution
   time and grades the `Exact Answer:` line deterministically.
@@ -653,6 +653,26 @@ Daytona usage rows land in the `cloud_compute_records` table when the
 run is connected to a Loom service (`--server-url`). Standalone
 laptop runs skip persistence — the trajectories + ATIF still drop on
 local disk.
+
+#### Modal
+
+```bash
+pip install 'loom[modal]'
+export MODAL_TOKEN_ID=...
+export MODAL_TOKEN_SECRET=...
+
+loom run --backend modal --dataset humaneval \
+  --agent oracle --concurrency 100
+
+loom run --backend modal --gpu A10 \
+  --task swe-bench-verified/django__django-11848 \
+  --agent claude-code
+```
+
+Modal network policy is fixed when the sandbox starts, hostname allowlists are
+not supported, and uploads/downloads use base64-over-exec. See the
+[`loom_drivers.modal` reference](../src/loom_drivers/modal/README.md) for GPU
+values, cost reporting, lifecycle cleanup, and size constraints.
 
 ## Model sources
 
@@ -687,7 +707,7 @@ agents need their own adapter-specific support.
 In service mode, team-scoped provider connections are the normal path
 for user-hosted OpenAI-compatible endpoints. Register the connection,
 refresh or manually add its model ids, then launch from the SPA. The
-v1.0 hosted/public platform does not run model servers for users; it only
+The hosted/public platform does not run model servers for users; it only
 stores the team-scoped provider connection and routes calls to the endpoint
 the team provides.
 SPA hides obvious tool/API entries by default and submits
@@ -765,7 +785,7 @@ Loom:
 6. Tears down vLLM at end-of-process (or on Ctrl-C / SIGTERM).
 
 This path is local `loom run` behavior only. It is not available as hosted
-platform inference in v1.0; service-mode users should run their own vLLM or
+platform inference; service-mode users should run their own vLLM or
 other OpenAI-compatible endpoint and register it as a provider connection.
 
 vLLM tuning (passed through to `vllm serve`):
@@ -835,11 +855,11 @@ cache_read_per_mtok = 0.0
 cache_write_per_mtok = 0.0
 ```
 
-Service-mode operators register local providers via env vars:
-`LOOM_GW_LOCAL_<NAME>_BASE_URL=http://...` (+ optional
-`LOOM_GW_LOCAL_<NAME>_API_KEY`). Route-level Gateway dispatch for
-`model=local/...` is the natural follow-up; today, service-mode
-clients reach local servers via `loom run` on the agent's host.
+Service-mode operators register local providers through
+`gateway_local_providers`, which renders
+`LOOM_GW_LOCAL_<NAME>_BASE_URL=http://...` and an optional Secret-backed API
+key. Gateway requests using `model=local/<name>/<model-id>` are routed to that
+configured OpenAI-compatible upstream.
 
 ### `loom serve` reference
 
@@ -1349,14 +1369,10 @@ configs are not valid `TaskConfig` objects. Source license metadata is visible
 on catalog/task rows but does not disable benchmarks or block submit. Disabled
 rows show the API-provided readiness message and
 raw-versus-runnable counts so operators know whether to publish, republish,
-or repair a benchmark. `Not supported yet` means the benchmark is intentionally
-visible but excluded from the current supported runtime surface; it cannot be
-selected until the listed runtime work lands. `Deferred` means the benchmark is
-visible for roadmap transparency but intentionally outside the current
-supported scope until the listed product or data-access follow-up lands. `Not
-in v1.0` means the built-in benchmark is outside the current v1.0 allowlist; it
-is visible, disabled, and excluded from supported task counts until a support
-issue promotes it into scope.
+or repair a benchmark. Disabled catalog rows are visible for diagnosis but
+cannot be selected. Their API-provided readiness message states the current
+blocker, such as missing runnable tasks, invalid stored task configuration,
+unavailable runtime support, or exclusion from the active catalog profile.
 Required public benchmarks should move from publish/repair pending states to
 `Ready`; hiding a needed benchmark is not a substitute for publishing it.
 
@@ -1378,7 +1394,7 @@ a platform/verifier failure.
 
 Harbor-shaped tasks outside the `terminal-bench-2@tb2.1-r6/` prefix do not get
 that isolation automatically. Select it at batch create with
-`--workspace-staging-policy tb21` (#1263) so model agents cannot read
+`--workspace-staging-policy tb21` so model agents cannot read
 `solution/` / `tests/` / `verifier/` from the sandbox.
 
 Full-cluster rollout smoke must use an explicit audited physical task ID via
@@ -1393,7 +1409,7 @@ and `loom datasets sync-config --dry-run` snippets that use token and database
 environment references instead of raw secrets.
 
 After the supported-benchmark acceptance batch or batches finish, operators can
-verify the v1.0 reward contract from the public API:
+verify the current reward contract from the public API:
 
 ```bash
 python scripts/benchmark_reward_gate.py sweep \
@@ -1404,7 +1420,7 @@ python scripts/benchmark_reward_gate.py sweep \
 
 Repeat `--batch-id` when the acceptance run uses separate batches for separate
 benchmarks. This gate checks that each batch is terminal, fan-out produced the
-expected number of trials, and every v1.0-supported benchmark has distinct
+expected number of trials, and every supported benchmark has distinct
 numeric-reward task coverage equal to `/api/v1/tasks/count`. It treats
 model-correctness scores such as `0` as valid verifier output. A later rerun
 batch can cover an earlier provider/agent/platform transient failure for the
@@ -1453,7 +1469,7 @@ loom run
   --split SPLIT           # default "test"
   --agent NAME            # oracle | litellm | <launcher adapter>
   --model PROVIDER/NAME   # e.g. anthropic/claude-opus-4-7
-  --backend BACKEND       # docker | fake | daytona
+  --backend BACKEND       # docker | fake | daytona | modal
   --concurrency N         # parallel trials (default 1)
   --output-dir DIR        # default ./runs
   --json                  # JSON-line output instead of text
@@ -1472,8 +1488,8 @@ loom run
   under `.loom/agent/`. Requires a provider + model; does not use
   `loom-launcher` or per-trial `install_script`. See
   [`architecture/terminus2-runtime.md`](architecture/terminus2-runtime.md).
-- any other name — resolved via `loom_launcher.get_adapter(name)`;
-  ships 11 concrete adapters (claude-code, codex, openhands, aider,
+- any other name — resolved via `loom_launcher.get_adapter(name)` from the
+  included adapters (claude-code, codex, openhands, aider,
   opencode, swe-agent, mini-swe-agent, openhands-sdk, gemini-cli,
   qwen-cli, kimi-cli)
 
@@ -1529,8 +1545,8 @@ trial sandbox at spawn time on top of the benchmark's `task_image`.
 The first trial of a new `(task_image, agent)` combination takes a
 few extra minutes (package installs); subsequent trials hit the
 content-addressed cache and start instantly. See
-[`operator-runbook.md#trial-cache-per-trial-agent-install`](runbooks/operator-runbook.md#trial-cache-per-trial-agent-install)
-for the operator-side knobs.
+[per-trial agent installation](architecture/agent-adapter.md#per-trial-agent-installation)
+for cache keys, sharing, registry configuration, and eviction settings.
 
 ### `loom config` reference
 
@@ -1573,13 +1589,6 @@ When inspecting a main production batch plus linked supplemental reruns, pass
 to the family total.
 
 ## Troubleshooting
-
-**`HfUriError: Repository id must be 'namespace/name'`** — older
-`loom-benchmarks` releases shipped two HuggingFace adapters
-(`humaneval`, `mbpp`) with unnamespaced upstream IDs that newer
-`huggingface_hub` versions reject. Upgrade `loom-benchmarks` to a
-release that pins `openai/openai_humaneval` and
-`google-research-datasets/mbpp`.
 
 **`no tasks selected (dataset='X' task='Y')`** — the `--task` form is
 `<dataset-slug>/<instance-id>`. HumanEval instance ids contain a

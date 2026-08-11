@@ -4,21 +4,21 @@
 # boto3 `put_bucket_lifecycle_configuration` to the configured object
 # store. Re-applying the same config is a no-op at the storage layer.
 #
-# Strategies shipped:
+# Strategies applied by the S3-compatible CLI path:
 #   expire_after_days
 #       Delete objects N days after creation.
 #   keep_forever
 #       Sentinel — emits no lifecycle rule. Documents intent.
-#   cleanup_incomplete_uploads_after_hours
-#       Aborts stuck multipart uploads. Doesn't touch completed objects.
 #
-# Provider-neutral by design. The same config renders into MinIO,
-# AWS S3, Cloudflare R2, Backblaze B2, and Wasabi — they share the
-# S3 lifecycle schema. GCS and Azure renderers will land as separate
-# follow-up work.
+# The CLI applies the same S3 lifecycle shape to MinIO, AWS S3, Cloudflare R2,
+# Backblaze B2, and Wasabi. The parser also accepts
+# cleanup_incomplete_uploads_after_hours, but the S3 renderer intentionally
+# omits it because MinIO drops AbortIncompleteMultipartUpload from persisted
+# lifecycle state. The library has a pure GCS renderer; this CLI does not
+# dispatch or apply it.
 #
 # See docs/architecture/storage-retention.md for the design rationale
-# and docs/runbooks/operator-runbook.md#storage-retention-policy for the
+# and docs/runbooks/operator-runbook.md#storage-retention for the
 # operator workflow.
 
 # Which renderer to use. Required.
@@ -45,21 +45,3 @@ days = 180
 [[retention]]
 bucket = "atif"
 strategy = "keep_forever"
-
-# Clean up stuck multipart uploads across every bucket. Matches the
-# behavior previously documented inline in cluster-deploy.md. Each
-# bucket is configured separately because S3 lifecycle is per-bucket.
-[[retention]]
-bucket = "trajectories"
-strategy = "cleanup_incomplete_uploads_after_hours"
-hours = 336  # 14 days — long trials (SWE-Bench-class) need this
-
-[[retention]]
-bucket = "artifacts"
-strategy = "cleanup_incomplete_uploads_after_hours"
-hours = 168  # 7 days
-
-[[retention]]
-bucket = "atif"
-strategy = "cleanup_incomplete_uploads_after_hours"
-hours = 168

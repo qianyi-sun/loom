@@ -17,9 +17,8 @@ from loom_launcher.adapters._openhands_runtime import (
 from loom_launcher.capture import stream_stdout_jsonl
 from loom_launcher.registry import register_adapter
 
-# #317 Phase 2: install openhands-sdk plus loom-launcher into a
-# dedicated Python 3.12 venv because openhands-sdk 1.27.0 no longer
-# resolves against Python 3.11 task images.
+# Install openhands-sdk plus loom-launcher into a dedicated Python 3.12 venv
+# because openhands-sdk 1.27.0 does not resolve against Python 3.11 task images.
 
 
 @dataclass(frozen=True)

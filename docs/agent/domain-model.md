@@ -31,11 +31,10 @@ from staging validation and from a GitHub pull request.
 The machine-enforced declaration of which workload capabilities a release
 candidate may claim. V1 accepts only `internal_trusted` with TaskSet transforms,
 transform network isolation, and untrusted-workload isolation all disabled.
-The exact release contract is defined in
-[`v1-workload-trust-contract.md`](../architecture/adr/v1-workload-trust-contract.md).
+The enforced runtime boundary is defined in
+[`sandbox-isolation.md`](../architecture/sandbox-isolation.md#workload-trust-mode).
 
 For v1, a TaskSet manifest that declares `transform` is rejected with
 `transform_unavailable_in_internal_trusted` before any transform/source/verifier
-blob fetch or runner invocation. A legacy subprocess helper or a best-effort
-`os.unshare` result is not untrusted-workload isolation. Post-v1 #758 owns the
-separate design for actual arbitrary-code isolation.
+blob fetch or runner invocation. A subprocess helper or best-effort
+`os.unshare` result is not treated as untrusted-workload isolation.

@@ -1,17 +1,16 @@
-# Production DB-backed environment desired state (#484 prod bootstrap).
+# Production DB-backed environment desired state.
 #
 # Prod is state/frontend/release/worker-identity isolated from staging+dev
 # (separate DB, MinIO, tokens, provider refs, frontend base). Physical GB10 /
 # OLDLAB Slurm hosts are shared, but prod workers connect only to the prod
 # control plane (env_file below points at the prod CP + prod token). Prod owns
 # capacity by default; staging borrows short-lived slots via lease and drains
-# under prod pressure (prod-pressure reclaim, #892/#489).
+# under production pressure.
 #
-# SHIPS DISABLED (fail-closed). Applying this profile does NOT activate any
-# prod worker: the GB10 row is enabled=false until the first prod go-live
-# decision. Non-exclusive allocation is the only supported Loom Slurm contract;
-# the policy remains disabled until #896 container-isolation evidence is
-# complete, rather than falling back to whole-node exclusivity.
+# This profile is fail-closed. Applying it does not activate a production
+# worker because the GB10 policy is disabled. Non-exclusive allocation is the
+# only supported Loom Slurm contract; it does not fall back to whole-node
+# exclusivity.
 #
 # Apply after image rollout with:
 #   loom admin environment-state apply \
@@ -26,11 +25,9 @@ environment = "production"
 pool_name = "gb10"
 actuator = "slurm"
 enabled = false
-disabled_reason = "prod not yet live; enable=true at the first prod go-live decision. Prod-first warm floor (min_slots) is tuned at activation; exclusive=false packing stays gated on #896."
-# Prod-first: at activation, set min_slots to a warm floor (>0) so prod always
-# holds a baseline of capacity, and prod-pressure reclaim drains staging's
-# borrowed slots when prod queues work. max_slots is the full pool; prod wins
-# contention via the prod-pressure policy, not by reserving nodes.
+disabled_reason = "production GB10 allocation is disabled in this profile; no authorized live capacity floor is configured"
+# With min_slots=0 and enabled=false, this profile holds no production warm
+# floor. max_slots records the full policy ceiling without allocating it.
 min_slots = 0
 max_slots = 150
 scale_up_threshold_slots = 1
@@ -70,7 +67,7 @@ repo_dir = "/shared_work/loom-prod-rollout/worker-repos/loom-remote-worker-${IMA
 requested_cpus = 20
 requested_memory_mib = 115000
 requested_concurrency = 10
-# Per-trial container caps (#896): concurrency * cap == the Slurm
+# Per-trial container caps: concurrency times each cap equals the Slurm
 # allocation above, so trials cannot exceed the lease. job_pids_max is
 # the job cgroup PID ceiling (>= container_pids * concurrency).
 container_cpus = 2.0
@@ -81,8 +78,7 @@ max_jobs = 15
 pending_job_cap = 2
 # The physical gb10 partition advertises MaxTime=1-00:00:00.
 time_limit = "1-00:00:00"
-# Keep disabled until #896 acceptance; do not use whole-node exclusivity as a
-# fallback.
+# The policy is disabled and whole-node exclusivity is not a fallback.
 exclusive = false
 external_runner = true
 
@@ -92,7 +88,7 @@ image_tag = "${IMAGE_TAG}"
 max_concurrent = 10
 env_config_version = "${ENV_CONFIG_VERSION}"
 source_git_commit = "${GIT_SHA}"
-# Ships at 0 (fail-closed); the go-live step raises target_slots with enabled=true.
+# Zero is the fail-closed current desired state.
 target_slots = 0
 
 [gb10_worker_pool_desired_states.host_intents]
@@ -165,9 +161,10 @@ env_template_glob = "/var/lib/loom-prod-rollout/generated/prod-gb10-worker-prod-
 # with dev/staging supervisors on a shared submit host):
 #   oldlab  dev/staging/prod = 15447 / 15448 / 15449
 #   gb10    dev/staging/prod = 15450 / 15451 / 15452
-# SHIPS enabled=false + active=false (fail-closed): applying writes the unit but
-# does not enable or start the timer, mirroring the pool's enabled=false gate.
-# Flip both to true at the prod go-live step.
+# Both controls are false (fail-closed): applying writes the unit but does not
+# enable or start the timer, matching the pool's disabled state. Enabling either
+# control changes live production capacity and requires the corresponding
+# reviewed environment-state change.
 [[external_slurm_autoscaler_supervisors]]
 name = "gb10-production"
 pool_name = "gb10"

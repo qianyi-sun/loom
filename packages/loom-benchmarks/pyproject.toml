@@ -19,14 +19,9 @@ dependencies = [
 dev = ["pytest>=8,<9", "pytest-asyncio>=0.23,<1"]
 
 [project.entry-points."loom.benchmarks"]
-# PR-2 (per-year AIME split + series-for-all): each AIME year ships
-# as its own adapter so users can pick AIME-24 / AIME-25 / both with
-# a single click. The combined `aime-aimo-validation` adapter is gone
-# (migration 0016 drops its row); the per-year adapters all pull from
-# `AI-MO/aimo-validation-aime` filtered by parsed year. AIME-25 stays
-# on its MathArena upstream. `swe-bench-verified` restored as a peer.
-# All standalone adapters get a series so the SPA has no "Other"
-# bucket: code / agents / skill.
+# Each AIME year has its own adapter. The 2022-2024 adapters filter
+# `AI-MO/aimo-validation-aime`; AIME 2025 uses MathArena. Every standalone
+# adapter declares a series for the SPA taxonomy.
 aime-22 = "loom_benchmarks.adapters.aime:AIME22Adapter"
 aime-23 = "loom_benchmarks.adapters.aime:AIME23Adapter"
 aime-24 = "loom_benchmarks.adapters.aime:AIME24Adapter"
@@ -46,7 +41,7 @@ osworld = "loom_benchmarks.adapters.osworld:OSWorldAdapter"
 skillflow = "loom_benchmarks.adapters.skillflow:SkillFlowAdapter"
 skillflow-iterative = "loom_benchmarks.adapters.skillflow:SkillFlowIterativeAdapter"
 skilllearnbench = "loom_benchmarks.adapters.skilllearnbench:SkillLearnBenchAdapter"
-# PR-4 #672 Item 1: 25 SLB baseline-matrix offline rows.
+# SkillLearnBench baseline-matrix rows.
 "skilllearnbench-human-authored" = "loom_benchmarks.adapters.skilllearnbench:SkillLearnBenchHumanAuthoredAdapter"
 "skilllearnbench-b1-one-shot-claude-haiku-4-5" = "loom_benchmarks.adapters.skilllearnbench:SkillLearnBenchB1OneShotClaudeHaiku45Adapter"
 "skilllearnbench-b1-one-shot-claude-opus-4-6" = "loom_benchmarks.adapters.skilllearnbench:SkillLearnBenchB1OneShotClaudeOpus46Adapter"
@@ -72,7 +67,7 @@ skilllearnbench = "loom_benchmarks.adapters.skilllearnbench:SkillLearnBenchAdapt
 "skilllearnbench-b4-skill-creator-gemini-3-flash-preview" = "loom_benchmarks.adapters.skilllearnbench:SkillLearnBenchB4SkillCreatorGemini3FlashPreviewAdapter"
 "skilllearnbench-b4-skill-creator-gemini-3.1-flash-lite-preview" = "loom_benchmarks.adapters.skilllearnbench:SkillLearnBenchB4SkillCreatorGemini31FlashLitePreviewAdapter"
 "skilllearnbench-b4-skill-creator-gemini-3.1-pro-preview" = "loom_benchmarks.adapters.skilllearnbench:SkillLearnBenchB4SkillCreatorGemini31ProPreviewAdapter"
-# PR-4 #672 Item 2: 5 SLB online-mode seed rows (canonical model = claude-haiku-4-5).
+# SkillLearnBench online-mode seed rows use claude-haiku-4-5 as the canonical model.
 "skilllearnbench-online-from-human-authored" = "loom_benchmarks.adapters.skilllearnbench:SkillLearnBenchOnlineFromHumanAuthoredAdapter"
 "skilllearnbench-online-from-b1-one-shot-claude-haiku-4-5" = "loom_benchmarks.adapters.skilllearnbench:SkillLearnBenchOnlineFromB1OneShotClaudeHaiku45Adapter"
 "skilllearnbench-online-from-b2-self-feedback-claude-haiku-4-5" = "loom_benchmarks.adapters.skilllearnbench:SkillLearnBenchOnlineFromB2SelfFeedbackClaudeHaiku45Adapter"

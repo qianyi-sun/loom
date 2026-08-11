@@ -1,5 +1,5 @@
 [Unit]
-# Administrator-owned root guard for non-exclusive Loom Slurm workers (#896).
+# Administrator-owned root guard for non-exclusive Loom Slurm workers.
 # It delegates the pids controller into each opted-in job cgroup and registers
 # an allocation-capped loom-job-<id>.slice so Docker's systemd cgroup driver has
 # a valid, contained parent. Install the guard script at the ExecStart path and

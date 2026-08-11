@@ -10,8 +10,8 @@
 environment = "staging"
 
 [[worker_pool_autoscaler_policies]]
-# GB10 is managed only by the controller-local Slurm supervisor. The legacy
-# per-node worker agents below are retired so there is one capacity authority.
+# GB10 is managed only by the controller-local Slurm supervisor. Per-node
+# worker agents below remain stopped so there is one capacity authority.
 pool_name = "gb10"
 actuator = "slurm"
 enabled = true
@@ -56,7 +56,7 @@ qos_normal = "loom-staging"
 requested_cpus = 20
 requested_memory_mib = 115000
 requested_concurrency = 10
-# Per-trial container caps (#896): concurrency * cap == the Slurm
+# Per-trial container caps: concurrency times each cap equals the Slurm
 # allocation above, so trials cannot exceed the lease. job_pids_max is
 # the job cgroup PID ceiling (>= container_pids * concurrency).
 container_cpus = 2.0

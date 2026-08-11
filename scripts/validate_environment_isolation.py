@@ -286,7 +286,7 @@ def validate_profiles(profiles: list[EnvironmentProfile], repo_root: Path) -> li
 
         # Reserved dev-instance space: per-developer dev environments derive
         # `loom-dev-<name>` namespaces and `/dev-<name>` routes (see
-        # loom.dev_instance / docs/architecture/multi-dev-env-design.md). A base
+        # loom.dev_instance / docs/architecture/multi-dev-environments.md). A base
         # env must never fall inside that space, or a dev instance could collide
         # with it.
         if profile.namespace.startswith("loom-dev-"):

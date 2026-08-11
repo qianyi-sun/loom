@@ -1,10 +1,8 @@
-"""Backwards-compatible registry view backed by entry-points.
+"""Compatibility registry view backed by entry points.
 
-Plan 14 shipped a hard-coded dict `REGISTRY: dict[str, BenchmarkAdapter]`.
-Plan 24 migrates to entry-points discovery. To avoid breaking
-`loom_benchmark_tool list/import/verify` and any third-party importer of
-`loom_benchmarks.registry.REGISTRY`, we expose a MutableMapping that lazily
-loads each adapter from its entry-point on first access.
+`loom_benchmarks.registry.REGISTRY` is a MutableMapping that lazily loads each
+adapter from its entry point. This keeps `loom_benchmark_tool
+list/import/verify` and third-party registry importers working.
 
 Thread safety: single-process CLI use only. `loom run` is one process per
 invocation; concurrent agentic workloads inside that process share the
@@ -91,8 +89,8 @@ class _EntryPointRegistry(MutableMapping[str, BenchmarkAdapter]):
     def copy(self) -> dict[str, BenchmarkAdapter]:
         """Materialize every entry into a plain dict.
 
-        Preserves the Plan-14 contract where callers could do
-        `REGISTRY.copy()` on the original `dict[str, BenchmarkAdapter]`.
+        Supports callers that require `REGISTRY.copy()` as a plain
+        `dict[str, BenchmarkAdapter]`.
         Materializing forces every entry-point to load, which can be
         expensive — prefer iteration unless you actually need a snapshot.
         """

@@ -49,8 +49,8 @@ Each sandbox emits one `cloud_compute_records` row tagged
 the per-bucket `modal_compute_seconds` / `modal_cost_usd` fields (and
 the cross-provider `cloud_compute_seconds` / `cloud_cost_usd` totals).
 
-Per-SKU rates live in `src/loom/cost/cloud.py`; revisit quarterly
-against [modal.com/pricing](https://modal.com/pricing).
+Per-SKU rates live in `src/loom/cost/cloud.py` and must match
+[modal.com/pricing](https://modal.com/pricing).
 
 ## Quirks vs. DockerDriver
 

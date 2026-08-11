@@ -1,8 +1,7 @@
 FROM python:3.12-slim
-# #199: transient PyPI ReadTimeouts during rollout builds — see
-# docs/runbooks/operator-runbook.md#rollout-build-resilience.
+# Retry transient package-index timeouts during image builds.
 ENV PIP_RETRIES=10 PIP_DEFAULT_TIMEOUT=60
-# Pinned Harbor Terminus2 runtime for builtin terminus-2 agent (#744).
+# Pinned Harbor Terminus2 runtime for the built-in terminus-2 agent.
 ARG HARBOR_COMPAT_SHA=527d50deb63a5d279e8c20593c18a2cbc7f61f9e
 WORKDIR /app
 # git is required for pip install harbor@git+...

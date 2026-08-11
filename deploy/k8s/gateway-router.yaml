@@ -1,18 +1,17 @@
 # loom-gateway-router — per-node TCP proxy from hostPort 30443 to the
-# in-cluster `loom-llm-gateway` Service (#78 partial-D).
+# in-cluster `loom-llm-gateway` Service.
 #
 # Why a DaemonSet + hostPort instead of just direct Service access:
 # Sandbox containers spawned by the worker are NOT k8s pods — they're
-# Docker containers on a per-trial (#78 D) or default bridge. Those
+# Docker containers on a per-trial or default bridge. Those
 # containers can reach the HOST's network interface but cannot resolve
 # in-cluster k8s Service DNS. The router gives them a stable
 # `node-IP:30443` endpoint to dial; the router pod proxies the TCP
 # stream into the in-cluster gateway Service.
 #
-# Image: a minimal socat container does the TCP forward. Replacing
-# socat with the loom-llm-gateway-sandbox singleton (which adds
-# TLS termination + step-JWT validation) is the next slice — for
-# now this is a plain TCP forward with no extra auth (the gateway
+# Image: a minimal socat container does the TCP forward. This router remains a
+# plain TCP path; the optional loom-llm-gateway-sandbox singleton adds TLS
+# termination and step-JWT validation before traffic reaches it (the gateway
 # itself enforces step-JWT auth).
 #
 # Why an exception in `loom cluster audit`: hostPort declarations

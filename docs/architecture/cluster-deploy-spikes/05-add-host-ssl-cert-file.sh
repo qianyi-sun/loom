@@ -10,7 +10,7 @@
 #      hostname resolves via /etc/hosts → TLS validates via loom-ca —
 #      works end-to-end with no SDK changes.
 #
-# These are the layers (1)+(2) of the rev 6+ SSRF defense. If any
+# These are the DNS and TLS layers of the sandbox SSRF defense. If either
 # breaks, the gateway-as-base-URL pattern fails.
 #
 # Runs against plain Docker. No k8s required.
@@ -75,9 +75,8 @@ http {
 }
 EOF
 
-# Pin nginx away from mutable nginx:alpine. Hub has returned manifests whose
-# layer blobs 404 (content descriptor not found), which fails this spike with
-# docker exit 125 even when spike 01/04 pass (#1089).
+# Use a versioned nginx tag so the regression test does not depend on the
+# mutable nginx:alpine tag.
 NGINX_IMAGE="${LOOM_SPIKE_NGINX_IMAGE:-nginx:1.27-alpine}"
 docker pull "$NGINX_IMAGE" >/dev/null
 docker run -d --name "$SERVER" --network "$NET" \
@@ -154,6 +153,6 @@ fi
 pass "claim 4: curl fails-closed without SSL_CERT_FILE (expected; loom-ca isn't in system trust)"
 
 echo ""
-echo "All claims verified. Rev 6+ Path B sandbox SDK redirect (--add-host"
+echo "All claims verified. The sandbox SDK redirect (--add-host"
 echo "+ SSL_CERT_FILE + bind-mounted loom-ca) composes correctly with"
-echo "Docker + stock curl. Phase 2 can implement against this contract."
+echo "Docker + stock curl."

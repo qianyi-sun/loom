@@ -133,8 +133,7 @@ def _materialize_git_lfs_pointers(repo_dir: Path) -> None:
     Detect LFS pointers post-clone by their spec-v1 header and delegate
     to `git-lfs pull`. Skip cleanly if either git-lfs isn't installed
     or the repo has no LFS content — both cases print a short warning
-    and leave the clone as-is (existing behavior for adapters that never
-    triggered this path). See #331.
+    and leave the clone as-is.
     """
     has_pointer = False
     for path in repo_dir.rglob("*"):

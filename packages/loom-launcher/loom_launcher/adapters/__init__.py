@@ -1,8 +1,7 @@
 """Adapter registry self-registration entry point.
 
-Importing this package self-registers every adapter module that lives
-under `loom_launcher/adapters/`. Plan 12 adds the eleven real adapters;
-Plan 10 ships only `HelloAdapter` as a reference for tests.
+Importing this package self-registers the production launcher adapters plus
+`HelloAdapter`, the reference used by tests.
 """
 
 from loom_launcher.adapters import (
@@ -18,7 +17,7 @@ from loom_launcher.adapters import (
     openhands_sdk,  # noqa: F401 — self-registers
     qwen_cli,  # noqa: F401 — self-registers
     swe_agent,  # noqa: F401 — self-registers
-    # terminus-2: native builtin runtime (#744); adapter registration removed.
+    # terminus-2 is a native builtin runtime and does not register here.
 )
 
 __all__: list[str] = []

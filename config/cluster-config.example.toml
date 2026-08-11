@@ -4,7 +4,7 @@
 
 # Object-store bucket for trial artifacts. Rendered into control-plane, worker, and loom-service env. Set per environment when deployments share an object-store endpoint.
 artifacts_bucket = "artifacts"
-# Optional container registry prefix applied to every locally-built loom-* image reference in the rendered manifest (no trailing slash). Empty (default) keeps the historical unprefixed shape that kind's in-cluster load-images path depends on. For multi-node k3s / production, set to the registry host+port (e.g. 192.168.50.13:5000) and point each node's /etc/rancher/k3s/registries.yaml at the same endpoint so containerd can pull without side-channel image imports.
+# Optional registry prefix for every locally built loom-* image in the rendered manifest, without a trailing slash. Empty keeps unprefixed images for kind load-images. Multi-node clusters set a registry host and configure every node's container runtime to pull it.
 container_registry = ""
 # Operator-local publication prefix for container_registry (no scheme or trailing slash). It must be set together with container_registry. This may differ from the pull prefix when k3s registry mirrors expose the same registry through a node-local endpoint, for example localhost:5000 -> 192.168.50.13:5000.
 container_registry_push = ""
@@ -48,7 +48,7 @@ provider_egress_allowlist = []
 runtime_environment = "production"
 # Object-store bucket for trial trajectories. Rendered into control-plane, worker, and loom-service env. Set per environment when deployments share an object-store endpoint.
 trajectories_bucket = "trajectories"
-# Registry repo path for the shared trial-image cache (#547 item #2). Enables cross-node build sharing so workers on node B can pull layered images built on node A instead of rebuilding. Empty (default) = per-worker local cache only. Set to e.g. `ghcr.io/qianyi-sun/loom-trial-cache` on staging/production to activate. Workers need push+pull credentials via a mounted docker-config secret; without them the pull-fail case falls back cleanly to a local build (harmless).
+# Registry repository for the shared trial-image cache. Empty uses only per-worker caches. A configured repository lets workers pull layered images built elsewhere; workers need mounted pull and push credentials. A failed shared pull falls back to a local build.
 trial_cache_registry_repo = ""
 # Sandbox-facing OpenAI-compatible gateway URL injected into k8s workers as LOOM_WORKER_SUBPROCESS_GATEWAY_URL. The default targets the rendered gateway-router hostPort; kind-on-host deployments with another host service on 30443 should override this, for example to http://host.docker.internal:30444/openai/v1 with a durable host port-forward.
 worker_subprocess_gateway_url = "http://host.docker.internal:30443/openai/v1"
@@ -59,7 +59,7 @@ enabled = false
 min_replicas = 2
 max_replicas = 8
 cpu_target_pct = 60
-# GB10 hosts managed by protected rollout retirement checks. ssh_config optionally points at an operator SSH config file used for every host; ssh_identity_file and ssh_certificate_file point at platform-dev-local deploy auth material for detached rollout runners. Each host entry contains only ssh_target and node_agent_service. Protected apply verifies the service-owned shared candidate and keeps predecessor direct worker/node-agent services and timers disabled; external Slurm owns on-demand capacity.
+# GB10 hosts whose direct worker and node-agent units are checked and held disabled by protected rollout. ssh_config optionally points at the operator SSH configuration used for every host; ssh_identity_file and ssh_certificate_file point at deployment authentication material for detached rollout runners. Each host entry contains only ssh_target and node_agent_service. External Slurm policy owns on-demand capacity.
 
 [gb10_pool]
 ssh_config = ""
@@ -72,14 +72,14 @@ enabled = false
 
 [llm_gateway_sandbox]
 enabled = false
-# PgBouncer connection multiplexer (#609). When enabled, renders a Deployment (2 replicas), Service (loom-pgbouncer:6432), PodDisruptionBudget, and NetworkPolicy; bootstrap populates *-db-url-pool secrets by deriving from the direct DSN. Rollback: enabled=false, re-render, redeploy — services fall back to db_url (direct). See docs/architecture/pgbouncer-transaction-mode-design.md.
+# PgBouncer transaction-mode connection multiplexer. When enabled, renders a Deployment (2 replicas), Service (loom-pgbouncer:6432), PodDisruptionBudget, and NetworkPolicy; bootstrap populates *-db-url-pool secrets by deriving from the direct DSN. Disable it, re-render, and redeploy to make services fall back to db_url (direct). See docs/architecture/pgbouncer.md.
 
 [pgbouncer]
 enabled = true
 default_pool_size = 25
 max_client_conn = 500
 min_pool_size = 5
-# Postgres runtime tuning knobs. max_connections bumped from Postgres default 100 to leave room for pgbouncer backend pool (default_pool_size × pgbouncer.replicas) + LISTEN watchers + Alembic + admin slack.
+# Postgres runtime tuning. max_connections leaves room for PgBouncer backend pools, LISTEN watchers, Alembic, and administrative connections.
 
 [postgres]
 max_connections = 150
@@ -93,7 +93,7 @@ worker = 3
 egress_xds = 0
 egress_proxy = 0
 pgbouncer = 2
-# Cluster topology (#637). `multi_node=true` opts into HA-shaped resources: Postgres replicas via CloudNativePG, distributed MinIO, cross-node anti-affinity, PDBs with minAvailable≥1, and Longhorn-backed persistent storage. `multi_node=false` renders single-pod stateful services with hostPath storage — the current pilot-cluster shape. Currently schema-default `false`; production will flip to `true` once the k3s multi-node cluster is provisioned. Profile overrides pin explicit values so a schema-default flip cannot silently break existing deployments. Storage backend `host_path` matches today; `longhorn` is the target for the multi-node production cluster; `nfs`/`csi` are unimplemented placeholders.
+# Cluster topology. `multi_node=true` renders Postgres through CloudNativePG, distributed MinIO, cross-node anti-affinity, and disruption budgets; `storage_backend=longhorn` requests the Longhorn StorageClass. `multi_node=false` renders single-pod Postgres and MinIO. Profiles must pin values that match the target cluster and its installed operators and storage classes. Supported storage backends are `host_path` and `longhorn`.
 
 [topology]
 multi_node = false

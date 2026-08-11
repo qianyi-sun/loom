@@ -14,7 +14,7 @@ persistent_storage_host_path_root = "/data/loom-prod"
 
 # Trial execution capacity comes from Slurm-managed pools (`oldlab`,
 # `gb10`); the in-cluster loom-worker Deployment is omitted to
-# avoid double-scheduling the OLDLAB host Docker daemon. See #383.
+# avoid double-scheduling a shared host Docker daemon.
 [k8s_worker]
 enabled = false
 
@@ -24,23 +24,10 @@ taskset_transforms_enabled = false
 taskset_transform_network_isolated = false
 untrusted_workload_isolation = false
 
-# Single-node default for now (#637). The multi-node HA templates
-# (#642) exist and were validated on a real k3s + CNPG + Longhorn
-# cluster, but we intentionally keep production on the single-node
-# shape until we've operated the multi-node cluster in staging long
-# enough to be confident. Flip `multi_node` to `true` (and swap the
-# other fields to the multi-node values shown in the commented block
-# below) in the same PR that starts the production HA rollout.
+# The checked-in production profile uses single-node Postgres and MinIO with
+# host-path storage.
 [topology]
 multi_node = false
 storage_backend = "host_path"
 postgres_replicas = 1
 minio_replicas = 1
-
-# When flipping to multi-node HA, use these values instead:
-#   multi_node        = true
-#   storage_backend   = "longhorn"    # requires Longhorn CSI installed
-#   postgres_replicas = 3             # CNPG-managed
-#   minio_replicas    = 4             # distributed, requires ≥4 nodes
-#                                     # with anti_affinity = "required"
-#   anti_affinity     = "required"    # or "preferred" if fewer nodes

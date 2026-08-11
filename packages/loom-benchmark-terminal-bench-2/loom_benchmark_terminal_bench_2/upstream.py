@@ -35,8 +35,7 @@ through `_looks_like_sha` and uses the `git init && git fetch <sha>` path
 instead of `--branch` (raw SHAs are not valid branch refs)."""
 
 DATASET_VERSION = "0.1.1"
-"""Surfaced into TB-2 report JSON as a top-level field if Harbor's
-reference shape adds one in a future schema bump."""
+"""Pinned terminal-bench-core dataset version metadata."""
 
 TASK_SUBDIR = "tasks"
 """Path relative to the repo root that holds per-task directories."""

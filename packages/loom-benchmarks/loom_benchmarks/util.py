@@ -91,7 +91,7 @@ canonical upstream solution at `solution/_reference.py` and this
 stub at `solution/solution.py`. The pytest verifier imports from
 `solution.solution`, so any attempt to run the tests against this
 stub fails loudly with NotImplementedError instead of silently
-passing on a pre-shipped answer.
+passing on the bundled reference answer.
 
 - Non-oracle agents: must overwrite `solution.py` with their own
   attempt (the file the pytest tests import from).

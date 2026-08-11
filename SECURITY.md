@@ -32,7 +32,7 @@ For public repository operation:
 
 - Run full Git-history secret scans before visibility or release-boundary
   changes and rotate any credential that ever appears in history, even if it has
-  since been removed.
+  is absent from the current tree.
 - Keep GitHub Secret Scanning and Push Protection enabled.
 - Keep non-GitHub Actions explicitly allowed by policy instead of relying on
   unrestricted workflow sources.
@@ -84,9 +84,8 @@ For public repository operation:
 - CLI and automation use named, scoped team API tokens with raw `loom_api_...`
   values revealed only on mint/rotate. Token lists, logs, audit metadata, and
   diagnostics must show only safe names, scopes, and hash prefixes.
-- Team is the execution, cost, provider credential, member, and API-token
-  boundary. Future quota/rate-limit enforcement, if added, must use an explicit
-  product policy rather than implicit pre-production defaults. Browser `viewer`, `member`,
+- Team is the execution, cost, provider credential, member, API-token, and
+  quota-policy boundary. Browser `viewer`, `member`,
   and `owner` roles are enforced server-side, with owner-only management of team
   API tokens and provider connections.
 
@@ -122,18 +121,17 @@ For public repository operation:
   and surfaced only with a safe blocked reason. Redaction/leak tests for shared
   artifacts are part of the staging security gate.
 
-## Platform Security Topics To Resolve
+## Current Security Contracts
 
-- Team and project-level access model; see
-  [`docs/architecture/auth-threat-model.md`](docs/architecture/auth-threat-model.md)
-  for the #10 admin/team-registration baseline and
-  [`docs/architecture/auth-registration-spec.md`](docs/architecture/auth-registration-spec.md)
-  for the user-session, membership, role, and CSRF contract.
-- Secret injection into sandboxed jobs.
-- Network egress policy for execution environments.
-- Artifact retention, deletion, and org-wide Run Library share-state rules.
-- Audit log requirements for PM, infra, and research users. The first auth
-  backend audit surface now covers team-registration approve/reject,
-  invite create/revoke/resend/accept, and `loom_service` token admin
-  mint/revoke, with a SPA audit review table for operators. Broader admin
-  mutation coverage remains follow-up work.
+- Accounts, teams, sessions, roles, CSRF, and operator authentication:
+  [`docs/architecture/auth-and-teams.md`](docs/architecture/auth-and-teams.md)
+  and
+  [`docs/architecture/auth-threat-model.md`](docs/architecture/auth-threat-model.md).
+- Sandbox credentials and network egress:
+  [`docs/architecture/sandbox-isolation.md`](docs/architecture/sandbox-isolation.md).
+- Artifact visibility and reuse:
+  [`docs/architecture/run-library.md`](docs/architecture/run-library.md).
+- Staging retention and exact-object deletion:
+  [`docs/architecture/staging-data-lifecycle.md`](docs/architecture/staging-data-lifecycle.md).
+- Admin mutations covered by service routes write safe attribution to
+  `admin_audit_events`; the SPA exposes the corresponding operator audit view.

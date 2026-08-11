@@ -1,6 +1,5 @@
 FROM python:3.11-slim
-# #199: transient PyPI ReadTimeouts during rollout builds — see
-# docs/runbooks/operator-runbook.md#rollout-build-resilience.
+# Retry transient package-index timeouts during image builds.
 ENV PIP_RETRIES=10 PIP_DEFAULT_TIMEOUT=60
 WORKDIR /app
 COPY pyproject.toml README.md ./
