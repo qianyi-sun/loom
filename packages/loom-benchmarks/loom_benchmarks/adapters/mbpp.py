@@ -63,8 +63,7 @@ class MBPPAdapter(CatalogBackedAdapter):
         # The `sanitized` config renames the legacy `text` field to
         # `prompt` and `test_setup_code` to `test_imports` (a list of
         # import statements). Fall back to the legacy field names so
-        # the adapter still works if a future config swap returns the
-        # `full` schema.
+        # the adapter also accepts the `full` schema's field names.
         prompt = r.get("prompt") or r.get("text") or ""
         setup = r.get("test_imports") or r.get("test_setup_code") or ""
         if isinstance(setup, list):

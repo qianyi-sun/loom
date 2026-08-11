@@ -2,11 +2,8 @@ FROM aquasec/trivy@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6d
 FROM registry.k8s.io/kubectl:v1.36.2@sha256:b0d792e0d8dfb9bb1b922b78b23137e2a34bb6f9667640353a9d2aadd1fd7761 AS kubectl
 
 FROM python:3.11-slim
-# #199: transient PyPI ReadTimeouts during staging rollout builds
-# used to fail the whole rollout. These env vars tell pip to retry each
-# request 10 times and wait 60s per attempt instead of the 5-retry /
-# 15s defaults. See docs/runbooks/operator-runbook.md#kind-cluster-loading-local-images
-# and the "Rollout build resilience" runbook section for the retry policy.
+# Retry each package-index request up to 10 times with a 60-second timeout so
+# transient index latency does not abort the image build.
 ENV PIP_RETRIES=10 PIP_DEFAULT_TIMEOUT=60
 RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends \

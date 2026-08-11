@@ -74,10 +74,7 @@ agent deadline.
 
 ## Typed trajectory events
 
-The subprocess-era events (`terminus2_session_ready`, `terminus2_exec_run`,
-`loom-terminus-2` tmux recovery) were removed with the Harbor-embedded runtime.
-Operators and
-debuggers should look for:
+The Harbor-embedded runtime emits these events for operators and debuggers:
 
 | Event kind | Purpose |
 |---|---|
@@ -119,8 +116,8 @@ image and gateway-ledger bridge:
 
 ```bash
 loom auth login --server https://yylx.world/dev ...
-# #1109: user eval create has no --required-worker-pool. For release/GB10
-# coverage evidence use loom admin batches submit-on-behalf separately.
+# User batch creation does not select a required worker pool. Operators collect
+# pool-specific coverage with `loom admin batches submit-on-behalf` separately.
 loom eval batch create \
   --name-suffix terminus2-gate3-smoke \
   --agent terminus-2 \
@@ -150,12 +147,12 @@ Evidence checklist:
 | Mode | Status | Source |
 |---|---|---|
 | `raw-harbor-tb2-v1` | Shipped | Provider logs + reward joins |
-| `raw-harbor-tb2-v2` | Shipped framework (`[Needs validation]` for live staging proof) | Checkpoint bridge / typed `terminus2_*` events via `Terminus2TrajectoryMapper` |
+| `raw-harbor-tb2-v2` | Shipped; requires typed source events | Checkpoint bridge / typed `terminus2_*` events via `Terminus2TrajectoryMapper` |
 
 `raw-harbor-tb2-v2` is wired in the delivery API and CLI. Use it when the
-trial trajectory contains typed `terminus2_*` events and native Harbor
-artifacts. Live staging validation is still pending; use `raw-harbor-tb2-v1`
-for provider-log-based exports until typed-event batches are available.
+trial trajectory contains typed `terminus2_*` events and hash-verified native
+Harbor artifacts. Its exporter fails closed when that contract is incomplete;
+use `raw-harbor-tb2-v1` for provider-log-based source trials.
 
 ## Related code
 
@@ -167,5 +164,5 @@ for provider-log-based exports until typed-event batches are available.
 | `src/loom/agent/terminus2/gateway_ledger.py` | CP `llm_calls` join |
 | `src/loom/agent/terminus2/mapper.py` | TB2 v2 projection |
 | `src/loom_service/delivery_export_tb2_v2.py` | TB2 v2 export framework |
-| `packages/loom-launcher/loom_launcher/terminus_2_runner.py` | Deprecated stub |
+| `packages/loom-launcher/loom_launcher/terminus_2_runner.py` | Import-stability stub; exits with current runtime guidance |
 | `tests/conformance/terminus2/README.md` | Local conformance notes |

@@ -171,9 +171,9 @@ Existing Batch Detail and Trial Detail pages also show owner team, visibility,
 share status, and provenance when those fields are present, so cloned/reused
 work remains explainable outside the Library.
 
-## Safety Tests
+## Safety verification
 
-Run Library changes should cover these cases:
+Automated coverage exercises these cases:
 
 - My team and All teams views include the right rows and `username / team`
   ownership labels, with legacy team fallback for old rows.

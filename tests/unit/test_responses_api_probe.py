@@ -6,10 +6,10 @@ Two exported entry points:
   supported; 404/501/5xx → unsupported; other 4xx → unknown (surfaces
   to caller as "keep the existing behaviour, don't dispatch to translator").
 - `probe_responses_api(upstream_url, api_key, transport)` — runs one
-  outbound POST with an empty JSON body; returns
+  outbound POST with a sentinel-model JSON body; returns
   `(supported: bool | None, error_detail: str | None)`.
 
-Spec: docs/architecture/responses-api-support-probe.md
+Reference: docs/architecture/responses-api.md
 """
 from __future__ import annotations
 

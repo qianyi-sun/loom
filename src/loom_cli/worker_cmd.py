@@ -1,14 +1,14 @@
-"""`loom worker` — worker-host-local operator commands (#317 Phase 3b).
+"""`loom worker` — worker-host-local operator commands.
 
-Currently:
+Available commands:
 - ``loom worker cache stats`` — inspect the trial-cache layered images
   on the worker's local Docker daemon (label=loom.trial-cache=true).
 - ``loom worker setup status`` — inspect setup-health admission and
   Loom-labeled setup/trial containers on the worker host.
 
-Runs on the worker host (where the Docker daemon is). Fleet-wide
-aggregation is not in v1 — operators run this per-host via ssh or
-their existing orchestration.
+Run these commands on the worker host where the Docker daemon is.
+Fleet-wide aggregation is not provided; operators run the commands
+per host through SSH or their existing orchestration.
 """
 
 from __future__ import annotations
@@ -293,7 +293,7 @@ def dispatch(argv: list[str]) -> int:
     sub = parser.add_subparsers(dest="worker_cmd", required=True)
 
     p_cache = sub.add_parser(
-        "cache", help="Trial-cache (#317) inspection.",
+        "cache", help="Inspect the trial image cache.",
     )
     cache_sub = p_cache.add_subparsers(dest="cache_cmd", required=True)
 

@@ -124,7 +124,7 @@ Domain resolution is backend-specific:
 
 Unresolvable domain → `DriverError` (no silent drop).
 
-## Shipped implementations
+## Included implementations
 
 ### `loom.driver.docker.DockerDriver`
 
@@ -171,8 +171,8 @@ Cloud Daytona sandboxes. See
 `src/loom_drivers/modal/`. Bridges Modal's sync SDK via
 `asyncio.to_thread` (same pattern DockerDriver uses for docker-py).
 Snapshot reuse via per-process `modal.Image.from_id()` cache keeps
-cold starts down. GPU passthrough via `Capabilities.gpu_types` (added
-additively when this driver shipped) + a `--gpu <TYPE>` CLI flag on
+cold starts down. GPU passthrough uses `Capabilities.gpu_types` plus a
+`--gpu <TYPE>` CLI flag on
 `loom run`. Cost telemetry routes through the same
 `cloud_compute_records` table as Daytona, tagged
 `cloud_provider="modal"`; `/api/v1/usage` exposes

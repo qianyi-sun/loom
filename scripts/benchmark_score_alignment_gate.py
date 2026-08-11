@@ -33,6 +33,7 @@ except ImportError:  # pragma: no cover - direct script fallback.
             "skilllearnbench",
             "swe-bench-verified",
             "terminal-bench-2",
+            "terminal-bench-2@tb2.1-r6",
         }
     )
 

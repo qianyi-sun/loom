@@ -27,8 +27,8 @@ execute **in-cluster** via the `k8s_worker` pool. Do not also start the control
 plane or service as local `uv` processes — that would create a second,
 conflicting authority against the same database and object store.
 
-External Slurm is an advanced, optional worker path (last section) and is
-usually not usable from a laptop; see the #827 caveat there.
+External Slurm is an advanced, optional worker path described in the last
+section and requires paths visible from its compute nodes.
 
 ## Prerequisites
 
@@ -243,9 +243,9 @@ keys are placeholders.
 ## 7. Advanced optional: external Slurm
 
 Use this **only** if you have a submit host that can reach the shared Slurm
-cluster AND make your candidate + worker env-file visible on the allocated
-**compute** nodes. This is the exact blocker recorded in **#827**: `env_file`
-and `repo_dir` are read inside the sbatch script *on the compute node*, so
+cluster and make your candidate plus worker env file visible on the allocated
+**compute** nodes. `env_file` and `repo_dir` are read inside the sbatch script
+*on the compute node*, so
 laptop-absolute paths and an SSH-forwarded login shell do **not** make them
 compute-visible. On a plain laptop this path does not work — keep the default
 `k8s_worker` path above.

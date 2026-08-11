@@ -1,6 +1,6 @@
 #!/bin/bash
 # One-time (idempotent) bootstrap of the k3s staging public entry + native TLS,
-# so a fresh bring-up self-provisions both with zero manual steps (#1114).
+# so a fresh bring-up self-provisions both with zero manual steps.
 #
 # Run as root on the k3s control-plane host (bb8-1), from a repo checkout:
 #   sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml scripts/ops/bootstrap_staging_k3s_entry_tls.sh
@@ -42,8 +42,7 @@ log "applying LE ClusterIssuer + Certificate"
 kubectl apply -f "${here}/deploy/staging-k3s/tls-acme.yaml"
 
 # 4. GB10 fleet connectivity: socat forwards from the ports the nodes tunnel to
-#    (bb8-1 :18081/:18082/:19000/:19100) onto the k3s router hostPorts. INTERIM
-#    until the node-agent dials the routers directly (#906).
+#    (bb8-1 :18081/:18082/:19000/:19100) onto the k3s router hostPorts.
 log "installing GB10 fleet forward units (kind->k3s connectivity bridge)"
 install -m 0755 "${here}/deploy/staging-k3s/loom-k3s-fleet-fwd.sh" \
   /usr/local/sbin/loom-k3s-fleet-fwd.sh

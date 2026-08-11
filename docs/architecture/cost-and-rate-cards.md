@@ -77,9 +77,6 @@ Why this shape:
   `usage_estimate_confidence` says whether the provider returned complete
   token usage (`high`, `partial`, `missing`, `none`).
 
-(Harbor froze `cost_usd` at emit time. RFC0001 acknowledges this
-goes wrong when prices move.)
-
 ## Rate card shape
 
 Both CLI mode and service mode use the same Pydantic model:

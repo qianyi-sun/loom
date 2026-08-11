@@ -162,6 +162,31 @@ def test_list_sends_filters_and_prints_rows(
     assert "dev-alice" in output
 
 
+def test_destroy_help_advertises_candidate_backed_teardown(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as error:
+        main(["dev", "destroy", "--help"])
+
+    assert error.value.code == 0
+    output = capsys.readouterr().out
+    assert "candidate-backed" in output
+    assert "ready" in output
+    assert "--keep-data" in output
+
+
+def test_dev_help_distinguishes_candidate_create_and_destroy(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as error:
+        main(["dev", "--help"])
+
+    assert error.value.code == 0
+    output = capsys.readouterr().out
+    assert "candidate-less create" in output
+    assert "candidate-backed destroy" in output
+
+
 def test_destroy_preserves_data_only_when_explicit(
     server: _Server,
 ) -> None:

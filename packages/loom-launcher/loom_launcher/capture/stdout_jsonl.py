@@ -82,7 +82,7 @@ async def stream_stdout_jsonl(
 
     SubprocessAgent uses `last_skip_sample` for the failure_message
     summary and persists the full `skip_samples` list to the trajectory
-    so post-hoc debugging doesn't depend on retained worker logs (#321).
+    so post-hoc debugging doesn't depend on retained worker logs.
     """
     buf = b""
     skipped = 0

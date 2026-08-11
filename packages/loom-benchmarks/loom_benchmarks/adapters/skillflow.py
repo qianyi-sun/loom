@@ -103,8 +103,8 @@ class SkillFlowAdapter(CatalogBackedAdapter):
 
         # Re-stamp task.toml's `id` field to the namespaced form.
         # Upstream bundles use the bare instance_id (which already
-        # matches the namespaced form for our v1 bundles), but force
-        # consistency so future upstream changes can't drift.
+        # matches the namespaced form for current bundles), but force
+        # consistency with the catalog identity.
         toml_path = out_dir / "task.toml"
         if toml_path.exists():
             old = toml_path.read_text()
@@ -510,7 +510,7 @@ PY
 
 
 class SkillFlowIterativeAdapter(SkillFlowAdapter):
-    """SkillFlow variant that opts into family-run iterative execution (#672).
+    """SkillFlow variant that opts into family-run iterative execution.
 
     Identical converter to :class:`SkillFlowAdapter`; the catalog
     ``skillflow-iterative`` entry supplies the ``family_run_defaults``
@@ -518,8 +518,7 @@ class SkillFlowIterativeAdapter(SkillFlowAdapter):
     batches route seeds ``batch_family_state`` at accept time and the
     scheduler serialises the family under one skills tarball.
 
-    Ships as a separate entry-point so operators can pick the family-run
-    experience explicitly without breaking existing single-shot
+    The separate entry point lets operators choose family-run or single-shot
     ``skillflow`` clones.
     """
 

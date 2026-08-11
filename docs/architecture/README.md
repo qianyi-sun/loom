@@ -1,183 +1,120 @@
 # Architecture
 
-Design docs, protocol specs, and ADRs for how Loom is built. Start with
-[`overview.md`](overview.md); drill into the area you care about from
-there.
+Current contracts for Loom's implementation. Start with
+[`overview.md`](overview.md), then follow the area-specific references below.
+Design proposals, implementation plans, and decision history are kept in
+[`../../archive/docs/architecture/`](../../archive/docs/architecture/) rather
+than mixed with current behavior.
 
-Durable design documents belong in this directory. Agent-generated execution
-plans and working drafts stay in ignored local state such as `.claude/plans/`;
-`docs/superpowers/` is not part of the repository documentation tree and is
-rejected by repository checks.
+## Core execution
 
-## Reading order for new contributors
+- **[Overview](overview.md)** — components, execution modes, and main data
+  flows.
+- **[Service mode](service-mode.md)** — Control Plane, Worker, LLM Gateway,
+  Postgres, object storage, and REST service.
+- **[CLI mode](cli-mode.md)** — stateless local execution through
+  `Trial.run()`.
+- **[Trajectories and ATIF](trajectory-and-atif.md)** — append-only event
+  storage, streaming, and ATIF projection.
+- **[Family runs](family-runs.md)** — ordered related trials, state adapters,
+  and the optional family orchestrator.
+- **[Pipeline orchestrator](pipeline-orchestrator.md)** — persisted RunGraph
+  reconciliation, the disabled-by-default controller boundary, and the
+  executable BEHAVIOR rollout-stage adapter.
 
-1. **[overview.md](overview.md)** — one-pager: component map, modes, data
-   flow.
-2. **[service-mode.md](service-mode.md)** — Control Plane + Worker + LLM
-   Gateway + Postgres + MinIO. The main production shape.
-3. **[cli-mode.md](cli-mode.md)** — the `loom` CLI reusing `Trial.run()`
-   statelessly, no server stack.
-4. **[trajectory-and-atif.md](trajectory-and-atif.md)** — event-sourced
-   trajectories, ATIF projection, MinIO layout.
+## Extension contracts
 
-## Extension protocols
+- **[Driver protocol](driver-protocol.md)** — sandbox lifecycle and included
+  driver capabilities.
+- **[Benchmark adapter](benchmark-adapter.md)** — adapter discovery, catalog
+  entries, task materialization, and operator registration.
+- **[Benchmark onboarding](benchmark-onboarding-pipeline.md)** — catalog
+  readiness, publication, and user-owned benchmark intake.
+- **[User-brought TaskSets](user-brought-tasksets.md)** — team-owned TaskSet
+  registration and materialization within the current trust boundary.
+- **[Agent adapter](agent-adapter.md)** — `loom-launcher`, built-in agents, and
+  per-trial installation caching.
+- **[Terminus-2 runtime](terminus2-runtime.md)** — the Harbor-embedded runtime
+  and its Loom integration.
+- **[Verifier protocol](verifier-protocol.md)** — verifier result schema and
+  built-in verifiers.
 
-- **[driver-protocol.md](driver-protocol.md)** — sandbox lifecycle contract;
-  DockerDriver, FakeDriver, DaytonaDriver; how to add a cloud backend.
-- **[benchmark-adapter.md](benchmark-adapter.md)** — `BenchmarkAdapter`
-  Protocol; the shipped adapters; entry-point discovery; how to add a new
-  dataset; the operator-facing `config/benchmarks.toml` registry for
-  `[[local]]` folders and `[[remap]]` adapter reuse.
-- **[benchmark-onboarding-pipeline.md](benchmark-onboarding-pipeline.md)** —
-  scalable benchmark lifecycle, runnable task configs, readiness states, and
-  user-owned benchmark onboarding.
-- **[user-brought-tasksets.md](user-brought-tasksets.md)** — team-owned
-  TaskSet intake, materialization, and run creation.
-- **[agent-adapter.md](agent-adapter.md)** — `loom-launcher` framework;
-  shipped CLI adapters; `SubprocessAgent`; per-trial install + content-
-  addressed image cache; how to add an agent.
-- **[terminus2-runtime.md](terminus2-runtime.md)** — Harbor-embedded
-  `terminus-2` builtin: worker image pin, typed trajectory events, gateway
-  ledger, staging acceptance, TB2 export status.
-- **[verifier-protocol.md](verifier-protocol.md)** — typed `VerifierResult`;
-  the five shipped verifiers (pytest, script, structured, llm_judge,
-  composite); how to add one.
+## Scheduling, capacity, and cost
 
-## Scheduling, gateway, cost
+- **[DRF scheduling](drf-scheduling.md)** — eligibility, fairness, claim
+  fencing, and recovery.
+- **[Global fleet capacity manager](global-fleet-capacity-manager.md)** — the
+  shadow-allocation service, personal subject projections, demand reports,
+  fenced dry-run grant/executor records, and the non-executable authority
+  boundary.
+- **[Global development-fleet autoscaler](global-dev-fleet-autoscaler.md)** —
+  implemented supervisor contract and the checked-in disabled boundary.
+- **[GB10 capacity](gb10-dynamic-capacity.md)** — inventory, health, dynamic
+  allocatable capacity, and placement rules.
+- **[LLM Gateway](llm-gateway.md)** — provider dialects, attribution, and
+  routing.
+- **[Cost and rate cards](cost-and-rate-cards.md)** — usage snapshots,
+  projected cost, and rate-card lookup.
 
-- **[drf-scheduling.md](drf-scheduling.md)** — the single-SQL claim query;
-  DRF tie-break + priority + FIFO; caps eligibility; crash recovery.
-- **[llm-gateway.md](llm-gateway.md)** — multi-dialect routing;
-  per-(team, trial, step) attribution; why we centralize the LLM call.
-- **[cost-and-rate-cards.md](cost-and-rate-cards.md)** — usage frozen, cost
-  derived; rate-card shape; CLI vs. service storage; re-pricing history.
-- **[issue45-worker-autoscaler-design.md](issue45-worker-autoscaler-design.md)**
-  — resource-aware OLDLAB Slurm autoscaling and GB10 desired-state
-  reconciliation.
-- **[global-fleet-capacity-manager.md](global-fleet-capacity-manager.md)** —
-  approved design for one fenced allocation writer spanning every Loom
-  environment and the OLDLAB and GB10 physical pools.
+## Security and tenancy
 
-## Auth, isolation, sandboxing
+- **[Authentication and teams](auth-and-teams.md)** — accounts,
+  teams, sessions, setup/reset links, audit events, and operator controls.
+- **[Authentication threat model](auth-threat-model.md)** — enforced trust
+  boundaries and mitigations.
+- **[Sandbox isolation](sandbox-isolation.md)** — network enforcement and the
+  supported workload trust mode.
+- **[Environment naming](env-naming-convention.md)** — canonical environment
+  identities and route prefixes.
 
-- **[auth-threat-model.md](auth-threat-model.md)** — threat model for
-  singleton admin auth, username registration, password reset, audit,
-  rotation, and production rollout gates.
-- **[auth-registration-spec.md](auth-registration-spec.md)** —
-  implementation spec for singleton admin secret, no-email
-  username/password accounts, admin-approved setup/reset links, audit
-  events, operator rotation commands, and DB-admin removal.
-- **[sandbox-isolation.md](sandbox-isolation.md)** — honest description of
-  the sandbox trust boundary as shipped: what iptables policies enforce,
-  what's still aspirational, the known `Public`-policy metadata-IP gap.
-- **[adr/v1-workload-trust-contract.md](adr/v1-workload-trust-contract.md)**
-  — v1's `internal_trusted` release boundary; user TaskSet transforms are
-  unavailable, and #758 owns future untrusted arbitrary-code isolation.
+## Data, storage, and shared results
 
-## Storage and Run Library
+- **[Staging data lifecycle](staging-data-lifecycle.md)** — data authority,
+  garbage collection, rollback leases, and checkpoints.
+- **[Staging rollout preflight](staging-rollout-preflight.md)** — candidate
+  checks, rehearsal, and attestations.
+- **[Storage retention](storage-retention.md)** — lifecycle policy rendering
+  and apply behavior for supported object stores.
+- **[Run Library](run-library.md)** — shared completed-run metadata, artifacts,
+  provenance, and access boundaries.
 
-- **[staging-data-lifecycle.md](staging-data-lifecycle.md)** — typed staging
-  execution-data authority, two-phase DB/object GC, mutation epochs, bounded
-  rollback leases, and the split between rollout checkpoints and asynchronous
-  disaster recovery.
-- **[staging-rollout-preflight.md](staging-rollout-preflight.md)** — reusable
-  staged checks, bounded-concurrency DAG coverage, isolated exact-candidate
-  rehearsal, and immutable drift-sensitive attestations.
-- **[storage-retention.md](storage-retention.md)** — operator-configurable
-  object-store retention policy; provider-neutral rules rendered into
-  S3-compatible lifecycle dicts; idempotent apply via
-  `loom cluster bootstrap-storage-lifecycle`.
-- **[storage-backend-pluggability.md](storage-backend-pluggability.md)** —
-  design spec for swapping MinIO for managed object storage (AWS S3, GCS)
-  as a first-class deployment shape at v1.0; what the operator pre-creates
-  vs. what Loom bootstraps; per-backend monitoring and backup posture.
-- **[run-library.md](run-library.md)** — org-wide completed-run metadata,
-  typed safe shared artifacts, metadata export, clone/reuse provenance,
-  and the team boundary for shared results.
-- **[loom-spa-v3.md](loom-spa-v3.md)** — trial-centric simplification of the
-  SPA; batch/trial/artifact routing.
+## Deployment and operations
 
-## Deployment shapes
+- **[Cluster deployment](cluster-deploy.md)** — `loom cluster` rendering,
+  preflight, lifecycle, diagnostics, and secret bootstrap.
+- **[Protected staging rollout](staging-rollout.md)** —
+  candidate binding, locking, backup, evidence, and operator authority.
+- **[Personal development environments](multi-dev-environments.md)** —
+  opt-in source-fresh CLI/API lifecycle, identity, activation, capacity
+  publication, candidate artifact collection, manager-first teardown, and
+  limits.
+- **[Multi-node topology](multi-node-topology.md)** — Postgres, MinIO,
+  storage, anti-affinity, and disruption budgets.
+- **[PgBouncer transaction mode](pgbouncer.md)** —
+  pooled database URLs, rendering, health checks, and fallback.
+- **[Configuration schema](configuration.md)** — generated settings,
+  cluster configuration, and secret projection from `loom-schema.toml`.
+- **[CI runner acceleration](ci-runner-acceleration.md)** — current
+  hosted/self-hosted runner selection and isolation requirements.
+- **[Executable cluster checks](cluster-deploy-spikes/README.md)** — CI-run
+  proofs for bridge networking, host preflight, JWT rotation, and TLS.
 
-- **[ci-runner-acceleration.md](ci-runner-acceleration.md)** — opt-in
-  GitHub-hosted/self-hosted runner routing, oldlab-5 ephemeral-KVM isolation
-  prerequisites, activation, and rollback.
-- **[cluster-deploy.md](cluster-deploy.md)** — the `loom cluster` CLI:
-  `render`, `preflight`, `audit`, `up`, `down`, `doctor`,
-  `bootstrap-secrets`.
-- **[independent-staging-rollout-design.md](independent-staging-rollout-design.md)**
-  — detailed design for the attributable, merged-candidate staging rollout
-  broker, including candidate binding, lifecycle locking, backup, evidence,
-  and operator acceptance boundaries.
-- **[multi-node-topology.md](multi-node-topology.md)** — Postgres HA
-  (#637), distributed MinIO (#610), topology schema (#641), HA templates
-  (#642).
-- **[pgbouncer-transaction-mode-design.md](pgbouncer-transaction-mode-design.md)**
-  — transaction-mode connection multiplexing design.
-- **[config-consolidation.md](config-consolidation.md)** —
-  `config/loom-schema.toml` as the single source of truth for Pydantic
-  Settings + k8s env blocks + Secret bootstrap + operator cluster knobs.
-- **[cluster-deploy-spikes/](cluster-deploy-spikes/README.md)** — the
-  archived Cluster-H investigation spikes referenced from cluster-deploy
-  and the images CI workflow.
+## Local model serving
 
-## Local LLMs
+- **[Local LLMs](local-llm.md)** — local OpenAI-compatible endpoints and the
+  inline vLLM helper.
+- **[Multiple local model servers](multi-server-local-llm.md)** — `loom serve`
+  and multi-model loading.
+- **[Responses API support](responses-api.md)** — capability
+  probing and Responses-to-Chat fallback.
 
-- **[local-llm.md](local-llm.md)** — local OpenAI-compatible server
-  dispatch (vLLM / ollama / llama.cpp / lm-studio); inline
-  `--local-server`; local CLI vLLM helper (`--model hf:` / `/path/`); not
-  hosted platform inference.
-- **[multi-server-local-llm.md](multi-server-local-llm.md)** — `loom
-  serve` + repeatable `--model` for comparing N models on the same
-  dataset; sequential-by-default load loop; `--parallel-models` opt-in.
+## Web application and observability
 
-## Observability
-
-- **[observability.md](observability.md)** — metric naming convention; the
-  5 Grafana dashboards + what each covers; Prometheus alert rules; on-call
-  triage path per alert.
-
-## Human-readable SPA
-
-- **[frontend-error-recovery.md](frontend-error-recovery.md)** — startup,
-  auth-session, root, and route recovery boundaries; safe `WEB-*` reports;
-  retry policy and redaction invariants.
-- **[frontend-quality-gate.md](frontend-quality-gate.md)** — required strict
-  TypeScript, Vitest coverage, production build, prefix-route Playwright, axe,
-  failure-ledger, ownership, and repository aggregation contracts.
-- **[human-readable-spa-ux.md](human-readable-spa-ux.md)** — two-layer
-  default/diagnostics rule; humanizer libraries; SPA specifications for
-  New Batch, Monitor, Trial Detail, Batch Detail, Providers.
-- **[human-readable-spa-ux-implementation-plan.md](human-readable-spa-ux-implementation-plan.md)**
-  — historical implementation plan for the human-readable UX rollout.
-
-## Provider probes
-
-- **[responses-api-support-probe.md](responses-api-support-probe.md)** —
-  proactive probe for Responses API support extending the Chat-fallback
-  shim.
-
-## Historical self-service runtime registration design
-
-- **[self-service-runtime-registration.md](self-service-runtime-registration.md)**
-  — historical `ModelEndpoint`, `ServingDeployment`, and `EvaluationHarness`
-  design. The self-service GB10/vLLM product is not planned under closed #144;
-  this document is not a supported-feature contract.
-- **[pipeline-platform-governance.md](pipeline-platform-governance.md)** —
-  active governance baseline for Pipeline extensibility, typed Artifacts,
-  official Recipes, plugins, SkillMarkdown injection, and data production.
-- **[pipeline-orchestrator.md](pipeline-orchestrator.md)** — durable v1 graph
-  reconciliation, fencing, hard budgets, cancellation, and the disabled
-  standalone controller deployment boundary.
-
-## ADRs
-
-Architecture decision records — durable "we decided X because Y" notes for
-choices that shape post-v1 architecture. See [`adr/`](adr/README.md).
-
-- **[adr/env-domain-topology.md](adr/env-domain-topology.md)** — accepted
-  single-origin public routes for development (`/dev`), staging (`/staging`),
-  and production (`/prod`), including path-prefix isolation requirements.
-- **[adr/pipeline-run-graph-v1.md](adr/pipeline-run-graph-v1.md)** — accepted
-  official-Recipe-only Pipeline RunGraph v1, including the closed node
-  vocabulary, manifest fan-out, and separation from Trial semantics.
+- **[Human-readable web UX](human-readable-spa-ux.md)** — default and
+  diagnostics presentation rules.
+- **[Frontend error recovery](frontend-error-recovery.md)** — safe recovery
+  boundaries and browser diagnostics.
+- **[Frontend quality gate](frontend-quality-gate.md)** — required type,
+  test, build, accessibility, and route checks.
+- **[Observability](observability.md)** — metrics, dashboards, alerts, and
+  alert-specific triage.

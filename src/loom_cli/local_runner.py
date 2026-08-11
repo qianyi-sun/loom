@@ -55,8 +55,8 @@ class LocalRunner:
     trial_config: TrialConfig | None = None
 
     async def run(self) -> TrialResult:
-        # Plan 23: TrialConfig requires agent_name + agent_model. In CLI
-        # mode (no API submission), the task.toml is the source of truth
+        # TrialConfig requires agent_name + agent_model. In CLI mode (no API
+        # submission), task.toml is the source of truth
         # — we copy the task's agent identity onto a fresh TrialConfig so
         # `loom run X` keeps working without the user having to pass
         # --agent / --model when the task already specifies them.

@@ -7,12 +7,12 @@ Covers three cases:
 - `responses_api_supported = FALSE` on the connection → skip the native
   outbound call entirely, translate to `/v1/chat/completions`, return
   a Responses-shaped body.
-- `responses_api_supported = NULL` (never probed) → probe with an empty
-  body, cache the result, dispatch based on the outcome.
+- `responses_api_supported = NULL` (never probed) → probe with a sentinel
+  model request, cache the result, dispatch based on the outcome.
 - `responses_api_supported = TRUE` (cached fresh) → existing native
   pass-through path unchanged.
 
-Spec: docs/architecture/responses-api-support-probe.md
+Reference: docs/architecture/responses-api.md
 """
 
 from __future__ import annotations

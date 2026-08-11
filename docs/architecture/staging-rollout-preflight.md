@@ -66,9 +66,9 @@ the fresh passing evidence becomes the attestation authority and is rechecked
 again at final admission. Candidate-static server-schema, field-ownership and
 browser-runtime evidence uses the same one-hour freshness budget as the other
 immutable Tier 1 artifacts, so the bounded cleanup wait cannot expire it while
-the current DAG is still running. This removes the previous circular dependency in
-which clone rehearsal needed a verified lease while the broker demanded the
-rehearsal attestation before it could create that lease.
+the current DAG is still running. This avoids a circular dependency in which
+clone rehearsal needs a verified lease while the broker requires rehearsal
+attestation before creating that lease.
 
 Persistence makes that distinction explicit. `preflight.json` reserves the
 candidate/tree, epoch, config, registry, coverage, and assessment identity;
@@ -361,12 +361,12 @@ an unattested attempt runnable.
 
 ## Tiers
 
-Historical late failures are executable fixtures rather than names in a list.
+Known late-failure classes are executable fixtures rather than names in a list.
 `replay_regression_manifest` requires one case for every checked-in fixture,
 verifies the production `RegisteredCheck` identity and declared tier, injects
 the fault through that check's real probe, validates its evidence schema, and
 requires the normalized failure code. Missing fixtures, an implementation
-substitution, or a historical fault that unexpectedly passes is a blocking
+substitution, or a recorded fault that unexpectedly passes is a blocking
 coverage defect.
 
 ### Tier 0: admission, under two minutes
@@ -744,14 +744,14 @@ means a published successful `final.protected-apply` is never repeated after a
 worker crash; an incomplete or failed execution cannot be treated as resume
 authority.
 
-An attested worker may not fall back to the historical 18-step driver. The
-production worker composition always injects the six-check `FinalGateRunner`;
+An attested worker may not use the 18-step compatibility driver. The production
+worker composition always injects the six-check `FinalGateRunner`;
 an unavailable composition fails with
 `final.protected-apply.runner-unavailable@final-only`, while a missing or
 invalid installed helper fails its fixed command boundary without invoking a
-protected action. These fail-closed transitions prevent a partially migrated
-installation from rebuilding images, rerendering manifests, or rediscovering
-an early predicate after backup.
+protected action. These fail-closed transitions prevent an installation without
+the complete six-check composition from rebuilding images, rerendering
+manifests, or rediscovering an early predicate after backup.
 
 Before those actions can run, `FinalGatePlan` joins the driver envelope, the
 digest-addressed attestation, and the build-once preflight artifact publication
@@ -837,8 +837,8 @@ epoch owned by that same request and plan, and `drifted` for every concurrent
 or malformed state. A crash after the transaction is therefore recovered by
 readback, never by a second increment.
 
-The one-time pre-0069 transition is explicit rather than silently pretending
-that a missing epoch row is current authority. Only a plan attesting epoch
+Schema bootstrap for a database below revision 0069 is explicit rather than
+treating a missing epoch row as current authority. Only a plan attesting epoch
 zero, a baseline schema below 0069, and a rehearsed target at or above 0069 may
 bootstrap the staging row. The exact migration component must converge first;
 then one SQL statement inserts the bootstrap row if absent, claims epoch one,
@@ -848,8 +848,8 @@ environment's database.
 
 The migration/epoch composition has one typed command runner and the same
 attempt journal in both orderings. Existing lifecycle authority claims the
-next epoch before the migration Job; the one-time legacy path migrates first
-and then bootstraps/claims epoch one. Commands are argv-only `kubectl`
+next epoch before the migration Job; the pre-0069 bootstrap path migrates first
+and then bootstraps and claims epoch one. Commands are argv-only `kubectl`
 invocations under a fixed non-inheriting kubeconfig environment, with bounded
 input/output and redacted failures. Re-entering the composition reclassifies
 terminal records and cannot repeat either the epoch CAS or the migration. The
@@ -1012,8 +1012,8 @@ completed oneshot result, enabled timer, and only the documented
 loaded/enabled `active/elapsed` state is also admitted as
 protected-repairable when manager, linger, service result, target unit, and
 daemon-reload evidence all remain exact. This does not make arbitrary timer
-drift healthy: protected GB10 prep must remove only the byte-exact legacy
-`deploy-window.conf`, reject any unknown effective drop-in, start the oneshot,
+drift healthy: protected GB10 prep may remove only the recognized byte-exact
+`deploy-window.conf`, must reject any unknown effective drop-in, start the oneshot,
 restart the candidate timer, and verify `active/waiting`. This narrow bridge
 avoids a preflight deadlock after a host reboot while keeping the mutation
 inside the existing protected component. All hosts are
@@ -1033,10 +1033,9 @@ observations with capped exponential backoff (60 seconds total sleep). This
 absorbs only the bounded cross-host visibility window; divergent content or an
 unsettled checkout still fails inside the 180-second check budget.
 
-The initial contract and coverage manifest are additive foundations. Existing
-broker predicates remain mapped while adapters are converted to the shared
-implementations. The coverage test prevents an unmapped legacy predicate or
-rollout step during that transition.
+The coverage manifest maps every broker predicate and rollout step to the
+shared check implementations. Its coverage test rejects any unmapped predicate
+or rollout step.
 
 Before a DAG may issue an attestation, its registry must exactly match every
 manifest entry through the requested tier: one implementation per check with

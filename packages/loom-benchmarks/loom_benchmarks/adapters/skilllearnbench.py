@@ -63,8 +63,7 @@ class SkillLearnBenchAdapter(SkillFlowAdapter):
         """When ``params.online_mode`` is truthy the adapter skips the
         baked-in per-family skill copy at convert time - the family_run
         state mount populates the target directory at trial start
-        instead (PR-4 #672 Item 7, Option B). Falsy value keeps the
-        legacy static-skill behaviour."""
+        instead. A falsy value keeps static skill copying enabled."""
         raw = self._params.get("online_mode")
         if isinstance(raw, bool):
             return raw
@@ -282,7 +281,7 @@ class SkillLearnBenchAdapter(SkillFlowAdapter):
         return True
 
 
-# ─── Baseline matrix + online-mode subclasses (PR-4 #672 Item 1/2) ────
+# ─── Baseline matrix + online-mode subclasses ────────────────────────
 #
 # Each named entry picks its ``skill_method`` (or ``online_mode=True``)
 # from the catalog row's ``params``. Adapter logic is inherited unchanged

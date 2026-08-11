@@ -3,7 +3,7 @@ columns to `provider_connections` so the LLM gateway can cache per-connection
 Responses-API support and dispatch through the existing
 `responses_chat_compat` translator for providers that lack it (yibuapi et al.).
 
-Spec: docs/architecture/responses-api-support-probe.md
+Reference: docs/architecture/responses-api.md
 """
 from __future__ import annotations
 

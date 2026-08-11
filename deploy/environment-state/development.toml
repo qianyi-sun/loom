@@ -1,16 +1,7 @@
-# Development DB-backed environment desired state (shared dev env, #857/#873).
+# Development DB-backed environment desired state.
 #
-# Shared dev runs trial execution on external Slurm (GB10 + OLDLAB), the same
-# model as staging/prod. BOTH worker rows ship enabled=false (fail-closed):
-# applying this profile does NOT activate any external Slurm worker. Activation
-# is gated on:
-#   - the dev cluster existing (k3d on platform-dev, post-#879 + #881 soak);
-#   - the per-env broker + publisher writing candidates to
-#     /shared_work/loom/candidates/development/ (#874 publisher, #877 broker);
-#   - GB10: the #827 external-Slurm acceptance matrix AND #896 container-isolation
-#     evidence (packed exclusive=false workers) -- see the GB10 row comment;
-#   - OLDLAB: #896 container-isolation evidence + double-duty headroom
-#     measurement, because OLDLAB nodes are k3s + MinIO + slurmd.
+# Both external Slurm policies and supervisors are disabled. Applying this
+# profile writes desired state but allocates no GB10 or OLDLAB capacity.
 #
 # Apply after image rollout with:
 #   loom admin environment-state apply \
@@ -22,23 +13,14 @@
 environment = "development"
 
 # --- GB10 pool (ARM, Slurm-only nodes, shared across envs) -------------------
-# SHIPS DISABLED and fail-closed. Applying this profile must NOT activate GB10:
-#   - #827 requires external Slurm to stay disabled until its allocation-side
-#     acceptance matrix passes;
-#   - #896 requires container-isolation evidence before any non-exclusive
-#     (packed) worker runs.
-# The checked-in state is enabled=false + exclusive=false. Disabled is the
-# fail-closed safety gate until #827 and #896 pass; Loom never falls back to
-# whole-node exclusive allocation.
-# min_slots=0 = scale to zero when idle, no warm floor. NOTE: with min_slots=0
-# the #877 QoS-boost trigger (count < min_slots) is unreachable, so it provides
-# NO dev-priority guarantee here; a priority mechanism is defined when the row
-# is activated, not via min_slots=0.
+# This row is fail-closed: enabled=false with exclusive=false. Applying it does
+# not activate GB10, and Loom does not fall back to whole-node exclusivity.
+# min_slots=0 provides no warm floor or development-priority guarantee.
 [[worker_pool_autoscaler_policies]]
 pool_name = "gb10"
 actuator = "slurm"
 enabled = false
-disabled_reason = "gated on #827 acceptance matrix + #896 container isolation; activate as exclusive=false only after both"
+disabled_reason = "development GB10 allocation is disabled; no authorized external allocation and containment boundary is configured"
 min_slots = 0
 max_slots = 5
 scale_up_threshold_slots = 1
@@ -70,14 +52,13 @@ allowed_nodes = [
   "trt-gb10-14",
   "trt-gb10-15",
 ]
-# Candidate + env-file paths land under the service-owned publisher root
-# (#874). Not active until that publisher extension ships.
+# Candidate and environment-file paths use the service-owned publisher root.
 env_file = "/shared_work/loom/candidates/development/env/development-gb10-worker-${IMAGE_TAG}.env"
 repo_dir = "/shared_work/loom/candidates/development/${IMAGE_TAG}"
 requested_cpus = 10
 requested_memory_mib = 57500
 requested_concurrency = 5
-# Per-trial container caps (#896): concurrency * cap == the Slurm
+# Per-trial container caps: concurrency times each cap equals the Slurm
 # allocation above, so trials cannot exceed the lease. job_pids_max is
 # the job cgroup PID ceiling (>= container_pids * concurrency).
 container_cpus = 2.0
@@ -88,23 +69,20 @@ max_jobs = 1
 pending_job_cap = 1
 # The physical gb10 partition advertises MaxTime=1-00:00:00.
 time_limit = "1-00:00:00"
-# Non-exclusive is the only supported Loom Slurm contract. Keep the policy
-# disabled until #896 + #827 prove the required containment and allocation path.
+# Non-exclusive is the only supported Loom Slurm contract; this policy is
+# disabled in the checked-in development state.
 exclusive = false
 external_runner = true
 
 # --- OLDLAB pool (x86_64, DOUBLE-DUTY nodes: k3s + MinIO + slurmd) ------------
-# GATED: enabled=false until #896 lands. OLDLAB nodes also run the k3s control
-# plane + MinIO/Longhorn, so workers must be non-exclusive (cannot claim a whole
-# node) and capped with headroom for k8s/MinIO. The resource values below are
-# PROVISIONAL placeholders reduced from the historical single-tenant profile
-# (12 CPU / 58000 MiB / concurrency 6); #896 must measure real double-duty
-# headroom and set the final values before flipping enabled=true.
+# This policy is disabled. OLDLAB nodes also run k3s and storage services, so
+# any worker allocation is non-exclusive and must preserve their headroom. The
+# resource values below are inert while enabled=false.
 [[worker_pool_autoscaler_policies]]
 pool_name = "oldlab"
 actuator = "slurm"
 enabled = false
-disabled_reason = "gated on #896 container isolation + double-duty headroom measurement; disabled is the safety gate and whole-node exclusivity is unsupported"
+disabled_reason = "development OLDLAB allocation is disabled; double-duty node containment and headroom are not authorized in this profile"
 min_slots = 0
 max_slots = 4
 scale_up_threshold_slots = 1
@@ -119,8 +97,7 @@ backend = "docker"
 cpu_arch = "x86_64"
 slurm_cluster_name = "trt-oldlab"
 slurm_controller_host = "TRT-EAI-OLDLAB-1"
-# OLDLAB jobs target the default partition (addressed by --nodelist), matching
-# the validated 2026-06-24 dry-run which passed no --partition.
+# OLDLAB jobs target the default partition and select nodes by name.
 partition = ""
 allowed_nodes = [
   "TRT-EAI-OLDLAB-1",
@@ -131,11 +108,11 @@ allowed_nodes = [
 ]
 env_file = "/shared_work/loom/candidates/development/env/development-oldlab-worker-${IMAGE_TAG}.env"
 repo_dir = "/shared_work/loom/candidates/development/${IMAGE_TAG}"
-# PROVISIONAL (pending #896 headroom measurement): leave CPU/mem for k3s+MinIO.
+# These inert limits preserve headroom for k3s and MinIO if inspected.
 requested_cpus = 4
 requested_memory_mib = 16000
 requested_concurrency = 2
-# Per-trial container caps (#896): concurrency * cap == the Slurm
+# Per-trial container caps: concurrency times each cap equals the Slurm
 # allocation above, so trials cannot exceed the lease. job_pids_max is
 # the job cgroup PID ceiling (>= container_pids * concurrency).
 container_cpus = 2.0
@@ -156,11 +133,8 @@ external_runner = true
 # supervisors on the same host collide:
 #   oldlab  dev/staging/prod = 15447 / 15448 / 15449
 #   gb10    dev/staging/prod = 15450 / 15451 / 15452
-# BOTH dev supervisors ship enabled=false + active=false (fail-closed): applying
-# this profile writes the unit files but does NOT enable or start any timer.
-# This mirrors the pools' own enabled=false gate above; activation follows the
-# same #827 (external-Slurm acceptance) + #896 (container-isolation) gates that
-# release the GB10 and OLDLAB pools.
+# Both development supervisors are enabled=false and active=false. Applying the
+# profile writes unit definitions but does not enable or start either timer.
 [[external_slurm_autoscaler_supervisors]]
 name = "oldlab-development"
 pool_name = "oldlab"

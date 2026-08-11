@@ -1,8 +1,8 @@
-"""Terminus2Adapter — deprecated (#744).
+"""Import-stability stub for the built-in Terminus2 runtime.
 
-``terminus-2`` is a Harbor-embedded builtin runtime (``loom.agent.terminus2``).
-This module is retained for import stability but no longer registers
-an adapter — the service catalog lists terminus-2 under ``_BUILTIN``.
+``terminus-2`` is implemented by ``loom.agent.terminus2`` and listed under the
+service catalog's ``_BUILTIN`` entries. This module does not register a
+launcher adapter.
 """
 
 from __future__ import annotations

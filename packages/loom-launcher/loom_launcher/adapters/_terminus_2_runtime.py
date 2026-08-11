@@ -1,4 +1,4 @@
-"""Deprecated — terminus-2 no longer uses a sandbox venv install (#744)."""
+"""Import-stability module; the built-in Terminus2 runtime needs no sandbox install."""
 
 from __future__ import annotations
 

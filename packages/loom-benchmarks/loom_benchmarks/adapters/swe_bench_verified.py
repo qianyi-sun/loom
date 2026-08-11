@@ -13,7 +13,7 @@ Conversion:
 - `tests/test_swebench.py` ← single pytest function that shells out to
   the upstream `pytest` with the union of FAIL_TO_PASS + PASS_TO_PASS
   node ids and asserts rc=0.
-- `task.toml` ← agent=oracle (Plan 15; LLM agents come later),
+- `task.toml` ← default agent `oracle`,
   verifier=pytest, docker_image = per-instance SWE-Bench eval image.
 """
 

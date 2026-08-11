@@ -42,7 +42,7 @@ services:
       - LOOM_WORKER_LOG_LEVEL=${LOOM_WORKER_LOG_LEVEL:-info}
       - LOOM_WORKER_TRAJECTORY_CACHE_DIR=/var/lib/loom/trajectories
       - LOOM_WORKER_BENCHMARK_CACHE=/var/lib/loom/benchmarks
-      # #896: pass the per-container caps into the worker PROCESS so
+      # Pass per-container caps into the worker process so
       # WorkerSettings picks them up and re-applies them to the trial +
       # setup-sidecar containers it creates. Default 0 == the schema
       # default (unbounded); it must be numeric, not empty, because the
@@ -57,7 +57,7 @@ services:
       # creates under that same allocation-owned parent.
       - LOOM_WORKER_REQUIRE_CGROUP_PARENT=${LOOM_WORKER_REQUIRE_CGROUP_PARENT:-false}
       - LOOM_WORKER_CGROUP_PARENT=${LOOM_WORKER_CGROUP_PARENT:-}
-      # #1023: Slurm jobs set these from the admission-bound sandbox/candidate
+      # Slurm jobs set these from the admission-bound sandbox/candidate
       # plus runtime allocation identity. They are forwarded so every child
       # trial/sidecar gets the same cleanup and GPU-allocation boundary.
       - LOOM_WORKER_SANDBOX_IDENTITY=${LOOM_WORKER_SANDBOX_IDENTITY:-manual}
@@ -74,8 +74,8 @@ services:
       nofile:
         soft: 65536
         hard: 65536
-    # #896: per-container hard caps for non-exclusive (packed) workers. Loom
-    # Slurm admission requires positive values; incomplete policies stay disabled.
+    # Per-container hard caps for non-exclusive workers. Loom Slurm admission
+    # requires positive values; incomplete policies stay disabled.
     cpus: ${LOOM_WORKER_CONTAINER_CPUS:-0}
     mem_limit: ${LOOM_WORKER_CONTAINER_MEMORY_MIB:-0}m
     pids_limit: ${LOOM_WORKER_CONTAINER_PIDS:--1}
@@ -85,8 +85,7 @@ services:
       loom.slurm_job_id: ${LOOM_WORKER_SLURM_JOB_ID:-none}
       loom.compose_project: ${LOOM_WORKER_COMPOSE_PROJECT:-manual}
     # Slurm jobs export "no" so dockerd cannot restart a worker outside the
-    # allocation after a host/daemon restart. Fixed remote workers retain the
-    # historical on-failure policy.
+    # allocation after a host/daemon restart. Fixed remote workers use on-failure.
     restart: ${LOOM_WORKER_RESTART_POLICY:-on-failure}
 
 volumes:

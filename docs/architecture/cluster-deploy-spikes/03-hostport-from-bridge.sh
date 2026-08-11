@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
 # 03-hostport-from-bridge.sh — verify hostPort traffic from a Docker bridge.
 #
-# This is the spike for the rev 9 weakened claim. The spec says:
+# The deployment contract treats this route as conditional:
 #   "hostPort is reachable from Docker bridges in most kubeadm/k3s setups,
 #    but the guarantee is conditional: CNI's portmap plugin installs
 #    iptables DNAT rules that match destination IPs the CNI considers
 #    'node-local,' and Docker bridge IPs aren't always in that set."
 #
-# This spike confirms whether the path actually works on kind. If it
-# does on kind (which uses kindnet, similar portmap behavior to common
-# CNIs), the design is more likely to work on real clusters. If it
-# DOESN'T even on kind, the design needs the NodePort fallback or a
-# host-routing escape hatch.
+# This spike verifies the path on kind, whose kindnet behavior is similar to
+# common CNI portmap behavior. A failure means this environment needs an
+# explicit host-routing rule or another supported network path.
 #
 # Topology:
 #   real host
@@ -24,8 +22,7 @@
 #   └─ host's IP on loom-uplink
 #
 # Test: singleton-mock on loom-uplink dials <host-bridge-gw>:30443.
-# Expected: traffic reaches the gateway-router pod (or doesn't, in
-# which case we know the design needs a different mechanism).
+# Expected: traffic reaches the gateway-router pod.
 
 set -euo pipefail
 export PATH="$HOME/.local/bin:$PATH"
@@ -118,23 +115,21 @@ echo "  reply from singleton's wget: '${reply:0:80}'"
 if echo "$reply" | grep -q "nginx\|Welcome"; then
   pass "claim: hostPort reachable from Docker bridge container via host's bridge IP"
   echo ""
-  echo "EMPIRICAL FINDING: On kind+kindnet, hostPort traffic DOES traverse"
-  echo "from a Docker bridge container to a k8s hostPort pod. This is good"
-  echo "evidence for the rev 9 design (preflight probe is still warranted"
-  echo "since CNI behavior varies on real clusters)."
+  echo "On kind+kindnet, hostPort traffic traverses from a Docker bridge"
+  echo "container to a k8s hostPort pod. The preflight probe remains required"
+  echo "because CNI behavior varies across clusters."
 else
   warn "hostPort NOT reachable from Docker bridge container on kind."
   echo ""
-  echo "EMPIRICAL FINDING: The hostPort-from-bridge path doesn't survive"
-  echo "the journey on kind. The design needs ONE of:"
+  echo "The hostPort-from-bridge path is unavailable on this kind cluster."
+  echo "Configure one of:"
   echo "  - explicit host-routing rule on the loom-uplink bridge"
   echo "  - alternative mechanism (NodePort with --nodeport-addresses tuning,"
-  echo "    or running the singleton on host network — but rev 6 rejected"
-  echo "    that)"
+  echo "    or a reviewed host-network deployment)"
   echo "  - per-trial bridge connected to a kind/k3s NodePort range"
   echo ""
-  echo "This is why the rev 9 preflight TCP-connect probe is mandatory:"
-  echo "the path may not work on the operator's specific CNI."
+  echo "The preflight TCP-connect probe is mandatory because this path is"
+  echo "specific to the cluster's CNI and host routing."
   fail "claim falsified on kind+kindnet"
 fi
 

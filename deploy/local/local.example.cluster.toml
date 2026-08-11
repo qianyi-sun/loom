@@ -62,7 +62,7 @@ enabled = true
 #
 # Use ONLY if you have a submit host that can BOTH reach the shared Slurm
 # cluster AND make your candidate + worker env-file visible on the allocated
-# COMPUTE nodes. This is the exact blocker recorded in #827: `env_file` and
+# COMPUTE nodes. `env_file` and
 # `repo_dir` are read inside the sbatch script ON THE COMPUTE NODE, so
 # laptop-absolute paths and an SSH-forwarded login shell do NOT make them
 # compute-visible. Do not use this path until a tested candidate-bound
@@ -81,7 +81,7 @@ enabled = true
 #     LOOM_CP_SLURM_WORKER_CONTROLLER_POOL_NAME=<your-slurm-pool>            # CHANGE ME
 #     LOOM_CP_SLURM_WORKER_CONTROLLER_PARTITION=<slurm-partition>            # CHANGE ME, if required
 #     # env_file/repo_dir MUST exist and be readable ON THE COMPUTE NODES
-#     # (a shared filesystem), not just on your laptop (see #827 above):
+#     # (a shared filesystem), not just on your laptop:
 #     LOOM_CP_SLURM_WORKER_CONTROLLER_ENV_FILE=/shared/abs/path/worker.env   # CHANGE ME (compute-visible)
 #     LOOM_CP_SLURM_WORKER_CONTROLLER_REPO_DIR=/shared/abs/path/to/loom      # CHANGE ME (compute-visible)
 #     LOOM_CP_SLURM_WORKER_CONTROLLER_REQUESTED_CPUS=12

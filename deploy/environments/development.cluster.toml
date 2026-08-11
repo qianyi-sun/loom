@@ -11,12 +11,11 @@ trajectories_bucket = "loom-dev-trajectories"
 artifacts_bucket = "loom-dev-artifacts"
 env_state_profile = "../environment-state/development.toml"
 
-# Shared dev is NOT a laptop cluster: it co-locates with staging/production on
+# Shared development is not a laptop cluster: it co-locates with the other environments on
 # the shared fleet (a `loom-dev` namespace alongside `loom-staging`/`loom-prod`)
 # and runs trial execution on the SAME external Slurm workers (OLDLAB + GB10),
-# so the in-cluster loom-worker Deployment is disabled here (#857/#873). Because
-# dev/staging/prod share that worker capacity, the worker-pool autoscaler
-# arbitrates it per-environment with prod-pressure drain/reclaim (#892): dev
+# so the in-cluster loom-worker Deployment is disabled. The worker-pool autoscaler
+# arbitrates shared capacity per environment: development
 # soaks up spare capacity and yields under prod pressure. The self-contained
 # per-developer LOCAL path is separate — deploy/local/local.example.cluster.toml
 # opts into an in-cluster k8s_worker so a laptop needs no Slurm/autoscaler.
@@ -25,13 +24,13 @@ enabled = false
 
 # Shared dev is a lightweight, low-resource env (just enough for post-merge
 # integration), so its backends are single-node-shaped BY CHOICE — not because
-# it's a single-node kind cluster. No pgbouncer (#609): one dev Postgres has no
+# it is a single-node kind cluster. PgBouncer is disabled because one development Postgres has no
 # realistic connection-count pressure and the extra Deployment isn't worth it.
 # Staging/production use the schema default (enabled=true).
 [pgbouncer]
 enabled = false
 
-# Single-node-shaped backends by choice (#637): 1 Postgres + 1 MinIO on
+# Single-node-shaped backends by choice: one Postgres and one MinIO on
 # host_path, no distributed CNPG/MinIO/Longhorn — dev doesn't need HA. This is
 # the backend shape, NOT the cluster: dev is a namespace on the shared k3s
 # fleet. Kept explicit so the shape can't silently flip if the schema default

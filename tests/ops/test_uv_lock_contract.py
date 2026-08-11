@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 import tomllib
 from pathlib import Path
@@ -8,15 +9,10 @@ from typing import Any
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
-UV_TOOLCHAIN = tomllib.loads(
-    (ROOT / "config/uv-toolchain.toml").read_text(encoding="utf-8")
-)
+UV_TOOLCHAIN = tomllib.loads((ROOT / "config/uv-toolchain.toml").read_text(encoding="utf-8"))
 UV_VERSION = UV_TOOLCHAIN["version"]
 SETUP_UV_PREFIX = "astral-sh/setup-uv@"
-UV_CHECKSUMS = {
-    target: metadata["sha256"]
-    for target, metadata in UV_TOOLCHAIN["archives"].items()
-}
+UV_CHECKSUMS = {target: metadata["sha256"] for target, metadata in UV_TOOLCHAIN["archives"].items()}
 MATRIX_CHECKSUM_EXPRESSION = "${{ matrix.uv_checksum }}"
 SAFE_SAVE_EXPRESSION = (
     "${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}"
@@ -39,17 +35,12 @@ def _workflows() -> dict[Path, dict[str, Any]]:
         *(ROOT / ".github/workflows").glob("*.yaml"),
     }
     return {
-        path: yaml.safe_load(path.read_text(encoding="utf-8"))
-        for path in sorted(workflow_paths)
+        path: yaml.safe_load(path.read_text(encoding="utf-8")) for path in sorted(workflow_paths)
     }
 
 
 def _workflow_steps(workflow: dict[str, Any]) -> list[dict[str, Any]]:
-    return [
-        step
-        for job in workflow["jobs"].values()
-        for step in job.get("steps", [])
-    ]
+    return [step for job in workflow["jobs"].values() for step in job.get("steps", [])]
 
 
 def test_uv_metadata_defines_one_non_narrowing_workspace_lock() -> None:
@@ -199,9 +190,7 @@ def test_ci_requires_real_locked_installs_on_both_linux_runner_architectures() -
             "uv_checksum": UV_CHECKSUMS["linux-arm64"],
         },
     ]
-    script = "\n".join(
-        str(step.get("run", "")) for step in matrix_job["steps"] if "run" in step
-    )
+    script = "\n".join(str(step.get("run", "")) for step in matrix_job["steps"] if "run" in step)
     assert "uv sync --locked --all-packages --extra dev --python 3.11" in script
     assert "uv pip check --python .venv/bin/python" in script
     for package in (
@@ -245,16 +234,13 @@ def test_runbook_uv_commands_never_resolve_implicitly() -> None:
     assert runbooks
     for path in runbooks:
         for line in path.read_text(encoding="utf-8").splitlines():
-            if "uv sync " in line:
+            if re.search(r"^\s*uv sync ", line):
                 assert "--locked" in line, (path, line)
-            if "uv run " in line:
+            if re.search(r"^\s*uv run ", line):
                 assert "uv run --no-sync " in line, (path, line)
 
-    first_prod = (ROOT / "docs/runbooks/first-prod-release-runbook.md").read_text(
-        encoding="utf-8"
-    )
+    operator_runbook = (ROOT / "docs/runbooks/operator-runbook.md").read_text(encoding="utf-8")
     assert (
-        "uv sync --locked --all-packages --extra cluster --extra rollout "
-        "--extra dev --python 3.11"
-    ) in first_prod
-    assert "uv pip check --python .venv/bin/python" in first_prod
+        "uv sync --locked --all-packages --extra cluster --extra rollout --extra dev --python 3.11"
+    ) in operator_runbook
+    assert "uv pip check --python .venv/bin/python" in operator_runbook

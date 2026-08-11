@@ -7,10 +7,12 @@ upstream-source kind (`huggingface`, `git`, `https-tarball`) so the
 instances into the Loom Postgres + MinIO state.
 
 See `docs/architecture/benchmark-adapter.md` for the framework
-reference (Protocol, canonical task layout, fetchers, how to add a
-new adapter). 21 adapters ship today.
+reference (Protocol, canonical task layout, fetchers, and how to add an
+adapter). The package declares one `loom.benchmarks` entry point for every row
+in its bundled `benchmarks.json`; use `loom datasets list` for the installed
+runtime catalog.
 
-## Full benchmark wave (historical: carinrc#307)
+## Pinned full benchmark sets
 
 These adapters pin full selected official task sets rather than smoke or
 sample subsets:
@@ -67,8 +69,8 @@ does not match the task/tests. The `human_authored` SkillLearnBench catalog row
 also declares `params.cpu_arch=any`; converted task configs therefore carry an
 explicit portable CPU-architecture requirement and can be scheduled on either
 x86_64 or ARM64 workers. Other bundle-backed adapters keep the default
-`x86_64` task requirement until their own dual-architecture evidence is added
-to catalog metadata.
+`x86_64` task requirement unless their catalog metadata explicitly declares
+another architecture contract.
 
 For official bundles, the adapter copies each task directory, preserves the
 upstream `environment/Dockerfile`, writes a Loom-owned `task.toml`, and adds a
@@ -146,7 +148,7 @@ SWE-Bench eval image. The generated `task.toml` points at
 `swebench/sweb.eval.x86_64.<instance>:latest`, so service-mode workers must be
 able to pull those per-instance images before executing the benchmark.
 Some SWE-Bench Multimodal rows ship empty upstream test-id lists; those bundles
-now emit a self-contained script verifier with an explicit diagnostic check,
+emit a self-contained script verifier with an explicit diagnostic check,
 producing numeric reward `0` instead of depending on image-local pytest.
 
 Republish this benchmark with the schema-v3 manifest path before treating it as
@@ -156,20 +158,16 @@ placeholders and should audit as `Needs republish`, not runnable tasks.
 ## UI-agent adapters
 
 OSWorld and WebArena adapters can convert upstream task metadata into Loom task
-bundles, but those rows are intentionally marked `Not supported yet` by the
-service readiness layer. They require a UI benchmark runtime rather than the
-normal single Docker image contract: OSWorld needs desktop VM/DesktopEnv
-support, and WebArena needs browser-agent control plus self-hosted site/auth
-reset and URL/HTML evaluators. Keep them visible in the catalog, but do not
-treat converted rows as supported runnable tasks until the runtime follow-ups
-land.
+bundles, but the service readiness layer marks those rows `Not supported yet`
+and makes them non-selectable. Loom's normal single-Docker-image runtime does
+not provide OSWorld's desktop VM/DesktopEnv services or WebArena's
+browser-control, self-hosted site/auth reset, and URL/HTML evaluator services.
 
 ## GAIA adapter
 
-GAIA remains a catalog adapter but is intentionally marked `Deferred` by the
-service readiness layer until operators can publish the gated dataset through a
-GAIA-authorized Hugging Face access path. Keep it visible in the catalog, but
-do not treat placeholder or unpublished rows as supported runnable tasks.
+GAIA is a catalog adapter, but the service readiness layer marks it `Deferred`
+and makes it non-selectable because the gated dataset is not part of the
+published catalog. Placeholder or unpublished rows are not runnable tasks.
 
 ## BFCL output contract
 

@@ -1,7 +1,5 @@
 # Loom Observability
 
-Status: shipped (#81)
-
 Loom exposes Prometheus metrics from all four in-cluster services. This document
 covers the metric naming convention, the five Grafana dashboards, the Prometheus
 alert rules, and the on-call triage path for each alert.

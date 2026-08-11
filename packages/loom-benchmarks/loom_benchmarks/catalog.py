@@ -1,17 +1,10 @@
 """Declarative catalog of first-party benchmarks.
 
 Single source of truth for benchmark metadata — series, display name,
-upstream source, license, splits, and per-benchmark params. Loaded
-from `benchmarks.json` shipped alongside this module. Adapter classes
-that inherit `CatalogBackedAdapter` pick up everything except their
-conversion logic from here.
-
-**Why:** the previous shape (7 class attrs per adapter file ×
-16 adapters) made structural changes — renaming a series, moving
-osworld from `agents` to `ui-agent`, splitting aime-aimo-validation
-into per-year siblings — touch 4 surfaces every time (adapter file +
-seed script + migration + tests). Promoting metadata to a JSON
-manifest centralizes the taxonomy and makes the diff legible.
+upstream source, license, splits, and per-benchmark params. The loader reads
+`benchmarks.json` beside this module. Adapter classes that inherit
+`CatalogBackedAdapter` obtain their metadata here and keep only conversion
+logic in Python.
 
 **Schema evolution.** `schema_version` is a positive int. Readers must
 tolerate unknown fields (forward-compat) and document required-fields
@@ -80,8 +73,8 @@ class CatalogEntry(BaseModel):
     # Per-benchmark knobs the adapter reads via `self._params`.
     # AIME's per-year adapters use this to share a single base class.
     params: dict[str, str] = Field(default_factory=dict)
-    # #672 family-runs: benchmark-level defaults for the family-run
-    # resolver. Any subset of :class:`FamilyRunSpec` roles is legal;
+    # Benchmark-level defaults for the family-run resolver. Any subset of
+    # :class:`FamilyRunSpec` roles is legal;
     # the batches route validates the shape at accept-time so a typo
     # here surfaces without waiting for the first trial to claim.
     family_run_defaults: dict[str, Any] | None = None

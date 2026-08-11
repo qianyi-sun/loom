@@ -1,79 +1,63 @@
-# Global development-fleet autoscaler
+# Global Development-Fleet Autoscaler
 
-Status: implemented (issue #1192)
+The repository contains a submit-host supervisor that can arbitrate capacity
+for a registry of development environments. It uses a durable SQLite lease
+ledger and emits candidate- and generation-bound grants to environment-local
+Slurm reconcilers. Individual development deployments do not own independent
+global budgets.
 
-## Decision
+This authority is not enabled by the checked-in development state:
+`deploy/environment-state/development.toml` disables both pool policies and
+both external supervisors. The candidate-aware personal-development lifecycle
+also does not create the per-instance external Slurm policy consumed by this
+supervisor. Its capacity-agent publication goes instead to the shadow-only
+global fleet capacity manager and does not create that policy. A
+candidate-backed environment can therefore become application `ready` without
+becoming an eligible input to this executable capacity path. The demand
+contract also accepts a 40-character Git candidate SHA, whereas personal
+candidates use a 64-character content SHA-256; the two bindings are not
+interchangeable. The global manager's dry-run reservation and launch-permit
+records are also not grants from this supervisor: they remain
+`executable: false` and cannot be consumed as its lease-ledger authority.
 
-Development environments do not each own a capacity budget and do not deploy
-separate arbitration services. One submit-host process runs the global dev
-fleet autoscaler. Its internal durable lease ledger performs the transaction
-that turns the complete, dynamic registry cohort into grants.
+## Demand and grants
 
-```text
-dev demand + registry + lease observations
-                    │
-                    v
-       global dev fleet autoscaler
-       (one transactional ledger)
-                    │
-        candidate/generation grants
-                    │
-                    v
-     environment-bound Slurm reconcilers
-```
+Each demand snapshot identifies its environment, deployment generation,
+candidate SHA, pool, minimum slots, requested slots, and observation time. A
+reconciliation validates the entire current cohort before changing leases.
 
-The ledger is an implementation detail, not a separately deployed “broker.”
-This preserves one place that sees all demand while retaining crash-safe lease
-epochs, pending-slot accounting, audit history, and drain-first reallocation.
+The ledger enforces global and per-pool committed and pending budgets. It
+shares requested minima first, then burst demand, choosing the least allocated
+eligible environment. A requested maximum is demand, not a reservation, so one
+active environment can use otherwise idle development capacity.
 
-## Contracts
+Every grant includes the exact environment, pool, deployment generation,
+candidate SHA, lease epoch, expiry, and maximum slots. Local autoscalers treat
+that value as a hard ceiling. A missing, expired, wrong-generation,
+wrong-candidate, or wrong-epoch grant yields zero authorized slots.
 
-Each demand snapshot identifies `(environment, deployment_generation,
-candidate_sha, pool_name)`, its local minimum and requested slot ceiling, and a
-fresh timestamp. The complete snapshot set is validated before lease mutation.
-Membership is data-driven; another developer requires no allow-list change.
+## Reconciliation safety
 
-The authority enforces global and per-pool committed-slot budgets plus separate
-pending-slot budgets. Allocation shares requested minima first and then burst
-demand, choosing the least-allocated environment. Policy `max_slots` is demand,
-not a reservation: every environment may request the whole dev budget, letting
-one active developer use otherwise-idle capacity.
+A tick applies matching lease observations, cancels removed, idle, or
+superseded requests, renews unchanged requests, and atomically writes a new
+report. Cancellation does not immediately free active, pending, or draining
+slots; they remain committed until the matching lease epoch reports
+termination. Grants expire when the supervisor stops renewing them.
 
-Every handoff contains the exact environment, pool, deployment generation,
-candidate SHA, lease epoch, expiry, and maximum slots. The local worker
-autoscaler treats it as a hard ceiling. Missing, expired, or mismatched grants
-fail closed at zero.
+Development grants are preemptible. Reducing the development budget to zero
+drains capacity, and the ledger reuses it only after observing the drain.
 
-## Reconciliation and safety
+## Runtime
 
-One global tick validates the full input, applies lease observations, cancels
-removed/idle/superseded requests, renews unchanged requests, and atomically
-allocates a new grant report. Cancellation never pretends workers disappeared:
-active, pending, and draining slots stay committed until matching-epoch
-termination is observed. A new deployment therefore cannot double-allocate
-while its predecessor drains. TTL renewal makes health explicit; abandoned
-grants expire.
+`scripts/ops/global_dev_fleet_autoscaler_external_once.py` is the
+registry-driven reconciliation entry point. It reads the dynamic registry and
+pool observations, updates the owner-only ledger, writes an owner-only report,
+refreshes exact-bound worker environment files for ready instances, and calls
+the existing external Slurm reconciler with each grant.
 
-## Operations
-
-`scripts/ops/global_dev_fleet_autoscaler_external_once.py` is the production
-registry-driven supervisor. It discovers the dynamic cohort, loads
-pool-scoped observations from each isolated database, updates the owner-only
-SQLite authority, atomically writes an owner-only report, refreshes
-candidate- and lifecycle-epoch-bound worker env files only for ready
-instances, and invokes the existing external Slurm reconciler with each exact
-grant. `deploy/dev-fleet/` owns its hardened systemd service/timer and
-activation runbook. The lower-level
-`global_dev_fleet_autoscaler_once.py` remains the deterministic versioned-input
-driver used for offline evidence and testing.
-
-Production pressure remains higher priority. Dev grants are preemptible and
-the global budget may be reduced to zero, but capacity is reused only after its
-drain is observed.
-
-## Activation gate
-
-Code, the dynamic demand/observation producer, and deterministic contracts are
-complete. A live rollout still requires operator-provided budgets,
-credentials, approved candidate evidence, and an approved submit-host change.
-Developer commands never mutate the global ledger directly.
+`deploy/dev-fleet/` contains systemd installation templates. The lower-level
+`scripts/ops/global_dev_fleet_autoscaler_once.py` accepts versioned files for
+deterministic offline checks. The autoscaler changes live capacity only where
+operators have explicitly installed and enabled the external supervisor with
+valid budgets, credentials, registry input, per-instance policies, and local
+reconcilers. Repository presence alone grants no capacity authority.

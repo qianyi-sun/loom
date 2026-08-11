@@ -1,4 +1,4 @@
-"""`loom admin` — operator-only admin operations (#80).
+"""`loom admin` — operator-only admin operations.
 
 Subcommands:
 
@@ -2447,7 +2447,7 @@ def dispatch(argv: list[str]) -> int:
         action="append",
         default=[],
         help=(
-            "Operator/release coverage only (#1109): add one extra "
+            "Operator and release coverage only: add one extra "
             "pool-pinned coverage trial on this worker pool. Repeat for "
             "mixed-pool release canaries. Not for user eval batches — "
             "use a separate on-behalf canary batch instead."

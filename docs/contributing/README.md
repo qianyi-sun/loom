@@ -1,24 +1,15 @@
 # Contributing
 
-For people working on Loom itself, not just running it. End-user docs live
-in [`../user-guide.md`](../user-guide.md); operator docs live in
+Documentation for people changing Loom itself. End-user instructions are in
+[`../user-guide.md`](../user-guide.md); operator procedures are in
 [`../runbooks/`](../runbooks/).
 
-## Contents
+- **[Contributor quickstart](contributor-quickstart.md)** — repository layout,
+  development setup, tests, coverage gates, workflow, and merge mechanics.
+- **[Loom and Harbor](loom-vs-harbor.md)** — current interoperability,
+  architectural differences, and capability boundaries.
+- [`../../CONTRIBUTING.md`](../../CONTRIBUTING.md) — change workflow, commit
+  style, and Definition of Done.
 
-- **[contributor-quickstart.md](contributor-quickstart.md)** — repo layout,
-  dev setup, tests + coverage gates, workflow, and merge mechanics. Read
-  this first if you're opening your first PR.
-- **[loom-vs-harbor.md](loom-vs-harbor.md)** — what Loom does better, what
-  Loom does worse, and why we replaced Harbor instead of forking. Design
-  tradeoffs and gaps for reviewers evaluating scope decisions.
-- **[repo-migration.md](repo-migration.md)** — canonical repository URL,
-  migrated GitHub settings, issue-tracker status, and local remote update
-  commands. Background for cross-repo issue/PR references you'll see in
-  older docs and evidence.
-
-## Related
-
-- `../../CONTRIBUTING.md` — PR workflow, commit style, Definition of Done.
-- `../architecture/` — architecture docs, ADRs, and design specs. Read the
-  relevant one before proposing a design change.
+Contributor docs describe the current repository. Put completed migrations,
+dated assessments, plans, and decision history in [`../../archive/`](../../archive/).

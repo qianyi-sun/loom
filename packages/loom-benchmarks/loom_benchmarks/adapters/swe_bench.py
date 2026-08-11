@@ -5,11 +5,9 @@ locator + name differ. We subclass to inherit `convert_instance`,
 then override `list_instances` so each row is tagged with whether it's
 also in the Verified subset.
 
-PR-1 series/tags rework: the Verified subset is no longer a separate
-benchmark. Operators who want to run only verified problems use the
-SPA's tag filter (`verified=true`) on this benchmark. This eliminates
-the replication footgun where group-selecting the SWE-Bench series
-would run the same 500 instances twice.
+Every row carries a `verified=true|false` tag, so operators can select the
+curated subset from the full adapter. The separate `swe-bench-verified`
+catalog entry also targets only that curated upstream subset.
 """
 
 from __future__ import annotations

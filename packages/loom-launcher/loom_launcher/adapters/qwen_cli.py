@@ -13,7 +13,7 @@ from loom_launcher.adapter import ExecHandle, ModelSpec, TrajectoryEventLike
 from loom_launcher.capture import tail_pty
 from loom_launcher.registry import register_adapter
 
-# #317 Phase 2: install qwen CLI. Version pinned to
+# Install the Qwen CLI. Version pinned to
 # deploy/agent-sandbox/npm-packages.txt.
 _QWEN_PKG = "@qwen-code/qwen-code"
 _QWEN_VERSION = "0.18.3"

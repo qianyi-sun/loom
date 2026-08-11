@@ -10,8 +10,7 @@
 #   18081,18082 -> 30080  worker-router (control-plane)
 #   19000       -> 30900  minio-router  (object store)
 #   19100       -> 30443  gateway-router (llm-gateway)
-# INTERIM: the durable form is nodes dialing the router hostPorts directly
-# (#906 / node-agent), retiring this host-side hub.
+# The host-side hub remains part of the current GB10-to-k3s route.
 set -euo pipefail
 K3S_INGRESS_IP="${K3S_INGRESS_IP:-192.168.50.103}"
 listen="${1%%-*}"; target="${1##*-}"

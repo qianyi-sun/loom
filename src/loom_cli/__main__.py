@@ -41,9 +41,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="loom",
         description=(
-            "Loom CLI — run LLMs on customizable tasks from a laptop. "
-            "Pluggable agents + benchmark adapters; trajectories + ATIF "
-            "results land on local disk. No server required."
+            "Run local evaluations and manage Loom datasets, providers, "
+            "service-mode evaluations, workers, and deployments."
         ),
     )
     p.add_argument("--version", action="version", version=__version__)
@@ -194,7 +193,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # the subcommand.
     sub.add_parser(
         "datasets",
-        help="Discover datasets (list/show/install/refresh-catalog)",
+        help="Discover, publish, register, audit, and activate datasets",
         add_help=False,
     )
     sub.add_parser(
@@ -224,10 +223,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub.add_parser(
         "providers",
-        help=(
-            "Manage LLM provider connections "
-            "(create/list/show/update/delete/test/rotate-key/models)"
-        ),
+        help="Manage service-mode provider connections and models",
         add_help=False,
     )
     sub.add_parser(
@@ -245,10 +241,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub.add_parser(
         "eval",
-        help=(
-            "Manage evaluation batches and trials "
-            "(batch create/show/list/cancel; trial list/show/cancel)"
-        ),
+        help="Submit, inspect, diagnose, and export service-mode evaluations",
         add_help=False,
     )
     sub.add_parser(
@@ -258,20 +251,30 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub.add_parser(
         "dev",
-        help="Manage isolated development environments on the shared fleet",
+        help="Use the candidate-less shared-fleet compatibility client",
         add_help=False,
     )
     sub.add_parser(
         "cluster",
-        help=(
-            "Manage the Kubernetes cluster deployment "
-            "(status/render/preflight/up/down/audit)"
-        ),
+        help="Manage Kubernetes deployments and protected rollouts",
         add_help=False,
     )
     sub.add_parser(
         "admin",
-        help="Admin operations — token mint/revoke/rotate (requires admin token)",
+        help=(
+            "Operate credentials, environment state, worker pools, batches, "
+            "and rate cards"
+        ),
+        add_help=False,
+    )
+    sub.add_parser(
+        "worker",
+        help="Inspect worker-host trial-image cache and setup admission",
+        add_help=False,
+    )
+    sub.add_parser(
+        "qa",
+        help="Run agent and benchmark compatibility matrices",
         add_help=False,
     )
 

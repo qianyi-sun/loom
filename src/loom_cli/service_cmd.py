@@ -187,7 +187,7 @@ def _alembic_upgrade(db_url: str) -> int:
 
 
 def _benchmarks_sync_config(db_url: str) -> None:
-    """Run `loom datasets sync-config` after seed (issue #234).
+    """Run `loom datasets sync-config` after seed.
 
     No-op when there's no config/benchmarks.toml (legacy). Failures
     log a WARN but don't fail `service up` — the registry layer is

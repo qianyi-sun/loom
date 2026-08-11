@@ -61,7 +61,7 @@ logger = logging.getLogger(__name__)
 # Cached Responses-API support beyond this age is treated as unknown
 # and re-probed on the next incoming request. Prevents a stale TRUE
 # from silently reintroducing the 40-min hang after upstream config
-# drift (#277 / responses-api-support-probe.md).
+# drift (see docs/architecture/responses-api.md).
 _PROBE_STALENESS_TTL = timedelta(hours=24)
 
 router = APIRouter()
@@ -294,7 +294,7 @@ async def responses(
                 failure_error_type=error_type,
             )
 
-        # #277 / responses-api-support-probe: proactively decide whether
+        # Proactively decide whether
         # to attempt the native /v1/responses call at all. On providers
         # like yibuapi that 504 the endpoint, this preempts a doomed
         # native call and dispatches straight into the translator.

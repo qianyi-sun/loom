@@ -1,0 +1,164 @@
+{
+  "batch_id": "5f417465-ecf6-4535-8f5c-f0f302b537f9",
+  "name": "stage-b-aime-24-haiku-full-30",
+  "agent": "litellm",
+  "model": "claude-haiku-4-5",
+  "provider": "qa-relay-anthropic (yibuapi)",
+  "tasks_attempted": 30,
+  "tasks_succeeded": 30,
+  "n_correct": 6,
+  "n_incorrect": 24,
+  "aggregate_reward": 0.2,
+  "trials": [
+    {
+      "task_id": "aime-24/2024-II/9",
+      "trial_id": "05fb5f3d-9c96-47ef-8c8b-bfb63a7c5448",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "aime-24/2024-II/8",
+      "trial_id": "3a99b3d4-a139-4053-98de-b4e3ca621b56",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "aime-24/2024-II/7",
+      "trial_id": "40879f28-487f-462b-91b4-e26cd3b49949",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "aime-24/2024-II/6",
+      "trial_id": "2bc9eb76-c765-4068-8f66-8200230b5830",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "aime-24/2024-II/5",
+      "trial_id": "d8a04230-a263-41f4-9d80-7985507ef55c",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "aime-24/2024-II/4",
+      "trial_id": "cf30ac69-86f7-451c-98cc-1d6750aad470",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "aime-24/2024-II/3",
+      "trial_id": "97751922-4ff8-4b64-bdb9-166fc06f1e9c",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "aime-24/2024-II/2",
+      "trial_id": "f00ecad1-f2d0-4ec4-a4b3-a0cbdf904ba9",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "aime-24/2024-II/15",
+      "trial_id": "88676c93-922e-47cb-8bbb-cd6cf7452d31",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "aime-24/2024-II/14",
+      "trial_id": "2a704d80-d47a-4625-9e7d-4eb3f83bed19",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "aime-24/2024-II/13",
+      "trial_id": "dc697190-9808-4aff-82ba-c8f834ef74d4",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "aime-24/2024-II/12",
+      "trial_id": "6a8fc799-9ee0-4fb3-88ae-050fefbb679c",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "aime-24/2024-II/11",
+      "trial_id": "a869f9d8-2d9e-4ef2-9881-6a6c756adc58",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "aime-24/2024-II/10",
+      "trial_id": "2da6b24b-4a52-42ad-a76e-27915ee95d31",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "aime-24/2024-II/1",
+      "trial_id": "4749054e-6099-431e-835a-b2004fb22041",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "aime-24/2024-I/9",
+      "trial_id": "6bdb6bdc-1db3-4c96-aa73-53f37300da74",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "aime-24/2024-I/8",
+      "trial_id": "6446b197-e215-4bce-aac7-828f8216ce15",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "aime-24/2024-I/7",
+      "trial_id": "6e4d9a1f-6e80-4394-8bb7-ed995b41ed99",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "aime-24/2024-I/6",
+      "trial_id": "f25cb4e7-bd08-466a-b6b1-3e7e0d0c9554",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "aime-24/2024-I/5",
+      "trial_id": "7aa8e6ea-0891-4c81-96a0-10539f37e028",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "aime-24/2024-I/4",
+      "trial_id": "b01f6b86-404d-4271-87c2-7c11900e3f96",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "aime-24/2024-I/3",
+      "trial_id": "a7dc0385-793a-4bde-8f9e-9c4798fa197f",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "aime-24/2024-I/2",
+      "trial_id": "cdad3cf9-0cb7-4df2-a30b-de01b41a5c84",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "aime-24/2024-I/15",
+      "trial_id": "22eba6e9-9650-46a9-b155-685b96e08dcc",
+      "aggregate_reward": 1.0
+    },
+    {
+      "task_id": "aime-24/2024-I/14",
+      "trial_id": "60b3f661-94be-4a40-97b3-58b5b355b698",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "aime-24/2024-I/13",
+      "trial_id": "d1bcd270-8450-4b1c-a460-2b33b42407da",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "aime-24/2024-I/12",
+      "trial_id": "5f46b55f-651d-442d-a370-63cfdffc6f96",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "aime-24/2024-I/11",
+      "trial_id": "fc2e31f8-36aa-45ea-921d-99b2fd6eabf6",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "aime-24/2024-I/10",
+      "trial_id": "1157a2ab-c850-4951-9048-6ff1dc1df8ab",
+      "aggregate_reward": 0.0
+    },
+    {
+      "task_id": "aime-24/2024-I/1",
+      "trial_id": "94aafb13-a57d-4120-962f-8d30111d2f0b",
+      "aggregate_reward": 1.0
+    }
+  ]
+}

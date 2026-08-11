@@ -1,9 +1,7 @@
-"""MATH benchmark adapters for the v1 MATH-500 subset and full test split.
+"""MATH adapters for the MATH-500 subset and full test split.
 
-The original `hendrycks/competition_math` Hub dataset is no longer publicly
-loadable without credentials in many environments. Loom uses the public
-HuggingFaceTB mirror of the same MATH data, pinned to a content SHA and the
-`all` config, then publishes the full official 5,000-row test split. MATH-500
+The full adapter uses the public HuggingFaceTB mirror, pinned to a content SHA
+and the `all` config, and publishes the official 5,000-row test split. MATH-500
 uses the public HuggingFaceH4 500-problem subset with the same answer verifier.
 """
 

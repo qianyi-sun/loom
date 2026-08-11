@@ -1,8 +1,10 @@
 name: auto-merge
 
 # This controller runs from the trusted base branch definition and never checks
-# out or executes pull-request code. It grants no merge authority itself:
-# branch protection still requires every current-head CI gate to succeed.
+# out or executes pull-request code. The active dev ruleset remains merge
+# authority there. For main, this workflow accepts only a same-repository dev
+# promotion; the repository currently has no active main ruleset, so
+# maintainers must not bypass this boundary with a direct push or manual merge.
 on:
   pull_request_target:
     types: [opened, reopened, ready_for_review, synchronize, edited]

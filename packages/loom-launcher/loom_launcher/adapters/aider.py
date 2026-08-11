@@ -13,7 +13,7 @@ from loom_launcher.adapter import ExecHandle, ModelSpec, TrajectoryEventLike
 from loom_launcher.capture import tail_log_file
 from loom_launcher.registry import register_adapter
 
-# #317 Phase 1: install aider into its own venv (matches
+# Install aider into its own venv (matches
 # deploy/agent-sandbox/python-cli-requirements.txt). Pinned version.
 _AIDER_INSTALL_SCRIPT = """\
 set -euo pipefail

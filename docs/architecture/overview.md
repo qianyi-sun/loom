@@ -25,7 +25,7 @@ bit-identical event-sourced JSONL trajectories.
 | Control Plane | `src/loom_control_plane/` | Trial state machine, DRF claim, trajectory index, signed-URL artifact upload |
 | LLM Gateway | `src/loom_llm_gateway/` | LiteLLM-backed provider proxy with rate-card cost compute + per-call attribution |
 | Worker | `src/loom_worker/` | Polls Control Plane for trials, runs them locally, emits trajectory to MinIO, reports state via fenced PATCH |
-| Service (REST + SPA) | `src/loom_service/` + `web/` | External REST surface (`/api/v1/...`), 11-page React SPA |
+| Service (REST + SPA) | `src/loom_service/` + `web/` | External REST surface (`/api/v1/...`) and React SPA |
 | Operator CLI | `src/loom_benchmark_tool/` | `loom-benchmark list/import/verify` for cluster-side adapter management |
 | Benchmark adapters | `packages/loom-benchmarks/` (13) + `packages/loom-benchmark-terminal-bench-2/` (1) | One PyPI-style sibling package per adapter family; discovered via `loom.benchmarks` entry-points |
 | Agent adapters | `packages/loom-launcher/` (11 production + `hello` test reference) | Subprocess-based CLI agent wrappers (claude-code, codex, openhands, ...) |

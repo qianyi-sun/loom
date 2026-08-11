@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 01-sandbox-bridge.sh — verify the rev 6+ Path B sandbox-isolation primitive.
+# 01-sandbox-bridge.sh — verify the sandbox-isolation bridge contract.
 #
 # Spec claims under test (cluster-deploy.md §Sandbox→gateway):
 #   1. `docker network create --internal` produces a bridge with no host
@@ -121,5 +121,5 @@ fi
 pass "claim 4: sandbox cannot reach host's IP on uplink bridge"
 
 echo ""
-echo "All claims verified. The rev 6+ Path B sandbox-isolation design"
+echo "All claims verified. The sandbox-isolation bridge contract"
 echo "composes correctly with Docker's primitives."

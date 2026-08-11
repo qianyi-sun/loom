@@ -1,7 +1,7 @@
 """AgentAdapter Protocol + supporting types.
 
-These types DUPLICATE shapes from `loom.driver.base` and `loom.models.types`
-on purpose: this package is shipped to PyPI for installation inside
+These types duplicate shapes from `loom.driver.base` and `loom.models.types`
+on purpose: this package is distributed for installation inside
 sandbox containers, where importing the full `loom` library would pull in
 unrelated server-side dependencies (sqlalchemy, fastapi, alembic).
 `loom_worker.SubprocessAgent._bridge()` adapts between the two surfaces.
@@ -32,8 +32,8 @@ class ModelSpec:
 class SandboxAccess(Protocol):
     """The minimal sandbox capability surface a capture utility needs to
     reach inside the sandbox container. Mirrors a strict subset of
-    `loom.driver.base.Driver`. `SubprocessAgent._bridge()` (Plan 11)
-    wraps a real Driver into this Protocol; tests use a fake."""
+    `loom.driver.base.Driver`. `SubprocessAgent._bridge()` wraps a real
+    Driver into this Protocol; tests use a fake."""
 
     async def read_text(self, path: PurePosixPath) -> str:
         """Read `path` from inside the sandbox as UTF-8 text. Used by
@@ -54,9 +54,9 @@ class SandboxAccess(Protocol):
 class ExecHandle:
     """Long-running process handle the worker hands to `capture_events()`.
 
-    Mirrors `loom.driver.base.ExecHandle` plus the `sandbox` side-channel
-    (Plan 9 amendment A11.2) so file-tail / http-poll capture mechanisms
-    can reach inside the sandbox without importing Loom's Driver Protocol.
+    Mirrors `loom.driver.base.ExecHandle` plus the `sandbox` side-channel so
+    file-tail / http-poll capture mechanisms can reach inside the sandbox
+    without importing Loom's Driver Protocol.
     `sandbox` is None when the adapter only needs stdout streaming.
     """
 
@@ -108,11 +108,11 @@ class AgentAdapter(Protocol):
     api_key_env: str  # e.g. "ANTHROPIC_API_KEY"
     base_url_env: str
     model_name_template: str  # Agent-facing model id template.
-    supports_multi_turn: bool  # metadata only in v1
+    supports_multi_turn: bool  # metadata only; execution does not branch on it
     additional_egress: frozenset[str]  # hostnames beyond Gateway
 
-    # #317 Phase 1: single multi-line shell script the worker runs
-    # inside the trial sandbox BEFORE the agent starts, to install the
+    # Single multi-line shell script the worker runs inside the trial sandbox
+    # before the agent starts, to install the
     # adapter's CLI. None = adapter assumes pre-installed binaries
     # (e.g. oracle, in-box agents — they're added in a different image).
     # Mounted as /tmp/install.sh and executed via `bash /tmp/install.sh`

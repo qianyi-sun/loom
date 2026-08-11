@@ -1,13 +1,11 @@
-"""`loom cluster {status, ...}` — k8s-mode operator surface.
+"""`loom cluster` — Kubernetes operator surface.
 
 Cluster mode targets an independently operated Kubernetes cluster
 (cluster-deploy.md). The dev/demo path stays on `loom service`;
 nothing here changes that.
 
-Phase 1A (#76): read-only `status` command. Reads pod / service /
-ingress state from the target context and reports component
-readiness. Foundation for the rest of the cluster surface (render,
-preflight, up, down — coming in subsequent PRs).
+The command group provides status, render, audit, preflight, lifecycle,
+maintenance, and protected-release operations.
 
 Lazy-imports the python `kubernetes` package so users who don't
 need cluster mode aren't forced to install it. The CLI surfaces a
@@ -146,16 +144,14 @@ _COMPONENT_DEPLOYMENTS: tuple[tuple[str, str], ...] = (
     ("loom-llm-gateway", "loom-llm-gateway"),
     ("loom-web", "loom-web"),
     # loom-worker is emitted as a Deployment on static-host-path
-    # profiles and as a StatefulSet on dynamic-storage profiles
-    # (#673). `_collect_workload` probes both shapes so status covers
+    # profiles and as a StatefulSet on dynamic-storage profiles.
+    # `_collect_workload` probes both shapes so status covers
     # either without needing a config plumb-through.
     ("loom-worker", "loom-worker"),
 )
 
-# Reserved for future DaemonSet components (e.g., per-node log
-# shippers). The trial-runner workload was DaemonSet in the original
-# design but ships as a Deployment today — see issue #108 for the
-# rationale and the deferred DaemonSet redesign.
+# No component currently uses the generic DaemonSet status list. Dedicated
+# router and sandbox DaemonSets are reported through their own checks.
 _COMPONENT_DAEMONSETS: tuple[tuple[str, str], ...] = ()
 
 _COMPONENT_STATEFULSETS: tuple[tuple[str, str], ...] = (
@@ -170,7 +166,7 @@ _COMPONENT_DESCRIPTIONS: dict[str, str] = {
     "loom-control-plane": "Internal scheduler + worker control",
     "loom-llm-gateway": "Provider-connection facade",
     "loom-web": "SPA (paused by default)",
-    "loom-worker": "Trial runner StatefulSet (per-pod RWO PVCs)",
+    "loom-worker": "Trial runner workload",
     "postgres": "Postgres (state)",
     "minio": "Object store (trajectories + ATIF)",
 }
@@ -1215,7 +1211,7 @@ def collect_status(
             "Secret 'loom-secrets' is missing — components that read "
             "from it (postgres URL, minio creds, JWT keys) will fail "
             "to start. See cluster-deploy.md §Bootstrap or run "
-            "`loom cluster preflight` (coming in a follow-up).",
+            "`loom cluster preflight`.",
         )
     return ClusterStatus(
         namespace=namespace,
@@ -5475,7 +5471,8 @@ def _bootstrap_storage_lifecycle(args: argparse.Namespace) -> int:
         sys.stderr.write(
             f"error: storage_backend={backend!r} is not S3-compatible. "
             "S3-compatible: minio | s3 | r2 | b2 | wasabi. "
-            "GCS support tracked at #254 (GCS lifecycle renderer).\n",
+            "Live lifecycle apply through this command supports only "
+            "S3-compatible backends.\n",
         )
         return 2
     # storage_backend and the config's `backend` field must agree so
@@ -5623,7 +5620,7 @@ def dispatch(argv: list[str]) -> int:
 
     p_rollout_status = rollout_sub.add_parser(
         "cluster-status",
-        help="Run `loom cluster status` with current and legacy format aliases.",
+        help="Run `loom cluster status` with current and compatibility formats.",
     )
     p_rollout_status.add_argument(
         "--context",
@@ -5638,7 +5635,7 @@ def dispatch(argv: list[str]) -> int:
     p_rollout_status.add_argument(
         "--status-format",
         default="json",
-        help="Status output format: json, table, or legacy alias text.",
+        help="Status output format: json, table, or compatibility alias text.",
     )
     p_rollout_status.set_defaults(handler=_rollout_evidence_cluster_status)
 
@@ -6305,7 +6302,7 @@ def dispatch(argv: list[str]) -> int:
         "--format",
         choices=["table", "json", "markdown"],
         default="table",
-        help="Output format. JSON for CI/scripting; Markdown for issue comments.",
+        help="Output format. JSON for automation; Markdown for release reports.",
     )
     p_release_gate.set_defaults(handler=_release_gate)
 
@@ -6385,8 +6382,8 @@ def dispatch(argv: list[str]) -> int:
 
     p_derive = sub.add_parser(
         "derive-pool-dsn",
-        help="Derive the pgbouncer pool DSN from a direct-to-Postgres DSN "
-        "by rewriting host+port (#609).",
+        help="Derive the PgBouncer pool DSN from a direct-to-Postgres DSN "
+        "by rewriting host and port.",
     )
     p_derive.add_argument(
         "dsn",
@@ -6431,8 +6428,7 @@ def dispatch(argv: list[str]) -> int:
         "bootstrap-evidence-paths",
         help=(
             "Emit a sudo-install script that creates operator-writable "
-            "rollout evidence directories under a protected /data root "
-            "(#174)."
+            "rollout evidence directories under a protected /data root."
         ),
     )
     p_evidence.add_argument(
@@ -6458,8 +6454,8 @@ def dispatch(argv: list[str]) -> int:
     p_load_images = sub.add_parser(
         "load-images",
         help=(
-            "Load local docker images into a kind cluster's node runtime "
-            "so kubectl apply doesn't ErrImagePull (#96)."
+            "Load local Docker images into a kind cluster's node runtime "
+            "so kubectl apply can resolve them."
         ),
     )
     p_load_images.add_argument(
@@ -6507,7 +6503,7 @@ def dispatch(argv: list[str]) -> int:
         "render-migration",
         help=(
             "Render a one-off Alembic migration Job with the sanctioned "
-            "app=loom-migration label (#332). Pipe to kubectl apply -f -."
+            "app=loom-migration label. Pipe to kubectl apply -f -."
         ),
     )
     p_render_migration.add_argument(
@@ -6562,7 +6558,7 @@ def dispatch(argv: list[str]) -> int:
         "rollout",
         help=(
             "One-command staging rollout driver with state-machine "
-            "resume (#340). Orchestrates 16 steps: resolve-target → "
+            "resume. Orchestrates 16 steps: resolve-target → "
             "worktree → build → kind-cluster → kind-load → backup → audit "
             "→ render → preflight → migrate → cluster-up → env-state "
             "→ gb10-prep → production-defaults → release-gate → smoke, "

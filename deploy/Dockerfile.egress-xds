@@ -1,23 +1,20 @@
-# loom_egress_xds — Envoy egress-proxy control plane (#190 PR-C1b).
+# loom_egress_xds — Envoy egress-proxy control plane.
 #
 # Standalone Python image. envoy-data-plane + xds-protos conflict
-# with the main project's google-generativeai protobuf<6 pin (see
-# pyproject.toml comment in PR #192), so this image installs them
-# in its OWN venv rather than via a project extra.
+# with the main project's google-generativeai protobuf<6 pin, so this image
+# installs them in its own environment rather than through a project extra.
 
 FROM python:3.11-slim
 
-# #199: transient PyPI ReadTimeouts during rollout builds — see
-# docs/runbooks/operator-runbook.md#rollout-build-resilience.
+# Retry transient package-index timeouts during image builds.
 ENV PIP_RETRIES=10 PIP_DEFAULT_TIMEOUT=60
 
 WORKDIR /app
 
-# Runtime deps. Pinned to the spike-tested versions (#196) against
-# Envoy v1.30. Version specifiers MUST be quoted — unquoted `<3.0`
+# Runtime dependencies are pinned for Envoy v1.30. Version specifiers must be
+# quoted — unquoted `<3.0`
 # is interpreted by /bin/sh as input redirection and the build
-# fails with "cannot open 3.0: No such file" (caught in post-merge
-# audit of #200).
+# fails with "cannot open 3.0: No such file".
 RUN pip install --no-cache-dir \
         "envoy-data-plane==2.1.0" \
         "xds-protos==1.81.1" \

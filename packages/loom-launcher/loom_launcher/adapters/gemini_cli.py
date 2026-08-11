@@ -15,7 +15,7 @@ from loom_launcher.adapter import ExecHandle, ModelSpec, TrajectoryEventLike
 from loom_launcher.capture import stream_stdout_jsonl
 from loom_launcher.registry import register_adapter
 
-# #317 Phase 2: install gemini CLI into the trial sandbox.
+# Install the Gemini CLI into the trial sandbox.
 # Version pinned to deploy/agent-sandbox/npm-packages.txt.
 _GEMINI_PKG = "@google/gemini-cli"
 _GEMINI_VERSION = "0.47.0"

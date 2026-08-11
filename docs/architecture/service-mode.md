@@ -5,8 +5,8 @@ Plane owns trial state, Workers poll for work and execute trials,
 an LLM Gateway centralizes provider calls + cost attribution, and a
 REST `loom_service` + React SPA give researchers and admins a UI.
 Team and worker auth still use database-backed bearer tokens, while admin auth
-uses the file-backed singleton secret specified in
-[auth-registration-spec.md](auth-registration-spec.md).
+uses the file-backed singleton secret described in
+[auth-and-teams.md](auth-and-teams.md).
 
 Postgres + MinIO are the only stateful services.
 
@@ -15,6 +15,20 @@ CLI with the Compose plugin before running
 `loom service up --environment local`, `down`, or `status`. On macOS, install
 and start Docker Desktop first and confirm
 `docker compose version` succeeds.
+
+`loom service up` always requires `--environment`. The `local` target is the
+Compose path above. A `dev-<name>` target authenticates to the configured Loom
+server, seals or reuses a personal candidate, and applies it through the
+candidate-aware environment API; it does not invoke local Compose or direct
+`kubectl`. Server-side readiness requires stable-route acknowledgement, a
+candidate-independent capacity-agent installation, and an initial
+non-executable demand publication to the global capacity manager; it does not
+promise live worker slots. The `staging` and `production` targets require a
+full Git candidate but deliberately refuse direct deployment and point to
+`loom cluster rollout`, which owns their approval and evidence workflow.
+`loom service down` and `status` remain local Compose commands.
+`loom dev destroy <name>` is the authenticated manager-first teardown client
+for a ready personal environment; it is not a local Compose operation.
 
 ## Service-prefix convention
 
@@ -54,10 +68,10 @@ compatibility metadata, and provisioner provenance; they are not maintained by
 manual SQL.
 
 `loom qa matrix --compatibility-plan` turns the same service-mode agent
-metadata into a login-free provider compatibility plan. It emits one cell per
+metadata into a login-free provider compatibility matrix. It emits one cell per
 repo-known displayed `service_mode_ready=true` agent and provider endpoint type,
-including generic `supported_providers=["*"]` agents as per-agent rows for #35
-planning. Each cell records whether the combination is repo-supported, skipped
+including generic `supported_providers=["*"]` agents as per-agent rows. Each
+cell records whether the combination is repo-supported, skipped
 because the harness takes no model, or blocked before submit because the
 agent's `supported_providers` do not include the endpoint provider family. Live
 provider-smoke evidence is optional and merged from sanitized JSON; absent live
@@ -120,20 +134,19 @@ installed in isolated virtual environments and linked onto `PATH` so
 their pinned dependencies do not conflict with OpenHands. `openhands`
 and `openhands-sdk` both use Loom's
 `loom_launcher.openhands_sdk_runner` module because upstream OpenHands SDK
-exposes a Python library rather than a stable one-shot CLI, and the old
-`openhands.server` entry point is not a usable non-interactive runner. A
+exposes a Python library rather than a stable one-shot CLI;
+`openhands.server` is not a usable non-interactive runner. A
 dynamic OpenHands install on top of an arbitrary benchmark task image uses a
 pinned `uv` installer to create `/opt/loom-agents/openhands-sdk` with Python
 3.12, installs `loom-launcher` from a pinned repository subdirectory ref, then
 invokes that venv's interpreter. This fixes Python-version drift in task images
 without baking the selected provider or model into the image; model choice is
 still passed at trial runtime through the adapter invocation and gateway
-environment. A
-successful image build or dependency audit does not by itself make an
-agent ready: the catalog should only be flipped after a platform-dev trial
-smoke passes. As of the #289 all-agent smoke, the displayed catalog is
-ready when the selected trial sandbox image satisfies the declared runtime
-dependencies; an audit of a thinner image can still report `blocked`.
+environment. A successful image build or dependency audit does not by itself
+make an agent ready. The displayed catalog is ready only when the selected
+trial sandbox image satisfies the declared runtime dependencies and the
+platform trial smoke has passed; an audit of a thinner image can still report
+`blocked`.
 
 ## Process model
 
@@ -420,7 +433,7 @@ rows without `requires_caps.cpu_arch` are treated as `x86_64`. ARM64 remote
 workers therefore only claim tasks explicitly submitted with
 `environment.cpu_arch = "arm64"` or `"any"`.
 
-### Runtime-fallback base image registry (#342)
+### Runtime-fallback base image registry
 
 A small set of amd64-only base images have known arm64 substitutes the
 worker can materialize on demand at trial start (currently just
@@ -522,10 +535,7 @@ hold `tokens:manage`.
 `tokens` table tracks `last_seen_at` and `last_used_at` per token for rotation
 hygiene. DB-backed bearer verification debounces those timestamp writes to at
 most once per token per 60 seconds so worker heartbeats, claims, and writebacks
-do not serialize on one shared token row under high concurrency. The
-`admin_audit_events` table records the first #10 backend audit surface: team
-registration approve/reject and service-token admin mint/revoke. Wider admin
-mutation audit coverage should be added deliberately as follow-up work.
+do not serialize on one shared token row under high concurrency.
 
 ## Auto-cancellation: trial source-state awareness
 
@@ -636,7 +646,7 @@ a CSRF token that the API client keeps in memory, sends with
 CSRF header. A 401 from `/auth/me` means signed out, and later 401s clear
 session state/query cache before returning the user to Settings. User-owned
 bearer tokens remain supported for CLI/API automation, but the production SPA
-no longer stores normal bearer-token login state in `localStorage`.
+does not store normal bearer-token login state in `localStorage`.
 
 **Deployment:** `deploy/Dockerfile.web` is a multi-stage build —
 node-slim builds the Vite bundle, nginx-alpine serves it, and a startup
@@ -739,7 +749,8 @@ host ports bind to
   trajectory writer + ATIF projector produce
 - [driver-protocol.md](driver-protocol.md) — sandbox contract the
   Worker calls
-- `../operator-runbook.md` — production deployment + ops
+- [Operator runbook](../runbooks/operator-runbook.md) — production deployment
+  and operations
 - `src/loom_control_plane/` — CP source
 - `src/loom_llm_gateway/` — Gateway source
 - `src/loom_worker/` — Worker source

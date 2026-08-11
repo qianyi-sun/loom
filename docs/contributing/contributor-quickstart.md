@@ -18,24 +18,21 @@ cd loom
 LICENSE                            # Apache-2.0
 src/loom/                          # foundation library (types, errors, models)
 src/loom_cli/                      # `loom` CLI entry point
-src/loom_drivers/                  # cloud Driver implementations (daytona/)
+src/loom_drivers/                  # cloud Driver implementations (Daytona, Modal)
 src/loom_control_plane/            # FastAPI Control Plane service
 src/loom_llm_gateway/              # OpenAI-compatible LLM Gateway service
 src/loom_worker/                   # Worker process
 src/loom_service/                  # REST surface for SPA / external clients
 src/loom_benchmark_tool/           # `loom-benchmark` operator CLI
 packages/loom-launcher/            # PyPI-style agent-adapter framework
-packages/loom-benchmarks/          # PyPI-style benchmark-adapter framework + 23 catalog entries (19 adapter files)
+packages/loom-benchmarks/          # PyPI-style benchmark adapters + bundled catalog
 packages/loom-benchmark-terminal-bench-2/  # TB-2 canonical adapter
 migrations/                        # Alembic
 tests/{unit,contract,integration,system,property,loom_cli,fixtures}/
 web/                               # React SPA
-deploy/                            # Dockerfile.{control-plane,gateway,worker,service,web}
-                                   # + k8s/{postgres,minio,llm-gateway,control-plane,
-                                   #        loom-service,web,worker,ingress}.yaml
-                                   # + nginx-spa.conf + docker-compose.{dev,test}.yml
-docs/                              # index.md → user-guide, architecture/, operator-runbook,
-                                   # authoring-a-task, loom-vs-harbor, contributor-quickstart
+deploy/                            # images, Compose, Kubernetes, environment, and fleet config
+docs/                              # current user, architecture, integration, and runbook docs
+archive/                           # non-current designs, plans, history, and evidence
 scripts/                           # operator + test helpers
 ```
 
@@ -110,8 +107,8 @@ Keep these invariants when adding a new failure path:
   single `main#main-content`, and distinct reference/report correlation.
 - Keep `BrowserFailureReport` bounded to reference, allowlisted kind, redacted
   pathname, and optional safe same-origin source position. The current reporter
-  is an in-memory hook, not a telemetry transport; do not attach the original
-  throwable when adding a transport later.
+  is an in-memory hook, not a telemetry transport, and does not retain the
+  original throwable.
 
 Run the focused recovery tests before the full web suite:
 
@@ -194,7 +191,7 @@ process or select another localhost port so Playwright can build and serve its
 own browser-test bundle.
 
 Vitest enforces statements, lines, and functions at 80% and branches at 75%;
-only the generated `src/api/schema.d.ts` production source is excluded. The
+only the generated `web/src/api/schema.d.ts` production source is excluded. The
 Playwright gate serves the production build at `/dev` by default and supports
 the same local contract at `/prod`. It exercises logged-out, user, and admin
 routes at 1440x900 and 390x844, reloads deep links, and rejects empty roots,
@@ -262,10 +259,8 @@ labels match. Comments and unrelated labels do not replace the epoch or share
 the authoritative source concurrency lane. Do not use an empty or
 tree-identical commit to repair a check rollup.
 
-The first same-repository `dev`-to-`main` promotion also uses this publisher
-even if `main` predates the publisher file; all other bootstrap PRs keep the
-legacy names until their target base contains the trusted workflow. Branch
-push aggregates use `*-push`, so they never duplicate a protected name on a
+Same-repository `dev`-to-`main` promotions use this publisher. Branch push
+aggregates use `*-push`, so they never duplicate a protected name on a
 later promotion PR that points at the same commit.
 
 The `slow` marker is applied at module level on the heaviest 9 test
@@ -344,11 +339,9 @@ trusted post-merge/release workflow rather than the required PR context.
   `coverage report --fail-under=70` in CI. Drops below fail
   `repository-checks` for everyone. The same job writes the default fast-tier
   coverage summary to the GitHub Actions step summary.
-- **Combined fast + integration:** measured + posted to the GitHub
-  Actions step summary (workflow run page) only on PRs labelled
-  `ci:integration` or `ci:coverage-summary`. Not yet gated; keep changes
-  aligned with the historical archive issue (carinrc#7).
-- Baseline at latest dev tip: ~72 % fast, ~85 % combined.
+- **Combined fast + integration:** measured and posted to the GitHub Actions
+  step summary only on PRs labelled `ci:integration` or
+  `ci:coverage-summary`. It is reported but is not a required threshold.
 - `coverage.xml` ships as a workflow artifact for external tools.
 
 To reproduce the protected fast coverage gate locally, run the equivalent
@@ -400,29 +393,29 @@ the only merge authority: `dev` requires no human approval, no CODEOWNER
 approval, and no conversation resolution. Maintainers should not manually
 merge an eligible `dev` PR just because CI is green.
 
-`main` accepts only a production release promotion from `dev`. The same trusted
-controller enables squash auto-merge after release evidence is attached. The
-four current-head gates are the only merge authority; no human or CODEOWNER
-approval is required.
+For `main`, the trusted controller enables squash auto-merge only for a
+same-repository `dev` promotion after release evidence is attached. GitHub has
+no active `main` ruleset, so maintainers must not use a direct push or manual
+merge to bypass the checked-in release flow.
 
-Current `dev` branch-protection settings (verified by Task 6):
+Current `dev protected admission` ruleset:
+
 - Squash-only (no rebase merge, no merge commits)
 - `required_linear_history: true`
 - `repository-checks`, `images-gate`, `cluster-smoke-gate`, and
   `staging-smoke-gate` are the required stable status checks
 - `allow_auto_merge: true`; the trusted controller enables it for every
   non-draft PR, and GitHub holds each candidate until the policy above passes
-- `enforce_admins: true` on `dev` - admins go through the gate too
+- no bypass actors; repository admins go through the gate too
 - no human approval, no CODEOWNER approval, and no conversation resolution
 
-Current `main` promotion policy:
+Current `main` promotion boundary:
 
-- the four strict current-head checks, admin enforcement, and linear history
-  remain required;
-- human approval, CODEOWNER review, and conversation resolution are not merge
-  gates;
-- only a same-repository `dev` -> `main` promotion is eligible for the trusted
-  auto-merge controller.
+- the trusted auto-merge controller accepts only a same-repository `dev` ->
+  `main` promotion and the checked-in release flow requires the four
+  current-head checks plus release evidence;
+- GitHub has no active `main` branch ruleset, so maintainers must not bypass the
+  controller with a direct push or manual merge.
 
 Secrets and side-effect workflows:
 - Pull request workflows use read-only `GITHUB_TOKEN` permissions and

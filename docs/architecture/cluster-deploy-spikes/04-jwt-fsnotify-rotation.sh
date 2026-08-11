@@ -7,19 +7,10 @@
 #   2. Atomic-rename rotation (write to .tmp + mv into place) is visible
 #      to the container with no partial-read window.
 #
-# IMPORTANT EMPIRICAL FINDING from running this spike:
-#
-#   The rev 7-11 spec said "worker writes new JWT via `docker cp` to a
-#   tmpfs-mounted `/run/loom/step-jwt`." That doesn't work. `docker cp`
-#   into a tmpfs mount of a running container exits 0 BUT the file
-#   inside the container is unchanged. This is because tmpfs mounts
-#   are kernel-managed in-memory filesystems owned by the running
-#   process's mount namespace; `docker cp` writes to container layers,
-#   not to active mount points overlaid on top of them.
-#
-#   This spike caught the bug. The corrected mechanism (verified below)
-#   is bind-mount + host-side write + atomic rename. The spec has been
-#   updated accordingly.
+# The supported mechanism is a bind mount plus a host-side atomic rename.
+# The negative assertion also verifies that `docker cp` is not used for an
+# active tmpfs mount: Docker writes to the container layer beneath that mount,
+# leaving the file observed by the running process unchanged.
 #
 # Runs against plain Docker. No k8s required.
 
@@ -113,10 +104,7 @@ if [ -n "$invalid_reads" ]; then
 fi
 pass "claim 4: no partial reads observed — bind-mount + atomic rename is safe"
 
-# --- Negative result: confirm the BROKEN mechanism is broken ----------------
-# This is the bug the spike caught. Documenting it inline so future
-# readers see the evidence. If this assertion ever stops failing, the
-# spec can revert to tmpfs+cp; until then, bind-mount stands.
+# --- Negative result: reject docker-cp into an active tmpfs mount ------------
 
 NEGATIVE="loom-jwt-negative-spike"
 docker run -d --name "$NEGATIVE" \
@@ -133,14 +121,11 @@ docker rm -f "$NEGATIVE" >/dev/null
 rm -f /tmp/spike-04-broken.txt
 
 if [ "$inside" = "BROKEN_MECHANISM_AFTER" ]; then
-  echo "  HUH: docker cp into tmpfs actually worked this time."
-  echo "  This is unexpected; the rev-7 mechanism may now be viable."
-  echo "  Verify on multiple Docker versions before reverting the spec."
+  fail "negative: docker cp unexpectedly replaced the file in the active tmpfs mount"
 else
-  pass "negative: docker cp into tmpfs of running container is BROKEN as expected (got '$inside')"
+  pass "negative: docker cp does not replace the file in an active tmpfs mount (got '$inside')"
 fi
 
 echo ""
 echo "All claims verified. JWT refresh = host-side bind-mount + atomic"
-echo "rename. The rev 7-11 spec's tmpfs+docker-cp mechanism doesn't work;"
-echo "spec updated accordingly."
+echo "rename; docker-cp into an active tmpfs mount is rejected."

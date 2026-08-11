@@ -793,6 +793,10 @@ describe("AdminAccess", () => {
   });
 
   it("confirms every exposed invite and request rejection class", async () => {
+    let resolvePasswordResetRejection: (() => void) | undefined;
+    const passwordResetRejectionGate = new Promise<void>((resolve) => {
+      resolvePasswordResetRejection = resolve;
+    });
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
@@ -854,6 +858,7 @@ describe("AdminAccess", () => {
           url.endsWith("/api/v1/admin/password-reset-requests/reset-req/reject") &&
           init?.method === "POST"
         ) {
+          await passwordResetRejectionGate;
           return jsonResponse({
             id: "reset-req",
             username: "ada",
@@ -972,6 +977,11 @@ describe("AdminAccess", () => {
     ).toBe(false);
     await user.click(screen.getByRole("button", { name: "Reject account ada" }));
     await user.click(screen.getByRole("button", { name: "Reject account" }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Reject account request" }),
+      ).not.toBeInTheDocument(),
+    );
 
     const legacyRow = (await screen.findByText("Legacy Lab")).closest("tr");
     expect(legacyRow).not.toBeNull();
@@ -982,6 +992,11 @@ describe("AdminAccess", () => {
     await user.click(
       screen.getByRole("button", { name: "Reject registration" }),
     );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Reject team registration" }),
+      ).not.toBeInTheDocument(),
+    );
 
     await user.click(screen.getByRole("tab", { name: "Accounts" }));
     await user.click(
@@ -991,6 +1006,15 @@ describe("AdminAccess", () => {
       screen.getByRole("dialog", { name: "Reject password reset" }),
     ).toHaveTextContent("ada");
     await user.click(screen.getByRole("button", { name: "Reject reset" }));
+    expect(
+      await screen.findByRole("button", { name: "Rejecting…" }),
+    ).toBeDisabled();
+    resolvePasswordResetRejection?.();
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Reject password reset" }),
+      ).not.toBeInTheDocument(),
+    );
 
     await user.click(screen.getByRole("tab", { name: "Invites" }));
     const inviteRow = (await screen.findByText("invitee@example.com")).closest("tr");
@@ -1000,11 +1024,21 @@ describe("AdminAccess", () => {
       screen.getByRole("dialog", { name: "Revoke invite" }),
     ).toHaveTextContent("invitee@example.com (inv12345)");
     await user.click(screen.getByRole("button", { name: "Revoke invite" }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Revoke invite" }),
+      ).not.toBeInTheDocument(),
+    );
     await user.click(within(inviteRow!).getByRole("button", { name: "Resend" }));
     expect(
       screen.getByRole("dialog", { name: "Resend invite" }),
     ).toHaveTextContent("current invite link will be invalidated");
     await user.click(screen.getByRole("button", { name: "Resend invite" }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Resend invite" }),
+      ).not.toBeInTheDocument(),
+    );
 
     await waitFor(() => {
       for (const suffix of [

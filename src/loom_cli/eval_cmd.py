@@ -1354,7 +1354,10 @@ def dispatch(argv: list[str]) -> int:
     p_bc.add_argument(
         "--agent",
         default=None,
-        help="Agent name for the legacy single-combination create path.",
+        help=(
+            "Agent name for single-combination creation; omit when using "
+            "--combinations-json."
+        ),
     )
     p_bc.add_argument(
         "--combinations-json",
@@ -1449,9 +1452,9 @@ def dispatch(argv: list[str]) -> int:
         default=None,
         help=(
             "Named agent-workspace staging policy for every trial in the batch "
-            "(#1263). `tb21` excludes solution/, tests/, verifier/, and "
+            "`tb21` excludes solution/, tests/, verifier/, and "
             "upstream-task.toml from the agent sandbox (Harbor-shaped packs). "
-            "`none` is legacy full-bundle upload. Omit to keep current "
+            "`none` uses full-bundle upload. Omit to keep current "
             "defaults (TB2.1-r6 tasks always enforce tb21). "
             "terminal-bench-2@tb2.1-r6/* cannot select `none`."
         ),
@@ -1554,7 +1557,7 @@ def dispatch(argv: list[str]) -> int:
         ],
         default="lightweight",
         help=(
-            "Export mode. lightweight preserves the #390 delivery bundle; "
+            "Export mode. lightweight emits the standard delivery bundle; "
             "raw-harbor adds raw provider logs, task bundles, agent-run "
             "artifacts, and derived SFT JSONL; raw-harbor-tb2-v1 adds the "
             "versioned TB2-facing delivery profile; raw-harbor-tb2-v2 "

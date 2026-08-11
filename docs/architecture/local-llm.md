@@ -4,7 +4,7 @@ How `loom run` dispatches to a local OpenAI-compatible server (vLLM,
 ollama, llama.cpp, lm-studio), and how the optional local CLI vLLM
 launcher fits in.
 
-This document is about laptop/CLI execution. Loom v1.0 service mode does not
+This document is about laptop/CLI execution. Loom service mode does not
 host model inference for users; service-mode teams provide their own hosted or
 self-hosted OpenAI-compatible endpoint and register it as a provider
 connection.
@@ -168,15 +168,14 @@ Two layers, deliberately partitioned by signal type:
 |---------------------|---------------------------------------------|-----------------------------------------------------------------|
 | Normal exit         | `atexit.register(stop_all)`                  | Also fires on `KeyboardInterrupt`-induced exit                  |
 | Ctrl-C (SIGINT)     | Python default → `KeyboardInterrupt`         | Propagates through `asyncio.run` to `_run_async`'s `try/finally` |
-| SIGTERM             | Custom handler → `stop_all()` then `SIG_DFL` | atexit does NOT fire on SIGTERM, so we install our own           |
+| SIGTERM             | Custom handler → `stop_all()` then `SIG_DFL` | `atexit` does not fire on SIGTERM, so the custom handler performs cleanup |
 | Happy-path teardown | `try/finally` around `asyncio.gather` calls `stop_all()` | Closes the GPU-reclaim window before process exit |
 | Crash mid-launch    | `launch_vllm` except path stops + removes from registry  | No orphan if step 6/7 raises                       |
 
-**Why no custom SIGINT handler**: a custom one would intercept Ctrl-C
-*before* `asyncio.run` raises `KeyboardInterrupt`, short-circuiting
-the `try/finally` that also tears down Docker containers and Daytona
-sandboxes. The default Python behavior (raise KI) is exactly what we
-want — it lets the same cleanup path run for every code-path exit.
+**SIGINT behavior:** the default handler lets `asyncio.run` raise
+`KeyboardInterrupt`, so the surrounding `try/finally` also tears down Docker
+containers and Daytona sandboxes. A custom SIGINT handler would intercept
+Ctrl-C before that shared cleanup path runs.
 
 ## Security defaults
 
@@ -189,24 +188,20 @@ in with `--vllm-host 0.0.0.0` if you actually want LAN access.
 
 `--concurrency N` runs N parallel trials under one `asyncio.Semaphore`.
 The vLLM launch happens *once*, before the gather — all trials share
-the same server. `_LIVE_PROCESSES` is module-level so multiple
-launches in one process (currently impossible but architecturally
-permitted, e.g., a future scenario where each task picks its own
-model) would all be tracked.
+the same server. `_LIVE_PROCESSES` is module-level and tracks every
+launcher process owned by the current CLI process.
 
 ## What this is NOT
 
-- **Not a multi-launcher abstraction.** Only vLLM is wired today.
+- **Not a multi-launcher abstraction.** Only vLLM is wired.
   ollama / llama.cpp / lm-studio users go through the manual
-  `local/<server>/<model_id>` path. The launcher protocol could be
-  extracted if a second backend lands.
+  `local/<server>/<model_id>` path.
 - **Not service-mode-aware.** Service-mode operators register local
   providers via `LOOM_GW_LOCAL_<NAME>_BASE_URL` env vars, dispatched
   inside the LLM Gateway. The launcher only runs in CLI mode
   (`loom_cli` package); the service-mode Gateway has no equivalent.
-- **Not batch scheduler-aware.** Harbor's `VLLMServerManager` supports batch scheduler
-  job submission; we scope to the local subprocess backend for now.
-  batch scheduler is follow-up work if a multi-node need lands.
+- **Not batch scheduler-aware.** The launcher supports only a local subprocess;
+  it does not submit vLLM servers to an external batch scheduler.
 
 For comparing N models in one run / pre-launching a server with
 `loom serve`, see [`multi-server-local-llm.md`](multi-server-local-llm.md).

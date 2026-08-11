@@ -184,10 +184,9 @@ redacted full request/response bodies into `provider_logs/`.
 Versioned training handoff profiles such as
 `--mode raw-harbor-tb2-v1` reconstruct SFT rows from those provider logs
 plus reward/metrics joins; the Loom event stream remains an audit spine rather
-than the SFT source of truth for that profile. For `terminus-2` trials, typed
-`terminus2_*` events and Harbor checkpoint artifacts are the intended source
-for a future `raw-harbor-tb2-v2` export; until that mode ships in the delivery
-API, use `raw-harbor-tb2-v1` or the typed trajectory download for debugging.
+than the SFT source of truth for that profile. For `terminus-2` trials,
+`--mode raw-harbor-tb2-v2` projects execution from typed `terminus2_*` events
+and embeds hash-verified native Harbor checkpoint artifacts.
 See [`terminus2-runtime.md`](terminus2-runtime.md).
 
 Codex subprocess alignment runs use a separate adapter-specific path
@@ -201,11 +200,10 @@ facade accepts that namespaced query param, sanitizes it again, merges
 the safe controls into the upstream provider payload, and records the
 same merged payload through the normal request-parameter audit.
 
-## Why centralise
+## Central gateway boundary
 
-Could agents call providers directly and emit token counts to the
-trajectory themselves? Harbor does. We rejected that for three
-reasons:
+Service-mode agents call providers through the Gateway rather than writing
+provider usage directly to their trajectories. The boundary provides:
 
 1. **Honesty** — agents are subprocesses that crash, misreport, or
    silently swallow errors. A Gateway-side count is observably
@@ -216,14 +214,14 @@ reasons:
 3. **Policy** — rate limits and per-team budget accounting need a chokepoint.
    Gateway is that chokepoint.
 
-The cost is one extra hop + the need for a service stack — exactly
-the trade-off CLI mode declines, accepting weaker attribution to
-ship the same `Trial.run()` on a laptop.
+This adds one network hop and requires the service stack. CLI mode runs the
+same `Trial.run()` without that stack and therefore has weaker centralized
+attribution.
 
 ## What `litellm_wrapper` is for
 
 LiteLLM provides a single `acompletion(model=..., ...)` call that
-dispatches to ~100 providers. We use it as the **tail-provider
+dispatches to ~100 providers. Loom uses it as the **tail-provider
 adapter** — anything not covered by Anthropic / OpenAI Chat /
 Responses / Gemini routes through LiteLLM. BYO OpenAI-compatible
 connections are also excluded from LiteLLM on the service-mode gateway
@@ -231,13 +229,13 @@ path for both Chat Completions and Responses: the route owns that wire
 shape and forwards with the pooled httpx client from `EgressClientPool`,
 so Envoy sees the
 `x-loom-connection-id` CONNECT header for the selected
-`provider_connection_id`. We don't use LiteLLM for the top-4 providers
-or BYO OpenAI-compatible dispatch because:
+`provider_connection_id`. The top-four providers and BYO
+OpenAI-compatible dispatch bypass LiteLLM so:
 
 - Native dialect responses are verbatim — LiteLLM's normalised
   response shape would obscure provider-specific fields.
-- Token-usage extraction is per-dialect; we'd lose
-  `cache_creation_input_tokens` etc. through LiteLLM's filter.
+- Token-usage extraction remains per-dialect, preserving fields such as
+  `cache_creation_input_tokens` through the provider-specific path.
 - LiteLLM does not provide a stable per-call hook for proxy CONNECT
   headers; the egress proxy's per-connection allowlist depends on that
   header.
@@ -286,7 +284,7 @@ with generic `internal_error` or agent logic failures.
 | `input_tokens`   | from DialectAdapter                                      |
 | `output_tokens`  | from DialectAdapter                                      |
 | `provider_extras`| JSONB — cache + reasoning counters verbatim on success; `_loom_call_status=failed` plus failure metadata on failed upstream attempts |
-| `request_params` | JSONB — redacted normalized generation controls. NULL means pre-#85 legacy/unavailable data |
+| `request_params` | JSONB — redacted normalized generation controls; `NULL` means the data is unavailable |
 | `cost_usd`       | computed at insert; cached for usage metrics/audits     |
 | `rate_card_hash` | rate-card table hash or sentinel such as `failed-upstream` |
 | `attempt`        | gateway-internal attempt number that produced the success or final failed response |

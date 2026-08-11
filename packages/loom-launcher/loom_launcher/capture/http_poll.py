@@ -1,15 +1,13 @@
 """poll_local_http — fetch events from an HTTP endpoint inside the sandbox.
 
-Used by adapters whose agent runs a local server inside the sandbox
-(openhands launches `openhands.server` on a fixed port). We can't reach
-the container's loopback directly from the worker, so we exec `curl`
-inside the sandbox and parse the output. Slower than streaming stdout
-but the right shape for server-style agents.
+This helper supports adapters whose agent runs a local server inside the
+sandbox. The worker cannot reach the container's loopback directly, so the
+helper executes `curl` inside the sandbox and parses the output. No included
+adapter currently selects this capture path.
 
 **Sandbox requirement.** The sandbox image MUST have `curl` installed
-on PATH. Plan 12's openhands adapter Dockerfile pins this; any adapter
-using this capture mechanism MUST document the dependency in its
-Dockerfile + adapter docstring. If curl is missing, `exec_oneshot`
+on PATH. Any adapter using this capture mechanism MUST document the dependency
+in its Dockerfile and adapter docstring. If curl is missing, `exec_oneshot`
 returns rc=127 and the polling loop emits zero events (logged at
 DEBUG, not an exception — silent failure is better than crashing the
 trial for what is fundamentally an image-build issue).

@@ -2,9 +2,7 @@
 
 > **Canonical repository:** use
 > [`qianyi-sun/loom`](https://github.com/qianyi-sun/loom) for new branches,
-> pull requests, and issues. The pre-2026-06-26 `carinrc/loom` tracker is
-> retained as a read-only archive; issue and PR numbers do not match across
-> repositories.
+> pull requests, and issues.
 
 > Loom is public-readiness hardened and is operated as an issue-scoped
 > GitHub-flow project. Normal
@@ -87,10 +85,7 @@ Before declaring work shipped:
   `docs/architecture/<topic>-spikes/` so CI can empirically verify
   the mechanism. See
   [`docs/architecture/cluster-deploy-spikes/README.md`](docs/architecture/cluster-deploy-spikes/README.md)
-  for the pattern and "when to add a spike" guidance. The cluster-deploy
-  spec went through 11 revs catching mechanisms that didn't compose
-  with the underlying primitives — spikes turn that 5-min test into
-  a CI gate
+  for the pattern and "when to add a spike" guidance
 - Post-ship self-audit pass (re-read each touched file once more for
   regressions, edge cases, type drift) - separate commit if anything
   surfaces
@@ -100,16 +95,6 @@ Before declaring work shipped:
 `AGENTS.md`, `MEMORY.md`, and `NEW_SESSION_BRIEFING.md` at the repo
 root are owner-local context files, gitignored. They are not part of
 the project artifact and must never be committed.
-
-## Known Gaps
-
-Tracked as GitHub issues with `label:gap`:
-[gap issues](https://github.com/qianyi-sun/loom/issues?q=is%3Aopen+label%3Agap).
-
-Per-arc tracking lives in the arc-tagged epic
-([`loom:arc`](https://github.com/qianyi-sun/loom/issues?q=is%3Aopen+label%3A%22loom%3Aarc%22)).
-Deferred long-horizon items use
-[`deferred:v1.5`](https://github.com/qianyi-sun/loom/issues?q=is%3Aopen+label%3A%22deferred%3Av1.5%22).
 
 ## Branching
 
@@ -176,11 +161,12 @@ secrets.
   request the `ci-aws` environment and does not treat a skipped real-AWS check
   as successful cloud evidence. Real AWS validation is a separate trusted,
   post-merge/release activity and cannot satisfy this protected PR context.
-- `main` accepts only an explicit production release promotion from `dev`.
-  The same author-neutral controller enables squash auto-merge; the fixed
-  release evidence and four current-head CI gates determine eligibility. No
-  human or CODEOWNER approval grants merge authority.
-- Changes to `.github/**`, CI planning/test policy, and production release
+- For `main`, the author-neutral controller enables squash auto-merge only for
+  a same-repository `dev` promotion. The checked-in release workflow requires
+  fixed release evidence and the four current-head CI gates. GitHub currently
+  has no active `main` branch ruleset, so maintainers must not bypass this
+  workflow with a direct push or manual merge.
+- Changes to `.github/**`, CI validation-selection policy, and production release
   verification select full CI. Manual dispatches use distinct `*-manual`
   check names and cannot satisfy branch protection.
 - Squash merge is the only allowed merge method, keeping `dev` linear
@@ -192,7 +178,7 @@ secrets.
 
 ## Release Flow
 
-1. After dev validation passes for a planned release, open a release
+1. After dev validation passes for a release candidate, open a release
    issue
 2. Bump `pyproject.toml [project] version` (root + any published
    `packages/<name>/pyproject.toml`); the GitHub release notes are
@@ -231,27 +217,24 @@ have one place to audit them.
 - **Publish and deploy workflows use protected GitHub Environments.**
   Secrets for benchmark-bundle publish or infrastructure deploy live in
   protected Environments so they are not available to pull request code.
-- **Target branch-protection policy for `dev`** requires the strict,
+- **The active `dev protected admission` ruleset** requires the strict,
   GitHub-Actions-app-bound current-head contexts `repository-checks`,
   `images-gate`, `cluster-smoke-gate`, and `staging-smoke-gate`, blocks direct
-  pushes, and enforces squash-only merges. It requires zero human approvals,
-  zero CODEOWNER approvals, and zero conversation resolution; these four CI
-  checks are its only merge authority.
-- **Target branch-protection policy for `main`** retains the four strict
-  contexts, admin enforcement, and linear history, but requires zero human
-  approvals, zero CODEOWNER approvals, and zero conversation resolution.
-  `main` still accepts only a `dev` release promotion with complete release
-  evidence.
+  pushes, deletion, and force-pushes, and enforces squash-only linear-history
+  merges. It has no bypass actors and requires zero human approvals, zero
+  CODEOWNER approvals, and zero conversation resolution; these four CI checks
+  are its merge authority.
+- **`main` has no active GitHub branch ruleset.** The trusted controller only
+  enables auto-merge for a same-repository `dev` promotion, and the release
+  workflow validates its evidence. Maintainers must preserve that boundary and
+  must not directly push or manually merge other changes to `main`.
 - **Auto-merge is author-neutral.** `allow_auto_merge=true` is paired with the
   trusted `.github/workflows/auto-merge.yml` base-branch controller. It never
   checks out PR code and enables squash auto-merge for every eligible non-draft
-  PR; branch protection remains the sole merge authority.
-  Task 6 verifies the remote GitHub settings and check contexts; this policy
-  description is not evidence that those settings are already applied.
-- **Merge queue readiness**: all four stable gate contexts run on GitHub's
-  `merge_group` event. Maintainers should prefer enabling GitHub merge queue
-  over weakening strict required-check behavior when PR concurrency causes
-  repeated behind-branch reruns.
+  PR. The `dev` ruleset remains merge authority for `dev`; `main` has the
+  workflow and maintainer boundary described above instead of a ruleset.
+  Verify remote rulesets through the GitHub API or repository settings rather
+  than treating this checked-in description as live evidence.
 - **Selected Actions sources** restricts third-party actions to the repository
   allowlist. Every remote `uses:` reference must also match the full commit SHA
   and upstream version recorded in `config/ci-actions-lock.json`; run

@@ -11,7 +11,7 @@ bucket creation are thin live wrappers (integration-tested), since
 ``CREATE DATABASE`` cannot run inside a transaction and needs an existence
 check on the maintenance database.
 
-See ``docs/architecture/multi-dev-env-design.md``.
+See ``docs/architecture/multi-dev-environments.md``.
 """
 
 from __future__ import annotations

@@ -1,10 +1,10 @@
-"""`loom qa matrix` — end-to-end agent × benchmark validation against a real provider.
+"""`loom qa matrix` — fixed acceptance helpers and live matrix validation.
 
-Codifies the manual QA workflow exercised in #316: query live catalogs,
-pick one representative task per ready benchmark, submit per-provider-family
-batches, poll until terminal, classify outcomes into PASS_PLATFORM /
+The command queries live catalogs, picks one representative task per ready
+benchmark, submits per-provider-family batches, polls until terminal,
+classifies outcomes into PASS_PLATFORM /
 FAIL_PLATFORM / SKIPPED / STUCK, and emit a matrix table operators can
-paste into a tracking issue.
+save or share.
 
 Usage:
 
@@ -392,13 +392,13 @@ def _provider_compatibility_cell_for_agent_endpoint(
     if "*" in providers:
         support_reason = (
             f"agent metadata {_supported_providers_text(providers)} accepts "
-            f"endpoint provider family {endpoint_provider!r}; pending #114 "
+            f"endpoint provider family {endpoint_provider!r}; pending "
             "live smoke evidence"
         )
     else:
         support_reason = (
             f"agent metadata {_supported_providers_text(providers)} includes "
-            f"endpoint provider family {endpoint_provider!r}; pending #114 "
+            f"endpoint provider family {endpoint_provider!r}; pending "
             "live smoke evidence"
         )
     return _compat_cell(
@@ -525,9 +525,9 @@ def _build_provider_compatibility_matrix(
         provider_endpoint_types=[dict(item) for item in _PROVIDER_ENDPOINT_TYPES],
         cells=cells,
         notes=[
-            "Repo-known compatibility plan only; this command does not run live provider calls.",
-            "Cells with pending_live_smoke remain open for #114 low-cost provider validation.",
-            "Use this matrix as pre-submit input for #35 agent x benchmark planning.",
+            "Static compatibility metadata only; this command does not run live provider calls.",
+            "Cells with pending_live_smoke have no merged live-smoke evidence.",
+            "Use this matrix as pre-submit validation input.",
         ],
     )
     _validate_provider_compatibility_matrix(matrix)
@@ -873,7 +873,7 @@ def _classify_trial(
                 "SUSPECT_PASS",
                 "model-using agent succeeded without an LLM call — "
                 "likely passing on a pre-shipped reference solution; "
-                "verify before trusting (see #388)",
+                "verify before trusting",
                 float(reward),
             )
         return "PASS_PLATFORM", None, float(reward)
@@ -1345,7 +1345,7 @@ def dispatch(argv: list[str]) -> int:
     p_matrix.add_argument(
         "--compatibility-plan", action="store_true",
         help=(
-            "Emit the repo-known agent harness x provider endpoint "
+            "Emit the fixed repository agent harness x provider endpoint "
             "compatibility matrix without login, provider calls, or batch submit."
         ),
     )
@@ -1354,8 +1354,8 @@ def dispatch(argv: list[str]) -> int:
         dest="preflight_plan",
         action="store_true",
         help=(
-            "Emit an offline #35 agent x benchmark pre-submit plan from "
-            "catalog snapshots and #114 compatibility-plan JSON. Does not "
+            "Emit the fixed offline agent x benchmark pre-submit validation matrix "
+            "from catalog snapshots and compatibility-plan JSON. Does not "
             "log in, contact /api/v1/*, call providers, or submit batches."
         ),
     )

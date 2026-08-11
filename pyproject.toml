@@ -74,7 +74,7 @@ rollout = [
 vllm = [
   "vllm>=0.6,<1.0",
 ]
-# `loom_egress_xds` (#78 Phase C) is a standalone process whose
+# `loom_egress_xds` is a standalone process whose
 # Envoy/gRPC deps (`envoy-data-plane`, `xds-protos`) require
 # `protobuf>=6`, which conflicts with `google-generativeai`'s
 # `protobuf<6` pin. Rather than crippling the main project's
@@ -135,7 +135,7 @@ include = ["loom*", "loom_drivers*"]
 
 [tool.setuptools.package-data]
 "loom_cli.data" = ["*.toml", "*.json", "grafana/*.json", "envoy/*.yaml"]
-# Jinja2 manifests rendered by `loom cluster render` (#76 Phase 1B).
+# Jinja2 manifests rendered by `loom cluster render`.
 # `importlib.resources.files()` picks these up via the package
 # spec; without this entry they'd be excluded from the wheel.
 "loom_cli.templates.k8s" = ["*.yaml.j2", "_env.j2"]
@@ -234,7 +234,7 @@ ignore_missing_imports = true
 module = ["harbor", "harbor.*"]
 ignore_missing_imports = true
 
-# loom_egress_xds (#190) imports Envoy protobuf bindings + grpc.
+# loom_egress_xds imports Envoy protobuf bindings and gRPC.
 # envoy-data-plane and xds-protos ship .py protobuf classes with no
 # stubs / py.typed; grpcio similarly. Suppressing missing-import at
 # the boundary so the package can be type-checked in CI without
@@ -280,20 +280,20 @@ norecursedirs = [
 # minutes to run; opt in explicitly with `pytest tests/system`.
 addopts = "--ignore=tests/system"
 # Per-test wall-clock cap from pytest-timeout. A single hanging test
-# (issue #7 observed `test_claim_endpoint::test_claim_rejects_unauth`
-# hang the whole CI for ~20 min) now becomes a single failed test,
+# A hang in `test_claim_endpoint::test_claim_rejects_unauth` can otherwise
+# block the whole CI for about 20 minutes. It becomes a single failed test,
 # letting the rest of the suite finish. Docker-tier tests can override
 # with `@pytest.mark.timeout(N)` on the test/class.
 timeout = 60
 # `signal` (SIGALRM) is more aggressive than `thread` — interrupts
 # the test even when it's blocked in a C-level extension. Required to
-# kill the hang in `test_claim_endpoint::test_claim_rejects_unauth`
-# (issue #7), which blocks on `starlette.TestClient.__exit__` →
+# interrupt `test_claim_endpoint::test_claim_rejects_unauth` when it blocks on
+# `starlette.TestClient.__exit__` and
 # `anyio` portal shutdown that the thread-method timer can't interrupt.
 timeout_method = "signal"
 markers = [
   "swe_bench_smoke: SWE-Bench Verified end-to-end smoke; pulls ~5GB per-instance images. Opt-in via LOOM_RUN_SWE_BENCH_SMOKE=1.",
   "docker: integration tests that spin up real Docker containers via the host daemon (DockerDriver, network-policy, trial-e2e, subprocess-agent). Excluded from the default integration CI tier; run via the `integration-docker` workflow job or `pytest -m docker` locally.",
-  "integration: pgbouncer + Postgres container integration tests (#609). Require Docker; skip with `-m 'not integration'` in environments without Docker.",
+  "integration: PgBouncer + Postgres container integration tests. Require Docker; skip with `-m 'not integration'` in environments without Docker.",
   "cluster_smoke: mutation-free tests for the checked-in live k3s render contract. Run via the `cluster-smoke` CI job or `pytest -m cluster_smoke` locally.",
 ]

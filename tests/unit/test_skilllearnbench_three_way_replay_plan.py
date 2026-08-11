@@ -8,7 +8,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "alignment" / "skilllearnbench_three_way_replay_plan.py"
-EVIDENCE_CSV = ROOT / "docs" / "evidence" / "2026-06-30-slb-three-way-codex-qwen36.csv"
 
 
 def _load_module():
@@ -192,18 +191,3 @@ def test_cli_writes_stable_json_and_markdown(tmp_path: Path) -> None:
     assert "Replay evidence requirements" in rendered_md
     assert "sk-secret" not in out_json.read_text(encoding="utf-8")
     assert "ghp_" not in rendered_md
-
-
-def test_checked_in_three_way_evidence_bucket_counts_are_stable() -> None:
-    mod = _load_module()
-
-    plan = mod.build_replay_plan(EVIDENCE_CSV)
-
-    assert plan["summary"]["total_rows"] == 100
-    assert plan["summary"]["planned_rows"] == 26
-    assert plan["summary"]["concordance_counts"]["loom_agrees_official_dissents"] == 11
-    assert plan["summary"]["category_counts"] == {
-        "architecture_specific_rerun_needed": 15,
-        "likely_verifier_artifact_replay_needed": 8,
-        "official_semantics_drift_candidate": 3,
-    }

@@ -10,7 +10,7 @@ This module is the single source of truth for that derivation and for the
 create-time guardrail check. It has no I/O: the guarded provisioning endpoint
 and the CLI both call these functions, and they are unit-tested directly.
 
-See ``docs/architecture/multi-dev-env-design.md``.
+See ``docs/architecture/multi-dev-environments.md``.
 """
 
 from __future__ import annotations

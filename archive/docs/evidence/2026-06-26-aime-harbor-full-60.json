@@ -1,0 +1,438 @@
+{
+  "job_id": "703d1118-017c-4071-bf56-ef07154171c9",
+  "name": "stage-b-aime-haiku-60",
+  "agent": "terminus-2",
+  "model": "claude-haiku-4-5",
+  "provider": "yibuapi via ANTHROPIC_API_BASE=https://yibuapi.com",
+  "tasks_attempted": 60,
+  "tasks_with_reward": 60,
+  "tasks_errored": 1,
+  "n_correct": 32,
+  "n_incorrect": 28,
+  "aggregate_reward": 0.5333333333333333,
+  "cost_usd": 5.913702349999998,
+  "n_input_tokens": 15176817,
+  "n_output_tokens": 491970,
+  "trials": [
+    {
+      "task_id": "aime_60",
+      "trial_name": "aime_60__L5VRDP9",
+      "trial_id": "cf3a8b61-97f5-48df-a750-aec8327a8e54",
+      "reward": 1.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_61",
+      "trial_name": "aime_61__6fZaVoj",
+      "trial_id": "5759f44f-7304-4ca5-9931-0f05e6a93a28",
+      "reward": 1.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_62",
+      "trial_name": "aime_62__uEpq3C9",
+      "trial_id": "62d4de76-aebf-4745-9bfd-2d9e31bb9967",
+      "reward": 1.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_63",
+      "trial_name": "aime_63__Hnc2zMR",
+      "trial_id": "f57d2fb1-2e8a-4231-aade-939316b9d494",
+      "reward": 0.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_64",
+      "trial_name": "aime_64__tz9H6Pp",
+      "trial_id": "50d0f51f-219c-4f13-8c20-12df74bef874",
+      "reward": 1.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_65",
+      "trial_name": "aime_65__8CSPJf8",
+      "trial_id": "b91f519e-9e85-44d4-88e4-9cc9db9b9677",
+      "reward": 0.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_66",
+      "trial_name": "aime_66__N9DsJ6f",
+      "trial_id": "5b047422-15a8-4827-8019-504da13fa462",
+      "reward": 0.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_67",
+      "trial_name": "aime_67__VXcz7cX",
+      "trial_id": "1ce1253a-8908-4a8a-a993-a16303e794fe",
+      "reward": 0.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_68",
+      "trial_name": "aime_68__kg3aPey",
+      "trial_id": "34523c94-fc74-49fe-a382-ea129e540511",
+      "reward": 0.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_69",
+      "trial_name": "aime_69__zVMru95",
+      "trial_id": "7a7718f9-01f2-4532-aef9-62e0e66189f1",
+      "reward": 0.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_70",
+      "trial_name": "aime_70__y3LSuAg",
+      "trial_id": "047f7975-40bd-42b6-8c11-50be7ff2bb94",
+      "reward": 0.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_71",
+      "trial_name": "aime_71__p6Uivfz",
+      "trial_id": "b2dd3f59-206a-4d12-b005-384f1d0a78b2",
+      "reward": 1.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_72",
+      "trial_name": "aime_72__DfduXvP",
+      "trial_id": "d9d0ac38-18a1-449b-8b6d-a8363c00abec",
+      "reward": 1.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_73",
+      "trial_name": "aime_73__Vp6GtxJ",
+      "trial_id": "abe88f4e-fbd6-49fc-9b50-e822795aa9cc",
+      "reward": 0.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_74",
+      "trial_name": "aime_74__tMm2toD",
+      "trial_id": "f5b22a68-17dc-4d25-a537-c9129d28ac96",
+      "reward": 1.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_75",
+      "trial_name": "aime_75__i5zoK7K",
+      "trial_id": "2923d0b0-e2a8-4618-bb80-cfed455cc9f8",
+      "reward": 1.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_76",
+      "trial_name": "aime_76__65WzXq3",
+      "trial_id": "2550a2f4-a081-48f4-8400-978758d0b495",
+      "reward": 1.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_77",
+      "trial_name": "aime_77__HADiCLE",
+      "trial_id": "d3506d61-0be3-4849-b5d5-c7d7ca87b01b",
+      "reward": 1.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_78",
+      "trial_name": "aime_78__qD7uAWJ",
+      "trial_id": "ce9ae420-3d55-4df8-8766-327469a7486b",
+      "reward": 0.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_79",
+      "trial_name": "aime_79__qvbdVBn",
+      "trial_id": "7e9839df-4eb7-4b6b-9f30-a9d54bea4a4e",
+      "reward": 1.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_80",
+      "trial_name": "aime_80__eSLujHm",
+      "trial_id": "f5a73e6b-1d21-484f-b704-0cb6cf9271ee",
+      "reward": 1.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_81",
+      "trial_name": "aime_81__T7KhAfs",
+      "trial_id": "df154afa-67d7-4df7-876e-ef0538467368",
+      "reward": 0.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_82",
+      "trial_name": "aime_82__kVtY9F2",
+      "trial_id": "4adfbe26-e652-4ca1-a5e9-242d99743879",
+      "reward": 1.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_83",
+      "trial_name": "aime_83__yaVvQRA",
+      "trial_id": "28d88f4d-2c5d-4973-bc18-aa435d3bf68c",
+      "reward": 1.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_84",
+      "trial_name": "aime_84__WFTPPkv",
+      "trial_id": "8fce7920-274d-4afb-b61e-e40fd33c9c99",
+      "reward": 0.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_85",
+      "trial_name": "aime_85__kJXZ8jC",
+      "trial_id": "5e5861e9-8b88-47ba-ba12-232195b7a851",
+      "reward": 1.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_86",
+      "trial_name": "aime_86__Rw2MZsp",
+      "trial_id": "0cf43937-d1b9-419a-8203-44064f5de790",
+      "reward": 1.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_87",
+      "trial_name": "aime_87__6ZopmqL",
+      "trial_id": "ba79d811-aa15-4b80-ac21-fbf5fb90cc9b",
+      "reward": 1.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_88",
+      "trial_name": "aime_88__r7xZF2z",
+      "trial_id": "35948e91-f7da-4f93-bbcd-0f1ea4f5cc95",
+      "reward": 0.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_89",
+      "trial_name": "aime_89__wHWmZZ8",
+      "trial_id": "90e5d09c-b3d3-4c23-b249-a95723aca99d",
+      "reward": 0.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_i-10",
+      "trial_name": "aime_i-10__9EqtwtE",
+      "trial_id": "32dd9110-d74b-469b-8eea-c856e74bc246",
+      "reward": 0.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_i-11",
+      "trial_name": "aime_i-11__LUBgZNf",
+      "trial_id": "04750210-2828-4a43-898a-c305ea3c925b",
+      "reward": 1.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_i-12",
+      "trial_name": "aime_i-12__uMamjCJ",
+      "trial_id": "92f9e8c0-a79f-4198-9ac1-4273bffadbf9",
+      "reward": 0.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_i-13",
+      "trial_name": "aime_i-13__W7fRJAQ",
+      "trial_id": "0254be57-1fbd-458f-af35-a5bcdc08b59a",
+      "reward": 0.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_i-14",
+      "trial_name": "aime_i-14__4nfJesz",
+      "trial_id": "60fbf4e7-00ce-4613-8d16-08c27d048b3c",
+      "reward": 0.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_i-15",
+      "trial_name": "aime_i-15__ViZKvM7",
+      "trial_id": "d241099f-d2c7-48bb-b6a7-976473b8a097",
+      "reward": 1.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_i-1",
+      "trial_name": "aime_i-1__sBz7y27",
+      "trial_id": "e5139134-0d82-4673-b9fb-23d6fb9cf977",
+      "reward": 0.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_i-2",
+      "trial_name": "aime_i-2__L2XQbod",
+      "trial_id": "0337e966-490e-4381-8d01-2c7d27acdd97",
+      "reward": 0.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_i-3",
+      "trial_name": "aime_i-3__FaSrbgc",
+      "trial_id": "6dba061e-937e-4ab0-9891-5c56ef8bf041",
+      "reward": 1.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_i-4",
+      "trial_name": "aime_i-4__74fZsP5",
+      "trial_id": "435190cf-6bf2-4c46-99e5-17c328d5d41d",
+      "reward": 1.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_i-5",
+      "trial_name": "aime_i-5__JJasivC",
+      "trial_id": "3ad9d8d2-2a52-4cca-ab84-bf8a10e0cd3f",
+      "reward": 1.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_i-6",
+      "trial_name": "aime_i-6__yJYJY3C",
+      "trial_id": "5833b679-a26b-49cf-a2d9-2b0e824d4507",
+      "reward": 1.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_i-7",
+      "trial_name": "aime_i-7__bNSS7ZW",
+      "trial_id": "dee9e3ec-9766-440e-86e0-db8d16e8645a",
+      "reward": 1.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_i-8",
+      "trial_name": "aime_i-8__9dJsZwQ",
+      "trial_id": "5886d0fc-3186-4f70-8080-ad1bef03cd4e",
+      "reward": 1.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_i-9",
+      "trial_name": "aime_i-9__Q3s7W6P",
+      "trial_id": "7e4e0d3d-f924-4400-ae36-97c672812249",
+      "reward": 0.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_ii-10",
+      "trial_name": "aime_ii-10__DtX2koY",
+      "trial_id": "ddac41b5-3a93-42c1-a7a4-6d966087d462",
+      "reward": 1.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_ii-11",
+      "trial_name": "aime_ii-11__hA3JaLH",
+      "trial_id": "5f380cc8-5f82-48bd-a7f3-5deaf5aab528",
+      "reward": 0.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_ii-12",
+      "trial_name": "aime_ii-12__wwd5YZE",
+      "trial_id": "96f9ca0b-044f-43aa-99fb-f1a93b33d711",
+      "reward": 1.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_ii-13",
+      "trial_name": "aime_ii-13__rWBpfwm",
+      "trial_id": "313dd431-6788-4644-b457-692076e1dd60",
+      "reward": 0.0,
+      "exception": "AgentTimeoutError"
+    },
+    {
+      "task_id": "aime_ii-14",
+      "trial_name": "aime_ii-14__zrdZxpe",
+      "trial_id": "4dc158a1-b114-466c-ad90-967797699fe5",
+      "reward": 0.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_ii-15",
+      "trial_name": "aime_ii-15__56PFCdu",
+      "trial_id": "379ee7d1-73b0-4ce8-a0cd-64f914a2da48",
+      "reward": 1.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_ii-1",
+      "trial_name": "aime_ii-1__3rdrtKu",
+      "trial_id": "34e47eea-d315-4983-949f-67a66d224885",
+      "reward": 0.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_ii-2",
+      "trial_name": "aime_ii-2__R5orRKQ",
+      "trial_id": "30d689c0-530b-4fe5-8969-fc462f5975c1",
+      "reward": 1.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_ii-3",
+      "trial_name": "aime_ii-3__6sk2QTN",
+      "trial_id": "7b451463-c080-4900-8361-24e524e4886a",
+      "reward": 0.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_ii-4",
+      "trial_name": "aime_ii-4__vcJHC9u",
+      "trial_id": "95db0dac-0398-440f-9075-5128e12dc3b2",
+      "reward": 0.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_ii-5",
+      "trial_name": "aime_ii-5__XJYmVCc",
+      "trial_id": "78ec6113-c84e-4f1d-adf2-cf0a9157be38",
+      "reward": 1.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_ii-6",
+      "trial_name": "aime_ii-6__RBtFoxv",
+      "trial_id": "6c844c5b-11a7-418e-816b-b16321ec3103",
+      "reward": 1.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_ii-7",
+      "trial_name": "aime_ii-7__XwKTqns",
+      "trial_id": "d2833d5e-10e8-41bc-8b93-7f8f613ead7b",
+      "reward": 0.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_ii-8",
+      "trial_name": "aime_ii-8__WfYiEQg",
+      "trial_id": "16177251-6abd-48e6-8228-08767523c730",
+      "reward": 1.0,
+      "exception": null
+    },
+    {
+      "task_id": "aime_ii-9",
+      "trial_name": "aime_ii-9__pwhGUeJ",
+      "trial_id": "5dcd93ad-5b46-4fc7-bb56-04a8d6683547",
+      "reward": 0.0,
+      "exception": null
+    }
+  ]
+}

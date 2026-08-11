@@ -13,7 +13,7 @@ from loom_launcher.adapter import ExecHandle, ModelSpec, TrajectoryEventLike
 from loom_launcher.capture import stream_stdout_jsonl
 from loom_launcher.registry import register_adapter
 
-# #317 Phase 2: install mini-swe-agent into its own venv (matches
+# Install mini-swe-agent into its own venv (matches
 # deploy/agent-sandbox/python-cli-requirements.txt). Pinned version.
 _MINI_SWE_AGENT_VERSION = "2.4.2"
 _MINI_SWE_AGENT_INSTALL_SCRIPT = f"""\

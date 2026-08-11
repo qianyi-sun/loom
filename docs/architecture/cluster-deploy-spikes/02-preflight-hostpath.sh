@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# 02-preflight-hostpath.sh — verify the rev 10 preflight hostPath mechanism.
+# 02-preflight-hostpath.sh — verify the preflight hostPath contract.
 #
 # Spec claims under test (cluster-deploy.md §Prerequisites):
 #   1. hostPath-mounting `/var/run` (the directory) and then running
 #      `test -S /host/var/run/docker.sock` inside the container is the
-#      correct way to check Docker presence. Rev 9 tried mounting the
-#      socket directly which fails to schedule when Docker is missing.
+#      scheduling-safe way to check Docker presence because the directory
+#      exists even when the socket does not.
 #   2. A k8s Job pod can use this pattern via `hostNetwork: true` to
 #      also get port-scan visibility on the host's port table.
 #   3. `topologySpreadConstraints` with `maxSkew: 1` lands one preflight
@@ -156,5 +156,5 @@ fi
 pass "claim 4: hostNetwork pod accessed host network namespace successfully"
 
 echo ""
-echo "All claims verified. Rev 10's preflight hostPath + hostNetwork +"
+echo "All claims verified. The preflight hostPath + hostNetwork +"
 echo "topologySpreadConstraints pattern composes correctly with k8s."
