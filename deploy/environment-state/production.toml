@@ -79,7 +79,8 @@ container_pids = 512
 job_pids_max = 5120
 max_jobs = 15
 pending_job_cap = 2
-time_limit = "2-00:00:00"
+# The physical gb10 partition advertises MaxTime=1-00:00:00.
+time_limit = "1-00:00:00"
 # Keep disabled until #896 acceptance; do not use whole-node exclusivity as a
 # fallback.
 exclusive = false

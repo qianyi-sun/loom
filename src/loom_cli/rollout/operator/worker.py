@@ -724,6 +724,9 @@ def _run(
 
 
 def _default_dependencies(config: OperatorConfig, *, service_uid: int) -> WorkerDependencies:
+    from loom_cli.rollout.preflight_authority import CandidatePreflightPlan
+
+    from .deep_preflight_authority import RuntimePurpose
     from .final_gate_action_source import FinalGateActionSource
     from .final_gate_runner import FinalGateRunner
     from .installed_deep_preflight_factory import build_installed_deep_preflight_composition
@@ -793,6 +796,19 @@ def _default_dependencies(config: OperatorConfig, *, service_uid: int) -> Worker
             expected_coverage_digest=envelope.preflight_coverage_sha256,
         )
 
+    def post_apply_plan(
+        candidate: CandidateBinding,
+        mutation_epoch: int,
+    ) -> CandidatePreflightPlan:
+        sources = composition.sources(
+            candidate,
+            mutation_epoch,
+            RuntimePurpose.ADMISSION,
+        )
+        if sources.candidate != candidate:
+            raise ValueError("post-apply source candidate drifted")
+        return sources.build(mutation_epoch=mutation_epoch).prebackup_plan(candidate)
+
     final_actions = FinalGateActionSource(
         request_store=store,
         artifact_store=composition.artifact_store,
@@ -801,6 +817,7 @@ def _default_dependencies(config: OperatorConfig, *, service_uid: int) -> Worker
         run=composition.final_gate_run,
         read_mutation_epoch=composition.read_mutation_epoch,
         now=clock,
+        post_apply_plan_factory=post_apply_plan,
     )
     final_gates = FinalGateRunner(
         attestation_store=composition.attestation_store,

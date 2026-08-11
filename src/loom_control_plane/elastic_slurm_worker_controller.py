@@ -681,6 +681,7 @@ def build_sbatch_request(
         "--parsable",
         f"--job-name={f'loom-{sandbox_identity}-{candidate_label}-{job_node}'[:128]}",
         f"--nodelist={node}",
+        f"--chdir={config.repo_dir}",
     ]
     if config.job_output_dir:
         args.append(f"--output={config.job_output_dir}/slurm-%j.out")

@@ -1608,6 +1608,12 @@ class FixedExternalSupervisorTransport:
         artifact: ExternalSupervisorArtifact,
         predecessor_authority: ExternalSupervisorPredecessorAuthority | None = None,
     ) -> ExternalSupervisorLiveObservation:
+        execution_hosts = {supervisor.execution_host for supervisor in artifact.supervisors}
+        if len(execution_hosts) != 1:
+            raise ValueError("protected external supervisor artifact spans controllers")
+        predecessor_manifest = load_predecessor_manifest(
+            execution_host=next(iter(execution_hosts)),
+        )
         expected_names = {
             name
             for supervisor in artifact.supervisors
@@ -1628,6 +1634,7 @@ class FixedExternalSupervisorTransport:
             units,
             canonical,
             predecessor_authority,
+            predecessor_manifest,
         )
         return ExternalSupervisorLiveObservation(
             unit_payloads=units,
@@ -1635,6 +1642,7 @@ class FixedExternalSupervisorTransport:
             service_statuses=services,
             canonical_identity=canonical,
             predecessor_authority=authority,
+            predecessor_manifest=predecessor_manifest,
             compensation_blockers=self.store.compensation_blockers(),
         )
 
@@ -2100,6 +2108,7 @@ class FixedExternalSupervisorTransport:
         units: Mapping[str, bytes | None],
         canonical: ExternalSupervisorCanonicalIdentity | None,
         requested: ExternalSupervisorPredecessorAuthority | None,
+        legacy: ExternalSupervisorPredecessorManifest,
     ) -> ExternalSupervisorPredecessorAuthority:
         if requested is None:
             if canonical is not None:
@@ -2109,7 +2118,6 @@ class FixedExternalSupervisorTransport:
                     unit_sha256=canonical.unit_sha256,
                 )
             else:
-                legacy = load_predecessor_manifest()
                 live = {
                     name: hashlib.sha256(payload).hexdigest()
                     for name, payload in units.items()
@@ -2135,7 +2143,6 @@ class FixedExternalSupervisorTransport:
         elif canonical is not None:
             raise RuntimeError("protected external supervisor unexpected canonical predecessor")
         elif requested.kind == "legacy-manifest":
-            legacy = load_predecessor_manifest()
             if requested.authority_digest != legacy.manifest_digest or dict(
                 requested.unit_sha256
             ) != dict(legacy.unit_sha256):
@@ -2156,7 +2163,7 @@ class FixedExternalSupervisorTransport:
                 raise RuntimeError("protected external supervisor canonical snapshot drifted")
             return predecessor
         if authority.kind == "legacy-manifest":
-            legacy = load_predecessor_manifest()
+            legacy = observation.predecessor_manifest or load_predecessor_manifest()
             if legacy.manifest_digest != authority.authority_digest:
                 raise RuntimeError("protected external supervisor legacy snapshot drifted")
             return ExternalSupervisorCanonicalIdentity.from_manifest(legacy)
