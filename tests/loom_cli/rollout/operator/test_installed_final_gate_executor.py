@@ -83,7 +83,10 @@ def _executor(tmp_path: Path) -> InstalledFinalGateExecutor:
         verify_install=lambda **_kwargs: SimpleNamespace(
             ready=True,
             attestation=SimpleNamespace(
-                asset_sha256={"config": plan.runner_config_hash},
+                asset_sha256={
+                    "config": plan.runner_config_hash,
+                    "worker-env-template": "a" * 64,
+                },
                 payload_digest=plan.runner_install_hash,
                 source_base_sha=(
                     plan.approved_base_sha if plan.source_mode == "sealed-cumulative" else "none"
@@ -246,4 +249,5 @@ def test_installed_protected_dispatch_binds_fixed_candidate_and_supervisor_trans
     assert isinstance(environment_state, HttpxProtectedEnvironmentStateTransport)
     assert environment_state.candidate_root == executor.config.runner_repo
     assert environment_state.cp_url == executor.config.cp_url
+    assert environment_state.expected_env_template_sha256 == "a" * 64
     assert captured["service_uid"] == os.geteuid()

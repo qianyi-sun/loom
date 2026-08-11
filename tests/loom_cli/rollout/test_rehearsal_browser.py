@@ -268,6 +268,16 @@ def test_browser_resource_job_and_pod_readback_are_exact(tmp_path: Path) -> None
     )
     assert rehearsal_browser_job_complete(job, artifact=artifact, plan=plan)
 
+    # A Job that succeeds after one or two bounded retries is complete.  The
+    # Kubernetes Job controller retains those failed attempts in status even
+    # after it sets the Complete condition.
+    job["status"]["failed"] = 1
+    assert rehearsal_browser_job_complete(job, artifact=artifact, plan=plan)
+    job["status"]["failed"] = 2
+    assert rehearsal_browser_job_complete(job, artifact=artifact, plan=plan)
+    job["status"]["failed"] = 3
+    assert not rehearsal_browser_job_complete(job, artifact=artifact, plan=plan)
+
     status = {
         "imageID": "docker-pullable://exact@" + artifact.browser_image_digest,
         "state": {"terminated": {"exitCode": 0, "reason": "Completed"}},
