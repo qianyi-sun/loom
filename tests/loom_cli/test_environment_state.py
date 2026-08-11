@@ -2297,11 +2297,16 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
     }
     assert profile.external_slurm_runner_prerequisites["require_worker_token_parity"] is True
     assert profile.external_slurm_runner_prerequisites["materialize"] is True
+    assert profile.hosted_provider_pricing_defaults == [
+        {
+            "name": "yibuapi-glm",
+            "pricing_source": "rate-card",
+            "rate_card_provider": "yibuapi",
+            "required": True,
+        }
+    ]
     assert (
-        profile.external_slurm_runner_prerequisites[
-            "require_external_allocation_authority"
-        ]
-        is True
+        profile.external_slurm_runner_prerequisites["require_external_allocation_authority"] is True
     )
     assert (
         profile.external_slurm_runner_prerequisites["env_template_glob"]
@@ -2379,9 +2384,7 @@ def test_committed_staging_profile_activates_both_slurm_supervisors() -> None:
     assert oldlab["active"] is True
     assert "15448" in oldlab["args"]
     assert "service/loom-postgres-rw" in oldlab["args"]
-    assert oldlab["working_directory"].startswith(
-        "/opt/loom-staging-runner/candidates/"
-    )
+    assert oldlab["working_directory"].startswith("/opt/loom-staging-runner/candidates/")
 
 
 def test_staging_profile_loader_rejects_candidate_self_attested_activation(
@@ -2680,12 +2683,10 @@ def test_staging_profile_scales_both_slurm_pools_from_zero() -> None:
         "/shared_work/loom/staging-rollout/worker-envs/"
     )
     assert oldlab["actuator_config"]["env_file"] == (
-        "/shared_work/loom/staging-rollout/worker-envs/"
-        "staging-oldlab-worker-staging-test.env"
+        "/shared_work/loom/staging-rollout/worker-envs/staging-oldlab-worker-staging-test.env"
     )
     assert oldlab["actuator_config"]["repo_dir"] == (
-        "/shared_work/loom/staging-rollout/worker-repos/"
-        "loom-remote-worker-staging-test"
+        "/shared_work/loom/staging-rollout/worker-repos/loom-remote-worker-staging-test"
     )
     assert oldlab["actuator_config"]["candidate_sha"] == "a" * 40
     assert oldlab["actuator_config"]["job_output_dir"] == (

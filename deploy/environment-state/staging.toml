@@ -191,7 +191,7 @@ enabled = true
 group = "default"
 
 [[hosted_provider_pricing_defaults]]
-name = "mz_tn_canada_qianyi"
+name = "yibuapi-glm"
 pricing_source = "rate-card"
 rate_card_provider = "yibuapi"
 required = true

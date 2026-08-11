@@ -6,11 +6,14 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+
+from sqlalchemy.engine import make_url
 
 from loom_cli.rollout.production_defaults_readiness import (
     PRODUCTION_DEFAULTS_ADMIN_ACTOR,
@@ -28,9 +31,11 @@ _ADMIN_ACTOR = PRODUCTION_DEFAULTS_ADMIN_ACTOR
 _MAX_ARTIFACT_BYTES = 1024 * 1024
 _MAX_RESPONSE_BYTES = 1024 * 1024
 _READ_SQL = YIBUAPI_RATE_CARD_INVENTORY_SQL
+_DATABASE_RE = re.compile(r"loom_rehearsal_[0-9a-f]{24}\Z")
 
 Request = Callable[[str, str, str, Mapping[str, object] | None], Mapping[str, object]]
 RateCardReader = Callable[[], list[object]]
+RateCardStager = Callable[[dict[str, str]], None]
 
 
 class RehearsalProductionDefaultsError(RuntimeError):
@@ -71,12 +76,29 @@ def _http_request(
     return decoded
 
 
-def _read_rate_cards() -> list[object]:
+def _rehearsal_database_url(expected_database: str) -> str:
     database_url = os.environ.get("LOOM_SVC_DB_URL", "")
-    if database_url.startswith("postgresql+psycopg://"):
-        database_url = "postgresql://" + database_url.removeprefix("postgresql+psycopg://")
-    if not database_url.startswith("postgresql://"):
+    try:
+        authority = make_url(database_url)
+    except Exception as exc:
+        raise RehearsalProductionDefaultsError("rehearsal database authority is invalid") from exc
+    if (
+        _DATABASE_RE.fullmatch(expected_database) is None
+        or authority.drivername != "postgresql+psycopg"
+        or authority.username != "loom_rehearsal"
+        or authority.password is not None
+        or authority.host != "loom-postgres"
+        or authority.port != 5432
+        or authority.database != expected_database
+        or authority.query
+    ):
         raise RehearsalProductionDefaultsError("rehearsal database authority is invalid")
+    return database_url
+
+
+def _read_rate_cards(expected_database: str) -> list[object]:
+    database_url = _rehearsal_database_url(expected_database)
+    database_url = "postgresql://" + database_url.removeprefix("postgresql+psycopg://")
     try:
         import psycopg
 
@@ -104,6 +126,45 @@ def _read_rate_cards() -> list[object]:
     return rate_cards
 
 
+def _stage_rehearsal_rate_card(
+    expected_database: str,
+    sync: dict[str, str],
+) -> None:
+    if set(sync) != {"group", "source_url"} or not all(sync.values()):
+        raise RehearsalProductionDefaultsError("rate-card rehearsal input is invalid")
+    database_url = _rehearsal_database_url(expected_database)
+    database_url = "postgresql://" + database_url.removeprefix("postgresql+psycopg://")
+    identifier = (
+        "rehearsal-yibuapi-"
+        + hashlib.sha256(
+            json.dumps(sync, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()[:16]
+    )
+    table = {
+        "entries": [],
+        "group": sync["group"],
+        "provider": "yibuapi",
+        "rehearsal_offline": True,
+        "source_url": sync["source_url"],
+    }
+    try:
+        import psycopg
+        from psycopg.types.json import Jsonb
+
+        with psycopg.connect(database_url, connect_timeout=15) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    'INSERT INTO rate_cards (id, captured_at, "table") '
+                    "VALUES (%s, CURRENT_TIMESTAMP, %s) "
+                    "ON CONFLICT (id) DO UPDATE SET "
+                    'captured_at=EXCLUDED.captured_at, "table"=EXCLUDED."table"',
+                    (identifier, Jsonb(table)),
+                )
+            connection.commit()
+    except Exception as exc:  # psycopg exposes driver-specific subclasses
+        raise RehearsalProductionDefaultsError("rate-card rehearsal staging failed") from exc
+
+
 def _inventory(request: Request, read_rate_cards: RateCardReader) -> dict[str, object]:
     response = request("GET", "/api/v1/provider-connections", "", None)
     try:
@@ -119,8 +180,10 @@ def run_probe(
     expected_artifact_sha256: str,
     expected_candidate_sha: str,
     expected_candidate_tree: str,
+    expected_database: str,
     request: Request | None = None,
-    read_rate_cards: RateCardReader = _read_rate_cards,
+    read_rate_cards: RateCardReader | None = None,
+    stage_rate_card: RateCardStager | None = None,
     admin_secret_path: Path = _ADMIN_SECRET_PATH,
     expected_owner_uid: int = 0,
     allowed_group_gid: int | None = None,
@@ -132,6 +195,7 @@ def run_probe(
         or len(expected_artifact_sha256) != 64
         or len(expected_candidate_sha) not in {40, 64}
         or len(expected_candidate_tree) != 40
+        or _DATABASE_RE.fullmatch(expected_database) is None
         or any(
             character not in "0123456789abcdef"
             for value in (
@@ -175,6 +239,10 @@ def run_probe(
     transport = request or (
         lambda method, path, _token, payload: _http_request(method, path, token, payload)
     )
+    rate_card_reader = read_rate_cards or (lambda: _read_rate_cards(expected_database))
+    rate_card_stager = stage_rate_card or (
+        lambda sync: _stage_rehearsal_rate_card(expected_database, sync)
+    )
 
     def bound_request(
         method: str,
@@ -186,15 +254,23 @@ def run_probe(
 
     before = plan_production_defaults_convergence(
         artifact,
-        _inventory(bound_request, read_rate_cards),
+        _inventory(bound_request, rate_card_reader),
     )
     if before.state == "drifted":
         raise RehearsalProductionDefaultsError("production defaults inventory drifted")
     for mutation in before.mutations:
-        bound_request(mutation.method, mutation.path, "", mutation.payload)
+        if mutation.operation == "sync-yibuapi":
+            rate_card_stager(
+                {
+                    "group": str(mutation.payload["group"]),
+                    "source_url": str(mutation.payload["source_url"]),
+                }
+            )
+        else:
+            bound_request(mutation.method, mutation.path, "", mutation.payload)
     after = plan_production_defaults_convergence(
         artifact,
-        _inventory(bound_request, read_rate_cards),
+        _inventory(bound_request, rate_card_reader),
     )
     if after.state != "exact":
         raise RehearsalProductionDefaultsError("production defaults did not converge exactly")
@@ -241,6 +317,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--artifact-sha256", required=True)
     parser.add_argument("--candidate-sha", required=True)
     parser.add_argument("--candidate-tree", required=True)
+    parser.add_argument("--database", required=True)
     return parser
 
 
@@ -254,6 +331,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             expected_artifact_sha256=args.artifact_sha256,
             expected_candidate_sha=args.candidate_sha,
             expected_candidate_tree=args.candidate_tree,
+            expected_database=args.database,
         )
     except (RehearsalProductionDefaultsError, ValueError):
         print(

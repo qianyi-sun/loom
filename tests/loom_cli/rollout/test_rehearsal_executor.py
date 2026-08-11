@@ -1902,6 +1902,7 @@ def test_production_defaults_streams_exact_artifact_to_candidate_probe(tmp_path:
         "-m",
         "loom_cli.rollout.rehearsal_production_defaults_probe",
     )
+    assert probe[probe.index("--database") + 1] == plan.resources.database
     assert "loom_admin_" not in " ".join(probe)
 
 
