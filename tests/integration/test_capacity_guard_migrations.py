@@ -40,6 +40,9 @@ EXPECTED_GUARD_TABLES = {
     "prepared_worker_bindings",
     "claim_guard_activation",
     "attempt_lifecycle_events",
+    "attempt_lifecycle_heads",
+    "attempt_lifecycle_projection_blockers",
+    "attempt_lifecycle_projection_resolutions",
     "protected_claim_leases",
     "legacy_compatibility_preparations",
     "legacy_writer_cursors",
@@ -532,6 +535,97 @@ def test_guard_migration_downgrades_and_reupgrades_without_public_changes(
             assert set(inspect(connection).get_table_names(schema="loom_capacity_guard")) == (
                 EXPECTED_GUARD_TABLES
             )
+    finally:
+        engine.dispose()
+
+
+def test_lifecycle_projection_backfills_existing_terminal_public_blocker(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    cfg = _guard_config(capacity_guard_database)
+    engine = create_engine(_value(capacity_guard_database, "admin_url"))
+    trial_id = _seed_trial(engine)
+    transition_id = uuid4()
+    try:
+        command.downgrade(cfg, "guard_0005")
+        with _owner_connection(capacity_guard_database) as connection:
+            protected_attempt_id, _subject_id = _insert_foundation_rows(connection, trial_id)
+            connection.execute(
+                text(
+                    "INSERT INTO loom_capacity_guard.attempt_lifecycle_events "
+                    "(transition_id, protected_attempt_id, execution_generation, "
+                    "requirements_digest, transition_sequence, operation, previous_state, "
+                    "lifecycle_state, executable, payload, payload_digest) "
+                    "SELECT :transition_id, protected_attempt_id, execution_generation, "
+                    "requirements_digest, 1, 'cancel', 'pending-unassigned', "
+                    "'cancelled-terminal', false, "
+                    "jsonb_build_object('schema_version', 1, 'operation', 'cancel'), "
+                    ":payload_digest "
+                    "FROM loom_capacity_guard.trial_attempts "
+                    "WHERE protected_attempt_id = :protected_attempt_id"
+                ),
+                {
+                    "transition_id": transition_id,
+                    "protected_attempt_id": protected_attempt_id,
+                    "payload_digest": "d" * 64,
+                },
+            )
+
+        command.upgrade(cfg, "head")
+        with engine.connect() as connection:
+            blocker = (
+                connection.execute(
+                    text(
+                        "SELECT transition_id, protected_attempt_id, blocker_reason, executable "
+                        "FROM loom_capacity_guard.attempt_lifecycle_projection_blockers"
+                    )
+                )
+                .mappings()
+                .one()
+            )
+        assert dict(blocker) == {
+            "transition_id": transition_id,
+            "protected_attempt_id": protected_attempt_id,
+            "blocker_reason": "terminal-public-queued",
+            "executable": False,
+        }
+    finally:
+        engine.dispose()
+
+
+def test_lifecycle_projection_has_bounded_unresolved_blocker_access_path(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    engine = create_engine(_value(capacity_guard_database, "admin_url"))
+    try:
+        with engine.connect() as connection:
+            transaction = connection.begin()
+            connection.exec_driver_sql("SET LOCAL enable_seqscan = off")
+            connection.exec_driver_sql("SET LOCAL enable_bitmapscan = off")
+            plan = "\n".join(
+                connection.execute(
+                    text(
+                        "EXPLAIN (COSTS OFF) SELECT transition_id "
+                        "FROM loom_capacity_guard.attempt_lifecycle_projection_blockers "
+                        "WHERE resolved_at IS NULL LIMIT 1"
+                    )
+                ).scalars()
+            )
+            demand_plan = "\n".join(
+                connection.execute(
+                    text(
+                        "EXPLAIN (COSTS OFF) SELECT protected_attempt_id "
+                        "FROM loom_capacity_guard.attempt_lifecycle_heads "
+                        "WHERE lifecycle_state IN ('pending-unassigned', 'assigned') "
+                        "ORDER BY protected_attempt_id LIMIT 101"
+                    )
+                ).scalars()
+            )
+            transaction.rollback()
+        assert "guard_lifecycle_projection_unresolved_blocker_key" in plan
+        assert "Seq Scan" not in plan
+        assert "guard_lifecycle_current_demand_key" in demand_plan
+        assert "Sort" not in demand_plan
     finally:
         engine.dispose()
 

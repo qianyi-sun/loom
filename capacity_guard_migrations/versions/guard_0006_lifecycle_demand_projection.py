@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects import postgresql
 
 revision: str = "guard_0006"
 down_revision: str | Sequence[str] | None = "guard_0005"
@@ -24,6 +26,217 @@ def _agent_role() -> str:
     if not isinstance(role, str) or not role:
         raise RuntimeError("lifecycle demand migration is missing the validated agent role")
     return op.get_bind().dialect.identifier_preparer.quote(role)
+
+
+def _install_lifecycle_head_guards() -> None:
+    op.execute(
+        f"""
+        CREATE FUNCTION {SCHEMA}.enforce_attempt_lifecycle_head_transition()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        SET search_path = pg_catalog
+        AS $function$
+        BEGIN
+          IF TG_OP = 'DELETE' OR pg_trigger_depth() < 2 THEN
+            RAISE EXCEPTION
+              'attempt lifecycle head can change only through an appended lifecycle event'
+              USING ERRCODE = '55000';
+          END IF;
+          IF TG_OP = 'INSERT' THEN
+            IF NEW.transition_sequence <> 0
+               OR NOT EXISTS (
+                 SELECT 1 FROM {SCHEMA}.attempt_lifecycle_events AS event
+                  WHERE event.transition_id = NEW.transition_id
+                    AND event.protected_attempt_id = NEW.protected_attempt_id
+                    AND event.transition_sequence = NEW.transition_sequence
+                    AND event.previous_state IS NULL
+                    AND event.lifecycle_state = NEW.lifecycle_state
+                    AND event.executable = NEW.executable
+                    AND event.created_at = NEW.updated_at
+               ) THEN
+              RAISE EXCEPTION 'initial attempt lifecycle head is not exact'
+                USING ERRCODE = '55000';
+            END IF;
+            RETURN NEW;
+          END IF;
+          IF NEW.protected_attempt_id IS DISTINCT FROM OLD.protected_attempt_id
+             OR NEW.created_at IS DISTINCT FROM OLD.created_at
+             OR NEW.transition_sequence <> OLD.transition_sequence + 1
+             OR NEW.updated_at < OLD.updated_at
+             OR NOT EXISTS (
+               SELECT 1 FROM {SCHEMA}.attempt_lifecycle_events AS event
+                WHERE event.transition_id = NEW.transition_id
+                  AND event.protected_attempt_id = NEW.protected_attempt_id
+                  AND event.transition_sequence = NEW.transition_sequence
+                  AND event.previous_state = OLD.lifecycle_state
+                  AND event.lifecycle_state = NEW.lifecycle_state
+                  AND event.executable = NEW.executable
+                  AND event.created_at = NEW.updated_at
+             ) THEN
+            RAISE EXCEPTION 'attempt lifecycle head transition is not exact and monotonic'
+              USING ERRCODE = '55000';
+          END IF;
+          RETURN NEW;
+        END
+        $function$
+        """
+    )
+    op.execute(
+        f"""
+        CREATE TRIGGER attempt_lifecycle_heads_monotonic_row
+        BEFORE INSERT OR UPDATE OR DELETE ON {SCHEMA}.attempt_lifecycle_heads
+        FOR EACH ROW EXECUTE FUNCTION {SCHEMA}.enforce_attempt_lifecycle_head_transition()
+        """
+    )
+    op.execute(
+        f"""
+        CREATE TRIGGER attempt_lifecycle_heads_no_truncate
+        BEFORE TRUNCATE ON {SCHEMA}.attempt_lifecycle_heads
+        FOR EACH STATEMENT EXECUTE FUNCTION {SCHEMA}.reject_append_only_mutation()
+        """
+    )
+    op.execute(
+        f"""
+        CREATE FUNCTION {SCHEMA}.enforce_attempt_lifecycle_projection_blocker()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        SET search_path = pg_catalog
+        AS $function$
+        BEGIN
+          IF TG_OP = 'DELETE'
+             OR pg_trigger_depth() < 2
+             OR NEW.transition_id IS DISTINCT FROM OLD.transition_id
+             OR NEW.protected_attempt_id IS DISTINCT FROM OLD.protected_attempt_id
+             OR NEW.blocker_reason IS DISTINCT FROM OLD.blocker_reason
+             OR NEW.executable IS DISTINCT FROM OLD.executable
+             OR NEW.created_at IS DISTINCT FROM OLD.created_at
+             OR OLD.resolved_at IS NOT NULL
+             OR NEW.resolved_at IS NULL
+             OR NOT EXISTS (
+               SELECT 1
+                 FROM {SCHEMA}.attempt_lifecycle_projection_resolutions AS resolution
+                WHERE resolution.transition_id = NEW.transition_id
+                  AND resolution.protected_attempt_id = NEW.protected_attempt_id
+                  AND resolution.resolved_at = NEW.resolved_at
+             ) THEN
+            RAISE EXCEPTION
+              'lifecycle projection blocker can resolve only through appended evidence'
+              USING ERRCODE = '55000';
+          END IF;
+          RETURN NEW;
+        END
+        $function$
+        """
+    )
+    op.execute(
+        f"""
+        CREATE TRIGGER attempt_lifecycle_projection_blockers_monotonic_row
+        BEFORE UPDATE OR DELETE
+        ON {SCHEMA}.attempt_lifecycle_projection_blockers
+        FOR EACH ROW EXECUTE FUNCTION
+          {SCHEMA}.enforce_attempt_lifecycle_projection_blocker()
+        """
+    )
+    op.execute(
+        f"""
+        CREATE TRIGGER attempt_lifecycle_projection_resolutions_append_only_row
+        BEFORE UPDATE OR DELETE
+        ON {SCHEMA}.attempt_lifecycle_projection_resolutions
+        FOR EACH ROW EXECUTE FUNCTION {SCHEMA}.reject_append_only_mutation()
+        """
+    )
+    for table in (
+        "attempt_lifecycle_projection_blockers",
+        "attempt_lifecycle_projection_resolutions",
+    ):
+        op.execute(
+            f"""
+            CREATE TRIGGER {table}_append_only_truncate
+            BEFORE TRUNCATE ON {SCHEMA}.{table}
+            FOR EACH STATEMENT EXECUTE FUNCTION {SCHEMA}.reject_append_only_mutation()
+            """
+        )
+    op.execute(
+        f"""
+        CREATE FUNCTION {SCHEMA}.project_attempt_lifecycle_projection_resolution()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        SET search_path = pg_catalog
+        AS $function$
+        BEGIN
+          UPDATE {SCHEMA}.attempt_lifecycle_projection_blockers
+             SET resolved_at = NEW.resolved_at
+           WHERE transition_id = NEW.transition_id
+             AND protected_attempt_id = NEW.protected_attempt_id
+             AND resolved_at IS NULL;
+          IF NOT FOUND THEN
+            RAISE EXCEPTION 'lifecycle projection resolution has no unresolved blocker'
+              USING ERRCODE = '55000';
+          END IF;
+          RETURN NEW;
+        END
+        $function$
+        """
+    )
+    op.execute(
+        f"""
+        CREATE TRIGGER attempt_lifecycle_projection_resolutions_project_blocker
+        AFTER INSERT ON {SCHEMA}.attempt_lifecycle_projection_resolutions
+        FOR EACH ROW EXECUTE FUNCTION
+          {SCHEMA}.project_attempt_lifecycle_projection_resolution()
+        """
+    )
+    op.execute(
+        f"""
+        CREATE FUNCTION {SCHEMA}.project_attempt_lifecycle_head()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        SET search_path = pg_catalog
+        AS $function$
+        BEGIN
+          UPDATE {SCHEMA}.attempt_lifecycle_heads
+             SET transition_id = NEW.transition_id,
+                 transition_sequence = NEW.transition_sequence,
+                 lifecycle_state = NEW.lifecycle_state,
+                 executable = NEW.executable,
+                 updated_at = NEW.created_at
+           WHERE protected_attempt_id = NEW.protected_attempt_id;
+          IF NOT FOUND THEN
+            INSERT INTO {SCHEMA}.attempt_lifecycle_heads
+              (protected_attempt_id, transition_id, transition_sequence,
+               lifecycle_state, executable, created_at, updated_at)
+            VALUES
+              (NEW.protected_attempt_id, NEW.transition_id, NEW.transition_sequence,
+               NEW.lifecycle_state, NEW.executable, NEW.created_at, NEW.created_at);
+          END IF;
+          IF NEW.lifecycle_state = 'cancelled-terminal'
+             AND EXISTS (
+               SELECT 1
+                 FROM {SCHEMA}.trial_attempts AS attempt
+                 JOIN public.trials AS trial ON trial.id = attempt.trial_id
+                WHERE attempt.protected_attempt_id = NEW.protected_attempt_id
+                  AND trial.state = 'queued'
+                  AND trial.cancellation_requested_at IS NULL
+             ) THEN
+            INSERT INTO {SCHEMA}.attempt_lifecycle_projection_blockers
+              (transition_id, protected_attempt_id, blocker_reason, executable,
+               created_at)
+            VALUES
+              (NEW.transition_id, NEW.protected_attempt_id,
+               'terminal-public-queued', false, NEW.created_at);
+          END IF;
+          RETURN NEW;
+        END
+        $function$
+        """
+    )
+    op.execute(
+        f"""
+        CREATE TRIGGER attempt_lifecycle_events_project_head
+        AFTER INSERT ON {SCHEMA}.attempt_lifecycle_events
+        FOR EACH ROW EXECUTE FUNCTION {SCHEMA}.project_attempt_lifecycle_head()
+        """
+    )
 
 
 def _install_legacy_capture_guard() -> None:
@@ -48,15 +261,9 @@ def _install_legacy_capture_guard() -> None:
           IF EXISTS (
             SELECT 1
               FROM {SCHEMA}.trial_attempts AS a
-              LEFT JOIN LATERAL (
-                SELECT latest.lifecycle_state
-                  FROM {SCHEMA}.attempt_lifecycle_events AS latest
-                 WHERE latest.protected_attempt_id = a.protected_attempt_id
-                 ORDER BY latest.transition_sequence DESC
-                 LIMIT 1
-              ) AS current ON true
-             WHERE current.lifecycle_state IS NULL
-                OR current.lifecycle_state <> 'pending-unassigned'
+              JOIN {SCHEMA}.attempt_lifecycle_heads AS current
+                ON current.protected_attempt_id = a.protected_attempt_id
+             WHERE current.lifecycle_state <> 'pending-unassigned'
           ) THEN
             RAISE EXCEPTION
               'legacy demand capture cannot represent the protected lifecycle state'
@@ -87,6 +294,7 @@ def _install_lifecycle_capture() -> None:
         DECLARE
           v_registration {SCHEMA}.agent_registrations%ROWTYPE;
           v_sequence bigint;
+          v_source_count integer := 0;
           v_attempt_count integer := 0;
           v_attempt_bytes bigint := 2;
           v_attempt_items jsonb[] := ARRAY[]::jsonb[];
@@ -141,6 +349,32 @@ def _install_lifecycle_capture() -> None:
           PERFORM 1 FROM {SCHEMA}.agent_runtime_authority
            WHERE singleton_id = 1 FOR UPDATE;
 
+          -- A terminal transition observed while the public row was still
+          -- runnable creates one append-only blocker. Resolve it only after a
+          -- later public projection supplies durable non-runnable evidence.
+          INSERT INTO {SCHEMA}.attempt_lifecycle_projection_resolutions
+            (transition_id, protected_attempt_id, public_state,
+             cancellation_requested_at, executable, resolved_at)
+          SELECT blocker.transition_id, blocker.protected_attempt_id,
+                 trial.state, trial.cancellation_requested_at, false, v_observed_at
+            FROM {SCHEMA}.attempt_lifecycle_projection_blockers AS blocker
+            JOIN {SCHEMA}.trial_attempts AS attempt
+              ON attempt.protected_attempt_id = blocker.protected_attempt_id
+            JOIN public.trials AS trial ON trial.id = attempt.trial_id
+           WHERE blocker.resolved_at IS NULL
+             AND (trial.state <> 'queued'
+                  OR trial.cancellation_requested_at IS NOT NULL)
+          ON CONFLICT (transition_id) DO NOTHING;
+          IF EXISTS (
+            SELECT 1
+              FROM {SCHEMA}.attempt_lifecycle_projection_blockers AS blocker
+             WHERE blocker.resolved_at IS NULL
+          ) THEN
+            RAISE EXCEPTION
+              'terminal protected lifecycle contradicts queued public state'
+              USING ERRCODE = '55000';
+          END IF;
+
           FOR v_row IN
             SELECT
               a.protected_attempt_id,
@@ -176,18 +410,19 @@ def _install_lifecycle_capture() -> None:
               shape.shape_state,
               shape.executable AS shape_executable,
               shape.payload AS shape_payload
-            FROM {SCHEMA}.trial_attempts AS a
+            FROM {SCHEMA}.attempt_lifecycle_heads AS head
+            JOIN {SCHEMA}.attempt_lifecycle_events AS l
+              ON l.transition_id = head.transition_id
+             AND l.protected_attempt_id = head.protected_attempt_id
+             AND l.transition_sequence = head.transition_sequence
+             AND l.lifecycle_state = head.lifecycle_state
+             AND l.executable = head.executable
+            JOIN {SCHEMA}.trial_attempts AS a
+              ON a.protected_attempt_id = head.protected_attempt_id
             JOIN {SCHEMA}.trial_requirements AS r
               ON r.trial_id = a.trial_id
              AND r.requirements_digest = a.requirements_digest
             JOIN public.trials AS t ON t.id = a.trial_id
-            LEFT JOIN LATERAL (
-              SELECT latest.*
-                FROM {SCHEMA}.attempt_lifecycle_events AS latest
-               WHERE latest.protected_attempt_id = a.protected_attempt_id
-               ORDER BY latest.transition_sequence DESC
-               LIMIT 1
-            ) AS l ON true
             LEFT JOIN {SCHEMA}.prepared_placement_allowances AS allowance
               ON allowance.allowance_id = l.allowance_id
              AND allowance.plan_id = l.plan_id
@@ -209,7 +444,9 @@ def _install_lifecycle_capture() -> None:
              AND shape.shape_instance_id = l.shape_instance_id
              AND shape.submission_intent_id = l.submission_intent_id
              AND shape.pool_id = l.pool_id
-            ORDER BY a.protected_attempt_id
+            WHERE head.lifecycle_state IN ('pending-unassigned', 'assigned')
+            ORDER BY head.protected_attempt_id
+            LIMIT (p_max_attempts + 1)
           LOOP
             IF v_row.lifecycle_state IS NULL THEN
               RAISE EXCEPTION 'protected attempt has no lifecycle projection'
@@ -219,16 +456,12 @@ def _install_lifecycle_capture() -> None:
               RAISE EXCEPTION 'protected lifecycle projection became executable'
                 USING ERRCODE = '55000';
             END IF;
-
-            IF v_row.lifecycle_state = 'cancelled-terminal' THEN
-              IF v_row.public_state = 'queued'
-                 AND v_row.cancellation_requested_at IS NULL THEN
-                RAISE EXCEPTION
-                  'terminal protected lifecycle contradicts queued public state'
-                  USING ERRCODE = '55000';
-              END IF;
-              CONTINUE;
+            v_source_count := v_source_count + 1;
+            IF v_source_count > p_max_attempts THEN
+              RAISE EXCEPTION 'protected demand exceeds the capture source row bound'
+                USING ERRCODE = '54000';
             END IF;
+
             IF v_row.lifecycle_state NOT IN ('pending-unassigned', 'assigned') THEN
               RAISE EXCEPTION 'protected lifecycle state is unsupported by demand projection'
                 USING ERRCODE = '55000';
@@ -389,6 +622,201 @@ def _install_lifecycle_capture() -> None:
 
 def upgrade() -> None:
     quoted_agent = _agent_role()
+    op.create_table(
+        "attempt_lifecycle_heads",
+        sa.Column("protected_attempt_id", sa.Uuid(), nullable=False),
+        sa.Column("transition_id", sa.Uuid(), nullable=False),
+        sa.Column("transition_sequence", sa.BigInteger(), nullable=False),
+        sa.Column("lifecycle_state", sa.Text(), nullable=False),
+        sa.Column("executable", sa.Boolean(), nullable=False),
+        sa.Column(
+            "created_at",
+            postgresql.TIMESTAMP(timezone=True),
+            nullable=False,
+            server_default=sa.text("now()"),
+        ),
+        sa.Column(
+            "updated_at",
+            postgresql.TIMESTAMP(timezone=True),
+            nullable=False,
+            server_default=sa.text("now()"),
+        ),
+        sa.CheckConstraint(
+            "transition_sequence >= 0",
+            name="guard_lifecycle_head_sequence_check",
+        ),
+        sa.CheckConstraint(
+            "lifecycle_state IN "
+            "('pending-unassigned', 'assigned', 'cancelled-terminal')",
+            name="guard_lifecycle_head_state_check",
+        ),
+        sa.CheckConstraint(
+            "executable = false",
+            name="guard_lifecycle_head_inert_check",
+        ),
+        sa.ForeignKeyConstraint(
+            ["transition_id"],
+            [f"{SCHEMA}.attempt_lifecycle_events.transition_id"],
+            ondelete="RESTRICT",
+            name="guard_lifecycle_head_event_fk",
+        ),
+        sa.ForeignKeyConstraint(
+            ["protected_attempt_id"],
+            [f"{SCHEMA}.trial_attempts.protected_attempt_id"],
+            ondelete="RESTRICT",
+            name="guard_lifecycle_head_attempt_fk",
+        ),
+        sa.PrimaryKeyConstraint("protected_attempt_id"),
+        sa.UniqueConstraint("transition_id", name="guard_lifecycle_head_transition_key"),
+        schema=SCHEMA,
+    )
+    op.create_index(
+        "guard_lifecycle_head_state_key",
+        "attempt_lifecycle_heads",
+        ["lifecycle_state", "protected_attempt_id"],
+        schema=SCHEMA,
+    )
+    op.create_index(
+        "guard_lifecycle_current_demand_key",
+        "attempt_lifecycle_heads",
+        ["protected_attempt_id"],
+        schema=SCHEMA,
+        postgresql_where=sa.text(
+            "lifecycle_state IN ('pending-unassigned', 'assigned')"
+        ),
+    )
+    op.create_table(
+        "attempt_lifecycle_projection_blockers",
+        sa.Column("transition_id", sa.Uuid(), nullable=False),
+        sa.Column("protected_attempt_id", sa.Uuid(), nullable=False),
+        sa.Column("blocker_reason", sa.Text(), nullable=False),
+        sa.Column("executable", sa.Boolean(), nullable=False),
+        sa.Column(
+            "created_at",
+            postgresql.TIMESTAMP(timezone=True),
+            nullable=False,
+        ),
+        sa.Column(
+            "resolved_at",
+            postgresql.TIMESTAMP(timezone=True),
+            nullable=True,
+        ),
+        sa.CheckConstraint(
+            "blocker_reason = 'terminal-public-queued' AND executable = false",
+            name="guard_lifecycle_projection_blocker_inert_check",
+        ),
+        sa.CheckConstraint(
+            "resolved_at IS NULL OR resolved_at >= created_at",
+            name="guard_lifecycle_projection_blocker_resolution_time_check",
+        ),
+        sa.ForeignKeyConstraint(
+            ["transition_id"],
+            [f"{SCHEMA}.attempt_lifecycle_events.transition_id"],
+            ondelete="RESTRICT",
+            name="guard_lifecycle_projection_blocker_event_fk",
+        ),
+        sa.ForeignKeyConstraint(
+            ["protected_attempt_id"],
+            [f"{SCHEMA}.attempt_lifecycle_heads.protected_attempt_id"],
+            ondelete="RESTRICT",
+            name="guard_lifecycle_projection_blocker_head_fk",
+        ),
+        sa.PrimaryKeyConstraint("transition_id"),
+        sa.UniqueConstraint(
+            "protected_attempt_id",
+            name="guard_lifecycle_projection_blocker_attempt_key",
+        ),
+        schema=SCHEMA,
+    )
+    op.create_index(
+        "guard_lifecycle_projection_unresolved_blocker_key",
+        "attempt_lifecycle_projection_blockers",
+        ["transition_id"],
+        schema=SCHEMA,
+        postgresql_where=sa.text("resolved_at IS NULL"),
+    )
+    op.create_table(
+        "attempt_lifecycle_projection_resolutions",
+        sa.Column("transition_id", sa.Uuid(), nullable=False),
+        sa.Column("protected_attempt_id", sa.Uuid(), nullable=False),
+        sa.Column("public_state", sa.Text(), nullable=False),
+        sa.Column(
+            "cancellation_requested_at",
+            postgresql.TIMESTAMP(timezone=True),
+            nullable=True,
+        ),
+        sa.Column("executable", sa.Boolean(), nullable=False),
+        sa.Column(
+            "resolved_at",
+            postgresql.TIMESTAMP(timezone=True),
+            nullable=False,
+        ),
+        sa.CheckConstraint(
+            "(public_state <> 'queued' OR cancellation_requested_at IS NOT NULL) "
+            "AND executable = false",
+            name="guard_lifecycle_projection_resolution_inert_check",
+        ),
+        sa.ForeignKeyConstraint(
+            ["transition_id"],
+            [f"{SCHEMA}.attempt_lifecycle_projection_blockers.transition_id"],
+            ondelete="RESTRICT",
+            name="guard_lifecycle_projection_resolution_blocker_fk",
+        ),
+        sa.ForeignKeyConstraint(
+            ["protected_attempt_id"],
+            [f"{SCHEMA}.attempt_lifecycle_heads.protected_attempt_id"],
+            ondelete="RESTRICT",
+            name="guard_lifecycle_projection_resolution_head_fk",
+        ),
+        sa.PrimaryKeyConstraint("transition_id"),
+        sa.UniqueConstraint(
+            "protected_attempt_id",
+            name="guard_lifecycle_projection_resolution_attempt_key",
+        ),
+        schema=SCHEMA,
+    )
+    op.execute(
+        f"""
+        INSERT INTO {SCHEMA}.attempt_lifecycle_heads
+          (protected_attempt_id, transition_id, transition_sequence,
+           lifecycle_state, executable, created_at, updated_at)
+        SELECT DISTINCT ON (event.protected_attempt_id)
+          event.protected_attempt_id, event.transition_id,
+          event.transition_sequence, event.lifecycle_state, event.executable,
+          event.created_at, event.created_at
+          FROM {SCHEMA}.attempt_lifecycle_events AS event
+         ORDER BY event.protected_attempt_id, event.transition_sequence DESC
+        """
+    )
+    op.execute(
+        f"""
+        INSERT INTO {SCHEMA}.attempt_lifecycle_projection_blockers
+          (transition_id, protected_attempt_id, blocker_reason, executable,
+           created_at)
+        SELECT head.transition_id, head.protected_attempt_id,
+               'terminal-public-queued', false, head.updated_at
+          FROM {SCHEMA}.attempt_lifecycle_heads AS head
+          JOIN {SCHEMA}.trial_attempts AS attempt
+            ON attempt.protected_attempt_id = head.protected_attempt_id
+          JOIN public.trials AS trial ON trial.id = attempt.trial_id
+         WHERE head.lifecycle_state = 'cancelled-terminal'
+           AND trial.state = 'queued'
+           AND trial.cancellation_requested_at IS NULL
+        """
+    )
+    op.create_foreign_key(
+        "guard_attempt_current_lifecycle_fk",
+        "trial_attempts",
+        "attempt_lifecycle_heads",
+        ["protected_attempt_id"],
+        ["protected_attempt_id"],
+        source_schema=SCHEMA,
+        referent_schema=SCHEMA,
+        ondelete="RESTRICT",
+        deferrable=True,
+        initially="DEFERRED",
+    )
+    _install_lifecycle_head_guards()
     op.execute(
         f"ALTER FUNCTION {SCHEMA}.capture_demand_observation(uuid, bigint, integer) "
         "RENAME TO capture_demand_observation_v1_legacy"
@@ -410,6 +838,22 @@ def upgrade() -> None:
     op.execute(
         f"REVOKE ALL PRIVILEGES ON FUNCTION {SCHEMA}.capture_demand_observation_v1_legacy"
         "(uuid, bigint, integer) FROM PUBLIC"
+    )
+    op.execute(
+        f"REVOKE ALL PRIVILEGES ON FUNCTION "
+        f"{SCHEMA}.enforce_attempt_lifecycle_head_transition() FROM PUBLIC"
+    )
+    op.execute(
+        f"REVOKE ALL PRIVILEGES ON FUNCTION "
+        f"{SCHEMA}.project_attempt_lifecycle_head() FROM PUBLIC"
+    )
+    op.execute(
+        f"REVOKE ALL PRIVILEGES ON FUNCTION "
+        f"{SCHEMA}.enforce_attempt_lifecycle_projection_blocker() FROM PUBLIC"
+    )
+    op.execute(
+        f"REVOKE ALL PRIVILEGES ON FUNCTION "
+        f"{SCHEMA}.project_attempt_lifecycle_projection_resolution() FROM PUBLIC"
     )
     op.execute(
         f"GRANT EXECUTE ON FUNCTION {SCHEMA}.capture_demand_observation"
@@ -443,3 +887,24 @@ def downgrade() -> None:
         f"GRANT EXECUTE ON FUNCTION {SCHEMA}.capture_demand_observation"
         f"(uuid, bigint, integer) TO {quoted_agent}"
     )
+    op.execute(
+        f"DROP TRIGGER attempt_lifecycle_events_project_head "
+        f"ON {SCHEMA}.attempt_lifecycle_events"
+    )
+    op.execute(f"DROP FUNCTION {SCHEMA}.project_attempt_lifecycle_head()")
+    op.execute(
+        f"DROP TRIGGER attempt_lifecycle_projection_resolutions_project_blocker "
+        f"ON {SCHEMA}.attempt_lifecycle_projection_resolutions"
+    )
+    op.execute(f"DROP FUNCTION {SCHEMA}.project_attempt_lifecycle_projection_resolution()")
+    op.drop_constraint(
+        "guard_attempt_current_lifecycle_fk",
+        "trial_attempts",
+        schema=SCHEMA,
+        type_="foreignkey",
+    )
+    op.drop_table("attempt_lifecycle_projection_resolutions", schema=SCHEMA)
+    op.drop_table("attempt_lifecycle_projection_blockers", schema=SCHEMA)
+    op.drop_table("attempt_lifecycle_heads", schema=SCHEMA)
+    op.execute(f"DROP FUNCTION {SCHEMA}.enforce_attempt_lifecycle_projection_blocker()")
+    op.execute(f"DROP FUNCTION {SCHEMA}.enforce_attempt_lifecycle_head_transition()")
