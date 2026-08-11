@@ -145,7 +145,11 @@ def test_agent_can_execute_only_the_bounded_agent_functions(
                         "(uuid,jsonb,bytea,text)', 'EXECUTE') AS legacy_freeze_execute, "
                         "has_function_privilege(:agent, "
                         "'loom_capacity_guard.reject_global_preparation_with_legacy()', "
-                        "'EXECUTE') AS cross_mode_guard_execute"
+                        "'EXECUTE') AS cross_mode_guard_execute, "
+                        "has_function_privilege(:agent, "
+                        "'loom_capacity_guard.register_inert_trial_submission"
+                        "(uuid,jsonb,bytea,text,bytea,text)', 'EXECUTE') "
+                        "AS submission_execute"
                     ),
                     {"agent": agent_role},
                 )
@@ -175,6 +179,7 @@ def test_agent_can_execute_only_the_bounded_agent_functions(
             "legacy_prepare_execute": True,
             "legacy_freeze_execute": True,
             "cross_mode_guard_execute": False,
+            "submission_execute": True,
         }
     finally:
         admin.dispose()
@@ -227,7 +232,8 @@ def test_agent_functions_have_fixed_search_paths_and_exact_definer_status(
                         "'inspect_inert_claim_proposal', "
                         "'prepare_inert_legacy_compatibility', "
                         "'freeze_inert_legacy_compatibility', "
-                        "'reject_global_preparation_with_legacy')"
+                        "'reject_global_preparation_with_legacy', "
+                        "'register_inert_trial_submission')"
                     )
                 )
                 .mappings()
@@ -252,6 +258,7 @@ def test_agent_functions_have_fixed_search_paths_and_exact_definer_status(
             "prepare_inert_legacy_compatibility",
             "freeze_inert_legacy_compatibility",
             "reject_global_preparation_with_legacy",
+            "register_inert_trial_submission",
         }
         for name, row in functions.items():
             assert row["proconfig"] == ["search_path=pg_catalog"]

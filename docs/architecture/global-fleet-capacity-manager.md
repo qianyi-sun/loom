@@ -205,6 +205,36 @@ This remains a disconnected and non-executable projection. It adds no route,
 runtime reporter loop, public mutation, credential, live claim, worker launch,
 Slurm operation, or activation authority. The protected ceiling remains zero.
 
+## Package 2C3 inert trial-submission registration
+
+The third Package 2C slice corrects the initial protected attempt key before
+submission cutover. `execution_generation` is the deployment generation bound
+at submission, not a retry counter. Protected attempts now also carry a
+monotonic `attempt_sequence`; the initial attempt is sequence zero, and a later
+retry can retain the same deployment generation while receiving a fresh
+protected identity and sequence. The old uniqueness rule that allowed only one
+attempt per trial and deployment generation is removed. Existing Package 2A
+attempts backfill to sequence zero without updating their append-only rows.
+
+One candidate-independent agent procedure can now register an already-created
+initial public trial. It accepts only canonical, hash-verified contracts bound
+to the exact registered disabled fence, stamps the current deployment
+generation, normalizes the public pool pin into the sealed requirement, rejects
+nonqueued, cancelled, assigned, retried, drifted, or malformed public rows, and
+creates the sealed requirement, sequence-zero attempt, pending-unassigned
+lifecycle event, and bounded audit atomically. Exact replay converges; a
+conflicting identity or requirement fails closed. The agent receives only
+`EXECUTE` on this procedure and no direct protected-object privilege. The guard
+owner remains read-only on the public trial projection.
+
+This slice deliberately does not call the procedure from a candidate route and
+does not claim that the live `trial-submission` inventory entry is closed. The
+candidate public insert and protected registration are not yet one transaction,
+and the legacy direct public writer is not yet fenced. Those are mandatory
+cutover conditions for the later live submission boundary. Until then the
+procedure is disconnected, every inventory entry remains `open`, and the guard
+stays disabled with zero executable capacity and no live-claim entry.
+
 ## Current activation blockers
 
 There is intentionally no live global fleet manifest. The checked-in
