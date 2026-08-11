@@ -150,9 +150,12 @@ def run_migrations_online() -> None:
             required_trial_columns = (
                 "id",
                 "state",
+                "requires_caps",
                 "cancellation_requested_at",
                 "next_attempt_at",
                 "autoscaler_pool_name",
+                "worker_id",
+                "attempt_count",
                 "submit_priority",
                 "submitted_at",
             )

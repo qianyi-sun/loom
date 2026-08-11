@@ -204,3 +204,24 @@ def test_lifecycle_demand_projection_is_read_only_and_nonexecutable() -> None:
     assert "insert into loom_capacity_guard.prepared_" not in lowered
     assert "sbatch" not in lowered
     assert "scancel" not in lowered
+
+
+def test_inert_submission_registration_has_no_live_or_public_mutation() -> None:
+    source = Path(
+        "capacity_guard_migrations/versions/guard_0007_inert_trial_submission.py"
+    ).read_text(encoding="utf-8")
+    lowered = source.lower()
+    assert "register_inert_trial_submission" in lowered
+    assert "attempt_sequence" in lowered
+    assert "execution_generation" in lowered
+    assert "live_claim_entry_enabled = false" in lowered
+    assert "executable', false" in lowered
+    assert "security definer" in lowered
+    assert "to public" not in lowered
+    assert "insert into public." not in lowered
+    assert "update public." not in lowered
+    assert "delete from public." not in lowered
+    assert "insert into loom_capacity_guard.protected_claim_leases" not in lowered
+    assert "insert into loom_capacity_guard.prepared_" not in lowered
+    assert "sbatch" not in lowered
+    assert "scancel" not in lowered

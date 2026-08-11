@@ -62,7 +62,7 @@ async def test_guard_schema_startup_returns_numeric_head(
 ) -> None:
     engine = create_async_engine(_value(capacity_guard_database, "migrator_url"))
     try:
-        assert await assert_capacity_guard_schema_at_head(engine) == 6
+        assert await assert_capacity_guard_schema_at_head(engine) == 7
     finally:
         await engine.dispose()
 
@@ -189,7 +189,7 @@ def test_guard_schema_has_exact_owner_and_preserves_public_application_tables(
             revision = connection.execute(
                 text("SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version")
             ).scalar_one()
-            assert revision == "guard_0006"
+            assert revision == "guard_0007"
             public_before = capacity_guard_database["public_tables_before"]
             assert isinstance(public_before, frozenset)
             assert frozenset(inspect(connection).get_table_names(schema="public")) == public_before
@@ -488,6 +488,9 @@ def test_candidate_role_has_no_protected_privileges(
                 "SELECT loom_capacity_guard.inspect_inert_claim_proposal("
                 "'00000000-0000-0000-0000-000000000001'::uuid, '{}'::jsonb, "
                 "'{}'::bytea, '" + "a" * 64 + "')",
+                "SELECT loom_capacity_guard.register_inert_trial_submission("
+                "'00000000-0000-0000-0000-000000000001'::uuid, '{}'::jsonb, "
+                "'{}'::bytea, '" + "a" * 64 + "', '{}'::bytea, '" + "b" * 64 + "')",
             ]
         )
         for statement in statements:
@@ -503,6 +506,37 @@ def test_candidate_role_has_no_protected_privileges(
             connection.exec_driver_sql("DROP SCHEMA IF EXISTS candidate_escape CASCADE")
             connection.exec_driver_sql(f"REVOKE USAGE ON SCHEMA public FROM {quoted_candidate}")
             connection.exec_driver_sql(f"DROP ROLE IF EXISTS {quoted_candidate}")
+        engine.dispose()
+
+
+def test_guard_owner_remains_read_only_on_public_trial_projection(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    engine = create_engine(_value(capacity_guard_database, "admin_url"))
+    owner = _value(capacity_guard_database, "owner_role")
+    try:
+        with engine.connect() as connection:
+            privileges = (
+                connection.execute(
+                    text(
+                        "SELECT has_table_privilege(:owner, 'public.trials', 'INSERT') "
+                        "AS can_insert, "
+                        "has_table_privilege(:owner, 'public.trials', 'UPDATE') "
+                        "AS can_update, "
+                        "has_table_privilege(:owner, 'public.trials', 'DELETE') "
+                        "AS can_delete"
+                    ),
+                    {"owner": owner},
+                )
+                .mappings()
+                .one()
+            )
+        assert dict(privileges) == {
+            "can_insert": False,
+            "can_update": False,
+            "can_delete": False,
+        }
+    finally:
         engine.dispose()
 
 

@@ -52,7 +52,9 @@ class AgentRegistrationV1(StrictGuardModel):
             self.reporter_incarnation,
         }
         if len(incarnations) != 4:
-            raise ValueError("subject, authority, agent, and reporter incarnations must be distinct")
+            raise ValueError(
+                "subject, authority, agent, and reporter incarnations must be distinct"
+            )
         return self
 
 
@@ -102,6 +104,28 @@ class ReporterConfigurationV1(AgentRegistrationV1):
         if len(offers) != len(set(offers)):
             raise ValueError("duplicate semantic pool capability offer")
         return tuple(sorted(value, key=lambda item: item.capability_id))
+
+
+class InertTrialSubmissionV1(AgentRegistrationV1):
+    """One initial public trial sealed into disabled protected admission."""
+
+    trial_id: UUID
+    protected_attempt_id: UUID
+    attempt_sequence: Literal[0] = 0
+    execution_generation: PositiveGeneration
+    requirements: SealedRequirementsV1
+    requirements_digest: Digest
+    executable: Literal[False] = False
+
+    @model_validator(mode="after")
+    def _exact_initial_binding(self) -> InertTrialSubmissionV1:
+        if self.trial_id == self.protected_attempt_id:
+            raise ValueError("trial and protected attempt identities must be distinct")
+        if self.execution_generation != self.deployment_generation:
+            raise ValueError("execution generation must equal the current deployment generation")
+        if canonical_digest(self.requirements) != self.requirements_digest:
+            raise ValueError("requirements digest does not match sealed requirements")
+        return self
 
 
 class GuardDemandAttemptV1(StrictGuardModel):
@@ -243,9 +267,7 @@ class GuardLifecycleDemandAttemptV2(StrictGuardModel):
             item is not None for item in assignment_fields
         ):
             raise ValueError("pending-unassigned attempt must not carry an assignment")
-        if self.lifecycle_state == "assigned" and any(
-            item is None for item in assignment_fields
-        ):
+        if self.lifecycle_state == "assigned" and any(item is None for item in assignment_fields):
             raise ValueError("assigned attempt requires a complete assignment binding")
         if self.lifecycle_state == "assigned":
             identities = {
@@ -306,5 +328,6 @@ __all__ = [
     "GuardDemandObservationV1",
     "GuardLifecycleDemandAttemptV2",
     "GuardLifecycleDemandObservationV2",
+    "InertTrialSubmissionV1",
     "ReporterConfigurationV1",
 ]

@@ -134,8 +134,9 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
                     f"GRANT REFERENCES ON TABLE public.trials TO {quoted_owner}"
                 )
                 connection.exec_driver_sql(
-                    "GRANT SELECT (id, state, cancellation_requested_at, next_attempt_at, "
-                    "autoscaler_pool_name, submit_priority, submitted_at) "
+                    "GRANT SELECT (id, state, requires_caps, cancellation_requested_at, "
+                    "next_attempt_at, autoscaler_pool_name, worker_id, attempt_count, "
+                    "submit_priority, submitted_at) "
                     f"ON TABLE public.trials TO {quoted_owner}"
                 )
                 public_tables_before = frozenset(

@@ -13,6 +13,7 @@ from loom_capacity_agent.contracts import (
     AgentRegistrationV1,
     GuardDemandAttemptV1,
     GuardDemandObservationV1,
+    InertTrialSubmissionV1,
     ReporterConfigurationV1,
 )
 from loom_capacity_guard.contracts import SealedRequirementsV1, canonical_digest
@@ -154,3 +155,31 @@ def test_observation_is_complete_disabled_and_has_unique_attempts() -> None:
         GuardDemandObservationV1(**{**values, "attempts": (attempt, attempt)})
     with pytest.raises(ValidationError):
         GuardDemandObservationV1(**{**values, "sequence": 0})
+
+
+def test_inert_submission_is_initial_generation_bound_and_exactly_sealed() -> None:
+    registration = _registration()
+    requirements = _requirements()
+    submission = InertTrialSubmissionV1(
+        **registration.model_dump(mode="python"),
+        trial_id=uuid4(),
+        protected_attempt_id=uuid4(),
+        attempt_sequence=0,
+        execution_generation=registration.deployment_generation,
+        requirements=requirements,
+        requirements_digest=canonical_digest(requirements),
+    )
+    assert submission.executable is False
+    assert submission.attempt_sequence == 0
+
+    for changed, pattern in (
+        ({"attempt_sequence": 1}, "Input should be 0"),
+        ({"execution_generation": 2}, "deployment generation"),
+        ({"requirements_digest": "b" * 64}, "requirements digest"),
+        ({"protected_attempt_id": submission.trial_id}, "identities"),
+        ({"executable": True}, "Input should be False"),
+    ):
+        with pytest.raises(ValidationError, match=pattern):
+            InertTrialSubmissionV1.model_validate(
+                {**submission.model_dump(mode="python"), **changed}
+            )
