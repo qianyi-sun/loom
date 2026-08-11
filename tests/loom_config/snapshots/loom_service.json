@@ -219,6 +219,21 @@
     "default": "PydanticUndefined",
     "required": true
   },
+  "personal_dev_activation_ack_max_age_sec": {
+    "annotation": "<class 'int'>",
+    "default": "300",
+    "required": false
+  },
+  "personal_dev_activation_hmac_key_file": {
+    "annotation": "pathlib.Path | None",
+    "default": "None",
+    "required": false
+  },
+  "personal_dev_activation_hmac_key_id": {
+    "annotation": "<class 'str'>",
+    "default": "'personal-dev-agent-v1'",
+    "required": false
+  },
   "personal_dev_global_live_instance_limit": {
     "annotation": "<class 'int'>",
     "default": "16",
@@ -237,6 +252,16 @@
   "personal_dev_per_owner_live_instance_limit": {
     "annotation": "<class 'int'>",
     "default": "2",
+    "required": false
+  },
+  "personal_dev_reconciler_lease_sec": {
+    "annotation": "<class 'int'>",
+    "default": "1800",
+    "required": false
+  },
+  "personal_dev_reconciler_poll_interval_sec": {
+    "annotation": "<class 'float'>",
+    "default": "2.0",
     "required": false
   },
   "personal_dev_source_max_archive_bytes": {

@@ -252,6 +252,33 @@ python_type = "int"
 default     = 16
 description = "Maximum sum of max_slots demand ceilings across one owner's non-deleted personal environments; this is not reserved physical capacity."
 
+[service_config.personal_dev_reconciler_poll_interval_sec]
+used_by     = ["loom-service"]
+python_type = "float"
+default     = 2.0
+description = "Idle poll interval for the lease-fenced personal environment reconciler."
+
+[service_config.personal_dev_reconciler_lease_sec]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 1800
+description = "Lease duration for one bounded personal environment preparation or activation-finalization attempt."
+
+[service_config.personal_dev_activation_hmac_key_file]
+used_by     = ["loom-service"]
+python_type = "Path"
+description = "Owner-only file containing the shared key used to authenticate trusted personal-dev environment activation acknowledgements."
+
+[service_config.personal_dev_activation_hmac_key_id]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "personal-dev-agent-v1"
+
+[service_config.personal_dev_activation_ack_max_age_sec]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 300
+
 [service_config.bind_host]
 used_by     = ["control-plane", "llm-gateway", "loom-service"]
 python_type = "str"

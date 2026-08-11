@@ -989,8 +989,19 @@ class DevLifecycleOperationAttempt(Base):
     __tablename__ = "dev_lifecycle_operation_attempts"
     __table_args__ = (
         CheckConstraint(
-            "operation_epoch > 0 AND attempt_sequence >= 0",
+            "operation_epoch > 0 AND attempt_sequence >= 0 AND lease_epoch >= 0",
             name="dev_lifecycle_operation_attempts_counters_check",
+        ),
+        CheckConstraint(
+            "credential_binding_version = 1 "
+            "AND bootstrap_auth_kind IN ('bearer', 'session') "
+            "AND octet_length(bootstrap_credential_hash) = 32",
+            name="dev_lifecycle_operation_attempts_credential_check",
+        ),
+        CheckConstraint(
+            "(claimed_by IS NULL AND lease_expires_at IS NULL) OR "
+            "(claimed_by IS NOT NULL AND lease_expires_at IS NOT NULL)",
+            name="dev_lifecycle_operation_attempts_lease_check",
         ),
         CheckConstraint(
             "state IN ('running', 'activating', 'succeeded', 'failed', 'cancelled')",
@@ -1015,6 +1026,14 @@ class DevLifecycleOperationAttempt(Base):
             unique=True,
             postgresql_where=text("state IN ('running', 'activating')"),
         ),
+        Index(
+            "dev_lifecycle_operation_attempts_picker_idx",
+            "state",
+            "checkpoint",
+            "lease_expires_at",
+            "created_at",
+            "id",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -1029,6 +1048,28 @@ class DevLifecycleOperationAttempt(Base):
     attempt_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
     state: Mapped[str] = mapped_column(String(16), nullable=False)
     checkpoint: Mapped[str] = mapped_column(String(32), nullable=False)
+    credential_binding_version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("1"),
+        default=1,
+    )
+    bootstrap_auth_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    bootstrap_credential_hash: Mapped[bytes] = mapped_column(
+        LargeBinary(32),
+        nullable=False,
+    )
+    lease_epoch: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        server_default=text("0"),
+        default=0,
+    )
+    claimed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
     failure_reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
@@ -1042,6 +1083,55 @@ class DevLifecycleOperationAttempt(Base):
     )
     started_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
+class DevLifecycleActivationAcknowledgement(Base):
+    """Append-only trusted environment acknowledgement for one activation."""
+
+    __tablename__ = "dev_lifecycle_activation_acknowledgements"
+    __table_args__ = (
+        CheckConstraint(
+            "operation_epoch > 0 AND deployment_generation > 0",
+            name="dev_lifecycle_activation_acknowledgements_counters_check",
+        ),
+        CheckConstraint(
+            "candidate_sha ~ '^[0-9a-f]{64}$' "
+            "AND readiness_evidence_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND local_activation_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND payload_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND signature_sha256 ~ '^[0-9a-f]{64}$'",
+            name="dev_lifecycle_activation_acknowledgements_digests_check",
+        ),
+        CheckConstraint(
+            "agent_key_id ~ '^[a-z][a-z0-9._-]{0,63}$'",
+            name="dev_lifecycle_activation_acknowledgements_key_check",
+        ),
+        UniqueConstraint(
+            "payload_sha256",
+            name="dev_lifecycle_activation_acknowledgements_payload_uidx",
+        ),
+    )
+
+    operation_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("dev_lifecycle_operations.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    environment_name: Mapped[str] = mapped_column(Text, nullable=False)
+    subject_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    subject_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    operation_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    attempt_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    candidate_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    candidate_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    deployment_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    readiness_evidence_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    local_activation_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    signature_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    agent_key_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    received_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
 
 
 class TeamMembership(Base):

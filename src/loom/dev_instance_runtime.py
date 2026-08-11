@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import secrets
 import shlex
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 import httpx
 import psycopg
@@ -26,8 +27,10 @@ from loom.dev_instance import DevInstanceIdentity, RequestedPolicy
 from loom.dev_instance_manifest import (
     DevInstanceManifestConfig,
     dev_instance_manifest_documents,
+    personal_dev_preparation_manifest_documents,
 )
 from loom.dev_instance_provisioner import OwnerAccessSnapshot, dev_buckets
+from loom.personal_dev_reconciler import PersonalDevReadinessObservation
 
 
 class DevInstanceRuntimeError(RuntimeError):
@@ -153,12 +156,35 @@ class KubectlClient:
         )
 
     async def read_secret(self, namespace: str, name: str) -> dict[str, bytes]:
+        data = await self.read_secret_optional(namespace, name)
+        if data is None:
+            raise DevInstanceRuntimeError("cluster secret is unavailable")
+        return data
+
+    async def read_secret_optional(
+        self,
+        namespace: str,
+        name: str,
+    ) -> dict[str, bytes] | None:
+        if not await self.namespace_exists(namespace):
+            return None
         result = await self.runner.run(
-            self._argv("get", "secret", name, "--namespace", namespace, "-o", "json"),
+            self._argv(
+                "get",
+                "secret",
+                name,
+                "--namespace",
+                namespace,
+                "--ignore-not-found=true",
+                "-o",
+                "json",
+            ),
             timeout_seconds=30,
         )
         try:
             raw = json.loads(result.stdout)
+            if raw == {}:
+                return None
             data = raw["data"]
             if not isinstance(data, dict):
                 raise TypeError
@@ -167,6 +193,48 @@ class KubectlClient:
             }
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             raise DevInstanceRuntimeError("cluster secret response was invalid") from None
+
+    async def namespace_exists(self, namespace: str) -> bool:
+        result = await self.runner.run(
+            self._argv(
+                "get",
+                "namespace",
+                namespace,
+                "--ignore-not-found=true",
+                "-o",
+                "json",
+            ),
+            timeout_seconds=30,
+        )
+        try:
+            value = json.loads(result.stdout)
+            if value == {}:
+                return False
+            metadata = value["metadata"]
+            if not isinstance(metadata, dict) or not isinstance(metadata.get("name"), str):
+                raise TypeError
+            return bool(metadata["name"] == namespace)
+        except (KeyError, TypeError, json.JSONDecodeError):
+            raise DevInstanceRuntimeError("cluster namespace response was invalid") from None
+
+    async def read_resource_json(
+        self,
+        *,
+        namespace: str,
+        kind: str,
+        name: str,
+    ) -> dict[str, Any]:
+        result = await self.runner.run(
+            self._argv("get", kind, name, "--namespace", namespace, "-o", "json"),
+            timeout_seconds=30,
+        )
+        try:
+            value = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            raise DevInstanceRuntimeError("cluster resource response was invalid") from None
+        if not isinstance(value, dict):
+            raise DevInstanceRuntimeError("cluster resource response was invalid")
+        return value
 
     async def exec_stdin(
         self,
@@ -538,24 +606,104 @@ class S3BucketEnsurer:
 class KubectlSecretVault:
     kubectl: KubectlClient
     database_admin_url: str
-    manifest_config: DevInstanceManifestConfig
+    manifest_config: DevInstanceManifestConfig | None = None
     _admin_tokens: dict[str, str] | None = None
     _object_credentials: dict[str, tuple[str, str]] | None = None
+    _database_passwords: dict[str, str] | None = None
 
     def __post_init__(self) -> None:
         self._admin_tokens = {}
         self._object_credentials = {}
+        self._database_passwords = {}
+
+    @staticmethod
+    def _password_from_secret(data: dict[str, bytes]) -> str:
+        try:
+            parsed = urlsplit(data["cp-db-url"].decode())
+            password = unquote(parsed.password or "")
+        except (KeyError, UnicodeDecodeError, ValueError):
+            raise DevInstanceRuntimeError("instance database credential is invalid") from None
+        if len(password) < 16 or any(character not in "0123456789abcdef" for character in password):
+            raise DevInstanceRuntimeError("instance database credential is invalid")
+        return password
+
+    @staticmethod
+    def _admin_token_from_secret(data: dict[str, bytes]) -> str:
+        try:
+            document = data["secrets.toml"].decode()
+            token_line = next(line for line in document.splitlines() if line.startswith("token = "))
+            return token_line.split('"', 2)[1]
+        except (KeyError, StopIteration, UnicodeDecodeError, IndexError):
+            raise DevInstanceRuntimeError("instance admin credential is invalid") from None
+
+    async def database_password(self, identity: DevInstanceIdentity) -> str | None:
+        assert self._database_passwords is not None
+        cached = self._database_passwords.get(identity.name)
+        if cached is not None:
+            return cached
+        data = await self.kubectl.read_secret_optional(identity.namespace, "loom-secrets")
+        if data is None:
+            return None
+        password = self._password_from_secret(data)
+        self._database_passwords[identity.name] = password
+        return password
 
     async def store(self, identity: DevInstanceIdentity, password: str) -> str:
+        existing_main = await self.kubectl.read_secret_optional(
+            identity.namespace,
+            "loom-secrets",
+        )
+        existing_admin = await self.kubectl.read_secret_optional(
+            identity.namespace,
+            "loom-admin-secret",
+        )
+        if (existing_main is None) != (existing_admin is None):
+            raise DevInstanceRuntimeError("instance secret set is incomplete")
+        if existing_main is not None and existing_admin is not None:
+            existing_password = self._password_from_secret(existing_main)
+            if existing_password != password:
+                raise ValueError("instance database password binding changed")
+            try:
+                object_credentials = (
+                    existing_main["minio-access-key"].decode(),
+                    existing_main["minio-secret-key"].decode(),
+                )
+            except (KeyError, UnicodeDecodeError):
+                raise DevInstanceRuntimeError("instance object credential is invalid") from None
+            admin_token = self._admin_token_from_secret(existing_admin)
+            assert self._admin_tokens is not None
+            assert self._object_credentials is not None
+            assert self._database_passwords is not None
+            self._admin_tokens[identity.name] = admin_token
+            self._object_credentials[identity.name] = object_credentials
+            self._database_passwords[identity.name] = existing_password
+            return f"k8s-secret://{identity.namespace}/loom-secrets"
         database_url = instance_database_url(self.database_admin_url, identity, password)
         admin_token = "loom_admin_" + secrets.token_urlsafe(32)
         object_access_key = f"loomdev-{identity.name}"
         object_secret_key = secrets.token_urlsafe(48)
         assert self._admin_tokens is not None
         assert self._object_credentials is not None
+        assert self._database_passwords is not None
         self._admin_tokens[identity.name] = admin_token
         self._object_credentials[identity.name] = (object_access_key, object_secret_key)
-        namespace = dev_instance_manifest_documents(identity, self.manifest_config)[0]
+        self._database_passwords[identity.name] = password
+        if self.manifest_config is None:
+            namespace = {
+                "apiVersion": "v1",
+                "kind": "Namespace",
+                "metadata": {
+                    "name": identity.namespace,
+                    "labels": {
+                        "app.kubernetes.io/managed-by": "loom-dev-instance-controller",
+                        "app.kubernetes.io/part-of": "loom",
+                        "loom.dev/instance": identity.name,
+                        "pod-security.kubernetes.io/enforce": "restricted",
+                    },
+                },
+            }
+        else:
+            namespace = dev_instance_manifest_documents(identity, self.manifest_config)[0]
         await self.kubectl.apply(yaml.safe_dump(namespace, sort_keys=False))
         labels = {
             "app.kubernetes.io/managed-by": "loom-dev-instance-controller",
@@ -602,12 +750,7 @@ class KubectlSecretVault:
         if cached is not None:
             return cached
         data = await self.kubectl.read_secret(identity.namespace, "loom-admin-secret")
-        try:
-            document = data["secrets.toml"].decode()
-            token_line = next(line for line in document.splitlines() if line.startswith("token = "))
-            token = token_line.split('"', 2)[1]
-        except (KeyError, StopIteration, UnicodeDecodeError, IndexError):
-            raise DevInstanceRuntimeError("instance admin credential is invalid") from None
+        token = self._admin_token_from_secret(data)
         self._admin_tokens[identity.name] = token
         return token
 
@@ -630,8 +773,10 @@ class KubectlSecretVault:
     async def delete(self, identity: DevInstanceIdentity) -> None:
         assert self._admin_tokens is not None
         assert self._object_credentials is not None
+        assert self._database_passwords is not None
         self._admin_tokens.pop(identity.name, None)
         self._object_credentials.pop(identity.name, None)
+        self._database_passwords.pop(identity.name, None)
         # Namespace deletion owns Kubernetes Secret cleanup. This remains an
         # explicit idempotent seam for non-Kubernetes vaults and future moves.
 
@@ -642,7 +787,7 @@ class KubectlMinioTenantProvisioner:
 
     kubectl: KubectlClient
     vault: KubectlSecretVault
-    namespace: str = "loom-dev-shared"
+    namespace: str = "loom-dev"
     pod: str = "loom-dev-minio-0"
     container: str = "admin"
 
@@ -763,13 +908,105 @@ class KubectlClusterProvisioner:
         await asyncio.gather(
             *(
                 self.kubectl.wait_deployment(identity.namespace, name)
-                for name in ("loom-control-plane", "loom-llm-gateway", "loom-service")
+                for name in (
+                    "loom-control-plane",
+                    "loom-llm-gateway",
+                    "loom-service",
+                    "loom-web",
+                )
             ),
         )
 
     async def destroy(self, identity: DevInstanceIdentity, *, keep_data: bool) -> None:
         del keep_data
         await self.kubectl.delete_namespace(identity.namespace)
+
+
+@dataclass(slots=True)
+class KubectlCandidateGenerationProvisioner:
+    """Prepare one digest-pinned generation without mutating stable routes."""
+
+    kubectl: KubectlClient
+
+    async def prepare(
+        self,
+        identity: DevInstanceIdentity,
+        config: DevInstanceManifestConfig,
+    ) -> PersonalDevReadinessObservation:
+        documents = personal_dev_preparation_manifest_documents(identity, config)
+        namespace, migration, *runtime = documents
+        await self.kubectl.apply(yaml.safe_dump(namespace, sort_keys=False))
+        await self.kubectl.apply(yaml.safe_dump(migration, sort_keys=False))
+        migration_name = str(migration["metadata"]["name"])
+        await self.kubectl.wait_job(identity.namespace, migration_name)
+        await self.kubectl.apply(
+            yaml.safe_dump_all(runtime, sort_keys=False, explicit_start=True),
+        )
+        names = {
+            component: f"loom-{component}-g{config.deployment_generation}"
+            for component in ("control-plane", "llm-gateway", "service", "web")
+        }
+        await asyncio.gather(
+            *(self.kubectl.wait_deployment(identity.namespace, name) for name in names.values()),
+        )
+        evidence: list[dict[str, object]] = []
+        deployed_images: dict[str, str] = {}
+        for component, name in names.items():
+            resource = await self.kubectl.read_resource_json(
+                namespace=identity.namespace,
+                kind="deployment",
+                name=name,
+            )
+            try:
+                metadata = resource["metadata"]
+                spec = resource["spec"]
+                status = resource["status"]
+                generation = int(metadata["generation"])
+                containers = spec["template"]["spec"]["containers"]
+                replicas = int(spec.get("replicas", 1))
+                image = str(containers[0]["image"])
+                observed_generation = int(status["observedGeneration"])
+                available = int(status.get("availableReplicas", 0))
+                updated = int(status.get("updatedReplicas", 0))
+                uid = str(metadata["uid"])
+                resource_version = str(metadata["resourceVersion"])
+            except (KeyError, IndexError, TypeError, ValueError):
+                raise DevInstanceRuntimeError(
+                    "candidate deployment readiness response was invalid",
+                ) from None
+            expected_image = config.image(component)
+            if (
+                len(containers) != 1
+                or image != expected_image
+                or observed_generation < generation
+                or available != replicas
+                or updated != replicas
+                or not uid
+                or not resource_version
+            ):
+                raise DevInstanceRuntimeError(
+                    "candidate deployment did not converge to the exact generation",
+                )
+            deployed_images[component] = image
+            evidence.append(
+                {
+                    "component": component,
+                    "generation": generation,
+                    "name": name,
+                    "resource_version": resource_version,
+                    "uid": uid,
+                },
+            )
+        canonical = json.dumps(
+            evidence,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("ascii")
+        return PersonalDevReadinessObservation(
+            deployed_images=deployed_images,
+            resource_evidence_sha256=hashlib.sha256(canonical).hexdigest(),
+        )
 
 
 @dataclass(slots=True)
@@ -923,6 +1160,7 @@ __all__ = [
     "CommandResult",
     "DevInstanceRuntimeError",
     "HttpControlPlanePolicyRegistrar",
+    "KubectlCandidateGenerationProvisioner",
     "KubectlClient",
     "KubectlClusterProvisioner",
     "KubectlMinioTenantProvisioner",

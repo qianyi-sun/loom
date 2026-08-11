@@ -16,7 +16,7 @@ def test_shared_fixture_is_one_postgres_and_minio_without_inline_secrets() -> No
         "loom-dev-postgres",
         "loom-dev-minio",
     ]
-    assert all(doc["metadata"]["namespace"] == "loom-dev-shared" for doc in docs[1:])
+    assert all(doc["metadata"]["namespace"] == "loom-dev" for doc in docs[1:])
     assert "secretKeyRef" in text
     assert "password:" not in text.lower()
     minio = next(doc for doc in stateful if doc["metadata"]["name"] == "loom-dev-minio")

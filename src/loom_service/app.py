@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -31,6 +32,7 @@ from loom.admin_secret import (
 )
 from loom.data_lifecycle_capacity import StagingAdmissionError
 from loom.db.schema_startup import assert_schema_at_head
+from loom.personal_dev_activation import load_personal_dev_activation_verifier
 from loom.personal_dev_environment import PersonalDevLifecycleLimits
 from loom.security.secret_store import assert_existing_secrets_decryptable
 from loom.startup_retry import retry_startup_dependency
@@ -38,10 +40,12 @@ from loom.taskset.transform_sandbox import TransformSandboxConfig
 from loom.workload_trust import WorkloadTrustContract
 from loom_service.batch_runner import run_loop as batch_run_loop
 from loom_service.config import LoomServiceSettings
+from loom_service.dev_instance_runtime import build_personal_dev_preparation_runtime
 from loom_service.metrics import (
     HTTP_REQUEST_LATENCY_SEC,
     HTTP_REQUESTS_TOTAL,
 )
+from loom_service.personal_dev_lifecycle import personal_dev_reconcile_run_loop
 from loom_service.routes import (
     admin_audit,
     agents,
@@ -120,17 +124,20 @@ async def _assert_schema_startup(engine: AsyncEngine) -> int:
 
 def create_app(settings: LoomServiceSettings) -> FastAPI:
     workload_contract = _validated_v1_workload_contract(settings)
+    personal_dev_limits: PersonalDevLifecycleLimits | None = None
     if settings.dev_instances_enabled:
-        PersonalDevLifecycleLimits(
+        personal_dev_limits = PersonalDevLifecycleLimits(
             global_live_instances=settings.personal_dev_global_live_instance_limit,
             per_owner_live_instances=settings.personal_dev_per_owner_live_instance_limit,
-            per_owner_aggregate_min_slots=(
-                settings.personal_dev_per_owner_aggregate_min_slots
-            ),
-            per_owner_aggregate_max_slots=(
-                settings.personal_dev_per_owner_aggregate_max_slots
-            ),
+            per_owner_aggregate_min_slots=(settings.personal_dev_per_owner_aggregate_min_slots),
+            per_owner_aggregate_max_slots=(settings.personal_dev_per_owner_aggregate_max_slots),
         )
+        if settings.personal_dev_reconciler_lease_sec <= 0:
+            raise RuntimeError("personal-dev reconciler lease must be positive")
+        if settings.personal_dev_reconciler_poll_interval_sec <= 0:
+            raise RuntimeError("personal-dev reconciler poll interval must be positive")
+        if settings.personal_dev_activation_ack_max_age_sec <= 0:
+            raise RuntimeError("personal-dev activation acknowledgement max age must be positive")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -147,10 +154,31 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         admin_secret_verifier = _load_admin_secret_verifier(settings)
 
         minio_client = create_minio_client(
-            settings, endpoint_url=settings.minio_endpoint,
+            settings,
+            endpoint_url=settings.minio_endpoint,
         )
+        personal_dev_task: asyncio.Task[None] | None = None
+        personal_dev_runtime = None
+        if personal_dev_limits is not None:
+            if settings.personal_dev_activation_hmac_key_file is None:
+                raise RuntimeError(
+                    "LOOM_SVC_PERSONAL_DEV_ACTIVATION_HMAC_KEY_FILE is required "
+                    "when dev instances are enabled",
+                )
+            app.state.personal_dev_activation_verifier = load_personal_dev_activation_verifier(
+                settings.personal_dev_activation_hmac_key_file,
+                key_id=settings.personal_dev_activation_hmac_key_id,
+                max_age_seconds=settings.personal_dev_activation_ack_max_age_sec,
+            )
+            personal_dev_runtime = build_personal_dev_preparation_runtime(
+                settings,
+                minio_client=minio_client,
+            )
+            if personal_dev_runtime is None:  # pragma: no cover - guarded by limits
+                raise RuntimeError("personal-dev preparation runtime is unavailable")
         http_client = httpx.AsyncClient(
-            base_url=str(settings.control_plane_url), timeout=10.0,
+            base_url=str(settings.control_plane_url),
+            timeout=10.0,
         )
 
         # Plan 20: separate httpx client for the Gateway. Rate-card
@@ -169,7 +197,8 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
                 f"absolute paths; a prefix would be silently dropped."
             )
         gateway_client = httpx.AsyncClient(
-            base_url=str(settings.gateway_url), timeout=10.0,
+            base_url=str(settings.gateway_url),
+            timeout=10.0,
         )
 
         app.state.settings = settings
@@ -178,6 +207,19 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         app.state.minio_client = minio_client
         app.state.http_client = http_client
         app.state.gateway_client = gateway_client
+        if personal_dev_runtime is not None and personal_dev_limits is not None:
+            personal_dev_task = asyncio.create_task(
+                personal_dev_reconcile_run_loop(
+                    session_factory=session_factory,
+                    executor=personal_dev_runtime,
+                    limits=personal_dev_limits,
+                    reconciler_id=f"loom-service:{socket.gethostname()}:{os.getpid()}",
+                    lease_seconds=settings.personal_dev_reconciler_lease_sec,
+                    poll_interval_seconds=(settings.personal_dev_reconciler_poll_interval_sec),
+                ),
+                name="loom-svc-personal-dev-reconciler",
+            )
+            app.state.personal_dev_reconciler_task = personal_dev_task
 
         # Plan 19: batch runner background task. Picks up
         # submitted/running batches on each poll, fans out trial
@@ -191,20 +233,14 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             if settings.batch_runner_cp_token is not None
             else None
         )
-        runner_authorization = (
-            f"Bearer {runner_token}" if runner_token else None
-        )
+        runner_authorization = f"Bearer {runner_token}" if runner_token else None
         runner_task = asyncio.create_task(
             batch_run_loop(
                 session_factory=session_factory,
                 http_client=http_client,
                 batch_size=settings.batch_runner_batch_size,
-                submit_rate_per_sec=(
-                    settings.batch_runner_submit_rate_per_sec
-                ),
-                poll_interval_sec=(
-                    settings.batch_runner_poll_interval_sec
-                ),
+                submit_rate_per_sec=(settings.batch_runner_submit_rate_per_sec),
+                poll_interval_sec=(settings.batch_runner_poll_interval_sec),
                 cp_authorization=runner_authorization,
             ),
             name="loom-svc-batch-runner",
@@ -253,12 +289,17 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             runner_task.cancel()
             materializer_task.cancel()
             gc_task.cancel()
+            if personal_dev_task is not None:
+                personal_dev_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await runner_task
             with contextlib.suppress(asyncio.CancelledError):
                 await materializer_task
             with contextlib.suppress(asyncio.CancelledError):
                 await gc_task
+            if personal_dev_task is not None:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await personal_dev_task
             with contextlib.suppress(Exception):
                 await gateway_client.aclose()
             with contextlib.suppress(Exception):
@@ -318,6 +359,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
     app.include_router(batches.router, prefix="/api/v1")
     app.include_router(delivery_exports.router, prefix="/api/v1")
     app.include_router(dev_instances.router, prefix="/api/v1")
+    app.include_router(dev_instances.internal_router, prefix="/api/v1/internal")
     app.include_router(personal_dev_candidates.router, prefix="/api/v1")
     app.include_router(run_library.router, prefix="/api/v1")
     app.include_router(rate_cards.router, prefix="/api/v1")
@@ -358,9 +400,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             return JSONResponse(
                 status_code=403,
                 content={
-                    "detail": (
-                        "staging admin browser session is validation-only"
-                    ),
+                    "detail": ("staging admin browser session is validation-only"),
                 },
                 headers={"Cache-Control": "no-store"},
             )
@@ -373,6 +413,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         label so cardinality is bounded by the route count, not the
         UUIDs in the URL."""
         import time as _time
+
         t0 = _time.perf_counter()
         response = await call_next(request)
         elapsed = _time.perf_counter() - t0
@@ -384,11 +425,13 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         route_path = getattr(route_obj, "path", None) or request.url.path
         status_class = f"{response.status_code // 100}xx"
         HTTP_REQUESTS_TOTAL.labels(
-            route=route_path, method=request.method,
+            route=route_path,
+            method=request.method,
             status_class=status_class,
         ).inc()
         HTTP_REQUEST_LATENCY_SEC.labels(
-            route=route_path, method=request.method,
+            route=route_path,
+            method=request.method,
         ).observe(elapsed)
         return response
 

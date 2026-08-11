@@ -64,10 +64,15 @@ class LoomServiceSettings(BaseSettings):
     minio_public_endpoint: str | None = None
     minio_region: str = "us-east-1"
     minio_secret_key: SecretStr
+    personal_dev_activation_ack_max_age_sec: int = 300
+    personal_dev_activation_hmac_key_file: Path | None = None
+    personal_dev_activation_hmac_key_id: str = "personal-dev-agent-v1"
     personal_dev_global_live_instance_limit: int = 16
     personal_dev_per_owner_aggregate_max_slots: int = 16
     personal_dev_per_owner_aggregate_min_slots: int = 8
     personal_dev_per_owner_live_instance_limit: int = 2
+    personal_dev_reconciler_lease_sec: int = 1800
+    personal_dev_reconciler_poll_interval_sec: float = 2.0
     personal_dev_source_max_archive_bytes: int = 402653184
     public_base_url: HttpUrl | None = None
     signed_url_expiry_sec: int = 3600

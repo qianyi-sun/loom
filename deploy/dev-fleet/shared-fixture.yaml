@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: loom-dev-shared
+  name: loom-dev
   labels:
     app.kubernetes.io/managed-by: loom-operator
     pod-security.kubernetes.io/enforce: baseline
@@ -10,7 +10,7 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: loom-dev-postgres
-  namespace: loom-dev-shared
+  namespace: loom-dev
 spec:
   serviceName: loom-dev-postgres
   replicas: 1
@@ -55,7 +55,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: loom-dev-postgres
-  namespace: loom-dev-shared
+  namespace: loom-dev
 spec:
   selector: { app: loom-dev-postgres }
   ports: [{ port: 5432, targetPort: 5432 }]
@@ -64,7 +64,7 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: loom-dev-minio
-  namespace: loom-dev-shared
+  namespace: loom-dev
 spec:
   serviceName: loom-dev-minio
   replicas: 1
@@ -122,7 +122,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: loom-dev-minio
-  namespace: loom-dev-shared
+  namespace: loom-dev
 spec:
   selector: { app: loom-dev-minio }
   ports:
@@ -133,7 +133,7 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: loom-dev-minio
-  namespace: loom-dev-shared
+  namespace: loom-dev
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt-prod
     nginx.ingress.kubernetes.io/proxy-body-size: "0"

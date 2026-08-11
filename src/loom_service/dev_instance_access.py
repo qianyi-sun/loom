@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from uuid import UUID
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +22,7 @@ from loom.dev_instance_provisioner import (
     OwnerAccessSnapshot,
     SessionAccessSnapshot,
 )
+from loom.personal_dev_environment import PersonalDevAccessBinding
 
 _DEFAULT_LICENSE_ALLOWLIST = ("MIT", "Apache-2.0", "BSD-3-Clause", "CC-BY-4.0")
 
@@ -27,9 +31,28 @@ class DevInstanceAccessError(RuntimeError):
     """The authenticated management identity cannot be bootstrapped safely."""
 
 
+def access_binding_from_context(ctx: AuthContext) -> PersonalDevAccessBinding:
+    """Reduce a verified request principal to the one credential it used."""
+    if ctx.auth_kind == "session":
+        if ctx.session_hash is None:
+            raise DevInstanceAccessError("authenticated browser session is incomplete")
+        return PersonalDevAccessBinding(
+            auth_kind="session",
+            credential_hash=ctx.session_hash,
+        )
+    if ctx.auth_kind != "bearer" or not ctx.token_hash:
+        raise DevInstanceAccessError("authenticated bearer credential is incomplete")
+    return PersonalDevAccessBinding(
+        auth_kind="bearer",
+        credential_hash=ctx.token_hash,
+    )
+
+
 async def load_owner_access_snapshot(
     session: AsyncSession,
     ctx: AuthContext,
+    *,
+    now: datetime | None = None,
 ) -> OwnerAccessSnapshot:
     """Load the caller's user/team plus only the credential used now.
 
@@ -39,31 +62,61 @@ async def load_owner_access_snapshot(
     """
     if ctx.user_id is None or ctx.team_id is None:
         raise DevInstanceAccessError("dev instance owner identity is incomplete")
-    user = await session.get(User, ctx.user_id)
-    team = await session.get(Team, ctx.team_id)
+    return await load_owner_access_snapshot_by_binding(
+        session,
+        owner_user_id=ctx.user_id,
+        owner_team_id=ctx.team_id,
+        binding=access_binding_from_context(ctx),
+        now=now,
+    )
+
+
+async def load_owner_access_snapshot_by_binding(
+    session: AsyncSession,
+    *,
+    owner_user_id: UUID,
+    owner_team_id: UUID,
+    binding: PersonalDevAccessBinding,
+    now: datetime | None = None,
+) -> OwnerAccessSnapshot:
+    """Reload the exact attempt-bound credential and current owner policy.
+
+    This is intentionally suitable for delayed background reconciliation: it
+    does not depend on a request-local ``AuthContext`` and fails closed when
+    the captured credential, owner, team, or membership is no longer active.
+    """
+    now = now or datetime.now(UTC)
+    user = await session.get(User, owner_user_id)
+    team = await session.get(Team, owner_team_id)
     membership = (
         await session.execute(
             select(TeamMembership).where(
-                TeamMembership.user_id == ctx.user_id,
-                TeamMembership.team_id == ctx.team_id,
+                TeamMembership.user_id == owner_user_id,
+                TeamMembership.team_id == owner_team_id,
             ),
         )
     ).scalar_one_or_none()
-    if user is None or team is None or membership is None:
+    if (
+        user is None
+        or team is None
+        or membership is None
+        or user.status != "active"
+        or user.disabled_at is not None
+        or team.disabled_at is not None
+    ):
         raise DevInstanceAccessError("dev instance owner records are incomplete")
-    quota = await session.get(TeamQuota, ctx.team_id)
+    quota = await session.get(TeamQuota, owner_team_id)
 
     bearer: BearerAccessSnapshot | None = None
     browser_session: SessionAccessSnapshot | None = None
-    if ctx.auth_kind == "session":
-        if ctx.session_hash is None:
-            raise DevInstanceAccessError("authenticated browser session is incomplete")
-        source_session = await session.get(UserSession, ctx.session_hash)
+    if binding.auth_kind == "session":
+        source_session = await session.get(UserSession, binding.credential_hash)
         if (
             source_session is None
-            or source_session.user_id != ctx.user_id
-            or source_session.current_team_id != ctx.team_id
+            or source_session.user_id != owner_user_id
+            or source_session.current_team_id != owner_team_id
             or source_session.revoked_at is not None
+            or source_session.expires_at <= now
         ):
             raise DevInstanceAccessError("authenticated browser session is unavailable")
         browser_session = SessionAccessSnapshot(
@@ -74,15 +127,14 @@ async def load_owner_access_snapshot(
             last_seen_at=source_session.last_seen_at,
         )
     else:
-        if not ctx.token_hash:
-            raise DevInstanceAccessError("authenticated bearer credential is incomplete")
-        source_token = await session.get(Token, ctx.token_hash)
+        source_token = await session.get(Token, binding.credential_hash)
         if (
             source_token is None
-            or source_token.created_by_user_id != ctx.user_id
-            or source_token.team_id != ctx.team_id
+            or source_token.created_by_user_id != owner_user_id
+            or source_token.team_id != owner_team_id
             or source_token.type != "team"
             or source_token.revoked_at is not None
+            or (source_token.expires_at is not None and source_token.expires_at <= now)
         ):
             raise DevInstanceAccessError("authenticated bearer credential is unavailable")
         bearer = BearerAccessSnapshot(
@@ -127,5 +179,7 @@ async def load_owner_access_snapshot(
 
 __all__ = [
     "DevInstanceAccessError",
+    "access_binding_from_context",
     "load_owner_access_snapshot",
+    "load_owner_access_snapshot_by_binding",
 ]

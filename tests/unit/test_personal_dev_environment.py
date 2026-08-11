@@ -3,6 +3,7 @@ from uuid import UUID
 import pytest
 
 from loom.personal_dev_environment import (
+    PersonalDevAccessBinding,
     PersonalDevEnvironmentApplyRequest,
     PersonalDevLifecycleLimits,
 )
@@ -66,3 +67,15 @@ def test_lifecycle_limits_are_finite_and_ordered() -> None:
             per_owner_aggregate_min_slots=9,
             per_owner_aggregate_max_slots=8,
         )
+
+
+def test_access_binding_accepts_only_exact_verified_credential_hashes() -> None:
+    bearer = PersonalDevAccessBinding(auth_kind="bearer", credential_hash=b"b" * 32)
+    browser = PersonalDevAccessBinding(auth_kind="session", credential_hash=b"s" * 32)
+    assert bearer.credential_hash == b"b" * 32
+    assert browser.auth_kind == "session"
+
+    with pytest.raises(ValueError):
+        PersonalDevAccessBinding(auth_kind="step", credential_hash=b"x" * 32)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        PersonalDevAccessBinding(auth_kind="bearer", credential_hash=b"short")

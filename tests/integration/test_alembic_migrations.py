@@ -6,7 +6,7 @@ import os
 import subprocess
 import sys
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -17,6 +17,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from testcontainers.postgres import PostgresContainer
 
 from loom.db.schema import Team, User
+from loom.personal_dev_activation import (
+    PersonalDevActivationAcknowledgement,
+    PersonalDevActivationVerifier,
+)
 from loom.personal_dev_candidate import (
     PERSONAL_DEV_COMPONENTS,
     PERSONAL_DEV_PLATFORMS,
@@ -28,6 +32,7 @@ from loom.personal_dev_candidate_store import (
     SqlAlchemyPersonalDevCandidateStore,
 )
 from loom.personal_dev_environment import (
+    PersonalDevAccessBinding,
     PersonalDevEnvironmentApplyRequest,
     PersonalDevLifecycleLimits,
 )
@@ -35,7 +40,13 @@ from loom.personal_dev_environment_store import (
     PersonalDevEnvironmentConflictError,
     PersonalDevEnvironmentEpochFencedError,
     PersonalDevEnvironmentNotFoundError,
+    PersonalDevEnvironmentOperationFencedError,
     SqlAlchemyPersonalDevEnvironmentAuthority,
+)
+
+_PERSONAL_DEV_ACCESS = PersonalDevAccessBinding(
+    auth_kind="bearer",
+    credential_hash=b"a" * 32,
 )
 
 
@@ -97,6 +108,7 @@ def test_all_tables_exist(postgres_url: str) -> None:
         "dev_instances",
         "dev_lifecycle_operations",
         "dev_lifecycle_operation_attempts",
+        "dev_lifecycle_activation_acknowledgements",
         "personal_dev_candidates",
         "personal_dev_candidate_build_attempts",
         "artifacts",
@@ -414,7 +426,11 @@ async def test_personal_dev_environment_apply_is_owner_bound_and_epoch_fenced(
         )
         async with sessions() as session:
             authority = SqlAlchemyPersonalDevEnvironmentAuthority(session)
-            created = await authority.apply(request, now=now)
+            created = await authority.apply(
+                request,
+                access_binding=_PERSONAL_DEV_ACCESS,
+                now=now,
+            )
             assert created.acquired is True
             assert created.requires_build_binding is True
             assert created.environment.status == "provisioning"
@@ -422,17 +438,36 @@ async def test_personal_dev_environment_apply_is_owner_bound_and_epoch_fenced(
             assert created.environment.subject_incarnation == created.operation.subject_incarnation
             assert created.operation.operation_epoch == 1
             assert created.operation.kind == "create"
-            retry = await authority.apply(request, now=now)
+            attempt_binding = (
+                await session.execute(
+                    text(
+                        "SELECT bootstrap_auth_kind, bootstrap_credential_hash, "
+                        "credential_binding_version FROM dev_lifecycle_operation_attempts "
+                        "WHERE id = :attempt_id",
+                    ),
+                    {"attempt_id": created.operation.attempt_id},
+                )
+            ).one()
+            assert attempt_binding.bootstrap_auth_kind == "bearer"
+            assert bytes(attempt_binding.bootstrap_credential_hash) == b"a" * 32
+            assert attempt_binding.credential_binding_version == 1
+            retry = await authority.apply(
+                request,
+                access_binding=_PERSONAL_DEV_ACCESS,
+                now=now,
+            )
             assert retry.acquired is False
             assert retry.operation.id == created.operation.id
 
             with pytest.raises(PersonalDevEnvironmentConflictError):
                 await authority.apply(
                     replace(request, max_slots=3),
+                    access_binding=_PERSONAL_DEV_ACCESS,
                     now=now,
                 )
             content_retry = await authority.apply(
                 replace(request, idempotency_key=uuid4()),
+                access_binding=_PERSONAL_DEV_ACCESS,
                 now=now,
             )
             assert content_retry.acquired is False
@@ -440,6 +475,7 @@ async def test_personal_dev_environment_apply_is_owner_bound_and_epoch_fenced(
             with pytest.raises(PersonalDevEnvironmentEpochFencedError):
                 await authority.apply(
                     replace(request, max_slots=3, idempotency_key=uuid4()),
+                    access_binding=_PERSONAL_DEV_ACCESS,
                     now=now,
                 )
             constrained = SqlAlchemyPersonalDevEnvironmentAuthority(
@@ -458,6 +494,7 @@ async def test_personal_dev_environment_apply_is_owner_bound_and_epoch_fenced(
                         name="charlie",
                         idempotency_key=uuid4(),
                     ),
+                    access_binding=_PERSONAL_DEV_ACCESS,
                     now=now,
                 )
 
@@ -471,6 +508,19 @@ async def test_personal_dev_environment_apply_is_owner_bound_and_epoch_fenced(
                     {
                         "candidate_sha": "9" * 64,
                         "operation_id": created.operation.id,
+                    },
+                )
+            await session.rollback()
+            with pytest.raises(DBAPIError):
+                await session.execute(
+                    text(
+                        "UPDATE dev_lifecycle_operation_attempts "
+                        "SET bootstrap_credential_hash = :credential_hash "
+                        "WHERE id = :attempt_id",
+                    ),
+                    {
+                        "credential_hash": b"z" * 32,
+                        "attempt_id": created.operation.attempt_id,
                     },
                 )
             await session.rollback()
@@ -506,20 +556,46 @@ async def test_personal_dev_environment_apply_is_owner_bound_and_epoch_fenced(
 
         async with sessions() as session:
             authority = SqlAlchemyPersonalDevEnvironmentAuthority(session)
+            reconcile_claim = await authority.claim_next_reconciliation(
+                reconciler_id="environment-test-reconciler",
+                now=now,
+                lease_seconds=60,
+            )
+            assert reconcile_claim is not None
             failed = await authority.fail_pre_activation(
                 operation_id=created.operation.id,
                 operation_epoch=1,
+                attempt_id=reconcile_claim.attempt.id,
+                reconciler_id="environment-test-reconciler",
+                lease_epoch=reconcile_claim.attempt.lease_epoch,
                 failure_reason="candidate_build_failed",
                 now=now,
             )
             assert failed.operation.state == "failed"
             assert failed.environment.status == "failed"
-            retried = await authority.apply(request, now=now)
+            retried = await authority.apply(
+                request,
+                access_binding=PersonalDevAccessBinding(
+                    auth_kind="bearer",
+                    credential_hash=b"r" * 32,
+                ),
+                now=now,
+            )
             assert retried.acquired is True
             assert retried.operation.id == created.operation.id
             assert retried.operation.attempt_sequence == 1
             assert retried.operation.attempt_id != created.operation.attempt_id
             assert retried.environment.status == "provisioning"
+            retry_binding = (
+                await session.execute(
+                    text(
+                        "SELECT bootstrap_credential_hash "
+                        "FROM dev_lifecycle_operation_attempts WHERE id = :attempt_id",
+                    ),
+                    {"attempt_id": retried.operation.attempt_id},
+                )
+            ).scalar_one()
+            assert bytes(retry_binding) == b"r" * 32
 
         other_owner = uuid4()
         async with sessions() as session:
@@ -540,6 +616,7 @@ async def test_personal_dev_environment_apply_is_owner_bound_and_epoch_fenced(
                         owner_user_id=other_owner,
                         idempotency_key=uuid4(),
                     ),
+                    access_binding=_PERSONAL_DEV_ACCESS,
                     now=now,
                 )
     finally:
@@ -607,6 +684,7 @@ async def test_personal_dev_environment_capacity_and_candidate_updates_are_atomi
                     expected_operation_epoch=0,
                     idempotency_key=uuid4(),
                 ),
+                access_binding=_PERSONAL_DEV_ACCESS,
                 now=now,
             )
 
@@ -635,42 +713,139 @@ async def test_personal_dev_environment_capacity_and_candidate_updates_are_atomi
 
         async with sessions() as session:
             authority = SqlAlchemyPersonalDevEnvironmentAuthority(session)
+            reconcile_claim = await authority.claim_next_reconciliation(
+                reconciler_id="environment-test-reconciler",
+                now=now,
+                lease_seconds=60,
+            )
+            assert reconcile_claim is not None
+            if reconcile_claim.operation.id != create.operation.id:
+                assert reconcile_claim.candidate.status == "failed"
+                await authority.fail_pre_activation(
+                    operation_id=reconcile_claim.operation.id,
+                    operation_epoch=reconcile_claim.operation.operation_epoch,
+                    attempt_id=reconcile_claim.attempt.id,
+                    reconciler_id="environment-test-reconciler",
+                    lease_epoch=reconcile_claim.attempt.lease_epoch,
+                    failure_reason="candidate_build_failed",
+                    now=now,
+                )
+                reconcile_claim = await authority.claim_next_reconciliation(
+                    reconciler_id="environment-test-reconciler",
+                    now=now,
+                    lease_seconds=60,
+                )
+                assert reconcile_claim is not None
+            assert reconcile_claim.candidate.id == first.id
+            assert (
+                await authority.claim_next_reconciliation(
+                    reconciler_id="competing-reconciler",
+                    now=now,
+                    lease_seconds=60,
+                )
+                is None
+            )
+            heartbeat = await authority.heartbeat_reconciliation(
+                operation_id=create.operation.id,
+                operation_epoch=1,
+                attempt_id=reconcile_claim.attempt.id,
+                reconciler_id="environment-test-reconciler",
+                lease_epoch=reconcile_claim.attempt.lease_epoch,
+                now=now + timedelta(seconds=30),
+                lease_seconds=60,
+            )
+            assert heartbeat.lease_expires_at == now + timedelta(seconds=90)
+            assert (
+                await authority.claim_next_reconciliation(
+                    reconciler_id="competing-reconciler",
+                    now=now + timedelta(seconds=61),
+                    lease_seconds=60,
+                )
+                is None
+            )
+            with pytest.raises(PersonalDevEnvironmentOperationFencedError):
+                await authority.begin_activation(
+                    operation_id=create.operation.id,
+                    operation_epoch=1,
+                    attempt_id=reconcile_claim.attempt.id,
+                    reconciler_id="competing-reconciler",
+                    lease_epoch=reconcile_claim.attempt.lease_epoch,
+                    readiness_evidence_sha256="4" * 64,
+                    now=now + timedelta(seconds=70),
+                )
             activation = await authority.begin_activation(
                 operation_id=create.operation.id,
                 operation_epoch=1,
+                attempt_id=reconcile_claim.attempt.id,
+                reconciler_id="environment-test-reconciler",
+                lease_epoch=reconcile_claim.attempt.lease_epoch,
                 readiness_evidence_sha256="4" * 64,
-                now=now,
+                now=now + timedelta(seconds=70),
             )
             activation_retry = await authority.begin_activation(
                 operation_id=create.operation.id,
                 operation_epoch=1,
+                attempt_id=reconcile_claim.attempt.id,
+                reconciler_id="environment-test-reconciler",
+                lease_epoch=reconcile_claim.attempt.lease_epoch,
                 readiness_evidence_sha256="4" * 64,
-                now=now,
+                now=now + timedelta(seconds=70),
             )
             assert activation.acquired is True
             assert activation_retry.acquired is False
+            activation_verifier = PersonalDevActivationVerifier(
+                keys={"personal-dev-agent-v1": b"k" * 32},
+            )
+            activation_acknowledgement = PersonalDevActivationAcknowledgement(
+                environment_name=activation.operation.environment_name,
+                subject_id=activation.operation.subject_id,
+                subject_incarnation=activation.operation.subject_incarnation,
+                operation_id=activation.operation.id,
+                operation_epoch=activation.operation.operation_epoch,
+                attempt_id=activation.operation.attempt_id,
+                candidate_id=activation.operation.candidate_id,
+                candidate_sha=activation.operation.candidate_sha,
+                deployment_generation=activation.operation.deployment_generation,
+                readiness_evidence_sha256="4" * 64,
+                local_activation_sha256="5" * 64,
+                agent_key_id="personal-dev-agent-v1",
+                observed_at=now + timedelta(seconds=70),
+            )
+            verified_acknowledgement = activation_verifier.verify(
+                activation_acknowledgement,
+                signature=activation_verifier.sign(activation_acknowledgement),
+                now=now + timedelta(seconds=70),
+            )
             acknowledgement = await authority.acknowledge_activation(
-                operation_id=create.operation.id,
-                operation_epoch=1,
-                acknowledgement_sha256="5" * 64,
-                now=now,
+                verified=verified_acknowledgement,
+                now=now + timedelta(seconds=70),
             )
             acknowledgement_retry = await authority.acknowledge_activation(
-                operation_id=create.operation.id,
-                operation_epoch=1,
-                acknowledgement_sha256="5" * 64,
-                now=now,
+                verified=verified_acknowledgement,
+                now=now + timedelta(seconds=70),
             )
             assert acknowledgement.acquired is True
             assert acknowledgement_retry.acquired is False
+            completion_claim = await authority.claim_next_reconciliation(
+                reconciler_id="environment-test-reconciler",
+                now=now + timedelta(seconds=70),
+                lease_seconds=60,
+            )
+            assert completion_claim is not None
             ready = await authority.complete_activation(
                 operation_id=create.operation.id,
                 operation_epoch=1,
-                now=now,
+                attempt_id=completion_claim.attempt.id,
+                reconciler_id="environment-test-reconciler",
+                lease_epoch=completion_claim.attempt.lease_epoch,
+                now=now + timedelta(seconds=70),
             )
             ready_retry = await authority.complete_activation(
                 operation_id=create.operation.id,
                 operation_epoch=1,
+                attempt_id=completion_claim.attempt.id,
+                reconciler_id="environment-test-reconciler",
+                lease_epoch=completion_claim.attempt.lease_epoch,
                 now=now,
             )
             assert ready.environment.status == "ready"
@@ -691,6 +866,7 @@ async def test_personal_dev_environment_capacity_and_candidate_updates_are_atomi
                     expected_operation_epoch=1,
                     idempotency_key=uuid4(),
                 ),
+                access_binding=_PERSONAL_DEV_ACCESS,
                 now=now,
             )
             assert capacity.operation.kind == "capacity"
@@ -711,9 +887,14 @@ async def test_personal_dev_environment_capacity_and_candidate_updates_are_atomi
                 expected_operation_epoch=2,
                 idempotency_key=uuid4(),
             )
-            noop = await authority.apply(noop_request, now=now)
+            noop = await authority.apply(
+                noop_request,
+                access_binding=_PERSONAL_DEV_ACCESS,
+                now=now,
+            )
             repeated_noop = await authority.apply(
                 replace(noop_request, idempotency_key=uuid4()),
+                access_binding=_PERSONAL_DEV_ACCESS,
                 now=now,
             )
             assert noop.operation.kind == "noop"
@@ -732,6 +913,7 @@ async def test_personal_dev_environment_capacity_and_candidate_updates_are_atomi
                     expected_operation_epoch=2,
                     idempotency_key=uuid4(),
                 ),
+                access_binding=_PERSONAL_DEV_ACCESS,
                 now=now,
             )
             assert update.operation.kind == "update"

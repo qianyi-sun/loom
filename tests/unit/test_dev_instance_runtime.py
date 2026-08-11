@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import base64
 import json
 from typing import Any
+from uuid import UUID
 
 import httpx
+import pytest
 
 from loom.dev_instance import RequestedPolicy, derive_identity
-from loom.dev_instance_manifest import DevInstanceManifestConfig
+from loom.dev_instance_manifest import DevInstanceManifestConfig, PersonalDevManifestBinding
 from loom.dev_instance_runtime import (
     CommandResult,
     HttpControlPlanePolicyRegistrar,
+    KubectlCandidateGenerationProvisioner,
     KubectlClient,
     KubectlClusterProvisioner,
     KubectlMinioTenantProvisioner,
@@ -71,16 +75,77 @@ async def test_kubectl_vault_sends_secrets_only_over_stdin() -> None:
     ref = await vault.store(derive_identity("alice"), "b" * 20)
 
     assert ref == "k8s-secret://loom-dev-alice/loom-secrets"
-    assert len(runner.calls) == 2
+    assert len(runner.calls) == 4
     flattened_argv = " ".join(part for argv, _stdin in runner.calls for part in argv)
     assert "fixture-secret" not in flattened_argv
     assert "minio-secret" not in flattened_argv
-    secret_input = runner.calls[1][1]
+    secret_input = runner.calls[-1][1]
     assert secret_input is not None
     assert "fixture-secret" not in secret_input  # admin credential is never copied
     assert "loomdev-alice" in secret_input
     assert "bbbbbbbbbbbbbbbbbbbb" in secret_input
     assert await vault.admin_token(derive_identity("alice"))
+
+
+class _ExistingSecretRunner(_Runner):
+    async def run(
+        self,
+        argv: list[str],
+        *,
+        stdin: str | None = None,
+        timeout_seconds: float = 120.0,
+    ) -> CommandResult:
+        del timeout_seconds
+        self.calls.append((argv, stdin))
+        if "namespace" in argv:
+            return CommandResult(stdout='{"metadata":{"name":"loom-dev-alice"}}', stderr="")
+        name = argv[argv.index("secret") + 1]
+        values = (
+            {
+                "cp-db-url": ("postgresql://loom_dev_alice:bbbbbbbbbbbbbbbbbbbb@db/loom_dev_alice"),
+                "svc-db-url": "svc-url",
+                "gw-db-url": "gw-url",
+                "step-jwt-signing-key": "step-key",
+                "minio-access-key": "loomdev-alice",
+                "minio-secret-key": "object-secret",
+                "secret-store-master-key": "master-key",
+            }
+            if name == "loom-secrets"
+            else {"secrets.toml": '[admin]\ntoken = "loom_admin_existing"\n'}
+        )
+        data = {key: base64.b64encode(value.encode()).decode() for key, value in values.items()}
+        return CommandResult(stdout=json.dumps({"data": data}), stderr="")
+
+
+async def test_kubectl_vault_treats_absent_namespace_as_absent_secret() -> None:
+    runner = _Runner()
+    vault = KubectlSecretVault(
+        kubectl=KubectlClient("kubectl", runner=runner),
+        database_admin_url="postgresql://admin:fixture-secret@db/postgres",
+    )
+
+    assert await vault.database_password(derive_identity("alice")) is None
+    assert len(runner.calls) == 1
+    assert "namespace" in runner.calls[0][0]
+    assert "secret" not in runner.calls[0][0]
+
+
+async def test_kubectl_vault_reuses_existing_generation_secrets_without_rotation() -> None:
+    runner = _ExistingSecretRunner()
+    vault = KubectlSecretVault(
+        kubectl=KubectlClient("kubectl", runner=runner),
+        database_admin_url="postgresql://admin:fixture-secret@db/postgres",
+        manifest_config=_manifest_config(),
+    )
+    identity = derive_identity("alice")
+
+    assert await vault.database_password(identity) == "b" * 20
+    assert await vault.store(identity, "b" * 20) == ("k8s-secret://loom-dev-alice/loom-secrets")
+    assert all("apply" not in argv for argv, _stdin in runner.calls)
+    assert await vault.admin_token(identity) == "loom_admin_existing"
+
+    with pytest.raises(ValueError, match="password binding"):
+        await vault.store(identity, "c" * 20)
 
 
 async def test_minio_tenant_is_bucket_scoped_and_secrets_use_stdin_only() -> None:
@@ -127,8 +192,100 @@ async def test_cluster_executor_applies_migration_then_runtime_and_waits() -> No
     assert "loom-migrate-a1b2c3d-g3" in " ".join(runner.calls[1][0])
     assert "kind: Deployment" in (runner.calls[2][1] or "")
     rollout_commands = [argv for argv, _stdin in runner.calls if "rollout" in argv]
-    assert len(rollout_commands) == 3
+    assert len(rollout_commands) == 4
     assert all("fixture-secret" not in " ".join(argv) for argv, _stdin in runner.calls)
+
+
+class _CandidateRunner(_Runner):
+    async def run(
+        self,
+        argv: list[str],
+        *,
+        stdin: str | None = None,
+        timeout_seconds: float = 120.0,
+    ) -> CommandResult:
+        del timeout_seconds
+        self.calls.append((argv, stdin))
+        if "get" in argv and "deployment" in argv:
+            name = argv[argv.index("deployment") + 1]
+            component = {
+                "loom-control-plane-g8": "control-plane",
+                "loom-llm-gateway-g8": "llm-gateway",
+                "loom-service-g8": "service",
+                "loom-web-g8": "web",
+            }[name]
+            return CommandResult(
+                stdout=json.dumps(
+                    {
+                        "metadata": {
+                            "uid": f"uid-{name}",
+                            "resourceVersion": "17",
+                            "generation": 1,
+                        },
+                        "spec": {
+                            "replicas": 1,
+                            "template": {
+                                "spec": {
+                                    "containers": [
+                                        {"image": _personal_manifest_config().image(component)}
+                                    ]
+                                }
+                            },
+                        },
+                        "status": {
+                            "observedGeneration": 1,
+                            "availableReplicas": 1,
+                            "updatedReplicas": 1,
+                        },
+                    }
+                ),
+                stderr="",
+            )
+        return CommandResult(stdout="{}", stderr="")
+
+
+def _personal_manifest_config() -> DevInstanceManifestConfig:
+    from loom.personal_dev_candidate import PERSONAL_DEV_COMPONENTS
+
+    return DevInstanceManifestConfig(
+        image_tag="",
+        candidate_sha="b" * 64,
+        deployment_generation=8,
+        container_registry="",
+        minio_endpoint="https://minio.example",
+        image_references={
+            component: f"registry.example/loom-{component}@sha256:{index:064x}"
+            for index, component in enumerate(PERSONAL_DEV_COMPONENTS, start=1)
+        },
+        lifecycle_binding=PersonalDevManifestBinding(
+            subject_id=UUID("00000000-0000-0000-0000-000000000001"),
+            subject_incarnation=UUID("00000000-0000-0000-0000-000000000002"),
+            operation_id=UUID("00000000-0000-0000-0000-000000000003"),
+            attempt_id=UUID("00000000-0000-0000-0000-000000000004"),
+            operation_epoch=5,
+        ),
+    )
+
+
+async def test_candidate_generation_prepares_exact_images_without_switching_routes() -> None:
+    runner = _CandidateRunner()
+    provisioner = KubectlCandidateGenerationProvisioner(
+        kubectl=KubectlClient("kubectl", runner=runner),
+    )
+
+    observation = await provisioner.prepare(
+        derive_identity("alice"),
+        _personal_manifest_config(),
+    )
+
+    applied = "\n".join(stdin or "" for _argv, stdin in runner.calls)
+    assert "kind: Ingress" not in applied
+    assert "metadata:\n  name: loom-service\n" not in applied
+    assert "name: loom-service-g8" in applied
+    assert observation.deployed_images["web"] == _personal_manifest_config().image("web")
+    assert len(observation.resource_evidence_sha256) == 64
+    rollout_commands = [argv for argv, _stdin in runner.calls if "rollout" in argv]
+    assert len(rollout_commands) == 4
 
 
 class _S3:
