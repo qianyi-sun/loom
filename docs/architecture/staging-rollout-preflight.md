@@ -236,9 +236,10 @@ The Kubernetes side is declared in
 `deploy/k8s/staging-rollout-readonly.yaml`: one namespace-scoped service
 account, Role, and RoleBinding, with token automount disabled and only
 `get/list/watch` plus `create` on the non-object-mutating
-`pods/portforward` subresource for the exact `loom-postgres-0` and
-`loom-minio-0` pods. Those are transports to a separately authenticated
-SELECT-only PostgreSQL role and a fixed non-mutating MinIO identity; they cannot
+`pods/portforward` subresource for `loom-minio-0` and the exact
+`loom-postgres-1` through `loom-postgres-3` pods. Those are transports to a
+separately authenticated SELECT-only PostgreSQL role and a fixed non-mutating
+MinIO identity; they cannot
 create or update a Kubernetes object and cannot connect to another pod. MinIO
 readiness uses a bounded bucket-versioning read through that exact localhost
 transport. Exact-version reads prove pinned object recoverability without a

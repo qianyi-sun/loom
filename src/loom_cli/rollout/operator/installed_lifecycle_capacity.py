@@ -266,6 +266,7 @@ class InstalledLifecycleCapacityService:
         expected_buckets: tuple[str, ...],
         expected_filesystem_paths: tuple[str, ...],
         capacity_source: str = "filesystem",
+        expected_drive_count: int | None = None,
         container_registry: str = "",
         container_registry_push: str = "",
     ) -> None:
@@ -279,7 +280,16 @@ class InstalledLifecycleCapacityService:
             or len(set(expected_buckets)) != 2
             or capacity_source not in {"filesystem", "minio-admin"}
             or (capacity_source == "filesystem" and not expected_filesystem_paths)
+            or (capacity_source == "filesystem" and expected_drive_count is not None)
             or (capacity_source == "minio-admin" and bool(expected_filesystem_paths))
+            or (
+                capacity_source == "minio-admin"
+                and (
+                    isinstance(expected_drive_count, bool)
+                    or not isinstance(expected_drive_count, int)
+                    or expected_drive_count < 1
+                )
+            )
             or len(set(expected_filesystem_paths)) != len(expected_filesystem_paths)
         ):
             raise InstalledLifecycleCapacityError("sealed lifecycle capacity authority is absent")
@@ -294,6 +304,7 @@ class InstalledLifecycleCapacityService:
         self.now = now
         self.expected_buckets = expected_buckets
         self.capacity_source = capacity_source
+        self.expected_drive_count = expected_drive_count
         self.expected_filesystem_paths = expected_filesystem_paths
         try:
             self.registry_publication = validate_container_registry_prefixes(
@@ -330,6 +341,7 @@ class InstalledLifecycleCapacityService:
             expected_buckets=self.expected_buckets,
             expected_filesystem_paths=self.expected_filesystem_paths,
             capacity_source=self.capacity_source,
+            expected_drive_count=self.expected_drive_count,
             container_registry=(
                 self.registry_publication[0] if self.registry_publication is not None else ""
             ),
