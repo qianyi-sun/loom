@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
@@ -53,7 +54,18 @@ def _git_repo(tmp_path: Path) -> Path:
     )
     (repo / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(repo), "add", "app.py"], check=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "base"], check=True)
+    commit_env = os.environ.copy()
+    commit_env.update(
+        {
+            "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
+            "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
+        }
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-qm", "base"],
+        check=True,
+        env=commit_env,
+    )
     return repo
 
 
