@@ -74,6 +74,45 @@ _CHILD_ENVIRONMENT = {
 }
 
 
+def _canonical_minio_policy(value: object) -> tuple[object, ...]:
+    """Canonicalize the set-valued fields in one exact read-only policy."""
+    if not isinstance(value, dict) or set(value) != {"Version", "Statement"}:
+        raise ValueError("MinIO policy shape is invalid")
+    version = value["Version"]
+    statements = value["Statement"]
+    if not isinstance(version, str) or not isinstance(statements, list) or not statements:
+        raise ValueError("MinIO policy shape is invalid")
+    canonical_statements: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = []
+    for statement in statements:
+        if not isinstance(statement, dict) or set(statement) != {
+            "Effect",
+            "Action",
+            "Resource",
+        }:
+            raise ValueError("MinIO policy statement is invalid")
+        effect = statement["Effect"]
+        actions = statement["Action"]
+        resources = statement["Resource"]
+        if (
+            not isinstance(effect, str)
+            or not isinstance(actions, list)
+            or not actions
+            or not all(isinstance(action, str) and action for action in actions)
+            or len(set(actions)) != len(actions)
+            or not isinstance(resources, list)
+            or not resources
+            or not all(isinstance(resource, str) and resource for resource in resources)
+            or len(set(resources)) != len(resources)
+        ):
+            raise ValueError("MinIO policy statement is invalid")
+        canonical_statements.append(
+            (effect, tuple(sorted(actions)), tuple(sorted(resources)))
+        )
+    if len(set(canonical_statements)) != len(canonical_statements):
+        raise ValueError("MinIO policy contains duplicate statements")
+    return (version, *sorted(canonical_statements))
+
+
 class CredentialInstallError(RuntimeError):
     """Fail-closed preflight credential convergence error."""
 
@@ -95,7 +134,16 @@ VALUES (
   ARRAY['read:own']::varchar[], '{team_id}'::uuid, NULL, '{_READONLY_PROBE_ACTOR}',
   CURRENT_TIMESTAMP, NULL, NULL, NULL, NULL
 )
-ON CONFLICT (token_hash) DO NOTHING;
+ON CONFLICT (token_hash) DO UPDATE
+SET team_id = EXCLUDED.team_id
+WHERE tokens.team_id IS DISTINCT FROM EXCLUDED.team_id
+  AND tokens.name = EXCLUDED.name
+  AND tokens.type = EXCLUDED.type
+  AND tokens.scopes = EXCLUDED.scopes
+  AND tokens.created_by_user_id IS NULL
+  AND tokens.created_by_actor = EXCLUDED.created_by_actor
+  AND tokens.expires_at IS NULL
+  AND tokens.revoked_at IS NULL;
 DO $loom$
 DECLARE
   exact_rows integer;
@@ -837,8 +885,14 @@ class PreflightCredentialInstaller:
             policy.get("policy") != READONLY_MINIO_POLICY_NAME
             or not isinstance(policy_info, dict)
             or policy_info.get("PolicyName") != READONLY_MINIO_POLICY_NAME
-            or policy_info.get("Policy") != readonly_minio_policy()
         ):
+            raise CredentialInstallError("readonly MinIO policy authority drifted")
+        try:
+            observed_policy = _canonical_minio_policy(policy_info.get("Policy"))
+            expected_policy = _canonical_minio_policy(readonly_minio_policy())
+        except ValueError as exc:
+            raise CredentialInstallError("readonly MinIO policy authority drifted") from exc
+        if observed_policy != expected_policy:
             raise CredentialInstallError("readonly MinIO policy authority drifted")
 
     def _minified_source_kubeconfig(self) -> bytes:
