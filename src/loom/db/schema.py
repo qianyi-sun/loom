@@ -2217,6 +2217,12 @@ class Worker(Base):
             name="workers_supported_work_kinds_check",
         ),
         CheckConstraint("lease_epoch > 0", name="workers_lease_epoch_positive_check"),
+        CheckConstraint(
+            "input_cache_capacity_bytes >= 0 AND input_cache_reserved_bytes >= 0 "
+            "AND input_cache_ready_bytes >= 0 AND input_cache_reserved_bytes <= input_cache_capacity_bytes "
+            "AND input_cache_ready_bytes <= input_cache_capacity_bytes",
+            name="workers_input_cache_capacity_check",
+        ),
         Index("idx_workers_drain_state", "drain_state"),
     )
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -2234,6 +2240,15 @@ class Worker(Base):
     lease_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
     max_concurrent: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     pool_name: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'default'"))
+    input_cache_capacity_bytes: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    input_cache_reserved_bytes: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    input_cache_ready_bytes: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
     drain_state: Mapped[str] = mapped_column(
         Text,
         nullable=False,
@@ -3486,6 +3501,9 @@ class ExecutionAttempt(Base):
         UniqueConstraint(
             "stage_run_id", "attempt_number", name="execution_attempts_stage_number_uidx"
         ),
+        UniqueConstraint(
+            "id", "worker_id", name="execution_attempts_worker_identity_uidx"
+        ),
         Index(
             "execution_attempts_claim_uidx",
             "claim_id",
@@ -3553,6 +3571,51 @@ class ExecutionAttempt(Base):
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
     )
     version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+
+
+class PipelineInputMaterializationEvidence(Base):
+    __tablename__ = "pipeline_input_materialization_evidence"
+    __table_args__ = (
+        CheckConstraint(
+            "lease_epoch >= 0",
+            name="pipeline_input_materialization_evidence_lease_epoch_nonnegative",
+        ),
+        CheckConstraint(
+            "cache_expectation IN ('cold_after_eviction','warm_reuse_only')",
+            name="pipeline_input_materialization_evidence_expectation_check",
+        ),
+        CheckConstraint(
+            "manifest_open_count >= 0 AND file_open_count >= 0 AND file_bytes >= 0 "
+            "AND archive_extraction_count >= 0 AND cas_rename_count >= 0",
+            name="pipeline_input_materialization_evidence_counters_nonnegative",
+        ),
+        ForeignKeyConstraint(
+            ["execution_attempt_id", "worker_id"],
+            ["execution_attempts.id", "execution_attempts.worker_id"],
+            ondelete="CASCADE",
+            name="pipeline_input_materialization_evidence_attempt_worker_fk",
+        ),
+    )
+
+    execution_attempt_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        primary_key=True,
+    )
+    worker_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("workers.id", ondelete="RESTRICT"), nullable=False
+    )
+    lease_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    cache_expectation: Mapped[str] = mapped_column(Text, nullable=False)
+    ordered_manifest_sha256s_json: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    manifest_open_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    file_open_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    file_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    archive_extraction_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    cas_rename_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    input_view_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    materialized_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    evidence_json: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    evidence_sha256: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class PipelineTerminalSnapshot(Base):

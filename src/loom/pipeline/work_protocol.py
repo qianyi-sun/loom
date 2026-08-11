@@ -541,6 +541,113 @@ class PipelineInputMaterializationEvidenceReportV1(PipelineModel):
     input_view_sha256: Digest
 
 
+class PipelineInputMaterializationEvidenceV1(PipelineModel):
+    schema_version: Literal["loom.pipeline-input-materialization-evidence.v1"]
+    execution_attempt_id: UUID
+    worker_id: UUID
+    lease_epoch: PositiveSafeInt
+    cache_expectation: Literal["cold_after_eviction", "warm_reuse_only"]
+    ordered_manifest_sha256s: Annotated[list[Digest], Field(min_length=5, max_length=5)]
+    manifest_open_count: NonNegativeSafeInt
+    file_open_count: NonNegativeSafeInt
+    file_bytes: NonNegativeSafeInt
+    archive_extraction_count: NonNegativeSafeInt
+    cas_rename_count: NonNegativeSafeInt
+    input_view_sha256: Digest
+    materialized_at: datetime
+
+    _materialized_is_aware = field_validator("materialized_at")(_aware)
+
+
+class PipelineInputMaterializationEvidenceRefV1(PipelineModel):
+    attempt_id: UUID
+    worker_id: UUID
+    lease_epoch: PositiveSafeInt
+    evidence_sha256: Digest
+
+
+class AcceptanceEvictionGrantV1(PipelineModel):
+    schema_version: Literal["loom.acceptance-eviction-grant.v1"]
+    command_id: UUID
+    authorization_id: UUID
+    candidate_sha256: Digest
+    worker_id: UUID
+    worker_lease_epoch: PositiveSafeInt
+    ordered_manifest_sha256s: Annotated[list[Digest], Field(min_length=5, max_length=5)]
+    pipeline_run_id: UUID
+    exclusive_fence_id: UUID
+    authorization_snapshot_sha256: Digest
+    backend_variant_id: Literal["oldlab-rtx5080-2gpu", "gb10-shared-1gpu"]
+    policy_id: Literal["behavior-gpu-oldlab", "behavior-gpu-gb10"]
+    policy_config_sha256: Digest
+    policy_activation_epoch: PositiveSafeInt
+    slurm_cluster_id: Literal["oldlab", "gb10"]
+    slurm_cluster_config_sha256: Digest
+    slurm_allocation_id: _BoundedText
+    worker_capability_snapshot_digest: Digest
+    action: Literal["matrix"]
+
+    @field_validator("ordered_manifest_sha256s")
+    @classmethod
+    def manifests_are_canonical(cls, values: list[str]) -> list[str]:
+        return _ordered_unique_strings(values, "acceptance eviction manifests")
+
+    @model_validator(mode="after")
+    def backend_authorities_are_exact(self) -> AcceptanceEvictionGrantV1:
+        expected = {
+            "oldlab-rtx5080-2gpu": ("behavior-gpu-oldlab", "oldlab"),
+            "gb10-shared-1gpu": ("behavior-gpu-gb10", "gb10"),
+        }[self.backend_variant_id]
+        if (self.policy_id, self.slurm_cluster_id) != expected:
+            raise ValueError("acceptance eviction backend authority drift")
+        return self
+
+
+class AcceptanceEvictionEntryV1(PipelineModel):
+    manifest_sha256: Digest
+    pre_state: Literal["ready", "absent"]
+    freed_bytes: NonNegativeSafeInt
+
+    @model_validator(mode="after")
+    def absent_frees_nothing(self) -> AcceptanceEvictionEntryV1:
+        if self.pre_state == "absent" and self.freed_bytes != 0:
+            raise ValueError("absent acceptance entry cannot free bytes")
+        return self
+
+
+class AcceptanceEvictionResultV1(PipelineModel):
+    schema_version: Literal["loom.acceptance-eviction-result.v1"]
+    authorization_id: UUID
+    candidate_sha256: Digest
+    worker_id: UUID
+    ordered_manifest_sha256s: Annotated[list[Digest], Field(min_length=5, max_length=5)]
+    entries: Annotated[list[AcceptanceEvictionEntryV1], Field(min_length=5, max_length=5)]
+    evicted_count: Annotated[int, Field(strict=True, ge=0, le=5)]
+    status: Literal["already_absent", "evicted"]
+    absence_verified: Literal[True]
+    finished_at: datetime
+
+    _finished_is_aware = field_validator("finished_at")(_aware)
+
+    @model_validator(mode="after")
+    def result_is_exact(self) -> AcceptanceEvictionResultV1:
+        manifests = _ordered_unique_strings(
+            self.ordered_manifest_sha256s, "acceptance eviction manifests"
+        )
+        entry_manifests = [entry.manifest_sha256 for entry in self.entries]
+        if entry_manifests != sorted(entry_manifests, key=str.encode):
+            raise ValueError("acceptance eviction entries must be bytewise sorted")
+        if set(entry_manifests) != set(manifests):
+            raise ValueError("acceptance eviction entries must cover the request exactly")
+        evicted = sum(entry.pre_state == "ready" for entry in self.entries)
+        if self.evicted_count != evicted:
+            raise ValueError("acceptance eviction count drift")
+        expected_status = "already_absent" if evicted == 0 else "evicted"
+        if self.status != expected_status:
+            raise ValueError("acceptance eviction status drift")
+        return self
+
+
 class ExecutionStartedV1(PipelineModel):
     container_id: _BoundedText
     runtime_started_at: datetime

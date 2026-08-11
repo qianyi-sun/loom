@@ -18,6 +18,7 @@ from loom.db.schema import (
     ArtifactUploadFile,
     ArtifactUploadSession,
     ExecutionAttempt,
+    PipelineAcceptancePreflightPrerequisite,
     PipelineInputImport,
     PipelineRun,
     PipelineStageRun,
@@ -41,7 +42,7 @@ from loom.pipeline.artifact_commit import (
     _SessionState,
 )
 from loom.pipeline.keys import canonical_digest, canonical_document, digest_bytes
-from loom.pipeline.spec import BindingSetV1
+from loom.pipeline.spec import BindingItemV1, BindingSetV1
 from loom.pipeline.work_protocol import (
     ExecutionCompleteV1,
     FinalOutputFileCompleteV1,
@@ -689,6 +690,38 @@ class SqlArtifactInputResolver:
             if stage is None or stage.resolved_input_bindings_json is None:
                 raise KeyError(attempt_id)
             bindings = [BindingSetV1.model_validate(value) for value in stage.resolved_input_bindings_json]
+            if (
+                binding_name == "loom_checkpoint"
+                and item_key == "singleton"
+                and attempt.resumed_checkpoint_artifact_id is not None
+            ):
+                checkpoint = await db.get(Artifact, attempt.resumed_checkpoint_artifact_id)
+                if (
+                    checkpoint is None
+                    or checkpoint.manifest_sha256 is None
+                    or checkpoint.stored_size_bytes is None
+                    or checkpoint.unpacked_size_bytes is None
+                    or checkpoint.file_count is None
+                ):
+                    raise KeyError(binding_name)
+                bindings.append(
+                    BindingSetV1(
+                        binding_name="loom_checkpoint",
+                        artifact_type=checkpoint.artifact_type,
+                        cardinality="one",
+                        items=[
+                            BindingItemV1(
+                                artifact_id=checkpoint.id,
+                                content_sha256=checkpoint.content_hash,
+                                file_count=checkpoint.file_count,
+                                item_key="singleton",
+                                manifest_sha256=checkpoint.manifest_sha256,
+                                stored_size_bytes=checkpoint.stored_size_bytes,
+                                unpacked_size_bytes=checkpoint.unpacked_size_bytes,
+                            )
+                        ],
+                    )
+                )
             binding = next((value for value in bindings if value.binding_name == binding_name), None)
             if binding is None:
                 raise KeyError(binding_name)
@@ -699,10 +732,13 @@ class SqlArtifactInputResolver:
             if artifact is None or artifact.artifact_upload_session_id is None:
                 raise KeyError(item.artifact_id)
             upload = await db.get(ArtifactUploadSession, artifact.artifact_upload_session_id)
+            run = await db.get(PipelineRun, stage.pipeline_run_id)
             if upload is None or upload.state != "committed":
                 raise KeyError(item.artifact_id)
             if (
-                artifact.team_id != upload.team_id
+                run is None
+                or artifact.team_id != run.team_id
+                or artifact.team_id != upload.team_id
                 or artifact.artifact_type != binding.artifact_type
                 or artifact.content_hash != item.content_sha256
                 or artifact.manifest_sha256 != item.manifest_sha256
@@ -716,11 +752,59 @@ class SqlArtifactInputResolver:
                     raise KeyError(item.artifact_id)
                 imported = await db.get(PipelineInputImport, artifact.pipeline_input_import_id)
                 frozen = stage.resolved_execution_spec_json or {}
+                ordinary_authorized = (
+                    run.submission_policy == "ordinary"
+                    and imported is not None
+                    and imported.recipe_digest == frozen.get("recipe_digest")
+                )
+                prerequisite = await db.get(
+                    PipelineAcceptancePreflightPrerequisite, run.id
+                )
+                consumed_attempt = (
+                    await db.get(ExecutionAttempt, prerequisite.consumed_attempt_id)
+                    if prerequisite is not None
+                    and prerequisite.consumed_attempt_id is not None
+                    else None
+                )
+                consumed_stage = (
+                    await db.get(PipelineStageRun, consumed_attempt.stage_run_id)
+                    if consumed_attempt is not None
+                    else None
+                )
+                acceptance_phase_chain = (
+                    stage.node_key.endswith("acceptance_preflight_cold")
+                    and prerequisite is not None
+                    and prerequisite.consumed_attempt_id == attempt.id
+                ) or (
+                    stage.node_key.endswith("acceptance_preflight_warm")
+                    and consumed_stage is not None
+                    and consumed_stage.pipeline_run_id == run.id
+                    and consumed_stage.node_key.endswith("acceptance_preflight_cold")
+                )
+                acceptance_authorized = (
+                    run.submission_policy == "acceptance_authorization_only"
+                    and run.acceptance_authorization_id is not None
+                    and run.acceptance_candidate_sha256 is not None
+                    and stage.node_key.endswith(
+                        ("acceptance_preflight_cold", "acceptance_preflight_warm")
+                    )
+                    and binding.binding_name in {"dataset", "policy", "mop_bank"}
+                    and imported is not None
+                    and imported.kind == binding.binding_name
+                    and prerequisite is not None
+                    and prerequisite.authorization_id == run.acceptance_authorization_id
+                    and prerequisite.candidate_sha256 == run.acceptance_candidate_sha256
+                    and prerequisite.preflight_input_set_id == "S02"
+                    and prerequisite.state == "consumed"
+                    and acceptance_phase_chain
+                    and prerequisite.fence_state == "active"
+                    and prerequisite.worker_id == attempt.worker_id
+                )
                 if (
                     imported is None
                     or imported.state != "committed"
                     or imported.trust_class != "internal_trusted"
-                    or imported.recipe_digest != frozen.get("recipe_digest")
+                    or not (ordinary_authorized or acceptance_authorized)
                 ):
                     raise KeyError(item.artifact_id)
             root = cast(dict[str, Any], upload.canonical_manifest_json)

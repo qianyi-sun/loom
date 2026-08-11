@@ -18,6 +18,7 @@ from loom.models.result import FailureReason
 from loom.pipeline.keys import canonical_digest
 from loom.pipeline.work_protocol import (
     AcceptancePreflightGrantV1,
+    ArtifactInputDescriptorV1,
     ExecutionAttemptClaimV1,
     StageRequestGrantV1,
     TrialClaimV1,
@@ -303,6 +304,37 @@ async def claim_any_work(
                     network_profile="none",
                     renderer_digest=renderer["digest"],
                 )
+            resume_checkpoint = None
+            if attempt_row["resumed_checkpoint_artifact_id"] is not None:
+                checkpoint_row = (
+                    await session.execute(
+                        text("""
+                            SELECT id,artifact_type,content_hash,manifest_sha256,
+                                   stored_size_bytes,unpacked_size_bytes,file_count
+                              FROM artifacts WHERE id=(:artifact_id)::uuid
+                        """),
+                        {"artifact_id": attempt_row["resumed_checkpoint_artifact_id"]},
+                    )
+                ).mappings().one_or_none()
+                if checkpoint_row is None or any(
+                    checkpoint_row[name] is None
+                    for name in (
+                        "manifest_sha256",
+                        "stored_size_bytes",
+                        "unpacked_size_bytes",
+                        "file_count",
+                    )
+                ):
+                    raise HTTPException(status_code=409, detail="resume_checkpoint_drift")
+                resume_checkpoint = ArtifactInputDescriptorV1(
+                    artifact_id=checkpoint_row["id"],
+                    artifact_type=checkpoint_row["artifact_type"],
+                    content_sha256=checkpoint_row["content_hash"],
+                    manifest_sha256=checkpoint_row["manifest_sha256"],
+                    stored_size_bytes=checkpoint_row["stored_size_bytes"],
+                    unpacked_size_bytes=checkpoint_row["unpacked_size_bytes"],
+                    file_count=checkpoint_row["file_count"],
+                )
             claim_payload = ExecutionAttemptClaimV1(
                 execution_attempt_id=attempt_row["id"],
                 pipeline_run_id=attempt_row["pipeline_run_id"],
@@ -339,7 +371,7 @@ async def claim_any_work(
                 acceptance_preflight=acceptance,
                 provider_connection_ref=attempt_row["provider_connection_ref"],
                 secret_refs=list(attempt_row["secret_refs"]),
-                resume_checkpoint=None,
+                resume_checkpoint=resume_checkpoint,
                 timeout_seconds=node["timeout_seconds"],
                 cancellation_poll_seconds=5,
                 cancellation_grace_seconds=30,
@@ -538,14 +570,50 @@ async def register_worker(
             ),
         )
 
-    capability_snapshot_digest = canonical_digest(
-        {
+    cache_field_names = (
+        "input_cache_capacity_bytes",
+        "input_cache_reserved_bytes",
+        "input_cache_ready_bytes",
+    )
+    raw_cache_values = tuple(payload.get(name) for name in cache_field_names)
+    if any(value is not None for value in raw_cache_values):
+        if any(value is None or isinstance(value, bool) for value in raw_cache_values):
+            raise HTTPException(
+                status_code=400, detail="input cache registration fields must be integers"
+            )
+        try:
+            raw_capacity, raw_reserved, raw_ready = raw_cache_values
+            assert raw_capacity is not None
+            assert raw_reserved is not None
+            assert raw_ready is not None
+            capacity_bytes = int(raw_capacity)
+            reserved_bytes = int(raw_reserved)
+            ready_bytes = int(raw_ready)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=400, detail="input cache registration fields must be integers"
+            ) from exc
+        if not (
+            0 <= reserved_bytes <= capacity_bytes
+            and 0 <= ready_bytes <= capacity_bytes
+        ):
+            raise HTTPException(status_code=400, detail="input_cache_capacity_drift")
+    else:
+        capacity_bytes = reserved_bytes = ready_bytes = 0
+
+    capability_identity: dict[str, Any] = {
             "capabilities": validated_caps,
             "max_concurrent": max_concurrent,
             "pool_name": pool_name,
             "supported_work_kinds": supported_work_kinds,
-        }
-    )
+    }
+    if any(value is not None for value in raw_cache_values):
+        capability_identity.update(
+            input_cache_capacity_bytes=capacity_bytes,
+            input_cache_reserved_bytes=reserved_bytes,
+            input_cache_ready_bytes=ready_bytes,
+        )
+    capability_snapshot_digest = canonical_digest(capability_identity)
     supplied_digest = payload.get("capability_snapshot_digest")
     if supplied_digest is not None and supplied_digest != capability_snapshot_digest:
         raise HTTPException(status_code=409, detail="capability_snapshot_mismatch")
@@ -562,6 +630,9 @@ async def register_worker(
             auth_token_hash=ctx.token_hash,
             max_concurrent=max_concurrent,
             pool_name=pool_name,
+            input_cache_capacity_bytes=capacity_bytes,
+            input_cache_reserved_bytes=reserved_bytes,
+            input_cache_ready_bytes=ready_bytes,
             registered_at=datetime.now(UTC),
             last_seen_at=datetime.now(UTC),
             status="active",
@@ -572,6 +643,9 @@ async def register_worker(
         "worker_id": str(worker_id),
         "capability_snapshot_digest": capability_snapshot_digest,
         "supported_work_kinds": supported_work_kinds,
+        "input_cache_capacity_bytes": capacity_bytes,
+        "input_cache_reserved_bytes": reserved_bytes,
+        "input_cache_ready_bytes": ready_bytes,
         "heartbeat_interval_sec": 5,
         "claim_poll_interval_sec": 1.0,
         "drain_timeout_sec": 600,
