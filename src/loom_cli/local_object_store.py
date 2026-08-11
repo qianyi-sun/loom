@@ -7,10 +7,14 @@ writer + finalizer call. Path-traversal-safe for `download_prefix`."""
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import os
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from loom.trajectory.storage import MultipartUpload, _has_traversal
+from loom.trajectory.storage import MultipartUpload, ObjectReadback, _has_traversal
 
 
 @dataclass
@@ -37,6 +41,21 @@ class LocalDiskObjectStore:
         self._multiparts[upload_id] = []
         self._multipart_meta[upload_id] = (bucket, key)
         return MultipartUpload(bucket=bucket, key=key, upload_id=upload_id)
+
+    async def resume_multipart_upload(
+        self, *, bucket: str, key: str, upload_id: str
+    ) -> MultipartUpload:
+        if self._multipart_meta.get(upload_id) != (bucket, key):
+            raise KeyError(upload_id)
+        return MultipartUpload(
+            bucket=bucket,
+            key=key,
+            upload_id=upload_id,
+            parts=[
+                (part_number, f"etag-{part_number}")
+                for part_number, _body in sorted(self._multiparts[upload_id])
+            ],
+        )
 
     async def upload_part(
         self, upload: MultipartUpload, *, part_number: int, body: bytes,
@@ -70,6 +89,66 @@ class LocalDiskObjectStore:
         if not p.exists():
             raise KeyError(f"s3://{bucket}/{key}")
         return p.read_bytes()
+
+    async def upload_part_stream(
+        self,
+        upload: MultipartUpload,
+        *,
+        part_number: int,
+        body: AsyncIterator[bytes],
+    ) -> None:
+        chunks = bytearray()
+        async for chunk in body:
+            chunks.extend(chunk)
+        await self.upload_part(upload, part_number=part_number, body=bytes(chunks))
+
+    async def put_object_stream(
+        self,
+        *,
+        bucket: str,
+        key: str,
+        body: AsyncIterator[bytes],
+    ) -> str:
+        destination = self._path(bucket, key)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+        try:
+            with temporary.open("xb") as target:
+                async for chunk in body:
+                    await asyncio.to_thread(target.write, chunk)
+                await asyncio.to_thread(target.flush)
+                await asyncio.to_thread(os.fsync, target.fileno())
+            os.replace(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return f"s3://{bucket}/{key}"
+
+    async def stat_object(self, *, bucket: str, key: str) -> ObjectReadback:
+        path = self._path(bucket, key)
+        digest = hashlib.sha256()
+        with path.open("rb") as source:
+            while chunk := source.read(1024 * 1024):
+                digest.update(chunk)
+        return ObjectReadback(
+            content_length=path.stat().st_size,
+            checksum_sha256=f"sha256:{digest.hexdigest()}",
+        )
+
+    async def stream_object(
+        self,
+        *,
+        bucket: str,
+        key: str,
+        start_offset: int = 0,
+        chunk_size: int = 64 * 1024 * 1024,
+    ) -> AsyncIterator[bytes]:
+        with self._path(bucket, key).open("rb") as source:
+            source.seek(start_offset)
+            while chunk := await asyncio.to_thread(source.read, chunk_size):
+                yield chunk
+
+    async def delete_object(self, *, bucket: str, key: str) -> None:
+        self._path(bucket, key).unlink(missing_ok=True)
 
     async def presign_put(
         self, *, bucket: str, key: str, expires_sec: int,

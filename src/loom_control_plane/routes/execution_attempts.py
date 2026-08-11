@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Protocol
 from uuid import UUID
 
-from fastapi import APIRouter, Body, Header, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
 from sqlalchemy import func, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -878,10 +878,9 @@ async def put_final_output_part(
     upload_token: Annotated[str, Header(alias="X-Loom-Upload-Token")],
     content_sha256: Annotated[str, Header(alias="X-Loom-Content-Sha256")],
     content_length: Annotated[int, Header(alias="Content-Length", ge=0)],
-    body: Annotated[bytes, Body()],
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    if len(body) != content_length or file_index < 0 or part_number < 1:
+    if file_index < 0 or part_number < 1:
         raise HTTPException(status_code=400, detail="invalid_part")
     attempt, service = await _output_context(
         attempt_id=attempt_id,
@@ -899,7 +898,8 @@ async def put_final_output_part(
         request_id=request_id,
         upload_token=upload_token,
         content_sha256=content_sha256,
-        body=body,
+        content_length=content_length,
+        body=request.stream(),
     )
 
 

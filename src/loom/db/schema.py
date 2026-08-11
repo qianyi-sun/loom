@@ -4123,21 +4123,489 @@ class BatchFamilyState(Base):
     )
 
 
+class PipelineInputImport(Base):
+    __tablename__ = "pipeline_input_imports"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('dataset','policy','mop_bank')",
+            name="pipeline_input_imports_kind_check",
+        ),
+        CheckConstraint(
+            "trust_class = 'internal_trusted'",
+            name="pipeline_input_imports_trust_check",
+        ),
+        CheckConstraint(
+            "state IN ('preparing','uploading','committing','committed','aborted')",
+            name="pipeline_input_imports_state_check",
+        ),
+        CheckConstraint(
+            "(state = 'committed' AND committed_artifact_id IS NOT NULL AND committed_at IS NOT NULL) OR "
+            "(state != 'committed' AND committed_artifact_id IS NULL AND committed_at IS NULL)",
+            name="pipeline_input_imports_committed_group_check",
+        ),
+        CheckConstraint(
+            "(state = 'aborted' AND aborted_at IS NOT NULL AND abort_reason IS NOT NULL) OR "
+            "(state != 'aborted' AND aborted_at IS NULL AND abort_reason IS NULL)",
+            name="pipeline_input_imports_aborted_group_check",
+        ),
+        UniqueConstraint("team_id", "idempotency_key", name="pipeline_input_imports_idempotency_uidx"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    team_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("teams.id"))
+    created_by_user_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("users.id"))
+    recipe_name: Mapped[str] = mapped_column(Text)
+    recipe_version: Mapped[int] = mapped_column(Integer)
+    recipe_digest: Mapped[str] = mapped_column(Text)
+    kind: Mapped[str] = mapped_column(Text)
+    target_artifact_type: Mapped[str] = mapped_column(Text)
+    input_manifest_json: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    input_manifest_digest: Mapped[str] = mapped_column(Text)
+    trust_class: Mapped[str] = mapped_column(Text, server_default=text("'internal_trusted'"))
+    max_bundle_bytes: Mapped[int] = mapped_column(BigInteger)
+    max_file_count: Mapped[int] = mapped_column(Integer)
+    state: Mapped[str] = mapped_column(Text)
+    artifact_upload_session_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey(
+            "artifact_upload_sessions.id",
+            use_alter=True,
+            name="pipeline_input_imports_upload_session_fk",
+        ),
+        unique=True,
+    )
+    committed_artifact_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey(
+            "artifacts.id",
+            use_alter=True,
+            name="pipeline_input_imports_committed_artifact_fk",
+        ),
+        unique=True,
+    )
+    idempotency_key: Mapped[str] = mapped_column(Text)
+    request_digest: Mapped[str] = mapped_column(Text)
+    abort_reason: Mapped[str | None] = mapped_column(Text)
+    expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
+    committed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    aborted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    version: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))
+
+
+class PipelineInputMaterialization(Base):
+    __tablename__ = "pipeline_input_materializations"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('preparing','committing','committed','aborted')",
+            name="pipeline_input_materializations_state_check",
+        ),
+        CheckConstraint(
+            "(official_materialization_kind IS NULL AND official_materialization_authority_id IS NULL "
+            "AND official_materialization_authority_snapshot_digest IS NULL "
+            "AND official_materialization_identity_digest IS NULL) OR "
+            "(official_materialization_kind IS NOT NULL AND official_materialization_authority_id IS NOT NULL "
+            "AND official_materialization_authority_snapshot_digest IS NOT NULL "
+            "AND official_materialization_identity_digest IS NOT NULL)",
+            name="pipeline_input_materializations_official_group_check",
+        ),
+        CheckConstraint(
+            "(state = 'committed' AND result_bindings_json IS NOT NULL AND committed_at IS NOT NULL) OR "
+            "(state != 'committed' AND result_bindings_json IS NULL AND committed_at IS NULL)",
+            name="pipeline_input_materializations_committed_group_check",
+        ),
+        CheckConstraint(
+            "(state = 'aborted' AND aborted_at IS NOT NULL AND abort_reason IS NOT NULL) OR "
+            "(state != 'aborted' AND aborted_at IS NULL AND abort_reason IS NULL)",
+            name="pipeline_input_materializations_aborted_group_check",
+        ),
+        UniqueConstraint(
+            "team_id", "idempotency_key", name="pipeline_input_materializations_idempotency_uidx"
+        ),
+        Index(
+            "pipeline_input_materializations_official_uidx",
+            "team_id",
+            "official_materialization_kind",
+            "official_materialization_authority_id",
+            "official_materialization_identity_digest",
+            unique=True,
+            postgresql_where=text("official_materialization_kind IS NOT NULL"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    team_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("teams.id"))
+    created_by_user_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("users.id"))
+    recipe_name: Mapped[str] = mapped_column(Text)
+    recipe_version: Mapped[int] = mapped_column(Integer)
+    recipe_digest: Mapped[str] = mapped_column(Text)
+    source_snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    source_snapshot_digest: Mapped[str] = mapped_column(Text)
+    parameters_json: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    parameters_digest: Mapped[str] = mapped_column(Text)
+    materialization_identity_digest: Mapped[str] = mapped_column(Text)
+    state: Mapped[str] = mapped_column(Text)
+    declared_outputs_json: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
+    declared_outputs_digest: Mapped[str] = mapped_column(Text)
+    artifact_upload_session_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey(
+            "artifact_upload_sessions.id",
+            use_alter=True,
+            name="pipeline_input_materializations_upload_session_fk",
+        ),
+        unique=True,
+    )
+    result_bindings_json: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)
+    official_materialization_kind: Mapped[str | None] = mapped_column(Text)
+    official_materialization_authority_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    official_materialization_authority_snapshot_digest: Mapped[str | None] = mapped_column(Text)
+    official_materialization_identity_digest: Mapped[str | None] = mapped_column(Text)
+    idempotency_key: Mapped[str] = mapped_column(Text)
+    request_digest: Mapped[str] = mapped_column(Text)
+    abort_reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
+    committed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    aborted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    version: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))
+
+
+class ArtifactUploadSession(Base):
+    __tablename__ = "artifact_upload_sessions"
+    __table_args__ = (
+        CheckConstraint(
+            "commit_kind IN ('final_output','checkpoint','input_import','input_materialization',"
+            "'acceptance_evidence','profile_calibration_evidence')",
+            name="artifact_upload_sessions_kind_check",
+        ),
+        CheckConstraint(
+            "state IN ('preparing','uploading','uploaded','committing','committed_ready','committed','aborted')",
+            name="artifact_upload_sessions_state_check",
+        ),
+        CheckConstraint(
+            "control_producer_kind IS NULL AND control_producer_id IS NULL AND ("
+            "(commit_kind='final_output' AND pipeline_run_id IS NOT NULL "
+            "AND pipeline_stage_run_id IS NOT NULL AND execution_attempt_id IS NOT NULL "
+            "AND attempt_number IS NOT NULL AND checkpoint_sequence IS NULL "
+            "AND pipeline_input_import_id IS NULL AND pipeline_input_materialization_id IS NULL "
+            "AND pipeline_acceptance_authorization_id IS NULL "
+            "AND pipeline_profile_calibration_authorization_id IS NULL AND actor_user_id IS NULL "
+            "AND stage_result_json IS NOT NULL AND stage_result_digest IS NOT NULL AND inventory_digest IS NOT NULL) OR "
+            "(commit_kind='checkpoint' AND pipeline_run_id IS NOT NULL "
+            "AND pipeline_stage_run_id IS NOT NULL AND execution_attempt_id IS NOT NULL "
+            "AND attempt_number IS NOT NULL AND checkpoint_sequence IS NOT NULL "
+            "AND pipeline_input_import_id IS NULL AND pipeline_input_materialization_id IS NULL "
+            "AND pipeline_acceptance_authorization_id IS NULL "
+            "AND pipeline_profile_calibration_authorization_id IS NULL AND actor_user_id IS NULL "
+            "AND stage_result_json IS NULL AND stage_result_digest IS NULL AND inventory_digest IS NULL) OR "
+            "(commit_kind='input_import' AND pipeline_input_import_id IS NOT NULL "
+            "AND actor_user_id IS NOT NULL AND pipeline_run_id IS NULL AND pipeline_stage_run_id IS NULL "
+            "AND execution_attempt_id IS NULL AND pipeline_input_materialization_id IS NULL "
+            "AND pipeline_acceptance_authorization_id IS NULL "
+            "AND pipeline_profile_calibration_authorization_id IS NULL) OR "
+            "(commit_kind='input_materialization' AND pipeline_input_materialization_id IS NOT NULL "
+            "AND actor_user_id IS NOT NULL AND pipeline_run_id IS NULL AND pipeline_stage_run_id IS NULL "
+            "AND execution_attempt_id IS NULL AND pipeline_input_import_id IS NULL "
+            "AND pipeline_acceptance_authorization_id IS NULL "
+            "AND pipeline_profile_calibration_authorization_id IS NULL) OR "
+            "(commit_kind='acceptance_evidence' AND pipeline_acceptance_authorization_id IS NOT NULL "
+            "AND acceptance_action IN ('matrix','soak') AND acceptance_candidate_sha256 IS NOT NULL "
+            "AND acceptance_result_kind IN ('success','terminal') AND actor_user_id IS NOT NULL "
+            "AND ((acceptance_result_kind='success' AND acceptance_termination_reason IS NULL) OR "
+            "(acceptance_result_kind='terminal' AND acceptance_termination_reason IS NOT NULL)) "
+            "AND pipeline_run_id IS NULL AND pipeline_stage_run_id IS NULL AND execution_attempt_id IS NULL "
+            "AND pipeline_input_import_id IS NULL AND pipeline_input_materialization_id IS NULL "
+            "AND pipeline_profile_calibration_authorization_id IS NULL) OR "
+            "(commit_kind='profile_calibration_evidence' "
+            "AND pipeline_profile_calibration_authorization_id IS NOT NULL "
+            "AND profile_calibration_spec_sha256 IS NOT NULL "
+            "AND profile_calibration_result_kind IN ('certification','catalog','terminal') "
+            "AND actor_user_id IS NOT NULL AND pipeline_run_id IS NULL AND pipeline_stage_run_id IS NULL "
+            "AND execution_attempt_id IS NULL AND pipeline_input_import_id IS NULL "
+            "AND pipeline_input_materialization_id IS NULL "
+            "AND pipeline_acceptance_authorization_id IS NULL))",
+            name="artifact_upload_sessions_producer_shape_check",
+        ),
+        CheckConstraint(
+            "state != 'committed_ready' OR commit_kind='final_output'",
+            name="artifact_upload_sessions_ready_kind_check",
+        ),
+        CheckConstraint(
+            "commit_kind != 'profile_calibration_evidence' OR "
+            "(profile_calibration_result_kind='certification' "
+            "AND profile_calibration_scenario_id IS NOT NULL "
+            "AND profile_calibration_candidate_identity_sha256 IS NOT NULL "
+            "AND profile_calibration_run_ordinal BETWEEN 1 AND 3 "
+            "AND profile_calibration_source_pipeline_run_id IS NOT NULL "
+            "AND profile_calibration_termination_reason IS NULL) OR "
+            "(profile_calibration_result_kind='catalog' "
+            "AND profile_calibration_scenario_id IS NULL "
+            "AND profile_calibration_candidate_identity_sha256 IS NULL "
+            "AND profile_calibration_run_ordinal IS NULL "
+            "AND profile_calibration_source_pipeline_run_id IS NULL "
+            "AND profile_calibration_termination_reason IS NULL) OR "
+            "(profile_calibration_result_kind='terminal' "
+            "AND profile_calibration_scenario_id IS NULL "
+            "AND profile_calibration_candidate_identity_sha256 IS NULL "
+            "AND profile_calibration_run_ordinal IS NULL "
+            "AND profile_calibration_source_pipeline_run_id IS NULL "
+            "AND profile_calibration_termination_reason IS NOT NULL)",
+            name="artifact_upload_sessions_profile_shape_check",
+        ),
+        CheckConstraint(
+            "actual_total_bytes >= 0 AND expected_total_max_bytes > 0 "
+            "AND actual_total_bytes <= expected_total_max_bytes",
+            name="artifact_upload_sessions_bytes_check",
+        ),
+        CheckConstraint(
+            "(state IN ('committed_ready','committed') AND canonical_manifest_json IS NOT NULL "
+            "AND manifest_sha256 IS NOT NULL AND committed_marker_sha256 IS NOT NULL) OR "
+            "(state NOT IN ('committed_ready','committed') AND canonical_manifest_json IS NULL "
+            "AND manifest_sha256 IS NULL AND committed_marker_sha256 IS NULL)",
+            name="artifact_upload_sessions_manifest_group_check",
+        ),
+        UniqueConstraint("prefix", name="artifact_upload_sessions_prefix_uidx"),
+        Index(
+            "artifact_upload_sessions_final_request_uidx",
+            "execution_attempt_id",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=text("commit_kind='final_output'"),
+        ),
+        Index(
+            "artifact_upload_sessions_checkpoint_request_uidx",
+            "execution_attempt_id",
+            "checkpoint_sequence",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=text("commit_kind='checkpoint'"),
+        ),
+        Index(
+            "artifact_upload_sessions_import_request_uidx",
+            "pipeline_input_import_id",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=text("commit_kind='input_import'"),
+        ),
+        Index(
+            "artifact_upload_sessions_materialization_request_uidx",
+            "pipeline_input_materialization_id",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=text("commit_kind='input_materialization'"),
+        ),
+        Index(
+            "artifact_upload_sessions_acceptance_uidx",
+            "pipeline_acceptance_authorization_id",
+            "acceptance_action",
+            "acceptance_candidate_sha256",
+            unique=True,
+            postgresql_where=text("commit_kind='acceptance_evidence'"),
+        ),
+        Index(
+            "artifact_upload_sessions_profile_certification_uidx",
+            "pipeline_profile_calibration_authorization_id",
+            "profile_calibration_spec_sha256",
+            "profile_calibration_scenario_id",
+            "profile_calibration_candidate_identity_sha256",
+            "profile_calibration_run_ordinal",
+            unique=True,
+            postgresql_where=text(
+                "commit_kind='profile_calibration_evidence' "
+                "AND profile_calibration_result_kind='certification'"
+            ),
+        ),
+        Index(
+            "artifact_upload_sessions_profile_final_uidx",
+            "pipeline_profile_calibration_authorization_id",
+            "profile_calibration_spec_sha256",
+            unique=True,
+            postgresql_where=text(
+                "commit_kind='profile_calibration_evidence' "
+                "AND profile_calibration_result_kind IN ('catalog','terminal')"
+            ),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    team_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("teams.id"))
+    commit_kind: Mapped[str] = mapped_column(Text)
+    pipeline_run_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("pipeline_runs.id", ondelete="CASCADE")
+    )
+    pipeline_stage_run_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("pipeline_stage_runs.id", ondelete="CASCADE")
+    )
+    execution_attempt_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("execution_attempts.id", ondelete="CASCADE")
+    )
+    attempt_number: Mapped[int | None] = mapped_column(Integer)
+    checkpoint_sequence: Mapped[int | None] = mapped_column(BigInteger)
+    control_producer_kind: Mapped[str | None] = mapped_column(Text)
+    control_producer_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    pipeline_input_import_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("pipeline_input_imports.id", ondelete="CASCADE")
+    )
+    pipeline_input_materialization_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("pipeline_input_materializations.id", ondelete="CASCADE")
+    )
+    pipeline_acceptance_authorization_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    acceptance_action: Mapped[str | None] = mapped_column(Text)
+    acceptance_candidate_sha256: Mapped[str | None] = mapped_column(Text)
+    acceptance_result_kind: Mapped[str | None] = mapped_column(Text)
+    acceptance_termination_reason: Mapped[str | None] = mapped_column(Text)
+    pipeline_profile_calibration_authorization_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True)
+    )
+    profile_calibration_spec_sha256: Mapped[str | None] = mapped_column(Text)
+    profile_calibration_result_kind: Mapped[str | None] = mapped_column(Text)
+    profile_calibration_scenario_id: Mapped[str | None] = mapped_column(Text)
+    profile_calibration_candidate_identity_sha256: Mapped[str | None] = mapped_column(Text)
+    profile_calibration_run_ordinal: Mapped[int | None] = mapped_column(Integer)
+    profile_calibration_source_pipeline_run_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("pipeline_runs.id", ondelete="RESTRICT")
+    )
+    profile_calibration_termination_reason: Mapped[str | None] = mapped_column(Text)
+    actor_user_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), ForeignKey("users.id"))
+    idempotency_key: Mapped[str] = mapped_column(Text)
+    request_digest: Mapped[str] = mapped_column(Text)
+    stage_result_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    stage_result_digest: Mapped[str | None] = mapped_column(Text)
+    inventory_digest: Mapped[str | None] = mapped_column(Text)
+    prefix: Mapped[str] = mapped_column(Text)
+    state: Mapped[str] = mapped_column(Text)
+    expected_total_max_bytes: Mapped[int] = mapped_column(BigInteger)
+    actual_total_bytes: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))
+    canonical_manifest_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    manifest_sha256: Mapped[str | None] = mapped_column(Text)
+    committed_marker_sha256: Mapped[str | None] = mapped_column(Text)
+    upload_token_digest: Mapped[bytes | None] = mapped_column(LargeBinary)
+    expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
+    committed_ready_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    committed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    aborted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    version: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))
+
+
+class ArtifactUploadFile(Base):
+    __tablename__ = "artifact_upload_files"
+    __table_args__ = (
+        CheckConstraint("file_index >= 0", name="artifact_upload_files_index_check"),
+        CheckConstraint(
+            "role IN ('semantic_document','payload','payload_archive')",
+            name="artifact_upload_files_role_check",
+        ),
+        CheckConstraint(
+            "archive_format IN ('none','tar','tar.zst','zip')",
+            name="artifact_upload_files_archive_check",
+        ),
+        UniqueConstraint(
+            "session_id",
+            "preallocated_artifact_id",
+            "relative_path",
+            name="artifact_upload_files_path_uidx",
+        ),
+    )
+
+    session_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("artifact_upload_sessions.id", ondelete="CASCADE"), primary_key=True
+    )
+    file_index: Mapped[int] = mapped_column(Integer, primary_key=True)
+    preallocated_artifact_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True))
+    relative_path: Mapped[str] = mapped_column(Text)
+    artifact_name: Mapped[str] = mapped_column(Text)
+    artifact_type: Mapped[str] = mapped_column(Text)
+    producer: Mapped[str] = mapped_column(Text)
+    media_type: Mapped[str] = mapped_column(Text)
+    role: Mapped[str] = mapped_column(Text)
+    archive_format: Mapped[str] = mapped_column(Text)
+    expected_max_bytes: Mapped[int] = mapped_column(BigInteger)
+    expected_sha256: Mapped[str | None] = mapped_column(Text)
+    expected_size: Mapped[int | None] = mapped_column(BigInteger)
+    multipart_upload_id: Mapped[str | None] = mapped_column(Text)
+    computed_sha256: Mapped[str | None] = mapped_column(Text)
+    actual_size: Mapped[int | None] = mapped_column(BigInteger)
+    state: Mapped[str] = mapped_column(Text, server_default=text("'planned'"))
+    ordered_part_receipts_json: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, server_default=text("'[]'::jsonb")
+    )
+
+
+class PipelineCheckpoint(Base):
+    __tablename__ = "pipeline_checkpoints"
+    __table_args__ = (
+        UniqueConstraint(
+            "execution_attempt_id", "checkpoint_sequence", name="pipeline_checkpoints_sequence_uidx"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    execution_attempt_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("execution_attempts.id", ondelete="CASCADE")
+    )
+    checkpoint_sequence: Mapped[int] = mapped_column(BigInteger)
+    artifact_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("artifacts.id", use_alter=True, name="pipeline_checkpoints_artifact_fk"),
+        unique=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
+
+
+class PipelineAcceptanceEvidenceRun(Base):
+    __tablename__ = "pipeline_acceptance_evidence_runs"
+    artifact_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey(
+            "artifacts.id",
+            use_alter=True,
+            name="pipeline_acceptance_evidence_runs_artifact_fk",
+        ),
+        primary_key=True,
+    )
+    run_ordinal: Mapped[int] = mapped_column(Integer, primary_key=True)
+    result_kind: Mapped[str] = mapped_column(Text)
+    run_kind: Mapped[str] = mapped_column(Text)
+    scenario_id: Mapped[str | None] = mapped_column(Text)
+    lane_or_input_set: Mapped[str | None] = mapped_column(Text)
+    provenance_digest: Mapped[str] = mapped_column(Text)
+    started_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    finished_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+
+
 class Artifact(Base):
     """Typed artifact registry entry for reusable run outputs."""
 
     __tablename__ = "artifacts"
     __table_args__ = (
         CheckConstraint(
-            "producer_kind IS NULL OR producer_kind IN ('container','platform','checkpoint')",
+            "producer_kind IS NULL OR producer_kind IN "
+            "('container','platform','checkpoint','input_import','recipe_input_materialization',"
+            "'pipeline_acceptance_evidence','pipeline_profile_calibration_evidence')",
             name="artifacts_pipeline_producer_kind_check",
         ),
         CheckConstraint(
-            "(pipeline_run_id IS NULL AND pipeline_stage_run_id IS NULL "
-            "AND execution_attempt_id IS NULL AND producer_kind IS NULL) OR "
-            "(pipeline_run_id IS NOT NULL AND pipeline_stage_run_id IS NOT NULL "
-            "AND execution_attempt_id IS NOT NULL AND producer_kind IS NOT NULL)",
+            "producer_kind IS NULL OR "
+            "(producer_kind IN ('container','platform','checkpoint') AND pipeline_run_id IS NOT NULL "
+            "AND pipeline_stage_run_id IS NOT NULL AND execution_attempt_id IS NOT NULL) OR "
+            "(producer_kind = 'input_import' AND pipeline_input_import_id IS NOT NULL "
+            "AND pipeline_run_id IS NULL AND pipeline_stage_run_id IS NULL AND execution_attempt_id IS NULL) OR "
+            "(producer_kind = 'recipe_input_materialization' AND pipeline_input_materialization_id IS NOT NULL "
+            "AND pipeline_run_id IS NULL AND pipeline_stage_run_id IS NULL AND execution_attempt_id IS NULL) OR "
+            "(producer_kind IN ('pipeline_acceptance_evidence','pipeline_profile_calibration_evidence') "
+            "AND pipeline_run_id IS NULL AND pipeline_stage_run_id IS NULL AND execution_attempt_id IS NULL)",
             name="artifacts_pipeline_identity_group_check",
+        ),
+        CheckConstraint(
+            "(artifact_upload_session_id IS NULL AND manifest_sha256 IS NULL "
+            "AND stored_size_bytes IS NULL AND unpacked_size_bytes IS NULL AND file_count IS NULL) OR "
+            "(artifact_upload_session_id IS NOT NULL AND manifest_sha256 IS NOT NULL "
+            "AND stored_size_bytes IS NOT NULL AND unpacked_size_bytes IS NOT NULL AND file_count IS NOT NULL)",
+            name="artifacts_pipeline_manifest_group_check",
         ),
         CheckConstraint(
             "(producer_kind IS NOT NULL AND control_producer_kind IS NULL "
@@ -4211,6 +4679,37 @@ class Artifact(Base):
     producer_kind: Mapped[str | None] = mapped_column(Text, nullable=True)
     control_producer_kind: Mapped[str | None] = mapped_column(Text, nullable=True)
     control_producer_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    pipeline_input_import_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("pipeline_input_imports.id", ondelete="RESTRICT")
+    )
+    pipeline_input_materialization_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("pipeline_input_materializations.id", ondelete="RESTRICT")
+    )
+    pipeline_acceptance_authorization_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    acceptance_action: Mapped[str | None] = mapped_column(Text)
+    acceptance_candidate_sha256: Mapped[str | None] = mapped_column(Text)
+    acceptance_result_kind: Mapped[str | None] = mapped_column(Text)
+    acceptance_termination_reason: Mapped[str | None] = mapped_column(Text)
+    pipeline_profile_calibration_authorization_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True)
+    )
+    profile_calibration_spec_sha256: Mapped[str | None] = mapped_column(Text)
+    profile_calibration_result_kind: Mapped[str | None] = mapped_column(Text)
+    profile_calibration_scenario_id: Mapped[str | None] = mapped_column(Text)
+    profile_calibration_candidate_identity_sha256: Mapped[str | None] = mapped_column(Text)
+    profile_calibration_run_ordinal: Mapped[int | None] = mapped_column(Integer)
+    profile_calibration_source_pipeline_run_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("pipeline_runs.id", ondelete="RESTRICT")
+    )
+    profile_calibration_termination_reason: Mapped[str | None] = mapped_column(Text)
+    actor_user_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), ForeignKey("users.id"))
+    artifact_upload_session_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("artifact_upload_sessions.id", ondelete="RESTRICT")
+    )
+    manifest_sha256: Mapped[str | None] = mapped_column(Text)
+    stored_size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    unpacked_size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    file_count: Mapped[int | None] = mapped_column(Integer)
     created_by: Mapped[dict[str, Any]] = mapped_column(
         JSONB,
         nullable=False,

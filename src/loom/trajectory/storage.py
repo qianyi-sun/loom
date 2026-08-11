@@ -10,8 +10,9 @@ import asyncio
 import contextlib
 import json
 import stat
+import tempfile
 import threading
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path
@@ -259,6 +260,18 @@ class MultipartUpload:
     parts: list[tuple[int, str]] = field(default_factory=list)  # (part_number, etag)
 
 
+@dataclass(frozen=True)
+class ObjectReadback:
+    """Trusted immutable facts returned after an object write.
+
+    ``checksum_sha256`` is populated only for a backend-provided full-object
+    checksum. Multipart ETags and caller metadata are intentionally excluded.
+    """
+
+    content_length: int
+    checksum_sha256: str | None
+
+
 class ObjectStore(Protocol):
     """Trajectory + artifact storage. Multipart for streaming writes; put_object
     for one-shot uploads; presign_put for client-driven uploads (workers ship
@@ -270,6 +283,10 @@ class ObjectStore(Protocol):
         *,
         bucket: str,
         key: str,
+    ) -> MultipartUpload: ...
+
+    async def resume_multipart_upload(
+        self, *, bucket: str, key: str, upload_id: str
     ) -> MultipartUpload: ...
 
     async def ensure_bucket(self, bucket: str) -> None:
@@ -293,6 +310,35 @@ class ObjectStore(Protocol):
     async def put_object(self, *, bucket: str, key: str, body: bytes) -> str: ...
 
     async def get_object(self, *, bucket: str, key: str) -> bytes: ...
+
+    async def upload_part_stream(
+        self,
+        upload: MultipartUpload,
+        *,
+        part_number: int,
+        body: AsyncIterator[bytes],
+    ) -> None: ...
+
+    async def put_object_stream(
+        self,
+        *,
+        bucket: str,
+        key: str,
+        body: AsyncIterator[bytes],
+    ) -> str: ...
+
+    async def stat_object(self, *, bucket: str, key: str) -> ObjectReadback: ...
+
+    def stream_object(
+        self,
+        *,
+        bucket: str,
+        key: str,
+        start_offset: int = 0,
+        chunk_size: int = 64 * 1024 * 1024,
+    ) -> AsyncIterator[bytes]: ...
+
+    async def delete_object(self, *, bucket: str, key: str) -> None: ...
 
     async def presign_put(
         self,
@@ -364,6 +410,19 @@ class FakeObjectStore:
         self._multiparts[upload_id] = []
         return MultipartUpload(bucket=bucket, key=key, upload_id=upload_id)
 
+    async def resume_multipart_upload(
+        self, *, bucket: str, key: str, upload_id: str
+    ) -> MultipartUpload:
+        parts = self._multiparts.get(upload_id)
+        if parts is None:
+            raise KeyError(upload_id)
+        return MultipartUpload(
+            bucket=bucket,
+            key=key,
+            upload_id=upload_id,
+            parts=[(number, f"etag-{number}") for number, _body in sorted(parts)],
+        )
+
     async def upload_part(
         self,
         upload: MultipartUpload,
@@ -390,6 +449,52 @@ class FakeObjectStore:
         if (bucket, key) not in self.objects:
             raise KeyError(f"s3://{bucket}/{key}")
         return self.objects[(bucket, key)]
+
+    async def upload_part_stream(
+        self,
+        upload: MultipartUpload,
+        *,
+        part_number: int,
+        body: AsyncIterator[bytes],
+    ) -> None:
+        chunks = bytearray()
+        async for chunk in body:
+            chunks.extend(chunk)
+        await self.upload_part(upload, part_number=part_number, body=bytes(chunks))
+
+    async def put_object_stream(
+        self,
+        *,
+        bucket: str,
+        key: str,
+        body: AsyncIterator[bytes],
+    ) -> str:
+        chunks = bytearray()
+        async for chunk in body:
+            chunks.extend(chunk)
+        return await self.put_object(bucket=bucket, key=key, body=bytes(chunks))
+
+    async def stat_object(self, *, bucket: str, key: str) -> ObjectReadback:
+        payload = self.objects[(bucket, key)]
+        return ObjectReadback(
+            content_length=len(payload),
+            checksum_sha256=f"sha256:{sha256(payload).hexdigest()}",
+        )
+
+    async def stream_object(
+        self,
+        *,
+        bucket: str,
+        key: str,
+        start_offset: int = 0,
+        chunk_size: int = 64 * 1024 * 1024,
+    ) -> AsyncIterator[bytes]:
+        payload = self.objects[(bucket, key)]
+        for offset in range(start_offset, len(payload), chunk_size):
+            yield payload[offset : offset + chunk_size]
+
+    async def delete_object(self, *, bucket: str, key: str) -> None:
+        self.objects.pop((bucket, key), None)
 
     async def presign_put(
         self,
@@ -618,6 +723,32 @@ class MinioObjectStore:
         upload_id = await self._run_client_call("create_multipart_upload", _do)
         return MultipartUpload(bucket=bucket, key=key, upload_id=upload_id)
 
+    async def resume_multipart_upload(
+        self, *, bucket: str, key: str, upload_id: str
+    ) -> MultipartUpload:
+        def _do(client: Any) -> list[tuple[int, str]]:
+            marker: int | None = None
+            parts: list[tuple[int, str]] = []
+            while True:
+                kwargs: dict[str, Any] = {
+                    "Bucket": bucket,
+                    "Key": key,
+                    "UploadId": upload_id,
+                }
+                if marker is not None:
+                    kwargs["PartNumberMarker"] = marker
+                response = client.list_parts(**kwargs)
+                parts.extend(
+                    (int(item["PartNumber"]), str(item["ETag"]))
+                    for item in response.get("Parts", [])
+                )
+                if not response.get("IsTruncated"):
+                    return parts
+                marker = int(response["NextPartNumberMarker"])
+
+        parts = await self._run_client_call("resume_multipart_upload", _do)
+        return MultipartUpload(bucket=bucket, key=key, upload_id=upload_id, parts=parts)
+
     async def upload_part(
         self,
         upload: MultipartUpload,
@@ -678,6 +809,113 @@ class MinioObjectStore:
             return cast(bytes, resp["Body"].read())
 
         return await self._run_client_call("get_object", _do)
+
+    @staticmethod
+    async def _copy_async_body_to_file(body: AsyncIterator[bytes], target: Any) -> None:
+        async for chunk in body:
+            if not isinstance(chunk, bytes | bytearray | memoryview):
+                raise TypeError("object stream chunks must be bytes-like")
+            await asyncio.to_thread(target.write, chunk)
+        await asyncio.to_thread(target.flush)
+        await asyncio.to_thread(target.seek, 0)
+
+    async def upload_part_stream(
+        self,
+        upload: MultipartUpload,
+        *,
+        part_number: int,
+        body: AsyncIterator[bytes],
+    ) -> None:
+        # Bridge the async request body into boto3 with an anonymous disk file,
+        # keeping the complete part out of Python memory and deleting it on exit.
+        with tempfile.TemporaryFile() as source:
+            await self._copy_async_body_to_file(body, source)
+
+            def _do(client: Any) -> str:
+                response = client.upload_part(
+                    Bucket=upload.bucket,
+                    Key=upload.key,
+                    PartNumber=part_number,
+                    UploadId=upload.upload_id,
+                    Body=source,
+                    ChecksumAlgorithm="SHA256",
+                )
+                return cast(str, response["ETag"])
+
+            etag = await self._run_client_call("upload_part_stream", _do)
+            upload.parts.append((part_number, etag))
+
+    async def put_object_stream(
+        self,
+        *,
+        bucket: str,
+        key: str,
+        body: AsyncIterator[bytes],
+    ) -> str:
+        with tempfile.TemporaryFile() as source:
+            await self._copy_async_body_to_file(body, source)
+
+            def _do(client: Any) -> None:
+                client.put_object(
+                    Bucket=bucket,
+                    Key=key,
+                    Body=source,
+                    ChecksumAlgorithm="SHA256",
+                )
+
+            await self._run_client_call("put_object_stream", _do)
+        return f"s3://{bucket}/{key}"
+
+    async def stat_object(self, *, bucket: str, key: str) -> ObjectReadback:
+        def _do(client: Any) -> ObjectReadback:
+            response = client.head_object(Bucket=bucket, Key=key, ChecksumMode="ENABLED")
+            encoded = response.get("ChecksumSHA256")
+            checksum: str | None = None
+            if isinstance(encoded, str):
+                import base64
+
+                try:
+                    raw = base64.b64decode(encoded, validate=True)
+                except ValueError:
+                    raw = b""
+                if len(raw) == 32:
+                    checksum = f"sha256:{raw.hex()}"
+            return ObjectReadback(
+                content_length=int(response["ContentLength"]),
+                checksum_sha256=checksum,
+            )
+
+        return await self._run_client_call("stat_object", _do)
+
+    async def stream_object(
+        self,
+        *,
+        bucket: str,
+        key: str,
+        start_offset: int = 0,
+        chunk_size: int = 64 * 1024 * 1024,
+    ) -> AsyncIterator[bytes]:
+        def _open(client: Any) -> Any:
+            kwargs: dict[str, Any] = {"Bucket": bucket, "Key": key}
+            if start_offset:
+                kwargs["Range"] = f"bytes={start_offset}-"
+            return client.get_object(**kwargs)["Body"]
+
+        stream = await self._run_client_call("stream_object_open", _open)
+        try:
+            while True:
+                chunk = await asyncio.to_thread(stream.read, chunk_size)
+                if not chunk:
+                    break
+                yield cast(bytes, chunk)
+        finally:
+            await asyncio.to_thread(stream.close)
+
+    async def delete_object(self, *, bucket: str, key: str) -> None:
+        def _do(client: Any) -> None:
+            client.delete_object(Bucket=bucket, Key=key)
+
+        await self._run_client_call("delete_object", _do)
 
     async def presign_put(
         self,
