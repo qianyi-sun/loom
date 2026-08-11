@@ -175,6 +175,8 @@ def test_minio_admin_capacity_source_probes_over_network(
                 "loom-staging-artifacts",
                 "--capacity-source",
                 "minio-admin",
+                "--expected-drive-count",
+                "2",
             ]
         )
         == 0
@@ -184,6 +186,7 @@ def test_minio_admin_capacity_source_probes_over_network(
         endpoint_url="http://loom-minio:9000",
         access_key="ak",
         secret_key="sk",
+        expected_drive_count=2,
     )
     from_drives.assert_called_once_with(
         namespace="loom-staging",
@@ -222,5 +225,33 @@ def test_filesystem_source_requires_a_path(monkeypatch: pytest.MonkeyPatch) -> N
                 "loom-staging",
                 "--bucket",
                 "loom-staging-artifacts",
+            ]
+        )
+
+
+def test_minio_admin_source_requires_positive_expected_drive_count() -> None:
+    with pytest.raises(RuntimeError, match="positive --expected-drive-count"):
+        data_lifecycle_maintenance.main(
+            [
+                "--namespace",
+                "loom-staging",
+                "--bucket",
+                "loom-staging-artifacts",
+                "--capacity-source",
+                "minio-admin",
+            ]
+        )
+
+
+def test_filesystem_source_rejects_expected_drive_count() -> None:
+    with pytest.raises(RuntimeError, match="cannot use --expected-drive-count"):
+        data_lifecycle_maintenance.main(
+            [
+                "--namespace",
+                "loom-staging",
+                "--bucket",
+                "loom-staging-artifacts",
+                "--expected-drive-count",
+                "1",
             ]
         )

@@ -64,6 +64,7 @@ def _require_job_template(
     registry_digest: str,
     expected_buckets: tuple[str, ...],
     capacity_source: str,
+    expected_drive_count: int | None,
     expected_filesystem_paths: tuple[str, ...],
 ) -> dict[str, Any]:
     if not rendered_yaml or len(rendered_yaml.encode()) > 16 * 1024 * 1024:
@@ -150,6 +151,8 @@ def _require_job_template(
     if capacity_source == "filesystem":
         for filesystem_path in expected_filesystem_paths:
             expected_args.extend(("--filesystem-path", filesystem_path))
+    else:
+        expected_args.extend(("--expected-drive-count", str(expected_drive_count)))
     args = _sequence(container.get("args"), "lifecycle arguments")
     if args != expected_args:
         raise LifecycleCapacityJobError("lifecycle capacity input authority drifted")
@@ -314,6 +317,7 @@ def build_lifecycle_capacity_job_plan(
     expected_buckets: tuple[str, ...],
     expected_filesystem_paths: tuple[str, ...],
     capacity_source: str = "filesystem",
+    expected_drive_count: int | None = None,
     container_registry: str = "",
     registry_digest: str = "",
 ) -> LifecycleCapacityJobPlan:
@@ -322,7 +326,16 @@ def build_lifecycle_capacity_job_plan(
         or len(set(expected_buckets)) != 2
         or capacity_source not in {"filesystem", "minio-admin"}
         or (capacity_source == "filesystem" and not expected_filesystem_paths)
+        or (capacity_source == "filesystem" and expected_drive_count is not None)
         or (capacity_source == "minio-admin" and bool(expected_filesystem_paths))
+        or (
+            capacity_source == "minio-admin"
+            and (
+                isinstance(expected_drive_count, bool)
+                or not isinstance(expected_drive_count, int)
+                or expected_drive_count < 1
+            )
+        )
         or len(set(expected_filesystem_paths)) != len(expected_filesystem_paths)
         or bool(container_registry) != bool(registry_digest)
         or (registry_digest and _IMAGE_ID_RE.fullmatch(registry_digest) is None)
@@ -339,6 +352,7 @@ def build_lifecycle_capacity_job_plan(
         registry_digest=registry_digest,
         expected_buckets=expected_buckets,
         capacity_source=capacity_source,
+        expected_drive_count=expected_drive_count,
         expected_filesystem_paths=expected_filesystem_paths,
     )
     job_name = f"loom-staging-capacity-{candidate_sha[:8]}-{artifact_bundle_sha256[:8]}"

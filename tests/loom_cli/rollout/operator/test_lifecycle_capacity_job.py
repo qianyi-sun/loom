@@ -88,6 +88,7 @@ def test_plan_accepts_multinode_staging_minio_admin_capacity_contract() -> None:
         rendered_yaml=rendered,
         expected_buckets=(config.trajectories_bucket, config.artifacts_bucket),
         capacity_source="minio-admin",
+        expected_drive_count=4,
         expected_filesystem_paths=(),
         container_registry=config.container_registry,
         registry_digest=registry_digests["loom-control-plane"],
@@ -96,7 +97,12 @@ def test_plan_accepts_multinode_staging_minio_admin_capacity_contract() -> None:
     document = yaml.safe_load(plan.job_manifest)
     pod_spec = document["spec"]["template"]["spec"]
     container = pod_spec["containers"][0]
-    assert container["args"][-2:] == ["--capacity-source", "minio-admin"]
+    assert container["args"][-4:] == [
+        "--capacity-source",
+        "minio-admin",
+        "--expected-drive-count",
+        "4",
+    ]
     assert "volumeMounts" not in container
     assert "volumes" not in pod_spec
 
