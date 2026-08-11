@@ -183,3 +183,24 @@ def test_legacy_fence_migration_is_inert_and_has_no_candidate_mutation() -> None
     assert "insert into loom_capacity_guard.protected_claim_leases" not in lowered
     assert "sbatch" not in lowered
     assert "scancel" not in lowered
+
+
+def test_lifecycle_demand_projection_is_read_only_and_nonexecutable() -> None:
+    source = Path(
+        "capacity_guard_migrations/versions/guard_0006_lifecycle_demand_projection.py"
+    ).read_text(encoding="utf-8")
+    lowered = source.lower()
+    assert "capture_demand_observation_v1_legacy" in lowered
+    assert "capture_lifecycle_demand_observation" in lowered
+    assert "attempt_lifecycle_heads" in lowered
+    assert "left join lateral" not in lowered
+    assert "executable', false" in lowered
+    assert "security definer" in lowered
+    assert "to public" not in lowered
+    assert "insert into public." not in lowered
+    assert "update public." not in lowered
+    assert "delete from public." not in lowered
+    assert "insert into loom_capacity_guard.protected_claim_leases" not in lowered
+    assert "insert into loom_capacity_guard.prepared_" not in lowered
+    assert "sbatch" not in lowered
+    assert "scancel" not in lowered

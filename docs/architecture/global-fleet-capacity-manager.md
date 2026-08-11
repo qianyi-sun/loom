@@ -168,6 +168,43 @@ public trial, create a claim, mint a credential, or touch Slurm.  Inventory
 entries remain activation-blocking and `open` until later Package 2C slices
 instrument and fence the corresponding live writers.
 
+## Package 2C2 lifecycle-aware demand projection
+
+The second Package 2C slice closes the ambiguity between the immutable
+Package 2A queued-attempt row and the current append-only Package 2B lifecycle.
+The legacy v1 capture remains available for rollback only while every protected
+attempt is currently pending-unassigned; it rejects the complete capture after
+an assignment or terminal transition instead of misreporting that attempt as
+new demand.
+
+The lifecycle-aware v2 capture reads one stable protected projection under the
+same writer mutex used by plan and lifecycle mutations. A trigger-maintained,
+monotonic lifecycle head avoids rescanning append-only event history. A partial
+current-demand index and a `max_attempts + 1` source limit bound each capture;
+deferred pending attempts count toward that source bound even though they are
+the only nonterminal rows omitted from the emitted view.
+
+Pending attempts carry no assignment fields. Assigned attempts carry their
+exact allowance, plan, admission incarnation, allocation epoch, pool and
+profile generations, profile digest, semantic shape, shape instance, and
+submission intent, and become manager `CurrentAssignmentV1` records rather
+than pending slots. A missing or incompatible prepared binding, a legacy pool
+projection, or disagreement with the public trial state rejects the whole
+observation before reporter high-water advances.
+
+A terminal transition that observes a still-runnable public trial appends a
+blocker; migration backfill creates the same evidence for pre-existing terminal
+heads. Only a later append-only public non-runnable observation can advance the
+blocker's protected `resolved_at` projection. A partial unresolved-blocker
+index keeps steady-state capture independent of resolved terminal history.
+Public-state regression and retry-generation registration remain activation
+blockers for the later submission-boundary package; this slice records exact
+evidence at the terminal transition but does not claim that later writer fence.
+
+This remains a disconnected and non-executable projection. It adds no route,
+runtime reporter loop, public mutation, credential, live claim, worker launch,
+Slurm operation, or activation authority. The protected ceiling remains zero.
+
 ## Current activation blockers
 
 There is intentionally no live global fleet manifest. The checked-in

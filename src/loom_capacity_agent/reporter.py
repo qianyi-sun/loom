@@ -6,6 +6,7 @@ import hashlib
 import json
 from collections import defaultdict
 from dataclasses import dataclass
+from typing import cast
 
 from pydantic import ValidationError
 
@@ -13,10 +14,12 @@ from loom_capacity_agent.contracts import (
     AgentPoolCapabilityV1,
     GuardDemandAttemptV1,
     GuardDemandObservationV1,
+    GuardLifecycleDemandAttemptV2,
+    GuardLifecycleDemandObservationV2,
     ReporterConfigurationV1,
 )
 from loom_capacity_guard.contracts import SealedRequirementsV1
-from loom_capacity_manager.contracts import DemandBucketV1, DemandSnapshotV1
+from loom_capacity_manager.contracts import CurrentAssignmentV1, DemandBucketV1, DemandSnapshotV1
 
 
 class DemandReportBlockedError(RuntimeError):
@@ -92,7 +95,7 @@ def _bucket_id(key: _BucketKey) -> str:
 
 
 def _binding_mismatches(
-    observation: GuardDemandObservationV1,
+    observation: GuardDemandObservationV1 | GuardLifecycleDemandObservationV2,
     configuration: ReporterConfigurationV1,
 ) -> tuple[str, ...]:
     return tuple(
@@ -168,4 +171,111 @@ def build_demand_snapshot(
         raise DemandReportBlockedError("protected demand snapshot is outside manager bounds") from exc
 
 
-__all__ = ["DemandReportBlockedError", "build_demand_snapshot"]
+def build_lifecycle_demand_snapshot(
+    observation: GuardLifecycleDemandObservationV2,
+    configuration: ReporterConfigurationV1,
+) -> DemandSnapshotV1:
+    """Build one lifecycle-aware report, or fail without publishing a partial view."""
+
+    mismatches = _binding_mismatches(observation, configuration)
+    if mismatches:
+        raise DemandReportBlockedError(
+            f"protected observation binding mismatch: {', '.join(mismatches)}"
+        )
+
+    grouped: dict[_BucketKey, list[GuardLifecycleDemandAttemptV2]] = defaultdict(list)
+    assignments: list[CurrentAssignmentV1] = []
+    for attempt in observation.attempts:
+        compatible_pool_ids = {
+            offer.pool_id
+            for offer in configuration.pool_capabilities
+            if _compatible(attempt.requirements, offer)
+        }
+        if attempt.lifecycle_state == "pending-unassigned":
+            eligible = tuple(sorted(compatible_pool_ids))
+            if not eligible:
+                raise DemandReportBlockedError(
+                    f"protected attempt {attempt.protected_attempt_id} has no compatible pool"
+                )
+            grouped[
+                _BucketKey(
+                    requirements_digest=attempt.requirements_digest,
+                    execution_generation=attempt.execution_generation,
+                    eligible_pool_ids=eligible,
+                    required_capabilities=_required_capabilities(attempt.requirements),
+                    local_priority=attempt.submit_priority,
+                )
+            ].append(attempt)
+            continue
+
+        if attempt.pool_id not in compatible_pool_ids:
+            raise DemandReportBlockedError(
+                f"protected attempt {attempt.protected_attempt_id} assigned pool is incompatible"
+            )
+        assignment_binding = (
+            attempt.pool_id,
+            attempt.pool_generation,
+            attempt.profile_id,
+            attempt.profile_generation,
+            attempt.profile_digest,
+            attempt.shape_id,
+            attempt.manager_allocation_epoch,
+        )
+        if any(item is None for item in assignment_binding):
+            raise DemandReportBlockedError(
+                f"protected attempt {attempt.protected_attempt_id} assignment binding is incomplete"
+            )
+        try:
+            assignments.append(
+                CurrentAssignmentV1(
+                    attempt_id=str(attempt.protected_attempt_id),
+                    pool_id=cast(str, attempt.pool_id),
+                    pool_generation=cast(int, attempt.pool_generation),
+                    profile_id=cast(str, attempt.profile_id),
+                    profile_generation=cast(int, attempt.profile_generation),
+                    profile_digest=cast(str, attempt.profile_digest),
+                    shape_id=cast(str, attempt.shape_id),
+                    allowance_epoch=cast(int, attempt.manager_allocation_epoch),
+                    local_priority=attempt.submit_priority,
+                    submitted_at=attempt.submitted_at,
+                )
+            )
+        except ValidationError as exc:
+            raise DemandReportBlockedError(
+                f"protected attempt {attempt.protected_attempt_id} assignment is outside bounds"
+            ) from exc
+
+    buckets = tuple(
+        DemandBucketV1(
+            bucket_id=_bucket_id(key),
+            requested_slots=len(attempts),
+            local_priority=key.local_priority,
+            oldest_submitted_at=min(item.submitted_at for item in attempts),
+            eligible_pool_ids=key.eligible_pool_ids,
+            required_capabilities=key.required_capabilities,
+            attempt_ids=tuple(str(item.protected_attempt_id) for item in attempts),
+        )
+        for key, attempts in sorted(grouped.items(), key=lambda item: _bucket_id(item[0]))
+    )
+    try:
+        return DemandSnapshotV1(
+            subject_id=observation.subject_id,
+            subject_incarnation=observation.subject_incarnation,
+            configuration_generation=observation.configuration_generation,
+            deployment_generation=observation.deployment_generation,
+            reporter_incarnation=observation.reporter_incarnation,
+            sequence=observation.sequence,
+            source_observed_at=observation.source_observed_at,
+            pending_unassigned=buckets,
+            current_assignments=tuple(assignments),
+            fixed_claims=(),
+        )
+    except ValidationError as exc:
+        raise DemandReportBlockedError("protected demand snapshot is outside manager bounds") from exc
+
+
+__all__ = [
+    "DemandReportBlockedError",
+    "build_demand_snapshot",
+    "build_lifecycle_demand_snapshot",
+]

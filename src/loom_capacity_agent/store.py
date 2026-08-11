@@ -11,7 +11,11 @@ from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from loom_capacity_agent.contracts import AgentRegistrationV1, GuardDemandObservationV1
+from loom_capacity_agent.contracts import (
+    AgentRegistrationV1,
+    GuardDemandObservationV1,
+    GuardLifecycleDemandObservationV2,
+)
 from loom_capacity_guard.contracts import canonical_bytes, canonical_digest
 from loom_capacity_guard.store import CapacityGuardStore
 
@@ -243,8 +247,64 @@ async def capture_demand_observation(
     return observation
 
 
+async def capture_lifecycle_demand_observation(
+    session: AsyncSession,
+    *,
+    registration: AgentRegistrationV1,
+    expected_high_water: int,
+    max_attempts: int,
+) -> GuardLifecycleDemandObservationV2:
+    """Atomically capture and validate one lifecycle-aware protected view."""
+
+    if type(expected_high_water) is not int or expected_high_water < 0:
+        raise CapacityAgentStoreError("expected reporter high-water must be nonnegative")
+    if type(max_attempts) is not int or not 1 <= max_attempts <= 10_000:
+        raise CapacityAgentStoreError("capture row bound must be between 1 and 10000")
+    async with session.begin_nested():
+        payload = (
+            await session.execute(
+                text(
+                    f"SELECT {_SCHEMA}.capture_lifecycle_demand_observation("
+                    ":agent_incarnation, :expected_high_water, :max_attempts)"
+                ),
+                {
+                    "agent_incarnation": registration.agent_incarnation,
+                    "expected_high_water": expected_high_water,
+                    "max_attempts": max_attempts,
+                },
+            )
+        ).scalar_one()
+        if not isinstance(payload, Mapping):
+            raise CapacityAgentStoreError("protected lifecycle demand capture returned a non-object")
+        try:
+            observation = GuardLifecycleDemandObservationV2.model_validate_json(
+                _json_payload(payload).encode("ascii")
+            )
+        except (ValidationError, ValueError) as exc:
+            raise CapacityAgentStoreError(
+                "protected lifecycle demand capture returned an invalid contract"
+            ) from exc
+        mismatches = tuple(
+            field
+            for field in AgentRegistrationV1.model_fields
+            if getattr(observation, field) != getattr(registration, field)
+        )
+        if mismatches:
+            raise CapacityAgentStoreError(
+                "protected lifecycle demand capture binding mismatch: "
+                f"{', '.join(mismatches)}"
+            )
+        if observation.sequence != expected_high_water + 1:
+            raise CapacityAgentStoreError(
+                "protected lifecycle demand capture returned a nonmonotonic sequence"
+            )
+        canonical_bytes(observation)
+    return observation
+
+
 __all__ = [
     "CapacityAgentStore",
     "CapacityAgentStoreError",
     "capture_demand_observation",
+    "capture_lifecycle_demand_observation",
 ]

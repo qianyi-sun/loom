@@ -12,6 +12,7 @@ from loom_capacity_guard.contracts import (
     Digest,
     GuardIdentifier,
     NetworkPolicy,
+    NonNegativeSequence,
     PositiveGeneration,
     SealedRequirementsV1,
     StrictGuardModel,
@@ -178,10 +179,132 @@ class GuardDemandObservationV1(AgentRegistrationV1):
         return tuple(sorted(value, key=lambda item: item.protected_attempt_id.hex))
 
 
+class GuardLifecycleDemandAttemptV2(StrictGuardModel):
+    """One pending or assigned attempt from the protected lifecycle projection."""
+
+    view_version: Literal[2] = 2
+    protected_attempt_id: UUID
+    execution_generation: PositiveGeneration
+    requirements: SealedRequirementsV1
+    requirements_digest: Digest
+    lifecycle_sequence: NonNegativeSequence
+    lifecycle_state: Literal["pending-unassigned", "assigned"]
+    allowance_id: UUID | None = None
+    plan_id: UUID | None = None
+    admission_incarnation: UUID | None = None
+    manager_allocation_epoch: PositiveGeneration | None = None
+    pool_id: Literal["oldlab", "gb10"] | None = None
+    pool_generation: PositiveGeneration | None = None
+    profile_id: GuardIdentifier | None = None
+    profile_generation: PositiveGeneration | None = None
+    profile_digest: Digest | None = None
+    shape_id: GuardIdentifier | None = None
+    shape_instance_id: GuardIdentifier | None = None
+    submission_intent_id: UUID | None = None
+    submit_priority: Annotated[int, Field(ge=0, le=(1 << 31) - 1)]
+    submitted_at: datetime
+    executable: Literal[False] = False
+
+    @field_validator("submitted_at", mode="before")
+    @classmethod
+    def _parse_time(cls, value: datetime | str) -> datetime | str:
+        if isinstance(value, str):
+            timestamp = f"{value[:-1]}+00:00" if value.endswith("Z") else value
+            try:
+                return datetime.fromisoformat(timestamp)
+            except ValueError:
+                return value
+        return value
+
+    @field_validator("submitted_at")
+    @classmethod
+    def _submitted_at_utc(cls, value: datetime) -> datetime:
+        return _utc(value)
+
+    @model_validator(mode="after")
+    def _exact_lifecycle_shape(self) -> GuardLifecycleDemandAttemptV2:
+        if canonical_digest(self.requirements) != self.requirements_digest:
+            raise ValueError("requirements digest does not match sealed requirements")
+        assignment_fields = (
+            self.allowance_id,
+            self.plan_id,
+            self.admission_incarnation,
+            self.manager_allocation_epoch,
+            self.pool_id,
+            self.pool_generation,
+            self.profile_id,
+            self.profile_generation,
+            self.profile_digest,
+            self.shape_id,
+            self.shape_instance_id,
+            self.submission_intent_id,
+        )
+        if self.lifecycle_state == "pending-unassigned" and any(
+            item is not None for item in assignment_fields
+        ):
+            raise ValueError("pending-unassigned attempt must not carry an assignment")
+        if self.lifecycle_state == "assigned" and any(
+            item is None for item in assignment_fields
+        ):
+            raise ValueError("assigned attempt requires a complete assignment binding")
+        if self.lifecycle_state == "assigned":
+            identities = {
+                self.protected_attempt_id,
+                self.allowance_id,
+                self.plan_id,
+                self.admission_incarnation,
+                self.submission_intent_id,
+            }
+            if len(identities) != 5:
+                raise ValueError("assigned attempt identities must be distinct")
+        return self
+
+
+class GuardLifecycleDemandObservationV2(AgentRegistrationV1):
+    """One complete bounded lifecycle-aware view of protected demand."""
+
+    view_version: Literal[2] = 2
+    sequence: PositiveGeneration
+    source_observed_at: datetime
+    view_state: Literal["complete"] = "complete"
+    attempts: Annotated[
+        tuple[GuardLifecycleDemandAttemptV2, ...], Field(max_length=MAX_FIXED_CLAIMS_PER_REPORT)
+    ]
+    executable: Literal[False] = False
+
+    @field_validator("source_observed_at", mode="before")
+    @classmethod
+    def _parse_time(cls, value: datetime | str) -> datetime | str:
+        if isinstance(value, str):
+            timestamp = f"{value[:-1]}+00:00" if value.endswith("Z") else value
+            try:
+                return datetime.fromisoformat(timestamp)
+            except ValueError:
+                return value
+        return value
+
+    @field_validator("source_observed_at")
+    @classmethod
+    def _observed_at_utc(cls, value: datetime) -> datetime:
+        return _utc(value)
+
+    @field_validator("attempts")
+    @classmethod
+    def _canonical_attempts(
+        cls, value: tuple[GuardLifecycleDemandAttemptV2, ...]
+    ) -> tuple[GuardLifecycleDemandAttemptV2, ...]:
+        identities = [item.protected_attempt_id for item in value]
+        if len(identities) != len(set(identities)):
+            raise ValueError("duplicate protected attempt identity")
+        return tuple(sorted(value, key=lambda item: item.protected_attempt_id.hex))
+
+
 __all__ = [
     "AgentPoolCapabilityV1",
     "AgentRegistrationV1",
     "GuardDemandAttemptV1",
     "GuardDemandObservationV1",
+    "GuardLifecycleDemandAttemptV2",
+    "GuardLifecycleDemandObservationV2",
     "ReporterConfigurationV1",
 ]
