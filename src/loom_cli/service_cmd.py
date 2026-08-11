@@ -9,7 +9,7 @@ Replaces the manual sequence:
 
 with:
 
-    loom service up      # all of the above + endpoint summary + token
+    loom service up --environment local  # all of the above + endpoint summary + token
     loom service down    # stop containers (preserves volumes)
     loom service status  # container state + endpoint URLs + Swagger UI link
 
@@ -26,6 +26,7 @@ import secrets
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 from datetime import UTC, datetime
@@ -35,15 +36,21 @@ import httpx
 import tomli_w
 
 from loom.admin_secret import AdminSecretConfigError, AdminSecretVerifier
+from loom.dev_instance import PER_INSTANCE_CAP, InvalidDevInstanceNameError, validate_name
 
 # Dev-stack defaults — match `deploy/docker-compose.dev.yml`. Keep in sync.
 _DEFAULT_COMPOSE_FILE = Path("deploy/docker-compose.dev.yml")
+_DEFAULT_ENV_FILE = Path(".env")
 _DEFAULT_DB_URL = "postgresql+psycopg://loom:loom@localhost:5432/loom"
 _DEFAULT_DEV_ADMIN_SECRET_FILE = Path(".loom/admin/secrets.toml")
 _DEFAULT_ADMIN_SECRET_FILE = Path.home() / ".config" / "loom" / "secrets.toml"
 _HEALTHCHECK_RETRIES = 30
 _HEALTHCHECK_INTERVAL_SEC = 2.0
 _DEFAULT_CP_URL = "http://localhost:8080"
+_DEFAULT_PERSONAL_MIN_SLOTS = 0
+_DEFAULT_PERSONAL_MAX_SLOTS = 2
+_DEFAULT_PERSONAL_TIMEOUT = 7200.0
+_DEFAULT_PERSONAL_POLL_INTERVAL = 2.0
 _MUTABLE_DEV_IMAGE_RE = re.compile(r"^loom-[a-z0-9-]+:dev$")
 
 # Endpoint map (matches compose YAML port bindings + k8s ingress).
@@ -388,7 +395,7 @@ def _print_summary(tokens: dict[str, str]) -> None:
     print()
 
 
-def _up(args: argparse.Namespace) -> int:
+def _up_local(args: argparse.Namespace) -> int:
     compose_file = args.compose_file
     env_file = args.env_file
     if not compose_file.is_file():
@@ -516,6 +523,259 @@ def _up(args: argparse.Namespace) -> int:
 
     _print_summary(tokens)
     return 0
+
+
+def _service_environment(value: str) -> str:
+    if value in {"local", "staging", "production"}:
+        return value
+    if value.startswith("dev-"):
+        name = value.removeprefix("dev-")
+        try:
+            validate_name(name)
+        except InvalidDevInstanceNameError as exc:
+            raise argparse.ArgumentTypeError(str(exc)) from exc
+        return value
+    raise argparse.ArgumentTypeError(
+        "must be local, staging, production, or dev-<name>"
+    )
+
+
+def _candidate_identifier(value: str) -> str:
+    if len(value) not in {40, 64} or any(
+        character not in "0123456789abcdef" for character in value
+    ):
+        raise argparse.ArgumentTypeError(
+            "must be a full lowercase Git commit or SHA-256 content digest"
+        )
+    return value
+
+
+def _positive_float(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a number") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be positive")
+    return parsed
+
+
+def _nonnegative_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be non-negative")
+    return parsed
+
+
+def _print_personal_summary(environment: dict[str, object]) -> None:
+    identity = environment.get("identity")
+    route_host = identity.get("route_host") if isinstance(identity, dict) else None
+    print(f"Development environment: dev-{environment['name']}")
+    print(f"Status: {environment['status']}")
+    print(f"Candidate: {environment['candidate_sha']}")
+    print(
+        "Capacity: "
+        f"min {environment['min_slots']} · max {environment['max_slots']} shared slots"
+    )
+    if isinstance(route_host, str) and route_host:
+        print(f"URL: https://{route_host}")
+
+
+def _up_personal(args: argparse.Namespace) -> int:
+    from loom.personal_dev_source import (
+        PersonalDevSourceError,
+        create_personal_dev_source_snapshot,
+    )
+    from loom_cli.personal_dev_deploy import (
+        PersonalDevDeployClient,
+        PersonalDevDeployError,
+    )
+    from loom_cli.server_client import (
+        HttpStatusError,
+        NotLoggedInError,
+        authed_client,
+        require_logged_in,
+    )
+
+    name = args.environment.removeprefix("dev-")
+    server = "configured server"
+    source_root = args.source_root or Path.cwd()
+    min_slots = (
+        _DEFAULT_PERSONAL_MIN_SLOTS if args.min_slots is None else args.min_slots
+    )
+    max_slots = (
+        _DEFAULT_PERSONAL_MAX_SLOTS if args.max_slots is None else args.max_slots
+    )
+    timeout = _DEFAULT_PERSONAL_TIMEOUT if args.timeout is None else args.timeout
+    poll_interval = (
+        _DEFAULT_PERSONAL_POLL_INTERVAL
+        if args.poll_interval is None
+        else args.poll_interval
+    )
+    if args.candidate is not None and len(args.candidate) != 64:
+        sys.stderr.write(
+            "error: a personal candidate must be a lowercase SHA-256 digest\n"
+        )
+        return 2
+    if min_slots > max_slots:
+        sys.stderr.write("error: --min-slots must not exceed --max-slots\n")
+        return 2
+    try:
+        cfg = require_logged_in()
+        server = cfg.server_url or server
+        with authed_client(cfg, timeout=120.0) as http_client:
+            deploy = PersonalDevDeployClient(http_client)
+            expected_epoch = (
+                args.expected_operation_epoch
+                if args.expected_operation_epoch is not None
+                else deploy.expected_operation_epoch(name)
+            )
+            if args.candidate is not None:
+                print(f"→ resolving owned ready candidate {args.candidate}")
+                candidate = deploy.resolve_ready_candidate(args.candidate)
+            else:
+                contexts = tuple(args.source_context or (".",))
+                with tempfile.TemporaryDirectory(prefix="loom-personal-dev-source-") as directory:
+                    archive = Path(directory) / "source.tar"
+                    print(
+                        f"→ sealing source from {source_root} "
+                        f"for {args.environment}"
+                    )
+                    snapshot = create_personal_dev_source_snapshot(
+                        source_root,
+                        archive,
+                        contexts=contexts,
+                    )
+                    print(
+                        "→ uploading immutable personal-dev source "
+                        f"{snapshot.source_digest}"
+                    )
+                    candidate = deploy.upload_snapshot(archive, snapshot)
+            print(
+                f"→ applying {args.environment} at expected operation epoch "
+                f"{expected_epoch}"
+            )
+            environment, operation = deploy.apply(
+                name=name,
+                candidate=candidate,
+                min_slots=min_slots,
+                max_slots=max_slots,
+                expected_operation_epoch=expected_epoch,
+            )
+            if not args.no_wait and environment["status"] != "ready":
+                environment = deploy.wait_ready(
+                    name,
+                    operation_id=str(operation["id"]),
+                    candidate_sha=str(candidate["candidate_sha"]),
+                    min_slots=min_slots,
+                    max_slots=max_slots,
+                    operation_epoch=int(operation["operation_epoch"]),
+                    timeout=timeout,
+                    poll_interval=poll_interval,
+                )
+            _print_personal_summary(environment)
+            return 0
+    except NotLoggedInError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+    except (PersonalDevSourceError, PersonalDevDeployError, HttpStatusError) as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 1
+    except httpx.RequestError as exc:
+        sys.stderr.write(f"error: could not reach {server}: {exc}\n")
+        return 2
+
+
+def _up_protected(args: argparse.Namespace) -> int:
+    if args.candidate is None:
+        sys.stderr.write(
+            f"error: --candidate is required for protected {args.environment} deployment\n"
+        )
+        return 2
+    if len(args.candidate) != 40:
+        sys.stderr.write(
+            "error: a protected candidate must be a full lowercase Git commit\n"
+        )
+        return 2
+    sys.stderr.write(
+        "error: the protected rollout request, approval, expected epoch, backup, and "
+        "release evidence must be submitted through `loom cluster rollout`; "
+        "`loom service up` will not create a direct Kubernetes or Compose bypass.\n"
+    )
+    return 2
+
+
+def _personal_options_present(args: argparse.Namespace) -> bool:
+    return any(
+        value is not None
+        for value in (
+            args.source_root,
+            args.source_context,
+            args.min_slots,
+            args.max_slots,
+            args.expected_operation_epoch,
+            args.timeout,
+            args.poll_interval,
+        )
+    ) or bool(args.no_wait)
+
+
+def _local_options_present(args: argparse.Namespace) -> bool:
+    return any(
+        value is not None
+        for value in (
+            args.compose_file,
+            args.env_file,
+            args.db_url,
+            args.admin_secret_file,
+            args.cp_url,
+        )
+    )
+
+
+def _populate_local_defaults(args: argparse.Namespace) -> None:
+    if args.compose_file is None:
+        args.compose_file = _DEFAULT_COMPOSE_FILE
+    if args.env_file is None:
+        args.env_file = _DEFAULT_ENV_FILE
+    if args.db_url is None:
+        args.db_url = _DEFAULT_DB_URL
+    if args.admin_secret_file is None:
+        args.admin_secret_file = _DEFAULT_DEV_ADMIN_SECRET_FILE
+    if args.cp_url is None:
+        args.cp_url = _DEFAULT_CP_URL
+
+
+def _up(args: argparse.Namespace) -> int:
+    if args.environment == "local":
+        if args.candidate is not None:
+            sys.stderr.write("error: --candidate is not valid for --environment local\n")
+            return 2
+        if _personal_options_present(args):
+            sys.stderr.write(
+                "error: personal-dev options are not valid for --environment local\n"
+            )
+            return 2
+        _populate_local_defaults(args)
+        return _up_local(args)
+    if _local_options_present(args):
+        sys.stderr.write(
+            f"error: local Compose options are not valid for --environment "
+            f"{args.environment}\n"
+        )
+        return 2
+    if args.environment.startswith("dev-"):
+        return _up_personal(args)
+    if _personal_options_present(args):
+        sys.stderr.write(
+            f"error: personal-dev options are not valid for protected "
+            f"{args.environment} deployment\n"
+        )
+        return 2
+    return _up_protected(args)
 
 
 _ENV_TOKEN_KEYS: dict[str, str] = {
@@ -712,10 +972,10 @@ def add_service_subparser(sub: argparse._SubParsersAction) -> None:  # type: ign
     """Register `loom service {up,down,status}` on the top-level argparse."""
     p_service = sub.add_parser(
         "service",
-        help="Start / stop / inspect the dev compose stack",
+        help="Deploy an explicit environment or manage the local Compose stack",
         description=(
-            "One-liner wrapper around docker-compose + alembic + "
-            "seed_test_data.py for the local dev stack."
+            "Deploy one explicitly selected local, personal-development, or protected "
+            "environment. Down/status and local up manage the Docker Compose stack."
         ),
     )
     service_sub = p_service.add_subparsers(dest="service_cmd", required=True)
@@ -723,11 +983,11 @@ def add_service_subparser(sub: argparse._SubParsersAction) -> None:  # type: ign
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument(
         "--compose-file", type=Path, default=_DEFAULT_COMPOSE_FILE,
-        help=f"Path to docker-compose YAML (default: {_DEFAULT_COMPOSE_FILE})",
+        help=f"Local-only Docker Compose YAML (default: {_DEFAULT_COMPOSE_FILE})",
     )
     common.add_argument(
         "--env-file", type=Path, default=Path(".env"),
-        help="Path to .env file (default: ./.env; ignored if missing)",
+        help="Local-only .env file (default: ./.env; ignored if missing)",
     )
 
     admin_secret_common = argparse.ArgumentParser(add_help=False)
@@ -742,25 +1002,108 @@ def add_service_subparser(sub: argparse._SubParsersAction) -> None:  # type: ign
     )
 
     p_up = service_sub.add_parser(
-        "up", parents=[common],
-        help="Start stack, run migrations, seed test data, print summary",
+        "up",
+        help="Deploy one explicit local, personal-dev, staging, or production target",
     )
-    p_up.add_argument(
-        "--db-url", default=_DEFAULT_DB_URL,
+    target_options = p_up.add_argument_group("target selection")
+    target_options.add_argument(
+        "--environment",
+        required=True,
+        type=_service_environment,
+        help="Required target: local, dev-<name>, staging, or production.",
+    )
+    target_options.add_argument(
+        "--candidate",
+        type=_candidate_identifier,
+        default=None,
+        help=(
+            "Reuse an owned personal SHA-256 content digest, or name the exact full "
+            "CI-approved Git commit required by a protected target. Omit only to seal "
+            "personal-dev source."
+        ),
+    )
+    personal_options = p_up.add_argument_group("personal-development options")
+    personal_options.add_argument(
+        "--source-root",
+        type=Path,
+        default=None,
+        help="Exact Git worktree root to seal for dev-<name>. Default: current directory.",
+    )
+    personal_options.add_argument(
+        "--source-context",
+        action="append",
+        default=None,
+        help="Allowed source context relative to --source-root. Repeatable; default: .",
+    )
+    personal_options.add_argument(
+        "--min-slots",
+        type=_nonnegative_int,
+        choices=range(PER_INSTANCE_CAP + 1),
+        default=None,
+        help="Aggregate shared-fleet warm minimum for dev-<name>. Default: 0.",
+    )
+    personal_options.add_argument(
+        "--max-slots",
+        type=int,
+        choices=range(PER_INSTANCE_CAP + 1),
+        default=None,
+        help="Finite aggregate shared-fleet demand ceiling for dev-<name>. Default: 2.",
+    )
+    personal_options.add_argument(
+        "--expected-operation-epoch",
+        type=_nonnegative_int,
+        default=None,
+        help=(
+            "Explicit personal lifecycle compare-and-set epoch. When omitted, resolve "
+            "the exact current epoch before mutation."
+        ),
+    )
+    personal_options.add_argument(
+        "--no-wait",
+        action="store_true",
+        help="Return after the personal lifecycle request is durably accepted.",
+    )
+    personal_options.add_argument(
+        "--timeout",
+        type=_positive_float,
+        default=None,
+        help="Personal deployment wait timeout in seconds. Default: 7200.",
+    )
+    personal_options.add_argument(
+        "--poll-interval",
+        type=_positive_float,
+        default=None,
+        help="Personal lifecycle poll interval in seconds. Default: 2.",
+    )
+    local_options = p_up.add_argument_group("local Compose options")
+    local_options.add_argument(
+        "--compose-file",
+        type=Path,
+        default=None,
+        help=f"Docker Compose YAML. Default: {_DEFAULT_COMPOSE_FILE}.",
+    )
+    local_options.add_argument(
+        "--env-file",
+        type=Path,
+        default=None,
+        help=f"Environment file; ignored if missing. Default: {_DEFAULT_ENV_FILE}.",
+    )
+    local_options.add_argument(
+        "--db-url", default=None,
         help=f"Postgres URL for migrations + seeding (default: {_DEFAULT_DB_URL})",
     )
-    p_up.add_argument(
+    local_options.add_argument(
         "--admin-secret-file",
         type=Path,
-        default=_DEFAULT_DEV_ADMIN_SECRET_FILE,
+        default=None,
         help=(
             "Dev singleton admin secrets.toml path mounted by compose "
             f"(default: {_DEFAULT_DEV_ADMIN_SECRET_FILE})"
         ),
     )
-    p_up.add_argument(
+    local_options.add_argument(
         "--cp-url",
-        default=_DEFAULT_CP_URL,
+        default=None,
         help=(
             "Control Plane base URL for minting the batch-runner token "
             f"(default: {_DEFAULT_CP_URL})"

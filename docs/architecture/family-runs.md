@@ -282,8 +282,8 @@ their existing protected secret authority.
 
 ### Deterministic local seed
 
-`loom service up` runs the dev seeder after migrations. It idempotently upserts
-25 `anthropic-poster-design` smoke tasks across the five canonical
+`loom service up --environment local` runs the dev seeder after migrations. It
+idempotently upserts 25 `anthropic-poster-design` smoke tasks across the five canonical
 SkillLearnBench baseline rows, plus three same-family `skillflow-iterative`
 tasks. All 28 rows use the checked-in `fixture://family-runs-dev/smoke` bundle,
 so local startup does not depend on a catalog download or network access. The
@@ -292,8 +292,9 @@ service-side sequencing to consume the intended non-alphabetical order before
 a worker has materialised the bundle.
 
 The default compose file uses mutable local `loom-*:dev` images. For that file,
-`loom service up` executes `docker compose up -d --build` before waiting for
-Postgres, running migrations, or seeding. Compose/BuildKit reuses a fresh cache
+`loom service up --environment local` executes
+`docker compose up -d --build` before waiting for Postgres, running migrations,
+or seeding. Compose/BuildKit reuses a fresh cache
 and rebuilds changed inputs, preventing a stale service image from starting
 against a newer host migration tree. Custom compose files containing only
 immutable image tags retain the existing no-build behaviour.

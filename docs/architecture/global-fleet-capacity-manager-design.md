@@ -1414,8 +1414,8 @@ target from the current checkout:
 ```text
 loom service up --environment local
 loom service up --environment dev-alice
-loom service up --environment staging --candidate <immutable-id>
-loom service up --environment production --candidate <immutable-id>
+loom service up --environment staging --candidate <full-CI-approved-commit>
+loom service up --environment production --candidate <full-CI-approved-commit>
 ```
 
 These illustrate target selection, not a way to omit target-policy arguments.

@@ -253,8 +253,9 @@ def dispatch(argv: list[str]) -> int:
         prog="loom dev",
         description=(
             "Manage isolated persistent development environments on the shared "
-            "fleet. For the local Docker Compose stack, use `loom service`; "
-            "`loom service up` is intentionally local-only and has no dev/staging/prod selector."
+            "fleet. These are lower-level lifecycle commands; `loom service up "
+            "--environment dev-<name>` is the source-fresh deployment entrypoint, and "
+            "`--environment local` selects Docker Compose."
         ),
     )
     sub = parser.add_subparsers(dest="dev_cmd", required=True)
