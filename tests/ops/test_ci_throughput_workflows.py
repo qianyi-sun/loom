@@ -865,7 +865,6 @@ def test_images_merge_groups_do_not_publish_or_write_cache() -> None:
     assert "--push" not in build_script
     assert "--cache-to" not in build_script
     assert 'merge_group) image_tag="merge-group-${sha_short}"' in build_script
-    assert "github.event_name == 'pull_request'" in build_step["env"]["INTERNAL_PULL_REQUEST"]
     assert "type=docker" in build_script
     assert ".docker.tar" in build_script
     assert "type=oci" not in build_script
@@ -892,15 +891,108 @@ def test_image_candidates_are_internal_pr_only_and_untrusted_build_is_read_only(
     assert "secrets." not in json.dumps(build_step)
     assert "docker login" not in json.dumps(build)
     assert "ghcr.io" not in json.dumps(build)
-    assert (
-        "github.event.pull_request.head.repo.full_name == github.repository"
-        in build_step["env"]["INTERNAL_PULL_REQUEST"]
-    )
+    assert '"$EVENT_NAME" == "pull_request"' in build_step["run"]
     assert (
         "github.event.pull_request.head.repo.full_name == github.repository" in archive_step["if"]
     )
     assert "candidate-${HEAD_SHA}-${ARCHITECTURE}" in build_step["run"]
     assert archive_step["with"]["path"].endswith(".docker.tar")
+
+
+def test_release_images_are_scanned_attested_and_verified_before_manifest_join() -> None:
+    workflow = _workflow(".github/workflows/images.yml")
+    build = workflow["jobs"]["build"]
+    publish = workflow["jobs"]["publish"]
+    manifest = workflow["jobs"]["publish-manifest"]
+
+    build_step_names = [step.get("name") for step in build["steps"]]
+    build_script = next(
+        step["run"]
+        for step in build["steps"]
+        if step.get("name") == "Build without registry or cache write authority"
+    )
+    build_scan = next(
+        step for step in build["steps"] if step.get("name") == "Scan native image archive"
+    )
+    assert "type=docker,dest=${archive}" in build_script
+    assert "INTERNAL_PULL_REQUEST" not in build_script
+    assert build_scan["uses"].startswith("aquasecurity/trivy-action@")
+    assert build_scan["with"] == {
+        "input": "/tmp/${{ matrix.image }}-${{ matrix.architecture }}.docker.tar",
+        "format": "json",
+        "output": "/tmp/${{ matrix.image }}-${{ matrix.architecture }}.trivy.json",
+        "exit-code": "1",
+        "ignore-unfixed": "false",
+        "severity": "HIGH,CRITICAL",
+        "scanners": "vuln",
+        "cache": "false",
+    }
+    assert build_step_names.index("Build without registry or cache write authority") < (
+        build_step_names.index("Scan native image archive")
+    )
+
+    publish_names = [step.get("name") for step in publish["steps"]]
+    trusted_scan = next(
+        step for step in publish["steps"] if step.get("name") == "Scan trusted image archive"
+    )
+    architecture_attestation = next(
+        step
+        for step in publish["steps"]
+        if step.get("name") == "Attest published architecture digest"
+    )
+    assert trusted_scan["uses"].startswith("aquasecurity/trivy-action@")
+    assert trusted_scan["with"]["cache"] == "false"
+    assert architecture_attestation["uses"].startswith(
+        "actions/attest-build-provenance@"
+    )
+    assert architecture_attestation["with"]["predicate-type"] == (
+        "https://slsa.dev/provenance/v1"
+    )
+    assert architecture_attestation["with"]["push-to-registry"] is True
+    assert publish_names.index("Scan trusted image archive") < publish_names.index(
+        "Publish scanned architecture image"
+    )
+    assert publish_names.index("Publish scanned architecture image") < publish_names.index(
+        "Attest published architecture digest"
+    )
+    assert publish_names.index("Attest published architecture digest") < publish_names.index(
+        "Verify published architecture attestation"
+    )
+
+    manifest_names = [step.get("name") for step in manifest["steps"]]
+    resolve = next(
+        step["run"]
+        for step in manifest["steps"]
+        if step.get("name") == "Verify architecture attestations"
+    )
+    join = next(
+        step["run"]
+        for step in manifest["steps"]
+        if step.get("name") == "Join verified native image manifest"
+    )
+    final_attestation = next(
+        step
+        for step in manifest["steps"]
+        if step.get("name") == "Attest published manifest digest"
+    )
+    assert "gh attestation verify" in resolve
+    assert "--signer-workflow" in resolve
+    assert "--source-digest" in resolve
+    assert "--source-ref" in resolve
+    assert "--deny-self-hosted-runners" in resolve
+    assert '"${image}@${amd64_digest}"' in join
+    assert '"${image}@${arm64_digest}"' in join
+    assert final_attestation["uses"].startswith("actions/attest-build-provenance@")
+    assert final_attestation["with"]["push-to-registry"] is True
+    assert manifest_names.index("Verify architecture attestations") < manifest_names.index(
+        "Join verified native image manifest"
+    )
+    assert manifest_names.index("Attest published manifest digest") < manifest_names.index(
+        "Verify published manifest attestation"
+    )
+    assert manifest_names.index("Verify published manifest attestation") < (
+        manifest_names.index("Publish verified manifest tags")
+    )
 
 
 def test_image_candidate_index_and_merge_resolver_are_exact_and_fail_closed() -> None:
@@ -912,12 +1004,7 @@ def test_image_candidate_index_and_merge_resolver_are_exact_and_fail_closed() ->
     publish_script = next(
         step["run"]
         for step in publish["steps"]
-        if step.get("name") == "Build and publish trusted image"
-    )
-    load_script = next(
-        step["run"]
-        for step in publish["steps"]
-        if step.get("name") == "Load and verify PR candidate archive"
+        if step.get("name") == "Publish scanned architecture image"
     )
 
     assert set(candidate_index["needs"]) == {"plan", "build"}
@@ -951,16 +1038,15 @@ def test_image_candidate_index_and_merge_resolver_are_exact_and_fail_closed() ->
     )
     assert 'docker tag "$local_image" "$target"' in publish_script
     assert 'docker push "$target"' in publish_script
-    assert "No exact candidate was available; rebuilt on trusted push." in publish_script
-    assert ".docker.tar" in load_script
-    assert 'docker load --input "$archive"' in load_script
+    assert ".release.docker.tar" in publish_script
+    assert 'docker load --input "$archive"' in publish_script
 
 
 def test_manifest_image_build_and_publish_pass_exact_full_head_sha() -> None:
     workflow = _workflow(".github/workflows/images.yml")
     expected_steps = {
         "build": "Build without registry or cache write authority",
-        "publish": "Build and publish trusted image",
+        "publish": "Build trusted archive when PR candidate is unavailable",
     }
 
     for job_name, step_name in expected_steps.items():
@@ -974,10 +1060,13 @@ def test_manifest_image_build_and_publish_pass_exact_full_head_sha() -> None:
             assert step["env"]["HEAD_SHA"] == "${{ github.sha }}"
         assert step["env"]["BUILD_CONTEXT"] == "${{ matrix.context }}"
         assert '--build-arg "LOOM_BUILD_SHA=${HEAD_SHA}"' in script
-        assert 'build_args+=("$BUILD_CONTEXT")' in script
-        assert script.index("LOOM_BUILD_SHA=${HEAD_SHA}") < script.index(
-            'build_args+=("$BUILD_CONTEXT")'
-        )
+        if job_name == "build":
+            assert 'build_args+=("$BUILD_CONTEXT")' in script
+            context_marker = 'build_args+=("$BUILD_CONTEXT")'
+        else:
+            assert '"$BUILD_CONTEXT"' in script
+            context_marker = '"$BUILD_CONTEXT"'
+        assert script.index("LOOM_BUILD_SHA=${HEAD_SHA}") < script.rindex(context_marker)
         assert 'if [[ "$IMAGE_NAME" == "service" ]]' not in script
         assert "build_args+=(.)" not in script
 

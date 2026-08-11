@@ -72,6 +72,27 @@
           "version": "v8.2.0"
         }
       }
+    },
+    {
+      "name": "image-supply-chain",
+      "actions": [
+        "actions/attest-build-provenance",
+        "aquasecurity/trivy-action"
+      ],
+      "compatibility_tests": [
+        "uv run --no-sync pytest -q tests/ops/test_ci_action_pins.py tests/ops/test_ci_image_release_evidence.py tests/ops/test_ci_throughput_workflows.py",
+        "actionlint .github/workflows/images.yml"
+      ],
+      "rollback": {
+        "actions/attest-build-provenance": {
+          "sha": "4d101475d8b20a2381f78447822ac1eab6504dd8",
+          "version": "v4.2.2"
+        },
+        "aquasecurity/trivy-action": {
+          "sha": "ed142fd0673e97e23eac54620cfb913e5ce36c25",
+          "version": "v0.36.0"
+        }
+      }
     }
   ]
 }

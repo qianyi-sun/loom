@@ -217,15 +217,21 @@ exact key contract and evidence commands are documented in the
 Only credential-preparation init containers mount that projected Secret. They
 copy the bounded, exact key set to mode-0600 UID-owned files on a memory-backed
 volume; the migration and manager application containers mount only that
-prepared runtime directory, read-only.
+prepared runtime directory, read-only. A held projected-generation descriptor
+and pre-install rebinding check prevent a Kubernetes `..data` rotation from
+mixing credential generations.
 
-The first reviewed replacement of the schema's bootstrap authority UUID writes
-an append-only binding audit marker in the same locked transaction. Exact
-replay backfills a missing marker from an earlier bootstrap implementation and
-is otherwise idempotent. Duplicate, contradictory, or different later binding
-evidence fails closed even before a writer registers. Percent-encoded database
+The schema migration writes a canonical seed event beside its generated
+bootstrap authority UUID. A reviewed replacement requires that one pristine
+seed and writes an append-only binding event in the same locked transaction.
+Legacy markerless state allows only same-UUID backfill. Duplicate, malformed,
+contradictory, or different later reserved evidence fails closed even before a
+writer registers. Percent-encoded database
 URLs retain their SQLAlchemy meaning: percent escaping occurs only at the
 Alembic ConfigParser boundary.
+Migration connections have fixed connect, lock, and statement timeouts, the Job
+has an active deadline, and PostgreSQL startup is protected by a bounded startup
+probe before liveness begins.
 The DNS-label-safe, length-bounded migration Job name incorporates the
 migration head and manager image digest plus a digest of the canonical complete
 Job spec and exact head. Any immutable spec change therefore renders a new Job

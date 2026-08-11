@@ -107,11 +107,18 @@ def test_images_publish_authority_is_push_only_on_trusted_branches() -> None:
     assert write_capable_jobs == {"publish", "publish-manifest"}
     assert publish["permissions"] == {
         "actions": "read",
+        "attestations": "write",
         "contents": "read",
+        "id-token": "write",
         "packages": "write",
     }
     manifest = workflow["jobs"]["publish-manifest"]
-    assert manifest["permissions"] == {"contents": "read", "packages": "write"}
+    assert manifest["permissions"] == {
+        "attestations": "write",
+        "contents": "read",
+        "id-token": "write",
+        "packages": "write",
+    }
     assert _normalized_expression(publish["if"]) == (
         "github.event_name == 'push' && "
         "(github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && "
@@ -146,18 +153,19 @@ def test_images_publish_authority_is_push_only_on_trusted_branches() -> None:
 
     script = "\n".join(_run_blocks(publish))
     assert "docker login" in script
-    assert "--push" in script
+    assert "docker push" in script
     assert "--cache-from" not in script
     assert "--cache-to" not in script
-    assert "build_args=(" in script
-    assert '"${build_args[@]}"' in script
+    assert "Scan trusted image archive" in str(publish)
+    assert "Attest published architecture digest" in str(publish)
     assert "${{" not in script
 
     manifest_script = "\n".join(_run_blocks(manifest))
     assert "docker buildx imagetools create" in manifest_script
-    assert '"${image}:build-${HEAD_SHA}-amd64"' in manifest_script
-    assert '"${image}:build-${HEAD_SHA}-arm64"' in manifest_script
-    assert 'expected = {"linux/amd64", "linux/arm64"}' in manifest_script
+    assert '"${image}@${amd64_digest}"' in manifest_script
+    assert '"${image}@${arm64_digest}"' in manifest_script
+    assert '"linux/amd64": os.environ["AMD64_DIGEST"]' in manifest_script
+    assert '"linux/arm64": os.environ["ARM64_DIGEST"]' in manifest_script
     assert "LOOM_CI_IMAGE_RUNS_ON" not in str(publish)
     assert "LOOM_CI_IMAGE_RUNS_ON" not in str(manifest)
 
@@ -202,11 +210,15 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
 
     assert jobs["publish"]["permissions"] == {
         "actions": "read",
+        "attestations": "write",
         "contents": "read",
+        "id-token": "write",
         "packages": "write",
     }
     assert jobs["publish-manifest"]["permissions"] == {
+        "attestations": "write",
         "contents": "read",
+        "id-token": "write",
         "packages": "write",
     }
     assert "environment" not in jobs["publish"]

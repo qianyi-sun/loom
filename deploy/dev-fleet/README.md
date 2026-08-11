@@ -71,19 +71,26 @@ created. It must already contain exactly the keys consumed by this release:
 Only the credential-preparation init containers mount the projected Secret.
 They copy this exact bounded file set to UID-owned mode-0600 regular files on a
 memory-backed volume. The migration and manager application containers mount
-only that prepared runtime directory, read-only. A percent-encoded
+only that prepared runtime directory, read-only. The copier pins one Kubernetes
+`..data` generation by directory descriptor, validates every standard key
+symlink, and rechecks the generation before installation; a projection rotation
+therefore fails closed instead of mixing credentials. A percent-encoded
 `database-url` keeps its original SQLAlchemy meaning; migration escapes percent
 signs only while passing the URL through Alembic's ConfigParser.
 
-The first reviewed bootstrap-authority replacement is recorded by an
-append-only audit marker in the same database transaction. Replaying the same
-UUID backfills a marker missing from an earlier bootstrap implementation and is
-otherwise idempotent; duplicate, contradictory, or later different binding
+The initial migration records its generated bootstrap UUID in a canonical
+append-only seed event in the same transaction. A reviewed replacement consumes
+only that one pristine seed and records its own binding event while holding the
+authority row lock. A legacy markerless database permits only same-UUID
+backfill; duplicate, malformed, contradictory, or later different reserved
 evidence fails closed. The DNS-label-safe, length-bounded migration Job name
 combines its migration head
 and manager-image digest with a digest of the canonical complete Job spec and
 exact head. Any immutable spec change creates a new Job rather than attempting
-to patch an existing Job.
+to patch an existing Job. PostgreSQL connections use fixed 10-second connect,
+30-second lock, and 300-second statement bounds; the Job has a 900-second active
+deadline. PostgreSQL's startup probe allows up to ten minutes for initialization
+or recovery before liveness can restart it.
 
 After a separately authorized #906 deployment, the read-only status check is:
 

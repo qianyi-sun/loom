@@ -123,7 +123,11 @@ Their init containers run the same immutable manager image and copy the exact
 projected Secret file set into a memory-backed volume as UID-owned mode-0600
 regular files. Only the init containers mount the projected Secret. The
 application containers mount the prepared memory-backed runtime directory
-read-only and never consume Kubernetes Secret symlinks directly.
+read-only and never consume Kubernetes Secret symlinks directly. Credential
+preparation opens and pins one projected `..data` generation, reads every key
+through that held generation directory, verifies the standard `key ->
+..data/key` links, and rechecks the binding before installation. A concurrent
+Secret rotation fails closed and leaves no partial runtime directory.
 
 The manager Service is ClusterIP-only. Manager ingress permits TCP 8443 from
 pods bearing the trusted capacity-agent label in any namespace and from the
@@ -153,13 +157,20 @@ when all of these facts hold in one locked transaction:
 Any other state fails closed without changing the UUID. This permits a new
 database to receive a reviewed stable identity but prevents a delayed or
 misconfigured Job from reincarnating an authority that has already been used.
-The first replacement also writes an append-only authority-binding audit marker
-in the same transaction. A different later UUID therefore cannot replace the
-reviewed identity even before writer registration. An exact replay converges by
-backfilling a missing marker from an earlier bootstrap implementation and is
-otherwise idempotent; duplicate or contradictory binding markers fail closed.
+The initial schema migration writes one canonical append-only seed event beside
+its generated UUID in the same transaction. Replacement requires that exact
+pristine seed, holds the authority row lock, and writes one append-only binding
+event in the replacement transaction. A different later UUID therefore cannot
+replace the reviewed identity even before writer registration. A legacy
+markerless database permits only same-UUID backfill. Exact replay is idempotent;
+duplicate, malformed, or contradictory reserved events fail closed.
 Percent-encoded database URLs are escaped only at Alembic's ConfigParser
 boundary and retain their original SQLAlchemy meaning.
+Both the Alembic and authority-binding connections enforce non-overridable
+10-second connection, 30-second lock, and 300-second statement timeouts. The
+Job also has a 900-second active deadline. PostgreSQL has a startup probe with a
+ten-minute initialization/recovery allowance, after which its existing
+readiness and liveness probes retain their normal bounds.
 The database constraints continue to prohibit a nonzero executable ceiling.
 Nil authority UUIDs are rejected before the migration command reads its
 database URL or changes schema state, and command failures emit no database
@@ -235,16 +246,26 @@ fixed executable and fixed credential paths in the manager container.
 runtime and `capacity_migrations`. It runs the manager as UID/GID 65532 and is
 registered as the `loom-capacity-manager` release image in the typed component
 ownership manifest. Existing image planning, native AMD64/ARM64 builds,
-scanning, candidate preservation, attestation, and trusted push publication are
-therefore inherited without a new workflow-owned image allowlist. Until the
+candidate preservation, and trusted push publication are therefore inherited
+without a new workflow-owned image allowlist. Every native build produces a
+Docker archive and passes a pinned Trivy HIGH/CRITICAL vulnerability gate. The
+trusted publisher rescans that exact archive before loading and pushing it,
+then signs and strictly verifies a SLSA v1 predicate for the resolved registry
+digest. The predicate binds the source commit/tree, Dockerfile, context,
+platform, scan-report digest, workflow run/attempt, and branch ref. The manifest
+publisher verifies both architecture attestations, joins only their immutable
+digests, signs and verifies the resulting manifest digest, and only then moves
+the release SHA and branch tags. Until the
 live lease broker recognizes this new image key, its AMD64 build uses a hosted
 runner like the other newly introduced trusted control-plane images.
 
 ## Failure handling
 
 - Invalid config or release identity returns CLI exit code 2 and emits no YAML.
-- Secret absence or an unexpected projected file set fails the init container.
-- Migration errors use Job retry bounds and leave the manager unready.
+- Secret absence, projection rotation, or an unexpected projected file set
+  fails the init container.
+- Migration errors use fixed client and Job deadline bounds and leave the
+  manager unready.
 - Authority mismatch on a used database never mutates the database.
 - A stale schema, incorrect UUID, unavailable database, lost writer fence, or
   nonzero ceiling makes `/healthz` return 503 and status fail.
@@ -262,7 +283,8 @@ invalid resources, and authority-binding attempts against any used database.
 
 The credential-copy tests use Kubernetes-style `..data` symlinks and prove
 owner-only nonsymlink destinations, exact file sets, idempotence, drift refusal,
-and cleanup after partial failure. Health tests use a real loopback mTLS server
+single-generation rotation refusal, and cleanup after partial failure. Health
+tests use a real loopback mTLS server
 and prove rejection of missing/untrusted clients, malformed JSON, wrong fields,
 not-ready state, and any nonzero or non-integer ceiling.
 
