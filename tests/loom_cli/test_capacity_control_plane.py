@@ -110,7 +110,7 @@ def test_renderer_emits_one_inert_control_plane_in_dependency_order() -> None:
         ("Namespace", "loom-dev"),
         ("Service", "loom-capacity-postgres"),
         ("StatefulSet", "loom-capacity-postgres"),
-        ("Job", "loom-capacity-migrate-capacity-0003-aaaaaaaaaa-f14bb6fc92"),
+        ("Job", "loom-capacity-migrate-capacity-0003-aaaaaaaaaa-b9e5e53375"),
         ("Service", "loom-capacity-manager"),
         ("Deployment", "loom-capacity-manager"),
         ("NetworkPolicy", "capacity-default-deny"),
@@ -233,6 +233,7 @@ def test_renderer_pins_images_credentials_security_and_zero_only_commands() -> N
     ]
     assert manager["spec"]["replicas"] == 1
     assert manager["spec"]["strategy"] == {"type": "Recreate"}
+    assert migration["spec"]["activeDeadlineSeconds"] == 900
     assert migration["spec"]["template"]["spec"]["restartPolicy"] == "Never"
 
     for workload in workloads.values():
@@ -280,6 +281,18 @@ def test_renderer_pins_images_credentials_security_and_zero_only_commands() -> N
         assert all(set(item) == {"key", "path"} for item in projected["secret"]["items"])
 
     manager_container = manager["spec"]["template"]["spec"]["containers"][0]
+    postgres_container = postgres["spec"]["template"]["spec"]["containers"][0]
+    postgres_health_command = [
+        "/bin/sh",
+        "-ec",
+        'exec pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"',
+    ]
+    assert postgres_container["startupProbe"] == {
+        "exec": {"command": postgres_health_command},
+        "periodSeconds": 5,
+        "failureThreshold": 120,
+        "timeoutSeconds": 3,
+    }
     environment = {item["name"]: item["value"] for item in manager_container["env"]}
     assert environment["LOOM_CAPACITY_EXPECTED_AUTHORITY_INCARNATION"] == str(_AUTHORITY)
     assert "CEILING" not in " ".join(environment)

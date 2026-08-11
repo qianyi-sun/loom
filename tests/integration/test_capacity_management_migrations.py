@@ -7,6 +7,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+import sqlalchemy
 from alembic import command
 from alembic.config import Config as AlembicConfig
 from sqlalchemy import create_engine, inspect, select, text
@@ -316,3 +317,36 @@ def test_capacity_alembic_environment_has_no_environment_db_fallback() -> None:
     assert "LOOM_CAPACITY_DB_URL" in source
     assert "LOOM_DB_URL" not in source
     assert "LOOM_CP_DB_URL" not in source
+
+
+def test_capacity_alembic_connection_enforces_fixed_postgres_timeouts(
+    capacity_postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path(__file__).resolve().parents[2]
+    encoded_url = (
+        f"{capacity_postgres_url}?application_name=capacity%40migration"
+        "&connect_timeout=99"
+    )
+    cfg = AlembicConfig(str(root / "capacity_migrations" / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "capacity_migrations"))
+    monkeypatch.setenv("LOOM_CAPACITY_DB_URL", encoded_url)
+    real_engine_from_config = sqlalchemy.engine_from_config
+    captured: dict[str, object] = {}
+
+    def capture(configuration: dict[str, object], **kwargs: object) -> sqlalchemy.Engine:
+        captured["url"] = configuration["sqlalchemy.url"]
+        captured["connect_args"] = kwargs.get("connect_args")
+        return real_engine_from_config(configuration, **kwargs)
+
+    monkeypatch.setattr(sqlalchemy, "engine_from_config", capture)
+
+    command.upgrade(cfg, "head")
+
+    assert captured == {
+        "url": encoded_url,
+        "connect_args": {
+            "connect_timeout": 10,
+            "options": "-c lock_timeout=30000 -c statement_timeout=300000",
+        },
+    }

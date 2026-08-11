@@ -585,3 +585,44 @@ def test_migration_entrypoint_accepts_percent_encoded_database_url(
     migrate_capacity_database(database_url_file, _REVIEWED_AUTHORITY)
 
     assert _authority(capacity_postgres_url)["authority_incarnation"] == _REVIEWED_AUTHORITY
+
+
+def test_authority_binding_connection_enforces_fixed_postgres_timeouts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = (
+        "postgresql+psycopg://operator:secret@example.invalid/capacity"
+        "?application_name=capacity%40bootstrap&connect_timeout=99"
+    )
+    database_url_file = tmp_path / "database-url"
+    database_url_file.write_text(database_url, encoding="utf-8")
+    database_url_file.chmod(0o600)
+    captured: dict[str, object] = {}
+
+    class FakeEngine:
+        def dispose(self) -> None:
+            captured["disposed"] = True
+
+    def create(url: str, **kwargs: object) -> FakeEngine:
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return FakeEngine()
+
+    monkeypatch.setattr(capacity_migrate.command, "upgrade", lambda *_args: None)
+    monkeypatch.setattr(capacity_migrate, "create_engine", create)
+    monkeypatch.setattr(capacity_migrate, "bind_fresh_authority", lambda *_args: None)
+
+    migrate_capacity_database(database_url_file, _REVIEWED_AUTHORITY)
+
+    assert captured == {
+        "url": database_url,
+        "kwargs": {
+            "isolation_level": "SERIALIZABLE",
+            "connect_args": {
+                "connect_timeout": 10,
+                "options": "-c lock_timeout=30000 -c statement_timeout=300000",
+            },
+        },
+        "disposed": True,
+    }

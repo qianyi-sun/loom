@@ -380,6 +380,18 @@ def _postgres_statefulset(profile: CapacityControlPlaneProfile) -> dict[str, Any
                                 "failureThreshold": 12,
                                 "timeoutSeconds": 3,
                             },
+                            "startupProbe": {
+                                "exec": {
+                                    "command": [
+                                        "/bin/sh",
+                                        "-ec",
+                                        'exec pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"',
+                                    ]
+                                },
+                                "periodSeconds": 5,
+                                "failureThreshold": 120,
+                                "timeoutSeconds": 3,
+                            },
                             "livenessProbe": {
                                 "exec": {
                                     "command": [
@@ -433,6 +445,7 @@ def _migration_job(
         resources=profile.migration_resources,
     )
     job_spec: dict[str, Any] = {
+        "activeDeadlineSeconds": 900,
         "backoffLimit": 6,
         "template": {
             "metadata": {"labels": labels},

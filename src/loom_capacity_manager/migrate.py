@@ -16,6 +16,7 @@ from sqlalchemy import Engine, MetaData, RowMapping, Table, create_engine, inspe
 
 from loom_capacity_manager.config import read_owner_only_secret
 from loom_capacity_manager.models import CapacityAuditEvent, CapacityAuthorityState
+from loom_capacity_manager.postgres_timeouts import capacity_migration_connect_args
 
 
 class CapacityAuthorityBootstrapError(RuntimeError):
@@ -231,7 +232,11 @@ def migrate_capacity_database(
         else:
             os.environ["LOOM_CAPACITY_DB_URL"] = previous_url
 
-    engine = create_engine(database_url, isolation_level="SERIALIZABLE")
+    engine = create_engine(
+        database_url,
+        isolation_level="SERIALIZABLE",
+        connect_args=capacity_migration_connect_args(),
+    )
     try:
         bind_fresh_authority(engine, expected)
     finally:
