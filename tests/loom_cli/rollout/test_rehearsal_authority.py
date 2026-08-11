@@ -40,15 +40,9 @@ def test_checked_in_rehearsal_authority_is_exact_and_bounded() -> None:
         "namespace": "ingress-nginx",
     }
     assert ingress_role["rules"][0]["resourceNames"] == ["ingress-nginx-controller"]
-    assert ingress_role["rules"][0]["resources"] == ["services"]
+    assert ingress_role["rules"][0]["resources"] == ["endpoints", "services"]
     assert ingress_binding["roleRef"]["kind"] == "Role"
-    node_rule = next(rule for rule in documents[2]["rules"] if rule["resources"] == ["nodes"])
-    assert node_rule == {
-        "apiGroups": [""],
-        "resources": ["nodes"],
-        "resourceNames": [f"trt-eai-oldlab-{index}" for index in range(1, 6)],
-        "verbs": ["get"],
-    }
+    assert all(rule["resources"] != ["nodes"] for rule in documents[2]["rules"])
 
 
 @pytest.mark.parametrize(

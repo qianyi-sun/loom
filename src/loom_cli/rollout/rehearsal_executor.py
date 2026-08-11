@@ -58,9 +58,8 @@ from loom_cli.rollout.rehearsal_browser import (
     INGRESS_CONTROLLER_SERVICE,
     RehearsalBrowserArtifact,
     build_rehearsal_browser_artifact,
+    ingress_controller_endpoints,
     ingress_controller_ip,
-    rehearsal_backend_endpoints,
-    rehearsal_backend_node_gateway_source_ip,
     rehearsal_browser_job_complete,
     rehearsal_browser_pod_complete,
     rehearsal_browser_report_ready,
@@ -287,12 +286,12 @@ def _default_secret_artifact(plan: RehearsalPlan) -> RehearsalSecretArtifact:
 def _default_browser_artifact(
     plan: RehearsalPlan,
     ingress_ip: str,
-    ingress_source_ips: Sequence[str],
+    ingress_endpoint_ips: Sequence[str],
 ) -> RehearsalBrowserArtifact:
     return build_rehearsal_browser_artifact(
         plan,
         ingress_ip=ingress_ip,
-        ingress_source_ips=ingress_source_ips,
+        ingress_endpoint_ips=ingress_endpoint_ips,
     )
 
 
@@ -420,70 +419,30 @@ class IsolatedRehearsalExecutor:
         ingress_ip = ingress_controller_ip(controller) if controller is not None else None
         if ingress_ip is None:
             return _blocked("browser", "ingress-controller-readback-failed")
-        backend_nodes: dict[str, list[str]] = {}
-        for name, port in (("loom-web", 8080), ("loom-service", 8090)):
-            endpoints = self._command(
-                (
-                    "kubectl",
-                    "--kubeconfig",
-                    str(self.kubeconfig),
-                    "--namespace",
-                    plan.resources.namespace,
-                    "get",
-                    "endpoints",
-                    name,
-                    "--request-timeout=15s",
-                    "-o",
-                    "json",
-                ),
-                None,
-                timeout=20,
-            )
-            backend_endpoints = (
-                rehearsal_backend_endpoints(
-                    endpoints,
-                    namespace=plan.resources.namespace,
-                    name=name,
-                    port=port,
-                )
-                if endpoints is not None
-                else None
-            )
-            if backend_endpoints is None:
-                return _blocked("browser", "backend-endpoints-readback-failed")
-            for node_name, pod_ip in backend_endpoints:
-                backend_nodes.setdefault(node_name, []).append(pod_ip)
-        ingress_source_ips: list[str] = []
-        for node_name, pod_ips in sorted(backend_nodes.items()):
-            node = self._command(
-                (
-                    "kubectl",
-                    "--kubeconfig",
-                    str(self.kubeconfig),
-                    "get",
-                    "node",
-                    node_name,
-                    "--request-timeout=15s",
-                    "-o",
-                    "json",
-                ),
-                None,
-                timeout=20,
-            )
-            source_ip = (
-                rehearsal_backend_node_gateway_source_ip(
-                    node,
-                    expected_name=node_name,
-                    expected_pod_ips=pod_ips,
-                )
-                if node is not None
-                else None
-            )
-            if source_ip is None:
-                return _blocked("browser", "backend-node-readback-failed")
-            ingress_source_ips.append(source_ip)
+        endpoints = self._command(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "--namespace",
+                INGRESS_CONTROLLER_NAMESPACE,
+                "get",
+                "endpoints",
+                INGRESS_CONTROLLER_SERVICE,
+                "--request-timeout=15s",
+                "-o",
+                "json",
+            ),
+            None,
+            timeout=20,
+        )
+        ingress_endpoint_ips = (
+            ingress_controller_endpoints(endpoints) if endpoints is not None else None
+        )
+        if ingress_endpoint_ips is None:
+            return _blocked("browser", "ingress-endpoints-readback-failed")
         try:
-            artifact = self.browser_artifacts(plan, ingress_ip, ingress_source_ips)
+            artifact = self.browser_artifacts(plan, ingress_ip, ingress_endpoint_ips)
         except (OSError, RuntimeError, ValueError):
             return _blocked("browser", "artifact-validation-failed")
         image_names = ("loom-staging-admin-browser-smoke",)
