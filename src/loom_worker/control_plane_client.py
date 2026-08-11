@@ -30,6 +30,18 @@ class StepTokenClient(Protocol):
     ) -> str: ...
 
 
+class ExecutionAttemptStepTokenClient(Protocol):
+    async def mint_execution_attempt_step_token(
+        self,
+        *,
+        team_id: UUID,
+        execution_attempt_id: UUID,
+        step_id: str,
+        ttl_sec: int,
+        claim: ExecutionAttemptClaimHeaders,
+    ) -> str: ...
+
+
 @dataclass(frozen=True)
 class ExecutionAttemptClaimHeaders:
     """The bearer-independent fencing identity for one Attempt claim.
@@ -839,6 +851,41 @@ class HttpControlPlaneClient:
             )
             r.raise_for_status()
             body = r.json()
+            return str(body["token"])
+        finally:
+            if owned:
+                await client.aclose()
+
+    async def mint_execution_attempt_step_token(
+        self,
+        *,
+        team_id: UUID,
+        execution_attempt_id: UUID,
+        step_id: str,
+        ttl_sec: int,
+        claim: ExecutionAttemptClaimHeaders,
+    ) -> str:
+        """Mint the rotating JWT for one fenced Pipeline Attempt.
+
+        The worker bearer remains outside the JSON body, and the lease token is
+        confined to the existing claim headers.  The Control Plane verifies
+        the exact Attempt, selected gateway network profile, and TTL contract.
+        """
+
+        client, owned = self._http()
+        try:
+            response = await client.post(
+                "/admin/step-tokens",
+                headers={**self._headers, **claim.as_headers()},
+                json={
+                    "team_id": str(team_id),
+                    "execution_attempt_id": str(execution_attempt_id),
+                    "step_id": step_id,
+                    "ttl_sec": ttl_sec,
+                },
+            )
+            response.raise_for_status()
+            body = response.json()
             return str(body["token"])
         finally:
             if owned:
