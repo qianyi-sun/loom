@@ -402,7 +402,9 @@ class EvidenceDirectory:
 
     def read_failure(self) -> dict[str, Any] | None:
         """Read normalized terminal failure evidence without following links."""
-        directory_fd = _open_rollout_directory(self.root, self.rollout_id)
+        directory_fd = _open_rollout_directory_if_present(self.root, self.rollout_id)
+        if directory_fd is None:
+            return None
         try:
             try:
                 return _read_json_object_at(directory_fd, self.FAILURE_JSON)

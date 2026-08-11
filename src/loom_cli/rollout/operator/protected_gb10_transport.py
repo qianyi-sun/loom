@@ -462,13 +462,16 @@ service_props = properties(service, ["LoadState", "ActiveState", "SubState"])
 timer_props = properties(timer, ["LoadState", "ActiveState", "SubState"])
 timer_enabled = run(["systemctl", "--user", "is-enabled", timer])
 
-def retired(unit, props, enabled):
-    return bool(enabled.returncode != 0 and (props is None or (
+def retired(unit, props, enabled, *, accept_static=False):
+    enablement = enabled.stdout.strip()
+    enablement_retired = bool(enabled.returncode != 0 or (
+        accept_static and enabled.returncode == 0 and enablement == "static"))
+    return bool(enablement_retired and (props is None or (
         props.get("ActiveState") not in {{"active", "activating", "reloading"}}
         and props.get("SubState") not in {{"running", "start", "start-pre", "start-post"}})))
 
 service_enabled = run(["systemctl", "--user", "is-enabled", service])
-service_retired = retired(service, service_props, service_enabled)
+service_retired = retired(service, service_props, service_enabled, accept_static=True)
 timer_retired = retired(timer, timer_props, timer_enabled)
 service_timer_exact = bool(service_retired and timer_retired)
 service_timer_transient = False
