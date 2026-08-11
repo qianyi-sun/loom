@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 import loom_cli.rollout.operator.final_gate_action_source as action_source_module
+from loom_cli.rollout.final_attestation_admission import PostApplyDriftTransientError
 from loom_cli.rollout.final_gate_readiness import (
     FINAL_CHECK_IDS,
     PROTECTED_MUTATION_CHECK_IDS,
@@ -272,6 +273,9 @@ def _authority(tmp_path: Path, *, tamper: bool = False):
         run=run,
         read_mutation_epoch=lambda: 8,
         now=lambda: NOW,
+        post_apply_plan_factory=lambda candidate, epoch: SimpleNamespace(
+            candidate=(candidate, epoch)
+        ),  # type: ignore[arg-type]
         executable=executable,
         executable_owner_uid=os.geteuid(),
     )
@@ -328,9 +332,82 @@ def test_final_gate_action_source_runs_post_apply_drift_in_process(
     assert result.observed_epoch == 8
     assert not result.protected_mutation
     assert captured["admission"] is admission
-    assert captured["plan"] is preflight_plan
+    assert captured["plan"] is not preflight_plan
+    assert captured["plan"].candidate == ("exact-plan", 8)  # type: ignore[union-attr]
     assert captured["current_mutation_epoch"] == 8
     assert calls == []
+
+
+def test_final_gate_action_source_retries_transient_post_apply_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, attestation, calls = _authority(tmp_path)
+    sleeps: list[float] = []
+    source = replace(
+        source,
+        post_apply_drift_attempts=3,
+        post_apply_drift_retry_interval_seconds=0.25,
+        sleep=sleeps.append,
+    )
+    preflight_plan = SimpleNamespace(candidate="exact-plan")
+    admission = replace(
+        _admission(attestation),
+        preflight_plan=preflight_plan,  # type: ignore[arg-type]
+    )
+    attempts = 0
+
+    def validate(**_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise PostApplyDriftTransientError("post-apply drift evidence is incomplete")
+        return SimpleNamespace(observed_mutation_epoch=8, evidence_digest="d" * 64)
+
+    monkeypatch.setattr(action_source_module, "validate_post_apply_attestation_drift", validate)
+
+    result = source(_envelope(attestation), attestation, 7, admission)["final.drift"](
+        CheckOperation.VERIFY
+    )
+
+    assert result.ready
+    assert attempts == 3
+    assert sleeps == [0.25, 0.25]
+    assert calls == []
+
+
+def test_final_gate_action_source_fails_after_bounded_validator_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, attestation, _calls = _authority(tmp_path)
+    sleeps: list[float] = []
+    source = replace(
+        source,
+        post_apply_drift_attempts=3,
+        post_apply_drift_retry_interval_seconds=0.25,
+        sleep=sleeps.append,
+    )
+    admission = replace(
+        _admission(attestation),
+        preflight_plan=SimpleNamespace(candidate="exact-plan"),  # type: ignore[arg-type]
+    )
+    attempts = 0
+
+    def validate(**_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise ValueError("post-apply context binding drifted")
+
+    monkeypatch.setattr(action_source_module, "validate_post_apply_attestation_drift", validate)
+
+    with pytest.raises(ValueError, match="context binding drifted"):
+        source(_envelope(attestation), attestation, 7, admission)["final.drift"](
+            CheckOperation.VERIFY
+        )
+
+    assert attempts == 3
+    assert sleeps == [0.25, 0.25]
 
 
 def test_final_gate_action_source_rejects_unbound_post_apply_plan(tmp_path: Path) -> None:

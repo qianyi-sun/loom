@@ -456,6 +456,21 @@ def properties(unit, names):
         raise SystemExit(1)
     return parsed
 
+def unit_enabled(unit):
+    result = subprocess.run(
+        ["systemctl", "--user", "is-enabled", unit],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    value = result.stdout.strip()
+    if not result.stderr and result.returncode == 0 and value == "enabled":
+        return True
+    if not result.stderr and result.returncode != 0 and value == "disabled":
+        return False
+    raise SystemExit(1)
+
 service = {service!r}
 timer = {timer!r}
 payload = {{
@@ -465,7 +480,7 @@ payload = {{
     "linger_enabled": run(["loginctl", "show-user", str(os.getuid()), "--property=Linger", "--value"]) == "yes",
     "service": properties(service, ["LoadState", "Type", "Result", "ExecMainStatus", "ActiveState", "SubState", "NeedDaemonReload"]),
     "timer": properties(timer, ["LoadState", "ActiveState", "SubState", "Unit", "NeedDaemonReload"]),
-    "timer_enabled": run(["systemctl", "--user", "is-enabled", timer]) == "enabled",
+    "timer_enabled": unit_enabled(timer),
 }}
 print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
 """.strip()

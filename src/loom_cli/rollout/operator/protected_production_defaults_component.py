@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +35,8 @@ _MAX_RESPONSE_BYTES = 1024 * 1024
 _MAX_TOKEN_BYTES = 64 * 1024
 _QUERY_TIMEOUT_SECONDS = 30.0
 _REQUEST_TIMEOUT_SECONDS = 60.0
+_RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0)
+_RETRYABLE_HTTP_STATUSES = frozenset({429, 500, 502, 503, 504})
 _ADMIN_ACTOR = PRODUCTION_DEFAULTS_ADMIN_ACTOR
 _PROVIDER_PATH_RE = re.compile(
     r"^/api/v1/provider-connections/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-"
@@ -147,6 +150,7 @@ class KubernetesProtectedProductionDefaultsComponent:
     service_uid: int
     epoch_guard: EpochGuard
     request: ProductionDefaultsTransport
+    sleep: Callable[[float], None] = time.sleep
 
     def __post_init__(self) -> None:
         if (
@@ -154,6 +158,7 @@ class KubernetesProtectedProductionDefaultsComponent:
             or "KUBECONFIG" not in self.environment
             or not callable(self.epoch_guard)
             or not callable(self.request)
+            or not callable(self.sleep)
         ):
             raise ValueError("protected production defaults authority is invalid")
 
@@ -305,17 +310,28 @@ class KubernetesProtectedProductionDefaultsComponent:
         path: str,
         payload: Mapping[str, object] | None,
     ) -> Mapping[str, object]:
-        status, body = self.request(
-            base_url=plan.route,
-            method=method,
-            path=path,
-            token=token,
-            payload=payload,
-            headers={"X-Loom-Admin-Actor": _ADMIN_ACTOR},
-            timeout_seconds=_REQUEST_TIMEOUT_SECONDS,
-        )
-        if status not in {200, 201} or len(body) > _MAX_RESPONSE_BYTES:
-            raise RuntimeError("production defaults request was rejected")
+        status = 0
+        body = b""
+        for attempt in range(len(_RETRY_DELAYS_SECONDS) + 1):
+            status, body = self.request(
+                base_url=plan.route,
+                method=method,
+                path=path,
+                token=token,
+                payload=payload,
+                headers={"X-Loom-Admin-Actor": _ADMIN_ACTOR},
+                timeout_seconds=_REQUEST_TIMEOUT_SECONDS,
+            )
+            if status in {200, 201} and len(body) <= _MAX_RESPONSE_BYTES:
+                break
+            if status in _RETRYABLE_HTTP_STATUSES and attempt < len(
+                _RETRY_DELAYS_SECONDS
+            ):
+                self.sleep(_RETRY_DELAYS_SECONDS[attempt])
+                continue
+            raise RuntimeError(
+                f"production defaults request was rejected with HTTP {status}"
+            )
         try:
             value = json.loads(body)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:

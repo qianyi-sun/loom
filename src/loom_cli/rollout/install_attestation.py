@@ -14,6 +14,9 @@ from types import MappingProxyType
 from loom_cli.rollout.credential_authority import TrustedFileRead, read_trusted_file
 
 INSTALL_ATTESTATION_PATH = Path("/etc/loom/staging-rollout.install-attestation.json")
+WORKER_ENV_TEMPLATE_PATH = Path(
+    "/var/lib/loom-staging-rollout/generated/staging-gb10-worker-staging-bootstrap.env"
+)
 INSTALL_ASSETS = MappingProxyType(
     {
         "broker": (Path("/usr/local/libexec/loom-staging-rollout-broker"), 0o755, False),
@@ -76,6 +79,7 @@ INSTALL_ASSETS = MappingProxyType(
         ),
         "sysctl": (Path("/etc/sysctl.d/90-loom-staging-rollout.conf"), 0o644, False),
         "tmpfiles": (Path("/etc/tmpfiles.d/loom-staging-rollout.conf"), 0o644, False),
+        "worker-env-template": (WORKER_ENV_TEMPLATE_PATH, 0o600, True),
     }
 )
 
@@ -255,7 +259,9 @@ def verify_runner_install(
                 path,
                 service_uid=service_uid,
                 expected_mode=mode,
-                expected_root_uid=expected_root_uid,
+                expected_root_uid=(
+                    service_uid if label == "worker-env-template" else expected_root_uid
+                ),
                 private=private,
             ).payload
         except (OSError, ValueError):
@@ -274,6 +280,7 @@ def verify_runner_install(
 __all__ = [
     "INSTALL_ASSETS",
     "INSTALL_ATTESTATION_PATH",
+    "WORKER_ENV_TEMPLATE_PATH",
     "RunnerInstallAttestation",
     "VerifiedRunnerInstall",
     "verify_runner_install",
