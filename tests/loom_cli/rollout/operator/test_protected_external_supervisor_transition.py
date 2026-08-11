@@ -35,6 +35,7 @@ def _artifact(
     *,
     supervisor_count: int = 1,
     timer_on_unit_active_sec: int = 30,
+    execution_host: str | None = None,
 ) -> ExternalSupervisorArtifact:
     candidate = tmp_path / "candidate"
     profile = candidate / "deploy/environment-state/staging.toml"
@@ -60,10 +61,11 @@ def _artifact(
             1,
         )
     if supervisor_count == 1:
-        oldlab_marker = "\n# OLDLAB staging autoscaler supervisor."
-        profile_text, separator, _oldlab_profile = profile_text.partition(oldlab_marker)
-        assert separator
-        profile_text += "\n"
+        if execution_host != "TRT-EAI-OLDLAB-1":
+            oldlab_marker = "\n# OLDLAB staging autoscaler supervisor."
+            profile_text, separator, _oldlab_profile = profile_text.partition(oldlab_marker)
+            assert separator
+            profile_text += "\n"
     else:
         assert supervisor_count == 2
     profile.write_text(profile_text, encoding="utf-8")
@@ -78,6 +80,7 @@ def _artifact(
             candidate_sha="a" * 40,
             candidate_tree="b" * 40,
             image_tag="staging-aaaaaaa",
+            execution_host=execution_host,
         )
 
 
@@ -366,6 +369,27 @@ def test_pr907_bytes_are_a_reachable_upgrade_but_arbitrary_bytes_fail_closed(
     store.publish_unit(service, b"arbitrary\n", expected_current=store.read_unit(service))
     drifted = transport.observe(artifact, authority)
     assert classify_external_supervisor_live_state(artifact, drifted) == "drifted"
+
+
+def test_oldlab_transport_uses_controller_specific_legacy_authority(
+    tmp_path: Path,
+) -> None:
+    execution_host = "TRT-EAI-OLDLAB-1"
+    artifact = _artifact(tmp_path, execution_host=execution_host)
+    store = _store(tmp_path)
+    legacy = load_predecessor_manifest(execution_host=execution_host)
+    _install_units(store, dict(legacy.unit_payloads))
+    authority = ExternalSupervisorPredecessorAuthority(
+        kind="legacy-manifest",
+        authority_digest=legacy.manifest_digest,
+        unit_sha256=legacy.unit_sha256,
+    )
+    transport = FixedExternalSupervisorTransport(store=store, control=_Control(store))
+
+    live = transport.observe(artifact, authority)
+
+    assert live.predecessor_manifest == legacy
+    assert classify_external_supervisor_live_state(artifact, live) == "ready"
 
 
 def test_successful_upgrade_promotes_one_immutable_activation_and_pointer(

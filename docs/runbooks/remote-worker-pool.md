@@ -1653,7 +1653,7 @@ allocatable capacity remains resource-observation driven:
     "requested_concurrency": 10,
     "max_jobs": 15,
     "pending_job_cap": 2,
-    "time_limit": "2-00:00:00",
+    "time_limit": "1-00:00:00",
     "exclusive": false,
     "container_cpus": 2,
     "container_memory_mib": 4096,
