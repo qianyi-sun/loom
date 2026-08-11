@@ -126,6 +126,59 @@ def test_parse_elapsed_timer_is_ready_only_for_protected_repair() -> None:
     assert not unsafe.repairable_timer
 
 
+def test_parse_retired_node_agent_is_ready_only_when_timer_is_disabled() -> None:
+    payload = {
+        "schema_version": 1,
+        "boot_id": BOOT_ID,
+        "manager_version": "255.4-1ubuntu8.16",
+        "linger_enabled": True,
+        "service": {
+            "LoadState": "loaded",
+            "Type": "oneshot",
+            "Result": "success",
+            "ExecMainStatus": "0",
+            "ActiveState": "inactive",
+            "SubState": "dead",
+            "NeedDaemonReload": "no",
+        },
+        "timer": {
+            "LoadState": "loaded",
+            "ActiveState": "inactive",
+            "SubState": "dead",
+            "Unit": "loom-gb10-node-agent.service",
+            "NeedDaemonReload": "no",
+        },
+        "timer_enabled": False,
+    }
+
+    evidence = parse_gb10_host_readiness(
+        json.dumps(payload),
+        service="loom-gb10-node-agent.service",
+    )
+
+    assert evidence is not None
+    assert evidence.ready
+    assert evidence.timer_state is NodeAgentTimerState.RETIRED
+    assert not evidence.transient_timer
+    assert not evidence.repairable_timer
+
+    payload["timer_enabled"] = True
+    enabled = parse_gb10_host_readiness(
+        json.dumps(payload),
+        service="loom-gb10-node-agent.service",
+    )
+    assert enabled is not None and not enabled.ready
+
+    payload["timer_enabled"] = False
+    payload["service"]["ActiveState"] = "active"
+    payload["service"]["SubState"] = "running"
+    active = parse_gb10_host_readiness(
+        json.dumps(payload),
+        service="loom-gb10-node-agent.service",
+    )
+    assert active is not None and not active.ready
+
+
 def test_parse_systemctl_properties_ignores_unstructured_lines() -> None:
     assert parse_systemctl_properties("LoadState=loaded\nnoise\nSubState=waiting\n") == {
         "LoadState": "loaded",
