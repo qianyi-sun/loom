@@ -9,10 +9,11 @@ from uuid import uuid4
 import pytest
 from alembic import command
 from alembic.config import Config as AlembicConfig
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from loom_capacity_manager.models import CapacityAuditEvent, CapacityAuthorityState
 from loom_capacity_manager.schema_startup import (
     CapacitySchemaNotAtHeadError,
     assert_capacity_schema_at_head,
@@ -285,6 +286,23 @@ def test_capacity_migration_downgrades_and_reupgrades(
         command.upgrade(cfg, "head")
         with engine.connect() as connection:
             assert EXPECTED_TABLES <= set(inspect(connection).get_table_names())
+            authority = connection.execute(
+                select(CapacityAuthorityState.authority_incarnation).where(
+                    CapacityAuthorityState.singleton_id == 1
+                )
+            ).scalar_one()
+            seeds = connection.execute(
+                select(CapacityAuditEvent).where(
+                    CapacityAuditEvent.event_kind == "authority_incarnation_seeded"
+                )
+            ).mappings().all()
+            assert len(seeds) == 1
+            assert seeds[0]["actor_kind"] == "migration"
+            assert seeds[0]["actor_id"] == "capacity-authority-bootstrap"
+            assert seeds[0]["object_binding"] == {
+                "authority_incarnation": str(authority)
+            }
+            assert seeds[0]["detail"] == {"state": "migration-generated-seed"}
     finally:
         engine.dispose()
 

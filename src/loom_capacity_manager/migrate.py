@@ -5,13 +5,14 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
 from uuid import UUID
 
 from alembic import command
 from alembic.config import Config as AlembicConfig
-from sqlalchemy import Engine, MetaData, Table, create_engine, inspect, select, update
+from sqlalchemy import Engine, MetaData, RowMapping, Table, create_engine, inspect, select, update
 
 from loom_capacity_manager.config import read_owner_only_secret
 from loom_capacity_manager.models import CapacityAuditEvent, CapacityAuthorityState
@@ -19,6 +20,71 @@ from loom_capacity_manager.models import CapacityAuditEvent, CapacityAuthoritySt
 
 class CapacityAuthorityBootstrapError(RuntimeError):
     """The management database is not safe to bind to a new authority."""
+
+
+_AUTHORITY_MARKER_ACTOR_KIND = "migration"
+_AUTHORITY_MARKER_ACTOR_ID = "capacity-authority-bootstrap"
+_AUTHORITY_SEED_EVENT = "authority_incarnation_seeded"
+_AUTHORITY_BOUND_EVENT = "authority_incarnation_bound"
+_RESERVED_AUTHORITY_EVENTS = frozenset(
+    {_AUTHORITY_SEED_EVENT, _AUTHORITY_BOUND_EVENT}
+)
+_AUTHORITY_EVENT_STATES = {
+    _AUTHORITY_SEED_EVENT: "migration-generated-seed",
+    _AUTHORITY_BOUND_EVENT: "reviewed-bootstrap-bound",
+}
+
+
+def _authority_marker(event_kind: str, authority: UUID) -> dict[str, object]:
+    return {
+        "actor_kind": _AUTHORITY_MARKER_ACTOR_KIND,
+        "actor_id": _AUTHORITY_MARKER_ACTOR_ID,
+        "event_kind": event_kind,
+        "object_binding": {"authority_incarnation": str(authority)},
+        "detail": {"state": _AUTHORITY_EVENT_STATES[event_kind]},
+    }
+
+
+def _validated_reserved_markers(
+    rows: Sequence[RowMapping],
+) -> dict[str, tuple[UUID, int]]:
+    markers: dict[str, tuple[UUID, int]] = {}
+    for row in rows:
+        event_kind = row["event_kind"]
+        if event_kind not in _RESERVED_AUTHORITY_EVENTS:
+            raise CapacityAuthorityBootstrapError(
+                "capacity authority reserved audit evidence is invalid"
+            )
+        if event_kind in markers:
+            raise CapacityAuthorityBootstrapError(
+                "capacity authority reserved audit evidence is duplicated"
+            )
+        object_binding = row["object_binding"]
+        detail = row["detail"]
+        if (
+            row["actor_kind"] != _AUTHORITY_MARKER_ACTOR_KIND
+            or row["actor_id"] != _AUTHORITY_MARKER_ACTOR_ID
+            or not isinstance(object_binding, dict)
+            or set(object_binding) != {"authority_incarnation"}
+            or not isinstance(detail, dict)
+            or detail != {"state": _AUTHORITY_EVENT_STATES[event_kind]}
+        ):
+            raise CapacityAuthorityBootstrapError(
+                "capacity authority reserved audit evidence is invalid"
+            )
+        raw_authority = object_binding["authority_incarnation"]
+        try:
+            marker_authority = UUID(raw_authority)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise CapacityAuthorityBootstrapError(
+                "capacity authority reserved audit evidence is invalid"
+            ) from exc
+        if marker_authority.int == 0 or str(marker_authority) != raw_authority:
+            raise CapacityAuthorityBootstrapError(
+                "capacity authority reserved audit evidence is invalid"
+            )
+        markers[event_kind] = (marker_authority, row["id"])
+    return markers
 
 
 def _validate_expected_authority(expected: UUID) -> None:
@@ -61,38 +127,43 @@ def bind_fresh_authority(engine: Engine, expected: UUID) -> None:
                 .mappings()
                 .one()
             )
-            binding_marker = {
-                "actor_kind": "migration",
-                "actor_id": "capacity-authority-bootstrap",
-                "event_kind": "authority_incarnation_bound",
-                "object_binding": {"authority_incarnation": str(expected)},
-                "detail": {"state": "reviewed-bootstrap-bound"},
-            }
-            if authority["authority_incarnation"] == expected:
-                binding_markers = (
-                    connection.execute(
-                        select(
-                            audit_table.c.object_binding,
-                            audit_table.c.detail,
-                        ).where(
-                            audit_table.c.actor_kind == binding_marker["actor_kind"],
-                            audit_table.c.actor_id == binding_marker["actor_id"],
-                            audit_table.c.event_kind == binding_marker["event_kind"],
-                        )
+            reserved_rows = (
+                connection.execute(
+                    select(
+                        audit_table.c.id,
+                        audit_table.c.actor_kind,
+                        audit_table.c.actor_id,
+                        audit_table.c.event_kind,
+                        audit_table.c.object_binding,
+                        audit_table.c.detail,
                     )
-                    .mappings()
-                    .all()
+                    .where(audit_table.c.event_kind.in_(_RESERVED_AUTHORITY_EVENTS))
+                    .order_by(audit_table.c.id)
                 )
-                if not binding_markers:
+                .mappings()
+                .all()
+            )
+            markers = _validated_reserved_markers(reserved_rows)
+            seed_marker = markers.get(_AUTHORITY_SEED_EVENT)
+            bound_marker = markers.get(_AUTHORITY_BOUND_EVENT)
+            current = authority["authority_incarnation"]
+            if bound_marker is not None and bound_marker[0] != current:
+                raise CapacityAuthorityBootstrapError(
+                    "capacity authority binding marker conflicts with its state"
+                )
+            if bound_marker is None and seed_marker is not None and seed_marker[0] != current:
+                raise CapacityAuthorityBootstrapError(
+                    "capacity authority seed marker conflicts with its state"
+                )
+            binding_marker = _authority_marker(_AUTHORITY_BOUND_EVENT, expected)
+            if authority["authority_incarnation"] == expected:
+                if bound_marker is None:
                     connection.execute(audit_table.insert().values(**binding_marker))
-                elif len(binding_markers) != 1 or dict(binding_markers[0]) != {
-                    "object_binding": binding_marker["object_binding"],
-                    "detail": binding_marker["detail"],
-                }:
-                    raise CapacityAuthorityBootstrapError(
-                        "capacity authority binding marker conflicts with its state"
-                    )
                 return
+            if bound_marker is not None or seed_marker is None or seed_marker[0] != current:
+                raise CapacityAuthorityBootstrapError(
+                    "capacity authority UUID is not the migration-generated seed"
+                )
             if (
                 authority["writer_epoch"] != 0
                 or authority["recovery_state"] != "shadow"
@@ -112,7 +183,10 @@ def bind_fresh_authority(engine: Engine, expected: UUID) -> None:
             )
             for table_name in table_names:
                 table = Table(table_name, MetaData(), autoload_with=connection)
-                if connection.execute(select(1).select_from(table).limit(1)).first() is not None:
+                statement = select(1).select_from(table)
+                if table_name == audit_table.name:
+                    statement = statement.where(table.c.id != seed_marker[1])
+                if connection.execute(statement.limit(1)).first() is not None:
                     raise CapacityAuthorityBootstrapError(
                         "capacity authority database is not empty"
                     )

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from uuid import UUID
 
 import pytest
-from sqlalchemy import create_engine, delete, select, update
+from sqlalchemy import Connection, Engine, create_engine, delete, select, text, update
 
 import loom_capacity_manager.migrate as capacity_migrate
 from loom_capacity_manager.migrate import (
@@ -19,6 +21,17 @@ from loom_capacity_manager.models import Base, CapacityAuditEvent, CapacityAutho
 
 _MIGRATION_AUTHORITY = UUID("00000000-0000-4000-8000-000000000900")
 _REVIEWED_AUTHORITY = UUID("00000000-0000-4000-8000-000000000901")
+_OTHER_AUTHORITY = UUID("00000000-0000-4000-8000-000000000902")
+
+
+def _seed_marker(authority: UUID) -> dict[str, object]:
+    return {
+        "actor_kind": "migration",
+        "actor_id": "capacity-authority-bootstrap",
+        "event_kind": "authority_incarnation_seeded",
+        "object_binding": {"authority_incarnation": str(authority)},
+        "detail": {"state": "migration-generated-seed"},
+    }
 
 
 def _reset_empty_shadow(database_url: str) -> None:
@@ -41,6 +54,11 @@ def _reset_empty_shadow(database_url: str) -> None:
                     global_pending_slot_ceiling=0,
                     global_pending_job_ceiling=0,
                     global_submission_rate_ceiling=0,
+                )
+            )
+            connection.execute(
+                CapacityAuditEvent.__table__.insert().values(
+                    **_seed_marker(_MIGRATION_AUTHORITY)
                 )
             )
     finally:
@@ -103,12 +121,11 @@ def test_different_authority_cannot_replace_reviewed_bootstrap(
     capacity_postgres_url: str,
 ) -> None:
     _reset_empty_shadow(capacity_postgres_url)
-    replacement = UUID("00000000-0000-4000-8000-000000000902")
     engine = create_engine(capacity_postgres_url)
     try:
         bind_fresh_authority(engine, _REVIEWED_AUTHORITY)
         with pytest.raises(CapacityAuthorityBootstrapError):
-            bind_fresh_authority(engine, replacement)
+            bind_fresh_authority(engine, _OTHER_AUTHORITY)
     finally:
         engine.dispose()
 
@@ -147,10 +164,10 @@ def test_matching_authority_backfills_a_missing_binding_fence(
     capacity_postgres_url: str,
 ) -> None:
     _reset_empty_shadow(capacity_postgres_url)
-    replacement = UUID("00000000-0000-4000-8000-000000000902")
     engine = create_engine(capacity_postgres_url)
     try:
         with engine.begin() as connection:
+            connection.execute(delete(CapacityAuditEvent))
             connection.execute(
                 update(CapacityAuthorityState)
                 .where(CapacityAuthorityState.singleton_id == 1)
@@ -158,7 +175,7 @@ def test_matching_authority_backfills_a_missing_binding_fence(
             )
         bind_fresh_authority(engine, _REVIEWED_AUTHORITY)
         with pytest.raises(CapacityAuthorityBootstrapError):
-            bind_fresh_authority(engine, replacement)
+            bind_fresh_authority(engine, _OTHER_AUTHORITY)
     finally:
         engine.dispose()
 
@@ -169,7 +186,217 @@ def test_matching_authority_rejects_a_conflicting_binding_marker(
     capacity_postgres_url: str,
 ) -> None:
     _reset_empty_shadow(capacity_postgres_url)
-    conflicting = UUID("00000000-0000-4000-8000-000000000902")
+    engine = create_engine(capacity_postgres_url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(delete(CapacityAuditEvent))
+            connection.execute(
+                update(CapacityAuthorityState)
+                .where(CapacityAuthorityState.singleton_id == 1)
+                .values(authority_incarnation=_REVIEWED_AUTHORITY)
+            )
+            connection.execute(
+                CapacityAuditEvent.__table__.insert().values(
+                    actor_kind="migration",
+                    actor_id="capacity-authority-bootstrap",
+                    event_kind="authority_incarnation_bound",
+                    object_binding={"authority_incarnation": str(_OTHER_AUTHORITY)},
+                    detail={"state": "reviewed-bootstrap-bound"},
+                )
+            )
+        with pytest.raises(CapacityAuthorityBootstrapError):
+            bind_fresh_authority(engine, _REVIEWED_AUTHORITY)
+    finally:
+        engine.dispose()
+
+
+def test_wrong_uuid_cannot_claim_markerless_reviewed_authority_before_backfill(
+    capacity_postgres_url: str,
+) -> None:
+    _reset_empty_shadow(capacity_postgres_url)
+    engine = create_engine(capacity_postgres_url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(delete(CapacityAuditEvent))
+            connection.execute(
+                update(CapacityAuthorityState)
+                .where(CapacityAuthorityState.singleton_id == 1)
+                .values(authority_incarnation=_REVIEWED_AUTHORITY)
+            )
+
+        with pytest.raises(CapacityAuthorityBootstrapError):
+            bind_fresh_authority(engine, _OTHER_AUTHORITY)
+        bind_fresh_authority(engine, _REVIEWED_AUTHORITY)
+    finally:
+        engine.dispose()
+
+    assert _authority(capacity_postgres_url)["authority_incarnation"] == _REVIEWED_AUTHORITY
+
+
+def test_concurrent_expected_and_wrong_uuid_fail_closed_on_markerless_state(
+    capacity_postgres_url: str,
+) -> None:
+    _reset_empty_shadow(capacity_postgres_url)
+    engine = create_engine(capacity_postgres_url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(delete(CapacityAuditEvent))
+            connection.execute(
+                update(CapacityAuthorityState)
+                .where(CapacityAuthorityState.singleton_id == 1)
+                .values(authority_incarnation=_REVIEWED_AUTHORITY)
+            )
+    finally:
+        engine.dispose()
+
+    wrong_application = "capacity-bootstrap-wrong"
+    expected_application = "capacity-bootstrap-expected"
+
+    wrong_engine = create_engine(
+        capacity_postgres_url,
+        connect_args={"application_name": wrong_application},
+    )
+    expected_engine = create_engine(
+        capacity_postgres_url,
+        connect_args={"application_name": expected_application},
+    )
+    for thread_engine, application_name in (
+        (wrong_engine, wrong_application),
+        (expected_engine, expected_application),
+    ):
+        with thread_engine.connect() as connection:
+            assert connection.execute(text("SHOW application_name")).scalar_one() == (
+                application_name
+            )
+
+    def bind(authority: UUID, thread_engine: Engine) -> str:
+        try:
+            bind_fresh_authority(thread_engine, authority)
+            return "bound"
+        except CapacityAuthorityBootstrapError:
+            return "rejected"
+
+    def wait_until_blocked(connection: Connection, application_name: str) -> None:
+        deadline = time.monotonic() + 5
+        observed: list[dict[str, object]] = []
+        while time.monotonic() < deadline:
+            observed = [
+                dict(row)
+                for row in connection.execute(
+                text(
+                    "SELECT state, wait_event_type, wait_event, query "
+                    "FROM pg_stat_activity WHERE application_name = :application_name"
+                ),
+                {"application_name": application_name},
+            ).mappings()
+            ]
+            if len(observed) == 1 and observed[0]["wait_event_type"] == "Lock":
+                return
+            time.sleep(0.01)
+        raise AssertionError(
+            f"{application_name} did not wait for the authority row lock: {observed!r}"
+        )
+
+    blocker_engine = create_engine(capacity_postgres_url)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            with blocker_engine.begin() as blocker:
+                blocker.execute(
+                    select(CapacityAuthorityState)
+                    .where(CapacityAuthorityState.singleton_id == 1)
+                    .with_for_update()
+                ).one()
+                wrong = executor.submit(bind, _OTHER_AUTHORITY, wrong_engine)
+                wait_until_blocked(blocker, wrong_application)
+                expected = executor.submit(
+                    bind,
+                    _REVIEWED_AUTHORITY,
+                    expected_engine,
+                )
+                wait_until_blocked(blocker, expected_application)
+    finally:
+        blocker_engine.dispose()
+        wrong_engine.dispose()
+        expected_engine.dispose()
+
+    assert expected.result(timeout=5) == "bound"
+    assert wrong.result(timeout=5) == "rejected"
+    assert _authority(capacity_postgres_url)["authority_incarnation"] == _REVIEWED_AUTHORITY
+
+
+@pytest.mark.parametrize(
+    "reserved_marker",
+    [
+        {
+            "actor_kind": "operator",
+            "actor_id": "capacity-authority-bootstrap",
+            "event_kind": "authority_incarnation_bound",
+            "object_binding": {"authority_incarnation": str(_REVIEWED_AUTHORITY)},
+            "detail": {"state": "reviewed-bootstrap-bound"},
+        },
+        {
+            "actor_kind": "migration",
+            "actor_id": "other-bootstrap",
+            "event_kind": "authority_incarnation_bound",
+            "object_binding": {"authority_incarnation": str(_REVIEWED_AUTHORITY)},
+            "detail": {"state": "reviewed-bootstrap-bound"},
+        },
+        {
+            **_seed_marker(_REVIEWED_AUTHORITY),
+            "object_binding": {"authority_incarnation": str(_OTHER_AUTHORITY)},
+        },
+        {
+            **_seed_marker(_REVIEWED_AUTHORITY),
+            "detail": {"state": "reviewed-bootstrap-bound"},
+        },
+    ],
+    ids=("actor-kind-drift", "actor-id-drift", "seed-payload-drift", "seed-detail-drift"),
+)
+def test_any_malformed_reserved_authority_evidence_fails_closed(
+    capacity_postgres_url: str,
+    reserved_marker: dict[str, object],
+) -> None:
+    _reset_empty_shadow(capacity_postgres_url)
+    engine = create_engine(capacity_postgres_url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(delete(CapacityAuditEvent))
+            connection.execute(
+                update(CapacityAuthorityState)
+                .where(CapacityAuthorityState.singleton_id == 1)
+                .values(authority_incarnation=_REVIEWED_AUTHORITY)
+            )
+            connection.execute(
+                CapacityAuditEvent.__table__.insert().values(**reserved_marker)
+            )
+        with pytest.raises(CapacityAuthorityBootstrapError):
+            bind_fresh_authority(engine, _REVIEWED_AUTHORITY)
+    finally:
+        engine.dispose()
+
+
+def test_duplicate_seed_evidence_fails_closed(capacity_postgres_url: str) -> None:
+    _reset_empty_shadow(capacity_postgres_url)
+    engine = create_engine(capacity_postgres_url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                CapacityAuditEvent.__table__.insert().values(
+                    **_seed_marker(_MIGRATION_AUTHORITY)
+                )
+            )
+        with pytest.raises(CapacityAuthorityBootstrapError):
+            bind_fresh_authority(engine, _REVIEWED_AUTHORITY)
+    finally:
+        engine.dispose()
+
+    assert _authority(capacity_postgres_url)["authority_incarnation"] == _MIGRATION_AUTHORITY
+
+
+def test_contradictory_seed_and_bound_evidence_fails_closed(
+    capacity_postgres_url: str,
+) -> None:
+    _reset_empty_shadow(capacity_postgres_url)
     engine = create_engine(capacity_postgres_url)
     try:
         with engine.begin() as connection:
@@ -183,7 +410,7 @@ def test_matching_authority_rejects_a_conflicting_binding_marker(
                     actor_kind="migration",
                     actor_id="capacity-authority-bootstrap",
                     event_kind="authority_incarnation_bound",
-                    object_binding={"authority_incarnation": str(conflicting)},
+                    object_binding={"authority_incarnation": str(_OTHER_AUTHORITY)},
                     detail={"state": "reviewed-bootstrap-bound"},
                 )
             )
@@ -191,6 +418,8 @@ def test_matching_authority_rejects_a_conflicting_binding_marker(
             bind_fresh_authority(engine, _REVIEWED_AUTHORITY)
     finally:
         engine.dispose()
+
+    assert _authority(capacity_postgres_url)["authority_incarnation"] == _REVIEWED_AUTHORITY
 
 
 def test_nil_authority_is_rejected_without_mutating_the_database(
