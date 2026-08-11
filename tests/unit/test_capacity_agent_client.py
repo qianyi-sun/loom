@@ -10,6 +10,7 @@ from uuid import uuid4
 import httpx
 import pytest
 
+from loom_capacity_agent.admission import PreparedProtectedReleaseV1
 from loom_capacity_agent.client import (
     DemandPublishError,
     DemandReporterClient,
@@ -24,7 +25,12 @@ from loom_capacity_agent.contracts import (
     ReporterConfigurationV1,
 )
 from loom_capacity_agent.reporter import build_demand_snapshot
+from loom_capacity_guard.contracts import canonical_digest as guard_canonical_digest
 from loom_capacity_manager.contracts import canonical_digest
+from loom_capacity_manager.grant_contracts import (
+    DryRunProtectedReleaseAcknowledgementV1,
+    canonical_grant_digest,
+)
 
 
 def _configuration() -> ReporterConfigurationV1:
@@ -64,15 +70,35 @@ def _configuration() -> ReporterConfigurationV1:
 
 def _snapshot(configuration: ReporterConfigurationV1):  # type: ignore[no-untyped-def]
     observation = GuardDemandObservationV1(
-        **{
-            field: getattr(configuration, field)
-            for field in AgentRegistrationV1.model_fields
-        },
+        **{field: getattr(configuration, field) for field in AgentRegistrationV1.model_fields},
         sequence=1,
         source_observed_at="2026-08-10T12:00:00Z",
         attempts=(),
     )
     return build_demand_snapshot(observation, configuration)
+
+
+def _protected_release(
+    configuration: ReporterConfigurationV1,
+) -> PreparedProtectedReleaseV1:
+    return PreparedProtectedReleaseV1(
+        **{field: getattr(configuration, field) for field in AgentRegistrationV1.model_fields},
+        release_id=uuid4(),
+        plan_id=uuid4(),
+        admission_incarnation=uuid4(),
+        manager_authority_incarnation=uuid4(),
+        manager_writer_epoch=1,
+        manager_configuration_epoch=2,
+        manager_allocation_epoch=3,
+        tranche_id=uuid4(),
+        pool_id="oldlab",
+        pool_generation=1,
+        shape_instance_id="shape-oldlab-1",
+        submission_intent_id=uuid4(),
+        bootstrap_registration_epoch=0,
+        protected_registration_epoch=1,
+        bootstrap_revoked=True,
+    )
 
 
 @pytest.mark.asyncio
@@ -140,6 +166,86 @@ async def test_publish_rejects_binding_mismatch_before_network() -> None:
     try:
         with pytest.raises(DemandPublishError, match="binding"):
             await client.publish(stale)
+    finally:
+        await http.aclose()
+    assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_publish_protected_release_maps_local_fence_and_verifies_receipt() -> None:
+    configuration = _configuration()
+    release = _protected_release(configuration)
+    idempotency_key = uuid4()
+    seen: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        acknowledgement = DryRunProtectedReleaseAcknowledgementV1.model_validate_json(
+            request.content
+        )
+        return httpx.Response(
+            200,
+            json={
+                "acknowledgement_id": str(uuid4()),
+                "shape_instance_id": release.shape_instance_id,
+                "acknowledgement_digest": canonical_grant_digest(acknowledgement),
+                "replayed": False,
+                "executable": False,
+            },
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = DemandReporterClient(
+        configuration,
+        manager_origin="https://capacity.internal",
+        bearer_token="reporter-secret",
+        http_client=http,
+    )
+    try:
+        receipt = await client.publish_protected_release(
+            release,
+            idempotency_key=idempotency_key,
+        )
+    finally:
+        await http.aclose()
+
+    assert receipt.shape_instance_id == release.shape_instance_id
+    assert receipt.executable is False
+    assert len(seen) == 1
+    request = seen[0]
+    assert request.url == httpx.URL(
+        "https://capacity.internal/v1/reports/protected-releases/"
+        f"{release.subject_id}/{release.shape_instance_id}"
+    )
+    assert request.headers["Idempotency-Key"] == str(idempotency_key)
+    acknowledgement = DryRunProtectedReleaseAcknowledgementV1.model_validate_json(request.content)
+    assert acknowledgement.protected_release_sha256 == guard_canonical_digest(release)
+    assert acknowledgement.intent_id == release.submission_intent_id
+
+
+@pytest.mark.asyncio
+async def test_publish_protected_release_rejects_invalid_idempotency_before_network() -> None:
+    configuration = _configuration()
+    calls = 0
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json={})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = DemandReporterClient(
+        configuration,
+        manager_origin="https://capacity.internal",
+        bearer_token="reporter-secret",
+        http_client=http,
+    )
+    try:
+        with pytest.raises(DemandPublishError, match="idempotency"):
+            await client.publish_protected_release(
+                _protected_release(configuration),
+                idempotency_key="not-a-uuid",  # type: ignore[arg-type]
+            )
     finally:
         await http.aclose()
     assert calls == 0

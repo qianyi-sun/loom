@@ -19,6 +19,7 @@ from loom_capacity_manager.allocator import ShadowAllocatorError, allocate_shado
 from loom_capacity_manager.contracts import (
     ConfigurationActivationV1,
     ConfigurationGenerationRefV1,
+    ObservedCommitmentV1,
     canonical_digest_excluding,
 )
 from loom_capacity_manager.models import (
@@ -35,6 +36,7 @@ from loom_capacity_manager.models import (
     CapacityDeploymentGeneration,
     CapacityDevelopmentProjection,
     CapacityObservedCommitment,
+    CapacitySubject,
     CapacityWorkerProfile,
 )
 from loom_capacity_manager.reconciler import reconcile_shadow_once
@@ -47,6 +49,7 @@ from loom_capacity_manager.store import (
     StaleReportError,
     StaleWriterError,
     WriterFence,
+    _deduplicate_observed_commitments,
 )
 from tests.capacity_fixtures import (
     ACTIVATION_KEY,
@@ -109,6 +112,38 @@ async def _allocation_epoch_count(session: AsyncSession) -> int:
             await session.execute(select(func.count()).select_from(CapacityAllocationEpoch))
         ).scalar_one()
     )
+
+
+def test_authenticated_commitment_deduplication_requires_one_exact_reservation() -> None:
+    authenticated = ObservedCommitmentV1(
+        kind="physical",
+        commitment_id="job-1",
+        physical_identity="job-1",
+        reservation_identity="intent-a",
+        ownership_state="authenticated",
+        subject_id=AUTHORITY_ID,
+        subject_incarnation=UUID(int=20),
+        deployment_generation=1,
+        pool_id="gb10",
+        pool_generation=1,
+        profile_id="one-slot",
+        profile_generation=1,
+        profile_digest="a" * 64,
+        shape_id="one-slot",
+        resources=resource_vector(),
+        state="pending",
+    )
+    unverified = authenticated.model_copy(
+        update={"ownership_state": "unverified", "reservation_identity": None}
+    )
+    preferred = _deduplicate_observed_commitments([unverified, authenticated])
+    assert preferred == (authenticated,)
+
+    rebound = authenticated.model_copy(update={"reservation_identity": "intent-b"})
+    conflicting = _deduplicate_observed_commitments([authenticated, rebound])
+    assert len(conflicting) == 2
+    assert {item.state for item in conflicting} == {"quarantined"}
+    assert {item.ownership_state for item in conflicting} == {"unverified"}
 
 
 async def _reset_committed_capacity_state(
@@ -676,6 +711,27 @@ async def test_concurrent_personal_projections_serialize_and_both_converge_after
             ).scalar_one() == 2
     finally:
         await _reset_committed_capacity_state(capacity_session_factory)
+
+
+async def test_activation_persists_configurable_account_and_subject_submission_rates(
+    capacity_session: AsyncSession,
+) -> None:
+    manifest = fleet_manifest()
+    account = manifest.account_policies[0].model_copy(update={"submission_rate_per_minute": 6})
+    manifest = fleet_manifest(account_policies=(account,))
+    subject = subject_configuration(
+        manifest,
+        submission_rate_per_minute=4,
+    )
+    await _activate_default(capacity_session, fleet=manifest, subject=subject)
+
+    account_rate = (
+        await capacity_session.execute(select(CapacityAccountPolicy.submission_rate_per_minute))
+    ).scalar_one()
+    subject_rate = (
+        await capacity_session.execute(select(CapacitySubject.submission_rate_per_minute))
+    ).scalar_one()
+    assert (account_rate, subject_rate) == (6, 4)
 
 
 async def test_exact_report_replay_is_idempotent_but_equivocation_fences(

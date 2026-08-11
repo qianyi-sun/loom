@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -10,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, TypeVar, cast
 from uuid import UUID
 
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,6 +30,7 @@ from loom_capacity_manager.contracts import (
     PoolAllocationInputV1,
     PoolObservationV1,
     ProfileReferenceV1,
+    ResourceVectorV1,
     ShadowEpochV1,
     StrictV1Model,
     SubjectAllocationInputV1,
@@ -59,6 +61,8 @@ from loom_capacity_manager.models import (
     CapacityPool,
     CapacityPoolObservation,
     CapacityPoolReporter,
+    CapacityReservationShape,
+    CapacityReservationTranche,
     CapacitySubject,
     CapacityTier,
     CapacityWorkerProfile,
@@ -171,6 +175,61 @@ _ContractT = TypeVar("_ContractT", bound=StrictV1Model)
 
 def _parse_contract(model: type[_ContractT], payload: dict[str, Any]) -> _ContractT:
     return model.model_validate_json(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+
+
+def _deduplicate_observed_commitments(
+    values: list[ObservedCommitmentV1],
+) -> tuple[ObservedCommitmentV1, ...]:
+    """Merge exact multi-source observations; retain conflicts as extra charge."""
+
+    grouped: dict[tuple[str, str], list[ObservedCommitmentV1]] = {}
+    for value in values:
+        grouped.setdefault((value.kind, value.commitment_id), []).append(value)
+    result: list[ObservedCommitmentV1] = []
+    state_rank = {
+        "proposed": 0,
+        "accepted": 1,
+        "pending": 2,
+        "live": 3,
+        "observed": 4,
+        "draining": 5,
+        "cancel-pending": 6,
+        "submitting-unknown": 7,
+        "unknown": 8,
+        "quarantined": 9,
+    }
+    ignored = {"state", "ownership_state", "reservation_identity"}
+    for key in sorted(grouped):
+        group = grouped[key]
+        payloads = []
+        for item in group:
+            payload = item.model_dump(mode="json", exclude_none=False)
+            for field in ignored:
+                payload.pop(field, None)
+            payloads.append(payload)
+        authenticated = [item for item in group if item.ownership_state == "authenticated"]
+        authenticated_reservations = {item.reservation_identity for item in authenticated}
+        if (
+            all(payload == payloads[0] for payload in payloads[1:])
+            and len(authenticated_reservations) <= 1
+        ):
+            chosen = authenticated[0] if authenticated else group[0]
+            conservative = max(group, key=lambda item: state_rank[item.state]).state
+            result.append(chosen.model_copy(update={"state": conservative}))
+            continue
+        for item in group:
+            digest = canonical_digest_excluding(item, "state")[:24]
+            result.append(
+                item.model_copy(
+                    update={
+                        "commitment_id": f"conflict-{digest}",
+                        "state": "quarantined",
+                        "ownership_state": "unverified",
+                        "reservation_identity": None,
+                    }
+                )
+            )
+    return tuple(sorted(result, key=lambda item: (item.kind, item.commitment_id)))
 
 
 @asynccontextmanager
@@ -427,7 +486,7 @@ class CapacityManagementStore:
     ) -> ActivatedConfiguration:
         request_digest = canonical_digest(proposal)
         async with _write_transaction(session):
-            await _lock_authority(session)
+            authority = await _lock_authority(session)
             replay = (
                 await session.execute(
                     select(CapacityConfigurationEpoch).where(
@@ -504,6 +563,10 @@ class CapacityManagementStore:
                     if account.owner_id is not None
                 )
             self._validate_activation(fleet, subjects, derived_accounts)
+            authority.global_pending_slot_ceiling = fleet.global_max_pending_slots
+            authority.global_pending_job_ceiling = fleet.global_max_pending_jobs
+            authority.global_submission_rate_ceiling = fleet.global_submission_rate_per_minute
+            authority.updated_at = await _db_now(session)
 
             if latest is not None:
                 previous_ids = {
@@ -1197,6 +1260,7 @@ class CapacityManagementStore:
                     max_surge_slots=account.max_surge_slots,
                     max_pending_slots=account.max_pending_slots,
                     max_pending_jobs=account.max_pending_jobs,
+                    submission_rate_per_minute=account.submission_rate_per_minute,
                     max_live_subjects=account.max_live_subjects,
                     max_builds=0,
                     max_artifact_bytes=0,
@@ -1244,6 +1308,7 @@ class CapacityManagementStore:
                     rollout_surge_slots=subject.rollout_surge_slots,
                     max_pending_slots=subject.max_pending_slots,
                     max_pending_jobs=subject.max_pending_jobs,
+                    submission_rate_per_minute=subject.submission_rate_per_minute,
                     lifecycle_state=subject.lifecycle_state,
                     candidate_generation=subject.candidate_generation,
                     deployment_generation=subject.deployment_generation,
@@ -1644,6 +1709,10 @@ class CapacityManagementStore:
                 reporter.last_receipt_time = now
                 reporter.last_digest = digest
                 for observed in report.commitments:
+                    if observed.ownership_state != "unverified":
+                        raise ConfigurationConflictError(
+                            "pool reporter cannot authenticate executor ownership"
+                        )
                     await self._upsert_commitment(
                         session,
                         kind="physical",
@@ -1866,6 +1935,58 @@ class CapacityManagementStore:
             if row.state != contract.state:
                 contract = contract.model_copy(update={"state": row.state})
             observed.append(contract)
+        reservation_rows = (
+            await session.execute(
+                select(CapacityReservationTranche, CapacityReservationShape)
+                .join(
+                    CapacityReservationShape,
+                    CapacityReservationShape.tranche_id == CapacityReservationTranche.id,
+                )
+                .where(
+                    or_(
+                        CapacityReservationTranche.state == "accepted",
+                        and_(
+                            CapacityReservationTranche.state == "proposed",
+                            CapacityReservationTranche.expires_at > now,
+                        ),
+                    ),
+                    CapacityReservationShape.state != "released",
+                )
+                .order_by(
+                    CapacityReservationTranche.id,
+                    CapacityReservationShape.shape_instance_id,
+                )
+            )
+        ).all()
+        state_by_shape = {
+            "proposed": "proposed",
+            "accepted": "accepted",
+            "releasing": "draining",
+        }
+        for tranche, shape in reservation_rows:
+            identity_digest = hashlib.sha256(
+                f"{tranche.id}:{shape.shape_instance_id}".encode("ascii")
+            ).hexdigest()[:24]
+            observed.append(
+                ObservedCommitmentV1(
+                    kind="reserve",
+                    commitment_id=f"reservation-{identity_digest}",
+                    physical_identity=f"reservation-{identity_digest}",
+                    reservation_identity=str(shape.intent_id),
+                    subject_id=tranche.subject_id,
+                    subject_incarnation=tranche.subject_incarnation,
+                    deployment_generation=tranche.deployment_generation,
+                    pool_id=tranche.pool_id,
+                    pool_generation=tranche.pool_generation,
+                    profile_id=shape.profile_id,
+                    profile_generation=shape.profile_generation,
+                    profile_digest=shape.profile_digest,
+                    shape_id=shape.shape_id,
+                    resources=ResourceVectorV1.model_validate(shape.resource_vector),
+                    state=cast(Any, state_by_shape[shape.state]),
+                    node_ids=tuple(shape.node_ids),
+                )
+            )
         fairness_rows = (
             (
                 await session.execute(
@@ -1928,7 +2049,7 @@ class CapacityManagementStore:
             effective_account_policies=effective_accounts,
             subjects=subject_inputs,
             pools=pool_inputs,
-            observed_commitments=tuple(observed),
+            observed_commitments=_deduplicate_observed_commitments(observed),
             fairness_cursors=fairness,
             existing_pending_slots=0,
             existing_pending_jobs=0,

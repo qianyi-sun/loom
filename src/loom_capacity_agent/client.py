@@ -9,13 +9,17 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 from urllib.parse import SplitResult, urlsplit
 from uuid import UUID
 
 import httpx
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from loom_capacity_agent.admission import PreparedProtectedReleaseV1
 from loom_capacity_agent.contracts import ReporterConfigurationV1
+from loom_capacity_guard.contracts import canonical_digest as guard_canonical_digest
+from loom_capacity_manager.auth import MAX_BEARER_TOKEN_BYTES
 from loom_capacity_manager.contracts import (
     CapacityContractError,
     DemandSnapshotV1,
@@ -24,8 +28,12 @@ from loom_capacity_manager.contracts import (
     canonical_bytes,
     canonical_digest,
 )
+from loom_capacity_manager.grant_contracts import (
+    DryRunProtectedReleaseAcknowledgementV1,
+    canonical_grant_digest,
+)
 
-_MAX_CREDENTIAL_BYTES = 16 * 1024
+_MAX_CREDENTIAL_BYTES = MAX_BEARER_TOKEN_BYTES
 _MAX_RECEIPT_BYTES = 16 * 1024
 _PUBLISH_BINDINGS = (
     "subject_id",
@@ -49,6 +57,18 @@ class DemandPublishReceiptV1(BaseModel):
     digest: Digest
     sequence: PositiveQuantity
     replayed: bool
+
+
+class ProtectedReleasePublishReceiptV1(BaseModel):
+    """Exact bounded manager receipt for one locally fenced release."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    acknowledgement_id: UUID
+    shape_instance_id: str
+    acknowledgement_digest: Digest
+    replayed: bool
+    executable: Literal[False]
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,6 +323,89 @@ class DemandReporterClient:
             raise DemandPublishError("capacity manager demand receipt does not match the report")
         return receipt
 
+    async def publish_protected_release(
+        self,
+        release: PreparedProtectedReleaseV1,
+        *,
+        idempotency_key: UUID,
+    ) -> ProtectedReleasePublishReceiptV1:
+        """Publish only a release already committed by the protected local store."""
+
+        if not isinstance(release, PreparedProtectedReleaseV1):
+            raise DemandPublishError("protected release is not a schema-v1 acknowledgement")
+        if not isinstance(idempotency_key, UUID):
+            raise DemandPublishError("protected release idempotency key must be a UUID")
+        mismatches = tuple(
+            field
+            for field in _PUBLISH_BINDINGS
+            if getattr(release, field) != getattr(self._configuration, field)
+        )
+        if mismatches:
+            raise DemandPublishError(
+                "protected release binding differs from trusted configuration: "
+                + ", ".join(mismatches)
+            )
+        acknowledgement = DryRunProtectedReleaseAcknowledgementV1(
+            authority_incarnation=release.manager_authority_incarnation,
+            writer_epoch=release.manager_writer_epoch,
+            configuration_epoch=release.manager_configuration_epoch,
+            allocation_epoch=release.manager_allocation_epoch,
+            tranche_id=release.tranche_id,
+            shape_instance_id=release.shape_instance_id,
+            intent_id=release.submission_intent_id,
+            subject_id=release.subject_id,
+            subject_incarnation=release.subject_incarnation,
+            reporter_incarnation=release.reporter_incarnation,
+            deployment_generation=release.deployment_generation,
+            pool_id=release.pool_id,
+            pool_generation=release.pool_generation,
+            bootstrap_registration_epoch=release.bootstrap_registration_epoch,
+            protected_registration_epoch=release.protected_registration_epoch,
+            bootstrap_revoked=release.bootstrap_revoked,
+            protected_release_sha256=guard_canonical_digest(release),
+        )
+        endpoint = (
+            f"{self._manager_origin}/v1/reports/protected-releases/"
+            f"{release.subject_id}/{release.shape_instance_id}"
+        )
+        try:
+            response = await self._http.put(
+                endpoint,
+                content=canonical_bytes(acknowledgement),
+                headers={
+                    "Authorization": f"Bearer {self._bearer_token}",
+                    "Content-Type": "application/json",
+                    "Idempotency-Key": str(idempotency_key),
+                },
+            )
+        except httpx.HTTPError:
+            raise DemandPublishError(
+                "capacity manager protected release transport failed"
+            ) from None
+        if response.status_code != 200:
+            raise DemandPublishError(
+                f"capacity manager rejected protected release with status {response.status_code}"
+            )
+        if len(response.content) > _MAX_RECEIPT_BYTES:
+            raise DemandPublishError(
+                "capacity manager protected release receipt exceeds its byte bound"
+            )
+        try:
+            receipt = ProtectedReleasePublishReceiptV1.model_validate_json(response.content)
+        except (ValidationError, ValueError) as exc:
+            raise DemandPublishError(
+                "capacity manager returned an invalid protected release receipt"
+            ) from exc
+        if (
+            receipt.shape_instance_id != release.shape_instance_id
+            or receipt.acknowledgement_digest != canonical_grant_digest(acknowledgement)
+            or receipt.executable is not False
+        ):
+            raise DemandPublishError(
+                "capacity manager protected release receipt does not match the report"
+            )
+        return receipt
+
     async def aclose(self) -> None:
         if self._owns_http:
             await self._http.aclose()
@@ -320,6 +423,7 @@ __all__ = [
     "DemandReporterClient",
     "DemandReporterConnection",
     "DemandReporterTLSFiles",
+    "ProtectedReleasePublishReceiptV1",
     "build_reporter_tls_context",
     "canonical_manager_origin",
     "read_owner_only_bearer_token",

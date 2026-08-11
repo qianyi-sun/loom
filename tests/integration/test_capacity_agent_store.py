@@ -20,6 +20,7 @@ from loom_capacity_agent.admission import (
     PreparedAdmissionPlanV1,
     PreparedBootstrapBindingV1,
     PreparedPlacementAllowanceV1,
+    PreparedProtectedReleaseV1,
     PreparedWorkerBindingV1,
     PreparedWorkerShapeV1,
 )
@@ -462,7 +463,9 @@ async def test_capture_reads_only_registered_runnable_attempts_and_fences_legacy
             connection.execute(
                 Trial.__table__.update()
                 .where(Trial.id == trial_id)
-                .values(autoscaler_pool_name="oldlab", autoscaler_pool_assigned_at=datetime.now(UTC))
+                .values(
+                    autoscaler_pool_name="oldlab", autoscaler_pool_assigned_at=datetime.now(UTC)
+                )
             )
     finally:
         admin.dispose()
@@ -531,8 +534,7 @@ async def test_agent_records_are_append_only_and_reporter_state_cannot_skip(
         )
 
     immutable_statements = (
-        "UPDATE loom_capacity_guard.agent_runtime_authority "
-        "SET agent_role_name = agent_role_name",
+        "UPDATE loom_capacity_guard.agent_runtime_authority SET agent_role_name = agent_role_name",
         "DELETE FROM loom_capacity_guard.agent_registrations",
         "TRUNCATE loom_capacity_guard.demand_observations",
     )
@@ -806,6 +808,36 @@ def _prepared_worker_bindings(
     return bootstrap, worker
 
 
+def _protected_release(
+    registration: AgentRegistrationV1,
+    plan: PreparedAdmissionPlanV1,
+    *,
+    bootstrap_registration_epoch: int,
+) -> PreparedProtectedReleaseV1:
+    shape = plan.worker_shapes[0]
+    registration_fields = {
+        field: getattr(registration, field) for field in AgentRegistrationV1.model_fields
+    }
+    return PreparedProtectedReleaseV1(
+        **registration_fields,
+        release_id=uuid4(),
+        plan_id=plan.plan_id,
+        admission_incarnation=plan.admission_incarnation,
+        manager_authority_incarnation=plan.manager_authority_incarnation,
+        manager_writer_epoch=plan.manager_writer_epoch,
+        manager_configuration_epoch=5,
+        manager_allocation_epoch=plan.manager_allocation_epoch,
+        tranche_id=uuid4(),
+        pool_id=plan.pool_id,
+        pool_generation=plan.pool_generation,
+        shape_instance_id=shape.shape_instance_id,
+        submission_intent_id=shape.submission_intent_id,
+        bootstrap_registration_epoch=bootstrap_registration_epoch,
+        protected_registration_epoch=bootstrap_registration_epoch + 1,
+        bootstrap_revoked=True,
+    )
+
+
 @pytest.mark.asyncio
 async def test_prepared_plan_is_exact_replay_and_persists_normalized_bindings(
     capacity_guard_database: dict[str, object],
@@ -841,9 +873,9 @@ async def test_prepared_plan_is_exact_replay_and_persists_normalized_bindings(
     conflicting = plan.model_copy(update={"manager_allocation_digest": "0" * 64})
     with pytest.raises(DBAPIError, match="conflicting prepared admission"):
         async with _agent_session(capacity_guard_database) as session:
-            await CapacityPreparedAdmissionStore(
-                session, registration=registration
-            ).prepare_plan(conflicting)
+            await CapacityPreparedAdmissionStore(session, registration=registration).prepare_plan(
+                conflicting
+            )
 
 
 @pytest.mark.asyncio
@@ -883,9 +915,7 @@ async def test_concurrent_prepared_plan_replay_converges(
 async def test_concurrent_shape_rebinding_allows_only_one_plan(
     capacity_guard_database: dict[str, object],
 ) -> None:
-    registration, _attempt, first = await _initialize_prepared_plan(
-        capacity_guard_database
-    )
+    registration, _attempt, first = await _initialize_prepared_plan(capacity_guard_database)
     original_shape = first.worker_shapes[0]
     changed_contract = original_shape.worker_shape.model_copy(
         update={"warm_approved": not original_shape.worker_shape.warm_approved}
@@ -938,9 +968,9 @@ async def test_prepared_plan_rejects_unregistered_or_mismatched_attempt(
     missing_plan = plan.model_copy(update={"placement_allowances": (missing,)})
     with pytest.raises(DBAPIError, match="allowance binding"):
         async with _agent_session(capacity_guard_database) as session:
-            await CapacityPreparedAdmissionStore(
-                session, registration=registration
-            ).prepare_plan(missing_plan)
+            await CapacityPreparedAdmissionStore(session, registration=registration).prepare_plan(
+                missing_plan
+            )
 
     mismatched = allowance.model_copy(
         update={"execution_generation": attempt.execution_generation + 1}
@@ -948,18 +978,16 @@ async def test_prepared_plan_rejects_unregistered_or_mismatched_attempt(
     mismatch_plan = plan.model_copy(update={"placement_allowances": (mismatched,)})
     with pytest.raises(DBAPIError, match="allowance binding"):
         async with _agent_session(capacity_guard_database) as session:
-            await CapacityPreparedAdmissionStore(
-                session, registration=registration
-            ).prepare_plan(mismatch_plan)
+            await CapacityPreparedAdmissionStore(session, registration=registration).prepare_plan(
+                mismatch_plan
+            )
 
 
 @pytest.mark.asyncio
 async def test_later_epoch_can_retain_but_not_rebind_a_shape_identity(
     capacity_guard_database: dict[str, object],
 ) -> None:
-    registration, _attempt, first = await _initialize_prepared_plan(
-        capacity_guard_database
-    )
+    registration, _attempt, first = await _initialize_prepared_plan(capacity_guard_database)
     second = PreparedAdmissionPlanV1.model_validate(
         {
             **first.model_dump(mode="python"),
@@ -1008,9 +1036,9 @@ async def test_later_epoch_can_retain_but_not_rebind_a_shape_identity(
     )
     with pytest.raises(DBAPIError, match="shape identity was rebound"):
         async with _agent_session(capacity_guard_database) as session:
-            await CapacityPreparedAdmissionStore(
-                session, registration=registration
-            ).prepare_plan(rebound)
+            await CapacityPreparedAdmissionStore(session, registration=registration).prepare_plan(
+                rebound
+            )
 
 
 @pytest.mark.asyncio
@@ -1037,9 +1065,9 @@ async def test_database_recomputes_prepared_payload_digest_before_insert(
 
     async with _agent_session(capacity_guard_database) as session:
         assert (
-            await CapacityPreparedAdmissionStore(
-                session, registration=registration
-            ).prepare_plan(plan)
+            await CapacityPreparedAdmissionStore(session, registration=registration).prepare_plan(
+                plan
+            )
             == plan
         )
 
@@ -1092,6 +1120,131 @@ async def test_bootstrap_and_worker_are_hash_only_exact_replays(
             .one()
         )
     assert dict(counts) == {"bootstraps": 1, "workers": 1, "audits": 2}
+
+
+@pytest.mark.asyncio
+async def test_protected_release_is_concurrent_append_only_and_fences_late_registration(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    registration, _attempt, unbound_plan = await _initialize_prepared_plan(capacity_guard_database)
+    plan = unbound_plan.model_copy(update={"manager_writer_epoch": 1})
+    bootstrap, _worker = _prepared_worker_bindings(registration, plan)
+    release = _protected_release(
+        registration,
+        plan,
+        bootstrap_registration_epoch=0,
+    )
+    async with _agent_session(capacity_guard_database) as session:
+        await CapacityPreparedAdmissionStore(session, registration=registration).prepare_plan(plan)
+
+    async def acknowledge() -> PreparedProtectedReleaseV1:
+        async with _agent_session(capacity_guard_database) as session:
+            return await CapacityPreparedAdmissionStore(
+                session, registration=registration
+            ).acknowledge_protected_release(release)
+
+    assert await asyncio.gather(acknowledge(), acknowledge()) == [release, release]
+
+    with pytest.raises(DBAPIError, match="protected release fence"):
+        async with _agent_session(capacity_guard_database) as session:
+            await CapacityPreparedAdmissionStore(
+                session, registration=registration
+            ).register_bootstrap(bootstrap)
+
+    async with _owner_session(capacity_guard_database) as (_, _, session):
+        counts = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT "
+                        "(SELECT count(*) FROM "
+                        "loom_capacity_guard.protected_release_acknowledgements) AS releases, "
+                        "(SELECT count(*) FROM loom_capacity_guard.audit_events WHERE "
+                        "event_type = 'protected_release_acknowledged.v1') AS audits"
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+    assert dict(counts) == {"releases": 1, "audits": 1}
+
+    immutable_statements = (
+        "UPDATE loom_capacity_guard.protected_release_acknowledgements SET executable = true",
+        "DELETE FROM loom_capacity_guard.protected_release_acknowledgements",
+        "TRUNCATE loom_capacity_guard.protected_release_acknowledgements",
+    )
+    for statement in immutable_statements:
+        with pytest.raises(DBAPIError, match="append-only"):
+            async with _owner_session(capacity_guard_database) as (_, _, session):
+                await session.execute(text(statement))
+
+
+@pytest.mark.asyncio
+async def test_protected_release_requires_exact_bootstrap_high_water_and_no_worker(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    registration, _attempt, unbound_plan = await _initialize_prepared_plan(capacity_guard_database)
+    plan = unbound_plan.model_copy(update={"manager_writer_epoch": 1})
+    bootstrap, worker = _prepared_worker_bindings(registration, plan)
+    async with _agent_session(capacity_guard_database) as session:
+        store = CapacityPreparedAdmissionStore(session, registration=registration)
+        await store.prepare_plan(plan)
+        await store.register_bootstrap(bootstrap)
+
+    stale_release = _protected_release(
+        registration,
+        plan,
+        bootstrap_registration_epoch=0,
+    )
+    with pytest.raises(DBAPIError, match="bootstrap high-water changed"):
+        async with _agent_session(capacity_guard_database) as session:
+            await CapacityPreparedAdmissionStore(
+                session, registration=registration
+            ).acknowledge_protected_release(stale_release)
+
+    current_release = _protected_release(
+        registration,
+        plan,
+        bootstrap_registration_epoch=bootstrap.bootstrap_registration_epoch,
+    )
+    async with _agent_session(capacity_guard_database) as session:
+        assert (
+            await CapacityPreparedAdmissionStore(
+                session, registration=registration
+            ).acknowledge_protected_release(current_release)
+            == current_release
+        )
+    with pytest.raises(DBAPIError, match="protected release fence"):
+        async with _agent_session(capacity_guard_database) as session:
+            await CapacityPreparedAdmissionStore(
+                session, registration=registration
+            ).record_prepared_worker(worker)
+
+
+@pytest.mark.asyncio
+async def test_protected_release_rejects_an_existing_prepared_worker(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    registration, _attempt, unbound_plan = await _initialize_prepared_plan(capacity_guard_database)
+    plan = unbound_plan.model_copy(update={"manager_writer_epoch": 1})
+    bootstrap, worker = _prepared_worker_bindings(registration, plan)
+    async with _agent_session(capacity_guard_database) as session:
+        store = CapacityPreparedAdmissionStore(session, registration=registration)
+        await store.prepare_plan(plan)
+        await store.register_bootstrap(bootstrap)
+        await store.record_prepared_worker(worker)
+
+    release = _protected_release(
+        registration,
+        plan,
+        bootstrap_registration_epoch=bootstrap.bootstrap_registration_epoch,
+    )
+    with pytest.raises(DBAPIError, match="prepared worker binding"):
+        async with _agent_session(capacity_guard_database) as session:
+            await CapacityPreparedAdmissionStore(
+                session, registration=registration
+            ).acknowledge_protected_release(release)
 
 
 @pytest.mark.asyncio
@@ -1291,9 +1444,7 @@ async def test_concurrent_inert_assignment_allows_one_transition(
         expected_sequence=0,
     )
     async with _agent_session(capacity_guard_database) as session:
-        await CapacityPreparedAdmissionStore(
-            session, registration=registration
-        ).prepare_plan(plan)
+        await CapacityPreparedAdmissionStore(session, registration=registration).prepare_plan(plan)
 
     async def assign(transition: InertAttemptTransitionV1) -> InertAttemptTransitionV1:
         async with _agent_session(capacity_guard_database) as session:
@@ -1332,12 +1483,10 @@ async def test_lifecycle_capture_reports_pending_then_assigned_and_fences_v1(
         expected_sequence=0,
     )
     async with _agent_session(capacity_guard_database) as session:
-        await CapacityPreparedAdmissionStore(
-            session, registration=registration
-        ).prepare_plan(plan)
-        await CapacityAttemptLifecycleStore(
-            session, registration=registration
-        ).apply_transition(assignment)
+        await CapacityPreparedAdmissionStore(session, registration=registration).prepare_plan(plan)
+        await CapacityAttemptLifecycleStore(session, registration=registration).apply_transition(
+            assignment
+        )
 
     with pytest.raises(DBAPIError, match="cannot represent the protected lifecycle"):
         async with _agent_session(capacity_guard_database) as session:
@@ -1411,9 +1560,7 @@ async def test_lifecycle_capture_rejects_terminal_public_contradiction_without_a
         expected_state="assigned",
     )
     async with _agent_session(capacity_guard_database) as session:
-        await CapacityPreparedAdmissionStore(
-            session, registration=registration
-        ).prepare_plan(plan)
+        await CapacityPreparedAdmissionStore(session, registration=registration).prepare_plan(plan)
         lifecycle = CapacityAttemptLifecycleStore(session, registration=registration)
         await lifecycle.apply_transition(assignment)
         await lifecycle.apply_transition(cancellation)
@@ -1547,12 +1694,10 @@ async def test_lifecycle_capture_rejects_incompatible_assigned_shape_without_adv
         expected_sequence=0,
     )
     async with _agent_session(capacity_guard_database) as session:
-        await CapacityPreparedAdmissionStore(
-            session, registration=registration
-        ).prepare_plan(plan)
-        await CapacityAttemptLifecycleStore(
-            session, registration=registration
-        ).apply_transition(assignment)
+        await CapacityPreparedAdmissionStore(session, registration=registration).prepare_plan(plan)
+        await CapacityAttemptLifecycleStore(session, registration=registration).apply_transition(
+            assignment
+        )
 
     with pytest.raises(DBAPIError, match="invalid prepared binding"):
         async with _agent_session(capacity_guard_database) as session:
@@ -1695,9 +1840,7 @@ async def test_inert_assignment_rechecks_current_workload_eligibility(
 ) -> None:
     registration, attempt, plan = await _initialize_prepared_plan(capacity_guard_database)
     async with _agent_session(capacity_guard_database) as session:
-        await CapacityPreparedAdmissionStore(
-            session, registration=registration
-        ).prepare_plan(plan)
+        await CapacityPreparedAdmissionStore(session, registration=registration).prepare_plan(plan)
 
     admin = create_engine(_value(capacity_guard_database, "admin_url"))
     try:
@@ -1745,9 +1888,7 @@ async def test_lifecycle_records_and_disabled_activation_are_append_only(
         expected_state="assigned",
     )
     async with _agent_session(capacity_guard_database) as session:
-        await CapacityPreparedAdmissionStore(
-            session, registration=registration
-        ).prepare_plan(plan)
+        await CapacityPreparedAdmissionStore(session, registration=registration).prepare_plan(plan)
         lifecycle = CapacityAttemptLifecycleStore(session, registration=registration)
         await lifecycle.apply_transition(assign)
         await lifecycle.apply_transition(cancel)
@@ -1759,8 +1900,7 @@ async def test_lifecycle_records_and_disabled_activation_are_append_only(
         "SET transition_sequence = transition_sequence",
         "DELETE FROM loom_capacity_guard.attempt_lifecycle_heads",
         "TRUNCATE loom_capacity_guard.attempt_lifecycle_heads CASCADE",
-        "UPDATE loom_capacity_guard.attempt_lifecycle_projection_blockers "
-        "SET resolved_at = now()",
+        "UPDATE loom_capacity_guard.attempt_lifecycle_projection_blockers SET resolved_at = now()",
         "DELETE FROM loom_capacity_guard.attempt_lifecycle_projection_blockers",
         "TRUNCATE loom_capacity_guard.attempt_lifecycle_projection_resolutions",
         "TRUNCATE loom_capacity_guard.protected_claim_leases",
@@ -1792,9 +1932,9 @@ async def test_database_claim_guard_inspects_exact_bindings_but_always_denies(
         await prepared.prepare_plan(plan)
         await prepared.register_bootstrap(bootstrap)
         await prepared.record_prepared_worker(worker)
-        await CapacityAttemptLifecycleStore(
-            session, registration=registration
-        ).apply_transition(assignment)
+        await CapacityAttemptLifecycleStore(session, registration=registration).apply_transition(
+            assignment
+        )
 
     allowance = plan.placement_allowances[0]
     proposal = ClaimProposalV1(

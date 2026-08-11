@@ -289,10 +289,54 @@ class PreparedWorkerBindingV1(AgentRegistrationV1):
         return self
 
 
+class PreparedProtectedReleaseV1(AgentRegistrationV1):
+    """Append-only local proof that one inert shape is fenced from registration."""
+
+    release_id: UUID
+    plan_id: UUID
+    admission_incarnation: UUID
+    manager_authority_incarnation: UUID
+    manager_writer_epoch: PositiveGeneration
+    manager_configuration_epoch: PositiveGeneration
+    manager_allocation_epoch: PositiveGeneration
+    tranche_id: UUID
+    pool_id: PhysicalPool
+    pool_generation: PositiveGeneration
+    shape_instance_id: Identifier
+    submission_intent_id: UUID
+    bootstrap_registration_epoch: NonNegativeSequence
+    protected_registration_epoch: PositiveGeneration
+    bootstrap_revoked: Literal[True]
+    release_state: Literal["acknowledged"] = "acknowledged"
+    executable: Literal[False] = False
+
+    @model_validator(mode="after")
+    def _release_fence(self) -> PreparedProtectedReleaseV1:
+        if self.protected_registration_epoch <= self.bootstrap_registration_epoch:
+            raise ValueError("protected registration epoch must advance past bootstrap")
+        identities = {
+            self.subject_id,
+            self.subject_incarnation,
+            self.authority_incarnation,
+            self.agent_incarnation,
+            self.reporter_incarnation,
+            self.release_id,
+            self.plan_id,
+            self.admission_incarnation,
+            self.manager_authority_incarnation,
+            self.tranche_id,
+            self.submission_intent_id,
+        }
+        if len(identities) != 11:
+            raise ValueError("protected release identities must be distinct")
+        return self
+
+
 __all__ = [
     "PreparedAdmissionPlanV1",
     "PreparedBootstrapBindingV1",
     "PreparedPlacementAllowanceV1",
+    "PreparedProtectedReleaseV1",
     "PreparedWorkerBindingV1",
     "PreparedWorkerShapeV1",
 ]

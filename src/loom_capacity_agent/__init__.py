@@ -4,6 +4,7 @@ from loom_capacity_agent.admission import (
     PreparedAdmissionPlanV1,
     PreparedBootstrapBindingV1,
     PreparedPlacementAllowanceV1,
+    PreparedProtectedReleaseV1,
     PreparedWorkerBindingV1,
     PreparedWorkerShapeV1,
 )
@@ -21,6 +22,7 @@ from loom_capacity_agent.client import (
     DemandReporterClient,
     DemandReporterConnection,
     DemandReporterTLSFiles,
+    ProtectedReleasePublishReceiptV1,
 )
 from loom_capacity_agent.contracts import (
     AgentPoolCapabilityV1,
@@ -104,8 +106,10 @@ __all__ = [
     "PreparedAdmissionPlanV1",
     "PreparedBootstrapBindingV1",
     "PreparedPlacementAllowanceV1",
+    "PreparedProtectedReleaseV1",
     "PreparedWorkerBindingV1",
     "PreparedWorkerShapeV1",
+    "ProtectedReleasePublishReceiptV1",
     "ReporterConfigurationV1",
     "build_demand_snapshot",
     "build_lifecycle_demand_snapshot",

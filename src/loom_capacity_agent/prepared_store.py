@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from loom_capacity_agent.admission import (
     PreparedAdmissionPlanV1,
     PreparedBootstrapBindingV1,
+    PreparedProtectedReleaseV1,
     PreparedWorkerBindingV1,
 )
 from loom_capacity_agent.contracts import AgentRegistrationV1
@@ -24,6 +25,7 @@ _PreparedT = TypeVar(
     "_PreparedT",
     PreparedAdmissionPlanV1,
     PreparedBootstrapBindingV1,
+    PreparedProtectedReleaseV1,
     PreparedWorkerBindingV1,
 )
 
@@ -131,6 +133,16 @@ class CapacityPreparedAdmissionStore:
             "record_inert_worker",
             binding,
             PreparedWorkerBindingV1,
+        )
+
+    async def acknowledge_protected_release(
+        self,
+        release: PreparedProtectedReleaseV1,
+    ) -> PreparedProtectedReleaseV1:
+        return await self._invoke(
+            "acknowledge_inert_protected_release",
+            release,
+            PreparedProtectedReleaseV1,
         )
 
 

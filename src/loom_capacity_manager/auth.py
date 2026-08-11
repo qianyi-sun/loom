@@ -16,7 +16,8 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 _MAX_REGISTRY_BYTES = 1024 * 1024
-_BEARER = re.compile(r"Bearer ([^\s]{1,4096})", re.ASCII)
+MAX_BEARER_TOKEN_BYTES = 4096
+_BEARER = re.compile(rf"Bearer ([^\s]{{1,{MAX_BEARER_TOKEN_BYTES}}})", re.ASCII)
 CapacityScope = Literal[
     "capacity:configure:fleet",
     "capacity:configure:subject",
@@ -26,6 +27,8 @@ CapacityScope = Literal[
     "capacity:read",
     "capacity:report:demand",
     "capacity:report:pool",
+    "capacity:grant:manage",
+    "capacity:execute:pool",
 ]
 
 
@@ -54,14 +57,19 @@ class _PrincipalDocument(_StrictModel):
     principal_id: Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[a-z0-9-]+$")]
     token_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
     scopes: Annotated[tuple[CapacityScope, ...], Field(min_length=1)]
-    subject_id: UUID | None
-    subject_incarnation: UUID | None
-    demand_reporter_incarnation: UUID | None
+    subject_id: UUID | None = None
+    subject_incarnation: UUID | None = None
+    demand_reporter_incarnation: UUID | None = None
     pool_id: Annotated[
         str | None,
         Field(min_length=1, max_length=128, pattern=r"^[a-z0-9-]+$"),
     ]
-    pool_reporter_incarnation: UUID | None
+    pool_reporter_incarnation: UUID | None = None
+    executor_id: Annotated[
+        str | None,
+        Field(min_length=1, max_length=128, pattern=r"^[a-z0-9-]+$"),
+    ] = None
+    executor_incarnation: UUID | None = None
 
     @field_validator("scopes")
     @classmethod
@@ -77,23 +85,44 @@ class _PrincipalDocument(_StrictModel):
             self.subject_incarnation,
             self.demand_reporter_incarnation,
         )
-        pool_values = (self.pool_id, self.pool_reporter_incarnation)
         has_subject = any(value is not None for value in subject_values)
-        has_pool = any(value is not None for value in pool_values)
+        has_pool_reporter = self.pool_reporter_incarnation is not None
+        has_executor = any(
+            value is not None for value in (self.executor_id, self.executor_incarnation)
+        )
         if has_subject and not all(value is not None for value in subject_values):
             raise ValueError("incomplete subject binding")
-        if has_pool and not all(value is not None for value in pool_values):
+        if has_pool_reporter and self.pool_id is None:
             raise ValueError("incomplete pool binding")
-        if has_subject and has_pool:
+        if has_executor and not all(
+            value is not None
+            for value in (self.pool_id, self.executor_id, self.executor_incarnation)
+        ):
+            raise ValueError("incomplete executor binding")
+        if has_subject and self.pool_id is not None:
             raise ValueError("principal cannot combine subject and pool bindings")
+        if has_pool_reporter and has_executor:
+            raise ValueError("principal cannot combine reporter and executor bindings")
+        if self.pool_id is not None and not (has_pool_reporter or has_executor):
+            raise ValueError("incomplete pool binding")
         if "capacity:report:demand" in self.scopes and not has_subject:
             raise ValueError("demand reporter requires complete subject binding")
-        if "capacity:report:pool" in self.scopes and not has_pool:
+        if "capacity:report:pool" in self.scopes and not has_pool_reporter:
             raise ValueError("pool reporter requires complete pool binding")
+        if "capacity:execute:pool" in self.scopes and not has_executor:
+            raise ValueError("pool executor requires complete executor binding")
         if has_subject and "capacity:report:demand" not in self.scopes:
             raise ValueError("subject binding requires demand reporter scope")
-        if has_pool and "capacity:report:pool" not in self.scopes:
+        if has_pool_reporter and "capacity:report:pool" not in self.scopes:
             raise ValueError("pool binding requires pool reporter scope")
+        if has_executor and "capacity:execute:pool" not in self.scopes:
+            raise ValueError("executor binding requires pool executor scope")
+        if has_subject and set(self.scopes) != {"capacity:report:demand"}:
+            raise ValueError("subject reporter principal must be single-purpose")
+        if has_pool_reporter and set(self.scopes) != {"capacity:report:pool"}:
+            raise ValueError("pool reporter principal must be single-purpose")
+        if has_executor and set(self.scopes) != {"capacity:execute:pool"}:
+            raise ValueError("pool executor principal must be single-purpose")
         return self
 
 
@@ -128,6 +157,8 @@ class CapacityPrincipal:
     demand_reporter_incarnation: UUID | None
     pool_id: str | None
     pool_reporter_incarnation: UUID | None
+    executor_id: str | None
+    executor_incarnation: UUID | None
 
     def has_scope(self, scope: CapacityScope) -> bool:
         return scope in self.scopes
@@ -199,8 +230,12 @@ class CapacityPrincipalVerifier:
                 label = "duplicate token"
             elif "subject binding" in message:
                 label = "invalid subject binding"
+            elif "executor binding" in message:
+                label = "invalid executor binding"
             elif "pool binding" in message:
                 label = "invalid pool binding"
+            elif "single-purpose" in message:
+                label = "bound principal must be single-purpose"
             elif "operator" in message:
                 label = "principal registry requires an operator"
             elif "scope" in message or "literal_error" in message:
@@ -219,6 +254,8 @@ class CapacityPrincipalVerifier:
                     demand_reporter_incarnation=item.demand_reporter_incarnation,
                     pool_id=item.pool_id,
                     pool_reporter_incarnation=item.pool_reporter_incarnation,
+                    executor_id=item.executor_id,
+                    executor_incarnation=item.executor_incarnation,
                 ),
             )
             for item in document.principals
@@ -237,6 +274,7 @@ class CapacityPrincipalVerifier:
 
 
 __all__ = [
+    "MAX_BEARER_TOKEN_BYTES",
     "AuthorizationError",
     "CapacityPrincipal",
     "CapacityPrincipalVerifier",

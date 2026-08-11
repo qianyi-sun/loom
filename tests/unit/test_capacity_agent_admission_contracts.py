@@ -12,6 +12,7 @@ from loom_capacity_agent.admission import (
     PreparedAdmissionPlanV1,
     PreparedBootstrapBindingV1,
     PreparedPlacementAllowanceV1,
+    PreparedProtectedReleaseV1,
     PreparedWorkerBindingV1,
     PreparedWorkerShapeV1,
 )
@@ -126,9 +127,7 @@ def test_prepared_plan_is_disabled_nonexecutable_and_exactly_bound() -> None:
         ("executable", True),
     ):
         with pytest.raises(ValidationError):
-            PreparedAdmissionPlanV1.model_validate(
-                {**plan.model_dump(mode="python"), field: value}
-            )
+            PreparedAdmissionPlanV1.model_validate({**plan.model_dump(mode="python"), field: value})
     with pytest.raises(ValidationError, match="identities"):
         PreparedAdmissionPlanV1.model_validate(
             {
@@ -159,9 +158,7 @@ def test_plan_rejects_cross_pool_profile_shape_or_intent_bindings() -> None:
     )
     for field, value in corruptions:
         with pytest.raises(ValidationError):
-            PreparedAdmissionPlanV1.model_validate(
-                {**plan.model_dump(mode="python"), field: value}
-            )
+            PreparedAdmissionPlanV1.model_validate({**plan.model_dump(mode="python"), field: value})
 
 
 def test_plan_rejects_duplicate_attempts_allowances_and_physical_slots() -> None:
@@ -204,10 +201,7 @@ def test_bootstrap_and_worker_bindings_contain_hashes_but_no_usable_secret() -> 
     plan = _plan()
     shape = plan.worker_shapes[0]
     bootstrap = PreparedBootstrapBindingV1(
-        **{
-            field: getattr(plan, field)
-            for field in AgentRegistrationV1.model_fields
-        },
+        **{field: getattr(plan, field) for field in AgentRegistrationV1.model_fields},
         bootstrap_id=uuid4(),
         plan_id=plan.plan_id,
         admission_incarnation=plan.admission_incarnation,
@@ -220,10 +214,7 @@ def test_bootstrap_and_worker_bindings_contain_hashes_but_no_usable_secret() -> 
         expires_at=plan.lease_not_after,
     )
     worker = PreparedWorkerBindingV1(
-        **{
-            field: getattr(plan, field)
-            for field in AgentRegistrationV1.model_fields
-        },
+        **{field: getattr(plan, field) for field in AgentRegistrationV1.model_fields},
         worker_id=uuid4(),
         worker_incarnation=uuid4(),
         bootstrap_id=bootstrap.bootstrap_id,
@@ -246,4 +237,38 @@ def test_bootstrap_and_worker_bindings_contain_hashes_but_no_usable_secret() -> 
     with pytest.raises(ValidationError):
         PreparedWorkerBindingV1.model_validate(
             {**worker.model_dump(mode="python"), "claim_authorization_epoch": 1}
+        )
+
+
+def test_protected_release_advances_registration_fence_and_is_non_executable() -> None:
+    plan = _plan().model_copy(update={"manager_writer_epoch": 1})
+    shape = plan.worker_shapes[0]
+    release = PreparedProtectedReleaseV1(
+        **{field: getattr(plan, field) for field in AgentRegistrationV1.model_fields},
+        release_id=uuid4(),
+        plan_id=plan.plan_id,
+        admission_incarnation=plan.admission_incarnation,
+        manager_authority_incarnation=plan.manager_authority_incarnation,
+        manager_writer_epoch=plan.manager_writer_epoch,
+        manager_configuration_epoch=1,
+        manager_allocation_epoch=plan.manager_allocation_epoch,
+        tranche_id=uuid4(),
+        pool_id=plan.pool_id,
+        pool_generation=plan.pool_generation,
+        shape_instance_id=shape.shape_instance_id,
+        submission_intent_id=shape.submission_intent_id,
+        bootstrap_registration_epoch=1,
+        protected_registration_epoch=2,
+        bootstrap_revoked=True,
+    )
+
+    assert release.release_state == "acknowledged"
+    assert release.executable is False
+    with pytest.raises(ValidationError, match="advance past bootstrap"):
+        PreparedProtectedReleaseV1.model_validate(
+            release.model_dump(mode="python") | {"protected_registration_epoch": 1}
+        )
+    with pytest.raises(ValidationError):
+        PreparedProtectedReleaseV1.model_validate(
+            release.model_dump(mode="python") | {"executable": True}
         )

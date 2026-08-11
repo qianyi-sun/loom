@@ -190,6 +190,7 @@ def fleet_payload(**overrides: Any) -> dict[str, Any]:
                 "max_surge_slots": 2,
                 "max_pending_slots": 16,
                 "max_pending_jobs": 16,
+                "submission_rate_per_minute": 8,
                 "max_live_subjects": 16,
             }
         ],
@@ -380,6 +381,7 @@ def subject_configuration(
         "rollout_surge_slots": 1,
         "max_pending_slots": 8,
         "max_pending_jobs": 8,
+        "submission_rate_per_minute": 8,
         "lifecycle_state": "active",
         "candidate_generation": 1,
         "deployment_generation": 1,
