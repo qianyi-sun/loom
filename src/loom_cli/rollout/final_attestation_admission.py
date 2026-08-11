@@ -40,6 +40,23 @@ _POST_APPLY_DRIFT_EVIDENCE_CHECKS = frozenset(
 _PRE_APPLY_DRIFT_EVIDENCE_CHECKS = _POST_APPLY_DRIFT_EVIDENCE_CHECKS | {
     "external-supervisor.predecessor"
 }
+_ROTATING_CREDENTIAL_METADATA = frozenset(
+    {"readonly-kubeconfig", "rehearsal-kubeconfig"}
+)
+
+
+def _credential_metadata_matches(
+    current: Mapping[str, str],
+    attested: Mapping[str, str],
+) -> bool:
+    """Freeze stable credentials while allowing reviewed TokenRequest rotation."""
+    if current.keys() != attested.keys():
+        return False
+    return all(
+        current[name] == fingerprint
+        for name, fingerprint in attested.items()
+        if name not in _ROTATING_CREDENTIAL_METADATA
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,7 +177,17 @@ def validate_final_attestation(
         evidence("candidate.identity", "resolved-sha") == bindings.candidate_sha,
         evidence("candidate.identity", "resolved-tree") == bindings.candidate_tree,
         evidence("runner.install", "attestation-digest") == bindings.runner_install_hash,
-        normalized_secret_metadata == dict(bindings.secret_metadata_fingerprints),
+        # These two kubeconfigs contain bounded TokenRequest credentials and are
+        # intentionally refreshed hourly.  Their current no-follow metadata,
+        # ACL, read stability, and downstream capability are revalidated by the
+        # passing preflight DAG above; freezing their inode/timestamps would
+        # turn an authorized refresh into unavoidable attestation drift.  The
+        # complete credential label set and every non-rotating credential stay
+        # byte-exact here.
+        _credential_metadata_matches(
+            normalized_secret_metadata,
+            bindings.secret_metadata_fingerprints,
+        ),
         evidence("gb10.shared-mount", "mount-digest") == bindings.gb10_mount_digest,
         evidence("gb10.candidate-source", "source-digest") == bindings.gb10_unit_digest,
         # gb10.host-readiness inventory-digest is intentionally NOT byte-matched:
@@ -322,7 +349,12 @@ def validate_post_apply_attestation_drift(
         evidence("candidate.identity", "resolved-sha") == bindings.candidate_sha,
         evidence("candidate.identity", "resolved-tree") == bindings.candidate_tree,
         evidence("runner.install", "attestation-digest") == bindings.runner_install_hash,
-        normalized_secret_metadata == dict(bindings.secret_metadata_fingerprints),
+        # TokenRequest kubeconfigs may rotate during the protected apply too;
+        # their current authority is still required to pass the DAG above.
+        _credential_metadata_matches(
+            normalized_secret_metadata,
+            bindings.secret_metadata_fingerprints,
+        ),
         evidence("gb10.shared-mount", "mount-digest") == bindings.gb10_mount_digest,
         evidence("gb10.candidate-source", "source-digest") == bindings.gb10_unit_digest,
         # gb10.host-readiness inventory-digest is intentionally NOT byte-matched:
