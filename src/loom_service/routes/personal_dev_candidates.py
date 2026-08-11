@@ -15,6 +15,8 @@ from loom.auth import AuthContext
 from loom.personal_dev_candidate import (
     CandidateRegistration,
     CandidateRegistry,
+    PersonalDevCandidateLimits,
+    PersonalDevCandidateQuotaError,
 )
 from loom.personal_dev_candidate_store import SqlAlchemyPersonalDevCandidateStore
 from loom_service.auth_guards import is_admin, require_scope, require_submitting_user
@@ -85,7 +87,33 @@ class PersonalDevCandidateListResponse(BaseModel):
 def _store(request: Request, session: AsyncSession) -> VisibleCandidateStore:
     factory = getattr(request.app.state, "personal_dev_candidate_store_factory", None)
     if factory is None:
-        return SqlAlchemyPersonalDevCandidateStore(session)
+        defaults = PersonalDevCandidateLimits()
+        settings = getattr(request.app.state, "settings", None)
+        return SqlAlchemyPersonalDevCandidateStore(
+            session,
+            limits=PersonalDevCandidateLimits(
+                per_owner_retained_candidates=getattr(
+                    settings,
+                    "personal_dev_candidate_retained_count_limit",
+                    defaults.per_owner_retained_candidates,
+                ),
+                per_owner_retained_archive_bytes=getattr(
+                    settings,
+                    "personal_dev_candidate_retained_bytes_limit",
+                    defaults.per_owner_retained_archive_bytes,
+                ),
+                global_active_builds=getattr(
+                    settings,
+                    "personal_dev_builder_global_concurrency",
+                    defaults.global_active_builds,
+                ),
+                per_owner_active_builds=getattr(
+                    settings,
+                    "personal_dev_builder_per_owner_concurrency",
+                    defaults.per_owner_active_builds,
+                ),
+            ),
+        )
     if not callable(factory):
         raise HTTPException(status_code=503, detail="personal-dev candidate registry unavailable")
     return cast(StoreFactory, factory)(session)
@@ -174,17 +202,20 @@ async def create_personal_dev_candidate(
     _require_enabled(request)
     owner_user_id, owner_team_id = _owner(ctx)
     settings = request.app.state.settings
-    registration = await intake_personal_dev_candidate(
-        registry=_store(request, session),
-        object_store=request.app.state.minio_client,
-        bucket=settings.artifacts_bucket,
-        owner_user_id=owner_user_id,
-        owner_team_id=owner_team_id,
-        source_upload=source,
-        expected_source_sha256=source_sha256,
-        expected_archive_sha256=archive_sha256,
-        max_archive_bytes=settings.personal_dev_source_max_archive_bytes,
-    )
+    try:
+        registration = await intake_personal_dev_candidate(
+            registry=_store(request, session),
+            object_store=request.app.state.minio_client,
+            bucket=settings.artifacts_bucket,
+            owner_user_id=owner_user_id,
+            owner_team_id=owner_team_id,
+            source_upload=source,
+            expected_source_sha256=source_sha256,
+            expected_archive_sha256=archive_sha256,
+            max_archive_bytes=settings.personal_dev_source_max_archive_bytes,
+        )
+    except PersonalDevCandidateQuotaError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     response.status_code = 201 if registration.created else 200
     return _response(registration)
 

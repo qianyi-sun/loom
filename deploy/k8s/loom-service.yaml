@@ -130,6 +130,46 @@ spec:
           value: '300'
         - name: LOOM_SVC_PERSONAL_DEV_ACTIVATION_HMAC_KEY_ID
           value: personal-dev-agent-v1
+        - name: LOOM_SVC_PERSONAL_DEV_BUILDER_DOCKER_PATH
+          value: /usr/bin/docker
+        - name: LOOM_SVC_PERSONAL_DEV_BUILDER_ENABLED
+          value: 'False'
+        - name: LOOM_SVC_PERSONAL_DEV_BUILDER_GLOBAL_CONCURRENCY
+          value: '4'
+        - name: LOOM_SVC_PERSONAL_DEV_BUILDER_IMAGE
+          value: ''
+        - name: LOOM_SVC_PERSONAL_DEV_BUILDER_LEASE_SEC
+          value: '4200'
+        - name: LOOM_SVC_PERSONAL_DEV_BUILDER_MAX_ARTIFACT_BYTES
+          value: '6442450944'
+        - name: LOOM_SVC_PERSONAL_DEV_BUILDER_MAX_IMAGE_ARCHIVE_BYTES
+          value: '2147483648'
+        - name: LOOM_SVC_PERSONAL_DEV_BUILDER_PER_OWNER_CONCURRENCY
+          value: '1'
+        - name: LOOM_SVC_PERSONAL_DEV_BUILDER_POLL_INTERVAL_SEC
+          value: '2.0'
+        - name: LOOM_SVC_PERSONAL_DEV_BUILDER_PUBLISHER_IDENTITY
+          value: ''
+        - name: LOOM_SVC_PERSONAL_DEV_BUILDER_REGISTRY_AUTH_FILE
+          value: /var/run/loom-personal-dev-registry/config.json
+        - name: LOOM_SVC_PERSONAL_DEV_BUILDER_REGISTRY_PREFIX
+          value: ''
+        - name: LOOM_SVC_PERSONAL_DEV_BUILDER_RUNTIME_CLASS_NAME
+          value: loom-personal-dev-builder
+        - name: LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_CACHE_DIR
+          value: /var/lib/loom-personal-dev-scanner
+        - name: LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_IDENTITY
+          value: ''
+        - name: LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_PATH
+          value: /usr/local/bin/trivy
+        - name: LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_POLICY_SHA256
+          value: ''
+        - name: LOOM_SVC_PERSONAL_DEV_BUILDER_SKOPEO_PATH
+          value: /usr/bin/skopeo
+        - name: LOOM_SVC_PERSONAL_DEV_CANDIDATE_RETAINED_BYTES_LIMIT
+          value: '3221225472'
+        - name: LOOM_SVC_PERSONAL_DEV_CANDIDATE_RETAINED_COUNT_LIMIT
+          value: '8'
         - name: LOOM_SVC_PERSONAL_DEV_GLOBAL_LIVE_INSTANCE_LIMIT
           value: '16'
         - name: LOOM_SVC_PERSONAL_DEV_PER_OWNER_AGGREGATE_MAX_SLOTS
@@ -138,12 +178,16 @@ spec:
           value: '8'
         - name: LOOM_SVC_PERSONAL_DEV_PER_OWNER_LIVE_INSTANCE_LIMIT
           value: '2'
+        - name: LOOM_SVC_PERSONAL_DEV_PROTOCOL_VERSIONS_JSON
+          value: '{}'
         - name: LOOM_SVC_PERSONAL_DEV_RECONCILER_LEASE_SEC
           value: '1800'
         - name: LOOM_SVC_PERSONAL_DEV_RECONCILER_POLL_INTERVAL_SEC
           value: '2.0'
         - name: LOOM_SVC_PERSONAL_DEV_SOURCE_MAX_ARCHIVE_BYTES
           value: '402653184'
+        - name: LOOM_SVC_PERSONAL_DEV_TRUSTED_LAUNCHER_PROFILE_SHA256
+          value: ''
         - name: LOOM_SVC_PUBLIC_BASE_URL
           value: https://loom.example.com
         - name: LOOM_SVC_SIGNED_URL_EXPIRY_SEC

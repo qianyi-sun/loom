@@ -467,6 +467,11 @@ async def apply_personal_dev_environment(
     session, ctx = sc
     require_scope(ctx, "submit")
     owner_user_id, owner_team_id = _require_user_identity(ctx)
+    if getattr(request.app.state, "personal_dev_builder_available", None) is False:
+        raise HTTPException(
+            status_code=503,
+            detail="personal-dev candidate builder is not activated in this environment",
+        )
     if payload.min_slots > payload.max_slots:
         raise HTTPException(status_code=400, detail="min_slots must not exceed max_slots")
     try:

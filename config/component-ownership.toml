@@ -147,6 +147,27 @@ runtime_policy = "start"
 rollout_role = "primary"
 
 [[components]]
+id = "personal-dev-builder"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.personal-dev-builder"
+build_context = "."
+source_paths = [
+  ".dockerignore",
+  "deploy/Dockerfile.personal-dev-builder",
+  "src/loom/__init__.py",
+  "src/loom/personal_dev_builder_artifact.py",
+  "src/loom/personal_dev_candidate.py",
+  "src/loom/personal_dev_sandbox_builder.py",
+  "src/loom/personal_dev_source.py",
+]
+smoke_owner = "sandbox-network-conformance"
+scan_owner = "images"
+attestation_owner = "release-provenance"
+release_digest = "loom-personal-dev-builder"
+runtime_policy = "conformance"
+rollout_role = "none"
+
+[[components]]
 id = "egress-xds"
 kind = "release-image"
 dockerfile = "deploy/Dockerfile.egress-xds"

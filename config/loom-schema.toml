@@ -228,6 +228,133 @@ python_type = "int"
 default     = 402653184
 description = "Maximum personal-dev source tar accepted by the management service. The default bounds the canonical 256 MiB source payload plus manifest and tar overhead."
 
+[service_config.personal_dev_candidate_retained_count_limit]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 8
+description = "Maximum retained content-addressed personal candidates for one immutable owner before garbage collection must free space."
+
+[service_config.personal_dev_candidate_retained_bytes_limit]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 3221225472
+description = "Maximum aggregate retained source-archive bytes for one immutable owner."
+
+[service_config.personal_dev_builder_global_concurrency]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 4
+description = "Maximum live lease-fenced personal candidate builds across all owners."
+
+[service_config.personal_dev_builder_per_owner_concurrency]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 1
+description = "Maximum live lease-fenced personal candidate builds for one immutable owner."
+
+[service_config.personal_dev_builder_poll_interval_sec]
+used_by     = ["loom-service"]
+python_type = "float"
+default     = 2.0
+description = "Idle poll interval for the lease-fenced personal candidate builder coordinator."
+
+[service_config.personal_dev_builder_lease_sec]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 4200
+description = "Lease and scoped-capability duration for one bounded native multi-architecture personal candidate build."
+
+[service_config.personal_dev_builder_enabled]
+used_by     = ["loom-service"]
+python_type = "bool"
+default     = false
+description = "Enable the restricted personal candidate builder only after its immutable image, runtime class, scanner evidence, and registry publisher are installed."
+
+[service_config.personal_dev_builder_image]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = ""
+description = "Immutable OCI reference for the trusted personal-dev rootless BuildKit wrapper."
+
+[service_config.personal_dev_builder_registry_prefix]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = ""
+description = "Registry repository prefix used only by the trusted personal-dev exporter."
+
+[service_config.personal_dev_builder_registry_auth_file]
+used_by     = ["loom-service"]
+python_type = "Path"
+default     = "/var/run/loom-personal-dev-registry/config.json"
+description = "Protected Docker-compatible registry authentication file used only by the trusted exporter."
+
+[service_config.personal_dev_builder_max_artifact_bytes]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 6442450944
+description = "Maximum object size accepted for one native platform's complete personal-dev build bundle."
+
+[service_config.personal_dev_builder_max_image_archive_bytes]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 2147483648
+description = "Maximum size of one verified native OCI image archive within a personal-dev build bundle."
+
+[service_config.personal_dev_builder_runtime_class_name]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "loom-personal-dev-builder"
+description = "Operator-installed RuntimeClass whose measured profile supplies user namespaces and the bounded PID/isolation contract for untrusted builds."
+
+[service_config.personal_dev_builder_scanner_path]
+used_by     = ["loom-service"]
+python_type = "Path"
+default     = "/usr/local/bin/trivy"
+
+[service_config.personal_dev_builder_scanner_cache_dir]
+used_by     = ["loom-service"]
+python_type = "Path"
+default     = "/var/lib/loom-personal-dev-scanner"
+
+[service_config.personal_dev_builder_scanner_identity]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = ""
+description = "Immutable scanner binary and vulnerability-database identity written into personal-dev safety evidence."
+
+[service_config.personal_dev_builder_scanner_policy_sha256]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = ""
+description = "SHA-256 of the operator-owned personal-dev image finding policy."
+
+[service_config.personal_dev_builder_skopeo_path]
+used_by     = ["loom-service"]
+python_type = "Path"
+default     = "/usr/bin/skopeo"
+
+[service_config.personal_dev_builder_docker_path]
+used_by     = ["loom-service"]
+python_type = "Path"
+default     = "/usr/bin/docker"
+
+[service_config.personal_dev_builder_publisher_identity]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = ""
+
+[service_config.personal_dev_trusted_launcher_profile_sha256]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = ""
+description = "Exact approved non-exclusive worker containment profile digest bound into the personal-dev-only publication."
+
+[service_config.personal_dev_protocol_versions_json]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "{}"
+description = "Operator-owned canonical JSON map of trusted personal-dev protocol compatibility versions."
+
 [service_config.personal_dev_global_live_instance_limit]
 used_by     = ["loom-service"]
 python_type = "int"

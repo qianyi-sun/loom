@@ -23,7 +23,11 @@ PERSONAL_DEV_COMPONENTS = (
     "web",
     "worker",
 )
-PERSONAL_DEV_PLATFORMS = ("linux/amd64", "linux/arm64")
+PersonalDevPlatform = Literal["linux/amd64", "linux/arm64"]
+PERSONAL_DEV_PLATFORMS: tuple[PersonalDevPlatform, ...] = (
+    "linux/amd64",
+    "linux/arm64",
+)
 PERSONAL_DEV_POOLS = ("gb10", "oldlab")
 _BUILD_CONTRACT = {
     "components": list(PERSONAL_DEV_COMPONENTS),
@@ -42,6 +46,35 @@ _OCI_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 _IMAGE_PATH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}")
 _PROTOCOL_KEY_RE = re.compile(r"[a-z][a-z0-9-]{0,63}")
 _PROTOCOL_VALUE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}")
+
+
+class PersonalDevCandidateQuotaError(RuntimeError):
+    """An owner-scoped retained artifact limit is exhausted."""
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalDevCandidateLimits:
+    """Finite artifact and concurrent-build envelope for shared dev."""
+
+    per_owner_retained_candidates: int = 8
+    per_owner_retained_archive_bytes: int = 3 * 1024 * 1024 * 1024
+    global_active_builds: int = 4
+    per_owner_active_builds: int = 1
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.per_owner_retained_candidates) is not int
+            or type(self.per_owner_retained_archive_bytes) is not int
+            or self.per_owner_retained_candidates <= 0
+            or self.per_owner_retained_archive_bytes <= 0
+        ):
+            raise ValueError("personal-dev retained candidate limits must be positive integers")
+        if (
+            type(self.global_active_builds) is not int
+            or type(self.per_owner_active_builds) is not int
+            or not 0 < self.per_owner_active_builds <= self.global_active_builds
+        ):
+            raise ValueError("personal-dev active build limits must be ordered positive integers")
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +169,21 @@ def _immutable_image_reference(value: object) -> str:
     return value
 
 
+def personal_dev_image_set_manifest_digest(images: Mapping[str, object]) -> str:
+    """Return the canonical digest that binds all immutable image descriptors."""
+    try:
+        canonical = json.dumps(
+            dict(images),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("ascii")
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        raise ValueError("personal-dev publication image set is invalid") from exc
+    return "sha256:" + hashlib.sha256(canonical).hexdigest()
+
+
 def validate_personal_dev_candidate_publication(
     candidate: PersonalDevCandidateRecord,
     publication: Mapping[str, object],
@@ -155,6 +203,7 @@ def validate_personal_dev_candidate_publication(
         "supported_architectures",
         "protocol_versions",
         "trusted_launcher_profile_sha256",
+        "safety_evidence",
         "safety_evidence_sha256",
         "publisher_identity",
         "published_at",
@@ -195,6 +244,9 @@ def validate_personal_dev_candidate_publication(
             for digest in platforms.values()
         ):
             raise ValueError("personal-dev publication platform digest is invalid")
+    expected_image_set_digest = personal_dev_image_set_manifest_digest(raw_images)
+    if image_set_digest != expected_image_set_digest:
+        raise ValueError("personal-dev publication image-set digest binding is invalid")
     protocols = value["protocol_versions"]
     if not isinstance(protocols, dict) or not 1 <= len(protocols) <= 32:
         raise ValueError("personal-dev publication protocol versions are invalid")
@@ -210,6 +262,25 @@ def validate_personal_dev_candidate_publication(
         digest = value[field]
         if not isinstance(digest, str) or _DIGEST_RE.fullmatch(digest) is None:
             raise ValueError(f"personal-dev publication {field} is invalid")
+    evidence_object = value["safety_evidence"]
+    if (
+        not isinstance(evidence_object, dict)
+        or set(evidence_object)
+        != {"bucket", "content_type", "key", "sha256", "size_bytes"}
+        or evidence_object["bucket"] != candidate.object_bucket
+        or evidence_object["content_type"]
+        != "application/vnd.loom.personal-dev-safety-evidence.v1+json"
+        or not isinstance(evidence_object["key"], str)
+        or not evidence_object["key"].startswith(
+            f"personal-dev/evidence/{candidate.candidate_sha}/"
+        )
+        or len(evidence_object["key"]) > 1024
+        or any(character in evidence_object["key"] for character in "\r\n\0")
+        or evidence_object["sha256"] != value["safety_evidence_sha256"]
+        or type(evidence_object["size_bytes"]) is not int
+        or not 0 < evidence_object["size_bytes"] <= 64 * 1024 * 1024
+    ):
+        raise ValueError("personal-dev publication safety evidence object is invalid")
     publisher = value["publisher_identity"]
     if (
         not isinstance(publisher, str)
@@ -248,6 +319,10 @@ __all__ = [
     "CandidateRegistry",
     "CandidateStatus",
     "PersonalDevCandidateBuildAttemptRecord",
+    "PersonalDevCandidateLimits",
+    "PersonalDevCandidateQuotaError",
     "PersonalDevCandidateRecord",
+    "PersonalDevPlatform",
+    "personal_dev_image_set_manifest_digest",
     "validate_personal_dev_candidate_publication",
 ]

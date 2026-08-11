@@ -185,6 +185,54 @@ def test_personal_generation_prepares_without_switching_stable_routes() -> None:
         assert service["metadata"]["labels"]["loom.dev/operation-epoch"] == "5"
 
 
+def test_personal_manifest_default_denies_network_and_allows_only_required_routes() -> None:
+    documents = personal_dev_preparation_manifest_documents(
+        derive_identity("alice"),
+        _immutable_config(),
+    )
+    policies = {
+        document["metadata"]["name"]: document
+        for document in documents
+        if document["kind"] == "NetworkPolicy"
+    }
+
+    assert policies["default-deny"]["spec"] == {
+        "podSelector": {},
+        "policyTypes": ["Ingress", "Egress"],
+    }
+    egress = policies["runtime-egress"]["spec"]["egress"]
+    shared_ports = {
+        port["port"]
+        for rule in egress
+        if any(
+            peer.get("namespaceSelector", {}).get("matchLabels", {}).get(
+                "kubernetes.io/metadata.name"
+            )
+            == "loom-dev"
+            for peer in rule["to"]
+        )
+        for port in rule["ports"]
+    }
+    assert shared_ports == {5432, 9000}
+    public = next(
+        rule for rule in egress if any("ipBlock" in peer for peer in rule["to"])
+    )
+    ipv4 = next(peer["ipBlock"] for peer in public["to"] if peer["ipBlock"]["cidr"] == "0.0.0.0/0")
+    assert "10.0.0.0/8" in ipv4["except"]
+    assert "169.254.0.0/16" in ipv4["except"]
+    assert {port["port"] for port in public["ports"]} == {80, 443}
+
+    ingress = policies["runtime-ingress"]["spec"]["ingress"]
+    assert any(
+        peer.get("namespaceSelector", {}).get("matchLabels", {}).get(
+            "kubernetes.io/metadata.name"
+        )
+        == "ingress-nginx"
+        for rule in ingress
+        for peer in rule["from"]
+    )
+
+
 def test_personal_manifest_rejects_incomplete_or_mutable_image_sets() -> None:
     values = dict(_immutable_config().image_references)
     values.pop("worker")

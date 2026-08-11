@@ -250,6 +250,177 @@ def _service(
     }
 
 
+def _personal_dev_network_policies(
+    identity: DevInstanceIdentity,
+    config: DevInstanceManifestConfig,
+) -> tuple[dict[str, Any], ...]:
+    """Restrict candidate workloads to their namespace and required dependencies."""
+    namespace_name_label = {"kubernetes.io/metadata.name": identity.namespace}
+    policies = (
+        {
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "NetworkPolicy",
+            "metadata": _metadata("default-deny", identity, config),
+            "spec": {
+                "podSelector": {},
+                "policyTypes": ["Ingress", "Egress"],
+            },
+        },
+        {
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "NetworkPolicy",
+            "metadata": _metadata("runtime-egress", identity, config),
+            "spec": {
+                "podSelector": {},
+                "policyTypes": ["Egress"],
+                "egress": [
+                    {
+                        "to": [
+                            {
+                                "namespaceSelector": {
+                                    "matchLabels": namespace_name_label,
+                                },
+                                "podSelector": {},
+                            }
+                        ]
+                    },
+                    {
+                        "to": [
+                            {
+                                "namespaceSelector": {
+                                    "matchLabels": {
+                                        "kubernetes.io/metadata.name": "kube-system",
+                                    },
+                                },
+                                "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}},
+                            }
+                        ],
+                        "ports": [
+                            {"protocol": "UDP", "port": 53},
+                            {"protocol": "TCP", "port": 53},
+                        ],
+                    },
+                    {
+                        "to": [
+                            {
+                                "namespaceSelector": {
+                                    "matchLabels": {
+                                        "kubernetes.io/metadata.name": "loom-dev",
+                                    },
+                                },
+                                "podSelector": {
+                                    "matchLabels": {"app": "loom-dev-postgres"},
+                                },
+                            }
+                        ],
+                        "ports": [{"protocol": "TCP", "port": 5432}],
+                    },
+                    {
+                        "to": [
+                            {
+                                "namespaceSelector": {
+                                    "matchLabels": {
+                                        "kubernetes.io/metadata.name": "loom-dev",
+                                    },
+                                },
+                                "podSelector": {
+                                    "matchLabels": {"app": "loom-dev-minio"},
+                                },
+                            }
+                        ],
+                        "ports": [{"protocol": "TCP", "port": 9000}],
+                    },
+                    {
+                        "to": [
+                            {
+                                "ipBlock": {
+                                    "cidr": "0.0.0.0/0",
+                                    "except": [
+                                        "0.0.0.0/8",
+                                        "10.0.0.0/8",
+                                        "100.64.0.0/10",
+                                        "127.0.0.0/8",
+                                        "169.254.0.0/16",
+                                        "172.16.0.0/12",
+                                        "192.0.0.0/24",
+                                        "192.0.2.0/24",
+                                        "192.168.0.0/16",
+                                        "198.18.0.0/15",
+                                        "198.51.100.0/24",
+                                        "203.0.113.0/24",
+                                        "224.0.0.0/4",
+                                        "240.0.0.0/4",
+                                    ],
+                                }
+                            },
+                            {
+                                "ipBlock": {
+                                    "cidr": "::/0",
+                                    "except": [
+                                        "::/128",
+                                        "::1/128",
+                                        "fc00::/7",
+                                        "fe80::/10",
+                                        "ff00::/8",
+                                        "2001:db8::/32",
+                                    ],
+                                }
+                            },
+                        ],
+                        "ports": [
+                            {"protocol": "TCP", "port": 80},
+                            {"protocol": "TCP", "port": 443},
+                        ],
+                    },
+                ],
+            },
+        },
+        {
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "NetworkPolicy",
+            "metadata": _metadata("runtime-ingress", identity, config),
+            "spec": {
+                "podSelector": {},
+                "policyTypes": ["Ingress"],
+                "ingress": [
+                    {
+                        "from": [
+                            {
+                                "namespaceSelector": {
+                                    "matchLabels": namespace_name_label,
+                                },
+                                "podSelector": {},
+                            }
+                        ]
+                    },
+                    {
+                        "from": [
+                            {
+                                "namespaceSelector": {
+                                    "matchLabels": {
+                                        "kubernetes.io/metadata.name": "ingress-nginx",
+                                    },
+                                },
+                                "podSelector": {
+                                    "matchLabels": {
+                                        "app.kubernetes.io/name": "ingress-nginx",
+                                    },
+                                },
+                            }
+                        ],
+                        "ports": [
+                            {"protocol": "TCP", "port": 8080},
+                            {"protocol": "TCP", "port": 8090},
+                            {"protocol": "TCP", "port": 9100},
+                        ],
+                    },
+                ],
+            },
+        },
+    )
+    return policies
+
+
 def _web_deployment(
     identity: DevInstanceIdentity,
     config: DevInstanceManifestConfig,
@@ -561,7 +732,7 @@ def dev_instance_manifest_documents(
             ],
         },
     }
-    preparation = (
+    preparation: tuple[dict[str, Any], ...] = (
         namespace,
         migration,
         cp,
@@ -600,6 +771,7 @@ def dev_instance_manifest_documents(
     )
     if not personal_candidate:
         return (*preparation, ingress)
+    preparation = (*preparation, *_personal_dev_network_policies(identity, config))
     activation = (
         _service(
             "loom-control-plane",

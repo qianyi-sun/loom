@@ -10,6 +10,7 @@ from uuid import UUID
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from loom.db.schema import PersonalDevCandidate, PersonalDevCandidateBuildAttempt
 from loom.personal_dev_candidate import (
@@ -17,6 +18,8 @@ from loom.personal_dev_candidate import (
     CandidateRegistration,
     CandidateStatus,
     PersonalDevCandidateBuildAttemptRecord,
+    PersonalDevCandidateLimits,
+    PersonalDevCandidateQuotaError,
     PersonalDevCandidateRecord,
     validate_personal_dev_candidate_publication,
 )
@@ -30,6 +33,13 @@ class PersonalDevBuildOperationConflictError(RuntimeError):
     """One lifecycle operation was already bound to a different candidate."""
 
 
+_BUILD_CLAIM_LOCK_DIGEST = hashlib.sha256(b"personal-dev-build-claim-v1").digest()
+_BUILD_CLAIM_LOCK_KEYS = (
+    int.from_bytes(_BUILD_CLAIM_LOCK_DIGEST[:4], byteorder="big", signed=True),
+    int.from_bytes(_BUILD_CLAIM_LOCK_DIGEST[4:8], byteorder="big", signed=True),
+)
+
+
 def _operation_lock_keys(
     subject_id: UUID,
     subject_incarnation: UUID,
@@ -41,6 +51,14 @@ def _operation_lock_keys(
         + operation_epoch.to_bytes(8, byteorder="big", signed=False)
     )
     digest = hashlib.sha256(material).digest()
+    return (
+        int.from_bytes(digest[:4], byteorder="big", signed=True),
+        int.from_bytes(digest[4:8], byteorder="big", signed=True),
+    )
+
+
+def _owner_lock_keys(owner_user_id: UUID) -> tuple[int, int]:
+    digest = hashlib.sha256(b"personal-dev-candidate-owner-v1\0" + owner_user_id.bytes).digest()
     return (
         int.from_bytes(digest[:4], byteorder="big", signed=True),
         int.from_bytes(digest[4:8], byteorder="big", signed=True),
@@ -96,16 +114,92 @@ def _attempt_record(
     )
 
 
+def _same_registration(
+    existing: PersonalDevCandidateRecord,
+    requested: PersonalDevCandidateRecord,
+) -> bool:
+    return (
+        existing.owner_user_id == requested.owner_user_id
+        and existing.owner_team_id == requested.owner_team_id
+        and existing.candidate_sha == requested.candidate_sha
+        and existing.source_sha256 == requested.source_sha256
+        and existing.archive_sha256 == requested.archive_sha256
+        and existing.build_contract_sha256 == requested.build_contract_sha256
+        and existing.source_commit == requested.source_commit
+        and existing.dirty is requested.dirty
+        and dict(existing.manifest_json) == dict(requested.manifest_json)
+        and existing.object_bucket == requested.object_bucket
+        and existing.object_key == requested.object_key
+        and existing.archive_size_bytes == requested.archive_size_bytes
+    )
+
+
 class SqlAlchemyPersonalDevCandidateStore:
     """Request-scoped candidate registry with idempotent source identity."""
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        limits: PersonalDevCandidateLimits | None = None,
+    ) -> None:
         self.session = session
+        self._limits = limits or PersonalDevCandidateLimits()
 
     async def register(
         self,
         requested: PersonalDevCandidateRecord,
     ) -> CandidateRegistration:
+        lock_a, lock_b = _owner_lock_keys(requested.owner_user_id)
+        await self.session.execute(select(func.pg_advisory_xact_lock(lock_a, lock_b)))
+        existing = (
+            await self.session.execute(
+                select(PersonalDevCandidate)
+                .where(
+                    PersonalDevCandidate.owner_user_id == requested.owner_user_id,
+                    PersonalDevCandidate.owner_team_id == requested.owner_team_id,
+                    PersonalDevCandidate.source_sha256 == requested.source_sha256,
+                    PersonalDevCandidate.archive_sha256 == requested.archive_sha256,
+                    PersonalDevCandidate.build_contract_sha256
+                    == requested.build_contract_sha256,
+                )
+                .with_for_update(),
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            candidate_record = _candidate_record(existing)
+            if not _same_registration(candidate_record, requested):
+                await self.session.rollback()
+                raise ValueError(
+                    "personal-dev candidate replay changed an immutable binding"
+                )
+            await self.session.commit()
+            return CandidateRegistration(
+                candidate=candidate_record,
+                build_attempt=None,
+                created=False,
+            )
+        retained_count, retained_bytes = (
+            await self.session.execute(
+                select(
+                    func.count(PersonalDevCandidate.id),
+                    func.coalesce(func.sum(PersonalDevCandidate.archive_size_bytes), 0),
+                ).where(PersonalDevCandidate.owner_user_id == requested.owner_user_id),
+            )
+        ).one()
+        if int(retained_count) + 1 > self._limits.per_owner_retained_candidates:
+            await self.session.rollback()
+            raise PersonalDevCandidateQuotaError(
+                "personal-dev retained candidate count limit is exhausted"
+            )
+        if (
+            int(retained_bytes) + requested.archive_size_bytes
+            > self._limits.per_owner_retained_archive_bytes
+        ):
+            await self.session.rollback()
+            raise PersonalDevCandidateQuotaError(
+                "personal-dev retained candidate byte limit is exhausted"
+            )
         inserted_id = (
             await self.session.execute(
                 pg_insert(PersonalDevCandidate)
@@ -369,9 +463,43 @@ class SqlAlchemyPersonalDevCandidateStore:
             raise ValueError("builder_id must be a non-empty bounded identifier")
         if type(lease_seconds) is not int or lease_seconds <= 0:
             raise ValueError("lease_seconds must be a positive integer")
+        await self.session.execute(
+            select(func.pg_advisory_xact_lock(*_BUILD_CLAIM_LOCK_KEYS))
+        )
+        live_global = int(
+            (
+                await self.session.execute(
+                    select(func.count(PersonalDevCandidateBuildAttempt.id)).where(
+                        PersonalDevCandidateBuildAttempt.state.in_(("claimed", "running")),
+                        PersonalDevCandidateBuildAttempt.lease_expires_at > now,
+                    ),
+                )
+            ).scalar_one()
+        )
+        if live_global >= self._limits.global_active_builds:
+            await self.session.rollback()
+            return None
+        active_attempt = aliased(PersonalDevCandidateBuildAttempt)
+        active_candidate = aliased(PersonalDevCandidate)
+        owner_active = (
+            select(func.count(active_attempt.id))
+            .select_from(active_attempt)
+            .join(active_candidate, active_candidate.id == active_attempt.candidate_id)
+            .where(
+                active_candidate.owner_user_id == PersonalDevCandidate.owner_user_id,
+                active_attempt.state.in_(("claimed", "running")),
+                active_attempt.lease_expires_at > now,
+            )
+            .correlate(PersonalDevCandidate)
+            .scalar_subquery()
+        )
         attempt = (
             await self.session.execute(
                 select(PersonalDevCandidateBuildAttempt)
+                .join(
+                    PersonalDevCandidate,
+                    PersonalDevCandidate.id == PersonalDevCandidateBuildAttempt.candidate_id,
+                )
                 .where(
                     or_(
                         PersonalDevCandidateBuildAttempt.state == "queued",
@@ -380,12 +508,14 @@ class SqlAlchemyPersonalDevCandidateStore:
                             & (PersonalDevCandidateBuildAttempt.lease_expires_at <= now)
                         ),
                     ),
+                    owner_active < self._limits.per_owner_active_builds,
                 )
                 .order_by(
+                    owner_active,
                     PersonalDevCandidateBuildAttempt.created_at,
                     PersonalDevCandidateBuildAttempt.id,
                 )
-                .with_for_update(skip_locked=True)
+                .with_for_update(of=PersonalDevCandidateBuildAttempt, skip_locked=True)
                 .limit(1),
             )
         ).scalar_one_or_none()
@@ -560,5 +690,6 @@ class SqlAlchemyPersonalDevCandidateStore:
 __all__ = [
     "PersonalDevBuildLeaseFencedError",
     "PersonalDevBuildOperationConflictError",
+    "PersonalDevCandidateQuotaError",
     "SqlAlchemyPersonalDevCandidateStore",
 ]

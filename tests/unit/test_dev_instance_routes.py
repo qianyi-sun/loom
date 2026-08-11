@@ -459,6 +459,7 @@ async def test_personal_apply_binds_authenticated_owner_and_returns_operation() 
 
     request = _request(_Store(), configured=False)
     request.app.state.settings = type("Settings", (), {"dev_instances_enabled": True})()
+    request.app.state.personal_dev_builder_available = True
     authority = _Authority()
     request.app.state.personal_dev_environment_authority_factory = lambda _session: authority
     response = Response()
@@ -485,6 +486,29 @@ async def test_personal_apply_binds_authenticated_owner_and_returns_operation() 
     assert captured[0][0].owner_team_id == _TEAM
     assert captured[0][1].auth_kind == "bearer"
     assert captured[0][1].credential_hash == b"x" * 32
+
+
+async def test_personal_apply_fails_before_mutation_when_builder_is_inert() -> None:
+    request = _request(_Store(), configured=False)
+    request.app.state.personal_dev_builder_available = False
+
+    with pytest.raises(HTTPException) as exc:
+        await apply_personal_dev_environment(
+            "alice",
+            PersonalDevEnvironmentApplyPayload(
+                candidate_id=UUID("00000000-0000-0000-0000-000000000010"),
+                candidate_sha="a" * 64,
+                min_slots=0,
+                max_slots=2,
+                expected_operation_epoch=0,
+                idempotency_key=UUID("00000000-0000-0000-0000-000000000011"),
+            ),
+            request,
+            (object(), _ctx(_OWNER)),  # type: ignore[arg-type]
+            Response(),
+        )
+
+    assert exc.value.status_code == 503
 
 
 async def test_candidate_less_create_is_retired_when_personal_lifecycle_is_enabled() -> None:

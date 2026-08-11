@@ -17,7 +17,9 @@ from loom.personal_dev_candidate import (
     PERSONAL_DEV_COMPONENTS,
     PERSONAL_DEV_PLATFORMS,
     CandidateRegistration,
+    PersonalDevCandidateQuotaError,
     PersonalDevCandidateRecord,
+    personal_dev_image_set_manifest_digest,
     validate_personal_dev_candidate_publication,
 )
 from loom.personal_dev_source import create_personal_dev_source_snapshot
@@ -113,6 +115,11 @@ class _ObjectStore:
         key = (str(kwargs["Bucket"]), str(kwargs["Key"]))
         self.objects[key] = payload
         self.metadata[key] = dict(kwargs["Metadata"])  # type: ignore[arg-type]
+
+    def delete_object(self, **kwargs: object) -> None:
+        key = (str(kwargs["Bucket"]), str(kwargs["Key"]))
+        self.objects.pop(key, None)
+        self.metadata.pop(key, None)
 
 
 async def _intake(
@@ -316,11 +323,46 @@ async def test_candidate_route_fails_closed_outside_management_dev(tmp_path: Pat
     assert registry.calls == 0
 
 
+async def test_candidate_route_returns_conflict_when_owner_retention_is_full(
+    tmp_path: Path,
+) -> None:
+    class _QuotaRegistry(_Registry):
+        async def register(self, requested: PersonalDevCandidateRecord) -> CandidateRegistration:
+            del requested
+            raise PersonalDevCandidateQuotaError("retained candidate count limit is exhausted")
+
+    repo = _git_repo(tmp_path)
+    archive = tmp_path / "source.tar"
+    snapshot = create_personal_dev_source_snapshot(repo, archive)
+    object_store = _ObjectStore()
+    request = _request(_QuotaRegistry(), object_store)
+    with archive.open("rb") as source, pytest.raises(HTTPException) as conflict:
+        await create_personal_dev_candidate(
+            request,
+            Response(),
+            (object(), _context(_OWNER)),  # type: ignore[arg-type]
+            UploadFile(filename="source.tar", file=source),
+            snapshot.source_digest,
+            snapshot.archive_sha256,
+        )
+    assert conflict.value.status_code == 409
+    assert object_store.objects == {}
+
+
 async def test_candidate_publication_requires_complete_immutable_safety_binding(
     tmp_path: Path,
 ) -> None:
     registration, _, _ = await _intake(tmp_path)
     candidate = registration.candidate
+    images: dict[str, object] = {
+        component: {
+            "index": f"registry.example/loom-{component}@sha256:" + "2" * 64,
+            "platforms": {
+                platform: "sha256:" + "3" * 64 for platform in PERSONAL_DEV_PLATFORMS
+            },
+        }
+        for component in PERSONAL_DEV_COMPONENTS
+    }
     publication: dict[str, object] = {
         "schema_version": 1,
         "attestation_scope": "personal-dev-only",
@@ -328,20 +370,22 @@ async def test_candidate_publication_requires_complete_immutable_safety_binding(
         "source_sha256": candidate.source_sha256,
         "archive_sha256": candidate.archive_sha256,
         "build_contract_sha256": candidate.build_contract_sha256,
-        "image_set_manifest_digest": "sha256:" + "1" * 64,
-        "images": {
-            component: {
-                "index": f"registry.example/loom-{component}@sha256:" + "2" * 64,
-                "platforms": {
-                    platform: "sha256:" + "3" * 64 for platform in PERSONAL_DEV_PLATFORMS
-                },
-            }
-            for component in PERSONAL_DEV_COMPONENTS
-        },
+        "image_set_manifest_digest": personal_dev_image_set_manifest_digest(images),
+        "images": images,
         "supported_pools": ["gb10", "oldlab"],
         "supported_architectures": list(PERSONAL_DEV_PLATFORMS),
         "protocol_versions": {"capacity-agent": "v1", "claim-guard": "v1"},
         "trusted_launcher_profile_sha256": "4" * 64,
+        "safety_evidence": {
+            "bucket": candidate.object_bucket,
+            "content_type": "application/vnd.loom.personal-dev-safety-evidence.v1+json",
+            "key": (
+                f"personal-dev/evidence/{candidate.candidate_sha}/"
+                "test/safety-evidence.json"
+            ),
+            "sha256": "5" * 64,
+            "size_bytes": 1024,
+        },
         "safety_evidence_sha256": "5" * 64,
         "publisher_identity": "system:serviceaccount:loom-dev:candidate-builder",
         "published_at": "2026-08-10T12:00:00Z",
@@ -353,7 +397,18 @@ async def test_candidate_publication_requires_complete_immutable_safety_binding(
     )
     assert normalized == publication
     assert len(digest) == 64
-    assert image_set == "sha256:" + "1" * 64
+    assert image_set == personal_dev_image_set_manifest_digest(images)
+
+    platform_digests = publication["images"]
+    assert isinstance(platform_digests, dict)
+    service = platform_digests["service"]
+    assert isinstance(service, dict)
+    service_platforms = service["platforms"]
+    assert isinstance(service_platforms, dict)
+    service_platforms["linux/amd64"] = "sha256:" + "9" * 64
+    with pytest.raises(ValueError, match="image-set digest"):
+        validate_personal_dev_candidate_publication(candidate, publication)
+    service_platforms["linux/amd64"] = "sha256:" + "3" * 64
 
     images = publication["images"]
     assert isinstance(images, dict)
