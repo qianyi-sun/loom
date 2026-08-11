@@ -45,6 +45,10 @@ _ROTATING_CREDENTIAL_METADATA = frozenset(
 )
 
 
+class PostApplyDriftTransientError(ValueError):
+    """A post-apply observation was temporarily incomplete but may converge."""
+
+
 def _credential_metadata_matches(
     current: Mapping[str, str],
     attested: Mapping[str, str],
@@ -311,7 +315,7 @@ def validate_post_apply_attestation_drift(
     if not _POST_APPLY_DRIFT_EVIDENCE_CHECKS <= by_id.keys() or any(
         not execution.passed for execution in executions
     ):
-        raise ValueError("post-apply drift evidence is incomplete")
+        raise PostApplyDriftTransientError("post-apply drift evidence is incomplete")
     selected = tuple(
         sorted(
             (by_id[check_id] for check_id in _POST_APPLY_DRIFT_EVIDENCE_CHECKS),
@@ -319,12 +323,13 @@ def validate_post_apply_attestation_drift(
         )
     )
     if any(
-        execution.expires_at <= now
-        or execution.implementation_digest
+        execution.implementation_digest
         != attestation.check_implementation_digests.get(execution.check_id)
         for execution in executions
     ):
-        raise ValueError("post-apply drift evidence expired or changed")
+        raise ValueError("post-apply drift evidence implementation changed")
+    if any(execution.expires_at <= now for execution in executions):
+        raise PostApplyDriftTransientError("post-apply drift evidence expired")
 
     def evidence(check_id: str, field: str) -> object:
         try:
@@ -389,6 +394,7 @@ def validate_post_apply_attestation_drift(
 __all__ = [
     "FinalAttestationAdmission",
     "PostApplyDriftEvidence",
+    "PostApplyDriftTransientError",
     "validate_final_attestation",
     "validate_post_apply_attestation_drift",
 ]
