@@ -1913,6 +1913,11 @@ def _default_dependencies(config: OperatorConfig) -> BrokerDependencies:
             capacity_source=(
                 "minio-admin" if bool(cluster_config.topology.multi_node) else "filesystem"
             ),
+            expected_drive_count=(
+                int(cluster_config.topology.minio_replicas)
+                if bool(cluster_config.topology.multi_node)
+                else None
+            ),
             expected_filesystem_paths=(
                 ()
                 if bool(cluster_config.topology.multi_node)

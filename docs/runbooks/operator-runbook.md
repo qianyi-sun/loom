@@ -1940,15 +1940,19 @@ The same install transaction creates or reuses a separate root-owned MinIO
 credential and converges one fixed non-mutating policy for
 `loom-staging-trajectories` and `loom-staging-artifacts`. The service copy is a
 single-link mode-0600 file under the credential directory. Its policy permits
-only bucket location/versioning, object/version enumeration, and exact-version
-reads; writes and deletes are absent. The readonly TokenRequest may port-forward only
-to `loom-minio-0` and `loom-postgres-0`. `check` independently compares the
-server-side policy document and user binding, and Tier 0 then proves it by
-enumerating the exact buckets and measuring `/data/loom-staging/minio` as
-`loom-rollout`. Tier 2 proves MinIO reachability with a bounded versioning read
-through the same fixed localhost transport; it does not require Kubernetes
-`services/proxy` authority. Do not replace either probe with the application
-MinIO secret, a broader proxy grant, or a privileged `kubectl exec` inventory.
+only bucket location/versioning, object/version enumeration, exact-version
+reads, and MinIO server information; object writes/deletes and server mutations
+are absent. The readonly TokenRequest may port-forward only to `loom-minio-0`
+and `loom-postgres-1` through `loom-postgres-3`. `check` independently compares
+the server-side policy document and user binding, and Tier 0 then proves it by
+enumerating the exact buckets. A single-node hostPath cluster measures
+`/data/loom-staging/minio` as `loom-rollout`; a distributed multi-node cluster
+reads the live MinIO drives through the bounded `admin:ServerInfo` action and
+uses the least-free drive as its byte/inode headroom. Tier 2 proves MinIO
+reachability with a bounded versioning read through the same fixed localhost
+transport; it does not require Kubernetes `services/proxy` authority. Do not
+replace either probe with the application MinIO secret, a broader proxy grant,
+or a privileged `kubectl exec` inventory.
 
 ```bash
 INSTALLER_CHECKOUT=/root/loom-staging-installer
