@@ -572,7 +572,9 @@ def test_cli_manifest_validation_rejects_ignored_or_extra_descriptors(
     payload = _manifest_fixture()
     manifests: Any = payload["manifests"]
     if case == "duplicate-platform":
-        manifests.append(deepcopy(manifests[0]))
+        duplicate = deepcopy(manifests[0])
+        duplicate["digest"] = f"sha256:{'0' * 64}"
+        manifests[1] = duplicate
     elif case == "incomplete-extra":
         manifests.append(
             {
@@ -593,7 +595,10 @@ def test_cli_manifest_validation_rejects_ignored_or_extra_descriptors(
     result = _validate_manifest_cli(manifest)
 
     assert result.returncode != 0
-    assert "published manifest" in result.stderr
+    if case == "duplicate-platform":
+        assert "published manifest platform is duplicated" in result.stderr
+    else:
+        assert "published manifest" in result.stderr
 
 
 def test_cli_validates_exact_canonical_architecture_record_set(tmp_path: Path) -> None:
@@ -795,6 +800,30 @@ def test_cli_rejects_duplicate_key_in_architecture_verification(tmp_path: Path) 
     assert "duplicate JSON key" in result.stderr
 
 
+def test_cli_rejects_exponent_overflow_in_architecture_verification(
+    tmp_path: Path,
+) -> None:
+    predicate = architecture_predicate(
+        **_common(),
+        platform="linux/amd64",
+        architecture="amd64",
+        scan_report_sha256=_SCAN,
+        build_mode="trusted-rebuild",
+    )
+    raw = json.dumps(_verification(predicate)).replace(
+        '{"verificationResult":',
+        '{"ignored":1e999,"verificationResult":',
+        1,
+    )
+    verification = tmp_path / "verification.json"
+    verification.write_text(raw, encoding="utf-8")
+
+    result = _verify_architecture_cli(verification, tmp_path / "output.json")
+
+    assert result.returncode != 0
+    assert "non-finite JSON value" in result.stderr
+
+
 def test_cli_rejects_nonfinite_value_in_manifest_verification(tmp_path: Path) -> None:
     architecture_digests = {
         "linux/amd64": f"sha256:{_AMD64_DIGEST}",
@@ -915,6 +944,21 @@ def test_cli_rejects_nonfinite_manifest_json_values(
     assert "non-finite JSON value" in result.stderr
 
 
+def test_cli_rejects_exponent_overflow_in_manifest_json(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.json"
+    raw = json.dumps(_manifest_fixture()).replace(
+        "{",
+        '{"ignored":1e999,',
+        1,
+    )
+    manifest.write_text(raw, encoding="utf-8")
+
+    result = _validate_manifest_cli(manifest)
+
+    assert result.returncode != 0
+    assert "non-finite JSON value" in result.stderr
+
+
 def test_cli_rejects_duplicate_key_in_manifest_json(tmp_path: Path) -> None:
     manifest = tmp_path / "manifest.json"
     raw = json.dumps(_manifest_fixture()).replace(
@@ -941,6 +985,36 @@ def test_cli_rejects_nonfinite_architecture_record_value(tmp_path: Path) -> None
     raw = record.read_text(encoding="utf-8").replace(
         '"schema_version":1',
         '"schema_version":NaN',
+        1,
+    )
+    record.write_text(raw, encoding="utf-8")
+
+    result = _run_cli(
+        "validate-architecture-record",
+        *_cli_common(),
+        "--platform",
+        "linux/amd64",
+        "--architecture",
+        "amd64",
+        "--record",
+        str(record),
+    )
+
+    assert result.returncode != 0
+    assert "non-finite JSON value" in result.stderr
+
+
+def test_cli_rejects_exponent_overflow_in_architecture_record(tmp_path: Path) -> None:
+    record = tmp_path / "capacity-manager-amd64.json"
+    assert _write_record(
+        record,
+        architecture="amd64",
+        subject_digest=_AMD64_DIGEST,
+        scan_digest=_SCAN,
+    ).returncode == 0
+    raw = record.read_text(encoding="utf-8").replace(
+        '"schema_version":1',
+        '"schema_version":1e999',
         1,
     )
     record.write_text(raw, encoding="utf-8")
@@ -998,6 +1072,32 @@ def test_cli_rejects_nonfinite_inline_architecture_build(tmp_path: Path) -> None
         f"linux/arm64={'1' * 64}",
         "--architecture-build",
         'linux/amd64={"mode":"trusted-rebuild","ignored":NaN}',
+        "--architecture-build",
+        'linux/arm64={"mode":"trusted-rebuild"}',
+        "--output",
+        str(tmp_path / "predicate.json"),
+    )
+
+    assert result.returncode != 0
+    assert "non-finite JSON value" in result.stderr
+
+
+def test_cli_rejects_exponent_overflow_in_inline_architecture_build(
+    tmp_path: Path,
+) -> None:
+    result = _run_cli(
+        "predicate-manifest",
+        *_cli_common(),
+        "--architecture-digest",
+        f"linux/amd64=sha256:{_AMD64_DIGEST}",
+        "--architecture-digest",
+        f"linux/arm64=sha256:{_ARM64_DIGEST}",
+        "--scan-report-digest",
+        f"linux/amd64={_SCAN}",
+        "--scan-report-digest",
+        f"linux/arm64={'1' * 64}",
+        "--architecture-build",
+        'linux/amd64={"mode":"trusted-rebuild","ignored":1e999}',
         "--architecture-build",
         'linux/arm64={"mode":"trusted-rebuild"}',
         "--output",

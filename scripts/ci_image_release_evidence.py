@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 from collections.abc import Mapping, Sequence
@@ -46,12 +47,20 @@ def _reject_nonfinite_json(value: str) -> object:
     raise EvidenceError(f"non-finite JSON value is forbidden: {value}")
 
 
+def _parse_finite_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise EvidenceError(f"non-finite JSON value is forbidden: {value}")
+    return parsed
+
+
 def _parse_json(value: str, label: str) -> object:
     try:
         return json.loads(
             value,
             object_pairs_hook=_reject_duplicate_keys,
             parse_constant=_reject_nonfinite_json,
+            parse_float=_parse_finite_float,
         )
     except json.JSONDecodeError as exc:
         raise EvidenceError(f"{label} is invalid JSON: {exc}") from None
