@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from uuid import UUID
 
 import pytest
 from sqlalchemy import create_engine, delete, select, update
 
+import loom_capacity_manager.migrate as capacity_migrate
 from loom_capacity_manager.migrate import (
     CapacityAuthorityBootstrapError,
     bind_fresh_authority,
@@ -95,6 +97,82 @@ def test_matching_authority_is_idempotent_after_writer_registration(
     authority = _authority(capacity_postgres_url)
     assert authority["authority_incarnation"] == _REVIEWED_AUTHORITY
     assert authority["writer_epoch"] == 4
+
+
+def test_nil_authority_is_rejected_without_mutating_the_database(
+    capacity_postgres_url: str,
+) -> None:
+    _reset_empty_shadow(capacity_postgres_url)
+    engine = create_engine(capacity_postgres_url)
+    try:
+        with pytest.raises(ValueError, match="non-nil"):
+            bind_fresh_authority(engine, UUID(int=0))
+    finally:
+        engine.dispose()
+
+    assert _authority(capacity_postgres_url)["authority_incarnation"] == _MIGRATION_AUTHORITY
+
+
+def test_migration_rejects_nil_authority_before_reading_database_url(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="non-nil"):
+        migrate_capacity_database(tmp_path / "missing-database-url", UUID(int=0))
+
+
+def test_migration_cli_rejects_nil_authority_as_an_argument_error(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "loom-capacity-migrate",
+            "--db-url-file",
+            "/does/not/matter",
+            "--expected-authority-incarnation",
+            str(UUID(int=0)),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as stopped:
+        capacity_migrate.main()
+
+    assert stopped.value.code == 2
+    assert "non-nil" in capsys.readouterr().err
+
+
+def test_migration_cli_redacts_runtime_failure_details(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    secret_detail = "postgresql://operator:do-not-log@example.invalid/capacity"
+
+    def fail(_db_url_file: Path, _expected: UUID) -> None:
+        raise CapacityAuthorityBootstrapError(secret_detail)
+
+    monkeypatch.setattr(capacity_migrate, "migrate_capacity_database", fail)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "loom-capacity-migrate",
+            "--db-url-file",
+            "/run/credentials/database-url",
+            "--expected-authority-incarnation",
+            str(_REVIEWED_AUTHORITY),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as stopped:
+        capacity_migrate.main()
+
+    captured = capsys.readouterr()
+    assert stopped.value.code == 1
+    assert captured.out == ""
+    assert captured.err == "error: capacity migration failed\n"
+    assert secret_detail not in captured.err
 
 
 @pytest.mark.parametrize(

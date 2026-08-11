@@ -86,7 +86,11 @@ def probe_capacity_manager(
             certfile=str(certificate_file),
             keyfile=str(private_key_file),
         )
-        with httpx.Client(verify=context, timeout=float(timeout_seconds)) as client:
+        with httpx.Client(
+            verify=context,
+            timeout=float(timeout_seconds),
+            trust_env=False,
+        ) as client:
             with client.stream("GET", url) as response:
                 payload = bytearray()
                 for chunk in response.iter_bytes(chunk_size=_MAX_HEALTH_BYTES + 1):

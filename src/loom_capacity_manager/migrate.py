@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from pathlib import Path
 from typing import cast
 from uuid import UUID
@@ -20,13 +21,33 @@ class CapacityAuthorityBootstrapError(RuntimeError):
     """The management database is not safe to bind to a new authority."""
 
 
+def _validate_expected_authority(expected: UUID) -> None:
+    if not isinstance(expected, UUID):
+        raise TypeError("expected capacity authority incarnation must be a UUID")
+    if expected.int == 0:
+        raise ValueError("expected capacity authority incarnation must be non-nil")
+
+
+def _non_nil_uuid_argument(value: str) -> UUID:
+    try:
+        expected = UUID(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "expected capacity authority incarnation must be a UUID"
+        ) from exc
+    if expected.int == 0:
+        raise argparse.ArgumentTypeError(
+            "expected capacity authority incarnation must be non-nil"
+        )
+    return expected
+
+
 def bind_fresh_authority(engine: Engine, expected: UUID) -> None:
     """Bind one reviewed UUID only while the migrated authority is unused."""
 
     if not isinstance(engine, Engine):
         raise TypeError("capacity authority bootstrap requires a synchronous engine")
-    if not isinstance(expected, UUID):
-        raise TypeError("expected capacity authority incarnation must be a UUID")
+    _validate_expected_authority(expected)
     authority_table = cast(Table, CapacityAuthorityState.__table__)
     try:
         with engine.begin() as connection:
@@ -85,6 +106,7 @@ def migrate_capacity_database(
 ) -> None:
     """Upgrade the independent schema, then bind its reviewed incarnation."""
 
+    _validate_expected_authority(expected)
     database_url = read_owner_only_secret(db_url_file)
     config_path = alembic_ini or Path(__file__).resolve().parents[2] / "capacity_migrations/alembic.ini"
     if not config_path.is_file():
@@ -115,12 +137,20 @@ def main() -> None:
         description="Migrate a new frozen global capacity authority"
     )
     parser.add_argument("--db-url-file", type=Path, required=True)
-    parser.add_argument("--expected-authority-incarnation", type=UUID, required=True)
-    arguments = parser.parse_args()
-    migrate_capacity_database(
-        arguments.db_url_file,
-        arguments.expected_authority_incarnation,
+    parser.add_argument(
+        "--expected-authority-incarnation",
+        type=_non_nil_uuid_argument,
+        required=True,
     )
+    arguments = parser.parse_args()
+    try:
+        migrate_capacity_database(
+            arguments.db_url_file,
+            arguments.expected_authority_incarnation,
+        )
+    except (CapacityAuthorityBootstrapError, OSError, ValueError):
+        sys.stderr.write("error: capacity migration failed\n")
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":  # pragma: no cover - module entry point

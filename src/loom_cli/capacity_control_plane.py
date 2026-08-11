@@ -22,6 +22,9 @@ _OCI_DIGEST_RE = re.compile(
 )
 _CPU_RE = re.compile(r"([1-9][0-9]*)(m)?")
 _MEMORY_RE = re.compile(r"([1-9][0-9]*)(Ki|Mi|Gi)")
+_MAX_CPU_MILLICORES = 64_000
+_MAX_RESOURCE_MEMORY_BYTES = 1024**4
+_MAX_POSTGRES_STORAGE_BYTES = 64 * 1024**4
 
 
 class _StrictModel(BaseModel):
@@ -70,10 +73,18 @@ class ResourceEnvelope(_StrictModel):
 
     @model_validator(mode="after")
     def _bounded(self) -> ResourceEnvelope:
-        if _cpu_millicores(self.cpu_request) > _cpu_millicores(self.cpu_limit):
+        cpu_request = _cpu_millicores(self.cpu_request)
+        cpu_limit = _cpu_millicores(self.cpu_limit)
+        memory_request = _memory_bytes(self.memory_request)
+        memory_limit = _memory_bytes(self.memory_limit)
+        if cpu_request > cpu_limit:
             raise ValueError("CPU request exceeds its limit")
-        if _memory_bytes(self.memory_request) > _memory_bytes(self.memory_limit):
+        if cpu_limit > _MAX_CPU_MILLICORES:
+            raise ValueError("CPU resource limit exceeds the control-plane bound")
+        if memory_request > memory_limit:
             raise ValueError("memory request exceeds its limit")
+        if memory_limit > _MAX_RESOURCE_MEMORY_BYTES:
+            raise ValueError("memory resource limit exceeds the control-plane bound")
         return self
 
     def kubernetes(self) -> dict[str, dict[str, str]]:
@@ -144,6 +155,8 @@ class CapacityControlPlaneProfile(_StrictModel):
     def _postgres_storage(cls, value: str) -> str:
         if _MEMORY_RE.fullmatch(value) is None:
             raise ValueError("capacity PostgreSQL storage must use positive Ki, Mi, or Gi")
+        if _memory_bytes(value) > _MAX_POSTGRES_STORAGE_BYTES:
+            raise ValueError("capacity PostgreSQL storage exceeds the control-plane bound")
         return value
 
     @field_validator("storage_class_name")

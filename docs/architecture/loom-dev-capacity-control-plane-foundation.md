@@ -80,6 +80,10 @@ Mutable tags, zero digests, non-`loom-dev` namespaces, unknown TOML fields,
 unsafe resource quantities, and invalid Kubernetes names fail before YAML is
 emitted.
 
+Per-container resources are capped at 64 CPUs and 1 TiB of memory, and the
+capacity PostgreSQL claim is capped at 64 TiB. These high safety bounds catch
+accidental unbounded quantities without constraining the checked-in profile.
+
 The referenced Secret is never rendered or mutated. It must already contain the
 following keys:
 
@@ -149,6 +153,9 @@ Any other state fails closed without changing the UUID. This permits a new
 database to receive a reviewed stable identity but prevents a delayed or
 misconfigured Job from reincarnating an authority that has already been used.
 The database constraints continue to prohibit a nonzero executable ceiling.
+Nil authority UUIDs are rejected before the migration command reads its
+database URL or changes schema state, and command failures emit no database
+diagnostic or URL.
 
 The Job name includes the Alembic head and manager image digest prefix. A new
 migration or exact image release creates a new immutable Job rather than
@@ -181,7 +188,8 @@ after the operator resolves the state.
 manager Pod through `kubectl exec`. It is read-only, prints the exact health JSON
 on success, forwards no secret material through arguments or output, and returns
 nonzero for missing workloads, mTLS failure, manager unready state, or a nonzero
-ceiling.
+ceiling. The in-Pod probe ignores proxy environment variables, and the wrapper
+adds a 15-second process timeout outside kubectl's 10-second request timeout.
 
 ## CLI behavior
 

@@ -66,6 +66,64 @@ def test_admin_render_rejects_invalid_release_without_partial_yaml(
     assert "immutable OCI reference" in captured.err
 
 
+def test_admin_render_does_not_echo_rejected_profile_values(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    secret_value = "do-not-log-this-accidental-password"
+    profile = tmp_path / "capacity-control-plane.toml"
+    profile.write_text(
+        _PROFILE.read_text(encoding="utf-8")
+        + f'\naccidental_password = "{secret_value}"\n',
+        encoding="utf-8",
+    )
+
+    result = dispatch(
+        [
+            "capacity-control-plane",
+            "render",
+            "--file",
+            str(profile),
+            "--manager-image",
+            _MANAGER_IMAGE,
+            "--authority-incarnation",
+            _AUTHORITY,
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == ""
+    assert captured.err == "error: capacity control-plane render inputs are invalid\n"
+    assert secret_value not in captured.err
+
+
+def test_admin_render_does_not_echo_invalid_authority_input(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    secret_value = "do-not-log-this-invalid-authority"
+
+    with pytest.raises(SystemExit) as stopped:
+        dispatch(
+            [
+                "capacity-control-plane",
+                "render",
+                "--file",
+                str(_PROFILE),
+                "--manager-image",
+                _MANAGER_IMAGE,
+                "--authority-incarnation",
+                secret_value,
+            ]
+        )
+
+    captured = capsys.readouterr()
+    assert stopped.value.code == 2
+    assert captured.out == ""
+    assert "must be a non-nil UUID" in captured.err
+    assert secret_value not in captured.err
+
+
 def test_admin_status_executes_the_fixed_in_pod_zero_ceiling_probe(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -73,9 +131,16 @@ def test_admin_status_executes_the_fixed_in_pod_zero_ceiling_probe(
     kubeconfig = tmp_path / "kubeconfig"
     kubeconfig.write_text("not-a-live-config", encoding="utf-8")
     observed: list[list[str]] = []
+    observed_timeouts: list[float | None] = []
 
-    def run(command: list[str], *, check: bool) -> subprocess.CompletedProcess[str]:
+    def run(
+        command: list[str],
+        *,
+        check: bool,
+        timeout: float | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         observed.append(command)
+        observed_timeouts.append(timeout)
         return subprocess.CompletedProcess(command, 0)
 
     monkeypatch.setattr(subprocess, "run", run)
@@ -92,6 +157,7 @@ def test_admin_status_executes_the_fixed_in_pod_zero_ceiling_probe(
     )
 
     assert result == 0
+    assert observed_timeouts == [15.0]
     assert observed == [
         [
             "kubectl",
@@ -118,6 +184,28 @@ def test_admin_status_executes_the_fixed_in_pod_zero_ceiling_probe(
             "/var/run/loom-capacity-manager/runtime/credentials/health-private-key.pem",
         ]
     ]
+
+
+def test_admin_status_timeout_is_a_bounded_failure(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def run(
+        command: list[str],
+        *,
+        check: bool,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(command, timeout)
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+    result = dispatch(["capacity-control-plane", "status"])
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == ""
+    assert "timed out" in captured.err
 
 
 def test_admin_capacity_control_plane_has_no_mutating_subcommand(

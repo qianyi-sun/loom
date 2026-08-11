@@ -263,7 +263,7 @@ jobs:
       checks: read
       contents: read
     outputs:
-      routes: ${{ steps.route.outputs.routes }}
+      routes: ${{ steps.route.outputs.routes || '{}' }}
     steps:
       - name: Checkout trusted route action
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -299,14 +299,16 @@ jobs:
                   "pipeline-orchestrator",
               }
           ]
-          if not keys or len(keys) != len(set(keys)):
-              raise SystemExit("native AMD64 route keys are empty or duplicated")
+          if len(keys) != len(set(keys)):
+              raise SystemExit("native AMD64 route keys are duplicated")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write("job_keys=" + json.dumps(keys, separators=(",", ":")) + "\n")
+              output.write("needs_route=" + ("true" if keys else "false") + "\n")
           PY
 
       - name: Resolve immutable assignments
         id: route
+        if: steps.keys.outputs.needs_route == 'true'
         uses: ./.loom-ci-route-action/.github/actions/ci-runner-route
         with:
           route-mode: ${{ vars.LOOM_CI_ROUTE_MODE || 'disabled' }}

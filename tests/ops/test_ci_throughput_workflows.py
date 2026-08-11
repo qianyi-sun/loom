@@ -210,6 +210,47 @@ def test_capacity_manager_amd64_build_bypasses_live_lease_routes(tmp_path: Path)
     assert json.loads(_github_output_value(github_output.read_text(), "job_keys")) == ["worker"]
 
 
+def test_hosted_only_image_matrix_requires_no_live_lease_route(tmp_path: Path) -> None:
+    workflow = _workflow(".github/workflows/images.yml")
+    route_job = workflow["jobs"]["image-route"]
+    route_step = next(
+        step
+        for step in route_job["steps"]
+        if step.get("name") == "Select native AMD64 image keys"
+    )
+    resolve_step = next(
+        step
+        for step in route_job["steps"]
+        if step.get("name") == "Resolve immutable assignments"
+    )
+    github_output = tmp_path / "github-output.txt"
+    result = subprocess.run(
+        ["bash"],
+        input=route_step["run"],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        env={
+            **os.environ,
+            "NATIVE_BUILDS": json.dumps(
+                [
+                    {"image": "capacity-manager", "architecture": "amd64"},
+                    {"image": "capacity-manager", "architecture": "arm64"},
+                ]
+            ),
+            "GITHUB_OUTPUT": str(github_output),
+        },
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    output = github_output.read_text()
+    assert json.loads(_github_output_value(output, "job_keys")) == []
+    assert _github_output_value(output, "needs_route") == "false"
+    assert resolve_step["if"] == "steps.keys.outputs.needs_route == 'true'"
+    assert route_job["outputs"]["routes"] == "${{ steps.route.outputs.routes || '{}' }}"
+
+
 def test_coverage_artifacts_map_hosted_and_oldlab_checkout_roots() -> None:
     config = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     paths = config["tool"]["coverage"]["paths"]

@@ -134,6 +134,7 @@ async def test_real_server_rejects_missing_and_untrusted_client_certificates(
     tmp_path: Path,
     capacity_postgres_url: str,
     capacity_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     await _reset_capacity_database(capacity_session_factory)
     ca_key, ca_certificate = _new_ca("trusted-capacity-ca")
@@ -243,6 +244,10 @@ async def test_real_server_rejects_missing_and_untrusted_client_certificates(
             response = client.get(url)
         assert response.status_code == 200
         assert response.json()["executable_new_capacity_ceiling"] == 0
+        monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+        monkeypatch.setenv("https_proxy", "http://127.0.0.1:1")
+        monkeypatch.setenv("NO_PROXY", "")
+        monkeypatch.setenv("no_proxy", "")
         assert probe_capacity_manager(
             url=url,
             ca_file=ca_path,

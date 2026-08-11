@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+from pydantic import ValidationError
+
 from loom_cli.capacity_control_plane import (
     load_capacity_control_plane_profile,
     render_capacity_control_plane_manifests,
@@ -16,6 +18,20 @@ from loom_cli.capacity_control_plane import (
 
 _NAMESPACE = "loom-dev"
 _CREDENTIALS = "/var/run/loom-capacity-manager/runtime/credentials"
+
+
+def _non_nil_uuid_argument(value: str) -> UUID:
+    try:
+        authority = UUID(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "capacity authority incarnation must be a non-nil UUID"
+        ) from exc
+    if authority.int == 0:
+        raise argparse.ArgumentTypeError(
+            "capacity authority incarnation must be a non-nil UUID"
+        )
+    return authority
 
 
 def _render(args: argparse.Namespace) -> int:
@@ -26,6 +42,9 @@ def _render(args: argparse.Namespace) -> int:
             manager_image=args.manager_image,
             authority_incarnation=args.authority_incarnation,
         )
+    except ValidationError:
+        sys.stderr.write("error: capacity control-plane render inputs are invalid\n")
+        return 2
     except (OSError, ValueError) as exc:
         sys.stderr.write(f"error: capacity control-plane render failed: {exc}\n")
         return 2
@@ -65,7 +84,10 @@ def _status(args: argparse.Namespace) -> int:
         ]
     )
     try:
-        result = subprocess.run(command, check=False)
+        result = subprocess.run(command, check=False, timeout=15.0)
+    except subprocess.TimeoutExpired:
+        sys.stderr.write("error: capacity status timed out\n")
+        return 2
     except OSError as exc:
         sys.stderr.write(f"error: capacity status could not run kubectl: {exc}\n")
         return 2
@@ -100,7 +122,7 @@ def add_capacity_control_plane_subparser(subparsers: Any) -> None:
     )
     render.add_argument(
         "--authority-incarnation",
-        type=UUID,
+        type=_non_nil_uuid_argument,
         required=True,
         help="Reviewed non-nil UUID of the independent capacity authority.",
     )
