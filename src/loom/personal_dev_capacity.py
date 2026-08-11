@@ -139,6 +139,10 @@ class PersonalDevCapacityInstaller(Protocol):
         installation: PersonalDevCapacityInstallation,
     ) -> None: ...
 
+    async def seal(self, claim: PersonalDevReconciliationClaim) -> None: ...
+
+    async def destroy(self, claim: PersonalDevReconciliationClaim) -> None: ...
+
 
 class PersonalDevCapacityProjector(Protocol):
     async def current_configuration_epoch(self) -> int: ...
@@ -294,15 +298,16 @@ class CapacityManagerPersonalDevProjector:
                 "capacity manager projection acknowledgement is invalid"
             ) from exc
         subject = parsed.subject
+        retiring = request.operation_kind == "destroy"
         if (
             parsed.configuration_epoch != request.expected_configuration_epoch + 1
             or subject.subject_id != request.subject_id
             or subject.subject_incarnation != request.subject_incarnation
             or subject.display_name != f"dev-{request.environment_name}"
             or subject.tier_id != "development"
-            or subject.lifecycle_state != "active"
-            or subject.min_slots != request.min_slots
-            or subject.max_slots != request.max_slots
+            or subject.lifecycle_state != ("disabled" if retiring else "active")
+            or subject.min_slots != (0 if retiring else request.min_slots)
+            or subject.max_slots != (0 if retiring else request.max_slots)
             or subject.candidate_generation != request.candidate_generation
             or subject.deployment_generation != request.deployment_generation
             or subject.configuration_generation != request.configuration_generation
@@ -363,7 +368,9 @@ def personal_dev_capacity_projection(
         raise ValueError("expected global capacity configuration epoch must be positive")
     request = DynamicDevelopmentSubjectProjectionV1(
         expected_configuration_epoch=expected_configuration_epoch,
-        operation_kind=cast(Literal["create", "update", "capacity"], operation.kind),
+        operation_kind=cast(
+            Literal["create", "update", "capacity", "destroy"], operation.kind
+        ),
         operation_id=operation.id,
         operation_epoch=operation.operation_epoch,
         environment_name=operation.environment_name,
@@ -391,6 +398,8 @@ def personal_dev_capacity_projection(
         "capacity_reporter_token_sha256": installation.reporter_token_sha256,
         "protected_admission_sha256": installation.protected_admission_sha256,
         "capacity_agent_installation_sha256": (installation.capacity_agent_installation_sha256),
+        "capacity_supported_pool_ids": installation.supported_pool_ids,
+        "capacity_supported_architectures": installation.supported_architectures,
     }
     mismatches = tuple(
         field_name
@@ -411,6 +420,84 @@ def personal_dev_capacity_projection(
     return request
 
 
+def personal_dev_capacity_retirement_projection(
+    claim: PersonalDevReconciliationClaim,
+    *,
+    expected_configuration_epoch: int,
+) -> DynamicDevelopmentSubjectProjectionV1:
+    """Rebuild the exact active subject evidence as a manager retirement."""
+
+    operation = claim.operation
+    candidate = claim.candidate
+    if operation.kind != "destroy":
+        raise ValueError("personal-dev capacity retirement requires a destroy operation")
+    required = (
+        operation.local_activation_sha256,
+        operation.capacity_reporter_incarnation,
+        operation.capacity_reporter_token_sha256,
+        operation.protected_admission_sha256,
+        operation.capacity_agent_installation_sha256,
+        operation.capacity_supported_pool_ids,
+        operation.capacity_supported_architectures,
+    )
+    if (
+        any(value is None for value in required)
+        or candidate.status != "ready"
+        or candidate.publication_sha256 is None
+        or candidate.publication_json is None
+    ):
+        raise ValueError("personal-dev capacity retirement evidence is incomplete")
+    if type(expected_configuration_epoch) is not int or expected_configuration_epoch <= 0:
+        raise ValueError("expected global capacity configuration epoch must be positive")
+    protocols = candidate.publication_json.get("protocol_versions")
+    if not isinstance(protocols, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str)
+        for key, value in protocols.items()
+    ):
+        raise ValueError("personal-dev candidate protocol publication is invalid")
+    supported_pool_ids = operation.capacity_supported_pool_ids
+    supported_architectures = operation.capacity_supported_architectures
+    reporter_incarnation = operation.capacity_reporter_incarnation
+    assert supported_pool_ids is not None
+    assert supported_architectures is not None
+    assert reporter_incarnation is not None
+    request = DynamicDevelopmentSubjectProjectionV1(
+        expected_configuration_epoch=expected_configuration_epoch,
+        operation_kind="destroy",
+        operation_id=operation.id,
+        operation_epoch=operation.operation_epoch,
+        environment_name=operation.environment_name,
+        subject_id=operation.subject_id,
+        subject_incarnation=operation.subject_incarnation,
+        owner_id=operation.owner_user_id,
+        min_slots=operation.min_slots,
+        max_slots=operation.max_slots,
+        candidate_generation=operation.deployment_generation,
+        candidate_sha256=operation.candidate_sha,
+        candidate_publication_sha256=candidate.publication_sha256,
+        deployment_generation=operation.deployment_generation,
+        configuration_generation=operation.operation_epoch,
+        demand_reporter_incarnation=reporter_incarnation,
+        demand_reporter_token_sha256=cast(str, operation.capacity_reporter_token_sha256),
+        local_activation_sha256=cast(str, operation.local_activation_sha256),
+        protected_admission_sha256=cast(str, operation.protected_admission_sha256),
+        capacity_agent_installation_sha256=cast(
+            str, operation.capacity_agent_installation_sha256
+        ),
+        supported_pool_ids=supported_pool_ids,
+        supported_architectures=supported_architectures,
+        protocol_versions=protocols,
+    )
+    if (
+        operation.capacity_projection_request_sha256 is not None
+        and operation.capacity_projection_request_sha256 != canonical_digest(request)
+    ):
+        raise PersonalDevCapacityProjectionError(
+            "capacity retirement request changed after durable preparation"
+        )
+    return request
+
+
 __all__ = [
     "CapacityManagerPersonalDevProjector",
     "PersonalDevCapacityInstallation",
@@ -421,4 +508,5 @@ __all__ = [
     "PersonalDevCapacityProjectionResult",
     "PersonalDevCapacityProjector",
     "personal_dev_capacity_projection",
+    "personal_dev_capacity_retirement_projection",
 ]

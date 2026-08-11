@@ -482,7 +482,7 @@ async def test_capacity_only_projection_cannot_change_candidate_or_reporter_bind
             "demand_reporter_token_sha256": "8" * 64,
         },
     ):
-        with pytest.raises(ConfigurationConflictError, match="capacity-only"):
+        with pytest.raises(ConfigurationConflictError, match="non-deployment"):
             await store.project_development_subject(
                 capacity_session,
                 base_capacity.model_copy(update=change),
@@ -490,6 +490,81 @@ async def test_capacity_only_projection_cannot_change_candidate_or_reporter_bind
                 idempotency_key=uuid4(),
             )
         await capacity_session.rollback()
+
+
+async def test_destroy_projection_requires_an_active_subject_and_retires_owner_authority(
+    capacity_session: AsyncSession,
+) -> None:
+    fleet = fleet_with_development_template()
+    store, active = await _activate_default(
+        capacity_session,
+        fleet=fleet,
+        subject=subject_configuration(fleet),
+    )
+    initial = development_projection(expected_configuration_epoch=active.configuration_epoch)
+    absent = initial.model_copy(
+        update={
+            "operation_kind": "destroy",
+            "operation_id": uuid4(),
+            "operation_epoch": 2,
+            "configuration_generation": 2,
+        }
+    )
+    with pytest.raises(ConfigurationConflictError, match="not active"):
+        await store.project_development_subject(
+            capacity_session,
+            absent,
+            actor="personal-lifecycle",
+            idempotency_key=uuid4(),
+        )
+    await capacity_session.rollback()
+
+    created = await store.project_development_subject(
+        capacity_session,
+        initial,
+        actor="personal-lifecycle",
+        idempotency_key=uuid4(),
+    )
+    retirement = initial.model_copy(
+        update={
+            "expected_configuration_epoch": created.configuration_epoch,
+            "operation_kind": "destroy",
+            "operation_id": uuid4(),
+            "operation_epoch": 2,
+            "configuration_generation": 2,
+        }
+    )
+    retired = await store.project_development_subject(
+        capacity_session,
+        retirement,
+        actor="personal-lifecycle",
+        idempotency_key=uuid4(),
+    )
+
+    assert retired.subject.lifecycle_state == "disabled"
+    assert retired.subject.min_slots == 0
+    assert retired.subject.max_slots == 0
+    assert (
+        await capacity_session.execute(
+            select(func.count())
+            .select_from(CapacityAccountPolicy)
+            .where(
+                CapacityAccountPolicy.configuration_epoch
+                == retired.configuration_epoch,
+                CapacityAccountPolicy.kind == "owner",
+            )
+        )
+    ).scalar_one() == 0
+    reporter = (
+        await capacity_session.execute(
+            select(CapacityDemandReporter).where(
+                CapacityDemandReporter.subject_id == retirement.subject_id,
+                CapacityDemandReporter.reporter_incarnation
+                == retirement.demand_reporter_incarnation,
+            )
+        )
+    ).scalar_one()
+    assert reporter.state == "fenced"
 
 
 async def test_dynamic_projection_identity_reuse_and_owner_limits_fail_closed(

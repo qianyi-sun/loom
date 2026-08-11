@@ -18,6 +18,7 @@ from loom.personal_dev_capacity import (
     PersonalDevCapacityProjectionConflictError,
     PersonalDevCapacityProjector,
     personal_dev_capacity_projection,
+    personal_dev_capacity_retirement_projection,
 )
 from loom.personal_dev_environment import PersonalDevReconciliationClaim
 from loom_capacity_manager.contracts import canonical_digest
@@ -202,6 +203,8 @@ class PersonalDevReconciliationAuthority(Protocol):
 
     async def record_capacity_projection(self, **kwargs: object) -> object: ...
 
+    async def advance_destroy_checkpoint(self, **kwargs: object) -> object: ...
+
 
 class PersonalDevPreparationExecutor(Protocol):
     async def prepare(
@@ -217,6 +220,14 @@ class PersonalDevPreparationExecutor(Protocol):
         *,
         access: OwnerAccessSnapshot,
     ) -> None: ...
+
+    async def delete_namespace(self, claim: PersonalDevReconciliationClaim) -> None: ...
+
+    async def delete_buckets(self, claim: PersonalDevReconciliationClaim) -> None: ...
+
+    async def delete_tenant(self, claim: PersonalDevReconciliationClaim) -> None: ...
+
+    async def delete_credentials(self, claim: PersonalDevReconciliationClaim) -> None: ...
 
 
 @dataclass(slots=True)
@@ -268,6 +279,14 @@ class PersonalDevEnvironmentReconciler:
             "reconciler_id": self.reconciler_id,
             "lease_epoch": attempt.lease_epoch,
         }
+        if claim.operation.kind == "destroy":
+            await self._reconcile_destroy(
+                claim,
+                lease=lease,
+                started=started,
+                initial_now=now,
+            )
+            return True
         if claim.operation.checkpoint == "capacity_projected":
             await self.authority.complete_activation(**lease, now=now)
             return True
@@ -309,6 +328,8 @@ class PersonalDevEnvironmentReconciler:
                     capacity_agent_installation_sha256=(
                         installation.capacity_agent_installation_sha256
                     ),
+                    supported_pool_ids=installation.supported_pool_ids,
+                    supported_architectures=installation.supported_architectures,
                 )
                 return True
             prepared_epoch = claim.operation.capacity_expected_configuration_epoch
@@ -437,6 +458,153 @@ class PersonalDevEnvironmentReconciler:
             readiness_evidence_sha256=readiness_evidence_sha256,
         )
         return True
+
+    async def _reconcile_destroy(
+        self,
+        claim: PersonalDevReconciliationClaim,
+        *,
+        lease: Mapping[str, object],
+        started: float,
+        initial_now: datetime,
+    ) -> None:
+        """Advance one manager-first, restart-safe teardown checkpoint."""
+
+        loop = asyncio.get_running_loop()
+        operation = claim.operation
+        checkpoint = operation.checkpoint
+        if checkpoint == "capacity_retirement_requested":
+            expected_epoch = await self._with_heartbeats(
+                self.capacity_projector.current_configuration_epoch(),
+                lease=lease,
+                started=started,
+                initial_now=initial_now,
+            )
+            request = personal_dev_capacity_retirement_projection(
+                claim,
+                expected_configuration_epoch=expected_epoch,
+            )
+            if (
+                operation.capacity_reporter_incarnation is None
+                or operation.capacity_reporter_token_sha256 is None
+                or operation.protected_admission_sha256 is None
+                or operation.capacity_agent_installation_sha256 is None
+                or operation.capacity_supported_pool_ids is None
+                or operation.capacity_supported_architectures is None
+            ):
+                raise RuntimeError("destroy capacity evidence is incomplete")
+            callback_now = initial_now + timedelta(seconds=loop.time() - started)
+            await self.authority.prepare_capacity_projection(
+                **lease,
+                now=callback_now,
+                expected_configuration_epoch=expected_epoch,
+                projection_request_sha256=canonical_digest(request),
+                reporter_incarnation=operation.capacity_reporter_incarnation,
+                reporter_token_sha256=operation.capacity_reporter_token_sha256,
+                protected_admission_sha256=operation.protected_admission_sha256,
+                capacity_agent_installation_sha256=(
+                    operation.capacity_agent_installation_sha256
+                ),
+                supported_pool_ids=operation.capacity_supported_pool_ids,
+                supported_architectures=operation.capacity_supported_architectures,
+            )
+            return
+        if checkpoint == "capacity_projection_pending":
+            prepared_epoch = operation.capacity_expected_configuration_epoch
+            if prepared_epoch is None:
+                raise RuntimeError("prepared capacity retirement has no global epoch")
+            request = personal_dev_capacity_retirement_projection(
+                claim,
+                expected_configuration_epoch=prepared_epoch,
+            )
+            try:
+                result = await self._with_heartbeats(
+                    self.capacity_projector.project(
+                        request,
+                        idempotency_key=operation.idempotency_key,
+                    ),
+                    lease=lease,
+                    started=started,
+                    initial_now=initial_now,
+                )
+            except PersonalDevCapacityProjectionConflictError as exc:
+                refreshed_epoch = await self._with_heartbeats(
+                    self.capacity_projector.current_configuration_epoch(),
+                    lease=lease,
+                    started=started,
+                    initial_now=initial_now,
+                )
+                if refreshed_epoch <= request.expected_configuration_epoch:
+                    raise RuntimeError(
+                        "capacity manager rejected retirement at its current epoch"
+                    ) from exc
+                refreshed = request.model_copy(
+                    update={"expected_configuration_epoch": refreshed_epoch}
+                )
+                callback_now = initial_now + timedelta(seconds=loop.time() - started)
+                await self.authority.refresh_capacity_projection_epoch(
+                    **lease,
+                    now=callback_now,
+                    expected_configuration_epoch=refreshed_epoch,
+                    projection_request_sha256=canonical_digest(refreshed),
+                )
+                return
+            callback_now = initial_now + timedelta(seconds=loop.time() - started)
+            await self.authority.record_capacity_projection(
+                **lease,
+                now=callback_now,
+                result=result,
+            )
+            return
+
+        actions: dict[str, tuple[Callable[[], Awaitable[None]], str]] = {
+            "capacity_retired": (
+                lambda: self.capacity_installer.seal(claim),
+                "local_authority_sealed",
+            ),
+            "local_authority_sealed": (
+                lambda: self.executor.delete_namespace(claim),
+                "namespace_deleted",
+            ),
+            "database_deleted": (
+                lambda: self.executor.delete_buckets(claim),
+                "buckets_deleted",
+            ),
+            "buckets_deleted": (
+                lambda: self.executor.delete_tenant(claim),
+                "tenant_deleted",
+            ),
+            "tenant_deleted": (
+                lambda: self.executor.delete_credentials(claim),
+                "complete",
+            ),
+        }
+        action: Awaitable[None]
+        if checkpoint == "namespace_deleted":
+            action = (
+                self.executor.delete_tenant(claim)
+                if operation.keep_data
+                else self.capacity_installer.destroy(claim)
+            )
+            next_checkpoint = "tenant_deleted" if operation.keep_data else "database_deleted"
+        else:
+            selected = actions.get(checkpoint)
+            if selected is None:
+                raise RuntimeError("personal-dev reconciler received an unknown destroy checkpoint")
+            action_factory, next_checkpoint = selected
+            action = action_factory()
+        await self._with_heartbeats(
+            action,
+            lease=lease,
+            started=started,
+            initial_now=initial_now,
+        )
+        callback_now = initial_now + timedelta(seconds=loop.time() - started)
+        await self.authority.advance_destroy_checkpoint(
+            **lease,
+            now=callback_now,
+            expected_checkpoint=checkpoint,
+            checkpoint=next_checkpoint,
+        )
 
     async def _with_heartbeats(
         self,

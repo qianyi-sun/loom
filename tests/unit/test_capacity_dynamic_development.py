@@ -217,6 +217,17 @@ def test_capacity_projection_still_binds_one_unchanged_deployment() -> None:
         )
 
 
+def test_destroy_projection_retains_exact_deployment_evidence() -> None:
+    request = projection_request(
+        operation_kind="destroy",
+        operation_epoch=2,
+        configuration_generation=2,
+    )
+
+    assert request.operation_kind == "destroy"
+    assert request.deployment_generation == 1
+
+
 def test_optional_schema_extensions_preserve_preprojection_allocation_bytes() -> None:
     value = allocator_input(
         (allocator_subject(1, account_id="owner-a"),),

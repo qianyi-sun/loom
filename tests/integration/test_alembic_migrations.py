@@ -17,7 +17,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from testcontainers.postgres import PostgresContainer
 
-from loom.db.schema import Team, User
+from loom.db.schema import DevInstance, PersonalDevCandidate, Team, User
 from loom.personal_dev_activation import (
     PersonalDevActivationAcknowledgement,
     PersonalDevActivationSigner,
@@ -40,6 +40,7 @@ from loom.personal_dev_capacity import PersonalDevCapacityProjectionResult
 from loom.personal_dev_environment import (
     PersonalDevAccessBinding,
     PersonalDevEnvironmentApplyRequest,
+    PersonalDevEnvironmentDestroyRequest,
     PersonalDevLifecycleLimits,
 )
 from loom.personal_dev_environment_store import (
@@ -1041,6 +1042,8 @@ async def test_personal_dev_environment_capacity_and_candidate_updates_are_atomi
                 reporter_token_sha256="7" * 64,
                 protected_admission_sha256="8" * 64,
                 capacity_agent_installation_sha256="9" * 64,
+                supported_pool_ids=("gb10", "oldlab"),
+                supported_architectures=("arm64", "x86_64"),
                 now=now + timedelta(seconds=70),
             )
             projection_claim = await authority.claim_next_reconciliation(
@@ -1160,6 +1163,8 @@ async def test_personal_dev_environment_capacity_and_candidate_updates_are_atomi
                 reporter_token_sha256="7" * 64,
                 protected_admission_sha256="8" * 64,
                 capacity_agent_installation_sha256="9" * 64,
+                supported_pool_ids=("gb10", "oldlab"),
+                supported_architectures=("arm64", "x86_64"),
                 now=now + timedelta(seconds=80),
             )
             capacity_projection_claim = await authority.claim_next_reconciliation(
@@ -1263,6 +1268,228 @@ async def test_personal_dev_environment_capacity_and_candidate_updates_are_atomi
             assert update.environment.candidate_id == first.id
             assert update.environment.candidate_sha == first.candidate_sha
             assert (update.environment.min_slots, update.environment.max_slots) == (1, 4)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("keep_data", [False, True])
+async def test_personal_dev_destroy_is_manager_first_replayable_and_checkpointed(
+    postgres_url: str,
+    keep_data: bool,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    owner_id = uuid4()
+    team_id = uuid4()
+    candidate_id = uuid4()
+    subject_id = uuid4()
+    subject_incarnation = uuid4()
+    name = f"d{uuid4().hex[:10]}"
+    now = datetime.now(UTC)
+    publication = {
+        "protocol_versions": {
+            "capacity-agent": "v1",
+            "claim-guard": "v1",
+            "control-plane-worker": "v1",
+        }
+    }
+    try:
+        async with sessions() as session:
+            session.add(Team(id=team_id, name=f"destroy-{team_id}"))
+            session.add(
+                User(
+                    id=owner_id,
+                    email=f"{owner_id}@example.test",
+                    username=f"user-{owner_id}",
+                    username_normalized=f"user-{owner_id}",
+                    status="active",
+                )
+            )
+            await session.flush()
+            session.add(
+                PersonalDevCandidate(
+                    id=candidate_id,
+                    owner_user_id=owner_id,
+                    owner_team_id=team_id,
+                    candidate_sha="a" * 64,
+                    source_sha256="b" * 64,
+                    archive_sha256="c" * 64,
+                    build_contract_sha256="d" * 64,
+                    source_commit="e" * 40,
+                    dirty=True,
+                    manifest_json={"schema_version": 1},
+                    object_bucket="artifacts",
+                    object_key=f"personal-dev/sources/{candidate_id}.tar",
+                    archive_size_bytes=10240,
+                    status="ready",
+                    image_manifest_digest="sha256:" + "1" * 64,
+                    publication_json=publication,
+                    publication_sha256="f" * 64,
+                    created_at=now,
+                    updated_at=now,
+                    ready_at=now,
+                )
+            )
+            await session.flush()
+            session.add(
+                DevInstance(
+                    name=name,
+                    subject_id=subject_id,
+                    subject_incarnation=subject_incarnation,
+                    owner_user_id=owner_id,
+                    owner_team_id=team_id,
+                    min_slots=0,
+                    max_slots=2,
+                    status="ready",
+                    deployment_generation=1,
+                    candidate_id=candidate_id,
+                    candidate_sha="a" * 64,
+                    operation_epoch=4,
+                    operation_id=uuid4(),
+                    operation_step="complete",
+                    capacity_configuration_epoch=7,
+                    capacity_configuration_sha256="7" * 64,
+                    capacity_reporter_incarnation=uuid4(),
+                    capacity_reporter_token_sha256="6" * 64,
+                    local_activation_sha256="5" * 64,
+                    protected_admission_sha256="8" * 64,
+                    capacity_agent_installation_sha256="9" * 64,
+                    capacity_supported_pool_ids=["gb10", "oldlab"],
+                    capacity_supported_architectures=["arm64", "x86_64"],
+                    keep_data=False,
+                    created_at=now,
+                    updated_at=now,
+                    ready_at=now,
+                )
+            )
+            await session.commit()
+
+        key = uuid4()
+        request = PersonalDevEnvironmentDestroyRequest(
+            name=name,
+            owner_user_id=owner_id,
+            owner_team_id=team_id,
+            expected_operation_epoch=4,
+            idempotency_key=key,
+            keep_data=keep_data,
+        )
+        async with sessions() as session:
+            authority = SqlAlchemyPersonalDevEnvironmentAuthority(session)
+            destroyed = await authority.destroy(
+                request,
+                access_binding=_PERSONAL_DEV_ACCESS,
+                now=now,
+            )
+            replay = await authority.destroy(
+                request,
+                access_binding=_PERSONAL_DEV_ACCESS,
+                now=now,
+            )
+            assert destroyed.acquired is True
+            assert replay.acquired is False
+            assert destroyed.operation.kind == "destroy"
+            assert destroyed.environment.status == "deleting"
+            assert destroyed.operation.checkpoint == "capacity_retirement_requested"
+
+            claim = await authority.claim_next_reconciliation(
+                reconciler_id="destroy-test",
+                now=now,
+                lease_seconds=60,
+            )
+            assert claim is not None and claim.operation.id == destroyed.operation.id
+            await authority.prepare_capacity_projection(
+                operation_id=destroyed.operation.id,
+                operation_epoch=5,
+                attempt_id=claim.attempt.id,
+                reconciler_id="destroy-test",
+                lease_epoch=claim.attempt.lease_epoch,
+                expected_configuration_epoch=100,
+                projection_request_sha256="1" * 64,
+                reporter_incarnation=destroyed.operation.capacity_reporter_incarnation,  # type: ignore[arg-type]
+                reporter_token_sha256="6" * 64,
+                protected_admission_sha256="8" * 64,
+                capacity_agent_installation_sha256="9" * 64,
+                supported_pool_ids=("gb10", "oldlab"),
+                supported_architectures=("arm64", "x86_64"),
+                now=now,
+            )
+            claim = await authority.claim_next_reconciliation(
+                reconciler_id="destroy-test",
+                now=now,
+                lease_seconds=60,
+            )
+            assert claim is not None and claim.operation.id == destroyed.operation.id
+            retired = await authority.record_capacity_projection(
+                operation_id=destroyed.operation.id,
+                operation_epoch=5,
+                attempt_id=claim.attempt.id,
+                reconciler_id="destroy-test",
+                lease_epoch=claim.attempt.lease_epoch,
+                result=PersonalDevCapacityProjectionResult(
+                    configuration_epoch=101,
+                    configuration_digest="2" * 64,
+                    subject_id=subject_id,
+                    subject_incarnation=subject_incarnation,
+                    configuration_generation=5,
+                    deployment_generation=1,
+                    reporter_incarnation=destroyed.operation.capacity_reporter_incarnation,  # type: ignore[arg-type]
+                    replayed=False,
+                ),
+                now=now,
+            )
+            assert retired.operation.checkpoint == "capacity_retired"
+
+            transitions = [
+                ("capacity_retired", "local_authority_sealed"),
+                ("local_authority_sealed", "namespace_deleted"),
+            ]
+            if not keep_data:
+                transitions.extend(
+                    [
+                        ("namespace_deleted", "database_deleted"),
+                        ("database_deleted", "buckets_deleted"),
+                        ("buckets_deleted", "tenant_deleted"),
+                    ]
+                )
+            else:
+                transitions.append(("namespace_deleted", "tenant_deleted"))
+            transitions.append(("tenant_deleted", "complete"))
+            for expected, checkpoint in transitions:
+                claim = await authority.claim_next_reconciliation(
+                    reconciler_id="destroy-test",
+                    now=now,
+                    lease_seconds=60,
+                )
+                assert claim is not None and claim.operation.checkpoint == expected
+                result = await authority.advance_destroy_checkpoint(
+                    operation_id=destroyed.operation.id,
+                    operation_epoch=5,
+                    attempt_id=claim.attempt.id,
+                    reconciler_id="destroy-test",
+                    lease_epoch=claim.attempt.lease_epoch,
+                    expected_checkpoint=expected,
+                    checkpoint=checkpoint,
+                    now=now,
+                )
+            assert result.operation.state == "succeeded"
+            assert result.environment.status == "deleted"
+            assert result.environment.deleted_at == now
+
+        async with sessions() as session:
+            await session.execute(
+                text(
+                    "UPDATE dev_instances SET capacity_supported_pool_ids = "
+                    "'[\"untrusted\"]'::jsonb WHERE name = :name"
+                ),
+                {"name": name},
+            )
+            await session.commit()
+            authority = SqlAlchemyPersonalDevEnvironmentAuthority(session)
+            with pytest.raises(
+                PersonalDevEnvironmentOperationFencedError,
+                match="capacity capability evidence is invalid",
+            ):
+                await authority.get(name)
     finally:
         await engine.dispose()
 

@@ -39,12 +39,12 @@ def _projection_response(request, *, configuration_epoch: int | None = None):
         display_name=f"dev-{request.environment_name}",
         account_id=account.account_id,
         tier_id="development",
-        min_slots=request.min_slots,
-        max_slots=request.max_slots,
+        min_slots=0 if request.operation_kind == "destroy" else request.min_slots,
+        max_slots=0 if request.operation_kind == "destroy" else request.max_slots,
         rollout_surge_slots=template.rollout_surge_slots,
         max_pending_slots=template.max_pending_slots_per_subject,
         max_pending_jobs=template.max_pending_jobs_per_subject,
-        lifecycle_state="active",
+        lifecycle_state="disabled" if request.operation_kind == "destroy" else "active",
         candidate_generation=request.candidate_generation,
         deployment_generation=request.deployment_generation,
         configuration_generation=request.configuration_generation,
@@ -109,6 +109,25 @@ async def test_capacity_projector_publishes_canonical_exact_request() -> None:
     assert result.configuration_epoch == 8
     assert result.subject_id == projection.subject_id
     assert result.reporter_incarnation == projection.demand_reporter_incarnation
+
+
+async def test_capacity_projector_accepts_only_a_disabled_zero_slot_retirement() -> None:
+    projection = development_projection().model_copy(update={"operation_kind": "destroy"})
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json=_projection_response(projection),
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        result = await CapacityManagerPersonalDevProjector(
+            manager_origin="https://capacity.example",
+            bearer_token="lifecycle-token",
+            http_client=http,
+        ).project(projection, idempotency_key=uuid4())
+    assert result.configuration_generation == projection.configuration_generation
 
 
 async def test_capacity_projector_distinguishes_epoch_conflict() -> None:

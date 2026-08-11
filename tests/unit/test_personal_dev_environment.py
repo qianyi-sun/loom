@@ -5,6 +5,7 @@ import pytest
 from loom.personal_dev_environment import (
     PersonalDevAccessBinding,
     PersonalDevEnvironmentApplyRequest,
+    PersonalDevEnvironmentDestroyRequest,
     PersonalDevLifecycleLimits,
 )
 
@@ -36,6 +37,34 @@ def test_apply_request_digest_is_canonical_and_complete() -> None:
     assert request.request_sha256 != _request(max_slots=3).request_sha256
     assert request.request_sha256 != _request(expected_operation_epoch=1).request_sha256
     assert len(request.request_sha256) == 64
+
+
+def test_destroy_request_digest_binds_epoch_owner_and_retention_policy() -> None:
+    request = PersonalDevEnvironmentDestroyRequest(
+        name="alice",
+        owner_user_id=_OWNER,
+        owner_team_id=_TEAM,
+        expected_operation_epoch=4,
+        idempotency_key=_KEY,
+    )
+    retained = PersonalDevEnvironmentDestroyRequest(
+        name="alice",
+        owner_user_id=_OWNER,
+        owner_team_id=_TEAM,
+        expected_operation_epoch=4,
+        idempotency_key=_KEY,
+        keep_data=True,
+    )
+    assert len(request.request_sha256) == 64
+    assert request.request_sha256 != retained.request_sha256
+    with pytest.raises(ValueError):
+        PersonalDevEnvironmentDestroyRequest(
+            name="alice",
+            owner_user_id=_OWNER,
+            owner_team_id=_TEAM,
+            expected_operation_epoch=0,
+            idempotency_key=_KEY,
+        )
 
 
 @pytest.mark.parametrize(

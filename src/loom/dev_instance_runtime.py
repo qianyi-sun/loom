@@ -598,18 +598,26 @@ class S3BucketEnsurer:
 
     def _remove_bucket(self, bucket: str) -> None:
         try:
-            paginator = self.client.get_paginator("list_object_versions")
-            for page in paginator.paginate(Bucket=bucket):
+            uploads = self.client.get_paginator("list_multipart_uploads")
+            for page in uploads.paginate(Bucket=bucket):
+                for upload in page.get("Uploads", []):
+                    self.client.abort_multipart_upload(
+                        Bucket=bucket,
+                        Key=upload["Key"],
+                        UploadId=upload["UploadId"],
+                    )
+            current_objects = self.client.get_paginator("list_objects_v2")
+            for page in current_objects.paginate(Bucket=bucket):
+                objects = [{"Key": item["Key"]} for item in page.get("Contents", [])]
+                self._delete_object_batches(bucket, objects)
+            versions = self.client.get_paginator("list_object_versions")
+            for page in versions.paginate(Bucket=bucket):
                 objects = [
                     {"Key": item["Key"], "VersionId": item["VersionId"]}
                     for field in ("Versions", "DeleteMarkers")
                     for item in page.get(field, [])
                 ]
-                for offset in range(0, len(objects), 1000):
-                    self.client.delete_objects(
-                        Bucket=bucket,
-                        Delete={"Objects": objects[offset : offset + 1000], "Quiet": True},
-                    )
+                self._delete_object_batches(bucket, objects)
             self.client.delete_bucket(Bucket=bucket)
         except Exception as exc:
             code = str(
@@ -617,6 +625,15 @@ class S3BucketEnsurer:
             )
             if code not in {"NoSuchBucket", "404"}:
                 raise DevInstanceRuntimeError("shared object-store bucket cleanup failed") from None
+
+    def _delete_object_batches(self, bucket: str, objects: list[dict[str, str]]) -> None:
+        for offset in range(0, len(objects), 1000):
+            result = self.client.delete_objects(
+                Bucket=bucket,
+                Delete={"Objects": objects[offset : offset + 1000], "Quiet": True},
+            )
+            if isinstance(result, dict) and result.get("Errors"):
+                raise DevInstanceRuntimeError("shared object-store object cleanup failed")
 
 
 @dataclass(slots=True)
@@ -979,6 +996,9 @@ class KubectlCandidateGenerationProvisioner:
             identity,
             config,
         )
+
+    async def destroy(self, identity: DevInstanceIdentity) -> None:
+        await self.kubectl.delete_namespace(identity.namespace)
 
 
 async def observe_personal_dev_candidate_generation(

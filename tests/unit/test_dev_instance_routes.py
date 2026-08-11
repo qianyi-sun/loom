@@ -519,6 +519,118 @@ async def test_personal_apply_fails_before_mutation_when_builder_is_inert() -> N
     assert exc.value.status_code == 503
 
 
+async def test_personal_destroy_requires_epoch_and_submits_durable_authority() -> None:
+    candidate_id = UUID("00000000-0000-0000-0000-000000000010")
+    operation_id = UUID("00000000-0000-0000-0000-000000000014")
+    destroy_id = UUID("00000000-0000-0000-0000-000000000015")
+    key = UUID("00000000-0000-0000-0000-000000000016")
+    store = _Store()
+    store.rows["alice"] = DevInstanceRecord(
+        name="alice",
+        owner_user_id=_OWNER,
+        owner_team_id=_TEAM,
+        min_slots=0,
+        max_slots=2,
+        status="ready",
+        deployment_generation=1,
+        candidate_sha="a" * 64,
+        candidate_id=candidate_id,
+        subject_id=UUID("00000000-0000-0000-0000-000000000012"),
+        subject_incarnation=UUID("00000000-0000-0000-0000-000000000013"),
+        operation_epoch=4,
+        operation_id=operation_id,
+        created_at=_NOW,
+        updated_at=_NOW,
+        ready_at=_NOW,
+    )
+    captured = []
+
+    class _Authority:
+        async def destroy(self, requested, *, access_binding, now=None):
+            captured.append((requested, access_binding))
+            environment = PersonalDevEnvironmentRecord(
+                name="alice",
+                subject_id=store.rows["alice"].subject_id,  # type: ignore[arg-type]
+                subject_incarnation=store.rows["alice"].subject_incarnation,  # type: ignore[arg-type]
+                owner_user_id=_OWNER,
+                owner_team_id=_TEAM,
+                min_slots=0,
+                max_slots=2,
+                status="deleting",
+                deployment_generation=1,
+                candidate_id=candidate_id,
+                candidate_sha="a" * 64,
+                operation_epoch=5,
+                operation_id=destroy_id,
+                operation_step="capacity_retirement_requested",
+                keep_data=True,
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+            operation = PersonalDevLifecycleOperationRecord(
+                id=destroy_id,
+                idempotency_key=key,
+                environment_name="alice",
+                subject_id=environment.subject_id,
+                subject_incarnation=environment.subject_incarnation,
+                owner_user_id=_OWNER,
+                owner_team_id=_TEAM,
+                operation_epoch=5,
+                expected_operation_epoch=4,
+                kind="destroy",
+                state="running",
+                attempt_id=UUID("00000000-0000-0000-0000-000000000017"),
+                attempt_sequence=0,
+                request_sha256=requested.request_sha256,
+                candidate_id=candidate_id,
+                candidate_sha="a" * 64,
+                min_slots=0,
+                max_slots=2,
+                deployment_generation=1,
+                checkpoint="capacity_retirement_requested",
+                keep_data=True,
+                created_at=_NOW,
+                updated_at=_NOW,
+                started_at=_NOW,
+            )
+            return PersonalDevApplyReservation(
+                environment=environment,
+                operation=operation,
+                acquired=True,
+                requires_build_binding=False,
+            )
+
+    request = _request(store, configured=False)
+    request.app.state.settings = type("Settings", (), {"dev_instances_enabled": True})()
+    request.app.state.personal_dev_environment_authority_factory = lambda _session: _Authority()
+    with pytest.raises(HTTPException) as missing:
+        await delete_dev_instance(
+            "alice",
+            request,
+            (object(), _ctx(_OWNER)),  # type: ignore[arg-type]
+            Response(),
+            keep_data=True,
+            expected_operation_epoch=None,
+            idempotency_key=None,
+        )
+    assert missing.value.status_code == 400
+
+    result = await delete_dev_instance(
+        "alice",
+        request,
+        (object(), _ctx(_OWNER)),  # type: ignore[arg-type]
+        Response(),
+        keep_data=True,
+        expected_operation_epoch=4,
+        idempotency_key=key,
+    )
+    assert result.status == "deleting"
+    assert result.keep_data is True
+    assert result.operation_id == destroy_id
+    assert captured[0][0].expected_operation_epoch == 4
+    assert captured[0][1].credential_hash == b"x" * 32
+
+
 async def test_candidate_less_create_is_retired_when_personal_lifecycle_is_enabled() -> None:
     store = _Store()
     request = _request(store)

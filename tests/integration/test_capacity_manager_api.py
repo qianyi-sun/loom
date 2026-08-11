@@ -368,6 +368,83 @@ def test_lifecycle_can_project_and_authenticate_a_personal_demand_reporter(
     assert rejected.status_code == 401
 
 
+def test_lifecycle_can_retire_personal_subject_and_fence_its_reporter(
+    api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
+    operator_headers: dict[str, str],
+) -> None:
+    client, _app, _settings, _allocator = api_context
+    create = development_projection().model_copy(
+        update={"demand_reporter_token_sha256": _hash(DYNAMIC_DEMAND_TOKEN)}
+    )
+    created = client.put(
+        f"/v1/development-projections/{DEVELOPMENT_SUBJECT_ID}",
+        headers=operator_headers | {"Idempotency-Key": str(uuid4())},
+        json=create.model_dump(mode="json"),
+    )
+    assert created.status_code == 200, created.text
+
+    retirement = create.model_copy(
+        update={
+            "expected_configuration_epoch": 2,
+            "operation_kind": "destroy",
+            "operation_id": uuid4(),
+            "operation_epoch": 2,
+            "configuration_generation": 2,
+        }
+    )
+    forged = retirement.model_copy(
+        update={
+            "operation_id": uuid4(),
+            "candidate_publication_sha256": "0" * 64,
+        }
+    )
+    rejected_forgery = client.put(
+        f"/v1/development-projections/{DEVELOPMENT_SUBJECT_ID}",
+        headers=operator_headers | {"Idempotency-Key": str(uuid4())},
+        json=forged.model_dump(mode="json"),
+    )
+    assert rejected_forgery.status_code == 409
+
+    retirement_key = uuid4()
+    retired = client.put(
+        f"/v1/development-projections/{DEVELOPMENT_SUBJECT_ID}",
+        headers=operator_headers | {"Idempotency-Key": str(retirement_key)},
+        json=retirement.model_dump(mode="json"),
+    )
+    assert retired.status_code == 200, retired.text
+    assert retired.json()["subject"]["lifecycle_state"] == "disabled"
+    assert retired.json()["subject"]["min_slots"] == 0
+    assert retired.json()["subject"]["max_slots"] == 0
+
+    replay = client.put(
+        f"/v1/development-projections/{DEVELOPMENT_SUBJECT_ID}",
+        headers=operator_headers | {"Idempotency-Key": str(retirement_key)},
+        json=retirement.model_dump(mode="json"),
+    )
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["configuration_epoch"] == retired.json()["configuration_epoch"]
+    assert replay.json()["replayed"] is True
+
+    report = demand_snapshot(
+        subject_id=DEVELOPMENT_SUBJECT_ID,
+        subject_incarnation=DEVELOPMENT_SUBJECT_INCARNATION,
+        reporter_incarnation=DEVELOPMENT_REPORTER_INCARNATION,
+    ).model_copy(update={"configuration_generation": 2})
+    rejected = client.put(
+        f"/v1/reports/demand/{DEVELOPMENT_SUBJECT_ID}",
+        headers={"Authorization": f"Bearer {DYNAMIC_DEMAND_TOKEN}"},
+        json=report.model_dump(mode="json"),
+    )
+    assert rejected.status_code == 401
+
+    subjects = client.get("/v1/status/subjects", headers=operator_headers)
+    assert subjects.status_code == 200
+    assert all(
+        item["subject_id"] != str(DEVELOPMENT_SUBJECT_ID)
+        for item in subjects.json()["items"]
+    )
+
+
 @pytest.mark.parametrize("operation_kind", ["update", "capacity"])
 def test_lifecycle_can_restore_an_unregistered_personal_subject_from_full_evidence(
     operation_kind: str,

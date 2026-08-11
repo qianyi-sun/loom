@@ -316,18 +316,28 @@ class _S3:
         self.created.append(bucket)
 
     def get_paginator(self, name: str) -> Any:
-        assert name == "list_object_versions"
+        assert name in {
+            "list_multipart_uploads",
+            "list_objects_v2",
+            "list_object_versions",
+        }
 
         class _Paginator:
             def paginate(self, *, Bucket: str):  # noqa: N803
                 del Bucket
-                return [{"Versions": []}]
+                return [{}]
 
         return _Paginator()
 
     def delete_bucket(self, *, Bucket: str) -> None:  # noqa: N803
         self.buckets.remove(Bucket)
         self.deleted.append(Bucket)
+
+    def delete_objects(self, **_kwargs: Any) -> dict[str, object]:
+        return {}
+
+    def abort_multipart_upload(self, **_kwargs: Any) -> None:
+        return None
 
 
 async def test_bucket_executor_is_idempotent() -> None:
@@ -341,6 +351,60 @@ async def test_bucket_executor_is_idempotent() -> None:
     assert client.created == buckets
     await executor.remove_buckets(identity, buckets)
     assert client.deleted == buckets
+
+
+async def test_bucket_cleanup_removes_uploads_unversioned_objects_and_versions() -> None:
+    class _PopulatedS3(_S3):
+        def __init__(self) -> None:
+            super().__init__()
+            self.aborted: list[tuple[str, str, str]] = []
+            self.object_deletes: list[list[dict[str, str]]] = []
+
+        def get_paginator(self, name: str) -> Any:
+            class _Paginator:
+                def paginate(self, *, Bucket: str):  # noqa: N803
+                    if name == "list_multipart_uploads":
+                        return [{"Uploads": [{"Key": "partial", "UploadId": "upload-1"}]}]
+                    if name == "list_objects_v2":
+                        return [{"Contents": [{"Key": "current"}]}]
+                    assert name == "list_object_versions"
+                    return [
+                        {
+                            "Versions": [{"Key": "history", "VersionId": "v1"}],
+                            "DeleteMarkers": [{"Key": "history", "VersionId": "marker"}],
+                        }
+                    ]
+
+            return _Paginator()
+
+        def abort_multipart_upload(
+            self,
+            *,
+            Bucket: str,  # noqa: N803
+            Key: str,  # noqa: N803
+            UploadId: str,  # noqa: N803
+        ) -> None:
+            self.aborted.append((Bucket, Key, UploadId))
+
+        def delete_objects(self, **kwargs: Any) -> dict[str, object]:
+            self.object_deletes.append(kwargs["Delete"]["Objects"])
+            return {"Errors": []}
+
+    client = _PopulatedS3()
+    identity = derive_identity("alice")
+    client.buckets.add(identity.task_bucket)
+
+    await S3BucketEnsurer(client).remove_buckets(identity, [identity.task_bucket])
+
+    assert client.aborted == [(identity.task_bucket, "partial", "upload-1")]
+    assert client.object_deletes == [
+        [{"Key": "current"}],
+        [
+            {"Key": "history", "VersionId": "v1"},
+            {"Key": "history", "VersionId": "marker"},
+        ],
+    ]
+    assert client.deleted == [identity.task_bucket]
 
 
 class _Vault:

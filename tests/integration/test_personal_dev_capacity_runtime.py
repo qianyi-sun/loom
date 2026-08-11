@@ -127,3 +127,38 @@ async def test_capacity_migrator_authority_is_sealed_between_reconciliations(
             (owner, database_name),
         )
         assert await create_privilege.fetchone() == (False,)
+
+
+@pytest.mark.asyncio
+async def test_destroy_seal_disables_primary_and_capacity_database_logins(
+    postgres_url: str,
+) -> None:
+    name = f"retain-{uuid4().hex[:8]}"
+    database_name = make_url(postgres_url).database
+    assert database_name is not None
+    identity = replace(derive_identity(name), database=database_name)
+    database = PsycopgPersonalDevCapacityDatabase(postgres_url)
+    connect_url = postgres_url.replace("postgresql+psycopg://", "postgresql://", 1)
+    async with await psycopg.AsyncConnection.connect(
+        connect_url,
+        autocommit=True,
+    ) as connection:
+        await connection.execute(
+            f'CREATE ROLE "{identity.db_role}" LOGIN PASSWORD \'primary-password\''
+        )
+    owner, migrator, agent, _migrator_url, _agent_url = await database._converge_roles(
+        identity,
+        _new_credentials(),
+    )
+
+    await database.seal(identity)
+
+    async with await psycopg.AsyncConnection.connect(connect_url) as connection:
+        roles = await connection.execute(
+            "SELECT rolname, rolcanlogin, rolpassword IS NULL FROM pg_authid "
+            "WHERE rolname = ANY(%s) ORDER BY rolname",
+            ([identity.db_role, owner, migrator, agent],),
+        )
+        assert await roles.fetchall() == sorted(
+            (role, False, True) for role in (identity.db_role, owner, migrator, agent)
+        )
