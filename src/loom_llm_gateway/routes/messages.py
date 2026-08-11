@@ -68,11 +68,12 @@ async def messages(
         )
     if ctx is None or "llm:call" not in ctx.scopes:
         raise HTTPException(status_code=401, detail="not authorized")
-    if ctx.trial_id is None or ctx.step_id is None or ctx.team_id is None:
+    if ctx.token_subject is None or ctx.step_id is None or ctx.team_id is None:
         raise HTTPException(
             status_code=403,
             detail="step-scoped token required (loom_step_<jwt>)",
         )
+    request.state.execution_attempt_id = ctx.execution_attempt_id
 
     if settings.anthropic_api_key is None:
         raise HTTPException(
@@ -179,6 +180,7 @@ async def messages(
             session,
             team_id=ctx.team_id,
             trial_id=ctx.trial_id,
+            execution_attempt_id=ctx.execution_attempt_id,
             step_id=ctx.step_id,
             dialect="anthropic",
             model=model_name,
@@ -371,13 +373,19 @@ async def _record_stream_call(
     if accum["input_tokens"] == 0 and accum["output_tokens"] == 0:
         logger.warning(
             "anthropic stream produced no usage events; skipping cost record",
-            extra={"trial_id": str(ctx.trial_id), "step_id": ctx.step_id},
+            extra={
+                "trial_id": str(ctx.trial_id) if ctx.trial_id is not None else None,
+                "execution_attempt_id": (
+                    str(ctx.execution_attempt_id) if ctx.execution_attempt_id is not None else None
+                ),
+                "step_id": ctx.step_id,
+            },
         )
         return
     # The outer route already 403'd when any of these were None; the
     # asserts narrow types for mypy without changing runtime behavior.
     assert ctx.team_id is not None
-    assert ctx.trial_id is not None
+    assert ctx.token_subject is not None
     assert ctx.step_id is not None
     extras = {
         k: accum[k]
@@ -403,6 +411,7 @@ async def _record_stream_call(
             session,
             team_id=ctx.team_id,
             trial_id=ctx.trial_id,
+            execution_attempt_id=ctx.execution_attempt_id,
             step_id=ctx.step_id,
             dialect="anthropic",
             model=model_name,
@@ -426,13 +435,14 @@ async def _record_failed_message_call(
     failure_error_type: str | None = None,
 ) -> None:
     assert ctx.team_id is not None
-    assert ctx.trial_id is not None
+    assert ctx.token_subject is not None
     assert ctx.step_id is not None
     async with request.app.state.session_factory() as session:
         await record_failed_call(
             session,
             team_id=ctx.team_id,
             trial_id=ctx.trial_id,
+            execution_attempt_id=ctx.execution_attempt_id,
             step_id=ctx.step_id,
             dialect="anthropic",
             model=model_name,

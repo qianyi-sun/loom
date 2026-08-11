@@ -177,6 +177,100 @@ async def test_messages_native_passthrough_records_llm_call(  # type: ignore[no-
     assert float(row["cost_usd"]) == pytest.approx(0.00567, abs=1e-6)
 
 
+async def test_messages_attributes_pipeline_jwt_to_execution_attempt(  # type: ignore[no-untyped-def]
+    gateway_setup,
+    postgres_url,
+):
+    app, _trial_jwt, team_id, _trial_id = gateway_setup
+    run_id, stage_id, attempt_id = uuid4(), uuid4(), uuid4()
+    digest = "sha256:" + "a" * 64
+    engine = create_engine(postgres_url)
+    with engine.begin() as connection:
+        connection.execute(
+            text("""
+                INSERT INTO pipeline_runs (
+                    id,team_id,submission_policy,recipe_name,recipe_version,recipe_digest,
+                    graph_spec_json,graph_spec_digest,parameters_json,parameters_digest,
+                    resolved_inputs_json,budget_json,request_digest,idempotency_key
+                ) VALUES (
+                    :id,:team,'ordinary','messages-attribution',1,:digest,
+                    '{}'::jsonb,:digest,'{}'::jsonb,:digest,'[]'::jsonb,'{}'::jsonb,
+                    :digest,:key
+                )
+            """),
+            {
+                "id": run_id,
+                "team": team_id,
+                "digest": digest,
+                "key": f"messages-{run_id}",
+            },
+        )
+        connection.execute(
+            text("""
+                INSERT INTO pipeline_stage_runs (
+                    id,pipeline_run_id,node_key,shard_key,node_kind,state,
+                    resource_profile_json,resource_profile_digest,failure_policy
+                ) VALUES (
+                    :id,:run,'recovery_primitive','singleton','container','blocked',
+                    '{}'::jsonb,:digest,'fail_run'
+                )
+            """),
+            {"id": stage_id, "run": run_id, "digest": digest},
+        )
+        connection.execute(
+            text("""
+                INSERT INTO execution_attempts (id,stage_run_id,attempt_number,state)
+                VALUES (:id,:stage,1,'fault_pending')
+            """),
+            {"id": attempt_id, "stage": stage_id},
+        )
+    step_jwt = mint_step_jwt(
+        team_id=team_id,
+        execution_attempt_id=attempt_id,
+        step_id="recovery_primitive",
+        ttl_sec=600,
+        signing_key=app.state.settings.step_jwt_signing_key.get_secret_value(),
+    )
+    try:
+        transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
+        async with httpx.AsyncClient(transport=transport, base_url="http://gw") as client:
+            response = await client.post(
+                "/v1/messages",
+                headers={"Authorization": f"Bearer {step_jwt}"},
+                json={
+                    "model": "claude-opus-4-7",
+                    "max_tokens": 32,
+                    "messages": [{"role": "user", "content": "recover"}],
+                },
+            )
+        assert response.status_code == 200, response.text
+        with engine.connect() as connection:
+            row = connection.execute(
+                text("""
+                    SELECT trial_id,execution_attempt_id,step_id
+                    FROM llm_calls WHERE execution_attempt_id=:attempt
+                """),
+                {"attempt": attempt_id},
+            ).one()
+        assert row.trial_id is None
+        assert row.execution_attempt_id == attempt_id
+        assert row.step_id == "recovery_primitive"
+    finally:
+        with engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM llm_calls WHERE execution_attempt_id=:id"),
+                {"id": attempt_id},
+            )
+            connection.execute(
+                text("DELETE FROM execution_attempts WHERE id=:id"), {"id": attempt_id}
+            )
+            connection.execute(
+                text("DELETE FROM pipeline_stage_runs WHERE id=:id"), {"id": stage_id}
+            )
+            connection.execute(text("DELETE FROM pipeline_runs WHERE id=:id"), {"id": run_id})
+        engine.dispose()
+
+
 async def test_messages_rejects_non_step_token(  # type: ignore[no-untyped-def]
     gateway_setup,
     postgres_url,

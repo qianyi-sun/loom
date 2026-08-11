@@ -15,7 +15,7 @@ from loom_cli.rollout.readonly_minio_bootstrap import (
 
 def test_readonly_minio_policy_has_exact_non_mutating_staging_authority() -> None:
     policy = readonly_minio_policy()
-    bucket_statement, object_statement = policy["Statement"]
+    bucket_statement, object_statement, server_info_statement = policy["Statement"]
 
     assert bucket_statement["Effect"] == "Allow"
     assert bucket_statement["Action"] == [
@@ -32,9 +32,17 @@ def test_readonly_minio_policy_has_exact_non_mutating_staging_authority() -> Non
         "Action": ["s3:GetObjectVersion"],
         "Resource": [f"arn:aws:s3:::{bucket}/*" for bucket in READONLY_MINIO_BUCKETS],
     }
+    assert server_info_statement == {
+        "Effect": "Allow",
+        "Action": ["admin:ServerInfo"],
+        "Resource": ["arn:aws:s3:::*"],
+    }
     rendered = json.dumps(policy).lower()
     assert "deleteobject" not in rendered
     assert "putobject" not in rendered
+    assert "serverupdate" not in rendered
+    assert "servicerestart" not in rendered
+    assert "servicestop" not in rendered
     assert len(readonly_minio_policy_digest()) == 64
 
 
