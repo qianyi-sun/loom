@@ -22,7 +22,7 @@ from loom_capacity_guard.contracts import (
 )
 
 LEGACY_MUTATION_INVENTORY_DIGEST = (
-    "81b48ba31d00111a532b2317248357f8af05a40b53e4b2b8bf7cd00c3ad59616"
+    "607f561f4af380cb1452995512e2ec4ab32490c29552b7a6618a3f76fea168a4"
 )
 MAX_LEGACY_WRITER_CURSORS = 64
 LEGACY_MUTATION_PATH_IDS = (
@@ -30,9 +30,16 @@ LEGACY_MUTATION_PATH_IDS = (
     "batch-user-cancel",
     "dead-worker-reclaim",
     "dev-environment-destroy",
+    "execution-attempt-heartbeat",
+    "execution-attempt-queued-to-claimed",
+    "execution-attempt-result-state",
+    "execution-attempt-worker-loss",
     "family-finalize-cascade",
     "legacy-compatibility-writer",
     "neutral-pool-assignment",
+    "pipeline-attempt-cancellation",
+    "pipeline-attempt-retry",
+    "pipeline-attempt-submission",
     "pre-start-heartbeat",
     "pre-start-retry-requeue",
     "queued-to-claimed",
@@ -107,7 +114,7 @@ class _InertLegacyAuthorityV1(AgentRegistrationV1):
     """Common zero-authority ceiling for preparation and freeze evidence."""
 
     mutation_inventory_digest: Literal[
-        "81b48ba31d00111a532b2317248357f8af05a40b53e4b2b8bf7cd00c3ad59616"
+        "607f561f4af380cb1452995512e2ec4ab32490c29552b7a6618a3f76fea168a4"
     ]
     activation_epoch: Literal[0] = 0
     new_submission_authority: Literal[False] = False

@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "generated_from_commit": "stacked-package-2b3",
+  "schema_version": 2,
+  "generated_from_commit": "package-2c3-plus-unified-execution-attempt-audit",
   "scope": "capacity eligibility, assignment, claim ownership, worker authority, retry, cancellation, recovery, and physical release",
   "activation_blocking": true,
   "closure_rule": "Every entry must be protected, disabled, or deleted before global activation.",
@@ -232,14 +232,101 @@
       "closure_status": "open"
     },
     {
+      "id": "pipeline-attempt-submission",
+      "category": "submission",
+      "sources": [
+        "src/loom_pipeline_orchestrator/repository.py:create_attempt"
+      ],
+      "current_mutation": "Creates a queued or fault-pending ExecutionAttempt and advances its PipelineStageRun using candidate-owned stage and resource contracts.",
+      "current_authority": "candidate pipeline orchestrator",
+      "required_replacement": "The trusted submission boundary must seal the normalized capacity requirement and create a fresh protected attempt identity in the same transaction before the candidate projection becomes claimable.",
+      "closure_status": "open"
+    },
+    {
+      "id": "execution-attempt-queued-to-claimed",
+      "category": "claim",
+      "sources": [
+        "src/loom_control_plane/routes/workers.py:claim_trial",
+        "src/loom_control_plane/scheduler/claim.py:claim_one"
+      ],
+      "current_mutation": "Selects a queued ExecutionAttempt and directly writes its worker, claim UUID, lease epoch, bearer digest, expiry, and claimed PipelineStageRun state.",
+      "current_authority": "candidate scheduler and worker API",
+      "required_replacement": "Candidate code may propose only; the trusted claim CAS must validate the exact sealed attempt, assignment, worker incarnation and shape, team gates, and atomically allocate one protected concurrency lease.",
+      "closure_status": "open"
+    },
+    {
+      "id": "execution-attempt-heartbeat",
+      "category": "claim-heartbeat",
+      "sources": [
+        "src/loom_control_plane/routes/execution_attempts.py:heartbeat_attempt"
+      ],
+      "current_mutation": "Extends an ExecutionAttempt lease and writes liveness directly after candidate-schema token and claim checks.",
+      "current_authority": "candidate control-plane worker API",
+      "required_replacement": "Refresh liveness only through the exact protected claim, worker incarnation, completion capability, and claim epoch; the candidate lease timestamp remains a projection.",
+      "closure_status": "open"
+    },
+    {
+      "id": "execution-attempt-result-state",
+      "category": "start-completion-failure",
+      "sources": [
+        "src/loom_control_plane/routes/execution_attempts.py:report_attempt_started",
+        "src/loom_control_plane/routes/execution_attempts.py:_terminal_report",
+        "src/loom_control_plane/routes/execution_attempts.py:report_attempt_complete",
+        "src/loom_pipeline_orchestrator/repository.py:_fail_provider_attempt_budget",
+        "src/loom_pipeline_orchestrator/repository.py:_fail_accounting_violation"
+      ],
+      "current_mutation": "Writes running, succeeded, failed, or cancelled ExecutionAttempt state and related StageRun state from worker reports or orchestrator budget decisions without protected claim completion.",
+      "current_authority": "candidate control-plane worker API and pipeline orchestrator",
+      "required_replacement": "Use exact protected start and terminal CAS procedures; workload terminality must not release concurrency until the matching protected completion transition closes the lease.",
+      "closure_status": "open"
+    },
+    {
+      "id": "pipeline-attempt-cancellation",
+      "category": "cancellation",
+      "sources": [
+        "src/loom_pipeline_orchestrator/repository.py:_latch_terminal_cause",
+        "src/loom_pipeline_orchestrator/repository.py:_cancel_not_started_attempts",
+        "src/loom_pipeline_orchestrator/repository.py:acknowledge_cancellation"
+      ],
+      "current_mutation": "Cancels unstarted ExecutionAttempts immediately and emits cancellation work for live attempts using only the candidate pipeline controller lease.",
+      "current_authority": "candidate pipeline orchestrator",
+      "required_replacement": "Cancel unclaimed protected attempts terminally; move live claims to cancel-pending, bind acknowledgement to the exact claim, and retain concurrency until scoped cessation evidence arrives.",
+      "closure_status": "open"
+    },
+    {
+      "id": "execution-attempt-worker-loss",
+      "category": "crash-recovery",
+      "sources": [
+        "src/loom_control_plane/routes/execution_attempts.py:report_worker_lost_cleanup"
+      ],
+      "current_mutation": "Marks an expired leased ExecutionAttempt lost or cancelled from a worker-reaper acknowledgement in the candidate schema.",
+      "current_authority": "candidate control-plane worker-reaper API",
+      "required_replacement": "Fence the exact protected worker and claim, retain the charged lease until ownership-scoped cessation is proven, then close it before authorizing retry or replacement.",
+      "closure_status": "open"
+    },
+    {
+      "id": "pipeline-attempt-retry",
+      "category": "retry-requeue",
+      "sources": [
+        "src/loom_pipeline_orchestrator/repository.py:schedule_retry",
+        "src/loom_pipeline_orchestrator/repository.py:create_attempt"
+      ],
+      "current_mutation": "Schedules a StageRun retry and creates the next queued ExecutionAttempt after candidate-visible terminal and cleanup state.",
+      "current_authority": "candidate pipeline orchestrator",
+      "required_replacement": "Create a fresh protected attempt sequence only after the previous exact claim has protected terminal or scoped cessation evidence; never infer release from candidate workload state alone.",
+      "closure_status": "open"
+    },
+    {
       "id": "legacy-compatibility-writer",
       "category": "cutover-rollback",
       "sources": [
         "src/loom_control_plane/scheduler/claim.py",
         "src/loom_control_plane/autoscaler_demand_router.py",
-        "src/loom_control_plane/routes/workers.py"
+        "src/loom_control_plane/routes/workers.py",
+        "src/loom_control_plane/routes/execution_attempts.py",
+        "src/loom_pipeline_orchestrator/repository.py"
       ],
-      "current_mutation": "The active legacy claim/assignment/token paths collectively form the current single writer but have no explicit epoch or expiry.",
+      "current_mutation": "The active Trial and ExecutionAttempt submission, claim, assignment, token, lifecycle, retry, and cancellation paths collectively form current writers with no shared protected epoch or expiry.",
       "current_authority": "candidate deployment",
       "required_replacement": "Mirror only exact pre-freeze authority into a unique expiring legacy-compatibility epoch; prohibit neutral moves, new workers after freeze, global allowance consumption, and survival past global activation.",
       "closure_status": "open"

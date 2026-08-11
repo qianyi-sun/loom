@@ -90,7 +90,7 @@ def _freeze(
 
 def test_preparation_requires_the_complete_canonical_inventory() -> None:
     preparation = _preparation()
-    assert len(preparation.writer_cursors) == len(LEGACY_MUTATION_PATH_IDS) == 20
+    assert len(preparation.writer_cursors) == len(LEGACY_MUTATION_PATH_IDS) == 27
     assert tuple(cursor.mutation_path_id for cursor in preparation.writer_cursors) == (
         LEGACY_MUTATION_PATH_IDS
     )
@@ -99,7 +99,7 @@ def test_preparation_requires_the_complete_canonical_inventory() -> None:
     assert preparation.activation_epoch == 0
     assert preparation.executable is False
 
-    with pytest.raises(ValidationError, match=r"20 items|complete mutation inventory"):
+    with pytest.raises(ValidationError, match=r"27 items|complete mutation inventory"):
         LegacyCompatibilityPreparationV1.model_validate(
             {
                 **preparation.model_dump(mode="python"),
