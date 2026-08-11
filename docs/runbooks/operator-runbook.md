@@ -1942,9 +1942,9 @@ credential and converges one fixed non-mutating policy for
 single-link mode-0600 file under the credential directory. Its policy permits
 only bucket location/versioning, object/version enumeration, exact-version
 reads, and MinIO server information; object writes/deletes and server mutations
-are absent. The readonly TokenRequest may port-forward only
-to `loom-minio-0` and `loom-postgres-0`. `check` independently compares the
-server-side policy document and user binding, and Tier 0 then proves it by
+are absent. The readonly TokenRequest may port-forward only to `loom-minio-0`
+and `loom-postgres-1` through `loom-postgres-3`. `check` independently compares
+the server-side policy document and user binding, and Tier 0 then proves it by
 enumerating the exact buckets. A single-node hostPath cluster measures
 `/data/loom-staging/minio` as `loom-rollout`; a distributed multi-node cluster
 reads the live MinIO drives through the bounded `admin:ServerInfo` action and

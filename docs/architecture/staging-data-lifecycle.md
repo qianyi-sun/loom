@@ -82,8 +82,9 @@ admission before request publication or backup.
 
 The rollout Tier 0 collector does not depend on migration `0070` already being
 live. Its installed Kubernetes TokenRequest may open localhost transports only
-to the exact `loom-minio-0` and `loom-postgres-0` pods. MinIO independently
-authenticates a fixed non-mutating user whose one exact policy can read bucket
+to `loom-minio-0` and the exact `loom-postgres-1` through `loom-postgres-3`
+pods. MinIO independently authenticates a fixed non-mutating user whose one
+exact policy can read bucket
 location/versioning, enumerate versions, read exact object versions in only the
 staging trajectories and artifacts buckets, and read MinIO server information;
 it cannot write/delete objects or change server state.

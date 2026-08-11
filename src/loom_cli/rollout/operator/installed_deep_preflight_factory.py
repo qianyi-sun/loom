@@ -94,15 +94,22 @@ def _hash_json(value: object) -> str:
 
 def _readonly_capacity_probe_inputs(
     cluster: object,
-) -> tuple[CapacitySource, tuple[Path, ...]]:
+) -> tuple[CapacitySource, tuple[Path, ...], int | None]:
     topology = getattr(cluster, "topology", None)
     storage_root = Path(str(getattr(cluster, "persistent_storage_host_path_root", "")))
     minio_filesystem_path = storage_root / "minio"
     if minio_filesystem_path != Path("/data/loom-staging/minio"):
         raise ValueError("installed staging MinIO filesystem authority drifted")
     if bool(getattr(topology, "multi_node", False)):
-        return "minio-admin", ()
-    return "filesystem", (minio_filesystem_path,)
+        expected_drive_count = getattr(topology, "minio_replicas", None)
+        if (
+            isinstance(expected_drive_count, bool)
+            or not isinstance(expected_drive_count, int)
+            or expected_drive_count < 1
+        ):
+            raise ValueError("installed staging MinIO replica authority drifted")
+        return "minio-admin", (), expected_drive_count
+    return "filesystem", (minio_filesystem_path,), None
 
 
 _EXTERNAL_SUPERVISOR_POOL_IDENTITY_SQL = """
@@ -375,11 +382,14 @@ def build_installed_deep_preflight_composition(
         service_uid=service_uid,
     )
     cluster = load_cluster_config(config.cluster_config_path)
-    capacity_kind, capacity_paths = _readonly_capacity_probe_inputs(cluster)
+    capacity_kind, capacity_paths, expected_drive_count = (
+        _readonly_capacity_probe_inputs(cluster)
+    )
     capacity_source = InstalledReadonlyCapacitySource(
         service_uid=service_uid,
         capacity_source=capacity_kind,
         filesystem_paths=capacity_paths,
+        expected_drive_count=expected_drive_count,
         buckets=tuple(sorted((cluster.artifacts_bucket, cluster.trajectories_bucket))),
     )
     inventory_source = ReadonlyLifecycleInventoryProvider(

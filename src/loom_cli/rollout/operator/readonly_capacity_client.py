@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import socket
 import subprocess
 import time
@@ -13,7 +14,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
-from typing import Any, Literal, Protocol, cast
+from typing import IO, Any, Literal, Protocol, cast
 
 import boto3
 from botocore.config import Config
@@ -44,6 +45,8 @@ _POD = "loom-minio-0"
 _REMOTE_PORT = 9000
 _START_TIMEOUT_SECONDS = 15.0
 _STOP_TIMEOUT_SECONDS = 5.0
+_KUBECTL_TIMEOUT_SECONDS = 15.0
+_MAX_KUBECTL_OUTPUT_BYTES = 1 << 20
 _CHILD_ENVIRONMENT = {
     "HOME": "/var/lib/loom-staging-rollout",
     "LANG": "C.UTF-8",
@@ -54,6 +57,8 @@ _CHILD_ENVIRONMENT = {
 
 
 class TunnelProcess(Protocol):
+    stdout: IO[bytes] | None
+
     def poll(self) -> int | None: ...
 
     def terminate(self) -> None: ...
@@ -73,7 +78,16 @@ class S3Client(Protocol):
     def close(self) -> None: ...
 
 
+class CommandResult(Protocol):
+    @property
+    def returncode(self) -> int: ...
+
+    @property
+    def stdout(self) -> bytes: ...
+
+
 Spawn = Callable[[Sequence[str], Mapping[str, str]], TunnelProcess]
+KubernetesRun = Callable[[Sequence[str], Mapping[str, str]], CommandResult]
 ClientFactory = Callable[[str, ReadonlyMinioCredential], S3Client]
 PortAllocator = Callable[[], int]
 WaitReady = Callable[[TunnelProcess, int], None]
@@ -87,10 +101,25 @@ def _spawn(argv: Sequence[str], environment: Mapping[str, str]) -> TunnelProcess
         list(argv),
         env=dict(environment),
         stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         close_fds=True,
         start_new_session=False,
+    )
+
+
+def _run_kubectl(
+    argv: Sequence[str],
+    environment: Mapping[str, str],
+) -> CommandResult:
+    return subprocess.run(
+        list(argv),
+        env=dict(environment),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        timeout=_KUBECTL_TIMEOUT_SECONDS,
+        check=False,
     )
 
 
@@ -105,15 +134,38 @@ def _allocate_port() -> int:
 
 
 def _wait_ready(process: TunnelProcess, port: int) -> None:
+    stream = getattr(process, "stdout", None)
+    if stream is None:
+        raise RuntimeError("readonly MinIO port-forward output is unavailable")
+    expected = f"Forwarding from 127.0.0.1:{port} -> {_REMOTE_PORT}".encode()
+    output = b""
+    try:
+        descriptor = stream.fileno()
+        os.set_blocking(descriptor, False)
+    except (AttributeError, OSError, ValueError) as exc:
+        raise RuntimeError("readonly MinIO port-forward output is unavailable") from exc
     deadline = time.monotonic() + _START_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError("readonly MinIO port-forward exited early")
         try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.25):
-                return
-        except OSError:
-            time.sleep(0.05)
+            chunk = os.read(descriptor, 1024)
+        except BlockingIOError:
+            chunk = None
+        except OSError as exc:
+            raise RuntimeError("readonly MinIO port-forward output failed") from exc
+        if chunk == b"":
+            raise RuntimeError("readonly MinIO port-forward output closed early")
+        if chunk:
+            output += chunk
+            if len(output) > 4096:
+                raise RuntimeError("readonly MinIO port-forward output is invalid")
+            complete, separator, pending = output.rpartition(b"\n")
+            if separator:
+                if expected in (line.rstrip(b"\r") for line in complete.splitlines()):
+                    return
+                output = pending
+        time.sleep(0.05)
     raise RuntimeError("readonly MinIO port-forward timed out")
 
 
@@ -138,18 +190,24 @@ def _client(endpoint: str, credential: ReadonlyMinioCredential) -> S3Client:
 
 
 def _stop_exact(process: TunnelProcess) -> None:
-    if process.poll() is not None:
-        return
-    process.terminate()
     try:
-        process.wait(timeout=_STOP_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired:
         if process.poll() is None:
-            process.kill()
+            process.terminate()
             try:
                 process.wait(timeout=_STOP_TIMEOUT_SECONDS)
-            except subprocess.TimeoutExpired as exc:
-                raise RuntimeError("readonly MinIO port-forward did not stop") from exc
+            except subprocess.TimeoutExpired:
+                if process.poll() is None:
+                    process.kill()
+                    try:
+                        process.wait(timeout=_STOP_TIMEOUT_SECONDS)
+                    except subprocess.TimeoutExpired as exc:
+                        raise RuntimeError(
+                            "readonly MinIO port-forward did not stop"
+                        ) from exc
+    finally:
+        stream = getattr(process, "stdout", None)
+        if stream is not None:
+            stream.close()
 
 
 @contextmanager
@@ -240,19 +298,109 @@ def open_readonly_minio_client(
 def probe_installed_minio_admin_drives(
     *,
     service_uid: int,
+    expected_drive_count: int,
     tunnel_context: Callable[..., Any] = _open_readonly_minio_tunnel,
+    replica_count_probe: Callable[..., int] | None = None,
     drive_probe: Callable[..., Sequence[DriveHeadroom]] = probe_minio_admin_drives,
 ) -> tuple[DriveHeadroom, ...]:
     """Read distributed MinIO drive headroom through the bounded admin action."""
+    live_drive_count = (replica_count_probe or probe_installed_minio_replica_count)(
+        service_uid=service_uid,
+        configured_drive_count=expected_drive_count,
+    )
     with tunnel_context(service_uid=service_uid) as (endpoint, credential):
         return tuple(
             drive_probe(
                 endpoint_url=endpoint,
                 access_key=credential.access_key,
                 secret_key=credential.secret_key,
+                expected_drive_count=live_drive_count,
                 region=credential.region,
             )
         )
+
+
+def probe_installed_minio_replica_count(
+    *,
+    service_uid: int,
+    configured_drive_count: int,
+    kubeconfig_path: Path = READONLY_KUBECONFIG_PATH,
+    run: KubernetesRun = _run_kubectl,
+) -> int:
+    """Bind drive telemetry to the fully ready live MinIO StatefulSet."""
+    if (
+        service_uid < 1
+        or isinstance(configured_drive_count, bool)
+        or not isinstance(configured_drive_count, int)
+        or configured_drive_count < 1
+        or not kubeconfig_path.is_absolute()
+        or ".." in kubeconfig_path.parts
+    ):
+        raise ValueError("readonly MinIO replica authority is invalid")
+    read_trusted_file(
+        kubeconfig_path,
+        service_uid=service_uid,
+        private=True,
+        max_bytes=1 << 20,
+        require_nonempty=True,
+    )
+    result = run(
+        (
+            "kubectl",
+            "--kubeconfig",
+            str(kubeconfig_path),
+            "--namespace",
+            _NAMESPACE,
+            "--request-timeout=10s",
+            "get",
+            "statefulset",
+            "loom-minio",
+            "--output=json",
+        ),
+        _CHILD_ENVIRONMENT,
+    )
+    if (
+        result.returncode != 0
+        or not isinstance(result.stdout, bytes)
+        or not result.stdout
+        or len(result.stdout) > _MAX_KUBECTL_OUTPUT_BYTES
+    ):
+        raise RuntimeError("readonly MinIO replica authority is unavailable")
+    try:
+        document = json.loads(result.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("readonly MinIO replica authority is invalid") from exc
+    if not isinstance(document, dict):
+        raise RuntimeError("readonly MinIO replica authority is invalid")
+    metadata = document.get("metadata")
+    spec = document.get("spec")
+    status = document.get("status")
+    if not all(isinstance(value, dict) for value in (metadata, spec, status)):
+        raise RuntimeError("readonly MinIO replica authority is invalid")
+    assert isinstance(metadata, dict)
+    assert isinstance(spec, dict)
+    assert isinstance(status, dict)
+    generation = metadata.get("generation")
+    replicas = spec.get("replicas")
+    observed_generation = status.get("observedGeneration")
+    ready_replicas = status.get("readyReplicas")
+    if (
+        document.get("apiVersion") != "apps/v1"
+        or document.get("kind") != "StatefulSet"
+        or metadata.get("name") != "loom-minio"
+        or metadata.get("namespace") != _NAMESPACE
+        or type(generation) is not int
+        or type(replicas) is not int
+        or type(observed_generation) is not int
+        or type(ready_replicas) is not int
+        or generation < 1
+        or replicas < 1
+        or replicas != configured_drive_count
+        or observed_generation != generation
+        or ready_replicas != replicas
+    ):
+        raise RuntimeError("readonly MinIO replica authority drifted")
+    return replicas
 
 
 def probe_installed_staging_capacity(
@@ -260,6 +408,7 @@ def probe_installed_staging_capacity(
     service_uid: int,
     filesystem_paths: Sequence[Path],
     capacity_source: CapacitySource = "filesystem",
+    expected_drive_count: int | None = None,
     buckets: Sequence[str] = READONLY_MINIO_BUCKETS,
     client_context: Callable[..., Any] = open_readonly_minio_client,
     admin_drive_probe: AdminDriveProbe = probe_installed_minio_admin_drives,
@@ -273,9 +422,17 @@ def probe_installed_staging_capacity(
     if capacity_source == "filesystem":
         if not exact_paths:
             raise ValueError("readonly filesystem capacity authority is unavailable")
+        if expected_drive_count is not None:
+            raise ValueError("readonly filesystem drive count authority is invalid")
     elif capacity_source == "minio-admin":
         if exact_paths:
             raise ValueError("readonly MinIO admin capacity cannot use filesystem paths")
+        if (
+            isinstance(expected_drive_count, bool)
+            or not isinstance(expected_drive_count, int)
+            or expected_drive_count < 1
+        ):
+            raise ValueError("readonly MinIO admin drive count authority is invalid")
     else:
         raise ValueError("readonly capacity source is invalid")
     with client_context(service_uid=service_uid) as client:
@@ -284,7 +441,10 @@ def probe_installed_staging_capacity(
             evidence = collect_staging_capacity_from_drives(
                 namespace=_NAMESPACE,
                 objects=objects,
-                drives=admin_drive_probe(service_uid=service_uid),
+                drives=admin_drive_probe(
+                    service_uid=service_uid,
+                    expected_drive_count=expected_drive_count,
+                ),
                 observed_at=now(),
             )
         else:
@@ -402,6 +562,7 @@ class InstalledReadonlyCapacitySource:
         service_uid: int,
         filesystem_paths: Sequence[Path],
         capacity_source: CapacitySource = "filesystem",
+        expected_drive_count: int | None = None,
         buckets: Sequence[str] = READONLY_MINIO_BUCKETS,
         probe: Callable[..., StagingCapacity] = probe_installed_staging_capacity,
     ) -> None:
@@ -409,16 +570,26 @@ class InstalledReadonlyCapacitySource:
         if (
             service_uid < 1
             or any(not path.is_absolute() or ".." in path.parts for path in exact_paths)
-            or (capacity_source == "filesystem" and not exact_paths)
-            or (capacity_source == "minio-admin" and bool(exact_paths))
             or capacity_source not in {"filesystem", "minio-admin"}
         ):
             raise ValueError("readonly capacity source authority is invalid")
+        if capacity_source == "filesystem" and (
+            not exact_paths or expected_drive_count is not None
+        ):
+            raise ValueError("readonly filesystem capacity authority is invalid")
+        if capacity_source == "minio-admin" and (
+            bool(exact_paths)
+            or isinstance(expected_drive_count, bool)
+            or not isinstance(expected_drive_count, int)
+            or expected_drive_count < 1
+        ):
+            raise ValueError("readonly MinIO admin drive count authority is invalid")
         if tuple(buckets) != READONLY_MINIO_BUCKETS:
             raise ValueError("readonly capacity source buckets drifted")
         self._service_uid = service_uid
         self._filesystem_paths = exact_paths
         self._capacity_source = capacity_source
+        self._expected_drive_count = expected_drive_count
         self._buckets = tuple(buckets)
         self._probe = probe
         self._lock = Lock()
@@ -432,6 +603,7 @@ class InstalledReadonlyCapacitySource:
                     capacity_source=self._capacity_source,
                     filesystem_paths=self._filesystem_paths,
                     buckets=self._buckets,
+                    expected_drive_count=self._expected_drive_count,
                 )
             return self._capacity
 
@@ -446,6 +618,7 @@ __all__ = [
     "WaitReady",
     "open_readonly_minio_client",
     "probe_installed_minio_admin_drives",
+    "probe_installed_minio_replica_count",
     "probe_installed_readonly_object_store_health",
     "probe_installed_staging_capacity",
     "verify_installed_immutable_objects",
