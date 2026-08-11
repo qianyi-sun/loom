@@ -458,6 +458,29 @@ def test_migration_change_selects_integration_images_and_staging() -> None:
     }
 
 
+def test_capacity_guard_migration_change_selects_owned_integration_lane() -> None:
+    plan = plan_validations(
+        changed_paths=[
+            "capacity_guard_migrations/versions/guard_0002_example.py",
+        ],
+        labels=set(),
+        event_name="pull_request",
+    )
+
+    assert plan.integration is True
+    assert plan.unowned_runtime is False
+
+
+def test_capacity_guard_source_change_selects_integration_lane() -> None:
+    plan = plan_validations(
+        changed_paths=["src/loom_capacity_guard/store.py"],
+        labels=set(),
+        event_name="pull_request",
+    )
+
+    assert plan.integration is True
+
+
 def test_every_docker_marked_integration_module_selects_docker() -> None:
     integration_dir = REPO_ROOT / "tests" / "integration"
     docker_marked_modules = [

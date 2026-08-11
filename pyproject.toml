@@ -184,7 +184,7 @@ ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-files = ["src/loom", "src/loom_llm_gateway", "src/loom_control_plane", "src/loom_worker", "src/loom_benchmark_tool", "src/loom_service", "src/loom_cli", "src/loom_drivers", "src/loom_egress_xds", "src/loom_family_orchestrator", "src/loom_pipeline_orchestrator", "src/loom_listen"]
+files = ["src/loom", "src/loom_llm_gateway", "src/loom_control_plane", "src/loom_worker", "src/loom_benchmark_tool", "src/loom_service", "src/loom_cli", "src/loom_drivers", "src/loom_egress_xds", "src/loom_family_orchestrator", "src/loom_pipeline_orchestrator", "src/loom_listen", "src/loom_capacity_guard", "src/loom_capacity_agent"]
 plugins = ["pydantic.mypy"]
 
 # boto3 / botocore don't ship type stubs and the full boto3-stubs[s3] package

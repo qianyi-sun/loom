@@ -25,7 +25,7 @@ from alembic import command
 from alembic.config import Config as AlembicConfig
 from botocore.config import Config
 from fastapi import FastAPI
-from sqlalchemy import create_engine, delete, insert, text
+from sqlalchemy import create_engine, delete, insert, inspect, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -53,6 +53,205 @@ from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 from tests.integration.pipeline_orchestrator_fixtures import orchestrator_seed  # noqa: F401
 from tests.integration.taskset_fixtures import tasksets_minio, tasksets_setup  # noqa: F401
+
+
+@pytest.fixture(scope="session")
+def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, object]]:
+    """Create a clean protected-schema template and its cluster-scoped roles."""
+
+    source_url = make_url(postgres_url)
+    suffix = f"{os.getpid()}_{uuid4().hex[:8]}"
+    database_name = f"loom_guard_test_{suffix}"
+    owner_role = f"loom_guard_owner_test_{suffix}"
+    migrator_role = f"loom_guard_migrator_test_{suffix}"
+    agent_role = f"loom_guard_agent_test_{suffix}"
+    # The literal percent becomes ``%25`` in the URL and exercises Alembic's
+    # ConfigParser interpolation boundary on every protected migration test.
+    migrator_password = f"guard-test-%-{uuid4().hex}"
+    admin_url = source_url.set(database="postgres")
+    environment_admin_url = source_url.set(database=database_name)
+    migrator_url = source_url.set(
+        database=database_name,
+        username=migrator_role,
+        password=migrator_password,
+    )
+    agent_password = f"guard-agent-test-{uuid4().hex}"
+    agent_url = source_url.set(
+        database=database_name,
+        username=agent_role,
+        password=agent_password,
+    )
+    admin_engine = create_engine(admin_url, isolation_level="AUTOCOMMIT")
+    preparer = admin_engine.dialect.identifier_preparer
+    quoted_database = preparer.quote(database_name)
+    quoted_owner = preparer.quote(owner_role)
+    quoted_migrator = preparer.quote(migrator_role)
+    quoted_agent = preparer.quote(agent_role)
+    repo_root = Path(__file__).resolve().parents[2]
+    created_database = False
+    created_owner = False
+    created_migrator = False
+    created_agent = False
+
+    try:
+        with admin_engine.connect() as connection:
+            connection.exec_driver_sql(
+                f"CREATE ROLE {quoted_owner} NOLOGIN NOSUPERUSER "
+                "NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"
+            )
+            created_owner = True
+            connection.execution_options(no_parameters=True).exec_driver_sql(
+                f"CREATE ROLE {quoted_migrator} LOGIN NOSUPERUSER "
+                "NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS "
+                f"PASSWORD '{migrator_password}'"
+            )
+            created_migrator = True
+            connection.exec_driver_sql(
+                f"CREATE ROLE {quoted_agent} LOGIN NOSUPERUSER "
+                "NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS "
+                f"PASSWORD '{agent_password}'"
+            )
+            created_agent = True
+            connection.exec_driver_sql(f"GRANT {quoted_owner} TO {quoted_migrator}")
+            connection.exec_driver_sql(f"CREATE DATABASE {quoted_database} TEMPLATE template0")
+            created_database = True
+            connection.exec_driver_sql(
+                f"GRANT CREATE ON DATABASE {quoted_database} TO {quoted_owner}"
+            )
+
+        application_cfg = AlembicConfig(str(repo_root / "migrations" / "alembic.ini"))
+        application_cfg.set_main_option("script_location", str(repo_root / "migrations"))
+        application_cfg.set_main_option(
+            "sqlalchemy.url", environment_admin_url.render_as_string(hide_password=False)
+        )
+        command.upgrade(application_cfg, "head")
+
+        environment_admin_engine = create_engine(environment_admin_url)
+        try:
+            with environment_admin_engine.begin() as connection:
+                connection.exec_driver_sql(f"GRANT USAGE ON SCHEMA public TO {quoted_owner}")
+                connection.exec_driver_sql(
+                    f"GRANT REFERENCES ON TABLE public.trials TO {quoted_owner}"
+                )
+                connection.exec_driver_sql(
+                    "GRANT SELECT (id, state, cancellation_requested_at, next_attempt_at, "
+                    "autoscaler_pool_name, submit_priority, submitted_at) "
+                    f"ON TABLE public.trials TO {quoted_owner}"
+                )
+                public_tables_before = frozenset(
+                    inspect(connection).get_table_names(schema="public")
+                )
+        finally:
+            environment_admin_engine.dispose()
+
+        guard_cfg = AlembicConfig(str(repo_root / "capacity_guard_migrations" / "alembic.ini"))
+        guard_cfg.set_main_option("script_location", str(repo_root / "capacity_guard_migrations"))
+        previous_url = os.environ.get("LOOM_CAPACITY_GUARD_DB_URL")
+        previous_owner = os.environ.get("LOOM_CAPACITY_GUARD_OWNER_ROLE")
+        previous_agent = os.environ.get("LOOM_CAPACITY_GUARD_AGENT_ROLE")
+        os.environ["LOOM_CAPACITY_GUARD_DB_URL"] = migrator_url.render_as_string(
+            hide_password=False
+        )
+        os.environ["LOOM_CAPACITY_GUARD_OWNER_ROLE"] = owner_role
+        os.environ["LOOM_CAPACITY_GUARD_AGENT_ROLE"] = agent_role
+        try:
+            command.upgrade(guard_cfg, "head")
+        finally:
+            if previous_url is None:
+                os.environ.pop("LOOM_CAPACITY_GUARD_DB_URL", None)
+            else:
+                os.environ["LOOM_CAPACITY_GUARD_DB_URL"] = previous_url
+            if previous_owner is None:
+                os.environ.pop("LOOM_CAPACITY_GUARD_OWNER_ROLE", None)
+            else:
+                os.environ["LOOM_CAPACITY_GUARD_OWNER_ROLE"] = previous_owner
+            if previous_agent is None:
+                os.environ.pop("LOOM_CAPACITY_GUARD_AGENT_ROLE", None)
+            else:
+                os.environ["LOOM_CAPACITY_GUARD_AGENT_ROLE"] = previous_agent
+
+        yield {
+            "admin_url": environment_admin_url.render_as_string(hide_password=False),
+            "agent_password": agent_password,
+            "agent_role": agent_role,
+            "agent_url": agent_url.render_as_string(hide_password=False),
+            "cluster_admin_url": admin_url.render_as_string(hide_password=False),
+            "database_name": database_name,
+            "migrator_url": migrator_url.render_as_string(hide_password=False),
+            "migrator_password": migrator_password,
+            "migrator_role": migrator_role,
+            "owner_role": owner_role,
+            "public_tables_before": public_tables_before,
+        }
+    finally:
+        if created_database:
+            with admin_engine.connect() as connection:
+                connection.execute(
+                    text(
+                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                        "WHERE datname = :database_name AND pid <> pg_backend_pid()"
+                    ),
+                    {"database_name": database_name},
+                )
+                connection.exec_driver_sql(f"DROP DATABASE IF EXISTS {quoted_database}")
+        with admin_engine.connect() as connection:
+            if created_agent:
+                connection.exec_driver_sql(f"DROP ROLE IF EXISTS {quoted_agent}")
+            if created_migrator:
+                connection.exec_driver_sql(f"DROP ROLE IF EXISTS {quoted_migrator}")
+            if created_owner:
+                connection.exec_driver_sql(f"DROP ROLE IF EXISTS {quoted_owner}")
+        admin_engine.dispose()
+
+
+@pytest.fixture
+def capacity_guard_database(
+    capacity_guard_template_database: dict[str, object],
+) -> Iterator[dict[str, object]]:
+    """Clone the clean guard template so append-only tests remain isolated."""
+
+    def required_string(key: str) -> str:
+        value = capacity_guard_template_database[key]
+        assert isinstance(value, str)
+        return value
+
+    cluster_admin_url = make_url(required_string("cluster_admin_url"))
+    template_name = required_string("database_name")
+    database_name = f"loom_guard_case_{os.getpid()}_{uuid4().hex[:8]}"
+    admin_url = make_url(required_string("admin_url")).set(database=database_name)
+    migrator_url = make_url(required_string("migrator_url")).set(database=database_name)
+    agent_url = make_url(required_string("agent_url")).set(database=database_name)
+    engine = create_engine(cluster_admin_url, isolation_level="AUTOCOMMIT")
+    preparer = engine.dialect.identifier_preparer
+    quoted_database = preparer.quote(database_name)
+    quoted_template = preparer.quote(template_name)
+    quoted_owner = preparer.quote(required_string("owner_role"))
+    try:
+        with engine.connect() as connection:
+            connection.exec_driver_sql(
+                f"CREATE DATABASE {quoted_database} TEMPLATE {quoted_template}"
+            )
+            connection.exec_driver_sql(
+                f"GRANT CREATE ON DATABASE {quoted_database} TO {quoted_owner}"
+            )
+        yield {
+            **capacity_guard_template_database,
+            "admin_url": admin_url.render_as_string(hide_password=False),
+            "agent_url": agent_url.render_as_string(hide_password=False),
+            "database_name": database_name,
+            "migrator_url": migrator_url.render_as_string(hide_password=False),
+        }
+    finally:
+        with engine.connect() as connection:
+            connection.execute(
+                text(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    "WHERE datname = :database_name AND pid <> pg_backend_pid()"
+                ),
+                {"database_name": database_name},
+            )
+            connection.exec_driver_sql(f"DROP DATABASE IF EXISTS {quoted_database}")
+        engine.dispose()
 
 
 @pytest.fixture(scope="session")
