@@ -86,7 +86,8 @@ than mixed with current behavior.
   candidate binding, locking, backup, evidence, and operator authority.
 - **[Personal development environments](multi-dev-environments.md)** —
   opt-in source-fresh CLI/API lifecycle, identity, activation, capacity
-  publication, manager-first teardown, and limits.
+  publication, candidate artifact collection, manager-first teardown, and
+  limits.
 - **[Multi-node topology](multi-node-topology.md)** — Postgres, MinIO,
   storage, anti-affinity, and disruption budgets.
 - **[PgBouncer transaction mode](pgbouncer.md)** —

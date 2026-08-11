@@ -168,15 +168,14 @@ Two layers, deliberately partitioned by signal type:
 |---------------------|---------------------------------------------|-----------------------------------------------------------------|
 | Normal exit         | `atexit.register(stop_all)`                  | Also fires on `KeyboardInterrupt`-induced exit                  |
 | Ctrl-C (SIGINT)     | Python default → `KeyboardInterrupt`         | Propagates through `asyncio.run` to `_run_async`'s `try/finally` |
-| SIGTERM             | Custom handler → `stop_all()` then `SIG_DFL` | atexit does NOT fire on SIGTERM, so we install our own           |
+| SIGTERM             | Custom handler → `stop_all()` then `SIG_DFL` | `atexit` does not fire on SIGTERM, so the custom handler performs cleanup |
 | Happy-path teardown | `try/finally` around `asyncio.gather` calls `stop_all()` | Closes the GPU-reclaim window before process exit |
 | Crash mid-launch    | `launch_vllm` except path stops + removes from registry  | No orphan if step 6/7 raises                       |
 
-**Why no custom SIGINT handler**: a custom one would intercept Ctrl-C
-*before* `asyncio.run` raises `KeyboardInterrupt`, short-circuiting
-the `try/finally` that also tears down Docker containers and Daytona
-sandboxes. The default Python behavior (raise KI) is exactly what we
-want — it lets the same cleanup path run for every code-path exit.
+**SIGINT behavior:** the default handler lets `asyncio.run` raise
+`KeyboardInterrupt`, so the surrounding `try/finally` also tears down Docker
+containers and Daytona sandboxes. A custom SIGINT handler would intercept
+Ctrl-C before that shared cleanup path runs.
 
 ## Security defaults
 

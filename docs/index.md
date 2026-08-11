@@ -16,7 +16,7 @@ migrations, research notes, and implementation plans live outside this tree in
   and cursor-based event reads.
 - **[Personal development environments](architecture/multi-dev-environments.md)**
   — source sealing, candidate deployment, activation, capacity publication,
-  manager-first teardown, and current lifecycle limits.
+  artifact collection, manager-first teardown, and current lifecycle limits.
 
 ## Author benchmarks and tasks
 

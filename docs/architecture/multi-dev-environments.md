@@ -25,7 +25,7 @@ library and HTTP interfaces.
 | `loom service up --environment dev-<name>` | Seals and uploads the selected source, or resolves an owned ready candidate supplied with `--candidate`; resolves the expected operation epoch, applies the exact candidate and capacity policy, and waits for activation plus the initial non-executable capacity publication unless `--no-wait` is set. |
 | `create_personal_dev_source_snapshot()` | Library API used by the CLI to seal a Git worktree into a deterministic source archive. |
 | `POST /api/v1/personal-dev-candidates` | Accepts a multipart `source` archive plus `source_sha256` and `archive_sha256`. Upload creates or returns an owner-scoped immutable candidate but does not start a build. |
-| `GET /api/v1/personal-dev-candidates[/{id}]` | Lists or reads visible candidates and their build state. |
+| `GET /api/v1/personal-dev-candidates[/{id}]` | Lists or reads visible candidates, including build state, artifact state, collection blocker, and collection time. |
 | `PUT /api/v1/dev-instances/{name}` | Compare-and-set apply for a candidate, capacity policy, expected operation epoch, and idempotency key. It queues the candidate build when required. |
 | `DELETE /api/v1/dev-instances/{name}` | Compare-and-set manager-first teardown for a ready personal environment. It binds `keep_data`, the expected operation epoch, and an idempotency key before queuing durable cleanup. |
 | `GET /api/v1/dev-instances/{name}/operations/{id}` | Reads the owner-scoped durable lifecycle operation. |
@@ -139,9 +139,9 @@ independent SHA-256 identities.
 
 Candidate intake streams the archive into a bounded no-follow temporary file,
 verifies both digests and the canonical archive, then publishes it under an
-owner-scoped content-addressed object key. Upload alone leaves the candidate
-in `uploaded`; a matching environment apply atomically creates the lifecycle
-operation and queues the first build attempt.
+owner-scoped candidate-and-generation object key. Upload alone leaves the
+candidate in `uploaded`; a matching environment apply atomically creates the
+lifecycle operation and queues the first build attempt.
 
 The restricted builder is separately gated by
 `LOOM_SVC_PERSONAL_DEV_BUILDER_ENABLED`, which also defaults to `false`.
@@ -157,6 +157,35 @@ exporter revalidates OCI descriptors and platform digests, scans all images,
 and publishes immutable multi-architecture references. Candidate and
 operation responses always identify this output as `personal-dev-only` and
 `promotable: false`; it is not staging or production release evidence.
+
+## Candidate artifact collection
+
+When both the personal-development controller and restricted builder are
+enabled, the service also runs the bounded artifact collector. A candidate in
+`uploaded`, `ready`, or `failed` first becomes eligible only when no
+non-deleted environment, active lifecycle operation, or queued/running build
+references it. The first unreferenced observation starts a grace period; any
+new environment apply, build claim, or exact re-upload clears that observation
+before collection begins. The default grace period is 24 hours, the collection
+lease is 15 minutes, and the idle poll interval is 30 seconds.
+
+After the grace period, the collector persists and leases a canonical deletion
+manifest. It names the exact owner, candidate, source generation and object,
+attempt-specific build and evidence prefixes, and attempt-and-lease-specific
+registry tags. The collector heartbeats while deleting current objects,
+versions, delete markers, multipart uploads, and registry tags, then records
+`collected` only if the lease epoch and manifest digest are still current. An
+expired lease reuses the persisted manifest. Missing registry authority or an
+invalid manifest blocks that candidate and exposes the reason instead of
+widening the deletion scope.
+
+Candidate reads expose `artifact_state` as `retained`, `collecting`, or
+`collected`, plus `artifact_gc_blocked_reason` and `artifact_collected_at`.
+Collection in progress makes re-upload and apply fail closed. Collected
+candidates stop consuming the retained-count and retained-byte quotas. An
+exact later re-upload reuses the candidate identity with a fresh source
+generation, returns it to `uploaded`, and requires a fresh build; prior
+collection evidence remains append-only.
 
 ## Preparation and activation
 
