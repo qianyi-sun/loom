@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import os
 import tempfile
+from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -24,6 +25,7 @@ from loom.personal_dev_candidate import (
     PERSONAL_DEV_BUILD_CONTRACT_SHA256,
     CandidateRegistration,
     CandidateRegistry,
+    PersonalDevArtifactCollectionInProgressError,
     PersonalDevCandidateQuotaError,
     PersonalDevCandidateRecord,
 )
@@ -105,14 +107,14 @@ def _publish_archive(
     candidate_sha: str,
     source_sha256: str,
     archive_sha256: str,
-) -> None:
+) -> str | None:
     descriptor = os.open(archive_path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
     try:
         metadata = os.fstat(descriptor)
         if metadata.st_nlink != 1 or metadata.st_size != size_bytes:
             raise RuntimeError("verified personal-dev source archive changed before publication")
         with os.fdopen(os.dup(descriptor), "rb") as body:
-            object_store.put_object(
+            result = object_store.put_object(
                 Bucket=bucket,
                 Key=key,
                 Body=body,
@@ -126,6 +128,11 @@ def _publish_archive(
                     "source-sha256": source_sha256,
                 },
             )
+            if isinstance(result, Mapping):
+                version_id = result.get("VersionId")
+                if isinstance(version_id, str) and version_id:
+                    return version_id
+            return None
     finally:
         os.close(descriptor)
 
@@ -176,12 +183,13 @@ async def intake_personal_dev_candidate(
             source_sha256=expected_source_sha256,
             archive_sha256=expected_archive_sha256,
         )
+        source_generation_id = uuid4()
         object_key = (
             f"personal-dev/sources/{owner_team_id}/{owner_user_id}/"
-            f"{candidate_sha}/{expected_archive_sha256}.tar"
+            f"{candidate_sha}/{source_generation_id}/{expected_archive_sha256}.tar"
         )
         try:
-            await asyncio.to_thread(
+            published_version_id = await asyncio.to_thread(
                 _publish_archive,
                 object_store,
                 archive_path=archive_path,
@@ -200,7 +208,7 @@ async def intake_personal_dev_candidate(
 
         now = datetime.now(UTC)
         requested = PersonalDevCandidateRecord(
-            id=uuid4(),
+            id=source_generation_id,
             owner_user_id=owner_user_id,
             owner_team_id=owner_team_id,
             candidate_sha=candidate_sha,
@@ -212,19 +220,28 @@ async def intake_personal_dev_candidate(
             manifest_json=asdict(manifest),
             object_bucket=bucket,
             object_key=object_key,
+            source_generation_id=source_generation_id,
             archive_size_bytes=size_bytes,
             status="uploaded",
             created_at=now,
             updated_at=now,
         )
         try:
-            return await registry.register(requested)
+            registration = await registry.register(requested)
+            if registration.candidate.object_key != object_key:
+                delete = {"Bucket": bucket, "Key": object_key}
+                if published_version_id is not None:
+                    delete["VersionId"] = published_version_id
+                await asyncio.to_thread(object_store.delete_object, **delete)
+            return registration
         except PersonalDevCandidateQuotaError:
             try:
+                delete = {"Bucket": bucket, "Key": object_key}
+                if published_version_id is not None:
+                    delete["VersionId"] = published_version_id
                 await asyncio.to_thread(
                     object_store.delete_object,
-                    Bucket=bucket,
-                    Key=object_key,
+                    **delete,
                 )
             except Exception as exc:
                 raise HTTPException(
@@ -232,6 +249,23 @@ async def intake_personal_dev_candidate(
                     detail="personal-dev rejected source cleanup failed",
                 ) from exc
             raise
+        except PersonalDevArtifactCollectionInProgressError as exc:
+            # Every upload has a unique generation key, so this cleanup cannot
+            # erase either the collecting generation or a later successful one.
+            try:
+                delete = {"Bucket": bucket, "Key": object_key}
+                if published_version_id is not None:
+                    delete["VersionId"] = published_version_id
+                await asyncio.to_thread(object_store.delete_object, **delete)
+            except Exception as cleanup_exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="personal-dev rejected source cleanup failed",
+                ) from cleanup_exc
+            raise HTTPException(
+                status_code=409,
+                detail="personal-dev candidate artifacts are being collected; retry",
+            ) from exc
         except Exception as exc:
             raise HTTPException(
                 status_code=503,

@@ -12,12 +12,18 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from testcontainers.postgres import PostgresContainer
 
-from loom.db.schema import DevInstance, PersonalDevCandidate, Team, User
+from loom.db.schema import (
+    DevInstance,
+    PersonalDevCandidate,
+    PersonalDevCandidateArtifactCollection,
+    Team,
+    User,
+)
 from loom.personal_dev_activation import (
     PersonalDevActivationAcknowledgement,
     PersonalDevActivationSigner,
@@ -33,6 +39,7 @@ from loom.personal_dev_candidate import (
     personal_dev_image_set_manifest_digest,
 )
 from loom.personal_dev_candidate_store import (
+    PersonalDevArtifactGcLeaseFencedError,
     PersonalDevBuildLeaseFencedError,
     SqlAlchemyPersonalDevCandidateStore,
 )
@@ -118,6 +125,7 @@ def test_all_tables_exist(postgres_url: str) -> None:
         "dev_lifecycle_operation_attempts",
         "dev_lifecycle_activation_acknowledgements",
         "personal_dev_candidates",
+        "personal_dev_candidate_artifact_collections",
         "personal_dev_candidate_build_attempts",
         "artifacts",
         "artifact_lineage_edges",
@@ -182,6 +190,27 @@ def _publication(
     }
 
 
+def _reupload(
+    candidate: PersonalDevCandidateRecord,
+    **changes: object,
+) -> PersonalDevCandidateRecord:
+    generation_id = uuid4()
+    requested = replace(
+        candidate,
+        id=generation_id,
+        source_generation_id=generation_id,
+        **changes,
+    )
+    return replace(
+        requested,
+        object_key=(
+            f"personal-dev/sources/{requested.owner_team_id}/"
+            f"{requested.owner_user_id}/{requested.candidate_sha}/"
+            f"{generation_id}/{requested.archive_sha256}.tar"
+        ),
+    )
+
+
 async def _claim_candidate_build(
     store: SqlAlchemyPersonalDevCandidateStore,
     *,
@@ -223,8 +252,9 @@ async def test_personal_dev_candidate_registration_and_build_lease(
     owner_id = uuid4()
     team_id = uuid4()
     now = datetime.now(UTC)
+    candidate_id = uuid4()
     requested = PersonalDevCandidateRecord(
-        id=uuid4(),
+        id=candidate_id,
         owner_user_id=owner_id,
         owner_team_id=team_id,
         candidate_sha="a" * 64,
@@ -235,7 +265,11 @@ async def test_personal_dev_candidate_registration_and_build_lease(
         dirty=True,
         manifest_json={"schema_version": 1, "attestation_scope": "personal-dev-only"},
         object_bucket="artifacts",
-        object_key=f"personal-dev/sources/{team_id}/{owner_id}/source.tar",
+        object_key=(
+            f"personal-dev/sources/{team_id}/{owner_id}/{'a' * 64}/"
+            f"{candidate_id}/{'c' * 64}.tar"
+        ),
+        source_generation_id=candidate_id,
         archive_size_bytes=10240,
         status="uploaded",
         created_at=now,
@@ -260,10 +294,15 @@ async def test_personal_dev_candidate_registration_and_build_lease(
             created = await store.register(requested)
             assert created.created is True
             retried = await store.register(
-                replace(requested, id=uuid4()),
+                _reupload(requested),
             )
             assert retried.created is False
             assert retried.candidate.id == created.candidate.id
+            assert retried.candidate.object_key == requested.object_key
+            assert (
+                retried.candidate.source_generation_id
+                == requested.source_generation_id
+            )
             assert retried.build_attempt is None
 
             subject_id = uuid4()
@@ -330,13 +369,11 @@ async def test_personal_dev_candidate_registration_and_build_lease(
         async with sessions() as session:
             store = SqlAlchemyPersonalDevCandidateStore(session)
             retry_candidate = await store.register(
-                replace(
+                _reupload(
                     requested,
-                    id=uuid4(),
                     candidate_sha="1" * 64,
                     source_sha256="2" * 64,
                     archive_sha256="3" * 64,
-                    object_key=f"personal-dev/sources/{team_id}/{owner_id}/retry.tar",
                 ),
             )
             retry_subject = uuid4()
@@ -396,8 +433,9 @@ async def test_personal_dev_candidate_registration_enforces_owner_retention_quot
     now = datetime.now(UTC)
 
     def candidate(digit: str) -> PersonalDevCandidateRecord:
+        candidate_id = uuid4()
         return PersonalDevCandidateRecord(
-            id=uuid4(),
+            id=candidate_id,
             owner_user_id=owner_id,
             owner_team_id=team_id,
             candidate_sha=digit * 64,
@@ -408,7 +446,11 @@ async def test_personal_dev_candidate_registration_enforces_owner_retention_quot
             dirty=True,
             manifest_json={"schema_version": 1},
             object_bucket="artifacts",
-            object_key=f"personal-dev/sources/{team_id}/{owner_id}/{digit}.tar",
+            object_key=(
+                f"personal-dev/sources/{team_id}/{owner_id}/{digit * 64}/"
+                f"{candidate_id}/{digit * 63 + 'b'}.tar"
+            ),
+            source_generation_id=candidate_id,
             archive_size_bytes=10240,
             status="uploaded",
             created_at=now,
@@ -440,18 +482,256 @@ async def test_personal_dev_candidate_registration_enforces_owner_retention_quot
             )
             first = await store.register(first_request)
             assert first.created is True
-            replay = await store.register(replace(first_request, id=uuid4()))
+            replay = await store.register(_reupload(first_request))
             assert replay.candidate.id == first.candidate.id
             with pytest.raises(ValueError, match="immutable binding"):
                 await store.register(
-                    replace(
+                    _reupload(
                         first_request,
-                        id=uuid4(),
                         candidate_sha="4" * 64,
                     )
                 )
             with pytest.raises(PersonalDevCandidateQuotaError, match="count"):
                 await store.register(candidate("3"))
+    finally:
+        await engine.dispose()
+
+
+async def test_personal_dev_artifact_gc_is_grace_delayed_lease_fenced_and_rehydratable(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    owner_id = uuid4()
+    team_id = uuid4()
+    now = datetime(2020, 1, 1, tzinfo=UTC)
+    candidate_sha = "8" * 64
+    archive_sha = "9" * 64
+    candidate_id = uuid4()
+    requested = PersonalDevCandidateRecord(
+        id=candidate_id,
+        owner_user_id=owner_id,
+        owner_team_id=team_id,
+        candidate_sha=candidate_sha,
+        source_sha256="a" * 64,
+        archive_sha256=archive_sha,
+        build_contract_sha256="b" * 64,
+        source_commit="c" * 40,
+        dirty=True,
+        manifest_json={"schema_version": 1},
+        object_bucket="artifacts",
+        object_key=(
+            f"personal-dev/sources/{team_id}/{owner_id}/{candidate_sha}/"
+            f"{candidate_id}/{archive_sha}.tar"
+        ),
+        source_generation_id=candidate_id,
+        archive_size_bytes=10240,
+        status="uploaded",
+        created_at=now,
+        updated_at=now,
+    )
+    limits = PersonalDevCandidateLimits(
+        per_owner_retained_candidates=1,
+        per_owner_retained_archive_bytes=10240,
+    )
+    try:
+        async with sessions() as session:
+            session.add(Team(id=team_id, name=f"candidate-gc-{team_id}"))
+            session.add(
+                User(
+                    id=owner_id,
+                    email=f"{owner_id}@example.test",
+                    username=f"user-{owner_id}",
+                    username_normalized=f"user-{owner_id}",
+                    status="active",
+                )
+            )
+            await session.commit()
+
+        async with sessions() as session:
+            store = SqlAlchemyPersonalDevCandidateStore(session, limits=limits)
+            registered = await store.register(requested)
+            assert await store.mark_next_artifact_gc(now=now) is True
+            assert (
+                await store.claim_next_artifact_gc(
+                    collector_id="collector-a",
+                    now=now + timedelta(seconds=59),
+                    retention_seconds=60,
+                    lease_seconds=300,
+                )
+                is None
+            )
+            claim = await store.claim_next_artifact_gc(
+                collector_id="collector-a",
+                now=now + timedelta(seconds=60),
+                retention_seconds=60,
+                lease_seconds=300,
+            )
+            assert claim is not None
+            assert claim.candidate_id == registered.candidate.id
+            assert claim.lease_epoch == 1
+            assert claim.manifest.source_object_key == requested.object_key
+            with pytest.raises(PersonalDevArtifactGcLeaseFencedError):
+                await store.finish_artifact_gc(
+                    candidate_id=claim.candidate_id,
+                    collector_id="collector-a",
+                    lease_epoch=2,
+                    manifest_sha256=claim.manifest.manifest_sha256,
+                    now=now + timedelta(seconds=61),
+                )
+            with pytest.raises(PersonalDevArtifactGcLeaseFencedError):
+                await store.finish_artifact_gc(
+                    candidate_id=claim.candidate_id,
+                    collector_id="collector-a",
+                    lease_epoch=claim.lease_epoch,
+                    manifest_sha256=claim.manifest.manifest_sha256,
+                    now=now + timedelta(seconds=361),
+                )
+            reclaimed = await store.claim_next_artifact_gc(
+                collector_id="collector-b",
+                now=now + timedelta(seconds=361),
+                retention_seconds=60,
+                lease_seconds=300,
+            )
+            assert reclaimed is not None
+            assert reclaimed.lease_epoch == claim.lease_epoch + 1
+            await store.finish_artifact_gc(
+                candidate_id=reclaimed.candidate_id,
+                collector_id="collector-b",
+                lease_epoch=reclaimed.lease_epoch,
+                manifest_sha256=reclaimed.manifest.manifest_sha256,
+                now=now + timedelta(seconds=362),
+            )
+            first_evidence = (
+                (
+                    await session.execute(
+                        select(PersonalDevCandidateArtifactCollection).where(
+                            PersonalDevCandidateArtifactCollection.candidate_id
+                            == registered.candidate.id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert [item.collection_sequence for item in first_evidence] == [1]
+            assert (
+                first_evidence[0].manifest_sha256
+                == reclaimed.manifest.manifest_sha256
+            )
+
+        replacement_sha = "d" * 64
+        replacement_archive = "e" * 64
+        async with sessions() as session:
+            store = SqlAlchemyPersonalDevCandidateStore(session, limits=limits)
+            replacement = await store.register(
+                _reupload(
+                    requested,
+                    candidate_sha=replacement_sha,
+                    source_sha256="f" * 64,
+                    archive_sha256=replacement_archive,
+                )
+            )
+            assert replacement.created is True
+            assert replacement.candidate.artifact_state == "retained"
+
+        async with sessions() as session:
+            store = SqlAlchemyPersonalDevCandidateStore(session, limits=limits)
+            assert await store.mark_next_artifact_gc(now=now + timedelta(minutes=2)) is True
+            claim = await store.claim_next_artifact_gc(
+                collector_id="collector-a",
+                now=now + timedelta(minutes=3),
+                retention_seconds=60,
+                lease_seconds=300,
+            )
+            assert claim is not None
+            await store.finish_artifact_gc(
+                candidate_id=claim.candidate_id,
+                collector_id="collector-a",
+                lease_epoch=claim.lease_epoch,
+                manifest_sha256=claim.manifest.manifest_sha256,
+                now=now + timedelta(minutes=3, seconds=1),
+            )
+            rehydration_request = _reupload(requested)
+            rehydrated = await store.register(rehydration_request)
+            assert rehydrated.created is False
+            assert rehydrated.candidate.id == requested.id
+            assert rehydrated.candidate.artifact_state == "retained"
+            assert rehydrated.candidate.status == "uploaded"
+            assert rehydrated.candidate.artifact_gc_manifest_sha256 is None
+            assert rehydrated.candidate.object_key == rehydration_request.object_key
+            assert (
+                rehydrated.candidate.source_generation_id
+                == rehydration_request.source_generation_id
+            )
+            assert rehydrated.candidate.object_key != requested.object_key
+            preserved = (
+                (
+                    await session.execute(
+                        select(PersonalDevCandidateArtifactCollection).where(
+                            PersonalDevCandidateArtifactCollection.candidate_id
+                            == requested.id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert [item.collection_sequence for item in preserved] == [1]
+
+            assert await store.mark_next_artifact_gc(
+                now=now + timedelta(minutes=4)
+            ) is True
+            second_claim = await store.claim_next_artifact_gc(
+                collector_id="collector-b",
+                now=now + timedelta(minutes=4),
+                retention_seconds=0,
+                lease_seconds=300,
+            )
+            assert second_claim is not None
+            assert second_claim.candidate_id == requested.id
+            assert (
+                second_claim.manifest.source_object_key
+                == rehydration_request.object_key
+            )
+            await store.finish_artifact_gc(
+                candidate_id=second_claim.candidate_id,
+                collector_id="collector-b",
+                lease_epoch=second_claim.lease_epoch,
+                manifest_sha256=second_claim.manifest.manifest_sha256,
+                now=now + timedelta(minutes=4, seconds=1),
+            )
+            completed = (
+                (
+                    await session.execute(
+                        select(PersonalDevCandidateArtifactCollection)
+                        .where(
+                            PersonalDevCandidateArtifactCollection.candidate_id
+                            == requested.id
+                        )
+                        .order_by(
+                            PersonalDevCandidateArtifactCollection.collection_sequence
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert [item.collection_sequence for item in completed] == [1, 2]
+
+            for mutation in (
+                "UPDATE personal_dev_candidate_artifact_collections "
+                "SET collector_id = 'mutated' WHERE candidate_id = :candidate_id",
+                "DELETE FROM personal_dev_candidate_artifact_collections "
+                "WHERE candidate_id = :candidate_id",
+            ):
+                with pytest.raises(DBAPIError, match="append-only"):
+                    await session.execute(
+                        text(mutation),
+                        {"candidate_id": requested.id},
+                    )
+                    await session.commit()
+                await session.rollback()
     finally:
         await engine.dispose()
 
@@ -472,6 +752,7 @@ async def test_personal_dev_build_claim_global_limit_is_concurrency_safe(
         for digit in ("6", "7"):
             owner_id = uuid4()
             team_id = uuid4()
+            candidate_id = uuid4()
             session.add(Team(id=team_id, name=f"claim-quota-{team_id}"))
             session.add(
                 User(
@@ -484,7 +765,7 @@ async def test_personal_dev_build_claim_global_limit_is_concurrency_safe(
             )
             seeded.append(
                 PersonalDevCandidateRecord(
-                    id=uuid4(),
+                    id=candidate_id,
                     owner_user_id=owner_id,
                     owner_team_id=team_id,
                     candidate_sha=digit * 64,
@@ -495,7 +776,11 @@ async def test_personal_dev_build_claim_global_limit_is_concurrency_safe(
                     dirty=True,
                     manifest_json={"schema_version": 1},
                     object_bucket="artifacts",
-                    object_key=f"personal-dev/sources/{team_id}/{owner_id}/{digit}.tar",
+                    object_key=(
+                        f"personal-dev/sources/{team_id}/{owner_id}/{digit * 64}/"
+                        f"{candidate_id}/{digit * 63 + 'b'}.tar"
+                    ),
+                    source_generation_id=candidate_id,
                     archive_size_bytes=10240,
                     status="uploaded",
                     created_at=now,
@@ -559,8 +844,9 @@ async def test_personal_dev_environment_apply_is_owner_bound_and_epoch_fenced(
     owner_id = uuid4()
     team_id = uuid4()
     now = datetime.now(UTC)
+    candidate_id = uuid4()
     candidate = PersonalDevCandidateRecord(
-        id=uuid4(),
+        id=candidate_id,
         owner_user_id=owner_id,
         owner_team_id=team_id,
         candidate_sha="a" * 64,
@@ -571,7 +857,11 @@ async def test_personal_dev_environment_apply_is_owner_bound_and_epoch_fenced(
         dirty=True,
         manifest_json={"schema_version": 1, "attestation_scope": "personal-dev-only"},
         object_bucket="artifacts",
-        object_key=f"personal-dev/sources/{team_id}/{owner_id}/environment.tar",
+        object_key=(
+            f"personal-dev/sources/{team_id}/{owner_id}/{'a' * 64}/"
+            f"{candidate_id}/{'c' * 64}.tar"
+        ),
+        source_generation_id=candidate_id,
         archive_size_bytes=10240,
         status="uploaded",
         created_at=now,
@@ -815,8 +1105,9 @@ async def test_personal_dev_environment_capacity_and_candidate_updates_are_atomi
 
     def candidate_record(digit: str) -> PersonalDevCandidateRecord:
         source_digit, archive_digit = {"2": ("4", "5"), "3": ("6", "7")}[digit]
+        candidate_id = uuid4()
         return PersonalDevCandidateRecord(
-            id=uuid4(),
+            id=candidate_id,
             owner_user_id=owner_id,
             owner_team_id=team_id,
             candidate_sha=digit * 64,
@@ -827,7 +1118,11 @@ async def test_personal_dev_environment_capacity_and_candidate_updates_are_atomi
             dirty=False,
             manifest_json={"schema_version": 1, "attestation_scope": "personal-dev-only"},
             object_bucket="artifacts",
-            object_key=f"personal-dev/sources/{team_id}/{owner_id}/{digit}.tar",
+            object_key=(
+                f"personal-dev/sources/{team_id}/{owner_id}/{digit * 64}/"
+                f"{candidate_id}/{archive_digit * 64}.tar"
+            ),
+            source_generation_id=candidate_id,
             archive_size_bytes=10240,
             status="uploaded",
             created_at=now,
@@ -1319,7 +1614,11 @@ async def test_personal_dev_destroy_is_manager_first_replayable_and_checkpointed
                     dirty=True,
                     manifest_json={"schema_version": 1},
                     object_bucket="artifacts",
-                    object_key=f"personal-dev/sources/{candidate_id}.tar",
+                    object_key=(
+                        f"personal-dev/sources/{team_id}/{owner_id}/{'a' * 64}/"
+                        f"{'c' * 64}.tar"
+                    ),
+                    source_generation_id=candidate_id,
                     archive_size_bytes=10240,
                     status="ready",
                     image_manifest_digest="sha256:" + "1" * 64,

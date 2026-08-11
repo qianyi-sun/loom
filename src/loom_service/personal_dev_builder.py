@@ -297,6 +297,7 @@ async def personal_dev_builder_run_loop(
     limits: PersonalDevCandidateLimits,
     builder_id: str,
     lease_seconds: int,
+    registry_prefix: str,
     poll_interval_seconds: float,
 ) -> None:
     if poll_interval_seconds <= 0:
@@ -307,6 +308,7 @@ async def personal_dev_builder_run_loop(
         executor=executor,
         builder_id=builder_id,
         lease_seconds=lease_seconds,
+        registry_prefix=registry_prefix,
     )
     while True:
         try:

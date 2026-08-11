@@ -85,6 +85,9 @@ class LoomServiceSettings(BaseSettings):
     personal_dev_builder_scanner_path: Path = Path("/usr/local/bin/trivy")
     personal_dev_builder_scanner_policy_sha256: str = ""
     personal_dev_builder_skopeo_path: Path = Path("/usr/bin/skopeo")
+    personal_dev_candidate_gc_lease_sec: int = 900
+    personal_dev_candidate_gc_poll_interval_sec: float = 30.0
+    personal_dev_candidate_gc_retention_sec: int = 86400
     personal_dev_candidate_retained_bytes_limit: int = 3221225472
     personal_dev_candidate_retained_count_limit: int = 8
     personal_dev_capacity_agent_image: str = ""

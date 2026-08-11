@@ -166,6 +166,12 @@ spec:
           value: ''
         - name: LOOM_SVC_PERSONAL_DEV_BUILDER_SKOPEO_PATH
           value: /usr/bin/skopeo
+        - name: LOOM_SVC_PERSONAL_DEV_CANDIDATE_GC_LEASE_SEC
+          value: '900'
+        - name: LOOM_SVC_PERSONAL_DEV_CANDIDATE_GC_POLL_INTERVAL_SEC
+          value: '30.0'
+        - name: LOOM_SVC_PERSONAL_DEV_CANDIDATE_GC_RETENTION_SEC
+          value: '86400'
         - name: LOOM_SVC_PERSONAL_DEV_CANDIDATE_RETAINED_BYTES_LIMIT
           value: '3221225472'
         - name: LOOM_SVC_PERSONAL_DEV_CANDIDATE_RETAINED_COUNT_LIMIT

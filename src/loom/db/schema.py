@@ -712,8 +712,73 @@ class PersonalDevCandidate(Base):
             name="personal_dev_candidates_archive_size_check",
         ),
         CheckConstraint(
+            "object_bucket <> '' AND object_bucket = btrim(object_bucket) "
+            "AND position('/' in object_bucket) = 0 AND "
+            "((source_generation_id = id AND "
+            "object_key = 'personal-dev/sources/' || owner_team_id::text || '/' || "
+            "owner_user_id::text || '/' || candidate_sha || '/' || "
+            "archive_sha256 || '.tar') OR "
+            "object_key = 'personal-dev/sources/' || owner_team_id::text || '/' || "
+            "owner_user_id::text || '/' || candidate_sha || '/' || "
+            "source_generation_id::text || '/' || archive_sha256 || '.tar')",
+            name="personal_dev_candidates_object_binding_check",
+        ),
+        CheckConstraint(
             "status IN ('uploaded', 'queued', 'building', 'ready', 'failed')",
             name="personal_dev_candidates_status_check",
+        ),
+        CheckConstraint(
+            "registry_prefix IS NULL OR ("
+            "registry_prefix ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,308}$' "
+            "AND right(registry_prefix, 1) NOT IN ('/', ':') "
+            "AND position('://' in registry_prefix) = 0 "
+            "AND position('@' in registry_prefix) = 0)",
+            name="personal_dev_candidates_registry_prefix_check",
+        ),
+        CheckConstraint(
+            "artifact_gc_lease_epoch >= 0 "
+            "AND (artifact_gc_blocked_reason IS NULL OR "
+            "artifact_gc_blocked_reason IN ("
+            "'manifest_authority_invalid', 'registry_authority_unavailable')) AND ("
+            "(artifact_state = 'retained' "
+            "AND artifact_gc_claimed_by IS NULL "
+            "AND artifact_gc_lease_expires_at IS NULL "
+            "AND artifact_gc_manifest_json IS NULL "
+            "AND artifact_gc_manifest_sha256 IS NULL "
+            "AND artifact_collected_at IS NULL) OR ("
+            "artifact_state = 'collecting' "
+            "AND artifact_gc_blocked_reason IS NULL "
+            "AND artifact_gc_unreferenced_at IS NOT NULL "
+            "AND artifact_gc_claimed_by IS NOT NULL "
+            "AND artifact_gc_lease_expires_at IS NOT NULL "
+            "AND artifact_gc_manifest_json IS NOT NULL "
+            "AND jsonb_typeof(artifact_gc_manifest_json) = 'object' "
+            "AND artifact_gc_manifest_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND artifact_collected_at IS NULL) OR ("
+            "artifact_state = 'collected' "
+            "AND artifact_gc_blocked_reason IS NULL "
+            "AND artifact_gc_unreferenced_at IS NOT NULL "
+            "AND artifact_gc_claimed_by IS NULL "
+            "AND artifact_gc_lease_expires_at IS NULL "
+            "AND artifact_gc_manifest_json IS NOT NULL "
+            "AND jsonb_typeof(artifact_gc_manifest_json) = 'object' "
+            "AND artifact_gc_manifest_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND artifact_collected_at IS NOT NULL))",
+            name="personal_dev_candidates_artifact_gc_check",
+        ),
+        CheckConstraint(
+            "artifact_gc_manifest_json IS NULL OR (("
+            "jsonb_typeof(artifact_gc_manifest_json) = 'object' "
+            "AND artifact_gc_manifest_json->>'schema_version' = '1' "
+            "AND artifact_gc_manifest_json->>'candidate_id' = id::text "
+            "AND artifact_gc_manifest_json->>'owner_user_id' = owner_user_id::text "
+            "AND artifact_gc_manifest_json->>'owner_team_id' = owner_team_id::text "
+            "AND artifact_gc_manifest_json->>'candidate_sha' = candidate_sha "
+            "AND artifact_gc_manifest_json->>'object_bucket' = object_bucket "
+            "AND artifact_gc_manifest_json->>'source_generation_id' = "
+            "source_generation_id::text "
+            "AND artifact_gc_manifest_json->>'source_object_key' = object_key) IS TRUE)",
+            name="personal_dev_candidates_artifact_manifest_binding_check",
         ),
         CheckConstraint(
             "(status IN ('uploaded', 'queued', 'building') "
@@ -751,6 +816,13 @@ class PersonalDevCandidate(Base):
             "created_at",
             "id",
         ),
+        Index(
+            "personal_dev_candidates_artifact_gc_idx",
+            "artifact_state",
+            "artifact_gc_unreferenced_at",
+            "artifact_gc_lease_expires_at",
+            "id",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -773,6 +845,7 @@ class PersonalDevCandidate(Base):
     manifest_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     object_bucket: Mapped[str] = mapped_column(Text, nullable=False)
     object_key: Mapped[str] = mapped_column(Text, nullable=False)
+    source_generation_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
     archive_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
     status: Mapped[str] = mapped_column(
         Text,
@@ -783,6 +856,39 @@ class PersonalDevCandidate(Base):
     publication_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     publication_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     failure_reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    registry_prefix: Mapped[str | None] = mapped_column(Text, nullable=True)
+    artifact_state: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        server_default=text("'retained'"),
+    )
+    artifact_gc_lease_epoch: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        server_default=text("0"),
+    )
+    artifact_gc_unreferenced_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+    artifact_gc_claimed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    artifact_gc_blocked_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    artifact_gc_lease_expires_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+    artifact_gc_manifest_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True),
+        nullable=True,
+    )
+    artifact_gc_manifest_sha256: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    artifact_collected_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=False,
@@ -794,6 +900,55 @@ class PersonalDevCandidate(Base):
         server_default=func.now(),
     )
     ready_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
+class PersonalDevCandidateArtifactCollection(Base):
+    """Append-only evidence for one completed personal candidate collection."""
+
+    __tablename__ = "personal_dev_candidate_artifact_collections"
+    __table_args__ = (
+        CheckConstraint(
+            "collection_sequence > 0 AND gc_lease_epoch > 0 "
+            "AND collector_id <> '' AND collector_id = btrim(collector_id) "
+            "AND manifest_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND jsonb_typeof(manifest_json) = 'object' "
+            "AND ((manifest_json->>'schema_version' = '1' "
+            "AND manifest_json->>'candidate_id' = candidate_id::text) IS TRUE) "
+            "AND collected_at >= unreferenced_at",
+            name="personal_dev_candidate_artifact_collections_check",
+        ),
+        UniqueConstraint(
+            "candidate_id",
+            "collection_sequence",
+            name="personal_dev_candidate_artifact_collections_sequence_uidx",
+        ),
+        Index(
+            "personal_dev_candidate_artifact_collections_candidate_idx",
+            "candidate_id",
+            "collected_at",
+            "id",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    candidate_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("personal_dev_candidates.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    collection_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    collector_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    gc_lease_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    manifest_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    unreferenced_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+    )
+    collected_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+    )
 
 
 class PersonalDevCandidateBuildAttempt(Base):

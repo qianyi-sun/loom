@@ -69,12 +69,15 @@ class PersonalDevCandidateResponse(BaseModel):
     dirty: bool
     archive_size_bytes: int
     status: Literal["uploaded", "queued", "building", "ready", "failed"]
+    artifact_state: Literal["retained", "collecting", "collected"]
+    artifact_gc_blocked_reason: str | None
     image_manifest_digest: str | None
     publication_sha256: str | None
     failure_reason: str | None
     created_at: datetime
     updated_at: datetime
     ready_at: datetime | None
+    artifact_collected_at: datetime | None
     build_attempt: PersonalDevBuildAttemptResponse | None
 
 
@@ -133,12 +136,15 @@ def _response(registration: CandidateRegistration) -> PersonalDevCandidateRespon
         dirty=candidate.dirty,
         archive_size_bytes=candidate.archive_size_bytes,
         status=candidate.status,
+        artifact_state=candidate.artifact_state,
+        artifact_gc_blocked_reason=candidate.artifact_gc_blocked_reason,
         image_manifest_digest=candidate.image_manifest_digest,
         publication_sha256=candidate.publication_sha256,
         failure_reason=candidate.failure_reason,
         created_at=candidate.created_at,
         updated_at=candidate.updated_at,
         ready_at=candidate.ready_at,
+        artifact_collected_at=candidate.artifact_collected_at,
         build_attempt=(
             PersonalDevBuildAttemptResponse(
                 id=attempt.id,

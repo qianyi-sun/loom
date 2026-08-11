@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from loom_service.personal_dev_builder import build_personal_dev_builder_runtime
+from loom_service.personal_dev_candidate_gc import build_personal_dev_artifact_collector
 
 
 def _settings(tmp_path: Path, **overrides):
@@ -32,7 +33,11 @@ def _settings(tmp_path: Path, **overrides):
     registry_auth.write_text('{"auths":{"registry.example":{}}}')
     registry_auth.chmod(0o640)
     values = {
+        "dev_instances_enabled": True,
         "personal_dev_builder_enabled": True,
+        "personal_dev_candidate_gc_retention_sec": 86400,
+        "personal_dev_candidate_gc_lease_sec": 900,
+        "personal_dev_candidate_gc_poll_interval_sec": 30.0,
         "artifacts_bucket": "artifacts",
         "personal_dev_source_max_archive_bytes": 1024 * 1024,
         "personal_dev_builder_lease_sec": 4200,
@@ -100,3 +105,55 @@ def test_builder_runtime_rejects_placeholder_safety_authority(tmp_path: Path) ->
             _settings(tmp_path, personal_dev_trusted_launcher_profile_sha256=""),  # type: ignore[arg-type]
             minio_client=object(),
         )
+
+
+def test_artifact_collector_is_wired_only_for_personal_lifecycle(tmp_path: Path) -> None:
+    disabled_root = tmp_path / "disabled"
+    enabled_root = tmp_path / "enabled"
+    disabled_root.mkdir()
+    enabled_root.mkdir()
+    settings = _settings(disabled_root, dev_instances_enabled=False)
+    assert (
+        build_personal_dev_artifact_collector(
+            settings,  # type: ignore[arg-type]
+            minio_client=object(),
+        )
+        is None
+    )
+    builder_disabled_root = tmp_path / "builder-disabled"
+    builder_disabled_root.mkdir()
+    builder_disabled = _settings(
+        builder_disabled_root,
+        personal_dev_builder_enabled=False,
+    )
+    assert (
+        build_personal_dev_artifact_collector(
+            builder_disabled,  # type: ignore[arg-type]
+            minio_client=object(),
+        )
+        is None
+    )
+
+    configured = _settings(enabled_root)
+    collector = build_personal_dev_artifact_collector(
+        configured,  # type: ignore[arg-type]
+        minio_client=object(),
+    )
+    assert collector is not None
+    assert collector.objects.expected_bucket == "artifacts"
+    assert collector.registry.expected_registry_prefix == "registry.example/personal-dev"
+
+
+def test_artifact_collector_rejects_invalid_gc_settings_at_startup(tmp_path: Path) -> None:
+    for override in (
+        {"personal_dev_candidate_gc_retention_sec": -1},
+        {"personal_dev_candidate_gc_lease_sec": 0},
+        {"personal_dev_candidate_gc_poll_interval_sec": 0.0},
+    ):
+        root = tmp_path / str(len(list(tmp_path.iterdir())))
+        root.mkdir()
+        with pytest.raises(RuntimeError, match="GC settings"):
+            build_personal_dev_artifact_collector(
+                _settings(root, **override),  # type: ignore[arg-type]
+                minio_client=object(),
+            )

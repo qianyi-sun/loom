@@ -23,6 +23,7 @@ from loom.personal_dev_activation import (
     VerifiedPersonalDevActivationAcknowledgement,
 )
 from loom.personal_dev_candidate import (
+    CandidateArtifactState,
     CandidateStatus,
     PersonalDevCandidateRecord,
     validate_personal_dev_candidate_publication,
@@ -370,6 +371,7 @@ def _candidate_record(row: PersonalDevCandidate) -> PersonalDevCandidateRecord:
         manifest_json=row.manifest_json,
         object_bucket=row.object_bucket,
         object_key=row.object_key,
+        source_generation_id=row.source_generation_id,
         archive_size_bytes=row.archive_size_bytes,
         status=cast(CandidateStatus, row.status),
         image_manifest_digest=row.image_manifest_digest,
@@ -379,6 +381,16 @@ def _candidate_record(row: PersonalDevCandidate) -> PersonalDevCandidateRecord:
         created_at=row.created_at,
         updated_at=row.updated_at,
         ready_at=row.ready_at,
+        registry_prefix=row.registry_prefix,
+        artifact_state=cast(CandidateArtifactState, row.artifact_state),
+        artifact_gc_lease_epoch=row.artifact_gc_lease_epoch,
+        artifact_gc_unreferenced_at=row.artifact_gc_unreferenced_at,
+        artifact_gc_claimed_by=row.artifact_gc_claimed_by,
+        artifact_gc_blocked_reason=row.artifact_gc_blocked_reason,
+        artifact_gc_lease_expires_at=row.artifact_gc_lease_expires_at,
+        artifact_gc_manifest_json=row.artifact_gc_manifest_json,
+        artifact_gc_manifest_sha256=row.artifact_gc_manifest_sha256,
+        artifact_collected_at=row.artifact_collected_at,
     )
 
 
@@ -724,8 +736,11 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             or candidate.owner_user_id != requested.owner_user_id
             or candidate.owner_team_id != requested.owner_team_id
             or candidate.candidate_sha != requested.candidate_sha
+            or candidate.artifact_state != "retained"
         ):
             raise PersonalDevEnvironmentNotFoundError("personal-dev candidate not found")
+        candidate.artifact_gc_unreferenced_at = None
+        candidate.updated_at = now
 
         environment = await self._locked_environment(requested.name)
         operation_id = uuid4()

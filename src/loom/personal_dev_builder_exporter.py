@@ -30,9 +30,12 @@ from loom.personal_dev_candidate import (
     personal_dev_image_set_manifest_digest,
     validate_personal_dev_candidate_publication,
 )
+from loom.personal_dev_candidate_gc import (
+    personal_dev_registry_repository,
+    validate_personal_dev_registry_prefix,
+)
 
 _ARTIFACT_CONTENT_TYPE = "application/vnd.loom.personal-dev-build.v1+tar"
-_REGISTRY_PREFIX_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,400}")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _OCI_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 _PROTOCOL_KEY_RE = re.compile(r"[a-z][a-z0-9-]{0,63}")
@@ -154,12 +157,10 @@ class S3TrustedPersonalDevBuildPublicationExporter:
             or not 0 < self.max_image_archive_bytes <= self.max_artifact_bytes
         ):
             raise ValueError("personal-dev exporter artifact limits are invalid")
-        if (
-            _REGISTRY_PREFIX_RE.fullmatch(self.registry_prefix) is None
-            or self.registry_prefix.endswith("/")
-            or "://" in self.registry_prefix
-        ):
-            raise ValueError("personal-dev exporter registry prefix is invalid")
+        try:
+            validate_personal_dev_registry_prefix(self.registry_prefix)
+        except ValueError as exc:
+            raise ValueError("personal-dev exporter registry prefix is invalid") from exc
         if (
             not self.publisher_identity
             or self.publisher_identity.strip() != self.publisher_identity
@@ -326,6 +327,7 @@ class S3TrustedPersonalDevBuildPublicationExporter:
             or attempt.state != "running"
             or attempt.lease_epoch <= 0
             or candidate.status != "building"
+            or candidate.registry_prefix != self.registry_prefix
         ):
             raise ValueError("personal-dev exporter registration is not a running attempt")
         now = self.clock()
@@ -409,7 +411,11 @@ class S3TrustedPersonalDevBuildPublicationExporter:
             for platform in PERSONAL_DEV_PLATFORMS:
                 for component in PERSONAL_DEV_COMPONENTS:
                     image = artifacts[platform].images[component]
-                    repository = f"{self.registry_prefix}/loom-{component}"
+                    repository = personal_dev_registry_repository(
+                        candidate,
+                        attempt,
+                        component=component,
+                    )
                     published_digest = await self.publisher.publish_platform(
                         image,
                         registration=registration,
@@ -423,7 +429,11 @@ class S3TrustedPersonalDevBuildPublicationExporter:
 
             images: dict[str, object] = {}
             for component in PERSONAL_DEV_COMPONENTS:
-                repository = f"{self.registry_prefix}/loom-{component}"
+                repository = personal_dev_registry_repository(
+                    candidate,
+                    attempt,
+                    component=component,
+                )
                 reference, index_digest = await self.publisher.publish_index(
                     registration=registration,
                     repository=repository,

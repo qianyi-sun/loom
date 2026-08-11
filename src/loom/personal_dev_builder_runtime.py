@@ -26,6 +26,7 @@ from loom.personal_dev_candidate import (
     CandidateRegistration,
     PersonalDevPlatform,
 )
+from loom.personal_dev_candidate_gc import personal_dev_source_object_keys
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,13 +179,9 @@ class S3PersonalDevBuildCapabilityProvider:
         now: datetime,
     ) -> PersonalDevBuildCapability:
         candidate = registration.candidate
-        expected_source_key = (
-            f"personal-dev/sources/{candidate.owner_team_id}/{candidate.owner_user_id}/"
-            f"{candidate.candidate_sha}/{candidate.archive_sha256}.tar"
-        )
         if (
             candidate.object_bucket != self.expected_bucket
-            or candidate.object_key != expected_source_key
+            or candidate.object_key not in personal_dev_source_object_keys(candidate)
             or now.tzinfo is None
         ):
             raise ValueError("personal-dev builder source capability binding is invalid")
