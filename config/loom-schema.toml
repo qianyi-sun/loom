@@ -222,6 +222,12 @@ used_by     = ["loom-service"]
 python_type = "int"
 default     = 900
 
+[service_config.personal_dev_source_max_archive_bytes]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 402653184
+description = "Maximum personal-dev source tar accepted by the management service. The default bounds the canonical 256 MiB source payload plus manifest and tar overhead."
+
 [service_config.bind_host]
 used_by     = ["control-plane", "llm-gateway", "loom-service"]
 python_type = "str"
