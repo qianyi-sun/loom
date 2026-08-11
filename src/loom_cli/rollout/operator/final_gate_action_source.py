@@ -11,7 +11,6 @@ from typing import Protocol
 
 from loom_cli.rollout.final_attestation_admission import (
     FinalAttestationAdmission,
-    PostApplyDriftTransientError,
     validate_post_apply_attestation_drift,
 )
 from loom_cli.rollout.final_gate_command_runner import (
@@ -156,7 +155,11 @@ class FinalGateActionSource:
                         current_mutation_epoch=current_mutation_epoch,
                         now=self.now(),
                     )
-                except PostApplyDriftTransientError:
+                # This validation is entirely read-only and blocks every later
+                # final gate.  Cross-host read-after-write windows can surface
+                # through more than one validator branch, so re-observe any
+                # bounded validation mismatch and still fail closed at expiry.
+                except ValueError:
                     if attempt >= self.post_apply_drift_attempts:
                         raise
                     self.sleep(self.post_apply_drift_retry_interval_seconds)
