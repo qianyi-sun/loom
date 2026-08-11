@@ -139,6 +139,35 @@ agent and protected admission transitions; Package 2C closes every legacy
 capacity mutation path and supplies rollback compatibility before enforcement
 can be considered.
 
+## Package 2B disconnected admission preparation
+
+Package 2B registers one candidate-independent environment agent, captures a
+bounded protected demand observation, and persists manager-selected placement,
+bootstrap, and worker bindings only as prepared, non-executable records.  Its
+attempt lifecycle can model inert assignment, withdrawal, and cancellation;
+its SERIALIZABLE claim inspection always denies and cannot create a protected
+claim lease.  The immutable activation row remains disabled at epoch zero with
+an executable ceiling of zero and live-claim entry disabled.
+
+## Package 2C1 inert legacy-authority fence
+
+The first Package 2C slice binds the exact machine-readable mutation inventory
+to a bounded set of writer-domain cursors.  Every one of the twenty mutation
+paths must be represented, while paths backed by more than one authority—such
+as the distinct OLDLAB and GB10 physical writers—retain separate incarnation,
+epoch, high-water, and policy-digest cursors.  A prepared compatibility record
+is expiring, append-only, and non-executable.  It cannot coexist with a
+prepared global admission in either serialization order.
+
+A monotonic freeze record requires a one-to-one acknowledgement for every
+prepared writer domain at the identical epoch and high-water mark.  The agent
+can store only fixed-shape, canonical records through two protected functions;
+candidate roles and `PUBLIC` receive no access.  Preparing or freezing these
+records does not invoke a legacy writer, change a candidate route, mutate a
+public trial, create a claim, mint a credential, or touch Slurm.  Inventory
+entries remain activation-blocking and `open` until later Package 2C slices
+instrument and fence the corresponding live writers.
+
 ## Current activation blockers
 
 There is intentionally no live global fleet manifest. The checked-in

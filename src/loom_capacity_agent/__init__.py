@@ -29,6 +29,19 @@ from loom_capacity_agent.contracts import (
     GuardDemandObservationV1,
     ReporterConfigurationV1,
 )
+from loom_capacity_agent.legacy_fence import (
+    LEGACY_MUTATION_INVENTORY_DIGEST,
+    LEGACY_MUTATION_PATH_IDS,
+    MAX_LEGACY_WRITER_CURSORS,
+    LegacyCompatibilityFreezeV1,
+    LegacyCompatibilityPreparationV1,
+    LegacyWriterCursorV1,
+    LegacyWriterFreezeCursorV1,
+)
+from loom_capacity_agent.legacy_fence_store import (
+    LegacyCompatibilityFenceError,
+    LegacyCompatibilityFenceStore,
+)
 from loom_capacity_agent.lifecycle_store import (
     CapacityAttemptLifecycleError,
     CapacityAttemptLifecycleStore,
@@ -45,6 +58,9 @@ from loom_capacity_agent.store import (
 )
 
 __all__ = [
+    "LEGACY_MUTATION_INVENTORY_DIGEST",
+    "LEGACY_MUTATION_PATH_IDS",
+    "MAX_LEGACY_WRITER_CURSORS",
     "AgentPoolCapabilityV1",
     "AgentRegistrationV1",
     "CapacityAgentStore",
@@ -68,6 +84,12 @@ __all__ = [
     "GuardDemandAttemptV1",
     "GuardDemandObservationV1",
     "InertAttemptTransitionV1",
+    "LegacyCompatibilityFenceError",
+    "LegacyCompatibilityFenceStore",
+    "LegacyCompatibilityFreezeV1",
+    "LegacyCompatibilityPreparationV1",
+    "LegacyWriterCursorV1",
+    "LegacyWriterFreezeCursorV1",
     "PreparedAdmissionPlanV1",
     "PreparedBootstrapBindingV1",
     "PreparedPlacementAllowanceV1",

@@ -128,9 +128,9 @@ def test_capacity_guard_is_in_default_static_validation() -> None:
 
 
 def test_prepared_admission_migration_remains_zero_executable_and_projection_read_only() -> None:
-    source = Path(
-        "capacity_guard_migrations/versions/guard_0003_prepared_admission.py"
-    ).read_text(encoding="utf-8")
+    source = Path("capacity_guard_migrations/versions/guard_0003_prepared_admission.py").read_text(
+        encoding="utf-8"
+    )
     lowered = source.lower()
     assert "executable = false" in lowered
     assert "claim_authorization_epoch = 0" in lowered
@@ -157,5 +157,29 @@ def test_disconnected_claim_guard_has_no_live_entry_or_candidate_mutation() -> N
     assert "update public.trials" not in lowered
     assert "delete from public.trials" not in lowered
     assert "update loom_capacity_guard.trial_attempts" not in lowered
+    assert "sbatch" not in lowered
+    assert "scancel" not in lowered
+
+
+def test_legacy_fence_migration_is_inert_and_has_no_candidate_mutation() -> None:
+    source = Path(
+        "capacity_guard_migrations/versions/guard_0005_inert_legacy_authority_fence.py"
+    ).read_text(encoding="utf-8")
+    lowered = source.lower()
+    assert "proposed_authority_mode = 'legacy-compatibility'" in lowered
+    assert "activation_epoch = 0" in lowered
+    assert "not new_submission_authority" in lowered
+    assert "not new_claim_authority" in lowered
+    assert "not scale_up_authority" in lowered
+    assert "not cross_pool_placement_authority" in lowered
+    assert "not global_allowance_authority" in lowered
+    assert "not new_worker_authority" in lowered
+    assert "not executable" in lowered
+    assert "security definer" in lowered
+    assert "to public" not in lowered
+    assert "insert into public." not in lowered
+    assert "update public." not in lowered
+    assert "delete from public." not in lowered
+    assert "insert into loom_capacity_guard.protected_claim_leases" not in lowered
     assert "sbatch" not in lowered
     assert "scancel" not in lowered
