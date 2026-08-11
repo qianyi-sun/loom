@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import subprocess
 from dataclasses import replace
@@ -383,6 +384,40 @@ def test_remote_shared_candidate_git_uses_live_nfs_timeout_budget(tmp_path) -> N
     assert "def output(argv, *, timeout_seconds=20):" in apply
     assert "timeout=timeout_seconds" in apply
     assert f"timeout_seconds={_REMOTE_SHARED_GIT_TIMEOUT_SECONDS}" in apply
+
+
+def test_remote_retirement_accepts_only_the_known_static_service_when_inactive(
+    tmp_path,
+) -> None:
+    source = _remote_observation_source(_target(), _plan(tmp_path, "trt-gb10-1"))
+    retired_node = next(
+        node
+        for node in ast.parse(source).body
+        if isinstance(node, ast.FunctionDef) and node.name == "retired"
+    )
+    namespace: dict[str, object] = {}
+    exec(
+        compile(ast.Module(body=[retired_node], type_ignores=[]), "<retired>", "exec"),
+        namespace,
+    )
+    retired = namespace["retired"]
+    inactive = {
+        "LoadState": "loaded",
+        "ActiveState": "inactive",
+        "SubState": "dead",
+    }
+    active = {**inactive, "ActiveState": "active", "SubState": "running"}
+    static = subprocess.CompletedProcess([], 0, "static\n", "")
+
+    assert callable(retired)
+    assert retired("loom-gb10-node-agent.service", inactive, static, accept_static=True)
+    assert not retired("loom-gb10-node-agent.service", inactive, static)
+    assert not retired("loom-gb10-node-agent.service", active, static, accept_static=True)
+
+    observation = source
+    assert "service_retired = retired(service, service_props, service_enabled, accept_static=True)" in observation
+    assert "timer_retired = retired(timer, timer_props, timer_enabled)" in observation
+    assert "legacy_absent = retired(legacy, legacy_props, legacy_enabled)" in observation
 
 
 def test_remote_retirement_uses_only_service_owned_candidate_and_disables_agents(

@@ -146,6 +146,24 @@ class TestEvidenceDirectory:
         }
         assert stat.S_IMODE(ev.failure_path().stat().st_mode) == 0o600
 
+    def test_read_failure_returns_none_when_rollout_directory_is_absent(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ev = EvidenceDirectory(tmp_path, "rid")
+
+        assert ev.read_failure() is None
+
+    def test_read_failure_refuses_an_unsafe_rollout_symlink(self, tmp_path: Path) -> None:
+        ev = EvidenceDirectory(tmp_path, "rid")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (tmp_path / "rollouts").mkdir()
+        ev.path.symlink_to(outside, target_is_directory=True)
+
+        with pytest.raises(OSError):
+            ev.read_failure()
+
     def test_write_state_is_atomic_private_and_redacted(self, tmp_path: Path) -> None:
         ev = EvidenceDirectory(tmp_path, "rid")
         ev.ensure()
