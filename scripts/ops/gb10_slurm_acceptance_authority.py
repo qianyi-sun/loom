@@ -28,10 +28,28 @@ CONTROLLER_HOST = "gx10-01c7"
 # The shared Slurm partition moved node 10 to ``debug`` for shard scheduling
 # and replaced it with node 16.  The retired direct-agent fleet remains the
 # original 1-15 host inventory, so keep those authorities distinct.
-SLURM_NODES = tuple(
-    f"trt-gb10-{index}" for index in (*range(1, 10), *range(11, 17))
-)
+SLURM_NODES = tuple(f"trt-gb10-{index}" for index in (*range(1, 10), *range(11, 17)))
 LEGACY_AGENT_NODES = tuple(f"trt-gb10-{index}" for index in range(1, 16))
+PRIVATE_WORKER_SERVICE_ENV = {
+    pool_name: {
+        "LOOM_WORKER_CONTROL_PLANE_URL": "http://192.168.50.103:18081",
+        "LOOM_WORKER_GATEWAY_URL": "http://192.168.50.103:19100",
+        "LOOM_WORKER_SUBPROCESS_GATEWAY_URL": "http://192.168.50.103:19100",
+        "LOOM_WORKER_MINIO_ENDPOINT": "http://192.168.50.103:19000",
+        "LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO": ("192.168.50.103:5443/loom-trial-cache"),
+    }
+    for pool_name in ("gb10", "oldlab")
+}
+TRIAL_CACHE_REGISTRY_REPO = "192.168.50.103:5443/loom-trial-cache"
+TRIAL_CACHE_CA_SHA256 = "539c97669d322f4fe91b91b4b8187a62a6618f5a9ec3f409e1ca5f9d7c56ecc3"
+TRIAL_CACHE_CANARY_TAG = "transport-canary"
+TRIAL_CACHE_CANARY_DIGEST = (
+    "sha256:c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e"
+)
+TRIAL_CACHE_CA_RELATIVE_PATH = Path("deploy/worker-pools/trial-cache/staging-ca.crt")
+TRIAL_CACHE_NODE_PROBE_RELATIVE_PATH = Path(
+    "scripts/ops/staging_trial_cache_registry_node_probe.py"
+)
 CANDIDATE_ROOT = Path("/opt/loom-staging-runner/candidates")
 INSTALLED_PATH = Path("/usr/local/libexec/loom-gb10-slurm-acceptance-authority")
 STATE_ROOT = Path("/var/lib/loom-gb10-slurm-authority")
@@ -76,29 +94,23 @@ def _replace_release_values(value: Any, variables: dict[str, str]) -> Any:
     if isinstance(value, list):
         return [_replace_release_values(item, variables) for item in value]
     if isinstance(value, dict):
-        return {
-            key: _replace_release_values(item, variables)
-            for key, item in value.items()
-        }
+        return {key: _replace_release_values(item, variables) for key, item in value.items()}
     return value
 
 
 def _one_row(rows: object, *, pool_name: str) -> dict[str, Any]:
-    matches = [
-        row
-        for row in rows if isinstance(row, dict) and row.get("pool_name") == pool_name
-    ] if isinstance(rows, list) else []
+    matches = (
+        [row for row in rows if isinstance(row, dict) and row.get("pool_name") == pool_name]
+        if isinstance(rows, list)
+        else []
+    )
     if len(matches) != 1:
         raise AcceptanceError(f"profile must contain one {pool_name} row")
     return matches[0]
 
 
 def _load_contract(candidate_sha: str, image_tag: str) -> dict[str, Any]:
-    profile_path = (
-        CANDIDATE_ROOT
-        / candidate_sha
-        / "repo/deploy/environment-state/staging.toml"
-    )
+    profile_path = CANDIDATE_ROOT / candidate_sha / "repo/deploy/environment-state/staging.toml"
     try:
         profile_bytes = profile_path.read_bytes()
         raw = tomllib.loads(profile_bytes.decode("utf-8"))
@@ -145,6 +157,7 @@ def _load_contract(candidate_sha: str, image_tag: str) -> dict[str, Any]:
         prerequisites.get("materialize") is not True
         or prerequisites.get("require_external_allocation_authority") is not True
         or "gb10" not in prerequisites.get("pools", [])
+        or prerequisites.get("worker_service_env") != PRIVATE_WORKER_SERVICE_ENV
     ):
         raise AcceptanceError("external Slurm authority prerequisites are incomplete")
     supervisors = profile.get("external_slurm_autoscaler_supervisors")
@@ -219,9 +232,7 @@ def _git_identity(repo: Path, *, uid: int, gid: int, mode: int, sha: str) -> str
     if uid == SERVICE_UID:
         git = ["runuser", "-u", SERVICE_USER, "--", "/usr/bin/git"]
     git_timeout = 120 if uid == SERVICE_UID else 30
-    head = _run(
-        [*git, "-C", str(repo), "rev-parse", "HEAD"], timeout=git_timeout
-    ).stdout.strip()
+    head = _run([*git, "-C", str(repo), "rev-parse", "HEAD"], timeout=git_timeout).stdout.strip()
     tree = _run(
         [*git, "-C", str(repo), "rev-parse", "HEAD^{tree}"], timeout=git_timeout
     ).stdout.strip()
@@ -271,7 +282,17 @@ def _verify_inputs(candidate_sha: str, contract: dict[str, Any]) -> str:
 
 _NODE_PROBE = r"""
 import json, os, subprocess, sys
-node, repo, env_file, expected_sha = sys.argv[1:]
+(
+    node,
+    repo,
+    env_file,
+    expected_sha,
+    registry_repo,
+    ca_sha256,
+    canary_digest,
+    registry_probe_path,
+    registry_ca_path,
+) = sys.argv[1:]
 actual_node = subprocess.check_output(
     ["/usr/bin/scontrol", "show", "hostnames", os.environ["SLURM_JOB_NODELIST"]],
     text=True,
@@ -291,13 +312,42 @@ assert subprocess.check_output(
     ["/usr/bin/git", "-C", repo, "rev-parse", "HEAD"], text=True
 ).strip() == expected_sha
 assert os.path.isfile(env_file) and os.access(env_file, os.R_OK)
-print(json.dumps({"node": node, "candidate_sha": expected_sha}, sort_keys=True))
+registry_probe = subprocess.check_output(
+    [
+        "/usr/bin/python3",
+        registry_probe_path,
+        "--env-file",
+        env_file,
+        "--ca-file",
+        registry_ca_path,
+        "--docker-bin",
+        "/usr/bin/docker",
+        "--expected-registry-repo",
+        registry_repo,
+        "--expected-ca-sha256",
+        ca_sha256,
+        "--canary-digest",
+        canary_digest,
+    ],
+    text=True,
+)
+print(json.dumps(
+    {
+        "node": node,
+        "candidate_sha": expected_sha,
+        "trial_cache_registry": json.loads(registry_probe),
+    },
+    sort_keys=True,
+))
 """
 
 
 def _cleanup_probe_jobs(job_name: str) -> None:
     queue_command = [
-        "runuser", "-u", SERVICE_USER, "--",
+        "runuser",
+        "-u",
+        SERVICE_USER,
+        "--",
         "/usr/bin/squeue",
         "--noheader",
         f"--user={SERVICE_USER}",
@@ -310,17 +360,16 @@ def _cleanup_probe_jobs(job_name: str) -> None:
     job_ids: list[str] = []
     for raw_line in queued.stdout.splitlines():
         job_id, separator, queued_name = raw_line.strip().partition("|")
-        if (
-            not separator
-            or queued_name != job_name
-            or JOB_ID_RE.fullmatch(job_id) is None
-        ):
+        if not separator or queued_name != job_name or JOB_ID_RE.fullmatch(job_id) is None:
             raise AcceptanceError("acceptance-probe cleanup evidence is invalid")
         job_ids.append(job_id)
     if job_ids:
         _run(
             [
-                "runuser", "-u", SERVICE_USER, "--",
+                "runuser",
+                "-u",
+                SERVICE_USER,
+                "--",
                 "/usr/bin/scancel",
                 *job_ids,
             ],
@@ -367,7 +416,10 @@ def _probe_nodes(
             raise AcceptanceError(f"canonical node is outside GB10 partition: {node}")
         job_name = f"loom-accept-{candidate_sha[:7]}-{index}-{os.getpid()}"
         command = [
-            "runuser", "-u", SERVICE_USER, "--",
+            "runuser",
+            "-u",
+            SERVICE_USER,
+            "--",
             "srun",
             "--quiet",
             "--immediate=15",
@@ -388,6 +440,11 @@ def _probe_nodes(
             str(contract["repo_dir"]),
             str(contract["env_file"]),
             candidate_sha,
+            TRIAL_CACHE_REGISTRY_REPO,
+            TRIAL_CACHE_CA_SHA256,
+            TRIAL_CACHE_CANARY_DIGEST,
+            str(contract["repo_dir"] / TRIAL_CACHE_NODE_PROBE_RELATIVE_PATH),
+            str(contract["repo_dir"] / TRIAL_CACHE_CA_RELATIVE_PATH),
         ]
         try:
             result = _run(command, timeout=60, check=False)
@@ -402,7 +459,15 @@ def _probe_nodes(
             payload = json.loads(result.stdout)
         except json.JSONDecodeError as exc:
             raise AcceptanceError(f"node allocation returned invalid evidence: {node}") from exc
-        if payload != {"candidate_sha": candidate_sha, "node": node}:
+        if payload != {
+            "candidate_sha": candidate_sha,
+            "node": node,
+            "trial_cache_registry": {
+                "ca_sha256": TRIAL_CACHE_CA_SHA256,
+                "registry_image": (f"{TRIAL_CACHE_REGISTRY_REPO}:{TRIAL_CACHE_CANARY_TAG}"),
+                "repo_digest": (f"{TRIAL_CACHE_REGISTRY_REPO}@{TRIAL_CACHE_CANARY_DIGEST}"),
+            },
+        }:
             raise AcceptanceError(f"node allocation evidence mismatched: {node}")
         passed.append(node)
     if not passed:
@@ -477,6 +542,11 @@ def main() -> int:
         "probed_nodes": probed_nodes,
         "probed_node_count": len(probed_nodes),
         "deferred_busy_nodes": deferred_busy_nodes,
+        "trial_cache_registry": {
+            "ca_sha256": TRIAL_CACHE_CA_SHA256,
+            "canary_digest": TRIAL_CACHE_CANARY_DIGEST,
+            "repository": TRIAL_CACHE_REGISTRY_REPO,
+        },
         "generated_at": generated_at.isoformat(),
         "expires_at": (generated_at + timedelta(minutes=30)).isoformat(),
     }

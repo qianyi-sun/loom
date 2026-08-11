@@ -19,11 +19,11 @@ from pathlib import Path
 from dotenv import dotenv_values as parse_dotenv
 
 CONFIG_PATH = Path("/etc/loom/staging-rollout.toml")
-CATALOG_PATH = Path("/shared_work/qianyi/loom-worker-capacity/staging-catalog-provisioning.env")
+PROTECTED_INPUT_ROOT = Path("/shared_work/loom/staging-rollout/credentials")
+CATALOG_PATH = PROTECTED_INPUT_ROOT / "staging-catalog-provisioning.env"
 PRIVATE_KEY_PATH = Path("/var/lib/loom-staging-rollout/gb10-deploy-ed25519")
-TASKSET_TOKEN_PATH = Path(
-    "/shared_work/qianyi/loom-worker-capacity/staging-taskset-fence-canary-token"
-)
+TASKSET_TOKEN_PATH = PROTECTED_INPUT_ROOT / "staging-taskset-fence-canary-token"
+WORKER_ENV_PATH = PROTECTED_INPUT_ROOT / "staging-gb10-worker-staging-bootstrap.env"
 REQUEST_ROOT = Path("/var/lib/loom-staging-rollout/requests")
 ROLLOUT_ROOT = Path("/data/loom-staging/rollouts")
 _MAX_ARTIFACT_BYTES = 64 << 20
@@ -101,6 +101,7 @@ def load_configured_secrets(
     catalog_path: Path = CATALOG_PATH,
     private_key_path: Path = PRIVATE_KEY_PATH,
     taskset_token_path: Path = TASKSET_TOKEN_PATH,
+    worker_env_path: Path = WORKER_ENV_PATH,
 ) -> tuple[bytes, ...]:
     config_payload = _read_regular_no_follow(config_path, limit=1 << 20)
     try:
@@ -114,6 +115,7 @@ def load_configured_secrets(
         if value:
             values.append(value)
     values.extend(_dotenv_values(_read_regular_no_follow(catalog_path, limit=_MAX_SECRET_BYTES)))
+    values.extend(_dotenv_values(_read_regular_no_follow(worker_env_path, limit=_MAX_SECRET_BYTES)))
     taskset_token = _read_regular_no_follow(taskset_token_path, limit=_MAX_SECRET_BYTES).strip()
     if taskset_token:
         values.append(taskset_token)

@@ -163,13 +163,13 @@ def _env_int(name: str, default: int) -> int:
 
 def _gather_setup_status(
     *,
-    read_snapshot: Callable[[], NodeHealthSnapshot] = read_node_health_snapshot,
+    read_snapshot: Callable[[], NodeHealthSnapshot] | None = None,
 ) -> dict[str, Any]:
     import docker
     from docker.errors import DockerException
 
     policy = _setup_policy_from_env()
-    decision = policy.evaluate(read_snapshot())
+    decision = policy.evaluate((read_snapshot or read_node_health_snapshot)())
     try:
         client = docker.from_env()
     except DockerException as exc:

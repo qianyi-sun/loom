@@ -58,6 +58,16 @@ _EXTERNAL_RUNNER_ROOTS: Mapping[str, tuple[Path, Path]] = {
         Path("/shared_work/loom/staging-rollout/worker-envs"),
     ),
 }
+_STAGING_WORKER_SERVICE_ENV: Mapping[str, Mapping[str, str]] = {
+    pool_name: {
+        "LOOM_WORKER_CONTROL_PLANE_URL": "http://192.168.50.103:18081",
+        "LOOM_WORKER_GATEWAY_URL": "http://192.168.50.103:19100",
+        "LOOM_WORKER_SUBPROCESS_GATEWAY_URL": "http://192.168.50.103:19100",
+        "LOOM_WORKER_MINIO_ENDPOINT": "http://192.168.50.103:19000",
+        "LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO": ("192.168.50.103:5443/loom-trial-cache"),
+    }
+    for pool_name in ("gb10", "oldlab")
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,12 +156,10 @@ class HttpxProtectedEnvironmentStateTransport:
         desired_drift = tuple(
             item for item in drift if item.path.startswith(_DESIRED_DRIFT_PREFIXES)
         )
-        prerequisite_drift, prerequisite_evidence = (
-            self._external_runner_prerequisite_evidence(
+        prerequisite_drift, prerequisite_evidence = self._external_runner_prerequisite_evidence(
             plan,
             targets,
             worker_token,
-            )
         )
         desired_exact = not desired_drift and not prerequisite_drift
         runtime_drift = tuple(drift) if include_runtime else desired_drift
@@ -272,10 +280,7 @@ class HttpxProtectedEnvironmentStateTransport:
             max_bytes=_MAX_TOKEN_BYTES,
             require_nonempty=True,
         )
-        if (
-            plan.secret_metadata_fingerprints.get(label)
-            != f"sha256:{trusted.metadata_fingerprint}"
-        ):
+        if plan.secret_metadata_fingerprints.get(label) != f"sha256:{trusted.metadata_fingerprint}":
             raise ValueError(f"protected environment-state {label} token metadata drifted")
         try:
             token = trusted.payload.strip().decode("ascii")
@@ -310,9 +315,7 @@ class HttpxProtectedEnvironmentStateTransport:
         pool_names = tuple(str(policy["pool_name"]) for policy in policies)
         configured_pools = settings.get("pools") if settings else None
         worker_token_env_key = (
-            settings.get("worker_token_env_key", DEFAULT_WORKER_TOKEN_ENV_KEY)
-            if settings
-            else None
+            settings.get("worker_token_env_key", DEFAULT_WORKER_TOKEN_ENV_KEY) if settings else None
         )
         if (
             not settings
@@ -326,6 +329,7 @@ class HttpxProtectedEnvironmentStateTransport:
             or worker_token_env_key != DEFAULT_WORKER_TOKEN_ENV_KEY
             or settings.get("env_template") != str(WORKER_ENV_TEMPLATE_PATH)
             or "env_template_glob" in settings
+            or settings.get("worker_service_env") != _STAGING_WORKER_SERVICE_ENV
         ):
             raise ValueError("protected external runner policy authority is invalid")
 
@@ -343,8 +347,7 @@ class HttpxProtectedEnvironmentStateTransport:
             repo_dir = Path(str(actuator_config.get("repo_dir", "")))
             image_tag = _image_tag(plan)
             if (
-                env_file
-                != env_root / f"staging-{pool_name}-worker-{image_tag}.env"
+                env_file != env_root / f"staging-{pool_name}-worker-{image_tag}.env"
                 or repo_dir != repo_root / f"loom-remote-worker-{image_tag}"
             ):
                 raise ValueError("protected external runner destination is invalid")
@@ -377,10 +380,7 @@ class HttpxProtectedEnvironmentStateTransport:
 
     @staticmethod
     def _worker_token_env_key(target: _ExternalRunnerTarget) -> str:
-        return str(
-            target.settings.get("worker_token_env_key")
-            or DEFAULT_WORKER_TOKEN_ENV_KEY
-        )
+        return str(target.settings.get("worker_token_env_key") or DEFAULT_WORKER_TOKEN_ENV_KEY)
 
     def _external_runner_prerequisite_evidence(
         self,
@@ -391,10 +391,7 @@ class HttpxProtectedEnvironmentStateTransport:
         drift: list[str] = []
         evidence: dict[str, dict[str, object]] = {}
         for target in targets:
-            prefix = (
-                "external_slurm_runner_prerequisites"
-                f"[staging/{target.pool_name}]"
-            )
+            prefix = f"external_slurm_runner_prerequisites[staging/{target.pool_name}]"
             pool_evidence: dict[str, object] = {
                 "env_exact": False,
                 "repo_exact": False,

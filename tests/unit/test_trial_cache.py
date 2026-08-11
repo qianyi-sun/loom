@@ -413,7 +413,7 @@ async def test_resolve_trial_image_builder_path() -> None:
         out = await tc.resolve_trial_image(
             task_image="python:3.11-slim",
             adapter=_StubAdapter(install_script=install),
-            settings=_StubSettings(),
+            settings=_StubSettings(setup_health_guard_enabled=False),
             cp_client=cp,
             worker_id=worker_id,
             docker_client=client,
@@ -441,7 +441,7 @@ async def test_resolve_trial_image_serializes_builds_across_cache_keys(
     """
     cp = _StubCPClient()
     worker_id = uuid4()
-    settings = _StubSettings()
+    settings = _StubSettings(setup_health_guard_enabled=False)
     entered: list[str] = []
     first_entered = threading.Event()
     first_can_finish = threading.Event()

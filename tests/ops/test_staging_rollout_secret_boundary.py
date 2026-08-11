@@ -69,12 +69,20 @@ def test_load_configured_secrets_includes_tokens_catalog_values_and_private_key(
     private_key.write_text("private-key-line-one\nprivate-key-line-two\n", encoding="utf-8")
     taskset_token = tmp_path / "taskset-token"
     taskset_token.write_text("taskset-token-fixture\n", encoding="utf-8")
+    worker_env = tmp_path / "worker.env"
+    worker_env.write_text(
+        "LOOM_WORKER_TOKEN=worker-env-token\n"
+        "LOOM_WORKER_MINIO_ACCESS_KEY=worker-env-access\n"
+        "LOOM_WORKER_MINIO_SECRET_KEY=worker-env-secret\n",
+        encoding="utf-8",
+    )
 
     secrets = verifier.load_configured_secrets(
         config_path=config,
         catalog_path=catalog,
         private_key_path=private_key,
         taskset_token_path=taskset_token,
+        worker_env_path=worker_env,
     )
 
     assert secrets == (
@@ -82,6 +90,9 @@ def test_load_configured_secrets_includes_tokens_catalog_values_and_private_key(
         b"token-1",
         b"token-2",
         b"catalog-secret",
+        b"worker-env-token",
+        b"worker-env-access",
+        b"worker-env-secret",
         b"taskset-token-fixture",
         b"private-key-line-one\nprivate-key-line-two",
         b"private-key-line-one",
@@ -113,6 +124,7 @@ def test_configured_secret_reader_rejects_symlink(tmp_path: Path) -> None:
             catalog_path=target,
             private_key_path=target,
             taskset_token_path=target,
+            worker_env_path=target,
         )
 
 

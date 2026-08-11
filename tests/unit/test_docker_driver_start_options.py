@@ -308,7 +308,55 @@ async def test_docker_driver_applies_exact_cgroup_parent(
     assert create_kwargs["cgroup_parent"] == ("/system.slice/slurmstepd.scope/job_123")
 
 
-@pytest.mark.parametrize("cgroup_parent", ["", "/", "relative/path", "/a/../b"])
+async def test_docker_driver_applies_guard_owned_systemd_slice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    create_kwargs: dict[str, Any] = {}
+    container = _FakeContainer()
+
+    class _Containers:
+        def create(self, image: str, **kwargs: Any) -> object:
+            create_kwargs.update(kwargs)
+            return container
+
+    class _Client:
+        containers = _Containers()
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(docker_module.docker, "from_env", lambda: _Client())
+    monkeypatch.setattr(DockerDriver, "_ensure_image", lambda self, opts: None)
+
+    async def _noop_wait(self: DockerDriver) -> None:
+        return None
+
+    async def _noop_policy(self: DockerDriver, policy: object) -> None:
+        return None
+
+    monkeypatch.setattr(DockerDriver, "_wait_until_running", _noop_wait)
+    monkeypatch.setattr(DockerDriver, "set_network_policy", _noop_policy)
+
+    driver = DockerDriver(image="loom-agent-sandbox:dev")
+    await driver.start(options=StartOptions(cgroup_parent="loom-job-123.slice"))
+
+    assert create_kwargs["cgroup_parent"] == "loom-job-123.slice"
+
+
+@pytest.mark.parametrize(
+    "cgroup_parent",
+    [
+        "",
+        "/",
+        "relative/path",
+        "/a/../b",
+        "loom-job-0.slice",
+        "loom-job-01.slice",
+        "loom-job--1.slice",
+        "loom-job-1.service",
+        "other-job-1.slice",
+    ],
+)
 async def test_docker_driver_rejects_unsafe_cgroup_parent(
     monkeypatch: pytest.MonkeyPatch,
     cgroup_parent: str,

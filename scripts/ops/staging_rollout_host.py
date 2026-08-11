@@ -87,7 +87,8 @@ STATE_ROOT = Path("/var/lib/loom-staging-rollout")
 ACTIVE_POINTER = STATE_ROOT / "active.json"
 GENERATED_ROOT = STATE_ROOT / "generated"
 GENERATED_GB10_ENV_SEED = GENERATED_ROOT / "staging-gb10-worker-staging-bootstrap.env"
-LEGACY_GB10_ENV_ROOT = Path("/shared_work/qianyi/loom-worker-capacity")
+PROTECTED_INPUT_ROOT = Path("/shared_work/loom/staging-rollout/credentials")
+PROTECTED_GB10_ENV_TEMPLATE = PROTECTED_INPUT_ROOT / ("staging-gb10-worker-staging-bootstrap.env")
 RUNTIME_ROOT = Path("/run/loom-staging-rollout")
 MAINTENANCE_MARKER = RUNTIME_ROOT / "maintenance"
 CONFIG_PATH = Path("/etc/loom/staging-rollout.toml")
@@ -129,11 +130,12 @@ SYSTEM_GIT = Path("/usr/bin/git")
 SEALED_SOURCE_UPLOAD_PACK = f"{SYSTEM_GIT} -c safe.directory={INSTALL_SOURCE / '.git'} upload-pack"
 
 PROTECTED_INPUTS = (
-    Path("/shared_work/qianyi/loom-worker-capacity/staging-admin-token"),
-    Path("/shared_work/qianyi/loom-worker-capacity/staging-service-token"),
-    Path("/shared_work/qianyi/loom-worker-capacity/staging-worker-token"),
-    Path("/shared_work/qianyi/loom-worker-capacity/staging-taskset-fence-canary-token"),
-    Path("/shared_work/qianyi/loom-worker-capacity/staging-catalog-provisioning.env"),
+    PROTECTED_INPUT_ROOT / "staging-admin-token",
+    PROTECTED_INPUT_ROOT / "staging-service-token",
+    PROTECTED_INPUT_ROOT / "staging-worker-token",
+    PROTECTED_INPUT_ROOT / "staging-taskset-fence-canary-token",
+    PROTECTED_INPUT_ROOT / "staging-catalog-provisioning.env",
+    PROTECTED_GB10_ENV_TEMPLATE,
 )
 DATA_DIRECTORIES = (
     Path("/data/loom-staging/rollouts"),
@@ -176,6 +178,15 @@ _ACL_ENTRY_RE = re.compile(
 )
 _ACL_SNAPSHOT_ENTRY_RE = re.compile(r"(user|group|mask|other):([^:]*):([rwx-]{3})")
 _ACL_ENTRY_ORDER = {"user": 0, "group": 1, "mask": 2, "other": 3}
+_RETIRED_PROTECTED_INPUT_NAMES = frozenset(
+    {
+        "staging-admin-token",
+        "staging-service-token",
+        "staging-worker-token",
+        "staging-taskset-fence-canary-token",
+        "staging-catalog-provisioning.env",
+    }
+)
 _GB10_ENV_NAME_RE = re.compile(r"^staging-gb10-worker-staging-[A-Za-z0-9._-]+[.]env$")
 _REQUIRED_GB10_ENV_KEYS = frozenset(
     {
@@ -773,18 +784,17 @@ class LocalFilesystem:
                 return payload
         return None
 
-    def legacy_gb10_env_template_payload(self) -> bytes:
+    def protected_gb10_env_template_payload(self) -> bytes:
         candidates = self._gb10_env_candidates(
-            LEGACY_GB10_ENV_ROOT,
+            PROTECTED_INPUT_ROOT,
             require_private_mode=False,
         )
-        if not candidates:
-            raise InstallError("legacy GB10 worker env template is unavailable")
-        _, _, payload = max(
-            candidates,
-            key=lambda item: (item[1].st_mtime_ns, item[0].name),
-        )
-        return payload
+        matching = [
+            payload for path, _, payload in candidates if path == PROTECTED_GB10_ENV_TEMPLATE
+        ]
+        if len(matching) != 1:
+            raise InstallError("protected GB10 worker env template is unavailable")
+        return matching[0]
 
     def ensure_directory(self, absolute: Path, mode: int) -> bool:
         path = self.path(absolute)
@@ -4354,6 +4364,50 @@ class HostInstaller:
         return scope
 
     @classmethod
+    def _retired_protected_acl_scope(
+        cls,
+        record: dict[str, object] | None,
+    ) -> set[AclGrant]:
+        if record is None or record.get("schema_version") not in {3, 4}:
+            return set()
+        raw = record.get("added_acls", [])
+        if not isinstance(raw, list):
+            raise InstallError("install record ACL ledger is invalid")
+        grants = {AclGrant.from_dict(value) for value in raw}
+        current_scope = cls._managed_acl_scope()
+        noncurrent = grants - current_scope
+        if not noncurrent:
+            return set()
+        retired_leaves = {
+            grant
+            for grant in noncurrent
+            if not grant.default and grant.path.name in _RETIRED_PROTECTED_INPUT_NAMES
+        }
+        if {grant.path.name for grant in retired_leaves} != _RETIRED_PROTECTED_INPUT_NAMES or len(
+            {grant.path.parent for grant in retired_leaves}
+        ) != 1:
+            raise InstallError("install record ACL ledger is invalid")
+        retired_root = next(iter(retired_leaves)).path.parent
+        shared_work_root = Path("/shared_work")
+        if (
+            retired_root == PROTECTED_INPUT_ROOT
+            or PROTECTED_INPUT_ROOT in retired_root.parents
+            or retired_root == shared_work_root
+            or shared_work_root not in retired_root.parents
+        ):
+            raise InstallError("install record ACL ledger is invalid")
+        retired_scope = set(retired_leaves)
+        candidate = retired_root
+        while True:
+            retired_scope.add(AclGrant(candidate))
+            if candidate == shared_work_root:
+                break
+            candidate = candidate.parent
+        if noncurrent != retired_scope - current_scope:
+            raise InstallError("install record ACL ledger is invalid")
+        return retired_scope
+
+    @classmethod
     def _record_grants(cls, record: dict[str, object] | None) -> set[AclGrant]:
         if record is None:
             return set()
@@ -4362,7 +4416,8 @@ class HostInstaller:
             raise InstallError("install record ACL ledger is invalid")
         parsed = [AclGrant.from_dict(value) for value in raw]
         grants = set(parsed)
-        if len(grants) != len(parsed) or not grants.issubset(cls._managed_acl_scope()):
+        accepted_scope = cls._managed_acl_scope() | cls._retired_protected_acl_scope(record)
+        if len(grants) != len(parsed) or not grants.issubset(accepted_scope):
             raise InstallError("install record ACL ledger is invalid")
         return grants
 
@@ -4379,10 +4434,11 @@ class HostInstaller:
         if not isinstance(raw, list):
             raise InstallError("install record ACL mask ledger is invalid")
         adjustments: dict[AclGrant, AclMaskAdjustment] = {}
+        accepted_scope = cls._managed_acl_scope() | cls._retired_protected_acl_scope(record)
         for value in raw:
             adjustment = AclMaskAdjustment.from_dict(value)
             grant = AclGrant(adjustment.path, default=adjustment.default)
-            if grant in adjustments or grant not in cls._managed_acl_scope():
+            if grant in adjustments or grant not in accepted_scope:
                 raise InstallError("install record ACL mask ledger is invalid")
             adjustments[grant] = adjustment
         return adjustments
@@ -4399,6 +4455,11 @@ class HostInstaller:
             raise InstallError("install record ACL snapshot ledger is invalid")
         adjustments: dict[AclGrant, AclSnapshotAdjustment] = {}
         protected_grants = {AclGrant(path) for path in PROTECTED_INPUTS}
+        protected_grants.update(
+            grant
+            for grant in cls._retired_protected_acl_scope(record)
+            if grant.path.name in _RETIRED_PROTECTED_INPUT_NAMES
+        )
         for value in raw:
             adjustment = AclSnapshotAdjustment.from_dict(value)
             grant = AclGrant(adjustment.path)
@@ -4815,10 +4876,8 @@ class HostInstaller:
         generated_env_error: InstallError | None = None
         try:
             generated_env_templates = self.filesystem.generated_gb10_env_templates()
-            generated_env_seed_payload = (
-                self.filesystem.generated_gb10_env_template_payload(
-                    GENERATED_GB10_ENV_SEED
-                )
+            generated_env_seed_payload = self.filesystem.generated_gb10_env_template_payload(
+                GENERATED_GB10_ENV_SEED
             )
         except InstallError as exc:
             generated_env_templates = ()
@@ -4846,6 +4905,8 @@ class HostInstaller:
                 raise InstallError("conflicting ACL convergence plans")
             acl_plan_by_grant[plan.grant] = plan
         acl_plans = list(acl_plan_by_grant.values())
+        retired_acl_scope = self._retired_protected_acl_scope(previous_record)
+        retired_only_acl_scope = retired_acl_scope - self._managed_acl_scope()
         grants = self._record_grants(previous_record)
         mask_adjustments = self._record_mask_adjustments(previous_record)
         snapshot_adjustments = self._record_snapshot_adjustments(previous_record)
@@ -4874,6 +4935,7 @@ class HostInstaller:
             live_plan = acl_plan_by_grant.get(grant)
             if state == "drift" or (
                 state == "before"
+                and grant not in retired_only_acl_scope
                 and (live_plan is None or live_plan.mask_adjustment != mask_adjustment)
             ):
                 raise InstallError("ACL mask ledger does not match the live ACL")
@@ -4882,6 +4944,7 @@ class HostInstaller:
             live_plan = acl_plan_by_grant.get(grant)
             if state == "drift" or (
                 state == "before"
+                and grant not in retired_only_acl_scope
                 and (live_plan is None or live_plan.snapshot_adjustment != snapshot_adjustment)
             ):
                 raise InstallError("ACL snapshot ledger does not match the live ACL")
@@ -5152,6 +5215,7 @@ class HostInstaller:
             or linger_missing
             or service_key_missing
             or acl_plans
+            or retired_only_acl_scope
             or not service_directories_ready
             or not shared_work2_mount_ready
             or not shared_worker_repo_ready
@@ -5248,10 +5312,8 @@ class HostInstaller:
         previous_worker_env_sha256 = self._installed_worker_env_template_sha256()
         if previous_worker_env_sha256 is not None:
             authorized_worker_env_sha256 = previous_worker_env_sha256
-            generated_env_seed_payload = (
-                self.filesystem.generated_gb10_env_template_payload(
-                    GENERATED_GB10_ENV_SEED
-                )
+            generated_env_seed_payload = self.filesystem.generated_gb10_env_template_payload(
+                GENERATED_GB10_ENV_SEED
             )
             if (
                 generated_env_seed_payload is None
@@ -5260,7 +5322,7 @@ class HostInstaller:
             ):
                 fail_closed_worker_env("attested GB10 worker env template drifted")
         else:
-            worker_env_payload = self.filesystem.legacy_gb10_env_template_payload()
+            worker_env_payload = self.filesystem.protected_gb10_env_template_payload()
             authorized_worker_env_sha256 = hashlib.sha256(worker_env_payload).hexdigest()
             if self.filesystem.atomic_write(
                 GENERATED_GB10_ENV_SEED,
@@ -5388,6 +5450,23 @@ class HostInstaller:
             for plan in acl_plans:
                 self.system.apply_acl(plan)
             changes.append("acls")
+        if retired_only_acl_scope:
+            for grant in reversed(
+                sorted(
+                    retired_only_acl_scope,
+                    key=lambda item: (len(item.path.parts), item.default),
+                )
+            ):
+                self.system.remove_acl(
+                    grant,
+                    mask_adjustments.get(grant) or snapshot_adjustments.get(grant),
+                    remove_service_entry=grant in grants,
+                )
+            grants.difference_update(retired_only_acl_scope)
+            for grant in retired_only_acl_scope:
+                mask_adjustments.pop(grant, None)
+                snapshot_adjustments.pop(grant, None)
+            changes.append("retired-protected-acls")
 
         transaction_active = transaction_active or bool(changes)
         if transaction_active:
@@ -5405,19 +5484,15 @@ class HostInstaller:
             admission=True,
             maintenance=False,
         )
-        generated_env_seed_payload = (
-            self.filesystem.generated_gb10_env_template_payload(
-                GENERATED_GB10_ENV_SEED
-            )
+        generated_env_seed_payload = self.filesystem.generated_gb10_env_template_payload(
+            GENERATED_GB10_ENV_SEED
         )
         if (
             generated_env_seed_payload is None
             or hashlib.sha256(generated_env_seed_payload).hexdigest()
             != authorized_worker_env_sha256
         ):
-            fail_closed_worker_env(
-                "authorized GB10 worker env template changed before publication"
-            )
+            fail_closed_worker_env("authorized GB10 worker env template changed before publication")
         attestation_assets["worker-env-template"] = generated_env_seed_payload
         install_attestation_payload = _runner_install_attestation_payload(
             ready_record,
@@ -5580,10 +5655,8 @@ class HostInstaller:
             except InstallError:
                 failures.append("rendered-config")
         try:
-            generated_env_seed_payload = (
-                self.filesystem.generated_gb10_env_template_payload(
-                    GENERATED_GB10_ENV_SEED
-                )
+            generated_env_seed_payload = self.filesystem.generated_gb10_env_template_payload(
+                GENERATED_GB10_ENV_SEED
             )
         except InstallError:
             generated_env_seed_payload = None

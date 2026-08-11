@@ -78,9 +78,7 @@ _CONTROL_PLANE_READY_INTERVAL_SECONDS = 0.5
 _MAX_CATALOG_SOURCE_BYTES = 1024 * 1024
 _MAX_PORT_FORWARD_LOG_CHARS = 64 * 1024
 _SHARED_WORKER_REPO_ROOT = Path("/shared_work2/loom-staging-rollout/worker-repos")
-_SHARED_OLDLAB_WORKER_REPO_ROOT = Path(
-    "/shared_work/loom/staging-rollout/worker-repos"
-)
+_SHARED_OLDLAB_WORKER_REPO_ROOT = Path("/shared_work/loom/staging-rollout/worker-repos")
 _SHARED_WORKER_REPO_CONSUMER = PurePosixPath("scripts/ops/staging_rollout_shared_repo_consumer.py")
 _GIT_OBJECT_ID_RE = re.compile(r"[0-9a-f]{40}\Z")
 _MAX_SHARED_REPO_INDEX_BYTES = 64 * 1024 * 1024
@@ -1368,6 +1366,104 @@ _REQUIRED_EXTERNAL_RUNNER_ENV_KEYS = frozenset(
         "LOOM_WORKER_MINIO_SECRET_KEY",
     }
 )
+_WORKER_SERVICE_ENV_KEYS = frozenset(
+    {
+        "LOOM_WORKER_CONTROL_PLANE_URL",
+        "LOOM_WORKER_GATEWAY_URL",
+        "LOOM_WORKER_SUBPROCESS_GATEWAY_URL",
+        "LOOM_WORKER_MINIO_ENDPOINT",
+        "LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO",
+    }
+)
+_REQUIRED_WORKER_SERVICE_ENV_KEYS = _WORKER_SERVICE_ENV_KEYS - {
+    "LOOM_WORKER_SUBPROCESS_GATEWAY_URL",
+    "LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO",
+}
+
+
+def _pool_worker_service_env(
+    settings: dict[str, Any],
+    *,
+    pool_name: str,
+) -> dict[str, str]:
+    configured = settings.get("worker_service_env")
+    if configured is None:
+        return {}
+    if not isinstance(configured, dict):
+        raise ExternalSlurmPrereqMaterializationError(
+            "external runner worker_service_env must be a table",
+        )
+    pool_config = configured.get(pool_name)
+    if pool_config is None:
+        return {}
+    if not isinstance(pool_config, dict):
+        raise ExternalSlurmPrereqMaterializationError(
+            f"external runner worker_service_env.{pool_name} must be a table",
+        )
+    keys = set(pool_config)
+    unknown = sorted(keys - _WORKER_SERVICE_ENV_KEYS)
+    missing = sorted(_REQUIRED_WORKER_SERVICE_ENV_KEYS - keys)
+    if unknown or missing:
+        raise ExternalSlurmPrereqMaterializationError(
+            f"external runner worker_service_env.{pool_name} has invalid keys",
+        )
+    rendered: dict[str, str] = {}
+    for key, raw_value in pool_config.items():
+        if not isinstance(raw_value, str):
+            raise ExternalSlurmPrereqMaterializationError(
+                f"external runner worker_service_env.{pool_name} values must be URLs",
+            )
+        value = _secret_safe_value(raw_value.strip())
+        if key == "LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO":
+            parsed_registry = urlsplit(f"//{value}")
+            try:
+                registry_port = parsed_registry.port
+            except ValueError:
+                registry_port = -1
+            if (
+                "://" in value
+                or parsed_registry.hostname is None
+                or parsed_registry.username is not None
+                or parsed_registry.password is not None
+                or parsed_registry.query
+                or parsed_registry.fragment
+                or registry_port == -1
+                or re.fullmatch(
+                    r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?"
+                    r"(?::[1-9][0-9]{0,4})?"
+                    r"/[a-z0-9]+(?:[._-][a-z0-9]+)*"
+                    r"(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*",
+                    value,
+                )
+                is None
+            ):
+                raise ExternalSlurmPrereqMaterializationError(
+                    "external runner "
+                    f"worker_service_env.{pool_name} values must be registry "
+                    "repository references",
+                )
+            rendered[key] = value
+            continue
+        parsed = urlsplit(value)
+        try:
+            _ = parsed.port
+        except ValueError:
+            raise ExternalSlurmPrereqMaterializationError(
+                f"external runner worker_service_env.{pool_name} values must be private HTTP URLs",
+            ) from None
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ExternalSlurmPrereqMaterializationError(
+                f"external runner worker_service_env.{pool_name} values must be private HTTP URLs",
+            )
+        rendered[key] = value
+    return rendered
 
 
 def _env_source_is_safe(path: Path) -> bool:
@@ -1499,6 +1595,10 @@ def _materialize_env_file(
         requested_concurrency=requested_concurrency,
         worker_token=worker_token,
         worker_token_env_key=worker_token_env_key,
+        worker_service_env=_pool_worker_service_env(
+            settings,
+            pool_name=pool_name,
+        ),
     )
 
     env_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1528,6 +1628,7 @@ def _render_external_runner_env(
     requested_concurrency: object,
     worker_token: str | None,
     worker_token_env_key: str,
+    worker_service_env: dict[str, str] | None = None,
 ) -> str:
     updates = {
         "IMAGE_TAG": image_tag,
@@ -1540,6 +1641,7 @@ def _render_external_runner_env(
         updates["LOOM_WORKER_MAX_CONCURRENT"] = str(requested_concurrency)
     if worker_token is not None:
         updates[worker_token_env_key] = worker_token
+    updates.update(worker_service_env or {})
     return _update_env_text(existing, updates)
 
 
@@ -1564,6 +1666,10 @@ def verify_external_runner_env(
         requested_concurrency=requested_concurrency,
         worker_token=worker_token,
         worker_token_env_key=worker_token_env_key,
+        worker_service_env=_pool_worker_service_env(
+            settings,
+            pool_name=pool_name,
+        ),
     )
     if existing != expected:
         raise ExternalSlurmPrereqMaterializationError(
@@ -2904,11 +3010,7 @@ def _verify_external_slurm_runner_consumers(
     """Verify the immutable target as the fixed service user on every GB10 node."""
     if not records:
         return None
-    gb10_records = [
-        record
-        for record in records
-        if record.get("pool_name") in {None, "gb10"}
-    ]
+    gb10_records = [record for record in records if record.get("pool_name") in {None, "gb10"}]
     if len(gb10_records) != 1 or ctx.scope != "current-gb10":
         raise ExternalSlurmPrereqMaterializationError(
             "external runner consumer verification requires one current-GB10 target",

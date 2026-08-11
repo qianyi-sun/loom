@@ -25,8 +25,7 @@ def test_clients_and_sudoers_fix_broker_commands_and_clean_environment() -> None
     assert "%loom-staging-operators ALL=(loom-rollout) NOPASSWD:NOSETENV:" in sudoers
     assert "/usr/local/libexec/loom-staging-rollout-broker *" in sudoers
     assert compatibility_broker == (
-        "#!/bin/sh\nset -eu\n\n"
-        'exec /usr/local/libexec/loom-rollout-broker --env staging "$@"\n'
+        '#!/bin/sh\nset -eu\n\nexec /usr/local/libexec/loom-rollout-broker --env staging "$@"\n'
     )
     assert "/usr/bin/env -i" in broker
     assert broker.index("umask 077") < broker.index("exec /usr/bin/env -i")
@@ -92,6 +91,10 @@ def test_config_template_is_non_secret_and_fixed_to_merged_dev() -> None:
     assert config["smoke_on_behalf_team_id"] == "__SMOKE_ON_BEHALF_TEAM_ID__"
     assert config["backup_max_objects"] == 1_000_000
     assert config["backup_max_entries"] == 16_000_000
+    protected_root = "/shared_work/loom/staging-rollout/credentials"
+    assert config["admin_token_source"] == f"file:{protected_root}/staging-admin-token"
+    assert config["worker_token_source"] == f"file:{protected_root}/staging-worker-token"
+    assert config["service_token_source"] == f"file:{protected_root}/staging-service-token"
     assert "loom_admin_" not in path.read_text(encoding="utf-8")
 
 
@@ -108,7 +111,10 @@ def test_repo_configs_no_longer_reference_qianyi_private_deploy_key() -> None:
     env_state = (REPO_ROOT / "deploy/environment-state/staging.toml").read_text(encoding="utf-8")
     assert "/shared_work/qianyi/loom-worker-capacity/staging-gb10-worker-" not in env_state
     assert "/shared_work2/loom-staging-rollout/worker-envs/staging-gb10-worker-" in env_state
-    assert "/shared_work/qianyi/loom-worker-capacity/staging-catalog-provisioning.env" in env_state
+    assert (
+        'env_file = "/shared_work/loom/staging-rollout/credentials/'
+        'staging-catalog-provisioning.env"'
+    ) in env_state
 
 
 def test_installed_gb10_trust_tool_uses_the_root_owned_candidate_inventory() -> None:

@@ -53,7 +53,7 @@ _EVIDENCE_RELATIVE_PATH = Path("canaries/taskset-lease-fencing/evidence.json")
 # taskset-fence-canary-token key mounted into loom-service.  It is deliberately
 # not a user-provided flag and no raw token enters the rollout evidence tree.
 _STAGING_CANARY_TOKEN_SOURCE = (
-    "file:/shared_work/qianyi/loom-worker-capacity/staging-taskset-fence-canary-token"
+    "file:/shared_work/loom/staging-rollout/credentials/staging-taskset-fence-canary-token"
 )
 
 
@@ -339,10 +339,7 @@ def _release_service_identity(
     expected_repo_digest = _digest_from_value(identity.get("repo_digest"))
     expected_image_id = identity.get("image_id")
     if expected_repo_digest is not None:
-        if (
-            pinned_candidate_digest is not None
-            and expected_repo_digest != pinned_candidate_digest
-        ):
+        if pinned_candidate_digest is not None and expected_repo_digest != pinned_candidate_digest:
             raise _invalid_live_target()
         return expected_image, expected_repo_digest, None
     if not isinstance(expected_image_id, str) or not expected_image_id:

@@ -24,6 +24,12 @@ are under `/shared_work/loom/staging-rollout/` and must be visible on every
 allowed compute node. Personal checkouts and control-host-only paths are not
 valid worker inputs.
 
+The candidate-owned worker env pins the Control Plane, Gateway, subprocess
+Gateway, and MinIO to OLDLAB-1's `192.168.50.103` private fleet forwards. It
+uses the TLS trial-cache repository
+`192.168.50.103:5443/loom-trial-cache`; per-node loopback tunnels and personal
+network services are not valid substitutes.
+
 ## Supervisor
 
 Environment-state renders and owns:
