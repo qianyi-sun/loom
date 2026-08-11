@@ -1642,6 +1642,209 @@ def test_check_reports_missing_generated_worker_env_template(tmp_path: Path) -> 
     assert "generated-gb10-worker-env-template" in result["failures"]
 
 
+def test_check_reports_attested_worker_env_template_content_drift(tmp_path: Path) -> None:
+    installer, _ = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    template = installer.filesystem.path(host.GENERATED_GB10_ENV_SEED)
+    template.write_text(
+        template.read_text(encoding="utf-8").replace(
+            "LOOM_WORKER_MINIO_ENDPOINT=http://control.example:9000",
+            "LOOM_WORKER_MINIO_ENDPOINT=http://drifted-minio:9000",
+        ),
+        encoding="utf-8",
+    )
+    template.chmod(0o600)
+
+    result = installer.check()
+
+    assert result["ok"] is False
+    assert str(host.INSTALL_ATTESTATION) in result["failures"]
+
+
+def test_reinstall_rejects_attested_worker_env_template_content_drift(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    statement_before = installer.filesystem.read_bytes(host.INSTALL_ATTESTATION)
+    template = installer.filesystem.path(host.GENERATED_GB10_ENV_SEED)
+    template.write_text(
+        template.read_text(encoding="utf-8").replace(
+            "LOOM_WORKER_MINIO_ENDPOINT=http://control.example:9000",
+            "LOOM_WORKER_MINIO_ENDPOINT=http://drifted-minio:9000",
+        ),
+        encoding="utf-8",
+    )
+    template.chmod(0o600)
+
+    with pytest.raises(host.InstallError, match="worker env template drifted"):
+        installer.install(TEAM_ID)
+
+    assert installer.filesystem.read_bytes(host.INSTALL_ATTESTATION) == statement_before
+    assert not installer.filesystem.exists(host.SUDOERS_PATH)
+    assert system.maintenance is True
+    record = installer.filesystem.load_install_record()
+    assert record is not None
+    assert record["installation_state"] == "installing"
+    assert record["admission_enabled"] is False
+
+
+def test_reinstall_never_promotes_unattested_generated_worker_env(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    installer.filesystem.remove(host.GENERATED_GB10_ENV_SEED)
+    alternate = installer.filesystem.path(
+        host.GENERATED_ROOT / "staging-gb10-worker-staging-unattested.env"
+    )
+    alternate.write_text(
+        installer.filesystem.read_bytes(
+            host.LEGACY_GB10_ENV_ROOT / "staging-gb10-worker-staging-previous.env"
+        ).decode("utf-8").replace(
+            "LOOM_WORKER_MINIO_ENDPOINT=http://control.example:9000",
+            "LOOM_WORKER_MINIO_ENDPOINT=http://unattested-minio:9000",
+        ),
+        encoding="utf-8",
+    )
+    alternate.chmod(0o600)
+
+    with pytest.raises(host.InstallError, match="worker env template drifted"):
+        installer.install(TEAM_ID)
+
+    assert not installer.filesystem.exists(host.GENERATED_GB10_ENV_SEED)
+    assert not installer.filesystem.exists(host.SUDOERS_PATH)
+    assert system.maintenance is True
+
+
+def test_upgrade_from_legacy_attestation_reimports_only_legacy_worker_env(
+    tmp_path: Path,
+) -> None:
+    installer, _ = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    statement = json.loads(installer.filesystem.read_bytes(host.INSTALL_ATTESTATION))
+    statement["asset_sha256"].pop("worker-env-template")
+    installer.filesystem.atomic_write(
+        host.INSTALL_ATTESTATION,
+        (json.dumps(statement, sort_keys=True, separators=(",", ":")) + "\n").encode(),
+        0o640,
+        expected_nlink=1,
+    )
+    template = installer.filesystem.path(host.GENERATED_GB10_ENV_SEED)
+    template.write_text(
+        template.read_text(encoding="utf-8").replace(
+            "LOOM_WORKER_MINIO_ENDPOINT=http://control.example:9000",
+            "LOOM_WORKER_MINIO_ENDPOINT=http://unattested-minio:9000",
+        ),
+        encoding="utf-8",
+    )
+    template.chmod(0o600)
+    legacy = installer.filesystem.read_bytes(
+        host.LEGACY_GB10_ENV_ROOT / "staging-gb10-worker-staging-previous.env"
+    )
+
+    result = installer.install(TEAM_ID)
+
+    assert result["ok"] is True
+    assert installer.filesystem.read_bytes(host.GENERATED_GB10_ENV_SEED) == legacy
+    upgraded = json.loads(installer.filesystem.read_bytes(host.INSTALL_ATTESTATION))
+    assert upgraded["asset_sha256"]["worker-env-template"] == hashlib.sha256(
+        legacy
+    ).hexdigest()
+
+
+def test_reinstall_rejects_worker_env_drift_before_attestation_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    statement_before = installer.filesystem.read_bytes(host.INSTALL_ATTESTATION)
+    original_read = host.LocalFilesystem.generated_gb10_env_template_payload
+    reads = 0
+
+    def mutate_before_final_read(
+        filesystem: host.LocalFilesystem,
+        target: Path,
+    ) -> bytes | None:
+        nonlocal reads
+        reads += 1
+        if reads == 3:
+            template = filesystem.path(host.GENERATED_GB10_ENV_SEED)
+            template.write_text(
+                template.read_text(encoding="utf-8").replace(
+                    "LOOM_WORKER_MINIO_ENDPOINT=http://control.example:9000",
+                    "LOOM_WORKER_MINIO_ENDPOINT=http://late-drift.example:9000",
+                ),
+                encoding="utf-8",
+            )
+            template.chmod(0o600)
+        return original_read(filesystem, target)
+
+    monkeypatch.setattr(
+        host.LocalFilesystem,
+        "generated_gb10_env_template_payload",
+        mutate_before_final_read,
+    )
+
+    with pytest.raises(host.InstallError, match="worker env template changed"):
+        installer.install(TEAM_ID)
+
+    assert installer.filesystem.read_bytes(host.INSTALL_ATTESTATION) == statement_before
+    assert not installer.filesystem.exists(host.SUDOERS_PATH)
+    assert system.maintenance is True
+    record = installer.filesystem.load_install_record()
+    assert record is not None
+    assert record["installation_state"] == "installing"
+    assert record["admission_enabled"] is False
+
+
+def test_reinstall_closes_admission_on_worker_env_second_read_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    statement_before = installer.filesystem.read_bytes(host.INSTALL_ATTESTATION)
+    original_read = host.LocalFilesystem.generated_gb10_env_template_payload
+    reads = 0
+
+    def mutate_before_authority_read(
+        filesystem: host.LocalFilesystem,
+        target: Path,
+    ) -> bytes | None:
+        nonlocal reads
+        reads += 1
+        if reads == 2:
+            template = filesystem.path(host.GENERATED_GB10_ENV_SEED)
+            template.write_text(
+                template.read_text(encoding="utf-8").replace(
+                    "LOOM_WORKER_MINIO_ENDPOINT=http://control.example:9000",
+                    "LOOM_WORKER_MINIO_ENDPOINT=http://second-read-drift.example:9000",
+                ),
+                encoding="utf-8",
+            )
+            template.chmod(0o600)
+        return original_read(filesystem, target)
+
+    monkeypatch.setattr(
+        host.LocalFilesystem,
+        "generated_gb10_env_template_payload",
+        mutate_before_authority_read,
+    )
+
+    with pytest.raises(host.InstallError, match="worker env template drifted"):
+        installer.install(TEAM_ID)
+
+    assert installer.filesystem.read_bytes(host.INSTALL_ATTESTATION) == statement_before
+    assert not installer.filesystem.exists(host.SUDOERS_PATH)
+    assert system.maintenance is True
+    record = installer.filesystem.load_install_record()
+    assert record is not None
+    assert record["installation_state"] == "installing"
+    assert record["admission_enabled"] is False
+
+
 def test_reinstall_closes_admission_before_rejecting_unsafe_generated_template(
     tmp_path: Path,
 ) -> None:
