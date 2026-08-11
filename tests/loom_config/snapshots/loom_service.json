@@ -224,14 +224,14 @@
     "default": "300",
     "required": false
   },
-  "personal_dev_activation_hmac_key_file": {
-    "annotation": "pathlib.Path | None",
-    "default": "None",
-    "required": false
-  },
-  "personal_dev_activation_hmac_key_id": {
+  "personal_dev_activation_key_id": {
     "annotation": "<class 'str'>",
     "default": "'personal-dev-agent-v1'",
+    "required": false
+  },
+  "personal_dev_activation_public_key_file": {
+    "annotation": "pathlib.Path | None",
+    "default": "None",
     "required": false
   },
   "personal_dev_builder_docker_path": {

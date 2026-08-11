@@ -214,6 +214,16 @@ class _CandidateRunner(_Runner):
                 "loom-service-g8": "service",
                 "loom-web-g8": "web",
             }[name]
+            binding = _personal_manifest_config().lifecycle_binding
+            assert binding is not None
+            labels = {
+                "loom.dev/subject": str(binding.subject_id),
+                "loom.dev/incarnation": str(binding.subject_incarnation),
+                "loom.dev/operation": str(binding.operation_id),
+                "loom.dev/attempt": str(binding.attempt_id),
+                "loom.dev/operation-epoch": str(binding.operation_epoch),
+                "loom.dev/generation": "8",
+            }
             return CommandResult(
                 stdout=json.dumps(
                     {
@@ -221,10 +231,12 @@ class _CandidateRunner(_Runner):
                             "uid": f"uid-{name}",
                             "resourceVersion": "17",
                             "generation": 1,
+                            "labels": labels,
                         },
                         "spec": {
                             "replicas": 1,
                             "template": {
+                                "metadata": {"labels": labels},
                                 "spec": {
                                     "containers": [
                                         {"image": _personal_manifest_config().image(component)}

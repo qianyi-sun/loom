@@ -391,12 +391,12 @@ python_type = "int"
 default     = 1800
 description = "Lease duration for one bounded personal environment preparation or activation-finalization attempt."
 
-[service_config.personal_dev_activation_hmac_key_file]
+[service_config.personal_dev_activation_public_key_file]
 used_by     = ["loom-service"]
 python_type = "Path"
-description = "Owner-only file containing the shared key used to authenticate trusted personal-dev environment activation acknowledgements."
+description = "Read-only file containing the Ed25519 public key used to verify trusted personal-dev activation acknowledgements; the service never receives signing authority."
 
-[service_config.personal_dev_activation_hmac_key_id]
+[service_config.personal_dev_activation_key_id]
 used_by     = ["loom-service"]
 python_type = "str"
 default     = "personal-dev-agent-v1"

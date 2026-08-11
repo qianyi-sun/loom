@@ -194,13 +194,16 @@ attempt, operation epoch, candidate, and deployment generation.
 
 Preparation publishes a canonical readiness digest and stops at a central
 `activation_intent`. The management API accepts a local activation
-acknowledgement only when it is fresh, HMAC-authenticated by an owner-only
-operator key, bound to the exact intent, and durably inserted into an
-append-only table. The service cannot manufacture that acknowledgement from
-its own readiness observation. The independently installed environment agent
-that applies the stable-route/local-admission transaction, the restricted
-candidate builder, and the global-capacity projection are still required
-before this path may be enabled for live capacity.
+acknowledgement only when it is fresh, Ed25519-authenticated by an agent-only
+private key, bound to the exact intent, and durably inserted into an append-only
+table. The management service receives only the public verification key and
+therefore cannot manufacture acknowledgement evidence from its own readiness
+observation. Signed intent polling prevents disclosure to an unauthenticated
+caller. The independent agent re-observes the exact immutable generation,
+proves both candidate legacy capacity paths remain disabled, converges only
+the stable Services and Ingress, reads them back, and signs that local digest.
+Protected global-capacity projection and final fleet activation are still
+required before this path may enable live worker capacity.
 
 When this authority is enabled, the earlier candidate-less `POST
 /dev-instances` mutation path is retired and the service no longer constructs

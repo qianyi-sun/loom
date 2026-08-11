@@ -14,7 +14,13 @@ from loom.dev_instance_provisioner import (
     InstanceReservation,
     OwnerAccessSnapshot,
 )
-from loom.personal_dev_activation import PersonalDevActivationVerifier
+from loom.personal_dev_activation import (
+    PersonalDevActivationIntent,
+    PersonalDevActivationIntentRequest,
+    PersonalDevActivationSigner,
+    PersonalDevActivationVerifier,
+)
+from loom.personal_dev_candidate import PERSONAL_DEV_COMPONENTS
 from loom.personal_dev_environment import (
     PersonalDevApplyReservation,
     PersonalDevEnvironmentRecord,
@@ -23,6 +29,7 @@ from loom.personal_dev_environment import (
 from loom_service.routes.dev_instances import (
     DevInstanceCreateRequest,
     PersonalDevActivationAcknowledgementPayload,
+    PersonalDevActivationIntentRequestPayload,
     PersonalDevEnvironmentApplyPayload,
     acknowledge_personal_dev_activation,
     apply_personal_dev_environment,
@@ -30,6 +37,7 @@ from loom_service.routes.dev_instances import (
     delete_dev_instance,
     get_dev_instance,
     list_dev_instances,
+    next_personal_dev_activation_intent,
 )
 
 _NOW = datetime(2026, 8, 6, tzinfo=UTC)
@@ -555,3 +563,77 @@ async def test_activation_ack_route_rejects_unsigned_agent_payload_before_databa
         )
 
     assert exc.value.status_code == 403
+
+
+async def test_activation_intent_route_requires_agent_signature_and_returns_exact_binding(
+    monkeypatch,
+) -> None:
+    private_key = bytes(range(32))
+    signer = PersonalDevActivationSigner(keys={"personal-dev-agent-v1": private_key})
+    verifier = PersonalDevActivationVerifier(
+        keys={
+            "personal-dev-agent-v1": signer.public_key_bytes("personal-dev-agent-v1"),
+        },
+    )
+    intent = PersonalDevActivationIntent(
+        environment_name="alice",
+        subject_id=UUID("00000000-0000-0000-0000-000000000010"),
+        subject_incarnation=UUID("00000000-0000-0000-0000-000000000011"),
+        operation_id=UUID("00000000-0000-0000-0000-000000000012"),
+        operation_epoch=1,
+        attempt_id=UUID("00000000-0000-0000-0000-000000000013"),
+        attempt_sequence=0,
+        candidate_id=UUID("00000000-0000-0000-0000-000000000014"),
+        candidate_sha="a" * 64,
+        candidate_publication_sha256="b" * 64,
+        deployment_generation=1,
+        readiness_evidence_sha256="c" * 64,
+        min_slots=0,
+        max_slots=2,
+        images={
+            component: f"registry.test/{component}@sha256:{str(index % 10) * 64}"
+            for index, component in enumerate(PERSONAL_DEV_COMPONENTS, start=1)
+        },
+        intent_created_at=_NOW,
+    )
+
+    class _SessionContext:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    request = _request(_Store(), configured=False)
+    request.app.state.personal_dev_activation_verifier = verifier
+    request.app.state.session_factory = lambda: _SessionContext()
+
+    async def next_intent(_self, **_kwargs):
+        return intent
+
+    monkeypatch.setattr(
+        "loom_service.routes.dev_instances.SqlAlchemyPersonalDevActivationIntentReader.next_intent",
+        next_intent,
+    )
+    poll = PersonalDevActivationIntentRequest(
+        agent_key_id="personal-dev-agent-v1",
+        request_nonce=UUID("00000000-0000-0000-0000-000000000099"),
+        requested_at=datetime.now(UTC),
+    )
+    payload = PersonalDevActivationIntentRequestPayload(
+        agent_key_id=poll.agent_key_id,
+        request_nonce=poll.request_nonce,
+        requested_at=poll.requested_at,
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await next_personal_dev_activation_intent(payload, request, signature="0" * 128)
+    assert exc.value.status_code == 403
+
+    response = await next_personal_dev_activation_intent(
+        payload,
+        request,
+        signature=signer.sign_intent_request(poll),
+    )
+    assert response.operation_id == intent.operation_id
+    assert response.intent_sha256 == intent.intent_sha256

@@ -182,14 +182,14 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         personal_dev_runtime = None
         personal_dev_builder_runtime = None
         if personal_dev_limits is not None:
-            if settings.personal_dev_activation_hmac_key_file is None:
+            if settings.personal_dev_activation_public_key_file is None:
                 raise RuntimeError(
-                    "LOOM_SVC_PERSONAL_DEV_ACTIVATION_HMAC_KEY_FILE is required "
+                    "LOOM_SVC_PERSONAL_DEV_ACTIVATION_PUBLIC_KEY_FILE is required "
                     "when dev instances are enabled",
                 )
             app.state.personal_dev_activation_verifier = load_personal_dev_activation_verifier(
-                settings.personal_dev_activation_hmac_key_file,
-                key_id=settings.personal_dev_activation_hmac_key_id,
+                settings.personal_dev_activation_public_key_file,
+                key_id=settings.personal_dev_activation_key_id,
                 max_age_seconds=settings.personal_dev_activation_ack_max_age_sec,
             )
             personal_dev_runtime = build_personal_dev_preparation_runtime(
