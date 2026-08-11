@@ -25,14 +25,15 @@ from loom.data_lifecycle import (
 from loom.data_lifecycle_capacity import CAPACITY_SOURCE
 from loom_cli.rollout.credential_authority import read_trusted_file
 from loom_cli.rollout.external_supervisor_readiness import (
-    REHEARSAL_KUBECONFIG as EXTERNAL_SUPERVISOR_REHEARSAL_KUBECONFIG,
-)
-from loom_cli.rollout.external_supervisor_readiness import (
+    PROFILE_PATH,
     STAGING_ROLLOUT_EXECUTION_HOST,
     ExternalSupervisorArtifact,
     ExternalSupervisorIdentity,
     build_external_supervisor_artifact,
     staging_working_directory,
+)
+from loom_cli.rollout.external_supervisor_readiness import (
+    REHEARSAL_KUBECONFIG as EXTERNAL_SUPERVISOR_REHEARSAL_KUBECONFIG,
 )
 from loom_cli.rollout.gb10_rehearsal import (
     FixedGB10RehearsalTransport,
@@ -85,6 +86,7 @@ from loom_cli.rollout.systemd_readiness import (
 REHEARSAL_KUBECONFIG = REHEARSAL_KUBECONFIG_PATH
 _MAX_OUTPUT_BYTES = 1024 * 1024
 _MAX_PRODUCTION_DEFAULTS_BYTES = 1024 * 1024
+_MAX_EXTERNAL_SUPERVISOR_PROFILE_BYTES = 1024 * 1024
 _KUBERNETES_UID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
@@ -177,6 +179,7 @@ SecretArtifactBuilder = Callable[[RehearsalPlan], RehearsalSecretArtifact]
 BrowserArtifactBuilder = Callable[[RehearsalPlan, str], RehearsalBrowserArtifact]
 RuntimeImageResolver = Callable[[RehearsalPlan, Sequence[str]], Mapping[str, Sequence[str]] | None]
 ExternalSupervisorArtifactBuilder = Callable[[RehearsalPlan], ExternalSupervisorArtifact]
+ExternalSupervisorProfileBuilder = Callable[[RehearsalPlan], bytes]
 
 
 class GB10RehearsalTransport(Protocol):
@@ -293,6 +296,19 @@ def _default_external_supervisor_artifact(plan: RehearsalPlan) -> ExternalSuperv
     )
 
 
+def _default_external_supervisor_profile(plan: RehearsalPlan) -> bytes:
+    trusted = read_trusted_file(
+        Path(staging_working_directory(plan.candidate_sha)) / PROFILE_PATH,
+        service_uid=os.geteuid(),
+        private=False,
+        max_bytes=_MAX_EXTERNAL_SUPERVISOR_PROFILE_BYTES,
+        require_nonempty=True,
+    )
+    if hashlib.sha256(trusted.payload).hexdigest() != plan.external_supervisor_profile_sha256:
+        raise ValueError("external supervisor profile identity drifted")
+    return trusted.payload
+
+
 def _open_absolute_regular_no_follow(path: Path) -> int:
     if not path.is_absolute() or ".." in path.parts or path == Path("/"):
         raise OSError("rehearsal stream source path is invalid")
@@ -326,6 +342,9 @@ class IsolatedRehearsalExecutor:
     browser_artifacts: BrowserArtifactBuilder = _default_browser_artifact
     external_supervisor_artifacts: ExternalSupervisorArtifactBuilder = (
         _default_external_supervisor_artifact
+    )
+    external_supervisor_profiles: ExternalSupervisorProfileBuilder = (
+        _default_external_supervisor_profile
     )
     kubeconfig: Path = REHEARSAL_KUBECONFIG
     monotonic: Callable[[], float] = time.monotonic
@@ -1538,6 +1557,11 @@ class IsolatedRehearsalExecutor:
                 None,
             )
 
+        policy_evidence_digest, policy_blocker = self._seed_external_supervisor_policies(plan)
+        if policy_blocker is not None:
+            return None, policy_blocker
+        assert policy_evidence_digest is not None
+
         # The external-supervisor validation port-forwards to CNPG's concrete
         # service/loom-postgres-rw, but the restore rehearsal only creates the
         # loom-rehearsal-db pod, and this validation runs before the release
@@ -1606,11 +1630,67 @@ class IsolatedRehearsalExecutor:
                     "artifact_sha256": artifact.artifact_digest,
                     "command_sha256": command_digests,
                     "namespace": plan.resources.namespace,
+                    "policy_seed_sha256": policy_evidence_digest,
                     "schema_version": 1,
                 }
             )
         ).hexdigest()
         return evidence_digest, None
+
+    def _seed_external_supervisor_policies(
+        self,
+        plan: RehearsalPlan,
+    ) -> tuple[str | None, str | None]:
+        try:
+            profile = self.external_supervisor_profiles(plan)
+        except (OSError, RuntimeError, ValueError):
+            return None, "external-supervisor-profile-invalid"
+        if (
+            not 1 <= len(profile) <= _MAX_EXTERNAL_SUPERVISOR_PROFILE_BYTES
+            or hashlib.sha256(profile).hexdigest() != plan.external_supervisor_profile_sha256
+        ):
+            return None, "external-supervisor-profile-drift"
+        result = self._command(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "--namespace",
+                plan.resources.namespace,
+                "exec",
+                "-i",
+                "pod/loom-rehearsal-db",
+                "--container",
+                "migration",
+                "--",
+                "env",
+                (
+                    "LOOM_DB_URL=postgresql+psycopg://loom_rehearsal@"
+                    f"127.0.0.1:5432/{plan.resources.database}"
+                ),
+                "PYTHONDONTWRITEBYTECODE=1",
+                "python",
+                "-m",
+                "loom_cli.rollout.rehearsal_environment_state_probe",
+                "--database",
+                plan.resources.database,
+                "--plan-sha256",
+                plan.plan_digest,
+                "--profile-sha256",
+                plan.external_supervisor_profile_sha256,
+                "--candidate-sha",
+                plan.candidate_sha,
+                "--candidate-tree",
+                plan.candidate_tree,
+                "--image-tag",
+                plan.image_tag,
+            ),
+            profile,
+            timeout=180,
+        )
+        if result is None or not _external_supervisor_policy_result_ready(result, plan=plan):
+            return None, "external-supervisor-policy-seed-failed"
+        return str(result["evidence_sha256"]), None
 
     def _retire_external_supervisor_validation_unit(
         self,
@@ -3104,6 +3184,39 @@ def _production_defaults_result_ready(
         and type(mutation_count) is int
         and 0 <= mutation_count <= 64
         and value.get("plan_sha256") == plan.plan_digest
+        and value.get("schema_version") == 1
+        and value.get("status") == "ready"
+    )
+
+
+def _external_supervisor_policy_result_ready(
+    value: dict[str, object],
+    *,
+    plan: RehearsalPlan,
+) -> bool:
+    policy_count = value.get("policy_count")
+    return bool(
+        set(value)
+        == {
+            "candidate_sha",
+            "candidate_tree",
+            "evidence_sha256",
+            "image_tag",
+            "plan_sha256",
+            "policy_count",
+            "profile_sha256",
+            "schema_version",
+            "status",
+        }
+        and value.get("candidate_sha") == plan.candidate_sha
+        and value.get("candidate_tree") == plan.candidate_tree
+        and isinstance(value.get("evidence_sha256"), str)
+        and re.fullmatch(r"[0-9a-f]{64}", str(value["evidence_sha256"])) is not None
+        and value.get("image_tag") == plan.image_tag
+        and value.get("plan_sha256") == plan.plan_digest
+        and type(policy_count) is int
+        and 1 <= policy_count <= 64
+        and value.get("profile_sha256") == plan.external_supervisor_profile_sha256
         and value.get("schema_version") == 1
         and value.get("status") == "ready"
     )
