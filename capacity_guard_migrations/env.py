@@ -19,12 +19,15 @@ if config.config_file_name is not None:
 
 db_url = os.environ.get("LOOM_CAPACITY_GUARD_DB_URL", "").strip()
 owner_role = os.environ.get("LOOM_CAPACITY_GUARD_OWNER_ROLE", "").strip()
+agent_role = os.environ.get("LOOM_CAPACITY_GUARD_AGENT_ROLE", "").strip()
 if not db_url:
     raise RuntimeError(
         "LOOM_CAPACITY_GUARD_DB_URL must be set to run protected capacity migrations"
     )
 if _ROLE_PATTERN.fullmatch(owner_role) is None:
     raise RuntimeError("LOOM_CAPACITY_GUARD_OWNER_ROLE must name an explicit canonical SQL role")
+if _ROLE_PATTERN.fullmatch(agent_role) is None or agent_role == owner_role:
+    raise RuntimeError("LOOM_CAPACITY_GUARD_AGENT_ROLE must name a distinct canonical SQL role")
 # Alembic stores options in ConfigParser, where URL-encoded percent signs in
 # credentials are interpolation markers unless doubled at this one boundary.
 config.set_main_option("sqlalchemy.url", db_url.replace("%", "%%"))
@@ -74,6 +77,44 @@ def run_migrations_online() -> None:
                 raise RuntimeError(
                     "protected capacity migration login must be a least-privileged role"
                 )
+            agent = (
+                connection.execute(
+                    text(
+                        "SELECT rolname, rolcanlogin, rolinherit, rolsuper, rolcreatedb, "
+                        "rolcreaterole, rolreplication, rolbypassrls, "
+                        "pg_has_role(rolname, :owner_role, 'MEMBER') AS owner_member, "
+                        "(SELECT count(*) FROM pg_auth_members AS m "
+                        "WHERE m.member = pg_roles.oid) AS role_memberships "
+                        "FROM pg_roles WHERE rolname = :agent_role"
+                    ),
+                    {"agent_role": agent_role, "owner_role": owner_role},
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if (
+                agent is None
+                or agent["rolcanlogin"] is not True
+                or agent["rolinherit"] is not False
+                or agent["owner_member"] is not False
+                or agent["role_memberships"] != 0
+                or agent["rolname"] == login["rolname"]
+                or any(
+                    agent[field] is True
+                    for field in (
+                        "rolsuper",
+                        "rolcreatedb",
+                        "rolcreaterole",
+                        "rolreplication",
+                        "rolbypassrls",
+                    )
+                )
+            ):
+                raise RuntimeError(
+                    "protected capacity agent must be a distinct least-privileged "
+                    "NOINHERIT login with no owner membership"
+                )
+            config.attributes["capacity_guard_agent_role"] = agent_role
             connection.exec_driver_sql(f"SET ROLE {quoted_owner}")
             role = (
                 connection.execute(
@@ -105,6 +146,32 @@ def run_migrations_online() -> None:
                 raise RuntimeError(
                     "protected capacity migrations require the exact least-privileged "
                     "NOLOGIN NOINHERIT owner role"
+                )
+            required_trial_columns = (
+                "id",
+                "state",
+                "cancellation_requested_at",
+                "next_attempt_at",
+                "autoscaler_pool_name",
+                "submit_priority",
+                "submitted_at",
+            )
+            missing_trial_columns = tuple(
+                column
+                for column in required_trial_columns
+                if not connection.execute(
+                    text(
+                        "SELECT has_column_privilege(current_user, "
+                        "'public.trials', :column, 'SELECT')"
+                    ),
+                    {"column": column},
+                ).scalar_one()
+            )
+            if missing_trial_columns:
+                raise RuntimeError(
+                    "protected capacity owner requires direct SELECT privileges on "
+                    "the demand-source columns of public.trials: "
+                    + ", ".join(missing_trial_columns)
                 )
 
             connection.exec_driver_sql(
