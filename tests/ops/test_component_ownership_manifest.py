@@ -867,7 +867,7 @@ def test_rollout_release_images_have_exact_manifest_owner() -> None:
         )
         == []
     )
-    assert len(rollout_images) == 8
+    assert len(rollout_images) == 9
 
 
 def test_rollout_roles_define_exact_primary_and_auxiliary_sets() -> None:
@@ -903,11 +903,43 @@ def test_release_image_matrix_is_derived_from_all_release_components() -> None:
 
     matrix = component_ownership.release_image_matrix(manifest)
 
-    assert len(matrix) == 14
+    assert len(matrix) == 15
     assert {entry["image_name"] for entry in matrix} == {
         component.release_digest for component in manifest.release_components()
     }
     assert all(entry["context"] == "." for entry in matrix)
+
+
+def test_capacity_manager_image_has_narrow_ownership_and_no_rollout_role() -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    component = next(
+        component for component in manifest.release_components() if component.id == "capacity-manager"
+    )
+
+    assert component.dockerfile == "deploy/Dockerfile.capacity-manager"
+    assert component.release_digest == "loom-capacity-manager"
+    assert component.runtime_policy == "start"
+    assert component.rollout_role == "none"
+    assert {
+        ".dockerignore",
+        "README.md",
+        "deploy/Dockerfile.capacity-manager",
+        "capacity_migrations/**",
+        "pyproject.toml",
+        "src/loom_capacity_manager/**",
+    } <= set(component.source_paths)
+    assert component_ownership.select_release_image_matrix(
+        manifest,
+        changed_paths=("deploy/Dockerfile.capacity-manager",),
+        force_all=False,
+    ) == (
+        {
+            "image": "capacity-manager",
+            "image_name": "loom-capacity-manager",
+            "dockerfile": "deploy/Dockerfile.capacity-manager",
+            "context": ".",
+        },
+    )
 
 
 def test_native_release_image_matrix_crosses_every_image_with_both_architectures() -> None:

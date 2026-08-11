@@ -1,0 +1,20 @@
+FROM python:3.11-slim
+
+ENV PIP_RETRIES=10 PIP_DEFAULT_TIMEOUT=60
+WORKDIR /app
+
+COPY pyproject.toml README.md ./
+COPY src/loom_capacity_manager ./src/loom_capacity_manager
+COPY capacity_migrations ./capacity_migrations
+RUN chmod -R a+rX ./src ./capacity_migrations && \
+    pip install --no-cache-dir -e .
+
+ARG LOOM_BUILD_SHA=unknown
+LABEL org.opencontainers.image.revision="${LOOM_BUILD_SHA}"
+RUN install -d -m 0755 /opt/loom && \
+    printf '%s\n' "${LOOM_BUILD_SHA}" > /opt/loom/build-sha && \
+    chmod 0444 /opt/loom/build-sha
+
+EXPOSE 8443
+USER 65532:65532
+CMD ["python", "-m", "loom_capacity_manager"]

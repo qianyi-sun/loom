@@ -293,6 +293,7 @@ jobs:
               for item in builds
               if item["architecture"] == "amd64"
               and item["image"] not in {
+                  "capacity-manager",
                   "personal-dev-activation-agent",
                   "personal-dev-builder",
                   "pipeline-orchestrator",
@@ -328,7 +329,7 @@ jobs:
       needs.plan.outputs.images != '[]'
     runs-on: >-
       ${{ matrix.architecture == 'arm64' && fromJSON('["ubuntu-24.04-arm"]') ||
-          (matrix.image == 'personal-dev-activation-agent' || matrix.image == 'personal-dev-builder' || matrix.image == 'pipeline-orchestrator') && fromJSON('["ubuntu-24.04"]') ||
+          (matrix.image == 'capacity-manager' || matrix.image == 'personal-dev-activation-agent' || matrix.image == 'personal-dev-builder' || matrix.image == 'pipeline-orchestrator') && fromJSON('["ubuntu-24.04"]') ||
           fromJSON(needs.image-route.outputs.routes)[matrix.image] }}
     timeout-minutes: 45
     permissions:
