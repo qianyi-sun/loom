@@ -10,7 +10,8 @@ surface that as `False` from the corresponding methods so callers can log
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.parse import quote
@@ -116,6 +117,9 @@ class HttpControlPlaneClient:
         pool_name: str = "default",
         supported_work_kinds: Sequence[str] | None = None,
         capability_snapshot_digest: str | None = None,
+        input_cache_capacity_bytes: int | None = None,
+        input_cache_reserved_bytes: int | None = None,
+        input_cache_ready_bytes: int | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "hostname": hostname,
@@ -130,6 +134,19 @@ class HttpControlPlaneClient:
             payload["supported_work_kinds"] = list(supported_work_kinds)
         if capability_snapshot_digest is not None:
             payload["capability_snapshot_digest"] = capability_snapshot_digest
+        cache_values = (
+            input_cache_capacity_bytes,
+            input_cache_reserved_bytes,
+            input_cache_ready_bytes,
+        )
+        if any(value is not None for value in cache_values):
+            if any(value is None for value in cache_values):
+                raise ValueError("input cache registration fields must be supplied together")
+            payload.update(
+                input_cache_capacity_bytes=input_cache_capacity_bytes,
+                input_cache_reserved_bytes=input_cache_reserved_bytes,
+                input_cache_ready_bytes=input_cache_ready_bytes,
+            )
         client, owned = self._http()
         try:
             r = await client.post(
@@ -413,6 +430,50 @@ class HttpControlPlaneClient:
             range_start=range_start,
         )
 
+    @asynccontextmanager
+    async def stream_execution_attempt_input_file(
+        self,
+        *,
+        attempt_id: UUID,
+        binding_name: str,
+        item_key: str,
+        file_index: int,
+        file_sha256: str,
+        claim: ExecutionAttemptClaimHeaders,
+        range_start: int | None = None,
+    ) -> AsyncIterator[httpx.Response]:
+        """Stream one claim-bound file with the fixed input timeout contract."""
+
+        if file_index < 0 or (range_start is not None and range_start < 0):
+            raise ValueError("file index and range start must be non-negative")
+        path = self._execution_attempt_input_path(
+            attempt_id=attempt_id,
+            binding_name=binding_name,
+            item_key=item_key,
+        )
+        headers = {
+            **self._headers,
+            **claim.as_headers(),
+            "If-Match": self._quoted_etag(file_sha256),
+        }
+        if range_start is not None:
+            headers["Range"] = f"bytes={range_start}-"
+        client, owned = self._http()
+        timeout = httpx.Timeout(connect=10.0, read=60.0, write=60.0, pool=10.0)
+        try:
+            async with client.stream(
+                "GET",
+                f"{path}/files/{file_index}",
+                headers=headers,
+                timeout=timeout,
+                follow_redirects=False,
+            ) as response:
+                response.raise_for_status()
+                yield response
+        finally:
+            if owned:
+                await client.aclose()
+
     async def get_acceptance_fault_arm(
         self,
         *,
@@ -661,7 +722,12 @@ class HttpControlPlaneClient:
         try:
             # AsyncClient.get buffers the body before returning.  The Response
             # therefore remains readable after an owned one-shot client closes.
-            r = await client.get(path, headers=headers)
+            r = await client.get(
+                path,
+                headers=headers,
+                timeout=httpx.Timeout(connect=10.0, read=60.0, write=60.0, pool=10.0),
+                follow_redirects=False,
+            )
             r.raise_for_status()
             return r
         finally:

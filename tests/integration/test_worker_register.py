@@ -116,6 +116,71 @@ def test_register_persists_worker_capacity_and_pool(
     assert row[1] == "gb10"
 
 
+def test_register_persists_closed_input_cache_capacity_snapshot(
+    app,
+    worker_token,
+    postgres_url: str,
+):  # type: ignore[no-untyped-def]
+    with TestClient(app) as client:
+        response = client.post(
+            "/workers/register",
+            headers={"Authorization": f"Bearer {worker_token}"},
+            json={
+                "hostname": "cache-worker",
+                "version": "0.1",
+                "capabilities": [_VALID_CAP],
+                "supported_work_kinds": ["trial", "execution_attempt"],
+                "input_cache_capacity_bytes": 1_649_267_441_664,
+                "input_cache_reserved_bytes": 4096,
+                "input_cache_ready_bytes": 8192,
+            },
+        )
+        assert response.status_code == 200, response.text
+        worker_id = response.json()["worker_id"]
+
+    engine = create_engine(postgres_url)
+    try:
+        with engine.connect() as connection:
+            row = connection.execute(
+                text(
+                    "SELECT input_cache_capacity_bytes,input_cache_reserved_bytes,"
+                    "input_cache_ready_bytes FROM workers WHERE id=:worker_id"
+                ),
+                {"worker_id": worker_id},
+            ).one()
+    finally:
+        engine.dispose()
+
+    assert tuple(row) == (1_649_267_441_664, 4096, 8192)
+
+
+def test_register_rejects_partial_or_overcommitted_cache_snapshot(
+    app, worker_token
+):  # type: ignore[no-untyped-def]
+    with TestClient(app) as client:
+        partial = client.post(
+            "/workers/register",
+            headers={"Authorization": f"Bearer {worker_token}"},
+            json={
+                "capabilities": [_VALID_CAP],
+                "input_cache_capacity_bytes": 100,
+            },
+        )
+        overcommitted = client.post(
+            "/workers/register",
+            headers={"Authorization": f"Bearer {worker_token}"},
+            json={
+                "capabilities": [_VALID_CAP],
+                "input_cache_capacity_bytes": 100,
+                "input_cache_reserved_bytes": 101,
+                "input_cache_ready_bytes": 0,
+            },
+        )
+
+    assert partial.status_code == 400
+    assert overcommitted.status_code == 400
+
+
 def test_register_rejects_missing_capabilities(app, worker_token):  # type: ignore[no-untyped-def]
     with TestClient(app) as client:
         r = client.post(

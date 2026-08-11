@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Any, Protocol
+from typing import Annotated, Any, Protocol, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
@@ -18,6 +18,7 @@ from loom.db.schema import (
     ExecutionAttemptRequest,
     ExecutionAttemptWorkerEvent,
     PipelineBudgetLedger,
+    PipelineInputMaterializationEvidence,
     PipelineStageRun,
 )
 from loom.pipeline.work_protocol import (
@@ -375,6 +376,19 @@ async def report_attempt_started(
             return replay
         if attempt.started_at is not None:
             raise HTTPException(status_code=409, detail="attempt_already_started")
+        stage = (
+            await session.execute(
+                select(PipelineStageRun).where(PipelineStageRun.id == attempt.stage_run_id)
+            )
+        ).scalar_one()
+        if stage.node_key.endswith(
+            ("acceptance_preflight_cold", "acceptance_preflight_warm")
+        ):
+            evidence = await session.get(PipelineInputMaterializationEvidence, attempt.id)
+            if evidence is None or evidence.input_view_sha256 != payload.input_view_digest:
+                raise HTTPException(
+                    status_code=409, detail="input_materialization_evidence_required"
+                )
         attempt.state = "running"
         attempt.started_at = datetime.now(UTC)
         attempt.container_id = payload.container_id
@@ -587,13 +601,8 @@ async def report_input_materialization_evidence(
         service = getattr(request.app.state, "input_materialization_evidence_service", None)
         if service is None:
             raise HTTPException(status_code=503, detail="input_materializer_unavailable")
-        evidence_sha256 = await service.persist(attempt=attempt, report=payload, session=session)
-        response = {
-            "attempt_id": str(attempt_id),
-            "worker_id": str(payload.worker_id),
-            "lease_epoch": lease_epoch,
-            "evidence_sha256": evidence_sha256,
-        }
+        evidence_ref = await service.persist(attempt=attempt, report=payload, session=session)
+        response = cast(dict[str, Any], evidence_ref.model_dump(mode="json"))
         await _journal_response(
             session,
             attempt_id=attempt_id,
