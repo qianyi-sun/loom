@@ -17,7 +17,7 @@ from loom.integrations.behavior.provider import (
     RotatingPipelineStepJwtReader,
     build_pipeline_anthropic_client,
 )
-from loom.integrations.behavior.stages import REGISTERED_STAGE_PROVIDER_MODES
+from loom.integrations.behavior.stage_credentials import REGISTERED_STAGE_PROVIDER_MODES
 from loom_worker.control_plane_client import (
     ExecutionAttemptClaimHeaders,
     HttpControlPlaneClient,

@@ -13,7 +13,7 @@ from loom.integrations.behavior.provider import (
     PipelineProviderAuthError,
     build_pipeline_anthropic_client,
 )
-from loom.integrations.behavior.stages import (
+from loom.integrations.behavior.stage_credentials import (
     StageProviderAuthority,
     provider_authority_for_request,
 )
