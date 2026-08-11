@@ -56,6 +56,7 @@ def _parser() -> argparse.ArgumentParser:
             "(distributed MinIO, whose RWO drive PVCs cannot be co-mounted)."
         ),
     )
+    parser.add_argument("--expected-drive-count", type=int, default=None)
     parser.add_argument("--filesystem-path", action="append", type=Path, default=None)
     parser.add_argument("--requested-by", default="staging-lifecycle-cronjob")
     return parser
@@ -63,6 +64,17 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.capacity_source == "minio-admin" and (
+        args.expected_drive_count is None or args.expected_drive_count < 1
+    ):
+        raise RuntimeError(
+            "--capacity-source minio-admin requires a positive "
+            "--expected-drive-count"
+        )
+    if args.capacity_source == "filesystem" and args.expected_drive_count is not None:
+        raise RuntimeError(
+            "--capacity-source filesystem cannot use --expected-drive-count"
+        )
     runtime = load_lifecycle_runtime()
     engine = build_lifecycle_engine(runtime.database)
     client = build_lifecycle_object_store_client(runtime.object_store)
@@ -81,6 +93,7 @@ def main(argv: list[str] | None = None) -> int:
                 endpoint_url=store.endpoint_url,
                 access_key=store.access_key,
                 secret_key=store.secret_key,
+                expected_drive_count=args.expected_drive_count,
             )
             capacity = collect_staging_capacity_from_drives(
                 namespace=args.namespace,
