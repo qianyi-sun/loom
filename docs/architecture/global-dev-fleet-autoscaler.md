@@ -10,8 +10,10 @@ This authority is not enabled by the checked-in development state:
 `deploy/environment-state/development.toml` disables both pool policies and
 both external supervisors. The candidate-aware personal-development lifecycle
 also does not create the per-instance external Slurm policy consumed by this
-supervisor. A candidate-backed environment can therefore become application
-`ready` without becoming an eligible input to this capacity path. The demand
+supervisor. Its capacity-agent publication goes instead to the shadow-only
+global fleet capacity manager and does not create that policy. A
+candidate-backed environment can therefore become application `ready` without
+becoming an eligible input to this executable capacity path. The demand
 contract also accepts a 40-character Git candidate SHA, whereas personal
 candidates use a 64-character content SHA-256; the two bindings are not
 interchangeable.

@@ -63,8 +63,9 @@ old/new rollout overlap is limited by the subject and account surge ceilings.
 
 ## Dynamic personal subject projection
 
-The lifecycle service registers a ready personal deployment through
-`PUT /v1/development-projections/{subject_id}`. The manager derives the
+After stable-route activation, the lifecycle service registers the personal
+deployment through `PUT /v1/development-projections/{subject_id}` before the
+environment can be marked ready. The manager derives the
 `dev-<name>` subject, its immutable owner account, and both physical-pool
 profiles from the active operator-owned fleet template in one serializable
 configuration epoch. The request binds the candidate publication, local
@@ -84,6 +85,12 @@ incarnation. Retrying a deployment rotates the reporter incarnation and
 fences the predecessor. The projection response and audit log never expose
 the token or its hash. All resulting allocations remain shadow-only while the
 global executable ceiling is zero.
+
+The independently installed capacity agent then captures protected lifecycle
+demand and publishes an exact, sequence-fenced report. Its readiness probe
+remains unavailable until a report succeeds. Personal lifecycle readiness is
+therefore gated on both the subject projection and the agent's initial demand
+publication, but neither event grants or launches physical capacity.
 
 ## Service surface
 

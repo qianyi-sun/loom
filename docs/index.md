@@ -14,6 +14,9 @@ migrations, research notes, and implementation plans live outside this tree in
   providers and operator-managed Slurm/vLLM endpoints.
 - **[Live event streaming](integrations/live-streaming.md)** — trial event SSE
   and cursor-based event reads.
+- **[Personal development environments](architecture/multi-dev-environments.md)**
+  — source sealing, candidate deployment, activation, capacity publication,
+  and current lifecycle limits.
 
 ## Author benchmarks and tasks
 

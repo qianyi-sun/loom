@@ -7,6 +7,11 @@ Pre-PR-C1b investigation: validates the planned Envoy filter shape
 before the gRPC xDS server is written. Run 2026-06-18 against Envoy
 v1.30 on Linux.
 
+Archived inputs:
+
+- [`bootstrap-a-minimal.yaml`](bootstrap-a-minimal.yaml)
+- [`bootstrap-b-per-connection.yaml`](bootstrap-b-per-connection.yaml)
+
 **TL;DR — pattern A wins** (CDS-only with per-connection cluster +
 header_match routing) **PAIRED with `:authority` CONNECT-target
 match** for hostname-level allowlisting. The cluster IPs alone are

@@ -68,7 +68,9 @@ preliminary/caveated rather than canonical #222 acceptance.
 
 ## Files
 
-- `per-task-results.json` — per-trial id, state, reward, llm_calls, failure_reason for all 86 tasks. Generated from `GET /api/v1/trials?batch_id=...` against the public-beta service.
+- [`per-task-results.json`](per-task-results.json) — per-trial id, state,
+  reward, llm_calls, and failure reason for all 86 tasks. Generated from
+  `GET /api/v1/trials?batch_id=...` against the public-beta service.
 
 ## Related
 

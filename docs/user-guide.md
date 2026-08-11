@@ -172,8 +172,9 @@ plugin; on macOS, install and start Docker Desktop, then verify
 
 Use this path only when the target Loom service has its personal-development
 controller, restricted builder, storage/database authorities, and independent
-activation agent enabled. The checked-in service configuration leaves this
-feature disabled by default.
+activation agent enabled, plus the global capacity-manager connection and
+candidate-independent capacity-agent runtime. The checked-in service
+configuration leaves this feature disabled by default.
 
 Authenticate to the target server, change to the Git worktree you want to
 deploy, and run:
@@ -209,7 +210,10 @@ loom dev status <name>
 controller. Candidate-backed destruction and `--keep-data` recovery are
 unavailable through the guarded API; `loom dev destroy` returns a conflict for
 these environments.
-Application `ready` also does not imply external worker slots are live. See
+
+Application `ready` confirms stable-route activation, capacity-agent
+installation, the shadow-only personal-subject projection, and an initial
+demand publication. It does not imply external worker slots are live. See
 [`Personal development environments`](architecture/multi-dev-environments.md)
 for the identity, source, build, activation, capacity, and limit contracts.
 

@@ -151,8 +151,8 @@ default     = false
 
 # Shared-fleet dev-instance controller. Disabled in ordinary/base deployments;
 # the operator enables it only on the management loom-service after provisioning
-# its fixture-admin credential, candidate images, Kubernetes RBAC, and external
-# Slurm supervisor.
+# its fixture-admin credential, candidate images, Kubernetes RBAC, global
+# capacity-manager projection authority, and trusted personal capacity agent.
 [service_config.dev_instances_enabled]
 used_by     = ["loom-service"]
 python_type = "bool"

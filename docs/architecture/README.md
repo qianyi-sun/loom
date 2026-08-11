@@ -43,7 +43,8 @@ than mixed with current behavior.
 - **[DRF scheduling](drf-scheduling.md)** — eligibility, fairness, claim
   fencing, and recovery.
 - **[Global fleet capacity manager](global-fleet-capacity-manager.md)** — the
-  current global and environment capacity authority boundary.
+  shadow-allocation service, personal subject projections, demand reports, and
+  the non-executable authority boundary.
 - **[Global development-fleet autoscaler](global-dev-fleet-autoscaler.md)** —
   implemented supervisor contract and the checked-in disabled boundary.
 - **[GB10 capacity](gb10-dynamic-capacity.md)** — inventory, health, dynamic
@@ -82,7 +83,8 @@ than mixed with current behavior.
 - **[Protected staging rollout](staging-rollout.md)** —
   candidate binding, locking, backup, evidence, and operator authority.
 - **[Personal development environments](multi-dev-environments.md)** —
-  opt-in source-fresh CLI/API lifecycle, identity, activation, and limits.
+  opt-in source-fresh CLI/API lifecycle, identity, activation, capacity
+  publication, and limits.
 - **[Multi-node topology](multi-node-topology.md)** — Postgres, MinIO,
   storage, anti-affinity, and disruption budgets.
 - **[PgBouncer transaction mode](pgbouncer.md)** —

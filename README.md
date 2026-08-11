@@ -195,6 +195,7 @@ Start with the user guide rather than copying commands from this README:
 | Install the CLI or run a local throwaway trial | [`docs/user-guide.md`](docs/user-guide.md) |
 | Submit from CLI to shared staging | [`docs/user-guide.md#quickstart-submit-from-the-cli-to-a-loom-server`](docs/user-guide.md#quickstart-submit-from-the-cli-to-a-loom-server) |
 | Use the web app | [`docs/user-guide.md#quickstart-submit-from-the-web-app`](docs/user-guide.md#quickstart-submit-from-the-web-app) |
+| Deploy a personal development environment | [`docs/user-guide.md#quickstart-deploy-a-personal-development-environment`](docs/user-guide.md#quickstart-deploy-a-personal-development-environment) |
 | Register or test a provider | [`docs/integrations/provider-onboarding.md`](docs/integrations/provider-onboarding.md) |
 | Upload and run user TaskSets | [`docs/architecture/user-brought-tasksets.md`](docs/architecture/user-brought-tasksets.md) |
 | Inspect usage and cost | [`docs/architecture/cost-and-rate-cards.md`](docs/architecture/cost-and-rate-cards.md) |

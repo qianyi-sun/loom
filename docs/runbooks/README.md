@@ -26,4 +26,5 @@ capacity workflow.
 
 Create a separate runbook only for a repeatable procedure with distinct safety,
 rollback, or coordination requirements. Put component behavior in architecture
-docs and one-off migration records in `archive/docs/runbooks/`.
+docs and one-off migration records in the
+[runbook archive](../../archive/docs/runbooks/).

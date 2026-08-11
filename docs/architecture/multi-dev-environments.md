@@ -4,7 +4,10 @@ Loom contains an opt-in controller for isolated, persistent development
 environments on the shared fixture. It is disabled by default:
 `LOOM_SVC_DEV_INSTANCES_ENABLED=false`. Enabling it also requires the fixture
 database authority, Kubernetes access, MinIO authority, an activation public
-key, and the restricted candidate-builder configuration.
+key, the restricted candidate-builder configuration, and the personal-capacity
+runtime. That runtime requires the global capacity-manager endpoint, distinct
+lifecycle and reporter credentials, an immutable capacity-agent image, and the
+operator-owned pool capability map.
 
 `loom service up` requires an explicit target. `--environment local` manages
 the Docker Compose stack; `--environment dev-<name>` drives the authenticated
@@ -19,7 +22,7 @@ library and HTTP interfaces.
 
 | Interface | Current behavior |
 | --- | --- |
-| `loom service up --environment dev-<name>` | Seals and uploads the selected source, or resolves an owned ready candidate supplied with `--candidate`; resolves the expected operation epoch, applies the exact candidate and capacity policy, and waits for the bound operation and environment unless `--no-wait` is set. |
+| `loom service up --environment dev-<name>` | Seals and uploads the selected source, or resolves an owned ready candidate supplied with `--candidate`; resolves the expected operation epoch, applies the exact candidate and capacity policy, and waits for activation plus the initial non-executable capacity publication unless `--no-wait` is set. |
 | `create_personal_dev_source_snapshot()` | Library API used by the CLI to seal a Git worktree into a deterministic source archive. |
 | `POST /api/v1/personal-dev-candidates` | Accepts a multipart `source` archive plus `source_sha256` and `archive_sha256`. Upload creates or returns an owner-scoped immutable candidate but does not start a build. |
 | `GET /api/v1/personal-dev-candidates[/{id}]` | Lists or reads visible candidates and their build state. |
@@ -169,8 +172,15 @@ rechecks the current intent immediately before mutation, re-observes the exact
 generation, and requires both the Control Plane Slurm controller and in-cluster
 worker capacity path to remain disabled. It alone applies the stable Services
 and Ingress and returns a signed local-activation digest. The management service
-has only the public key. After the acknowledgement, the reconciler marks the
-operation succeeded and the environment `ready`.
+has only the public key.
+
+After the acknowledgement, the reconciler converges the candidate-independent
+capacity agent and its protected state, prepares the personal subject against
+the global manager's current configuration epoch, and publishes it through
+`PUT /v1/development-projections/{subject_id}`. It then waits for the exact
+installed agent to become ready after its first successful demand report. Only
+after recording that non-executable projection and publication evidence does
+the reconciler mark the operation succeeded and the environment `ready`.
 
 The agent is packaged separately and has an operator-edited example at
 `deploy/dev-fleet/personal-dev-activation-agent.yaml.example`; Loom does not
@@ -196,11 +206,14 @@ operator-configurable through the schema-backed service settings.
 `min_slots` and `max_slots` are stored demand policy, not reserved physical
 capacity. Candidate activation deliberately verifies that the Control Plane
 Slurm controller and in-cluster worker path are disabled. The current
-candidate-aware path does not publish or execute an external worker-capacity
-grant, so `ready` means the immutable application generation and stable routes
-were acknowledged, not that worker slots are live. Candidate-backed drain,
-destruction, and `--keep-data` recovery are also unavailable through the
-guarded API. The separate global development-fleet supervisor consumes
-40-character Git candidate identities and existing per-instance external
-Slurm policies, so it cannot consume these 64-character personal-candidate
-bindings directly.
+candidate-aware path publishes its protected demand and subject configuration
+to the shadow-only global capacity manager, whose executable-new-capacity
+ceiling is fixed at zero. It does not receive or execute a worker-capacity
+grant. Consequently, `ready` confirms the immutable application generation,
+stable-route acknowledgement, capacity-agent installation, subject projection,
+and initial demand publication; it does not mean worker slots are live.
+Candidate-backed drain, destruction, and `--keep-data` recovery are also
+unavailable through the guarded API. The separate global development-fleet
+supervisor consumes 40-character Git candidate identities and existing
+per-instance external Slurm policies, so it cannot consume these 64-character
+personal-candidate bindings directly.

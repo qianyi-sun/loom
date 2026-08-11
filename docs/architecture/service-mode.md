@@ -20,10 +20,13 @@ and start Docker Desktop first and confirm
 Compose path above. A `dev-<name>` target authenticates to the configured Loom
 server, seals or reuses a personal candidate, and applies it through the
 candidate-aware environment API; it does not invoke local Compose or direct
-`kubectl`. The `staging` and `production` targets require a full Git candidate
-but deliberately refuse direct deployment and point to `loom cluster rollout`,
-which owns their approval and evidence workflow. `loom service down` and
-`status` remain local Compose commands.
+`kubectl`. Server-side readiness requires stable-route acknowledgement, a
+candidate-independent capacity-agent installation, and an initial
+non-executable demand publication to the global capacity manager; it does not
+promise live worker slots. The `staging` and `production` targets require a
+full Git candidate but deliberately refuse direct deployment and point to
+`loom cluster rollout`, which owns their approval and evidence workflow.
+`loom service down` and `status` remain local Compose commands.
 
 ## Service-prefix convention
 
@@ -744,7 +747,8 @@ host ports bind to
   trajectory writer + ATIF projector produce
 - [driver-protocol.md](driver-protocol.md) — sandbox contract the
   Worker calls
-- `../operator-runbook.md` — production deployment + ops
+- [Operator runbook](../runbooks/operator-runbook.md) — production deployment
+  and operations
 - `src/loom_control_plane/` — CP source
 - `src/loom_llm_gateway/` — Gateway source
 - `src/loom_worker/` — Worker source
