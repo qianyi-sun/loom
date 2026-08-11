@@ -1,0 +1,37 @@
+schema_version = 1
+namespace = "loom-dev"
+secret_name = "loom-capacity-manager"
+postgres_image = "postgres:17.4@sha256:304ab813518754228f9f792f79d6da36359b82d8ecf418096c636725f8c930ad"
+postgres_storage = "20Gi"
+
+[postgres_resources]
+cpu_request = "250m"
+memory_request = "512Mi"
+cpu_limit = "2"
+memory_limit = "4Gi"
+
+[migration_resources]
+cpu_request = "50m"
+memory_request = "128Mi"
+cpu_limit = "1"
+memory_limit = "1Gi"
+
+[manager_resources]
+cpu_request = "100m"
+memory_request = "256Mi"
+cpu_limit = "1"
+memory_limit = "1Gi"
+
+[dns]
+namespace = "kube-system"
+pod_label_key = "k8s-app"
+pod_label_value = "kube-dns"
+port = 53
+
+[capacity_agent_client]
+pod_label_key = "app.kubernetes.io/name"
+pod_label_value = "loom-capacity-agent"
+
+[lifecycle_client]
+pod_label_key = "app"
+pod_label_value = "loom-service"
