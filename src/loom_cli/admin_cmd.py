@@ -1910,6 +1910,10 @@ def dispatch(argv: list[str]) -> int:
     )
     sub = parser.add_subparsers(dest="admin_cmd", required=True)
 
+    from loom_cli.capacity_control_plane_cmd import add_capacity_control_plane_subparser
+
+    add_capacity_control_plane_subparser(sub)
+
     p_env_diagnostics = sub.add_parser(
         "env-diagnostics",
         help="Print redacted runtime environment diagnostics.",
