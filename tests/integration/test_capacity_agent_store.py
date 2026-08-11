@@ -22,7 +22,10 @@ from loom_capacity_agent.admission import (
     PreparedWorkerBindingV1,
     PreparedWorkerShapeV1,
 )
+from loom_capacity_agent.claim_guard import ClaimProposalV1, InertAttemptTransitionV1
+from loom_capacity_agent.claim_guard_store import DatabaseClaimGuard
 from loom_capacity_agent.contracts import AgentRegistrationV1
+from loom_capacity_agent.lifecycle_store import CapacityAttemptLifecycleStore
 from loom_capacity_agent.prepared_store import CapacityPreparedAdmissionStore
 from loom_capacity_agent.store import (
     CapacityAgentStore,
@@ -145,6 +148,21 @@ async def _owner_session(
 @asynccontextmanager
 async def _agent_session(database: dict[str, object]) -> AsyncIterator[AsyncSession]:
     engine = create_async_engine(make_url(_value(database, "agent_url")))
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with factory() as session, session.begin():
+            yield session
+    finally:
+        await engine.dispose()
+
+
+@asynccontextmanager
+async def _serializable_agent_session(
+    database: dict[str, object],
+) -> AsyncIterator[AsyncSession]:
+    engine = create_async_engine(
+        make_url(_value(database, "agent_url")), isolation_level="SERIALIZABLE"
+    )
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with factory() as session, session.begin():
@@ -953,3 +971,294 @@ async def test_owner_cannot_turn_prepared_records_executable_or_mutate_them(
         with pytest.raises(DBAPIError, match=r"append-only|check constraint"):
             async with _owner_session(capacity_guard_database) as (_, _, session):
                 await session.execute(text(statement))
+
+
+def _attempt_transition(
+    registration: AgentRegistrationV1,
+    attempt: ProtectedAttemptV1,
+    plan: PreparedAdmissionPlanV1,
+    *,
+    operation: str,
+    expected_sequence: int,
+    expected_state: str | None = None,
+    transition_id: UUID | None = None,
+) -> InertAttemptTransitionV1:
+    allowance = plan.placement_allowances[0]
+    state_pairs = {
+        "assign": ("pending-unassigned", "assigned"),
+        "withdraw": ("assigned", "pending-unassigned"),
+        "cancel": (expected_state or "pending-unassigned", "cancelled-terminal"),
+    }
+    source, target = state_pairs[operation]
+    assignment = operation in {"assign", "withdraw"} or source == "assigned"
+    return InertAttemptTransitionV1(
+        **registration.model_dump(mode="python"),
+        transition_id=transition_id or uuid4(),
+        protected_attempt_id=attempt.protected_attempt_id,
+        execution_generation=attempt.execution_generation,
+        requirements_digest=attempt.requirements_digest,
+        expected_transition_sequence=expected_sequence,
+        operation=operation,
+        expected_state=source,
+        target_state=target,
+        allowance_id=allowance.allowance_id if assignment else None,
+        plan_id=plan.plan_id if assignment else None,
+        admission_incarnation=plan.admission_incarnation if assignment else None,
+        manager_allocation_epoch=plan.manager_allocation_epoch if assignment else None,
+        pool_id=plan.pool_id if assignment else None,
+        shape_instance_id=allowance.shape_instance_id if assignment else None,
+        submission_intent_id=allowance.submission_intent_id if assignment else None,
+        transition_reason={
+            "assign": "manager-placement",
+            "withdraw": "allowance-withdrawn",
+            "cancel": "owner-cancelled-unclaimed",
+        }[operation],
+    )
+
+
+@pytest.mark.asyncio
+async def test_inert_attempt_lifecycle_is_exact_monotonic_and_terminal(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    registration, attempt, plan = await _initialize_prepared_plan(capacity_guard_database)
+    assign = _attempt_transition(
+        registration,
+        attempt,
+        plan,
+        operation="assign",
+        expected_sequence=0,
+    )
+    withdraw = _attempt_transition(
+        registration,
+        attempt,
+        plan,
+        operation="withdraw",
+        expected_sequence=1,
+    )
+    cancel = _attempt_transition(
+        registration,
+        attempt,
+        plan,
+        operation="cancel",
+        expected_sequence=2,
+    )
+    async with _agent_session(capacity_guard_database) as session:
+        prepared = CapacityPreparedAdmissionStore(session, registration=registration)
+        lifecycle = CapacityAttemptLifecycleStore(session, registration=registration)
+        await prepared.prepare_plan(plan)
+        assert await lifecycle.apply_transition(assign) == assign
+        assert await lifecycle.apply_transition(assign) == assign
+        conflicting = assign.model_copy(update={"transition_reason": "conflicting-replay"})
+        with pytest.raises(DBAPIError, match="conflicting inert lifecycle replay"):
+            await lifecycle.apply_transition(conflicting)
+        assert await lifecycle.apply_transition(withdraw) == withdraw
+        assert await lifecycle.apply_transition(cancel) == cancel
+
+    async with _owner_session(capacity_guard_database) as (_, _, session):
+        rows = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT transition_sequence, lifecycle_state, executable "
+                        "FROM loom_capacity_guard.attempt_lifecycle_events "
+                        "ORDER BY transition_sequence"
+                    )
+                )
+            )
+            .mappings()
+            .all()
+        )
+        assert [dict(row) for row in rows] == [
+            {
+                "transition_sequence": 0,
+                "lifecycle_state": "pending-unassigned",
+                "executable": False,
+            },
+            {"transition_sequence": 1, "lifecycle_state": "assigned", "executable": False},
+            {
+                "transition_sequence": 2,
+                "lifecycle_state": "pending-unassigned",
+                "executable": False,
+            },
+            {
+                "transition_sequence": 3,
+                "lifecycle_state": "cancelled-terminal",
+                "executable": False,
+            },
+        ]
+        assert (
+            await session.execute(
+                text("SELECT count(*) FROM loom_capacity_guard.protected_claim_leases")
+            )
+        ).scalar_one() == 0
+
+    late = _attempt_transition(
+        registration,
+        attempt,
+        plan,
+        operation="assign",
+        expected_sequence=3,
+    )
+    with pytest.raises(DBAPIError, match="lifecycle compare-and-set"):
+        async with _agent_session(capacity_guard_database) as session:
+            await CapacityAttemptLifecycleStore(
+                session, registration=registration
+            ).apply_transition(late)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_inert_assignment_allows_one_transition(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    registration, attempt, plan = await _initialize_prepared_plan(capacity_guard_database)
+    first = _attempt_transition(
+        registration,
+        attempt,
+        plan,
+        operation="assign",
+        expected_sequence=0,
+    )
+    second = _attempt_transition(
+        registration,
+        attempt,
+        plan,
+        operation="assign",
+        expected_sequence=0,
+    )
+    async with _agent_session(capacity_guard_database) as session:
+        await CapacityPreparedAdmissionStore(
+            session, registration=registration
+        ).prepare_plan(plan)
+
+    async def assign(transition: InertAttemptTransitionV1) -> InertAttemptTransitionV1:
+        async with _agent_session(capacity_guard_database) as session:
+            return await CapacityAttemptLifecycleStore(
+                session, registration=registration
+            ).apply_transition(transition)
+
+    results = await asyncio.gather(assign(first), assign(second), return_exceptions=True)
+    assert sum(isinstance(result, InertAttemptTransitionV1) for result in results) == 1
+    assert sum(isinstance(result, DBAPIError) for result in results) == 1
+
+
+@pytest.mark.asyncio
+async def test_inert_assignment_rechecks_current_workload_eligibility(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    registration, attempt, plan = await _initialize_prepared_plan(capacity_guard_database)
+    async with _agent_session(capacity_guard_database) as session:
+        await CapacityPreparedAdmissionStore(
+            session, registration=registration
+        ).prepare_plan(plan)
+
+    admin = create_engine(_value(capacity_guard_database, "admin_url"))
+    try:
+        with admin.begin() as connection:
+            connection.execute(
+                Trial.__table__.update()
+                .where(Trial.id == attempt.trial_id)
+                .values(cancellation_requested_at=datetime.now(UTC))
+            )
+    finally:
+        admin.dispose()
+
+    transition = _attempt_transition(
+        registration,
+        attempt,
+        plan,
+        operation="assign",
+        expected_sequence=0,
+    )
+    with pytest.raises(DBAPIError, match="prepared allowance"):
+        async with _agent_session(capacity_guard_database) as session:
+            await CapacityAttemptLifecycleStore(
+                session, registration=registration
+            ).apply_transition(transition)
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_records_and_disabled_activation_are_append_only(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    registration, attempt, plan = await _initialize_prepared_plan(capacity_guard_database)
+    assign = _attempt_transition(
+        registration,
+        attempt,
+        plan,
+        operation="assign",
+        expected_sequence=0,
+    )
+    async with _agent_session(capacity_guard_database) as session:
+        await CapacityPreparedAdmissionStore(
+            session, registration=registration
+        ).prepare_plan(plan)
+        await CapacityAttemptLifecycleStore(
+            session, registration=registration
+        ).apply_transition(assign)
+
+    statements = (
+        "UPDATE loom_capacity_guard.claim_guard_activation SET activation_state = 'enabled'",
+        "DELETE FROM loom_capacity_guard.attempt_lifecycle_events",
+        "TRUNCATE loom_capacity_guard.protected_claim_leases",
+    )
+    for statement in statements:
+        with pytest.raises(DBAPIError, match=r"append-only|check constraint"):
+            async with _owner_session(capacity_guard_database) as (_, _, session):
+                await session.execute(text(statement))
+
+
+@pytest.mark.asyncio
+async def test_database_claim_guard_inspects_exact_bindings_but_always_denies(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    registration, attempt, plan = await _initialize_prepared_plan(capacity_guard_database)
+    bootstrap, worker = _prepared_worker_bindings(registration, plan)
+    assignment = _attempt_transition(
+        registration,
+        attempt,
+        plan,
+        operation="assign",
+        expected_sequence=0,
+    )
+    async with _agent_session(capacity_guard_database) as session:
+        prepared = CapacityPreparedAdmissionStore(session, registration=registration)
+        await prepared.prepare_plan(plan)
+        await prepared.register_bootstrap(bootstrap)
+        await prepared.record_prepared_worker(worker)
+        await CapacityAttemptLifecycleStore(
+            session, registration=registration
+        ).apply_transition(assignment)
+
+    allowance = plan.placement_allowances[0]
+    proposal = ClaimProposalV1(
+        **registration.model_dump(mode="python"),
+        proposal_id=uuid4(),
+        protected_attempt_id=attempt.protected_attempt_id,
+        execution_generation=attempt.execution_generation,
+        requirements_digest=attempt.requirements_digest,
+        expected_transition_sequence=1,
+        allowance_id=allowance.allowance_id,
+        plan_id=plan.plan_id,
+        admission_incarnation=plan.admission_incarnation,
+        manager_allocation_epoch=plan.manager_allocation_epoch,
+        pool_id=plan.pool_id,
+        shape_instance_id=allowance.shape_instance_id,
+        submission_intent_id=allowance.submission_intent_id,
+        worker_id=worker.worker_id,
+        worker_incarnation=worker.worker_incarnation,
+        bootstrap_id=worker.bootstrap_id,
+        proposed_claim_epoch=1,
+    )
+    async with _serializable_agent_session(capacity_guard_database) as session:
+        guard = DatabaseClaimGuard(session, registration=registration)
+        exact = await guard.evaluate(proposal)
+        assert exact.reason == "activation-disabled"
+        assert exact.admitted is False
+        assert exact.claim_id is None
+        mismatch = await guard.evaluate(proposal.model_copy(update={"worker_id": uuid4()}))
+        assert mismatch.reason == "not-admitted"
+        assert mismatch.admitted is False
+
+    with pytest.raises(DBAPIError, match="SERIALIZABLE"):
+        async with _agent_session(capacity_guard_database) as session:
+            await DatabaseClaimGuard(session, registration=registration).evaluate(proposal)

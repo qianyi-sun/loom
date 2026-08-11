@@ -38,6 +38,9 @@ EXPECTED_GUARD_TABLES = {
     "prepared_placement_allowances",
     "prepared_bootstrap_bindings",
     "prepared_worker_bindings",
+    "claim_guard_activation",
+    "attempt_lifecycle_events",
+    "protected_claim_leases",
 }
 
 
@@ -53,7 +56,7 @@ async def test_guard_schema_startup_returns_numeric_head(
 ) -> None:
     engine = create_async_engine(_value(capacity_guard_database, "migrator_url"))
     try:
-        assert await assert_capacity_guard_schema_at_head(engine) == 3
+        assert await assert_capacity_guard_schema_at_head(engine) == 4
     finally:
         await engine.dispose()
 
@@ -180,7 +183,7 @@ def test_guard_schema_has_exact_owner_and_preserves_public_application_tables(
             revision = connection.execute(
                 text("SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version")
             ).scalar_one()
-            assert revision == "guard_0003"
+            assert revision == "guard_0004"
             public_before = capacity_guard_database["public_tables_before"]
             assert isinstance(public_before, frozenset)
             assert frozenset(inspect(connection).get_table_names(schema="public")) == public_before
@@ -225,6 +228,25 @@ def test_guard_schema_has_exact_owner_and_preserves_public_application_tables(
                 .all()
             )
             assert function_owners == [owner]
+
+            activation = (
+                connection.execute(
+                    text(
+                        "SELECT activation_state, authority_mode, activation_epoch, "
+                        "executable_new_capacity_ceiling, live_claim_entry_enabled "
+                        "FROM loom_capacity_guard.claim_guard_activation"
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            assert dict(activation) == {
+                "activation_state": "disabled",
+                "authority_mode": "disabled",
+                "activation_epoch": 0,
+                "executable_new_capacity_ceiling": 0,
+                "live_claim_entry_enabled": False,
+            }
     finally:
         engine.dispose()
 
@@ -448,6 +470,12 @@ def test_candidate_role_has_no_protected_privileges(
                 "SELECT loom_capacity_guard.capture_demand_observation("
                 "'00000000-0000-0000-0000-000000000001'::uuid, 0, 100)",
                 "SELECT loom_capacity_guard.prepare_inert_admission_plan("
+                "'00000000-0000-0000-0000-000000000001'::uuid, '{}'::jsonb, "
+                "'{}'::bytea, '" + "a" * 64 + "')",
+                "SELECT loom_capacity_guard.apply_inert_attempt_transition("
+                "'00000000-0000-0000-0000-000000000001'::uuid, '{}'::jsonb, "
+                "'{}'::bytea, '" + "a" * 64 + "')",
+                "SELECT loom_capacity_guard.inspect_inert_claim_proposal("
                 "'00000000-0000-0000-0000-000000000001'::uuid, '{}'::jsonb, "
                 "'{}'::bytea, '" + "a" * 64 + "')",
             ]

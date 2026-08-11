@@ -142,3 +142,20 @@ def test_prepared_admission_migration_remains_zero_executable_and_projection_rea
     assert "update loom_capacity_guard.trial_attempts" not in lowered
     assert "sbatch" not in lowered
     assert "scancel" not in lowered
+
+
+def test_disconnected_claim_guard_has_no_live_entry_or_candidate_mutation() -> None:
+    source = Path(
+        "capacity_guard_migrations/versions/guard_0004_disconnected_claim_guard.py"
+    ).read_text(encoding="utf-8")
+    lowered = source.lower()
+    assert "executable_new_capacity_ceiling = 0" in lowered
+    assert "live_claim_entry_enabled = false" in lowered
+    assert "executable = false" in lowered
+    assert "insert into loom_capacity_guard.protected_claim_leases" not in lowered
+    assert "insert into public.trials" not in lowered
+    assert "update public.trials" not in lowered
+    assert "delete from public.trials" not in lowered
+    assert "update loom_capacity_guard.trial_attempts" not in lowered
+    assert "sbatch" not in lowered
+    assert "scancel" not in lowered
