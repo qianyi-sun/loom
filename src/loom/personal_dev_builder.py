@@ -26,6 +26,10 @@ from loom.personal_dev_candidate import (
     PersonalDevCandidateRecord,
     validate_personal_dev_candidate_publication,
 )
+from loom.personal_dev_candidate_gc import (
+    personal_dev_source_object_keys,
+    validate_personal_dev_registry_prefix,
+)
 from loom.personal_dev_source import (
     PersonalDevSourceError,
     verify_personal_dev_source_snapshot,
@@ -98,6 +102,7 @@ class PersonalDevBuildCoordinator:
     executor: PersonalDevBuildExecutor
     builder_id: str
     lease_seconds: int
+    registry_prefix: str | None = None
     heartbeat_interval_seconds: float | None = None
 
     def __post_init__(self) -> None:
@@ -109,6 +114,8 @@ class PersonalDevBuildCoordinator:
             raise ValueError("builder_id must be a non-empty bounded identifier")
         if type(self.lease_seconds) is not int or self.lease_seconds <= 0:
             raise ValueError("lease_seconds must be a positive integer")
+        if self.registry_prefix is not None:
+            validate_personal_dev_registry_prefix(self.registry_prefix)
         if self.heartbeat_interval_seconds is not None and (
             self.heartbeat_interval_seconds <= 0
             or self.heartbeat_interval_seconds >= self.lease_seconds
@@ -124,6 +131,7 @@ class PersonalDevBuildCoordinator:
             builder_id=self.builder_id,
             now=now,
             lease_seconds=self.lease_seconds,
+            registry_prefix=self.registry_prefix,
         )
         if registration is None:
             return False
@@ -229,13 +237,6 @@ class SyncObjectStore(Protocol):
     def get_object(self, **kwargs: Any) -> Mapping[str, object]: ...
 
 
-def _canonical_source_key(candidate: PersonalDevCandidateRecord) -> str:
-    return (
-        f"personal-dev/sources/{candidate.owner_team_id}/{candidate.owner_user_id}/"
-        f"{candidate.candidate_sha}/{candidate.archive_sha256}.tar"
-    )
-
-
 @dataclass(slots=True)
 class S3PersonalDevBuildSource:
     """Reacquire and independently verify one exact intake object."""
@@ -259,7 +260,7 @@ class S3PersonalDevBuildSource:
             raise PersonalDevSourceError(
                 "personal-dev source object bucket is not authoritative"
             )
-        if candidate.object_key != _canonical_source_key(candidate):
+        if candidate.object_key not in personal_dev_source_object_keys(candidate):
             raise PersonalDevSourceError("personal-dev source object key is not canonical")
         if not 0 < candidate.archive_size_bytes <= self.max_archive_bytes:
             raise PersonalDevSourceError(

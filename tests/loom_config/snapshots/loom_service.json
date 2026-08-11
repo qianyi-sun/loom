@@ -324,6 +324,21 @@
     "default": "PosixPath('/usr/bin/skopeo')",
     "required": false
   },
+  "personal_dev_candidate_gc_lease_sec": {
+    "annotation": "<class 'int'>",
+    "default": "900",
+    "required": false
+  },
+  "personal_dev_candidate_gc_poll_interval_sec": {
+    "annotation": "<class 'float'>",
+    "default": "30.0",
+    "required": false
+  },
+  "personal_dev_candidate_gc_retention_sec": {
+    "annotation": "<class 'int'>",
+    "default": "86400",
+    "required": false
+  },
   "personal_dev_candidate_retained_bytes_limit": {
     "annotation": "<class 'int'>",
     "default": "3221225472",

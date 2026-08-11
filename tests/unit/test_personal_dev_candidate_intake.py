@@ -17,6 +17,7 @@ from loom.personal_dev_candidate import (
     PERSONAL_DEV_COMPONENTS,
     PERSONAL_DEV_PLATFORMS,
     CandidateRegistration,
+    PersonalDevArtifactCollectionInProgressError,
     PersonalDevCandidateQuotaError,
     PersonalDevCandidateRecord,
     personal_dev_image_set_manifest_digest,
@@ -107,16 +108,21 @@ class _ObjectStore:
     def __init__(self) -> None:
         self.objects: dict[tuple[str, str], bytes] = {}
         self.metadata: dict[tuple[str, str], dict[str, str]] = {}
+        self.version = 0
+        self.deleted: list[dict[str, object]] = []
 
-    def put_object(self, **kwargs: object) -> None:
+    def put_object(self, **kwargs: object) -> dict[str, str]:
         body = kwargs["Body"]
         assert hasattr(body, "read")
         payload = body.read()  # type: ignore[union-attr]
         key = (str(kwargs["Bucket"]), str(kwargs["Key"]))
         self.objects[key] = payload
         self.metadata[key] = dict(kwargs["Metadata"])  # type: ignore[arg-type]
+        self.version += 1
+        return {"VersionId": f"v{self.version}"}
 
     def delete_object(self, **kwargs: object) -> None:
+        self.deleted.append(dict(kwargs))
         key = (str(kwargs["Bucket"]), str(kwargs["Key"]))
         self.objects.pop(key, None)
         self.metadata.pop(key, None)
@@ -165,6 +171,7 @@ async def test_verified_upload_is_content_addressed_and_enqueues_one_build(
     assert result.candidate.build_contract_sha256 == PERSONAL_DEV_BUILD_CONTRACT_SHA256
     assert len(result.candidate.candidate_sha) == 64
     assert result.candidate.object_key.startswith(f"personal-dev/sources/{_TEAM}/{_OWNER}/")
+    assert f"/{result.candidate.source_generation_id}/" in result.candidate.object_key
     assert result.build_attempt is None
     object_key = (result.candidate.object_bucket, result.candidate.object_key)
     assert len(object_store.objects[object_key]) == result.candidate.archive_size_bytes
@@ -199,6 +206,62 @@ async def test_exact_retry_is_idempotent_and_does_not_enqueue_another_build(
     assert second.build_attempt is None
     assert len(registry.by_identity) == 1
     assert len(object_store.objects) == 1
+    assert len(object_store.deleted) == 1
+    assert object_store.deleted[0]["Key"] != first.candidate.object_key
+
+
+async def test_collection_race_removes_rejected_reupload_and_returns_conflict(
+    tmp_path: Path,
+) -> None:
+    class _CollectingRegistry(_Registry):
+        async def register(
+            self,
+            requested: PersonalDevCandidateRecord,
+        ) -> CandidateRegistration:
+            self.calls += 1
+            raise PersonalDevArtifactCollectionInProgressError(
+                "personal-dev candidate artifacts are being collected"
+            )
+
+    object_store = _ObjectStore()
+    with pytest.raises(HTTPException) as exc:
+        await _intake(
+            tmp_path,
+            registry=_CollectingRegistry(),
+            object_store=object_store,
+        )
+
+    assert exc.value.status_code == 409
+    assert object_store.objects == {}
+    assert object_store.deleted[0]["VersionId"] == "v1"
+
+
+async def test_collection_race_deletes_only_its_unique_unversioned_generation(
+    tmp_path: Path,
+) -> None:
+    class _CollectingRegistry(_Registry):
+        async def register(
+            self,
+            requested: PersonalDevCandidateRecord,
+        ) -> CandidateRegistration:
+            raise PersonalDevArtifactCollectionInProgressError("collecting")
+
+    class _UnversionedObjectStore(_ObjectStore):
+        def put_object(self, **kwargs: object) -> None:
+            super().put_object(**kwargs)
+
+    object_store = _UnversionedObjectStore()
+    with pytest.raises(HTTPException) as exc:
+        await _intake(
+            tmp_path,
+            registry=_CollectingRegistry(),
+            object_store=object_store,
+        )
+
+    assert exc.value.status_code == 409
+    assert object_store.objects == {}
+    assert len(object_store.deleted) == 1
+    assert "VersionId" not in object_store.deleted[0]
 
 
 async def test_digest_mismatch_and_oversize_fail_before_publication(tmp_path: Path) -> None:

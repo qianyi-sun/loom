@@ -40,6 +40,7 @@ PERSONAL_DEV_BUILD_CONTRACT_SHA256 = hashlib.sha256(
 ).hexdigest()
 
 CandidateStatus = Literal["uploaded", "queued", "building", "ready", "failed"]
+CandidateArtifactState = Literal["retained", "collecting", "collected"]
 BuildAttemptState = Literal["queued", "claimed", "running", "succeeded", "failed"]
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _OCI_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
@@ -50,6 +51,10 @@ _PROTOCOL_VALUE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}")
 
 class PersonalDevCandidateQuotaError(RuntimeError):
     """An owner-scoped retained artifact limit is exhausted."""
+
+
+class PersonalDevArtifactCollectionInProgressError(RuntimeError):
+    """A candidate re-upload raced its active artifact collection lease."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +96,7 @@ class PersonalDevCandidateRecord:
     manifest_json: Mapping[str, object]
     object_bucket: str
     object_key: str
+    source_generation_id: UUID
     archive_size_bytes: int
     status: CandidateStatus
     created_at: datetime
@@ -100,6 +106,16 @@ class PersonalDevCandidateRecord:
     publication_sha256: str | None = None
     failure_reason: str | None = None
     ready_at: datetime | None = None
+    registry_prefix: str | None = None
+    artifact_state: CandidateArtifactState = "retained"
+    artifact_gc_lease_epoch: int = 0
+    artifact_gc_unreferenced_at: datetime | None = None
+    artifact_gc_claimed_by: str | None = None
+    artifact_gc_blocked_reason: str | None = None
+    artifact_gc_lease_expires_at: datetime | None = None
+    artifact_gc_manifest_json: Mapping[str, object] | None = None
+    artifact_gc_manifest_sha256: str | None = None
+    artifact_collected_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -318,6 +334,7 @@ __all__ = [
     "CandidateRegistration",
     "CandidateRegistry",
     "CandidateStatus",
+    "PersonalDevArtifactCollectionInProgressError",
     "PersonalDevCandidateBuildAttemptRecord",
     "PersonalDevCandidateLimits",
     "PersonalDevCandidateQuotaError",

@@ -21,6 +21,11 @@ from loom.personal_dev_candidate import (
     PERSONAL_DEV_PLATFORMS,
     CandidateRegistration,
 )
+from loom.personal_dev_candidate_gc import (
+    PersonalDevArtifactGcManifest,
+    personal_dev_registry_tag,
+    validate_personal_dev_registry_prefix,
+)
 
 _OCI_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 _REGISTRY_REPOSITORY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}")
@@ -40,6 +45,10 @@ class BoundedCommandRunner(Protocol):
 
 class ExternalToolError(RuntimeError):
     """A trusted external tool failed without exposing its raw diagnostics."""
+
+    def __init__(self, message: str, *, registry_object_absent: bool = False) -> None:
+        super().__init__(message)
+        self.registry_object_absent = registry_object_absent
 
 
 async def _read_bounded(
@@ -111,7 +120,7 @@ class AsyncBoundedCommandRunner:
             _read_bounded(process.stderr, max_bytes=_MAX_TOOL_STDERR_BYTES)
         )
         try:
-            stdout, _stderr, return_code = await asyncio.wait_for(
+            stdout, stderr, return_code = await asyncio.wait_for(
                 asyncio.gather(stdout_task, stderr_task, process.wait()),
                 timeout=timeout_seconds,
             )
@@ -135,7 +144,16 @@ class AsyncBoundedCommandRunner:
             raise ExternalToolError("trusted external tool timed out") from None
         if return_code != 0:
             raise ExternalToolError(
-                f"trusted external tool failed with exit code {return_code}"
+                f"trusted external tool failed with exit code {return_code}",
+                registry_object_absent=any(
+                    marker in stderr.lower()
+                    for marker in (
+                        b"manifest unknown",
+                        b"name unknown",
+                        b"status code: 404",
+                        b"status 404",
+                    )
+                ),
             )
         return stdout
 
@@ -299,9 +317,11 @@ def _repository(value: str) -> str:
 def _attempt_tag(registration: CandidateRegistration, *, suffix: str) -> str:
     attempt = registration.build_attempt
     assert attempt is not None
-    return (
-        f"pdc-{registration.candidate.candidate_sha[:12]}-{attempt.id.hex}-"
-        f"l{attempt.lease_epoch:016x}-{suffix}"
+    return personal_dev_registry_tag(
+        registration.candidate,
+        attempt,
+        lease_epoch=attempt.lease_epoch,
+        suffix=suffix,
     )
 
 
@@ -437,10 +457,57 @@ class SkopeoBuildxPersonalDevRegistryPublisher:
         return f"{repository}@{index_digest}", index_digest
 
 
+@dataclass(slots=True)
+class SkopeoPersonalDevRegistryArtifactCollector:
+    """Delete only attempt-isolated registry tags from one sealed manifest."""
+
+    runner: BoundedCommandRunner
+    skopeo_executable: str
+    registry_auth_file: Path
+    expected_registry_prefix: str
+    timeout_seconds: float = 300.0
+
+    def __post_init__(self) -> None:
+        self.skopeo_executable = _executable(self.skopeo_executable, label="skopeo")
+        if (
+            not self.registry_auth_file.is_absolute()
+            or self.registry_auth_file.name != "config.json"
+        ):
+            raise ValueError("personal-dev registry authentication file is invalid")
+        try:
+            validate_personal_dev_registry_prefix(self.expected_registry_prefix)
+        except ValueError as exc:
+            raise ValueError("personal-dev registry cleanup prefix is invalid") from exc
+        if self.timeout_seconds <= 0:
+            raise ValueError("personal-dev registry cleanup timeout is invalid")
+
+    async def collect(self, manifest: PersonalDevArtifactGcManifest) -> None:
+        manifest.validate()
+        for reference in manifest.registry_tags:
+            if not reference.startswith(f"{self.expected_registry_prefix}/"):
+                raise RuntimeError("personal-dev registry cleanup prefix changed")
+            try:
+                await self.runner.run(
+                    [
+                        self.skopeo_executable,
+                        "delete",
+                        "--authfile",
+                        str(self.registry_auth_file),
+                        f"docker://{reference}",
+                    ],
+                    timeout_seconds=self.timeout_seconds,
+                    max_output_bytes=1024 * 1024,
+                )
+            except ExternalToolError as exc:
+                if not exc.registry_object_absent:
+                    raise
+
+
 __all__ = [
     "AsyncBoundedCommandRunner",
     "BoundedCommandRunner",
     "ExternalToolError",
     "SkopeoBuildxPersonalDevRegistryPublisher",
+    "SkopeoPersonalDevRegistryArtifactCollector",
     "TrivyPersonalDevImageScanner",
 ]

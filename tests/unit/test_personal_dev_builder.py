@@ -56,8 +56,9 @@ def _candidate(**overrides: object) -> PersonalDevCandidateRecord:
         "object_key": (
             "personal-dev/sources/00000000-0000-0000-0000-000000000004/"
             "00000000-0000-0000-0000-000000000003/"
-            f"{'a' * 64}/{'c' * 64}.tar"
+            f"{'a' * 64}/{_CANDIDATE_ID}/{'c' * 64}.tar"
         ),
+        "source_generation_id": _CANDIDATE_ID,
         "archive_size_bytes": 10240,
         "status": "building",
         "created_at": _NOW,
@@ -305,7 +306,8 @@ async def test_s3_build_source_reverifies_exact_object_and_removes_temporary_fil
     )
     canonical_key = (
         f"personal-dev/sources/{candidate.owner_team_id}/{candidate.owner_user_id}/"
-        f"{candidate.candidate_sha}/{candidate.archive_sha256}.tar"
+        f"{candidate.candidate_sha}/{candidate.source_generation_id}/"
+        f"{candidate.archive_sha256}.tar"
     )
     candidate = replace(candidate, object_key=canonical_key)
     store = _ObjectStore(

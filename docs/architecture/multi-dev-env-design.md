@@ -172,7 +172,28 @@ mutation. A retry therefore cannot rotate identity inside the same deployment
 generation after a partial Kubernetes failure. Readiness verifies that seed
 against the runtime Secret both before and after rollout completion.
 The manager and local claim guard remain zero-executable until #906 activates
-the fleet-wide cutover. Durable destroy/GC also remains activation-blocking.
+the fleet-wide cutover. Manager-first zero-slot destroy is durable and
+checkpointed, but live drain/cancellation remains blocked on the Package 2/3
+claim and executor protocols.
+
+Candidate artifact collection is a separate two-phase authority. A terminal
+candidate must first be observed without an active environment, lifecycle
+operation, or build attempt; that observation starts the configured grace
+period. Collection later leases and persists a canonical deletion manifest,
+heartbeats while deleting, and commits `collected` only with the exact current
+lease and manifest digest. The manifest names only the owner's canonical source
+generation, attempt-specific build/evidence prefixes, and attempt-isolated
+registry tags. A fresh owner-scoped generation key fences every rehydration, so
+an expired collector cannot delete a later upload even if one remote request
+outlives its database lease. Current objects, versions, delete markers, and
+multipart uploads are all removed. Each completion appends an
+update/delete-protected evidence row with
+the exact lease and manifest, while collected candidates no longer consume
+retained-artifact quota. Re-uploading the exact source rehydrates the same
+candidate metadata under the owner quota and requires a fresh build without
+altering prior collection evidence; an apply racing collection either clears
+the initial unreferenced mark or fails closed after collection has acquired the
+candidate row.
 
 The following lifecycle-authority slice adds immutable subject UUID/lifecycle
 incarnation identity and a durable `dev_lifecycle_operations` row for every

@@ -81,6 +81,7 @@ def _candidate(*, status: str = "ready") -> PersonalDevCandidateRecord:
         manifest_json={},
         object_bucket="artifacts",
         object_key="personal-dev/source.tar",
+        source_generation_id=_CANDIDATE_ID,
         archive_size_bytes=10240,
         status=status,  # type: ignore[arg-type]
         publication_json=publication if status == "ready" else None,

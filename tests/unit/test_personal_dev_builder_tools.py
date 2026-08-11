@@ -5,13 +5,18 @@ import json
 import tarfile
 from pathlib import Path
 
+import pytest
+
 from loom.personal_dev_builder_artifact import verify_personal_dev_build_artifact
 from loom.personal_dev_builder_tools import (
     AsyncBoundedCommandRunner,
+    ExternalToolError,
     SkopeoBuildxPersonalDevRegistryPublisher,
+    SkopeoPersonalDevRegistryArtifactCollector,
     TrivyPersonalDevImageScanner,
 )
-from tests.unit.test_personal_dev_builder import _registration
+from loom.personal_dev_candidate_gc import build_personal_dev_artifact_gc_manifest
+from tests.unit.test_personal_dev_builder import _attempt, _candidate, _registration
 from tests.unit.test_personal_dev_builder_artifact import _artifact
 from tests.unit.test_personal_dev_builder_exporter import _running_registration
 
@@ -153,3 +158,77 @@ async def test_registry_publisher_preserves_platform_digest_and_verifies_joined_
     assert copy[-1].startswith("docker://registry.example/")
     join = runner.calls[2][0]
     assert join[:4] == ["/usr/bin/docker", "buildx", "imagetools", "create"]
+
+
+async def test_registry_artifact_collector_deletes_only_manifest_tags(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate(
+        status="failed",
+        registry_prefix="registry.example/personal-dev",
+    )
+    attempt = _attempt(state="failed", lease_epoch=1)
+    manifest = build_personal_dev_artifact_gc_manifest(candidate, [attempt])
+    runner = _Runner([b""] * len(manifest.registry_tags))
+    collector = SkopeoPersonalDevRegistryArtifactCollector(
+        runner=runner,  # type: ignore[arg-type]
+        skopeo_executable="/usr/bin/skopeo",
+        registry_auth_file=tmp_path / "registry" / "config.json",
+        expected_registry_prefix="registry.example/personal-dev",
+    )
+
+    await collector.collect(manifest)
+
+    assert len(runner.calls) == len(manifest.registry_tags)
+    assert {call[0][-1].removeprefix("docker://") for call in runner.calls} == set(
+        manifest.registry_tags
+    )
+    assert all(call[0][1:4] == ["delete", "--authfile", str(collector.registry_auth_file)] for call in runner.calls)
+
+
+async def test_registry_artifact_collector_treats_exact_absence_as_idempotent(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate(
+        status="failed",
+        registry_prefix="registry.example/personal-dev",
+    )
+    manifest = build_personal_dev_artifact_gc_manifest(
+        candidate,
+        [_attempt(state="failed", lease_epoch=1)],
+    )
+
+    class _AbsentRunner:
+        async def run(self, *_args, **_kwargs):
+            raise ExternalToolError("absent", registry_object_absent=True)
+
+    collector = SkopeoPersonalDevRegistryArtifactCollector(
+        runner=_AbsentRunner(),  # type: ignore[arg-type]
+        skopeo_executable="/usr/bin/skopeo",
+        registry_auth_file=tmp_path / "registry" / "config.json",
+        expected_registry_prefix="registry.example/personal-dev",
+    )
+
+    await collector.collect(manifest)
+
+
+async def test_registry_artifact_collector_rejects_a_changed_registry_prefix(
+    tmp_path: Path,
+) -> None:
+    candidate = _candidate(
+        status="failed",
+        registry_prefix="registry.example/personal-dev",
+    )
+    manifest = build_personal_dev_artifact_gc_manifest(
+        candidate,
+        [_attempt(state="failed", lease_epoch=1)],
+    )
+    collector = SkopeoPersonalDevRegistryArtifactCollector(
+        runner=_Runner([]),  # type: ignore[arg-type]
+        skopeo_executable="/usr/bin/skopeo",
+        registry_auth_file=tmp_path / "registry" / "config.json",
+        expected_registry_prefix="registry.example/replacement",
+    )
+
+    with pytest.raises(RuntimeError, match="prefix changed"):
+        await collector.collect(manifest)

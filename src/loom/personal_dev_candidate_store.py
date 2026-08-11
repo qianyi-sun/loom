@@ -7,21 +7,37 @@ from datetime import datetime, timedelta
 from typing import cast
 from uuid import UUID
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
+from sqlalchemy.sql.elements import ColumnElement
 
-from loom.db.schema import PersonalDevCandidate, PersonalDevCandidateBuildAttempt
+from loom.db.schema import (
+    DevInstance,
+    DevLifecycleOperation,
+    PersonalDevCandidate,
+    PersonalDevCandidateArtifactCollection,
+    PersonalDevCandidateBuildAttempt,
+)
 from loom.personal_dev_candidate import (
     BuildAttemptState,
+    CandidateArtifactState,
     CandidateRegistration,
     CandidateStatus,
+    PersonalDevArtifactCollectionInProgressError,
     PersonalDevCandidateBuildAttemptRecord,
     PersonalDevCandidateLimits,
     PersonalDevCandidateQuotaError,
     PersonalDevCandidateRecord,
     validate_personal_dev_candidate_publication,
+)
+from loom.personal_dev_candidate_gc import (
+    PersonalDevArtifactGcAuthorityUnavailableError,
+    PersonalDevArtifactGcClaim,
+    PersonalDevArtifactGcManifest,
+    build_personal_dev_artifact_gc_manifest,
+    validate_personal_dev_registry_prefix,
 )
 
 
@@ -31,6 +47,10 @@ class PersonalDevBuildLeaseFencedError(RuntimeError):
 
 class PersonalDevBuildOperationConflictError(RuntimeError):
     """One lifecycle operation was already bound to a different candidate."""
+
+
+class PersonalDevArtifactGcLeaseFencedError(RuntimeError):
+    """The artifact deletion lease no longer belongs to the caller."""
 
 
 _BUILD_CLAIM_LOCK_DIGEST = hashlib.sha256(b"personal-dev-build-claim-v1").digest()
@@ -79,6 +99,7 @@ def _candidate_record(row: PersonalDevCandidate) -> PersonalDevCandidateRecord:
         manifest_json=row.manifest_json,
         object_bucket=row.object_bucket,
         object_key=row.object_key,
+        source_generation_id=row.source_generation_id,
         archive_size_bytes=row.archive_size_bytes,
         status=cast(CandidateStatus, row.status),
         image_manifest_digest=row.image_manifest_digest,
@@ -88,6 +109,16 @@ def _candidate_record(row: PersonalDevCandidate) -> PersonalDevCandidateRecord:
         created_at=row.created_at,
         updated_at=row.updated_at,
         ready_at=row.ready_at,
+        registry_prefix=row.registry_prefix,
+        artifact_state=cast(CandidateArtifactState, row.artifact_state),
+        artifact_gc_lease_epoch=row.artifact_gc_lease_epoch,
+        artifact_gc_unreferenced_at=row.artifact_gc_unreferenced_at,
+        artifact_gc_claimed_by=row.artifact_gc_claimed_by,
+        artifact_gc_blocked_reason=row.artifact_gc_blocked_reason,
+        artifact_gc_lease_expires_at=row.artifact_gc_lease_expires_at,
+        artifact_gc_manifest_json=row.artifact_gc_manifest_json,
+        artifact_gc_manifest_sha256=row.artifact_gc_manifest_sha256,
+        artifact_collected_at=row.artifact_collected_at,
     )
 
 
@@ -129,7 +160,6 @@ def _same_registration(
         and existing.dirty is requested.dirty
         and dict(existing.manifest_json) == dict(requested.manifest_json)
         and existing.object_bucket == requested.object_bucket
-        and existing.object_key == requested.object_key
         and existing.archive_size_bytes == requested.archive_size_bytes
     )
 
@@ -150,6 +180,19 @@ class SqlAlchemyPersonalDevCandidateStore:
         self,
         requested: PersonalDevCandidateRecord,
     ) -> CandidateRegistration:
+        expected_object_key = (
+            f"personal-dev/sources/{requested.owner_team_id}/{requested.owner_user_id}/"
+            f"{requested.candidate_sha}/{requested.source_generation_id}/"
+            f"{requested.archive_sha256}.tar"
+        )
+        if (
+            requested.object_key != expected_object_key
+            or requested.source_generation_id != requested.id
+            or not requested.object_bucket
+            or requested.object_bucket.strip() != requested.object_bucket
+            or "/" in requested.object_bucket
+        ):
+            raise ValueError("personal-dev candidate source object binding is invalid")
         lock_a, lock_b = _owner_lock_keys(requested.owner_user_id)
         await self.session.execute(select(func.pg_advisory_xact_lock(lock_a, lock_b)))
         existing = (
@@ -173,6 +216,62 @@ class SqlAlchemyPersonalDevCandidateStore:
                 raise ValueError(
                     "personal-dev candidate replay changed an immutable binding"
                 )
+            if existing.artifact_state == "collecting":
+                await self.session.rollback()
+                raise PersonalDevArtifactCollectionInProgressError(
+                    "personal-dev candidate artifacts are being collected"
+                )
+            if existing.artifact_state == "collected":
+                retained_count, retained_bytes = (
+                    await self.session.execute(
+                        select(
+                            func.count(PersonalDevCandidate.id),
+                            func.coalesce(func.sum(PersonalDevCandidate.archive_size_bytes), 0),
+                        ).where(
+                            PersonalDevCandidate.owner_user_id == requested.owner_user_id,
+                            PersonalDevCandidate.artifact_state != "collected",
+                        ),
+                    )
+                ).one()
+                if int(retained_count) + 1 > self._limits.per_owner_retained_candidates:
+                    await self.session.rollback()
+                    raise PersonalDevCandidateQuotaError(
+                        "personal-dev retained candidate count limit is exhausted"
+                    )
+                if (
+                    int(retained_bytes) + requested.archive_size_bytes
+                    > self._limits.per_owner_retained_archive_bytes
+                ):
+                    await self.session.rollback()
+                    raise PersonalDevCandidateQuotaError(
+                        "personal-dev retained candidate byte limit is exhausted"
+                    )
+                existing.status = "uploaded"
+                existing.image_manifest_digest = None
+                existing.publication_json = None
+                existing.publication_sha256 = None
+                existing.failure_reason = None
+                existing.ready_at = None
+                existing.registry_prefix = None
+                existing.object_key = requested.object_key
+                existing.source_generation_id = requested.source_generation_id
+                existing.artifact_state = "retained"
+                existing.artifact_gc_unreferenced_at = None
+                existing.artifact_gc_claimed_by = None
+                existing.artifact_gc_blocked_reason = None
+                existing.artifact_gc_lease_expires_at = None
+                existing.artifact_gc_manifest_json = None
+                existing.artifact_gc_manifest_sha256 = None
+                existing.artifact_collected_at = None
+                existing.updated_at = requested.updated_at
+                candidate_record = _candidate_record(existing)
+            else:
+                # An exact, freshly verified re-upload proves the canonical
+                # source object exists again and restarts its unreferenced grace.
+                existing.artifact_gc_unreferenced_at = None
+                existing.artifact_gc_blocked_reason = None
+                existing.updated_at = requested.updated_at
+                candidate_record = _candidate_record(existing)
             await self.session.commit()
             return CandidateRegistration(
                 candidate=candidate_record,
@@ -184,7 +283,10 @@ class SqlAlchemyPersonalDevCandidateStore:
                 select(
                     func.count(PersonalDevCandidate.id),
                     func.coalesce(func.sum(PersonalDevCandidate.archive_size_bytes), 0),
-                ).where(PersonalDevCandidate.owner_user_id == requested.owner_user_id),
+                ).where(
+                    PersonalDevCandidate.owner_user_id == requested.owner_user_id,
+                    PersonalDevCandidate.artifact_state != "collected",
+                ),
             )
         ).one()
         if int(retained_count) + 1 > self._limits.per_owner_retained_candidates:
@@ -216,6 +318,7 @@ class SqlAlchemyPersonalDevCandidateStore:
                     manifest_json=dict(requested.manifest_json),
                     object_bucket=requested.object_bucket,
                     object_key=requested.object_key,
+                    source_generation_id=requested.source_generation_id,
                     archive_size_bytes=requested.archive_size_bytes,
                     status="uploaded",
                     created_at=requested.created_at,
@@ -332,6 +435,297 @@ class SqlAlchemyPersonalDevCandidateStore:
             for candidate in candidates
         ]
 
+    @staticmethod
+    def _artifact_unreferenced() -> ColumnElement[bool]:
+        active_environment = (
+            select(DevInstance.name)
+            .where(
+                DevInstance.candidate_id == PersonalDevCandidate.id,
+                DevInstance.status != "deleted",
+            )
+            .exists()
+        )
+        active_operation = (
+            select(DevLifecycleOperation.id)
+            .where(
+                DevLifecycleOperation.candidate_id == PersonalDevCandidate.id,
+                DevLifecycleOperation.state.in_(
+                    ("requested", "running", "activating", "cancelling")
+                ),
+            )
+            .exists()
+        )
+        active_build = (
+            select(PersonalDevCandidateBuildAttempt.id)
+            .where(
+                PersonalDevCandidateBuildAttempt.candidate_id == PersonalDevCandidate.id,
+                PersonalDevCandidateBuildAttempt.state.in_(("queued", "claimed", "running")),
+            )
+            .exists()
+        )
+        return and_(~active_environment, ~active_operation, ~active_build)
+
+    async def mark_next_artifact_gc(self, *, now: datetime) -> bool:
+        """Start the grace clock for one exact, currently unreferenced candidate."""
+
+        if now.tzinfo is None:
+            raise ValueError("personal-dev artifact GC time must include a timezone")
+        candidate = (
+            await self.session.execute(
+                select(PersonalDevCandidate)
+                .where(
+                    PersonalDevCandidate.artifact_state == "retained",
+                    PersonalDevCandidate.artifact_gc_unreferenced_at.is_(None),
+                    PersonalDevCandidate.artifact_gc_blocked_reason.is_(None),
+                    PersonalDevCandidate.status.in_(("uploaded", "ready", "failed")),
+                    self._artifact_unreferenced(),
+                )
+                .order_by(PersonalDevCandidate.created_at, PersonalDevCandidate.id)
+                .with_for_update(skip_locked=True)
+                .limit(1),
+            )
+        ).scalar_one_or_none()
+        if candidate is None:
+            await self.session.rollback()
+            return False
+        candidate.artifact_gc_unreferenced_at = now
+        candidate.updated_at = now
+        await self.session.commit()
+        return True
+
+    async def claim_next_artifact_gc(
+        self,
+        *,
+        collector_id: str,
+        now: datetime,
+        retention_seconds: int,
+        lease_seconds: int,
+    ) -> PersonalDevArtifactGcClaim | None:
+        """Lease one grace-expired mark or an expired prior collection."""
+
+        if (
+            not collector_id
+            or collector_id.strip() != collector_id
+            or len(collector_id) > 128
+        ):
+            raise ValueError("personal-dev artifact collector identifier is invalid")
+        if now.tzinfo is None:
+            raise ValueError("personal-dev artifact GC time must include a timezone")
+        if type(retention_seconds) is not int or retention_seconds < 0:
+            raise ValueError("personal-dev artifact retention must be non-negative")
+        if type(lease_seconds) is not int or lease_seconds <= 0:
+            raise ValueError("personal-dev artifact GC lease must be positive")
+        cutoff = now - timedelta(seconds=retention_seconds)
+        retained_eligible = and_(
+            PersonalDevCandidate.artifact_state == "retained",
+            PersonalDevCandidate.artifact_gc_blocked_reason.is_(None),
+            PersonalDevCandidate.artifact_gc_unreferenced_at <= cutoff,
+            PersonalDevCandidate.status.in_(("uploaded", "ready", "failed")),
+            self._artifact_unreferenced(),
+        )
+        expired_claim = and_(
+            PersonalDevCandidate.artifact_state == "collecting",
+            PersonalDevCandidate.artifact_gc_lease_expires_at <= now,
+        )
+        candidate = (
+            await self.session.execute(
+                select(PersonalDevCandidate)
+                .where(or_(retained_eligible, expired_claim))
+                .order_by(
+                    PersonalDevCandidate.artifact_gc_unreferenced_at,
+                    PersonalDevCandidate.id,
+                )
+                .with_for_update(skip_locked=True)
+                .limit(1),
+            )
+        ).scalar_one_or_none()
+        if candidate is None:
+            await self.session.rollback()
+            return None
+        if candidate.artifact_state == "collecting":
+            if (
+                candidate.artifact_gc_manifest_json is None
+                or candidate.artifact_gc_manifest_sha256 is None
+            ):
+                await self.session.rollback()
+                raise RuntimeError("personal-dev artifact GC manifest disappeared")
+            try:
+                manifest = PersonalDevArtifactGcManifest.from_json(
+                    candidate.artifact_gc_manifest_json,
+                    candidate.artifact_gc_manifest_sha256,
+                )
+            except ValueError:
+                # A persisted claim should already be valid. Quarantine any
+                # privileged or out-of-band corruption without allowing one
+                # row to starve all later collection work.
+                candidate.artifact_state = "retained"
+                candidate.artifact_gc_claimed_by = None
+                candidate.artifact_gc_lease_expires_at = None
+                candidate.artifact_gc_manifest_json = None
+                candidate.artifact_gc_manifest_sha256 = None
+                candidate.artifact_gc_blocked_reason = "manifest_authority_invalid"
+                candidate.updated_at = now
+                await self.session.commit()
+                return None
+        else:
+            attempt_rows = (
+                (
+                    await self.session.execute(
+                        select(PersonalDevCandidateBuildAttempt)
+                        .where(PersonalDevCandidateBuildAttempt.candidate_id == candidate.id)
+                        .order_by(
+                            PersonalDevCandidateBuildAttempt.attempt_sequence,
+                            PersonalDevCandidateBuildAttempt.id,
+                        ),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            try:
+                manifest = build_personal_dev_artifact_gc_manifest(
+                    _candidate_record(candidate),
+                    [_attempt_record(attempt) for attempt in attempt_rows],
+                )
+            except PersonalDevArtifactGcAuthorityUnavailableError:
+                candidate.artifact_gc_blocked_reason = "registry_authority_unavailable"
+                candidate.updated_at = now
+                await self.session.commit()
+                return None
+            except ValueError:
+                candidate.artifact_gc_blocked_reason = "manifest_authority_invalid"
+                candidate.updated_at = now
+                await self.session.commit()
+                return None
+            candidate.artifact_state = "collecting"
+            candidate.artifact_gc_blocked_reason = None
+            candidate.artifact_gc_manifest_json = manifest.payload()
+            candidate.artifact_gc_manifest_sha256 = manifest.manifest_sha256
+        candidate.artifact_gc_lease_epoch += 1
+        candidate.artifact_gc_claimed_by = collector_id
+        candidate.artifact_gc_lease_expires_at = now + timedelta(seconds=lease_seconds)
+        candidate.updated_at = now
+        claim = PersonalDevArtifactGcClaim(
+            candidate_id=candidate.id,
+            collector_id=collector_id,
+            lease_epoch=candidate.artifact_gc_lease_epoch,
+            lease_expires_at=candidate.artifact_gc_lease_expires_at,
+            manifest=manifest,
+        )
+        await self.session.commit()
+        return claim
+
+    async def finish_artifact_gc(
+        self,
+        *,
+        candidate_id: UUID,
+        collector_id: str,
+        lease_epoch: int,
+        manifest_sha256: str,
+        now: datetime,
+    ) -> None:
+        """Commit collection only for the exact current deletion authority."""
+
+        if now.tzinfo is None:
+            raise ValueError("personal-dev artifact GC time must include a timezone")
+        candidate = (
+            await self.session.execute(
+                select(PersonalDevCandidate)
+                .where(
+                    PersonalDevCandidate.id == candidate_id,
+                    PersonalDevCandidate.artifact_state == "collecting",
+                    PersonalDevCandidate.artifact_gc_claimed_by == collector_id,
+                    PersonalDevCandidate.artifact_gc_lease_epoch == lease_epoch,
+                    PersonalDevCandidate.artifact_gc_manifest_sha256
+                    == manifest_sha256,
+                    PersonalDevCandidate.artifact_gc_lease_expires_at > now,
+                )
+                .with_for_update(),
+            )
+        ).scalar_one_or_none()
+        if candidate is None:
+            await self.session.rollback()
+            raise PersonalDevArtifactGcLeaseFencedError(
+                "personal-dev artifact GC lease was superseded"
+            )
+        if (
+            candidate.artifact_gc_manifest_json is None
+            or candidate.artifact_gc_unreferenced_at is None
+        ):
+            await self.session.rollback()
+            raise RuntimeError("personal-dev artifact GC evidence disappeared")
+        prior_sequence = int(
+            (
+                await self.session.execute(
+                    select(
+                        func.coalesce(
+                            func.max(
+                                PersonalDevCandidateArtifactCollection.collection_sequence
+                            ),
+                            0,
+                        )
+                    ).where(
+                        PersonalDevCandidateArtifactCollection.candidate_id == candidate_id
+                    ),
+                )
+            ).scalar_one()
+        )
+        self.session.add(
+            PersonalDevCandidateArtifactCollection(
+                candidate_id=candidate_id,
+                collection_sequence=prior_sequence + 1,
+                collector_id=collector_id,
+                gc_lease_epoch=lease_epoch,
+                manifest_json=candidate.artifact_gc_manifest_json,
+                manifest_sha256=manifest_sha256,
+                unreferenced_at=candidate.artifact_gc_unreferenced_at,
+                collected_at=now,
+            )
+        )
+        candidate.artifact_state = "collected"
+        candidate.artifact_gc_claimed_by = None
+        candidate.artifact_gc_lease_expires_at = None
+        candidate.artifact_collected_at = now
+        candidate.updated_at = now
+        await self.session.commit()
+
+    async def heartbeat_artifact_gc(
+        self,
+        *,
+        candidate_id: UUID,
+        collector_id: str,
+        lease_epoch: int,
+        manifest_sha256: str,
+        now: datetime,
+        lease_seconds: int,
+    ) -> None:
+        if now.tzinfo is None:
+            raise ValueError("personal-dev artifact GC time must include a timezone")
+        if type(lease_seconds) is not int or lease_seconds <= 0:
+            raise ValueError("personal-dev artifact GC lease must be positive")
+        result = await self.session.execute(
+            update(PersonalDevCandidate)
+            .where(
+                PersonalDevCandidate.id == candidate_id,
+                PersonalDevCandidate.artifact_state == "collecting",
+                PersonalDevCandidate.artifact_gc_claimed_by == collector_id,
+                PersonalDevCandidate.artifact_gc_lease_epoch == lease_epoch,
+                PersonalDevCandidate.artifact_gc_manifest_sha256 == manifest_sha256,
+                PersonalDevCandidate.artifact_gc_lease_expires_at > now,
+            )
+            .values(
+                artifact_gc_lease_expires_at=now + timedelta(seconds=lease_seconds),
+                updated_at=now,
+            )
+            .returning(PersonalDevCandidate.id),
+        )
+        if result.scalar_one_or_none() is None:
+            await self.session.rollback()
+            raise PersonalDevArtifactGcLeaseFencedError(
+                "personal-dev artifact GC lease was superseded"
+            )
+        await self.session.commit()
+
     async def enqueue_build(
         self,
         *,
@@ -366,6 +760,11 @@ class SqlAlchemyPersonalDevCandidateStore:
         if candidate is None:
             await self.session.rollback()
             raise KeyError("personal-dev candidate not found")
+        if candidate.artifact_state != "retained":
+            await self.session.rollback()
+            raise KeyError("personal-dev candidate artifacts are unavailable")
+        candidate.artifact_gc_unreferenced_at = None
+        candidate.updated_at = now
         operation_attempt = (
             await self.session.execute(
                 select(PersonalDevCandidateBuildAttempt)
@@ -456,6 +855,7 @@ class SqlAlchemyPersonalDevCandidateStore:
         builder_id: str,
         now: datetime,
         lease_seconds: int,
+        registry_prefix: str | None = None,
     ) -> CandidateRegistration | None:
         """Claim one queued/stale build with row locking and a monotonic epoch."""
 
@@ -463,6 +863,8 @@ class SqlAlchemyPersonalDevCandidateStore:
             raise ValueError("builder_id must be a non-empty bounded identifier")
         if type(lease_seconds) is not int or lease_seconds <= 0:
             raise ValueError("lease_seconds must be a positive integer")
+        if registry_prefix is not None:
+            validate_personal_dev_registry_prefix(registry_prefix)
         await self.session.execute(
             select(func.pg_advisory_xact_lock(*_BUILD_CLAIM_LOCK_KEYS))
         )
@@ -508,6 +910,7 @@ class SqlAlchemyPersonalDevCandidateStore:
                             & (PersonalDevCandidateBuildAttempt.lease_expires_at <= now)
                         ),
                     ),
+                    PersonalDevCandidate.artifact_state == "retained",
                     owner_active < self._limits.per_owner_active_builds,
                 )
                 .order_by(
@@ -533,7 +936,17 @@ class SqlAlchemyPersonalDevCandidateStore:
         candidate = await self.session.get(PersonalDevCandidate, attempt.candidate_id)
         if candidate is None:  # pragma: no cover - FK prevents this
             raise RuntimeError("personal-dev build candidate disappeared")
+        if candidate.artifact_state != "retained":
+            await self.session.rollback()
+            return None
+        if registry_prefix is not None:
+            if candidate.registry_prefix is None:
+                candidate.registry_prefix = registry_prefix
+            elif candidate.registry_prefix != registry_prefix:
+                await self.session.rollback()
+                raise RuntimeError("personal-dev candidate registry prefix changed")
         candidate.status = "building"
+        candidate.artifact_gc_unreferenced_at = None
         candidate.failure_reason = None
         candidate.updated_at = now
         candidate_record = _candidate_record(candidate)
@@ -688,6 +1101,7 @@ class SqlAlchemyPersonalDevCandidateStore:
 
 
 __all__ = [
+    "PersonalDevArtifactGcLeaseFencedError",
     "PersonalDevBuildLeaseFencedError",
     "PersonalDevBuildOperationConflictError",
     "PersonalDevCandidateQuotaError",

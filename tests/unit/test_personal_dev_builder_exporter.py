@@ -27,6 +27,10 @@ def _running_registration():
     assert registration.build_attempt is not None
     return replace(
         registration,
+        candidate=replace(
+            registration.candidate,
+            registry_prefix="registry.example/personal-dev",
+        ),
         build_attempt=replace(registration.build_attempt, state="running"),
     )
 

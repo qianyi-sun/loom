@@ -50,6 +50,10 @@ from loom_service.personal_dev_builder import (
     build_personal_dev_builder_runtime,
     personal_dev_builder_run_loop,
 )
+from loom_service.personal_dev_candidate_gc import (
+    build_personal_dev_artifact_collector,
+    personal_dev_artifact_gc_run_loop,
+)
 from loom_service.personal_dev_lifecycle import (
     build_personal_dev_capacity_runtime,
     personal_dev_reconcile_run_loop,
@@ -161,6 +165,12 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             raise RuntimeError("personal-dev builder lease must be between 300 and 7200 seconds")
         if settings.personal_dev_builder_poll_interval_sec <= 0:
             raise RuntimeError("personal-dev builder poll interval must be positive")
+        if settings.personal_dev_candidate_gc_retention_sec < 0:
+            raise RuntimeError("personal-dev artifact GC retention must be non-negative")
+        if not 60 <= settings.personal_dev_candidate_gc_lease_sec <= 7200:
+            raise RuntimeError("personal-dev artifact GC lease must be between 60 and 7200 seconds")
+        if settings.personal_dev_candidate_gc_poll_interval_sec <= 0:
+            raise RuntimeError("personal-dev artifact GC poll interval must be positive")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -191,8 +201,10 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         )
         personal_dev_task: asyncio.Task[None] | None = None
         personal_dev_builder_task: asyncio.Task[None] | None = None
+        personal_dev_artifact_gc_task: asyncio.Task[None] | None = None
         personal_dev_runtime = None
         personal_dev_builder_runtime = None
+        personal_dev_artifact_collector = None
         personal_dev_capacity_runtime = None
         if personal_dev_limits is not None:
             if settings.personal_dev_activation_public_key_file is None:
@@ -212,6 +224,10 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             if personal_dev_runtime is None:  # pragma: no cover - guarded by limits
                 raise RuntimeError("personal-dev preparation runtime is unavailable")
             personal_dev_builder_runtime = build_personal_dev_builder_runtime(
+                settings,
+                minio_client=minio_client,
+            )
+            personal_dev_artifact_collector = build_personal_dev_artifact_collector(
                 settings,
                 minio_client=minio_client,
             )
@@ -256,11 +272,31 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
                     limits=personal_dev_candidate_limits,
                     builder_id=f"loom-service:{socket.gethostname()}:{os.getpid()}",
                     lease_seconds=settings.personal_dev_builder_lease_sec,
+                    registry_prefix=settings.personal_dev_builder_registry_prefix,
                     poll_interval_seconds=settings.personal_dev_builder_poll_interval_sec,
                 ),
                 name="loom-svc-personal-dev-builder",
             )
             app.state.personal_dev_builder_task = personal_dev_builder_task
+        if (
+            personal_dev_artifact_collector is not None
+            and personal_dev_candidate_limits is not None
+        ):
+            personal_dev_artifact_gc_task = asyncio.create_task(
+                personal_dev_artifact_gc_run_loop(
+                    session_factory=session_factory,
+                    collector=personal_dev_artifact_collector,
+                    limits=personal_dev_candidate_limits,
+                    collector_id=f"loom-service:{socket.gethostname()}:{os.getpid()}",
+                    retention_seconds=settings.personal_dev_candidate_gc_retention_sec,
+                    lease_seconds=settings.personal_dev_candidate_gc_lease_sec,
+                    poll_interval_seconds=(
+                        settings.personal_dev_candidate_gc_poll_interval_sec
+                    ),
+                ),
+                name="loom-svc-personal-dev-artifact-gc",
+            )
+            app.state.personal_dev_artifact_gc_task = personal_dev_artifact_gc_task
         if (
             personal_dev_runtime is not None
             and personal_dev_capacity_runtime is not None
@@ -353,6 +389,8 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
                 personal_dev_task.cancel()
             if personal_dev_builder_task is not None:
                 personal_dev_builder_task.cancel()
+            if personal_dev_artifact_gc_task is not None:
+                personal_dev_artifact_gc_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await runner_task
             with contextlib.suppress(asyncio.CancelledError):
@@ -365,6 +403,9 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             if personal_dev_builder_task is not None:
                 with contextlib.suppress(asyncio.CancelledError):
                     await personal_dev_builder_task
+            if personal_dev_artifact_gc_task is not None:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await personal_dev_artifact_gc_task
             with contextlib.suppress(Exception):
                 await gateway_client.aclose()
             with contextlib.suppress(Exception):
