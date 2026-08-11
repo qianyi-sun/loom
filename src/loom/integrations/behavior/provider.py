@@ -180,17 +180,21 @@ class RotatingPipelineStepJwtReader:
         now = int(time.time())
         if expires_at <= now:
             raise PipelineProviderAuthError("step JWT is expired")
-        if issued_at > now + 30 or expires_at <= issued_at:
+        if (
+            issued_at > now + 30
+            or expires_at <= issued_at
+            or expires_at - issued_at > MAX_PIPELINE_STEP_JWT_TTL_SECONDS
+        ):
             raise PipelineProviderAuthError("step JWT lifetime drift")
 
         raw_binding = claims.get("binding_sha256", claims.get("control_binding_sha256"))
-        if raw_binding is not None and raw_binding != self._binding_sha256:
+        if raw_binding != self._binding_sha256:
             raise PipelineProviderAuthError("step JWT binding drift")
         return PipelineStepJwtClaims(
             execution_attempt_id=self._attempt_id,
             step_id=self._step_id,
             expires_at=expires_at,
-            binding_sha256=raw_binding if isinstance(raw_binding, str) else None,
+            binding_sha256=raw_binding,
         )
 
 

@@ -34,23 +34,25 @@ def _token(
     attempt_id: UUID,
     *,
     step_id: str = PRIMITIVE_STEP_ID,
-    binding_sha256: str = DIGEST,
+    binding_sha256: str | None = DIGEST,
     expires_delta: int = 600,
 ) -> str:
     now = int(time.time())
+    claims = {
+        "iss": "loom-control-plane",
+        "sub": "step-session",
+        "team_id": str(uuid4()),
+        "execution_attempt_id": str(attempt_id),
+        "subject_kind": "execution_attempt",
+        "step_id": step_id,
+        "iat": now,
+        "exp": now + expires_delta,
+        "scopes": ["llm:call"],
+    }
+    if binding_sha256 is not None:
+        claims["binding_sha256"] = binding_sha256
     body = jwt.encode(
-        {
-            "iss": "loom-control-plane",
-            "sub": "step-session",
-            "team_id": str(uuid4()),
-            "execution_attempt_id": str(attempt_id),
-            "subject_kind": "execution_attempt",
-            "step_id": step_id,
-            "binding_sha256": binding_sha256,
-            "iat": now,
-            "exp": now + expires_delta,
-            "scopes": ["llm:call"],
-        },
+        claims,
         "test-only-signing-key-at-least-32-bytes",
         algorithm="HS256",
     )
@@ -91,6 +93,8 @@ def test_reader_reopens_rotated_attempt_jwt_and_rejects_cross_node(tmp_path: Pat
         ("expired", "expired"),
         ("attempt", "Attempt subject drift"),
         ("binding", "binding drift"),
+        ("missing_binding", "binding drift"),
+        ("overlong_lifetime", "lifetime drift"),
         ("mode", "0400"),
     ],
 )
@@ -104,8 +108,12 @@ def test_reader_rejects_invalid_file_before_dispatch(
     token = _token(
         uuid4() if mutation == "attempt" else attempt_id,
         binding_sha256="sha256:" + "b" * 64 if mutation == "binding" else DIGEST,
-        expires_delta=-1 if mutation == "expired" else 600,
+        expires_delta=(
+            -1 if mutation == "expired" else 30_001 if mutation == "overlong_lifetime" else 600
+        ),
     )
+    if mutation == "missing_binding":
+        token = _token(attempt_id, binding_sha256=None)
     _install(token_path, token)
     if mutation == "mode":
         token_path.chmod(0o600)
