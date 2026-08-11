@@ -29,7 +29,7 @@ import uuid
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 
 if TYPE_CHECKING:
     from scripts.ops.staging_rollout_sealed_source import (
@@ -236,8 +236,18 @@ _INSTALL_ATTESTATION_ASSETS = frozenset(
         "shared-work2-mount-unit",
         "sysctl",
         "tmpfiles",
+        "worker-env-template",
     }
 )
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON key")
+        value[key] = item
+    return value
 
 
 def _runner_install_attestation_payload(
@@ -753,6 +763,15 @@ class LocalFilesystem:
                 require_private_mode=True,
             )
         )
+
+    def generated_gb10_env_template_payload(self, target: Path) -> bytes | None:
+        for path, _, payload in self._gb10_env_candidates(
+            GENERATED_ROOT,
+            require_private_mode=True,
+        ):
+            if path == target:
+                return payload
+        return None
 
     def legacy_gb10_env_template_payload(self) -> bytes:
         candidates = self._gb10_env_candidates(
@@ -4438,6 +4457,54 @@ class HostInstaller:
             raise InstallError("install record service-key fingerprint is invalid")
         return value
 
+    def _installed_worker_env_template_sha256(self) -> str | None:
+        if not self.filesystem.exists(INSTALL_ATTESTATION):
+            return None
+        if not self.system.file_owner_ready(
+            INSTALL_ATTESTATION,
+            owner="root",
+            group=SERVICE_GROUP,
+            mode=0o640,
+            nlink=1,
+        ):
+            raise InstallError("existing runner install attestation authority is unsafe")
+        payload = self.filesystem.read_bytes(INSTALL_ATTESTATION, limit=64 * 1024)
+        try:
+            statement = json.loads(payload, object_pairs_hook=_reject_duplicate_json_keys)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            raise InstallError("existing runner install attestation is invalid") from exc
+        assets = statement.get("asset_sha256") if isinstance(statement, dict) else None
+        accepted_assets = (
+            _INSTALL_ATTESTATION_ASSETS,
+            _INSTALL_ATTESTATION_ASSETS - {"worker-env-template"},
+        )
+        if (
+            not isinstance(statement, dict)
+            or set(statement)
+            != {
+                "asset_sha256",
+                "install_record_sha256",
+                "schema_version",
+                "source_base_sha",
+                "source_mode",
+                "source_sha",
+                "source_tree_sha",
+            }
+            or statement.get("schema_version") != 1
+            or type(statement.get("schema_version")) is not int
+            or not isinstance(assets, dict)
+            or set(assets) not in accepted_assets
+            or any(
+                not isinstance(label, str)
+                or not isinstance(digest, str)
+                or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+                for label, digest in assets.items()
+            )
+        ):
+            raise InstallError("existing runner install attestation is invalid")
+        digest = assets.get("worker-env-template")
+        return str(digest) if digest is not None else None
+
     @staticmethod
     def _record_legacy_trust_source_sha(
         record: dict[str, object] | None,
@@ -4748,10 +4815,16 @@ class HostInstaller:
         generated_env_error: InstallError | None = None
         try:
             generated_env_templates = self.filesystem.generated_gb10_env_templates()
+            generated_env_seed_payload = (
+                self.filesystem.generated_gb10_env_template_payload(
+                    GENERATED_GB10_ENV_SEED
+                )
+            )
         except InstallError as exc:
             generated_env_templates = ()
+            generated_env_seed_payload = None
             generated_env_error = exc
-        generated_env_templates_ready = bool(generated_env_templates) and all(
+        generated_env_templates_ready = generated_env_seed_payload is not None and all(
             self.system.file_owner_ready(
                 path,
                 owner=SERVICE_USER,
@@ -4928,6 +5001,20 @@ class HostInstaller:
             owner_changed = self.system.install_owner(INSTALL_RECORD, "root", 0o600)
             return changed or owner_changed
 
+        def fail_closed_worker_env(message: str) -> NoReturn:
+            nonlocal admission_enabled, maintenance_enabled
+            self.filesystem.remove(SUDOERS_PATH)
+            if not maintenance_enabled:
+                self.system.begin_maintenance()
+                maintenance_enabled = True
+            admission_enabled = False
+            persist_record(
+                "installing",
+                admission=admission_enabled,
+                maintenance=maintenance_enabled,
+            )
+            raise InstallError(message)
+
         install_source_ready = self.system.install_source_ready(source_sha)
         service_directories_ready = not service_user_missing and all(
             self.system.owned_directory_ready(directory, owner=SERVICE_USER, mode=mode)
@@ -5016,25 +5103,28 @@ class HostInstaller:
             admission=True,
             maintenance=False,
         )
-        install_attestation_payload = _runner_install_attestation_payload(
-            desired_ready_record,
-            attestation_assets,
-        )
-        install_attestation_ready = bool(
-            self.filesystem.file_matches(
-                INSTALL_ATTESTATION,
-                install_attestation_payload,
-                0o640,
-                expected_nlink=1,
+        install_attestation_ready = False
+        if generated_env_seed_payload is not None:
+            attestation_assets["worker-env-template"] = generated_env_seed_payload
+            install_attestation_payload = _runner_install_attestation_payload(
+                desired_ready_record,
+                attestation_assets,
             )
-            and self.system.file_owner_ready(
-                INSTALL_ATTESTATION,
-                owner="root",
-                group=SERVICE_GROUP,
-                mode=0o640,
-                nlink=1,
+            install_attestation_ready = bool(
+                self.filesystem.file_matches(
+                    INSTALL_ATTESTATION,
+                    install_attestation_payload,
+                    0o640,
+                    expected_nlink=1,
+                )
+                and self.system.file_owner_ready(
+                    INSTALL_ATTESTATION,
+                    owner="root",
+                    group=SERVICE_GROUP,
+                    mode=0o640,
+                    nlink=1,
+                )
             )
-        )
 
         def restore_admission() -> None:
             if existing_sudoers is None:  # pragma: no cover - caller owns this invariant
@@ -5155,8 +5245,23 @@ class HostInstaller:
 
         if generated_env_error is not None:
             raise generated_env_error
-        if not generated_env_templates:
+        previous_worker_env_sha256 = self._installed_worker_env_template_sha256()
+        if previous_worker_env_sha256 is not None:
+            authorized_worker_env_sha256 = previous_worker_env_sha256
+            generated_env_seed_payload = (
+                self.filesystem.generated_gb10_env_template_payload(
+                    GENERATED_GB10_ENV_SEED
+                )
+            )
+            if (
+                generated_env_seed_payload is None
+                or hashlib.sha256(generated_env_seed_payload).hexdigest()
+                != previous_worker_env_sha256
+            ):
+                fail_closed_worker_env("attested GB10 worker env template drifted")
+        else:
             worker_env_payload = self.filesystem.legacy_gb10_env_template_payload()
+            authorized_worker_env_sha256 = hashlib.sha256(worker_env_payload).hexdigest()
             if self.filesystem.atomic_write(
                 GENERATED_GB10_ENV_SEED,
                 worker_env_payload,
@@ -5164,7 +5269,8 @@ class HostInstaller:
                 expected_nlink=1,
             ):
                 changes.append(f"worker-env-template:{GENERATED_GB10_ENV_SEED}")
-            generated_env_templates = (GENERATED_GB10_ENV_SEED,)
+            generated_env_seed_payload = worker_env_payload
+            generated_env_templates = self.filesystem.generated_gb10_env_templates()
         for path in generated_env_templates:
             if self.system.install_owner(path, SERVICE_USER, 0o600):
                 changes.append(f"ownership:{path}")
@@ -5299,6 +5405,20 @@ class HostInstaller:
             admission=True,
             maintenance=False,
         )
+        generated_env_seed_payload = (
+            self.filesystem.generated_gb10_env_template_payload(
+                GENERATED_GB10_ENV_SEED
+            )
+        )
+        if (
+            generated_env_seed_payload is None
+            or hashlib.sha256(generated_env_seed_payload).hexdigest()
+            != authorized_worker_env_sha256
+        ):
+            fail_closed_worker_env(
+                "authorized GB10 worker env template changed before publication"
+            )
+        attestation_assets["worker-env-template"] = generated_env_seed_payload
         install_attestation_payload = _runner_install_attestation_payload(
             ready_record,
             attestation_assets,
@@ -5459,7 +5579,15 @@ class HostInstaller:
                 )
             except InstallError:
                 failures.append("rendered-config")
-        if config_payload is None:
+        try:
+            generated_env_seed_payload = (
+                self.filesystem.generated_gb10_env_template_payload(
+                    GENERATED_GB10_ENV_SEED
+                )
+            )
+        except InstallError:
+            generated_env_seed_payload = None
+        if config_payload is None or generated_env_seed_payload is None:
             failures.append(str(INSTALL_ATTESTATION))
         else:
             attestation_assets = {
@@ -5482,6 +5610,7 @@ class HostInstaller:
                 "shared-work2-mount-unit": self._asset(SHARED_WORK2_MOUNT_UNIT),
                 "sysctl": self._asset("loom-staging-rollout.sysctl"),
                 "tmpfiles": self._asset("loom-staging-rollout.tmpfiles"),
+                "worker-env-template": generated_env_seed_payload,
             }
             expected_attestation = _runner_install_attestation_payload(
                 record,

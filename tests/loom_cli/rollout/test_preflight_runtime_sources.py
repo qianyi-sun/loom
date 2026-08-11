@@ -97,6 +97,7 @@ def test_sources_build_complete_exact_registry_without_running_probes(
 
     gb10_concurrency: dict[str, int] = {}
     candidate_source_options: dict[str, object] = {}
+    host_readiness_options: dict[str, object] = {}
     for builder_name in (
         "build_gb10_ssh_topology_check",
         "build_gb10_candidate_source_check",
@@ -113,6 +114,12 @@ def test_sources_build_complete_exact_registry_without_running_probes(
             gb10_concurrency[_builder_name] = kwargs["max_concurrency"]
             if _builder_name == "build_gb10_candidate_source_check":
                 candidate_source_options.update(
+                    run=args[0],
+                    settle_attempts=kwargs["settle_attempts"],
+                    settle_interval_seconds=kwargs["settle_interval_seconds"],
+                )
+            if _builder_name == "build_gb10_host_readiness_check":
+                host_readiness_options.update(
                     run=args[0],
                     settle_attempts=kwargs["settle_attempts"],
                     settle_interval_seconds=kwargs["settle_interval_seconds"],
@@ -246,6 +253,11 @@ def test_sources_build_complete_exact_registry_without_running_probes(
     }
     assert candidate_source_options == {
         "run": candidate_source_command,
+        "settle_attempts": 2,
+        "settle_interval_seconds": 1.0,
+    }
+    assert host_readiness_options == {
+        "run": command,
         "settle_attempts": 2,
         "settle_interval_seconds": 1.0,
     }
