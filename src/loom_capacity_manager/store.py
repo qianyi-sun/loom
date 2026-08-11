@@ -723,49 +723,131 @@ class CapacityManagementStore:
                 raise ConfigurationConflictError(
                     "dynamic development subject identity conflicts with active state"
                 )
+            if existing is None and request.operation_kind != "create":
+                raise ConfigurationConflictError(
+                    "dynamic development subject must be created before it can be changed"
+                )
+            if existing is not None and request.operation_kind == "create":
+                raise ConfigurationConflictError("dynamic development subject is already active")
 
             account = _derive_owner_account(fleet, request.owner_id)
             if existing is not None and existing.account_id != account.account_id:
                 raise ConfigurationConflictError(
                     "dynamic development subject owner cannot be changed"
                 )
-            expected_generation = 1 if existing is None else existing.configuration_generation + 1
-            expected_deployment = 1 if existing is None else existing.deployment_generation + 1
-            if request.configuration_generation != expected_generation:
-                raise ConfigurationConflictError(
-                    "dynamic development configuration generation is not the exact successor"
-                )
-            if (
-                request.deployment_generation != expected_deployment
-                or request.candidate_generation != expected_deployment
+            if existing is not None and (
+                request.configuration_generation <= existing.configuration_generation
             ):
                 raise ConfigurationConflictError(
-                    "dynamic development deployment generation is not the exact successor"
+                    "dynamic development configuration generation is not monotonic"
                 )
-            if existing is not None and (
-                existing.demand_reporter_incarnation == request.demand_reporter_incarnation
+            if request.operation_kind == "update" and (
+                existing is None or request.deployment_generation <= existing.deployment_generation
+            ):
+                raise ConfigurationConflictError(
+                    "dynamic development deployment generation is not monotonic"
+                )
+            if request.operation_kind == "capacity" and (
+                existing is None
+                or request.deployment_generation != existing.deployment_generation
+                or request.candidate_generation != existing.candidate_generation
+                or request.demand_reporter_incarnation != existing.demand_reporter_incarnation
+            ):
+                raise ConfigurationConflictError(
+                    "capacity-only projection must retain its deployment and reporter binding"
+                )
+            if (
+                request.operation_kind == "update"
+                and existing is not None
+                and (existing.demand_reporter_incarnation == request.demand_reporter_incarnation)
             ):
                 raise ConfigurationConflictError(
                     "a new deployment must rotate the demand reporter incarnation"
                 )
-            reporter_identity_conflict = (
-                await session.execute(
-                    select(CapacityDemandReporter)
-                    .where(
-                        or_(
-                            CapacityDemandReporter.token_sha256
-                            == request.demand_reporter_token_sha256,
-                            CapacityDemandReporter.reporter_incarnation
-                            == request.demand_reporter_incarnation,
+            current_candidate: CapacityCandidate | None = None
+            current_deployment: CapacityDeploymentGeneration | None = None
+            current_reporter: CapacityDemandReporter | None = None
+            if existing is not None:
+                current_candidate = (
+                    await session.execute(
+                        select(CapacityCandidate).where(
+                            CapacityCandidate.subject_id == request.subject_id,
+                            CapacityCandidate.subject_incarnation == request.subject_incarnation,
+                            CapacityCandidate.candidate_generation == existing.candidate_generation,
                         )
                     )
-                    .limit(1)
-                )
-            ).scalar_one_or_none()
-            if reporter_identity_conflict is not None:
-                raise ConfigurationConflictError(
-                    "dynamic development demand reporter identity was already used"
-                )
+                ).scalar_one_or_none()
+                current_deployment = (
+                    await session.execute(
+                        select(CapacityDeploymentGeneration).where(
+                            CapacityDeploymentGeneration.subject_id == request.subject_id,
+                            CapacityDeploymentGeneration.subject_incarnation
+                            == request.subject_incarnation,
+                            CapacityDeploymentGeneration.deployment_generation
+                            == existing.deployment_generation,
+                        )
+                    )
+                ).scalar_one_or_none()
+                current_reporter = (
+                    await session.execute(
+                        select(CapacityDemandReporter).where(
+                            CapacityDemandReporter.subject_id == request.subject_id,
+                            CapacityDemandReporter.subject_incarnation
+                            == request.subject_incarnation,
+                            CapacityDemandReporter.reporter_incarnation
+                            == existing.demand_reporter_incarnation,
+                            CapacityDemandReporter.state == "current",
+                        )
+                    )
+                ).scalar_one_or_none()
+            if request.operation_kind == "capacity":
+                expected_architecture = {
+                    "supported_architectures": list(request.supported_architectures),
+                    "supported_pool_ids": list(request.supported_pool_ids),
+                }
+                expected_cutover = {
+                    "local_activation_sha256": request.local_activation_sha256,
+                    "candidate_publication_sha256": request.candidate_publication_sha256,
+                    "protected_admission_sha256": request.protected_admission_sha256,
+                    "capacity_agent_installation_sha256": (
+                        request.capacity_agent_installation_sha256
+                    ),
+                }
+                if (
+                    current_candidate is None
+                    or current_deployment is None
+                    or current_reporter is None
+                    or current_candidate.candidate_digest != request.candidate_sha256
+                    or current_candidate.source_payload
+                    != {"publication_sha256": request.candidate_publication_sha256}
+                    or current_candidate.architecture_payload != expected_architecture
+                    or current_candidate.protocol_payload != request.protocol_versions
+                    or current_deployment.candidate_digest != request.candidate_sha256
+                    or current_deployment.cutover_payload != expected_cutover
+                    or current_reporter.token_sha256 != request.demand_reporter_token_sha256
+                ):
+                    raise ConfigurationConflictError(
+                        "capacity-only projection cannot change candidate or reporter evidence"
+                    )
+            else:
+                reporter_identity_conflict = (
+                    await session.execute(
+                        select(CapacityDemandReporter)
+                        .where(
+                            or_(
+                                CapacityDemandReporter.token_sha256
+                                == request.demand_reporter_token_sha256,
+                                CapacityDemandReporter.reporter_incarnation
+                                == request.demand_reporter_incarnation,
+                            )
+                        )
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if reporter_identity_conflict is not None:
+                    raise ConfigurationConflictError(
+                        "dynamic development demand reporter identity was already used"
+                    )
 
             owner_subjects = [
                 subject
@@ -851,52 +933,55 @@ class CapacityManagementStore:
                 idempotency_key=request.operation_id,
             )
             session.add(subject_row)
-            session.add(
-                CapacityCandidate(
-                    subject_id=request.subject_id,
-                    subject_incarnation=request.subject_incarnation,
-                    candidate_generation=request.candidate_generation,
-                    candidate_digest=request.candidate_sha256,
-                    source_payload={"publication_sha256": request.candidate_publication_sha256},
-                    artifact_payload={"candidate_sha256": request.candidate_sha256},
-                    architecture_payload={
-                        "supported_architectures": list(request.supported_architectures),
-                        "supported_pool_ids": list(request.supported_pool_ids),
-                    },
-                    launcher_payload={"local_activation_sha256": request.local_activation_sha256},
-                    attestation_payload={
-                        "operation_id": str(request.operation_id),
-                        "operation_epoch": request.operation_epoch,
-                        "protected_admission_sha256": request.protected_admission_sha256,
-                        "capacity_agent_installation_sha256": (
-                            request.capacity_agent_installation_sha256
-                        ),
-                    },
-                    protocol_payload=request.protocol_versions,
+            if request.operation_kind != "capacity":
+                session.add(
+                    CapacityCandidate(
+                        subject_id=request.subject_id,
+                        subject_incarnation=request.subject_incarnation,
+                        candidate_generation=request.candidate_generation,
+                        candidate_digest=request.candidate_sha256,
+                        source_payload={"publication_sha256": request.candidate_publication_sha256},
+                        artifact_payload={"candidate_sha256": request.candidate_sha256},
+                        architecture_payload={
+                            "supported_architectures": list(request.supported_architectures),
+                            "supported_pool_ids": list(request.supported_pool_ids),
+                        },
+                        launcher_payload={
+                            "local_activation_sha256": request.local_activation_sha256
+                        },
+                        attestation_payload={
+                            "operation_id": str(request.operation_id),
+                            "operation_epoch": request.operation_epoch,
+                            "protected_admission_sha256": request.protected_admission_sha256,
+                            "capacity_agent_installation_sha256": (
+                                request.capacity_agent_installation_sha256
+                            ),
+                        },
+                        protocol_payload=request.protocol_versions,
+                    )
                 )
-            )
-            session.add(
-                CapacityDeploymentGeneration(
-                    subject_id=request.subject_id,
-                    subject_incarnation=request.subject_incarnation,
-                    deployment_generation=request.deployment_generation,
-                    candidate_digest=request.candidate_sha256,
-                    required_profiles=[
-                        profile.model_dump(mode="json", exclude_none=False)
-                        for profile in subject.profiles
-                    ],
-                    readiness_state="ready",
-                    lifecycle_state="active",
-                    cutover_payload={
-                        "local_activation_sha256": request.local_activation_sha256,
-                        "candidate_publication_sha256": request.candidate_publication_sha256,
-                        "protected_admission_sha256": request.protected_admission_sha256,
-                        "capacity_agent_installation_sha256": (
-                            request.capacity_agent_installation_sha256
-                        ),
-                    },
+                session.add(
+                    CapacityDeploymentGeneration(
+                        subject_id=request.subject_id,
+                        subject_incarnation=request.subject_incarnation,
+                        deployment_generation=request.deployment_generation,
+                        candidate_digest=request.candidate_sha256,
+                        required_profiles=[
+                            profile.model_dump(mode="json", exclude_none=False)
+                            for profile in subject.profiles
+                        ],
+                        readiness_state="ready",
+                        lifecycle_state="active",
+                        cutover_payload={
+                            "local_activation_sha256": request.local_activation_sha256,
+                            "candidate_publication_sha256": (request.candidate_publication_sha256),
+                            "protected_admission_sha256": request.protected_admission_sha256,
+                            "capacity_agent_installation_sha256": (
+                                request.capacity_agent_installation_sha256
+                            ),
+                        },
+                    )
                 )
-            )
             await session.flush()
 
             configuration_epoch = latest.configuration_epoch + 1
@@ -1268,6 +1353,14 @@ class CapacityManagementStore:
             raise ConfigurationConflictError("retired demand reporter cannot be reactivated")
         elif token_sha256 is not None and existing.token_sha256 != token_sha256:
             raise ConfigurationConflictError("demand reporter token binding conflicts")
+        elif existing.deployment_generation != subject.deployment_generation:
+            raise ConfigurationConflictError("demand reporter deployment binding conflicts")
+        elif existing.configuration_generation > subject.configuration_generation:
+            raise ConfigurationConflictError("demand reporter configuration binding regressed")
+        else:
+            # Capacity-only policy changes retain the protected reporter and
+            # high-water, but advance the generation accepted by the manager.
+            existing.configuration_generation = subject.configuration_generation
 
     async def _register_pool_reporter(self, session: AsyncSession, pool: Any) -> None:
         existing = (

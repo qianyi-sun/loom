@@ -307,6 +307,7 @@ def fleet_with_development_template(
 def development_projection(
     *,
     expected_configuration_epoch: int = 1,
+    operation_kind: str = "create",
     operation_id: UUID = DEVELOPMENT_OPERATION_ID,
     operation_epoch: int = 1,
     environment_name: str = "alice",
@@ -322,6 +323,7 @@ def development_projection(
 ) -> DynamicDevelopmentSubjectProjectionV1:
     return DynamicDevelopmentSubjectProjectionV1(
         expected_configuration_epoch=expected_configuration_epoch,
+        operation_kind=operation_kind,
         operation_id=operation_id,
         operation_epoch=operation_epoch,
         environment_name=environment_name,

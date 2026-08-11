@@ -394,6 +394,104 @@ async def test_dynamic_development_projection_is_atomic_idempotent_and_shadow_on
     assert allocate_shadow(allocation_input).executable is False
 
 
+async def test_dynamic_projection_accepts_consumed_local_generations_and_capacity_only_update(
+    capacity_session: AsyncSession,
+) -> None:
+    fleet = fleet_with_development_template()
+    store, active = await _activate_default(
+        capacity_session,
+        fleet=fleet,
+        subject=subject_configuration(fleet),
+    )
+    created_request = development_projection(
+        expected_configuration_epoch=active.configuration_epoch,
+        operation_epoch=4,
+        candidate_generation=3,
+        deployment_generation=3,
+        configuration_generation=4,
+    )
+    created = await store.project_development_subject(
+        capacity_session,
+        created_request,
+        actor="personal-lifecycle",
+        idempotency_key=uuid4(),
+    )
+
+    capacity_request = created_request.model_copy(
+        update={
+            "expected_configuration_epoch": created.configuration_epoch,
+            "operation_kind": "capacity",
+            "operation_id": uuid4(),
+            "operation_epoch": 6,
+            "configuration_generation": 6,
+            "min_slots": 1,
+            "max_slots": 3,
+        }
+    )
+    resized = await store.project_development_subject(
+        capacity_session,
+        capacity_request,
+        actor="personal-lifecycle",
+        idempotency_key=uuid4(),
+    )
+
+    assert resized.subject.configuration_generation == 6
+    assert resized.subject.deployment_generation == 3
+    assert resized.subject.min_slots == 1
+    assert resized.subject.max_slots == 3
+    assert (
+        await capacity_session.execute(select(func.count()).select_from(CapacityCandidate))
+    ).scalar_one() == 1
+    assert (
+        await capacity_session.execute(
+            select(func.count()).select_from(CapacityDeploymentGeneration)
+        )
+    ).scalar_one() == 1
+
+
+async def test_capacity_only_projection_cannot_change_candidate_or_reporter_binding(
+    capacity_session: AsyncSession,
+) -> None:
+    fleet = fleet_with_development_template()
+    store, active = await _activate_default(
+        capacity_session,
+        fleet=fleet,
+        subject=subject_configuration(fleet),
+    )
+    initial = development_projection(expected_configuration_epoch=active.configuration_epoch)
+    created = await store.project_development_subject(
+        capacity_session,
+        initial,
+        actor="personal-lifecycle",
+        idempotency_key=uuid4(),
+    )
+    base_capacity = initial.model_copy(
+        update={
+            "expected_configuration_epoch": created.configuration_epoch,
+            "operation_kind": "capacity",
+            "operation_id": uuid4(),
+            "operation_epoch": 2,
+            "configuration_generation": 2,
+        }
+    )
+
+    for change in (
+        {"candidate_sha256": "9" * 64},
+        {
+            "demand_reporter_incarnation": uuid4(),
+            "demand_reporter_token_sha256": "8" * 64,
+        },
+    ):
+        with pytest.raises(ConfigurationConflictError, match="capacity-only"):
+            await store.project_development_subject(
+                capacity_session,
+                base_capacity.model_copy(update=change),
+                actor="personal-lifecycle",
+                idempotency_key=uuid4(),
+            )
+        await capacity_session.rollback()
+
+
 async def test_dynamic_projection_identity_reuse_and_owner_limits_fail_closed(
     capacity_session: AsyncSession,
 ) -> None:

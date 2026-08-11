@@ -76,6 +76,7 @@ def fleet_with_development_template() -> FleetManifestV1:
 def projection_request(**changes: object) -> DynamicDevelopmentSubjectProjectionV1:
     payload: dict[str, object] = {
         "expected_configuration_epoch": 1,
+        "operation_kind": "create",
         "operation_id": _OPERATION_ID,
         "operation_epoch": 1,
         "environment_name": "alice",
@@ -188,6 +189,31 @@ def test_dynamic_projection_is_strict_and_zero_execution_has_no_override() -> No
     with pytest.raises(ValidationError, match="extra"):
         DynamicDevelopmentSubjectProjectionV1.model_validate(
             {**request.model_dump(mode="python"), "executable": True}
+        )
+
+
+def test_dynamic_projection_allows_gapped_lifecycle_generations() -> None:
+    request = projection_request(
+        operation_epoch=7,
+        candidate_generation=5,
+        deployment_generation=5,
+        configuration_generation=7,
+    )
+
+    assert request.operation_epoch == 7
+    assert request.deployment_generation == 5
+    assert request.configuration_generation == 7
+
+
+def test_capacity_projection_still_binds_one_unchanged_deployment() -> None:
+    request = projection_request(operation_kind="capacity")
+
+    assert request.operation_kind == "capacity"
+    with pytest.raises(ValidationError, match="candidate generation"):
+        projection_request(
+            operation_kind="capacity",
+            candidate_generation=2,
+            deployment_generation=1,
         )
 
 
