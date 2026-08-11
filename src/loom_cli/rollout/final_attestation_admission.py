@@ -373,7 +373,12 @@ def validate_post_apply_attestation_drift(
         string_map("gb10.host-readiness", "boot-ids") == dict(bindings.gb10_boot_ids),
     )
     if not all(exact):
-        raise ValueError("post-apply drift-sensitive evidence changed")
+        # Protected apply can leave a short read-after-write window across the
+        # independently managed OLDLAB and GB10 hosts.  Re-observe without
+        # mutating; the action source still fails closed after its bounded wait.
+        raise PostApplyDriftTransientError(
+            "post-apply drift-sensitive evidence changed"
+        )
     payload = {
         "checks": {
             execution.check_id: {

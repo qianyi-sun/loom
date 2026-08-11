@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from loom_cli.rollout.final_attestation_admission import (
+    PostApplyDriftTransientError,
     validate_final_attestation,
     validate_post_apply_attestation_drift,
 )
@@ -608,7 +609,7 @@ def test_post_apply_drift_rejects_wrong_epoch_or_expired_attestation() -> None:
         )
 
 
-def test_post_apply_drift_reruns_and_rejects_changed_host_identity() -> None:
+def test_post_apply_drift_classifies_changed_host_identity_as_transient() -> None:
     plan = _plan(_checks())
     admission = validate_final_attestation(
         attestation=_attestation(plan),
@@ -619,7 +620,10 @@ def test_post_apply_drift_reruns_and_rejects_changed_host_identity() -> None:
     )
     drifted_plan = _plan(_checks(boot_id="boot-2"))
 
-    with pytest.raises(ValueError, match="drift-sensitive evidence changed"):
+    with pytest.raises(
+        PostApplyDriftTransientError,
+        match="drift-sensitive evidence changed",
+    ):
         validate_post_apply_attestation_drift(
             admission=admission,
             plan=drifted_plan,
