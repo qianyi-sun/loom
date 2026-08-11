@@ -40,6 +40,27 @@ _POST_APPLY_DRIFT_EVIDENCE_CHECKS = frozenset(
 _PRE_APPLY_DRIFT_EVIDENCE_CHECKS = _POST_APPLY_DRIFT_EVIDENCE_CHECKS | {
     "external-supervisor.predecessor"
 }
+_ROTATING_CREDENTIAL_METADATA = frozenset(
+    {"readonly-kubeconfig", "rehearsal-kubeconfig"}
+)
+
+
+class PostApplyDriftTransientError(ValueError):
+    """A post-apply observation was temporarily incomplete but may converge."""
+
+
+def _credential_metadata_matches(
+    current: Mapping[str, str],
+    attested: Mapping[str, str],
+) -> bool:
+    """Freeze stable credentials while allowing reviewed TokenRequest rotation."""
+    if current.keys() != attested.keys():
+        return False
+    return all(
+        current[name] == fingerprint
+        for name, fingerprint in attested.items()
+        if name not in _ROTATING_CREDENTIAL_METADATA
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,7 +181,17 @@ def validate_final_attestation(
         evidence("candidate.identity", "resolved-sha") == bindings.candidate_sha,
         evidence("candidate.identity", "resolved-tree") == bindings.candidate_tree,
         evidence("runner.install", "attestation-digest") == bindings.runner_install_hash,
-        normalized_secret_metadata == dict(bindings.secret_metadata_fingerprints),
+        # These two kubeconfigs contain bounded TokenRequest credentials and are
+        # intentionally refreshed hourly.  Their current no-follow metadata,
+        # ACL, read stability, and downstream capability are revalidated by the
+        # passing preflight DAG above; freezing their inode/timestamps would
+        # turn an authorized refresh into unavoidable attestation drift.  The
+        # complete credential label set and every non-rotating credential stay
+        # byte-exact here.
+        _credential_metadata_matches(
+            normalized_secret_metadata,
+            bindings.secret_metadata_fingerprints,
+        ),
         evidence("gb10.shared-mount", "mount-digest") == bindings.gb10_mount_digest,
         evidence("gb10.candidate-source", "source-digest") == bindings.gb10_unit_digest,
         # gb10.host-readiness inventory-digest is intentionally NOT byte-matched:
@@ -234,7 +265,7 @@ def validate_post_apply_attestation_drift(
     now: datetime,
     max_concurrency: int = 8,
 ) -> PostApplyDriftEvidence:
-    """Rerun only epoch-independent exact inputs after protected apply."""
+    """Rerun only exact inputs from a fresh post-apply runtime plan."""
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("post-apply drift clock must be timezone-aware")
     attestation = admission.attestation
@@ -255,7 +286,7 @@ def validate_post_apply_attestation_drift(
         "environment": bindings.environment,
         "namespace": bindings.namespace,
         "route": bindings.route,
-        "staging.mutation-epoch": bindings.staging_mutation_epoch,
+        "staging.mutation-epoch": current_mutation_epoch,
     }
     if any(plan.context.bindings.get(key) != value for key, value in context_expected.items()):
         raise ValueError("post-apply context binding drifted")
@@ -284,7 +315,7 @@ def validate_post_apply_attestation_drift(
     if not _POST_APPLY_DRIFT_EVIDENCE_CHECKS <= by_id.keys() or any(
         not execution.passed for execution in executions
     ):
-        raise ValueError("post-apply drift evidence is incomplete")
+        raise PostApplyDriftTransientError("post-apply drift evidence is incomplete")
     selected = tuple(
         sorted(
             (by_id[check_id] for check_id in _POST_APPLY_DRIFT_EVIDENCE_CHECKS),
@@ -292,12 +323,13 @@ def validate_post_apply_attestation_drift(
         )
     )
     if any(
-        execution.expires_at <= now
-        or execution.implementation_digest
+        execution.implementation_digest
         != attestation.check_implementation_digests.get(execution.check_id)
         for execution in executions
     ):
-        raise ValueError("post-apply drift evidence expired or changed")
+        raise ValueError("post-apply drift evidence implementation changed")
+    if any(execution.expires_at <= now for execution in executions):
+        raise PostApplyDriftTransientError("post-apply drift evidence expired")
 
     def evidence(check_id: str, field: str) -> object:
         try:
@@ -322,7 +354,12 @@ def validate_post_apply_attestation_drift(
         evidence("candidate.identity", "resolved-sha") == bindings.candidate_sha,
         evidence("candidate.identity", "resolved-tree") == bindings.candidate_tree,
         evidence("runner.install", "attestation-digest") == bindings.runner_install_hash,
-        normalized_secret_metadata == dict(bindings.secret_metadata_fingerprints),
+        # TokenRequest kubeconfigs may rotate during the protected apply too;
+        # their current authority is still required to pass the DAG above.
+        _credential_metadata_matches(
+            normalized_secret_metadata,
+            bindings.secret_metadata_fingerprints,
+        ),
         evidence("gb10.shared-mount", "mount-digest") == bindings.gb10_mount_digest,
         evidence("gb10.candidate-source", "source-digest") == bindings.gb10_unit_digest,
         # gb10.host-readiness inventory-digest is intentionally NOT byte-matched:
@@ -336,7 +373,12 @@ def validate_post_apply_attestation_drift(
         string_map("gb10.host-readiness", "boot-ids") == dict(bindings.gb10_boot_ids),
     )
     if not all(exact):
-        raise ValueError("post-apply drift-sensitive evidence changed")
+        # Protected apply can leave a short read-after-write window across the
+        # independently managed OLDLAB and GB10 hosts.  Re-observe without
+        # mutating; the action source still fails closed after its bounded wait.
+        raise PostApplyDriftTransientError(
+            "post-apply drift-sensitive evidence changed"
+        )
     payload = {
         "checks": {
             execution.check_id: {
@@ -357,6 +399,7 @@ def validate_post_apply_attestation_drift(
 __all__ = [
     "FinalAttestationAdmission",
     "PostApplyDriftEvidence",
+    "PostApplyDriftTransientError",
     "validate_final_attestation",
     "validate_post_apply_attestation_drift",
 ]

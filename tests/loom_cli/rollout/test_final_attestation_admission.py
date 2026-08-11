@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from loom_cli.rollout.final_attestation_admission import (
+    PostApplyDriftTransientError,
     validate_final_attestation,
     validate_post_apply_attestation_drift,
 )
@@ -125,6 +126,7 @@ def _checks(
     *,
     boot_id: str = "boot-1",
     baseline_digest: str = "6" * 64,
+    credential_metadata: dict[str, str] | None = None,
     predecessor_live_digest: str = "d" * 64,
     predecessor_pool_digest: str = "2" * 64,
     gb10_inventory_digest: str = "4" * 64,
@@ -147,7 +149,13 @@ def _checks(
         ),
         _check(
             "credentials.metadata",
-            {"metadata-fingerprints": {"admin": "abcd"}},
+            {
+                "metadata-fingerprints": (
+                    {"admin": "abcd"}
+                    if credential_metadata is None
+                    else credential_metadata
+                )
+            },
             (EvidenceField("metadata-fingerprints", "string-map"),),
             policy=SecretRedactionPolicy.METADATA_FINGERPRINTS_ONLY,
         ),
@@ -324,6 +332,12 @@ def _attestation(plan: CandidatePreflightPlan) -> PreflightAttestation:
     )
 
 
+def _at_epoch(plan: CandidatePreflightPlan, mutation_epoch: int) -> CandidatePreflightPlan:
+    bindings = dict(plan.context.bindings)
+    bindings["staging.mutation-epoch"] = mutation_epoch
+    return replace(plan, context=CheckContext(bindings))
+
+
 def test_final_admission_rechecks_exact_drift_sensitive_tier0() -> None:
     plan = _plan(_checks())
     admission = validate_final_attestation(
@@ -381,6 +395,99 @@ def test_final_admission_tolerates_gb10_inventory_drift() -> None:
     )
 
     assert all(execution.passed for execution in admission.tier0_executions)
+
+
+def test_final_and_post_apply_admission_tolerate_tokenrequest_kubeconfig_rotation() -> None:
+    attested_metadata = {
+        "admin": "abcd",
+        "readonly-kubeconfig": "1" * 64,
+        "rehearsal-kubeconfig": "2" * 64,
+    }
+    attested_plan = _plan(_checks(credential_metadata=attested_metadata))
+    attestation = _attestation(attested_plan)
+    attestation = replace(
+        attestation,
+        bindings=replace(
+            attestation.bindings,
+            secret_metadata_fingerprints={
+                key: f"sha256:{value}" for key, value in attested_metadata.items()
+            },
+        ),
+    )
+    final_plan = _plan(
+        _checks(
+            credential_metadata={
+                **attested_metadata,
+                "readonly-kubeconfig": "3" * 64,
+                "rehearsal-kubeconfig": "4" * 64,
+            }
+        )
+    )
+
+    admission = validate_final_attestation(
+        attestation=attestation,
+        candidate=_candidate(),
+        plan=final_plan,
+        current_mutation_epoch=7,
+        now=NOW,
+    )
+    post_apply_plan = _at_epoch(
+        _plan(
+            _checks(
+                credential_metadata={
+                    **attested_metadata,
+                    "readonly-kubeconfig": "5" * 64,
+                    "rehearsal-kubeconfig": "6" * 64,
+                }
+            )
+        ),
+        8,
+    )
+
+    evidence = validate_post_apply_attestation_drift(
+        admission=admission,
+        plan=post_apply_plan,
+        current_mutation_epoch=8,
+        now=NOW,
+    )
+
+    assert evidence.observed_mutation_epoch == 8
+
+
+def test_final_admission_still_rejects_stable_credential_or_source_set_drift() -> None:
+    attested_metadata = {
+        "admin": "abcd",
+        "readonly-kubeconfig": "1" * 64,
+        "rehearsal-kubeconfig": "2" * 64,
+    }
+    attested_plan = _plan(_checks(credential_metadata=attested_metadata))
+    attestation = _attestation(attested_plan)
+    attestation = replace(
+        attestation,
+        bindings=replace(
+            attestation.bindings,
+            secret_metadata_fingerprints={
+                key: f"sha256:{value}" for key, value in attested_metadata.items()
+            },
+        ),
+    )
+    for drifted_metadata in (
+        {**attested_metadata, "admin": "9" * 64},
+        {
+            name: fingerprint
+            for name, fingerprint in attested_metadata.items()
+            if name != "rehearsal-kubeconfig"
+        },
+    ):
+        drifted_plan = _plan(_checks(credential_metadata=drifted_metadata))
+        with pytest.raises(ValueError, match="drift-sensitive evidence changed"):
+            validate_final_attestation(
+                attestation=attestation,
+                candidate=_candidate(),
+                plan=drifted_plan,
+                current_mutation_epoch=7,
+                now=NOW,
+            )
 
 
 def test_final_admission_rejects_host_boot_or_epoch_drift() -> None:
@@ -455,7 +562,7 @@ def test_final_admission_rejects_predecessor_drift_before_apply() -> None:
         )
 
 
-def test_post_apply_drift_reuses_exact_admission_without_baseline_replay() -> None:
+def test_post_apply_drift_uses_fresh_epoch_plan_without_baseline_replay() -> None:
     plan = _plan(_checks())
     admission = validate_final_attestation(
         attestation=_attestation(plan),
@@ -465,7 +572,10 @@ def test_post_apply_drift_reuses_exact_admission_without_baseline_replay() -> No
         now=NOW,
     )
 
-    post_apply_plan = _plan(_checks(predecessor_live_digest="0" * 64))
+    post_apply_plan = _at_epoch(
+        _plan(_checks(predecessor_live_digest="0" * 64)),
+        8,
+    )
     evidence = validate_post_apply_attestation_drift(
         admission=admission,
         plan=post_apply_plan,
@@ -511,7 +621,7 @@ def test_post_apply_drift_rejects_wrong_epoch_or_expired_attestation() -> None:
         )
 
 
-def test_post_apply_drift_reruns_and_rejects_changed_host_identity() -> None:
+def test_post_apply_drift_classifies_changed_host_identity_as_transient() -> None:
     plan = _plan(_checks())
     admission = validate_final_attestation(
         attestation=_attestation(plan),
@@ -520,9 +630,12 @@ def test_post_apply_drift_reruns_and_rejects_changed_host_identity() -> None:
         current_mutation_epoch=7,
         now=NOW,
     )
-    drifted_plan = _plan(_checks(boot_id="boot-2"))
+    drifted_plan = _at_epoch(_plan(_checks(boot_id="boot-2")), 8)
 
-    with pytest.raises(ValueError, match="drift-sensitive evidence changed"):
+    with pytest.raises(
+        PostApplyDriftTransientError,
+        match="drift-sensitive evidence changed",
+    ):
         validate_post_apply_attestation_drift(
             admission=admission,
             plan=drifted_plan,
@@ -542,6 +655,7 @@ def test_post_apply_drift_rejects_route_or_config_context_drift() -> None:
     )
     drifted_bindings = dict(plan.context.bindings)
     drifted_bindings["route"] = "https://yylx.world/other"
+    drifted_bindings["staging.mutation-epoch"] = 8
     drifted_plan = replace(plan, context=CheckContext(drifted_bindings))
 
     with pytest.raises(ValueError, match="context binding drifted"):

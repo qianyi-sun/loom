@@ -397,6 +397,67 @@ def test_installed_epoch_source_is_single_flight_before_concurrent_dag() -> None
     assert calls == [os.getuid()]
 
 
+def test_installed_epoch_source_refreshes_after_protected_mutation() -> None:
+    before = ReadonlyMutationEpochEvidence(
+        schema_revision="0070",
+        mutation_epoch=12,
+        epoch_authority="staging-mutation-epoch-v1",
+        evidence_sha256="b" * 64,
+    )
+    after = ReadonlyMutationEpochEvidence(
+        schema_revision="0070",
+        mutation_epoch=13,
+        epoch_authority="staging-mutation-epoch-v1",
+        evidence_sha256="c" * 64,
+    )
+    observations = iter((before, after))
+    calls: list[int] = []
+
+    def probe(*, service_uid: int) -> ReadonlyMutationEpochEvidence:
+        calls.append(service_uid)
+        return next(observations)
+
+    source = InstalledReadonlyMutationEpochSource(
+        service_uid=os.getuid(),
+        probe=probe,
+    )
+
+    assert source().mutation_epoch == 12
+    assert source().mutation_epoch == 12
+    assert source.refresh().mutation_epoch == 13
+    assert source().mutation_epoch == 13
+    assert calls == [os.getuid(), os.getuid()]
+
+
+def test_installed_epoch_source_failed_refresh_preserves_snapshot_and_fails_closed() -> None:
+    before = ReadonlyMutationEpochEvidence(
+        schema_revision="0070",
+        mutation_epoch=12,
+        epoch_authority="staging-mutation-epoch-v1",
+        evidence_sha256="b" * 64,
+    )
+    calls = 0
+
+    def probe(*, service_uid: int) -> ReadonlyMutationEpochEvidence:
+        nonlocal calls
+        assert service_uid == os.getuid()
+        calls += 1
+        if calls == 1:
+            return before
+        raise RuntimeError("current mutation epoch is unavailable")
+
+    source = InstalledReadonlyMutationEpochSource(
+        service_uid=os.getuid(),
+        probe=probe,
+    )
+
+    assert source() == before
+    with pytest.raises(RuntimeError, match="current mutation epoch is unavailable"):
+        source.refresh()
+    assert source() == before
+    assert calls == 2
+
+
 def test_installed_database_source_caches_one_fail_closed_probe_per_concurrent_dag() -> None:
     calls: list[int] = []
     entered = threading.Barrier(4)

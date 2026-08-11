@@ -78,6 +78,9 @@ _CONTROL_PLANE_READY_INTERVAL_SECONDS = 0.5
 _MAX_CATALOG_SOURCE_BYTES = 1024 * 1024
 _MAX_PORT_FORWARD_LOG_CHARS = 64 * 1024
 _SHARED_WORKER_REPO_ROOT = Path("/shared_work2/loom-staging-rollout/worker-repos")
+_SHARED_OLDLAB_WORKER_REPO_ROOT = Path(
+    "/shared_work/loom/staging-rollout/worker-repos"
+)
 _SHARED_WORKER_REPO_CONSUMER = PurePosixPath("scripts/ops/staging_rollout_shared_repo_consumer.py")
 _GIT_OBJECT_ID_RE = re.compile(r"[0-9a-f]{40}\Z")
 _MAX_SHARED_REPO_INDEX_BYTES = 64 * 1024 * 1024
@@ -1381,7 +1384,11 @@ def _env_source_is_safe(path: Path) -> bool:
     )
 
 
-def _read_env_source(path: Path) -> str:
+def _read_env_source(
+    path: Path,
+    *,
+    expected_sha256: str | None = None,
+) -> str:
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(path, flags)
@@ -1407,6 +1414,13 @@ def _read_env_source(path: Path) -> str:
             )
     finally:
         os.close(fd)
+    if expected_sha256 is not None and (
+        re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None
+        or hashlib.sha256(payload).hexdigest() != expected_sha256
+    ):
+        raise ExternalSlurmPrereqMaterializationError(
+            f"external runner env template digest drifted: {path}",
+        )
     try:
         text = payload.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -1460,8 +1474,10 @@ def _materialize_env_file(
     requested_concurrency: object,
     worker_token: str | None,
     worker_token_env_key: str,
+    refresh_from_template: bool = False,
+    expected_template_sha256: str | None = None,
 ) -> dict[str, Any]:
-    if os.path.lexists(env_file):
+    if os.path.lexists(env_file) and not refresh_from_template:
         if not _env_source_is_safe(env_file):
             raise ExternalSlurmPrereqMaterializationError(
                 f"external runner env file is unsafe: {env_file}",
@@ -1472,21 +1488,20 @@ def _materialize_env_file(
             target=env_file,
             settings=settings,
         )
-    existing = _read_env_source(source)
-    updates = {
-        "IMAGE_TAG": image_tag,
-        "ENV_CONFIG_VERSION": image_tag,
-        "LOOM_IMAGE_TAG": image_tag,
-        "LOOM_WORKER_ENV_CONFIG_VERSION": image_tag,
-        "LOOM_WORKER_POOL_NAME": pool_name,
-    }
-    if requested_concurrency is not None:
-        updates["LOOM_WORKER_MAX_CONCURRENT"] = str(requested_concurrency)
-    if worker_token is not None:
-        updates[worker_token_env_key] = worker_token
+    existing = _read_env_source(
+        source,
+        expected_sha256=(expected_template_sha256 if source != env_file else None),
+    )
+    rendered = _render_external_runner_env(
+        existing,
+        image_tag=image_tag,
+        pool_name=pool_name,
+        requested_concurrency=requested_concurrency,
+        worker_token=worker_token,
+        worker_token_env_key=worker_token_env_key,
+    )
 
     env_file.parent.mkdir(parents=True, exist_ok=True)
-    rendered = _update_env_text(existing, updates)
     tmp = env_file.with_name(f".{env_file.name}.tmp-{os.getpid()}")
     tmp.write_text(rendered, encoding="utf-8")
     os.chmod(tmp, 0o600)
@@ -1498,9 +1513,72 @@ def _materialize_env_file(
         "env_action": "updated" if source == env_file else "created",
         "env_template": None if source == env_file else str(source),
         "env_mode": oct(env_file.stat().st_mode & 0o777),
+        "env_sha256": hashlib.sha256(rendered.encode()).hexdigest(),
         "worker_token_key": worker_token_env_key if worker_token is not None else None,
         "worker_token": "[REDACTED]" if worker_token is not None else None,
         "worker_token_fingerprint": token_fingerprint,
+    }
+
+
+def _render_external_runner_env(
+    existing: str,
+    *,
+    image_tag: str,
+    pool_name: str,
+    requested_concurrency: object,
+    worker_token: str | None,
+    worker_token_env_key: str,
+) -> str:
+    updates = {
+        "IMAGE_TAG": image_tag,
+        "ENV_CONFIG_VERSION": image_tag,
+        "LOOM_IMAGE_TAG": image_tag,
+        "LOOM_WORKER_ENV_CONFIG_VERSION": image_tag,
+        "LOOM_WORKER_POOL_NAME": pool_name,
+    }
+    if requested_concurrency is not None:
+        updates["LOOM_WORKER_MAX_CONCURRENT"] = str(requested_concurrency)
+    if worker_token is not None:
+        updates[worker_token_env_key] = worker_token
+    return _update_env_text(existing, updates)
+
+
+def verify_external_runner_env(
+    *,
+    env_file: Path,
+    image_tag: str,
+    pool_name: str,
+    requested_concurrency: object,
+    worker_token: str | None,
+    worker_token_env_key: str,
+    settings: dict[str, Any],
+    expected_template_sha256: str,
+) -> dict[str, Any]:
+    """Verify one candidate-bound external-runner environment without writing it."""
+    existing = _read_env_source(env_file)
+    template = _select_env_template(target=env_file, settings=settings)
+    expected = _render_external_runner_env(
+        _read_env_source(template, expected_sha256=expected_template_sha256),
+        image_tag=image_tag,
+        pool_name=pool_name,
+        requested_concurrency=requested_concurrency,
+        worker_token=worker_token,
+        worker_token_env_key=worker_token_env_key,
+    )
+    if existing != expected:
+        raise ExternalSlurmPrereqMaterializationError(
+            "external runner env file does not exactly match the candidate",
+        )
+    return {
+        "env_file": str(env_file),
+        "env_action": "matched",
+        "env_mode": oct(env_file.stat().st_mode & 0o777),
+        "env_sha256": hashlib.sha256(existing.encode()).hexdigest(),
+        "worker_token_key": worker_token_env_key if worker_token is not None else None,
+        "worker_token": "[REDACTED]" if worker_token is not None else None,
+        "worker_token_fingerprint": (
+            worker_token_fingerprint(worker_token) if worker_token is not None else None
+        ),
     }
 
 
@@ -1620,13 +1698,20 @@ def _open_bound_directory(path: Path) -> _BoundDirectory:
         raise
 
 
-def _validate_repo_root(repo_dir: Path, expected_ref: str) -> _BoundDirectory:
+def _validate_repo_root(
+    repo_dir: Path,
+    expected_ref: str,
+) -> _BoundDirectory:
+    approved_roots = {
+        _SHARED_WORKER_REPO_ROOT,
+        _SHARED_OLDLAB_WORKER_REPO_ROOT,
+    }
     expected_name = f"loom-remote-worker-{expected_ref.strip()}"
     if (
         not repo_dir.is_absolute()
         or ".." in repo_dir.parts
         or repo_dir.name != expected_name
-        or repo_dir.parent != _SHARED_WORKER_REPO_ROOT
+        or repo_dir.parent not in approved_roots
     ):
         raise ExternalSlurmPrereqMaterializationError(
             "external runner repository destination is outside its candidate-bound root",

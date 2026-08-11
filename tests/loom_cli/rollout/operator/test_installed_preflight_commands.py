@@ -185,3 +185,22 @@ def test_candidate_source_ssh_has_sub_dag_cancellation_timeout(tmp_path: Path) -
 
     assert calls[0]["argv"] == ("ssh", "trt-gb10-1", "probe")
     assert calls[0]["timeout"] == 12
+
+
+def test_gb10_fleet_ssh_is_bounded_below_dag_timeout(tmp_path: Path) -> None:
+    calls: list[dict[str, object]] = []
+
+    def run(argv, **kwargs):
+        calls.append({"argv": tuple(argv), **kwargs})
+        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+    commands = InstalledPreflightCommands(
+        _config(tmp_path),
+        _environment(),
+        run_subprocess=run,
+    )
+
+    commands.gb10_fleet(("ssh", "trt-gb10-1", "probe"))
+
+    assert calls[0]["argv"] == ("ssh", "trt-gb10-1", "probe")
+    assert calls[0]["timeout"] == 5
