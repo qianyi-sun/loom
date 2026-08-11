@@ -2480,7 +2480,11 @@ def test_browser_executes_exact_isolated_job_and_validates_report() -> None:
             route_origin="https://yylx.world/dev",
         ),
     )
-    artifact = build_rehearsal_browser_artifact(plan, ingress_ip="10.96.12.34")
+    artifact = build_rehearsal_browser_artifact(
+        plan,
+        ingress_ip="10.96.12.34",
+        ingress_source_ips=("10.42.1.1",),
+    )
     resources = {
         (item["kind"], item["metadata"]["name"]): item
         for item in yaml.safe_load_all(artifact.payload)
@@ -2557,10 +2561,57 @@ def test_browser_executes_exact_isolated_job_and_validates_report() -> None:
                 },
                 "spec": {"clusterIP": "10.96.12.34", "type": "ClusterIP"},
             }
+        elif "endpoints" in argv and "loom-web" in argv:
+            value = {
+                "apiVersion": "v1",
+                "kind": "Endpoints",
+                "metadata": {
+                    "name": "loom-web",
+                    "namespace": plan.resources.namespace,
+                },
+                "subsets": [
+                    {
+                        "addresses": [
+                            {"ip": "10.42.1.7", "nodeName": "trt-eai-oldlab-2"}
+                        ],
+                        "ports": [{"name": "http", "port": 8080, "protocol": "TCP"}],
+                    }
+                ],
+            }
+        elif "endpoints" in argv and "loom-service" in argv:
+            value = {
+                "apiVersion": "v1",
+                "kind": "Endpoints",
+                "metadata": {
+                    "name": "loom-service",
+                    "namespace": plan.resources.namespace,
+                },
+                "subsets": [
+                    {
+                        "addresses": [
+                            {"ip": "10.42.1.6", "nodeName": "trt-eai-oldlab-2"}
+                        ],
+                        "ports": [{"name": "http", "port": 8090, "protocol": "TCP"}],
+                    }
+                ],
+            }
+        elif "node" in argv and "trt-eai-oldlab-2" in argv:
+            value = {
+                "apiVersion": "v1",
+                "kind": "Node",
+                "metadata": {"name": "trt-eai-oldlab-2"},
+                "spec": {"podCIDR": "10.42.1.0/24", "podCIDRs": ["10.42.1.0/24"]},
+                "status": {
+                    "addresses": [
+                        {"address": "192.168.50.14", "type": "InternalIP"},
+                        {"address": "trt-eai-oldlab-2", "type": "Hostname"},
+                    ]
+                },
+            }
         elif "ingress" in argv:
             value = resources[("Ingress", "loom-rehearsal-browser")]
         elif "networkpolicy" in argv:
-            value = resources[("NetworkPolicy", "loom-rehearsal-browser")]
+            value = resources[("NetworkPolicy", argv[argv.index("networkpolicy") + 1])]
         elif "job" in argv:
             value = (
                 completed_job
@@ -2573,7 +2624,7 @@ def test_browser_executes_exact_isolated_job_and_validates_report() -> None:
 
     outcome = IsolatedRehearsalExecutor(
         run=run,
-        browser_artifacts=lambda _plan, _ip: artifact,
+        browser_artifacts=lambda _plan, _ip, _source_ips: artifact,
         runtime_image_resolver=_runtime_images,
     ).execute("rehearsal.browser", plan)
 
@@ -2602,3 +2653,87 @@ def test_browser_fails_closed_before_mutation_when_ingress_readback_drifts() -> 
     assert outcome.blockers == {"browser": "ingress-controller-readback-failed"}
     assert len(calls) == 1
     assert "apply" not in calls[0]
+
+
+def test_browser_fails_closed_before_mutation_when_backend_endpoints_drift() -> None:
+    plan = replace(
+        _plan(),
+        resources=RehearsalResources.derive(
+            "rehearsal-" + "5" * 24,
+            route_origin="https://yylx.world/dev",
+        ),
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def run(argv, payload, timeout):
+        calls.append(tuple(argv))
+        if "service" in argv:
+            value = {
+                "apiVersion": "v1",
+                "kind": "Service",
+                "metadata": {
+                    "name": "ingress-nginx-controller",
+                    "namespace": "ingress-nginx",
+                },
+                "spec": {"clusterIP": "10.96.12.34", "type": "ClusterIP"},
+            }
+            return subprocess.CompletedProcess(argv, 0, json.dumps(value), "")
+        return subprocess.CompletedProcess(argv, 0, "{}", "")
+
+    outcome = IsolatedRehearsalExecutor(run=run).execute("rehearsal.browser", plan)
+
+    assert outcome.blockers == {"browser": "backend-endpoints-readback-failed"}
+    assert len(calls) == 2
+    assert all("apply" not in call for call in calls)
+
+
+def test_browser_fails_closed_before_mutation_when_backend_node_drift() -> None:
+    plan = replace(
+        _plan(),
+        resources=RehearsalResources.derive(
+            "rehearsal-" + "5" * 24,
+            route_origin="https://yylx.world/dev",
+        ),
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def run(argv, payload, timeout):
+        calls.append(tuple(argv))
+        if "service" in argv:
+            value = {
+                "apiVersion": "v1",
+                "kind": "Service",
+                "metadata": {
+                    "name": "ingress-nginx-controller",
+                    "namespace": "ingress-nginx",
+                },
+                "spec": {"clusterIP": "10.96.12.34", "type": "ClusterIP"},
+            }
+        elif "endpoints" in argv:
+            name = "loom-web" if "loom-web" in argv else "loom-service"
+            port = 8080 if name == "loom-web" else 8090
+            value = {
+                "apiVersion": "v1",
+                "kind": "Endpoints",
+                "metadata": {
+                    "name": name,
+                    "namespace": plan.resources.namespace,
+                },
+                "subsets": [
+                    {
+                        "addresses": [
+                            {"ip": "10.42.1.7", "nodeName": "trt-eai-oldlab-2"}
+                        ],
+                        "ports": [{"name": "http", "port": port, "protocol": "TCP"}],
+                    }
+                ],
+            }
+        else:
+            value = {}
+        return subprocess.CompletedProcess(argv, 0, json.dumps(value), "")
+
+    outcome = IsolatedRehearsalExecutor(run=run).execute("rehearsal.browser", plan)
+
+    assert outcome.blockers == {"browser": "backend-node-readback-failed"}
+    assert len(calls) == 4
+    assert all("apply" not in call for call in calls)

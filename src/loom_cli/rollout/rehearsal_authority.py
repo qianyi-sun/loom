@@ -25,12 +25,18 @@ _EXPECTED_KINDS = (
     "RoleBinding",
 )
 _MUTATING_VERBS = frozenset({"create", "delete", "patch", "update"})
-_EXPECTED_CANONICAL_SHA256 = "e5f6037033c20128b98c8c40ae0e103633b4199b78028384ba938b4b685251e7"
+_EXPECTED_CANONICAL_SHA256 = "fb90731781b7187d0b6a1aa38f379ce83aa32070f60c77057487799427040560"
 _MUTATOR_RULES = [
     {
         "apiGroups": [""],
         "resources": ["namespaces"],
         "verbs": ["create", "delete", "get", "patch", "update"],
+    },
+    {
+        "apiGroups": [""],
+        "resources": ["nodes"],
+        "resourceNames": [f"trt-eai-oldlab-{index}" for index in range(1, 6)],
+        "verbs": ["get"],
     },
     {
         "apiGroups": [""],
@@ -290,13 +296,17 @@ def _role_is_bounded(value: Mapping[str, object]) -> bool:
             or "*" in resources
             or "*" in verbs
             or set(verbs) & {"list", "watch"}
-            or ("get" in verbs and resources != ["namespaces"])
+            or ("get" in verbs and resources not in (["namespaces"], ["nodes"]))
         ):
             return False
         if "bind" in verbs and (
             resources != ["clusterroles"]
             or rule.get("resourceNames") != ["loom-rollout-rehearsal-observer"]
         ):
+            return False
+        if resources == ["nodes"] and rule.get("resourceNames") != [
+            f"trt-eai-oldlab-{index}" for index in range(1, 6)
+        ]:
             return False
         mutation = bool(set(verbs) & _MUTATING_VERBS)
         has_namespace_mutation = has_namespace_mutation or (

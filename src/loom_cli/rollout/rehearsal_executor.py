@@ -51,6 +51,7 @@ from loom_cli.rollout.rehearsal_action_source import (
 )
 from loom_cli.rollout.rehearsal_browser import (
     BROWSER_INGRESS_NAME,
+    BROWSER_INGRESS_NETWORK_POLICY_NAME,
     BROWSER_JOB_NAME,
     BROWSER_NETWORK_POLICY_NAME,
     INGRESS_CONTROLLER_NAMESPACE,
@@ -58,6 +59,8 @@ from loom_cli.rollout.rehearsal_browser import (
     RehearsalBrowserArtifact,
     build_rehearsal_browser_artifact,
     ingress_controller_ip,
+    rehearsal_backend_endpoints,
+    rehearsal_backend_node_gateway_source_ip,
     rehearsal_browser_job_complete,
     rehearsal_browser_pod_complete,
     rehearsal_browser_report_ready,
@@ -176,7 +179,7 @@ CommandRunner = Callable[[Sequence[str], bytes | None, int], CommandResult]
 StreamCommandRunner = Callable[[Sequence[str], Path, int], CommandResult]
 ReleaseArtifactBuilder = Callable[[RehearsalPlan], RehearsalReleaseArtifact]
 SecretArtifactBuilder = Callable[[RehearsalPlan], RehearsalSecretArtifact]
-BrowserArtifactBuilder = Callable[[RehearsalPlan, str], RehearsalBrowserArtifact]
+BrowserArtifactBuilder = Callable[[RehearsalPlan, str, Sequence[str]], RehearsalBrowserArtifact]
 RuntimeImageResolver = Callable[[RehearsalPlan, Sequence[str]], Mapping[str, Sequence[str]] | None]
 ExternalSupervisorArtifactBuilder = Callable[[RehearsalPlan], ExternalSupervisorArtifact]
 ExternalSupervisorProfileBuilder = Callable[[RehearsalPlan], bytes]
@@ -281,8 +284,16 @@ def _default_secret_artifact(plan: RehearsalPlan) -> RehearsalSecretArtifact:
     )
 
 
-def _default_browser_artifact(plan: RehearsalPlan, ingress_ip: str) -> RehearsalBrowserArtifact:
-    return build_rehearsal_browser_artifact(plan, ingress_ip=ingress_ip)
+def _default_browser_artifact(
+    plan: RehearsalPlan,
+    ingress_ip: str,
+    ingress_source_ips: Sequence[str],
+) -> RehearsalBrowserArtifact:
+    return build_rehearsal_browser_artifact(
+        plan,
+        ingress_ip=ingress_ip,
+        ingress_source_ips=ingress_source_ips,
+    )
 
 
 def _default_external_supervisor_artifact(plan: RehearsalPlan) -> ExternalSupervisorArtifact:
@@ -409,8 +420,70 @@ class IsolatedRehearsalExecutor:
         ingress_ip = ingress_controller_ip(controller) if controller is not None else None
         if ingress_ip is None:
             return _blocked("browser", "ingress-controller-readback-failed")
+        backend_nodes: dict[str, list[str]] = {}
+        for name, port in (("loom-web", 8080), ("loom-service", 8090)):
+            endpoints = self._command(
+                (
+                    "kubectl",
+                    "--kubeconfig",
+                    str(self.kubeconfig),
+                    "--namespace",
+                    plan.resources.namespace,
+                    "get",
+                    "endpoints",
+                    name,
+                    "--request-timeout=15s",
+                    "-o",
+                    "json",
+                ),
+                None,
+                timeout=20,
+            )
+            backend_endpoints = (
+                rehearsal_backend_endpoints(
+                    endpoints,
+                    namespace=plan.resources.namespace,
+                    name=name,
+                    port=port,
+                )
+                if endpoints is not None
+                else None
+            )
+            if backend_endpoints is None:
+                return _blocked("browser", "backend-endpoints-readback-failed")
+            for node_name, pod_ip in backend_endpoints:
+                backend_nodes.setdefault(node_name, []).append(pod_ip)
+        ingress_source_ips: list[str] = []
+        for node_name, pod_ips in sorted(backend_nodes.items()):
+            node = self._command(
+                (
+                    "kubectl",
+                    "--kubeconfig",
+                    str(self.kubeconfig),
+                    "get",
+                    "node",
+                    node_name,
+                    "--request-timeout=15s",
+                    "-o",
+                    "json",
+                ),
+                None,
+                timeout=20,
+            )
+            source_ip = (
+                rehearsal_backend_node_gateway_source_ip(
+                    node,
+                    expected_name=node_name,
+                    expected_pod_ips=pod_ips,
+                )
+                if node is not None
+                else None
+            )
+            if source_ip is None:
+                return _blocked("browser", "backend-node-readback-failed")
+            ingress_source_ips.append(source_ip)
         try:
-            artifact = self.browser_artifacts(plan, ingress_ip)
+            artifact = self.browser_artifacts(plan, ingress_ip, ingress_source_ips)
         except (OSError, RuntimeError, ValueError):
             return _blocked("browser", "artifact-validation-failed")
         image_names = ("loom-staging-admin-browser-smoke",)
@@ -440,6 +513,11 @@ class IsolatedRehearsalExecutor:
         for resource, name, kind in (
             ("ingress", BROWSER_INGRESS_NAME, "Ingress"),
             ("networkpolicy", BROWSER_NETWORK_POLICY_NAME, "NetworkPolicy"),
+            (
+                "networkpolicy",
+                BROWSER_INGRESS_NETWORK_POLICY_NAME,
+                "NetworkPolicy",
+            ),
             ("job", BROWSER_JOB_NAME, "Job"),
         ):
             observed = self._command(

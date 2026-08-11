@@ -21,6 +21,15 @@ rules:
     resources: ["namespaces"]
     verbs: ["create", "delete", "get", "patch", "update"]
   - apiGroups: [""]
+    resources: ["nodes"]
+    resourceNames:
+      - "trt-eai-oldlab-1"
+      - "trt-eai-oldlab-2"
+      - "trt-eai-oldlab-3"
+      - "trt-eai-oldlab-4"
+      - "trt-eai-oldlab-5"
+    verbs: ["get"]
+  - apiGroups: [""]
     resources:
       - "configmaps"
       - "endpoints"
