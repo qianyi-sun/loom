@@ -14,6 +14,7 @@ from loom.dev_instance_provisioner import (
     InstanceReservation,
     OwnerAccessSnapshot,
 )
+from loom.personal_dev_activation import PersonalDevActivationVerifier
 from loom.personal_dev_environment import (
     PersonalDevApplyReservation,
     PersonalDevEnvironmentRecord,
@@ -21,7 +22,9 @@ from loom.personal_dev_environment import (
 )
 from loom_service.routes.dev_instances import (
     DevInstanceCreateRequest,
+    PersonalDevActivationAcknowledgementPayload,
     PersonalDevEnvironmentApplyPayload,
+    acknowledge_personal_dev_activation,
     apply_personal_dev_environment,
     create_dev_instance,
     delete_dev_instance,
@@ -402,8 +405,8 @@ async def test_personal_apply_binds_authenticated_owner_and_returns_operation() 
     captured = []
 
     class _Authority:
-        async def apply(self, requested, *, now=None):
-            captured.append(requested)
+        async def apply(self, requested, *, access_binding, now=None):
+            captured.append((requested, access_binding))
             environment = PersonalDevEnvironmentRecord(
                 name=requested.name,
                 subject_id=subject_id,
@@ -478,8 +481,10 @@ async def test_personal_apply_binds_authenticated_owner_and_returns_operation() 
     assert result.environment.subject_id == subject_id
     assert result.operation.id == operation_id
     assert result.operation.promotable is False
-    assert captured[0].owner_user_id == _OWNER
-    assert captured[0].owner_team_id == _TEAM
+    assert captured[0][0].owner_user_id == _OWNER
+    assert captured[0][0].owner_team_id == _TEAM
+    assert captured[0][1].auth_kind == "bearer"
+    assert captured[0][1].credential_hash == b"x" * 32
 
 
 async def test_candidate_less_create_is_retired_when_personal_lifecycle_is_enabled() -> None:
@@ -494,3 +499,35 @@ async def test_candidate_less_create_is_retired_when_personal_lifecycle_is_enabl
         )
     assert exc.value.status_code == 410
     assert store.rows == {}
+
+
+async def test_activation_ack_route_rejects_unsigned_agent_payload_before_database() -> None:
+    request = _request(_Store(), configured=False)
+    request.app.state.personal_dev_activation_verifier = PersonalDevActivationVerifier(
+        keys={"personal-dev-agent-v1": b"k" * 32},
+    )
+    request.app.state.session_factory = object()
+    payload = PersonalDevActivationAcknowledgementPayload(
+        environment_name="alice",
+        subject_id=UUID("00000000-0000-0000-0000-000000000010"),
+        subject_incarnation=UUID("00000000-0000-0000-0000-000000000011"),
+        operation_id=UUID("00000000-0000-0000-0000-000000000012"),
+        operation_epoch=1,
+        attempt_id=UUID("00000000-0000-0000-0000-000000000013"),
+        candidate_id=UUID("00000000-0000-0000-0000-000000000014"),
+        candidate_sha="a" * 64,
+        deployment_generation=1,
+        readiness_evidence_sha256="b" * 64,
+        local_activation_sha256="c" * 64,
+        agent_key_id="personal-dev-agent-v1",
+        observed_at=datetime.now(UTC),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await acknowledge_personal_dev_activation(
+            payload,
+            request,
+            signature="0" * 64,
+        )
+
+    assert exc.value.status_code == 403

@@ -6,7 +6,10 @@ from pathlib import Path
 import pytest
 
 from loom_service.config import LoomServiceSettings
-from loom_service.dev_instance_runtime import build_dev_instance_provisioner_factory
+from loom_service.dev_instance_runtime import (
+    build_dev_instance_provisioner_factory,
+    build_personal_dev_preparation_runtime,
+)
 
 
 class _Minio:
@@ -50,6 +53,24 @@ def _settings(tmp_path: Path, **overrides: object) -> LoomServiceSettings:
 def test_controller_wiring_is_absent_by_default(tmp_path: Path) -> None:
     settings = _settings(tmp_path, dev_instances_enabled=False)
     assert build_dev_instance_provisioner_factory(settings, minio_client=_Minio()) is None
+    assert build_personal_dev_preparation_runtime(settings, minio_client=_Minio()) is None
+
+
+def test_personal_runtime_uses_candidate_aware_executor_without_legacy_candidate(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(
+        tmp_path,
+        dev_instance_candidate_sha="",
+        dev_instance_image_tag="",
+        dev_instance_container_registry="",
+        dev_instance_slurm_actuator_config_json="{}",
+    )
+
+    runtime = build_personal_dev_preparation_runtime(settings, minio_client=_Minio())
+
+    assert runtime is not None
+    assert runtime.config.minio_endpoint == settings.minio_endpoint
 
 
 def test_controller_wiring_requires_complete_candidate_and_slurm_contract(

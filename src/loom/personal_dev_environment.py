@@ -16,6 +16,7 @@ from typing import Literal
 from uuid import UUID
 
 from loom.dev_instance import PER_INSTANCE_CAP, InvalidDevInstanceNameError, validate_name
+from loom.personal_dev_candidate import PersonalDevCandidateRecord
 
 PersonalDevEnvironmentStatus = Literal[
     "provisioning",
@@ -37,8 +38,23 @@ PersonalDevOperationState = Literal[
     "cancelling",
     "cancelled",
 ]
+PersonalDevAccessKind = Literal["bearer", "session"]
 
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalDevAccessBinding:
+    """Hash-only credential authority captured for one lifecycle attempt."""
+
+    auth_kind: PersonalDevAccessKind
+    credential_hash: bytes
+
+    def __post_init__(self) -> None:
+        if self.auth_kind not in {"bearer", "session"}:
+            raise ValueError("personal-dev access kind must be bearer or session")
+        if not isinstance(self.credential_hash, bytes) or len(self.credential_hash) != 32:
+            raise ValueError("personal-dev credential hash must be exactly 32 bytes")
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,9 +77,7 @@ class PersonalDevLifecycleLimits:
         if (
             type(self.per_owner_aggregate_min_slots) is not int
             or type(self.per_owner_aggregate_max_slots) is not int
-            or not 0
-            <= self.per_owner_aggregate_min_slots
-            <= self.per_owner_aggregate_max_slots
+            or not 0 <= self.per_owner_aggregate_min_slots <= self.per_owner_aggregate_max_slots
         ):
             raise ValueError("personal-dev aggregate slot limits must be ordered integers")
 
@@ -96,10 +110,7 @@ class PersonalDevEnvironmentApplyRequest:
             raise ValueError(
                 f"personal-dev slots must satisfy 0 <= min <= max <= {PER_INSTANCE_CAP}",
             )
-        if (
-            type(self.expected_operation_epoch) is not int
-            or self.expected_operation_epoch < 0
-        ):
+        if type(self.expected_operation_epoch) is not int or self.expected_operation_epoch < 0:
             raise ValueError("expected_operation_epoch must be a nonnegative integer")
         payload = {
             "candidate_id": str(self.candidate_id),
@@ -180,6 +191,39 @@ class PersonalDevLifecycleOperationRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class PersonalDevLifecycleAttemptRecord:
+    """One immutable execution identity plus its current durable lease."""
+
+    id: UUID
+    operation_id: UUID
+    subject_id: UUID
+    subject_incarnation: UUID
+    operation_epoch: int
+    attempt_sequence: int
+    state: Literal["running", "activating", "succeeded", "failed", "cancelled"]
+    checkpoint: str
+    access_binding: PersonalDevAccessBinding
+    lease_epoch: int
+    claimed_by: str | None
+    lease_expires_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime
+    finished_at: datetime | None = None
+    failure_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalDevReconciliationClaim:
+    """Exact current operation/attempt/candidate bundle held by one lease."""
+
+    environment: PersonalDevEnvironmentRecord
+    operation: PersonalDevLifecycleOperationRecord
+    attempt: PersonalDevLifecycleAttemptRecord
+    candidate: PersonalDevCandidateRecord
+
+
+@dataclass(frozen=True, slots=True)
 class PersonalDevApplyReservation:
     environment: PersonalDevEnvironmentRecord
     operation: PersonalDevLifecycleOperationRecord
@@ -188,12 +232,16 @@ class PersonalDevApplyReservation:
 
 
 __all__ = [
+    "PersonalDevAccessBinding",
+    "PersonalDevAccessKind",
     "PersonalDevApplyReservation",
     "PersonalDevEnvironmentApplyRequest",
     "PersonalDevEnvironmentRecord",
     "PersonalDevEnvironmentStatus",
+    "PersonalDevLifecycleAttemptRecord",
     "PersonalDevLifecycleLimits",
     "PersonalDevLifecycleOperationRecord",
     "PersonalDevOperationKind",
     "PersonalDevOperationState",
+    "PersonalDevReconciliationClaim",
 ]

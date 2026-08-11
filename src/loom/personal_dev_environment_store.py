@@ -4,29 +4,35 @@ from __future__ import annotations
 
 import hashlib
 import re
-from datetime import UTC, datetime
-from typing import cast
+from datetime import UTC, datetime, timedelta
+from typing import Literal, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import (
     DevInstance,
+    DevLifecycleActivationAcknowledgement,
     DevLifecycleOperation,
     DevLifecycleOperationAttempt,
     PersonalDevCandidate,
 )
+from loom.personal_dev_activation import VerifiedPersonalDevActivationAcknowledgement
+from loom.personal_dev_candidate import CandidateStatus, PersonalDevCandidateRecord
 from loom.personal_dev_candidate_store import SqlAlchemyPersonalDevCandidateStore
 from loom.personal_dev_environment import (
+    PersonalDevAccessBinding,
     PersonalDevApplyReservation,
     PersonalDevEnvironmentApplyRequest,
     PersonalDevEnvironmentRecord,
     PersonalDevEnvironmentStatus,
+    PersonalDevLifecycleAttemptRecord,
     PersonalDevLifecycleLimits,
     PersonalDevLifecycleOperationRecord,
     PersonalDevOperationKind,
     PersonalDevOperationState,
+    PersonalDevReconciliationClaim,
 )
 
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
@@ -114,13 +120,73 @@ def _operation_record(row: DevLifecycleOperation) -> PersonalDevLifecycleOperati
         checkpoint=row.checkpoint,
         failure_reason=row.failure_reason,
         readiness_evidence_sha256=row.readiness_evidence_sha256,
-        activation_acknowledgement_sha256=(
-            row.activation_acknowledgement_sha256
-        ),
+        activation_acknowledgement_sha256=(row.activation_acknowledgement_sha256),
         created_at=row.created_at,
         updated_at=row.updated_at,
         started_at=row.started_at,
         finished_at=row.finished_at,
+    )
+
+
+def _attempt_record(row: DevLifecycleOperationAttempt) -> PersonalDevLifecycleAttemptRecord:
+    if row.credential_binding_version != 1:
+        raise PersonalDevEnvironmentOperationFencedError(
+            "personal-dev lifecycle attempt has no supported credential binding",
+        )
+    if row.bootstrap_auth_kind not in {"bearer", "session"}:
+        raise PersonalDevEnvironmentOperationFencedError(
+            "personal-dev lifecycle attempt credential binding is invalid",
+        )
+    return PersonalDevLifecycleAttemptRecord(
+        id=row.id,
+        operation_id=row.operation_id,
+        subject_id=row.subject_id,
+        subject_incarnation=row.subject_incarnation,
+        operation_epoch=row.operation_epoch,
+        attempt_sequence=row.attempt_sequence,
+        state=cast(
+            Literal["running", "activating", "succeeded", "failed", "cancelled"],
+            row.state,
+        ),
+        checkpoint=row.checkpoint,
+        access_binding=PersonalDevAccessBinding(
+            auth_kind=cast(Literal["bearer", "session"], row.bootstrap_auth_kind),
+            credential_hash=bytes(row.bootstrap_credential_hash),
+        ),
+        lease_epoch=row.lease_epoch,
+        claimed_by=row.claimed_by,
+        lease_expires_at=row.lease_expires_at,
+        failure_reason=row.failure_reason,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        started_at=row.started_at,
+        finished_at=row.finished_at,
+    )
+
+
+def _candidate_record(row: PersonalDevCandidate) -> PersonalDevCandidateRecord:
+    return PersonalDevCandidateRecord(
+        id=row.id,
+        owner_user_id=row.owner_user_id,
+        owner_team_id=row.owner_team_id,
+        candidate_sha=row.candidate_sha,
+        source_sha256=row.source_sha256,
+        archive_sha256=row.archive_sha256,
+        build_contract_sha256=row.build_contract_sha256,
+        source_commit=row.source_commit,
+        dirty=row.dirty,
+        manifest_json=row.manifest_json,
+        object_bucket=row.object_bucket,
+        object_key=row.object_key,
+        archive_size_bytes=row.archive_size_bytes,
+        status=cast(CandidateStatus, row.status),
+        image_manifest_digest=row.image_manifest_digest,
+        publication_json=row.publication_json,
+        publication_sha256=row.publication_sha256,
+        failure_reason=row.failure_reason,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        ready_at=row.ready_at,
     )
 
 
@@ -141,11 +207,16 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         self,
         requested: PersonalDevEnvironmentApplyRequest,
         *,
+        access_binding: PersonalDevAccessBinding,
         now: datetime | None = None,
     ) -> PersonalDevApplyReservation:
         now = now or datetime.now(UTC)
         try:
-            reservation = await self._claim_apply(requested, now=now)
+            reservation = await self._claim_apply(
+                requested,
+                access_binding=access_binding,
+                now=now,
+            )
             if reservation.requires_build_binding:
                 await self._candidates.enqueue_build(
                     candidate_id=reservation.operation.candidate_id,
@@ -167,6 +238,7 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         self,
         requested: PersonalDevEnvironmentApplyRequest,
         *,
+        access_binding: PersonalDevAccessBinding,
         now: datetime,
     ) -> PersonalDevApplyReservation:
         global_lock_a, global_lock_b = _lock_keys("\0global-admission")
@@ -211,7 +283,12 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                     "personal-dev lifecycle operation was superseded",
                 )
             if prior.state == "failed":
-                return await self._retry_failed_operation(prior, environment, now=now)
+                return await self._retry_failed_operation(
+                    prior,
+                    environment,
+                    access_binding=access_binding,
+                    now=now,
+                )
             prior_record = _operation_record(prior)
             return PersonalDevApplyReservation(
                 environment=_environment_record(environment),
@@ -313,6 +390,7 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                     return await self._retry_failed_operation(
                         exact_prior,
                         environment,
+                        access_binding=access_binding,
                         now=now,
                     )
                 exact_record = _operation_record(exact_prior)
@@ -466,6 +544,9 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                 attempt_sequence=0,
                 state="succeeded" if state == "succeeded" else "running",
                 checkpoint="complete" if state == "succeeded" else "candidate_build",
+                credential_binding_version=1,
+                bootstrap_auth_kind=access_binding.auth_kind,
+                bootstrap_credential_hash=access_binding.credential_hash,
                 created_at=now,
                 updated_at=now,
                 started_at=now,
@@ -480,11 +561,101 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             requires_build_binding=kind in {"create", "update"},
         )
 
+    async def claim_next_reconciliation(
+        self,
+        *,
+        reconciler_id: str,
+        now: datetime,
+        lease_seconds: int,
+    ) -> PersonalDevReconciliationClaim | None:
+        """Lease one build-terminal or activation-acknowledged attempt."""
+        if not reconciler_id or reconciler_id.strip() != reconciler_id or len(reconciler_id) > 128:
+            raise ValueError("reconciler_id must be a non-empty bounded identifier")
+        if type(lease_seconds) is not int or lease_seconds <= 0:
+            raise ValueError("lease_seconds must be a positive integer")
+        eligible_checkpoint = or_(
+            and_(
+                DevLifecycleOperation.state == "running",
+                DevLifecycleOperation.checkpoint == "candidate_build",
+                PersonalDevCandidate.status.in_(("ready", "failed")),
+            ),
+            and_(
+                DevLifecycleOperation.state == "activating",
+                DevLifecycleOperation.checkpoint == "activation_acknowledged",
+                DevLifecycleOperation.activation_acknowledgement_sha256.is_not(None),
+            ),
+        )
+        statement = (
+            select(
+                DevLifecycleOperationAttempt,
+                DevLifecycleOperation,
+                DevInstance,
+                PersonalDevCandidate,
+            )
+            .join(
+                DevLifecycleOperation,
+                DevLifecycleOperation.id == DevLifecycleOperationAttempt.operation_id,
+            )
+            .join(DevInstance, DevInstance.name == DevLifecycleOperation.environment_name)
+            .join(
+                PersonalDevCandidate, PersonalDevCandidate.id == DevLifecycleOperation.candidate_id
+            )
+            .where(
+                DevLifecycleOperation.attempt_id == DevLifecycleOperationAttempt.id,
+                DevLifecycleOperation.attempt_sequence
+                == DevLifecycleOperationAttempt.attempt_sequence,
+                DevLifecycleOperation.subject_id == DevLifecycleOperationAttempt.subject_id,
+                DevLifecycleOperation.subject_incarnation
+                == DevLifecycleOperationAttempt.subject_incarnation,
+                DevLifecycleOperation.operation_epoch
+                == DevLifecycleOperationAttempt.operation_epoch,
+                DevInstance.operation_id == DevLifecycleOperation.id,
+                DevInstance.subject_id == DevLifecycleOperation.subject_id,
+                DevInstance.subject_incarnation == DevLifecycleOperation.subject_incarnation,
+                DevInstance.operation_epoch == DevLifecycleOperation.operation_epoch,
+                DevLifecycleOperationAttempt.state.in_(("running", "activating")),
+                or_(
+                    DevLifecycleOperationAttempt.claimed_by.is_(None),
+                    DevLifecycleOperationAttempt.lease_expires_at <= now,
+                ),
+                eligible_checkpoint,
+            )
+            .order_by(
+                DevLifecycleOperationAttempt.created_at,
+                DevLifecycleOperationAttempt.id,
+            )
+            .with_for_update(of=DevLifecycleOperationAttempt, skip_locked=True)
+            .limit(1)
+        )
+        row = (await self.session.execute(statement)).one_or_none()
+        if row is None:
+            await self.session.rollback()
+            return None
+        attempt, operation, environment, candidate = row
+        # Validate credential material before making the lease externally visible.
+        _attempt_record(attempt)
+        attempt.lease_epoch += 1
+        attempt.claimed_by = reconciler_id
+        attempt.lease_expires_at = now + timedelta(seconds=lease_seconds)
+        attempt.updated_at = now
+        await self.session.flush()
+        claim = PersonalDevReconciliationClaim(
+            environment=_environment_record(environment),
+            operation=_operation_record(operation),
+            attempt=_attempt_record(attempt),
+            candidate=_candidate_record(candidate),
+        )
+        await self.session.commit()
+        return claim
+
     async def begin_activation(
         self,
         *,
         operation_id: UUID,
         operation_epoch: int,
+        attempt_id: UUID,
+        reconciler_id: str,
+        lease_epoch: int,
         readiness_evidence_sha256: str,
         now: datetime | None = None,
     ) -> PersonalDevApplyReservation:
@@ -509,7 +680,13 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             raise PersonalDevEnvironmentOperationFencedError(
                 "personal-dev operation cannot begin activation",
             )
-        attempt = await self._locked_current_attempt(operation)
+        attempt = await self._locked_current_attempt_lease(
+            operation,
+            attempt_id=attempt_id,
+            reconciler_id=reconciler_id,
+            lease_epoch=lease_epoch,
+            now=now,
+        )
         if attempt.state != "running":
             await self.session.rollback()
             raise PersonalDevEnvironmentOperationFencedError(
@@ -533,6 +710,8 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         operation.updated_at = now
         attempt.state = "activating"
         attempt.checkpoint = "activation_intent"
+        attempt.claimed_by = None
+        attempt.lease_expires_at = None
         attempt.updated_at = now
         environment.status = "activating"
         environment.operation_step = "activation_intent"
@@ -542,23 +721,76 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         await self.session.commit()
         return result
 
-    async def acknowledge_activation(
+    async def heartbeat_reconciliation(
         self,
         *,
         operation_id: UUID,
         operation_epoch: int,
-        acknowledgement_sha256: str,
-        now: datetime | None = None,
-    ) -> PersonalDevApplyReservation:
-        if _DIGEST_RE.fullmatch(acknowledgement_sha256) is None:
-            raise ValueError("activation acknowledgement must be a lowercase SHA-256 digest")
-        now = now or datetime.now(UTC)
-        operation, environment = await self._locked_current_operation(
+        attempt_id: UUID,
+        reconciler_id: str,
+        lease_epoch: int,
+        now: datetime,
+        lease_seconds: int,
+    ) -> PersonalDevLifecycleAttemptRecord:
+        """Extend a live current lease without allowing expired resurrection."""
+        if type(lease_seconds) is not int or lease_seconds <= 0:
+            raise ValueError("lease_seconds must be a positive integer")
+        operation, _environment = await self._locked_current_operation(
             operation_id,
             operation_epoch,
         )
-        if operation.state == "succeeded":
-            if operation.activation_acknowledgement_sha256 != acknowledgement_sha256:
+        attempt = await self._locked_current_attempt_lease(
+            operation,
+            attempt_id=attempt_id,
+            reconciler_id=reconciler_id,
+            lease_epoch=lease_epoch,
+            now=now,
+        )
+        attempt.lease_expires_at = now + timedelta(seconds=lease_seconds)
+        attempt.updated_at = now
+        await self.session.flush()
+        record = _attempt_record(attempt)
+        await self.session.commit()
+        return record
+
+    async def acknowledge_activation(
+        self,
+        *,
+        verified: VerifiedPersonalDevActivationAcknowledgement,
+        now: datetime | None = None,
+    ) -> PersonalDevApplyReservation:
+        now = now or datetime.now(UTC)
+        acknowledgement = verified.acknowledgement
+        operation, environment = await self._locked_current_operation(
+            acknowledgement.operation_id,
+            acknowledgement.operation_epoch,
+        )
+        bindings_match = (
+            acknowledgement.environment_name == operation.environment_name
+            and acknowledgement.subject_id == operation.subject_id
+            and acknowledgement.subject_incarnation == operation.subject_incarnation
+            and acknowledgement.attempt_id == operation.attempt_id
+            and acknowledgement.candidate_id == operation.candidate_id
+            and acknowledgement.candidate_sha == operation.candidate_sha
+            and acknowledgement.deployment_generation == operation.deployment_generation
+            and acknowledgement.readiness_evidence_sha256 == operation.readiness_evidence_sha256
+            and acknowledgement.observed_at >= operation.updated_at
+        )
+        if not bindings_match:
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError(
+                "personal-dev activation acknowledgement binding was superseded",
+            )
+        existing_acknowledgement = await self.session.get(
+            DevLifecycleActivationAcknowledgement,
+            operation.id,
+        )
+        if existing_acknowledgement is not None:
+            if (
+                existing_acknowledgement.payload_sha256 != verified.payload_sha256
+                or existing_acknowledgement.signature_sha256 != verified.signature_sha256
+                or operation.activation_acknowledgement_sha256 != verified.payload_sha256
+            ):
                 await self.session.rollback()
                 raise PersonalDevEnvironmentConflictError(
                     "activation acknowledgement changed for the same operation",
@@ -575,12 +807,32 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                 "personal-dev activation intent is unavailable",
             )
         existing = operation.activation_acknowledgement_sha256
-        if existing is not None and existing != acknowledgement_sha256:
+        if existing is not None:
             await self.session.rollback()
             raise PersonalDevEnvironmentConflictError(
                 "activation acknowledgement changed for the same operation",
             )
-        operation.activation_acknowledgement_sha256 = acknowledgement_sha256
+        self.session.add(
+            DevLifecycleActivationAcknowledgement(
+                operation_id=operation.id,
+                environment_name=acknowledgement.environment_name,
+                subject_id=acknowledgement.subject_id,
+                subject_incarnation=acknowledgement.subject_incarnation,
+                operation_epoch=acknowledgement.operation_epoch,
+                attempt_id=acknowledgement.attempt_id,
+                candidate_id=acknowledgement.candidate_id,
+                candidate_sha=acknowledgement.candidate_sha,
+                deployment_generation=acknowledgement.deployment_generation,
+                readiness_evidence_sha256=(acknowledgement.readiness_evidence_sha256),
+                local_activation_sha256=acknowledgement.local_activation_sha256,
+                payload_sha256=verified.payload_sha256,
+                signature_sha256=verified.signature_sha256,
+                agent_key_id=acknowledgement.agent_key_id,
+                observed_at=acknowledgement.observed_at,
+                received_at=now,
+            ),
+        )
+        operation.activation_acknowledgement_sha256 = verified.payload_sha256
         operation.checkpoint = "activation_acknowledged"
         operation.updated_at = now
         attempt = await self._locked_current_attempt(operation)
@@ -603,6 +855,9 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         *,
         operation_id: UUID,
         operation_epoch: int,
+        attempt_id: UUID,
+        reconciler_id: str,
+        lease_epoch: int,
         now: datetime | None = None,
     ) -> PersonalDevApplyReservation:
         now = now or datetime.now(UTC)
@@ -646,7 +901,13 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             raise PersonalDevEnvironmentOperationFencedError(
                 "personal-dev candidate readiness was superseded",
             )
-        attempt = await self._locked_current_attempt(operation)
+        attempt = await self._locked_current_attempt_lease(
+            operation,
+            attempt_id=attempt_id,
+            reconciler_id=reconciler_id,
+            lease_epoch=lease_epoch,
+            now=now,
+        )
         if attempt.state != "activating" or attempt.checkpoint != "activation_acknowledged":
             await self.session.rollback()
             raise PersonalDevEnvironmentOperationFencedError(
@@ -668,6 +929,8 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         operation.updated_at = now
         attempt.state = "succeeded"
         attempt.checkpoint = "complete"
+        attempt.claimed_by = None
+        attempt.lease_expires_at = None
         attempt.finished_at = now
         attempt.updated_at = now
         await self.session.flush()
@@ -680,6 +943,9 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         *,
         operation_id: UUID,
         operation_epoch: int,
+        attempt_id: UUID,
+        reconciler_id: str,
+        lease_epoch: int,
         failure_reason: str,
         now: datetime | None = None,
     ) -> PersonalDevApplyReservation:
@@ -705,7 +971,13 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             raise PersonalDevEnvironmentOperationFencedError(
                 "personal-dev operation is not pre-activation",
             )
-        attempt = await self._locked_current_attempt(operation)
+        attempt = await self._locked_current_attempt_lease(
+            operation,
+            attempt_id=attempt_id,
+            reconciler_id=reconciler_id,
+            lease_epoch=lease_epoch,
+            now=now,
+        )
         if attempt.state != "running":
             await self.session.rollback()
             raise PersonalDevEnvironmentOperationFencedError(
@@ -718,6 +990,8 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         operation.updated_at = now
         attempt.state = "failed"
         attempt.checkpoint = "failed"
+        attempt.claimed_by = None
+        attempt.lease_expires_at = None
         attempt.failure_reason = failure_reason
         attempt.finished_at = now
         attempt.updated_at = now
@@ -746,6 +1020,7 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         operation: DevLifecycleOperation,
         environment: DevInstance,
         *,
+        access_binding: PersonalDevAccessBinding,
         now: datetime,
     ) -> PersonalDevApplyReservation:
         if operation.kind not in {"create", "update"}:
@@ -787,6 +1062,9 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                 attempt_sequence=attempt_sequence,
                 state="running",
                 checkpoint="candidate_build",
+                credential_binding_version=1,
+                bootstrap_auth_kind=access_binding.auth_kind,
+                bootstrap_credential_hash=access_binding.credential_hash,
                 created_at=now,
                 updated_at=now,
                 started_at=now,
@@ -844,8 +1122,7 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                 .where(
                     DevLifecycleOperationAttempt.id == operation.attempt_id,
                     DevLifecycleOperationAttempt.operation_id == operation.id,
-                    DevLifecycleOperationAttempt.attempt_sequence
-                    == operation.attempt_sequence,
+                    DevLifecycleOperationAttempt.attempt_sequence == operation.attempt_sequence,
                     DevLifecycleOperationAttempt.subject_id == operation.subject_id,
                     DevLifecycleOperationAttempt.subject_incarnation
                     == operation.subject_incarnation,
@@ -861,6 +1138,29 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             )
         return attempt
 
+    async def _locked_current_attempt_lease(
+        self,
+        operation: DevLifecycleOperation,
+        *,
+        attempt_id: UUID,
+        reconciler_id: str,
+        lease_epoch: int,
+        now: datetime,
+    ) -> DevLifecycleOperationAttempt:
+        attempt = await self._locked_current_attempt(operation)
+        if (
+            attempt.id != attempt_id
+            or attempt.claimed_by != reconciler_id
+            or attempt.lease_epoch != lease_epoch
+            or attempt.lease_expires_at is None
+            or attempt.lease_expires_at <= now
+        ):
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError(
+                "personal-dev lifecycle reconciliation lease was superseded",
+            )
+        return attempt
+
     async def _assert_limits(
         self,
         requested: PersonalDevEnvironmentApplyRequest,
@@ -870,9 +1170,7 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         live = (
             (
                 await self.session.execute(
-                    select(DevInstance)
-                    .where(DevInstance.status != "deleted")
-                    .with_for_update(),
+                    select(DevInstance).where(DevInstance.status != "deleted").with_for_update(),
                 )
             )
             .scalars()

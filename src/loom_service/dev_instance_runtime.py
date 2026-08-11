@@ -11,6 +11,7 @@ from loom.dev_instance_manifest import DevInstanceManifestConfig
 from loom.dev_instance_provisioner import DevInstanceProvisioner, InstanceStore
 from loom.dev_instance_runtime import (
     HttpControlPlanePolicyRegistrar,
+    KubectlCandidateGenerationProvisioner,
     KubectlClient,
     KubectlClusterProvisioner,
     KubectlMinioTenantProvisioner,
@@ -19,6 +20,7 @@ from loom.dev_instance_runtime import (
     PsycopgSharedFixtureSqlExecutor,
     S3BucketEnsurer,
 )
+from loom.personal_dev_runtime import PersonalDevPreparationRuntime, PersonalDevRuntimeConfig
 from loom_service.config import LoomServiceSettings
 
 DevInstanceProvisionerFactory = Callable[[InstanceStore], DevInstanceProvisioner]
@@ -148,4 +150,53 @@ def build_dev_instance_provisioner_factory(
     return factory
 
 
-__all__ = ["DevInstanceProvisionerFactory", "build_dev_instance_provisioner_factory"]
+def build_personal_dev_preparation_runtime(
+    settings: LoomServiceSettings,
+    *,
+    minio_client: Any,
+) -> PersonalDevPreparationRuntime | None:
+    """Build the sole candidate-aware preparation executor when enabled."""
+    if not settings.dev_instances_enabled:
+        return None
+    if settings.dev_instance_database_admin_url is None:
+        raise RuntimeError(
+            "LOOM_SVC_DEV_INSTANCE_DATABASE_ADMIN_URL is required when dev instances are enabled",
+        )
+    kubectl_path = settings.dev_instance_kubectl_path
+    if not kubectl_path.is_file() or not os.access(kubectl_path, os.X_OK):
+        raise RuntimeError("configured dev-instance kubectl executable is unavailable")
+    kubectl = KubectlClient(
+        str(kubectl_path),
+        context=settings.dev_instance_kube_context,
+    )
+    database_admin_url = str(settings.dev_instance_database_admin_url)
+    vault = KubectlSecretVault(
+        kubectl=kubectl,
+        database_admin_url=database_admin_url,
+    )
+    return PersonalDevPreparationRuntime(
+        config=PersonalDevRuntimeConfig(
+            minio_endpoint=settings.minio_endpoint,
+            minio_region=settings.minio_region,
+            ingress_class_name=settings.dev_instance_ingress_class_name,
+            ingress_cert_manager_cluster_issuer=(
+                settings.dev_instance_ingress_cert_manager_cluster_issuer
+            ),
+        ),
+        sql=PsycopgSharedFixtureSqlExecutor(database_admin_url),
+        buckets=S3BucketEnsurer(minio_client, region=settings.minio_region),
+        vault=vault,
+        object_store_tenant=KubectlMinioTenantProvisioner(
+            kubectl=kubectl,
+            vault=vault,
+        ),
+        cluster=KubectlCandidateGenerationProvisioner(kubectl=kubectl),
+        access=PsycopgOwnerAccessBootstrap(database_admin_url),
+    )
+
+
+__all__ = [
+    "DevInstanceProvisionerFactory",
+    "build_dev_instance_provisioner_factory",
+    "build_personal_dev_preparation_runtime",
+]

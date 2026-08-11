@@ -147,8 +147,35 @@ commit until separate readiness evidence and an environment acknowledgement
 are present. Finite configurable global, per-owner, and aggregate slot limits
 serialize only lifecycle admission, so unrelated environments can perform
 their external provisioning concurrently. The candidate-aware restricted
-builder, deployment reconciler, protected environment acknowledgement, and
-global-capacity projection remain activation-blocking work.
+builder, protected environment agent, and global-capacity projection remain
+activation-blocking work.
+
+The next reconciler slice captures only the hash of the credential verified by
+the apply request on the immutable operation-attempt row. A delayed worker
+reloads that exact bearer or browser-session row and fails closed if the
+credential, owner, team, membership, expiry, or revocation state changed.
+Database leases with monotonic epochs and periodic heartbeats permit multiple
+management-service replicas without process-local ownership.
+
+Once the candidate publication is ready, the trusted preparation runtime
+requires explicit activation, migration-compatibility, capacity-agent, claim
+guard, and worker protocol versions before external mutation. It renders only
+immutable OCI references, preserves existing fixture secrets, and creates
+generation-suffixed Deployments and preview Services. Stable Services and the
+Ingress are a separate activation manifest and are not applied during
+preparation, so an update cannot replace the serving generation early. Every
+candidate object is stamped with subject, incarnation, logical operation,
+attempt, operation epoch, candidate, and deployment generation.
+
+Preparation publishes a canonical readiness digest and stops at a central
+`activation_intent`. The management API accepts a local activation
+acknowledgement only when it is fresh, HMAC-authenticated by an owner-only
+operator key, bound to the exact intent, and durably inserted into an
+append-only table. The service cannot manufacture that acknowledgement from
+its own readiness observation. The independently installed environment agent
+that applies the stable-route/local-admission transaction, the restricted
+candidate builder, and the global-capacity projection are still required
+before this path may be enabled for live capacity.
 
 When this authority is enabled, the earlier candidate-less `POST
 /dev-instances` mutation path is retired and the service no longer constructs

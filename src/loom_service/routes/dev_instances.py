@@ -5,10 +5,10 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime
-from typing import Literal, Protocol, cast
+from typing import Annotated, Literal, Protocol, cast
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,6 +24,10 @@ from loom.dev_instance_provisioner import (
     OwnerAccessSnapshot,
 )
 from loom.dev_instance_store import SqlAlchemyDevInstanceStore
+from loom.personal_dev_activation import (
+    PersonalDevActivationAcknowledgement,
+    PersonalDevActivationVerifier,
+)
 from loom.personal_dev_environment import (
     PersonalDevApplyReservation,
     PersonalDevEnvironmentApplyRequest,
@@ -42,11 +46,13 @@ from loom_service.auth_guards import is_admin, require_scope, require_submitting
 from loom_service.dependencies import SessionAndCtx
 from loom_service.dev_instance_access import (
     DevInstanceAccessError,
+    access_binding_from_context,
     load_owner_access_snapshot,
 )
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+internal_router = APIRouter()
 
 ProvisionerFactory = Callable[[InstanceStore], DevInstanceProvisioner]
 
@@ -98,6 +104,24 @@ class PersonalDevEnvironmentApplyPayload(BaseModel):
     max_slots: int = Field(default=2, ge=0, le=PER_INSTANCE_CAP)
     expected_operation_epoch: int = Field(ge=0)
     idempotency_key: UUID
+
+
+class PersonalDevActivationAcknowledgementPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    environment_name: str = Field(min_length=1, max_length=20)
+    subject_id: UUID
+    subject_incarnation: UUID
+    operation_id: UUID
+    operation_epoch: int = Field(gt=0)
+    attempt_id: UUID
+    candidate_id: UUID
+    candidate_sha: str = Field(pattern=r"^[0-9a-f]{64}$")
+    deployment_generation: int = Field(gt=0)
+    readiness_evidence_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    local_activation_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    agent_key_id: str = Field(pattern=r"^[a-z][a-z0-9._-]{0,63}$")
+    observed_at: datetime
 
 
 class DevInstanceIdentityResponse(BaseModel):
@@ -327,9 +351,7 @@ def _personal_operation_response(
         checkpoint=record.checkpoint,
         failure_reason=record.failure_reason,
         readiness_evidence_sha256=record.readiness_evidence_sha256,
-        activation_acknowledgement_sha256=(
-            record.activation_acknowledgement_sha256
-        ),
+        activation_acknowledgement_sha256=(record.activation_acknowledgement_sha256),
         created_at=record.created_at,
         updated_at=record.updated_at,
         started_at=record.started_at,
@@ -397,22 +419,16 @@ def _personal_authority(
         return SqlAlchemyPersonalDevEnvironmentAuthority(
             session,
             limits=PersonalDevLifecycleLimits(
-                global_live_instances=(
-                    settings.personal_dev_global_live_instance_limit
-                ),
-                per_owner_live_instances=(
-                    settings.personal_dev_per_owner_live_instance_limit
-                ),
-                per_owner_aggregate_min_slots=(
-                    settings.personal_dev_per_owner_aggregate_min_slots
-                ),
-                per_owner_aggregate_max_slots=(
-                    settings.personal_dev_per_owner_aggregate_max_slots
-                ),
+                global_live_instances=(settings.personal_dev_global_live_instance_limit),
+                per_owner_live_instances=(settings.personal_dev_per_owner_live_instance_limit),
+                per_owner_aggregate_min_slots=(settings.personal_dev_per_owner_aggregate_min_slots),
+                per_owner_aggregate_max_slots=(settings.personal_dev_per_owner_aggregate_max_slots),
             ),
         )
     if not callable(factory):
-        raise HTTPException(status_code=503, detail="personal-dev lifecycle authority is unavailable")
+        raise HTTPException(
+            status_code=503, detail="personal-dev lifecycle authority is unavailable"
+        )
     return cast(PersonalAuthorityFactory, factory)(session)
 
 
@@ -466,6 +482,7 @@ async def apply_personal_dev_environment(
                 expected_operation_epoch=payload.expected_operation_epoch,
                 idempotency_key=payload.idempotency_key,
             ),
+            access_binding=access_binding_from_context(ctx),
         )
     except PersonalDevEnvironmentNotFoundError as exc:
         raise HTTPException(status_code=404, detail="personal-dev resource not found") from exc
@@ -477,6 +494,8 @@ async def apply_personal_dev_environment(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except DevInstanceAccessError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except Exception:
         logger.exception(
             "personal_dev_environment_apply_failed",
@@ -487,6 +506,54 @@ async def apply_personal_dev_environment(
             detail="personal-dev environment apply failed before external activation",
         ) from None
     response.status_code = 200 if reservation.operation.state == "succeeded" else 202
+    return _personal_apply_response(reservation)
+
+
+@internal_router.post(
+    "/personal-dev/activation-acknowledgements",
+    response_model=PersonalDevEnvironmentApplyResponse,
+)
+async def acknowledge_personal_dev_activation(
+    payload: PersonalDevActivationAcknowledgementPayload,
+    request: Request,
+    signature: Annotated[str, Header(alias="X-Loom-Activation-Signature")],
+) -> PersonalDevEnvironmentApplyResponse:
+    """Accept only fresh evidence signed by the trusted environment agent."""
+    verifier = getattr(request.app.state, "personal_dev_activation_verifier", None)
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if not isinstance(verifier, PersonalDevActivationVerifier) or session_factory is None:
+        raise HTTPException(status_code=503, detail="personal-dev activation authority unavailable")
+    try:
+        acknowledgement = PersonalDevActivationAcknowledgement(**payload.model_dump())
+        verified = verifier.verify(
+            acknowledgement,
+            signature=signature,
+            now=datetime.now(acknowledgement.observed_at.tzinfo),
+        )
+    except ValueError:
+        raise HTTPException(
+            status_code=403,
+            detail="personal-dev activation acknowledgement is invalid",
+        ) from None
+    try:
+        async with session_factory() as session:
+            reservation = await _personal_authority(request, session).acknowledge_activation(
+                verified=verified,
+            )
+    except (
+        PersonalDevEnvironmentConflictError,
+        PersonalDevEnvironmentOperationFencedError,
+    ) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception:
+        logger.exception(
+            "personal_dev_activation_acknowledgement_failed",
+            extra={"dev_instance_name": payload.environment_name},
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="personal-dev activation acknowledgement could not be committed",
+        ) from None
     return _personal_apply_response(reservation)
 
 
