@@ -1245,7 +1245,7 @@ def test_release_rejects_external_supervisor_artifact_drift_after_secret_readbac
             and "apply" in command
             and payload is not None
             and b'"kind":"Service"' in payload
-            and b"loom-postgres" in payload
+            and b'"name":"loom-postgres-rw"' in payload
         ):
             return subprocess.CompletedProcess(argv, 0, "applied\n", "")
         if "secret" in command and "get" in command:
@@ -1295,7 +1295,7 @@ def test_release_external_supervisor_failure_is_secret_free_and_blocks_manifest(
             and "apply" in command
             and payload is not None
             and b'"kind":"Service"' in payload
-            and b"loom-postgres" in payload
+            and b'"name":"loom-postgres-rw"' in payload
         ):
             return subprocess.CompletedProcess(argv, 0, "applied\n", "")
         if "secret" in command and "get" in command:
@@ -1326,7 +1326,7 @@ def test_release_external_supervisor_failure_is_secret_free_and_blocks_manifest(
         )
         < validation_index
     )
-    # The db-clone pod is bridged to service/loom-postgres before the supervisor
+    # The db-clone pod is bridged to service/loom-postgres-rw before the supervisor
     # (which port-forwards to that service) is launched.
     service_apply_index = next(
         index
@@ -1335,7 +1335,7 @@ def test_release_external_supervisor_failure_is_secret_free_and_blocks_manifest(
         and "apply" in command
         and payload is not None
         and b'"kind":"Service"' in payload
-        and b"loom-postgres" in payload
+        and b'"name":"loom-postgres-rw"' in payload
     )
     assert service_apply_index < validation_index
 

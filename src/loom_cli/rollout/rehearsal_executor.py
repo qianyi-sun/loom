@@ -1538,13 +1538,13 @@ class IsolatedRehearsalExecutor:
                 None,
             )
 
-        # The external-supervisor validation port-forwards to
-        # service/loom-postgres, but the restore rehearsal only creates the
+        # The external-supervisor validation port-forwards to CNPG's concrete
+        # service/loom-postgres-rw, but the restore rehearsal only creates the
         # loom-rehearsal-db pod, and this validation runs before the release
         # manifests (which would otherwise provide that service). Expose the
-        # already-restored, ready db-clone pod as service/loom-postgres so the
-        # supervisor can reach it -- it is the only postgres available at this
-        # point in the rehearsal.
+        # already-restored, ready db-clone pod as service/loom-postgres-rw so
+        # the supervisor can reach it -- it is the only postgres available at
+        # this point in the rehearsal.
         if not self._status_with_payload(
             (
                 "kubectl",
@@ -2512,10 +2512,10 @@ def _default_deny_network_policy_matches(value: dict[str, object], plan: Rehears
 
 
 def _supervisor_database_service_manifest(plan: RehearsalPlan) -> dict[str, object]:
-    """Expose the restored db-clone pod as service/loom-postgres.
+    """Expose the restored db-clone pod as service/loom-postgres-rw.
 
     The external-supervisor validation resolves its DB target through
-    ``service/loom-postgres``; the restored rehearsal database is the
+    ``service/loom-postgres-rw``; the restored rehearsal database is the
     ``loom-rehearsal-db`` pod, so this ClusterIP service bridges the two.
     """
     return {
@@ -2523,7 +2523,7 @@ def _supervisor_database_service_manifest(plan: RehearsalPlan) -> dict[str, obje
         "kind": "Service",
         "metadata": {
             "annotations": {"loom.openai.dev/plan-sha256": plan.plan_digest},
-            "name": "loom-postgres",
+            "name": "loom-postgres-rw",
             "namespace": plan.resources.namespace,
         },
         "spec": {
