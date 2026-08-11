@@ -37,6 +37,7 @@ class FakeSystem:
         self.input_acls: set[Path] = set()
         self.data_acls: set[Path] = set()
         self.acl_adjustment_states: dict[host.AclGrant, str] = {}
+        self.removed_acl_adjustments: set[host.AclGrant] = set()
         self.linger = False
         self.status = "idle"
         self.validated = 0
@@ -660,6 +661,17 @@ class FakeSystem:
         default = adjustment.default if isinstance(adjustment, host.AclMaskAdjustment) else False
         grant = host.AclGrant(adjustment.path, default=default)
         return self.acl_adjustment_states.get(grant, "before")
+
+    def acl_removal_state(
+        self,
+        grant: host.AclGrant,
+        adjustment: host.AclMaskAdjustment | host.AclSnapshotAdjustment,
+        *,
+        remove_service_entry: bool,
+    ) -> str:
+        if remove_service_entry and grant in self.removed_acl_adjustments:
+            return "removed"
+        return self.acl_adjustment_state(adjustment)
 
     def ensure_input_acl(self, path: Path) -> tuple[host.AclGrant, ...]:
         return tuple(self.apply_acl(plan) for plan in self.plan_input_acl(path))
@@ -4925,6 +4937,49 @@ def test_acl_snapshot_adjustment_record_rejects_drift_and_unmanaged_scope() -> N
     assert all(call[0] != "setfacl" for call in runner.calls)
 
 
+def test_acl_removal_state_recognizes_restored_preimage_without_service_entry() -> None:
+    path = host.PROTECTED_INPUTS[0]
+    adjustment = host.AclSnapshotAdjustment.from_dict(
+        {
+            "path": str(path),
+            "before_acl": [
+                "user::rw-",
+                "user:2012:r--",
+                "user:loom-rollout:r--",
+                "group::r--",
+                "mask::r--",
+                "other::---",
+            ],
+            "after_acl": [
+                "user::rw-",
+                "user:loom-rollout:r--",
+                "group::r--",
+                "mask::r--",
+                "other::---",
+            ],
+        }
+    )
+    restored = (
+        "user::rw-",
+        "user:2012:r--",
+        "group::r--",
+        "mask::r--",
+        "other::---",
+    )
+    runner = StatefulAclRunner()
+    runner.seed(path, access=restored)
+    system = host.HostSystem(runner)
+
+    assert (
+        system.acl_removal_state(
+            host.AclGrant(path),
+            adjustment,
+            remove_service_entry=True,
+        )
+        == "removed"
+    )
+
+
 def test_acl_converges_masked_preexisting_service_and_restores_without_removing_it() -> None:
     path = host.PROTECTED_INPUTS[3]
     before = (
@@ -5418,6 +5473,58 @@ def test_install_migrates_interrupted_retired_protected_acl_ledger_only_after_cu
     assert all(system.acl_adjustment_states[plan.grant] == "before" for plan in retired_snapshots)
     assert all(grant.path not in system.input_acls for grant in retired_only_scope)
     assert all(path in system.input_acls for path in host.PROTECTED_INPUTS)
+
+
+def test_install_resumes_after_retired_acl_service_entry_was_already_removed(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    previous = installer.filesystem.load_install_record()
+    assert previous is not None
+
+    retired_root = Path("/shared_work") / "retired-operator" / "loom-worker-capacity"
+    retired_scope = _retired_protected_acl_scope(retired_root)
+    current_scope = host.HostInstaller._managed_acl_scope()
+    retired_only_scope = retired_scope - current_scope
+    retired_path = retired_root / "staging-admin-token"
+    plan = _fake_snapshot_plan(retired_path, service_preexisting=True)
+    assert plan.snapshot_adjustment is not None
+    data_grants = {
+        grant
+        for grant in host.HostInstaller._record_grants(previous)
+        if grant.path in host.DATA_DIRECTORIES
+    }
+    previous["installation_state"] = "installing"
+    previous["admission_enabled"] = False
+    previous["maintenance_enabled"] = True
+    previous["added_acls"] = [
+        grant.to_dict()
+        for grant in sorted(
+            data_grants | retired_scope,
+            key=lambda item: (str(item.path), item.default),
+        )
+    ]
+    previous["acl_snapshot_adjustments"] = [plan.snapshot_adjustment.to_dict()]
+    installer.filesystem.atomic_write(
+        host.INSTALL_RECORD,
+        (json.dumps(previous, sort_keys=True) + "\n").encode(),
+        0o600,
+    )
+    system.input_acls = {grant.path for grant in retired_scope}
+    system.input_acls.discard(retired_path)
+    system.acl_adjustment_states[plan.grant] = "drift"
+    system.removed_acl_adjustments.add(plan.grant)
+    system.maintenance = True
+
+    result = installer.install(TEAM_ID)
+
+    assert result["ok"] is True
+    ready = installer.filesystem.load_install_record()
+    assert ready is not None
+    assert ready["installation_state"] == "ready"
+    assert retired_only_scope.isdisjoint(host.HostInstaller._record_grants(ready))
+    assert plan.grant not in host.HostInstaller._record_snapshot_adjustments(ready)
 
 
 def test_install_persists_snapshot_preimage_before_acl_sanitation_and_uninstall_restores_it(

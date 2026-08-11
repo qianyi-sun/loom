@@ -3328,6 +3328,54 @@ class HostSystem:
             return "after"
         return "drift"
 
+    @staticmethod
+    def _acl_removal_target(
+        grant: AclGrant,
+        adjustment: AclMaskAdjustment | AclSnapshotAdjustment,
+        *,
+        remove_service_entry: bool,
+    ) -> tuple[str, ...]:
+        adjustment_default = (
+            adjustment.default if isinstance(adjustment, AclMaskAdjustment) else False
+        )
+        if (adjustment.path, adjustment_default) != (grant.path, grant.default):
+            raise InstallError("ACL adjustment ledger scope is inconsistent")
+        target = _acl_snapshot_map(
+            adjustment.before_acl,
+            allow_empty=grant.default,
+        )
+        if remove_service_entry:
+            target.pop(("user", SERVICE_USER), None)
+        return _canonical_acl_snapshot(target)
+
+    def acl_removal_state(
+        self,
+        grant: AclGrant,
+        adjustment: AclMaskAdjustment | AclSnapshotAdjustment,
+        *,
+        remove_service_entry: bool,
+    ) -> str:
+        self._assert_acl_transition_safe(
+            adjustment.before_acl,
+            adjustment.after_acl,
+            default=grant.default,
+        )
+        current = self._acl_snapshot(
+            self._acl_entries(grant.path),
+            default=grant.default,
+        )
+        if current == self._acl_removal_target(
+            grant,
+            adjustment,
+            remove_service_entry=remove_service_entry,
+        ):
+            return "removed"
+        if current == adjustment.before_acl:
+            return "before"
+        if current == adjustment.after_acl:
+            return "after"
+        return "drift"
+
     def plan_input_acl(self, path: Path) -> tuple[AclPlan, ...]:
         plans: list[AclPlan] = []
         for parent in path.parents:
@@ -3376,22 +3424,11 @@ class HostSystem:
         current_acl = self._acl_snapshot(entries, default=grant.default)
         service_key = ("user", SERVICE_USER)
         if adjustment is not None:
-            adjustment_default = (
-                adjustment.default if isinstance(adjustment, AclMaskAdjustment) else False
+            target_acl = self._acl_removal_target(
+                grant,
+                adjustment,
+                remove_service_entry=remove_service_entry,
             )
-            if (adjustment.path, adjustment_default) != (
-                grant.path,
-                grant.default,
-            ):
-                raise InstallError("ACL adjustment ledger scope is inconsistent")
-            before = _acl_snapshot_map(
-                adjustment.before_acl,
-                allow_empty=grant.default,
-            )
-            target = dict(before)
-            if remove_service_entry:
-                target.pop(service_key, None)
-            target_acl = _canonical_acl_snapshot(target)
             if current_acl == target_acl:
                 return
             if current_acl not in {
@@ -4931,7 +4968,15 @@ class HostInstaller:
                 raise InstallError("ACL mask ledger conflicts with the live baseline")
             mask_adjustments[plan.grant] = adjustment
         for grant, mask_adjustment in mask_adjustments.items():
-            state = self.system.acl_adjustment_state(mask_adjustment)
+            state = (
+                self.system.acl_removal_state(
+                    grant,
+                    mask_adjustment,
+                    remove_service_entry=grant in grants,
+                )
+                if grant in retired_only_acl_scope
+                else self.system.acl_adjustment_state(mask_adjustment)
+            )
             live_plan = acl_plan_by_grant.get(grant)
             if state == "drift" or (
                 state == "before"
@@ -4940,7 +4985,15 @@ class HostInstaller:
             ):
                 raise InstallError("ACL mask ledger does not match the live ACL")
         for grant, snapshot_adjustment in snapshot_adjustments.items():
-            state = self.system.acl_adjustment_state(snapshot_adjustment)
+            state = (
+                self.system.acl_removal_state(
+                    grant,
+                    snapshot_adjustment,
+                    remove_service_entry=grant in grants,
+                )
+                if grant in retired_only_acl_scope
+                else self.system.acl_adjustment_state(snapshot_adjustment)
+            )
             live_plan = acl_plan_by_grant.get(grant)
             if state == "drift" or (
                 state == "before"
