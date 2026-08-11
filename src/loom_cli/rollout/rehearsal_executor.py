@@ -605,6 +605,8 @@ class IsolatedRehearsalExecutor:
                 plan.candidate_sha,
                 "--candidate-tree",
                 plan.candidate_tree,
+                "--database",
+                plan.resources.database,
             ),
             trusted.payload,
             timeout=300,
