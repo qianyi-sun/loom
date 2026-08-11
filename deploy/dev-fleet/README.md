@@ -1,4 +1,4 @@
-# Inactive shared-development fleet assets
+# Shared-development fleet assets
 
 The files in this directory are retained as compatibility inputs for the
 disabled global development-fleet implementation. They are not part of the

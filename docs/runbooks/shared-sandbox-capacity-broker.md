@@ -1,10 +1,13 @@
 # Shared sandbox capacity ledger compatibility interface
 
 > This is the internal ledger of the single global development fleet
-> autoscaler, not a separately deployed service. Normal operations use
-> `scripts/ops/global_dev_fleet_autoscaler_once.py` and
-> `docs/architecture/global-dev-fleet-autoscaler.md`; the commands below are
-> compatibility tools for inspection and incident recovery.
+> autoscaler, not a separately deployed service. An explicitly installed live
+> supervisor uses
+> `scripts/ops/global_dev_fleet_autoscaler_external_once.py`; the lower-level
+> `global_dev_fleet_autoscaler_once.py` and commands below are deterministic
+> offline/compatibility tools. The checked-in development profile keeps this
+> capacity path disabled. See
+> `docs/architecture/global-dev-fleet-autoscaler.md`.
 
 The shared capacity broker is the single slot authority for the disposable
 `sandbox-qianyi`, `sandbox-hongjian`, and `sandbox-devansh` Control Planes. It

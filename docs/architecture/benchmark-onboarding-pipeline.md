@@ -12,8 +12,10 @@ creating native benchmark rows.
 
 - `config/benchmarks.toml` declares repository-known benchmark adapters and
   local fixtures.
-- Adapter code under `src/loom/benchmarks/` converts upstream examples into
-  Loom `TaskConfig` bundles.
+- Adapter code under
+  `packages/loom-benchmarks/loom_benchmarks/adapters/` converts upstream
+  examples into Loom `TaskConfig` bundles. The Terminal-Bench adapter is the
+  separate `packages/loom-benchmark-terminal-bench-2/` workspace package.
 - Registered `benchmarks` and `tasks` rows are the service catalog used by the
   SPA and evaluation APIs.
 - Immutable object-store or Hugging Face manifests bind task IDs, checksums,
@@ -67,10 +69,10 @@ the same checks, so a client cannot bypass a blocked catalog entry by calling
 the API directly.
 
 Terminal-Bench-shaped `task.toml` bundles and `environment/` subtrees are
-normalized by the current adapter/materializer path. Repository fixtures and
-tests under `tests/fixtures/benchmarks/`, `tests/unit/`, and `tests/system/`
-exercise manifest validation, conversion, registration, audit, activation,
-and sample execution.
+normalized by the current adapter/materializer path. Tests under
+`packages/loom-benchmarks/tests/`, `tests/unit/`, and `tests/system/` exercise
+manifest validation, conversion, registration, audit, activation, and sample
+execution. Task-bundle fixtures live under `tests/fixtures/tasks/`.
 
 For third-party adapter authoring, see
 [Benchmark adapter](benchmark-adapter.md). For operator command examples, see

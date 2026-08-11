@@ -251,7 +251,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub.add_parser(
         "dev",
-        help="Manage isolated development environments on the shared fleet",
+        help="Use the candidate-less shared-fleet compatibility client",
         add_help=False,
     )
     sub.add_parser(

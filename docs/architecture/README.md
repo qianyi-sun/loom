@@ -45,7 +45,7 @@ than mixed with current behavior.
 - **[Global fleet capacity manager](global-fleet-capacity-manager.md)** — the
   current global and environment capacity authority boundary.
 - **[Global development-fleet autoscaler](global-dev-fleet-autoscaler.md)** —
-  development-environment capacity reconciliation.
+  implemented supervisor contract and the checked-in disabled boundary.
 - **[GB10 capacity](gb10-dynamic-capacity.md)** — inventory, health, dynamic
   allocatable capacity, and placement rules.
 - **[LLM Gateway](llm-gateway.md)** — provider dialects, attribution, and
@@ -81,8 +81,8 @@ than mixed with current behavior.
   preflight, lifecycle, diagnostics, and secret bootstrap.
 - **[Protected staging rollout](staging-rollout.md)** —
   candidate binding, locking, backup, evidence, and operator authority.
-- **[Multiple development environments](multi-dev-environments.md)** —
-  per-developer identity, ownership, capacity, and lifecycle.
+- **[Personal development environments](multi-dev-environments.md)** —
+  opt-in candidate APIs, identity, activation, limits, and current CLI gaps.
 - **[Multi-node topology](multi-node-topology.md)** — Postgres, MinIO,
   storage, anti-affinity, and disruption budgets.
 - **[PgBouncer transaction mode](pgbouncer.md)** —

@@ -38,9 +38,12 @@ The generator updates:
 - `src/loom_llm_gateway/config/_generated.py`
 - `src/loom_service/config/_generated.py`
 - `src/loom_worker/config/_generated.py`
-- `src/loom_cli/data/loom-schema.toml`
 - `config/cluster-config.example.toml`
-- `src/loom_cli/data/cluster-config.example.toml`
+
+`src/loom_cli/data/loom-schema.toml` is the packaged runtime copy of the
+canonical schema, not a codegen output. It must remain byte-identical to
+`config/loom-schema.toml`; the cluster-config packaging tests enforce that
+copy boundary.
 
 Kubernetes templates use the schema-aware environment-block helper at render
 time, so runtime environment names and Secret references remain aligned with

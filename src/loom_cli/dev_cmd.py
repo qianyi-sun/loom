@@ -1,8 +1,9 @@
-"""Self-service shared-fleet development environments.
+"""Candidate-less shared-fleet development compatibility client.
 
-This is deliberately a thin client over the guarded loom-service lifecycle
-API. It never shells out to kubectl, writes autoscaler policy directly, or
-reuses the local Docker Compose ``loom service`` path.
+This remains a thin client over the earlier loom-service lifecycle API. It
+never shells out to kubectl, writes autoscaler policy directly, or reuses the
+local Docker Compose ``loom service`` path. Candidate-aware deployment is
+exposed separately through ``loom service up --environment dev-<name>``.
 """
 
 from __future__ import annotations
@@ -282,15 +283,17 @@ def dispatch(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="loom dev",
         description=(
-            "Manage isolated persistent development environments on the shared "
-            "fleet. These are lower-level lifecycle commands; `loom service up "
-            "--environment dev-<name>` is the source-fresh deployment entrypoint, and "
-            "`--environment local` selects Docker Compose."
+            "Compatibility client for the candidate-less shared-fleet API. "
+            "Use `loom service up --environment dev-<name>` for candidate-aware "
+            "personal deployment, or `--environment local` for Docker Compose."
         ),
     )
     sub = parser.add_subparsers(dest="dev_cmd", required=True)
 
-    create = sub.add_parser("create", help="Create or converge one shared-fleet environment.")
+    create = sub.add_parser(
+        "create",
+        help="Request candidate-less create on a compatible server.",
+    )
     create.add_argument(
         "name",
         type=_dev_instance_name,
@@ -315,7 +318,10 @@ def dispatch(argv: list[str]) -> int:
     _add_format(status)
     status.set_defaults(handler=_status)
 
-    destroy = sub.add_parser("destroy", help="Destroy one owned development environment.")
+    destroy = sub.add_parser(
+        "destroy",
+        help="Request legacy destroy; candidate-backed environments are rejected.",
+    )
     destroy.add_argument("name", type=_dev_instance_name)
     destroy.add_argument(
         "--keep-data",

@@ -19,8 +19,8 @@ capacity workflow.
   Slurm-backed capacity, tunnels, and recovery.
 - **[Developer sandboxes](developer-sandboxes.md)** — candidate-bound shared
   development sandboxes.
-- **[Shared sandbox capacity](shared-sandbox-capacity-broker.md)** — request,
-  lease, drain, observation, and evidence interface for shared capacity.
+- **[Shared sandbox capacity](shared-sandbox-capacity-broker.md)** — disabled
+  compatibility ledger, offline request/lease checks, and recovery evidence.
 - **[Local development](local-dev-workflow.md)** — local kind deployment and
   pre-push checks.
 

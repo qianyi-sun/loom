@@ -1,10 +1,20 @@
 # Global Development-Fleet Autoscaler
 
-One submit-host supervisor can arbitrate capacity for the complete registry of
-development environments. It uses a durable SQLite lease ledger and emits
-candidate- and generation-bound grants to environment-local Slurm
-reconcilers. Individual development deployments do not own independent global
-budgets.
+The repository contains a submit-host supervisor that can arbitrate capacity
+for a registry of development environments. It uses a durable SQLite lease
+ledger and emits candidate- and generation-bound grants to environment-local
+Slurm reconcilers. Individual development deployments do not own independent
+global budgets.
+
+This authority is not enabled by the checked-in development state:
+`deploy/environment-state/development.toml` disables both pool policies and
+both external supervisors. The candidate-aware personal-development lifecycle
+also does not create the per-instance external Slurm policy consumed by this
+supervisor. A candidate-backed environment can therefore become application
+`ready` without becoming an eligible input to this capacity path. The demand
+contract also accepts a 40-character Git candidate SHA, whereas personal
+candidates use a 64-character content SHA-256; the two bindings are not
+interchangeable.
 
 ## Demand and grants
 
@@ -41,8 +51,9 @@ pool observations, updates the owner-only ledger, writes an owner-only report,
 refreshes exact-bound worker environment files for ready instances, and calls
 the existing external Slurm reconciler with each grant.
 
-`deploy/dev-fleet/` contains the hardened systemd service and timer. The lower
-level `scripts/ops/global_dev_fleet_autoscaler_once.py` accepts versioned files
-for deterministic offline checks. The autoscaler changes live capacity only
-where operators have installed and enabled the external supervisor with valid
-budgets, credentials, registry input, and local reconcilers.
+`deploy/dev-fleet/` contains systemd installation templates. The lower-level
+`scripts/ops/global_dev_fleet_autoscaler_once.py` accepts versioned files for
+deterministic offline checks. The autoscaler changes live capacity only where
+operators have explicitly installed and enabled the external supervisor with
+valid budgets, credentials, registry input, per-instance policies, and local
+reconcilers. Repository presence alone grants no capacity authority.

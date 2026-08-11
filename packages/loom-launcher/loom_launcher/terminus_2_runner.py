@@ -15,7 +15,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "terminus-2 is not a loom-launcher subprocess runtime. "
         "Use the Harbor-embedded LoomTerminus2Runtime; the worker routes agent.name "
-        "'terminus-2' automatically).",
+        "'terminus-2' automatically.",
         file=sys.stderr,
     )
     return 2
