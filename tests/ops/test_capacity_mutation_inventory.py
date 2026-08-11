@@ -13,15 +13,31 @@ from loom_capacity_agent.legacy_fence import (
 
 INVENTORY = Path("docs/architecture/capacity-mutation-path-inventory.json")
 
+EXECUTION_ATTEMPT_MUTATION_SOURCE_FLOOR = {
+    "src/loom_control_plane/routes/execution_attempts.py:heartbeat_attempt",
+    "src/loom_control_plane/routes/execution_attempts.py:report_attempt_started",
+    "src/loom_control_plane/routes/execution_attempts.py:_terminal_report",
+    "src/loom_control_plane/routes/execution_attempts.py:report_attempt_complete",
+    "src/loom_control_plane/routes/execution_attempts.py:report_worker_lost_cleanup",
+    "src/loom_control_plane/scheduler/claim.py:claim_one",
+    "src/loom_pipeline_orchestrator/repository.py:create_attempt",
+    "src/loom_pipeline_orchestrator/repository.py:schedule_retry",
+    "src/loom_pipeline_orchestrator/repository.py:_fail_provider_attempt_budget",
+    "src/loom_pipeline_orchestrator/repository.py:_fail_accounting_violation",
+    "src/loom_pipeline_orchestrator/repository.py:_latch_terminal_cause",
+    "src/loom_pipeline_orchestrator/repository.py:_cancel_not_started_attempts",
+    "src/loom_pipeline_orchestrator/repository.py:acknowledge_cancellation",
+}
+
 
 def test_capacity_mutation_inventory_is_complete_and_activation_blocking() -> None:
     inventory_bytes = INVENTORY.read_bytes()
     document = json.loads(inventory_bytes)
-    assert document["schema_version"] == 1
+    assert document["schema_version"] == 2
     assert document["activation_blocking"] is True
     entries = document["entries"]
     assert isinstance(entries, list)
-    assert len(entries) >= 19
+    assert len(entries) >= 27
     identities = [entry["id"] for entry in entries]
     assert len(identities) == len(set(identities))
     assert {
@@ -35,6 +51,13 @@ def test_capacity_mutation_inventory_is_complete_and_activation_blocking() -> No
         "slurm-job-launch-registry-release",
         "dev-environment-destroy",
         "legacy-compatibility-writer",
+        "pipeline-attempt-submission",
+        "execution-attempt-queued-to-claimed",
+        "execution-attempt-heartbeat",
+        "execution-attempt-result-state",
+        "pipeline-attempt-cancellation",
+        "execution-attempt-worker-loss",
+        "pipeline-attempt-retry",
     } <= set(identities)
     for entry in entries:
         assert entry["closure_status"] == "open"
@@ -53,3 +76,9 @@ def test_capacity_mutation_inventory_is_complete_and_activation_blocking() -> No
 
     assert tuple(sorted(identities)) == LEGACY_MUTATION_PATH_IDS
     assert hashlib.sha256(inventory_bytes).hexdigest() == LEGACY_MUTATION_INVENTORY_DIGEST
+
+
+def test_unified_execution_attempt_capacity_mutations_cannot_fall_out_of_inventory() -> None:
+    document = json.loads(INVENTORY.read_bytes())
+    inventoried_sources = {source for entry in document["entries"] for source in entry["sources"]}
+    assert EXECUTION_ATTEMPT_MUTATION_SOURCE_FLOOR <= inventoried_sources

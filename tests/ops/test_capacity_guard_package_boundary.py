@@ -225,3 +225,20 @@ def test_inert_submission_registration_has_no_live_or_public_mutation() -> None:
     assert "insert into loom_capacity_guard.prepared_" not in lowered
     assert "sbatch" not in lowered
     assert "scancel" not in lowered
+
+
+def test_complete_mutation_inventory_migration_only_tightens_inert_policy() -> None:
+    source = Path(
+        "capacity_guard_migrations/versions/guard_0008_complete_mutation_inventory.py"
+    ).read_text(encoding="utf-8")
+    lowered = source.lower()
+    assert "execution-attempt-queued-to-claimed" in lowered
+    assert "pipeline-attempt-cancellation" in lowered
+    assert "_assert_fence_is_empty" in lowered
+    assert "create or replace function" not in lowered
+    assert "insert into public." not in lowered
+    assert "update public." not in lowered
+    assert "delete from public." not in lowered
+    assert "insert into loom_capacity_guard.protected_claim_leases" not in lowered
+    assert "sbatch" not in lowered
+    assert "scancel" not in lowered

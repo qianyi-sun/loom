@@ -152,8 +152,8 @@ an executable ceiling of zero and live-claim entry disabled.
 ## Package 2C1 inert legacy-authority fence
 
 The first Package 2C slice binds the exact machine-readable mutation inventory
-to a bounded set of writer-domain cursors.  Every one of the twenty mutation
-paths must be represented, while paths backed by more than one authority—such
+to a bounded set of writer-domain cursors. Every inventoried mutation path must
+be represented, while paths backed by more than one authority—such
 as the distinct OLDLAB and GB10 physical writers—retain separate incarnation,
 epoch, high-water, and policy-digest cursors.  A prepared compatibility record
 is expiring, append-only, and non-executable.  It cannot coexist with a
@@ -167,6 +167,13 @@ records does not invoke a legacy writer, change a candidate route, mutate a
 public trial, create a claim, mint a credential, or touch Slurm.  Inventory
 entries remain activation-blocking and `open` until later Package 2C slices
 instrument and fence the corresponding live writers.
+
+The inventory v2 audit expands that freeze boundary from twenty to twenty-seven
+paths. The original inventory omitted the unified Pipeline `ExecutionAttempt`
+protocol even though it has independent submission, claim, heartbeat, result,
+cancellation, worker-loss, and retry writers. Those seven domains now require
+their own cursors. An obsolete non-empty v1 preparation cannot be silently
+reinterpreted as complete; migration fails closed and requires fresh evidence.
 
 ## Package 2C2 lifecycle-aware demand projection
 
