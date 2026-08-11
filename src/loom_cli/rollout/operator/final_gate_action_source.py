@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -26,12 +27,13 @@ from loom_cli.rollout.preflight_artifact_store import (
     PreflightArtifactPublication,
     PreflightArtifactStore,
 )
+from loom_cli.rollout.preflight_authority import CandidatePreflightPlan
 from loom_cli.rollout.preflight_contract import CheckOperation, PreflightAttestation
 from loom_cli.rollout.preflight_pipeline import PreflightRehearsal
 
 from .backup_lease import BackupLease
 from .final_gate_plan import FinalGatePlan, FinalGatePlanStore
-from .model import DriverEnvelope
+from .model import CandidateBinding, DriverEnvelope
 from .protected_apply_baseline import ProtectedApplyBaseline
 
 
@@ -52,8 +54,12 @@ class FinalGateActionSource:
     run: CommandRunner
     read_mutation_epoch: Callable[[], int]
     now: Callable[[], datetime]
+    post_apply_plan_factory: Callable[[CandidateBinding, int], CandidatePreflightPlan]
     executable: Path = FINAL_GATE_HELPER_PATH
     executable_owner_uid: int = 0
+    post_apply_drift_attempts: int = 13
+    post_apply_drift_retry_interval_seconds: float = 5.0
+    sleep: Callable[[float], None] = time.sleep
 
     def __post_init__(self) -> None:
         if (
@@ -63,6 +69,10 @@ class FinalGateActionSource:
             or self.executable_owner_uid < 0
             or not callable(self.read_mutation_epoch)
             or not callable(self.now)
+            or not callable(self.post_apply_plan_factory)
+            or not 1 <= self.post_apply_drift_attempts <= 61
+            or not 0 < self.post_apply_drift_retry_interval_seconds <= 60
+            or not callable(self.sleep)
         ):
             raise ValueError("final gate action source authority is invalid")
 
@@ -137,15 +147,31 @@ class FinalGateActionSource:
         def verify_post_apply_drift(operation: CheckOperation) -> FinalGateResult:
             if operation is not CheckOperation.VERIFY or admission.preflight_plan is None:
                 raise ValueError("post-apply drift action is unavailable")
-            current_mutation_epoch = self.read_mutation_epoch()
-            if type(current_mutation_epoch) is not int or current_mutation_epoch < 0:
-                raise ValueError("post-apply mutation epoch authority is invalid")
-            evidence = validate_post_apply_attestation_drift(
-                admission=admission,
-                plan=admission.preflight_plan,
-                current_mutation_epoch=current_mutation_epoch,
-                now=self.now(),
-            )
+            for attempt in range(1, self.post_apply_drift_attempts + 1):
+                current_mutation_epoch = self.read_mutation_epoch()
+                if type(current_mutation_epoch) is not int or current_mutation_epoch < 0:
+                    raise ValueError("post-apply mutation epoch authority is invalid")
+                try:
+                    post_apply_plan = self.post_apply_plan_factory(
+                        admission.preflight_plan.candidate,
+                        current_mutation_epoch,
+                    )
+                    evidence = validate_post_apply_attestation_drift(
+                        admission=admission,
+                        plan=post_apply_plan,
+                        current_mutation_epoch=current_mutation_epoch,
+                        now=self.now(),
+                    )
+                # This validation is entirely read-only and blocks every later
+                # final gate.  Cross-host read-after-write windows can surface
+                # through more than one validator branch, so re-observe any
+                # bounded validation mismatch and still fail closed at expiry.
+                except ValueError:
+                    if attempt >= self.post_apply_drift_attempts:
+                        raise
+                    self.sleep(self.post_apply_drift_retry_interval_seconds)
+                    continue
+                break
             return FinalGateResult(
                 check_id="final.drift",
                 operation=operation,
