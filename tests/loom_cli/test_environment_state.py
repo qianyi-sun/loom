@@ -2316,8 +2316,8 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
         profile.external_slurm_runner_prerequisites["require_external_allocation_authority"] is True
     )
     assert (
-        profile.external_slurm_runner_prerequisites["env_template_glob"]
-        == "/var/lib/loom-staging-rollout/generated/staging-gb10-worker-staging-*.env"
+        profile.external_slurm_runner_prerequisites["env_template"]
+        == "/var/lib/loom-staging-rollout/generated/staging-gb10-worker-staging-bootstrap.env"
     )
 
 

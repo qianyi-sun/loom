@@ -287,6 +287,7 @@ def test_build_sbatch_request_uses_environment_specific_worker_settings() -> Non
         "--parsable",
         "--job-name=loom-production-legacy-oldlab-4",
         "--nodelist=oldlab-4",
+        "--chdir=/opt/loom",
         "--comment=loom-cgroup-v1:pids=3072",
         "--time=7-00:00:00",
         "--partition=cpu",
