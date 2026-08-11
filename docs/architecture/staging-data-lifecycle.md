@@ -84,11 +84,14 @@ The rollout Tier 0 collector does not depend on migration `0070` already being
 live. Its installed Kubernetes TokenRequest may open localhost transports only
 to the exact `loom-minio-0` and `loom-postgres-0` pods. MinIO independently
 authenticates a fixed non-mutating user whose one exact policy can read bucket
-location/versioning, enumerate versions, and read exact object versions in only
-the staging trajectories and artifacts buckets; it cannot write/delete anything.
-The collector inventories those exact buckets and measures the canonical
-`/data/loom-staging/minio` backing filesystem directly under the rollout
-service account. This fresh snapshot is the single source for
+location/versioning, enumerate versions, read exact object versions in only the
+staging trajectories and artifacts buckets, and read MinIO server information;
+it cannot write/delete objects or change server state.
+The collector inventories those exact buckets. On single-node hostPath
+clusters it measures the canonical `/data/loom-staging/minio` backing
+filesystem directly; on distributed multi-node clusters it reads each live
+MinIO drive's byte and inode headroom through the bounded
+`admin:ServerInfo` API. This fresh snapshot is the single source for
 `capacity.high-water` on both legacy and migrated staging. The `0070` row
 remains runtime run-admission authority, but a missing legacy row can no longer
 hide a real byte, object, disk, or inode blocker from rollout preflight.
@@ -391,6 +394,9 @@ auth over the existing `loom-minio:9000` egress — no drive mount, no Prometheu
 JWT). Admission still fails closed on the most constrained drive, and the object
 inventory continues to come from the exact S3 listing. The sealed single-node
 broker path is unaffected: it always renders `--capacity-source filesystem`.
+The installed Tier 0 collector makes the same topology-based selection, so a
+distributed cluster never mistakes the rollout host's unrelated local
+filesystem for Longhorn PVC capacity.
 The same module also exposes an explicit `capacity` action for a reviewed,
 candidate-bound one-shot maintenance Job. That action publishes only the fresh
 capacity row and returns `gc: null`; it cannot inventory, mark, delete or resume
