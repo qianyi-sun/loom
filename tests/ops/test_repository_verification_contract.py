@@ -16,7 +16,10 @@ def test_repository_checks_ruff_scope_matches_repo_wide_local_lint() -> None:
     steps = workflow["jobs"]["lint-and-static"]["steps"]
     ruff_step = next(step for step in steps if step.get("name") == "Ruff")
 
-    assert ruff_step["run"] == "uv run --no-sync ruff check src tests packages migrations"
+    assert ruff_step["run"] == (
+        "uv run --no-sync ruff check src tests packages migrations "
+        "capacity_guard_migrations"
+    )
 
 
 def test_local_python_version_is_pinned_to_ci_interpreter() -> None:
