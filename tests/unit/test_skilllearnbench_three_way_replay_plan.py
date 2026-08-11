@@ -8,7 +8,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "alignment" / "skilllearnbench_three_way_replay_plan.py"
-EVIDENCE_CSV = ROOT / "docs" / "evidence" / "2026-06-30-slb-three-way-codex-qwen36.csv"
+EVIDENCE_CSV = (
+    ROOT
+    / "archive"
+    / "docs"
+    / "evidence"
+    / "2026-06-30-slb-three-way-codex-qwen36.csv"
+)
 
 
 def _load_module():

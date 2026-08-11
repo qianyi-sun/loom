@@ -9,8 +9,8 @@ data:
     #
     # Fetches Cluster and Route definitions from
     # `loom_egress_xds`. The xDS server publishes a new snapshot on every
-    # `provider_connections_changed` NOTIFY (Postgres trigger from
-    # migration 0026).
+    # `provider_connections_changed` notification from the provider-connection
+    # database trigger.
     #
     # Listener `:30443` is an HTTP proxy endpoint. HTTPS providers use
     # CONNECT tunneling; HTTP providers use ordinary forward-proxy
