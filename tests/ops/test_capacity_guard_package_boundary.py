@@ -125,3 +125,20 @@ def test_capacity_guard_is_in_default_static_validation() -> None:
     workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
     ruff_command = "ruff check src tests packages migrations capacity_guard_migrations"
     assert ruff_command in workflow
+
+
+def test_prepared_admission_migration_remains_zero_executable_and_projection_read_only() -> None:
+    source = Path(
+        "capacity_guard_migrations/versions/guard_0003_prepared_admission.py"
+    ).read_text(encoding="utf-8")
+    lowered = source.lower()
+    assert "executable = false" in lowered
+    assert "claim_authorization_epoch = 0" in lowered
+    assert "security definer" in lowered
+    assert "to public" not in lowered
+    assert "insert into public.trials" not in lowered
+    assert "update public.trials" not in lowered
+    assert "delete from public.trials" not in lowered
+    assert "update loom_capacity_guard.trial_attempts" not in lowered
+    assert "sbatch" not in lowered
+    assert "scancel" not in lowered
