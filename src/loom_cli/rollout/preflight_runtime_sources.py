@@ -502,6 +502,8 @@ class PreflightRuntimeSources:
                 ssh_config=self.gb10_ssh_config,
                 identity=self.gb10_identity,
                 max_concurrency=GB10_PREFLIGHT_FLEET_CONCURRENCY,
+                settle_attempts=2,
+                settle_interval_seconds=1.0,
             ),
             build_backup_lease_eligibility_check(
                 authority.lease_source,

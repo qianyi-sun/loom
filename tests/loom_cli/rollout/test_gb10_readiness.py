@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import ast
 import json
 import subprocess
 from collections import defaultdict
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from loom_cli.rollout.gb10_readiness import (
     GB10ProbeTarget,
+    _remote_probe_source,
     candidate_source_remote_command,
     probe_gb10_candidate_source_readonly,
     probe_gb10_fleet_readonly,
@@ -65,6 +70,38 @@ def test_remote_probe_command_is_fixed_and_readonly() -> None:
     assert " enable " not in command
     assert " disable " not in command
     assert "--user" in command
+
+
+def test_remote_probe_accepts_only_exact_enabled_or_disabled_timer_state() -> None:
+    source = _remote_probe_source("loom-gb10-node-agent.service")
+    enabled_node = next(
+        node
+        for node in ast.parse(source).body
+        if isinstance(node, ast.FunctionDef) and node.name == "unit_enabled"
+    )
+
+    def evaluate(returncode: int, stdout: str, stderr: str = "") -> bool:
+        namespace = {
+            "subprocess": SimpleNamespace(
+                run=lambda *_args, **_kwargs: subprocess.CompletedProcess(
+                    [], returncode, stdout, stderr
+                )
+            )
+        }
+        exec(
+            compile(ast.Module(body=[enabled_node], type_ignores=[]), "<enabled>", "exec"),
+            namespace,
+        )
+        return namespace["unit_enabled"]("loom-gb10-node-agent.timer")
+
+    assert evaluate(0, "enabled\n") is True
+    assert evaluate(1, "disabled\n") is False
+    with pytest.raises(SystemExit):
+        evaluate(0, "static\n")
+    with pytest.raises(SystemExit):
+        evaluate(1, "disabled\n", "diagnostic")
+
+    assert '"timer_enabled": unit_enabled(timer)' in source
 
 
 def test_candidate_source_remote_command_is_fixed_readonly_and_exact() -> None:
@@ -389,6 +426,32 @@ def test_fleet_probe_accepts_exact_elapsed_timer_for_protected_repair() -> None:
     assert result.ready
     assert result.failed_hosts == ()
     assert result.transient_hosts == ("trt-gb10-1",)
+    assert calls == 1
+
+
+def test_fleet_probe_accepts_exact_retired_node_agent_without_retry() -> None:
+    target = GB10ProbeTarget("trt-gb10-1", "loom-gb10-node-agent.service")
+    payload = json.loads(_payload("trt-gb10-1"))
+    payload["timer_enabled"] = False
+    payload["timer"].update(ActiveState="inactive", SubState="dead")
+    calls = 0
+
+    def run(argv: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        nonlocal calls
+        calls += 1
+        return subprocess.CompletedProcess(argv, 0, json.dumps(payload), "")
+
+    result = probe_gb10_fleet_readonly(
+        run,
+        (target,),
+        ssh_config=Path("/fixed/ssh-config"),
+        identity=Path("/fixed/identity"),
+        settle_attempts=2,
+        settle_interval_seconds=0,
+    )
+
+    assert result.ready
+    assert result.failed_hosts == ()
     assert calls == 1
 
 

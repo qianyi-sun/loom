@@ -44,11 +44,12 @@ CommandRunner = Callable[[Sequence[str]], CommandResult]
 
 
 class NodeAgentTimerState(StrEnum):
-    """Documented healthy, protected-repairable, and fail-closed timer states."""
+    """Documented active, retired, protected-repairable, and invalid timer states."""
 
     PREPARED = "prepared"
     TRANSIENT_RUNNING = "transient-running"
     REPAIRABLE_ELAPSED = "repairable-elapsed"
+    RETIRED = "retired"
     INVALID = "invalid"
 
 
@@ -100,17 +101,22 @@ class GB10HostReadiness:
 
     @property
     def ready(self) -> bool:
-        return (
-            _BOOT_ID_RE.fullmatch(self.boot_id) is not None
-            and _SYSTEMD_VERSION_RE.fullmatch(self.manager_version) is not None
-            and self.linger_enabled
-            and self.service_ready
+        timer_ready = (
+            self.timer_enabled
             and self.timer_state
             in {
                 NodeAgentTimerState.PREPARED,
                 NodeAgentTimerState.REPAIRABLE_ELAPSED,
             }
-            and self.timer_enabled
+        ) or (
+            not self.timer_enabled and self.timer_state is NodeAgentTimerState.RETIRED
+        )
+        return (
+            _BOOT_ID_RE.fullmatch(self.boot_id) is not None
+            and _SYSTEMD_VERSION_RE.fullmatch(self.manager_version) is not None
+            and self.linger_enabled
+            and self.service_ready
+            and timer_ready
         )
 
     @property
@@ -270,19 +276,25 @@ def classify_node_agent_timer(
     *,
     service: str,
 ) -> NodeAgentTimerState:
-    """Recognize waiting, in-flight, and the exact protected-repairable state."""
-    common = (
+    """Recognize waiting, in-flight, repairable, and exact retired states."""
+    identity = (
         properties.get("LoadState") == "loaded"
-        and properties.get("ActiveState") == "active"
         and properties.get("Unit") == service
         and properties.get("NeedDaemonReload") == "no"
     )
-    if common and properties.get("SubState") == "waiting":
+    active = identity and properties.get("ActiveState") == "active"
+    if active and properties.get("SubState") == "waiting":
         return NodeAgentTimerState.PREPARED
-    if common and properties.get("SubState") == "running":
+    if active and properties.get("SubState") == "running":
         return NodeAgentTimerState.TRANSIENT_RUNNING
-    if common and properties.get("SubState") == "elapsed":
+    if active and properties.get("SubState") == "elapsed":
         return NodeAgentTimerState.REPAIRABLE_ELAPSED
+    if (
+        identity
+        and properties.get("ActiveState") == "inactive"
+        and properties.get("SubState") == "dead"
+    ):
+        return NodeAgentTimerState.RETIRED
     return NodeAgentTimerState.INVALID
 
 
@@ -402,7 +414,10 @@ def parse_gb10_host_readiness(
     ):
         return None
     timer_state = classify_node_agent_timer(decoded["timer"], service=service)
-    if timer_state is NodeAgentTimerState.REPAIRABLE_ELAPSED and (
+    if timer_state in {
+        NodeAgentTimerState.REPAIRABLE_ELAPSED,
+        NodeAgentTimerState.RETIRED,
+    } and (
         decoded["service"]["ActiveState"] != "inactive"
         or decoded["service"]["SubState"] != "dead"
     ):
