@@ -615,6 +615,199 @@ class DevInstance(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
 
 
+class PersonalDevCandidate(Base):
+    """Immutable, owner-scoped source identity and build status for personal dev."""
+
+    __tablename__ = "personal_dev_candidates"
+    __table_args__ = (
+        CheckConstraint(
+            "candidate_sha ~ '^[0-9a-f]{64}$' AND "
+            "source_sha256 ~ '^[0-9a-f]{64}$' AND "
+            "archive_sha256 ~ '^[0-9a-f]{64}$' AND "
+            "build_contract_sha256 ~ '^[0-9a-f]{64}$'",
+            name="personal_dev_candidates_digests_check",
+        ),
+        CheckConstraint(
+            "source_commit ~ '^[0-9a-f]{40}$'",
+            name="personal_dev_candidates_source_commit_check",
+        ),
+        CheckConstraint(
+            "archive_size_bytes > 0",
+            name="personal_dev_candidates_archive_size_check",
+        ),
+        CheckConstraint(
+            "status IN ('uploaded', 'queued', 'building', 'ready', 'failed')",
+            name="personal_dev_candidates_status_check",
+        ),
+        CheckConstraint(
+            "(status IN ('uploaded', 'queued', 'building') "
+            "AND image_manifest_digest IS NULL "
+            "AND publication_json IS NULL AND publication_sha256 IS NULL "
+            "AND failure_reason IS NULL AND ready_at IS NULL) OR "
+            "(status = 'ready' AND image_manifest_digest IS NOT NULL "
+            "AND image_manifest_digest ~ '^sha256:[0-9a-f]{64}$' "
+            "AND publication_json IS NOT NULL "
+            "AND publication_sha256 IS NOT NULL "
+            "AND publication_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND failure_reason IS NULL AND ready_at IS NOT NULL) OR "
+            "(status = 'failed' AND image_manifest_digest IS NULL "
+            "AND publication_json IS NULL AND publication_sha256 IS NULL "
+            "AND failure_reason IS NOT NULL AND ready_at IS NULL)",
+            name="personal_dev_candidates_terminal_fields_check",
+        ),
+        UniqueConstraint(
+            "owner_user_id",
+            "owner_team_id",
+            "source_sha256",
+            "archive_sha256",
+            "build_contract_sha256",
+            name="personal_dev_candidates_owner_source_uidx",
+        ),
+        Index(
+            "personal_dev_candidates_owner_created_idx",
+            "owner_user_id",
+            "created_at",
+            "id",
+        ),
+        Index(
+            "personal_dev_candidates_status_created_idx",
+            "status",
+            "created_at",
+            "id",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    owner_user_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    owner_team_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("teams.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    candidate_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    archive_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    build_contract_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_commit: Mapped[str] = mapped_column(String(40), nullable=False)
+    dirty: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    manifest_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    object_bucket: Mapped[str] = mapped_column(Text, nullable=False)
+    object_key: Mapped[str] = mapped_column(Text, nullable=False)
+    archive_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'uploaded'"),
+    )
+    image_manifest_digest: Mapped[str | None] = mapped_column(String(71), nullable=True)
+    publication_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    publication_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    failure_reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    ready_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
+class PersonalDevCandidateBuildAttempt(Base):
+    """Lease-fenced handoff from trusted intake to an isolated image builder."""
+
+    __tablename__ = "personal_dev_candidate_build_attempts"
+    __table_args__ = (
+        CheckConstraint(
+            "attempt_sequence >= 0 AND operation_epoch > 0 AND lease_epoch >= 0",
+            name="personal_dev_candidate_build_attempts_counters_check",
+        ),
+        CheckConstraint(
+            "state IN ('queued', 'claimed', 'running', 'succeeded', 'failed')",
+            name="personal_dev_candidate_build_attempts_state_check",
+        ),
+        CheckConstraint(
+            "(state = 'queued' AND claimed_by IS NULL AND lease_expires_at IS NULL "
+            "AND started_at IS NULL AND finished_at IS NULL AND failure_reason IS NULL) OR "
+            "(state = 'claimed' AND claimed_by IS NOT NULL AND lease_expires_at IS NOT NULL "
+            "AND started_at IS NULL AND finished_at IS NULL AND failure_reason IS NULL) OR "
+            "(state = 'running' AND claimed_by IS NOT NULL AND lease_expires_at IS NOT NULL "
+            "AND started_at IS NOT NULL AND finished_at IS NULL AND failure_reason IS NULL) OR "
+            "(state = 'succeeded' AND claimed_by IS NOT NULL AND lease_expires_at IS NULL "
+            "AND started_at IS NOT NULL AND finished_at IS NOT NULL AND failure_reason IS NULL) OR "
+            "(state = 'failed' AND claimed_by IS NOT NULL AND lease_expires_at IS NULL "
+            "AND started_at IS NOT NULL AND finished_at IS NOT NULL AND failure_reason IS NOT NULL)",
+            name="personal_dev_candidate_build_attempts_state_fields_check",
+        ),
+        UniqueConstraint(
+            "candidate_id",
+            "attempt_sequence",
+            name="personal_dev_candidate_build_attempts_sequence_uidx",
+        ),
+        UniqueConstraint(
+            "subject_id",
+            "subject_incarnation",
+            "operation_epoch",
+            "attempt_sequence",
+            name="personal_dev_candidate_build_attempts_operation_uidx",
+        ),
+        Index(
+            "personal_dev_candidate_build_attempts_picker_idx",
+            "state",
+            "lease_expires_at",
+            "created_at",
+            "id",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    candidate_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("personal_dev_candidates.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    subject_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    subject_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    operation_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    operation_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    attempt_sequence: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("0"),
+    )
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'queued'"))
+    lease_epoch: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        server_default=text("0"),
+    )
+    claimed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+    failure_reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
 class TeamMembership(Base):
     __tablename__ = "team_memberships"
     __table_args__ = (
@@ -2359,7 +2552,9 @@ class PipelineRun(Base):
     )
     started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
-    next_event_seq: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    next_event_seq: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("1")
+    )
     claimed_by: Mapped[str | None] = mapped_column(Text)
     lease_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
     lease_expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
@@ -2369,7 +2564,9 @@ class PipelineRun(Base):
 class PipelineStageRun(Base):
     __tablename__ = "pipeline_stage_runs"
     __table_args__ = (
-        CheckConstraint("node_kind IN ('container', 'gate')", name="pipeline_stage_runs_kind_check"),
+        CheckConstraint(
+            "node_kind IN ('container', 'gate')", name="pipeline_stage_runs_kind_check"
+        ),
         CheckConstraint(
             "state IN ('blocked','ready','queued','claimed','running','retry_wait',"
             "'succeeded','failed','cancelled','skipped')",
@@ -2645,7 +2842,9 @@ class ExecutionAttempt(Base):
             "(state IN ('succeeded','failed','cancelled','lost')) = (finished_at IS NOT NULL)",
             name="execution_attempts_terminal_timestamp_check",
         ),
-        UniqueConstraint("stage_run_id", "attempt_number", name="execution_attempts_stage_number_uidx"),
+        UniqueConstraint(
+            "stage_run_id", "attempt_number", name="execution_attempts_stage_number_uidx"
+        ),
         Index(
             "execution_attempts_claim_uidx",
             "claim_id",
@@ -2664,7 +2863,9 @@ class ExecutionAttempt(Base):
 
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
     stage_run_id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("pipeline_stage_runs.id", ondelete="CASCADE"), nullable=False
+        PgUUID(as_uuid=True),
+        ForeignKey("pipeline_stage_runs.id", ondelete="CASCADE"),
+        nullable=False,
     )
     attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
     state: Mapped[str] = mapped_column(Text, nullable=False)
@@ -2750,24 +2951,22 @@ class PipelineTerminalSnapshot(Base):
 class PipelineFanoutExpansion(Base):
     __tablename__ = "pipeline_fanout_expansions"
     __table_args__ = (
-        CheckConstraint("source_kind IN ('run_input','stage_output')", name="pipeline_fanout_source_check"),
+        CheckConstraint(
+            "source_kind IN ('run_input','stage_output')", name="pipeline_fanout_source_check"
+        ),
         CheckConstraint(
             "(source_kind = 'run_input' AND source_stage_run_id IS NULL) OR "
             "(source_kind = 'stage_output' AND source_stage_run_id IS NOT NULL)",
             name="pipeline_fanout_source_stage_check",
         ),
-        CheckConstraint(
-            "item_count BETWEEN 0 AND 5000", name="pipeline_fanout_item_count_range"
-        ),
+        CheckConstraint("item_count BETWEEN 0 AND 5000", name="pipeline_fanout_item_count_range"),
         UniqueConstraint(
             "pipeline_run_id",
             "node_key",
             "source_artifact_id",
             name="pipeline_fanout_expansions_identity_uidx",
         ),
-        UniqueConstraint(
-            "pipeline_run_id", "id", name="pipeline_fanout_expansions_run_id_uidx"
-        ),
+        UniqueConstraint("pipeline_run_id", "id", name="pipeline_fanout_expansions_run_id_uidx"),
         ForeignKeyConstraint(
             ["pipeline_run_id", "source_stage_run_id"],
             ["pipeline_stage_runs.pipeline_run_id", "pipeline_stage_runs.id"],
@@ -2898,12 +3097,15 @@ class ExecutionAttemptControlCommand(Base):
 class PipelineAcceptancePreflightPrerequisite(Base):
     __tablename__ = "pipeline_acceptance_preflight_prerequisites"
     __table_args__ = (
-        CheckConstraint("state IN ('pending','satisfied','consumed')", name="pipeline_preflight_state_check"),
+        CheckConstraint(
+            "state IN ('pending','satisfied','consumed')", name="pipeline_preflight_state_check"
+        ),
         CheckConstraint(
             "preflight_input_set_id = 'S02'", name="pipeline_preflight_input_set_check"
         ),
         CheckConstraint(
-            "fence_state IN ('pending','active','released')", name="pipeline_preflight_fence_state_check"
+            "fence_state IN ('pending','active','released')",
+            name="pipeline_preflight_fence_state_check",
         ),
         CheckConstraint(
             "policy_activation_epoch IS NULL OR policy_activation_epoch > 0",
@@ -3118,7 +3320,10 @@ class PipelineBudgetReservation(Base):
             name="pipeline_budget_reservations_key_namespace_check",
         ),
         UniqueConstraint(
-            "pipeline_run_id", "kind", "reservation_key", name="pipeline_budget_reservations_key_uidx"
+            "pipeline_run_id",
+            "kind",
+            "reservation_key",
+            name="pipeline_budget_reservations_key_uidx",
         ),
         Index("pipeline_budget_reservations_run_state_idx", "pipeline_run_id", "state", "id"),
     )
@@ -3161,12 +3366,18 @@ class ExecutionAttemptProviderBudget(Base):
     )
 
     attempt_id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("execution_attempts.id", ondelete="CASCADE"), primary_key=True
+        PgUUID(as_uuid=True),
+        ForeignKey("execution_attempts.id", ondelete="CASCADE"),
+        primary_key=True,
     )
     binding_snapshot_sha256: Mapped[str] = mapped_column(Text, nullable=False)
     request_limit: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    requests_reserved: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
-    requests_settled: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    requests_reserved: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    requests_settled: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
     cost_limit_microusd: Mapped[int] = mapped_column(BigInteger, nullable=False)
     cost_reserved_microusd: Mapped[int] = mapped_column(
         BigInteger, nullable=False, server_default=text("0")
@@ -3208,7 +3419,9 @@ class PipelineCancellationOutbox(Base):
         PgUUID(as_uuid=True), ForeignKey("pipeline_runs.id", ondelete="CASCADE"), nullable=False
     )
     execution_attempt_id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("execution_attempts.id", ondelete="CASCADE"), nullable=False
+        PgUUID(as_uuid=True),
+        ForeignKey("execution_attempts.id", ondelete="CASCADE"),
+        nullable=False,
     )
     terminal_cause: Mapped[str] = mapped_column(Text, nullable=False)
     idempotency_key: Mapped[str] = mapped_column(Text, nullable=False)

@@ -110,11 +110,22 @@ manifest receive independent SHA-256 digests and carry the immutable
 `personal-dev-only` scope.
 
 The isolated-builder verifier opens the archive no-follow, checks its expected
-artifact digest before parsing, enforces canonical metadata and limits without
-extracting paths, revalidates every member against the manifest, and checks the
-expected source digest. This slice does not yet upload the archive, run a
-builder, publish an image, or alter a personal environment; those remain
-activation-blocking integration work.
+artifact digest before parsing, enforces canonical metadata, exact tar size,
+zero-filled trailer, and limits without extracting paths, revalidates every
+member against the manifest, and checks the expected source digest.
+
+The next Package 4 slice supplies authenticated intake. The management service
+streams the upload into a bounded no-follow temporary file, verifies both
+digests and the canonical archive independently, publishes the verified bytes
+under an owner-scoped content-addressed object key, and idempotently records an
+immutable `uploaded` candidate. Upload deliberately does not enqueue a build.
+Only a later lifecycle operation that has resolved the environment owner,
+subject/incarnation, and expected operation epoch may create the first queued
+build attempt. Build attempts carry those bindings, use monotonic lease epochs,
+and reject stale start, heartbeat, and completion calls. This keeps candidate
+publication reusable while preventing an upload or stale build from mutating
+an environment. The restricted builder runtime, safety attestation, image
+publication, and create-or-update cutover remain activation-blocking work.
 
 After migration, the service copies only the requesting user, current team,
 quota policy, membership, and the hash of the credential used for creation
