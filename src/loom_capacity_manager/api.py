@@ -14,7 +14,7 @@ from uuid import UUID
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.encoders import jsonable_encoder
 from pydantic import ValidationError
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -28,6 +28,7 @@ from loom_capacity_manager.auth import (
     CapacityPrincipal,
     CapacityPrincipalVerifier,
     CapacityScope,
+    bearer_token_sha256,
 )
 from loom_capacity_manager.config import CapacityManagerSettings, read_owner_only_secret
 from loom_capacity_manager.contracts import (
@@ -35,6 +36,7 @@ from loom_capacity_manager.contracts import (
     MAX_POOLS,
     ConfigurationActivationV1,
     DemandSnapshotV1,
+    DynamicDevelopmentSubjectProjectionV1,
     FleetManifestV1,
     PoolObservationV1,
     ShadowEpochV1,
@@ -61,6 +63,7 @@ from loom_capacity_manager.reconciler import (
     ShadowRunResult,
     reconcile_shadow_once,
 )
+from loom_capacity_manager.schema_startup import assert_capacity_schema_at_head
 from loom_capacity_manager.store import (
     CapacityManagementStore,
     CapacityStoreError,
@@ -212,11 +215,7 @@ def create_app(
             session_factory = async_sessionmaker(engine, expire_on_commit=False)
             store = CapacityManagementStore(freshness_seconds=settings.freshness_seconds)
             async with session_factory() as session:
-                revision = (
-                    await session.execute(text("SELECT version_num FROM alembic_version"))
-                ).scalar_one()
-                if revision != "capacity_0001":
-                    raise RuntimeError("capacity database schema mismatch")
+                await assert_capacity_schema_at_head(engine)
                 authority = (
                     await session.execute(
                         select(CapacityAuthorityState).where(
@@ -292,6 +291,7 @@ def create_app(
     fleet_body = contract_body(FleetManifestV1)
     subject_body = contract_body(SubjectConfigurationV1)
     activation_body = contract_body(ConfigurationActivationV1)
+    development_projection_body = contract_body(DynamicDevelopmentSubjectProjectionV1)
     demand_body = contract_body(DemandSnapshotV1)
     pool_body = contract_body(PoolObservationV1)
 
@@ -415,27 +415,77 @@ def create_app(
         except CapacityStoreError as exc:
             raise _store_error(exc) from exc
 
+    @app.put("/v1/development-projections/{subject_id}")
+    async def project_development_subject(
+        subject_id: UUID,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:project:development")),
+        value: DynamicDevelopmentSubjectProjectionV1 = Depends(development_projection_body),
+        idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    ) -> Any:
+        if value.subject_id != subject_id:
+            raise HTTPException(status_code=409, detail="capacity state conflict")
+        session_factory, store, _writer = runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await store.project_development_subject(
+                    session,
+                    value,
+                    actor=actor.principal_id,
+                    idempotency_key=idempotency_key,
+                )
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
     @app.put("/v1/reports/demand/{subject_id}")
     async def ingest_demand(
         subject_id: UUID,
         request: Request,
-        actor: CapacityPrincipal = Depends(require("capacity:report:demand")),
         value: DemandSnapshotV1 = Depends(demand_body),
+        authorization: str | None = Header(default=None),
     ) -> Any:
-        if (
-            value.subject_id != subject_id
-            or actor.subject_id != subject_id
-            or actor.subject_incarnation != value.subject_incarnation
-            or actor.demand_reporter_incarnation != value.reporter_incarnation
-        ):
+        if value.subject_id != subject_id:
             raise HTTPException(status_code=403, detail="forbidden")
         session_factory, store, _writer = runtime(request)
         try:
+            actor_id: str
+            try:
+                actor = resolved_verifier.verify_bearer(authorization)
+            except AuthorizationError:
+                try:
+                    token_sha256 = bearer_token_sha256(authorization)
+                except AuthorizationError as exc:
+                    raise HTTPException(
+                        status_code=401,
+                        detail="invalid capacity credentials",
+                    ) from exc
+                async with session_factory() as session:
+                    try:
+                        actor_id = await store.authenticate_dynamic_demand_reporter(
+                            session,
+                            value,
+                            token_sha256=token_sha256,
+                        )
+                    except UnknownReporterError as exc:
+                        raise HTTPException(
+                            status_code=401,
+                            detail="invalid capacity credentials",
+                        ) from exc
+            else:
+                if (
+                    not actor.has_scope("capacity:report:demand")
+                    or actor.subject_id != subject_id
+                    or actor.subject_incarnation != value.subject_incarnation
+                    or actor.demand_reporter_incarnation != value.reporter_incarnation
+                ):
+                    raise HTTPException(status_code=403, detail="forbidden")
+                actor_id = actor.principal_id
             async with session_factory() as session:
                 result = await store.ingest_demand_snapshot(
                     session,
                     value,
-                    actor=actor.principal_id,
+                    actor=actor_id,
                 )
             return jsonable_encoder(result)
         except CapacityStoreError as exc:

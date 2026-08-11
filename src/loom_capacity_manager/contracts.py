@@ -36,6 +36,10 @@ MAX_CONTRACT_BYTES = 8 * 1024 * 1024
 _IDENTIFIER_PATTERN = r"^[a-z0-9][a-z0-9_.-]{0,127}$"
 _RESOURCE_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{0,62}$")
 _DIGEST_PATTERN = r"^[0-9a-f]{64}$"
+_DEV_NAME_PATTERN = re.compile(r"^[a-z]([-a-z0-9]{0,18}[a-z0-9])?$")
+_RESERVED_DEV_NAMES = frozenset(
+    {"dev", "development", "staging", "production", "prod", "local", "loom", "shared"}
+)
 
 Identifier = Annotated[str, Field(min_length=1, max_length=128, pattern=_IDENTIFIER_PATTERN)]
 Digest = Annotated[str, Field(pattern=_DIGEST_PATTERN)]
@@ -103,6 +107,20 @@ def _canonical_payload(model: StrictV1Model) -> dict[str, Any]:
     payload = model.model_dump(mode="json", exclude_none=False)
     if not isinstance(payload, dict):  # pragma: no cover - BaseModel guarantee
         raise CapacityContractError("contract payload must be an object")
+    # Preserve schema-v1 fleet digests emitted before dynamic development
+    # templates existed. A present template is authoritative and digest-bound;
+    # an absent optional extension is not serialized as a synthetic null field.
+    if (
+        model.__class__.__name__ == "FleetManifestV1"
+        and payload.get("development_subject_template") is None
+    ):
+        payload.pop("development_subject_template", None)
+    if model.__class__.__name__ == "AllocationInputV1":
+        if not payload.get("effective_account_policies"):
+            payload.pop("effective_account_policies", None)
+        fleet = payload.get("fleet")
+        if isinstance(fleet, dict) and fleet.get("development_subject_template") is None:
+            fleet.pop("development_subject_template", None)
     return payload
 
 
@@ -338,6 +356,37 @@ class PoolManifestV1(StrictV1Model):
         return self
 
 
+class DevelopmentSubjectTemplateV1(StrictV1Model):
+    """Operator-owned derivation template for dynamic personal subjects."""
+
+    owner_account_template_id: Identifier
+    max_slots_per_subject: PositiveQuantity
+    rollout_surge_slots: Quantity = 0
+    max_pending_slots_per_subject: Quantity
+    max_pending_jobs_per_subject: Quantity
+    profiles: Annotated[
+        tuple[ProfileReferenceV1, ...],
+        Field(max_length=2),
+    ]
+
+    @field_validator("profiles")
+    @classmethod
+    def _profiles(
+        cls,
+        value: tuple[ProfileReferenceV1, ...],
+    ) -> tuple[ProfileReferenceV1, ...]:
+        _ensure_unique(value, "pool_id", "development template profile pool_id")
+        ordered = tuple(sorted(value, key=lambda item: item.pool_id))
+        if tuple(item.pool_id for item in ordered) != ("gb10", "oldlab"):
+            raise ValueError("development template requires gb10 and oldlab profiles")
+        return ordered
+
+    @model_validator(mode="after")
+    def _finite_subject_limits(self) -> DevelopmentSubjectTemplateV1:
+        checked_add(self.max_slots_per_subject, self.rollout_surge_slots)
+        return self
+
+
 class FleetManifestV1(StrictV1Model):
     authority_incarnation: UUID
     fleet_generation: PositiveQuantity
@@ -346,6 +395,7 @@ class FleetManifestV1(StrictV1Model):
     tiers: Annotated[tuple[TierPolicyV1, ...], Field(min_length=3, max_length=3)]
     account_policies: Annotated[tuple[AccountPolicyV1, ...], Field(min_length=1)]
     pools: Annotated[tuple[PoolManifestV1, ...], Field(min_length=1, max_length=MAX_POOLS)]
+    development_subject_template: DevelopmentSubjectTemplateV1 | None = None
     global_max_pending_slots: Quantity
     global_max_pending_jobs: Quantity
     global_submission_rate_per_minute: Quantity
@@ -375,6 +425,30 @@ class FleetManifestV1(StrictV1Model):
     def _pools(cls, value: tuple[PoolManifestV1, ...]) -> tuple[PoolManifestV1, ...]:
         _ensure_unique(value, "pool_id", "pool_id")
         return tuple(sorted(value, key=lambda item: item.pool_id))
+
+    @model_validator(mode="after")
+    def _development_template_account(self) -> FleetManifestV1:
+        if self.development_subject_template is None:
+            return self
+        template_id = self.development_subject_template.owner_account_template_id
+        matches = [
+            account
+            for account in self.account_policies
+            if account.account_id == template_id and account.kind == "owner_template"
+        ]
+        if len(matches) != 1:
+            raise ValueError("development subject template requires one owner account template")
+        account = matches[0]
+        template = self.development_subject_template
+        if template.max_slots_per_subject > account.max_slots:
+            raise ValueError("development subject maximum exceeds owner account maximum")
+        if template.rollout_surge_slots > account.max_surge_slots:
+            raise ValueError("development subject surge exceeds owner account surge")
+        if template.max_pending_slots_per_subject > account.max_pending_slots:
+            raise ValueError("development subject pending slots exceed owner account limit")
+        if template.max_pending_jobs_per_subject > account.max_pending_jobs:
+            raise ValueError("development subject pending jobs exceed owner account limit")
+        return self
 
 
 class ProfileReferenceV1(StrictV1Model):
@@ -415,6 +489,10 @@ class ProfileReferenceV1(StrictV1Model):
         return self
 
 
+DevelopmentSubjectTemplateV1.model_rebuild()
+FleetManifestV1.model_rebuild()
+
+
 class SubjectConfigurationV1(StrictV1Model):
     subject_id: UUID
     subject_incarnation: UUID
@@ -449,6 +527,79 @@ class SubjectConfigurationV1(StrictV1Model):
             "oldlab",
         }:
             raise ValueError("development subjects require gb10 and oldlab profiles")
+        return self
+
+
+class DynamicDevelopmentSubjectProjectionV1(StrictV1Model):
+    """Trusted lifecycle request for one dynamic, zero-executable subject."""
+
+    expected_configuration_epoch: PositiveQuantity
+    operation_id: UUID
+    operation_epoch: PositiveQuantity
+    environment_name: Annotated[str, Field(min_length=1, max_length=20)]
+    subject_id: UUID
+    subject_incarnation: UUID
+    owner_id: UUID
+    min_slots: Quantity = 0
+    max_slots: Quantity
+    candidate_generation: PositiveQuantity
+    candidate_sha256: Digest
+    candidate_publication_sha256: Digest
+    deployment_generation: PositiveQuantity
+    configuration_generation: PositiveQuantity
+    demand_reporter_incarnation: UUID
+    demand_reporter_token_sha256: Digest
+    local_activation_sha256: Digest
+    supported_pool_ids: Annotated[tuple[Identifier, ...], Field(max_length=2)]
+    supported_architectures: Annotated[
+        tuple[Literal["arm64", "x86_64"], ...],
+        Field(max_length=2),
+    ]
+    protocol_versions: dict[Identifier, Identifier]
+
+    @field_validator("environment_name")
+    @classmethod
+    def _environment_name(cls, value: str) -> str:
+        if _DEV_NAME_PATTERN.fullmatch(value) is None or value in _RESERVED_DEV_NAMES:
+            raise ValueError("dynamic development environment name is invalid")
+        return value
+
+    @field_validator("supported_pool_ids")
+    @classmethod
+    def _pools(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        ordered = tuple(sorted(value))
+        if ordered != ("gb10", "oldlab"):
+            raise ValueError("dynamic development projection requires both physical pools")
+        return ordered
+
+    @field_validator("supported_architectures")
+    @classmethod
+    def _architectures(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        ordered = tuple(sorted(value))
+        if ordered != ("arm64", "x86_64"):
+            raise ValueError("dynamic development projection requires both architectures")
+        return ordered
+
+    @field_validator("protocol_versions")
+    @classmethod
+    def _protocols(cls, value: dict[str, str]) -> dict[str, str]:
+        required = {
+            "capacity-agent": "v1",
+            "claim-guard": "v1",
+            "control-plane-worker": "v1",
+        }
+        if any(value.get(name) != version for name, version in required.items()):
+            raise ValueError("dynamic development projection protocol binding is incomplete")
+        return dict(sorted(value.items()))
+
+    @model_validator(mode="after")
+    def _limits_and_generations(self) -> DynamicDevelopmentSubjectProjectionV1:
+        if self.min_slots > self.max_slots:
+            raise ValueError("dynamic development min_slots must not exceed max_slots")
+        if self.candidate_generation != self.deployment_generation:
+            raise ValueError("candidate generation must match the personal deployment generation")
+        if self.configuration_generation != self.operation_epoch:
+            raise ValueError("configuration generation must match the lifecycle operation epoch")
         return self
 
 
@@ -986,12 +1137,24 @@ class ShadowEpochV1(StrictV1Model):
 class AllocationInputV1(StrictV1Model):
     configuration: ConfigurationSnapshotV1
     fleet: FleetManifestV1
+    # Active account policy rows include owner accounts deterministically derived
+    # from an operator-owned fleet template.  The fleet document remains immutable.
+    effective_account_policies: tuple[AccountPolicyV1, ...] = ()
     subjects: Annotated[tuple[SubjectAllocationInputV1, ...], Field(max_length=MAX_SUBJECTS)]
     pools: Annotated[tuple[PoolAllocationInputV1, ...], Field(max_length=MAX_POOLS)]
     observed_commitments: tuple[ObservedCommitmentV1, ...] = ()
     fairness_cursors: tuple[FairnessCursorV1, ...] = ()
     existing_pending_slots: Quantity = 0
     existing_pending_jobs: Quantity = 0
+
+    @field_validator("effective_account_policies")
+    @classmethod
+    def _effective_accounts(
+        cls,
+        value: tuple[AccountPolicyV1, ...],
+    ) -> tuple[AccountPolicyV1, ...]:
+        _ensure_unique(value, "account_id", "effective account_id")
+        return tuple(sorted(value, key=lambda item: item.account_id))
 
     @property
     def observed_commitment_ids(self) -> tuple[str, ...]:
@@ -1074,6 +1237,8 @@ __all__ = [
     "DemandBucketV1",
     "DemandSnapshotV1",
     "DesiredShapeCountV1",
+    "DevelopmentSubjectTemplateV1",
+    "DynamicDevelopmentSubjectProjectionV1",
     "FairnessCursorV1",
     "FixedClaimV1",
     "FleetManifestV1",

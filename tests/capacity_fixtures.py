@@ -7,6 +7,7 @@ from typing import Any
 from uuid import UUID
 
 from loom_capacity_manager.contracts import (
+    AccountPolicyV1,
     AllocationInputV1,
     ConfigurationActivationV1,
     ConfigurationGenerationRefV1,
@@ -14,6 +15,8 @@ from loom_capacity_manager.contracts import (
     CurrentAssignmentV1,
     DemandBucketV1,
     DemandSnapshotV1,
+    DevelopmentSubjectTemplateV1,
+    DynamicDevelopmentSubjectProjectionV1,
     FairnessCursorV1,
     FixedClaimV1,
     FleetManifestV1,
@@ -47,6 +50,11 @@ ACTIVATION_KEY = UUID("00000000-0000-4000-8000-000000000009")
 FIXED_TIME = datetime(2026, 8, 10, 12, 0, tzinfo=UTC)
 SHA_A = "a" * 64
 SHA_B = "b" * 64
+DEVELOPMENT_OWNER_ID = UUID("00000000-0000-4000-8000-000000000100")
+DEVELOPMENT_SUBJECT_ID = UUID("00000000-0000-4000-8000-000000000101")
+DEVELOPMENT_SUBJECT_INCARNATION = UUID("00000000-0000-4000-8000-000000000102")
+DEVELOPMENT_REPORTER_INCARNATION = UUID("00000000-0000-4000-8000-000000000103")
+DEVELOPMENT_OPERATION_ID = UUID("00000000-0000-4000-8000-000000000104")
 
 
 def resource_vector_payload(
@@ -249,6 +257,97 @@ def valid_profile_payload(
     return payload
 
 
+def fleet_with_development_template(
+    *,
+    owner_min_reservation_slots: int = 4,
+    owner_max_slots: int = 8,
+    owner_max_live_subjects: int = 2,
+    max_slots_per_subject: int = 8,
+) -> FleetManifestV1:
+    base = fleet_manifest()
+    owner_template = AccountPolicyV1(
+        account_id="personal-development-owner",
+        kind="owner_template",
+        owner_id=None,
+        min_reservation_slots=owner_min_reservation_slots,
+        max_slots=owner_max_slots,
+        max_surge_slots=1,
+        max_pending_slots=8,
+        max_pending_jobs=8,
+        max_live_subjects=owner_max_live_subjects,
+    )
+    template = DevelopmentSubjectTemplateV1(
+        owner_account_template_id=owner_template.account_id,
+        max_slots_per_subject=max_slots_per_subject,
+        rollout_surge_slots=0,
+        max_pending_slots_per_subject=8,
+        max_pending_jobs_per_subject=8,
+        profiles=tuple(
+            ProfileReferenceV1.model_validate(valid_profile_payload(base, pool_id=pool_id))
+            for pool_id in ("gb10", "oldlab")
+        ),
+    )
+    changed = base.model_copy(
+        update={
+            "fleet_digest": "f" * 64,
+            "account_policies": tuple(
+                sorted(
+                    (*base.account_policies, owner_template),
+                    key=lambda account: account.account_id,
+                )
+            ),
+            "development_subject_template": template,
+        }
+    )
+    return changed.model_copy(
+        update={"fleet_digest": canonical_digest_excluding(changed, "fleet_digest")}
+    )
+
+
+def development_projection(
+    *,
+    expected_configuration_epoch: int = 1,
+    operation_id: UUID = DEVELOPMENT_OPERATION_ID,
+    operation_epoch: int = 1,
+    environment_name: str = "alice",
+    subject_id: UUID = DEVELOPMENT_SUBJECT_ID,
+    subject_incarnation: UUID = DEVELOPMENT_SUBJECT_INCARNATION,
+    owner_id: UUID = DEVELOPMENT_OWNER_ID,
+    min_slots: int = 0,
+    max_slots: int = 2,
+    candidate_generation: int = 1,
+    deployment_generation: int = 1,
+    configuration_generation: int = 1,
+    demand_reporter_incarnation: UUID = DEVELOPMENT_REPORTER_INCARNATION,
+) -> DynamicDevelopmentSubjectProjectionV1:
+    return DynamicDevelopmentSubjectProjectionV1(
+        expected_configuration_epoch=expected_configuration_epoch,
+        operation_id=operation_id,
+        operation_epoch=operation_epoch,
+        environment_name=environment_name,
+        subject_id=subject_id,
+        subject_incarnation=subject_incarnation,
+        owner_id=owner_id,
+        min_slots=min_slots,
+        max_slots=max_slots,
+        candidate_generation=candidate_generation,
+        candidate_sha256="a" * 64,
+        candidate_publication_sha256="b" * 64,
+        deployment_generation=deployment_generation,
+        configuration_generation=configuration_generation,
+        demand_reporter_incarnation=demand_reporter_incarnation,
+        demand_reporter_token_sha256="c" * 64,
+        local_activation_sha256="d" * 64,
+        supported_pool_ids=("gb10", "oldlab"),
+        supported_architectures=("arm64", "x86_64"),
+        protocol_versions={
+            "capacity-agent": "v1",
+            "claim-guard": "v1",
+            "control-plane-worker": "v1",
+        },
+    )
+
+
 def profile_reference(
     manifest: FleetManifestV1 | None = None,
     **overrides: Any,
@@ -323,6 +422,11 @@ def demand_snapshot(
     fixed_claim_ids: tuple[str, ...] = (),
     pending_attempt_ids: tuple[str, ...] = ("attempt-pending",),
     assigned_attempt_ids: tuple[str, ...] = (),
+    subject_id: UUID = SUBJECT_ID,
+    subject_incarnation: UUID = SUBJECT_INCARNATION,
+    configuration_generation: int = 1,
+    deployment_generation: int = 1,
+    reporter_incarnation: UUID = DEMAND_REPORTER_ID,
 ) -> DemandSnapshotV1:
     pending = (
         (
@@ -373,11 +477,11 @@ def demand_snapshot(
         for claim_id in fixed_claim_ids
     )
     return DemandSnapshotV1(
-        subject_id=SUBJECT_ID,
-        subject_incarnation=SUBJECT_INCARNATION,
-        configuration_generation=1,
-        deployment_generation=1,
-        reporter_incarnation=DEMAND_REPORTER_ID,
+        subject_id=subject_id,
+        subject_incarnation=subject_incarnation,
+        configuration_generation=configuration_generation,
+        deployment_generation=deployment_generation,
+        reporter_incarnation=reporter_incarnation,
         sequence=sequence,
         source_observed_at=FIXED_TIME,
         pending_unassigned=pending,

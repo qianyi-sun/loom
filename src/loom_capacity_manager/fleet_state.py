@@ -139,6 +139,10 @@ def validate_fleet_manifest_digests(manifest: FleetManifestV1) -> None:
     computed_fleet = _digest_without(manifest, "fleet_digest")
     if manifest.fleet_digest != computed_fleet:
         raise FleetStateError(f"fleet digest mismatch: expected {computed_fleet}")
+    template = manifest.development_subject_template
+    if template is not None:
+        for profile in template.profiles:
+            validate_profile_narrowing(manifest, profile)
 
 
 def _require_digest(value: Any, *, label: str) -> str:

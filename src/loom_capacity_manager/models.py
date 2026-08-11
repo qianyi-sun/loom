@@ -459,6 +459,14 @@ class CapacityDemandReporter(Base):
             "reporter_incarnation",
             name="capacity_demand_reporter_binding_key",
         ),
+        CheckConstraint(
+            "token_sha256 IS NULL OR token_sha256 ~ '^[0-9a-f]{64}$'",
+            name="capacity_demand_reporter_token_digest_check",
+        ),
+        UniqueConstraint(
+            "token_sha256",
+            name="capacity_demand_reporter_token_key",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -471,6 +479,48 @@ class CapacityDemandReporter(Base):
     state: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'current'"))
     last_receipt_time: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     last_digest: Mapped[str | None] = mapped_column(Text)
+    token_sha256: Mapped[str | None] = mapped_column(Text)
+
+
+class CapacityDevelopmentProjection(Base):
+    """Idempotency and evidence binding for one lifecycle-owned projection."""
+
+    __tablename__ = "capacity_development_projections"
+    __table_args__ = (
+        CheckConstraint(
+            "request_digest ~ '^[0-9a-f]{64}$' AND result_digest ~ '^[0-9a-f]{64}$'",
+            name="capacity_development_projection_digest_check",
+        ),
+        CheckConstraint(
+            "configuration_epoch > 0 AND configuration_generation > 0",
+            name="capacity_development_projection_generation_check",
+        ),
+        UniqueConstraint("operation_id", name="capacity_development_projection_operation_key"),
+        UniqueConstraint(
+            "idempotency_key",
+            name="capacity_development_projection_idempotency_key",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    operation_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    idempotency_key: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    request_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    request_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    subject_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    subject_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    configuration_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    configuration_epoch: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("capacity_configuration_epochs.configuration_epoch", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    result_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    result_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    actor: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
 
 
 class CapacityDemandSnapshot(Base):

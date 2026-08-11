@@ -21,11 +21,21 @@ CapacityScope = Literal[
     "capacity:configure:fleet",
     "capacity:configure:subject",
     "capacity:configure:activate",
+    "capacity:project:development",
     "capacity:reconcile",
     "capacity:read",
     "capacity:report:demand",
     "capacity:report:pool",
 ]
+
+
+def bearer_token_sha256(header: str | None) -> str:
+    """Validate one bearer header and return only its lowercase digest."""
+
+    matched = _BEARER.fullmatch(header or "")
+    if matched is None:
+        raise AuthorizationError("invalid capacity credentials")
+    return hashlib.sha256(matched.group(1).encode("utf-8")).hexdigest()
 
 
 class PrincipalRegistryError(ValueError):
@@ -216,10 +226,7 @@ class CapacityPrincipalVerifier:
         return cls(principals)
 
     def verify_bearer(self, header: str | None) -> CapacityPrincipal:
-        matched = _BEARER.fullmatch(header or "")
-        if matched is None:
-            raise AuthorizationError("invalid capacity credentials")
-        presented = hashlib.sha256(matched.group(1).encode("utf-8")).digest()
+        presented = bytes.fromhex(bearer_token_sha256(header))
         principal: CapacityPrincipal | None = None
         for candidate, value in self._principals:
             if hmac.compare_digest(presented, candidate):
@@ -235,4 +242,5 @@ __all__ = [
     "CapacityPrincipalVerifier",
     "CapacityScope",
     "PrincipalRegistryError",
+    "bearer_token_sha256",
 ]
