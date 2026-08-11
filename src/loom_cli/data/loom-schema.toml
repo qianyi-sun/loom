@@ -240,6 +240,24 @@ python_type = "int"
 default     = 3221225472
 description = "Maximum aggregate retained source-archive bytes for one immutable owner."
 
+[service_config.personal_dev_candidate_gc_retention_sec]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 86400
+description = "Grace period after a personal candidate is first observed unreferenced before its exact source, build, evidence, and attempt-isolated registry artifacts may be collected."
+
+[service_config.personal_dev_candidate_gc_lease_sec]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 900
+description = "Lease duration for one heartbeat-fenced personal candidate artifact collection pass."
+
+[service_config.personal_dev_candidate_gc_poll_interval_sec]
+used_by     = ["loom-service"]
+python_type = "float"
+default     = 30.0
+description = "Idle poll interval for the bounded personal candidate artifact collector."
+
 [service_config.personal_dev_builder_global_concurrency]
 used_by     = ["loom-service"]
 python_type = "int"
