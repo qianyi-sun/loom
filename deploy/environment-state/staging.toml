@@ -65,7 +65,10 @@ container_pids = 512
 job_pids_max = 5120
 max_jobs = 15
 pending_job_cap = 2
-time_limit = "2-00:00:00"
+# The physical gb10 partition advertises MaxTime=1-00:00:00. Slurm rejects
+# longer requests before allocation, so keep every autoscaled worker lease at
+# that exact ceiling.
+time_limit = "1-00:00:00"
 # Resource-aware admission keeps Loom within each node's currently free Slurm
 # CPU/memory envelope while sharing the institution's GB10 partition.
 resource_aware = true
@@ -203,7 +206,7 @@ require_clean_repo = true
 require_worker_token_parity = true
 materialize = true
 require_external_allocation_authority = true
-env_template_glob = "/var/lib/loom-staging-rollout/generated/staging-gb10-worker-staging-*.env"
+env_template = "/var/lib/loom-staging-rollout/generated/staging-gb10-worker-staging-bootstrap.env"
 
 # --- External autoscaler supervisor (systemd --user timer) -------------------
 # Renders a `systemctl --user` service+timer that periodically runs

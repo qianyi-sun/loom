@@ -102,6 +102,10 @@ class InstalledPreflightCommands:
         """
         return self._execute(argv, timeout=12)
 
+    def gb10_fleet(self, argv: Sequence[str]) -> CommandResult:
+        """Keep two complete four-wave fleet attempts inside the 60s DAG bound."""
+        return self._execute(argv, timeout=5)
+
     def systemd_preflight(self, argv: Sequence[str]) -> CommandResult:
         """Run only the fixed Tier 0 systemd probes with a short RPC bound."""
         command = tuple(argv)
