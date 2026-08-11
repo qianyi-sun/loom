@@ -30,6 +30,18 @@ def _guard_head() -> str:
     return head
 
 
+def capacity_guard_schema_head() -> tuple[str, int]:
+    """Return the packaged protected migration head and its numeric generation."""
+
+    head = _guard_head()
+    suffix = head.removeprefix("guard_")
+    if not suffix.isdigit():  # pragma: no cover - migration naming invariant
+        raise CapacityGuardSchemaNotAtHeadError(
+            f"protected capacity migration head {head!r} has no numeric generation"
+        )
+    return head, int(suffix)
+
+
 async def _database_guard_revision(engine: AsyncEngine) -> str | None:
     async with engine.connect() as connection:
         return (await connection.execute(text(_VERSION_QUERY))).scalar_one_or_none()
@@ -51,22 +63,18 @@ def _remediation(
 async def assert_capacity_guard_schema_at_head(engine: AsyncEngine) -> int:
     """Return the numeric protected-schema generation only at exact head."""
 
-    expected = _guard_head()
+    expected, generation = capacity_guard_schema_head()
     try:
         actual = await _database_guard_revision(engine)
     except SQLAlchemyError as exc:
         raise _remediation(None, expected) from exc
     if actual != expected:
         raise _remediation(actual, expected)
-    suffix = expected.removeprefix("guard_")
-    if not suffix.isdigit():  # pragma: no cover - migration naming invariant
-        raise CapacityGuardSchemaNotAtHeadError(
-            f"protected capacity migration head {expected!r} has no numeric generation"
-        )
-    return int(suffix)
+    return generation
 
 
 __all__ = [
     "CapacityGuardSchemaNotAtHeadError",
     "assert_capacity_guard_schema_at_head",
+    "capacity_guard_schema_head",
 ]

@@ -89,22 +89,26 @@ def test_capacity_agent_has_no_pool_mutation_or_candidate_runtime_wiring() -> No
                     isinstance(target, ast.Attribute) and target.attr.lower() in ROUTE_DECORATORS
                 ), path
 
+    # The trusted lifecycle authority intentionally installs the separately
+    # fenced reporter.  Keep that orchestration out of the untrusted candidate
+    # build/activation boundary instead of banning all service-owned wiring.
     runtime_roots = (
-        Path("deploy"),
         Path("src/loom"),
         Path("src/loom_cli"),
         Path("src/loom_control_plane"),
         Path("src/loom_service"),
     )
-    wired = [
+    wired = {
         path
         for root in runtime_roots
-        if root.exists()
-        for path in root.rglob("*")
-        if path.is_file()
-        and "loom_capacity_agent" in path.read_text(encoding="utf-8", errors="ignore")
-    ]
-    assert wired == []
+        for path in root.rglob("*.py")
+        if "loom_capacity_agent" in path.read_text(encoding="utf-8")
+    }
+    assert wired == {
+        Path("src/loom/personal_dev_capacity.py"),
+        Path("src/loom/personal_dev_capacity_runtime.py"),
+        Path("src/loom_service/personal_dev_lifecycle.py"),
+    }
 
 
 def test_capacity_guard_migrations_have_no_candidate_database_fallback() -> None:

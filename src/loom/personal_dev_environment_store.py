@@ -28,6 +28,7 @@ from loom.personal_dev_candidate import (
     validate_personal_dev_candidate_publication,
 )
 from loom.personal_dev_candidate_store import SqlAlchemyPersonalDevCandidateStore
+from loom.personal_dev_capacity import PersonalDevCapacityProjectionResult
 from loom.personal_dev_environment import (
     PersonalDevAccessBinding,
     PersonalDevApplyReservation,
@@ -218,6 +219,13 @@ def _environment_record(row: DevInstance) -> PersonalDevEnvironmentRecord:
         updated_at=row.updated_at,
         ready_at=row.ready_at,
         deleted_at=row.deleted_at,
+        capacity_configuration_epoch=row.capacity_configuration_epoch,
+        capacity_configuration_sha256=row.capacity_configuration_sha256,
+        capacity_reporter_incarnation=row.capacity_reporter_incarnation,
+        capacity_reporter_token_sha256=row.capacity_reporter_token_sha256,
+        local_activation_sha256=row.local_activation_sha256,
+        protected_admission_sha256=row.protected_admission_sha256,
+        capacity_agent_installation_sha256=(row.capacity_agent_installation_sha256),
     )
 
 
@@ -246,6 +254,15 @@ def _operation_record(row: DevLifecycleOperation) -> PersonalDevLifecycleOperati
         failure_reason=row.failure_reason,
         readiness_evidence_sha256=row.readiness_evidence_sha256,
         activation_acknowledgement_sha256=(row.activation_acknowledgement_sha256),
+        local_activation_sha256=row.local_activation_sha256,
+        capacity_expected_configuration_epoch=(row.capacity_expected_configuration_epoch),
+        capacity_projection_request_sha256=row.capacity_projection_request_sha256,
+        capacity_configuration_epoch=row.capacity_configuration_epoch,
+        capacity_configuration_sha256=row.capacity_configuration_sha256,
+        capacity_reporter_incarnation=row.capacity_reporter_incarnation,
+        capacity_reporter_token_sha256=row.capacity_reporter_token_sha256,
+        protected_admission_sha256=row.protected_admission_sha256,
+        capacity_agent_installation_sha256=(row.capacity_agent_installation_sha256),
         created_at=row.created_at,
         updated_at=row.updated_at,
         started_at=row.started_at,
@@ -442,6 +459,13 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
 
         environment = await self._locked_environment(requested.name)
         operation_id = uuid4()
+        local_activation_sha256: str | None = None
+        capacity_configuration_epoch: int | None = None
+        capacity_configuration_sha256: str | None = None
+        capacity_reporter_incarnation: UUID | None = None
+        capacity_reporter_token_sha256: str | None = None
+        protected_admission_sha256: str | None = None
+        capacity_agent_installation_sha256: str | None = None
         if environment is None:
             if requested.expected_operation_epoch != 0:
                 raise PersonalDevEnvironmentEpochFencedError(
@@ -587,12 +611,23 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                     operation_epoch = environment.operation_epoch + 1
                     generation = environment.deployment_generation
                     kind = "capacity"
-                    state = "succeeded"
-                    environment.min_slots = requested.min_slots
-                    environment.max_slots = requested.max_slots
+                    state = "running"
+                    local_activation_sha256 = environment.local_activation_sha256
+                    if local_activation_sha256 is None:
+                        prior_acknowledgement = await self.session.get(
+                            DevLifecycleActivationAcknowledgement,
+                            environment.operation_id,
+                        )
+                        if prior_acknowledgement is not None:
+                            local_activation_sha256 = prior_acknowledgement.local_activation_sha256
+                    if local_activation_sha256 is None:
+                        raise PersonalDevEnvironmentConflictError(
+                            "personal-dev capacity update has no trusted activation evidence"
+                        )
+                    environment.status = "updating"
                     environment.operation_epoch = operation_epoch
                     environment.operation_id = operation_id
-                    environment.operation_step = "complete"
+                    environment.operation_step = "capacity_projection_requested"
                     environment.failure_reason = None
                     environment.updated_at = now
                 else:
@@ -630,6 +665,13 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                 )
 
         finished_at = now if state == "succeeded" else None
+        checkpoint = (
+            "complete"
+            if state == "succeeded"
+            else "capacity_projection_requested"
+            if kind == "capacity"
+            else "candidate_build"
+        )
         attempt_id = uuid4()
         operation = DevLifecycleOperation(
             id=operation_id,
@@ -651,7 +693,14 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             min_slots=requested.min_slots,
             max_slots=requested.max_slots,
             deployment_generation=generation,
-            checkpoint="complete" if state == "succeeded" else "candidate_build",
+            local_activation_sha256=local_activation_sha256,
+            capacity_configuration_epoch=capacity_configuration_epoch,
+            capacity_configuration_sha256=capacity_configuration_sha256,
+            capacity_reporter_incarnation=capacity_reporter_incarnation,
+            capacity_reporter_token_sha256=capacity_reporter_token_sha256,
+            protected_admission_sha256=protected_admission_sha256,
+            capacity_agent_installation_sha256=(capacity_agent_installation_sha256),
+            checkpoint=checkpoint,
             created_at=now,
             updated_at=now,
             started_at=now,
@@ -668,7 +717,7 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                 operation_epoch=operation_epoch,
                 attempt_sequence=0,
                 state="succeeded" if state == "succeeded" else "running",
-                checkpoint="complete" if state == "succeeded" else "candidate_build",
+                checkpoint=checkpoint,
                 credential_binding_version=1,
                 bootstrap_auth_kind=access_binding.auth_kind,
                 bootstrap_credential_hash=access_binding.credential_hash,
@@ -708,6 +757,22 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                 DevLifecycleOperation.state == "activating",
                 DevLifecycleOperation.checkpoint == "activation_acknowledged",
                 DevLifecycleOperation.activation_acknowledgement_sha256.is_not(None),
+            ),
+            and_(
+                DevLifecycleOperation.kind == "capacity",
+                DevLifecycleOperation.state == "running",
+                DevLifecycleOperation.checkpoint == "capacity_projection_requested",
+                DevLifecycleOperation.local_activation_sha256.is_not(None),
+            ),
+            and_(
+                DevLifecycleOperation.state.in_(("running", "activating")),
+                DevLifecycleOperation.checkpoint == "capacity_projection_pending",
+                DevLifecycleOperation.capacity_expected_configuration_epoch.is_not(None),
+            ),
+            and_(
+                DevLifecycleOperation.state == "activating",
+                DevLifecycleOperation.checkpoint == "capacity_projected",
+                DevLifecycleOperation.capacity_configuration_epoch.is_not(None),
             ),
         )
         statement = (
@@ -958,6 +1023,7 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             ),
         )
         operation.activation_acknowledgement_sha256 = verified.payload_sha256
+        operation.local_activation_sha256 = acknowledgement.local_activation_sha256
         operation.checkpoint = "activation_acknowledged"
         operation.updated_at = now
         attempt = await self._locked_current_attempt(operation)
@@ -974,6 +1040,268 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         result = self._reservation(environment, operation, acquired=existing is None)
         await self.session.commit()
         return result
+
+    async def prepare_capacity_projection(
+        self,
+        *,
+        operation_id: UUID,
+        operation_epoch: int,
+        attempt_id: UUID,
+        reconciler_id: str,
+        lease_epoch: int,
+        expected_configuration_epoch: int,
+        projection_request_sha256: str,
+        reporter_incarnation: UUID,
+        reporter_token_sha256: str,
+        protected_admission_sha256: str,
+        capacity_agent_installation_sha256: str,
+        now: datetime | None = None,
+    ) -> PersonalDevApplyReservation:
+        """Persist the exact outbound manager request before network mutation."""
+
+        if type(expected_configuration_epoch) is not int or expected_configuration_epoch <= 0:
+            raise ValueError("capacity configuration epoch must be positive")
+        digests = (
+            projection_request_sha256,
+            reporter_token_sha256,
+            protected_admission_sha256,
+            capacity_agent_installation_sha256,
+        )
+        if any(_DIGEST_RE.fullmatch(value) is None for value in digests):
+            raise ValueError("capacity projection evidence must use SHA-256 digests")
+        now = now or datetime.now(UTC)
+        operation, environment = await self._locked_current_operation(
+            operation_id,
+            operation_epoch,
+        )
+        exact = (
+            operation.checkpoint == "capacity_projection_pending"
+            and operation.capacity_expected_configuration_epoch == expected_configuration_epoch
+            and operation.capacity_projection_request_sha256 == projection_request_sha256
+            and operation.capacity_reporter_incarnation == reporter_incarnation
+            and operation.capacity_reporter_token_sha256 == reporter_token_sha256
+            and operation.protected_admission_sha256 == protected_admission_sha256
+            and operation.capacity_agent_installation_sha256 == capacity_agent_installation_sha256
+        )
+        if exact:
+            result = self._reservation(environment, operation, acquired=False)
+            await self.session.commit()
+            return result
+        allowed = (
+            operation.kind in {"create", "update"}
+            and operation.state == "activating"
+            and operation.checkpoint == "activation_acknowledged"
+            and operation.activation_acknowledgement_sha256 is not None
+            and operation.local_activation_sha256 is not None
+        ) or (
+            operation.kind == "capacity"
+            and operation.state == "running"
+            and operation.checkpoint == "capacity_projection_requested"
+            and operation.local_activation_sha256 is not None
+        )
+        if not allowed:
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError(
+                "personal-dev operation cannot prepare capacity projection"
+            )
+        if operation.kind == "capacity" and environment.capacity_configuration_epoch is not None:
+            if (
+                environment.capacity_reporter_incarnation != reporter_incarnation
+                or environment.capacity_reporter_token_sha256 != reporter_token_sha256
+                or environment.local_activation_sha256 != operation.local_activation_sha256
+                or environment.protected_admission_sha256 != protected_admission_sha256
+                or environment.capacity_agent_installation_sha256
+                != capacity_agent_installation_sha256
+            ):
+                await self.session.rollback()
+                raise PersonalDevEnvironmentConflictError(
+                    "capacity-only update changed trusted deployment evidence"
+                )
+        attempt = await self._locked_current_attempt_lease(
+            operation,
+            attempt_id=attempt_id,
+            reconciler_id=reconciler_id,
+            lease_epoch=lease_epoch,
+            now=now,
+        )
+        expected_attempt_state = "activating" if operation.state == "activating" else "running"
+        if attempt.state != expected_attempt_state:
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError(
+                "personal-dev lifecycle attempt was superseded"
+            )
+        operation.capacity_expected_configuration_epoch = expected_configuration_epoch
+        operation.capacity_projection_request_sha256 = projection_request_sha256
+        operation.capacity_configuration_epoch = None
+        operation.capacity_configuration_sha256 = None
+        operation.capacity_reporter_incarnation = reporter_incarnation
+        operation.capacity_reporter_token_sha256 = reporter_token_sha256
+        operation.protected_admission_sha256 = protected_admission_sha256
+        operation.capacity_agent_installation_sha256 = capacity_agent_installation_sha256
+        operation.checkpoint = "capacity_projection_pending"
+        operation.updated_at = now
+        attempt.checkpoint = "capacity_projection_pending"
+        attempt.claimed_by = None
+        attempt.lease_expires_at = None
+        attempt.updated_at = now
+        environment.operation_step = "capacity_projection_pending"
+        environment.updated_at = now
+        await self.session.flush()
+        result = self._reservation(environment, operation, acquired=True)
+        await self.session.commit()
+        return result
+
+    async def refresh_capacity_projection_epoch(
+        self,
+        *,
+        operation_id: UUID,
+        operation_epoch: int,
+        attempt_id: UUID,
+        reconciler_id: str,
+        lease_epoch: int,
+        expected_configuration_epoch: int,
+        projection_request_sha256: str,
+        now: datetime | None = None,
+    ) -> PersonalDevApplyReservation:
+        """Advance only a manager-rejected pending request to a newer global epoch."""
+
+        if type(expected_configuration_epoch) is not int or expected_configuration_epoch <= 0:
+            raise ValueError("capacity configuration epoch must be positive")
+        if _DIGEST_RE.fullmatch(projection_request_sha256) is None:
+            raise ValueError("capacity projection request digest must be SHA-256")
+        now = now or datetime.now(UTC)
+        operation, environment = await self._locked_current_operation(
+            operation_id,
+            operation_epoch,
+        )
+        if (
+            operation.checkpoint != "capacity_projection_pending"
+            or operation.capacity_expected_configuration_epoch is None
+            or expected_configuration_epoch <= operation.capacity_expected_configuration_epoch
+            or operation.capacity_configuration_epoch is not None
+        ):
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError(
+                "capacity projection epoch did not advance"
+            )
+        attempt = await self._locked_current_attempt_lease(
+            operation,
+            attempt_id=attempt_id,
+            reconciler_id=reconciler_id,
+            lease_epoch=lease_epoch,
+            now=now,
+        )
+        if attempt.checkpoint != "capacity_projection_pending":
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError(
+                "personal-dev lifecycle attempt was superseded"
+            )
+        operation.capacity_expected_configuration_epoch = expected_configuration_epoch
+        operation.capacity_projection_request_sha256 = projection_request_sha256
+        operation.updated_at = now
+        attempt.claimed_by = None
+        attempt.lease_expires_at = None
+        attempt.updated_at = now
+        await self.session.flush()
+        result = self._reservation(environment, operation, acquired=True)
+        await self.session.commit()
+        return result
+
+    async def record_capacity_projection(
+        self,
+        *,
+        operation_id: UUID,
+        operation_epoch: int,
+        attempt_id: UUID,
+        reconciler_id: str,
+        lease_epoch: int,
+        result: PersonalDevCapacityProjectionResult,
+        now: datetime | None = None,
+    ) -> PersonalDevApplyReservation:
+        """Record the exact manager acknowledgement and expose readiness only afterward."""
+
+        if not isinstance(result, PersonalDevCapacityProjectionResult):
+            raise TypeError("capacity projection result is invalid")
+        now = now or datetime.now(UTC)
+        operation, environment = await self._locked_current_operation(
+            operation_id,
+            operation_epoch,
+        )
+        binding_matches = (
+            result.subject_id == operation.subject_id
+            and result.subject_incarnation == operation.subject_incarnation
+            and result.configuration_generation == operation.operation_epoch
+            and result.deployment_generation == operation.deployment_generation
+            and result.reporter_incarnation == operation.capacity_reporter_incarnation
+        )
+        exact = (
+            operation.capacity_configuration_epoch == result.configuration_epoch
+            and operation.capacity_configuration_sha256 == result.configuration_digest
+            and binding_matches
+        )
+        if exact and operation.checkpoint in {"capacity_projected", "complete"}:
+            reservation = self._reservation(environment, operation, acquired=False)
+            await self.session.commit()
+            return reservation
+        if (
+            operation.checkpoint != "capacity_projection_pending"
+            or operation.capacity_expected_configuration_epoch is None
+            or operation.capacity_projection_request_sha256 is None
+            or operation.capacity_reporter_incarnation is None
+            or operation.capacity_reporter_token_sha256 is None
+            or operation.protected_admission_sha256 is None
+            or operation.capacity_agent_installation_sha256 is None
+            or result.configuration_epoch != operation.capacity_expected_configuration_epoch + 1
+            or not binding_matches
+        ):
+            await self.session.rollback()
+            raise PersonalDevEnvironmentOperationFencedError(
+                "capacity projection acknowledgement binding was superseded"
+            )
+        attempt = await self._locked_current_attempt_lease(
+            operation,
+            attempt_id=attempt_id,
+            reconciler_id=reconciler_id,
+            lease_epoch=lease_epoch,
+            now=now,
+        )
+        operation.capacity_configuration_epoch = result.configuration_epoch
+        operation.capacity_configuration_sha256 = result.configuration_digest
+        operation.updated_at = now
+        if operation.kind == "capacity":
+            environment.min_slots = operation.min_slots
+            environment.max_slots = operation.max_slots
+            environment.status = "ready"
+            environment.operation_step = "complete"
+            environment.failure_reason = None
+            environment.ready_at = now
+            operation.state = "succeeded"
+            operation.checkpoint = "complete"
+            operation.finished_at = now
+            attempt.state = "succeeded"
+            attempt.checkpoint = "complete"
+            attempt.finished_at = now
+        else:
+            operation.checkpoint = "capacity_projected"
+            attempt.checkpoint = "capacity_projected"
+            environment.operation_step = "capacity_projected"
+        environment.capacity_configuration_epoch = result.configuration_epoch
+        environment.capacity_configuration_sha256 = result.configuration_digest
+        environment.capacity_reporter_incarnation = operation.capacity_reporter_incarnation
+        environment.capacity_reporter_token_sha256 = operation.capacity_reporter_token_sha256
+        environment.local_activation_sha256 = operation.local_activation_sha256
+        environment.protected_admission_sha256 = operation.protected_admission_sha256
+        environment.capacity_agent_installation_sha256 = (
+            operation.capacity_agent_installation_sha256
+        )
+        environment.updated_at = now
+        attempt.claimed_by = None
+        attempt.lease_expires_at = None
+        attempt.updated_at = now
+        await self.session.flush()
+        reservation = self._reservation(environment, operation, acquired=True)
+        await self.session.commit()
+        return reservation
 
     async def complete_activation(
         self,
@@ -992,11 +1320,34 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         )
         if operation.state == "succeeded":
             if (
-                operation.checkpoint != "complete"
+                operation.kind not in {"create", "update"}
+                or operation.checkpoint != "complete"
                 or environment.status != "ready"
                 or environment.candidate_id != operation.candidate_id
                 or environment.candidate_sha != operation.candidate_sha
+                or environment.min_slots != operation.min_slots
+                or environment.max_slots != operation.max_slots
                 or environment.deployment_generation != operation.deployment_generation
+                or operation.capacity_configuration_epoch is None
+                or operation.capacity_configuration_sha256 is None
+                or operation.capacity_reporter_incarnation is None
+                or operation.capacity_reporter_token_sha256 is None
+                or operation.local_activation_sha256 is None
+                or operation.protected_admission_sha256 is None
+                or operation.capacity_agent_installation_sha256 is None
+                or environment.capacity_configuration_epoch
+                != operation.capacity_configuration_epoch
+                or environment.capacity_configuration_sha256
+                != operation.capacity_configuration_sha256
+                or environment.capacity_reporter_incarnation
+                != operation.capacity_reporter_incarnation
+                or environment.capacity_reporter_token_sha256
+                != operation.capacity_reporter_token_sha256
+                or environment.local_activation_sha256 != operation.local_activation_sha256
+                or environment.protected_admission_sha256
+                != operation.protected_admission_sha256
+                or environment.capacity_agent_installation_sha256
+                != operation.capacity_agent_installation_sha256
             ):
                 await self.session.rollback()
                 raise PersonalDevEnvironmentOperationFencedError(
@@ -1007,9 +1358,16 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             return result
         if (
             operation.state != "activating"
-            or operation.checkpoint != "activation_acknowledged"
+            or operation.checkpoint != "capacity_projected"
             or operation.readiness_evidence_sha256 is None
             or operation.activation_acknowledgement_sha256 is None
+            or operation.local_activation_sha256 is None
+            or operation.capacity_configuration_epoch is None
+            or operation.capacity_configuration_sha256 is None
+            or operation.capacity_reporter_incarnation is None
+            or operation.capacity_reporter_token_sha256 is None
+            or operation.protected_admission_sha256 is None
+            or operation.capacity_agent_installation_sha256 is None
         ):
             await self.session.rollback()
             raise PersonalDevEnvironmentOperationFencedError(
@@ -1033,7 +1391,7 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             lease_epoch=lease_epoch,
             now=now,
         )
-        if attempt.state != "activating" or attempt.checkpoint != "activation_acknowledged":
+        if attempt.state != "activating" or attempt.checkpoint != "capacity_projected":
             await self.session.rollback()
             raise PersonalDevEnvironmentOperationFencedError(
                 "personal-dev lifecycle attempt was superseded",
@@ -1043,6 +1401,15 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         environment.min_slots = operation.min_slots
         environment.max_slots = operation.max_slots
         environment.deployment_generation = operation.deployment_generation
+        environment.capacity_configuration_epoch = operation.capacity_configuration_epoch
+        environment.capacity_configuration_sha256 = operation.capacity_configuration_sha256
+        environment.capacity_reporter_incarnation = operation.capacity_reporter_incarnation
+        environment.capacity_reporter_token_sha256 = operation.capacity_reporter_token_sha256
+        environment.local_activation_sha256 = operation.local_activation_sha256
+        environment.protected_admission_sha256 = operation.protected_admission_sha256
+        environment.capacity_agent_installation_sha256 = (
+            operation.capacity_agent_installation_sha256
+        )
         environment.status = "ready"
         environment.operation_step = "complete"
         environment.failure_reason = None

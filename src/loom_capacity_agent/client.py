@@ -73,7 +73,7 @@ class DemandReporterConnection:
     timeout_seconds: float = 10.0
 
     def __post_init__(self) -> None:
-        _canonical_manager_origin(self.manager_origin)
+        canonical_manager_origin(self.manager_origin)
         if not isinstance(self.bearer_token_file, Path):
             raise TypeError("reporter bearer credential must be an explicit path")
         if not isinstance(self.tls_files, DemandReporterTLSFiles):
@@ -138,7 +138,7 @@ def read_owner_only_bytes(path: Path, *, max_bytes: int = _MAX_CREDENTIAL_BYTES)
     return payload
 
 
-def _read_bearer_token(path: Path) -> str:
+def read_owner_only_bearer_token(path: Path) -> str:
     payload = read_owner_only_bytes(path)
     try:
         value = payload.decode("utf-8")
@@ -146,8 +146,10 @@ def _read_bearer_token(path: Path) -> str:
         raise ValueError("reporter bearer credential is not UTF-8") from exc
     if value.endswith("\n"):
         value = value[:-1]
-    if not value or value != value.strip() or any(
-        character in value for character in ("\r", "\n", "\x00")
+    if (
+        not value
+        or value != value.strip()
+        or any(character in value for character in ("\r", "\n", "\x00"))
     ):
         raise ValueError("reporter bearer credential must contain one exact nonempty line")
     return value
@@ -178,7 +180,7 @@ def build_reporter_tls_context(files: DemandReporterTLSFiles) -> ssl.SSLContext:
     return context
 
 
-def _canonical_manager_origin(value: str) -> str:
+def canonical_manager_origin(value: str) -> str:
     if (
         not isinstance(value, str)
         or not value
@@ -230,7 +232,7 @@ class DemandReporterClient:
         if not isinstance(http_client, httpx.AsyncClient):
             raise TypeError("reporter HTTP client must be asynchronous")
         self._configuration = configuration
-        self._manager_origin = _canonical_manager_origin(manager_origin)
+        self._manager_origin = canonical_manager_origin(manager_origin)
         self._bearer_token = bearer_token
         self._http = http_client
         self._owns_http = owns_http_client
@@ -241,7 +243,7 @@ class DemandReporterClient:
         configuration: ReporterConfigurationV1,
         connection: DemandReporterConnection,
     ) -> DemandReporterClient:
-        token = _read_bearer_token(connection.bearer_token_file)
+        token = read_owner_only_bearer_token(connection.bearer_token_file)
         tls = build_reporter_tls_context(connection.tls_files)
         client = httpx.AsyncClient(
             verify=tls,
@@ -273,9 +275,7 @@ class DemandReporterClient:
             payload = canonical_bytes(snapshot)
         except CapacityContractError as exc:
             raise DemandPublishError("demand report exceeds its canonical contract bound") from exc
-        endpoint = (
-            f"{self._manager_origin}/v1/reports/demand/{self._configuration.subject_id}"
-        )
+        endpoint = f"{self._manager_origin}/v1/reports/demand/{self._configuration.subject_id}"
         try:
             response = await self._http.put(
                 endpoint,
@@ -321,5 +321,7 @@ __all__ = [
     "DemandReporterConnection",
     "DemandReporterTLSFiles",
     "build_reporter_tls_context",
+    "canonical_manager_origin",
+    "read_owner_only_bearer_token",
     "read_owner_only_bytes",
 ]

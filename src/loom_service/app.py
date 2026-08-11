@@ -50,7 +50,10 @@ from loom_service.personal_dev_builder import (
     build_personal_dev_builder_runtime,
     personal_dev_builder_run_loop,
 )
-from loom_service.personal_dev_lifecycle import personal_dev_reconcile_run_loop
+from loom_service.personal_dev_lifecycle import (
+    build_personal_dev_capacity_runtime,
+    personal_dev_reconcile_run_loop,
+)
 from loom_service.routes import (
     admin_audit,
     agents,
@@ -161,6 +164,15 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        # Validate deterministic URL shape before opening database, mTLS, or
+        # HTTP resources so a startup rejection cannot leak any of them.
+        gw_path = settings.gateway_url.path or "/"
+        if gw_path not in ("", "/"):
+            raise RuntimeError(
+                f"LOOM_SVC_GATEWAY_URL must not include a path prefix "
+                f"(got {settings.gateway_url!s}). Forwarders use "
+                f"absolute paths; a prefix would be silently dropped."
+            )
         engine = create_async_engine(
             settings.db_engine_url,
             connect_args=settings.db_engine_connect_args,
@@ -181,6 +193,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         personal_dev_builder_task: asyncio.Task[None] | None = None
         personal_dev_runtime = None
         personal_dev_builder_runtime = None
+        personal_dev_capacity_runtime = None
         if personal_dev_limits is not None:
             if settings.personal_dev_activation_public_key_file is None:
                 raise RuntimeError(
@@ -202,6 +215,9 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
                 settings,
                 minio_client=minio_client,
             )
+            personal_dev_capacity_runtime = build_personal_dev_capacity_runtime(settings)
+            if personal_dev_capacity_runtime is None:  # pragma: no cover - guarded by limits
+                raise RuntimeError("personal-dev capacity runtime is unavailable")
         http_client = httpx.AsyncClient(
             base_url=str(settings.control_plane_url),
             timeout=10.0,
@@ -215,13 +231,6 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         # (e.g. `https://gw/loom/`) silently strips the prefix when
         # the forwarder uses absolute paths like `/admin/rate-cards`.
         # Fail at startup rather than route to the wrong URL.
-        gw_path = settings.gateway_url.path or "/"
-        if gw_path not in ("", "/"):
-            raise RuntimeError(
-                f"LOOM_SVC_GATEWAY_URL must not include a path prefix "
-                f"(got {settings.gateway_url!s}). Forwarders use "
-                f"absolute paths; a prefix would be silently dropped."
-            )
         gateway_client = httpx.AsyncClient(
             base_url=str(settings.gateway_url),
             timeout=10.0,
@@ -252,11 +261,17 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
                 name="loom-svc-personal-dev-builder",
             )
             app.state.personal_dev_builder_task = personal_dev_builder_task
-        if personal_dev_runtime is not None and personal_dev_limits is not None:
+        if (
+            personal_dev_runtime is not None
+            and personal_dev_capacity_runtime is not None
+            and personal_dev_limits is not None
+        ):
             personal_dev_task = asyncio.create_task(
                 personal_dev_reconcile_run_loop(
                     session_factory=session_factory,
                     executor=personal_dev_runtime,
+                    capacity_installer=personal_dev_capacity_runtime.installer,
+                    capacity_projector=personal_dev_capacity_runtime.projector,
                     limits=personal_dev_limits,
                     reconciler_id=f"loom-service:{socket.gethostname()}:{os.getpid()}",
                     lease_seconds=settings.personal_dev_reconciler_lease_sec,
@@ -354,6 +369,9 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
                 await gateway_client.aclose()
             with contextlib.suppress(Exception):
                 await http_client.aclose()
+            if personal_dev_capacity_runtime is not None:
+                with contextlib.suppress(Exception):
+                    await personal_dev_capacity_runtime.projector.aclose()
             await engine.dispose()
 
     app = FastAPI(title="Loom Service", version="0.0.1", lifespan=lifespan)

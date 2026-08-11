@@ -155,6 +155,13 @@ class PersonalDevEnvironmentRecord:
     ready_at: datetime | None = None
     deleted_at: datetime | None = None
     failure_reason: str | None = None
+    capacity_configuration_epoch: int | None = None
+    capacity_configuration_sha256: str | None = None
+    capacity_reporter_incarnation: UUID | None = None
+    capacity_reporter_token_sha256: str | None = None
+    local_activation_sha256: str | None = None
+    protected_admission_sha256: str | None = None
+    capacity_agent_installation_sha256: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,6 +195,15 @@ class PersonalDevLifecycleOperationRecord:
     failure_reason: str | None = None
     readiness_evidence_sha256: str | None = None
     activation_acknowledgement_sha256: str | None = None
+    local_activation_sha256: str | None = None
+    capacity_expected_configuration_epoch: int | None = None
+    capacity_projection_request_sha256: str | None = None
+    capacity_configuration_epoch: int | None = None
+    capacity_configuration_sha256: str | None = None
+    capacity_reporter_incarnation: UUID | None = None
+    capacity_reporter_token_sha256: str | None = None
+    protected_admission_sha256: str | None = None
+    capacity_agent_installation_sha256: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

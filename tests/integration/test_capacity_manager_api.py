@@ -368,6 +368,30 @@ def test_lifecycle_can_project_and_authenticate_a_personal_demand_reporter(
     assert rejected.status_code == 401
 
 
+@pytest.mark.parametrize("operation_kind", ["update", "capacity"])
+def test_lifecycle_can_restore_an_unregistered_personal_subject_from_full_evidence(
+    operation_kind: str,
+    api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
+    operator_headers: dict[str, str],
+) -> None:
+    client, _app, _settings, _allocator = api_context
+    projection = development_projection().model_copy(
+        update={
+            "operation_kind": operation_kind,
+            "demand_reporter_token_sha256": _hash(DYNAMIC_DEMAND_TOKEN),
+        }
+    )
+    response = client.put(
+        f"/v1/development-projections/{DEVELOPMENT_SUBJECT_ID}",
+        headers=operator_headers | {"Idempotency-Key": str(uuid4())},
+        json=projection.model_dump(mode="json"),
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["subject"]["configuration_generation"] == (
+        projection.configuration_generation
+    )
+
+
 async def test_streaming_body_limit_rejects_oversized_body_without_content_length() -> None:
     downstream_called = False
     sent: list[dict[str, object]] = []

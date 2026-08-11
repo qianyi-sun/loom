@@ -33,6 +33,8 @@ from loom_capacity_agent.store import (
     CapacityAgentStoreError,
     capture_demand_observation,
     capture_lifecycle_demand_observation,
+    read_agent_lifecycle_demand_observation,
+    read_agent_reporter_high_water,
 )
 from loom_capacity_guard.contracts import (
     GuardFenceV1,
@@ -276,6 +278,147 @@ async def test_capture_is_monotonic_persisted_and_exactly_bound(
             .one()
         )
     assert dict(row) == {"high_water": 2, "observations": 2}
+
+
+@pytest.mark.asyncio
+async def test_agent_can_resume_from_protected_high_water_after_restart(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    _, registration = await _initialize_and_register(capacity_guard_database)
+    async with _agent_session(capacity_guard_database) as session:
+        observation = await capture_lifecycle_demand_observation(
+            session,
+            registration=registration,
+            expected_high_water=0,
+            max_attempts=100,
+        )
+    async with _agent_session(capacity_guard_database) as restarted:
+        assert (
+            await read_agent_reporter_high_water(
+                restarted,
+                registration=registration,
+            )
+            == 1
+        )
+        assert (
+            await read_agent_lifecycle_demand_observation(
+                restarted,
+                registration=registration,
+                sequence=1,
+            )
+            == observation
+        )
+
+
+@pytest.mark.asyncio
+async def test_owner_reconfigures_disabled_agent_monotonically_without_resetting_sequence(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    fence, registration = await _initialize_and_register(capacity_guard_database)
+    async with _agent_session(capacity_guard_database) as session:
+        first_observation = await capture_lifecycle_demand_observation(
+            session,
+            registration=registration,
+            expected_high_water=0,
+            max_attempts=100,
+        )
+    capacity_fence = fence.model_copy(update={"configuration_generation": 12})
+    capacity_registration = registration.model_copy(
+        update={"configuration_generation": 12}
+    )
+    async with _owner_session(capacity_guard_database) as (agent_store, guard_store, _):
+        await guard_store.reconfigure_disabled_authority(
+            capacity_fence,
+            expected_configuration_generation=11,
+        )
+        assert await agent_store.reconfigure_agent(
+            capacity_registration,
+            expected_configuration_generation=11,
+        ) == capacity_registration
+    async with _agent_session(capacity_guard_database) as session:
+        assert (
+            await read_agent_lifecycle_demand_observation(
+                session,
+                registration=capacity_registration,
+                sequence=1,
+            )
+            == first_observation
+        )
+
+    replacement_fence = capacity_fence.model_copy(
+        update={
+            "reporter_incarnation": uuid4(),
+            "candidate_digest": "b" * 64,
+            "deployment_generation": 14,
+            "configuration_generation": 15,
+        }
+    )
+    replacement_registration = capacity_registration.model_copy(
+        update={
+            "reporter_incarnation": replacement_fence.reporter_incarnation,
+            "candidate_digest": replacement_fence.candidate_digest,
+            "deployment_generation": replacement_fence.deployment_generation,
+            "configuration_generation": replacement_fence.configuration_generation,
+        }
+    )
+    async with _owner_session(capacity_guard_database) as (agent_store, guard_store, _):
+        await guard_store.reconfigure_disabled_authority(
+            replacement_fence,
+            expected_configuration_generation=12,
+        )
+        await agent_store.reconfigure_agent(
+            replacement_registration,
+            expected_configuration_generation=12,
+        )
+
+    async with _agent_session(capacity_guard_database) as session:
+        assert (
+            await read_agent_reporter_high_water(
+                session,
+                registration=replacement_registration,
+            )
+            == 1
+        )
+        observation = await capture_lifecycle_demand_observation(
+            session,
+            registration=replacement_registration,
+            expected_high_water=1,
+            max_attempts=100,
+        )
+    assert observation.sequence == 2
+    assert observation.reporter_incarnation == replacement_fence.reporter_incarnation
+
+
+@pytest.mark.asyncio
+async def test_agent_reconfiguration_rejects_reporter_rotation_without_deployment_change(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    fence, _registration = await _initialize_and_register(capacity_guard_database)
+    invalid = fence.model_copy(
+        update={"configuration_generation": 12, "reporter_incarnation": uuid4()}
+    )
+    with pytest.raises(DBAPIError, match="reporter"):
+        async with _owner_session(capacity_guard_database) as (_, guard_store, _):
+            await guard_store.reconfigure_disabled_authority(
+                invalid,
+                expected_configuration_generation=11,
+            )
+
+
+@pytest.mark.asyncio
+async def test_authority_reconfiguration_requires_updated_at_to_advance(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    await _initialize_and_register(capacity_guard_database)
+    with pytest.raises(DBAPIError, match="timestamp"):
+        async with _owner_session(capacity_guard_database) as (_, _, session):
+            await session.execute(
+                text(
+                    "UPDATE loom_capacity_guard.authority_state SET "
+                    "configuration_generation = configuration_generation + 1, "
+                    "updated_at = updated_at WHERE singleton_id = 1"
+                )
+            )
 
 
 @pytest.mark.asyncio

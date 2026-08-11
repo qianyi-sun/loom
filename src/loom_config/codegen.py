@@ -63,9 +63,9 @@ def _format_default(entry: ServiceConfigEntry, service: str, py: str) -> str:
 
 def _literal(value: Any, py: str) -> str:
     if py == "Path":
-        return f'Path("{value}")'
+        return f"Path({json.dumps(str(value))})"
     if py in ("str", "LogLevel", "HttpUrl", "PostgresDsn"):
-        return f'"{value}"'
+        return json.dumps(str(value))
     if py == "bool":
         return "True" if value else "False"
     if py in ("int", "float"):

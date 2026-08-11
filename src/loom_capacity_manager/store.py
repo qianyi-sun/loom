@@ -723,10 +723,6 @@ class CapacityManagementStore:
                 raise ConfigurationConflictError(
                     "dynamic development subject identity conflicts with active state"
                 )
-            if existing is None and request.operation_kind != "create":
-                raise ConfigurationConflictError(
-                    "dynamic development subject must be created before it can be changed"
-                )
             if existing is not None and request.operation_kind == "create":
                 raise ConfigurationConflictError("dynamic development subject is already active")
 
@@ -741,15 +737,16 @@ class CapacityManagementStore:
                 raise ConfigurationConflictError(
                     "dynamic development configuration generation is not monotonic"
                 )
-            if request.operation_kind == "update" and (
-                existing is None or request.deployment_generation <= existing.deployment_generation
+            if (
+                request.operation_kind == "update"
+                and existing is not None
+                and request.deployment_generation <= existing.deployment_generation
             ):
                 raise ConfigurationConflictError(
                     "dynamic development deployment generation is not monotonic"
                 )
-            if request.operation_kind == "capacity" and (
-                existing is None
-                or request.deployment_generation != existing.deployment_generation
+            if request.operation_kind == "capacity" and existing is not None and (
+                request.deployment_generation != existing.deployment_generation
                 or request.candidate_generation != existing.candidate_generation
                 or request.demand_reporter_incarnation != existing.demand_reporter_incarnation
             ):
@@ -800,7 +797,7 @@ class CapacityManagementStore:
                         )
                     )
                 ).scalar_one_or_none()
-            if request.operation_kind == "capacity":
+            if request.operation_kind == "capacity" and existing is not None:
                 expected_architecture = {
                     "supported_architectures": list(request.supported_architectures),
                     "supported_pool_ids": list(request.supported_pool_ids),
@@ -933,7 +930,7 @@ class CapacityManagementStore:
                 idempotency_key=request.operation_id,
             )
             session.add(subject_row)
-            if request.operation_kind != "capacity":
+            if request.operation_kind != "capacity" or existing is None:
                 session.add(
                     CapacityCandidate(
                         subject_id=request.subject_id,

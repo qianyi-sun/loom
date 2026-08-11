@@ -168,6 +168,79 @@ class CapacityGuardStore:
                 )
         return fence
 
+    async def reconfigure_disabled_authority(
+        self,
+        fence: GuardFenceV1,
+        *,
+        expected_configuration_generation: int,
+    ) -> GuardFenceV1:
+        """Advance the disabled singleton without discarding protected history."""
+
+        await self._assert_owner_session()
+        if (
+            type(expected_configuration_generation) is not int
+            or expected_configuration_generation <= 0
+        ):
+            raise ValueError("expected protected configuration generation must be positive")
+        payload, payload_digest = _canonical_payload(fence)
+        async with self._session.begin_nested():
+            current = await self._read_guard_fence(lock=True, require_audit=True)
+            if current == fence:
+                return fence
+            immutable = (
+                "environment_id",
+                "subject_id",
+                "subject_incarnation",
+                "authority_mode",
+                "authority_incarnation",
+                "reporter_high_water",
+                "allocation_epoch",
+            )
+            if any(getattr(current, name) != getattr(fence, name) for name in immutable):
+                raise GuardReplayConflictError(
+                    "protected authority reconfiguration changed an immutable binding"
+                )
+            if current.configuration_generation != expected_configuration_generation:
+                raise GuardReplayConflictError(
+                    "protected authority configuration generation was superseded"
+                )
+            updated = (
+                await self._session.execute(
+                    text(
+                        f"UPDATE {_SCHEMA}.authority_state SET "
+                        "reporter_incarnation = :reporter_incarnation, "
+                        "candidate_digest = :candidate_digest, "
+                        "deployment_generation = :deployment_generation, "
+                        "configuration_generation = :configuration_generation, "
+                        "updated_at = statement_timestamp() "
+                        "WHERE singleton_id = 1 "
+                        "AND configuration_generation = :expected_generation "
+                        "RETURNING singleton_id"
+                    ),
+                    {
+                        **fence.model_dump(mode="python", exclude_none=False),
+                        "expected_generation": expected_configuration_generation,
+                    },
+                )
+            ).scalar_one_or_none()
+            if updated is None:
+                raise GuardReplayConflictError(
+                    "protected authority configuration generation was superseded"
+                )
+            await self._insert_audit(
+                event_type="authority_reconfigured.v1",
+                trial_id=None,
+                protected_attempt_id=None,
+                payload=payload,
+                payload_digest=payload_digest,
+            )
+            stored = await self._read_guard_fence(lock=True, require_audit=True)
+            if stored != fence:
+                raise GuardDataIntegrityError(
+                    "protected authority reconfiguration was not exact"
+                )
+        return fence
+
     async def read_guard_fence(self) -> GuardFenceV1:
         """Read and integrity-check the initialized disabled authority fence."""
 
@@ -203,13 +276,35 @@ class CapacityGuardStore:
         except ValidationError as exc:
             raise GuardDataIntegrityError("stored authority fence is invalid") from exc
         if require_audit:
-            await self._verify_single_audit(
-                event_type="authority_initialized.v1",
-                trial_id=None,
-                protected_attempt_id=None,
-                model=fence,
-            )
+            await self._verify_current_authority_audit(fence)
         return fence
+
+    async def _verify_current_authority_audit(self, fence: GuardFenceV1) -> None:
+        rows = (
+            (
+                await self._session.execute(
+                    text(
+                        f"SELECT event_type, payload, payload_digest FROM {_SCHEMA}.audit_events "
+                        "WHERE event_type IN "
+                        "('authority_initialized.v1', 'authority_reconfigured.v1') "
+                        "AND trial_id IS NULL AND protected_attempt_id IS NULL "
+                        "ORDER BY event_id DESC LIMIT 1"
+                    )
+                )
+            )
+            .mappings()
+            .all()
+        )
+        expected_payload, expected_digest = _canonical_payload(fence)
+        if len(rows) != 1:
+            raise GuardDataIntegrityError("expected a current authority configuration audit")
+        if (
+            rows[0]["payload"] != expected_payload
+            or rows[0]["payload_digest"] != expected_digest
+        ):
+            raise GuardDataIntegrityError(
+                "current authority configuration audit does not match its binding"
+            )
 
     async def register_trial_attempt(
         self,

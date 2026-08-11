@@ -5,6 +5,11 @@ implementation. Packages 2–4 of the global fleet design must replace or
 converge them before use. In particular, the current manifest and
 global-development timer must not be installed or activated as written.
 
+The application now contains the zero-executable personal lifecycle,
+candidate-builder boundary, independently owned capacity guard/agent installer,
+and global-manager projection checkpoint. Those components deliberately do not
+turn these legacy assets into an activation manifest.
+
 ## Target architecture
 
 - The converged fixture runs in `loom-dev` with one development PostgreSQL
@@ -26,14 +31,31 @@ global-development timer must not be installed or activated as written.
 
 ## Activation
 
-No asset in this directory currently authorizes activation. Package 4 must
-first replace the manifest namespace with `loom-dev`, install the trusted
-lifecycle and personal-candidate boundaries, and remove the obsolete
-global-development SQLite writer. Packages 2 and 3 must provide protected
-claim admission and both pool-local executors. Package 5 then performs the
-fleet-wide freeze, adoption, zero-capacity rehearsal, and bounded cutover.
+No asset in this directory currently authorizes activation. The checked-in
+legacy fixture/timer must be replaced by a reviewed `loom-dev` infrastructure
+release and the obsolete global-development SQLite writer must be removed.
+The zero-executable protected claim path and both pool-local executors must be
+completed before Package 5 performs the fleet-wide freeze, adoption,
+zero-capacity rehearsal, and bounded cutover.
 
 Do not apply `shared-fixture.yaml`, install
 `loom-global-dev-fleet-autoscaler.*`, create DNS, or enable capacity from this
 directory before those merge gates pass. The only activation authority is the
 re-scoped operations gate in #906 under the global fleet design.
+
+Before enabling the personal lifecycle service in `loom-dev`, the operator must
+provide an immutable `personal_dev_capacity_agent_image`, the exact oldlab and
+GB10 capability JSON, and distinct owner-only regular files for the lifecycle
+bearer token and lifecycle client CA/certificate/private key, plus a separate
+reporter-agent client CA/certificate/private key. The lifecycle bearer principal
+needs `capacity:project:development` and `capacity:read`; its plaintext token is
+never copied into a personal namespace. Each dynamically generated reporter
+gets a distinct token whose hash is registered in the manager projection. The
+privileged lifecycle client certificate is also never copied into a personal
+namespace; only the lower-authority reporter-agent certificate is installed.
+operator must also set the exact manager and shared-PostgreSQL namespace,
+pod-label-key, pod-label-value, and TCP port selectors used by the generated
+egress policy, plus the cluster DNS namespace/label/port selector (UDP and TCP).
+The service fails startup if any of these inputs is missing, mutable, malformed,
+or not owner-only; an incorrect network selector prevents the agent Deployment
+from becoming ready.

@@ -80,16 +80,7 @@ class CapacityAgentStore:
             raise CapacityAgentStoreError(
                 f"agent registration binding differs from the guard fence: {', '.join(mismatches)}"
             )
-        role = (
-            await self._session.execute(
-                text(
-                    f"SELECT agent_role_name FROM {_SCHEMA}.agent_runtime_authority "
-                    "WHERE singleton_id = 1"
-                )
-            )
-        ).scalar_one_or_none()
-        if role != self._expected_agent_role:
-            raise CapacityAgentStoreError("protected agent role binding is missing or mismatched")
+        await self._assert_agent_role_binding()
 
         payload = registration.model_dump(mode="json", exclude_none=False)
         payload_digest = canonical_digest(registration)
@@ -140,7 +131,109 @@ class CapacityAgentStore:
                 await self._verify_registration_audit(registration)
         return registration
 
-    async def _read_registration(self) -> AgentRegistrationV1:
+    async def reconfigure_agent(
+        self,
+        registration: AgentRegistrationV1,
+        *,
+        expected_configuration_generation: int,
+    ) -> AgentRegistrationV1:
+        """Advance one disabled candidate/config binding without resetting sequence."""
+
+        if (
+            type(expected_configuration_generation) is not int
+            or expected_configuration_generation <= 0
+        ):
+            raise ValueError("expected agent configuration generation must be positive")
+        guard = CapacityGuardStore(
+            self._session,
+            expected_owner_role=self._expected_owner_role,
+        )
+        fence = await guard.read_guard_fence()
+        await self._assert_agent_role_binding()
+        mismatches = tuple(
+            field
+            for field in _REGISTRATION_BINDINGS
+            if getattr(registration, field) != getattr(fence, field)
+        )
+        if mismatches:
+            raise CapacityAgentStoreError(
+                "agent reconfiguration differs from the guard fence: "
+                + ", ".join(mismatches)
+            )
+        payload = registration.model_dump(mode="json", exclude_none=False)
+        payload_digest = canonical_digest(registration)
+        async with self._session.begin_nested():
+            current = await self._read_registration(lock=True)
+            if current == registration:
+                await self._verify_registration_audit(registration)
+                return registration
+            if (
+                current.agent_incarnation != registration.agent_incarnation
+                or current.environment_id != registration.environment_id
+                or current.subject_id != registration.subject_id
+                or current.subject_incarnation != registration.subject_incarnation
+                or current.authority_incarnation != registration.authority_incarnation
+                or current.authority_mode != registration.authority_mode
+                or current.allocation_epoch != registration.allocation_epoch
+            ):
+                raise CapacityAgentStoreError(
+                    "agent reconfiguration changed an immutable binding"
+                )
+            if current.configuration_generation != expected_configuration_generation:
+                raise CapacityAgentStoreError(
+                    "agent configuration generation was superseded"
+                )
+            updated = (
+                await self._session.execute(
+                    text(
+                        f"UPDATE {_SCHEMA}.agent_registrations SET "
+                        "reporter_incarnation = :reporter_incarnation, "
+                        "candidate_digest = :candidate_digest, "
+                        "deployment_generation = :deployment_generation, "
+                        "configuration_generation = :configuration_generation "
+                        "WHERE agent_incarnation = :agent_incarnation "
+                        "AND configuration_generation = :expected_generation "
+                        "RETURNING agent_incarnation"
+                    ),
+                    {
+                        **registration.model_dump(mode="python", exclude_none=False),
+                        "expected_generation": expected_configuration_generation,
+                    },
+                )
+            ).scalar_one_or_none()
+            if updated is None:
+                raise CapacityAgentStoreError(
+                    "agent configuration generation was superseded"
+                )
+            await self._session.execute(
+                text(
+                    f"INSERT INTO {_SCHEMA}.audit_events "
+                    "(event_type, payload, payload_digest) "
+                    "VALUES ('agent_reconfigured.v1', CAST(:payload AS jsonb), :payload_digest)"
+                ),
+                {
+                    "payload": _json_payload(payload),
+                    "payload_digest": payload_digest,
+                },
+            )
+            stored = await self._read_registration(lock=True)
+            if stored != registration:
+                raise CapacityAgentStoreError("agent reconfiguration was not exact")
+        return registration
+
+    async def _assert_agent_role_binding(self) -> None:
+        role = (
+            await self._session.execute(
+                text(
+                    f"SELECT agent_role_name FROM {_SCHEMA}.agent_runtime_authority "
+                    "WHERE singleton_id = 1"
+                )
+            )
+        ).scalar_one_or_none()
+        if role != self._expected_agent_role:
+            raise CapacityAgentStoreError("protected agent role binding is missing or mismatched")
+
+    async def _read_registration(self, *, lock: bool = False) -> AgentRegistrationV1:
         row = (
             (
                 await self._session.execute(
@@ -150,7 +243,7 @@ class CapacityAgentStore:
                         "authority_mode, allocation_epoch, candidate_digest, "
                         "deployment_generation, configuration_generation "
                         f"FROM {_SCHEMA}.agent_registrations WHERE singleton_id = 1 "
-                        "FOR KEY SHARE"
+                        + ("FOR UPDATE" if lock else "FOR KEY SHARE")
                     )
                 )
             )
@@ -171,8 +264,11 @@ class CapacityAgentStore:
             (
                 await self._session.execute(
                     text(
-                        f"SELECT payload, payload_digest FROM {_SCHEMA}.audit_events "
-                        "WHERE event_type = 'agent_registered.v1' ORDER BY event_id LIMIT 2"
+                        f"SELECT event_type, payload, payload_digest "
+                        f"FROM {_SCHEMA}.audit_events "
+                        "WHERE event_type IN "
+                        "('agent_registered.v1', 'agent_reconfigured.v1') "
+                        "ORDER BY event_id DESC LIMIT 1"
                     )
                 )
             )
@@ -181,12 +277,102 @@ class CapacityAgentStore:
         )
         expected_payload = registration.model_dump(mode="json", exclude_none=False)
         if len(rows) != 1:
-            raise CapacityAgentStoreError("expected exactly one agent registration audit")
+            raise CapacityAgentStoreError("expected a current agent registration audit")
         if (
             rows[0]["payload"] != expected_payload
             or rows[0]["payload_digest"] != canonical_digest(registration)
         ):
             raise CapacityAgentStoreError("agent registration audit does not match its binding")
+
+
+async def read_agent_reporter_high_water(
+    session: AsyncSession,
+    *,
+    registration: AgentRegistrationV1,
+) -> int:
+    """Read only the exact current agent's restart-safe protected sequence."""
+
+    value = (
+        await session.execute(
+            text(
+                f"SELECT {_SCHEMA}.read_agent_reporter_high_water(:agent_incarnation)"
+            ),
+            {"agent_incarnation": registration.agent_incarnation},
+        )
+    ).scalar_one()
+    if type(value) is not int or value < 0:
+        raise CapacityAgentStoreError("protected reporter high-water is invalid")
+    return value
+
+
+async def read_agent_lifecycle_demand_observation(
+    session: AsyncSession,
+    *,
+    registration: AgentRegistrationV1,
+    sequence: int,
+) -> GuardLifecycleDemandObservationV2:
+    """Recover only the exact current protected observation after a restart."""
+
+    if type(sequence) is not int or sequence <= 0:
+        raise CapacityAgentStoreError("protected observation sequence must be positive")
+    payload = (
+        await session.execute(
+            text(
+                f"SELECT {_SCHEMA}.read_agent_lifecycle_demand_observation("
+                ":agent_incarnation, :sequence)"
+            ),
+            {
+                "agent_incarnation": registration.agent_incarnation,
+                "sequence": sequence,
+            },
+        )
+    ).scalar_one()
+    if not isinstance(payload, Mapping):
+        raise CapacityAgentStoreError("protected recovered observation is not an object")
+    try:
+        observation = GuardLifecycleDemandObservationV2.model_validate_json(
+            _json_payload(payload).encode("ascii")
+        )
+    except (ValidationError, ValueError) as exc:
+        raise CapacityAgentStoreError("protected recovered observation is invalid") from exc
+    immutable_mismatches = tuple(
+        field
+        for field in (
+            "environment_id",
+            "subject_id",
+            "subject_incarnation",
+            "authority_incarnation",
+            "agent_incarnation",
+            "authority_mode",
+            "allocation_epoch",
+            "reporter_high_water",
+        )
+        if getattr(observation, field) != getattr(registration, field)
+    )
+    superseded = observation.configuration_generation < registration.configuration_generation
+    invalid_transition = (
+        observation.configuration_generation > registration.configuration_generation
+        or observation.deployment_generation > registration.deployment_generation
+        or (
+            observation.deployment_generation == registration.deployment_generation
+            and (
+                observation.reporter_incarnation != registration.reporter_incarnation
+                or observation.candidate_digest != registration.candidate_digest
+            )
+        )
+        or (
+            not superseded
+            and (
+                observation.deployment_generation != registration.deployment_generation
+                or observation.reporter_incarnation != registration.reporter_incarnation
+                or observation.candidate_digest != registration.candidate_digest
+            )
+        )
+    )
+    if immutable_mismatches or invalid_transition or observation.sequence != sequence:
+        raise CapacityAgentStoreError("protected recovered observation binding is invalid")
+    canonical_bytes(observation)
+    return observation
 
 
 async def capture_demand_observation(
@@ -307,4 +493,6 @@ __all__ = [
     "CapacityAgentStoreError",
     "capture_demand_observation",
     "capture_lifecycle_demand_observation",
+    "read_agent_lifecycle_demand_observation",
+    "read_agent_reporter_high_water",
 ]

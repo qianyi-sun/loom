@@ -41,7 +41,16 @@ def test_gateway_source_is_readable_by_declared_nonroot_workloads() -> None:
 def test_service_source_is_readable_by_declared_nonroot_workloads() -> None:
     text = (ROOT / "deploy" / "Dockerfile.service").read_text()
 
-    assert "chmod -R a+rX ./src ./packages ./migrations" in text
+    assert (
+        "chmod -R a+rX ./src ./packages ./migrations ./capacity_guard_migrations"
+        in text
+    )
+
+
+def test_service_image_contains_capacity_guard_migrations() -> None:
+    text = (ROOT / "deploy" / "Dockerfile.service").read_text()
+
+    assert "COPY capacity_guard_migrations ./capacity_guard_migrations" in text
 
 
 def test_service_image_contains_digest_pinned_kubectl_for_personal_lifecycle() -> None:
