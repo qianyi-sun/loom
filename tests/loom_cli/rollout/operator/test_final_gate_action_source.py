@@ -372,7 +372,7 @@ def test_final_gate_action_source_retries_transient_post_apply_drift(
     assert calls == []
 
 
-def test_final_gate_action_source_does_not_retry_exact_post_apply_drift(
+def test_final_gate_action_source_fails_after_bounded_persistent_exact_drift(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -393,7 +393,9 @@ def test_final_gate_action_source_does_not_retry_exact_post_apply_drift(
     def validate(**_kwargs):
         nonlocal attempts
         attempts += 1
-        raise ValueError("post-apply drift-sensitive evidence changed")
+        raise PostApplyDriftTransientError(
+            "post-apply drift-sensitive evidence changed"
+        )
 
     monkeypatch.setattr(action_source_module, "validate_post_apply_attestation_drift", validate)
 
@@ -402,8 +404,8 @@ def test_final_gate_action_source_does_not_retry_exact_post_apply_drift(
             CheckOperation.VERIFY
         )
 
-    assert attempts == 1
-    assert sleeps == []
+    assert attempts == 3
+    assert sleeps == [0.25, 0.25]
 
 
 def test_final_gate_action_source_rejects_unbound_post_apply_plan(tmp_path: Path) -> None:
