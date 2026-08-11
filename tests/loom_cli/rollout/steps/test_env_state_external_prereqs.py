@@ -1612,6 +1612,24 @@ def test_private_claim_requires_linux_setgid_inheritance_for_nonmember_shared_gr
         )
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory read permissions")
+def test_open_bound_directory_allows_traverse_only_ancestor(tmp_path: Path) -> None:
+    ancestor = tmp_path / "shared-work"
+    managed_root = ancestor / "loom" / "staging-rollout" / "worker-repos"
+    managed_root.mkdir(parents=True)
+    ancestor.chmod(0o100)
+
+    try:
+        binding = env_state_module._open_bound_directory(managed_root)
+        try:
+            assert stat.S_ISDIR(binding.identity.st_mode)
+            binding.assert_stable()
+        finally:
+            os.close(binding.fd)
+    finally:
+        ancestor.chmod(0o700)
+
+
 @pytest.mark.parametrize("drift", ("owner", "group", "mode"))
 def test_materialize_repo_dir_rejects_root_metadata_drift(
     tmp_path: Path,
