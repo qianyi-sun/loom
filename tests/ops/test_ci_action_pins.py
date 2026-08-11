@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 import yaml
 from scripts.check_ci_action_pins import check_action_pins
+from scripts.ci_image_release_evidence import TRIVY_ACTION
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -80,7 +81,7 @@ def test_repository_workflows_match_the_verified_action_lock() -> None:
 
     assert result.errors == ()
     assert result.workflow_count == 13
-    assert result.reference_count == 83
+    assert result.reference_count == 84
     assert set(result.remote_actions) == {
         "actions/attest-build-provenance",
         "actions/checkout",
@@ -91,6 +92,26 @@ def test_repository_workflows_match_the_verified_action_lock() -> None:
         "aquasecurity/trivy-action",
         "astral-sh/setup-uv",
     }
+
+
+def test_release_evidence_trivy_identity_matches_workflow_and_action_lock() -> None:
+    lock = json.loads(
+        (REPO_ROOT / "config/ci-actions-lock.json").read_text(encoding="utf-8"),
+    )
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github/workflows/images.yml").read_text(encoding="utf-8"),
+    )
+    trivy_uses = [
+        step["uses"]
+        for job in workflow["jobs"].values()
+        for step in job.get("steps", [])
+        if str(step.get("uses", "")).startswith("aquasecurity/trivy-action@")
+    ]
+    locked = lock["actions"]["aquasecurity/trivy-action"]
+    expected = f"aquasecurity/trivy-action@{locked['sha']}"
+
+    assert TRIVY_ACTION == expected
+    assert trivy_uses == [expected, expected]
 
 
 def test_local_action_and_digest_pinned_docker_action_are_allowed(tmp_path: Path) -> None:

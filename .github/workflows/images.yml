@@ -1264,12 +1264,17 @@ jobs:
           [[ ${#GHCR_ACTOR} -le 100 \
             && "$GHCR_ACTOR" =~ ^[A-Za-z0-9][A-Za-z0-9-]*(\[bot\])?$ ]] || exit 1
 
-      - name: Download exact architecture evidence
+      - name: Download exact AMD64 architecture evidence
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: image-release-record-${{ matrix.image }}-*-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
-          path: /tmp/loom-image-release-records
-          merge-multiple: true
+          name: image-release-record-${{ matrix.image }}-amd64-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: /tmp/loom-image-release-artifacts/amd64
+
+      - name: Download exact ARM64 architecture evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: image-release-record-${{ matrix.image }}-arm64-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: /tmp/loom-image-release-artifacts/arm64
 
       - name: Validate exact architecture evidence
         id: architecture-records
@@ -1296,7 +1301,7 @@ jobs:
             --image-name "$IMAGE_DIGEST_NAME" \
             --dockerfile "$DOCKERFILE" \
             --build-context "$BUILD_CONTEXT" \
-            --records-dir /tmp/loom-image-release-records \
+            --records-dir /tmp/loom-image-release-artifacts \
             --output "$metadata"
           {
             echo "metadata=$metadata"
@@ -1332,7 +1337,7 @@ jobs:
           set -euo pipefail
           for architecture in amd64 arm64; do
             platform="linux/${architecture}"
-            record="/tmp/loom-image-release-records/${IMAGE_NAME}-${architecture}.json"
+            record="/tmp/loom-image-release-artifacts/${architecture}/${IMAGE_NAME}-${architecture}.json"
             subject_name=$(jq -er .subject.name "$record")
             digest=$(jq -er .subject.digest "$record")
             scan_digest=$(jq -er .scan.report_sha256 "$record")
@@ -1433,28 +1438,10 @@ jobs:
           manifest_digest="${manifest_digests[0]}"
           docker buildx imagetools inspect --raw "${image}@${manifest_digest}" \
             > /tmp/loom-image-manifest.json
-          python3 - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          payload = json.loads(Path("/tmp/loom-image-manifest.json").read_text())
-          subjects = {
-              f"{platform['os']}/{platform['architecture']}": item.get("digest")
-              for item in payload.get("manifests", [])
-              if isinstance((platform := item.get("platform")), dict)
-              and platform.get("os")
-              and platform.get("architecture")
-          }
-          expected = {
-              "linux/amd64": os.environ["AMD64_DIGEST"],
-              "linux/arm64": os.environ["ARM64_DIGEST"],
-          }
-          if subjects != expected:
-              raise SystemExit(
-                  f"FAIL: manifest subjects {subjects!r} != {expected!r}"
-              )
-          PY
+          python3 scripts/ci_image_release_evidence.py validate-manifest \
+            --manifest "/tmp/loom-image-manifest.json" \
+            --architecture-digest "linux/amd64=${AMD64_DIGEST}" \
+            --architecture-digest "linux/arm64=${ARM64_DIGEST}"
           predicate="/tmp/${IMAGE_NAME}-manifest.slsa.json"
           python3 scripts/ci_image_release_evidence.py predicate-manifest \
             --repository "$GITHUB_REPOSITORY" \

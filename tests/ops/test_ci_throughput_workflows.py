@@ -1095,29 +1095,56 @@ def test_release_architecture_records_are_exact_and_source_mode_aware() -> None:
         "retention-days": 1,
     }
 
-    download = next(
+    downloads = [
         step
         for step in manifest["steps"]
-        if step.get("name") == "Download exact architecture evidence"
-    )
+        if str(step.get("name", "")).startswith("Download exact ")
+        and str(step.get("name", "")).endswith(" architecture evidence")
+    ]
     validate = next(
         step
         for step in manifest["steps"]
         if step.get("name") == "Validate exact architecture evidence"
     )
-    assert download["uses"] == (
-        f"actions/download-artifact@{_locked_action_sha('actions/download-artifact')}"
-    )
-    assert download["with"] == {
-        "pattern": (
-            "image-release-record-${{ matrix.image }}-*-run-${{ github.run_id }}-"
-            "attempt-${{ github.run_attempt }}"
+    assert len(downloads) == 2
+    expected_downloads = {
+        "Download exact AMD64 architecture evidence": (
+            "image-release-record-${{ matrix.image }}-amd64-"
+            "run-${{ github.run_id }}-attempt-${{ github.run_attempt }}"
         ),
-        "path": "/tmp/loom-image-release-records",
-        "merge-multiple": True,
+        "Download exact ARM64 architecture evidence": (
+            "image-release-record-${{ matrix.image }}-arm64-"
+            "run-${{ github.run_id }}-attempt-${{ github.run_attempt }}"
+        ),
     }
+    for download in downloads:
+        architecture = "amd64" if "AMD64" in download["name"] else "arm64"
+        assert download["uses"] == (
+            f"actions/download-artifact@{_locked_action_sha('actions/download-artifact')}"
+        )
+        assert download["with"] == {
+            "name": expected_downloads[download["name"]],
+            "path": f"/tmp/loom-image-release-artifacts/{architecture}",
+        }
+
+    concrete_names = {
+        template.replace("${{ matrix.image }}", image)
+        for template in expected_downloads.values()
+        for image in ("llm-gateway", "llm-gateway-sandbox")
+    }
+    assert len(concrete_names) == 4
     assert "validate-architecture-records" in validate["run"]
-    assert "--records-dir /tmp/loom-image-release-records" in validate["run"]
+    assert "--records-dir /tmp/loom-image-release-artifacts" in validate["run"]
+    verify_records = next(
+        step
+        for step in manifest["steps"]
+        if step.get("name") == "Verify architecture attestations"
+    )
+    assert (
+        'record="/tmp/loom-image-release-artifacts/${architecture}/'
+        '${IMAGE_NAME}-${architecture}.json"'
+        in verify_records["run"]
+    )
     assert set(manifest["permissions"]) >= {"actions", "attestations", "contents"}
 
 
@@ -1136,6 +1163,9 @@ def test_manifest_digest_is_captured_once_and_tags_follow_verification() -> None
     assert "--progress plain" in script
     assert "pushing manifest for .*@(sha256:[0-9a-f]{64})" in script
     assert 'imagetools inspect --raw "${image}@${manifest_digest}"' in script
+    assert "ci_image_release_evidence.py validate-manifest" in script
+    assert '--manifest "/tmp/loom-image-manifest.json"' in script
+    assert 'python3 - <<\'PY\'' not in script
     assert 'imagetools inspect --raw "${image}:manifest-${HEAD_SHA}"' not in script
     assert 'imagetools inspect "${image}:manifest-${HEAD_SHA}"' not in script
     assert names.index("Verify published manifest attestation") < names.index(
@@ -1146,7 +1176,10 @@ def test_manifest_digest_is_captured_once_and_tags_follow_verification() -> None
 def test_release_record_helper_rejects_incomplete_workflow_handoff(tmp_path: Path) -> None:
     records = tmp_path / "records"
     records.mkdir()
-    (records / "capacity-manager-amd64.json").write_text("{}\n", encoding="utf-8")
+    (records / "amd64").mkdir()
+    (records / "amd64" / "capacity-manager-amd64.json").write_text(
+        "{}\n", encoding="utf-8"
+    )
     result = subprocess.run(
         [
             sys.executable,

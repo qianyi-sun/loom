@@ -33,6 +33,49 @@ class EvidenceError(ValueError):
     """Release evidence is incomplete, ambiguous, or inconsistent."""
 
 
+def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise EvidenceError(f"duplicate JSON key is forbidden: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite_json(value: str) -> object:
+    raise EvidenceError(f"non-finite JSON value is forbidden: {value}")
+
+
+def _parse_json(value: str, label: str) -> object:
+    try:
+        return json.loads(
+            value,
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite_json,
+        )
+    except json.JSONDecodeError as exc:
+        raise EvidenceError(f"{label} is invalid JSON: {exc}") from None
+
+
+def _read_json(path: Path, label: str) -> object:
+    return _parse_json(path.read_text(encoding="utf-8"), label)
+
+
+def _type_strict_equal(observed: object, expected: object) -> bool:
+    if type(observed) is not type(expected):
+        return False
+    if isinstance(observed, dict) and isinstance(expected, dict):
+        return observed.keys() == expected.keys() and all(
+            _type_strict_equal(observed[key], expected[key]) for key in observed
+        )
+    if isinstance(observed, list) and isinstance(expected, list):
+        return len(observed) == len(expected) and all(
+            _type_strict_equal(observed_item, expected_item)
+            for observed_item, expected_item in zip(observed, expected, strict=True)
+        )
+    return observed == expected
+
+
 def _exact(pattern: re.Pattern[str], value: str, label: str) -> str:
     if not isinstance(value, str) or pattern.fullmatch(value) is None:
         raise EvidenceError(f"{label} is invalid")
@@ -522,7 +565,7 @@ def verify_architecture_attestation(
             )
         except (EvidenceError, KeyError, TypeError):
             continue
-        if predicate == expected and (
+        if _type_strict_equal(predicate, expected) and (
             scan_report_sha256 is None or observed_scan == scan_report_sha256
         ):
             matches.append(observed_scan)
@@ -577,7 +620,7 @@ def verify_manifest_attestation(
         for predicate in _matching_predicates(
             payload, subject_name=subject_name, subject_digest=subject_digest
         )
-        if predicate == expected
+        if _type_strict_equal(predicate, expected)
     ]
     if len(matches) != 1:
         raise EvidenceError(
@@ -722,7 +765,7 @@ def validate_architecture_record(
         )
     except (KeyError, TypeError):
         raise EvidenceError("canonical architecture record is invalid") from None
-    if payload != expected:
+    if not _type_strict_equal(payload, expected):
         raise EvidenceError("canonical architecture record is invalid")
     return expected
 
@@ -743,11 +786,10 @@ def validate_architecture_records(
 ) -> dict[str, object]:
     """Validate the exact AMD64/ARM64 handoff set for one release image."""
 
-    expected_names = {f"{image}-{architecture}.json" for architecture in _PLATFORMS}
-    entries = list(records_dir.iterdir())
-    if (
-        {entry.name for entry in entries} != expected_names
-        or any(not entry.is_file() or entry.is_symlink() for entry in entries)
+    expected_directories = set(_PLATFORMS)
+    directories = list(records_dir.iterdir())
+    if {entry.name for entry in directories} != expected_directories or any(
+        not entry.is_dir() or entry.is_symlink() for entry in directories
     ):
         raise EvidenceError(
             "record directory must contain exactly the expected architecture files"
@@ -755,8 +797,18 @@ def validate_architecture_records(
     architectures: dict[str, object] = {}
     subject_names: set[str] = set()
     for architecture, platform in sorted(_PLATFORMS.items()):
-        path = records_dir / f"{image}-{architecture}.json"
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        directory = records_dir / architecture
+        expected_name = f"{image}-{architecture}.json"
+        entries = list(directory.iterdir())
+        if (
+            {entry.name for entry in entries} != {expected_name}
+            or any(not entry.is_file() or entry.is_symlink() for entry in entries)
+        ):
+            raise EvidenceError(
+                "record directory must contain exactly the expected architecture files"
+            )
+        path = directory / expected_name
+        payload = _read_json(path, "architecture record")
         record = validate_architecture_record(
             payload,
             repository=repository,
@@ -786,6 +838,47 @@ def validate_architecture_records(
     if len(subject_names) != 1:
         raise EvidenceError("architecture record subjects are inconsistent")
     return {"subject_name": subject_names.pop(), "architectures": architectures}
+
+
+def validate_manifest_subjects(
+    payload: object,
+    *,
+    architecture_digests: Mapping[str, str],
+) -> None:
+    """Validate the platform subjects in one published manifest index."""
+
+    expected = _exact_platform_map(architecture_digests, "architecture digests")
+    for digest in expected.values():
+        if not digest.startswith("sha256:") or _HEX64.fullmatch(digest[7:]) is None:
+            raise EvidenceError("architecture digest is invalid")
+    if not isinstance(payload, Mapping) or not isinstance(payload.get("manifests"), list):
+        raise EvidenceError("published manifest is invalid")
+    manifests = payload["manifests"]
+    if len(manifests) != 2:
+        raise EvidenceError("published manifest must contain exactly two descriptors")
+    subjects: dict[str, str] = {}
+    for item in manifests:
+        if not isinstance(item, Mapping):
+            raise EvidenceError("published manifest descriptor is invalid")
+        platform = item.get("platform")
+        observed_digest = item.get("digest")
+        if (
+            not isinstance(platform, Mapping)
+            or not isinstance(platform.get("os"), str)
+            or not platform["os"]
+            or not isinstance(platform.get("architecture"), str)
+            or not platform["architecture"]
+            or not isinstance(observed_digest, str)
+            or not observed_digest.startswith("sha256:")
+            or _HEX64.fullmatch(observed_digest[7:]) is None
+        ):
+            raise EvidenceError("published manifest descriptor is invalid")
+        identity = f"{platform['os']}/{platform['architecture']}"
+        if identity in subjects:
+            raise EvidenceError("published manifest platform is duplicated")
+        subjects[identity] = observed_digest
+    if not _type_strict_equal(subjects, expected):
+        raise EvidenceError("published manifest subjects are invalid")
 
 
 def _common_arguments(parser: argparse.ArgumentParser) -> None:
@@ -835,10 +928,7 @@ def _platform_build_map(values: Sequence[str]) -> dict[str, object]:
         platform, separator, raw_build = value.partition("=")
         if not separator or platform in parsed:
             raise EvidenceError("architecture build is invalid")
-        try:
-            parsed[platform] = json.loads(raw_build)
-        except json.JSONDecodeError:
-            raise EvidenceError("architecture build is invalid") from None
+        parsed[platform] = _parse_json(raw_build, "architecture build")
     return parsed
 
 
@@ -865,7 +955,13 @@ def _build_namespace(arguments: argparse.Namespace) -> dict[str, Any]:
 
 def _write_json(path: Path, payload: object) -> None:
     path.write_text(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        + "\n",
         encoding="utf-8",
     )
 
@@ -913,9 +1009,26 @@ def main() -> None:
     validate_record.add_argument("--architecture", required=True)
     validate_record.add_argument("--record", type=Path, required=True)
     validate_record.add_argument("--output", type=Path)
+    validate_manifest = operations.add_parser("validate-manifest")
+    validate_manifest.add_argument("--manifest", type=Path, required=True)
+    validate_manifest.add_argument(
+        "--architecture-digest", action="append", required=True
+    )
+    validate_manifest.add_argument("--output", type=Path)
     arguments = parser.parse_args()
-    common = _common_namespace(arguments)
     try:
+        if arguments.operation == "validate-manifest":
+            payload = _read_json(arguments.manifest, "published manifest")
+            validate_manifest_subjects(
+                payload,
+                architecture_digests=_platform_map(
+                    arguments.architecture_digest, "architecture digest"
+                ),
+            )
+            if arguments.output is not None:
+                _write_json(arguments.output, {"status": "validated"})
+            return
+        common = _common_namespace(arguments)
         if arguments.operation == "predicate-architecture":
             if arguments.scan_report_sha256 is None:
                 raise EvidenceError("scan report digest is required")
@@ -928,7 +1041,7 @@ def main() -> None:
             )
             _write_json(arguments.output, predicate)
         elif arguments.operation == "verify-architecture":
-            payload = json.loads(arguments.verification.read_text(encoding="utf-8"))
+            payload = _read_json(arguments.verification, "architecture verification")
             scan_digest = verify_architecture_attestation(
                 payload,
                 **common,
@@ -961,7 +1074,7 @@ def main() -> None:
             if arguments.output is not None:
                 _write_json(arguments.output, validated)
         elif arguments.operation == "validate-architecture-record":
-            payload = json.loads(arguments.record.read_text(encoding="utf-8"))
+            payload = _read_json(arguments.record, "architecture record")
             validated = validate_architecture_record(
                 payload,
                 **common,
@@ -989,7 +1102,7 @@ def main() -> None:
                 )
                 _write_json(arguments.output, predicate)
             else:
-                payload = json.loads(arguments.verification.read_text(encoding="utf-8"))
+                payload = _read_json(arguments.verification, "manifest verification")
                 verify_manifest_attestation(
                     payload,
                     **common,
@@ -1019,6 +1132,7 @@ __all__ = [
     "manifest_predicate",
     "validate_architecture_record",
     "validate_architecture_records",
+    "validate_manifest_subjects",
     "verify_architecture_attestation",
     "verify_manifest_attestation",
 ]

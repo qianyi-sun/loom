@@ -291,6 +291,32 @@ def test_candidate_verification_rejects_tampered_source_mode() -> None:
         )
 
 
+def test_architecture_verification_rejects_boolean_for_integer_policy_field() -> None:
+    predicate = architecture_predicate(
+        **_common(),
+        platform="linux/amd64",
+        architecture="amd64",
+        scan_report_sha256=_SCAN,
+        build_mode="trusted-rebuild",
+    )
+    tampered = _verification(deepcopy(predicate))
+    tampered_payload: Any = tampered
+    tampered_payload[0]["verificationResult"]["statement"]["predicate"][
+        "buildDefinition"
+    ]["externalParameters"]["scan"]["exit_code"] = True
+
+    with pytest.raises(EvidenceError, match="exactly one"):
+        verify_architecture_attestation(
+            tampered,
+            **_common(),
+            platform="linux/amd64",
+            architecture="amd64",
+            subject_name="ghcr.io/qianyi-sun/loom-capacity-manager",
+            subject_digest=f"sha256:{_DIGEST}",
+            build_mode="trusted-rebuild",
+        )
+
+
 def test_manifest_attestation_binds_both_verified_architecture_subjects() -> None:
     predicate = manifest_predicate(
         **_common(),
@@ -365,6 +391,40 @@ def test_manifest_attestation_binds_both_verified_architecture_subjects() -> Non
         )
 
 
+def test_manifest_verification_rejects_float_for_integer_run_id() -> None:
+    architecture_digests = {
+        "linux/amd64": f"sha256:{_AMD64_DIGEST}",
+        "linux/arm64": f"sha256:{_ARM64_DIGEST}",
+    }
+    scan_report_digests = {"linux/amd64": _SCAN, "linux/arm64": "1" * 64}
+    architecture_builds = {
+        "linux/amd64": {"mode": "trusted-rebuild"},
+        "linux/arm64": {"mode": "trusted-rebuild"},
+    }
+    predicate = manifest_predicate(
+        **_common(),
+        architecture_digests=architecture_digests,
+        scan_report_digests=scan_report_digests,
+        architecture_builds=architecture_builds,
+    )
+    tampered = _verification(deepcopy(predicate))
+    tampered_payload: Any = tampered
+    tampered_payload[0]["verificationResult"]["statement"]["predicate"][
+        "buildDefinition"
+    ]["internalParameters"]["github"]["run_id"] = 123.0
+
+    with pytest.raises(EvidenceError, match="exactly one"):
+        verify_manifest_attestation(
+            tampered,
+            **_common(),
+            subject_name="ghcr.io/qianyi-sun/loom-capacity-manager",
+            subject_digest=f"sha256:{_DIGEST}",
+            architecture_digests=architecture_digests,
+            scan_report_digests=scan_report_digests,
+            architecture_builds=architecture_builds,
+        )
+
+
 def _cli_common() -> list[str]:
     common = _common()
     return [
@@ -400,6 +460,32 @@ def _run_cli(*arguments: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _verify_architecture_cli(
+    verification: Path,
+    output: Path,
+) -> subprocess.CompletedProcess[str]:
+    return _run_cli(
+        "verify-architecture",
+        *_cli_common(),
+        "--platform",
+        "linux/amd64",
+        "--architecture",
+        "amd64",
+        "--verification",
+        str(verification),
+        "--subject-name",
+        "ghcr.io/qianyi-sun/loom-capacity-manager",
+        "--subject-digest",
+        f"sha256:{_DIGEST}",
+        "--scan-report-sha256",
+        _SCAN,
+        "--build-mode",
+        "trusted-rebuild",
+        "--output",
+        str(output),
+    )
+
+
 def _write_record(
     output: Path,
     *,
@@ -427,11 +513,94 @@ def _write_record(
     )
 
 
+def _artifact_record_path(records: Path, architecture: str) -> Path:
+    directory = records / architecture
+    directory.mkdir(exist_ok=True)
+    return directory / f"capacity-manager-{architecture}.json"
+
+
+def _manifest_fixture() -> dict[str, object]:
+    return {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": [
+            {
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "digest": f"sha256:{_AMD64_DIGEST}",
+                "size": 1234,
+                "platform": {"architecture": "amd64", "os": "linux"},
+            },
+            {
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "digest": f"sha256:{_ARM64_DIGEST}",
+                "size": 2345,
+                "platform": {"architecture": "arm64", "os": "linux"},
+            },
+        ],
+    }
+
+
+def _validate_manifest_cli(manifest: Path) -> subprocess.CompletedProcess[str]:
+    return _run_cli(
+        "validate-manifest",
+        "--manifest",
+        str(manifest),
+        "--architecture-digest",
+        f"linux/amd64=sha256:{_AMD64_DIGEST}",
+        "--architecture-digest",
+        f"linux/arm64=sha256:{_ARM64_DIGEST}",
+    )
+
+
+def test_cli_validates_exact_two_descriptor_manifest(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps(_manifest_fixture()), encoding="utf-8")
+
+    result = _validate_manifest_cli(manifest)
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["duplicate-platform", "incomplete-extra", "unexpected-platform"],
+)
+def test_cli_manifest_validation_rejects_ignored_or_extra_descriptors(
+    tmp_path: Path,
+    case: str,
+) -> None:
+    payload = _manifest_fixture()
+    manifests: Any = payload["manifests"]
+    if case == "duplicate-platform":
+        manifests.append(deepcopy(manifests[0]))
+    elif case == "incomplete-extra":
+        manifests.append(
+            {
+                "digest": f"sha256:{'0' * 64}",
+                "platform": {"os": "linux"},
+            }
+        )
+    else:
+        manifests.append(
+            {
+                "digest": f"sha256:{'0' * 64}",
+                "platform": {"architecture": "s390x", "os": "linux"},
+            }
+        )
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = _validate_manifest_cli(manifest)
+
+    assert result.returncode != 0
+    assert "published manifest" in result.stderr
+
+
 def test_cli_validates_exact_canonical_architecture_record_set(tmp_path: Path) -> None:
     records = tmp_path / "records"
     records.mkdir()
-    amd64 = records / "capacity-manager-amd64.json"
-    arm64 = records / "capacity-manager-arm64.json"
+    amd64 = _artifact_record_path(records, "amd64")
+    arm64 = _artifact_record_path(records, "arm64")
     assert _write_record(
         amd64,
         architecture="amd64",
@@ -498,6 +667,41 @@ def test_cli_validates_one_canonical_architecture_record(tmp_path: Path) -> None
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.parametrize(("path", "replacement"), [(("schema_version",), True), (("release", "run_attempt"), 2.0)])
+def test_cli_record_validation_is_type_strict(
+    tmp_path: Path,
+    path: tuple[str, ...],
+    replacement: object,
+) -> None:
+    record = tmp_path / "capacity-manager-amd64.json"
+    assert _write_record(
+        record,
+        architecture="amd64",
+        subject_digest=_AMD64_DIGEST,
+        scan_digest=_SCAN,
+    ).returncode == 0
+    payload = json.loads(record.read_text(encoding="utf-8"))
+    target = payload
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = replacement
+    record.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = _run_cli(
+        "validate-architecture-record",
+        *_cli_common(),
+        "--platform",
+        "linux/amd64",
+        "--architecture",
+        "amd64",
+        "--record",
+        str(record),
+    )
+
+    assert result.returncode != 0
+    assert "canonical architecture record" in result.stderr
+
+
 def test_cli_rejects_extra_or_tampered_architecture_records(tmp_path: Path) -> None:
     records = tmp_path / "records"
     records.mkdir()
@@ -506,14 +710,15 @@ def test_cli_rejects_extra_or_tampered_architecture_records(tmp_path: Path) -> N
         ("arm64", _ARM64_DIGEST, "1" * 64),
     ):
         result = _write_record(
-            records / f"capacity-manager-{architecture}.json",
+            _artifact_record_path(records, architecture),
             architecture=architecture,
             subject_digest=digest,
             scan_digest=scan,
         )
         assert result.returncode == 0, result.stderr
 
-    (records / "unexpected.json").write_text("{}\n", encoding="utf-8")
+    duplicate_path = records / "amd64" / "capacity-manager-arm64.json"
+    duplicate_path.write_text("{}\n", encoding="utf-8")
     result = _run_cli(
         "validate-architecture-records",
         *_cli_common(),
@@ -522,13 +727,15 @@ def test_cli_rejects_extra_or_tampered_architecture_records(tmp_path: Path) -> N
     )
     assert result.returncode != 0
     assert "exactly the expected architecture files" in result.stderr
-    (records / "unexpected.json").unlink()
+    duplicate_path.unlink()
 
     record = json.loads(
-        (records / "capacity-manager-amd64.json").read_text(encoding="utf-8")
+        (records / "amd64" / "capacity-manager-amd64.json").read_text(
+            encoding="utf-8"
+        )
     )
     record["release"]["tree"] = "0" * 40
-    (records / "capacity-manager-amd64.json").write_text(
+    (records / "amd64" / "capacity-manager-amd64.json").write_text(
         json.dumps(record),
         encoding="utf-8",
     )
@@ -564,3 +771,238 @@ def test_cli_rejects_record_for_a_different_registry_subject(tmp_path: Path) -> 
 
     assert result.returncode != 0
     assert "expected release image" in result.stderr
+
+
+def test_cli_rejects_duplicate_key_in_architecture_verification(tmp_path: Path) -> None:
+    predicate = architecture_predicate(
+        **_common(),
+        platform="linux/amd64",
+        architecture="amd64",
+        scan_report_sha256=_SCAN,
+        build_mode="trusted-rebuild",
+    )
+    raw = json.dumps(_verification(predicate)).replace(
+        '"verificationResult":',
+        '"verificationResult":{},"verificationResult":',
+        1,
+    )
+    verification = tmp_path / "verification.json"
+    verification.write_text(raw, encoding="utf-8")
+
+    result = _verify_architecture_cli(verification, tmp_path / "output.json")
+
+    assert result.returncode != 0
+    assert "duplicate JSON key" in result.stderr
+
+
+def test_cli_rejects_nonfinite_value_in_manifest_verification(tmp_path: Path) -> None:
+    architecture_digests = {
+        "linux/amd64": f"sha256:{_AMD64_DIGEST}",
+        "linux/arm64": f"sha256:{_ARM64_DIGEST}",
+    }
+    scan_report_digests = {"linux/amd64": _SCAN, "linux/arm64": "1" * 64}
+    architecture_builds = {
+        "linux/amd64": {"mode": "trusted-rebuild"},
+        "linux/arm64": {"mode": "trusted-rebuild"},
+    }
+    predicate = manifest_predicate(
+        **_common(),
+        architecture_digests=architecture_digests,
+        scan_report_digests=scan_report_digests,
+        architecture_builds=architecture_builds,
+    )
+    raw = json.dumps(_verification(predicate)).replace(
+        '{"verificationResult":',
+        '{"ignored":NaN,"verificationResult":',
+        1,
+    )
+    verification = tmp_path / "verification.json"
+    verification.write_text(raw, encoding="utf-8")
+
+    result = _run_cli(
+        "verify-manifest",
+        *_cli_common(),
+        "--verification",
+        str(verification),
+        "--subject-name",
+        "ghcr.io/qianyi-sun/loom-capacity-manager",
+        "--subject-digest",
+        f"sha256:{_DIGEST}",
+        "--architecture-digest",
+        f"linux/amd64=sha256:{_AMD64_DIGEST}",
+        "--architecture-digest",
+        f"linux/arm64=sha256:{_ARM64_DIGEST}",
+        "--scan-report-digest",
+        f"linux/amd64={_SCAN}",
+        "--scan-report-digest",
+        f"linux/arm64={'1' * 64}",
+        "--architecture-build",
+        'linux/amd64={"mode":"trusted-rebuild"}',
+        "--architecture-build",
+        'linux/arm64={"mode":"trusted-rebuild"}',
+    )
+
+    assert result.returncode != 0
+    assert "non-finite JSON value" in result.stderr
+
+
+@pytest.mark.parametrize("operation", ["single", "directory"])
+def test_cli_rejects_duplicate_key_in_architecture_records(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    records = tmp_path / "records"
+    records.mkdir()
+    amd64 = _artifact_record_path(records, "amd64")
+    assert _write_record(
+        amd64,
+        architecture="amd64",
+        subject_digest=_AMD64_DIGEST,
+        scan_digest=_SCAN,
+    ).returncode == 0
+    raw = amd64.read_text(encoding="utf-8").replace(
+        '"schema_version":1',
+        '"schema_version":1,"schema_version":1',
+        1,
+    )
+    amd64.write_text(raw, encoding="utf-8")
+    if operation == "single":
+        result = _run_cli(
+            "validate-architecture-record",
+            *_cli_common(),
+            "--platform",
+            "linux/amd64",
+            "--architecture",
+            "amd64",
+            "--record",
+            str(amd64),
+        )
+    else:
+        arm64 = _artifact_record_path(records, "arm64")
+        assert _write_record(
+            arm64,
+            architecture="arm64",
+            subject_digest=_ARM64_DIGEST,
+            scan_digest="1" * 64,
+        ).returncode == 0
+        result = _run_cli(
+            "validate-architecture-records",
+            *_cli_common(),
+            "--records-dir",
+            str(records),
+        )
+
+    assert result.returncode != 0
+    assert "duplicate JSON key" in result.stderr
+
+
+@pytest.mark.parametrize("token", ["NaN", "Infinity", "-Infinity"])
+def test_cli_rejects_nonfinite_manifest_json_values(
+    tmp_path: Path,
+    token: str,
+) -> None:
+    manifest = tmp_path / "manifest.json"
+    raw = json.dumps(_manifest_fixture()).replace(
+        "{",
+        f'{{"ignored":{token},',
+        1,
+    )
+    manifest.write_text(raw, encoding="utf-8")
+
+    result = _validate_manifest_cli(manifest)
+
+    assert result.returncode != 0
+    assert "non-finite JSON value" in result.stderr
+
+
+def test_cli_rejects_duplicate_key_in_manifest_json(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.json"
+    raw = json.dumps(_manifest_fixture()).replace(
+        '"manifests":',
+        '"manifests":[],"manifests":',
+        1,
+    )
+    manifest.write_text(raw, encoding="utf-8")
+
+    result = _validate_manifest_cli(manifest)
+
+    assert result.returncode != 0
+    assert "duplicate JSON key" in result.stderr
+
+
+def test_cli_rejects_nonfinite_architecture_record_value(tmp_path: Path) -> None:
+    record = tmp_path / "capacity-manager-amd64.json"
+    assert _write_record(
+        record,
+        architecture="amd64",
+        subject_digest=_AMD64_DIGEST,
+        scan_digest=_SCAN,
+    ).returncode == 0
+    raw = record.read_text(encoding="utf-8").replace(
+        '"schema_version":1',
+        '"schema_version":NaN',
+        1,
+    )
+    record.write_text(raw, encoding="utf-8")
+
+    result = _run_cli(
+        "validate-architecture-record",
+        *_cli_common(),
+        "--platform",
+        "linux/amd64",
+        "--architecture",
+        "amd64",
+        "--record",
+        str(record),
+    )
+
+    assert result.returncode != 0
+    assert "non-finite JSON value" in result.stderr
+
+
+def test_cli_rejects_duplicate_key_in_inline_architecture_build(tmp_path: Path) -> None:
+    result = _run_cli(
+        "predicate-manifest",
+        *_cli_common(),
+        "--architecture-digest",
+        f"linux/amd64=sha256:{_AMD64_DIGEST}",
+        "--architecture-digest",
+        f"linux/arm64=sha256:{_ARM64_DIGEST}",
+        "--scan-report-digest",
+        f"linux/amd64={_SCAN}",
+        "--scan-report-digest",
+        f"linux/arm64={'1' * 64}",
+        "--architecture-build",
+        'linux/amd64={"mode":"trusted-rebuild","mode":"trusted-rebuild"}',
+        "--architecture-build",
+        'linux/arm64={"mode":"trusted-rebuild"}',
+        "--output",
+        str(tmp_path / "predicate.json"),
+    )
+
+    assert result.returncode != 0
+    assert "duplicate JSON key" in result.stderr
+
+
+def test_cli_rejects_nonfinite_inline_architecture_build(tmp_path: Path) -> None:
+    result = _run_cli(
+        "predicate-manifest",
+        *_cli_common(),
+        "--architecture-digest",
+        f"linux/amd64=sha256:{_AMD64_DIGEST}",
+        "--architecture-digest",
+        f"linux/arm64=sha256:{_ARM64_DIGEST}",
+        "--scan-report-digest",
+        f"linux/amd64={_SCAN}",
+        "--scan-report-digest",
+        f"linux/arm64={'1' * 64}",
+        "--architecture-build",
+        'linux/amd64={"mode":"trusted-rebuild","ignored":NaN}',
+        "--architecture-build",
+        'linux/arm64={"mode":"trusted-rebuild"}',
+        "--output",
+        str(tmp_path / "predicate.json"),
+    )
+
+    assert result.returncode != 0
+    assert "non-finite JSON value" in result.stderr
