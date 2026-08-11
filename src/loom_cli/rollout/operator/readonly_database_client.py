@@ -445,6 +445,12 @@ class InstalledReadonlyMutationEpochSource:
                 self._evidence = self._probe(service_uid=self._service_uid)
             return self._evidence
 
+    def refresh(self) -> ReadonlyMutationEpochEvidence:
+        """Replace the process-local snapshot after a protected mutation."""
+        with self._lock:
+            self._evidence = self._probe(service_uid=self._service_uid)
+            return self._evidence
+
 
 __all__ = [
     "Connect",

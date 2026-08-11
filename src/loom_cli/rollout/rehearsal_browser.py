@@ -237,12 +237,28 @@ def rehearsal_browser_job_complete(
         name=BROWSER_JOB_NAME,
     ):
         return False
+    expected = _artifact_resource(
+        artifact,
+        kind="Job",
+        name=BROWSER_JOB_NAME,
+    )
+    expected_spec = expected.get("spec")
+    backoff_limit = (
+        expected_spec.get("backoffLimit")
+        if isinstance(expected_spec, Mapping)
+        else None
+    )
     status = observed.get("status")
     conditions = status.get("conditions") if isinstance(status, Mapping) else None
+    failed = status.get("failed", 0) if isinstance(status, Mapping) else None
     return bool(
         isinstance(status, Mapping)
+        and isinstance(backoff_limit, int)
+        and not isinstance(backoff_limit, bool)
+        and isinstance(failed, int)
+        and not isinstance(failed, bool)
+        and 0 <= failed <= backoff_limit
         and status.get("succeeded") == 1
-        and status.get("failed") in (None, 0)
         and isinstance(conditions, list)
         and any(
             isinstance(item, Mapping)

@@ -153,7 +153,7 @@ class InstalledFinalGateExecutor:
         operation: CheckOperation,
         plan: FinalGatePlan,
     ) -> FinalGateResult:
-        self._validate_plan(plan)
+        installed = self._validate_plan(plan)
         if check_id in {"final.protected-apply", "final.convergence"}:
             container_registry = str(
                 load_cluster_config(self.config.cluster_config_path).container_registry
@@ -173,6 +173,12 @@ class InstalledFinalGateExecutor:
             environment_state = HttpxProtectedEnvironmentStateTransport(
                 candidate_root=self.config.runner_repo,
                 admin_token_path=Path(self.config.admin_token_source.removeprefix("file:")),
+                worker_token_path=Path(
+                    self.config.worker_token_source.removeprefix("file:")
+                ),
+                expected_env_template_sha256=installed.attestation.asset_sha256[
+                    "worker-env-template"
+                ],
                 cp_url=self.config.cp_url,
                 service_uid=self.service_uid,
             )
@@ -222,7 +228,7 @@ class InstalledFinalGateExecutor:
             )
         raise ValueError("installed final gate check has no fixed executor")
 
-    def _validate_plan(self, plan: FinalGatePlan) -> None:
+    def _validate_plan(self, plan: FinalGatePlan) -> VerifiedRunnerInstall:
         try:
             installed = self.verify_install(service_uid=self.service_uid)
         except (OSError, ValueError) as exc:
@@ -258,6 +264,7 @@ class InstalledFinalGateExecutor:
             )
         ):
             raise ValueError("installed final gate plan drifted from runner config")
+        return installed
 
     @staticmethod
     def _ssh_run(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
