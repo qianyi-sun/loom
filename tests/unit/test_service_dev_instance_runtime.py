@@ -5,11 +5,13 @@ from pathlib import Path
 
 import pytest
 
+from loom.personal_dev_capacity import CapacityManagerPersonalDevProjector
 from loom_service.config import LoomServiceSettings
 from loom_service.dev_instance_runtime import (
     build_dev_instance_provisioner_factory,
     build_personal_dev_preparation_runtime,
 )
+from loom_service.personal_dev_lifecycle import build_personal_dev_capacity_runtime
 
 
 class _Minio:
@@ -54,6 +56,125 @@ def test_controller_wiring_is_absent_by_default(tmp_path: Path) -> None:
     settings = _settings(tmp_path, dev_instances_enabled=False)
     assert build_dev_instance_provisioner_factory(settings, minio_client=_Minio()) is None
     assert build_personal_dev_preparation_runtime(settings, minio_client=_Minio()) is None
+    assert build_personal_dev_capacity_runtime(settings) is None
+
+
+def test_capacity_runtime_wires_global_projector_and_trusted_installer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    projector = object()
+    captured: dict[str, object] = {}
+
+    def credential(name: str, value: str) -> Path:
+        path = tmp_path / name
+        path.write_text(value)
+        path.chmod(0o600)
+        return path
+
+    agent_ca = credential("agent-ca.pem", "agent-ca")
+    agent_certificate = credential("agent-certificate.pem", "agent-certificate")
+    agent_private_key = credential("agent-private-key.pem", "agent-private-key")
+    lifecycle_ca = credential("lifecycle-ca.pem", "lifecycle-ca")
+    lifecycle_certificate = credential(
+        "lifecycle-certificate.pem", "lifecycle-certificate"
+    )
+    lifecycle_private_key = credential(
+        "lifecycle-private-key.pem", "lifecycle-private-key"
+    )
+
+    def projector_from_files(connection: object) -> object:
+        captured["connection"] = connection
+        return projector
+
+    monkeypatch.setattr(
+        CapacityManagerPersonalDevProjector,
+        "from_files",
+        projector_from_files,
+    )
+    monkeypatch.setattr(
+        "loom_service.personal_dev_lifecycle.build_reporter_tls_context",
+        lambda _files: object(),
+    )
+    settings = _settings(
+        tmp_path,
+        personal_dev_capacity_agent_image=(
+            "registry.example/loom-service@sha256:" + "1" * 64
+        ),
+        personal_dev_capacity_ca_file=agent_ca,
+        personal_dev_capacity_certificate_file=agent_certificate,
+        personal_dev_capacity_private_key_file=agent_private_key,
+        personal_dev_capacity_lifecycle_ca_file=lifecycle_ca,
+        personal_dev_capacity_lifecycle_certificate_file=lifecycle_certificate,
+        personal_dev_capacity_lifecycle_private_key_file=lifecycle_private_key,
+    )
+
+    runtime = build_personal_dev_capacity_runtime(settings)
+
+    assert runtime is not None
+    assert runtime.projector is projector
+    assert runtime.installer is not None
+    connection = captured["connection"]
+    assert connection.tls_files.ca_file == lifecycle_ca  # type: ignore[attr-defined]
+    assert runtime.installer._config.tls_files.ca_file == agent_ca  # type: ignore[attr-defined]
+
+
+def test_capacity_runtime_rejects_shared_lifecycle_and_agent_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def credential(name: str, value: str) -> Path:
+        path = tmp_path / name
+        path.write_text(value)
+        path.chmod(0o600)
+        return path
+
+    agent_ca = credential("shared-ca.pem", "ca")
+    shared_certificate = credential("shared-certificate.pem", "certificate")
+    shared_private_key = credential("shared-private-key.pem", "private-key")
+    monkeypatch.setattr(
+        "loom_service.personal_dev_lifecycle.build_reporter_tls_context",
+        lambda _files: object(),
+    )
+
+    with pytest.raises(RuntimeError, match="must use distinct identities"):
+        build_personal_dev_capacity_runtime(
+            _settings(
+                tmp_path,
+                personal_dev_capacity_agent_image=(
+                    "registry.example/loom-service@sha256:" + "1" * 64
+                ),
+                personal_dev_capacity_ca_file=agent_ca,
+                personal_dev_capacity_certificate_file=shared_certificate,
+                personal_dev_capacity_private_key_file=shared_private_key,
+                personal_dev_capacity_lifecycle_ca_file=agent_ca,
+                personal_dev_capacity_lifecycle_certificate_file=shared_certificate,
+                personal_dev_capacity_lifecycle_private_key_file=shared_private_key,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "image",
+    ["", "@sha256:" + "1" * 64],
+)
+def test_capacity_runtime_rejects_invalid_agent_image(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    image: str,
+) -> None:
+    def unexpected_projector(_connection: object) -> object:
+        raise AssertionError("credentials must not be opened before config validation")
+
+    monkeypatch.setattr(
+        CapacityManagerPersonalDevProjector,
+        "from_files",
+        unexpected_projector,
+    )
+    with pytest.raises(RuntimeError, match="configuration is invalid"):
+        build_personal_dev_capacity_runtime(
+            _settings(tmp_path, personal_dev_capacity_agent_image=image)
+        )
 
 
 def test_personal_runtime_uses_candidate_aware_executor_without_legacy_candidate(

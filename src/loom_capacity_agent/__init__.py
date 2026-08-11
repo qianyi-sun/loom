@@ -62,6 +62,8 @@ from loom_capacity_agent.store import (
     CapacityAgentStoreError,
     capture_demand_observation,
     capture_lifecycle_demand_observation,
+    read_agent_lifecycle_demand_observation,
+    read_agent_reporter_high_water,
 )
 
 __all__ = [
@@ -109,4 +111,6 @@ __all__ = [
     "build_lifecycle_demand_snapshot",
     "capture_demand_observation",
     "capture_lifecycle_demand_observation",
+    "read_agent_lifecycle_demand_observation",
+    "read_agent_reporter_high_water",
 ]

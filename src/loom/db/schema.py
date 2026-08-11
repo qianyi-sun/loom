@@ -561,6 +561,28 @@ class DevInstance(Base):
             "operation_epoch > 0",
             name="dev_instances_operation_epoch_check",
         ),
+        CheckConstraint(
+            "(capacity_configuration_epoch IS NULL "
+            "AND capacity_configuration_sha256 IS NULL "
+            "AND capacity_reporter_incarnation IS NULL "
+            "AND capacity_reporter_token_sha256 IS NULL "
+            "AND local_activation_sha256 IS NULL "
+            "AND protected_admission_sha256 IS NULL "
+            "AND capacity_agent_installation_sha256 IS NULL) OR ("
+            "capacity_configuration_epoch > 0 "
+            "AND capacity_configuration_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND capacity_reporter_incarnation IS NOT NULL "
+            "AND capacity_reporter_token_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND local_activation_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND protected_admission_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND capacity_agent_installation_sha256 ~ '^[0-9a-f]{64}$')",
+            name="dev_instances_capacity_projection_check",
+        ),
+        CheckConstraint(
+            "status <> 'ready' OR candidate_id IS NULL "
+            "OR capacity_configuration_epoch IS NOT NULL",
+            name="dev_instances_personal_readiness_capacity_check",
+        ),
         UniqueConstraint("subject_id", name="dev_instances_subject_id_uidx"),
         Index("dev_instances_owner_status_idx", "owner_user_id", "status"),
         Index("dev_instances_team_status_idx", "owner_team_id", "status"),
@@ -611,6 +633,28 @@ class DevInstance(Base):
         String(32),
         nullable=False,
         server_default=text("'claimed'"),
+    )
+    capacity_configuration_epoch: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+    )
+    capacity_configuration_sha256: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    capacity_reporter_incarnation: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        nullable=True,
+    )
+    capacity_reporter_token_sha256: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    local_activation_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    protected_admission_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    capacity_agent_installation_sha256: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
     )
     secret_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     keep_data: Mapped[bool] = mapped_column(
@@ -852,8 +896,47 @@ class DevLifecycleOperation(Base):
             "AND (readiness_evidence_sha256 IS NULL OR "
             "readiness_evidence_sha256 ~ '^[0-9a-f]{64}$') "
             "AND (activation_acknowledgement_sha256 IS NULL OR "
-            "activation_acknowledgement_sha256 ~ '^[0-9a-f]{64}$')",
+            "activation_acknowledgement_sha256 ~ '^[0-9a-f]{64}$') "
+            "AND (local_activation_sha256 IS NULL OR "
+            "local_activation_sha256 ~ '^[0-9a-f]{64}$') "
+            "AND (capacity_projection_request_sha256 IS NULL OR "
+            "capacity_projection_request_sha256 ~ '^[0-9a-f]{64}$') "
+            "AND (capacity_configuration_sha256 IS NULL OR "
+            "capacity_configuration_sha256 ~ '^[0-9a-f]{64}$') "
+            "AND (capacity_reporter_token_sha256 IS NULL OR "
+            "capacity_reporter_token_sha256 ~ '^[0-9a-f]{64}$') "
+            "AND (protected_admission_sha256 IS NULL OR "
+            "protected_admission_sha256 ~ '^[0-9a-f]{64}$') "
+            "AND (capacity_agent_installation_sha256 IS NULL OR "
+            "capacity_agent_installation_sha256 ~ '^[0-9a-f]{64}$')",
             name="dev_lifecycle_operations_digests_check",
+        ),
+        CheckConstraint(
+            "(capacity_expected_configuration_epoch IS NULL "
+            "AND capacity_projection_request_sha256 IS NULL "
+            "AND capacity_configuration_epoch IS NULL "
+            "AND capacity_configuration_sha256 IS NULL "
+            "AND capacity_reporter_incarnation IS NULL "
+            "AND capacity_reporter_token_sha256 IS NULL "
+            "AND protected_admission_sha256 IS NULL "
+            "AND capacity_agent_installation_sha256 IS NULL) OR ("
+            "capacity_expected_configuration_epoch > 0 "
+            "AND local_activation_sha256 IS NOT NULL "
+            "AND capacity_projection_request_sha256 IS NOT NULL "
+            "AND capacity_reporter_incarnation IS NOT NULL "
+            "AND capacity_reporter_token_sha256 IS NOT NULL "
+            "AND protected_admission_sha256 IS NOT NULL "
+            "AND capacity_agent_installation_sha256 IS NOT NULL "
+            "AND ((capacity_configuration_epoch IS NULL "
+            "AND capacity_configuration_sha256 IS NULL) OR ("
+            "capacity_configuration_epoch = capacity_expected_configuration_epoch + 1 "
+            "AND capacity_configuration_sha256 IS NOT NULL)))",
+            name="dev_lifecycle_operations_capacity_projection_check",
+        ),
+        CheckConstraint(
+            "state <> 'succeeded' OR kind = 'noop' "
+            "OR capacity_configuration_epoch IS NOT NULL",
+            name="dev_lifecycle_operations_capacity_completion_check",
         ),
         CheckConstraint(
             "min_slots >= 0 AND max_slots >= min_slots AND max_slots <= 8 "
@@ -960,6 +1043,36 @@ class DevLifecycleOperation(Base):
     deployment_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
     readiness_evidence_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     activation_acknowledgement_sha256: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    local_activation_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    capacity_expected_configuration_epoch: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+    )
+    capacity_projection_request_sha256: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    capacity_configuration_epoch: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+    )
+    capacity_configuration_sha256: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    capacity_reporter_incarnation: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        nullable=True,
+    )
+    capacity_reporter_token_sha256: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    protected_admission_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    capacity_agent_installation_sha256: Mapped[str | None] = mapped_column(
         String(64),
         nullable=True,
     )

@@ -334,6 +334,126 @@
     "default": "8",
     "required": false
   },
+  "personal_dev_capacity_agent_image": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
+  "personal_dev_capacity_agent_max_attempts": {
+    "annotation": "<class 'int'>",
+    "default": "10000",
+    "required": false
+  },
+  "personal_dev_capacity_agent_poll_interval_sec": {
+    "annotation": "<class 'float'>",
+    "default": "5.0",
+    "required": false
+  },
+  "personal_dev_capacity_ca_file": {
+    "annotation": "<class 'pathlib.Path'>",
+    "default": "PosixPath('/var/run/loom-personal-dev-capacity/ca.pem')",
+    "required": false
+  },
+  "personal_dev_capacity_certificate_file": {
+    "annotation": "<class 'pathlib.Path'>",
+    "default": "PosixPath('/var/run/loom-personal-dev-capacity/certificate.pem')",
+    "required": false
+  },
+  "personal_dev_capacity_database_namespace": {
+    "annotation": "<class 'str'>",
+    "default": "'loom-dev'",
+    "required": false
+  },
+  "personal_dev_capacity_database_pod_label": {
+    "annotation": "<class 'str'>",
+    "default": "'loom-dev-postgres'",
+    "required": false
+  },
+  "personal_dev_capacity_database_pod_label_key": {
+    "annotation": "<class 'str'>",
+    "default": "'app'",
+    "required": false
+  },
+  "personal_dev_capacity_database_port": {
+    "annotation": "<class 'int'>",
+    "default": "5432",
+    "required": false
+  },
+  "personal_dev_capacity_dns_namespace": {
+    "annotation": "<class 'str'>",
+    "default": "'kube-system'",
+    "required": false
+  },
+  "personal_dev_capacity_dns_pod_label": {
+    "annotation": "<class 'str'>",
+    "default": "'kube-dns'",
+    "required": false
+  },
+  "personal_dev_capacity_dns_pod_label_key": {
+    "annotation": "<class 'str'>",
+    "default": "'k8s-app'",
+    "required": false
+  },
+  "personal_dev_capacity_dns_port": {
+    "annotation": "<class 'int'>",
+    "default": "53",
+    "required": false
+  },
+  "personal_dev_capacity_lifecycle_bearer_token_file": {
+    "annotation": "<class 'pathlib.Path'>",
+    "default": "PosixPath('/var/run/loom-personal-dev-capacity/lifecycle-token')",
+    "required": false
+  },
+  "personal_dev_capacity_lifecycle_ca_file": {
+    "annotation": "<class 'pathlib.Path'>",
+    "default": "PosixPath('/var/run/loom-personal-dev-capacity/lifecycle-ca.pem')",
+    "required": false
+  },
+  "personal_dev_capacity_lifecycle_certificate_file": {
+    "annotation": "<class 'pathlib.Path'>",
+    "default": "PosixPath('/var/run/loom-personal-dev-capacity/lifecycle-certificate.pem')",
+    "required": false
+  },
+  "personal_dev_capacity_lifecycle_private_key_file": {
+    "annotation": "<class 'pathlib.Path'>",
+    "default": "PosixPath('/var/run/loom-personal-dev-capacity/lifecycle-private-key.pem')",
+    "required": false
+  },
+  "personal_dev_capacity_manager_namespace": {
+    "annotation": "<class 'str'>",
+    "default": "'loom-dev'",
+    "required": false
+  },
+  "personal_dev_capacity_manager_origin": {
+    "annotation": "<class 'str'>",
+    "default": "'https://loom-capacity-manager.loom-dev.svc.cluster.local:8443'",
+    "required": false
+  },
+  "personal_dev_capacity_manager_pod_label": {
+    "annotation": "<class 'str'>",
+    "default": "'loom-capacity-manager'",
+    "required": false
+  },
+  "personal_dev_capacity_manager_pod_label_key": {
+    "annotation": "<class 'str'>",
+    "default": "'app.kubernetes.io/name'",
+    "required": false
+  },
+  "personal_dev_capacity_manager_port": {
+    "annotation": "<class 'int'>",
+    "default": "8443",
+    "required": false
+  },
+  "personal_dev_capacity_pool_capabilities_json": {
+    "annotation": "<class 'str'>",
+    "default": "'[{\"capability_id\":\"oldlab-x86-none\",\"pool_id\":\"oldlab\",\"operating_system\":\"linux\",\"cpu_architecture\":\"x86_64\",\"gpu_vendor\":\"none\",\"network_policies\":[\"public\"]},{\"capability_id\":\"gb10-arm-none\",\"pool_id\":\"gb10\",\"operating_system\":\"linux\",\"cpu_architecture\":\"arm64\",\"gpu_vendor\":\"none\",\"network_policies\":[\"public\"]}]'",
+    "required": false
+  },
+  "personal_dev_capacity_private_key_file": {
+    "annotation": "<class 'pathlib.Path'>",
+    "default": "PosixPath('/var/run/loom-personal-dev-capacity/private-key.pem')",
+    "required": false
+  },
   "personal_dev_global_live_instance_limit": {
     "annotation": "<class 'int'>",
     "default": "16",

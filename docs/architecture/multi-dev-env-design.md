@@ -150,9 +150,29 @@ request receives `503` before lifecycle mutation while that authority is
 inert. Live enablement still requires measured RuntimeClass/PID and CNI egress
 evidence plus read-only scanner databases and scoped registry credentials.
 
-The independently installed environment agent, protected global-capacity
-projection, durable destroy/GC path, and final create-or-update cutover remain
-activation-blocking work.
+The following protected-capacity slice installs the environment agent from an
+operator-pinned fleet image, creates independently owned guard and agent roles,
+runs the separately versioned guard migrations, and gates lifecycle completion
+on an exact, durably checkpointed projection to the global manager. Migration
+login and owner membership exist only while one convergence is in
+flight; the login credential, membership, and database CREATE authority are
+sealed again before the agent is installed. Reporter tokens are dynamically
+registered by hash; lifecycle authority and mTLS files
+remain outside candidate containers. The lifecycle projection mTLS identity
+also remains outside every personal namespace; installed agents receive a
+separate reporter-only mTLS identity. Capacity-only changes retain deployment,
+candidate, reporter, and installation evidence while advancing only the global
+and local configuration generation. Replacement deployments rotate the
+reporter. Protected demand capture survives ordinary pod restarts by replaying
+the exact durable high-water observation, while an explicitly superseded
+configuration retires its old observation and continues the monotonic sequence.
+Reporter identity, token, and agent-database password are first written to a
+separate lifecycle-owned credential-seed Secret before protected database
+mutation. A retry therefore cannot rotate identity inside the same deployment
+generation after a partial Kubernetes failure. Readiness verifies that seed
+against the runtime Secret both before and after rollout completion.
+The manager and local claim guard remain zero-executable until #906 activates
+the fleet-wide cutover. Durable destroy/GC also remains activation-blocking.
 
 The following lifecycle-authority slice adds immutable subject UUID/lifecycle
 incarnation identity and a durable `dev_lifecycle_operations` row for every
@@ -171,9 +191,9 @@ projection while the replacement is prepared. Central activation cannot
 commit until separate readiness evidence and an environment acknowledgement
 are present. Finite configurable global, per-owner, and aggregate slot limits
 serialize only lifecycle admission, so unrelated environments can perform
-their external provisioning concurrently. The candidate-aware restricted
-builder, protected environment agent, and global-capacity projection remain
-activation-blocking work.
+their external provisioning concurrently. At that intermediate slice, the
+candidate-aware restricted builder, protected environment agent, and
+global-capacity projection remained activation-blocking work.
 
 The next reconciler slice captures only the hash of the credential verified by
 the apply request on the immutable operation-attempt row. A delayed worker
@@ -202,8 +222,14 @@ observation. Signed intent polling prevents disclosure to an unauthenticated
 caller. The independent agent re-observes the exact immutable generation,
 proves both candidate legacy capacity paths remain disabled, converges only
 the stable Services and Ingress, reads them back, and signs that local digest.
-Protected global-capacity projection and final fleet activation are still
-required before this path may enable live worker capacity.
+The lifecycle next converges the protected local capacity installation, records
+the complete outbound projection before network mutation, resolves concurrent
+manager epochs without changing any other request field, and records the exact
+manager acknowledgement only after the exact installed agent has successfully
+published through its restricted egress path. Only then does it mark a
+create/update ready or apply a capacity-only min/max change. This is readiness of the zero-executable
+control path; final fleet activation is still required before it may enable
+live worker capacity.
 
 When this authority is enabled, the earlier candidate-less `POST
 /dev-instances` mutation path is retired and the service no longer constructs

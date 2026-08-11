@@ -292,6 +292,7 @@ build_context = "."
 source_paths = [
   ".dockerignore",
   "README.md",
+  "capacity_guard_migrations/**",
   "deploy/Dockerfile.service",
   "migrations/**",
   "packages/**",

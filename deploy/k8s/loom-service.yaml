@@ -170,6 +170,54 @@ spec:
           value: '3221225472'
         - name: LOOM_SVC_PERSONAL_DEV_CANDIDATE_RETAINED_COUNT_LIMIT
           value: '8'
+        - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_AGENT_IMAGE
+          value: ''
+        - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_AGENT_MAX_ATTEMPTS
+          value: '10000'
+        - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_AGENT_POLL_INTERVAL_SEC
+          value: '5.0'
+        - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_CA_FILE
+          value: /var/run/loom-personal-dev-capacity/ca.pem
+        - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_CERTIFICATE_FILE
+          value: /var/run/loom-personal-dev-capacity/certificate.pem
+        - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_DATABASE_NAMESPACE
+          value: loom-dev
+        - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_DATABASE_POD_LABEL
+          value: loom-dev-postgres
+        - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_DATABASE_POD_LABEL_KEY
+          value: app
+        - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_DATABASE_PORT
+          value: '5432'
+        - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_DNS_NAMESPACE
+          value: kube-system
+        - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_DNS_POD_LABEL
+          value: kube-dns
+        - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_DNS_POD_LABEL_KEY
+          value: k8s-app
+        - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_DNS_PORT
+          value: '53'
+        - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_LIFECYCLE_BEARER_TOKEN_FILE
+          value: /var/run/loom-personal-dev-capacity/lifecycle-token
+        - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_LIFECYCLE_CA_FILE
+          value: /var/run/loom-personal-dev-capacity/lifecycle-ca.pem
+        - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_LIFECYCLE_CERTIFICATE_FILE
+          value: /var/run/loom-personal-dev-capacity/lifecycle-certificate.pem
+        - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_LIFECYCLE_PRIVATE_KEY_FILE
+          value: /var/run/loom-personal-dev-capacity/lifecycle-private-key.pem
+        - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_MANAGER_NAMESPACE
+          value: loom-dev
+        - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_MANAGER_ORIGIN
+          value: https://loom-capacity-manager.loom-dev.svc.cluster.local:8443
+        - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_MANAGER_POD_LABEL
+          value: loom-capacity-manager
+        - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_MANAGER_POD_LABEL_KEY
+          value: app.kubernetes.io/name
+        - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_MANAGER_PORT
+          value: '8443'
+        - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_POOL_CAPABILITIES_JSON
+          value: '[{"capability_id":"oldlab-x86-none","pool_id":"oldlab","operating_system":"linux","cpu_architecture":"x86_64","gpu_vendor":"none","network_policies":["public"]},{"capability_id":"gb10-arm-none","pool_id":"gb10","operating_system":"linux","cpu_architecture":"arm64","gpu_vendor":"none","network_policies":["public"]}]'
+        - name: LOOM_SVC_PERSONAL_DEV_CAPACITY_PRIVATE_KEY_FILE
+          value: /var/run/loom-personal-dev-capacity/private-key.pem
         - name: LOOM_SVC_PERSONAL_DEV_GLOBAL_LIVE_INSTANCE_LIMIT
           value: '16'
         - name: LOOM_SVC_PERSONAL_DEV_PER_OWNER_AGGREGATE_MAX_SLOTS

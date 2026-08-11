@@ -9,11 +9,18 @@ import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 from loom.dev_instance_provisioner import OwnerAccessSnapshot
 from loom.personal_dev_activation import PersonalDevActivationIntent
+from loom.personal_dev_capacity import (
+    PersonalDevCapacityInstaller,
+    PersonalDevCapacityProjectionConflictError,
+    PersonalDevCapacityProjector,
+    personal_dev_capacity_projection,
+)
 from loom.personal_dev_environment import PersonalDevReconciliationClaim
+from loom_capacity_manager.contracts import canonical_digest
 
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _DEPLOYED_COMPONENTS = ("control-plane", "llm-gateway", "service", "web")
@@ -24,6 +31,7 @@ _REQUIRED_ACTIVATION_PROTOCOLS = {
     "database-migrations": "expand-compatible-v1",
     "personal-dev-activation": "v1",
 }
+_T = TypeVar("_T")
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,10 +153,7 @@ def personal_dev_intent_readiness_sha256(
     observation: PersonalDevReadinessObservation,
 ) -> str:
     """Recompute central readiness from a secret-free activation intent."""
-    expected_images = {
-        component: intent.images[component]
-        for component in _DEPLOYED_COMPONENTS
-    }
+    expected_images = {component: intent.images[component] for component in _DEPLOYED_COMPONENTS}
     observed_images = dict(observation.deployed_images)
     if observed_images != expected_images:
         raise ValueError("deployed image does not match the activation intent")
@@ -191,6 +196,12 @@ class PersonalDevReconciliationAuthority(Protocol):
 
     async def complete_activation(self, **kwargs: object) -> object: ...
 
+    async def prepare_capacity_projection(self, **kwargs: object) -> object: ...
+
+    async def refresh_capacity_projection_epoch(self, **kwargs: object) -> object: ...
+
+    async def record_capacity_projection(self, **kwargs: object) -> object: ...
+
 
 class PersonalDevPreparationExecutor(Protocol):
     async def prepare(
@@ -214,6 +225,8 @@ class PersonalDevEnvironmentReconciler:
 
     authority: PersonalDevReconciliationAuthority
     executor: PersonalDevPreparationExecutor
+    capacity_installer: PersonalDevCapacityInstaller
+    capacity_projector: PersonalDevCapacityProjector
     access_loader: Callable[
         [PersonalDevReconciliationClaim],
         Awaitable[OwnerAccessSnapshot],
@@ -255,11 +268,101 @@ class PersonalDevEnvironmentReconciler:
             "reconciler_id": self.reconciler_id,
             "lease_epoch": attempt.lease_epoch,
         }
-        if (
-            claim.operation.state == "activating"
-            and claim.operation.checkpoint == "activation_acknowledged"
-        ):
+        if claim.operation.checkpoint == "capacity_projected":
             await self.authority.complete_activation(**lease, now=now)
+            return True
+        if claim.operation.checkpoint in {
+            "activation_acknowledged",
+            "capacity_projection_requested",
+            "capacity_projection_pending",
+        }:
+            installation = await self._with_heartbeats(
+                self.capacity_installer.converge(claim),
+                lease=lease,
+                started=started,
+                initial_now=now,
+            )
+            if claim.operation.checkpoint in {
+                "activation_acknowledged",
+                "capacity_projection_requested",
+            }:
+                expected_epoch = await self._with_heartbeats(
+                    self.capacity_projector.current_configuration_epoch(),
+                    lease=lease,
+                    started=started,
+                    initial_now=now,
+                )
+                request = personal_dev_capacity_projection(
+                    claim,
+                    installation,
+                    expected_configuration_epoch=expected_epoch,
+                )
+                callback_now = now + timedelta(seconds=loop.time() - started)
+                await self.authority.prepare_capacity_projection(
+                    **lease,
+                    now=callback_now,
+                    expected_configuration_epoch=expected_epoch,
+                    projection_request_sha256=canonical_digest(request),
+                    reporter_incarnation=installation.reporter_incarnation,
+                    reporter_token_sha256=installation.reporter_token_sha256,
+                    protected_admission_sha256=(installation.protected_admission_sha256),
+                    capacity_agent_installation_sha256=(
+                        installation.capacity_agent_installation_sha256
+                    ),
+                )
+                return True
+            prepared_epoch = claim.operation.capacity_expected_configuration_epoch
+            if prepared_epoch is None:
+                raise RuntimeError("prepared capacity projection has no global epoch")
+            request = personal_dev_capacity_projection(
+                claim,
+                installation,
+                expected_configuration_epoch=prepared_epoch,
+            )
+            try:
+                result = await self._with_heartbeats(
+                    self.capacity_projector.project(
+                        request,
+                        idempotency_key=claim.operation.idempotency_key,
+                    ),
+                    lease=lease,
+                    started=started,
+                    initial_now=now,
+                )
+            except PersonalDevCapacityProjectionConflictError as exc:
+                refreshed_epoch = await self._with_heartbeats(
+                    self.capacity_projector.current_configuration_epoch(),
+                    lease=lease,
+                    started=started,
+                    initial_now=now,
+                )
+                if refreshed_epoch <= request.expected_configuration_epoch:
+                    raise RuntimeError(
+                        "capacity manager rejected the request at its current epoch"
+                    ) from exc
+                refreshed = request.model_copy(
+                    update={"expected_configuration_epoch": refreshed_epoch}
+                )
+                callback_now = now + timedelta(seconds=loop.time() - started)
+                await self.authority.refresh_capacity_projection_epoch(
+                    **lease,
+                    now=callback_now,
+                    expected_configuration_epoch=refreshed_epoch,
+                    projection_request_sha256=canonical_digest(refreshed),
+                )
+                return True
+            await self._with_heartbeats(
+                self.capacity_installer.verify_publishing(claim, installation),
+                lease=lease,
+                started=started,
+                initial_now=now,
+            )
+            callback_now = now + timedelta(seconds=loop.time() - started)
+            await self.authority.record_capacity_projection(
+                **lease,
+                now=callback_now,
+                result=result,
+            )
             return True
         if claim.operation.state != "running" or claim.operation.checkpoint != "candidate_build":
             raise RuntimeError("personal-dev reconciler received an ineligible checkpoint")
@@ -334,6 +437,36 @@ class PersonalDevEnvironmentReconciler:
             readiness_evidence_sha256=readiness_evidence_sha256,
         )
         return True
+
+    async def _with_heartbeats(
+        self,
+        awaitable: Awaitable[_T],
+        *,
+        lease: Mapping[str, object],
+        started: float,
+        initial_now: datetime,
+    ) -> _T:
+        """Keep the attempt lease live around one bounded external operation."""
+
+        loop = asyncio.get_running_loop()
+        task = asyncio.ensure_future(awaitable)
+        heartbeat_interval = max(0.1, self.lease_seconds / 3)
+        try:
+            while True:
+                done, _pending = await asyncio.wait({task}, timeout=heartbeat_interval)
+                if done:
+                    return await task
+                heartbeat_now = initial_now + timedelta(seconds=loop.time() - started)
+                await self.authority.heartbeat_reconciliation(
+                    **lease,
+                    now=heartbeat_now,
+                    lease_seconds=self.lease_seconds,
+                )
+        except BaseException:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            raise
 
 
 __all__ = [

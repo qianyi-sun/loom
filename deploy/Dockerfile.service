@@ -21,7 +21,8 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 COPY packages ./packages
 COPY migrations ./migrations
-RUN chmod -R a+rX ./src ./packages ./migrations && \
+COPY capacity_guard_migrations ./capacity_guard_migrations
+RUN chmod -R a+rX ./src ./packages ./migrations ./capacity_guard_migrations && \
     pip install --no-cache-dir -e . && \
     pip install --no-cache-dir -e ./packages/loom-launcher
 ARG LOOM_BUILD_SHA=unknown

@@ -1,11 +1,25 @@
 from __future__ import annotations
 
+import base64
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import UUID
 
 import pytest
+import yaml
 
 from loom.personal_dev_candidate import PERSONAL_DEV_COMPONENTS, PersonalDevCandidateRecord
+from loom.personal_dev_capacity import (
+    PersonalDevCapacityInstallation,
+    PersonalDevCapacityProjectionResult,
+)
+from loom.personal_dev_capacity_runtime import (
+    CapacityDatabaseInstallation,
+    KubectlPersonalDevCapacityInstaller,
+    PersonalDevCapacityInstallationError,
+    PersonalDevCapacityRuntimeConfig,
+)
 from loom.personal_dev_environment import (
     PersonalDevAccessBinding,
     PersonalDevEnvironmentRecord,
@@ -19,6 +33,8 @@ from loom.personal_dev_reconciler import (
     personal_dev_readiness_sha256,
 )
 from loom.personal_dev_runtime import PersonalDevPreparationRuntime, PersonalDevRuntimeConfig
+from loom_capacity_agent.client import DemandReporterTLSFiles
+from loom_capacity_agent.contracts import AgentPoolCapabilityV1
 
 _NOW = datetime(2026, 8, 11, tzinfo=UTC)
 _OPERATION_ID = UUID("00000000-0000-0000-0000-000000000010")
@@ -78,7 +94,11 @@ def _candidate(*, status: str = "ready") -> PersonalDevCandidateRecord:
 
 
 def _claim(
-    *, state: str = "running", checkpoint: str = "candidate_build", status: str = "ready"
+    *,
+    state: str = "running",
+    checkpoint: str = "candidate_build",
+    status: str = "ready",
+    expected_capacity_epoch: int | None = None,
 ) -> PersonalDevReconciliationClaim:
     operation = PersonalDevLifecycleOperationRecord(
         id=_OPERATION_ID,
@@ -103,6 +123,23 @@ def _claim(
         checkpoint=checkpoint,
         readiness_evidence_sha256="3" * 64 if state == "activating" else None,
         activation_acknowledgement_sha256="4" * 64 if state == "activating" else None,
+        local_activation_sha256="5" * 64 if state == "activating" else None,
+        capacity_expected_configuration_epoch=expected_capacity_epoch,
+        capacity_projection_request_sha256=None,
+        capacity_reporter_incarnation=(
+            UUID("00000000-0000-0000-0000-000000000031")
+            if expected_capacity_epoch is not None
+            else None
+        ),
+        capacity_reporter_token_sha256=(
+            "9620a6302cf6bd606b15d74072424d9c70135ba56a686618dbba4dfa2d554476"
+            if expected_capacity_epoch is not None
+            else None
+        ),
+        protected_admission_sha256=("8" * 64 if expected_capacity_epoch is not None else None),
+        capacity_agent_installation_sha256=(
+            "9" * 64 if expected_capacity_epoch is not None else None
+        ),
         created_at=_NOW,
         updated_at=_NOW,
         started_at=_NOW,
@@ -182,6 +219,9 @@ class _Authority:
         self.begun: list[str] = []
         self.failed: list[str] = []
         self.completed = 0
+        self.prepared_capacity: list[dict[str, object]] = []
+        self.refreshed_capacity: list[int] = []
+        self.projected_capacity: list[PersonalDevCapacityProjectionResult] = []
 
     async def claim_next_reconciliation(self, **_kwargs):
         return self.claim
@@ -194,6 +234,66 @@ class _Authority:
 
     async def complete_activation(self, **_kwargs):
         self.completed += 1
+
+    async def prepare_capacity_projection(self, **kwargs):
+        self.prepared_capacity.append(kwargs)
+
+    async def refresh_capacity_projection_epoch(self, *, expected_configuration_epoch, **_kwargs):
+        self.refreshed_capacity.append(expected_configuration_epoch)
+
+    async def record_capacity_projection(self, *, result, **_kwargs):
+        self.projected_capacity.append(result)
+
+
+def _installation() -> PersonalDevCapacityInstallation:
+    return PersonalDevCapacityInstallation(
+        reporter_incarnation=UUID("00000000-0000-0000-0000-000000000031"),
+        reporter_token="reporter-token",
+        protected_admission_sha256="8" * 64,
+        capacity_agent_installation_sha256="9" * 64,
+        supported_pool_ids=("gb10", "oldlab"),
+        supported_architectures=("arm64", "x86_64"),
+    )
+
+
+class _Installer:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.publishing_checks = 0
+
+    async def converge(self, _claim):
+        self.calls += 1
+        return _installation()
+
+    async def verify_publishing(self, _claim, installation):
+        assert installation == _installation()
+        self.publishing_checks += 1
+
+
+class _Projector:
+    def __init__(self, *, conflict: bool = False) -> None:
+        self.conflict = conflict
+        self.requests = []
+
+    async def current_configuration_epoch(self) -> int:
+        return 11
+
+    async def project(self, request, *, idempotency_key):
+        from loom.personal_dev_capacity import PersonalDevCapacityProjectionConflictError
+
+        self.requests.append((request, idempotency_key))
+        if self.conflict:
+            raise PersonalDevCapacityProjectionConflictError("stale")
+        return PersonalDevCapacityProjectionResult(
+            configuration_epoch=request.expected_configuration_epoch + 1,
+            configuration_digest="a" * 64,
+            subject_id=request.subject_id,
+            subject_incarnation=request.subject_incarnation,
+            configuration_generation=request.configuration_generation,
+            deployment_generation=request.deployment_generation,
+            reporter_incarnation=request.demand_reporter_incarnation,
+            replayed=False,
+        )
 
 
 class _Executor:
@@ -221,6 +321,8 @@ async def test_reconciler_prepares_ready_candidate_but_waits_for_trusted_ack() -
     reconciled = await PersonalDevEnvironmentReconciler(
         authority=authority,  # type: ignore[arg-type]
         executor=executor,  # type: ignore[arg-type]
+        capacity_installer=_Installer(),
+        capacity_projector=_Projector(),
         access_loader=lambda _claim: _async_value(next(snapshots)),
         reconciler_id="reconciler-a",
         lease_seconds=60,
@@ -248,6 +350,8 @@ async def test_reconciler_fails_when_bound_credential_is_revoked_during_preparat
     await PersonalDevEnvironmentReconciler(
         authority=authority,  # type: ignore[arg-type]
         executor=executor,  # type: ignore[arg-type]
+        capacity_installer=_Installer(),
+        capacity_projector=_Projector(),
         access_loader=load_access,
         reconciler_id="reconciler-a",
         lease_seconds=60,
@@ -266,6 +370,8 @@ async def test_reconciler_terminalizes_failed_build_without_external_effects() -
     await PersonalDevEnvironmentReconciler(
         authority=authority,  # type: ignore[arg-type]
         executor=executor,  # type: ignore[arg-type]
+        capacity_installer=_Installer(),
+        capacity_projector=_Projector(),
         access_loader=lambda _claim: _async_value("owner-access-before"),
         reconciler_id="reconciler-a",
         lease_seconds=60,
@@ -275,20 +381,99 @@ async def test_reconciler_terminalizes_failed_build_without_external_effects() -
     assert authority.failed == ["candidate_build_failed"]
 
 
-async def test_reconciler_finalizes_only_an_acknowledged_activation_claim() -> None:
+async def test_reconciler_prepares_capacity_before_finalizing_acknowledged_activation() -> None:
     authority = _Authority(_claim(state="activating", checkpoint="activation_acknowledged"))
     executor = _Executor()
+    installer = _Installer()
+    projector = _Projector()
 
     await PersonalDevEnvironmentReconciler(
         authority=authority,  # type: ignore[arg-type]
         executor=executor,  # type: ignore[arg-type]
+        capacity_installer=installer,
+        capacity_projector=projector,
+        access_loader=lambda _claim: _async_value("owner-access-before"),
+        reconciler_id="reconciler-a",
+        lease_seconds=60,
+    ).reconcile_once(now=_NOW)
+
+    assert authority.completed == 0
+    assert installer.calls == 1
+    assert projector.requests == []
+    assert len(authority.prepared_capacity) == 1
+    assert authority.prepared_capacity[0]["expected_configuration_epoch"] == 11
+    assert executor.prepared == 0
+
+
+async def test_reconciler_projects_exact_prepared_capacity_then_waits_to_finalize() -> None:
+    authority = _Authority(
+        _claim(
+            state="activating",
+            checkpoint="capacity_projection_pending",
+            expected_capacity_epoch=11,
+        )
+    )
+    projector = _Projector()
+
+    installer = _Installer()
+    await PersonalDevEnvironmentReconciler(
+        authority=authority,  # type: ignore[arg-type]
+        executor=_Executor(),  # type: ignore[arg-type]
+        capacity_installer=installer,
+        capacity_projector=projector,
+        access_loader=lambda _claim: _async_value("owner-access-before"),
+        reconciler_id="reconciler-a",
+        lease_seconds=60,
+    ).reconcile_once(now=_NOW)
+
+    assert len(projector.requests) == 1
+    request, idempotency_key = projector.requests[0]
+    assert request.expected_configuration_epoch == 11
+    assert request.local_activation_sha256 == "5" * 64
+    assert idempotency_key == _claim().operation.idempotency_key
+    assert installer.publishing_checks == 1
+    assert len(authority.projected_capacity) == 1
+    assert authority.completed == 0
+
+
+async def test_reconciler_refreshes_global_epoch_after_projection_contention() -> None:
+    authority = _Authority(
+        _claim(
+            state="activating",
+            checkpoint="capacity_projection_pending",
+            expected_capacity_epoch=10,
+        )
+    )
+
+    await PersonalDevEnvironmentReconciler(
+        authority=authority,  # type: ignore[arg-type]
+        executor=_Executor(),  # type: ignore[arg-type]
+        capacity_installer=_Installer(),
+        capacity_projector=_Projector(conflict=True),
+        access_loader=lambda _claim: _async_value("owner-access-before"),
+        reconciler_id="reconciler-a",
+        lease_seconds=60,
+    ).reconcile_once(now=_NOW)
+
+    assert authority.refreshed_capacity == [11]
+    assert authority.projected_capacity == []
+    assert authority.completed == 0
+
+
+async def test_reconciler_finalizes_only_a_capacity_projected_activation() -> None:
+    authority = _Authority(_claim(state="activating", checkpoint="capacity_projected"))
+
+    await PersonalDevEnvironmentReconciler(
+        authority=authority,  # type: ignore[arg-type]
+        executor=_Executor(),  # type: ignore[arg-type]
+        capacity_installer=_Installer(),
+        capacity_projector=_Projector(),
         access_loader=lambda _claim: _async_value("owner-access-before"),
         reconciler_id="reconciler-a",
         lease_seconds=60,
     ).reconcile_once(now=_NOW)
 
     assert authority.completed == 1
-    assert executor.prepared == 0
 
 
 async def _async_value(value):
@@ -361,3 +546,296 @@ async def test_live_preparation_runtime_converges_fixtures_then_exact_generation
         access=owner_access,  # type: ignore[arg-type]
     )
     assert events[-1] == "access"
+
+
+@pytest.mark.asyncio
+async def test_capacity_installer_is_idempotent_and_rotates_only_for_replacement(
+    tmp_path: Path,
+) -> None:
+    class _Kubectl:
+        def __init__(self) -> None:
+            self.secrets: dict[str, dict[str, bytes]] = {}
+            self.documents: list[dict[str, object]] = []
+            self.applied: list[list[dict[str, object]]] = []
+            self.waited: list[tuple[str, str]] = []
+
+        async def read_secret_optional(self, namespace, name):
+            assert namespace == "loom-dev-alice"
+            assert name in {"loom-capacity-agent", "loom-capacity-agent-credentials"}
+            return self.secrets.get(name)
+
+        async def apply(self, manifest):
+            self.documents = [item for item in yaml.safe_load_all(manifest) if item]
+            self.applied.append(self.documents)
+            for document in self.documents:
+                if document["kind"] != "Secret":
+                    continue
+                self.secrets[document["metadata"]["name"]] = {  # type: ignore[index]
+                    key: base64.b64decode(value)
+                    for key, value in document["data"].items()  # type: ignore[index,union-attr]
+                }
+
+        async def wait_deployment(self, namespace, name):
+            self.waited.append((namespace, name))
+
+    class _Database:
+        def __init__(self) -> None:
+            self.configurations = []
+
+        async def converge(self, *, configuration, credentials, **_kwargs):
+            self.configurations.append(configuration)
+            return CapacityDatabaseInstallation(
+                protected_admission_sha256=(
+                    ("7" if configuration.candidate_digest == "a" * 64 else "8") * 64
+                ),
+                agent_database_url=(
+                    "postgresql+psycopg://agent:"
+                    + credentials.agent_password
+                    + "@loom-dev-postgres/loom_dev_alice"
+                ),
+            )
+
+    def credential(name: str, payload: str) -> Path:
+        path = tmp_path / name
+        path.write_text(payload)
+        path.chmod(0o600)
+        return path
+
+    kubectl = _Kubectl()
+    database = _Database()
+    runtime_config = PersonalDevCapacityRuntimeConfig(
+        manager_origin="https://loom-capacity-manager.loom-dev.svc.cluster.local:8443",
+        tls_files=DemandReporterTLSFiles(
+            ca_file=credential("ca.pem", "ca"),
+            certificate_file=credential("certificate.pem", "certificate"),
+            private_key_file=credential("private-key.pem", "private-key"),
+        ),
+        trusted_agent_image="registry.example/loom-service@sha256:" + "1" * 64,
+        pool_capabilities=(
+            AgentPoolCapabilityV1(
+                capability_id="oldlab-x86-none",
+                pool_id="oldlab",
+                operating_system="linux",
+                cpu_architecture="x86_64",
+                gpu_vendor="none",
+                network_policies=("public",),
+            ),
+            AgentPoolCapabilityV1(
+                capability_id="gb10-arm-none",
+                pool_id="gb10",
+                operating_system="linux",
+                cpu_architecture="arm64",
+                gpu_vendor="none",
+                network_policies=("public",),
+            ),
+        ),
+    )
+    installer = KubectlPersonalDevCapacityInstaller(
+        kubectl=kubectl,  # type: ignore[arg-type]
+        database=database,
+        config=runtime_config,
+    )
+    create = _claim()
+    first = await installer.converge(create)
+    replay = await installer.converge(create)
+    assert replay == first
+    assert database.configurations[-1].reporter_incarnation == first.reporter_incarnation
+    seed = kubectl.secrets["loom-capacity-agent-credentials"]
+    runtime_secret = kubectl.secrets["loom-capacity-agent"]
+    assert seed["reporter-token"] == runtime_secret["reporter-token"]
+    assert seed["operation-id"] == runtime_secret["operation-id"]
+    assert seed["agent-password"] in runtime_secret["database-url"]
+    assert kubectl.waited == []
+    await installer.verify_publishing(create, first)
+    assert kubectl.waited == [("loom-dev-alice", "loom-capacity-agent")]
+    changed_runtime = KubectlPersonalDevCapacityInstaller(
+        kubectl=kubectl,  # type: ignore[arg-type]
+        database=database,
+        config=replace(runtime_config, max_attempts=9_999),
+    )
+    changed_installation = await changed_runtime.converge(create)
+    assert (
+        changed_installation.capacity_agent_installation_sha256
+        != first.capacity_agent_installation_sha256
+    )
+
+    capacity_operation = replace(
+        create.operation,
+        id=UUID("00000000-0000-0000-0000-000000000041"),
+        idempotency_key=UUID("00000000-0000-0000-0000-000000000042"),
+        operation_epoch=2,
+        expected_operation_epoch=1,
+        kind="capacity",
+        checkpoint="capacity_projection_requested",
+    )
+    capacity = replace(create, operation=capacity_operation)
+    capacity_result = await installer.converge(capacity)
+    assert capacity_result.reporter_incarnation == first.reporter_incarnation
+    assert capacity_result.protected_admission_sha256 == first.protected_admission_sha256
+    assert (
+        capacity_result.capacity_agent_installation_sha256
+        == first.capacity_agent_installation_sha256
+    )
+    assert database.configurations[-1].configuration_generation == 2
+
+    replacement_operation = replace(
+        create.operation,
+        id=UUID("00000000-0000-0000-0000-000000000051"),
+        idempotency_key=UUID("00000000-0000-0000-0000-000000000052"),
+        operation_epoch=3,
+        expected_operation_epoch=2,
+        kind="update",
+        candidate_sha="b" * 64,
+        deployment_generation=2,
+    )
+    replacement = replace(create, operation=replacement_operation)
+    replacement_result = await installer.converge(replacement)
+    assert replacement_result.reporter_incarnation != first.reporter_incarnation
+    assert replacement_result.protected_admission_sha256 != first.protected_admission_sha256
+    assert database.configurations[-1].candidate_digest == "b" * 64
+    assert database.configurations[-1].deployment_generation == 2
+
+    deployment = kubectl.documents[1]
+    assert deployment["kind"] == "Deployment"
+    assert "registry.example/loom-service@sha256:" in str(deployment)
+    assert "registry.example/loom-service@sha256:" + "1" * 64 in str(deployment)
+    network_policy = kubectl.documents[2]
+    assert network_policy["kind"] == "NetworkPolicy"
+    egress = network_policy["spec"]["egress"]  # type: ignore[index]
+    assert egress == [
+        {
+            "to": [
+                {
+                    "namespaceSelector": {
+                        "matchLabels": {"kubernetes.io/metadata.name": "loom-dev"}
+                    },
+                    "podSelector": {
+                        "matchLabels": {
+                            "app.kubernetes.io/name": "loom-capacity-manager"
+                        }
+                    },
+                }
+            ],
+            "ports": [{"protocol": "TCP", "port": 8443}],
+        },
+        {
+            "to": [
+                {
+                    "namespaceSelector": {
+                        "matchLabels": {"kubernetes.io/metadata.name": "loom-dev"}
+                    },
+                    "podSelector": {
+                        "matchLabels": {"app": "loom-dev-postgres"}
+                    },
+                }
+            ],
+            "ports": [{"protocol": "TCP", "port": 5432}],
+        },
+        {
+            "to": [
+                {
+                    "namespaceSelector": {
+                        "matchLabels": {"kubernetes.io/metadata.name": "kube-system"}
+                    },
+                    "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}},
+                }
+            ],
+            "ports": [
+                {"protocol": "UDP", "port": 53},
+                {"protocol": "TCP", "port": 53},
+            ],
+        },
+    ]
+    assert kubectl.waited == [("loom-dev-alice", "loom-capacity-agent")]
+
+
+@pytest.mark.asyncio
+async def test_capacity_installer_persists_credentials_before_database_mutation(
+    tmp_path: Path,
+) -> None:
+    class _Kubectl:
+        def __init__(self) -> None:
+            self.secrets: dict[str, dict[str, bytes]] = {}
+            self.mutate_seed = False
+
+        async def read_secret_optional(self, namespace, name):
+            assert namespace == "loom-dev-alice"
+            return self.secrets.get(name)
+
+        async def apply(self, manifest):
+            for document in yaml.safe_load_all(manifest):
+                if document and document["kind"] == "Secret":
+                    name = document["metadata"]["name"]
+                    self.secrets[name] = {
+                        key: base64.b64decode(value)
+                        for key, value in document["data"].items()
+                    }
+                    if self.mutate_seed and name == "loom-capacity-agent-credentials":
+                        self.secrets[name]["unexpected"] = b"mutation"
+
+    class _FailingDatabase:
+        def __init__(self) -> None:
+            self.reporters = []
+
+        async def converge(self, *, configuration, **_kwargs):
+            self.reporters.append(configuration.reporter_incarnation)
+            raise RuntimeError("database failed after protected mutation")
+
+    def credential(name: str, payload: str) -> Path:
+        path = tmp_path / name
+        path.write_text(payload)
+        path.chmod(0o600)
+        return path
+
+    kubectl = _Kubectl()
+    database = _FailingDatabase()
+    installer = KubectlPersonalDevCapacityInstaller(
+        kubectl=kubectl,  # type: ignore[arg-type]
+        database=database,  # type: ignore[arg-type]
+        config=PersonalDevCapacityRuntimeConfig(
+            manager_origin="https://loom-capacity-manager.loom-dev.svc.cluster.local:8443",
+            tls_files=DemandReporterTLSFiles(
+                ca_file=credential("seed-ca.pem", "ca"),
+                certificate_file=credential("seed-certificate.pem", "certificate"),
+                private_key_file=credential("seed-private-key.pem", "private-key"),
+            ),
+            trusted_agent_image="registry.example/loom-service@sha256:" + "1" * 64,
+            pool_capabilities=(
+                AgentPoolCapabilityV1(
+                    capability_id="oldlab-x86-none",
+                    pool_id="oldlab",
+                    operating_system="linux",
+                    cpu_architecture="x86_64",
+                    gpu_vendor="none",
+                    network_policies=("public",),
+                ),
+                AgentPoolCapabilityV1(
+                    capability_id="gb10-arm-none",
+                    pool_id="gb10",
+                    operating_system="linux",
+                    cpu_architecture="arm64",
+                    gpu_vendor="none",
+                    network_policies=("public",),
+                ),
+            ),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="database failed"):
+        await installer.converge(_claim())
+    first_seed = dict(kubectl.secrets["loom-capacity-agent-credentials"])
+
+    with pytest.raises(RuntimeError, match="database failed"):
+        await installer.converge(_claim())
+
+    assert kubectl.secrets["loom-capacity-agent-credentials"] == first_seed
+    assert database.reporters[0] == database.reporters[1]
+    assert "loom-capacity-agent" not in kubectl.secrets
+
+    kubectl.mutate_seed = True
+    with pytest.raises(
+        PersonalDevCapacityInstallationError,
+        match="seed was not installed exactly",
+    ):
+        await installer.converge(_claim())
+    assert len(database.reporters) == 2

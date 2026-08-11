@@ -36,6 +36,7 @@ from loom.personal_dev_candidate_store import (
     PersonalDevBuildLeaseFencedError,
     SqlAlchemyPersonalDevCandidateStore,
 )
+from loom.personal_dev_capacity import PersonalDevCapacityProjectionResult
 from loom.personal_dev_environment import (
     PersonalDevAccessBinding,
     PersonalDevEnvironmentApplyRequest,
@@ -170,10 +171,7 @@ def _publication(
         "safety_evidence": {
             "bucket": candidate.object_bucket,
             "content_type": "application/vnd.loom.personal-dev-safety-evidence.v1+json",
-            "key": (
-                f"personal-dev/evidence/{candidate.candidate_sha}/"
-                "test/safety-evidence.json"
-            ),
+            "key": (f"personal-dev/evidence/{candidate.candidate_sha}/test/safety-evidence.json"),
             "sha256": "5" * 64,
             "size_bytes": 1024,
         },
@@ -1030,6 +1028,51 @@ async def test_personal_dev_environment_capacity_and_candidate_updates_are_atomi
                 lease_seconds=60,
             )
             assert completion_claim is not None
+            reporter_incarnation = uuid4()
+            await authority.prepare_capacity_projection(
+                operation_id=create.operation.id,
+                operation_epoch=1,
+                attempt_id=completion_claim.attempt.id,
+                reconciler_id="environment-test-reconciler",
+                lease_epoch=completion_claim.attempt.lease_epoch,
+                expected_configuration_epoch=1,
+                projection_request_sha256="6" * 64,
+                reporter_incarnation=reporter_incarnation,
+                reporter_token_sha256="7" * 64,
+                protected_admission_sha256="8" * 64,
+                capacity_agent_installation_sha256="9" * 64,
+                now=now + timedelta(seconds=70),
+            )
+            projection_claim = await authority.claim_next_reconciliation(
+                reconciler_id="environment-test-reconciler",
+                now=now + timedelta(seconds=70),
+                lease_seconds=60,
+            )
+            assert projection_claim is not None
+            await authority.record_capacity_projection(
+                operation_id=create.operation.id,
+                operation_epoch=1,
+                attempt_id=projection_claim.attempt.id,
+                reconciler_id="environment-test-reconciler",
+                lease_epoch=projection_claim.attempt.lease_epoch,
+                result=PersonalDevCapacityProjectionResult(
+                    configuration_epoch=2,
+                    configuration_digest="a" * 64,
+                    subject_id=create.operation.subject_id,
+                    subject_incarnation=create.operation.subject_incarnation,
+                    configuration_generation=1,
+                    deployment_generation=1,
+                    reporter_incarnation=reporter_incarnation,
+                    replayed=False,
+                ),
+                now=now + timedelta(seconds=70),
+            )
+            completion_claim = await authority.claim_next_reconciliation(
+                reconciler_id="environment-test-reconciler",
+                now=now + timedelta(seconds=70),
+                lease_seconds=60,
+            )
+            assert completion_claim is not None
             ready = await authority.complete_activation(
                 operation_id=create.operation.id,
                 operation_epoch=1,
@@ -1050,6 +1093,31 @@ async def test_personal_dev_environment_capacity_and_candidate_updates_are_atomi
             assert ready.environment.candidate_id == first.id
             assert ready_retry.acquired is False
 
+            with pytest.raises(DBAPIError):
+                await session.execute(
+                    text(
+                        "UPDATE dev_instances SET "
+                        "capacity_configuration_epoch = NULL, "
+                        "capacity_configuration_sha256 = NULL, "
+                        "capacity_reporter_incarnation = NULL, "
+                        "capacity_reporter_token_sha256 = NULL, "
+                        "local_activation_sha256 = NULL, "
+                        "protected_admission_sha256 = NULL, "
+                        "capacity_agent_installation_sha256 = NULL "
+                        "WHERE name = 'bob'"
+                    )
+                )
+            await session.rollback()
+            with pytest.raises(DBAPIError):
+                await session.execute(
+                    text(
+                        "UPDATE dev_lifecycle_operations "
+                        "SET local_activation_sha256 = NULL WHERE id = :operation_id"
+                    ),
+                    {"operation_id": create.operation.id},
+                )
+            await session.rollback()
+
         async with sessions() as session:
             authority = SqlAlchemyPersonalDevEnvironmentAuthority(session)
             capacity = await authority.apply(
@@ -1068,11 +1136,86 @@ async def test_personal_dev_environment_capacity_and_candidate_updates_are_atomi
                 now=now,
             )
             assert capacity.operation.kind == "capacity"
-            assert capacity.operation.state == "succeeded"
+            assert capacity.operation.state == "running"
             assert capacity.environment.operation_epoch == 2
             assert capacity.environment.deployment_generation == 1
-            assert (capacity.environment.min_slots, capacity.environment.max_slots) == (1, 4)
+            assert (capacity.environment.min_slots, capacity.environment.max_slots) == (0, 2)
             assert capacity.requires_build_binding is False
+
+            capacity_claim = await authority.claim_next_reconciliation(
+                reconciler_id="environment-test-reconciler",
+                now=now + timedelta(seconds=80),
+                lease_seconds=60,
+            )
+            assert capacity_claim is not None
+            await authority.prepare_capacity_projection(
+                operation_id=capacity.operation.id,
+                operation_epoch=2,
+                attempt_id=capacity_claim.attempt.id,
+                reconciler_id="environment-test-reconciler",
+                lease_epoch=capacity_claim.attempt.lease_epoch,
+                expected_configuration_epoch=2,
+                projection_request_sha256="b" * 64,
+                reporter_incarnation=reporter_incarnation,
+                reporter_token_sha256="7" * 64,
+                protected_admission_sha256="8" * 64,
+                capacity_agent_installation_sha256="9" * 64,
+                now=now + timedelta(seconds=80),
+            )
+            capacity_projection_claim = await authority.claim_next_reconciliation(
+                reconciler_id="environment-test-reconciler",
+                now=now + timedelta(seconds=80),
+                lease_seconds=60,
+            )
+            assert capacity_projection_claim is not None
+            capacity = await authority.record_capacity_projection(
+                operation_id=capacity.operation.id,
+                operation_epoch=2,
+                attempt_id=capacity_projection_claim.attempt.id,
+                reconciler_id="environment-test-reconciler",
+                lease_epoch=capacity_projection_claim.attempt.lease_epoch,
+                result=PersonalDevCapacityProjectionResult(
+                    configuration_epoch=3,
+                    configuration_digest="c" * 64,
+                    subject_id=capacity.operation.subject_id,
+                    subject_incarnation=capacity.operation.subject_incarnation,
+                    configuration_generation=2,
+                    deployment_generation=1,
+                    reporter_incarnation=reporter_incarnation,
+                    replayed=False,
+                ),
+                now=now + timedelta(seconds=80),
+            )
+            assert capacity.operation.state == "succeeded"
+            assert (capacity.environment.min_slots, capacity.environment.max_slots) == (1, 4)
+            with pytest.raises(PersonalDevEnvironmentOperationFencedError):
+                await authority.record_capacity_projection(
+                    operation_id=capacity.operation.id,
+                    operation_epoch=2,
+                    attempt_id=capacity_projection_claim.attempt.id,
+                    reconciler_id="environment-test-reconciler",
+                    lease_epoch=capacity_projection_claim.attempt.lease_epoch,
+                    result=PersonalDevCapacityProjectionResult(
+                        configuration_epoch=3,
+                        configuration_digest="c" * 64,
+                        subject_id=uuid4(),
+                        subject_incarnation=capacity.operation.subject_incarnation,
+                        configuration_generation=2,
+                        deployment_generation=1,
+                        reporter_incarnation=reporter_incarnation,
+                        replayed=True,
+                    ),
+                    now=now + timedelta(seconds=80),
+                )
+            with pytest.raises(PersonalDevEnvironmentOperationFencedError):
+                await authority.complete_activation(
+                    operation_id=capacity.operation.id,
+                    operation_epoch=2,
+                    attempt_id=capacity_projection_claim.attempt.id,
+                    reconciler_id="environment-test-reconciler",
+                    lease_epoch=capacity_projection_claim.attempt.lease_epoch,
+                    now=now + timedelta(seconds=80),
+                )
 
             noop_request = PersonalDevEnvironmentApplyRequest(
                 name="bob",

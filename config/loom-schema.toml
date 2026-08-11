@@ -406,6 +406,136 @@ used_by     = ["loom-service"]
 python_type = "int"
 default     = 300
 
+[service_config.personal_dev_capacity_manager_origin]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "https://loom-capacity-manager.loom-dev.svc.cluster.local:8443"
+description = "Exact HTTPS origin of the one global capacity manager used by lifecycle projection and independently installed personal demand agents."
+
+[service_config.personal_dev_capacity_lifecycle_bearer_token_file]
+used_by     = ["loom-service"]
+python_type = "Path"
+default     = "/var/run/loom-personal-dev-capacity/lifecycle-token"
+description = "Owner-only lifecycle projection bearer credential file; the credential is never copied into a personal namespace."
+
+[service_config.personal_dev_capacity_lifecycle_ca_file]
+used_by     = ["loom-service"]
+python_type = "Path"
+default     = "/var/run/loom-personal-dev-capacity/lifecycle-ca.pem"
+description = "Owner-only CA for the privileged lifecycle projection client; this file is never copied into a personal namespace."
+
+[service_config.personal_dev_capacity_lifecycle_certificate_file]
+used_by     = ["loom-service"]
+python_type = "Path"
+default     = "/var/run/loom-personal-dev-capacity/lifecycle-certificate.pem"
+description = "Owner-only certificate for the privileged lifecycle projection client; this file is never copied into a personal namespace."
+
+[service_config.personal_dev_capacity_lifecycle_private_key_file]
+used_by     = ["loom-service"]
+python_type = "Path"
+default     = "/var/run/loom-personal-dev-capacity/lifecycle-private-key.pem"
+description = "Owner-only private key for the privileged lifecycle projection client; this file is never copied into a personal namespace."
+
+[service_config.personal_dev_capacity_ca_file]
+used_by     = ["loom-service"]
+python_type = "Path"
+default     = "/var/run/loom-personal-dev-capacity/ca.pem"
+description = "Owner-only CA copied only into trusted reporter-agent Secrets, never candidate workloads."
+
+[service_config.personal_dev_capacity_certificate_file]
+used_by     = ["loom-service"]
+python_type = "Path"
+default     = "/var/run/loom-personal-dev-capacity/certificate.pem"
+description = "Owner-only reporter-agent certificate distinct from lifecycle projection authority."
+
+[service_config.personal_dev_capacity_private_key_file]
+used_by     = ["loom-service"]
+python_type = "Path"
+default     = "/var/run/loom-personal-dev-capacity/private-key.pem"
+description = "Owner-only reporter-agent private key distinct from lifecycle projection authority."
+
+[service_config.personal_dev_capacity_agent_image]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = ""
+description = "Immutable digest-qualified trusted fleet image used for the candidate-independent personal capacity agent."
+
+[service_config.personal_dev_capacity_pool_capabilities_json]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = '[{"capability_id":"oldlab-x86-none","pool_id":"oldlab","operating_system":"linux","cpu_architecture":"x86_64","gpu_vendor":"none","network_policies":["public"]},{"capability_id":"gb10-arm-none","pool_id":"gb10","operating_system":"linux","cpu_architecture":"arm64","gpu_vendor":"none","network_policies":["public"]}]'
+description = "Operator-owned physical pool capability offers for arch-specific and arch-neutral task matching. This contract contains no pool weights."
+
+[service_config.personal_dev_capacity_agent_poll_interval_sec]
+used_by     = ["loom-service"]
+python_type = "float"
+default     = 5.0
+
+[service_config.personal_dev_capacity_agent_max_attempts]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 10000
+
+[service_config.personal_dev_capacity_manager_namespace]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "loom-dev"
+
+[service_config.personal_dev_capacity_manager_pod_label]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "loom-capacity-manager"
+
+[service_config.personal_dev_capacity_manager_pod_label_key]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "app.kubernetes.io/name"
+
+[service_config.personal_dev_capacity_manager_port]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 8443
+
+[service_config.personal_dev_capacity_database_namespace]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "loom-dev"
+
+[service_config.personal_dev_capacity_database_pod_label_key]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "app"
+
+[service_config.personal_dev_capacity_database_pod_label]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "loom-dev-postgres"
+
+[service_config.personal_dev_capacity_database_port]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 5432
+
+[service_config.personal_dev_capacity_dns_namespace]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "kube-system"
+
+[service_config.personal_dev_capacity_dns_pod_label_key]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "k8s-app"
+
+[service_config.personal_dev_capacity_dns_pod_label]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "kube-dns"
+
+[service_config.personal_dev_capacity_dns_port]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 53
+
 [service_config.bind_host]
 used_by     = ["control-plane", "llm-gateway", "loom-service"]
 python_type = "str"
