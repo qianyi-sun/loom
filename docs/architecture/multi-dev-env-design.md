@@ -126,8 +126,33 @@ subject/incarnation, and expected operation epoch may create the first queued
 build attempt. Build attempts carry those bindings, use monotonic lease epochs,
 and reject stale start, heartbeat, and completion calls. This keeps candidate
 publication reusable while preventing an upload or stale build from mutating
-an environment. The restricted builder runtime, safety attestation, image
-publication, and create-or-update cutover remain activation-blocking work.
+an environment.
+
+The following restricted-builder slice adds a lease-fenced coordinator with
+finite global and per-owner concurrency, retained-source quotas, and an
+attempt/lease-unique Kubernetes namespace. Two native jobs build the complete
+amd64 and arm64 image set with a digest-pinned rootless BuildKit wrapper. The
+jobs have no service-account token, registry credential, Docker socket, host
+namespace, or general object-store credential; an S3 POST policy bounds each
+exact output object as well as its key, metadata, lifetime, and size.
+
+The trusted exporter reacquires and verifies both bundles without extracting
+candidate paths, validates every OCI descriptor/blob/config/platform digest,
+scans all images before any registry push, preserves each native manifest
+digest, independently verifies the joined multi-architecture indices, and
+stores each bounded scan report plus the aggregate safety record under
+attempt/lease-unique content-addressed object keys referenced by publication.
+The shipped builder authority is inert by default. Startup verifies the exact
+builder image, RuntimeClass name, scanner binary and offline database identity,
+finding-policy digest, registry tools, publisher identity, protocol map, and
+trusted launcher-profile digest before the background loop exists. An apply
+request receives `503` before lifecycle mutation while that authority is
+inert. Live enablement still requires measured RuntimeClass/PID and CNI egress
+evidence plus read-only scanner databases and scoped registry credentials.
+
+The independently installed environment agent, protected global-capacity
+projection, durable destroy/GC path, and final create-or-update cutover remain
+activation-blocking work.
 
 The following lifecycle-authority slice adds immutable subject UUID/lifecycle
 incarnation identity and a durable `dev_lifecycle_operations` row for every

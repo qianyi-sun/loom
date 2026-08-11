@@ -234,6 +234,106 @@
     "default": "'personal-dev-agent-v1'",
     "required": false
   },
+  "personal_dev_builder_docker_path": {
+    "annotation": "<class 'pathlib.Path'>",
+    "default": "PosixPath('/usr/bin/docker')",
+    "required": false
+  },
+  "personal_dev_builder_enabled": {
+    "annotation": "<class 'bool'>",
+    "default": "False",
+    "required": false
+  },
+  "personal_dev_builder_global_concurrency": {
+    "annotation": "<class 'int'>",
+    "default": "4",
+    "required": false
+  },
+  "personal_dev_builder_image": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
+  "personal_dev_builder_lease_sec": {
+    "annotation": "<class 'int'>",
+    "default": "4200",
+    "required": false
+  },
+  "personal_dev_builder_max_artifact_bytes": {
+    "annotation": "<class 'int'>",
+    "default": "6442450944",
+    "required": false
+  },
+  "personal_dev_builder_max_image_archive_bytes": {
+    "annotation": "<class 'int'>",
+    "default": "2147483648",
+    "required": false
+  },
+  "personal_dev_builder_per_owner_concurrency": {
+    "annotation": "<class 'int'>",
+    "default": "1",
+    "required": false
+  },
+  "personal_dev_builder_poll_interval_sec": {
+    "annotation": "<class 'float'>",
+    "default": "2.0",
+    "required": false
+  },
+  "personal_dev_builder_publisher_identity": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
+  "personal_dev_builder_registry_auth_file": {
+    "annotation": "<class 'pathlib.Path'>",
+    "default": "PosixPath('/var/run/loom-personal-dev-registry/config.json')",
+    "required": false
+  },
+  "personal_dev_builder_registry_prefix": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
+  "personal_dev_builder_runtime_class_name": {
+    "annotation": "<class 'str'>",
+    "default": "'loom-personal-dev-builder'",
+    "required": false
+  },
+  "personal_dev_builder_scanner_cache_dir": {
+    "annotation": "<class 'pathlib.Path'>",
+    "default": "PosixPath('/var/lib/loom-personal-dev-scanner')",
+    "required": false
+  },
+  "personal_dev_builder_scanner_identity": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
+  "personal_dev_builder_scanner_path": {
+    "annotation": "<class 'pathlib.Path'>",
+    "default": "PosixPath('/usr/local/bin/trivy')",
+    "required": false
+  },
+  "personal_dev_builder_scanner_policy_sha256": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
+  "personal_dev_builder_skopeo_path": {
+    "annotation": "<class 'pathlib.Path'>",
+    "default": "PosixPath('/usr/bin/skopeo')",
+    "required": false
+  },
+  "personal_dev_candidate_retained_bytes_limit": {
+    "annotation": "<class 'int'>",
+    "default": "3221225472",
+    "required": false
+  },
+  "personal_dev_candidate_retained_count_limit": {
+    "annotation": "<class 'int'>",
+    "default": "8",
+    "required": false
+  },
   "personal_dev_global_live_instance_limit": {
     "annotation": "<class 'int'>",
     "default": "16",
@@ -254,6 +354,11 @@
     "default": "2",
     "required": false
   },
+  "personal_dev_protocol_versions_json": {
+    "annotation": "<class 'str'>",
+    "default": "'{}'",
+    "required": false
+  },
   "personal_dev_reconciler_lease_sec": {
     "annotation": "<class 'int'>",
     "default": "1800",
@@ -267,6 +372,11 @@
   "personal_dev_source_max_archive_bytes": {
     "annotation": "<class 'int'>",
     "default": "402653184",
+    "required": false
+  },
+  "personal_dev_trusted_launcher_profile_sha256": {
+    "annotation": "<class 'str'>",
+    "default": "''",
     "required": false
   },
   "public_base_url": {

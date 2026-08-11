@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import sys
@@ -25,7 +26,10 @@ from loom.personal_dev_candidate import (
     PERSONAL_DEV_COMPONENTS,
     PERSONAL_DEV_PLATFORMS,
     CandidateRegistration,
+    PersonalDevCandidateLimits,
+    PersonalDevCandidateQuotaError,
     PersonalDevCandidateRecord,
+    personal_dev_image_set_manifest_digest,
 )
 from loom.personal_dev_candidate_store import (
     PersonalDevBuildLeaseFencedError,
@@ -134,6 +138,16 @@ def _publication(
     candidate: PersonalDevCandidateRecord,
     now: datetime,
 ) -> dict[str, object]:
+    images: dict[str, object] = {
+        component: {
+            "index": f"registry.example/loom-{component}@sha256:" + "7" * 64,
+            "platforms": {
+                platform: "sha256:" + ("8" if platform.endswith("amd64") else "9") * 64
+                for platform in PERSONAL_DEV_PLATFORMS
+            },
+        }
+        for component in PERSONAL_DEV_COMPONENTS
+    }
     return {
         "schema_version": 1,
         "attestation_scope": "personal-dev-only",
@@ -141,17 +155,8 @@ def _publication(
         "source_sha256": candidate.source_sha256,
         "archive_sha256": candidate.archive_sha256,
         "build_contract_sha256": candidate.build_contract_sha256,
-        "image_set_manifest_digest": "sha256:" + "6" * 64,
-        "images": {
-            component: {
-                "index": f"registry.example/loom-{component}@sha256:" + "7" * 64,
-                "platforms": {
-                    platform: "sha256:" + ("8" if platform.endswith("amd64") else "9") * 64
-                    for platform in PERSONAL_DEV_PLATFORMS
-                },
-            }
-            for component in PERSONAL_DEV_COMPONENTS
-        },
+        "image_set_manifest_digest": personal_dev_image_set_manifest_digest(images),
+        "images": images,
         "supported_pools": ["gb10", "oldlab"],
         "supported_architectures": list(PERSONAL_DEV_PLATFORMS),
         "protocol_versions": {
@@ -160,6 +165,16 @@ def _publication(
             "control-plane-worker": "v1",
         },
         "trusted_launcher_profile_sha256": "4" * 64,
+        "safety_evidence": {
+            "bucket": candidate.object_bucket,
+            "content_type": "application/vnd.loom.personal-dev-safety-evidence.v1+json",
+            "key": (
+                f"personal-dev/evidence/{candidate.candidate_sha}/"
+                "test/safety-evidence.json"
+            ),
+            "sha256": "5" * 64,
+            "size_bytes": 1024,
+        },
         "safety_evidence_sha256": "5" * 64,
         "publisher_identity": "system:serviceaccount:loom-dev:candidate-builder",
         "published_at": now.astimezone(UTC).isoformat().replace("+00:00", "Z"),
@@ -366,6 +381,171 @@ async def test_personal_dev_candidate_registration_and_build_lease(
             assert retried.created is True
             assert retried.build_attempt is not None
             assert retried.build_attempt.attempt_sequence == 1
+    finally:
+        await engine.dispose()
+
+
+async def test_personal_dev_candidate_registration_enforces_owner_retention_quota(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    owner_id = uuid4()
+    team_id = uuid4()
+    now = datetime.now(UTC)
+
+    def candidate(digit: str) -> PersonalDevCandidateRecord:
+        return PersonalDevCandidateRecord(
+            id=uuid4(),
+            owner_user_id=owner_id,
+            owner_team_id=team_id,
+            candidate_sha=digit * 64,
+            source_sha256=digit * 63 + "a",
+            archive_sha256=digit * 63 + "b",
+            build_contract_sha256="f" * 64,
+            source_commit="e" * 40,
+            dirty=True,
+            manifest_json={"schema_version": 1},
+            object_bucket="artifacts",
+            object_key=f"personal-dev/sources/{team_id}/{owner_id}/{digit}.tar",
+            archive_size_bytes=10240,
+            status="uploaded",
+            created_at=now,
+            updated_at=now,
+        )
+
+    try:
+        async with sessions() as session:
+            session.add(Team(id=team_id, name=f"quota-{team_id}"))
+            session.add(
+                User(
+                    id=owner_id,
+                    email=f"{owner_id}@example.test",
+                    username=f"user-{owner_id}",
+                    username_normalized=f"user-{owner_id}",
+                    status="active",
+                )
+            )
+            await session.commit()
+
+        first_request = candidate("2")
+        async with sessions() as session:
+            store = SqlAlchemyPersonalDevCandidateStore(
+                session,
+                limits=PersonalDevCandidateLimits(
+                    per_owner_retained_candidates=1,
+                    per_owner_retained_archive_bytes=10240,
+                ),
+            )
+            first = await store.register(first_request)
+            assert first.created is True
+            replay = await store.register(replace(first_request, id=uuid4()))
+            assert replay.candidate.id == first.candidate.id
+            with pytest.raises(ValueError, match="immutable binding"):
+                await store.register(
+                    replace(
+                        first_request,
+                        id=uuid4(),
+                        candidate_sha="4" * 64,
+                    )
+                )
+            with pytest.raises(PersonalDevCandidateQuotaError, match="count"):
+                await store.register(candidate("3"))
+    finally:
+        await engine.dispose()
+
+
+async def test_personal_dev_build_claim_global_limit_is_concurrency_safe(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    limits = PersonalDevCandidateLimits(
+        global_active_builds=1,
+        per_owner_active_builds=1,
+    )
+
+    async with sessions() as session:
+        seeded: list[PersonalDevCandidateRecord] = []
+        for digit in ("6", "7"):
+            owner_id = uuid4()
+            team_id = uuid4()
+            session.add(Team(id=team_id, name=f"claim-quota-{team_id}"))
+            session.add(
+                User(
+                    id=owner_id,
+                    email=f"{owner_id}@example.test",
+                    username=f"user-{owner_id}",
+                    username_normalized=f"user-{owner_id}",
+                    status="active",
+                )
+            )
+            seeded.append(
+                PersonalDevCandidateRecord(
+                    id=uuid4(),
+                    owner_user_id=owner_id,
+                    owner_team_id=team_id,
+                    candidate_sha=digit * 64,
+                    source_sha256=digit * 63 + "a",
+                    archive_sha256=digit * 63 + "b",
+                    build_contract_sha256="f" * 64,
+                    source_commit="e" * 40,
+                    dirty=True,
+                    manifest_json={"schema_version": 1},
+                    object_bucket="artifacts",
+                    object_key=f"personal-dev/sources/{team_id}/{owner_id}/{digit}.tar",
+                    archive_size_bytes=10240,
+                    status="uploaded",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        await session.commit()
+        store = SqlAlchemyPersonalDevCandidateStore(session, limits=limits)
+        for candidate in seeded:
+            registered = await store.register(candidate)
+            await store.enqueue_build(
+                candidate_id=registered.candidate.id,
+                subject_id=uuid4(),
+                subject_incarnation=uuid4(),
+                operation_id=uuid4(),
+                operation_epoch=1,
+                now=now,
+            )
+
+    async def claim(builder_id: str) -> CandidateRegistration | None:
+        async with sessions() as session:
+            return await SqlAlchemyPersonalDevCandidateStore(
+                session,
+                limits=limits,
+            ).claim_next_build(
+                builder_id=builder_id,
+                now=now,
+                lease_seconds=60,
+            )
+
+    try:
+        first, second = await asyncio.gather(claim("quota-builder-a"), claim("quota-builder-b"))
+        claimed = [item for item in (first, second) if item is not None]
+        assert len(claimed) == 1
+        registration = claimed[0]
+        assert registration.build_attempt is not None
+        async with sessions() as session:
+            store = SqlAlchemyPersonalDevCandidateStore(session, limits=limits)
+            running = await store.start_build(
+                attempt_id=registration.build_attempt.id,
+                builder_id=str(registration.build_attempt.claimed_by),
+                lease_epoch=registration.build_attempt.lease_epoch,
+                now=now,
+            )
+            await store.finish_build(
+                attempt_id=running.id,
+                builder_id=str(running.claimed_by),
+                lease_epoch=running.lease_epoch,
+                now=now,
+                failure_reason="test_cleanup",
+            )
     finally:
         await engine.dispose()
 

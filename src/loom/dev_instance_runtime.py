@@ -94,11 +94,21 @@ class AsyncCommandRunner:
 class KubectlClient:
     executable: str
     context: str = ""
+    field_manager: str = "loom-dev-instance"
+    job_wait_timeout_seconds: int = 600
     runner: AsyncCommandRunner | Any = None
 
     def __post_init__(self) -> None:
         if not self.executable:
             raise ValueError("kubectl executable is required")
+        if (
+            not self.field_manager
+            or len(self.field_manager) > 128
+            or any(character.isspace() for character in self.field_manager)
+            or type(self.job_wait_timeout_seconds) is not int
+            or self.job_wait_timeout_seconds <= 0
+        ):
+            raise ValueError("kubectl controller settings are invalid")
         if self.runner is None:
             self.runner = AsyncCommandRunner()
 
@@ -111,7 +121,14 @@ class KubectlClient:
 
     async def apply(self, manifest: str, *, timeout_seconds: float = 120.0) -> None:
         await self.runner.run(
-            self._argv("apply", "--server-side", "--field-manager", "loom-dev-instance", "-f", "-"),
+            self._argv(
+                "apply",
+                "--server-side",
+                "--field-manager",
+                self.field_manager,
+                "-f",
+                "-",
+            ),
             stdin=manifest,
             timeout_seconds=timeout_seconds,
         )
@@ -123,10 +140,10 @@ class KubectlClient:
                 "--namespace",
                 namespace,
                 "--for=condition=complete",
-                "--timeout=600s",
+                f"--timeout={self.job_wait_timeout_seconds}s",
                 f"job/{name}",
             ),
-            timeout_seconds=630,
+            timeout_seconds=self.job_wait_timeout_seconds + 30,
         )
 
     async def wait_deployment(self, namespace: str, name: str) -> None:

@@ -1,0 +1,27 @@
+# Trusted, credential-minimal BuildKit wrapper for personal development source.
+#
+# The base is the multi-architecture v0.32.2 rootless index. Updating it is a
+# reviewed trusted-fleet change; candidate source cannot select this image.
+FROM moby/buildkit:rootless@sha256:504731e577c20559c00f968f33219f30115e70be29ab96728d1d06e963fc494b
+
+USER root
+RUN apk add --no-cache ca-certificates python3 \
+    && test -x /usr/bin/buildctl-daemonless.sh
+
+WORKDIR /opt/loom-personal-dev-builder
+COPY src/loom/__init__.py ./loom/__init__.py
+COPY src/loom/personal_dev_builder_artifact.py ./loom/personal_dev_builder_artifact.py
+COPY src/loom/personal_dev_candidate.py ./loom/personal_dev_candidate.py
+COPY src/loom/personal_dev_sandbox_builder.py ./loom/personal_dev_sandbox_builder.py
+COPY src/loom/personal_dev_source.py ./loom/personal_dev_source.py
+
+RUN python3 -m compileall -q /opt/loom-personal-dev-builder \
+    && chown -R 1000:1000 /opt/loom-personal-dev-builder
+
+USER 1000:1000
+ENV HOME=/workspace/home \
+    PYTHONPATH=/opt/loom-personal-dev-builder \
+    TMPDIR=/tmp \
+    XDG_RUNTIME_DIR=/workspace/run
+
+ENTRYPOINT ["python3", "-m", "loom.personal_dev_sandbox_builder"]

@@ -24,6 +24,7 @@ from loom.personal_dev_candidate import (
     PERSONAL_DEV_BUILD_CONTRACT_SHA256,
     CandidateRegistration,
     CandidateRegistry,
+    PersonalDevCandidateQuotaError,
     PersonalDevCandidateRecord,
 )
 from loom.personal_dev_source import (
@@ -37,6 +38,8 @@ _UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 class SyncObjectStore(Protocol):
     def put_object(self, **kwargs: Any) -> object: ...
+
+    def delete_object(self, **kwargs: Any) -> object: ...
 
 
 def _validate_digest(value: str, *, label: str) -> None:
@@ -216,6 +219,19 @@ async def intake_personal_dev_candidate(
         )
         try:
             return await registry.register(requested)
+        except PersonalDevCandidateQuotaError:
+            try:
+                await asyncio.to_thread(
+                    object_store.delete_object,
+                    Bucket=bucket,
+                    Key=object_key,
+                )
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="personal-dev rejected source cleanup failed",
+                ) from exc
+            raise
         except Exception as exc:
             raise HTTPException(
                 status_code=503,
