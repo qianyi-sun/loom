@@ -27,12 +27,13 @@ from loom_cli.rollout.preflight_artifact_store import (
     PreflightArtifactPublication,
     PreflightArtifactStore,
 )
+from loom_cli.rollout.preflight_authority import CandidatePreflightPlan
 from loom_cli.rollout.preflight_contract import CheckOperation, PreflightAttestation
 from loom_cli.rollout.preflight_pipeline import PreflightRehearsal
 
 from .backup_lease import BackupLease
 from .final_gate_plan import FinalGatePlan, FinalGatePlanStore
-from .model import DriverEnvelope
+from .model import CandidateBinding, DriverEnvelope
 from .protected_apply_baseline import ProtectedApplyBaseline
 
 
@@ -53,6 +54,7 @@ class FinalGateActionSource:
     run: CommandRunner
     read_mutation_epoch: Callable[[], int]
     now: Callable[[], datetime]
+    post_apply_plan_factory: Callable[[CandidateBinding, int], CandidatePreflightPlan]
     executable: Path = FINAL_GATE_HELPER_PATH
     executable_owner_uid: int = 0
     post_apply_drift_attempts: int = 13
@@ -67,6 +69,7 @@ class FinalGateActionSource:
             or self.executable_owner_uid < 0
             or not callable(self.read_mutation_epoch)
             or not callable(self.now)
+            or not callable(self.post_apply_plan_factory)
             or not 1 <= self.post_apply_drift_attempts <= 61
             or not 0 < self.post_apply_drift_retry_interval_seconds <= 60
             or not callable(self.sleep)
@@ -149,9 +152,13 @@ class FinalGateActionSource:
                 if type(current_mutation_epoch) is not int or current_mutation_epoch < 0:
                     raise ValueError("post-apply mutation epoch authority is invalid")
                 try:
+                    post_apply_plan = self.post_apply_plan_factory(
+                        admission.preflight_plan.candidate,
+                        current_mutation_epoch,
+                    )
                     evidence = validate_post_apply_attestation_drift(
                         admission=admission,
-                        plan=admission.preflight_plan,
+                        plan=post_apply_plan,
                         current_mutation_epoch=current_mutation_epoch,
                         now=self.now(),
                     )

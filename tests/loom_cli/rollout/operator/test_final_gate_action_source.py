@@ -273,6 +273,9 @@ def _authority(tmp_path: Path, *, tamper: bool = False):
         run=run,
         read_mutation_epoch=lambda: 8,
         now=lambda: NOW,
+        post_apply_plan_factory=lambda candidate, epoch: SimpleNamespace(
+            candidate=(candidate, epoch)
+        ),  # type: ignore[arg-type]
         executable=executable,
         executable_owner_uid=os.geteuid(),
     )
@@ -329,7 +332,8 @@ def test_final_gate_action_source_runs_post_apply_drift_in_process(
     assert result.observed_epoch == 8
     assert not result.protected_mutation
     assert captured["admission"] is admission
-    assert captured["plan"] is preflight_plan
+    assert captured["plan"] is not preflight_plan
+    assert captured["plan"].candidate == ("exact-plan", 8)  # type: ignore[union-attr]
     assert captured["current_mutation_epoch"] == 8
     assert calls == []
 

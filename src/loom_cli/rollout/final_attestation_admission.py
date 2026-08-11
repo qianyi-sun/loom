@@ -265,7 +265,7 @@ def validate_post_apply_attestation_drift(
     now: datetime,
     max_concurrency: int = 8,
 ) -> PostApplyDriftEvidence:
-    """Rerun only epoch-independent exact inputs after protected apply."""
+    """Rerun only exact inputs from a fresh post-apply runtime plan."""
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("post-apply drift clock must be timezone-aware")
     attestation = admission.attestation
@@ -286,7 +286,7 @@ def validate_post_apply_attestation_drift(
         "environment": bindings.environment,
         "namespace": bindings.namespace,
         "route": bindings.route,
-        "staging.mutation-epoch": bindings.staging_mutation_epoch,
+        "staging.mutation-epoch": current_mutation_epoch,
     }
     if any(plan.context.bindings.get(key) != value for key, value in context_expected.items()):
         raise ValueError("post-apply context binding drifted")
