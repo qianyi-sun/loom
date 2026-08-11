@@ -1,7 +1,7 @@
 # Global fleet pool-executor dry run
 
-Package 3 provides one pool-bound executor protocol for each physical Slurm
-controller. It is deliberately usable only while the management authority has
+Loom provides one pool-bound dry-run executor protocol for each physical Slurm
+controller. It is usable only while the management authority has
 `executable_new_capacity_ceiling = 0`. The code can reserve, order, inventory,
 quarantine, and release dry-run records; it has no scheduler client, subprocess
 entry point, or Slurm mutation surface.
@@ -72,10 +72,10 @@ issue, and permit consumption. An unavailable pool may still heartbeat and
 publish complete inventory so it can recover without losing accounting state,
 but it cannot advance any capacity-increase transition.
 
-Rollout-surge reservations remain fail-closed in Package 3: permit consumption
-is rejected until the protected lifecycle package supplies the exact durable
-old-worker drain acknowledgement. Do not treat the recorded surge pairing by
-itself as proof that the old worker is already draining and nonclaimable.
+Rollout-surge reservations remain fail-closed: permit consumption is rejected
+without the exact durable old-worker drain acknowledgement from the protected
+lifecycle authority. Do not treat the recorded surge pairing by itself as
+proof that the old worker is already draining and nonclaimable.
 
 ## Protected environment release fence
 
@@ -117,7 +117,8 @@ entire rehearsal:
 - ambiguous or missing inventory stays charged or quarantined; and
 - evidence is retained separately for OLDLAB and GB10.
 
-Do not enable or install a scheduler-facing daemon from this package. Package 5
-owns controller service installation, legacy freeze/adoption, exact Slurm
-mutation proofs, rollback rehearsal, and the one transaction that can raise
-the executable ceiling after #906 and #896 are satisfied.
+Do not enable or install this dry-run surface as a scheduler-facing daemon. It
+contains no scheduler mutation client or process-execution entry point, and the
+manager refuses a non-zero executable ceiling. Existing executable capacity
+controllers are separate authorities and cannot treat these receipts as
+permission to launch, cancel, signal, or release physical capacity.

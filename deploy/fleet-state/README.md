@@ -3,6 +3,8 @@
 `schema-v1.example.toml` is synthetic validator input for the global fleet
 state format. It is not a live manifest, cannot activate capacity, and must not
 replace the per-environment files under `deploy/environment-state/`.
+It also does not register a dry-run pool executor, bind an ownership key, or
+create reservation, permit, inventory, or release records.
 
 The current read-only diagnostic compares those environment files and reports
 conflicts without choosing a winner or mutating controllers, partitions,

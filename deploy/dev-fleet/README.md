@@ -19,6 +19,13 @@ checkpoint. A ready lifecycle operation includes an initial non-executable
 capacity publication, but it does not activate the fixture or global autoscaler
 templates in this directory and does not grant physical worker capacity.
 
+The global manager's fenced pool-executor protocol is also separate from these
+assets. Its reservation, permit, inventory, and release receipts are
+`executable: false`; this directory contains no scheduler-facing executor
+service for them. Use the
+[pool-executor dry-run runbook](../../docs/runbooks/global-fleet-pool-executor-dry-run.md)
+for the implemented rehearsal and recovery procedure.
+
 `personal-dev-activation-agent.yaml.example` is the operator template for the
 independently keyed stable-route activation agent. Replace its image and Secret
 placeholders with reviewed immutable values before an authorized apply. The

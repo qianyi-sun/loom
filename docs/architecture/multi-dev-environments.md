@@ -233,9 +233,11 @@ Slurm controller and in-cluster worker path are disabled. The current
 candidate-aware path publishes its protected demand and subject configuration
 to the shadow-only global capacity manager, whose executable-new-capacity
 ceiling is fixed at zero. It does not receive or execute a worker-capacity
-grant. Consequently, `ready` confirms the immutable application generation,
-stable-route acknowledgement, capacity-agent installation, subject projection,
-and initial demand publication; it does not mean worker slots are live.
+grant, and the personal lifecycle does not consume the manager's dry-run
+reservation, permit, or pool-executor routes. Consequently, `ready` confirms
+the immutable application generation, stable-route acknowledgement,
+capacity-agent installation, subject projection, and initial demand
+publication; it does not mean worker slots are live.
 The separate global development-fleet supervisor consumes 40-character Git
 candidate identities and existing per-instance external Slurm policies, so it
 cannot consume these 64-character personal-candidate bindings directly.

@@ -44,8 +44,9 @@ than mixed with current behavior.
 - **[DRF scheduling](drf-scheduling.md)** — eligibility, fairness, claim
   fencing, and recovery.
 - **[Global fleet capacity manager](global-fleet-capacity-manager.md)** — the
-  shadow-allocation service, personal subject projections, demand reports, and
-  the non-executable authority boundary.
+  shadow-allocation service, personal subject projections, demand reports,
+  fenced dry-run grant/executor records, and the non-executable authority
+  boundary.
 - **[Global development-fleet autoscaler](global-dev-fleet-autoscaler.md)** —
   implemented supervisor contract and the checked-in disabled boundary.
 - **[GB10 capacity](gb10-dynamic-capacity.md)** — inventory, health, dynamic

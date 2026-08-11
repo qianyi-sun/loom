@@ -16,7 +16,9 @@ candidate-backed environment can therefore become application `ready` without
 becoming an eligible input to this executable capacity path. The demand
 contract also accepts a 40-character Git candidate SHA, whereas personal
 candidates use a 64-character content SHA-256; the two bindings are not
-interchangeable.
+interchangeable. The global manager's dry-run reservation and launch-permit
+records are also not grants from this supervisor: they remain
+`executable: false` and cannot be consumed as its lease-ledger authority.
 
 ## Demand and grants
 

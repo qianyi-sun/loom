@@ -21,6 +21,9 @@ capacity workflow.
   development sandboxes.
 - **[Shared sandbox capacity](shared-sandbox-capacity-broker.md)** — disabled
   compatibility ledger, offline request/lease checks, and recovery evidence.
+- **[Global fleet pool-executor dry run](global-fleet-pool-executor-dry-run.md)**
+  — non-executable reservation, permit, inventory, journaling, fencing, and
+  protected-release rehearsal for physical pool controllers.
 - **[Local development](local-dev-workflow.md)** — local kind deployment and
   pre-push checks.
 
