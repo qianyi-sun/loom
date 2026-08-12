@@ -837,7 +837,9 @@ jobs:
     runs-on: >-
       ${{ fromJSON(needs.ci-route.outputs.routes)['go-checks'] }}
     needs: [workflow-plan, ci-route]
-    if: needs.workflow-plan.outputs.gate_mode == 'full'
+    if: >-
+      needs.workflow-plan.outputs.gate_mode == 'full' &&
+      needs.workflow-plan.outputs.docs_only != 'true'
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Set up Go
@@ -1222,7 +1224,11 @@ jobs:
           require_boolean web_checks "$WEB_SELECTED"
           require_success workflow-plan "$PLAN_RESULT"
           require_success fast-checks "$FAST_RESULT"
-          require_success go-checks "$GO_RESULT"
+          if [[ "$DOCS_ONLY" == "true" ]]; then
+            require_selected false go-checks "$GO_RESULT"
+          else
+            require_success go-checks "$GO_RESULT"
+          fi
           require_selected "$WEB_SELECTED" web-checks "$WEB_RESULT"
           require_selected "$INTEGRATION_SELECTED" integration "$INTEGRATION_RESULT"
           require_selected "$DOCKER_SELECTED" integration-docker "$DOCKER_RESULT"

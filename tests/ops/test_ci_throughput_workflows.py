@@ -472,6 +472,7 @@ def test_authoritative_gate_workflow_uses_only_trusted_code() -> None:
         "contents": "read",
         "issues": "read",
         "pull-requests": "read",
+        "statuses": "write",
     }
 
     assert "concurrency" not in workflow
@@ -568,7 +569,7 @@ def test_authoritative_gate_workflow_uses_only_trusted_code() -> None:
     )
 
 
-def test_only_trusted_publishers_can_write_checkruns() -> None:
+def test_only_trusted_publishers_can_write_authoritative_states() -> None:
     workflow_paths = sorted((REPO_ROOT / ".github/workflows").glob("*.yml"))
     for workflow_file in workflow_paths:
         workflow_path = workflow_file.relative_to(REPO_ROOT).as_posix()
@@ -586,11 +587,13 @@ def test_only_trusted_publishers_can_write_checkruns() -> None:
             assert "scripts/ops/ci_runner_route_publisher.py" in workflow_source
             continue
         assert workflow_permissions.get("checks") != "write"
+        assert workflow_permissions.get("statuses") != "write"
 
         for job_name, job in workflow["jobs"].items():
             effective_permissions = job.get("permissions", workflow_permissions)
             assert isinstance(effective_permissions, dict), job_name
             assert effective_permissions.get("checks") != "write", job_name
+            assert effective_permissions.get("statuses") != "write", job_name
 
 
 def _gate_script(workflow_path: str, gate_id: str) -> str:
@@ -1626,6 +1629,54 @@ def test_repository_checks_preserves_result_semantics(
     assert result.returncode == 0, (selected, validation_result, result.stderr)
 
 
+@pytest.mark.parametrize(
+    ("docs_only", "go_result", "accepted"),
+    [
+        ("true", "skipped", True),
+        ("true", "success", True),
+        ("true", "failure", False),
+        ("true", "cancelled", False),
+        ("false", "success", True),
+        ("false", "skipped", False),
+        ("false", "failure", False),
+        ("false", "cancelled", False),
+    ],
+)
+def test_repository_checks_enforces_docs_only_go_result_semantics(
+    docs_only: str,
+    go_result: str,
+    accepted: bool,
+) -> None:
+    result = subprocess.run(
+        ["bash"],
+        input=_gate_script(".github/workflows/ci.yml", "repository-checks"),
+        text=True,
+        capture_output=True,
+        env={
+            "PLAN_RESULT": "success",
+            "GATE_MODE": "full",
+            "FAST_RESULT": "success",
+            "GO_RESULT": go_result,
+            "DOCS_ONLY": docs_only,
+            "INTEGRATION_SELECTED": "false",
+            "INTEGRATION_RESULT": "skipped",
+            "DOCKER_SELECTED": "false",
+            "DOCKER_RESULT": "skipped",
+            "COVERAGE_SELECTED": "false",
+            "COVERAGE_RESULT": "skipped",
+            "WEB_SELECTED": "false",
+            "WEB_RESULT": "skipped",
+        },
+        check=False,
+    )
+
+    assert (result.returncode == 0) is accepted, (
+        docs_only,
+        go_result,
+        result.stderr,
+    )
+
+
 def test_optional_validation_workflows_have_stable_gate_contexts() -> None:
     contracts = {
         ".github/workflows/images.yml": (
@@ -1704,6 +1755,7 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
     assert "gate_mode == 'preflight'" not in jobs["fast-checks"]["if"]
     assert set(jobs["integration"]["needs"]) == {"workflow-plan", "ci-route"}
     assert set(jobs["integration-docker"]["needs"]) == {"workflow-plan", "ci-route"}
+    assert "docs_only != 'true'" in jobs["go-checks"]["if"]
     assert "gate_mode == 'full'" in jobs["integration"]["if"]
     assert "gate_mode == 'full'" in jobs["integration-docker"]["if"]
     assert "repository-checks" in jobs["repository-checks"]["name"]
