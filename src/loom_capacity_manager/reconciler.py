@@ -52,6 +52,10 @@ class ShadowRunResult:
     attempt_count: int
 
 
+class ReconciliationFailurePersistenceError(CapacityStoreError):
+    """Failure evidence and its increase freeze could not be persisted."""
+
+
 async def _commit_reconciled_epoch(
     session: AsyncSession,
     store: CapacityManagementStore,
@@ -288,12 +292,11 @@ async def _record_failure(
     ],
     reason: str,
     input_digest: str | None,
-    expected_authority: ExecutionAuthorityV2 | None,
     persist_failed_epoch: bool = True,
 ) -> int | None:
     async with session_factory() as session:
-        if expected_authority is None:
-            recorded = await store.record_shadow_failure(
+        try:
+            recorded = await store.record_reconcile_failure(
                 session,
                 writer,
                 event_kind=event_kind,
@@ -301,16 +304,10 @@ async def _record_failure(
                 expected_input_digest=input_digest,
                 persist_failed_epoch=persist_failed_epoch,
             )
-        else:
-            recorded = await store.record_executable_reconcile_failure(
-                session,
-                writer,
-                expected_authority,
-                event_kind=event_kind,
-                reason=reason,
-                expected_input_digest=input_digest,
-                persist_failed_epoch=persist_failed_epoch,
-            )
+        except Exception as exc:
+            raise ReconciliationFailurePersistenceError(
+                "failed to persist reconciliation failure evidence and increase freeze"
+            ) from exc
         return recorded.allocation_epoch
 
 
@@ -335,19 +332,11 @@ async def reconcile_shadow_once(
         raise ValueError("allocation_timeout_seconds must be between 0 and 60")
     resolved_store = store or CapacityManagementStore()
     last_input_digest = "0" * 64
-    last_expected_authority: ExecutionAuthorityV2 | None = None
 
     for attempt_count in range(1, max_attempts + 1):
-        expected_authority: ExecutionAuthorityV2 | None = None
         try:
             async with session_factory() as session:
-                execution = await resolved_store.execution_authority(session)
-                if (
-                    isinstance(execution, ExecutionAuthorityV2)
-                    and execution.execution_state == "active"
-                ):
-                    expected_authority = execution
-                    last_expected_authority = execution
+                await resolved_store.execution_authority(session)
                 allocation_input = await resolved_store.load_allocation_input(
                     session,
                     writer,
@@ -363,18 +352,14 @@ async def reconcile_shadow_once(
             )
         except Exception:
             reason = "capacity allocation input is invalid"
-            try:
-                allocation_epoch = await _record_failure(
-                    session_factory,
-                    resolved_store,
-                    writer,
-                    event_kind="shadow_allocation_invalid",
-                    reason=reason,
-                    input_digest=None,
-                    expected_authority=expected_authority,
-                )
-            except StaleWriterError:
-                allocation_epoch = None
+            allocation_epoch = await _record_failure(
+                session_factory,
+                resolved_store,
+                writer,
+                event_kind="shadow_allocation_invalid",
+                reason=reason,
+                input_digest=None,
+            )
             return ShadowRunResult(
                 status="failed",
                 allocation_epoch=allocation_epoch,
@@ -395,20 +380,14 @@ async def reconcile_shadow_once(
             _validate_complete_epoch(allocation_input, epoch)
         except TimeoutError:
             reason = "shadow allocation exceeded its configured deadline"
-            try:
-                allocation_epoch = await _record_failure(
-                    session_factory,
-                    resolved_store,
-                    writer,
-                    event_kind="shadow_allocation_timeout",
-                    reason=reason,
-                    input_digest=last_input_digest,
-                    expected_authority=expected_authority,
-                )
-            except StaleAllocationInputError:
-                continue
-            except StaleWriterError:
-                allocation_epoch = None
+            allocation_epoch = await _record_failure(
+                session_factory,
+                resolved_store,
+                writer,
+                event_kind="shadow_allocation_timeout",
+                reason=reason,
+                input_digest=last_input_digest,
+            )
             return ShadowRunResult(
                 status="failed",
                 allocation_epoch=allocation_epoch,
@@ -418,20 +397,14 @@ async def reconcile_shadow_once(
             )
         except (ShadowAllocatorError, CapacityContractError, ArithmeticError, ValueError):
             reason = "shadow allocator rejected the complete global input"
-            try:
-                allocation_epoch = await _record_failure(
-                    session_factory,
-                    resolved_store,
-                    writer,
-                    event_kind="shadow_allocation_invalid",
-                    reason=reason,
-                    input_digest=last_input_digest,
-                    expected_authority=expected_authority,
-                )
-            except StaleAllocationInputError:
-                continue
-            except StaleWriterError:
-                allocation_epoch = None
+            allocation_epoch = await _record_failure(
+                session_factory,
+                resolved_store,
+                writer,
+                event_kind="shadow_allocation_invalid",
+                reason=reason,
+                input_digest=last_input_digest,
+            )
             return ShadowRunResult(
                 status="failed",
                 allocation_epoch=allocation_epoch,
@@ -441,20 +414,14 @@ async def reconcile_shadow_once(
             )
         except Exception:
             reason = "shadow allocator failed unexpectedly"
-            try:
-                allocation_epoch = await _record_failure(
-                    session_factory,
-                    resolved_store,
-                    writer,
-                    event_kind="shadow_allocation_failure",
-                    reason=reason,
-                    input_digest=last_input_digest,
-                    expected_authority=expected_authority,
-                )
-            except StaleAllocationInputError:
-                continue
-            except StaleWriterError:
-                allocation_epoch = None
+            allocation_epoch = await _record_failure(
+                session_factory,
+                resolved_store,
+                writer,
+                event_kind="shadow_allocation_failure",
+                reason=reason,
+                input_digest=last_input_digest,
+            )
             return ShadowRunResult(
                 status="failed",
                 allocation_epoch=allocation_epoch,
@@ -505,20 +472,14 @@ async def reconcile_shadow_once(
             )
         except Exception:
             reason = "shadow epoch transaction failed"
-            try:
-                allocation_epoch = await _record_failure(
-                    session_factory,
-                    resolved_store,
-                    writer,
-                    event_kind="shadow_allocation_failure",
-                    reason=reason,
-                    input_digest=last_input_digest,
-                    expected_authority=expected_authority,
-                )
-            except StaleAllocationInputError:
-                continue
-            except Exception:
-                allocation_epoch = None
+            allocation_epoch = await _record_failure(
+                session_factory,
+                resolved_store,
+                writer,
+                event_kind="shadow_allocation_failure",
+                reason=reason,
+                input_digest=last_input_digest,
+            )
             return ShadowRunResult(
                 status="failed",
                 allocation_epoch=allocation_epoch,
@@ -528,19 +489,15 @@ async def reconcile_shadow_once(
             )
 
     reason = "allocation input changed during every reconciliation attempt"
-    try:
-        await _record_failure(
-            session_factory,
-            resolved_store,
-            writer,
-            event_kind="shadow_allocation_input_contention",
-            reason=reason,
-            input_digest=None,
-            expected_authority=last_expected_authority,
-            persist_failed_epoch=False,
-        )
-    except (StaleAllocationInputError, StaleWriterError):
-        pass
+    await _record_failure(
+        session_factory,
+        resolved_store,
+        writer,
+        event_kind="shadow_allocation_input_contention",
+        reason=reason,
+        input_digest=None,
+        persist_failed_epoch=False,
+    )
     return ShadowRunResult(
         status="input-contention",
         allocation_epoch=None,
@@ -550,4 +507,9 @@ async def reconcile_shadow_once(
     )
 
 
-__all__ = ["ShadowAllocator", "ShadowRunResult", "reconcile_shadow_once"]
+__all__ = [
+    "ReconciliationFailurePersistenceError",
+    "ShadowAllocator",
+    "ShadowRunResult",
+    "reconcile_shadow_once",
+]

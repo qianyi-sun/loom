@@ -195,6 +195,26 @@ class ActiveCommitFailureStore(CapacityManagementStore):
         return await super().load_allocation_input(session, writer)
 
 
+class AuthorityResolutionFailureStore(CapacityManagementStore):
+    def __init__(self) -> None:
+        super().__init__(execution_policy=execution_policy())
+        self.reconcile_failure_records = 0
+
+    async def execution_authority(self, session):  # type: ignore[no-untyped-def]
+        del session
+        raise RuntimeError("synthetic authority resolution failure")
+
+    async def record_reconcile_failure(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        self.reconcile_failure_records += 1
+        return await super().record_reconcile_failure(*args, **kwargs)
+
+
+class CommitAndRecorderFailureStore(ActiveCommitFailureStore):
+    async def record_reconcile_failure(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        del args, kwargs
+        raise RuntimeError("synthetic recorder failure")
+
+
 @pytest.fixture
 def operator_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {OPERATOR_TOKEN}"}
@@ -1038,10 +1058,79 @@ async def test_allocation_active_failure_records_false_null_evidence_and_freezes
     assert audit is not None and audit.event_kind == expected_event
 
 
-async def test_allocation_active_failure_rejects_a_stale_authority_fence(
+async def test_allocation_authority_resolution_failure_uses_locked_durable_authority(
     capacity_session: AsyncSession,
 ) -> None:
     fixture, active = await _active_execution_fixture(capacity_session)
+    store = AuthorityResolutionFailureStore()
+    session_factory = async_sessionmaker(
+        bind=capacity_session.bind,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+
+    result = await reconcile_shadow_once(
+        session_factory,
+        fixture.writer,
+        store=store,
+    )
+
+    assert result.status == "failed"
+    assert store.reconcile_failure_records == 1
+    failed = (await capacity_session.execute(select(CapacityAllocationEpoch))).scalar_one()
+    authority = (await capacity_session.execute(select(CapacityAuthorityState))).scalar_one()
+    audit = (
+        (
+            await capacity_session.execute(
+                select(CapacityAuditEvent).order_by(CapacityAuditEvent.id.desc())
+            )
+        )
+        .scalars()
+        .first()
+    )
+    assert failed.status == "failed"
+    assert failed.writer_epoch == fixture.writer.writer_epoch
+    assert failed.configuration_epoch == active.configuration_epoch
+    assert failed.executable is False
+    assert failed.execution_epoch is None
+    assert failed.execution_manifest_sha256 is None
+    assert authority.increase_freeze is True
+    assert authority.increase_freeze_reason == "shadow_allocation_invalid"
+    assert audit is not None
+    assert audit.object_binding == {
+        "allocation_epoch": failed.allocation_epoch,
+        "configuration_epoch": active.configuration_epoch,
+        "execution_epoch": active.execution_epoch,
+        "execution_manifest_sha256": active.execution_manifest_sha256,
+        "writer_epoch": fixture.writer.writer_epoch,
+    }
+
+
+async def test_allocation_commit_and_failure_recorder_errors_propagate_hard_failure(
+    capacity_session: AsyncSession,
+) -> None:
+    fixture, _active = await _active_execution_fixture(capacity_session)
+    session_factory = async_sessionmaker(
+        bind=capacity_session.bind,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+
+    with pytest.raises(RuntimeError, match="failed to persist reconciliation failure") as caught:
+        await reconcile_shadow_once(
+            session_factory,
+            fixture.writer,
+            store=CommitAndRecorderFailureStore(),
+        )
+
+    assert caught.value.__cause__ is not None
+    assert "synthetic recorder failure" in str(caught.value.__cause__)
+
+
+async def test_allocation_active_failure_rejects_a_stale_authority_fence(
+    capacity_session: AsyncSession,
+) -> None:
+    fixture, _active = await _active_execution_fixture(capacity_session)
     successor = await fixture.store.register_writer(
         capacity_session,
         AUTHORITY_ID,
@@ -1049,10 +1138,9 @@ async def test_allocation_active_failure_rejects_a_stale_authority_fence(
     )
 
     with pytest.raises(StaleWriterError):
-        await fixture.store.record_executable_reconcile_failure(
+        await fixture.store.record_reconcile_failure(
             capacity_session,
             fixture.writer,
-            active,
             event_kind="shadow_allocation_failure",
             reason="synthetic stale active failure",
             expected_input_digest=None,
@@ -1067,11 +1155,10 @@ async def test_allocation_active_failure_rejects_a_stale_authority_fence(
 async def test_allocation_active_failure_freeze_blocks_later_promotion(
     capacity_session: AsyncSession,
 ) -> None:
-    fixture, active = await _active_execution_fixture(capacity_session)
-    await fixture.store.record_executable_reconcile_failure(
+    fixture, _active = await _active_execution_fixture(capacity_session)
+    await fixture.store.record_reconcile_failure(
         capacity_session,
         fixture.writer,
-        active,
         event_kind="shadow_allocation_failure",
         reason="synthetic active failure",
         expected_input_digest=None,

@@ -3153,7 +3153,7 @@ class CapacityManagementStore:
             )
             return CommittedShadowEpoch(row.allocation_epoch, epoch.input_digest)
 
-    async def record_shadow_failure(
+    async def record_reconcile_failure(
         self,
         session: AsyncSession,
         writer: WriterFence,
@@ -3168,94 +3168,7 @@ class CapacityManagementStore:
         expected_input_digest: str | None,
         persist_failed_epoch: bool = True,
     ) -> RecordedShadowFailure:
-        """Persist one fenced fail-closed diagnostic without allocation rows."""
-
-        if not reason or len(reason.encode("utf-8")) > 1024:
-            raise ValueError("shadow failure reason must be between 1 and 1024 bytes")
-        if expected_input_digest is not None and (
-            len(expected_input_digest) != 64
-            or any(character not in "0123456789abcdef" for character in expected_input_digest)
-        ):
-            raise ValueError("expected input digest must be lowercase SHA-256")
-        async with _write_transaction(session):
-            authority = await _lock_authority(session)
-            if (
-                authority.authority_incarnation != writer.authority_incarnation
-                or authority.writer_epoch != writer.writer_epoch
-            ):
-                raise StaleWriterError("writer is no longer current")
-            current_input: AllocationInputV1 | None = None
-            if expected_input_digest is not None:
-                current_input = await self.load_allocation_input(session, writer)
-                if canonical_digest(current_input) != expected_input_digest:
-                    raise StaleAllocationInputError(
-                        "allocation input changed before failure record"
-                    )
-            configuration_epoch = (
-                current_input.configuration.configuration_epoch
-                if current_input is not None
-                else (
-                    await session.execute(
-                        select(func.max(CapacityConfigurationEpoch.configuration_epoch))
-                    )
-                ).scalar_one()
-            )
-            input_digest = expected_input_digest or ("0" * 64)
-            allocation_epoch: int | None = None
-            if persist_failed_epoch and configuration_epoch is not None:
-                row = CapacityAllocationEpoch(
-                    writer_epoch=writer.writer_epoch,
-                    configuration_epoch=configuration_epoch,
-                    input_digest=input_digest,
-                    status="failed",
-                    failure_reason=reason,
-                    complete_payload={
-                        "schema_version": 1,
-                        "input_digest": input_digest,
-                        "reason": reason,
-                        "executable": False,
-                    },
-                    executable=False,
-                    committed_at=await _db_now(session),
-                )
-                session.add(row)
-                await session.flush()
-                allocation_epoch = row.allocation_epoch
-            now = await _db_now(session)
-            authority.increase_freeze = True
-            authority.increase_freeze_reason = event_kind
-            authority.updated_at = now
-            session.add(
-                _audit(
-                    actor_kind="manager",
-                    actor_id=str(writer.authority_incarnation),
-                    event_kind=event_kind,
-                    object_binding={
-                        "allocation_epoch": allocation_epoch,
-                        "writer_epoch": writer.writer_epoch,
-                    },
-                    detail={"input_digest": input_digest, "reason": reason},
-                )
-            )
-            return RecordedShadowFailure(allocation_epoch, input_digest)
-
-    async def record_executable_reconcile_failure(
-        self,
-        session: AsyncSession,
-        writer: WriterFence,
-        expected_authority: ExecutionAuthorityV2,
-        *,
-        event_kind: Literal[
-            "shadow_allocation_timeout",
-            "shadow_allocation_invalid",
-            "shadow_allocation_failure",
-            "shadow_allocation_input_contention",
-        ],
-        reason: str,
-        expected_input_digest: str | None,
-        persist_failed_epoch: bool = True,
-    ) -> RecordedShadowFailure:
-        """Freeze one exact active fence and record non-executable failure evidence."""
+        """Inspect locked durable authority and persist one fail-closed diagnostic."""
 
         if not reason or len(reason.encode("utf-8")) > 1024:
             raise ValueError("shadow failure reason must be between 1 and 1024 bytes")
@@ -3271,14 +3184,49 @@ class CapacityManagementStore:
                 or authority.writer_epoch != writer.writer_epoch
             ):
                 raise StaleWriterError("writer is no longer current")
-            current_authority = await self.execution_authority(session)
-            if current_authority != expected_authority or (
-                not isinstance(current_authority, ExecutionAuthorityV2)
-                or current_authority.execution_state != "active"
-                or current_authority.executable_new_capacity_ceiling <= 0
-                or current_authority.executable_new_capacity_rate_per_minute <= 0
-            ):
-                raise StaleAllocationInputError("execution authority changed before failure record")
+
+            execution_epoch: int | None = None
+            execution_manifest_sha256: str | None = None
+            if authority.execution_state == "shadow":
+                if (
+                    authority.execution_epoch != 0
+                    or authority.execution_manifest_sha256 is not None
+                    or authority.executable_new_capacity_ceiling != 0
+                ):
+                    raise AuthorityRecoveryError("shadow execution authority is contradictory")
+                configuration_epoch: int | None = None
+            elif authority.execution_state == "active":
+                if (
+                    authority.execution_epoch <= 0
+                    or authority.execution_manifest_sha256 is None
+                    or authority.executable_new_capacity_ceiling <= 0
+                ):
+                    raise AuthorityRecoveryError("active execution authority is incomplete")
+                execution_row = (
+                    await session.execute(
+                        select(CapacityExecutionEpoch)
+                        .where(CapacityExecutionEpoch.execution_epoch == authority.execution_epoch)
+                        .with_for_update()
+                    )
+                ).scalar_one_or_none()
+                if execution_row is None:
+                    raise AuthorityRecoveryError("execution epoch row is missing")
+                execution = self._execution_context(authority, execution_row)
+                if (
+                    not isinstance(execution, ExecutionAuthorityV2)
+                    or execution.execution_state != "active"
+                    or execution.executable_new_capacity_ceiling <= 0
+                    or execution.executable_new_capacity_rate_per_minute <= 0
+                ):
+                    raise AuthorityRecoveryError("active execution authority is invalid")
+                configuration_epoch = execution.configuration_epoch
+                execution_epoch = execution.execution_epoch
+                execution_manifest_sha256 = execution.execution_manifest_sha256
+            else:
+                raise AuthorityRecoveryError(
+                    "reconciliation failure cannot be attributed to transitional authority"
+                )
+
             current_input: AllocationInputV1 | None = None
             if expected_input_digest is not None:
                 current_input = await self.load_allocation_input(session, writer)
@@ -3286,15 +3234,25 @@ class CapacityManagementStore:
                     raise StaleAllocationInputError(
                         "allocation input changed before failure record"
                     )
-            configuration_epoch = (
-                current_input.configuration.configuration_epoch
-                if current_input is not None
-                else current_authority.configuration_epoch
-            )
+                if (
+                    configuration_epoch is not None
+                    and current_input.configuration.configuration_epoch != configuration_epoch
+                ):
+                    raise AuthorityRecoveryError(
+                        "active execution configuration changed before failure record"
+                    )
+                configuration_epoch = current_input.configuration.configuration_epoch
+            elif configuration_epoch is None:
+                configuration_epoch = (
+                    await session.execute(
+                        select(func.max(CapacityConfigurationEpoch.configuration_epoch))
+                    )
+                ).scalar_one()
+
             input_digest = expected_input_digest or ("0" * 64)
             allocation_epoch: int | None = None
             now = await _db_now(session)
-            if persist_failed_epoch:
+            if persist_failed_epoch and configuration_epoch is not None:
                 row = CapacityAllocationEpoch(
                     writer_epoch=writer.writer_epoch,
                     configuration_epoch=configuration_epoch,
@@ -3318,19 +3276,28 @@ class CapacityManagementStore:
             authority.increase_freeze = True
             authority.increase_freeze_reason = event_kind
             authority.updated_at = now
+            object_binding: dict[str, Any] = {
+                "allocation_epoch": allocation_epoch,
+                "writer_epoch": writer.writer_epoch,
+            }
+            if configuration_epoch is not None:
+                object_binding["configuration_epoch"] = configuration_epoch
+            if execution_epoch is not None:
+                object_binding.update(
+                    {
+                        "execution_epoch": execution_epoch,
+                        "execution_manifest_sha256": execution_manifest_sha256,
+                    }
+                )
             session.add(
                 _audit(
                     actor_kind="manager",
                     actor_id=str(writer.authority_incarnation),
                     event_kind=event_kind,
-                    object_binding={
-                        "allocation_epoch": allocation_epoch,
-                        "execution_epoch": expected_authority.execution_epoch,
-                        "execution_manifest_sha256": (expected_authority.execution_manifest_sha256),
-                    },
+                    object_binding=object_binding,
                     detail={
-                        "reason": reason,
                         "input_digest": input_digest,
+                        "reason": reason,
                         "executable": False,
                     },
                 )
