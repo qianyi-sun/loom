@@ -364,6 +364,12 @@ class CheckContext:
 
         return self._cancellation is not None and self._cancellation.requested
 
+    @property
+    def deadline_monotonic(self) -> float | None:
+        """Return the absolute execution deadline for cooperative child bounds."""
+
+        return None if self._cancellation is None else self._cancellation.deadline
+
 
 @dataclass(frozen=True, slots=True)
 class CheckProbe:

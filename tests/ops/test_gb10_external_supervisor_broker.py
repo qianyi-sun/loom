@@ -237,6 +237,53 @@ def test_candidate_tree_rejects_direct_relative_symlink_escape(tmp_path: Path) -
         )
 
 
+def test_candidate_tree_rejects_relative_symlink_chain_escape(tmp_path: Path) -> None:
+    root = tmp_path / "candidate"
+    link_dir = root / "bin"
+    link_dir.mkdir(parents=True)
+    root.chmod(0o755)
+    link_dir.chmod(0o755)
+    outside = tmp_path / "outside"
+    outside.write_text("outside\n", encoding="utf-8")
+    system_python = tmp_path / "system-python"
+    system_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    system_python.chmod(0o755)
+    (link_dir / "a").symlink_to("..")
+    (link_dir / "escaped").symlink_to("a/../outside")
+
+    with pytest.raises(broker.BrokerError, match="escapes authority"):
+        broker._safe_tree(
+            root,
+            owner_uid=os.geteuid(),
+            owner_gid=os.getegid(),
+            system_python=system_python,
+        )
+
+
+def test_candidate_tree_rejects_relative_symlink_escape_that_reenters_root(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "candidate"
+    link_dir = root / "bin"
+    link_dir.mkdir(parents=True)
+    root.chmod(0o755)
+    link_dir.chmod(0o755)
+    (root / "safe").write_text("safe\n", encoding="utf-8")
+    system_python = tmp_path / "system-python"
+    system_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    system_python.chmod(0o755)
+    (link_dir / "outside").symlink_to("../..")
+    (link_dir / "reentered").symlink_to("outside/candidate/safe")
+
+    with pytest.raises(broker.BrokerError, match="escapes authority"):
+        broker._safe_tree(
+            root,
+            owner_uid=os.geteuid(),
+            owner_gid=os.getegid(),
+            system_python=system_python,
+        )
+
+
 def test_candidate_inspection_disables_candidate_configured_executable_git_hooks(
     tmp_path: Path,
 ) -> None:
