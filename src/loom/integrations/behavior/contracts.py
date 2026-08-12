@@ -1605,10 +1605,13 @@ class BehaviorInspectionReportArtifactV1(PipelineModel):
         paths = [item.relative_path for item in self.files]
         if paths != ["payload/report.md", "payload/seed.json"]:
             raise ValueError("inspection output requires only report.md and seed.json")
-        if {item.sha256 for item in self.files} != {
-            self.payload.report_sha256,
-            self.payload.seed_sha256,
-        }:
+        expected = [
+            ("inspection_report", self.payload.report_sha256, "text/markdown"),
+            ("judgement_seed", self.payload.seed_sha256, "application/json"),
+        ]
+        if [
+            (item.name, item.sha256, item.media_type) for item in self.files
+        ] != expected or any(item.required is not True for item in self.files):
             raise ValueError("inspection payload hashes do not match file inventory")
         return self
 

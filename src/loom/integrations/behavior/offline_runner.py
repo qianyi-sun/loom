@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
@@ -9,19 +10,31 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Final, Literal
+from typing import Final, Literal, Protocol
 from urllib.parse import urlsplit
 from uuid import UUID
 
+from loom.integrations.behavior.contracts import ProviderUsageV1
+from loom.integrations.behavior.errors import (
+    BehaviorContractError,
+    BehaviorInfrastructureTransientError,
+    BehaviorProviderTransientError,
+)
 from loom.integrations.behavior.provider import (
     OFFLINE_JUDGE_STEP_ID,
     PIPELINE_STEP_JWT_PATH,
     RotatingPipelineStepJwtReader,
 )
+from loom.integrations.behavior.stages.offline_judge import (
+    OfflineJudgeRunRequest,
+    OfflineJudgeRunResult,
+)
 from loom_worker.pipeline_codex import (
     CODEX_HOME,
     OFFICIAL_CODEX_VERSION,
+    PipelineLockedHomeProcessSpec,
     build_pipeline_codex_process_spec,
+    build_pipeline_locked_home_process_spec,
 )
 
 BASELINE_CODEX_PROFILE: Final = "codex"
@@ -72,6 +85,192 @@ class OfflineJudgeGatewayShim:
         if "accept" in normalized:
             headers["accept"] = normalized["accept"]
         return MappingProxyType(headers)
+
+
+PassFailure = Literal["provider_429", "provider_5xx", "gateway_transport", "stage_helper_transient"]
+
+
+@dataclass(frozen=True)
+class LockedCodexPassSpec:
+    process: PipelineLockedHomeProcessSpec
+    argv: tuple[str, ...]
+    stdin: bytes
+    resume_session_id: UUID | None
+
+
+@dataclass(frozen=True)
+class LockedCodexPassResult:
+    events_jsonl: bytes
+    report: bytes | None
+    seed: bytes | None
+    returncode: int
+    failure: PassFailure | None = None
+
+
+class LockedCodexExecutor(Protocol):
+    """Outer-container supervisor implemented by the worker runtime in #1363."""
+
+    def verify_binary(self, path: str, sha256: str, *, version: str | None) -> None: ...
+
+    def execute(self, spec: LockedCodexPassSpec) -> LockedCodexPassResult: ...
+
+    def cleanup(
+        self,
+        *,
+        paths: tuple[str, ...],
+        term_grace_seconds: int,
+        kill_after_grace: bool,
+    ) -> None: ...
+
+
+class GatewaySettlementReader(Protocol):
+    """Read authoritative Attempt/provider totals, never child-reported usage."""
+
+    def read(self, *, attempt_id: UUID, control_binding_sha256: str) -> ProviderUsageV1: ...
+
+
+class LockedCodexOfflineJudgeRunner:
+    """Closed initial/resume state machine for the official Codex profile.
+
+    The executor owns host operations and the rotating-JWT loopback shim.  This
+    class owns the immutable lock, one-session rule, at-most-one resume, stable
+    failure classes, cleanup, and independent Gateway settlement readback.
+    """
+
+    def __init__(
+        self,
+        *,
+        gateway_responses_url: str,
+        shim_port: int,
+        executor: LockedCodexExecutor,
+        settlement_reader: GatewaySettlementReader,
+    ) -> None:
+        _validate_responses_url(gateway_responses_url)
+        if isinstance(shim_port, bool) or not 1024 <= shim_port <= 65535:
+            raise ValueError("shim_port must be uint16 1024..65535")
+        self._gateway_responses_url = gateway_responses_url
+        self._shim_port = shim_port
+        self._executor = executor
+        self._settlement_reader = settlement_reader
+
+    def run(self, run: OfflineJudgeRunRequest) -> OfflineJudgeRunResult:
+        if run.profile.agent_adapter != "codex_pipeline_locked_home_v1":
+            raise BehaviorContractError("runner/profile adapter mismatch")
+        lock = run.assets.runner_lock
+        process = build_pipeline_locked_home_process_spec(
+            runner_lock=lock,
+            gateway_responses_url=self._gateway_responses_url,
+            attempt_id=run.request.attempt_id,
+            task_id=run.inputs.task_instance.payload.behavior_task_id,
+            shim_port=self._shim_port,
+        )
+        # Both immutable executables are verified before execute() may expose a
+        # JWT or open the Gateway route.
+        self._executor.verify_binary(
+            lock.codex.binary_path,
+            lock.codex.binary_sha256,
+            version=lock.codex.version,
+        )
+        self._executor.verify_binary(
+            lock.shim.binary_path,
+            lock.shim.binary_sha256,
+            version=None,
+        )
+        try:
+            initial = self._executor.execute(
+                LockedCodexPassSpec(process, process.initial_argv, run.prompt, None)
+            )
+            session_id = _one_thread_started(initial.events_jsonl)
+            _raise_pass_failure(initial.failure)
+            report, seed = initial.report, initial.seed
+            final_returncode = initial.returncode
+            if report is None or seed is None:
+                resumed_process = build_pipeline_locked_home_process_spec(
+                    runner_lock=lock,
+                    gateway_responses_url=self._gateway_responses_url,
+                    attempt_id=run.request.attempt_id,
+                    task_id=run.inputs.task_instance.payload.behavior_task_id,
+                    shim_port=self._shim_port,
+                    resume_session_id=session_id,
+                )
+                resumed = self._executor.execute(
+                    LockedCodexPassSpec(
+                        resumed_process,
+                        resumed_process.resume_argv,
+                        _locked_resume_prompt(report is None, seed is None),
+                        session_id,
+                    )
+                )
+                _raise_pass_failure(resumed.failure)
+                if report is not None and resumed.report not in {None, report}:
+                    raise BehaviorContractError("resume rewrote the existing report")
+                if seed is not None and resumed.seed not in {None, seed}:
+                    raise BehaviorContractError("resume rewrote the existing seed")
+                report = report if report is not None else resumed.report
+                seed = seed if seed is not None else resumed.seed
+                final_returncode = resumed.returncode
+            if report is None or seed is None:
+                raise BehaviorContractError("Codex left report.md or seed.json missing")
+            control = run.request.provenance.control_binding
+            if control is None:
+                raise BehaviorContractError("offline judge lacks frozen control binding")
+            usage = self._settlement_reader.read(
+                attempt_id=run.request.attempt_id,
+                control_binding_sha256=control.snapshot_sha256,
+            )
+            return OfflineJudgeRunResult(report, seed, usage, final_returncode)
+        finally:
+            self._executor.cleanup(
+                paths=tuple(lock.cleanup.scrub_paths),
+                term_grace_seconds=lock.cleanup.term_grace_seconds,
+                kill_after_grace=lock.cleanup.kill_after_grace,
+            )
+
+
+def _one_thread_started(events: bytes) -> UUID:
+    if len(events) > 16 * 1024 * 1024:
+        raise BehaviorContractError("Codex event log exceeds 16 MiB")
+    sessions: list[UUID] = []
+    for raw_line in events.splitlines():
+        try:
+            item = json.loads(raw_line)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise BehaviorContractError("Codex event log is invalid JSONL") from exc
+        if not isinstance(item, dict):
+            raise BehaviorContractError("Codex event must be an object")
+        if item.get("type") != "thread.started":
+            continue
+        raw_id = item.get("thread_id")
+        try:
+            session = UUID(raw_id) if isinstance(raw_id, str) else None
+        except ValueError as exc:
+            raise BehaviorContractError("thread.started UUID is invalid") from exc
+        if session is None or str(session) != raw_id:
+            raise BehaviorContractError("thread.started UUID is not canonical")
+        sessions.append(session)
+    if len(sessions) != 1:
+        raise BehaviorContractError("Codex must emit exactly one thread.started session")
+    return sessions[0]
+
+
+def _locked_resume_prompt(report_missing: bool, seed_missing: bool) -> bytes:
+    missing = [
+        name
+        for name, is_missing in (("report.md", report_missing), ("seed.json", seed_missing))
+        if is_missing
+    ]
+    return (
+        "Write only the missing output file(s): "
+        + ", ".join(missing)
+        + ". Do not re-investigate or rewrite an existing output.\n"
+    ).encode()
+
+
+def _raise_pass_failure(failure: PassFailure | None) -> None:
+    if failure in {"provider_429", "provider_5xx", "gateway_transport"}:
+        raise BehaviorProviderTransientError(failure)
+    if failure == "stage_helper_transient":
+        raise BehaviorInfrastructureTransientError(failure)
 
 
 def build_pipeline_offline_judge_process_spec(
@@ -136,7 +335,7 @@ def build_pipeline_offline_judge_process_spec(
 def terminate_process_group(
     process: subprocess.Popen[bytes],
     *,
-    grace_seconds: float = 2.0,
+    grace_seconds: float = 30.0,
 ) -> None:
     """Terminate and reap the complete runner process group.
 
@@ -144,7 +343,11 @@ def terminate_process_group(
     targets the caller's group and escalates only after a bounded grace period.
     """
 
-    if not isinstance(grace_seconds, int | float) or grace_seconds < 0:
+    if (
+        isinstance(grace_seconds, bool)
+        or not isinstance(grace_seconds, int | float)
+        or grace_seconds < 0
+    ):
         raise ValueError("grace_seconds must be non-negative")
     if process.poll() is not None:
         process.wait()

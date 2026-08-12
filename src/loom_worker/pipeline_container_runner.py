@@ -350,6 +350,7 @@ class MaterializedInputView:
     root: Path
     input_view_digest: str
     stage_request_path: Path | None = None
+    control_binding_path: Path | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "root", _closed_host_path(self.root, "input view"))
@@ -361,6 +362,15 @@ class MaterializedInputView:
                     "stage request must be the reserved /inputs/stage-request.json file"
                 )
             object.__setattr__(self, "stage_request_path", stage_request)
+        if self.control_binding_path is not None:
+            control_binding = _closed_host_path(
+                self.control_binding_path, "control binding snapshot"
+            )
+            if control_binding != self.root / "control-binding.json":
+                raise PipelineContainerContractError(
+                    "control binding must be the reserved /inputs/control-binding.json file"
+                )
+            object.__setattr__(self, "control_binding_path", control_binding)
 
 
 @dataclass(frozen=True)

@@ -8,6 +8,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from urllib.parse import urlsplit
+from uuid import UUID
+
+from loom.integrations.behavior.offline_judge_assets import BehaviorOfflineRunnerLockV1
 
 OFFICIAL_CODEX_VERSION = "0.146.0"
 OFFICIAL_MCP_SERVERS = ("video", "video_demo")
@@ -30,6 +33,19 @@ class PipelineCodexProcessSpec:
     codex_env: MappingProxyType[str, str]
     shim_env: MappingProxyType[str, str]
     mcp_servers: tuple[str, str]
+    new_process_group: bool = True
+
+
+@dataclass(frozen=True)
+class PipelineLockedHomeProcessSpec:
+    binary_sha256: str
+    initial_argv: tuple[str, ...]
+    resume_argv: tuple[str, ...]
+    config_toml: bytes
+    codex_env: MappingProxyType[str, str]
+    shim_argv: tuple[str, ...]
+    shim_env: MappingProxyType[str, str]
+    install_script: None = None
     new_process_group: bool = True
 
 
@@ -82,6 +98,47 @@ def build_pipeline_codex_process_spec(
     )
 
 
+def build_pipeline_locked_home_process_spec(
+    *,
+    runner_lock: BehaviorOfflineRunnerLockV1,
+    gateway_responses_url: str,
+    attempt_id: UUID,
+    task_id: int,
+    shim_port: int,
+    resume_session_id: UUID | None = None,
+) -> PipelineLockedHomeProcessSpec:
+    """Render the #1223 exact Codex mode without changing Trial Codex behavior."""
+
+    parsed = urlsplit(gateway_responses_url)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path != "/v1/responses"
+    ):
+        raise PipelineCodexContractError(
+            "Gateway Responses URL must be server-owned HTTPS /v1/responses"
+        )
+    initial = runner_lock.initial_argv()
+    resume = (
+        runner_lock.resume_argv(resume_session_id)
+        if resume_session_id is not None
+        else runner_lock.resume_argv(UUID(int=0))
+    )
+    if "--ignore-user-config" in (*initial, *resume):
+        raise PipelineCodexContractError("locked home cannot suppress its own config")
+    return PipelineLockedHomeProcessSpec(
+        binary_sha256=runner_lock.codex.binary_sha256,
+        initial_argv=initial,
+        resume_argv=resume,
+        config_toml=runner_lock.render_config_toml(task_id=task_id, shim_port=shim_port),
+        codex_env=MappingProxyType(dict(runner_lock.codex_env)),
+        shim_argv=runner_lock.shim_argv(attempt_id=attempt_id, shim_port=shim_port),
+        shim_env=MappingProxyType(dict(runner_lock.shim_env(gateway_responses_url))),
+    )
 class RotatingStepJwtReader:
     """Open and verify the current token inode for every shim request."""
 
