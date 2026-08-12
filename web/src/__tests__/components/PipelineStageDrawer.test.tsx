@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactElement } from "react";
+import { MemoryRouter } from "react-router-dom";
 import { vi } from "vitest";
 
 import { api, type PipelineStageRunSummary } from "../../api/client";
@@ -29,6 +30,7 @@ const detail = {
     visibility: "team", share_status: "pending_scan", download_path: "/download/1",
     pipeline_run_id: "run-1", pipeline_stage_run_id: "stage-1",
     execution_attempt_id: "attempt-1", producer_kind: "pipeline",
+    detail_path: "/pipelines/run-1/stages/stage-1/artifacts/artifact-1",
   }],
 };
 
@@ -44,7 +46,7 @@ const attempts = { items: [{
 
 function renderDrawer(element: ReactElement): ReturnType<typeof render> {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(<QueryClientProvider client={client}>{element}</QueryClientProvider>);
+  return render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><QueryClientProvider client={client}>{element}</QueryClientProvider></MemoryRouter>);
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -63,7 +65,7 @@ test("renders detail, attempts, artifacts, filtered events, and requests replay"
   expect(screen.getByText("Retry:").closest("p")).toHaveTextContent("Retry: eligible");
   expect(screen.getByText(/pool redacted · rc —/)).toBeInTheDocument();
   expect(screen.getByText(/Cancellation acknowledgement: 2026/)).toBeInTheDocument();
-  expect(screen.getByRole("link", { name: "result.json" })).toHaveAttribute("href", "/download/1");
+  expect(screen.getByRole("link", { name: "result.json" })).toHaveAttribute("href", "/pipelines/run-1/stages/stage-1/artifacts/artifact-1");
   expect(screen.getByText(/Team private — scan pending/)).toBeInTheDocument();
   expect(screen.getByText(/#2 failed/)).toBeInTheDocument();
   expect(screen.queryByText(/#1 ignored/)).not.toBeInTheDocument();
@@ -96,7 +98,7 @@ test("shows query errors and does not fetch while closed", async () => {
   const { rerender } = renderDrawer(<PipelineStageDrawer stage={stage} events={[]} onClose={vi.fn()} onRetry={vi.fn()} />);
   expect(await screen.findByText(/detail failed/)).toBeInTheDocument();
 
-  rerender(<QueryClientProvider client={new QueryClient()}><PipelineStageDrawer stage={null} events={[]} onClose={vi.fn()} onRetry={vi.fn()} /></QueryClientProvider>);
+  rerender(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><QueryClientProvider client={new QueryClient()}><PipelineStageDrawer stage={null} events={[]} onClose={vi.fn()} onRetry={vi.fn()} /></QueryClientProvider></MemoryRouter>);
   await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   expect(getDetail).toHaveBeenCalledTimes(1);
 });

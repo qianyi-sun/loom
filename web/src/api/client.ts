@@ -225,6 +225,8 @@ export type PipelineRetryResponse =
   paths["/api/v1/pipeline-stage-runs/{stage_run_id}/retry"]["post"]["responses"][200]["content"]["application/json"];
 export type PipelineRetryBody =
   paths["/api/v1/pipeline-stage-runs/{stage_run_id}/retry"]["post"]["requestBody"]["content"]["application/json"];
+export type PipelineArtifactDetail =
+  paths["/api/v1/pipeline-runs/{run_id}/stages/{stage_run_id}/artifacts/{artifact_id}"]["get"]["responses"][200]["content"]["application/json"];
 
 export type PipelineRunListParams = {
   state?: PipelineRunListItem["state"];
@@ -286,6 +288,25 @@ export function listPipelineEvents(
     `/api/v1/pipeline-runs/${encodeURIComponent(runId)}/events${pipelineQuery(params)}`,
     { signal },
   );
+}
+
+export function getPipelineArtifact(
+  runId: string,
+  stageRunId: string,
+  artifactId: string,
+  signal?: AbortSignal,
+): Promise<PipelineArtifactDetail> {
+  return apiFetch<PipelineArtifactDetail>(
+    `/api/v1/pipeline-runs/${encodeURIComponent(runId)}/stages/${encodeURIComponent(stageRunId)}/artifacts/${encodeURIComponent(artifactId)}`,
+    { signal },
+  );
+}
+
+export function pipelineArtifactFileUrl(
+  artifactId: string,
+  fileIndex: number,
+): string {
+  return `${getApiBase()}/api/v1/pipeline-artifacts/${encodeURIComponent(artifactId)}/files/${fileIndex}`;
 }
 
 export function cancelPipelineRun(
@@ -1085,6 +1106,7 @@ export const api = {
   getPipelineStageRun,
   listPipelineStageAttempts,
   listPipelineEvents,
+  getPipelineArtifact,
   cancelPipelineRun,
   retryPipelineStageRun,
   getOverview: () =>
