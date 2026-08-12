@@ -4,20 +4,22 @@ ENV PIP_RETRIES=10 PIP_DEFAULT_TIMEOUT=60
 # Pinned Harbor Terminus2 runtime for the built-in terminus-2 agent.
 ARG HARBOR_COMPAT_SHA=527d50deb63a5d279e8c20593c18a2cbc7f61f9e
 WORKDIR /app
-# git is required for pip install harbor@git+...
-RUN apt-get update -qq && \
-    apt-get install -y --no-install-recommends git && \
-    rm -rf /var/lib/apt/lists/*
 # Worker uses the Docker SDK for Python (the `docker` PyPI package
 # already in pyproject.toml deps) to talk to the host daemon over the
 # bind-mounted /var/run/docker.sock. No CLI binary needed in the image.
 COPY pyproject.toml README.md ./
 COPY src ./src
 COPY packages ./packages
-RUN pip install --no-cache-dir -e . && \
+# git is required only while pip resolves the pinned Harbor source. Purging it
+# in the same layer removes Git's unused Perl runtime from the final image.
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends git && \
+    pip install --no-cache-dir -e . && \
     pip install --no-cache-dir -e ./packages/loom-launcher && \
     pip install --no-cache-dir -e ./packages/loom-benchmarks && \
     pip install --no-cache-dir \
       "harbor @ git+https://github.com/harbor-framework/harbor.git@${HARBOR_COMPAT_SHA}" && \
+    apt-get purge -y --auto-remove git && \
+    rm -rf /var/lib/apt/lists/* && \
     pip check
 CMD ["python", "-m", "loom_worker"]

@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 import yaml
 from scripts.check_ci_action_pins import check_action_pins
+from scripts.ci_image_release_evidence import TRIVY_ARCHIVE_SHA256, TRIVY_RELEASE_URL
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -80,14 +81,62 @@ def test_repository_workflows_match_the_verified_action_lock() -> None:
 
     assert result.errors == ()
     assert result.workflow_count == 13
-    assert result.reference_count == 77
+    assert result.reference_count == 81
     assert set(result.remote_actions) == {
+        "actions/attest-build-provenance",
         "actions/checkout",
         "actions/download-artifact",
         "actions/setup-go",
         "actions/setup-node",
         "actions/upload-artifact",
         "astral-sh/setup-uv",
+    }
+
+
+def test_repository_workflows_use_only_actions_allowed_by_github_policy() -> None:
+    result = check_action_pins(
+        workflows_dir=REPO_ROOT / ".github" / "workflows",
+        lock_file=REPO_ROOT / "config" / "ci-actions-lock.json",
+    )
+
+    forbidden = {
+        action
+        for action in result.remote_actions
+        if not action.startswith(("actions/", "qianyi-sun/"))
+        and action != "astral-sh/setup-uv"
+    }
+
+    assert forbidden == set()
+
+
+def test_release_evidence_trivy_identity_matches_repository_owned_installer() -> None:
+    lock = json.loads(
+        (REPO_ROOT / "config/ci-actions-lock.json").read_text(encoding="utf-8"),
+    )
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github/workflows/images.yml").read_text(encoding="utf-8"),
+    )
+    remote_trivy_uses = [
+        step["uses"]
+        for job in workflow["jobs"].values()
+        for step in job.get("steps", [])
+        if str(step.get("uses", "")).startswith("aquasecurity/trivy-action@")
+    ]
+    scan_scripts = [
+        step["run"]
+        for job in workflow["jobs"].values()
+        for step in job.get("steps", [])
+        if step.get("name") in {"Scan native image archive", "Scan trusted image archive"}
+    ]
+
+    assert "aquasecurity/trivy-action" not in lock["actions"]
+    assert remote_trivy_uses == []
+    assert len(scan_scripts) == 2
+    assert all("python3 scripts/install_trivy.py" in script for script in scan_scripts)
+    assert TRIVY_RELEASE_URL.endswith("/v0.70.0")
+    assert TRIVY_ARCHIVE_SHA256 == {
+        "amd64": "8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9",
+        "arm64": "2f6bb988b553a1bbac6bdd1ce890f5e412439564e17522b88a4541b4f364fc8d",
     }
 
 

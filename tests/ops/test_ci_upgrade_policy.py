@@ -45,6 +45,29 @@ def test_setup_go_node24_upgrade_is_exact_and_rollbackable() -> None:
     ]
 
 
+def test_image_supply_chain_upgrade_has_real_previous_release_rollbacks() -> None:
+    policy = json.loads(
+        (REPO_ROOT / "config/ci-upgrade-policy.json").read_text(encoding="utf-8"),
+    )
+    image_batch = next(
+        batch for batch in policy["batches"] if batch["name"] == "image-supply-chain"
+    )
+
+    assert image_batch["compatibility_tests"] == [
+        "uv run --no-sync pytest -q tests/ops/test_ci_action_pins.py "
+        "tests/ops/test_install_trivy.py tests/ops/test_ci_trivy_release_policy.py "
+        "tests/ops/test_ci_image_release_evidence.py "
+        "tests/ops/test_ci_throughput_workflows.py",
+        "actionlint .github/workflows/images.yml",
+    ]
+    assert image_batch["rollback"] == {
+        "actions/attest-build-provenance": {
+            "sha": "0f67c3f4856b2e3261c31976d6725780e5e4c373",
+            "version": "v4.1.1",
+        }
+    }
+
+
 def test_batch_larger_than_two_fails_closed(tmp_path: Path) -> None:
     lock = {
         "actions": {

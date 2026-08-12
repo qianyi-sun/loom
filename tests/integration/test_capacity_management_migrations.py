@@ -7,12 +7,14 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+import sqlalchemy
 from alembic import command
 from alembic.config import Config as AlembicConfig
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from loom_capacity_manager.models import CapacityAuditEvent, CapacityAuthorityState
 from loom_capacity_manager.schema_startup import (
     CapacitySchemaNotAtHeadError,
     assert_capacity_schema_at_head,
@@ -137,14 +139,16 @@ def test_capacity_schema_has_independent_revision_table(
         environment_engine.dispose()
 
 
-async def test_capacity_schema_error_never_names_environment_migrations(
+async def test_capacity_schema_error_uses_installed_capacity_migration_command(
     empty_capacity_engine: AsyncEngine,
 ) -> None:
     with pytest.raises(CapacitySchemaNotAtHeadError) as caught:
         await assert_capacity_schema_at_head(empty_capacity_engine)
     message = str(caught.value)
-    assert "capacity_migrations/alembic.ini" in message
-    assert "migrations/alembic.ini" not in message.replace("capacity_migrations/alembic.ini", "")
+    assert "python -m loom_capacity_manager.migrate" in message
+    assert "--db-url-file <owner-only-database-url-file>" in message
+    assert "--expected-authority-incarnation <reviewed-non-nil-uuid>" in message
+    assert "capacity_migrations/alembic.ini" not in message
 
 
 async def test_capacity_schema_startup_returns_numeric_head(
@@ -285,6 +289,25 @@ def test_capacity_migration_downgrades_and_reupgrades(
         command.upgrade(cfg, "head")
         with engine.connect() as connection:
             assert EXPECTED_TABLES <= set(inspect(connection).get_table_names())
+            authority = connection.execute(
+                select(CapacityAuthorityState.authority_incarnation).where(
+                    CapacityAuthorityState.singleton_id == 1
+                )
+            ).scalar_one()
+            seeds = (
+                connection.execute(
+                    select(CapacityAuditEvent).where(
+                        CapacityAuditEvent.event_kind == "authority_incarnation_seeded"
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            assert len(seeds) == 1
+            assert seeds[0]["actor_kind"] == "migration"
+            assert seeds[0]["actor_id"] == "capacity-authority-bootstrap"
+            assert seeds[0]["object_binding"] == {"authority_incarnation": str(authority)}
+            assert seeds[0]["detail"] == {"state": "migration-generated-seed"}
     finally:
         engine.dispose()
 
@@ -298,3 +321,35 @@ def test_capacity_alembic_environment_has_no_environment_db_fallback() -> None:
     assert "LOOM_CAPACITY_DB_URL" in source
     assert "LOOM_DB_URL" not in source
     assert "LOOM_CP_DB_URL" not in source
+
+
+def test_capacity_alembic_connection_enforces_fixed_postgres_timeouts(
+    capacity_postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path(__file__).resolve().parents[2]
+    encoded_url = (
+        f"{capacity_postgres_url}?application_name=capacity%40migration&connect_timeout=99"
+    )
+    cfg = AlembicConfig(str(root / "capacity_migrations" / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "capacity_migrations"))
+    monkeypatch.setenv("LOOM_CAPACITY_DB_URL", encoded_url)
+    real_engine_from_config = sqlalchemy.engine_from_config
+    captured: dict[str, object] = {}
+
+    def capture(configuration: dict[str, object], **kwargs: object) -> sqlalchemy.Engine:
+        captured["url"] = configuration["sqlalchemy.url"]
+        captured["connect_args"] = kwargs.get("connect_args")
+        return real_engine_from_config(configuration, **kwargs)
+
+    monkeypatch.setattr(sqlalchemy, "engine_from_config", capture)
+
+    command.upgrade(cfg, "head")
+
+    assert captured == {
+        "url": encoded_url,
+        "connect_args": {
+            "connect_timeout": 10,
+            "options": "-c lock_timeout=30000 -c statement_timeout=300000",
+        },
+    }

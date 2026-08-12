@@ -68,3 +68,46 @@ The current runner version floor and Node runtime compatibility are recorded
 in `config/ci-upgrade-policy.json`. Workflow routing is implemented in
 `.github/workflows/ci.yml`, `images.yml`, `cluster-smoke.yml`, and
 `staging-smoke.yml`.
+
+## Release image evidence
+
+Image routing remains separate from release authority. The untrusted build and
+trusted publication scans both use pinned Trivy v0.70.0 with `scan-type: image`,
+`vuln-type: os,library`, `timeout: 10m0s`, `severity: CRITICAL`, `exit-code:
+'1'`, `ignore-unfixed: 'false'`, `scanners: vuln`, and `cache: 'false'`. Before
+each scan, a repository helper writes the fixed config and reviewed ignore file
+outside the checkout. Maintained images and dependencies are upgraded before
+an exception is considered. The temporary exceptions cover only the four
+unfixed Perl findings (CVE-2026-13221, CVE-2026-42496, CVE-2026-57433, and
+CVE-2026-8376) on the exact Debian Perl packages required by Debian base
+runtimes, the agent toolchain, and the staging-compatible PostgreSQL 17.4
+rehearsal image, CVE-2026-43185 on the agent compiler's
+`linux-libc-dev`, and CVE-2025-7458, CVE-2026-6653, and CVE-2023-45853 on the
+staging-compatible PostgreSQL 17.4 rehearsal dependencies. Each structured
+exception records its exact Debian PURL scope and review statement and expires
+at 2026-09-12 UTC; policy generation fails closed at that boundary. A second
+repository-owned helper installs only
+the architecture-specific v0.70.0 release archive against its
+repository-pinned SHA-256; this avoids relying on actions forbidden by
+repository policy. The
+signed release predicate binds every reviewed field, scanner name/version,
+release URL and architecture archive digest, controlled-file hashes, explicit
+exception IDs, package scopes, statements, expiries, and resulting report
+digest. A failed scan prints a bounded, log-safe critical-finding summary
+while preserving Trivy's exit code.
+
+The hosted publisher rebuilds every architecture archive from the protected
+release commit and captures the single digest emitted by each architecture
+push. Official evidence accepts only `trusted-rebuild` and binds the release
+head, tree, ref, and current run. PR candidate archives remain untrusted CI
+evidence only and are never downloaded, loaded, scanned as release, attested,
+or published by the publisher. After immutable-digest attestation verification,
+each architecture uploads one uniquely named canonical record. The manifest job
+downloads and accepts exactly the current image's AMD64 and ARM64 records,
+verifies their recorded registry subjects, and joins only their immutable
+digests.
+
+Manifest creation writes only the temporary `manifest-${HEAD_SHA}` tag and
+captures the creation digest directly. Registry validation and final
+attestation verification use that digest, never a mutable-tag rediscovery. The
+official SHA and branch tags are promoted only after that verification.
