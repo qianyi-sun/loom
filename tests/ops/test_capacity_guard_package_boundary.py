@@ -116,6 +116,7 @@ def test_capacity_guard_migrations_have_no_candidate_database_fallback() -> None
     assert "LOOM_CAPACITY_GUARD_DB_URL" in source
     assert "LOOM_CAPACITY_GUARD_OWNER_ROLE" in source
     assert "LOOM_CAPACITY_GUARD_AGENT_ROLE" in source
+    assert "LOOM_CAPACITY_GUARD_EXECUTOR_ROLE" in source
     assert "LOOM_DB_URL" not in source
     assert "LOOM_CP_DB_URL" not in source
     assert "LOOM_CAPACITY_DB_URL" not in source

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Literal, Protocol
 from uuid import UUID
 
@@ -15,6 +16,7 @@ from loom_capacity_guard.contracts import (
     PositiveGeneration,
     StrictGuardModel,
 )
+from loom_capacity_manager.executable_contracts import StrictV2Model
 
 UnclaimedAttemptState = Literal[
     "pending-unassigned",
@@ -185,10 +187,50 @@ class DisabledClaimGuard:
         )
 
 
+class ExecutableClaimProposalV2(StrictV2Model):
+    """Minimal protected claim identity checked before any claim mutation."""
+
+    operation_id: UUID
+    protected_attempt_id: UUID
+    execution_generation: PositiveGeneration
+    requirements_digest: Digest
+    worker_id: UUID
+    worker_incarnation: UUID
+    expected_claim_high_water: NonNegativeSequence
+    executable: Literal[True] = True
+
+
+WorkerCanClaim = Callable[[UUID, UUID], Awaitable[bool]]
+
+
+class ExecutableClaimGate:
+    """Stop a draining or revoked worker before a candidate claim transition."""
+
+    def __init__(self, *, worker_can_claim: WorkerCanClaim) -> None:
+        if not callable(worker_can_claim):
+            raise TypeError("executable claim gate requires a claimability reader")
+        self._worker_can_claim = worker_can_claim
+
+    async def evaluate(
+        self,
+        proposal: ExecutableClaimProposalV2,
+    ) -> ExecutableClaimProposalV2 | None:
+        if not isinstance(proposal, ExecutableClaimProposalV2):
+            raise TypeError("executable claim proposal is invalid")
+        if not await self._worker_can_claim(
+            proposal.worker_id,
+            proposal.worker_incarnation,
+        ):
+            return None
+        return proposal
+
+
 __all__ = [
     "ClaimGuard",
     "ClaimGuardDecisionV1",
     "ClaimProposalV1",
     "DisabledClaimGuard",
+    "ExecutableClaimGate",
+    "ExecutableClaimProposalV2",
     "InertAttemptTransitionV1",
 ]

@@ -72,7 +72,7 @@ def _sha256_json(value: object) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _role_names(identity: DevInstanceIdentity) -> tuple[str, str, str]:
+def _role_names(identity: DevInstanceIdentity) -> tuple[str, str, str, str]:
     slug = identity.name
     for old, new in _ROLE_REPLACEMENTS.items():
         slug = slug.replace(old, new)
@@ -80,6 +80,7 @@ def _role_names(identity: DevInstanceIdentity) -> tuple[str, str, str]:
         f"loom_cap_{slug}_owner",
         f"loom_cap_{slug}_migrator",
         f"loom_cap_{slug}_agent",
+        f"loom_cap_{slug}_executor",
     )
 
 
@@ -208,8 +209,8 @@ class PsycopgPersonalDevCapacityDatabase:
         self,
         identity: DevInstanceIdentity,
         credentials: _CapacityCredentials,
-    ) -> tuple[str, str, str, str, str]:
-        owner, migrator, agent = _role_names(identity)
+    ) -> tuple[str, str, str, str, str, str]:
+        owner, migrator, agent, executor = _role_names(identity)
         migrator_url = _retarget_database_url(
             self._admin_url,
             database=identity.database,
@@ -228,9 +229,9 @@ class PsycopgPersonalDevCapacityDatabase:
                 autocommit=True,
             ) as connection:
                 protected_roles = sql.SQL(", ").join(
-                    sql.Identifier(role) for role in (owner, migrator, agent)
+                    sql.Identifier(role) for role in (owner, migrator, agent, executor)
                 )
-                for role in (owner, migrator, agent):
+                for role in (owner, migrator, agent, executor):
                     await connection.execute(
                         sql.SQL(
                             "DO $loom$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles "
@@ -245,6 +246,12 @@ class PsycopgPersonalDevCapacityDatabase:
                         "ALTER ROLE {} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
                         "NOINHERIT NOREPLICATION NOBYPASSRLS"
                     ).format(sql.Identifier(owner))
+                )
+                await connection.execute(
+                    sql.SQL(
+                        "ALTER ROLE {} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
+                        "NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL"
+                    ).format(sql.Identifier(executor))
                 )
                 for role, password, inherit in (
                     (migrator, credentials.migrator_password, "INHERIT"),
@@ -291,7 +298,10 @@ class PsycopgPersonalDevCapacityDatabase:
                     "JOIN pg_roles granted ON granted.oid = m.roleid "
                     "WHERE member.rolname = ANY(%s) OR granted.rolname = ANY(%s) "
                     "ORDER BY member.rolname, granted.rolname",
-                    ([owner, migrator, agent], [owner, migrator, agent]),
+                    (
+                        [owner, migrator, agent, executor],
+                        [owner, migrator, agent, executor],
+                    ),
                 )
                 observed = {(row[0], row[1]) for row in await memberships.fetchall()}
                 if observed != {(migrator, owner)}:
@@ -312,7 +322,7 @@ class PsycopgPersonalDevCapacityDatabase:
             ) as connection:
                 async with connection.transaction():
                     protected_roles = sql.SQL(", ").join(
-                        sql.Identifier(role) for role in (owner, migrator, agent)
+                        sql.Identifier(role) for role in (owner, migrator, agent, executor)
                     )
                     for object_kind in (
                         "SCHEMA public",
@@ -384,7 +394,7 @@ class PsycopgPersonalDevCapacityDatabase:
             raise PersonalDevCapacityInstallationError(
                 "protected capacity database role convergence failed"
             ) from None
-        return owner, migrator, agent, migrator_url, agent_url
+        return owner, migrator, agent, executor, migrator_url, agent_url
 
     async def _seal_migrator(
         self,
@@ -429,8 +439,8 @@ class PsycopgPersonalDevCapacityDatabase:
     async def seal(self, identity: DevInstanceIdentity) -> None:
         """Disable every protected login before retained data can outlive its pod."""
 
-        owner, migrator, agent = _role_names(identity)
-        protected = (owner, migrator, agent, identity.db_role)
+        owner, migrator, agent, executor = _role_names(identity)
+        protected = (owner, migrator, agent, executor, identity.db_role)
         try:
             async with await psycopg.AsyncConnection.connect(
                 self._connect_url,
@@ -487,8 +497,8 @@ class PsycopgPersonalDevCapacityDatabase:
         """Drop the isolated database and every role after namespace termination."""
 
         await self.seal(identity)
-        owner, migrator, agent = _role_names(identity)
-        roles = (agent, migrator, owner, identity.db_role)
+        owner, migrator, agent, executor = _role_names(identity)
+        roles = (executor, agent, migrator, owner, identity.db_role)
         try:
             async with await psycopg.AsyncConnection.connect(
                 self._connect_url,
@@ -517,7 +527,14 @@ class PsycopgPersonalDevCapacityDatabase:
                 "personal-dev protected database cleanup failed"
             ) from None
 
-    async def _migrate(self, *, migrator_url: str, owner: str, agent: str) -> None:
+    async def _migrate(
+        self,
+        *,
+        migrator_url: str,
+        owner: str,
+        agent: str,
+        executor: str,
+    ) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         config_path = repo_root / "capacity_guard_migrations" / "alembic.ini"
         if not config_path.is_file():
@@ -530,6 +547,7 @@ class PsycopgPersonalDevCapacityDatabase:
                 "LOOM_CAPACITY_GUARD_DB_URL": migrator_url,
                 "LOOM_CAPACITY_GUARD_OWNER_ROLE": owner,
                 "LOOM_CAPACITY_GUARD_AGENT_ROLE": agent,
+                "LOOM_CAPACITY_GUARD_EXECUTOR_ROLE": executor,
             }
         )
         process = await asyncio.create_subprocess_exec(
@@ -570,12 +588,21 @@ class PsycopgPersonalDevCapacityDatabase:
         credentials: _CapacityCredentials,
         configuration: ReporterConfigurationV1,
     ) -> CapacityDatabaseInstallation:
-        owner, migrator, agent, migrator_url, agent_url = await self._converge_roles(
-            identity,
-            credentials,
-        )
+        (
+            owner,
+            migrator,
+            agent,
+            executor,
+            migrator_url,
+            agent_url,
+        ) = await self._converge_roles(identity, credentials)
         try:
-            await self._migrate(migrator_url=migrator_url, owner=owner, agent=agent)
+            await self._migrate(
+                migrator_url=migrator_url,
+                owner=owner,
+                agent=agent,
+                executor=executor,
+            )
             fence = GuardFenceV1(
                 environment_id=configuration.environment_id,
                 subject_id=configuration.subject_id,
@@ -642,7 +669,7 @@ class PsycopgPersonalDevCapacityDatabase:
             "environment_id": fence.environment_id,
             "guard_schema_generation": capacity_guard_schema_head()[1],
             "reporter_incarnation": str(fence.reporter_incarnation),
-            "roles": {"agent": agent, "owner": owner},
+            "roles": {"agent": agent, "executor": executor, "owner": owner},
             "schema_version": 1,
             "subject_id": str(fence.subject_id),
             "subject_incarnation": str(fence.subject_incarnation),
