@@ -222,7 +222,8 @@ def test_workflow_scans_only_the_controlled_absolute_policy_files() -> None:
             "  --config-file /tmp/loom-trivy-release.yaml \\\n"
             "  --ignore-file /tmp/loom-trivy-release.ignore.yaml"
         )
-        assert "python3 scripts/install_trivy.py" in scan["run"]
+        assert "python3 scripts/install_trivy.py" not in scan["run"]
+        assert "/tmp/loom-trivy-binaries/${ARCHITECTURE}/trivy" in scan["run"]
         assert "--config /tmp/loom-trivy-release.yaml" in scan["run"]
         assert "--ignorefile /tmp/loom-trivy-release.ignore.yaml" in scan["run"]
         assert "--show-suppressed" in scan["run"]
