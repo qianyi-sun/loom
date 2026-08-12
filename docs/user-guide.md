@@ -1662,7 +1662,40 @@ same-origin authorized Loom route and never reveal an internal object-store URL.
 Input import is restricted to the current team owner. It validates a local
 manifest and tree before the first HTTP request, creates a deterministic
 `payload.tar.zst`, rotates the upload token, and aborts on interruption. See
-`loom pipeline --help` for the fixed command set.
+`loom pipeline --help` for the fixed command set. For
+`behavior-recovery@1`, import the three already-authorized companion trees
+separately (the provenance locator is recorded but never fetched):
+
+```bash
+loom pipeline import-input \
+  --recipe behavior-recovery@1 \
+  --kind dataset \
+  --manifest @input-manifest.json \
+  --root /path/to/declared-tree \
+  --idempotency-key behavior-dataset-r1
+```
+
+Repeat with `--kind policy` and `--kind mop_bank`, then materialize the run
+inputs from an existing team TaskSet:
+
+```bash
+loom pipeline materialize-inputs \
+  --recipe behavior-recovery@1 \
+  --task-set 00000000-0000-4000-8000-000000000001 \
+  --input dataset=00000000-0000-4000-8000-000000000002 \
+  --input policy=00000000-0000-4000-8000-000000000003 \
+  --input mop_bank=00000000-0000-4000-8000-000000000004 \
+  --params @materialization.json \
+  --idempotency-key behavior-inputs-r1
+```
+
+`materialization.json` accepts only `episodes_per_instance` (1–10, default 1)
+and `seed_base` (uint32, default 0). A successful response contains exactly
+five immutable graph inputs: `task_set`, `task_instances`, `dataset`, `policy`,
+and `mop_bank`. Materialization does not create a PipelineRun. Imported
+companions remain team-private with unknown safety and are admissible only via
+the same-team `behavior-recovery@1` input exception; they are not promoted to
+verified or made shareable by import or materialization.
 When inspecting a main production batch plus linked supplemental reruns, pass
 `batch_id=<main-batch-id>&include_batch_family=true` to `/api/v1/usage` or use
 `loom eval usage --batch-id <main-batch-id> --include-batch-family`. Add

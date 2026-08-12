@@ -17,8 +17,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from loom.db.schema import (
     ApiIdempotencyRecord,
     Artifact,
+    ArtifactUploadSession,
     PipelineBudgetLedger,
     PipelineEvent,
+    PipelineInputImport,
     PipelineRun,
     PipelineRunControlBinding,
     PipelineRunGpuBackendSelection,
@@ -44,6 +46,55 @@ class PipelineApiError(RuntimeError):
         self.status_code = status_code
         self.reason_code = reason_code
         self.message = message
+
+
+async def _behavior_unknown_input_is_admissible(
+    session: AsyncSession,
+    *,
+    artifact: Artifact,
+    team_id: UUID,
+    recipe_name: str,
+    recipe_version: int,
+    recipe_digest: str,
+    input_name: str,
+) -> bool:
+    """The sole ordinary-use exception for an unknown-safety Artifact."""
+
+    expected_types = {
+        "dataset": "behavior_dataset_snapshot.v1",
+        "policy": "behavior_policy_checkpoint.v1",
+        "mop_bank": "behavior_mop_bank.v1",
+    }
+    if (
+        (recipe_name, recipe_version) != ("behavior-recovery", 1)
+        or expected_types.get(input_name) != artifact.artifact_type
+        or artifact.team_id != team_id
+        or artifact.safety_state != "unknown"
+        or artifact.producer_kind != "input_import"
+        or artifact.pipeline_input_import_id is None
+        or artifact.artifact_upload_session_id is None
+        or artifact.manifest_sha256 is None
+    ):
+        return False
+    imported = await session.get(PipelineInputImport, artifact.pipeline_input_import_id)
+    upload = await session.get(ArtifactUploadSession, artifact.artifact_upload_session_id)
+    return bool(
+        imported is not None
+        and upload is not None
+        and imported.team_id == team_id
+        and imported.kind == input_name
+        and imported.target_artifact_type == artifact.artifact_type
+        and imported.trust_class == "internal_trusted"
+        and imported.state == "committed"
+        and imported.recipe_name == recipe_name
+        and imported.recipe_version == recipe_version
+        and imported.recipe_digest == recipe_digest
+        and imported.committed_artifact_id == artifact.id
+        and imported.artifact_upload_session_id == upload.id
+        and upload.state == "committed"
+        and upload.manifest_sha256 == artifact.provenance.get("root_manifest_sha256")
+        and upload.committed_marker_sha256 == artifact.provenance.get("marker_sha256")
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -339,7 +390,18 @@ async def create_public_run(
             artifact is None
             or artifact.artifact_type != expected[input_name]
             or artifact.manifest_sha256 is None
-            or artifact.safety_state not in {"verified_internal", "verified"}
+        ):
+            raise PipelineApiError(422, "input_not_reusable", "Pipeline input is not reusable")
+        if artifact.safety_state not in {"verified_internal", "verified"} and not (
+            await _behavior_unknown_input_is_admissible(
+                session,
+                artifact=artifact,
+                team_id=team_id,
+                recipe_name=name,
+                recipe_version=version,
+                recipe_digest=registration.digest,
+                input_name=input_name,
+            )
         ):
             raise PipelineApiError(422, "input_not_reusable", "Pipeline input is not reusable")
         resolved.append(
@@ -471,7 +533,17 @@ async def create_retry_run(
             or artifact.manifest_sha256 != frozen["manifest_sha256"]
         ):
             raise PipelineApiError(409, "input_drift", "Original input snapshot drifted")
-        if artifact.safety_state not in {"verified_internal", "verified"}:
+        if artifact.safety_state not in {"verified_internal", "verified"} and not (
+            await _behavior_unknown_input_is_admissible(
+                session,
+                artifact=artifact,
+                team_id=team_id,
+                recipe_name=source.recipe_name,
+                recipe_version=source.recipe_version,
+                recipe_digest=source.recipe_digest,
+                input_name=frozen["input_name"],
+            )
+        ):
             raise PipelineApiError(409, "input_not_reusable", "Original input is not reusable")
     logical_slots = _logical_control_slots(graph)
     if logical_slots:

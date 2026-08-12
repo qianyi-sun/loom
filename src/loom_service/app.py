@@ -41,6 +41,7 @@ from loom.system_identities import assert_pipeline_controller_identity
 from loom.taskset.transform_sandbox import TransformSandboxConfig
 from loom.workload_trust import WorkloadTrustContract
 from loom_service.batch_runner import run_loop as batch_run_loop
+from loom_service.behavior_pipeline_adapter import install_behavior_pipeline_public_adapter
 from loom_service.config import LoomServiceSettings
 from loom_service.dev_instance_runtime import build_personal_dev_preparation_runtime
 from loom_service.metrics import (
@@ -268,6 +269,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         app.state.gateway_client = gateway_client
         app.state.personal_dev_candidate_limits = personal_dev_candidate_limits
         app.state.personal_dev_builder_available = personal_dev_builder_runtime is not None
+        install_behavior_pipeline_public_adapter(app=app, settings=settings)
         if (
             personal_dev_builder_runtime is not None
             and personal_dev_candidate_limits is not None

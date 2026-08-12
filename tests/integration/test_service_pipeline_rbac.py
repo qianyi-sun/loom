@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
@@ -76,6 +77,44 @@ def _budget() -> dict[str, object]:
     }
 
 
+def _input_import_manifest() -> dict[str, object]:
+    checkpoint_tree_sha256 = (
+        "sha256:0749d74c81fc078f8354547f87812260fdb8c4c07a981934ec7d79df0cffd106"
+    )
+    return {
+        "schema_version": "behavior.input-import.v1",
+        "kind": "policy",
+        "name": "rbac-fixture",
+        "version": "1",
+        "upstream": {
+            "type": "artifact",
+            "locator": "tests/rbac-fixture",
+            "revision": "r1",
+        },
+        "compatibility": {
+            "kind": "policy",
+            "architecture": "pi_behavior_b1k_fast",
+            "action_dim": 23,
+            "state_dim": 23,
+            "robot_action_dim": 25,
+            "checkpoint_format": "openpi_checkpoint_directory_v1",
+            "checkpoint_root": "payload/checkpoint",
+            "checkpoint_tree_sha256": checkpoint_tree_sha256,
+            "model_identifier": "pi0-behavior-r1",
+            "vla_interface_version": "behavior_b1k_websocket_v1",
+            "controller_adapter_version": "r1pro_25_to_pi23_v1",
+        },
+        "files": [
+            {
+                "path": "checkpoint/weights.bin",
+                "sha256": "a" * 64,
+                "size_bytes": 3,
+                "media_type": "application/octet-stream",
+            }
+        ],
+    }
+
+
 async def test_read_scope_can_list_but_cannot_submit() -> None:
     session = _Session(_Result())
     context = _context(
@@ -137,7 +176,7 @@ async def test_cross_team_run_is_hidden_as_not_found() -> None:
 
     assert response.status_code == 404
     assert response.json()["detail"]["reason_code"] == "not_found"
-    statement = session.statements[0]
+    statement = cast(Any, session.statements[0])
     assert "pipeline_runs.team_id" in str(statement)
     assert selected_team_id in statement.compile().params.values()
 
@@ -161,7 +200,11 @@ async def test_non_owner_cannot_create_an_input_import() -> None:
         response = await client.post(
             "/api/v1/pipeline-input-imports",
             headers={"Idempotency-Key": "member-import"},
-            json={"kind": "dataset", "manifest": {}, "recipe": "smoke@1"},
+            json={
+                "kind": "policy",
+                "manifest": _input_import_manifest(),
+                "recipe": "behavior-recovery@1",
+            },
         )
 
     assert response.status_code == 403
@@ -192,7 +235,11 @@ async def test_team_owner_can_create_an_input_import() -> None:
         response = await client.post(
             "/api/v1/pipeline-input-imports",
             headers={"Idempotency-Key": "owner-import"},
-            json={"kind": "dataset", "manifest": {}, "recipe": "smoke@1"},
+            json={
+                "kind": "policy",
+                "manifest": _input_import_manifest(),
+                "recipe": "behavior-recovery@1",
+            },
         )
 
     assert response.status_code == 200, response.text

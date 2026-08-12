@@ -22,6 +22,7 @@ from loom.db.schema import (
     TeamMembership,
 )
 from loom.pipeline.artifact_commit import PartReceiptV1
+from loom.pipeline.behavior_input_import import BehaviorInputImportManifestV1
 from loom.pipeline.control_bindings import (
     JudgeExecutionProfileApplyV1,
     RecipeProviderBindingApplyV1,
@@ -36,7 +37,7 @@ from loom.pipeline.public_api import (
     validate_idempotency_key,
 )
 from loom.pipeline.recipes import OfficialRecipeRegistry
-from loom.pipeline.spec import PipelineModel
+from loom.pipeline.spec import ArtifactType, Digest, PipelineModel
 from loom_service.auth_guards import is_admin, require_scope, require_submitting_user
 from loom_service.dependencies import SessionAndCtx
 from loom_service.pipeline_api_service import (
@@ -589,8 +590,16 @@ async def list_judge_profiles(
 
 class PipelineInputImportCreateV1(PipelineModel):
     kind: Literal["dataset", "policy", "mop_bank"]
-    manifest: dict[str, Any]
+    manifest: BehaviorInputImportManifestV1
     recipe: Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9-]{0,127}@[1-9][0-9]{0,9}$")]
+
+    @model_validator(mode="after")
+    def fixed_behavior_import(self) -> PipelineInputImportCreateV1:
+        if self.recipe != "behavior-recovery@1":
+            raise ValueError("input imports are registered only for behavior-recovery@1")
+        if self.kind != self.manifest.kind:
+            raise ValueError("request kind differs from the signed import manifest")
+        return self
 
 
 class PipelineInputImportRenewV1(PipelineModel):
@@ -632,6 +641,32 @@ class PipelineMaterializeInputsV1(PipelineModel):
             raise ValueError("seed_base must be an unsigned 32-bit integer")
         result["parameters"] = {"episodes_per_instance": episodes, "seed_base": seed}
         return result
+
+    @model_validator(mode="after")
+    def exact_behavior_inputs(self) -> PipelineMaterializeInputsV1:
+        if set(self.inputs) != {"dataset", "policy", "mop_bank"}:
+            raise ValueError("behavior-recovery requires exactly dataset, policy, and mop_bank")
+        return self
+
+
+class PipelineMaterializedGraphInputV1(PipelineModel):
+    name: Literal["task_set", "task_instances", "dataset", "policy", "mop_bank"]
+    artifact_id: UUID
+    artifact_type: ArtifactType
+    manifest_sha256: Digest
+
+
+class PipelineMaterializeInputsResponseV1(PipelineModel):
+    materialization_id: UUID
+    state: Literal["committed"]
+    results: Annotated[list[PipelineMaterializedGraphInputV1], Field(min_length=5, max_length=5)]
+
+    @model_validator(mode="after")
+    def exact_five_refs(self) -> PipelineMaterializeInputsResponseV1:
+        expected = ["task_set", "task_instances", "dataset", "policy", "mop_bank"]
+        if [item.name for item in self.results] != expected:
+            raise ValueError("materialization response must contain the exact five graph inputs")
+        return self
 
 
 async def _adapter_call(app_request: Request, name: str, **kwargs: Any) -> Any:
@@ -766,7 +801,10 @@ async def abort_pipeline_import(
     )
 
 
-@router.post("/pipeline-recipes/{name}/{version}/materialize-inputs")
+@router.post(
+    "/pipeline-recipes/{name}/{version}/materialize-inputs",
+    response_model=PipelineMaterializeInputsResponseV1,
+)
 async def materialize_pipeline_inputs(
     request: Request,
     sc: SessionAndCtx,

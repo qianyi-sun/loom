@@ -97,7 +97,7 @@ async def test_import_create_and_streamed_part_preserve_admin_scope_and_headers(
     adapter = ImportAdapter()
     session = SimpleNamespace(marker="import-session")
     sc = cast(Any, (session, _admin(team_id, user_id)))
-    create_payload = PipelineInputImportCreateV1(
+    create_payload = PipelineInputImportCreateV1.model_construct(
         kind="dataset",
         manifest={"schema_version": "behavior.input-import.v1"},
         recipe="behavior-recovery@1",
@@ -181,7 +181,7 @@ async def test_import_create_rejects_non_admin_before_adapter_call() -> None:
         await create_pipeline_input_import(
             request=_request(adapter),
             sc=cast(Any, (Session(), member)),
-            payload=PipelineInputImportCreateV1(
+            payload=PipelineInputImportCreateV1.model_construct(
                 kind="dataset",
                 manifest={"schema_version": "behavior.input-import.v1"},
                 recipe="behavior-recovery@1",

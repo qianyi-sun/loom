@@ -716,6 +716,21 @@ class ArtifactCommitService:
             raise ArtifactCommitError("idempotency_conflict")
         return existing.committed
 
+    async def committed_session_evidence(
+        self, session_id: UUID
+    ) -> tuple[ArtifactCommitManifestV1, str, str]:
+        """Return read-only marker evidence after a successful common commit."""
+
+        session = await self._repository.get(session_id)
+        if (
+            session.state != "committed"
+            or session.manifest is None
+            or session.manifest_sha256 is None
+            or session.marker_sha256 is None
+        ):
+            raise ArtifactCommitError("session_not_committed")
+        return session.manifest, session.manifest_sha256, session.marker_sha256
+
     async def prepare_session(
         self,
         *,
