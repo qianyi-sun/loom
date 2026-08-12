@@ -2546,7 +2546,7 @@ class PipelineRepository:
                            cancellation_outcome='not_started', finished_at=clock_timestamp(),
                            retry_class='cancelled', reason_code=:cause,
                            cleanup_acknowledged_at=clock_timestamp(),
-                           cleanup_proof_json='{\"not_started\":true}'::jsonb,
+                           cleanup_proof_json=CAST(:cleanup_proof AS jsonb),
                            cleanup_proof_digest=:cleanup_digest,
                            version=a.version+1
                       FROM pipeline_stage_runs s
@@ -2557,6 +2557,7 @@ class PipelineRepository:
                 {
                     "run_id": lease.pipeline_run_id,
                     "cause": cause.value,
+                    "cleanup_proof": '{"not_started":true}',
                     "cleanup_digest": canonical_digest({"not_started": True}),
                 },
                 )
