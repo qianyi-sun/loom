@@ -281,6 +281,13 @@ ruleset active with an empty bypass-actor list throughout this acceptance; a
 green source workflow or an ordinary non-required CheckRun is not equivalent
 evidence.
 
+During a normal auto-merge, GitHub can remove the commit's open-PR association
+before its direct PR snapshot reports the merge. The publisher may preserve an
+already-terminal result through that lag only when the pull number, head/base
+snapshot, authority generation, and source run/attempt all still match exactly.
+It must never synthesize success from an empty association, and any competing
+open association remains a fail-closed authority error.
+
 Same-repository `dev`-to-`main` promotions use this publisher. Branch push
 aggregates use `*-push`, so they never duplicate a protected name on a
 later promotion PR that points at the same commit.
