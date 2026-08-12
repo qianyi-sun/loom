@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -33,6 +34,8 @@ from loom_capacity_manager.models import (
     CapacityAuthorityState,
     CapacityExecutableExecutorState,
     CapacityExecutableIntent,
+    CapacityPool,
+    CapacityPoolObservation,
 )
 from loom_capacity_manager.ownership import OwnershipKeyring
 from loom_capacity_manager.reconciler import reconcile_shadow_once
@@ -44,7 +47,7 @@ from tests.capacity_execution_fixtures import (
     register_execution_executors,
     setup_execution,
 )
-from tests.capacity_fixtures import demand_snapshot, pool_observation
+from tests.capacity_fixtures import demand_snapshot, pool_observation, resource_vector
 
 
 def test_execution_store_is_a_distinct_v2_ledger() -> None:
@@ -340,6 +343,84 @@ async def test_permit_consumption_rechecks_global_pending_limit(
     )
 
     with pytest.raises(ExecutionConflictError, match="global pending limit"):
+        await store.consume_launch_permit(
+            capacity_session,
+            ExecutablePermitConsumptionV2(
+                permit_id=permit.permit_id,
+                permit_digest=store.contract_digest(permit),
+                binding=permit.binding,
+                command_sequence=3,
+            ),
+        )
+
+
+async def test_closing_intent_remains_charged_until_release(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityExecutionStore()
+    permit = await _launch_ready(store, capacity_session)
+    close = ExecutableIntentCloseV2(
+        binding=permit.binding,
+        command_sequence=3,
+    )
+    await store.begin_intent_close(capacity_session, close)
+    context = await store._locked_execution_context(
+        capacity_session,
+        permit.binding.execution,
+        executor_binding(permit.binding.pool_id),
+    )
+
+    with pytest.raises(ExecutionConflictError, match="capacity ceiling"):
+        await store._assert_increase_eligible(
+            capacity_session,
+            context,
+            proposed=permit.binding,
+        )
+
+
+async def test_permit_consumption_rechecks_selected_node_headroom(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityExecutionStore()
+    permit = await _launch_ready(store, capacity_session)
+    pool = (
+        await capacity_session.execute(
+            select(CapacityPool).where(
+                CapacityPool.configuration_epoch == permit.binding.execution.configuration_epoch,
+                CapacityPool.pool_id == permit.binding.pool_id,
+            )
+        )
+    ).scalar_one()
+    topology = json.loads(json.dumps(pool.topology))
+    spare = json.loads(json.dumps(topology["resource_domains"][0]["nodes"][0]))
+    spare["node_id"] = "gb10-spare"
+    topology["resource_domains"][0]["nodes"].append(spare)
+    pool.topology = topology
+    occupied = pool_observation(pool_id="gb10").model_copy(
+        update={
+            "commitments": (
+                pool_observation(pool_id="gb10", commitment_ids=("occupied",))
+                .commitments[0]
+                .model_copy(
+                    update={
+                        "resources": resource_vector(
+                            slots=8,
+                            cpu_millicores=8_000,
+                            memory_bytes=17_179_869_184,
+                        ),
+                        "node_ids": permit.binding.node_ids,
+                    }
+                ),
+            )
+        }
+    )
+    await capacity_session.execute(
+        update(CapacityPoolObservation)
+        .where(CapacityPoolObservation.pool_id == permit.binding.pool_id)
+        .values(payload=occupied.model_dump(mode="json", exclude_none=False))
+    )
+
+    with pytest.raises(ExecutionConflictError, match="node headroom"):
         await store.consume_launch_permit(
             capacity_session,
             ExecutablePermitConsumptionV2(

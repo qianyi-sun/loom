@@ -1501,7 +1501,7 @@ class CapacityExecutionStore:
                 await session.execute(
                     select(CapacityExecutableIntent).where(
                         CapacityExecutableIntent.execution_epoch == context.epoch.execution_epoch,
-                        CapacityExecutableIntent.state.not_in(["released", "closing"]),
+                        CapacityExecutableIntent.state != "released",
                     )
                 )
             )
@@ -1538,6 +1538,39 @@ class CapacityExecutionStore:
         )
         if not vector_fits(checked_add_vectors(committed, binding.resources), total):
             raise ExecutionConflictError("pool headroom changed")
+        node_capacity = {
+            node["node_id"]: ResourceVectorV1.model_validate(node["allocatable"])
+            for domain in pool.topology["resource_domains"]
+            for node in domain["nodes"]
+        }
+        shape = next(
+            (item for item in profile.shape_catalog if item["shape_id"] == binding.shape_id),
+            None,
+        )
+        if (
+            shape is None
+            or len(shape["node_resources"]) != len(binding.node_ids)
+            or any(node_id not in node_capacity for node_id in binding.node_ids)
+        ):
+            raise ExecutionConflictError("selected node headroom changed")
+        committed_by_node: dict[str, ResourceVectorV1] = {}
+        for item in observation.commitments:
+            for node_id in item.node_ids:
+                committed_by_node[node_id] = checked_add_vectors(
+                    committed_by_node.get(node_id, ResourceVectorV1()),
+                    item.resources,
+                )
+        for node_id, required in zip(
+            binding.node_ids,
+            shape["node_resources"],
+            strict=True,
+        ):
+            used = committed_by_node.get(node_id, ResourceVectorV1())
+            if not vector_fits(
+                checked_add_vectors(used, ResourceVectorV1.model_validate(required)),
+                node_capacity[node_id],
+            ):
+                raise ExecutionConflictError("selected node headroom changed")
         account = (
             await session.execute(
                 select(CapacityAccountPolicy).where(
