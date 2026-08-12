@@ -115,7 +115,7 @@ class InstalledPreflightCommands:
 
         if not payload or len(payload.encode()) > 4 * 1024 * 1024:
             raise ValueError("GB10 supervisor controller payload is invalid")
-        return self._execute(argv, input=payload, timeout=30)
+        return self._execute(argv, input=payload, timeout=12)
 
     def systemd_preflight(self, argv: Sequence[str]) -> CommandResult:
         """Run only the fixed Tier 0 systemd probes with a short RPC bound."""

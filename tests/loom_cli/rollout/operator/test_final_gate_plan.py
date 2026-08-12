@@ -12,6 +12,11 @@ import pytest
 from loom_cli.rollout.external_supervisor_controller import (
     ExternalSupervisorControllerBinding,
     encode_external_supervisor_controller_bindings,
+    parse_external_supervisor_controller_bindings,
+)
+from loom_cli.rollout.external_supervisor_predecessor import (
+    GB10_CANONICAL_UNIT_DIR,
+    PROTECTED_CANONICAL_UNIT_DIR,
 )
 from loom_cli.rollout.operator.backup_lease import BackupLease, component_set_digest
 from loom_cli.rollout.operator.final_gate_plan import (
@@ -141,6 +146,7 @@ def _attestation() -> PreflightAttestation:
             predecessor["pending-transition-digest"]
         ),
         supervisor_transition_digest=external_supervisor_transition_digest(
+            unit_directory=GB10_CANONICAL_UNIT_DIR,
             candidate_sha="a" * 40,
             candidate_tree="b" * 40,
             environment="staging",
@@ -330,6 +336,7 @@ def _predecessor_evidence(*, pool_identity_digest: str = "b" * 64) -> dict[str, 
             "gx10-01c7/unit-set-digest": external_supervisor_unit_set_digest(units),
             "gx10-01c7/live-evidence-digest": "a" * 64,
             "gx10-01c7/pending-transition-digest": hashlib.sha256(b"{}").hexdigest(),
+            "gx10-01c7/unit-directory": GB10_CANONICAL_UNIT_DIR,
             **{f"gx10-01c7/unit/{name}": digest for name, digest in units.items()},
             "TRT-EAI-OLDLAB-1/authority-kind": "legacy-manifest",
             "TRT-EAI-OLDLAB-1/authority-digest": "e" * 64,
@@ -337,6 +344,7 @@ def _predecessor_evidence(*, pool_identity_digest: str = "b" * 64) -> dict[str, 
             "TRT-EAI-OLDLAB-1/unit-set-digest": external_supervisor_unit_set_digest(oldlab_units),
             "TRT-EAI-OLDLAB-1/live-evidence-digest": "f" * 64,
             "TRT-EAI-OLDLAB-1/pending-transition-digest": hashlib.sha256(b"{}").hexdigest(),
+            "TRT-EAI-OLDLAB-1/unit-directory": PROTECTED_CANONICAL_UNIT_DIR,
             **{f"TRT-EAI-OLDLAB-1/unit/{name}": digest for name, digest in oldlab_units.items()},
         },
     }
@@ -381,6 +389,7 @@ def _controller_bindings(
             predecessor_pending_transition_digest=predecessors[
                 f"{prefix}pending-transition-digest"
             ],
+            unit_directory=predecessors[f"{prefix}unit-directory"],
             target_artifact_digest=artifacts[host],
             target_profile_sha256=systemd["supervisor-profile-sha256"],
             target_script_sha256=systemd["supervisor-script-digests"],
@@ -439,6 +448,9 @@ def test_final_gate_plan_preserves_independent_supervisor_controller_authority(
     assert dict(plan.supervisor_controller_bindings) == dict(
         plan.to_dict()["supervisor_controller_bindings"]
     )
+    controllers = parse_external_supervisor_controller_bindings(plan.supervisor_controller_bindings)
+    assert controllers["gx10-01c7"].unit_directory == GB10_CANONICAL_UNIT_DIR
+    assert controllers["TRT-EAI-OLDLAB-1"].unit_directory == PROTECTED_CANONICAL_UNIT_DIR
 
 
 def test_final_gate_plan_rejects_drift_or_content_tamper(tmp_path: Path) -> None:
@@ -581,6 +593,7 @@ def test_final_gate_plan_accepts_absent_supervisor_predecessor(tmp_path: Path) -
         if name not in UNIT_PATHS
     }
     payload["supervisor_transition_digest"] = external_supervisor_transition_digest(
+        unit_directory=GB10_CANONICAL_UNIT_DIR,
         candidate_sha=payload["candidate_sha"],
         candidate_tree=payload["candidate_tree"],
         environment=payload["environment"],

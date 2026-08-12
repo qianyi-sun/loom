@@ -26,6 +26,9 @@ from loom_cli.rollout.credential_authority import (
 )
 from loom_cli.rollout.docker_readiness import CommandRunner as DockerCommandRunner
 from loom_cli.rollout.docker_readiness import probe_docker_runtime
+from loom_cli.rollout.external_supervisor_predecessor import (
+    external_supervisor_unit_directory,
+)
 from loom_cli.rollout.external_supervisor_readiness import (
     build_external_supervisor_artifact,
     verify_external_supervisor_artifact,
@@ -914,6 +917,7 @@ def build_external_supervisor_predecessor_check(
                 f"{host}/unit-set-digest": snapshot.unit_set_digest,
                 f"{host}/live-evidence-digest": snapshot.live_evidence_digest,
                 f"{host}/pending-transition-digest": snapshot.pending_transition_digest,
+                f"{host}/unit-directory": external_supervisor_unit_directory(host),
                 **{f"{host}/unit/{name}": digest for name, digest in snapshot.unit_sha256.items()},
             }.items()
         }

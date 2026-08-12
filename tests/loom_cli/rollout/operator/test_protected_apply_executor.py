@@ -175,7 +175,7 @@ class ExternalSupervisors:
         *,
         exact: bool = False,
         fail_reconcile: bool = False,
-        unit_dir: Path = Path("/var/lib/loom-staging-rollout/.config/systemd/user"),
+        unit_dir: Path = Path("/var/lib/loom-rollout/.config/systemd/user"),
     ) -> None:
         self.exact = exact
         self.fail_reconcile = fail_reconcile
@@ -274,6 +274,7 @@ def test_executor_orders_epoch_before_nonlegacy_migration_and_recovers(
         environment_state_transport=EnvironmentState(),
         candidate_root=tmp_path / "candidate",
         external_supervisor_transport=supervisors,
+        external_supervisor_execution_host="gx10-01c7",
         production_defaults_request=_defaults_request,
     )
 
@@ -309,6 +310,7 @@ def test_executor_reconciles_old_supervisor_prefix_before_any_new_mutation(
         environment_state_transport=EnvironmentState(),
         candidate_root=tmp_path / "candidate",
         external_supervisor_transport=supervisors,
+        external_supervisor_execution_host="gx10-01c7",
         production_defaults_request=_defaults_request,
     )
 
@@ -337,6 +339,7 @@ def test_executor_orders_legacy_migration_before_epoch_bootstrap(tmp_path: Path)
         environment_state_transport=EnvironmentState(),
         candidate_root=tmp_path / "candidate",
         external_supervisor_transport=ExternalSupervisors(),
+        external_supervisor_execution_host="gx10-01c7",
         production_defaults_request=_defaults_request,
     )
 
@@ -363,6 +366,7 @@ def test_executor_rejects_non_apply_operation(tmp_path: Path) -> None:
         environment_state_transport=EnvironmentState(),
         candidate_root=tmp_path / "candidate",
         external_supervisor_transport=ExternalSupervisors(),
+        external_supervisor_execution_host="gx10-01c7",
     )
     with pytest.raises(ValueError, match="operation is invalid"):
         executor("final.browser", CheckOperation.VERIFY, _plan(tmp_path))
@@ -385,6 +389,7 @@ def test_convergence_reuses_exact_classifiers_without_mutating(tmp_path: Path) -
         environment_state_transport=environment_state,
         candidate_root=tmp_path / "candidate",
         external_supervisor_transport=supervisors,
+        external_supervisor_execution_host="gx10-01c7",
         production_defaults_request=_defaults_request,
     )("final.protected-apply", CheckOperation.APPLY, plan)
     assert applied.ready
@@ -397,6 +402,7 @@ def test_convergence_reuses_exact_classifiers_without_mutating(tmp_path: Path) -
         environment_state_transport=environment_state,
         candidate_root=tmp_path / "candidate",
         external_supervisor_transport=supervisors,
+        external_supervisor_execution_host="gx10-01c7",
         production_defaults_request=_defaults_request,
     )("final.convergence", CheckOperation.VERIFY, plan)
 
@@ -424,6 +430,7 @@ def test_convergence_reports_drift_without_applying(tmp_path: Path) -> None:
         environment_state_transport=EnvironmentState(desired_exact=True),
         candidate_root=tmp_path / "candidate",
         external_supervisor_transport=ExternalSupervisors(exact=False),
+        external_supervisor_execution_host="gx10-01c7",
         production_defaults_request=_defaults_request,
         environment_state_attempts=1,
     )("final.convergence", CheckOperation.VERIFY, plan)
@@ -461,7 +468,10 @@ def test_convergence_blocks_when_only_oldlab_supervisor_is_stale(tmp_path: Path)
         candidate_root=candidate_root,
         external_supervisor_transports={
             "gx10-01c7": gb10_supervisor,
-            "TRT-EAI-OLDLAB-1": ExternalSupervisors(exact=False),
+            "TRT-EAI-OLDLAB-1": ExternalSupervisors(
+                exact=False,
+                unit_dir=Path(external_supervisor_unit_directory("TRT-EAI-OLDLAB-1")),
+            ),
         },
         production_defaults_request=_defaults_request,
         environment_state_attempts=1,
@@ -482,7 +492,9 @@ def test_protected_apply_journals_and_activates_both_supervisor_controllers(
         "gx10-01c7": ExternalSupervisors(
             unit_dir=Path(external_supervisor_unit_directory("gx10-01c7")),
         ),
-        "TRT-EAI-OLDLAB-1": ExternalSupervisors(),
+        "TRT-EAI-OLDLAB-1": ExternalSupervisors(
+            unit_dir=Path(external_supervisor_unit_directory("TRT-EAI-OLDLAB-1")),
+        ),
     }
 
     result = MigrationEpochProtectedApplyExecutor(
@@ -535,6 +547,7 @@ def test_convergence_waits_boundedly_for_worker_runtime(tmp_path: Path) -> None:
         environment_state_transport=environment_state,
         candidate_root=tmp_path / "candidate",
         external_supervisor_transport=supervisors,
+        external_supervisor_execution_host="gx10-01c7",
         production_defaults_request=_defaults_request,
         environment_state_attempts=3,
         environment_state_interval_seconds=0.25,
@@ -554,6 +567,7 @@ def test_convergence_rejects_mutating_or_wrong_check_operation(tmp_path: Path) -
         environment_state_transport=EnvironmentState(desired_exact=True),
         candidate_root=tmp_path / "candidate",
         external_supervisor_transport=ExternalSupervisors(exact=True),
+        external_supervisor_execution_host="gx10-01c7",
     )
     with pytest.raises(ValueError, match="operation is invalid"):
         executor("final.convergence", CheckOperation.APPLY, _plan(tmp_path))

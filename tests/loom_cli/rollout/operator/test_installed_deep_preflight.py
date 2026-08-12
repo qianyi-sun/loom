@@ -529,6 +529,52 @@ def test_installed_gb10_predecessor_source_uses_remote_typed_observation_and_uni
     assert snapshot.runtime_ready is True
 
 
+def test_installed_gb10_canonical_predecessor_rejects_oldlab_unit_directory() -> None:
+    candidate_root = Path(__file__).resolve().parents[4]
+    candidate_sha = _git_run(["git", "-C", str(candidate_root), "rev-parse", "HEAD"]).stdout.strip()
+    candidate_tree = _git_run(
+        ["git", "-C", str(candidate_root), "rev-parse", "HEAD^{tree}"]
+    ).stdout.strip()
+    artifact = build_external_supervisor_artifact(
+        candidate_root,
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+        image_tag=f"staging-{candidate_sha[:7]}",
+        environment="staging",
+        execution_host="gx10-01c7",
+    )
+    observation = _observation(
+        artifact,
+        files="exact",
+        runtime="exact",
+        unit_dir=PROTECTED_USER_UNIT_DIR,
+    )
+    source = installed_deep_preflight_factory._external_supervisor_predecessor_source(
+        candidate_root=candidate_root,
+        git_run=_git_run,
+        service_uid=501,
+        pool_identity_source=lambda: _pool_identity(
+            "0067",
+            legacy_count=0,
+            target_count=1,
+        ),
+        execution_host="gx10-01c7",
+        unit_dir=Path(GB10_CANONICAL_UNIT_DIR),
+        observation_source=lambda _context: observation,
+    )
+
+    snapshot = source(
+        _installed_predecessor_context(
+            candidate_root,
+            backup_schema_revision="0067",
+            database_schema_revision="0067",
+        )
+    )
+
+    assert snapshot.kind == "canonical"
+    assert snapshot.runtime_ready is False
+
+
 def test_installed_predecessor_sources_require_exact_two_controller_map() -> None:
     snapshot = ExternalSupervisorPredecessorSnapshot(
         kind="absent",
@@ -557,6 +603,105 @@ def test_installed_predecessor_sources_require_exact_two_controller_map() -> Non
         installed_deep_preflight_factory._controller_predecessor_sources(
             {"TRT-EAI-OLDLAB-1": lambda _context: snapshot}
         )
+
+
+def test_installed_predecessor_sources_share_one_pool_identity_snapshot() -> None:
+    identity = _pool_identity()
+    calls = 0
+    seen: list[ExternalSupervisorPoolIdentity] = []
+
+    def pool_identity_source() -> ExternalSupervisorPoolIdentity:
+        nonlocal calls
+        calls += 1
+        return identity
+
+    def source(
+        _context: CheckContext,
+        pool_identity: ExternalSupervisorPoolIdentity,
+    ) -> ExternalSupervisorPredecessorSnapshot:
+        seen.append(pool_identity)
+        return ExternalSupervisorPredecessorSnapshot(
+            kind="absent",
+            authority_digest=EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+            pointer_digest=EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+            unit_sha256={},
+            live_evidence_digest="a" * 64,
+            pending_transition_digest=hashlib.sha256(b"{}").hexdigest(),
+            transition_clear=True,
+            runtime_ready=True,
+            pool_identity_digest=pool_identity.evidence_digest,
+        )
+
+    combined = installed_deep_preflight_factory._controller_predecessor_sources(
+        {
+            "gx10-01c7": source,
+            "TRT-EAI-OLDLAB-1": source,
+        },
+        pool_identity_source=pool_identity_source,
+    )
+
+    snapshots = combined(SimpleNamespace())
+
+    assert calls == 1
+    assert seen == [identity, identity]
+    assert {snapshot.pool_identity_digest for snapshot in snapshots.values()} == {
+        identity.evidence_digest
+    }
+
+
+def test_installed_gb10_absent_retry_fits_inside_predecessor_check_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    candidate_root = Path(__file__).resolve().parents[4]
+    context = _installed_predecessor_context(candidate_root)
+    expected = SimpleNamespace()
+    attempts: list[dict[str, object]] = []
+
+    def run_subprocess(argv, **kwargs):
+        attempts.append({"argv": tuple(argv), **kwargs})
+        return SimpleNamespace(
+            returncode=1 if len(attempts) == 1 else 0,
+            stdout="",
+            stderr="",
+        )
+
+    commands = installed_deep_preflight_factory.InstalledPreflightCommands(
+        _config(tmp_path),
+        {
+            "HOME": "/var/lib/loom-staging-rollout",
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "PATH": "/usr/bin:/bin",
+            "USER": "loom-rollout",
+        },
+        run_subprocess=run_subprocess,
+    )
+
+    class Transport:
+        def observe(self, _artifact, authority=None):
+            result = commands.gb10_supervisor_controller(
+                ("ssh", "fixed-controller"),
+                '{"schema_version":1}\n',
+            )
+            if result.returncode != 0:
+                raise RuntimeError("delayed first attempt failed")
+            assert authority is not None and authority.kind == "absent"
+            return expected
+
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "build_fixed_gb10_external_supervisor_transport",
+        lambda **_kwargs: Transport(),
+    )
+    source = installed_deep_preflight_factory._gb10_external_supervisor_observation_source(
+        candidate_root=candidate_root,
+        run=commands.gb10_supervisor_controller,
+    )
+
+    assert source(context) is expected
+    assert [attempt["timeout"] for attempt in attempts] == [12, 12]
+    assert sum(int(attempt["timeout"]) for attempt in attempts) < 30
 
 
 def test_installed_gb10_observation_binds_context_candidate_to_typed_transport(

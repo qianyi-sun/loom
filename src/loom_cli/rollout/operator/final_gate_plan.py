@@ -17,6 +17,7 @@ from uuid import uuid4
 from loom_cli.rollout.external_supervisor_controller import (
     parse_external_supervisor_controller_bindings,
 )
+from loom_cli.rollout.external_supervisor_predecessor import GB10_CANONICAL_UNIT_DIR
 from loom_cli.rollout.external_supervisor_readiness import SCRIPT_PATH
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactPublication
 from loom_cli.rollout.preflight_contract import (
@@ -361,6 +362,7 @@ class FinalGatePlan:
         ):
             raise ValueError("final gate supervisor predecessor authority is invalid")
         expected_transition = external_supervisor_transition_digest(
+            unit_directory=GB10_CANONICAL_UNIT_DIR,
             candidate_sha=self.candidate_sha,
             candidate_tree=self.candidate_tree,
             environment=self.environment,
@@ -409,6 +411,7 @@ class FinalGatePlan:
                 external_supervisor_unit_set_digest(host_units)
                 != self.supervisor_controller_unit_set_digests[host]
                 or external_supervisor_transition_digest(
+                    unit_directory=binding.unit_directory,
                     candidate_sha=self.candidate_sha,
                     candidate_tree=self.candidate_tree,
                     environment=self.environment,
@@ -506,6 +509,7 @@ class FinalGatePlan:
         } != predecessor["controller_bindings"]:
             raise ValueError("final gate supervisor controller predecessor drifted")
         supervisor_transition = external_supervisor_transition_digest(
+            unit_directory=GB10_CANONICAL_UNIT_DIR,
             candidate_sha=bindings.candidate_sha,
             candidate_tree=bindings.candidate_tree,
             environment=bindings.environment,

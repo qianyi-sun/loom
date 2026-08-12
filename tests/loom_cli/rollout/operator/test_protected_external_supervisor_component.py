@@ -171,6 +171,7 @@ def _bound_artifact(tmp_path: Path):
     legacy = load_predecessor_manifest()
     predecessor_live = _observation(artifact, files="legacy", runtime="exact")
     transition_digest = external_supervisor_transition_digest(
+        unit_directory=external_supervisor_unit_directory(artifact.supervisors[0].execution_host),
         candidate_sha=plan.candidate_sha,
         candidate_tree=plan.candidate_tree,
         environment=plan.environment,
@@ -222,6 +223,9 @@ def _bound_artifact(tmp_path: Path):
                 f"{execution_host}/live-evidence-digest": predecessor_live.evidence_digest,
                 f"{execution_host}/pending-transition-digest": (
                     predecessor_live.pending_transition_digest
+                ),
+                f"{execution_host}/unit-directory": external_supervisor_unit_directory(
+                    execution_host
                 ),
                 f"{execution_host}/transition-digest": transition_digest,
                 **{
@@ -289,6 +293,7 @@ def _bound_multi_artifacts(tmp_path: Path):
             predecessor_unit_set_digest=legacy.unit_set_digest,
             predecessor_live_evidence_digest=predecessor_live.evidence_digest,
             predecessor_pending_transition_digest=predecessor_live.pending_transition_digest,
+            unit_directory=external_supervisor_unit_directory(execution_host),
             target_artifact_digest=artifact.artifact_digest,
             target_profile_sha256=artifact.profile_sha256,
             target_script_sha256=artifact.script_sha256,
@@ -297,6 +302,7 @@ def _bound_multi_artifacts(tmp_path: Path):
         )
     primary = controller_bindings["gx10-01c7"]
     aggregate_transition = external_supervisor_transition_digest(
+        unit_directory=primary.unit_directory,
         candidate_sha=plan.candidate_sha,
         candidate_tree=plan.candidate_tree,
         environment=plan.environment,
@@ -376,9 +382,13 @@ def _observation(
     runtime: str,
     plan_digest: str = "a" * 64,
     attestation_digest: str = "b" * 64,
-    unit_dir: Path = PROTECTED_USER_UNIT_DIR,
+    unit_dir: Path | None = None,
 ) -> ExternalSupervisorLiveObservation:
     execution_hosts = {supervisor.execution_host for supervisor in artifact.supervisors}
+    if unit_dir is None:
+        if len(execution_hosts) != 1:
+            raise ValueError("test observation requires one explicit controller")
+        unit_dir = Path(external_supervisor_unit_directory(next(iter(execution_hosts))))
     legacy = load_predecessor_manifest(
         execution_host=(next(iter(execution_hosts)) if len(execution_hosts) == 1 else None)
     )
@@ -553,6 +563,7 @@ def test_component_classifies_bound_predecessor_partial_and_exact_states(tmp_pat
         candidate_root=candidate_root,
         transport=transport,
         epoch_guard=lambda value: _epoch(value),
+        unit_dir=Path(external_supervisor_unit_directory(artifact.supervisors[0].execution_host)),
         artifact_builder=_build_active_artifact,
     )
 
@@ -584,6 +595,7 @@ def test_component_identity_is_scoped_to_its_execution_host(tmp_path: Path) -> N
         ),
         epoch_guard=lambda value: _epoch(value),
         execution_host=execution_host,
+        unit_dir=Path(external_supervisor_unit_directory(execution_host)),
         artifact_builder=_build_active_artifact,
     ).component(plan)
 
@@ -646,11 +658,38 @@ def test_component_apply_classifies_gb10_against_explicit_controller_unit_direct
     assert transport.applied == 1
 
 
+def test_component_rejects_unit_directory_drift_from_controller_binding(
+    tmp_path: Path,
+) -> None:
+    plan, candidate_root, artifacts = _bound_multi_artifacts(tmp_path)
+    artifact = artifacts["gx10-01c7"]
+    component = ProtectedExternalSupervisorComponent(
+        candidate_root=candidate_root,
+        transport=_Transport(
+            artifact,
+            _observation(
+                artifact,
+                files="legacy",
+                runtime="exact",
+                unit_dir=Path(GB10_CANONICAL_UNIT_DIR),
+            ),
+        ),
+        epoch_guard=lambda value: _epoch(value),
+        execution_host="gx10-01c7",
+        unit_dir=PROTECTED_USER_UNIT_DIR,
+        artifact_builder=_build_active_artifact,
+    )
+
+    with pytest.raises(ValueError, match="unit directory"):
+        component.component(plan)
+
+
 def _bound_absent(tmp_path: Path):
     plan, candidate_root, artifact = _bound_artifact(tmp_path)
     predecessor_live = _observation(artifact, files="absent", runtime="absent")
     absent_unit_set = external_supervisor_unit_set_digest_or_empty({})
     transition_digest = external_supervisor_transition_digest(
+        unit_directory=external_supervisor_unit_directory(artifact.supervisors[0].execution_host),
         candidate_sha=plan.candidate_sha,
         candidate_tree=plan.candidate_tree,
         environment=plan.environment,
@@ -696,6 +735,9 @@ def _bound_absent(tmp_path: Path):
                 f"{artifact.supervisors[0].execution_host}/pending-transition-digest": (
                     predecessor_live.pending_transition_digest
                 ),
+                f"{artifact.supervisors[0].execution_host}/unit-directory": (
+                    external_supervisor_unit_directory(artifact.supervisors[0].execution_host)
+                ),
                 f"{artifact.supervisors[0].execution_host}/transition-digest": (transition_digest),
             },
         }
@@ -736,6 +778,7 @@ def test_component_classifies_absent_bootstrap_ready_via_plan_authority(tmp_path
         candidate_root=candidate_root,
         transport=transport,
         epoch_guard=lambda value: _epoch(value),
+        unit_dir=Path(external_supervisor_unit_directory(artifact.supervisors[0].execution_host)),
         artifact_builder=_build_active_artifact,
     )
     assert component.classify(plan).state is ComponentState.READY
@@ -752,6 +795,7 @@ def test_component_stays_drifted_when_bare_observe_refuses_non_absent(tmp_path: 
         candidate_root=candidate_root,
         transport=transport,
         epoch_guard=lambda value: _epoch(value),
+        unit_dir=Path(external_supervisor_unit_directory(artifact.supervisors[0].execution_host)),
         artifact_builder=_build_active_artifact,
     )
     assert component.classify(plan).state is ComponentState.DRIFTED
@@ -764,6 +808,7 @@ def test_component_applies_and_reaches_exact(tmp_path: Path) -> None:
         candidate_root=candidate_root,
         transport=transport,
         epoch_guard=lambda value: _epoch(value),
+        unit_dir=Path(external_supervisor_unit_directory(artifact.supervisors[0].execution_host)),
         artifact_builder=_build_active_artifact,
     )
 
@@ -791,6 +836,7 @@ def test_component_rejects_stale_bytes_failed_state_and_epoch(tmp_path: Path) ->
         candidate_root=candidate_root,
         transport=transport,
         epoch_guard=lambda value: _epoch(value),
+        unit_dir=Path(external_supervisor_unit_directory(artifact.supervisors[0].execution_host)),
         artifact_builder=_build_active_artifact,
     )
     assert component.classify(plan).state is ComponentState.DRIFTED
@@ -811,6 +857,7 @@ def test_component_rebuilds_and_rejects_candidate_or_plan_drift(tmp_path: Path) 
             _observation(artifact, files="legacy", runtime="exact"),
         ),
         epoch_guard=lambda value: _epoch(value),
+        unit_dir=Path(external_supervisor_unit_directory(artifact.supervisors[0].execution_host)),
         artifact_builder=_build_active_artifact,
     )
     with pytest.raises(ValueError, match="transition identity drifted"):

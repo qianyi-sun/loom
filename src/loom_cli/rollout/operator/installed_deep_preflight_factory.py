@@ -202,7 +202,7 @@ def _external_supervisor_predecessor_source(
     execution_host: str | None = None,
     unit_dir: Path = PROTECTED_USER_UNIT_DIR,
     observation_source: Callable[[CheckContext], ExternalSupervisorLiveObservation] | None = None,
-) -> ExternalSupervisorPredecessorSource:
+) -> Callable[..., ExternalSupervisorPredecessorSnapshot]:
     """Return a no-write adapter over the fixed protected user-systemd store."""
 
     if not unit_dir.is_absolute() or ".." in unit_dir.parts:
@@ -228,7 +228,10 @@ def _external_supervisor_predecessor_source(
             raise ValueError("external supervisor predecessor Git provenance is unavailable")
         return result.stdout
 
-    def source(context: CheckContext) -> ExternalSupervisorPredecessorSnapshot:
+    def source(
+        context: CheckContext,
+        pool_identity_override: ExternalSupervisorPoolIdentity | None = None,
+    ) -> ExternalSupervisorPredecessorSnapshot:
         legacy = load_predecessor_manifest(execution_host=execution_host)
         candidate_sha = context.bindings.get("candidate.sha")
         candidate_tree = context.bindings.get("candidate.tree")
@@ -301,7 +304,7 @@ def _external_supervisor_predecessor_source(
             and authority.authority_digest != legacy.manifest_digest
         ):
             raise ValueError("external supervisor predecessor authority drifted")
-        pool_identity = pool_identity_source()
+        pool_identity = pool_identity_override or pool_identity_source()
         bound_schema_revision = context.bindings.get("database.schema.revision")
         if (
             not isinstance(bound_schema_revision, str)
@@ -314,7 +317,9 @@ def _external_supervisor_predecessor_source(
             else authority.kind
         )
         if canonical is not None:
-            runtime_ready = canonical_external_supervisor_runtime_ready(
+            runtime_ready = canonical.unit_dir == str(
+                unit_dir
+            ) and canonical_external_supervisor_runtime_ready(
                 canonical,
                 unit_payloads=units,
                 timer_statuses=timers,
@@ -385,7 +390,9 @@ def _external_supervisor_predecessor_source(
 
 
 def _controller_predecessor_sources(
-    sources: Mapping[str, ExternalSupervisorPredecessorSource],
+    sources: Mapping[str, Callable[..., ExternalSupervisorPredecessorSnapshot]],
+    *,
+    pool_identity_source: Callable[[], ExternalSupervisorPoolIdentity] | None = None,
 ) -> ExternalSupervisorPredecessorSource:
     expected = {GB10_CONTROLLER_EXECUTION_HOST, STAGING_ROLLOUT_EXECUTION_HOST}
     if set(sources) != expected or any(not callable(source) for source in sources.values()):
@@ -395,8 +402,13 @@ def _controller_predecessor_sources(
         context: CheckContext,
     ) -> Mapping[str, ExternalSupervisorPredecessorSnapshot]:
         snapshots: dict[str, ExternalSupervisorPredecessorSnapshot] = {}
+        pool_identity = None if pool_identity_source is None else pool_identity_source()
         for host in sorted(sources):
-            snapshot = sources[host](context)
+            snapshot = (
+                sources[host](context)
+                if pool_identity is None
+                else sources[host](context, pool_identity)
+            )
             if not isinstance(snapshot, ExternalSupervisorPredecessorSnapshot):
                 raise ValueError("external supervisor controller snapshot is invalid")
             snapshots[host] = snapshot
@@ -621,6 +633,9 @@ def build_installed_deep_preflight_composition(
 
         return unavailable_actions, unavailable_identity
 
+    def pool_identity_source() -> ExternalSupervisorPoolIdentity:
+        return _probe_installed_external_supervisor_pool_identity(service_uid=service_uid)
+
     return InstalledDeepPreflightComposition(
         config=config,
         service_uid=service_uid,
@@ -643,11 +658,7 @@ def build_installed_deep_preflight_composition(
                             candidate_root=config.runner_repo,
                             git_run=commands.git,
                             service_uid=service_uid,
-                            pool_identity_source=lambda: (
-                                _probe_installed_external_supervisor_pool_identity(
-                                    service_uid=service_uid
-                                )
-                            ),
+                            pool_identity_source=pool_identity_source,
                             execution_host=GB10_CONTROLLER_EXECUTION_HOST,
                             unit_dir=Path(
                                 external_supervisor_unit_directory(GB10_CONTROLLER_EXECUTION_HOST)
@@ -665,15 +676,12 @@ def build_installed_deep_preflight_composition(
                             candidate_root=config.runner_repo,
                             git_run=commands.git,
                             service_uid=service_uid,
-                            pool_identity_source=lambda: (
-                                _probe_installed_external_supervisor_pool_identity(
-                                    service_uid=service_uid
-                                )
-                            ),
+                            pool_identity_source=pool_identity_source,
                             execution_host=STAGING_ROLLOUT_EXECUTION_HOST,
                         )
                     ),
-                }
+                },
+                pool_identity_source=pool_identity_source,
             )
         ),
         systemd_run=commands.systemd_preflight,

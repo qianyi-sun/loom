@@ -311,6 +311,8 @@ def _safe_tree(
                 continue
             if not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)):
                 raise BrokerError("candidate runtime contains a special file")
+            if stat.S_ISREG(metadata.st_mode) and metadata.st_nlink != 1:
+                raise BrokerError("candidate runtime contains an external hardlink")
             if stat.S_IMODE(metadata.st_mode) & 0o022:
                 raise BrokerError("candidate runtime is writable outside root")
 
@@ -384,13 +386,17 @@ def _git(
     repo: Path,
     *arguments: str,
     check: bool = True,
-    run_as: tuple[int, int] | None = None,
+    run_as: tuple[int, int],
 ) -> subprocess.CompletedProcess[str]:
     return _run(
         [
             "/usr/bin/git",
             "-c",
             f"safe.directory={repo}",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
             "-C",
             str(repo),
             *arguments,
@@ -408,6 +414,8 @@ def _validate_candidate_path(
     remote_url: str,
     owner_uid: int,
     owner_gid: int,
+    inspection_uid: int,
+    inspection_gid: int,
     system_python: Path,
 ) -> Path:
     if _SHA_RE.fullmatch(candidate_sha) is None or _SHA_RE.fullmatch(candidate_tree) is None:
@@ -422,17 +430,43 @@ def _validate_candidate_path(
     )
     _safe_directory(repo, owner_uid=owner_uid, owner_gid=owner_gid, label="candidate repo")
     _safe_directory(venv, owner_uid=owner_uid, owner_gid=owner_gid, label="candidate venv")
-    if _git(repo, "remote").stdout.splitlines() != ["origin"]:
+    inspection_identity = (inspection_uid, inspection_gid)
+    if _git(repo, "remote", run_as=inspection_identity).stdout.splitlines() != ["origin"]:
         raise BrokerError("candidate origin authority drifted")
-    if _git(repo, "config", "--get-all", "remote.origin.url").stdout.splitlines() != [remote_url]:
+    if _git(
+        repo,
+        "config",
+        "--get-all",
+        "remote.origin.url",
+        run_as=inspection_identity,
+    ).stdout.splitlines() != [remote_url]:
         raise BrokerError("candidate origin URL drifted")
-    if _git(repo, "config", "--get-all", "remote.origin.pushurl", check=False).returncode == 0:
+    if (
+        _git(
+            repo,
+            "config",
+            "--get-all",
+            "remote.origin.pushurl",
+            check=False,
+            run_as=inspection_identity,
+        ).returncode
+        == 0
+    ):
         raise BrokerError("candidate push authority appeared")
-    if _git(repo, "rev-parse", "HEAD").stdout.strip() != candidate_sha:
+    if _git(repo, "rev-parse", "HEAD", run_as=inspection_identity).stdout.strip() != candidate_sha:
         raise BrokerError("candidate commit identity drifted")
-    if _git(repo, "rev-parse", "HEAD^{tree}").stdout.strip() != candidate_tree:
+    if (
+        _git(repo, "rev-parse", "HEAD^{tree}", run_as=inspection_identity).stdout.strip()
+        != candidate_tree
+    ):
         raise BrokerError("candidate tree identity drifted")
-    if _git(repo, "status", "--porcelain=v1", "--untracked-files=all").stdout:
+    if _git(
+        repo,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        run_as=inspection_identity,
+    ).stdout:
         raise BrokerError("candidate checkout is dirty")
     python = venv / "bin/python"
     if python.resolve(strict=True) != system_python.resolve(strict=True):
@@ -454,6 +488,8 @@ def _validate_candidate(
     remote_url: str,
     owner_uid: int,
     owner_gid: int,
+    inspection_uid: int,
+    inspection_gid: int,
     system_python: Path,
 ) -> Path:
     if not candidates_root.is_absolute() or ".." in candidates_root.parts:
@@ -471,6 +507,8 @@ def _validate_candidate(
         remote_url=remote_url,
         owner_uid=owner_uid,
         owner_gid=owner_gid,
+        inspection_uid=inspection_uid,
+        inspection_gid=inspection_gid,
         system_python=system_python,
     )
 
@@ -483,6 +521,8 @@ def candidate_ready(
     remote_url: str = REMOTE_URL,
     owner_uid: int = 0,
     owner_gid: int = 0,
+    inspection_uid: int = SERVICE_UID,
+    inspection_gid: int = SERVICE_GID,
     system_python: Path = SYSTEM_PYTHON,
 ) -> bool:
     try:
@@ -493,6 +533,8 @@ def candidate_ready(
             remote_url=remote_url,
             owner_uid=owner_uid,
             owner_gid=owner_gid,
+            inspection_uid=inspection_uid,
+            inspection_gid=inspection_gid,
             system_python=system_python,
         )
     except (BrokerError, OSError, subprocess.SubprocessError):
@@ -501,17 +543,32 @@ def candidate_ready(
 
 
 def _harden_tree(root: Path, *, owner_uid: int, owner_gid: int) -> None:
+    inventory: list[tuple[Path, os.stat_result]] = []
     for directory, names, files in os.walk(root, topdown=False, followlinks=False):
         for name in [*names, *files]:
             path = Path(directory) / name
             metadata = os.lstat(path)
-            if metadata.st_uid != owner_uid or metadata.st_gid != owner_gid:
-                os.lchown(path, owner_uid, owner_gid)
-            if stat.S_ISDIR(metadata.st_mode):
-                os.chmod(path, 0o555, follow_symlinks=False)
-            elif stat.S_ISREG(metadata.st_mode):
-                executable = bool(stat.S_IMODE(metadata.st_mode) & 0o111)
-                os.chmod(path, 0o555 if executable else 0o444, follow_symlinks=False)
+            if not (
+                stat.S_ISDIR(metadata.st_mode)
+                or stat.S_ISREG(metadata.st_mode)
+                or stat.S_ISLNK(metadata.st_mode)
+            ):
+                raise BrokerError("candidate runtime contains a special file")
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                and not stat.S_ISLNK(metadata.st_mode)
+                and metadata.st_nlink != 1
+            ):
+                raise BrokerError("candidate runtime contains an external hardlink")
+            inventory.append((path, metadata))
+    for path, metadata in inventory:
+        if metadata.st_uid != owner_uid or metadata.st_gid != owner_gid:
+            os.lchown(path, owner_uid, owner_gid)
+        if stat.S_ISDIR(metadata.st_mode):
+            os.chmod(path, 0o555, follow_symlinks=False)
+        elif stat.S_ISREG(metadata.st_mode):
+            executable = bool(stat.S_IMODE(metadata.st_mode) & 0o111)
+            os.chmod(path, 0o555 if executable else 0o444, follow_symlinks=False)
     metadata = os.lstat(root)
     if metadata.st_uid != owner_uid or metadata.st_gid != owner_gid:
         os.chown(root, owner_uid, owner_gid)
@@ -573,6 +630,7 @@ def _publish_candidate(
             "LANG": "C.UTF-8",
             "LC_ALL": "C.UTF-8",
             "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "UV_LINK_MODE": "copy",
             "UV_PROJECT_ENVIRONMENT": str(temporary / "venv"),
         }
         _run(
@@ -604,6 +662,8 @@ def _publish_candidate(
             remote_url=remote_url,
             owner_uid=owner_uid,
             owner_gid=owner_gid,
+            inspection_uid=build_uid,
+            inspection_gid=build_gid,
             system_python=system_python,
         )
         final = candidates_root / candidate_sha
@@ -663,6 +723,8 @@ def ensure_candidate(
             remote_url=remote_url,
             owner_uid=owner_uid,
             owner_gid=owner_gid,
+            inspection_uid=build_uid,
+            inspection_gid=build_gid,
             system_python=system_python,
         ):
             return candidates_root / candidate_sha

@@ -9,6 +9,7 @@ from types import MappingProxyType
 
 from loom_cli.rollout.external_supervisor_predecessor import (
     ABSENT_PREDECESSOR_DIGEST,
+    external_supervisor_unit_directory,
     external_supervisor_unit_set_digest_or_empty,
 )
 
@@ -25,6 +26,7 @@ _REQUIRED_FIELDS = frozenset(
         "live-evidence-digest",
         "pending-transition-digest",
         "transition-digest",
+        "unit-directory",
     }
 )
 
@@ -41,14 +43,20 @@ class ExternalSupervisorControllerBinding:
     predecessor_unit_set_digest: str
     predecessor_live_evidence_digest: str
     predecessor_pending_transition_digest: str
+    unit_directory: str
     transition_digest: str
 
     def __post_init__(self) -> None:
         units = dict(self.predecessor_unit_sha256)
         absent = self.predecessor_kind == "absent"
+        try:
+            expected_unit_directory = external_supervisor_unit_directory(self.execution_host)
+        except ValueError as exc:
+            raise ValueError("external supervisor controller binding is invalid") from exc
         if (
             _HOST_RE.fullmatch(self.execution_host) is None
             or self.predecessor_kind not in {"legacy-manifest", "canonical", "absent"}
+            or self.unit_directory != expected_unit_directory
             or bool(units) == absent
             or any(
                 _UNIT_RE.fullmatch(name) is None or _SHA256_RE.fullmatch(digest) is None
@@ -100,6 +108,7 @@ class ExternalSupervisorControllerBinding:
         predecessor_unit_set_digest: str,
         predecessor_live_evidence_digest: str,
         predecessor_pending_transition_digest: str,
+        unit_directory: str,
         target_artifact_digest: str,
         target_profile_sha256: str,
         target_script_sha256: Mapping[str, str],
@@ -117,7 +126,9 @@ class ExternalSupervisorControllerBinding:
             predecessor_unit_set_digest=predecessor_unit_set_digest,
             predecessor_live_evidence_digest=predecessor_live_evidence_digest,
             predecessor_pending_transition_digest=predecessor_pending_transition_digest,
+            unit_directory=unit_directory,
             transition_digest=external_supervisor_transition_digest(
+                unit_directory=unit_directory,
                 candidate_sha=candidate_sha,
                 candidate_tree=candidate_tree,
                 environment=environment,
@@ -145,6 +156,7 @@ class ExternalSupervisorControllerBinding:
             f"{prefix}unit-set-digest": self.predecessor_unit_set_digest,
             f"{prefix}live-evidence-digest": self.predecessor_live_evidence_digest,
             f"{prefix}pending-transition-digest": (self.predecessor_pending_transition_digest),
+            f"{prefix}unit-directory": self.unit_directory,
             f"{prefix}transition-digest": self.transition_digest,
             **{
                 f"{prefix}{_UNIT_PREFIX}{name}": digest
@@ -203,6 +215,7 @@ def parse_external_supervisor_controller_bindings(
             predecessor_unit_set_digest=fields["unit-set-digest"],
             predecessor_live_evidence_digest=fields["live-evidence-digest"],
             predecessor_pending_transition_digest=fields["pending-transition-digest"],
+            unit_directory=fields["unit-directory"],
             transition_digest=fields["transition-digest"],
         )
     return MappingProxyType(dict(sorted(result.items())))

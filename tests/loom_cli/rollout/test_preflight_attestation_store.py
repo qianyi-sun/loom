@@ -108,6 +108,7 @@ def _attestation() -> PreflightAttestation:
             "gx10-01c7/unit-set-digest": external_supervisor_unit_set_digest(predecessor_units),
             "gx10-01c7/live-evidence-digest": "1" * 64,
             "gx10-01c7/pending-transition-digest": "2" * 64,
+            "gx10-01c7/unit-directory": "/var/lib/loom-rollout/.config/systemd/user",
             "gx10-01c7/transition-digest": "3" * 64,
             **{f"gx10-01c7/unit/{name}": digest for name, digest in predecessor_units.items()},
         },

@@ -71,7 +71,15 @@ def _existing_candidate(
     root = tmp_path / "candidates"
     candidate = root / sha
     candidate.mkdir(parents=True)
-    _run("git", "clone", "-q", str(source), str(candidate / "repo"), cwd=tmp_path)
+    _run(
+        "git",
+        "clone",
+        "-q",
+        "--no-hardlinks",
+        str(source),
+        str(candidate / "repo"),
+        cwd=tmp_path,
+    )
     _run("git", "checkout", "-q", "--detach", sha, cwd=candidate / "repo")
     venv_bin = candidate / "venv/bin"
     venv_bin.mkdir(parents=True)
@@ -140,6 +148,8 @@ def test_existing_candidate_requires_exact_clean_hardened_root_owned_runtime(
         remote_url=str(source),
         owner_uid=os.geteuid(),
         owner_gid=os.getegid(),
+        inspection_uid=os.geteuid(),
+        inspection_gid=os.getegid(),
         system_python=system_python,
     )
 
@@ -151,8 +161,78 @@ def test_existing_candidate_requires_exact_clean_hardened_root_owned_runtime(
         remote_url=str(source),
         owner_uid=os.geteuid(),
         owner_gid=os.getegid(),
+        inspection_uid=os.geteuid(),
+        inspection_gid=os.getegid(),
         system_python=system_python,
     )
+
+
+def test_candidate_inspection_disables_candidate_configured_executable_git_hooks(
+    tmp_path: Path,
+) -> None:
+    source, sha, tree = _source_repo(tmp_path)
+    root = tmp_path / "candidates"
+    candidate = root / sha
+    candidate.mkdir(parents=True)
+    repo = candidate / "repo"
+    _run("git", "clone", "-q", "--no-hardlinks", str(source), str(repo), cwd=tmp_path)
+    _run("git", "checkout", "-q", "--detach", sha, cwd=repo)
+    marker = tmp_path / "candidate-git-hook-ran"
+    fsmonitor = candidate / "candidate-fsmonitor"
+    fsmonitor.write_text(
+        f"#!/bin/sh\ntouch {marker}\nprintf '\\n'\n",
+        encoding="utf-8",
+    )
+    fsmonitor.chmod(0o755)
+    _run("git", "config", "core.fsmonitor", str(fsmonitor), cwd=repo)
+    venv_bin = candidate / "venv/bin"
+    venv_bin.mkdir(parents=True)
+    system_python = tmp_path / "system-python"
+    system_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    system_python.chmod(0o755)
+    (venv_bin / "python").symlink_to(system_python)
+    root.chmod(0o755)
+    broker._harden_tree(candidate, owner_uid=os.geteuid(), owner_gid=os.getegid())
+
+    ready = broker.candidate_ready(
+        root,
+        sha,
+        tree,
+        remote_url=str(source),
+        owner_uid=os.geteuid(),
+        owner_gid=os.getegid(),
+        inspection_uid=os.geteuid(),
+        inspection_gid=os.getegid(),
+        system_python=system_python,
+    )
+
+    assert ready is True
+    assert not marker.exists()
+
+
+def test_candidate_hardening_rejects_external_hardlinks_before_mutation(
+    tmp_path: Path,
+) -> None:
+    external = tmp_path / "service-owned-state"
+    external.write_text("preserve\n", encoding="utf-8")
+    external.chmod(0o600)
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    os.link(external, candidate / "linked-state")
+    before = external.stat()
+
+    with pytest.raises(broker.BrokerError, match="hardlink"):
+        broker._harden_tree(
+            candidate,
+            owner_uid=os.geteuid(),
+            owner_gid=os.getegid(),
+        )
+
+    after = external.stat()
+    assert after.st_mode == before.st_mode
+    assert after.st_uid == before.st_uid
+    assert after.st_gid == before.st_gid
+    assert external.read_text(encoding="utf-8") == "preserve\n"
 
 
 def test_absent_candidate_is_published_atomically_and_verified(tmp_path: Path) -> None:
@@ -195,6 +275,8 @@ def test_absent_candidate_is_published_atomically_and_verified(tmp_path: Path) -
         remote_url=str(source),
         owner_uid=os.geteuid(),
         owner_gid=os.getegid(),
+        inspection_uid=os.geteuid(),
+        inspection_gid=os.getegid(),
         system_python=system_python,
     )
     assert not tuple(candidates.glob(f".{sha}.*"))

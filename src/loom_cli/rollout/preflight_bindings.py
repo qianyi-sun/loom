@@ -8,6 +8,7 @@ from loom_cli.rollout.external_supervisor_controller import (
     ExternalSupervisorControllerBinding,
     encode_external_supervisor_controller_bindings,
 )
+from loom_cli.rollout.external_supervisor_predecessor import GB10_CANONICAL_UNIT_DIR
 from loom_cli.rollout.operator.backup_lease import BackupLease, component_set_digest
 from loom_cli.rollout.preflight_contract import (
     AttestationBindings,
@@ -86,6 +87,7 @@ def _controller_predecessors(
         "unit-set-digest",
         "live-evidence-digest",
         "pending-transition-digest",
+        "unit-directory",
     }
     result: dict[str, dict[str, object]] = {}
     for host, fields in grouped.items():
@@ -232,6 +234,7 @@ def derive_attestation_bindings(
     if external_supervisor_unit_set_digest(target_unit_sha256) != target_unit_set_digest:
         raise ValueError("external supervisor target unit evidence drifted")
     supervisor_transition = external_supervisor_transition_digest(
+        unit_directory=GB10_CANONICAL_UNIT_DIR,
         candidate_sha=candidate_sha,
         candidate_tree=candidate_tree,
         environment=_string(binding("environment"), "environment"),
@@ -304,6 +307,7 @@ def derive_attestation_bindings(
             predecessor_pending_transition_digest=str(
                 controller_predecessor["pending-transition-digest"]
             ),
+            unit_directory=str(controller_predecessor["unit-directory"]),
             target_artifact_digest=controller_artifacts[host],
             target_profile_sha256=target_profile_sha256,
             target_script_sha256=target_script_sha256,

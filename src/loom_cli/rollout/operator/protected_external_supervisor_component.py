@@ -289,6 +289,7 @@ class ProtectedExternalSupervisorComponent:
             raise RuntimeError("protected external supervisor predecessor evidence drifted")
         target_unit_set_digest = external_supervisor_unit_set_digest(artifact.unit_sha256)
         calculated_transition = external_supervisor_transition_digest(
+            unit_directory=controller.unit_directory,
             candidate_sha=plan.candidate_sha,
             candidate_tree=plan.candidate_tree,
             environment=plan.environment,
@@ -350,8 +351,8 @@ class ProtectedExternalSupervisorComponent:
             raise ValueError("protected external supervisor artifact drifted from final plan")
         return artifact
 
-    @staticmethod
     def _controller_binding(
+        self,
         plan: FinalGatePlan,
         artifact: ExternalSupervisorArtifact,
     ) -> ExternalSupervisorControllerBinding:
@@ -360,11 +361,14 @@ class ProtectedExternalSupervisorComponent:
             raise ValueError("protected external supervisor artifact spans controllers")
         execution_host = next(iter(execution_hosts))
         try:
-            return parse_external_supervisor_controller_bindings(
+            binding = parse_external_supervisor_controller_bindings(
                 plan.supervisor_controller_bindings
             )[execution_host]
         except KeyError as exc:
             raise ValueError("protected external supervisor controller binding is missing") from exc
+        if binding.unit_directory != str(self.unit_dir):
+            raise ValueError("protected external supervisor controller unit directory drifted")
+        return binding
 
     @staticmethod
     def _observation(

@@ -6,6 +6,10 @@ from types import MappingProxyType
 
 import pytest
 
+from loom_cli.rollout.external_supervisor_predecessor import (
+    GB10_CANONICAL_UNIT_DIR,
+    PROTECTED_CANONICAL_UNIT_DIR,
+)
 from loom_cli.rollout.operator.backup_lease import BackupLease, component_set_digest
 from loom_cli.rollout.preflight_bindings import derive_attestation_bindings
 from loom_cli.rollout.preflight_contract import (
@@ -126,6 +130,7 @@ def _executions() -> tuple[CheckExecution, ...]:
                     ),
                     "gx10-01c7/live-evidence-digest": "9" * 64,
                     "gx10-01c7/pending-transition-digest": "0" * 64,
+                    "gx10-01c7/unit-directory": GB10_CANONICAL_UNIT_DIR,
                     **{
                         f"gx10-01c7/unit/{name}": digest
                         for name, digest in predecessor_units.items()
@@ -138,6 +143,7 @@ def _executions() -> tuple[CheckExecution, ...]:
                     ),
                     "TRT-EAI-OLDLAB-1/live-evidence-digest": "b" * 64,
                     "TRT-EAI-OLDLAB-1/pending-transition-digest": "0" * 64,
+                    "TRT-EAI-OLDLAB-1/unit-directory": PROTECTED_CANONICAL_UNIT_DIR,
                     **{
                         f"TRT-EAI-OLDLAB-1/unit/{name}": digest
                         for name, digest in oldlab_predecessor_units.items()
@@ -205,6 +211,7 @@ def test_derives_complete_bindings_only_from_exact_evidence() -> None:
         execution for execution in _executions() if execution.check_id == "systemd.render"
     )
     assert bindings.supervisor_transition_digest == external_supervisor_transition_digest(
+        unit_directory=GB10_CANONICAL_UNIT_DIR,
         candidate_sha=bindings.candidate_sha,
         candidate_tree=bindings.candidate_tree,
         environment=bindings.environment,
@@ -233,6 +240,8 @@ def test_derives_complete_bindings_only_from_exact_evidence() -> None:
         controller_bindings["gx10-01c7/transition-digest"]
         != (controller_bindings["TRT-EAI-OLDLAB-1/transition-digest"])
     )
+    assert controller_bindings["gx10-01c7/unit-directory"] == GB10_CANONICAL_UNIT_DIR
+    assert controller_bindings["TRT-EAI-OLDLAB-1/unit-directory"] == PROTECTED_CANONICAL_UNIT_DIR
 
 
 def test_restore_verified_lease_overrides_prebackup_reuse_evidence() -> None:
