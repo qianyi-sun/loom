@@ -30,6 +30,7 @@ from loom_capacity_manager.grant_store import CapacityGrantStore
 from loom_capacity_manager.models import (
     Base,
     CapacityAuthorityState,
+    CapacityCandidate,
     CapacityExecutionEpoch,
     CapacityExecutionExecutor,
 )
@@ -40,6 +41,7 @@ from loom_capacity_manager.store import (
     ExecutionConflictError,
     ExecutionPreparationDisabledError,
     IdempotencyConflictError,
+    StaleWriterError,
     WriterFence,
 )
 from tests.capacity_fixtures import (
@@ -76,8 +78,8 @@ def _acknowledgement() -> SubjectExecutionAcknowledgementV2:
         configuration_generation=subject.configuration_generation,
         deployment_generation=subject.deployment_generation,
         candidate=CandidateBindingV2(
-            algorithm="git-sha1",
-            identity="1" * 40,
+            algorithm="source-sha256",
+            identity="1" * 64,
             publication_sha256="2" * 64,
         ),
         reporter_incarnation=subject.demand_reporter_incarnation,
@@ -180,6 +182,22 @@ async def _setup(
         actor="fleet-operator",
         idempotency_key=UUID(int=703),
     )
+    acknowledgement = _acknowledgement()
+    session.add(
+        CapacityCandidate(
+            subject_id=acknowledgement.subject_id,
+            subject_incarnation=acknowledgement.subject_incarnation,
+            candidate_generation=subject.candidate_generation,
+            candidate_digest=acknowledgement.candidate.identity,
+            source_payload={"publication_sha256": acknowledgement.candidate.publication_sha256},
+            artifact_payload={},
+            architecture_payload={},
+            launcher_payload={},
+            attestation_payload={},
+            protocol_payload={},
+        )
+    )
+    await session.flush()
     writer = await store.register_writer(session, AUTHORITY_ID, expected_epoch=0)
 
     grant_store = CapacityGrantStore(
@@ -222,7 +240,6 @@ async def _setup(
             )
         )
 
-    acknowledgement = _acknowledgement()
     request = ExecutionPreparationV2(
         authority_incarnation=AUTHORITY_ID,
         expected_writer_epoch=writer.writer_epoch,
@@ -323,9 +340,7 @@ async def test_prepare_is_exact_replay_and_keeps_the_ceiling_zero(
             await capacity_session.execute(
                 update(CapacityExecutionEpoch).values(fleet_digest="f" * 64)
             )
-    row = (
-        await capacity_session.execute(select(CapacityExecutionEpoch))
-    ).scalar_one()
+    row = (await capacity_session.execute(select(CapacityExecutionEpoch))).scalar_one()
     with pytest.raises(DBAPIError, match="must be inserted prepared"):
         async with capacity_session.begin_nested():
             capacity_session.add(
@@ -333,6 +348,7 @@ async def test_prepare_is_exact_replay_and_keeps_the_ceiling_zero(
                     execution_epoch=row.execution_epoch + 1,
                     authority_incarnation=row.authority_incarnation,
                     prepared_writer_epoch=row.prepared_writer_epoch,
+                    current_writer_epoch=row.current_writer_epoch,
                     configuration_epoch=row.configuration_epoch,
                     fleet_generation=row.fleet_generation,
                     fleet_digest=row.fleet_digest,
@@ -347,9 +363,7 @@ async def test_prepare_is_exact_replay_and_keeps_the_ceiling_zero(
                     gb10_executor_incarnation=row.gb10_executor_incarnation,
                     gb10_pool_id=row.gb10_pool_id,
                     gb10_pool_generation=row.gb10_pool_generation,
-                    environment_acknowledgements_sha256=(
-                        row.environment_acknowledgements_sha256
-                    ),
+                    environment_acknowledgements_sha256=(row.environment_acknowledgements_sha256),
                     legacy_writer_manifest_sha256=row.legacy_writer_manifest_sha256,
                     rollback_evidence_sha256=row.rollback_evidence_sha256,
                     requested_ceiling=1,
@@ -442,6 +456,61 @@ async def test_activation_rechecks_freeze_and_exact_evidence(
         )
 
 
+async def test_execution_rechecks_durable_candidate_provenance(
+    capacity_session: AsyncSession,
+) -> None:
+    """A policy-matching acknowledgement cannot override durable candidate state."""
+
+    fixture = await _setup(capacity_session, execution_policy=_policy())
+    await capacity_session.execute(update(CapacityCandidate).values(candidate_digest="9" * 64))
+    with pytest.raises(ExecutionConflictError, match="candidate provenance"):
+        await fixture.store.prepare_execution_epoch(
+            capacity_session,
+            fixture.request,
+            actor="activation-operator",
+            idempotency_key=UUID(int=733),
+        )
+
+    await capacity_session.execute(update(CapacityCandidate).values(candidate_digest="1" * 64))
+    prepared = await fixture.store.prepare_execution_epoch(
+        capacity_session,
+        fixture.request,
+        actor="activation-operator",
+        idempotency_key=UUID(int=734),
+    )
+    await _register_execution_executors(capacity_session, fixture, prepared)
+    activation = ExecutionActivationV2(
+        authority_incarnation=AUTHORITY_ID,
+        expected_writer_epoch=fixture.writer.writer_epoch,
+        execution_epoch=prepared.execution_epoch,
+        execution_manifest_sha256=prepared.execution_manifest_sha256,
+        executable_new_capacity_ceiling=1,
+        executable_new_capacity_rate_per_minute=1,
+    )
+    await capacity_session.execute(
+        update(CapacityCandidate).values(source_payload={"publication_sha256": "8" * 64})
+    )
+    with pytest.raises(ExecutionConflictError, match="candidate provenance"):
+        await fixture.store.activate_execution_epoch(
+            capacity_session,
+            activation,
+            actor="activation-operator",
+            idempotency_key=UUID(int=735),
+        )
+    await capacity_session.execute(
+        update(CapacityCandidate).values(source_payload={"publication_sha256": "2" * 64})
+    )
+    await fixture.store.activate_execution_epoch(
+        capacity_session,
+        activation,
+        actor="activation-operator",
+        idempotency_key=UUID(int=738),
+    )
+    await capacity_session.execute(update(CapacityCandidate).values(candidate_digest="7" * 64))
+    with pytest.raises(AuthorityRecoveryError, match="owner policy"):
+        await fixture.store.execution_authority(capacity_session)
+
+
 async def test_writer_restart_retires_a_stale_preparation(
     capacity_session: AsyncSession,
 ) -> None:
@@ -480,6 +549,66 @@ async def test_writer_restart_retires_a_stale_preparation(
             actor="activation-operator",
             idempotency_key=UUID(int=729),
         )
+
+
+async def test_active_writer_restart_clamps_to_drain_only_and_refences(
+    capacity_session: AsyncSession,
+) -> None:
+    """A replacement writer must atomically remove stale scale-up authority."""
+
+    fixture = await _setup(capacity_session, execution_policy=_policy())
+    prepared = await fixture.store.prepare_execution_epoch(
+        capacity_session,
+        fixture.request,
+        actor="activation-operator",
+        idempotency_key=UUID(int=736),
+    )
+    await _register_execution_executors(capacity_session, fixture, prepared)
+    await fixture.store.activate_execution_epoch(
+        capacity_session,
+        ExecutionActivationV2(
+            authority_incarnation=AUTHORITY_ID,
+            expected_writer_epoch=fixture.writer.writer_epoch,
+            execution_epoch=prepared.execution_epoch,
+            execution_manifest_sha256=prepared.execution_manifest_sha256,
+            executable_new_capacity_ceiling=1,
+            executable_new_capacity_rate_per_minute=1,
+        ),
+        actor="activation-operator",
+        idempotency_key=UUID(int=737),
+    )
+
+    successor = await fixture.store.register_writer(
+        capacity_session,
+        AUTHORITY_ID,
+        expected_epoch=fixture.writer.writer_epoch,
+    )
+
+    authority = await fixture.store.execution_authority(capacity_session)
+    assert authority is not None
+    assert authority.execution_state == "drain-only"
+    assert authority.executable_new_capacity_ceiling == 0
+    assert authority.executable_new_capacity_rate_per_minute == 0
+    assert authority.writer_epoch == successor.writer_epoch
+    row = (await capacity_session.execute(select(CapacityExecutionEpoch))).scalar_one()
+    assert row.state == "drain-only"
+    assert row.current_writer_epoch == successor.writer_epoch
+    with pytest.raises(StaleWriterError):
+        await fixture.store.load_allocation_input(capacity_session, fixture.writer)
+
+    replacement = await fixture.store.register_writer(
+        capacity_session,
+        AUTHORITY_ID,
+        expected_epoch=successor.writer_epoch,
+    )
+    authority = await fixture.store.execution_authority(capacity_session)
+    assert authority is not None
+    assert authority.execution_state == "drain-only"
+    assert authority.writer_epoch == replacement.writer_epoch
+    await capacity_session.refresh(row)
+    assert row.current_writer_epoch == replacement.writer_epoch
+    with pytest.raises(StaleWriterError):
+        await fixture.store.load_allocation_input(capacity_session, successor)
 
 
 async def test_dry_run_executor_registration_is_not_executable_provenance(
@@ -550,9 +679,7 @@ async def test_activation_is_atomic_and_exact_replay(
     with pytest.raises(DBAPIError, match="append-only"):
         async with capacity_session.begin_nested():
             await capacity_session.execute(
-                update(CapacityExecutionExecutor).values(
-                    local_authority_sha256="9" * 64
-                )
+                update(CapacityExecutionExecutor).values(local_authority_sha256="9" * 64)
             )
     first = await fixture.store.activate_execution_epoch(
         capacity_session,
@@ -595,9 +722,3 @@ async def test_activation_is_atomic_and_exact_replay(
 
     with pytest.raises(AuthorityRecoveryError, match="owner policy"):
         await CapacityManagementStore().execution_authority(capacity_session)
-    with pytest.raises(AuthorityRecoveryError, match="shadow-only"):
-        await fixture.store.register_writer(
-            capacity_session,
-            AUTHORITY_ID,
-            expected_epoch=fixture.writer.writer_epoch,
-        )

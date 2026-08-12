@@ -25,6 +25,7 @@ def upgrade() -> None:
         sa.Column("execution_epoch", sa.BigInteger(), autoincrement=False, nullable=False),
         sa.Column("authority_incarnation", sa.UUID(), nullable=False),
         sa.Column("prepared_writer_epoch", sa.BigInteger(), nullable=False),
+        sa.Column("current_writer_epoch", sa.BigInteger(), nullable=False),
         sa.Column("configuration_epoch", sa.BigInteger(), nullable=False),
         sa.Column("fleet_generation", sa.BigInteger(), nullable=False),
         sa.Column("fleet_digest", sa.Text(), nullable=False),
@@ -64,6 +65,7 @@ def upgrade() -> None:
         sa.Column("retired_at", postgresql.TIMESTAMP(timezone=True), nullable=True),
         sa.CheckConstraint(
             "execution_epoch > 0 AND prepared_writer_epoch > 0 "
+            "AND current_writer_epoch > 0 "
             "AND configuration_epoch > 0 AND fleet_generation > 0 "
             "AND oldlab_pool_generation > 0 AND gb10_pool_generation > 0 "
             "AND requested_ceiling = 1 AND effective_ceiling >= 0 "
@@ -164,8 +166,7 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.CheckConstraint(
-            "execution_epoch > 0 AND pool_generation > 0 "
-            "AND pool_id IN ('gb10','oldlab')",
+            "execution_epoch > 0 AND pool_generation > 0 AND pool_id IN ('gb10','oldlab')",
             name="capacity_execution_executor_binding_check",
         ),
         sa.CheckConstraint(
@@ -282,6 +283,10 @@ def upgrade() -> None:
               RAISE EXCEPTION 'capacity execution epoch must be inserted prepared'
                 USING ERRCODE = '23514';
             END IF;
+            IF NEW.current_writer_epoch <> NEW.prepared_writer_epoch THEN
+              RAISE EXCEPTION 'capacity execution epoch initial writer evidence is invalid'
+                USING ERRCODE = '23514';
+            END IF;
             RETURN NEW;
           END IF;
 
@@ -373,6 +378,13 @@ def upgrade() -> None:
               OLD.activated_at,
               OLD.drain_only_at,
               OLD.retired_at
+            )
+            OR (
+              NEW.current_writer_epoch <> OLD.current_writer_epoch
+              AND NOT (
+                OLD.state = 'drain-only'
+                AND NEW.current_writer_epoch = OLD.current_writer_epoch + 1
+              )
             ) THEN
               RAISE EXCEPTION 'execution epoch state evidence changed without transition'
                 USING ERRCODE = '23514';
@@ -380,6 +392,7 @@ def upgrade() -> None:
           ELSIF OLD.state = 'prepared' AND NEW.state = 'active' THEN
             IF NEW.effective_ceiling <= 0
                OR NEW.effective_rate_per_minute <= 0
+               OR NEW.current_writer_epoch <> OLD.current_writer_epoch
                OR NEW.activation_actor IS NULL
                OR NEW.activation_idempotency_key IS NULL
                OR NEW.activation_request_digest IS NULL
@@ -415,6 +428,7 @@ def upgrade() -> None:
           ELSIF OLD.state = 'prepared' AND NEW.state = 'retired' THEN
             IF NEW.effective_ceiling <> 0
                OR NEW.effective_rate_per_minute <> 0
+               OR NEW.current_writer_epoch <> OLD.current_writer_epoch
                OR NEW.activation_actor IS NOT NULL
                OR NEW.activation_idempotency_key IS NOT NULL
                OR NEW.activation_request_digest IS NOT NULL
@@ -427,6 +441,7 @@ def upgrade() -> None:
           ELSIF OLD.state = 'active' AND NEW.state = 'drain-only' THEN
             IF NEW.effective_ceiling <> 0
                OR NEW.effective_rate_per_minute <> 0
+               OR NEW.current_writer_epoch <> OLD.current_writer_epoch + 1
                OR ROW(
                  NEW.activation_actor,
                  NEW.activation_idempotency_key,
@@ -446,6 +461,7 @@ def upgrade() -> None:
           ELSIF OLD.state = 'drain-only' AND NEW.state = 'retired' THEN
             IF NEW.effective_ceiling <> 0
                OR NEW.effective_rate_per_minute <> 0
+               OR NEW.current_writer_epoch <> OLD.current_writer_epoch
                OR ROW(
                  NEW.activation_actor,
                  NEW.activation_idempotency_key,
@@ -517,18 +533,13 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute(
-        "DROP TRIGGER capacity_execution_executor_truncate_guard "
-        "ON capacity_execution_executors"
+        "DROP TRIGGER capacity_execution_executor_truncate_guard ON capacity_execution_executors"
     )
     op.execute(
-        "DROP TRIGGER capacity_execution_executor_append_only_guard "
-        "ON capacity_execution_executors"
+        "DROP TRIGGER capacity_execution_executor_append_only_guard ON capacity_execution_executors"
     )
     op.execute("DROP FUNCTION capacity_execution_evidence_append_only_guard()")
-    op.execute(
-        "DROP TRIGGER capacity_execution_epoch_truncate_guard "
-        "ON capacity_execution_epochs"
-    )
+    op.execute("DROP TRIGGER capacity_execution_epoch_truncate_guard ON capacity_execution_epochs")
     op.execute(
         "DROP TRIGGER capacity_execution_epoch_transition_guard ON capacity_execution_epochs"
     )

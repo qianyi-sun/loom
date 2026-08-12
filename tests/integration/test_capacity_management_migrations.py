@@ -69,9 +69,7 @@ def _capacity_config(url: str) -> AlembicConfig:
 def isolated_capacity_migration_url(postgres_url: str) -> Iterator[str]:
     source_url = make_url(postgres_url)
     database_name = f"loom_capacity_migration_{uuid4().hex}"
-    admin_engine = create_engine(
-        source_url.set(database="postgres"), isolation_level="AUTOCOMMIT"
-    )
+    admin_engine = create_engine(source_url.set(database="postgres"), isolation_level="AUTOCOMMIT")
     quoted = admin_engine.dialect.identifier_preparer.quote(database_name)
     try:
         with admin_engine.connect() as connection:
@@ -184,40 +182,64 @@ def test_capacity_0004_preserves_populated_writer_and_journal_across_downgrade(
 
         command.upgrade(cfg, "capacity_0004")
         with engine.connect() as connection:
-            assert connection.execute(
-                text("SELECT writer_epoch FROM capacity_authority_state")
-            ).scalar_one() == 7
-            assert connection.execute(
-                text("SELECT journal_high_water FROM capacity_executors")
-            ).scalar_one() == 5
-            assert connection.execute(
-                text("SELECT execution_epoch FROM capacity_authority_state")
-            ).scalar_one() == 0
+            assert (
+                connection.execute(
+                    text("SELECT writer_epoch FROM capacity_authority_state")
+                ).scalar_one()
+                == 7
+            )
+            assert (
+                connection.execute(
+                    text("SELECT journal_high_water FROM capacity_executors")
+                ).scalar_one()
+                == 5
+            )
+            assert (
+                connection.execute(
+                    text("SELECT execution_epoch FROM capacity_authority_state")
+                ).scalar_one()
+                == 0
+            )
 
         command.downgrade(cfg, "capacity_0003")
         with engine.connect() as connection:
-            assert connection.execute(
-                text("SELECT writer_epoch FROM capacity_authority_state")
-            ).scalar_one() == 7
-            assert connection.execute(
-                text("SELECT journal_high_water FROM capacity_executors")
-            ).scalar_one() == 5
+            assert (
+                connection.execute(
+                    text("SELECT writer_epoch FROM capacity_authority_state")
+                ).scalar_one()
+                == 7
+            )
+            assert (
+                connection.execute(
+                    text("SELECT journal_high_water FROM capacity_executors")
+                ).scalar_one()
+                == 5
+            )
             assert "capacity_execution_epochs" not in inspect(connection).get_table_names()
-            assert connection.execute(
-                text(
-                    "SELECT count(*) FROM pg_proc "
-                    "WHERE proname = 'capacity_execution_epoch_transition_guard'"
-                )
-            ).scalar_one() == 0
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT count(*) FROM pg_proc "
+                        "WHERE proname = 'capacity_execution_epoch_transition_guard'"
+                    )
+                ).scalar_one()
+                == 0
+            )
 
         command.upgrade(cfg, "capacity_0004")
         with engine.connect() as connection:
-            assert connection.execute(
-                text("SELECT writer_epoch FROM capacity_authority_state")
-            ).scalar_one() == 7
-            assert connection.execute(
-                text("SELECT journal_high_water FROM capacity_executors")
-            ).scalar_one() == 5
+            assert (
+                connection.execute(
+                    text("SELECT writer_epoch FROM capacity_authority_state")
+                ).scalar_one()
+                == 7
+            )
+            assert (
+                connection.execute(
+                    text("SELECT journal_high_water FROM capacity_executors")
+                ).scalar_one()
+                == 5
+            )
     finally:
         engine.dispose()
 

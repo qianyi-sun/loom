@@ -738,11 +738,14 @@ def test_body_limit_and_status_pagination_are_bounded(
     assert status_body["execution_epoch"] == 0
     assert status_body["execution_manifest_sha256"] is None
     assert status_body["executable_new_capacity_ceiling"] == 0
-    assert client.post(
-        "/v1/execution-activations",
-        headers=operator_headers | {"Idempotency-Key": str(uuid4())},
-        json={},
-    ).status_code == 404
+    assert (
+        client.post(
+            "/v1/execution-activations",
+            headers=operator_headers | {"Idempotency-Key": str(uuid4())},
+            json={},
+        ).status_code
+        == 404
+    )
 
 
 def test_metrics_have_no_subject_or_environment_labels(

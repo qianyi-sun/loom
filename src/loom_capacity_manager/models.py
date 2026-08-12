@@ -196,6 +196,7 @@ class CapacityExecutionEpoch(Base):
     __table_args__ = (
         CheckConstraint(
             "execution_epoch > 0 AND prepared_writer_epoch > 0 "
+            "AND current_writer_epoch > 0 "
             "AND configuration_epoch > 0 AND fleet_generation > 0 "
             "AND oldlab_pool_generation > 0 AND gb10_pool_generation > 0 "
             "AND requested_ceiling = 1 AND effective_ceiling >= 0 "
@@ -269,6 +270,7 @@ class CapacityExecutionEpoch(Base):
     execution_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     authority_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
     prepared_writer_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    current_writer_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
     configuration_epoch: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("capacity_configuration_epochs.configuration_epoch", ondelete="RESTRICT"),
@@ -313,8 +315,7 @@ class CapacityExecutionExecutor(Base):
     __tablename__ = "capacity_execution_executors"
     __table_args__ = (
         CheckConstraint(
-            "execution_epoch > 0 AND pool_generation > 0 "
-            "AND pool_id IN ('gb10','oldlab')",
+            "execution_epoch > 0 AND pool_generation > 0 AND pool_id IN ('gb10','oldlab')",
             name="capacity_execution_executor_binding_check",
         ),
         CheckConstraint(
@@ -325,15 +326,11 @@ class CapacityExecutionExecutor(Base):
             "AND registration_digest ~ '^[0-9a-f]{64}$'",
             name="capacity_execution_executor_digest_check",
         ),
-        UniqueConstraint(
-            "execution_epoch", "pool_id", name="capacity_execution_executor_pool_key"
-        ),
+        UniqueConstraint("execution_epoch", "pool_id", name="capacity_execution_executor_pool_key"),
         UniqueConstraint(
             "executor_incarnation", name="capacity_execution_executor_incarnation_key"
         ),
-        UniqueConstraint(
-            "idempotency_key", name="capacity_execution_executor_idempotency_key"
-        ),
+        UniqueConstraint("idempotency_key", name="capacity_execution_executor_idempotency_key"),
     )
 
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
