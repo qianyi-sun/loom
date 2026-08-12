@@ -507,6 +507,40 @@ export interface paths {
       };
     };
   };
+  "/api/v1/pipeline-runs/{run_id}/stages/{stage_run_id}/artifacts/{artifact_id}": {
+    get: {
+      parameters: {
+        path: { run_id: string; stage_run_id: string; artifact_id: string };
+      };
+      responses: {
+        200: {
+          content: {
+            "application/json": components["schemas"]["PipelineArtifactDetailV1"];
+          };
+        };
+      };
+    };
+  };
+  "/api/v1/pipeline-artifacts/{artifact_id}/files/{file_index}": {
+    get: {
+      parameters: { path: { artifact_id: string; file_index: number } };
+      responses: {
+        200: { content: { "application/octet-stream": unknown } };
+        206: { content: { "application/octet-stream": unknown } };
+        304: { content: never };
+        416: { content: never };
+      };
+    };
+    head: {
+      parameters: { path: { artifact_id: string; file_index: number } };
+      responses: {
+        200: { content: { "application/octet-stream": unknown } };
+        206: { content: { "application/octet-stream": unknown } };
+        304: { content: never };
+        416: { content: never };
+      };
+    };
+  };
   "/api/v1/pipeline-stage-runs/{stage_run_id}": {
     get: {
       parameters: { path: { stage_run_id: string } };
@@ -1302,6 +1336,22 @@ export interface components {
       pipeline_stage_run_id: string | null;
       execution_attempt_id: string | null;
       producer_kind: string | null;
+      detail_path: string;
+    };
+    PipelineArtifactFileProjectionV1: {
+      file_index: number;
+      relative_path: string;
+      role: string;
+      media_type: string;
+      size_bytes: number;
+      sha256: string;
+      download_path: string;
+    };
+    PipelineArtifactDetailV1: components["schemas"]["PipelineArtifactSummaryV1"] & {
+      created_at: string;
+      lineage_artifact_ids: string[];
+      lineage_digests: string[];
+      files: components["schemas"]["PipelineArtifactFileProjectionV1"][];
     };
     PipelineRunListItemV1: {
       id: string;

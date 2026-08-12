@@ -312,6 +312,24 @@ class PipelineArtifactSummaryV1(PipelineReadModel):
     pipeline_stage_run_id: UUID | None
     execution_attempt_id: UUID | None
     producer_kind: str | None
+    detail_path: str
+
+
+class PipelineArtifactFileProjectionV1(PipelineReadModel):
+    file_index: NonNegativeSafeInt
+    relative_path: str
+    role: str
+    media_type: str
+    size_bytes: NonNegativeSafeInt
+    sha256: str
+    download_path: str
+
+
+class PipelineArtifactDetailV1(PipelineArtifactSummaryV1):
+    created_at: datetime
+    lineage_artifact_ids: list[UUID]
+    lineage_digests: list[str]
+    files: list[PipelineArtifactFileProjectionV1]
 
 
 class PipelineBudgetCounterV1(PipelineReadModel):

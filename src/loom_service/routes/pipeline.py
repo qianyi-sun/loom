@@ -29,6 +29,7 @@ from loom.pipeline.control_bindings import (
 )
 from loom.pipeline.keys import canonical_digest
 from loom.pipeline.public_api import (
+    PipelineArtifactDetailV1,
     PipelineExecutionAttemptListV1,
     PipelineRunCancelRequestV1,
     PipelineRunDetailV1,
@@ -54,6 +55,12 @@ from loom_service.pipeline_api_service import (
     request_user_cancellation,
     run_projection,
 )
+from loom_service.pipeline_artifact_files import (
+    public_artifact_projection,
+    resolve_public_artifact,
+    stream_public_artifact_file,
+    validate_public_artifact,
+)
 from loom_service.pipeline_control_bindings import (
     apply_judge_profile,
     apply_provider_binding,
@@ -63,6 +70,32 @@ from loom_service.pipeline_control_bindings import (
 from loom_service.routes.object_downloads import stream_object_response
 
 router = APIRouter(tags=["pipeline"])
+
+_ARTIFACT_FILE_RESPONSE_HEADERS = {
+    "Accept-Ranges": {"schema": {"type": "string"}},
+    "Content-Length": {"schema": {"type": "integer"}},
+    "Content-Type": {"schema": {"type": "string"}},
+    "ETag": {"schema": {"type": "string"}},
+    "Content-Disposition": {"schema": {"type": "string"}},
+    "Content-Range": {"schema": {"type": "string"}},
+}
+_ARTIFACT_FILE_RESPONSES: dict[int | str, dict[str, Any]] = {
+    200: {
+        "description": "Complete committed Artifact file",
+        "headers": _ARTIFACT_FILE_RESPONSE_HEADERS,
+        "content": {"application/octet-stream": {}},
+    },
+    206: {
+        "description": "Single byte range",
+        "headers": _ARTIFACT_FILE_RESPONSE_HEADERS,
+        "content": {"application/octet-stream": {}},
+    },
+    304: {"description": "Artifact file ETag has not changed"},
+    416: {
+        "description": "Invalid, multiple, or unsatisfied byte range",
+        "headers": _ARTIFACT_FILE_RESPONSE_HEADERS,
+    },
+}
 
 
 def _error(exc: PipelineApiError) -> HTTPException:
@@ -953,6 +986,108 @@ async def download_pipeline_artifact(
     )
 
 
+@router.get(
+    "/pipeline-runs/{run_id}/stages/{stage_run_id}/artifacts/{artifact_id}",
+    response_model=PipelineArtifactDetailV1,
+)
+async def get_pipeline_artifact(
+    request: Request,
+    sc: SessionAndCtx,
+    run_id: UUID,
+    stage_run_id: UUID,
+    artifact_id: UUID,
+) -> dict[str, Any]:
+    team_id, _ = _team_and_user(sc, mutation=False)
+    resolved = await resolve_public_artifact(
+        sc[0],
+        team_id=team_id,
+        artifact_id=artifact_id,
+        run_id=run_id,
+        stage_run_id=stage_run_id,
+    )
+    await validate_public_artifact(
+        resolved,
+        client=request.app.state.minio_client,
+        bucket=request.app.state.settings.artifacts_bucket,
+    )
+    return public_artifact_projection(resolved)
+
+
+async def _read_pipeline_artifact_file(
+    request: Request,
+    sc: SessionAndCtx,
+    artifact_id: UUID,
+    file_index: int,
+    range_header: Annotated[str | None, Header(alias="Range")] = None,
+    if_none_match: Annotated[str | None, Header(alias="If-None-Match")] = None,
+    if_range: Annotated[str | None, Header(alias="If-Range")] = None,
+) -> Response:
+    team_id, _ = _team_and_user(sc, mutation=False)
+    resolved = await resolve_public_artifact(
+        sc[0], team_id=team_id, artifact_id=artifact_id
+    )
+    return await stream_public_artifact_file(
+        resolved,
+        file_index=file_index,
+        method=request.method,
+        range_header=range_header,
+        if_none_match=if_none_match,
+        if_range=if_range,
+        client=request.app.state.minio_client,
+        bucket=request.app.state.settings.artifacts_bucket,
+    )
+
+
+@router.get(
+    "/pipeline-artifacts/{artifact_id}/files/{file_index}",
+    response_class=Response,
+    responses=_ARTIFACT_FILE_RESPONSES,
+)
+async def get_pipeline_artifact_file(
+    request: Request,
+    sc: SessionAndCtx,
+    artifact_id: UUID,
+    file_index: int,
+    range_header: Annotated[str | None, Header(alias="Range")] = None,
+    if_none_match: Annotated[str | None, Header(alias="If-None-Match")] = None,
+    if_range: Annotated[str | None, Header(alias="If-Range")] = None,
+) -> Response:
+    return await _read_pipeline_artifact_file(
+        request,
+        sc,
+        artifact_id,
+        file_index,
+        range_header,
+        if_none_match,
+        if_range,
+    )
+
+
+@router.head(
+    "/pipeline-artifacts/{artifact_id}/files/{file_index}",
+    response_class=Response,
+    responses=_ARTIFACT_FILE_RESPONSES,
+)
+async def head_pipeline_artifact_file(
+    request: Request,
+    sc: SessionAndCtx,
+    artifact_id: UUID,
+    file_index: int,
+    range_header: Annotated[str | None, Header(alias="Range")] = None,
+    if_none_match: Annotated[str | None, Header(alias="If-None-Match")] = None,
+    if_range: Annotated[str | None, Header(alias="If-Range")] = None,
+) -> Response:
+    return await _read_pipeline_artifact_file(
+        request,
+        sc,
+        artifact_id,
+        file_index,
+        range_header,
+        if_none_match,
+        if_range,
+    )
+
+
 def _recipe_projection(item: Any) -> dict[str, Any]:
     return {
         "name": item.name,
@@ -1107,6 +1242,8 @@ def _attempt_projection(item: ExecutionAttempt) -> dict[str, Any]:
 
 
 def _artifact_projection(item: Artifact) -> dict[str, Any]:
+    pipeline_run_id = getattr(item, "pipeline_run_id", None)
+    pipeline_stage_run_id = getattr(item, "pipeline_stage_run_id", None)
     return {
         "id": str(item.id),
         "name": item.name,
@@ -1119,12 +1256,12 @@ def _artifact_projection(item: Artifact) -> dict[str, Any]:
         "visibility": getattr(item, "visibility", "team"),
         "share_status": getattr(item, "share_status", "pending_scan"),
         "download_path": f"/api/v1/pipeline-artifacts/{item.id}/download",
-        "pipeline_run_id": str(item.pipeline_run_id)
-        if getattr(item, "pipeline_run_id", None)
-        else None,
-        "pipeline_stage_run_id": str(item.pipeline_stage_run_id)
-        if getattr(item, "pipeline_stage_run_id", None)
-        else None,
+        "detail_path": (
+            f"/pipelines/{pipeline_run_id}/stages/"
+            f"{pipeline_stage_run_id}/artifacts/{item.id}"
+        ),
+        "pipeline_run_id": str(pipeline_run_id) if pipeline_run_id else None,
+        "pipeline_stage_run_id": str(pipeline_stage_run_id) if pipeline_stage_run_id else None,
         "execution_attempt_id": str(item.execution_attempt_id)
         if getattr(item, "execution_attempt_id", None)
         else None,
