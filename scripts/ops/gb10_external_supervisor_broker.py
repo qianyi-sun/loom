@@ -548,6 +548,26 @@ def _set_fd_owner(descriptor: int, *, owner_uid: int, owner_gid: int) -> None:
         os.fchown(descriptor, owner_uid, owner_gid)
 
 
+def _source_metadata_changed(
+    before: os.stat_result,
+    after: os.stat_result,
+) -> bool:
+    return any(
+        getattr(before, field) != getattr(after, field)
+        for field in (
+            "st_dev",
+            "st_ino",
+            "st_mode",
+            "st_nlink",
+            "st_uid",
+            "st_gid",
+            "st_size",
+            "st_mtime_ns",
+            "st_ctime_ns",
+        )
+    )
+
+
 def _copy_hardened_directory(
     source: int,
     destination: int,
@@ -565,6 +585,11 @@ def _copy_hardened_directory(
         | getattr(os, "O_NOFOLLOW", 0)
     )
     file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    symlink_flags = (
+        getattr(os, "O_PATH", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    )
+    if not getattr(os, "O_PATH", 0):
+        raise BrokerError("candidate runtime symlink inspection is unsupported")
     for name in sorted(os.listdir(source)):
         if not name or name in {".", ".."} or "/" in name or "\x00" in name:
             raise BrokerError("candidate runtime entry name is unsafe")
@@ -582,6 +607,7 @@ def _copy_hardened_directory(
                     not stat.S_ISDIR(opened.st_mode)
                     or opened.st_uid != source_uid
                     or opened.st_gid != source_gid
+                    or _source_metadata_changed(metadata, opened)
                 ):
                     raise BrokerError("candidate build directory changed during publication")
                 os.mkdir(name, mode=0o700, dir_fd=destination)
@@ -603,6 +629,8 @@ def _copy_hardened_directory(
                     )
                     os.fchmod(destination_child, 0o555)
                     os.fsync(destination_child)
+                    if _source_metadata_changed(opened, os.fstat(source_child)):
+                        raise BrokerError("candidate build directory changed during publication")
                 finally:
                     os.close(destination_child)
             finally:
@@ -619,6 +647,7 @@ def _copy_hardened_directory(
                     or opened.st_uid != source_uid
                     or opened.st_gid != source_gid
                     or opened.st_nlink != 1
+                    or _source_metadata_changed(metadata, opened)
                 ):
                     raise BrokerError("candidate build file changed during publication")
                 destination_file = os.open(
@@ -642,7 +671,7 @@ def _copy_hardened_directory(
                             if written <= 0:
                                 raise BrokerError("candidate runtime copy failed")
                             offset += written
-                    if os.fstat(source_file).st_nlink != 1:
+                    if _source_metadata_changed(opened, os.fstat(source_file)):
                         raise BrokerError("candidate build file changed during publication")
                     _set_fd_owner(
                         destination_file,
@@ -662,15 +691,30 @@ def _copy_hardened_directory(
         if stat.S_ISLNK(metadata.st_mode):
             if metadata.st_nlink != 1:
                 raise BrokerError("candidate runtime contains an external hardlink")
-            target = os.readlink(name, dir_fd=source)
-            os.symlink(target, name, dir_fd=destination)
-            os.chown(
-                name,
-                owner_uid,
-                owner_gid,
-                dir_fd=destination,
-                follow_symlinks=False,
-            )
+            source_link = os.open(name, symlink_flags, dir_fd=source)
+            try:
+                opened = os.fstat(source_link)
+                if (
+                    not stat.S_ISLNK(opened.st_mode)
+                    or opened.st_uid != source_uid
+                    or opened.st_gid != source_gid
+                    or opened.st_nlink != 1
+                    or _source_metadata_changed(metadata, opened)
+                ):
+                    raise BrokerError("candidate build symlink changed during publication")
+                target = os.readlink("", dir_fd=source_link)
+                if _source_metadata_changed(opened, os.fstat(source_link)):
+                    raise BrokerError("candidate build symlink changed during publication")
+                os.symlink(target, name, dir_fd=destination)
+                os.chown(
+                    name,
+                    owner_uid,
+                    owner_gid,
+                    dir_fd=destination,
+                    follow_symlinks=False,
+                )
+            finally:
+                os.close(source_link)
             continue
         raise BrokerError("candidate runtime contains a special file")
 
@@ -726,6 +770,8 @@ def _copy_hardened_tree(
             owner_gid=owner_gid,
             entries=[0],
         )
+        if _source_metadata_changed(source_metadata, os.fstat(source_descriptor)):
+            raise BrokerError("candidate build root changed during publication")
         os.fchmod(destination_descriptor, 0o555)
         os.fsync(destination_descriptor)
     finally:
@@ -756,9 +802,7 @@ def _publish_candidate(
     system_python: Path,
     uv_binary: Path,
 ) -> Path:
-    build_temporary = Path(
-        tempfile.mkdtemp(prefix=f".{candidate_sha}.build.", dir=candidates_root)
-    )
+    build_temporary = Path(tempfile.mkdtemp(prefix=f".{candidate_sha}.build.", dir=candidates_root))
     sealed_temporary: Path | None = None
     try:
         os.chown(build_temporary, build_uid, build_gid)

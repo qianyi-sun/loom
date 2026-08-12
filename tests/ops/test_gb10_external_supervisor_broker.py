@@ -64,6 +64,23 @@ def _source_repo(tmp_path: Path) -> tuple[Path, str, str]:
     return source, sha, tree
 
 
+def _candidate_toolchain(tmp_path: Path, uv_script: str) -> tuple[Path, Path]:
+    system_python = tmp_path / "system-python"
+    system_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    system_python.chmod(0o755)
+    fake_uv = tmp_path / "uv"
+    fake_uv.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        'mkdir -p "$UV_PROJECT_ENVIRONMENT/bin"\n'
+        f'ln -s {system_python} "$UV_PROJECT_ENVIRONMENT/bin/python"\n'
+        f"{uv_script}",
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o700)
+    return system_python, fake_uv
+
+
 def _existing_candidate(
     tmp_path: Path,
 ) -> tuple[Path, str, str, Path, Path]:
@@ -403,6 +420,263 @@ def test_candidate_publication_never_mutates_a_raced_external_inode(
     assert after.st_uid == before.st_uid
     assert after.st_gid == before.st_gid
     assert external.read_text(encoding="utf-8") == "external state\n"
+
+
+def test_candidate_publication_rejects_same_owner_file_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, sha, tree = _source_repo(tmp_path)
+    candidates = tmp_path / "candidates"
+    candidates.mkdir(mode=0o755)
+    module_name = "protected_gb10_external_supervisor_transport.py"
+    system_python, fake_uv = _candidate_toolchain(
+        tmp_path,
+        'mkdir -p "$UV_PROJECT_ENVIRONMENT/lib/python3.11/site-packages/loom_cli/rollout"\n'
+        f'printf "trusted\\n" > "$UV_PROJECT_ENVIRONMENT/lib/python3.11/site-packages/'
+        f'loom_cli/rollout/{module_name}"\n',
+    )
+    replacement = tmp_path / "replacement-module.py"
+    replacement.write_text("malicious\n", encoding="utf-8")
+    original_open = broker.os.open
+    attacked = False
+
+    def replace_file_before_descriptor_open(
+        path: str | bytes | Path,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal attacked
+        if not attacked and path == module_name and dir_fd is not None:
+            attacked = True
+            os.replace(replacement, path, dst_dir_fd=dir_fd)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(broker.os, "open", replace_file_before_descriptor_open)
+
+    with pytest.raises(broker.BrokerError, match="changed during publication"):
+        broker.ensure_candidate(
+            candidates,
+            sha,
+            tree,
+            remote_url=str(source),
+            owner_uid=os.geteuid(),
+            owner_gid=os.getegid(),
+            build_uid=os.geteuid(),
+            build_gid=os.getegid(),
+            system_python=system_python,
+            uv_binary=fake_uv,
+        )
+
+    assert attacked
+    assert not (candidates / sha).exists()
+
+
+def test_candidate_publication_rejects_same_owner_directory_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, sha, tree = _source_repo(tmp_path)
+    candidates = tmp_path / "candidates"
+    candidates.mkdir(mode=0o755)
+    system_python, fake_uv = _candidate_toolchain(
+        tmp_path,
+        'mkdir -p "$UV_PROJECT_ENVIRONMENT/lib/python3.11/site-packages/loom_cli/rollout"\n'
+        'printf "trusted\\n" > "$UV_PROJECT_ENVIRONMENT/lib/python3.11/site-packages/'
+        'loom_cli/rollout/helper.py"\n',
+    )
+    replacement = tmp_path / "replacement-rollout"
+    replacement.mkdir()
+    (replacement / "helper.py").write_text("malicious\n", encoding="utf-8")
+    original_open = broker.os.open
+    attacked = False
+
+    def replace_directory_before_descriptor_open(
+        path: str | bytes | Path,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal attacked
+        if (
+            not attacked
+            and path == "rollout"
+            and dir_fd is not None
+            and flags & getattr(os, "O_DIRECTORY", 0)
+        ):
+            attacked = True
+            os.rename(path, "trusted-rollout", src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            os.rename(replacement, path, dst_dir_fd=dir_fd)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(broker.os, "open", replace_directory_before_descriptor_open)
+
+    with pytest.raises(broker.BrokerError, match="changed during publication"):
+        broker.ensure_candidate(
+            candidates,
+            sha,
+            tree,
+            remote_url=str(source),
+            owner_uid=os.geteuid(),
+            owner_gid=os.getegid(),
+            build_uid=os.geteuid(),
+            build_gid=os.getegid(),
+            system_python=system_python,
+            uv_binary=fake_uv,
+        )
+
+    assert attacked
+    assert not (candidates / sha).exists()
+
+
+def test_candidate_publication_rejects_same_owner_symlink_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, sha, tree = _source_repo(tmp_path)
+    candidates = tmp_path / "candidates"
+    candidates.mkdir(mode=0o755)
+    system_python, fake_uv = _candidate_toolchain(
+        tmp_path,
+        'mkdir -p "$UV_PROJECT_ENVIRONMENT/lib"\n'
+        'ln -s trusted-target "$UV_PROJECT_ENVIRONMENT/lib/selected"\n',
+    )
+    replacement = tmp_path / "replacement-link"
+    replacement.symlink_to("malicious-target")
+    original_open = broker.os.open
+    attacked = False
+
+    def replace_symlink_before_descriptor_open(
+        path: str | bytes | Path,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal attacked
+        if not attacked and path == "selected" and dir_fd is not None:
+            attacked = True
+            os.replace(replacement, path, dst_dir_fd=dir_fd)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(broker.os, "open", replace_symlink_before_descriptor_open)
+
+    with pytest.raises(broker.BrokerError, match="changed during publication"):
+        broker.ensure_candidate(
+            candidates,
+            sha,
+            tree,
+            remote_url=str(source),
+            owner_uid=os.geteuid(),
+            owner_gid=os.getegid(),
+            build_uid=os.geteuid(),
+            build_gid=os.getegid(),
+            system_python=system_python,
+            uv_binary=fake_uv,
+        )
+
+    assert attacked
+    assert not (candidates / sha).exists()
+
+
+def test_candidate_publication_rejects_regular_file_mutation_during_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, sha, tree = _source_repo(tmp_path)
+    candidates = tmp_path / "candidates"
+    candidates.mkdir(mode=0o755)
+    file_name = "large-runtime.bin"
+    system_python, fake_uv = _candidate_toolchain(
+        tmp_path,
+        f'head -c 2097152 /dev/zero > "$UV_PROJECT_ENVIRONMENT/{file_name}"\n',
+    )
+    original_read = broker.os.read
+    original_readlink = broker.os.readlink
+    attacked = False
+
+    def mutate_source_after_first_chunk(descriptor: int, size: int) -> bytes:
+        nonlocal attacked
+        chunk = original_read(descriptor, size)
+        if not attacked and chunk:
+            source_path = Path(original_readlink(f"/proc/self/fd/{descriptor}"))
+            if source_path.name == file_name:
+                attacked = True
+                with source_path.open("r+b") as stream:
+                    stream.seek(1024 * 1024)
+                    stream.write(b"malicious")
+                    stream.flush()
+                    os.fsync(stream.fileno())
+        return chunk
+
+    monkeypatch.setattr(broker.os, "read", mutate_source_after_first_chunk)
+
+    with pytest.raises(broker.BrokerError, match="changed during publication"):
+        broker.ensure_candidate(
+            candidates,
+            sha,
+            tree,
+            remote_url=str(source),
+            owner_uid=os.geteuid(),
+            owner_gid=os.getegid(),
+            build_uid=os.geteuid(),
+            build_gid=os.getegid(),
+            system_python=system_python,
+            uv_binary=fake_uv,
+        )
+
+    assert attacked
+    assert not (candidates / sha).exists()
+
+
+def test_candidate_publication_rejects_directory_mutation_during_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, sha, tree = _source_repo(tmp_path)
+    candidates = tmp_path / "candidates"
+    candidates.mkdir(mode=0o755)
+    system_python, fake_uv = _candidate_toolchain(
+        tmp_path,
+        'mkdir -p "$UV_PROJECT_ENVIRONMENT/lib/python3.11/site-packages/loom_cli/rollout"\n'
+        'printf "trusted\\n" > "$UV_PROJECT_ENVIRONMENT/lib/python3.11/site-packages/'
+        'loom_cli/rollout/helper.py"\n',
+    )
+    original_listdir = broker.os.listdir
+    original_readlink = broker.os.readlink
+    attacked = False
+
+    def mutate_directory_after_listing(path: str | bytes | Path | int) -> list[str]:
+        nonlocal attacked
+        names = original_listdir(path)
+        if not attacked and isinstance(path, int):
+            source_path = Path(original_readlink(f"/proc/self/fd/{path}"))
+            if source_path.name == "rollout":
+                attacked = True
+                (source_path / "late-module.py").write_text("malicious\n", encoding="utf-8")
+        return names
+
+    monkeypatch.setattr(broker.os, "listdir", mutate_directory_after_listing)
+
+    with pytest.raises(broker.BrokerError, match="changed during publication"):
+        broker.ensure_candidate(
+            candidates,
+            sha,
+            tree,
+            remote_url=str(source),
+            owner_uid=os.geteuid(),
+            owner_gid=os.getegid(),
+            build_uid=os.geteuid(),
+            build_gid=os.getegid(),
+            system_python=system_python,
+            uv_binary=fake_uv,
+        )
+
+    assert attacked
+    assert not (candidates / sha).exists()
 
 
 def test_candidate_materialization_commands_run_as_unprivileged_service_identity(
