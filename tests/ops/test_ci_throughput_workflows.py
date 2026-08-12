@@ -168,6 +168,7 @@ def test_native_image_publish_jobs_stay_on_architecture_matched_github_hosts() -
     assert "matrix.image == 'capacity-manager'" in build_runs_on
     assert "matrix.image == 'personal-dev-activation-agent'" in build_runs_on
     assert "matrix.image == 'personal-dev-builder'" in build_runs_on
+    assert "matrix.image == 'pipeline-core-fixture'" in build_runs_on
     assert "matrix.image == 'pipeline-orchestrator'" in build_runs_on
     assert "ubuntu-24.04" in build_runs_on
     publish_runs_on = jobs["publish"]["runs-on"]
@@ -178,7 +179,7 @@ def test_native_image_publish_jobs_stay_on_architecture_matched_github_hosts() -
     assert jobs["publish-manifest"]["runs-on"] == "ubuntu-24.04"
 
 
-def test_capacity_manager_amd64_build_bypasses_live_lease_routes(tmp_path: Path) -> None:
+def test_hosted_only_amd64_builds_bypass_live_lease_routes(tmp_path: Path) -> None:
     workflow = _workflow(".github/workflows/images.yml")
     route_step = next(
         step
@@ -198,6 +199,8 @@ def test_capacity_manager_amd64_build_bypasses_live_lease_routes(tmp_path: Path)
                 [
                     {"image": "capacity-manager", "architecture": "amd64"},
                     {"image": "capacity-manager", "architecture": "arm64"},
+                    {"image": "pipeline-core-fixture", "architecture": "amd64"},
+                    {"image": "pipeline-core-fixture", "architecture": "arm64"},
                     {"image": "worker", "architecture": "amd64"},
                 ]
             ),
@@ -232,6 +235,8 @@ def test_hosted_only_image_matrix_requires_no_live_lease_route(tmp_path: Path) -
                 [
                     {"image": "capacity-manager", "architecture": "amd64"},
                     {"image": "capacity-manager", "architecture": "arm64"},
+                    {"image": "pipeline-core-fixture", "architecture": "amd64"},
+                    {"image": "pipeline-core-fixture", "architecture": "arm64"},
                 ]
             ),
             "GITHUB_OUTPUT": str(github_output),
@@ -696,7 +701,7 @@ def test_images_required_unowned_runtime_path_selects_all_images(tmp_path: Path)
     matrix = json.loads(_github_output_value(output, "images"))
     native_matrix = json.loads(_github_output_value(output, "native_builds"))
     assert _github_output_value(output, "required") == "true"
-    assert len(matrix) == 15
+    assert len(matrix) == 16
     assert {entry["image"] for entry in matrix} == {
         "agent-sandbox",
         "capacity-manager",
@@ -704,6 +709,7 @@ def test_images_required_unowned_runtime_path_selects_all_images(tmp_path: Path)
         "egress-xds",
         "family-orchestrator",
         "pipeline-orchestrator",
+        "pipeline-core-fixture",
         "llm-gateway",
         "llm-gateway-sandbox",
         "personal-dev-activation-agent",
@@ -715,7 +721,7 @@ def test_images_required_unowned_runtime_path_selects_all_images(tmp_path: Path)
         "worker",
     }
     assert all(set(entry) == {"image", "image_name", "dockerfile", "context"} for entry in matrix)
-    assert len(native_matrix) == 30
+    assert len(native_matrix) == 32
     assert {(entry["architecture"], entry["platform"]) for entry in native_matrix} == {
         ("amd64", "linux/amd64"),
         ("arm64", "linux/arm64"),
@@ -741,6 +747,7 @@ def test_images_mixed_known_and_unowned_paths_select_all_images(tmp_path: Path) 
         "egress-xds",
         "family-orchestrator",
         "pipeline-orchestrator",
+        "pipeline-core-fixture",
         "personal-dev-activation-agent",
         "personal-dev-builder",
         "llm-gateway",

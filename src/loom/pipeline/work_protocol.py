@@ -196,7 +196,12 @@ class ResourceExecutionVariantV1(PipelineModel):
     memory_accounting_kind: Literal["separate", "unified_shared"]
     container_memory_bytes_override: NonNegativeSafeInt | None
     same_gpu_model_required: bool
-    pool_class: Literal["behavior-cpu-data", "behavior-gpu-oldlab", "behavior-gpu-gb10"]
+    pool_class: Literal[
+        "behavior-cpu-data",
+        "behavior-gpu-oldlab",
+        "behavior-gpu-gb10",
+        "pipeline-test-cpu",
+    ]
     device_roles: ResourceDeviceRolesV1 | None
 
     @field_validator("allowed_gpu_models")
@@ -217,7 +222,7 @@ class ResourceExecutionVariantV1(PipelineModel):
                 or self.memory_accounting_kind != "separate"
                 or self.container_memory_bytes_override is not None
                 or self.same_gpu_model_required
-                or self.pool_class != "behavior-cpu-data"
+                or self.pool_class not in {"behavior-cpu-data", "pipeline-test-cpu"}
             ):
                 raise ValueError("CPU execution variant cannot carry GPU requirements")
         else:
@@ -293,8 +298,8 @@ class ResourceProfileV1(PipelineModel):
                 raise ValueError("GPU profiles require NVIDIA runtime and EGL")
             if not {"isaac-sim-5.1", "omnigibson-3.8"} <= image_features:
                 raise ValueError("GPU profiles require the attested simulation image features")
-        elif image_features != {"behavior-cpu-data"}:
-            raise ValueError("zero-GPU profiles require only behavior-cpu-data")
+        elif image_features not in ({"behavior-cpu-data"}, {"pipeline-test-cpu"}):
+            raise ValueError("zero-GPU profiles require one exact CPU image feature")
         return self
 
 

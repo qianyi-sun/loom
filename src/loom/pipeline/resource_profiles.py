@@ -158,6 +158,8 @@ def _validate_builtin_contract(registry: ResourceProfileRegistry) -> None:
         "behavior-offline-none@1",
         "behavior-sim-local-gateway@1",
         "behavior-sim-local-none@1",
+        "pipeline-test-cpu-gateway@1",
+        "pipeline-test-cpu-none@1",
     )
     if identities != expected_identities:
         raise ResourceProfileRegistryError("built-in ResourceProfile set is not exact")
@@ -167,6 +169,8 @@ def _validate_builtin_contract(registry: ResourceProfileRegistry) -> None:
         "behavior-offline-none@1": (8, 16 << 30, 50 << 30, 3_600, "none"),
         "behavior-sim-local-gateway@1": (16, 64 << 30, 150 << 30, 14_400, "gateway"),
         "behavior-sim-local-none@1": (16, 64 << 30, 150 << 30, 14_400, "none"),
+        "pipeline-test-cpu-gateway@1": (2, 1 << 30, 2 << 30, 600, "gateway"),
+        "pipeline-test-cpu-none@1": (2, 1 << 30, 2 << 30, 600, "none"),
     }
     cpu_variant = {
         "variant_id": "cpu-data-x86_64",
@@ -182,6 +186,11 @@ def _validate_builtin_contract(registry: ResourceProfileRegistry) -> None:
         "same_gpu_model_required": False,
         "pool_class": "behavior-cpu-data",
         "device_roles": None,
+    }
+    pipeline_test_cpu_variant = {
+        **cpu_variant,
+        "variant_id": "pipeline-test-cpu-x86_64",
+        "pool_class": "pipeline-test-cpu",
     }
     gpu_variants = [
         {
@@ -230,6 +239,11 @@ def _validate_builtin_contract(registry: ResourceProfileRegistry) -> None:
             ["egl", "nvidia-container-runtime"],
             ["isaac-sim-5.1", "omnigibson-3.8"],
         ),
+        "pipeline-test-cpu-gateway@1": (
+            ["loom-secret-tmpfs-v1"],
+            ["pipeline-test-cpu"],
+        ),
+        "pipeline-test-cpu-none@1": ([], ["pipeline-test-cpu"]),
     }
     for record in registry.list():
         profile = record.profile
@@ -242,7 +256,12 @@ def _validate_builtin_contract(registry: ResourceProfileRegistry) -> None:
         )
         if actual != expected_scalars[record.identity]:
             raise ResourceProfileRegistryError(f"{record.identity} scalar contract drift")
-        if profile.input_cache_capacity_bytes_min != INPUT_CACHE_ALLOCATABLE_BYTES_MIN:
+        expected_cache_capacity = (
+            0
+            if record.identity.startswith("pipeline-test-cpu-")
+            else INPUT_CACHE_ALLOCATABLE_BYTES_MIN
+        )
+        if profile.input_cache_capacity_bytes_min != expected_cache_capacity:
             raise ResourceProfileRegistryError(f"{record.identity} cache capacity drift")
         if (
             profile.required_host_runtime_features,
@@ -253,6 +272,8 @@ def _validate_builtin_contract(registry: ResourceProfileRegistry) -> None:
         expected_variants = (
             ("gb10-shared-1gpu", "oldlab-rtx5080-2gpu")
             if record.identity.startswith("behavior-sim-local-")
+            else ("pipeline-test-cpu-x86_64",)
+            if record.identity.startswith("pipeline-test-cpu-")
             else ("cpu-data-x86_64",)
         )
         if variant_ids != expected_variants:
@@ -263,6 +284,8 @@ def _validate_builtin_contract(registry: ResourceProfileRegistry) -> None:
         if actual_variants != (
             gpu_variants
             if record.identity.startswith("behavior-sim-local-")
+            else [pipeline_test_cpu_variant]
+            if record.identity.startswith("pipeline-test-cpu-")
             else [cpu_variant]
         ):
             raise ResourceProfileRegistryError(f"{record.identity} variant contract drift")

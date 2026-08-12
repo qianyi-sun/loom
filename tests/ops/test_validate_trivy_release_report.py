@@ -68,6 +68,11 @@ _EXPECTED_FINDINGS = {
         ("CVE-2025-7458", "pkg:deb/debian/libsqlite3-0"),
         ("CVE-2026-6653", "pkg:deb/debian/libxml2"),
     },
+    "pipeline-core-fixture": _PERL_BASE_FINDINGS
+    | {
+        ("CVE-2023-45853", "pkg:deb/debian/zlib1g"),
+        ("CVE-2025-7458", "pkg:deb/debian/libsqlite3-0"),
+    },
     **{component: _PERL_BASE_FINDINGS for component in _PERL_BASE_COMPONENTS},
     **{component: frozenset() for component in _EMPTY_COMPONENTS},
 }

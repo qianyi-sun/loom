@@ -70,3 +70,29 @@ required_host_runtime_features = ["egl", "nvidia-container-runtime"]
 required_image_features = ["isaac-sim-5.1", "omnigibson-3.8"]
 network_profile = "none"
 input_cache_capacity_bytes_min = 1649267441664
+
+[[profiles]]
+name = "pipeline-test-cpu-gateway"
+version = 1
+execution_variants = [{ variant_id = "pipeline-test-cpu-x86_64", cpu_arch = "x86_64", gpu_count_exact = 0, allowed_gpu_models = [], memory_accounting_kind = "separate", same_gpu_model_required = false, pool_class = "pipeline-test-cpu" }]
+cpu_cores = 2
+memory_bytes = 1073741824
+scratch_bytes = 2147483648
+timeout_seconds_max = 600
+required_host_runtime_features = ["loom-secret-tmpfs-v1"]
+required_image_features = ["pipeline-test-cpu"]
+network_profile = "gateway"
+input_cache_capacity_bytes_min = 0
+
+[[profiles]]
+name = "pipeline-test-cpu-none"
+version = 1
+execution_variants = [{ variant_id = "pipeline-test-cpu-x86_64", cpu_arch = "x86_64", gpu_count_exact = 0, allowed_gpu_models = [], memory_accounting_kind = "separate", same_gpu_model_required = false, pool_class = "pipeline-test-cpu" }]
+cpu_cores = 2
+memory_bytes = 1073741824
+scratch_bytes = 2147483648
+timeout_seconds_max = 600
+required_host_runtime_features = []
+required_image_features = ["pipeline-test-cpu"]
+network_profile = "none"
+input_cache_capacity_bytes_min = 0

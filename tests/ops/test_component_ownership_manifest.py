@@ -903,7 +903,7 @@ def test_release_image_matrix_is_derived_from_all_release_components() -> None:
 
     matrix = component_ownership.release_image_matrix(manifest)
 
-    assert len(matrix) == 15
+    assert len(matrix) == 16
     assert {entry["image_name"] for entry in matrix} == {
         component.release_digest for component in manifest.release_components()
     }
@@ -940,6 +940,35 @@ def test_capacity_manager_image_has_narrow_ownership_and_no_rollout_role() -> No
             "context": ".",
         },
     )
+
+
+def test_pipeline_core_fixture_is_conformance_only_and_never_a_rollout_image() -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    component = next(
+        item for item in manifest.release_components() if item.id == "pipeline-core-fixture"
+    )
+
+    assert component.dockerfile == "deploy/Dockerfile.pipeline-core-fixture"
+    assert component.release_digest == "loom-pipeline-core-fixture"
+    assert component.runtime_policy == "conformance"
+    assert component.rollout_role == "none"
+    assert component.smoke_owner == "worker-runtime-conformance"
+    assert component.scan_owner == "images"
+    assert component.attestation_owner == "release-provenance"
+    assert component.release_digest not in {
+        entry["image_name"]
+        for entry in component_ownership.release_images_for_rollout_role(
+            manifest,
+            rollout_role="primary",
+        )
+    }
+    assert component.release_digest not in {
+        entry["image_name"]
+        for entry in component_ownership.release_images_for_rollout_role(
+            manifest,
+            rollout_role="auxiliary",
+        )
+    }
 
 
 def test_native_release_image_matrix_crosses_every_image_with_both_architectures() -> None:
